@@ -18,9 +18,11 @@ breaks the chain. The copy published to the handoff repository is the anchor: a 
 
 Where: ~/.local/state/devkit/audit/YYYY-MM.jsonl on this machine (append-only, 0600 in a 0700 folder), published
 daily by the `audit` job to the handoff repository as audit/<user>@<host>/YYYY-MM.jsonl. Kept for
-audit.retention.local_months here and team_months there, never under floor_months, and not pruned at all under
-audit.hold; the team policy (<handoff>/policy/audit.json) raises any of them. Secrets are redacted before a record is
-written. Query with `dev audit`; export with `dev audit export` (JSONL, CSV, OCSF, CEF).
+audit.retention.local_months here and team_months there, never under floor_months (at least 3), and not pruned at all
+under audit.hold; the team policy (<handoff>/policy/audit.json) raises any of them. Pruning the handoff copy removes
+files from its working copy only: git history keeps every published month. Secrets, crew message text and home folders
+never reach a record (docs/audit.md, Personal data). Query with `dev audit`; export with `dev audit export` (JSONL,
+CSV, OCSF, CEF).
 """
 from __future__ import annotations
 
@@ -121,6 +123,72 @@ def redact(text, extra=None) -> str:
     for rx in (extra if extra is not None else _extra_rules(settings()["redact"]["extra"])):
         s = rx.sub(MARK, s)
     return s
+
+
+# --------------------------------------------------------------------------- personal data in a record (GDPR)
+#
+# A record says who acted and what changed. It never holds what people wrote to each other (crew messages quote the
+# developer's requests), nor the OS user name inside a home path (compliance review, section 2). Every text field
+# passes through here when a record is built, and v1 records when they are read, so an export never carries them.
+
+# another person's home folder too (a v1 record from another machine); /Users/Shared names nobody
+_HOMES = re.compile(r"(?<![\w.~-])/(?:Users|home)/(?!Shared(?![^/\s]))[^/\s:'\"`]+")
+# actions whose detail is the text of a message: only its length is recorded
+MESSAGE_ACTIONS = {"crew.message"}
+# `dev crew ask|answer` arguments that name someone or something; every other argument is message text
+_CREW_NAMES = ("--to", "--recommend", "--irreversible", "--target")
+
+
+def _home(s: str) -> str:
+    """The home folder (this machine's, or any /Users/<name> and /home/<name>) as ~."""
+    h = str(core.HOME).rstrip("/")
+    if len(h) > 1 and h in s:
+        s = re.sub(re.escape(h) + r"(?![\w.-])", "~", s)
+    return _HOMES.sub("~", s) if "/" in s else s
+
+
+def _clean(text, rx) -> str:
+    return _home(redact(text, rx))
+
+
+def _untext(n: int, cut: bool) -> str:
+    return f"[message text not recorded: {n}{'+' if cut else ''} characters]"
+
+
+def _crew_args(target: str) -> str:
+    """`dev crew ask|answer …` as cli.py records it (arguments joined by spaces) without the message: the
+    subcommand, the message id, the naming arguments, and the length of the rest."""
+    toks = target.split(" ")
+    i = next((n for n, t in enumerate(toks) if t and not t.startswith("-")), None)
+    if i is None or toks[i] not in ("ask", "answer"):
+        return target
+    keep, text, n = toks[:i + 1], [], i + 1
+    if toks[i] == "answer" and n < len(toks) and toks[n] and not toks[n].startswith("-"):
+        keep.append(toks[n])  # the id of the message it answers
+        n += 1
+    while n < len(toks):
+        t = toks[n]
+        if t in _CREW_NAMES and n + 1 < len(toks):
+            keep += [t, toks[n + 1]]
+            n += 2
+            continue
+        if t == "--decision" or ("=" in t and t.split("=", 1)[0] in _CREW_NAMES):
+            keep.append(t)
+        else:
+            text.append(t)
+        n += 1
+    body = " ".join(text)
+    return " ".join(keep + ([_untext(len(body), len(target) >= 300)] if body else []))  # cli.py cuts at 300
+
+
+def _field(action: str, name: str, text, rx) -> str:
+    """A record's target or detail as it may be stored: no message text, no secret, no home folder."""
+    s = text if isinstance(text, str) else str(text if text is not None else "")
+    if name == "detail" and action in MESSAGE_ACTIONS:
+        return _untext(len(s), len(s) >= 300) if s else ""  # progress cuts a message at 300 before it gets here
+    if name == "target" and action == "dev.crew":
+        s = _crew_args(s)
+    return _clean(s, rx)
 
 
 # --------------------------------------------------------------------------- settings (R3, R4, R7)
@@ -297,7 +365,7 @@ def _value(v, extra):
         v = ", ".join(str(x) for x in v)
     if isinstance(v, bool) or v is None or isinstance(v, (int, float)):
         return v
-    return redact(str(v), extra)[:300]
+    return _clean(str(v), extra)[:300]
 
 
 def _place(rec: dict, key: str, v, extra) -> None:
@@ -416,8 +484,8 @@ def build(action: str, target="", detail="", outcome="ok", extra: dict = None, c
     out, code, raw = outcome_of(outcome)
     cat, sev = kind(action)
     rec = {"v": V, "id": new_id(ts), "ts": ts, "time": iso(ts), "actor": actor(), "action": str(action)[:80],
-           "category": cat, "severity": sev, "target": redact(str(target or ""), rx)[:300],
-           "detail": redact(str(detail or ""), rx)[:600], "outcome": out}
+           "category": cat, "severity": sev, "target": _field(str(action), "target", target or "", rx)[:300],
+           "detail": _field(str(action), "detail", detail or "", rx)[:600], "outcome": out}
     for k, v in extra.items():
         _place(rec, k, v, rx)
     if code is not None:
@@ -425,9 +493,9 @@ def build(action: str, target="", detail="", outcome="ok", extra: dict = None, c
     if raw:
         rec.setdefault("ref", {}).setdefault("result", raw)
     where = context(str((rec.get("crew") or {}).get("lane") or ""))
-    for k in ("project", "branch", "run", "step"):
+    for k in ("project", "branch", "run", "step"):  # the run goal and step names are free text, like target
         if where.get(k) and not rec.get(k):
-            rec[k] = where[k]
+            rec[k] = _clean(where[k], rx)
     crew = {**(rec.get("crew") or {}), **(where.get("crew") or {})}  # the run's lane wins over a caller's guess
     if crew.get("member") and "role" not in crew:
         crew["member"], role = _member(crew["member"])
@@ -691,20 +759,25 @@ def _changes(argv: list) -> bool:
 _V1_CORE = {"ts", "user", "host", "agent", "session", "action", "target", "detail", "outcome"}
 
 
-def lift(r: dict, line: bytes = b"") -> dict:
-    """A record as schema v2 reads it: v2 records as they are, v1 records mapped (v stays 1, no chain)."""
+def lift(r: dict, line: bytes = b"", extra=None) -> dict:
+    """A record as schema v2 reads it: v2 records as they are (sealed by their hash), v1 records mapped (v stays 1,
+    no chain) and cleaned as a v2 record is when it is written: no secret, message text or home folder, so no query
+    or export shows them. `extra`: the compiled audit.redact.extra patterns (default: the built-in rules only)."""
     if r.get("v") == V:
         return r
+    rx = extra if extra is not None else []
     ts = float(r.get("ts") or 0)
     out, code, raw = outcome_of(r.get("outcome"))
     cat, sev = kind(r.get("action"))
+    action = str(r.get("action") or "")
     rec = {"v": 1, "id": "V1" + hashlib.sha256(line or json.dumps(r, sort_keys=True).encode()).hexdigest()[:24].upper(),
            "ts": ts, "time": iso(ts), "actor": {k: str(r.get(k) or "") for k in ("user", "host", "agent", "session")},
-           "action": str(r.get("action") or ""), "category": cat, "severity": sev,
-           "target": str(r.get("target") or ""), "detail": str(r.get("detail") or ""), "outcome": out}
+           "action": action, "category": cat, "severity": sev,
+           "target": _field(action, "target", r.get("target") or "", rx),
+           "detail": _field(action, "detail", r.get("detail") or "", rx), "outcome": out}
     for k, v in r.items():
         if k not in _V1_CORE:
-            _place(rec, k, v, [])
+            _place(rec, k, v, rx)
     if code is not None:
         rec.setdefault("evidence", {}).setdefault("exit", code)
     if raw:
@@ -728,6 +801,10 @@ def _files(team: bool = False) -> list:
 
 def _read(team: bool = False):
     seen = set()
+    try:
+        rx = _extra_rules(settings()["redact"]["extra"])
+    except Exception:
+        rx = []
     for f in _files(team):
         try:
             data = f.read_bytes()
@@ -740,7 +817,7 @@ def _read(team: bool = False):
                 continue
             if not isinstance(r, dict):
                 continue
-            rec = lift(r, ln)
+            rec = lift(r, ln, rx)
             key = rec["id"]
             if key in seen:
                 continue

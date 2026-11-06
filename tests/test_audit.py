@@ -323,6 +323,88 @@ class SchemaTests(AuditCase):
         self.assertEqual(audit.records(1, action="crew")[0]["target"], "acme/app")  # the old reader's API
 
 
+class PersonalDataTests(AuditCase):
+    # the compliance review, section 2: a record keeps who and what, never the text people wrote to each other, and
+    # never the OS user name inside a home path; the same holds for v1 records when they are read or exported
+    def test_a_crew_message_keeps_its_id_and_length_but_not_its_text(self):
+        # progress.crew_ask records each message this way; crew messages quote the developer's requests
+        text = "Ana asked for the Acme roadmap by Friday, please"
+        audit.record("crew.message", "Neo → Persephone", text[:300], project="acme/app", id="M12")
+        r = audit.query(action="crew.message")[-1]
+        self.assertNotIn("roadmap", json.dumps(r))
+        self.assertEqual((r["target"], r["ref"]["id"]), ("Neo → Persephone", "M12"))
+        self.assertIn(f"{len(text)} characters", r["detail"])
+        audit.record("crew.message", "Neo → Morpheus", "x" * 300, id="M13")  # progress cuts long text at 300
+        self.assertIn("300+ characters", audit.query(action="crew.message")[-1]["detail"])
+
+    def test_dev_crew_ask_and_answer_keep_their_arguments_but_not_the_message(self):
+        # cli.py records `dev crew …` with its arguments joined by spaces
+        cases = {
+            "ask --to Persephone please confirm the Acme roadmap": "ask --to Persephone",
+            "answer M12 yes, the roadmap for Acme is fine": "answer M12",
+            "ask --decision which roadmap for Acme? --options A: ship | B: wait --recommend A --irreversible push":
+                "ask --decision --recommend A --irreversible push",
+            "--json ask --to=neo the roadmap": "--json ask --to=neo",
+        }
+        for target, kept in cases.items():
+            with self.subTest(target=target[:20]):
+                audit.record("dev.crew", target, "", "ok")
+                got = audit.query(action="dev.crew")[-1]["target"]
+                self.assertTrue(got.startswith(kept + " "), got)
+                self.assertNotIn("roadmap", got)
+                self.assertIn("characters", got)
+        for target in ("decide D3 B", "mode auto --approve push", "delegate api --to Tank"):
+            with self.subTest(target=target):
+                audit.record("dev.crew", target, "", "ok")
+                self.assertEqual(audit.query(action="dev.crew")[-1]["target"], target)
+
+    def test_run_step_and_branch_from_the_session_are_redacted(self):
+        os.environ["DEVKIT_SESSION"] = "claude:sess-2"
+        progress.SESSIONS.mkdir(parents=True)
+        (progress.SESSIONS / "claude-sess-2.json").write_text(json.dumps(
+            {"agent": "claude", "session": "sess-2", "project": "acme/app", "branch": "fix/password=" + VALUE}))
+        progress.RUNS.mkdir(parents=True)
+        (progress.RUNS / "claude-sess-2.json").write_text(json.dumps({
+            "v": 2, "agent": "claude", "session": "sess-2", "project": "acme/app",
+            "goal": "deploy with ghp_" + A36, "agents": {},
+            "plan": [{"name": "rotate token=" + VALUE, "state": "running", "owner": "main"}]}))
+        audit.record("dev.task", "add x", "", "ok")
+        r = audit.query(action="dev.task")[-1]
+        for k in ("run", "step", "branch"):
+            with self.subTest(field=k):
+                self.assertIn("[redacted]", r[k])
+        self.assertNotIn(A36[4:], json.dumps(r))
+        self.assertNotIn(VALUE, json.dumps(r))
+
+    def test_the_home_folder_becomes_tilde_in_text_fields(self):
+        home = str(core.HOME)
+        audit.record("dev.rm", f"{home}/Development/acme/app/build", f"moved to {home}/.Trash", "ok",
+                     why=f"cleanup of {home}/tmp", cwd=f"{home}/Development")
+        audit.record("dev.mv", "/Users/jane.doe/Development/x /Users/Shared/x", "", "ok")
+        rm, mv = audit.query(action="dev.rm")[-1], audit.query(action="dev.mv")[-1]
+        self.assertEqual((rm["target"], rm["detail"], rm["why"], rm["evidence"]["cwd"]),
+                         ("~/Development/acme/app/build", "moved to ~/.Trash", "cleanup of ~/tmp", "~/Development"))
+        self.assertEqual(mv["target"], "~/Development/x /Users/Shared/x")  # a shared folder names nobody
+
+    def test_v1_records_are_redacted_when_read_and_in_every_export(self):
+        audit.AUDIT.mkdir(parents=True)
+        v1 = {"ts": time.time() - 60, "user": "fixture-user", "host": "fixture-host", "agent": "claude",
+              "session": "abc123", "action": "dev.crew",
+              "target": "ask --to neo Authorization: Bearer " + "abcdefghijklmnop1234",
+              "detail": "run on /Users/fixture-user/Development/x", "outcome": "ok", "why": "token=" + VALUE}
+        (audit.AUDIT / time.strftime("%Y-%m.jsonl")).write_text(json.dumps(v1) + "\n")
+        recs = audit.query(action="dev.crew")
+        self.assertEqual((len(recs), recs[0]["v"]), (1, 1))
+        self.assertEqual(recs[0]["detail"], "run on ~/Development/x")
+        for fmt in audit.FORMATS:
+            with self.subTest(format=fmt):
+                out = audit.render(fmt, recs)
+                self.assertNotIn("abcdefghijklmnop1234", out)
+                self.assertNotIn(VALUE, out)
+                self.assertNotIn("/Users/fixture-user", out)
+                self.assertIn("fixture-host", out)  # who acted stays: the actor is not text people wrote
+
+
 class IntegrityTests(AuditCase):
     # R2: the hash chain, file modes, `dev audit verify`, and the published copy as the anchor
     def month(self) -> Path:
