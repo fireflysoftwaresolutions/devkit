@@ -49,6 +49,11 @@ def _session_file(agent: str, sid: str) -> Path:
     return STATE / "sessions" / f"{agent}-{sid}.json"
 
 
+def _session_lock(agent: str, sid: str) -> core.Lock:
+    """The lock progress.note_agent_launch and on_subagent hold while they change this session's record."""
+    return core.Lock(f"session-{agent}-{re.sub(r'[^A-Za-z0-9_-]', '', sid or '-')[:80]}", wait=2)
+
+
 def _spawn(args, logname="sync.log"):
     """Detached background `dev …` so the hook returns immediately."""
     log = open(STATE / "logs" / logname, "a")
@@ -1134,8 +1139,12 @@ def post_tool(agent: str):
         if sf.exists():  # only sessions that started with devkit active
             sess = core.read_json(sf, {}) or {}
             closing = closing_reminder(data, sess, time.time())
-            if closing:
-                sf.write_text(json.dumps(sess))
+            if closing:  # only the reminder's field, on a fresh copy: a background launch's SubagentStart runs at the
+                with _session_lock(agent, data.get("session_id") or "-"):  # same moment and claims its launch entry
+                    fresh = core.read_json(sf, None)
+                    if isinstance(fresh, dict):
+                        fresh["closing_nudge"] = sess.get("closing_nudge")
+                        sf.write_text(json.dumps(fresh))
     except Exception:
         _log(f"post-tool closing {agent}: {traceback.format_exc()[-300:]}")
     _context_out("PostToolUse", "\n\n".join(x for x in (_bulk_rewrite_note(data), closing,

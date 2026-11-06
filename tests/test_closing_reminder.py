@@ -84,6 +84,27 @@ class ClosingReminderTests(unittest.TestCase):
         with mock.patch.dict(os.environ, {"DEVKIT_SCOPE": "all"}):
             self.assertTrue(self.remind(LAUNCH))
 
+    def test_the_reminder_never_writes_back_an_old_copy_of_the_session(self):
+        """A subagent's start may claim its launch entry while this hook runs: the hook must keep that change."""
+        sf = Path(self.tmp.name) / "claude-s1.json"
+        sf.write_text(json.dumps(dict(self.sess, pending_agents=[{"label": "Neo: plan", "type": "", "ts": 1}])))
+        real = hooks.closing_reminder
+
+        def start_meanwhile(data, sess, now):
+            out = real(data, sess, now)
+            d = json.loads(sf.read_text())
+            d["pending_agents"] = []  # SubagentStart claimed it in between
+            sf.write_text(json.dumps(d))
+            return out
+        with mock.patch.object(hooks, "_session_file", lambda agent, sid: sf), \
+                mock.patch.object(hooks, "closing_reminder", start_meanwhile), \
+                mock.patch.object(progress, "on_tool_done", lambda agent, data: None), \
+                mock.patch("sys.stdin", io.StringIO(json.dumps(LAUNCH))), contextlib.redirect_stdout(io.StringIO()):
+            hooks.post_tool("claude")
+        after = json.loads(sf.read_text())
+        self.assertEqual(after["pending_agents"], [])  # the claim survives
+        self.assertGreater(after["closing_nudge"], T0)
+
     def test_the_post_tool_hook_delivers_it_and_remembers_when(self):
         sf = Path(self.tmp.name) / "claude-s1.json"
         sf.write_text(json.dumps(self.sess))
