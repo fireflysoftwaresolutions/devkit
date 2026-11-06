@@ -89,14 +89,14 @@ def hero_svg(theme="dark", W=1600, H=520):
                     for x, y, r, o, b in ((1240, 108, 16, 0.35, 6), (1452, 300, 26, 0.18, 14), (1090, 210, 9, 0.30, 6),
                                           (1520, 120, 10, 0.25, 6), (1330, 400, 20, 0.12, 14)))
     return f"""<svg xmlns="http://www.w3.org/2000/svg" width="{W}" height="{H}" viewBox="0 0 {W} {H}">
-{a11y("devkit", "devkit: one workspace for developers, Claude Code and Codex. By Firefly Software Solutions Inc.")}
+{a11y("devkit", "devkit: Every repo in its place. Every agent on the same page. By Firefly Software Solutions Inc.")}
 {DEFS}
 <rect width="{W}" height="{H}" fill="{bg}"/>
 {bokeh}
 {''.join(trails)}
 {spark(int(W * 0.885), 150, 4.2, glow_r=150)}
 {wordmark(m, base, size, ink)[0]}
-<text x="{m + 6}" y="{base + 78}" font-family="Manrope" font-size="38" font-weight="400" letter-spacing="-0.6" fill="{sub}">One workspace for developers, Claude Code and Codex.</text>
+<text x="{m + 6}" y="{base + 78}" font-family="Manrope" font-size="38" font-weight="400" letter-spacing="-0.6" fill="{sub}">Every repo in its place. Every agent on the same page.</text>
 <line x1="{m + 6}" y1="{H - 74}" x2="{m + 66}" y2="{H - 74}" stroke="{hair}" stroke-width="2"/>
 <text x="{m + 6}" y="{H - 40}" font-family="Manrope" font-size="22" font-weight="650" letter-spacing="0.6" fill="{label}">by Firefly Software Solutions Inc.</text>
 </svg>"""
@@ -119,31 +119,6 @@ def lockup_svg(theme="dark"):
 </svg>"""
 
 
-def terminal_art():
-    """Pre-render the lockup as terminal art (truecolor, 256-colour, ASCII) into lib/devkit/art/."""
-    import shutil
-    if not shutil.which("chafa"):
-        print("chafa not found (brew install chafa): terminal art skipped")
-        return
-    art = ROOT / "lib" / "devkit" / "art"
-    src = ROOT / "assets" / "src"
-    art.mkdir(parents=True, exist_ok=True)
-    for theme in ("dark", "light"):
-        svg = src / f"lockup-{theme}.svg"
-        svg.write_text(lockup_svg(theme))
-        png = src / f"lockup-{theme}.png"
-        run("rsvg-convert", "-w", 1100, "-h", 300, svg, "-o", png)
-        for colors, suffix in (("full", ""), ("256", "-256")):
-            out = subprocess.run(["chafa", "--size", "60x9", "--format", "symbols", "--symbols", "block+border+space",
-                                  "--colors", colors, "--fg-only", "--polite", "on", str(png)],
-                                 capture_output=True, text=True, check=True).stdout
-            (art / f"lockup-{theme}{suffix}.ans").write_text(out)
-    ascii_ = subprocess.run(["chafa", "--size", "60x9", "--format", "symbols", "--symbols", "ascii",
-                             "--colors", "none", "--polite", "on", str(src / "lockup-dark.png")],
-                            capture_output=True, text=True, check=True).stdout
-    (art / "lockup.txt").write_text(ascii_)
-
-
 def run(*args):
     subprocess.run([str(a) for a in args], check=True)
 
@@ -164,7 +139,6 @@ def main():
         png = src / f"hero-{theme}.png"
         run("rsvg-convert", "-w", 1600, "-h", 520, svg, "-o", png)
         run("cwebp", "-quiet", "-q", "92", png, "-o", imgs / f"hero-{theme}.webp")
-    terminal_art()
     print("rendered:", ", ".join(str(p.relative_to(ROOT)) for p in
                                  [passets / "logo.png", passets / "icon.png", imgs / "hero-dark.webp", imgs / "hero-light.webp"]))
 

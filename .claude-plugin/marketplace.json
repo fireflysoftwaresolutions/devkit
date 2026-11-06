@@ -1,6 +1,6 @@
 {
   "name": "firefly-devkit",
-  "description": "devkit from Firefly Software Solutions Inc.: one workspace for developers, Claude Code and Codex.",
+  "description": "devkit from Firefly Software Solutions Inc.: every repo in its place, every agent on the same page.",
   "owner": {
     "name": "Firefly Software Solutions Inc.",
     "email": "info@fireflysoftware.io"
@@ -9,7 +9,7 @@
     {
       "name": "devkit",
       "source": "./plugin",
-      "description": "One workspace for developers, Claude Code and Codex: project context and handoff notes, tasks, a portfolio overview, local-first delivery (one push, one CI run), backend methodology, managed worktrees and a guard.",
+      "description": "Every repo in its place, every agent on the same page: project context and handoff notes, tasks, a portfolio overview, local-first delivery (one push, one CI run), backend methodology, managed worktrees and a guard.",
       "category": "development",
       "keywords": [
         "devkit",

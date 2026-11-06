@@ -173,33 +173,86 @@ def print_help():
     print(f"  {ui.dim(COPYRIGHT)}\n")
 
 
+def _attention(issues) -> list:
+    """Registry issues as (headline, command, detail), similar ones grouped, commands split out of the text."""
+    import re as _re
+    out, stray = [], {}
+    for kind, msg in issues:
+        m = _re.match(r"(.+?): worktree outside the managed locations: (.+)$", msg)
+        if m:
+            stray.setdefault(m.group(1), []).append(m.group(2))
+            continue
+        cmd = ""
+        cm = _re.search(r"→\s*`([^`]+)`", msg)
+        if cm:
+            cmd, msg = cm.group(1), msg[:cm.start()].rstrip(" ;,→")
+        lm = _re.match(r"(\S+) lives at (\S+); canonical is (\S+)", msg)
+        if lm:
+            msg = f"{lm.group(1).split('/')[-1]} is outside the workspace layout (should be in {lm.group(3)})"
+        out.append((msg, cmd, ""))
+    for pid, paths in stray.items():
+        names = ", ".join(Path(p).name for p in paths)
+        out.append((f"{len(paths)} worktree(s) of {pid.split('/')[-1]} outside the managed folder: {names}",
+                    "", "dev adopt moves them with the repository; dev wt ls shows them"))
+    return out
+
+
+def _wrap(text: str, indent: int, width_: int) -> list:
+    import textwrap
+    return textwrap.wrap(text, max(30, width_ - indent), break_on_hyphens=False, break_long_words=False) or [""]
+
+
 def cmd_home(a):
     print(ui.banner(tilde(DEV)))
-    print(f"  {ui.bold(ui.greeting(core.gh_user().get('name', '')))} {ui.dim('Here is your workspace.')}")
+    W = min(ui.width(), 110)
+    print(f"  {ui.bold(ui.greeting(core.gh_user().get('name', '')))}")
     reg = _reg(prs=True)
     ps = reg["projects"]
     p, w = registry.project_for_cwd(reg, os.getcwd())
     if p:
-        _print_status(p, w)
+        co = w or p["main"]
+        print(ui.section(p["id"].split("/")[-1] + ui.dim(f"  {p['id']}") if "/" in p["id"] else p["id"]))
+        print(f"  {ui.cyan(co.get('branch') or '-')}  {_state(co)}")
+        sl = p.get("status_line") or registry.status_line(p["id"])
+        if sl and sl.get("line"):
+            from . import canary
+            segs = canary.segments(sl["line"])
+            done = next((x for x in segs[2:] if x[:1] not in "✓⚠✗–▸" and not x.lower().startswith("next")), "")
+            nxt = next((x[len("next →"):].strip() for x in segs if x.lower().startswith("next")), "")
+            if done:
+                who = f"({sl.get('agent', '')}, {ago(sl.get('ts'))})"
+                lines = _wrap(f"{done} {who}", 8, W)
+                lines[-1] = lines[-1][:-len(who)] + ui.dim(who) if lines[-1].endswith(who) else lines[-1]
+                print(f"  {ui.dim('last')}  " + "\n        ".join(lines))
+            if nxt:
+                print(f"  {ui.dim('next')}  " + "\n        ".join(_wrap(nxt, 8, W)))
+    else:
+        print(f"  {ui.dim('Not inside a project. `dev ls` lists them; `dcd <name>` jumps to one.')}")
     n_wt = sum(len(x["worktrees"]) for x in ps)
     live = sum(1 for x in ps for y in x["worktrees"] if y.get("active")) + sum(1 for x in ps if x["main"].get("active"))
     last = core.read_json(STATE / "last-sync.json", {}) or {}
-    print(ui.section("Workspace"))
-    print(ui.kv("projects", f"{len(ps)} · worktrees {n_wt} · live sessions {live}"))
-    print(ui.kv("handoff", f"{tilde(HANDOFF)} → {core.handoff_repo()} · last sync {ago(last.get('ts'))}"))
     from . import canary
-    print(ui.kv("canary", canary.summary_line(7) + ui.dim("  ([Firefly> DevKit] marker, 7 days)")))
-    recent = sorted(ps, key=lambda x: -(x.get("last_activity") or 0))[:5]
-    if recent:
-        print(ui.kv("recent", ", ".join(f"{x['id']} {ui.dim(ago(x.get('last_activity')))}" for x in recent)))
-    if reg["issues"]:
-        print(ui.section(f"Needs attention ({len(reg['issues'])})"))
-        for kind, msg in reg["issues"][:6]:
-            print(f"  {ui.WARN} {msg}")
-        if len(reg["issues"]) > 6:
-            print(f"  {ui.dim('… `dev status` / PROJECTS.md for the rest')}")
-    print(f"\n  {ui.cyan('tip')} {ui.dim(ui.tip())}")
-    print(f"  {ui.dim('dev help · dev ls · dev doctor')}\n")
+    print(ui.section("Workspace"))
+    print(f"  {len(ps)} projects · {n_wt} worktrees · {live} live sessions · synced {ago(last.get('ts'))}")
+    good, scored = canary.format_rate(7)
+    sm = canary.summary(7)
+    if sm:
+        ok_, tot = sum(o for o, _ in sm.values()), sum(t for _, t in sm.values())
+        print(ui.dim(f"  agents followed the rules in {100 * ok_ // tot}% of replies this week"
+                     + (f", {100 * good // scored}% in the full format" if scored else "")))
+    items = _attention(reg["issues"])
+    if items:
+        print(ui.section(f"Needs attention · {len(items)}"))
+        for head, cmd, detail in items[:5]:
+            lines = _wrap(head, 5, W)
+            print(f"  {ui.yellow('!')}  " + "\n     ".join(lines))
+            if cmd:
+                print(f"     {ui.cyan(cmd)}")
+            if detail:
+                print(f"     {ui.dim(detail)}")
+        if len(items) > 5:
+            print(f"  {ui.dim(f'+{len(items) - 5} more: dev dashboard')}")
+    print(f"\n  {ui.dim('dev status · dev ls · dev dashboard · dev help')}\n")
 
 
 # --------------------------------------------------------------------------- projects

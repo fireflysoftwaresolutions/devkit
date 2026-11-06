@@ -1,6 +1,6 @@
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="docs/images/hero-dark.webp">
-  <img src="docs/images/hero-light.webp" alt="devkit: one workspace for developers, Claude Code, and Codex. By Firefly Software Solutions Inc." width="100%">
+  <img src="docs/images/hero-light.webp" alt="devkit: Every repo in its place. Every agent on the same page. By Firefly Software Solutions Inc." width="100%">
 </picture>
 
 # devkit

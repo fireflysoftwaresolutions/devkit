@@ -53,14 +53,16 @@ FIREFLY_MASK = [
 ]
 TRAIL = "·   ˚  ✦   ⋆  ·  ✧"
 _PAL24 = {"a": (140, 140, 165), "w": (185, 228, 255), "e": (255, 255, 255), "b": (96, 96, 124),
-          "g": (205, 255, 70), "s": (255, 214, 90)}
+          "g": (205, 255, 70), "s": (255, 214, 90),
+          # Firefly brand: amber is the light (the spark), paper and charcoal the ink, stone the quiet text
+          "amber": (255, 179, 74), "paper": (243, 241, 235), "charcoal": (16, 17, 15), "stone": (191, 184, 171)}
 _PAL256 = {"a": 245, "w": 153, "e": 231, "b": 240, "g": 154, "s": 221}
 # firefly lime -> cyan -> violet
 _STOPS = [(190, 255, 60), (0, 214, 255), (170, 90, 255)]
 _LINE256 = [154, 49, 45, 39, 63, 99]
 _SHADOW = set("╗╔╝╚║═")
 FRAME_INNER = 68
-TAGLINE = "one workspace · every repo in its place · agents that hand off"
+TAGLINE = "Every repo in its place. Every agent on the same page."
 TIPS = [
     "`dcd <query>` jumps into any project; `dwt <branch>` creates a worktree and jumps into it.",
     "`dev claude -w feat/x` starts Claude Code in its own worktree: parallel work without sibling copies.",
@@ -99,51 +101,11 @@ def _gradient(line: str, t0: float = 0.0, t1: float = 1.0) -> str:
     return "".join(_fg(_grad(t0 + (t1 - t0) * (i / max(1, n - 1))), ch) for i, ch in enumerate(line))
 
 
-def _logo_row(i: int) -> str:
-    line = BANNER[i]
-    if TRUECOLOR:
-        n = len(line)
-        out = []
-        for j, ch in enumerate(line):
-            if ch == " ":
-                out.append(" ")
-            elif ch in _SHADOW:
-                out.append(_fg(_grad(j / (n - 1), 0.45), ch))
-            else:
-                out.append(_fg(_grad(j / (n - 1)), ch, bold_=True))
-        return "".join(out)
-    if COLOR:
-        return f"\x1b[1;38;5;{_LINE256[i]}m{line}\x1b[0m"
-    return line
-
-
-def _firefly_row(i: int) -> str:
-    art, mask = FIREFLY[i], FIREFLY_MASK[i]
-    if not COLOR:
-        return art
-    out = []
-    for ch, m in zip(art, mask):
-        if m == " ":
-            out.append(ch)
-        elif TRUECOLOR:
-            out.append(_fg(_PAL24[m], ch, bold_=m in "ge"))
-        else:
-            out.append(f"\x1b[{'1;' if m in 'ge' else ''}38;5;{_PAL256[m]}m{ch}\x1b[0m")
-    return "".join(out)
-
-
-def _trail() -> str:
-    if TRUECOLOR:
-        n = len(TRAIL)
-        return "".join(_fg((255, int(214 - 90 * j / n), int(90 + 120 * j / n)), ch) for j, ch in enumerate(TRAIL))
-    return f"\x1b[38;5;221m{TRAIL}\x1b[0m" if COLOR else TRAIL
-
-
 def logo_inline() -> str:
     """Compact one-line logo for narrow terminals and sub-headers."""
     s = "✦ devkit"
     if TRUECOLOR:
-        return _fg(_PAL24["g"], "✦", True) + " " + bold(_gradient("devkit"))
+        return _fg(_PAL24["amber"], "✦", True) + " " + bold("devkit")
     return bold(cyan(s)) if COLOR else s
 
 
@@ -159,51 +121,39 @@ def terminal_theme() -> str:
     return "light" if bg in ("7", "15") else "dark"
 
 
-def logo_art() -> list:
-    """The devkit logo (mark + wordmark) as pre-rendered terminal art, matched to the terminal's colour support."""
-    theme = terminal_theme()
-    name = (f"lockup-{theme}.ans" if TRUECOLOR else f"lockup-{theme}-256.ans" if COLOR else "lockup.txt")
-    try:
-        lines = (ART_DIR / name).read_text().rstrip("\n").split("\n")
-    except OSError:
-        return []
-    while lines and not ANSI_RE.sub("", lines[0]).strip():
-        lines.pop(0)
-    while lines and not ANSI_RE.sub("", lines[-1]).strip():
-        lines.pop()
-    return [ln + ("\x1b[0m" if COLOR else "") for ln in lines]
+# The devkit wordmark in half blocks, drawn by hand on the Manrope letterforms; ✦ (amber) is the dot of the i.
+WORDMARK = [
+    "     ██                 ██       ✦  ██  ",
+    " ▄▄▄▄██  ▄▄▄▄▄  ▄▄   ▄▄ ██  ▄▄  ▄▄ ▄██▄▄",
+    "██   ██ ██▄▄▄██ ██   ██ ██▄█▀   ██  ██  ",
+    "██   ██ ██▀▀▀▀▀ ▀█▄ ▄█▀ ███▄    ██  ██  ",
+    "▀█▄▄▄██ ▀█▄▄▄▄   ▀███▀  ██ ▀█▄  ██  ▀█▄▄",
+]
+
+
+def wordmark() -> list:
+    """The wordmark rows, inked for the terminal's theme (paper on dark, charcoal on light)."""
+    dark = terminal_theme() == "dark"
+    if TRUECOLOR:
+        ink = _PAL24["paper"] if dark else _PAL24["charcoal"]
+        return [_fg(ink, r.replace("✦", "\x00"), False).replace("\x00", _fg(_PAL24["amber"], "✦", True) +
+                                                                       f"\x1b[38;2;{ink[0]};{ink[1]};{ink[2]}m")
+                for r in WORDMARK]
+    if COLOR:
+        return [r.replace("✦", yellow("✦")) for r in WORDMARK]
+    return list(WORDMARK)
 
 
 def banner(context: str = "", framed: bool = True) -> str:
-    """The devkit welcome art: firefly + 3D gradient logo in a double frame, version and copyright footer."""
+    """Welcome: the devkit wordmark, the tagline, then version, context and copyright in one quiet line."""
     from .core import COPYRIGHT, VERSION
-    footer_l = f"v{VERSION}" + (f" · {context}" if context else "")
-    if width() < FRAME_INNER + 6 or not framed:
-        return f"\n  {logo_inline()}  {dim(footer_l)}  {dim(COPYRIGHT)}\n"
-    W = FRAME_INNER
-
-    def pad(s, n=W):
-        return s + " " * max(0, n - visible_len(s))
-
-    edge = (lambda s: _gradient(s)) if TRUECOLOR else (gray if COLOR else (lambda s: s))
-    top = edge("╔" + "═" * W + "╗")
-    bot = edge("╚" + "═" * W + "╝")
-    side_l, side_r = edge("║"), edge("║")
-    rows = [" " * (W - len(TRAIL) - 3) + _trail() + "   "]
-    art = logo_art()
-    if art:
-        rows += ["   " + ln for ln in art]
-    else:  # fallback: drawn firefly + block letters
-        for i in range(6):
-            rows.append("  " + _firefly_row(i) + "   " + _logo_row(i))
-    rows.append("")
-    rows.append("  " + italic(dim(TAGLINE)) if COLOR else "  " + TAGLINE)
-    rows.append("  " + dim("─" * (W - 4)))
-    spark = _fg(_PAL24["g"], "✦", True) if TRUECOLOR else (yellow("✦") if COLOR else "*")
-    rows.append(f"  {spark} {bold(footer_l)}")
-    rows.append("  " + (_gradient(COPYRIGHT, 0.0, 1.0) if TRUECOLOR else dim(COPYRIGHT)))
-    body = [f"  {side_l}{pad(r)}{side_r}" for r in rows]
-    return "\n" + "\n".join(["  " + top] + body + ["  " + bot]) + "\n"
+    meta = f"v{VERSION}" + (f" · {context}" if context else "")
+    if width() < len(WORDMARK[0]) + 6:
+        return f"\n  {logo_inline()}  {dim(meta)}\n"
+    out = [""] + ["  " + r for r in wordmark()] + [""]
+    out.append("  " + (_fg(_PAL24["stone"], TAGLINE, False) if TRUECOLOR else TAGLINE))
+    out.append("  " + dim(f"{meta}  ·  {COPYRIGHT}"))
+    return "\n".join(out) + "\n"
 
 
 def greeting(name: str = "") -> str:
@@ -256,7 +206,10 @@ def table(rows, headers, max_widths=None, indent=2) -> str:
 
 
 def section(title: str) -> str:
-    return "\n" + bold(cyan("▸ ")) + bold(title)
+    """A heading: the title in bold and a quiet rule to the right (no marker, so it never reads as a selection)."""
+    total = min(width() - 4, 78)  # every heading's rule ends in the same column
+    rule = "─" * max(3, total - visible_len(title) - 1)
+    return "\n  " + bold(title) + " " + dim(rule)
 
 
 def kv(key: str, value, key_width=14) -> str:
