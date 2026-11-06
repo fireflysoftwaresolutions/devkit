@@ -711,8 +711,9 @@ READ_SUB = {("task", "ls"), ("task", "show"), ("task", "history"), ("task", None
             ("issue", "ls"), ("issue", "view"), ("sec", "scan"), ("desktop", "status"), ("crew", None),
             ("crew", "show"), ("crew", "brief"), ("crew", "inbox"), ("crew", "decisions"), ("crew", "next"),
             ("ci", None), ("ci", "status"), ("ci", "audit"), ("session", "brief"), ("session", "compactions"),
-            ("session", None)}
-# `ci audit --fix` edits workflow files and `ci init` writes a pipeline (unless --dry-run): both are audited
+            ("session", None), ("alias", None)}
+# `ci audit --fix` edits workflow files and `ci init` writes a pipeline (unless --dry-run): both are audited;
+# `alias` alone lists the aliases, and `free` (or `gc`) without item numbers, --safe or --apply prints the plan
 # crew sync, ask, answer, decide, delegate, decline, mode <guided|auto> and route --apply change state;
 # `crew mode` alone and `crew route` without --apply only read
 PLUMBING = {"__complete", "hook"}  # shell completion and the agents' hooks: never a command of their own
@@ -734,8 +735,8 @@ def _changes(argv: list) -> bool:
         return False
     if cmd == "sleep" and "--dry-run" in argv:
         return False
-    if cmd == "gc" and "--apply" not in argv:
-        return False
+    if cmd in ("free", "gc"):  # the plan only reads; item numbers, --safe and --apply delete
+        return any(x in ("--apply", "--safe") or x.isdigit() for x in argv[1:])
     if cmd == "crew" and sub == "route":
         return "--apply" in argv
     if cmd == "ci":
