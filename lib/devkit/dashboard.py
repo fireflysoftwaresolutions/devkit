@@ -5,18 +5,22 @@ One self-contained HTML file (inline CSS, JS and SVG; data embedded as JSON)
 rendered from the registry that `dev sync` produces, the PR cache, the canary
 and guard logs, and the handoff repository's Markdown (Explorer).
 
-It is organised around jobs, not counts, with drill-down pages:
-  Home         a compact summary of everything: KPIs, the top of the action list,
-               initiative cards, who is working on what, what changed
-  Initiatives  list (cards or table, roadmap) -> #/initiatives/<slug>: overview,
+Each view answers one question in its first screen (summary -> page -> drawer):
+  Home         is anything wrong, and where do things stand? A title that answers,
+               four figures, the grouped action list, team now, initiatives, since yesterday
+  Initiatives  how is each programme going? One table and the roadmap ->
+               #/initiatives/<slug>: state, what is in progress, who is on it; tabs for
                member projects (grouped, searchable), tasks, plans, sessions, docs
-  Projects     dense table -> #/projects/<id>: overview, tasks, PRs, worktrees,
-               plans, sessions, the handoff note
-  Team         one card per person (user@host): live sessions, locks, claimed
-               tasks, recent sessions; collisions flagged
+  Projects     dense table -> #/projects/<id>: the state of the repo; tabs for tasks,
+               PRs, worktrees, plans, sessions, the handoff note
+  Team         who is doing what right now? One column per person (user@host); each
+               live session once; locks; collisions first
   Tasks        work items across scopes (kanban or list) -> the task drawer with
-               lock state, the full changelog and the `dev task` commands
-  Activity · Explorer · Health   as before
+               lock state, the next command, the other commands and the full changelog
+  Activity · Explorer · Health
+
+Design (v4): four type sizes, two weights, one amber accent per screen at most,
+status as dots or short text, rows divided by hairlines (no nested cards), SVG icons.
 
 Decisions (action priority, project health, "since yesterday", guard rule
 grouping) are computed here in Python so they are unit-tested; the page only
@@ -924,350 +928,573 @@ def _logo(name: str, cls: str) -> str:
 
 LIGHT = """
   color-scheme: light;
-  --page:#f3f1eb; --surface:#ffffff; --surface-2:#f9f8f4; --surface-3:#efece4; --hover:#f6f4ee;
-  --line:#d8d4ca; --line-soft:#e7e3da; --text:#272820; --heading:#10110f; --text-2:#62645b; --muted:#62645b;
-  --accent:#ffb34a; --accent-ink:#10110f; --accent-text:#855414; --focus:#855414;
-  --mark:#9d671f; --mark-soft:rgba(157,103,31,.10); --deemph:#c4bfb2; --grid:#ebe8e0; --axis:#c9c4b8;
-  --good:#0ca30c; --warning:#d99a0b; --serious:#ec835a; --critical:#d03b3b; --good-text:#006300; --bad-text:#a52a2a;
-  --warn-text:#7a5200; --hl:rgba(255,179,74,.45); --overlay:rgba(16,17,15,.40);
-  --shadow:0 1px 2px rgba(16,17,15,.05),0 12px 32px rgba(16,17,15,.08);
+  --page:#f3f1eb; --raised:#fbfaf7; --wash:#e9e6de; --hover:#ebe8e0; --select:rgba(255,179,74,.35);
+  --line:#d8d4ca; --line-soft:#e3dfd6; --text:#272820; --strong:#10110f; --text-2:#62645b;
+  --mark:#474a42; --track:#dedad0; --grid:#e3dfd6; --axis:#c9c4b8; --deemph:#bfb8ab;
+  --accent:#ffb34a; --accent-hover:#ffbe63; --accent-ink:#10110f; --focus:#855414;
+  --good:#2f9e44; --warn:#d99a0b; --bad:#d03b3b; --warning:#d99a0b; --critical:#d03b3b;
+  --good-text:#1d6b2f; --warn-text:#7a5200; --bad-text:#a52a2a; --hl:rgba(255,179,74,.45);
+  --overlay:rgba(16,17,15,.32); --shadow:0 2px 6px rgba(16,17,15,.06),0 16px 32px rgba(16,17,15,.10); --elev-border:0 solid transparent;
   --logo-dark:none; --logo-light:block;
 """
 DARK = """
   color-scheme: dark;
-  --page:#10110f; --surface:#171815; --surface-2:#1c1d19; --surface-3:#24251f; --hover:#1f201c;
-  --line:#3a3c35; --line-soft:#272923; --text:#f3f1eb; --heading:#ffffff; --text-2:#bfb8ab; --muted:#9d988c;
-  --accent:#ffb34a; --accent-ink:#10110f; --accent-text:#ffb34a; --focus:#ffb34a;
-  --mark:#c38530; --mark-soft:rgba(195,133,48,.14); --deemph:#4f524a; --grid:#262822; --axis:#474a42;
-  --good:#22b322; --warning:#fab219; --serious:#ec835a; --critical:#e04b4b; --good-text:#3cc23c; --bad-text:#f08585;
-  --warn-text:#fab219; --hl:rgba(255,179,74,.32); --overlay:rgba(0,0,0,.55);
-  --shadow:0 1px 2px rgba(0,0,0,.4),0 16px 40px rgba(0,0,0,.40);
+  --page:#10110f; --raised:#191a17; --wash:#22231f; --hover:#1c1d19; --select:rgba(255,179,74,.30);
+  --line:#474a42; --line-soft:#2b2d28; --text:#f3f1eb; --strong:#ffffff; --text-2:#bfb8ab;
+  --mark:#bfb8ab; --track:#30322c; --grid:#2b2d28; --axis:#474a42; --deemph:#62645b;
+  --accent:#ffb34a; --accent-hover:#ffc06b; --accent-ink:#10110f; --focus:#ffb34a;
+  --good:#3cb25a; --warn:#fab219; --bad:#e5534b; --warning:#fab219; --critical:#e5534b;
+  --good-text:#6fd08a; --warn-text:#fab219; --bad-text:#f29b95; --hl:rgba(255,179,74,.32);
+  --overlay:rgba(0,0,0,.6); --shadow:none; --elev-border:1px solid #474a42;
   --logo-dark:block; --logo-light:none;
 """
 
 CSS = r"""
 *,*::before,*::after{box-sizing:border-box}
-:root{--s1:4px;--s2:8px;--s3:12px;--s4:16px;--s5:24px;--s6:32px;--s7:48px;--r:12px;--rs:8px;
-  --fs-xs:.75rem;--fs-sm:.8125rem;--fs-md:.875rem;--fs-base:.9375rem;--fs-lg:1.0625rem;--fs-title:1.7rem;--row:44px}
-html{-webkit-text-size-adjust:100%}
-body{margin:0;background:var(--page);color:var(--text);font:400 var(--fs-base)/1.55 "Manrope","Manrope Variable",system-ui,-apple-system,"Segoe UI",Arial,sans-serif}
-body.dense{--fs-base:.875rem;--row:34px}
+/* one scale for space, four type sizes (13 / 15 / 18 / 28 px), two weights (400 / 600) */
+:root{--s1:4px;--s2:8px;--s3:12px;--s4:16px;--s5:24px;--s6:32px;--s7:48px;--s8:64px;
+  --fs-1:.8125rem;--fs-2:.9375rem;--fs-3:1.125rem;--fs-4:1.75rem;--r:10px;--rs:6px;--row:44px;--nav-h:56px;--tabs-h:44px;--wide:1280px;
+  --mono:ui-monospace,"SF Mono",Menlo,Consolas,monospace;--ease:cubic-bezier(.2,.8,.2,1)}
+html{-webkit-text-size-adjust:100%;scrollbar-color:var(--line) transparent}
+body{margin:0;background:var(--page);color:var(--text);font:400 var(--fs-2)/1.5 "Manrope","Manrope Variable",system-ui,-apple-system,"Segoe UI",Arial,sans-serif}
+body.dense{--row:36px}
+::selection{background:var(--select)}
 [hidden]{display:none!important}
-a{color:inherit;text-underline-offset:3px;text-decoration-color:var(--line)}
+a{color:inherit;text-decoration:underline;text-decoration-color:var(--line);text-underline-offset:3px}
 a:hover{text-decoration-color:currentColor}
 button,input,select{font:inherit;color:inherit}
-:focus-visible{outline:2px solid var(--focus);outline-offset:2px;border-radius:6px}
-.skip{position:absolute;left:-999px;top:8px;background:var(--surface);padding:8px 12px;border-radius:8px;z-index:100}
+input::placeholder{color:var(--text-2)}
+:focus-visible{outline:2px solid var(--focus);outline-offset:2px;border-radius:4px}
+.skip{position:absolute;left:-999px;top:8px;background:var(--raised);padding:8px 12px;border-radius:var(--rs);z-index:100}
 .skip:focus{left:8px}
-code,kbd,pre,.mono{font-family:ui-monospace,"SF Mono",Menlo,Consolas,monospace}
-code{font-size:.86em}
-kbd{display:inline-block;border:1px solid var(--line);border-bottom-width:2px;border-radius:5px;padding:0 5px;background:var(--surface-2);color:var(--text-2);font-size:.7rem;line-height:1.5}
-.t2{color:var(--text-2)} .muted{color:var(--muted)} .num{font-variant-numeric:tabular-nums}
-.label{font-size:var(--fs-xs);font-weight:650;letter-spacing:.06em;text-transform:uppercase;color:var(--text-2)}
+code,kbd,pre,.mono{font-family:var(--mono)}
+code{font-size:var(--fs-1)}
+kbd{display:inline-block;min-width:20px;padding:0 5px;border:1px solid var(--line);border-radius:4px;color:var(--text-2);font:400 var(--fs-1)/18px var(--mono);text-align:center}
+.t2,.muted{color:var(--text-2)} .num{font-variant-numeric:tabular-nums}
+.label{font-size:var(--fs-1);color:var(--text-2)}
 .ell{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;min-width:0}
-/* ---------- navbar: firefly | devkit lockup */
-.nav{position:sticky;top:0;z-index:30;display:flex;align-items:center;gap:var(--s4);height:56px;padding:0 var(--s5);background:color-mix(in srgb,var(--page) 88%,transparent);backdrop-filter:saturate(1.2) blur(12px);-webkit-backdrop-filter:blur(12px);border-bottom:1px solid var(--line-soft)}
-.lockup{display:flex;align-items:center;gap:var(--s3);text-decoration:none;flex:none;border-radius:8px;padding:var(--s1) var(--s1) var(--s1) 0}
+.bad{color:var(--bad-text)} .warn-t{color:var(--warn-text)} .good-t{color:var(--good-text)}
+.strong{color:var(--strong);font-weight:600}
+.i{width:16px;height:16px;flex:none;display:inline-block;vertical-align:-3px}
+.meta{display:inline-flex;flex-wrap:wrap;align-items:center;gap:2px var(--s3);min-width:0}
+.meta>*{min-width:0}
+/* ---------- navbar: the official firefly | devkit lockup, text tabs, search */
+.nav{position:sticky;top:0;z-index:30;display:flex;align-items:center;gap:var(--s5);height:var(--nav-h);padding:0 max(var(--s5),calc((100% - var(--wide)) / 2 + var(--s5)));background:var(--page);border-bottom:1px solid var(--line-soft)}
+.lockup{display:flex;align-items:center;gap:var(--s3);text-decoration:none;flex:none;border-radius:var(--rs);padding:var(--s1) var(--s1) var(--s1) 0}
 .lockup .ff{height:22px;width:auto;flex:none}
 .lockup .ff-dark{display:var(--logo-dark)} .lockup .ff-light{display:var(--logo-light)}
-.lockup .ff-text{font-weight:700;font-size:1.2rem;letter-spacing:-.04em}
+.lockup .ff-text{font-weight:600;font-size:var(--fs-3);letter-spacing:-.04em}
 .lockup .vr{width:1px;height:22px;background:var(--line);flex:none}
-.lockup .dk{display:flex;align-items:center;gap:6px;color:var(--heading);font-weight:700;font-size:1.0625rem;letter-spacing:-.025em;line-height:1;transform:translateY(-1px)}
+.lockup .dk{display:flex;align-items:center;gap:6px;color:var(--strong);font-weight:600;font-size:var(--fs-3);letter-spacing:-.02em;line-height:1;transform:translateY(-1px)}
 .lockup .dk .spark{width:18px;height:18px;color:var(--accent);flex:none;transform:translateY(1px)}
-.tabs{display:flex;gap:2px;overflow-x:auto;scrollbar-width:none;min-width:0}
+.tabs{display:flex;align-self:stretch;gap:var(--s4);overflow-x:auto;scrollbar-width:none;min-width:0}
 .tabs::-webkit-scrollbar{display:none}
-.tab{border:0;background:none;padding:6px 12px;border-radius:999px;color:var(--text-2);font-weight:600;font-size:var(--fs-md);cursor:pointer;white-space:nowrap;display:flex;align-items:center;gap:6px}
-.tab:hover{background:var(--hover);color:var(--text)}
-.tab[aria-selected="true"]{background:var(--surface);color:var(--heading);box-shadow:inset 0 0 0 1px var(--line)}
-.tab .n{min-width:18px;height:18px;padding:0 5px;border-radius:999px;font-size:.68rem;line-height:18px;text-align:center;background:var(--critical);color:#fff;font-weight:700}
+.tab{border:0;background:none;padding:0 2px;color:var(--text-2);font-size:var(--fs-2);cursor:pointer;white-space:nowrap;display:flex;align-items:center;gap:6px;box-shadow:inset 0 -2px 0 transparent}
+.tab:hover{color:var(--strong)}
+.tab[aria-selected="true"]{color:var(--strong);font-weight:600;box-shadow:inset 0 -2px 0 var(--strong)}
+.tab.sec{margin-left:var(--s2)}
+.tab .n{width:7px;height:7px;border-radius:50%;background:var(--bad);flex:none}
+.tab .n.warn{background:var(--warn)}
 .spacer{flex:1}
-.search{position:relative;flex:0 1 280px;min-width:150px}
-.search input{width:100%;height:34px;padding:0 34px 0 32px;border-radius:999px;border:1px solid var(--line);background:var(--surface);outline:none;font-size:var(--fs-md)}
-.search input:focus{border-color:var(--focus);box-shadow:0 0 0 3px var(--mark-soft)}
-.search .ico{position:absolute;left:12px;top:50%;transform:translateY(-50%);color:var(--muted);pointer-events:none;font-size:.9rem}
-.search kbd{position:absolute;right:10px;top:50%;transform:translateY(-50%)}
-.btn{display:inline-flex;align-items:center;justify-content:center;gap:6px;height:32px;border:1px solid var(--line);background:var(--surface);border-radius:999px;padding:0 var(--s3);cursor:pointer;font-size:var(--fs-sm);font-weight:600;white-space:nowrap;text-decoration:none}
-.btn:hover{border-color:var(--text-2)}
-.btn.sm{height:26px;padding:0 10px;font-size:var(--fs-xs)}
+.search{position:relative;flex:0 1 240px;min-width:150px}
+.search input{width:100%;height:34px;padding:0 34px 0 34px;border-radius:var(--rs);border:1px solid var(--line);background:transparent;outline:none;font-size:var(--fs-1)}
+.search input:focus{border-color:var(--focus)}
+.search .ico{position:absolute;left:10px;top:50%;transform:translateY(-50%);color:var(--text-2);pointer-events:none;display:flex}
+.search kbd{position:absolute;right:8px;top:50%;transform:translateY(-50%)}
+/* ---------- buttons: quiet by default, one amber primary per screen */
+.btn{display:inline-flex;align-items:center;justify-content:center;gap:6px;height:32px;border:1px solid var(--line);background:transparent;border-radius:var(--rs);padding:0 var(--s3);cursor:pointer;font-size:var(--fs-1);font-weight:600;color:var(--text);white-space:nowrap;text-decoration:none;max-width:100%}
+.btn:hover{background:var(--hover)}
+.btn.primary{background:var(--accent);border-color:var(--accent);color:var(--accent-ink)}
+.btn.primary:hover{background:var(--accent-hover)}
+.btn.sm{height:28px;padding:0 10px}
 .btn.icon{width:32px;padding:0}
-.btn.ghost{border-color:transparent;background:none}
-.btn[aria-pressed="true"]{background:var(--surface-3);border-color:var(--text-2)}
+.btn.ghost{border-color:transparent}
+.btn[aria-pressed="true"]{background:var(--wash)}
+.btn .lbl{overflow:hidden;text-overflow:ellipsis;min-width:0}
+.icopy{flex:none;width:28px;height:28px;border-radius:var(--rs);border:0;background:none;cursor:pointer;color:var(--text-2);display:inline-grid;place-items:center;padding:0}
+.icopy:hover{background:var(--hover);color:var(--strong)}
+.linkbtn{all:unset;cursor:pointer;color:var(--text-2);font-size:var(--fs-1);white-space:nowrap} .linkbtn:hover{color:var(--strong);text-decoration:underline}
+.linkbtn:focus-visible,.lnk:focus-visible,.sc:focus-visible{outline:2px solid var(--focus);border-radius:4px}
+a.more,.more-l{color:var(--text-2);font-size:var(--fs-1);text-decoration:none;white-space:nowrap} a.more:hover,.more-l:hover{color:var(--strong);text-decoration:underline}
+.more-l.pad{display:inline-block;padding:var(--s3) 0 0}
+.lnk{all:unset;cursor:pointer;font-weight:600;color:var(--strong)} .lnk:hover{text-decoration:underline}
+/* command rows (drawer, command menus): label, the command in mono, a copy icon */
+.cmds{display:grid;grid-template-columns:minmax(0,1fr)}
+.cmdr{display:grid;grid-template-columns:minmax(110px,160px) minmax(0,1fr) 28px;gap:var(--s3);align-items:center;padding:6px 0;border-bottom:1px solid var(--line-soft);font-size:var(--fs-1)}
+.cmdr:last-child{border-bottom:0}
+.cmdr code{color:var(--text);overflow-wrap:anywhere}
+.cmenu{position:relative;display:inline-block}
+.cmenu>summary{list-style:none} .cmenu>summary::-webkit-details-marker{display:none}
+.cmenu .menu{right:0;left:auto;min-width:min(520px,calc(100vw - 32px));padding:var(--s2) var(--s4)}
+.cmenu .cmdr{grid-template-columns:minmax(0,1fr) 28px} .cmenu .cmdr .t2{grid-column:1/-1;margin-bottom:-4px}
 /* ---------- filters */
-.filters{display:flex;flex-wrap:wrap;align-items:center;gap:var(--s2);padding:var(--s2) var(--s5);border-bottom:1px solid var(--line-soft);background:var(--page)}
+.filters{display:flex;flex-wrap:wrap;align-items:center;gap:var(--s2);max-width:var(--wide);margin:0 auto;padding:var(--s4) var(--s5) 0}
 .facet{position:relative}
 .facet>summary{list-style:none;cursor:pointer}
 .facet>summary::-webkit-details-marker{display:none}
-.menu{position:absolute;top:calc(100% + 6px);left:0;z-index:40;min-width:220px;max-height:340px;overflow:auto;background:var(--surface);border:1px solid var(--line);border-radius:var(--r);box-shadow:var(--shadow);padding:6px}
-.menu label{display:flex;align-items:center;gap:8px;padding:6px 8px;border-radius:8px;cursor:pointer;font-size:var(--fs-md)}
+.menu{position:absolute;top:calc(100% + 6px);left:0;z-index:40;min-width:220px;max-height:360px;overflow:auto;background:var(--raised);border:var(--elev-border);border-radius:var(--r);box-shadow:var(--shadow);padding:6px}
+.menu label{display:flex;align-items:center;gap:8px;padding:6px 8px;border-radius:var(--rs);cursor:pointer;font-size:var(--fs-1)}
 .menu label:hover{background:var(--hover)}
-.menu .count{margin-left:auto;color:var(--muted);font-size:var(--fs-xs)}
-.chip{display:inline-flex;align-items:center;gap:6px;height:26px;padding:0 4px 0 10px;border-radius:999px;background:var(--surface-3);font-size:var(--fs-xs);font-weight:650}
+.menu .count{margin-left:auto;color:var(--text-2)}
+.chip{display:inline-flex;align-items:center;gap:4px;height:28px;padding:0 4px 0 10px;border-radius:999px;background:var(--wash);font-size:var(--fs-1)}
 .chip button{border:0;background:none;cursor:pointer;color:var(--text-2);padding:0 6px;border-radius:999px}
-.toggle{display:inline-flex;align-items:center;gap:6px;font-size:var(--fs-sm);color:var(--text-2);cursor:pointer;padding:0 6px;height:26px}
-.toggle input{accent-color:var(--mark)}
+.toggle{display:inline-flex;align-items:center;gap:6px;font-size:var(--fs-1);color:var(--text-2);cursor:pointer;padding:0 6px;height:28px}
+.toggle input{accent-color:var(--strong)}
 /* ---------- page */
-main{max-width:1440px;margin:0 auto;padding:var(--s5) var(--s5) var(--s7);outline:none}
-.head{display:flex;flex-wrap:wrap;align-items:baseline;gap:var(--s2) var(--s4);margin:0 0 var(--s4)}
-.head h1{margin:0;font-size:var(--fs-title);font-weight:450;letter-spacing:-.035em;line-height:1.2;color:var(--heading)}
-.head .sub{color:var(--text-2);font-size:var(--fs-md)}
+main{max-width:var(--wide);margin:0 auto;padding:var(--s6) var(--s5) var(--s8);outline:none}
+.head{display:flex;flex-wrap:wrap;align-items:baseline;gap:var(--s2) var(--s4);margin:0 0 var(--s6)}
+.head h1,.phead h1{margin:0;font-size:var(--fs-4);font-weight:400;letter-spacing:-.025em;line-height:1.2;color:var(--strong);text-wrap:balance}
+.head .sub{color:var(--text-2)}
 .head .right{margin-left:auto;display:flex;gap:var(--s2);align-items:center;flex-wrap:wrap}
-.panel{background:var(--surface);border:1px solid var(--line-soft);border-radius:var(--r);min-width:0}
-.ph{display:flex;align-items:center;gap:var(--s2);min-height:48px;padding:var(--s2) var(--s4);border-bottom:1px solid var(--line-soft)}
-.ph h2{margin:0;font-size:var(--fs-lg);font-weight:650;letter-spacing:-.015em;color:var(--heading)}
-.ph .count{color:var(--muted);font-size:var(--fs-sm);font-weight:600}
-.ph .right{margin-left:auto;display:flex;gap:var(--s2);align-items:center;flex-wrap:wrap;justify-content:flex-end}
-.pb{padding:var(--s2) var(--s4) var(--s4)}
+/* a section: heading, count, one quiet link; no box around it */
+.panel{min-width:0}
+.ph{display:flex;align-items:baseline;gap:var(--s2);min-height:32px;padding:0 0 var(--s2);border-bottom:1px solid var(--line)}
+.ph h2{margin:0;font-size:var(--fs-3);font-weight:600;letter-spacing:-.01em;color:var(--strong)}
+.ph .count{color:var(--text-2)}
+.ph .right{margin-left:auto;display:flex;gap:var(--s3);align-items:center;flex-wrap:wrap;justify-content:flex-end;min-width:0;max-width:100%}
+.pb{padding:var(--s3) 0 0;min-width:0}
 .pb.flush{padding:0}
-.stack-v{display:grid;gap:var(--s4)}
-.cols{display:grid;gap:var(--s4);grid-template-columns:minmax(0,1.7fr) minmax(0,1fr);align-items:start}
+.stack-v{display:grid;gap:var(--s7);grid-template-columns:minmax(0,1fr)}
+.cols{display:grid;gap:var(--s7);grid-template-columns:minmax(0,1.6fr) minmax(0,1fr);align-items:start}
 .cols.even{grid-template-columns:repeat(2,minmax(0,1fr))}
-/* tiles */
-.tiles{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:var(--s3);margin-bottom:var(--s4)}
-.tile{display:flex;align-items:center;gap:var(--s3);padding:var(--s3) var(--s4);background:var(--surface);border:1px solid var(--line-soft);border-radius:var(--r);text-decoration:none;min-width:0;transition:border-color .15s}
-.tile:hover{border-color:var(--line)}
-.tile .tv{font-size:1.6rem;font-weight:600;letter-spacing:-.03em;line-height:1;color:var(--heading)}
-.tile .tl{font-size:var(--fs-sm);color:var(--text-2);line-height:1.3}
-.tile .tl b{display:block;color:var(--text);font-weight:650;font-size:var(--fs-md)}
-.tile.risk .tv{color:var(--bad-text)} .tile.ok .tv{color:var(--heading)}
-/* severity + dots */
-.dot{display:inline-block;width:8px;height:8px;border-radius:50%;flex:none;background:var(--deemph)}
-.d-good,.d-ok,.d-passing{background:var(--good)} .d-warn,.d-pending,.d-warning{background:var(--warning)}
-.d-risk,.d-failing,.d-critical{background:var(--critical)} .d-none,.d-unknown,.d-info{background:var(--deemph)}
-.d-live{background:var(--good);box-shadow:0 0 0 3px color-mix(in srgb,var(--good) 22%,transparent)}
-.hd{width:10px;height:10px;box-shadow:0 0 0 2px var(--surface)}
-.sev{flex:none;width:22px;height:22px;border-radius:999px;display:grid;place-items:center;font-size:.72rem;font-weight:800;color:#fff}
-.sev.risk{background:var(--critical)} .sev.warn{background:var(--warning);color:#10110f} .sev.info{background:var(--surface-3);color:var(--text-2)}
-.tag{display:inline-flex;align-items:center;height:20px;padding:0 7px;border-radius:6px;font-size:.68rem;font-weight:700;letter-spacing:.05em;text-transform:uppercase;background:var(--surface-3);color:var(--text-2);white-space:nowrap}
-.badge{display:inline-flex;align-items:center;gap:5px;height:22px;font-size:var(--fs-xs);font-weight:650;padding:0 8px;border-radius:999px;border:1px solid var(--line);color:var(--text);background:var(--surface-2);white-space:nowrap}
-.badge .ic{font-size:.66rem;line-height:1}
-.s-active .ic{color:var(--good)} .s-paused .ic{color:var(--warning)} .s-blocked .ic{color:var(--critical)} .s-done .ic,.s-archived .ic,.s-untracked .ic{color:var(--muted)}
-.p-high .ic{color:var(--accent-text)} .p-low .ic{color:var(--muted)}
-.stk{display:inline-block;font-size:.7rem;padding:1px 6px;border-radius:6px;background:var(--surface-3);color:var(--text-2);margin-right:4px}
-.pr{display:inline-flex;align-items:center;gap:4px;height:22px;padding:0 7px 0 6px;border-radius:999px;border:1px solid var(--line-soft);font-size:var(--fs-xs);font-weight:650;text-decoration:none;white-space:nowrap;background:var(--surface-2)}
-.pr:hover{border-color:var(--line)}
-.prs{display:flex;flex-wrap:wrap;gap:4px}
-/* copy command */
-.cmd{display:inline-flex;align-items:center;gap:8px;max-width:100%;height:30px;padding:0 4px 0 10px;border:1px solid var(--line);border-radius:8px;background:var(--surface-2);cursor:pointer;font-size:var(--fs-sm);text-align:left}
-.cmd code{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;min-width:0;font-size:.78rem}
-.cmd .cp{flex:none;height:22px;padding:0 8px;border-radius:6px;background:var(--surface-3);font-size:.7rem;font-weight:700;display:grid;place-items:center;color:var(--text-2)}
-.cmd:hover{border-color:var(--text-2)}
-.cmd.primary{background:var(--accent);border-color:var(--accent);color:var(--accent-ink)}
-.cmd.primary .cp{background:rgba(16,17,15,.14);color:var(--accent-ink)}
-.icopy{flex:none;width:26px;height:26px;border-radius:6px;border:1px solid transparent;background:none;cursor:pointer;color:var(--text-2);display:grid;place-items:center;font-size:.8rem}
-.icopy:hover{border-color:var(--line);background:var(--surface-2);color:var(--text)}
-/* action list */
-.acts{list-style:none;margin:0;padding:0}
-.act{display:grid;grid-template-columns:22px minmax(0,1fr) minmax(0,auto);gap:var(--s2) var(--s3);align-items:center;padding:var(--s3) var(--s4);border-bottom:1px solid var(--line-soft)}
-.act:last-child{border-bottom:0}
-.more{padding:var(--s2) var(--s4);border-top:1px solid var(--line-soft)}
-.more-l{display:block;padding:var(--s2) 0;font-size:var(--fs-sm);color:var(--text-2);text-decoration:none} .more-l:hover{color:var(--text)}
-.act:hover{background:var(--hover)}
-.act .at{font-weight:650;color:var(--heading);display:flex;gap:var(--s2);align-items:center;flex-wrap:wrap;line-height:1.35}
-.act .ad{color:var(--text-2);font-size:var(--fs-sm);margin-top:2px}
-.act .ad a,.act .at a{text-decoration:none}
-.act .ad .proj{color:var(--text);font-weight:600}
+.mb{margin-bottom:var(--s7)} .mt{margin-top:var(--s7)}
+/* headline figures: a few numbers with context, no tiles */
+.figs{display:grid;grid-template-columns:repeat(var(--n,4),minmax(0,1fr));gap:var(--s5);margin:0 0 var(--s7)}
+.fig{display:grid;align-content:start;gap:2px;padding-top:var(--s3);border-top:1px solid var(--line);text-decoration:none;min-width:0}
+.fig .fv{display:flex;align-items:baseline;gap:6px;color:var(--text);min-width:0}
+.fig .fv b{font-size:var(--fs-3);font-weight:600;color:var(--strong);font-variant-numeric:tabular-nums;line-height:1.3}
+.fig .fv .dot{align-self:center}
+.fig .fl{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.fig .fs{font-size:var(--fs-1);color:var(--text-2)}
+a.fig:hover .fl{text-decoration:underline;text-underline-offset:3px;text-decoration-color:var(--line)}
+.figs.sm{margin:0 0 var(--s4)}
+/* status: an 8 px dot and short text */
+.dot{display:inline-block;width:8px;height:8px;border-radius:50%;flex:none;background:var(--track)}
+.d-good,.d-ok,.d-passing{background:var(--good)} .d-warn,.d-pending,.d-warning{background:var(--warn)}
+.d-risk,.d-failing,.d-critical{background:var(--bad)} .d-none,.d-unknown,.d-info{background:var(--track)}
+.d-live{background:var(--good)}
+.hd{width:8px;height:8px}
+.stat{display:inline-flex;align-items:center;gap:6px;white-space:nowrap}
+.badge{display:inline-flex;align-items:center;gap:6px;font-size:var(--fs-1);color:var(--text-2);white-space:nowrap}
+.tag{display:inline-flex;align-items:center;height:20px;padding:0 6px;border-radius:4px;font-size:var(--fs-1);background:var(--wash);color:var(--text-2);white-space:nowrap}
+.stk{display:inline-block;font-size:var(--fs-1);padding:0 6px;border-radius:4px;background:var(--wash);color:var(--text-2);margin-right:4px}
+.due{font-size:var(--fs-1);color:var(--text-2);white-space:nowrap} .due.over{color:var(--bad-text)}
+.pico{font-size:var(--fs-1);color:var(--text-2);margin-left:6px} .meta .pico,.tc .meta .pico,.imeta .pico{margin-left:0}
+.pr{display:inline-flex;align-items:center;gap:5px;font-size:var(--fs-1);text-decoration:none;white-space:nowrap;color:var(--text)}
+.pr:hover{text-decoration:underline}
+.prs{display:flex;flex-wrap:wrap;gap:4px 10px}
+/* progress: thin, neutral */
+.prog{display:inline-flex;align-items:center;gap:var(--s2);width:100%;max-width:220px;vertical-align:middle;min-width:0}
+.prog.wide{max-width:none}
+.pbar{flex:1;height:4px;border-radius:2px;background:var(--track);overflow:hidden;min-width:40px}
+.pbar i{display:block;height:100%;background:var(--mark)}
+.prog .pv{font-size:var(--fs-1);color:var(--text-2);min-width:34px;text-align:right;font-variant-numeric:tabular-nums}
+.rbar{height:4px;border-radius:2px;background:var(--track);overflow:hidden;margin:2px 0}
+.rbar i{display:block;height:100%;background:var(--mark)}
+.rbar.over i{background:var(--warn)} .rbar.blocked i,.run.blocked .rbar i{background:var(--bad)} .run.done .rbar i{background:var(--good)}
+.qbar{height:4px;border-radius:2px;background:var(--track);overflow:hidden;margin:var(--s2) 0 var(--s1)}
+.qbar i{display:block;height:100%}
+/* people */
+.av{position:relative;flex:none;display:inline-grid;place-items:center;width:26px;height:26px;border-radius:50%;background:var(--wash);color:var(--strong);font-size:var(--fs-1);font-weight:600;line-height:1}
+.av.lg{width:36px;height:36px}
+.av.live::after{content:"";position:absolute;right:-1px;bottom:-1px;width:8px;height:8px;border-radius:50%;background:var(--good);box-shadow:0 0 0 2px var(--page)}
+.av.more{color:var(--text-2);font-weight:400}
+.avs{display:inline-flex;align-items:center;gap:4px}
+.claim{display:inline-flex;align-items:center;gap:5px;max-width:100%;font-size:var(--fs-1);color:var(--text-2);white-space:nowrap;min-width:0}
+.claim .lk{flex:none} .claim .cw{min-width:0;overflow:hidden;text-overflow:ellipsis} .claim.mine{color:var(--text)}
+.claim.exp{color:var(--warn-text)}
+/* ---------- rows: one pattern for every list */
+.acts,.irows,.prows,.lrows,.rrows,.inis,.plans,.tl-rows{list-style:none;margin:0;padding:0}
+.act,.irow,.prow,.lrow,.inir{border-bottom:1px solid var(--line-soft);min-width:0}
+.act:last-child,.irow:last-child,.prow:last-child,.lrow:last-child,.inir:last-child{border-bottom:0}
+[data-nav]{cursor:pointer}
+.act:hover,.irow:hover,.prow:hover,.lrow:hover,.inir:hover,table.t tr[data-nav]:hover td{background:var(--hover)}
+.act{display:grid;grid-template-columns:8px minmax(0,1fr) auto;gap:2px var(--s3);align-items:start;padding:var(--s3) var(--s2)}
+.act>.dot{margin-top:8px}
+.act .at{font-weight:600;color:var(--strong);line-height:1.4;min-width:0}
+.act .at a{text-decoration:none} .act .at a:hover{text-decoration:underline}
+.act .ad{font-size:var(--fs-1);color:var(--text-2);margin-top:2px}
+.act .ad .proj{color:var(--text)}
 .act .ar{display:flex;gap:var(--s2);align-items:center;justify-content:flex-end;min-width:0}
-.act .ar .cmd{max-width:360px}
-.body-dense .act{padding:var(--s2) var(--s4)}
-/* now list */
-.grp{padding:var(--s2) 0;border-bottom:1px solid var(--line-soft)}
-.grp:last-child{border-bottom:0}
-.grp-h{display:flex;align-items:center;gap:var(--s2);font-weight:650;font-size:var(--fs-md);margin:var(--s1) 0}
-.grp-h button{all:unset;cursor:pointer;color:var(--heading)} .grp-h button:hover{text-decoration:underline}
-.tl-rows{list-style:none;margin:0;padding:0}
-.trow{display:flex;align-items:flex-start;gap:var(--s2);padding:3px 0;font-size:var(--fs-md)}
-.trow .box{flex:none;width:14px;height:14px;margin-top:3px;border:1.5px solid var(--text-2);border-radius:4px}
-.trow .box.doing{border-color:var(--mark);background:var(--mark-soft)} .trow .box.done{background:var(--text-2);border-color:var(--text-2)}
-.trow .tx{flex:1;min-width:0}
-.due{display:inline-block;font-size:.7rem;font-weight:700;padding:0 6px;border-radius:6px;background:var(--surface-3);white-space:nowrap;margin-left:6px}
-.due.over{color:var(--bad-text)}
-/* tables */
+.irow{display:grid;grid-template-columns:16px minmax(0,1fr) minmax(0,auto) 28px;gap:2px var(--s3);align-items:center;padding:var(--s2) var(--s2);min-height:var(--row)}
+.irow.closed .itl{color:var(--text-2)}
+.irow .im{min-width:0} .irow .itl{color:var(--strong);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.imeta{display:flex;flex-wrap:wrap;gap:2px var(--s3);align-items:center;font-size:var(--fs-1);color:var(--text-2)}
+.iid{font-size:var(--fs-1);color:var(--text-2);font-variant-numeric:tabular-nums}
+.icl{min-width:0;display:flex;justify-content:flex-end}
+.ist{flex:none;display:inline-grid;place-items:center;width:16px;height:16px;color:var(--text-2)}
+.ist.i-doing{color:var(--strong)} .ist.i-blocked{color:var(--bad-text)} .ist.i-done{color:var(--good-text)}
+.sc{all:unset;cursor:pointer;color:var(--text-2);max-width:240px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap} .sc:hover{color:var(--strong);text-decoration:underline}
+.mchip{all:unset;cursor:pointer;font-size:var(--fs-1);color:var(--text-2);white-space:nowrap} .mchip:hover{color:var(--strong);text-decoration:underline}
+.prow{display:grid;grid-template-columns:26px minmax(0,1fr) auto;gap:2px var(--s3);align-items:start;padding:var(--s3) var(--s2)}
+.prow .pm{min-width:0} .prow .pw{display:flex;align-items:center;gap:var(--s2);min-width:0;font-weight:600;color:var(--strong)}
+.prow .ps{font-size:var(--fs-1);color:var(--text-2)}
+.prow .pp{display:flex;align-items:center;gap:var(--s2);margin-top:6px;font-size:var(--fs-1);color:var(--text-2)}
+.prow .pp .rbar{flex:1;max-width:140px;margin:0}
+.prow .pr2{display:flex;gap:var(--s2);align-items:center;font-size:var(--fs-1);color:var(--text-2);padding-top:2px}
+.warnline{display:flex;gap:var(--s2);align-items:baseline;font-size:var(--fs-1);color:var(--text);padding:var(--s2) var(--s2);border-bottom:1px solid var(--line-soft);min-width:0}
+.warnline .dot{transform:translateY(-1px)}
+/* initiative rows (Home) */
+.inir{display:grid;grid-template-columns:minmax(0,1.5fr) minmax(120px,1fr) minmax(0,1fr) minmax(0,1fr);gap:var(--s1) var(--s4);align-items:center;padding:var(--s3) var(--s2)}
+.inir .nm{display:flex;align-items:center;gap:var(--s2);font-weight:600;color:var(--strong);min-width:0}
+.inir .sub{font-size:var(--fs-1);color:var(--text-2)}
+/* ---------- tables: quiet */
 .tw{overflow-x:auto}
-table.t{width:100%;border-collapse:collapse;font-size:var(--fs-md)}
-table.t th,table.t td{text-align:left;padding:0 var(--s3);height:var(--row);border-bottom:1px solid var(--line-soft);vertical-align:middle}
-table.t th{height:36px;font-size:.7rem;font-weight:700;letter-spacing:.06em;text-transform:uppercase;color:var(--text-2);background:var(--surface-2);position:sticky;top:0;z-index:1;white-space:nowrap}
+table.t{width:100%;border-collapse:collapse}
+table.t th,table.t td{text-align:left;padding:var(--s2) var(--s3);height:var(--row);border-bottom:1px solid var(--line-soft);vertical-align:middle}
+table.t th:first-child,table.t td:first-child{padding-left:var(--s2)}
+table.t th{height:36px;font-size:var(--fs-1);font-weight:400;color:var(--text-2);background:var(--page);border-bottom-color:var(--line);position:sticky;top:0;z-index:1;white-space:nowrap}
 table.t th button{all:unset;cursor:pointer} table.t th button:focus-visible{outline:2px solid var(--focus)}
 table.t tbody tr:last-child td{border-bottom:0}
-table.t tr[data-nav]{cursor:pointer} table.t tr[data-nav]:hover td{background:var(--hover)}
-table.t td.c-health{width:28px;padding-right:0}
-table.t .pname{font-weight:650;color:var(--heading);display:block;line-height:1.25}
-table.t .powner{display:block;font-size:var(--fs-xs);color:var(--muted);line-height:1.25}
+table.t td.c-health{width:24px;padding-right:0}
+table.t .pname{font-weight:600;color:var(--strong);display:block;line-height:1.35}
+table.t .powner{display:block;font-size:var(--fs-1);color:var(--text-2);line-height:1.35}
 table.t td .ell{display:block;max-width:100%}
 table.pt td{white-space:nowrap}
 table.pt td.c-name{max-width:220px} table.pt .pname,table.pt .powner{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
-td.c-now{max-width:210px;white-space:normal} td.c-status{max-width:250px;white-space:normal}
+td.c-now{max-width:200px;white-space:normal} td.c-status{max-width:230px;white-space:normal}
+td.c-prog{width:170px} table.pt .prog{min-width:100px}
+td.c-who{width:100px} td.c-cta{width:120px;text-align:right}
 table.pt .prs{flex-wrap:nowrap}
-.pico{display:inline-block;margin-left:6px;font-size:.72rem;vertical-align:1px} .pico.p-high{color:var(--accent-text)} .pico.p-low{color:var(--muted)}
-.slt{font-size:var(--fs-sm);line-height:1.35}
-.slt .who{color:var(--muted);font-size:var(--fs-xs)}
-/* cards (compact) */
-.cards{display:grid;grid-template-columns:repeat(auto-fill,minmax(320px,1fr));gap:var(--s3)}
-.pcard{display:grid;gap:var(--s2);padding:var(--s3) var(--s4);background:var(--surface);border:1px solid var(--line-soft);border-radius:var(--r);cursor:pointer;text-align:left;min-width:0}
-.pcard:hover,.pcard:focus-visible{border-color:var(--line)}
-.pcard .r1{display:flex;align-items:center;gap:var(--s2);min-width:0}
-.pcard .r1 .nm{font-weight:650;color:var(--heading);min-width:0}
-.pcard .r1 .bd{margin-left:auto;display:flex;gap:4px}
-.pcard .r3{display:flex;align-items:center;gap:var(--s3);font-size:var(--fs-xs);color:var(--text-2);flex-wrap:wrap}
-.statusline{border-left:2px solid var(--accent);padding:2px 0 2px 10px;font-size:var(--fs-sm)}
-.statusline .who{display:block;font-size:var(--fs-xs);color:var(--muted)}
-/* kanban */
-.board{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:var(--s3);align-items:start}
-.col{background:var(--surface-2);border:1px solid var(--line-soft);border-radius:var(--r);padding:var(--s2)}
-.col h3{display:flex;align-items:center;gap:var(--s2);margin:var(--s1) var(--s2) var(--s2);font-size:var(--fs-md);font-weight:700}
-.col h3 .n{margin-left:auto;color:var(--muted);font-weight:600;font-size:var(--fs-xs)}
-.tc{display:grid;grid-template-columns:minmax(0,1fr) auto;gap:var(--s1) var(--s2);background:var(--surface);border:1px solid var(--line-soft);border-radius:10px;padding:var(--s2) var(--s2) var(--s2) var(--s3);margin-bottom:var(--s2);font-size:var(--fs-md)}
-.tc:hover{border-color:var(--line)}
-.tc .tx{cursor:pointer;line-height:1.4}
-.tc .meta{grid-column:1/-1;display:flex;gap:6px;align-items:center;flex-wrap:wrap;font-size:var(--fs-xs);color:var(--text-2)}
+.slt{font-size:var(--fs-1);line-height:1.4;color:var(--text)}
+.slt .who{color:var(--text-2)}
+.sl-task{color:var(--text-2)}
+.ck.ok{color:var(--good-text)} .ck.warn{color:var(--warn-text)} .ck.bad{color:var(--bad-text)} .ck.na{color:var(--text-2)}
+/* ---------- page header, breadcrumbs, tabs */
+.crumbs ol{list-style:none;display:flex;flex-wrap:wrap;gap:2px 0;margin:0 0 var(--s3);padding:0;font-size:var(--fs-1);color:var(--text-2)}
+.crumbs li{display:flex;align-items:center;min-width:0}
+.crumbs li+li::before{content:"/";margin:0 8px;color:var(--line)}
+.crumbs a{color:var(--text-2);text-decoration:none} .crumbs a:hover{color:var(--strong);text-decoration:underline}
+.crumbs [aria-current]{color:var(--text);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;max-width:60vw}
+.phead{display:grid;grid-template-columns:minmax(0,1fr);gap:var(--s3);margin:0 0 var(--s6)}
+.pt1{display:grid;grid-template-columns:minmax(0,1fr) auto;gap:var(--s3) var(--s5);align-items:start}
+.pt1>*{min-width:0}
+.phead h1{display:flex;align-items:center;gap:var(--s3);overflow-wrap:anywhere}
+.phead .go{display:flex;flex-wrap:wrap;gap:var(--s2);align-items:center;justify-content:flex-end}
+.pline{font-size:var(--fs-2);color:var(--text-2)}
+.pline .stat{color:var(--text)}
+.lead{margin:0;max-width:70ch;color:var(--text);font-size:var(--fs-2)}
+.lead p{margin:0}
+.pprog{display:flex;align-items:center;gap:var(--s3);max-width:520px;font-size:var(--fs-1);color:var(--text-2)}
+.pprog .prog{max-width:260px}
+.hreason{display:flex;gap:var(--s2);align-items:baseline;font-size:var(--fs-2);color:var(--text)}
+.hreason .dot{transform:translateY(-1px)}
+.ptabs{position:sticky;top:var(--nav-h);z-index:20;display:flex;gap:var(--s5);margin:0 0 var(--s6);border-bottom:1px solid var(--line);background:var(--page);overflow-x:auto;scrollbar-width:none;height:var(--tabs-h);align-items:stretch}
+.ptabs::-webkit-scrollbar{display:none}
+.ptab{border:0;background:none;padding:0;color:var(--text-2);font-size:var(--fs-2);cursor:pointer;white-space:nowrap;display:flex;align-items:center;gap:6px;box-shadow:inset 0 -2px 0 transparent}
+.ptab:hover{color:var(--strong)}
+.ptab[aria-selected="true"]{color:var(--strong);font-weight:600;box-shadow:inset 0 -2px 0 var(--strong)}
+.ptab .n{font-weight:400;color:var(--text-2);font-variant-numeric:tabular-nums}
+.tabpanel{min-width:0}
+.seg{display:inline-flex;gap:2px;padding:2px;border-radius:8px;background:var(--wash);max-width:100%;overflow-x:auto;scrollbar-width:none}
+.seg::-webkit-scrollbar{display:none}
+.seg button{flex:none;border:0;background:none;height:28px;padding:0 10px;border-radius:var(--rs);cursor:pointer;font-size:var(--fs-1);color:var(--text-2)}
+.seg button:hover{color:var(--strong)}
+.seg button[aria-pressed="true"]{background:var(--page);color:var(--strong);font-weight:600;box-shadow:0 1px 2px rgba(16,17,15,.08)}
+.seg .sn{margin-left:6px;color:var(--text-2);font-weight:400}
+.toolbar{display:flex;flex-wrap:wrap;gap:var(--s2) var(--s3);align-items:center;margin:0 0 var(--s4)}
+.toolbar .count{color:var(--text-2);margin-right:auto}
+.toolbar select{height:32px;padding:0 8px;border-radius:var(--rs);border:1px solid var(--line);background:var(--page);font-size:var(--fs-1);max-width:100%;min-width:0}
+.fin{height:32px;padding:0 12px;border-radius:var(--rs);border:1px solid var(--line);background:transparent;min-width:240px;font-size:var(--fs-1);outline:none}
+.fin:focus{border-color:var(--focus)}
+/* ---------- callouts: a tinted line, no border */
+.callout{display:flex;flex-wrap:wrap;gap:var(--s2) var(--s3);align-items:center;padding:var(--s3) var(--s4);border-radius:var(--r);background:var(--wash);margin:0 0 var(--s5)}
+.callout>.dot{flex:none}
+.callout .cbody{flex:1 1 260px;min-width:0;font-size:var(--fs-1);color:var(--text-2)}
+.callout .cbody strong{display:block;color:var(--strong);font-size:var(--fs-2);font-weight:600}
+.callout .cact{display:flex;gap:var(--s2);flex-wrap:wrap;margin-left:auto;max-width:100%;min-width:0}
+.db .callout,.person .callout{margin:0}
+/* ---------- Team: one column per person, each session once */
+.people{display:grid;grid-template-columns:repeat(auto-fill,minmax(340px,1fr));gap:var(--s7) var(--s6);align-items:start}
+.person{display:grid;grid-template-columns:minmax(0,1fr);gap:var(--s4);padding-top:var(--s4);border-top:1px solid var(--line);min-width:0}
+.pc-h{display:flex;gap:var(--s3);align-items:center;min-width:0}
+.pc-n{min-width:0;flex:1}
+.pc-n h3{margin:0;display:flex;align-items:center;gap:var(--s2);font-size:var(--fs-3);font-weight:600;color:var(--strong);min-width:0}
+.pc-n .t2{font-size:var(--fs-1)}
+.pc-s{display:grid;grid-template-columns:minmax(0,1fr);gap:var(--s1)}
+.pc-s>.label{padding-bottom:var(--s1)}
+.sessl{display:grid;grid-template-columns:minmax(0,1fr)}
+.sess{display:grid;grid-template-columns:minmax(0,1fr);gap:6px;padding:var(--s3) 0;border-bottom:1px solid var(--line-soft);min-width:0}
+.sess:first-child{padding-top:0}
+.sess:last-child{border-bottom:0}
+.sess .sh{display:flex;align-items:baseline;gap:var(--s2);flex-wrap:nowrap;min-width:0;font-size:var(--fs-1);color:var(--text-2)}
+.sess .sp{all:unset;cursor:pointer;font-size:var(--fs-2);font-weight:600;color:var(--strong)} .sess .sp:hover{text-decoration:underline} .sess .sp:focus-visible{outline:2px solid var(--focus);border-radius:4px}
+.sess .sh>*{flex:none} .sess .sh .br{flex:0 1 auto;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap} .sess .sh .br .i{margin-right:4px}
+.sess .ss{margin-left:auto}
+.run{display:grid;grid-template-columns:minmax(0,1fr);gap:4px;font-size:var(--fs-2)}
+.run .rh{display:flex;align-items:baseline;gap:var(--s2);min-width:0} .run .rh strong{font-weight:400;color:var(--strong);min-width:0;flex:1}
+.run .rs{font-size:var(--fs-1);color:var(--text-2);white-space:nowrap}
+.run.blocked .rs{color:var(--bad-text)}
+.rmeta{font-size:var(--fs-1);color:var(--text-2)} .rmeta.warn{color:var(--warn-text)}
+.srows{display:grid;grid-template-columns:52px minmax(0,1fr);gap:2px var(--s3);margin:2px 0 0;font-size:var(--fs-1);line-height:1.45}
+.srows dt{color:var(--text-2)} .srows dd{margin:0;min-width:0;overflow-wrap:anywhere;color:var(--text)}
+.srows dd.bad{color:var(--bad-text)}
+.lrow{display:grid;grid-template-columns:16px minmax(0,1fr) auto;gap:var(--s2);align-items:start;padding:var(--s2) var(--s2);font-size:var(--fs-1)}
+.lrow .lk{color:var(--text-2);margin-top:3px} .lrow.exp .lk,.lrow .lu.bad{color:var(--warn-text)}
+.lrow .lm{min-width:0} .lrow .lt{font-size:var(--fs-2);color:var(--strong)}
+.lrow .ls,.lrow .lu{color:var(--text-2)}
+.recent>summary{cursor:pointer;font-size:var(--fs-1);color:var(--text-2);list-style:none;padding:var(--s1) 0}
+.recent>summary::-webkit-details-marker{display:none}
+.recent>summary::before{content:"";display:inline-block;width:6px;height:6px;margin-right:8px;border-right:1.5px solid currentColor;border-bottom:1.5px solid currentColor;transform:rotate(-45deg);transition:transform .15s var(--ease);vertical-align:1px}
+.recent[open]>summary::before{transform:rotate(45deg)}
+.rrows li{padding:var(--s2) 0;border-bottom:1px solid var(--line-soft);font-size:var(--fs-1);min-width:0} .rrows li:last-child{border-bottom:0}
+.slw{font-size:var(--fs-1);color:var(--text-2);display:flex;flex-wrap:wrap;align-items:center;gap:2px var(--s2)}
+/* the saved status block: Done, Check, Progress, Next */
+.sblock{display:grid;grid-template-columns:minmax(0,1fr);gap:var(--s2);min-width:0}
+.sb-rows{display:grid;grid-template-columns:72px minmax(0,1fr);gap:4px var(--s3);margin:0;font-size:var(--fs-2);line-height:1.45}
+.sb-rows dt{color:var(--text-2);font-size:var(--fs-1);padding-top:2px}
+.sb-rows dd{margin:0;min-width:0;overflow-wrap:anywhere;color:var(--text)}
+.statusline{font-size:var(--fs-1);color:var(--text)}
+.statusline .who{display:block;color:var(--text-2)}
+.mk{display:inline-block;padding:0 6px;border-radius:4px;background:var(--wash);font:400 var(--fs-1)/20px var(--mono);color:var(--strong);white-space:nowrap}
+.mk .chev{color:var(--text-2);margin:0 1px}
+/* ---------- members (initiative page) */
+.mgrp{border-bottom:1px solid var(--line-soft)}
+.mgrp>summary{display:flex;align-items:center;gap:var(--s3);min-height:48px;padding:var(--s2) var(--s2);cursor:pointer;list-style:none}
+.mgrp>summary::-webkit-details-marker{display:none}
+.mgrp>summary::before{content:"";width:6px;height:6px;border-right:1.5px solid var(--text-2);border-bottom:1.5px solid var(--text-2);transform:rotate(-45deg);transition:transform .15s var(--ease);flex:none}
+.mgrp[open]>summary::before{transform:rotate(45deg)}
+.mgrp>summary:hover{background:var(--hover)}
+.mgrp .mg-n{font-weight:600;color:var(--strong);text-transform:capitalize}
+.mgrp .count{color:var(--text-2)}
+.mgrp .mg-c{margin-left:auto;font-size:var(--fs-1);color:var(--text-2)}
+.mgrp .tw{padding-bottom:var(--s3)}
+.mini{display:inline-flex;gap:10px;font-size:var(--fs-1);color:var(--text-2)} .mini>span{display:inline-flex;align-items:center;gap:4px}
+.nc{display:inline-flex;gap:4px;align-items:center}
+/* ---------- plans, changelog */
+.pl{padding:var(--s3) var(--s2);border-bottom:1px solid var(--line-soft);display:grid;grid-template-columns:minmax(0,1fr);gap:var(--s2)} .pl:last-child{border-bottom:0}
+.pl-h{display:flex;flex-wrap:wrap;align-items:baseline;gap:var(--s1) var(--s3)} .pl-t{font-weight:600;color:var(--strong);text-decoration:none} a.pl-t:hover{text-decoration:underline}
+.pl-u{margin-left:auto;font-size:var(--fs-1)}
+.badge.pl-approved{color:var(--good-text)} .badge.pl-superseded{text-decoration:line-through} .badge.pl-draft{color:var(--text)}
+.badge.warn-b{color:var(--warn-text)}
+.pl-log>summary{cursor:pointer;font-size:var(--fs-1);color:var(--text-2)} .pl-log .clog{margin-top:var(--s2)}
+.clog{list-style:none;margin:0;padding:0}
+.clog li{display:grid;grid-template-columns:36px minmax(0,1fr);gap:var(--s3);padding:0 0 var(--s4);position:relative}
+.clog li::before{content:"";position:absolute;left:17px;top:24px;bottom:4px;width:1px;background:var(--line-soft)}
+.clog li:last-child::before{display:none}
+.clog .cv{display:grid;place-items:center;height:22px;border-radius:4px;background:var(--wash);font-size:var(--fs-1);color:var(--text-2);font-variant-numeric:tabular-nums}
+.clog li:first-child .cv{color:var(--strong);font-weight:600}
+.clog .ch{color:var(--text)} .clog .ch strong{font-weight:600;color:var(--strong)}
+.clog .cm{display:flex;align-items:center;gap:6px;flex-wrap:nowrap;font-size:var(--fs-1);color:var(--text-2);margin-top:2px}
+.clog .cm .av{width:20px;height:20px;font-size:var(--fs-1)}
+.clog .cm .av::after{display:none}
+.clog .cwhy{margin-top:4px;font-size:var(--fs-1);color:var(--text)}
+.clog .cwhy .label{margin-right:4px}
+/* ---------- drawer, palette, sheet: one elevation each (shadow in light, hairline in dark) */
+.scrim{position:fixed;inset:0;background:var(--overlay);z-index:60;opacity:0;transition:opacity .18s var(--ease)}
+.scrim.on{opacity:1}
+.drawer{position:fixed;top:0;right:0;bottom:0;width:min(640px,100vw);z-index:70;background:var(--raised);border-left:var(--elev-border);box-shadow:var(--shadow);overflow:auto;transform:translateX(100%);transition:transform .22s var(--ease)}
+.drawer.on{transform:none}
+.dh{position:sticky;top:0;z-index:3;background:var(--raised);border-bottom:1px solid var(--line-soft);padding:var(--s5) var(--s6) var(--s4)}
+.dh .r1{display:flex;gap:var(--s3);align-items:flex-start}
+.dh h2{margin:0;font-size:var(--fs-4);font-weight:400;letter-spacing:-.025em;line-height:1.2;color:var(--strong);overflow-wrap:anywhere;text-wrap:balance}
+.dh .crumbs ol{margin-bottom:var(--s2)}
+.dh .pline{margin-top:var(--s2);font-size:var(--fs-1)}
+.db{padding:var(--s5) var(--s6) var(--s7);display:grid;grid-template-columns:minmax(0,1fr);gap:var(--s6)}
+.db .panel{scroll-margin-top:150px}
+.lockline{font-size:var(--fs-2);color:var(--text)}
+.lockline .t2{display:block;font-size:var(--fs-1);margin-top:2px}
+.nextcmd{display:grid;gap:var(--s2);justify-items:start}
+.nextcmd code{color:var(--text-2);overflow-wrap:anywhere}
+.tnote{font-size:var(--fs-1);color:var(--text-2);margin:var(--s3) 0 0}
+.drawer .md{padding:0}
+.kv{display:grid;grid-template-columns:auto minmax(0,1fr);gap:6px var(--s5);font-size:var(--fs-1);margin:0}
+.kv dt{color:var(--text-2)} .kv dd{margin:0;min-width:0;overflow-wrap:anywhere;color:var(--text)}
+.palette{position:fixed;inset:10vh 0 auto 0;margin:0 auto;width:min(680px,94vw);z-index:90;background:var(--raised);border:var(--elev-border);border-radius:14px;box-shadow:var(--shadow);overflow:hidden}
+.palette input{width:100%;border:0;border-bottom:1px solid var(--line-soft);padding:16px 18px;font-size:var(--fs-3);background:none;outline:none}
+.palette ul{list-style:none;margin:0;padding:6px;max-height:56vh;overflow:auto}
+.palette li{display:flex;gap:10px;align-items:center;padding:8px 10px;border-radius:var(--rs);cursor:pointer;font-size:var(--fs-2)}
+.palette li[aria-selected="true"]{background:var(--wash)}
+.palette li .grp{margin-left:auto;font-size:var(--fs-1);color:var(--text-2)}
+.palette .ft{display:flex;gap:14px;padding:8px 14px;border-top:1px solid var(--line-soft);font-size:var(--fs-1);color:var(--text-2)}
+.sheet{position:fixed;inset:12vh 0 auto 0;margin:0 auto;width:min(560px,94vw);z-index:90;background:var(--raised);border:var(--elev-border);border-radius:14px;box-shadow:var(--shadow);padding:var(--s5) var(--s5)}
+.sheet h2{margin:0 0 var(--s3);font-size:var(--fs-3);font-weight:600;color:var(--strong)}
+.sheet dl{display:grid;grid-template-columns:auto 1fr;gap:6px 16px;margin:0;font-size:var(--fs-1)}
+.sheet dt{text-align:right}
+.toast{position:fixed;bottom:24px;left:50%;transform:translate(-50%,12px);opacity:0;z-index:95;background:var(--strong);color:var(--page);padding:8px 14px;border-radius:8px;font-size:var(--fs-1);font-weight:600;transition:opacity .2s var(--ease),transform .2s var(--ease);pointer-events:none;max-width:90vw;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.toast.on{opacity:1;transform:translate(-50%,0)}
+.tip{position:fixed;z-index:80;pointer-events:none;background:var(--raised);color:var(--text);border:var(--elev-border);border-radius:var(--r);box-shadow:var(--shadow);padding:8px 10px;font-size:var(--fs-1);min-width:140px;max-width:300px}
+.tip strong{font-size:var(--fs-2);color:var(--strong)}
+.tip ul{list-style:none;margin:6px 0 0;padding:0;display:grid;gap:2px}
+.tip li{display:flex;gap:8px;justify-content:space-between}
+.empty{padding:var(--s5) 0;color:var(--text-2);font-size:var(--fs-1)}
+.empty strong{display:block;color:var(--strong);font-size:var(--fs-2);font-weight:600;margin-bottom:2px}
+.empty code{background:var(--wash);padding:1px 6px;border-radius:4px}
+.err{position:fixed;left:12px;right:12px;bottom:12px;z-index:99;background:#5a1d1d;color:#fff;padding:10px 14px;border-radius:var(--r);font-size:var(--fs-1)}
+.notice{font-size:var(--fs-1);color:var(--text-2);background:var(--wash);border-radius:var(--rs);padding:8px 10px;margin:var(--s3) 0 0}
+/* ---------- since yesterday */
+.since{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:var(--s5)}
+.since>div{min-width:0}
+.since h3{display:flex;align-items:baseline;gap:6px;margin:0 0 var(--s2);font-size:var(--fs-2);font-weight:600;color:var(--strong)}
+.since h3 .n{color:var(--text-2);font-weight:400}
+.since ul{list-style:none;margin:0;padding:0;display:grid;gap:var(--s2);font-size:var(--fs-1)}
+.since li{min-width:0}
+.since .k{color:var(--text-2)}
+/* ---------- kanban (lists, not nested cards) */
+.board{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:var(--s5);align-items:start}
+.col h3{display:flex;align-items:center;gap:var(--s2);margin:0;padding:0 0 var(--s2);border-bottom:1px solid var(--line);font-size:var(--fs-2);font-weight:600;color:var(--strong)}
+.col h3 .n{margin-left:auto;color:var(--text-2);font-weight:400}
+.tc{display:grid;grid-template-columns:minmax(0,1fr) auto;gap:var(--s1) var(--s2);padding:var(--s2) var(--s2);border-bottom:1px solid var(--line-soft)}
+.tc:hover{background:var(--hover)}
+.tc .tx{display:flex;gap:6px;align-items:flex-start;line-height:1.4;color:var(--strong)} .tc .tx .ist{margin-top:2px}
+.tc .meta{grid-column:1/-1;display:flex;gap:2px var(--s3);align-items:center;flex-wrap:wrap;font-size:var(--fs-1);color:var(--text-2)}
 .tc .meta button{all:unset;cursor:pointer} .tc .meta button:hover{text-decoration:underline}
-/* charts */
+/* ---------- project cards (Projects, cards layout) */
+.cards{display:grid;grid-template-columns:repeat(auto-fill,minmax(320px,1fr));gap:var(--s4)}
+.pcard{display:grid;grid-template-columns:minmax(0,1fr);gap:var(--s2);padding:var(--s4);background:transparent;border:1px solid var(--line-soft);border-radius:var(--r);cursor:pointer;text-align:left;min-width:0}
+.pcard:hover{border-color:var(--line);background:var(--hover)}
+.pcard .r1{display:flex;align-items:center;gap:var(--s2);min-width:0}
+.pcard .r1 .nm{font-weight:600;color:var(--strong);min-width:0}
+.pcard .r1 .bd{margin-left:auto;display:flex;gap:var(--s2)}
+.pcard .r3{display:flex;align-items:center;gap:var(--s3);font-size:var(--fs-1);color:var(--text-2);flex-wrap:wrap}
+/* ---------- charts, roadmap */
 .chartbox{position:relative;width:100%}
 .chartbox svg{display:block;width:100%;height:auto;overflow:visible}
 .chartbox svg:focus-visible{outline:2px solid var(--focus);outline-offset:4px}
-.ax{fill:var(--muted);font-size:11px;font-variant-numeric:tabular-nums}
-.vlabel{fill:var(--text);font-size:11px;font-weight:700}
+.ax{fill:var(--text-2);font-size:var(--fs-1);font-variant-numeric:tabular-nums}
+.vlabel{fill:var(--text);font-size:var(--fs-1);font-weight:600}
 .bar{fill:var(--mark);transition:opacity .12s} .bar.dim{opacity:.35}
-.spk rect{fill:var(--deemph)} .spk rect.cur{fill:var(--mark)}
-.hbar{display:grid;grid-template-columns:minmax(110px,38%) 1fr auto;gap:6px 12px;align-items:center;font-size:var(--fs-sm)}
-.hbar .trk{height:8px}
-.hbar .trk i{display:block;height:100%;border-radius:0 4px 4px 0;background:var(--mark);min-width:2px}
+.spk rect{fill:var(--track)} .spk rect.cur{fill:var(--mark)}
+.hbar{display:grid;grid-template-columns:minmax(110px,38%) 1fr auto;gap:6px 12px;align-items:center;font-size:var(--fs-1)}
+.hbar .trk{height:4px}
+.hbar .trk i{display:block;height:100%;border-radius:2px;background:var(--mark);min-width:2px}
 .hbar button{all:unset;cursor:pointer;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .hbar button:hover{text-decoration:underline}
-.tip{position:fixed;z-index:80;pointer-events:none;background:var(--surface);color:var(--text);border:1px solid var(--line);border-radius:10px;box-shadow:var(--shadow);padding:8px 10px;font-size:var(--fs-sm);min-width:140px;max-width:300px}
-.tip strong{font-size:1rem;color:var(--heading)}
-.tip ul{list-style:none;margin:6px 0 0;padding:0;display:grid;gap:2px}
-.tip li{display:flex;gap:8px;justify-content:space-between}
-/* timeline */
+.road{display:grid;padding:var(--s2) 0}
+.road-row{display:grid;grid-template-columns:minmax(120px,240px) minmax(0,1fr);gap:var(--s3);align-items:center;min-height:32px}
+.road-row:hover{background:var(--hover)}
+.road-axis:hover{background:none}
+.road-l{display:flex;align-items:center;gap:var(--s2);font-size:var(--fs-1);padding-left:var(--s2);color:var(--text)}
+.road-track{position:relative;height:32px;border-bottom:1px solid var(--line-soft)}
+.road-axis .road-track{height:24px;border-bottom:1px solid var(--line)}
+.road-tick{position:absolute;top:0;bottom:0;width:1px;background:var(--line-soft)}
+.road-today{position:absolute;top:-2px;bottom:-2px;width:1px;background:var(--strong);z-index:1}
+.road-tl{position:absolute;top:2px;transform:translateX(4px);font-size:var(--fs-1);color:var(--text-2);white-space:nowrap}
+.road-tl.today{color:var(--strong);font-weight:600}
+.road-m{position:absolute;top:50%;width:9px;height:9px;margin:-5px 0 0 -5px;transform:rotate(45deg);background:var(--mark);border-radius:1px;z-index:2}
+.road-m.over{background:var(--bad)} .road-m.done{background:var(--good)}
+.road-t{position:absolute;top:50%;transform:translate(10px,-50%);font-size:var(--fs-1);color:var(--text-2);white-space:nowrap;z-index:2;background:var(--page);padding:0 4px}
+.road-t.r{transform:translate(-10px,-50%)}
+/* ---------- timeline */
 .tl{list-style:none;margin:0;padding:0}
-.tl .day{position:sticky;top:56px;background:var(--surface);font-size:.7rem;font-weight:700;text-transform:uppercase;letter-spacing:.06em;color:var(--text-2);padding:var(--s3) var(--s4) var(--s1);z-index:1}
-.tl .it{display:grid;grid-template-columns:44px 18px minmax(0,1fr);gap:var(--s2);padding:var(--s2) var(--s4);border-bottom:1px solid var(--line-soft);font-size:var(--fs-md);align-items:start}
-.tl .it .tm{color:var(--muted);font-variant-numeric:tabular-nums;font-size:var(--fs-xs);padding-top:2px}
-.tl .it .ki{font-size:.8rem;text-align:center;color:var(--text-2);padding-top:1px}
-.tl .who{font-weight:650;margin-right:6px;text-decoration:none}
-.seg{display:inline-flex;border:1px solid var(--line);border-radius:999px;padding:2px;background:var(--surface)}
-.seg button{border:0;background:none;height:26px;padding:0 12px;border-radius:999px;cursor:pointer;font-size:var(--fs-xs);font-weight:650;color:var(--text-2)}
-.seg button[aria-pressed="true"]{background:var(--surface-3);color:var(--heading)}
-.toolbar{display:flex;flex-wrap:wrap;gap:var(--s2);align-items:center;margin:0 0 var(--s3)}
-.toolbar .count{font-size:var(--fs-md);color:var(--text-2);margin-right:auto}
-.toolbar select{height:32px;padding:0 10px;border-radius:999px;border:1px solid var(--line);background:var(--surface);font-size:var(--fs-sm)}
-/* agents + since */
-.prov{display:inline-flex;align-items:center;gap:6px;height:26px;padding:0 10px;border-radius:999px;border:1px solid var(--line-soft);background:var(--surface-2);font-size:var(--fs-xs);font-weight:650;white-space:nowrap}
-.since{display:grid;grid-template-columns:repeat(4,minmax(0,1fr))}
-.since>div{padding:var(--s3) var(--s4);border-right:1px solid var(--line-soft);min-width:0}
-.since>div:last-child{border-right:0}
-.since h3{display:flex;align-items:baseline;gap:6px;margin:0 0 var(--s2);font-size:var(--fs-md);font-weight:700;color:var(--heading)}
-.since h3 .n{color:var(--muted);font-weight:600;font-size:var(--fs-xs)}
-.since ul{list-style:none;margin:0;padding:0;display:grid;gap:6px;font-size:var(--fs-sm)}
-.since li{min-width:0}
-.since .k{color:var(--muted);font-size:var(--fs-xs)}
-/* explorer */
-.explorer{display:grid;grid-template-columns:300px minmax(0,1fr);gap:var(--s4);align-items:start}
-.tree{position:sticky;top:72px;max-height:calc(100vh - 92px);overflow:auto;padding:var(--s2)}
-.tree input{width:100%;height:32px;padding:0 10px;border-radius:8px;border:1px solid var(--line);background:var(--surface-2);margin-bottom:var(--s2)}
+.tl .day{position:sticky;top:var(--nav-h);background:var(--page);font-size:var(--fs-1);font-weight:600;color:var(--text-2);padding:var(--s4) 0 var(--s1);z-index:1;border-bottom:1px solid var(--line)}
+.tl .it{display:grid;grid-template-columns:44px 26px minmax(0,1fr);gap:var(--s2);padding:var(--s2) 0;border-bottom:1px solid var(--line-soft);font-size:var(--fs-1);align-items:start}
+.tl .it>div{min-width:0;overflow-wrap:anywhere}
+.tl .it .tm{color:var(--text-2);font-variant-numeric:tabular-nums;padding-top:2px}
+.tl .it .ki{display:grid;place-items:center;color:var(--text-2);padding-top:2px}
+.tl .it .av{width:22px;height:22px}
+.tl .who{font-weight:600;margin-right:6px;text-decoration:none;color:var(--strong)}
+/* ---------- explorer, markdown, search */
+.explorer{display:grid;grid-template-columns:280px minmax(0,1fr);gap:var(--s6);align-items:start}
+.tree{position:sticky;top:calc(var(--nav-h) + 16px);max-height:calc(100vh - 92px);overflow:auto;padding-right:var(--s3);border-right:1px solid var(--line-soft)}
+.tree input{width:100%;height:32px;padding:0 10px;border-radius:var(--rs);border:1px solid var(--line);background:transparent;margin-bottom:var(--s2);font-size:var(--fs-1)}
 .tree details{margin-left:4px}
-.tree summary{cursor:pointer;padding:4px 6px;border-radius:8px;font-size:var(--fs-sm);font-weight:700;list-style:none;display:flex;gap:6px;align-items:center}
-.tree summary::before{content:"▸";color:var(--muted);font-size:.7rem;transition:transform .12s}
-.tree details[open]>summary::before{transform:rotate(90deg)}
+.tree summary{cursor:pointer;padding:4px 6px;border-radius:var(--rs);font-size:var(--fs-1);font-weight:600;list-style:none;display:flex;gap:8px;align-items:center;color:var(--strong)}
+.tree summary::before{content:"";width:5px;height:5px;border-right:1.5px solid var(--text-2);border-bottom:1.5px solid var(--text-2);transform:rotate(-45deg);transition:transform .12s;flex:none}
+.tree details[open]>summary::before{transform:rotate(45deg)}
 .tree summary::-webkit-details-marker{display:none}
-.tree .file{display:block;width:100%;text-align:left;border:0;background:none;padding:4px 8px 4px 22px;border-radius:8px;font-size:var(--fs-sm);cursor:pointer;color:var(--text-2);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.tree .file{display:block;width:100%;text-align:left;border:0;background:none;padding:4px 8px 4px 22px;border-radius:var(--rs);font-size:var(--fs-1);cursor:pointer;color:var(--text-2);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 .tree .file:hover{background:var(--hover);color:var(--text)}
-.tree .file[aria-current="true"]{background:var(--surface-3);color:var(--heading);font-weight:700}
-.viewer .vh{display:flex;flex-wrap:wrap;gap:var(--s2);align-items:center;padding:var(--s2) var(--s4);border-bottom:1px solid var(--line-soft);position:sticky;top:56px;background:var(--surface);border-radius:var(--r) var(--r) 0 0;z-index:5}
-.viewer .vh .path{font-weight:700;color:var(--heading);word-break:break-all}
-.viewer .vh input{height:30px;padding:0 10px;border-radius:999px;border:1px solid var(--line);background:var(--surface-2);min-width:170px}
-.notice{font-size:var(--fs-sm);color:var(--text-2);background:var(--surface-2);border:1px dashed var(--line);border-radius:10px;padding:8px 10px;margin:var(--s3) var(--s4) 0}
-/* markdown */
-.md{padding:var(--s4) var(--s5) var(--s5);font-size:var(--fs-base);line-height:1.65;overflow-wrap:anywhere}
-.md h1,.md h2,.md h3,.md h4{color:var(--heading);letter-spacing:-.02em;line-height:1.25;margin:1.2em 0 .5em}
-.md h1{font-size:1.45rem;font-weight:500} .md h2{font-size:1.15rem;font-weight:650} .md h3{font-size:1rem;font-weight:700}
+.tree .file[aria-current="true"]{background:var(--wash);color:var(--strong);font-weight:600}
+.viewer .vh{display:flex;flex-wrap:wrap;gap:var(--s2);align-items:center;padding:0 0 var(--s3);border-bottom:1px solid var(--line);position:sticky;top:var(--nav-h);background:var(--page);z-index:5}
+.viewer .vh .path{font-weight:600;color:var(--strong);word-break:break-all}
+.viewer .vh input{height:30px;padding:0 10px;border-radius:var(--rs);border:1px solid var(--line);background:transparent;min-width:170px;font-size:var(--fs-1)}
+.md{padding:var(--s4) 0 0;font-size:var(--fs-2);line-height:1.65;overflow-wrap:anywhere;max-width:78ch}
+.md h1,.md h2,.md h3,.md h4{color:var(--strong);letter-spacing:-.01em;line-height:1.3;margin:1.4em 0 .4em;font-weight:600}
+.md h1{font-size:var(--fs-3)} .md h2,.md h3,.md h4{font-size:var(--fs-2)}
 .md h1:first-child,.md h2:first-child,.md>.fm+h1{margin-top:0}
 .md p{margin:.45em 0} .md ul,.md ol{margin:.35em 0;padding-left:1.4em} .md li{margin:.12em 0}
 .md li.task{list-style:none;margin-left:-1.3em}
-.md li.task input{margin:0 8px 0 0;accent-color:var(--mark);vertical-align:-2px}
-.md li.task.done>span{color:var(--muted);text-decoration:line-through}
-.md code{background:var(--surface-3);padding:1px 5px;border-radius:5px}
-.md pre{background:var(--surface-2);border:1px solid var(--line-soft);padding:12px 14px;border-radius:10px;overflow:auto}
+.md li.task input{margin:0 8px 0 0;accent-color:var(--strong);vertical-align:-2px}
+.md li.task.done>span{color:var(--text-2);text-decoration:line-through}
+.md code{background:var(--wash);padding:1px 5px;border-radius:4px}
+.md pre{background:var(--wash);padding:12px 14px;border-radius:var(--rs);overflow:auto}
 .md pre code{background:none;padding:0}
-.md blockquote{margin:.6em 0;padding:.2em 0 .2em 12px;border-left:3px solid var(--line);color:var(--text-2)}
-.md table{border-collapse:collapse;margin:.8em 0;font-size:var(--fs-sm);display:block;overflow-x:auto}
-.md th,.md td{border:1px solid var(--line-soft);padding:6px 10px;text-align:left}
-.md th{background:var(--surface-2)}
+.md blockquote{margin:.6em 0;padding:.1em 0 .1em 14px;border-left:1px solid var(--line);color:var(--text-2)}
+.md table{border-collapse:collapse;margin:.8em 0;font-size:var(--fs-1);display:block;overflow-x:auto}
+.md th,.md td{border-bottom:1px solid var(--line-soft);padding:6px 10px;text-align:left}
+.md th{font-weight:600;border-bottom-color:var(--line)}
 .md hr{border:0;border-top:1px solid var(--line-soft);margin:1.2em 0}
 .md em{color:var(--text-2)}
-.md .fm{display:flex;flex-wrap:wrap;gap:6px;margin-bottom:12px}
+.md .fm{display:flex;flex-wrap:wrap;gap:4px 14px;margin-bottom:12px}
+.pb .md{padding:0}
 mark{background:var(--hl);color:inherit;border-radius:3px;padding:0 1px}
-mark.cur{outline:2px solid var(--accent)}
-/* drawer, palette, sheet */
-.scrim{position:fixed;inset:0;background:var(--overlay);z-index:60;opacity:0;transition:opacity .18s}
-.scrim.on{opacity:1}
-.drawer{position:fixed;top:0;right:0;bottom:0;width:min(860px,100vw);z-index:70;background:var(--page);border-left:1px solid var(--line);box-shadow:var(--shadow);overflow:auto;transform:translateX(100%);transition:transform .22s ease}
-.drawer.on{transform:none}
-.dh{position:sticky;top:0;z-index:3;background:var(--page);border-bottom:1px solid var(--line-soft);padding:var(--s4) var(--s5) 0}
-.dh .r1{display:flex;gap:var(--s3);align-items:flex-start}
-.dh h2{margin:0;font-size:var(--fs-title);font-weight:450;letter-spacing:-.035em;line-height:1.2;color:var(--heading);word-break:break-word}
-.dh .bd{display:flex;flex-wrap:wrap;gap:6px;margin-top:var(--s2)}
-.dh .go{display:flex;flex-wrap:wrap;gap:var(--s2);margin-top:var(--s3)}
-.dnav{display:flex;gap:2px;margin-top:var(--s3);overflow-x:auto;scrollbar-width:none}
-.dnav a{padding:6px 10px;font-size:var(--fs-sm);font-weight:650;color:var(--text-2);text-decoration:none;border-bottom:2px solid transparent;white-space:nowrap}
-.dnav a:hover{color:var(--text);border-bottom-color:var(--line)}
-.db{padding:var(--s4) var(--s5) var(--s7);display:grid;gap:var(--s4)}
-.db .panel{scroll-margin-top:150px}
-.drawer .md{padding:0}
-.palette{position:fixed;inset:10vh 0 auto 0;margin:0 auto;width:min(680px,94vw);z-index:90;background:var(--surface);border:1px solid var(--line);border-radius:16px;box-shadow:var(--shadow);overflow:hidden}
-.palette input{width:100%;border:0;border-bottom:1px solid var(--line-soft);padding:16px 18px;font-size:1.02rem;background:none;outline:none}
-.palette ul{list-style:none;margin:0;padding:6px;max-height:56vh;overflow:auto}
-.palette li{display:flex;gap:10px;align-items:center;padding:8px 10px;border-radius:10px;cursor:pointer;font-size:var(--fs-md)}
-.palette li[aria-selected="true"]{background:var(--surface-3)}
-.palette li .grp{margin-left:auto;font-size:.7rem;color:var(--muted);text-transform:uppercase;letter-spacing:.05em}
-.palette .ft{display:flex;gap:14px;padding:8px 14px;border-top:1px solid var(--line-soft);font-size:var(--fs-xs);color:var(--text-2)}
-.sheet{position:fixed;inset:12vh 0 auto 0;margin:0 auto;width:min(560px,94vw);z-index:90;background:var(--surface);border:1px solid var(--line);border-radius:16px;box-shadow:var(--shadow);padding:18px 22px}
-.sheet h2{margin:0 0 10px;font-size:1.2rem;font-weight:600}
-.sheet dl{display:grid;grid-template-columns:auto 1fr;gap:6px 16px;margin:0;font-size:var(--fs-md)}
-.sheet dt{text-align:right}
-.toast{position:fixed;bottom:24px;left:50%;transform:translate(-50%,20px);opacity:0;z-index:95;background:var(--heading);color:var(--page);padding:8px 14px;border-radius:999px;font-size:var(--fs-sm);font-weight:650;transition:all .2s;pointer-events:none;max-width:90vw;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
-.toast.on{opacity:1;transform:translate(-50%,0)}
-.empty{padding:var(--s5) var(--s4);color:var(--text-2);text-align:center;font-size:var(--fs-md)}
-.empty strong{display:block;color:var(--heading);font-size:var(--fs-base);margin-bottom:4px}
-.empty code{background:var(--surface-3);padding:2px 6px;border-radius:6px}
-.err{position:fixed;left:12px;right:12px;bottom:12px;z-index:99;background:#5a1d1d;color:#fff;padding:10px 14px;border-radius:10px;font-size:.85rem}
-.results .res{display:block;width:100%;text-align:left;border:0;border-bottom:1px solid var(--line-soft);background:none;padding:var(--s3) var(--s4);cursor:pointer}
+mark.cur{outline:2px solid var(--focus)}
+.results .res{display:block;width:100%;text-align:left;border:0;border-bottom:1px solid var(--line-soft);background:none;padding:var(--s3) var(--s2);cursor:pointer}
 .results .res:hover,.results .res:focus-visible{background:var(--hover)}
-.results .rt{display:flex;gap:8px;align-items:center;font-weight:650;font-size:var(--fs-md);color:var(--heading)}
-.results .rs{font-size:var(--fs-sm);color:var(--text-2);margin-top:2px}
-.qbar{height:8px;border-radius:999px;background:var(--surface-3);overflow:hidden;margin:var(--s2) 0 var(--s1)}
-.qbar i{display:block;height:100%;border-radius:999px}
-.kv{display:grid;grid-template-columns:auto 1fr;gap:4px 16px;font-size:var(--fs-sm);margin:0}
-.kv dt{color:var(--text-2)} .kv dd{margin:0}
-.foot{max-width:1440px;margin:0 auto;padding:var(--s4) var(--s5) var(--s6);display:flex;flex-wrap:wrap;gap:8px 18px;font-size:var(--fs-xs);color:var(--muted);border-top:1px solid var(--line-soft)}
-.foot .spark{width:12px;height:12px;color:var(--accent);vertical-align:-2px}
+.results .rt{display:flex;gap:8px;align-items:center;font-weight:600;color:var(--strong)}
+.results .rs{font-size:var(--fs-1);color:var(--text-2);margin-top:2px}
+.prov{display:inline-flex;align-items:center;gap:6px;font-size:var(--fs-1);color:var(--text);white-space:nowrap}
+.foot{width:calc(100% - 2 * var(--s5));max-width:calc(var(--wide) - 2 * var(--s5));margin:0 auto;padding:var(--s4) 0 var(--s6);display:flex;flex-wrap:wrap;gap:4px 18px;font-size:var(--fs-1);color:var(--text-2);border-top:1px solid var(--line-soft)}
+.foot .spark{width:12px;height:12px;color:var(--text-2);vertical-align:-2px}
+/* links inside rows: the row is clickable, its title is the real link */
+a.rl,a.at,a.itl{color:inherit;text-decoration:none} a.rl:hover,a.at:hover,a.itl:hover{text-decoration:underline;text-decoration-color:currentColor}
+.irow a.itl{display:block}
+.tok{white-space:nowrap}
+.sr{position:absolute;width:1px;height:1px;overflow:hidden;clip:rect(0 0 0 0);white-space:nowrap}
+.sub3{margin:var(--s4) 0 var(--s1);font-size:var(--fs-1);font-weight:600;color:var(--text-2)}
+.sub3:first-child{margin-top:0}
+.sub3.pad{margin:var(--s4) 0 0;padding:0 var(--s2)}
+.act .ad{display:flex;gap:2px var(--s3);min-width:0} .act .ad>span{flex:none;max-width:100%} .act .ad>.ell{flex:0 1 auto;min-width:0}
+.trow{display:flex;gap:var(--s3);justify-content:space-between;padding:var(--s1) 0;font-size:var(--fs-1)} .trow .tx{min-width:0}
+/* copy icons on list rows show on hover and focus (always on touch screens) */
+@media (hover:hover){.irow>.icopy,.tc>.icopy,.act .ar>.icopy{opacity:0;transition:opacity .12s} .irow:hover>.icopy,.irow:focus-within>.icopy,.tc:hover>.icopy,.tc:focus-within>.icopy,.act:hover .ar>.icopy,.act:focus-within .ar>.icopy{opacity:1}
+  table.t td.c-cta .icopy{opacity:0;transition:opacity .12s} table.t tr:hover td.c-cta .icopy,table.t tr:focus-within td.c-cta .icopy{opacity:1}}
+.since .sl1{display:flex;gap:var(--s2);align-items:baseline;min-width:0} .since .sl1 .lnk{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.rpath{font-family:var(--mono);font-size:var(--fs-1)}
+/* sticky table headers on wide screens (tables that fit), under the navbar and the page tabs */
+@media (min-width:1280px){main .tw.st{overflow:visible} main .tw.st.x{overflow-x:auto}
+  main .tw.st:not(.x) table.t th{top:var(--nav-h)} main .tabpanel .tw.st:not(.x) table.t th{top:calc(var(--nav-h) + var(--tabs-h))}}
 /* ---------- responsive */
-@media (max-width:1180px){.tiles{grid-template-columns:repeat(2,minmax(0,1fr))}.since{grid-template-columns:repeat(2,minmax(0,1fr))}.since>div:nth-child(2){border-right:0}.since>div:nth-child(-n+2){border-bottom:1px solid var(--line-soft)}
-  .board{grid-template-columns:repeat(2,minmax(0,1fr))}.c-size,.c-act{display:none}}
-@media (max-width:1024px){.cols{grid-template-columns:minmax(0,1fr)}.cols.even{grid-template-columns:minmax(0,1fr)}.search{flex-basis:200px}.c-last{display:none}}
+@media (max-width:1600px){table.pt:not(.it) .c-act{display:none}}
+@media (max-width:1180px){.board{grid-template-columns:repeat(2,minmax(0,1fr))}.c-size,.c-act{display:none}td.c-who{display:none}
+  .since{grid-template-columns:repeat(2,minmax(0,1fr))}.people{grid-template-columns:minmax(0,1fr)}}
+@media (max-width:1024px){.cols,.cols.even{grid-template-columns:minmax(0,1fr)}.search{flex-basis:200px}.c-last{display:none}
+  .inir{grid-template-columns:minmax(0,1fr) minmax(120px,200px)}.inir .c3,.inir .c4{grid-column:1/-1}}
+@media (pointer:coarse){.icopy{width:40px;height:40px}.btn{height:40px}.btn.sm{height:36px}}
 @media (max-width:768px){
-  .nav{flex-wrap:wrap;height:auto;padding:var(--s2) var(--s4);gap:var(--s2) var(--s3)}
-  .lockup .ff{height:18px}.lockup .vr{height:18px}.lockup .dk{font-size:1rem}
-  .tabs{order:3;width:100%;margin:0 -4px}.search{order:2;flex:1 1 100%}#palbtn{display:none}
-  .filters{padding:var(--s2) var(--s4);overflow-x:auto;flex-wrap:nowrap}
-  main{padding:var(--s4) var(--s4) var(--s6)}.head h1{font-size:1.45rem}
-  .act{grid-template-columns:22px minmax(0,1fr)}.act .ar{grid-column:2;justify-content:flex-start}.act .ar .cmd{max-width:100%}
-  .since{grid-template-columns:minmax(0,1fr)}.since>div{border-right:0;border-bottom:1px solid var(--line-soft)}
-  .board{grid-template-columns:minmax(0,1fr)}.cards{grid-template-columns:minmax(0,1fr)}
-  .explorer{grid-template-columns:minmax(0,1fr)}.tree{position:static;max-height:none}.viewer .vh{position:static}
+  :root{--nav-h:0px}
+  .foot{width:calc(100% - 2 * var(--s4))}
+  .nav{position:relative;flex-wrap:wrap;height:auto;padding:var(--s3) var(--s4);gap:var(--s3)}
+  .lockup .ff{height:18px}.lockup .vr{height:18px}.lockup .dk{font-size:var(--fs-2)}
+  .tabs{order:3;width:100%;height:40px;gap:var(--s4)}.search{order:2;flex:1 1 100%}#palbtn{display:none}
+  .filters{padding:var(--s3) var(--s4) 0;overflow-x:auto;flex-wrap:nowrap}
+  main{padding:var(--s5) var(--s4) var(--s7)}
+  .head{margin-bottom:var(--s5)}
+  .figs{--n:2!important;gap:var(--s4)}
+  .stack-v,.cols{gap:var(--s6)}
+  .act:has(.ar .btn){grid-template-columns:8px minmax(0,1fr)}.act:has(.ar .btn) .ar{grid-column:2;justify-content:flex-start}
+  .since,.board,.cards{grid-template-columns:minmax(0,1fr)}
+  .explorer{grid-template-columns:minmax(0,1fr)}.tree{position:static;max-height:none;border-right:0;padding-right:0}.viewer .vh{position:static}
+  .pt1{grid-template-columns:minmax(0,1fr)}.phead .go{justify-content:flex-start}
+  .inir{grid-template-columns:minmax(0,1fr)}
+  .irow{grid-template-columns:16px minmax(0,1fr) 28px}.irow .icl{grid-column:2;grid-row:2;justify-content:flex-start}.irow .icl:empty{display:none}
+  .irow>.icopy,.irow>span:last-child{grid-column:3;grid-row:1}
+  .fin{min-width:0;flex:1 1 100%}
+  .toolbar select{flex:1 1 140px;width:0}
+  .cmdr{grid-template-columns:minmax(0,1fr) 28px}.cmdr>.t2{grid-column:1/-1}
+  .db{padding:var(--s4) var(--s4) var(--s6)}.dh{padding:var(--s4) var(--s4) var(--s3)}
+  .ph{flex-wrap:wrap}
+  .mgrp>summary{flex-wrap:wrap;gap:var(--s2)}.mgrp .mg-c{margin-left:0}
   table.pt thead{display:none}
   table.pt,table.pt tbody,table.pt tr,table.pt td{display:block;width:100%}
-  table.pt tr{display:grid;grid-template-columns:20px minmax(0,1fr) auto;gap:4px 8px;padding:var(--s3) var(--s4);border-bottom:1px solid var(--line-soft)}
+  table.pt tr{display:grid;grid-template-columns:16px minmax(0,1fr) auto;gap:4px 8px;padding:var(--s3) var(--s2);border-bottom:1px solid var(--line-soft)}
   table.pt td{height:auto;border:0;padding:0}
-  table.pt td.c-health{grid-row:1;padding-top:6px}table.pt td.c-name{grid-column:2}table.pt td.c-st{grid-column:3;grid-row:1}
-  table.pt td.c-now,table.pt td.c-status,table.pt td.c-prs{grid-column:2/-1;max-width:none}
+  table.pt td.c-health{grid-row:1;padding-top:6px}table.pt td.c-name{grid-column:2;max-width:none}table.pt td.c-st{grid-column:3;grid-row:1}
+  table.pt td.c-now,table.pt td.c-status,table.pt td.c-prs,table.pt td.c-prog,table.pt td.c-who,table.pt td.c-cta,table.pt td.c-ms,table.pt td.c-work{grid-column:2/-1;max-width:none;width:auto;text-align:left;white-space:normal}
   table.pt td.c-act,table.pt td.c-last,table.pt td.c-size{display:none}
-  .tiles{gap:var(--s2)}.tile{padding:var(--s2) var(--s3)}.tile .tv{font-size:1.3rem}
+  table.pt td:has(>.muted:only-child){display:none}
 }
-@media (prefers-reduced-motion:reduce){*,*::before,*::after{transition:none!important;animation:none!important;scroll-behavior:auto!important}}
+@media (prefers-reduced-motion:reduce){
+  *,*::before,*::after{scroll-behavior:auto!important}
+  .drawer{transform:none;opacity:0;transition:opacity .15s linear}.drawer.on{opacity:1}
+  .toast{transform:translate(-50%,0);transition:opacity .15s linear}
+  .recent>summary::before,.mgrp>summary::before,.tree summary::before,.bar{transition:none}
+}
 @media print{
-  :root{--page:#fff;--surface:#fff;--surface-2:#fff;--shadow:none}
-  .nav,.filters,.drawer,.scrim,.palette,.sheet,.toast,.btn,.cmd,.icopy,.seg,.toolbar select,.tree input,.viewer .vh input{display:none!important}
-  main{max-width:none;padding:0}.panel,.pcard,.col,.tile{break-inside:avoid;box-shadow:none}
+  :root{--page:#fff;--raised:#fff;--shadow:none}
+  .nav,.filters,.drawer,.scrim,.palette,.sheet,.toast,.btn,.icopy,.seg,.cmenu,.toolbar select,.tree input,.viewer .vh input{display:none!important}
+  main{max-width:none;padding:0}.panel,.pcard,.person{break-inside:avoid}
   .explorer{grid-template-columns:1fr}.tree{display:none}a{text-decoration:none}
 }
 """
@@ -1341,15 +1568,15 @@ function fmtMin(m) { m = Math.max(0, Math.round(m || 0)); return m >= 60 ? Math.
 /* ---------------------------------------------------------------- data model: work items, projects, initiatives, people */
 const OPEN = ["todo", "doing", "blocked"];
 const ME = D.who || "";
-const STATUS = {active: ["●", "Active"], paused: ["❚❚", "Paused"], blocked: ["⊘", "Blocked"], done: ["✓", "Done"], archived: ["▢", "Archived"], untracked: ["○", "No note"], unknown: ["○", "No note"]};
-const PRIO = {high: ["▲", "High"], normal: ["", "Normal"], low: ["▼", "Low"]};
+/* [unused, label]: status is drawn as a dot (projects, initiatives) or an SVG icon (tasks), never as a glyph */
+const STATUS = {active: ["", "Active"], paused: ["", "Paused"], blocked: ["", "Blocked"], done: ["", "Done"], archived: ["", "Archived"], untracked: ["", "No note"], unknown: ["", "No note"]};
+const PRIO = {high: ["", "High"], normal: ["", "Normal"], low: ["", "Low"]};
 const PRANK = {high: 0, normal: 1, low: 2}, HRANK = {risk: 0, warn: 1, ok: 2};
-const SEVICON = {risk: "!", warn: "!", info: "i"};
 const KIND = {"ci-failing": "CI", "changes-requested": "Review", "conflicts": "Conflicts", "review-waiting": "Review", "review-requested": "Review",
   "blocked": "Blocked", "blocked-task": "Blocked", "overdue": "Overdue", "idle-work": "Unsaved work", "reclaim": "Reclaim", "layout": "Layout", "stale-note": "Handoff",
   "drift": "Config", "sign-in": "Sign in", "collision": "Collision", "expired-lock": "Lock"};
 const CHECKS = {passing: "CI passing", failing: "CI failing", pending: "CI running", none: "no CI", unknown: "CI unknown"};
-const ISTATUS = {todo: ["○", "To do"], doing: ["◐", "Doing"], blocked: ["⊘", "Blocked"], done: ["✓", "Done"], cancelled: ["✕", "Cancelled"]};
+const ISTATUS = {todo: ["", "To do"], doing: ["", "Doing"], blocked: ["", "Blocked"], done: ["", "Done"], cancelled: ["", "Cancelled"]};
 const SDOT = {active: "d-ok", paused: "d-warn", blocked: "d-risk", done: "d-info", archived: "d-info", untracked: "d-info", unknown: "d-info"};
 const SORDER = {blocked: 0, active: 1, paused: 2, untracked: 3, unknown: 3, done: 4, archived: 5};
 function whoOf(s) { return String(s || "").split(" ")[0]; }
@@ -1407,7 +1634,7 @@ const INITS = (D.initiatives || []).map(x => {
   const items = linked.length || BYSCOPE.has(scope) ? linked : legacy(scope, tk, x.task_index || {});
   const projects = x.projects || [], members = x.members || [];
   const last = Math.max(x.last_activity || 0, ...projects.map(id => (BYID.get(id) || {}).last_activity || 0));
-  return Object.assign({}, x, {t: tk, scope, items, cnt: cnt(items), members, projects, tidx: x.task_index || {}, status: x.status || "active", priority: x.priority || "normal",
+  return Object.assign({}, x, {t: tk, scope, scopeText: x.scope || "", items, cnt: cnt(items), members, projects, tidx: x.task_index || {}, status: x.status || "active", priority: x.priority || "normal",
     title: x.title || x.id, tags: x.tags || [], sessions: x.sessions || [], last, people: peopleOn(projects.concat([scope]), items),
     hay: [x.id, x.title, x.goal, x.scope, x.state, projects.join(" "), items.filter(i => i.open).map(i => i.id + " " + i.title).join(" "), (x.tags || []).join(" ")].filter(Boolean).join(" \n ").toLowerCase()});
 });
@@ -1418,21 +1645,22 @@ function allItems() { const out = ITEMS.slice(); for (const p of P) if (p.items.
 function progOf(x) {
   const t = x.t || {}, done = t.done || 0, total = (t.open || 0) + done;
   if (x.progress != null && x.progress !== "" && !isNaN(+x.progress)) {
-    const src = x.progress_source === "manual" ? "manual" : "tasks";
-    return {pct: Math.max(0, Math.min(100, Math.round(+x.progress))), src, why: src === "manual" ? "Progress set manually in the note" : "Computed from tasks: " + done + " done of " + total};
+    const src = x.progress_source === "manual" ? "manual" : "tasks", pct = Math.max(0, Math.min(100, Math.round(+x.progress)));
+    /* only quote counts that actually produce the percentage */
+    return {pct, src, why: src === "manual" ? "Set manually in the note" : total && Math.round(100 * done / total) === pct ? done + " of " + total + " tasks done" : "Computed from the tasks"};
   }
-  if (total) return {pct: Math.round(100 * done / total), src: "tasks", why: "Computed from tasks: " + done + " done of " + total};
+  if (total) return {pct: Math.round(100 * done / total), src: "tasks", why: done + " of " + total + " tasks done"};
   return {pct: null, src: "none", why: "No tasks and no manual progress yet"};
 }
 function progressBar(x, wide) {
   const pr = progOf(x);
-  if (pr.pct == null) return h("span", {class: "prog none", title: pr.why}, h("span", {class: "muted", text: "no tasks"}));
+  if (pr.pct == null) return h("span", {class: "prog none muted", title: pr.why, text: "no tasks"});
   return h("span", {class: "prog" + (wide ? " wide" : ""), title: pr.why},
     h("span", {class: "pbar", role: "progressbar", "aria-valuenow": pr.pct, "aria-valuemin": 0, "aria-valuemax": 100, "aria-label": "Progress " + pr.pct + "%, " + (pr.src === "manual" ? "set manually" : "from tasks")}, h("i", {style: "width:" + pr.pct + "%"})),
-    h("span", {class: "num pv", text: pr.pct + "%"}), pr.src === "manual" ? h("span", {class: "pm", "aria-hidden": "true", text: "✎"}) : null);
+    h("span", {class: "num pv", text: pr.pct + "%"}));
 }
 function dueBadge(due, done) { if (!due) return null; const over = !done && due < lkey(new Date());
-  return h("span", {class: "due" + (over ? " over" : ""), title: over ? "Past its due date (" + due + ")" : "Due " + due, text: (over ? "overdue · " : "due ") + shortDay(due)}); }
+  return h("span", {class: "due" + (over ? " over" : ""), title: over ? "Past its due date (" + due + ")" : "Due " + due, text: over ? "overdue since " + shortDay(due) : "due " + shortDay(due)}); }
 const FILES = D.files || [];
 const FILEMAP = new Map(FILES.map(f => [f.path, f]));
 const ACTIONS = D.actions || [];
@@ -1581,33 +1809,72 @@ function highlight(el, q, cls) {
 }
 
 /* ---------------------------------------------------------------- widgets */
+/* ---------------------------------------------------------------- icons: authored SVG, one 1.5 px stroke (no Unicode glyphs) */
+const ICON = {
+  search: [["circle", {cx: 7, cy: 7, r: 4.5}], ["path", {d: "M10.5 10.5 14 14"}]],
+  copy: [["rect", {x: 5.5, y: 5.5, width: 8, height: 8, rx: 1.5}], ["path", {d: "M10.5 5.5v-2a1 1 0 0 0-1-1h-6a1 1 0 0 0-1 1v6a1 1 0 0 0 1 1h2"}]],
+  close: [["path", {d: "M4 4l8 8M12 4l-8 8"}]],
+  theme: [["circle", {cx: 8, cy: 8, r: 5.5}], ["path", {d: "M8 2.5a5.5 5.5 0 0 1 0 11z", fill: "currentColor"}]],
+  lock: [["rect", {x: 3.5, y: 7, width: 9, height: 6.5, rx: 1.5}], ["path", {d: "M5.5 7V5a2.5 2.5 0 0 1 5 0v2"}]],
+  branch: [["circle", {cx: 5, cy: 3.5, r: 1.5}], ["circle", {cx: 5, cy: 12.5, r: 1.5}], ["circle", {cx: 11, cy: 5.5, r: 1.5}], ["path", {d: "M5 5v6M11 7c0 2.5-3 2.5-5.5 4"}]],
+  chevron: [["path", {d: "M4.5 6.5 8 10l3.5-3.5"}]],
+  todo: [["circle", {cx: 8, cy: 8, r: 5}]],
+  doing: [["circle", {cx: 8, cy: 8, r: 5}], ["path", {d: "M8 3a5 5 0 0 1 0 10z", fill: "currentColor"}]],
+  blocked: [["circle", {cx: 8, cy: 8, r: 5}], ["path", {d: "M4.6 11.4l6.8-6.8"}]],
+  done: [["circle", {cx: 8, cy: 8, r: 5}], ["path", {d: "M5.6 8.2l1.7 1.7 3.2-3.5"}]],
+  cancelled: [["circle", {cx: 8, cy: 8, r: 5}], ["path", {d: "M6.2 6.2l3.6 3.6M9.8 6.2l-3.6 3.6"}]],
+  session: [["circle", {cx: 8, cy: 8, r: 5}], ["circle", {cx: 8, cy: 8, r: 1.5, fill: "currentColor"}]],
+  merge: [["circle", {cx: 4.5, cy: 3.5, r: 1.5}], ["circle", {cx: 4.5, cy: 12.5, r: 1.5}], ["circle", {cx: 11.5, cy: 12.5, r: 1.5}], ["path", {d: "M4.5 5v6M4.5 6c0 3 7 2 7 5"}]],
+  gear: [["circle", {cx: 8, cy: 8, r: 2}], ["path", {d: "M8 2v2M8 12v2M2 8h2M12 8h2M3.8 3.8l1.4 1.4M10.8 10.8l1.4 1.4M3.8 12.2l1.4-1.4M10.8 5.2l1.4-1.4"}]],
+  miss: [["circle", {cx: 8, cy: 8, r: 5}], ["path", {d: "M8 5.5v3M8 10.5v.1"}]]
+};
+function icon(name, label) {
+  return sv("svg", {class: "i i-" + name, viewBox: "0 0 16 16", width: 16, height: 16, fill: "none", stroke: "currentColor", "stroke-width": 1.5, "stroke-linecap": "round", "stroke-linejoin": "round",
+    "aria-hidden": label ? null : "true", role: label ? "img" : null, "aria-label": label || null, focusable: "false"}, (ICON[name] || []).map(([t, a]) => sv(t, a)));
+}
+/* a row is clickable with the mouse; its title is a real link (keyboard, screen readers, j/k) */
+function rowClick(fn) { return e => { if (e.target.closest && e.target.closest("a,button,summary,input,select,label")) return; fn(); }; }
+function taskHref(id) { return encode(Object.assign({}, S, {task: id})); }
+function linkTo(href, text, cls, title) { return h("a", {class: "rl" + (cls ? " " + cls : ""), href, "data-nav": "", title: title || null, text}); }
+function meta(...parts) { return h("span", {class: "meta"}, parts.flat().filter(x => x != null && x !== false && x !== "").map(x => x.nodeType ? x : h("span", {text: String(x)}))); }
+function cmdCode(cmd) { return h("code", null, String(cmd).split(" ").map((t, i) => [i ? " " : null, h("span", {class: "tok", text: t})])); }
+function cmdRow(label, cmd) { return h("div", {class: "cmdr"}, h("span", {class: "t2", text: label}), cmdCode(cmd), icopy(cmd, "Copy command to " + label.toLowerCase())); }
+function cmdMenu(label, rows) {
+  const det = h("details", {class: "cmenu"}, h("summary", {class: "btn"}, h("span", {class: "lbl", text: label}), icon("chevron")),
+    h("div", {class: "menu", role: "group", "aria-label": label}, h("div", {class: "cmds"}, rows.filter(Boolean).map(([l, c]) => cmdRow(l, c)))));
+  return det;
+}
 function toast(msg) { const t = $("#toast"); t.textContent = msg; t.classList.add("on"); clearTimeout(toast.t); toast.t = setTimeout(() => t.classList.remove("on"), 1800); }
 function copy(text) {
   const done = () => toast("Copied · " + text);
   const fallback = () => { const ta = h("textarea", {style: "position:fixed;opacity:0"}); ta.value = text; document.body.append(ta); ta.select(); try { document.execCommand("copy"); done(); } catch (e) { toast("Copy failed — select the command instead"); } ta.remove(); };
   if (navigator.clipboard && navigator.clipboard.writeText) navigator.clipboard.writeText(text).then(done, fallback); else fallback();
 }
-function cmdBtn(cmd, primary) { return h("button", {class: "cmd" + (primary ? " primary" : ""), type: "button", title: "Copy: " + cmd, "aria-label": "Copy command: " + cmd, onclick: e => { e.stopPropagation(); copy(cmd); }}, h("code", {text: cmd}), h("span", {class: "cp", "aria-hidden": "true", text: "Copy"})); }
-function icopy(cmd, label) { return h("button", {class: "icopy", type: "button", title: "Copy: " + cmd, "aria-label": (label || "Copy") + ": " + cmd, onclick: e => { e.stopPropagation(); copy(cmd); }}, "⧉"); }
+function cmdBtn(cmd, primary, label) {
+  const short = !label && String(cmd).length <= 30;
+  return h("button", {class: "btn" + (primary ? " primary" : ""), type: "button", title: cmd, "aria-label": (label ? label + " (copies " : "Copy command (") + cmd + ")", onclick: e => { e.stopPropagation(); copy(cmd); }},
+    icon("copy"), short ? h("code", {class: "lbl", text: cmd}) : h("span", {class: "lbl", text: label || "Copy command"}));
+}
+function icopy(cmd, label) { return h("button", {class: "icopy", type: "button", title: cmd, "aria-label": (label || "Copy command") + ": " + cmd, onclick: e => { e.stopPropagation(); copy(cmd); }}, icon("copy")); }
 function empty(title, ...body) { return h("div", {class: "empty"}, h("strong", {text: title}), ...body); }
 function tip(x, y, node) { const t = $("#tip"); clear(t).append(node); t.hidden = false; const r = t.getBoundingClientRect(); let l = x + 14, tp = y + 14; if (l + r.width > innerWidth - 8) l = x - r.width - 14; if (tp + r.height > innerHeight - 8) tp = y - r.height - 14; t.style.left = Math.max(8, l) + "px"; t.style.top = Math.max(8, tp) + "px"; }
 function untip() { $("#tip").hidden = true; }
-function statusBadge(s) { const [ic, l] = STATUS[s] || STATUS.active; return h("span", {class: "badge s-" + s, title: "Status: " + l}, h("span", {class: "ic", "aria-hidden": "true", text: ic}), l); }
-function prioBadge(p) { if (!PRIO[p] || p === "normal") return null; const [ic, l] = PRIO[p]; return h("span", {class: "badge p-" + p, title: "Priority: " + l}, h("span", {class: "ic", "aria-hidden": "true", text: ic}), l); }
-function prioIcon(p) { if (!PRIO[p] || p === "normal") return null; const [ic, l] = PRIO[p]; return h("span", {class: "pico p-" + p, title: "Priority: " + l, "aria-label": "Priority " + l, text: ic}); }
+function statusBadge(s, plainText) { const l = (STATUS[s] || STATUS.active)[1]; return h("span", {class: "stat", title: "Status: " + l}, plainText ? null : h("span", {class: "dot " + (SDOT[s] || "d-info"), "aria-hidden": "true"}), l); }
+function prioBadge(p) { return p === "high" ? h("span", {text: "High priority"}) : p === "low" ? h("span", {text: "Low priority"}) : null; }
+function prioIcon(p) { return p === "high" ? h("span", {class: "pico", title: "Priority: High", text: "high"}) : null; }
 function healthDot(p) { const lv = p.health.level, why = p.health.reasons.length ? p.health.reasons.join(" · ") : "Nothing needs attention";
   return h("span", {class: "dot hd d-" + lv, role: "img", title: (lv === "ok" ? "Healthy" : lv === "warn" ? "Needs a look" : "At risk") + " — " + why, "aria-label": "Health " + lv + ": " + why}); }
 function prPill(p, r) {
   const st = r.checks || "unknown", rv = r.review === "CHANGES_REQUESTED" ? "changes requested" : r.review === "APPROVED" ? "approved" : r.review === "REVIEW_REQUIRED" ? "review required" : "";
-  const title = "#" + r.number + " " + (r.title || "") + " — " + CHECKS[st] + (rv ? " · " + rv : "") + (r.mergeable === "CONFLICTING" ? " · merge conflicts" : "") + (r.draft ? " · draft" : "");
+  const title = "#" + r.number + " " + (r.title || "") + ": " + CHECKS[st] + (rv ? ", " + rv : "") + (r.mergeable === "CONFLICTING" ? ", merge conflicts" : "") + (r.draft ? ", draft" : "");
   return h("a", {class: "pr", href: r.url || (p.github ? "https://github.com/" + p.github + "/pull/" + r.number : "#"), target: "_blank", rel: "noopener noreferrer", title, "aria-label": title, onclick: e => e.stopPropagation()},
-    h("span", {class: "dot d-" + st, "aria-hidden": "true"}), "#" + r.number, r.mergeable === "CONFLICTING" ? h("span", {class: "t2", "aria-hidden": "true", text: "⚠"}) : null);
+    h("span", {class: "dot d-" + st, "aria-hidden": "true"}), "#" + r.number);
 }
 function prPills(p, max) {
   if (!p.prsOpen.length) return h("span", {class: "muted", text: "—"});
   const sorted = p.prsOpen.slice().sort((a, b) => ({failing: 0, pending: 1, passing: 2}[a.checks] ?? 3) - ({failing: 0, pending: 1, passing: 2}[b.checks] ?? 3));
   const n = max || 3;
-  return h("div", {class: "prs"}, sorted.slice(0, n).map(r => prPill(p, r)), sorted.length > n ? h("span", {class: "t2", style: "font-size:.75rem;align-self:center", text: "+" + (sorted.length - n)}) : null);
+  return h("div", {class: "prs"}, sorted.slice(0, n).map(r => prPill(p, r)), sorted.length > n ? h("span", {class: "t2", style: "font-size:var(--fs-1);align-self:center", text: "+" + (sorted.length - n)}) : null);
 }
 function sparkline(p, n, w, hh) {
   const ks = days(n || 30), vals = ks.map(k => p.act[k] || 0), max = Math.max(1, ...vals); w = w || 72; hh = hh || 18; const bw = w / ks.length;
@@ -1634,13 +1901,16 @@ function crumbs(list) {
   return h("nav", {class: "crumbs", "aria-label": "Breadcrumb"}, h("ol", null, list.map(([label, href], i) => h("li", null,
     href && i < list.length - 1 ? h("a", {href, text: label}) : h("span", {"aria-current": i === list.length - 1 ? "page" : null, text: label})))));
 }
-function stats(rows) {
-  return h("div", {class: "stats"}, rows.filter(Boolean).map(([v, l, tone, title, href]) => h(href ? "a" : "div", {class: "st" + (tone ? " " + tone : ""), title: title || null, href: href || null},
-    h("span", {class: "sv num", text: String(v)}), h("span", {class: "sl", text: l}))));
+/* a few figures with context: "28 urgent / of 46 items that need you"; rows are [value, label, tone, context, href] */
+function stats(rows, sm) {
+  rows = rows.filter(Boolean);
+  return h("div", {class: "figs" + (sm ? " sm" : ""), style: "--n:" + rows.length, role: "list"}, rows.map(([v, l, tone, sub, href]) => h(href ? "a" : "div", {class: "fig", href: href || null, role: "listitem"},
+    h("span", {class: "fv"}, tone ? h("span", {class: "dot d-" + (tone === "risk" ? "risk" : "warn"), "aria-hidden": "true"}) : null, h("b", {class: "num", text: String(v)}), h("span", {class: "fl", text: l})),
+    sub ? h("span", {class: "fs", text: sub}) : null)));
 }
 function callout(tone, title, body, act) {
-  return h("div", {class: "callout " + tone, role: tone === "risk" ? "alert" : null}, h("span", {class: "sev " + tone, "aria-hidden": "true", text: tone === "info" ? "i" : "!"}),
-    h("div", {class: "cbody"}, h("strong", {text: title}), body ? h("div", {class: "t2"}, body) : null), act ? h("div", {class: "cact"}, act) : null);
+  return h("div", {class: "callout " + tone, role: tone === "risk" ? "alert" : null}, tone === "info" ? null : h("span", {class: "dot d-" + (tone === "risk" ? "risk" : "warn"), "aria-hidden": "true"}),
+    h("div", {class: "cbody"}, h("strong", {text: title}), body ? h("div", null, body) : null), act ? h("div", {class: "cact"}, act) : null);
 }
 function pageTabs(tabs, cur) {
   const bar = h("div", {class: "ptabs", role: "tablist", "aria-label": "Sections"});
@@ -1656,27 +1926,28 @@ function pageTabs(tabs, cur) {
 function avatar(w, lg) {
   const user = String(w || "?").split("@")[0], ini = (user.replace(/[^a-z0-9]/gi, "").slice(0, 2) || "?").toUpperCase();
   const live = ((BYWHO.get(w) || {}).sessions || []).length > 0;
-  return h("span", {class: "av" + (lg ? " lg" : "") + (live ? " live" : "") + (isMe(w) ? " me" : ""), role: "img", title: w + (isMe(w) ? " (you)" : "") + (live ? " · live session" : ""), "aria-label": w + (isMe(w) ? " (you)" : "") + (live ? ", live" : "")}, ini);
+  return h("span", {class: "av" + (lg ? " lg" : "") + (live ? " live" : ""), role: "img", title: w + (isMe(w) ? " (you)" : "") + (live ? ", live session" : ""), "aria-label": w + (isMe(w) ? " (you)" : "") + (live ? ", live" : "")}, ini);
 }
 function avatars(list, max) {
   max = max || 4; if (!list.length) return h("span", {class: "muted", text: "—"});
   return h("span", {class: "avs"}, list.slice(0, max).map(w => avatar(w)), list.length > max ? h("span", {class: "av more", title: list.slice(max).join(", "), text: "+" + (list.length - max)}) : null);
 }
-function lockIcon() { return sv("svg", {class: "lk", width: 10, height: 12, viewBox: "0 0 10 12", "aria-hidden": "true", focusable: "false"}, sv("rect", {x: 1, y: 5, width: 8, height: 6.5, rx: 1.5, fill: "currentColor"}), sv("path", {d: "M3 5V3.6a2 2 0 0 1 4 0V5", fill: "none", stroke: "currentColor", "stroke-width": 1.4})); }
+function lockIcon() { const s = icon("lock"); s.classList.add("lk"); return s; }
 function untilText(s) { const t = iso(s); if (!t) return ""; const d = t - nowS(); return d <= 0 ? "expired " + rel(t) : "for " + dur(d); }
 function claimChip(it, short) {
   if (!it.claimed_by) return null;
-  const exp = it.lock === "expired", w = it.holder;
-  return h("span", {class: "claim" + (exp ? " exp" : "") + (isMe(w) ? " mine" : ""), title: "Claimed by " + it.claimed_by + (it.lock_expires ? (exp ? " · lock expired " : " · lock until ") + fmt(iso(it.lock_expires)) : "")},
-    lockIcon(), h("span", {class: "cw ell", text: (isMe(w) ? "you" : w) + (it.agent && !short ? " · " + it.agent : "")}), short && !exp ? null : h("span", {class: "cu", text: exp ? "expired" : untilText(it.lock_expires)}));
+  const exp = it.lock === "expired", w = it.holder, who = isMe(w) ? "you" : String(w).split("@")[0];
+  const left = String(untilText(it.lock_expires)).replace(/^for /, "");
+  return h("span", {class: "claim" + (exp ? " exp" : "") + (isMe(w) ? " mine" : ""), title: "Claimed by " + it.claimed_by + (it.lock_expires ? (exp ? ", lock expired " : ", lock until ") + fmt(iso(it.lock_expires)) : "")},
+    lockIcon(), h("span", {class: "cw", text: who + (exp ? ", lock expired" : short || !left ? "" : ", " + left + " left")}));
 }
-function istatusIcon(st) { const [ic, l] = ISTATUS[st] || ISTATUS.todo; return h("span", {class: "ist i-" + st, role: "img", title: l, "aria-label": l, text: ic}); }
-function istatusBadge(st) { const [ic, l] = ISTATUS[st] || ISTATUS.todo; return h("span", {class: "badge i-" + st}, h("span", {class: "ic", "aria-hidden": "true", text: ic}), l); }
-function typeTag(t) { return t && t !== "task" ? h("span", {class: "tag ty-" + t, text: t}) : null; }
+function istatusIcon(st) { const l = (ISTATUS[st] || ISTATUS.todo)[1]; return h("span", {class: "ist i-" + st, role: "img", title: l, "aria-label": l}, icon(ICON[st] ? st : "todo")); }
+function istatusBadge(st) { const l = (ISTATUS[st] || ISTATUS.todo)[1]; return h("span", {class: "stat"}, h("span", {class: "ist i-" + st, "aria-hidden": "true"}, icon(ICON[st] ? st : "todo")), l); }
+function typeTag(t) { return t && t !== "task" ? h("span", {text: t.charAt(0).toUpperCase() + t.slice(1)}) : null; }
 function scopeName(scope) { if (isInit(scope)) { const x = BYINIT.get(scope.slice(12)); return x ? x.title : scope.slice(12); } const p = BYID.get(scope); return p ? (p.name || p.id) : String(scope || "").split("/").pop(); }
 function scopeChip(scope) {
   const ini = isInit(scope);
-  return h("button", {class: "mchip sc", type: "button", title: (ini ? "Initiative " : "Project ") + scope, onclick: e => { e.stopPropagation(); ini ? openInitiative(scope.slice(12)) : openProject(scope); }}, ini ? h("span", {class: "t2", "aria-hidden": "true", text: "◆"}) : null, scopeName(scope));
+  return h("button", {class: "sc", type: "button", title: (ini ? "Initiative " : "Project ") + scope, onclick: e => { e.stopPropagation(); ini ? openInitiative(scope.slice(12)) : openProject(scope); }}, scopeName(scope));
 }
 function taskCmds(it) {
   if (it.legacy && !it.n) return [];
@@ -1695,11 +1966,11 @@ function taskCmds(it) {
 function itemRow(it, opts) {
   opts = opts || {};
   const first = taskCmds(it)[0];
-  return h("li", {class: "irow" + (it.open ? "" : " closed"), "data-nav": "", tabindex: "0", onclick: () => openTask(it.id), onkeydown: e => { if (e.key === "Enter") openTask(it.id); }},
+  const sub = [opts.scope && it.scope !== opts.home ? scopeChip(it.scope) : null, it.due ? dueBadge(it.due, !it.open) : null, it.legacy && it.n ? h("span", {text: "#" + it.n + " in the note"}) : null].filter(Boolean);
+  return h("li", {class: "irow" + (it.open ? "" : " closed"), onclick: rowClick(() => openTask(it.id))},
     istatusIcon(it.status),
-    h("div", {class: "im"}, h("div", {class: "itl", title: it.title}, it.title),
-      h("div", {class: "imeta"}, h("span", {class: "iid mono", text: it.legacy ? (it.n ? "#" + it.n + " · note" : "note") : it.id}), typeTag(it.type), opts.scope && it.scope !== opts.home ? scopeChip(it.scope) : null,
-        prioIcon(it.priority), it.due ? dueBadge(it.due, !it.open) : null, !it.legacy && it.version > 1 ? h("span", {class: "muted", title: "Version " + it.version + " — open for the history", text: "v" + it.version}) : null)),
+    h("div", {class: "im"}, h("a", {class: "itl", href: taskHref(it.id), "data-nav": "", title: it.title, onclick: e => { e.preventDefault(); openTask(it.id); }, text: it.title}),
+      sub.length ? h("div", {class: "imeta"}, sub) : null),
     h("div", {class: "icl"}, claimChip(it)),
     first && it.open ? icopy(first[1], first[0]) : h("span"));
 }
@@ -1716,10 +1987,10 @@ function parseLog(line) {
 function changelog(lines) {
   if (!lines || !lines.length) return empty("No history yet");
   return h("ol", {class: "clog"}, lines.map(l => { const e = parseLog(l);
-    return h("li", null, h("span", {class: "cv num", text: e.v || "•"}),
-      h("div", {class: "cb"}, h("div", {class: "ch"}, h("strong", {text: e.op}), e.detail ? h("span", {class: "t2", text: " · " + e.detail.replace(/\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z/g, m => fmt(iso(m)))}) : null),
-        h("div", {class: "cm"}, e.who.includes("@") ? avatar(e.who) : null, h("span", {text: e.who + (e.agent ? " · " + e.agent : "")}), e.ts ? h("span", {class: "muted", title: fmt(e.ts), text: " · " + fmt(e.ts) + " (" + rel(e.ts) + ")"}) : null),
-        e.why ? h("div", {class: "cwhy"}, h("span", {class: "label", text: "Why"}), " ", inline(e.why)) : null)); }));
+    return h("li", null, h("span", {class: "cv num", text: e.v || "·"}),
+      h("div", {class: "cb"}, h("div", {class: "ch"}, h("strong", {text: e.op}), e.detail ? h("span", {class: "t2", text: " " + e.detail.replace(/\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z/g, m => fmt(iso(m)))}) : null),
+        h("div", {class: "cm"}, e.who.includes("@") ? avatar(e.who) : null, meta(e.who + (e.agent ? " with " + e.agent : ""), e.ts ? h("span", {title: fmt(e.ts), text: fmt(e.ts) + " (" + rel(e.ts) + ")"}) : null)),
+        e.why ? h("div", {class: "cwhy"}, h("span", {class: "label", text: "Why:"}), inline(e.why)) : null)); }));
 }
 /* ---------------------------------------------------------------- column chart (single series) with tooltip, keyboard, table twin */
 function activityChart(projects, n, title, height) {
@@ -1789,60 +2060,62 @@ function facetMenu(key, label, values, fmtv) {
 function counts(fn) { const m = new Map(); for (const p of P) for (const v of [].concat(fn(p))) if (v) m.set(v, (m.get(v) || 0) + 1); return Array.from(m.entries()).sort((a, b) => b[1] - a[1] || String(a[0]).localeCompare(b[0])); }
 
 /* ---------------------------------------------------------------- live runs: progress, ETA, subagents, current turn */
+/* a live run: goal, a thin bar, steps and time; blocked runs say so in red text */
 function liveRun(s, asOf) {
   const p = s.progress || null, run = runOf(s), now = nowS();
-  const tp90 = ((D.timing || {}).turns || {}).p90;
-  const turn = s.turn_started ? now - s.turn_started : 0;
-  const chips = h("div", {class: "rchips"},
-    turn ? h("span", {class: "rc" + (tp90 && turn / 60 > tp90 ? " warn" : ""), title: tp90 ? "90% of turns here finish within " + fmtMin(tp90) : null}, h("span", {class: "dot d-live", "aria-hidden": "true"}), "turn running " + dur(turn), tp90 && turn / 60 > tp90 ? " · longer than 90% of turns" : "") : h("span", {class: "rc muted", text: "idle between turns"}),
-    s.subagents ? h("span", {class: "rc"}, h("span", {class: "sa", "aria-hidden": "true", text: "⧉"}), plural(s.subagents, "subagent") + " running") : null);
-  if (!p) return h("div", {class: "run none"}, chips);
+  if (!p) return null;
   const el = p.started ? (now - p.started) / 60 : 0, est = (run && run.estimate_cal) || p.estimate || 0;
   const left = p.eta_min != null && p.state === "running" ? Math.max(0, p.eta_min - (now - (asOf || D.rendered || now)) / 60) : null;
   const pct = p.steps ? Math.min(100, 100 * (p.step || 0) / p.steps) : est ? Math.min(100, 100 * el / est) : null;
   const over = est && el > est && p.state === "running";
-  const head = [p.steps ? (p.step || 0) + "/" + p.steps + " steps" : "step " + (p.step || 0), fmtMin(el) + " elapsed" + (est ? " of ~" + fmtMin(est) : ""), p.state === "running" ? (left != null ? "ETA ~" + fmtMin(left) : "") : p.state].filter(Boolean).join(" · ");
+  const state = p.state === "blocked" ? "blocked" : p.state === "done" ? "done" : left != null ? "about " + fmtMin(left) + " left" : "running";
+  const steps = p.steps ? (p.step || 0) + " of " + p.steps + " steps" : "step " + (p.step || 0);
   return h("div", {class: "run " + (p.state || "running")},
-    h("div", {class: "rh"}, h("strong", {class: "ell", text: p.goal || "Agent run"}), h("span", {class: "badge r-" + (p.state || "running")}, p.state === "blocked" ? "⊘ blocked" : p.state === "done" ? "✓ done" : "● running")),
-    pct != null ? h("div", {class: "rbar" + (over ? " over" : ""), role: "progressbar", "aria-valuenow": Math.round(pct), "aria-valuemin": 0, "aria-valuemax": 100, "aria-label": "Run progress " + head}, h("i", {style: "width:" + pct.toFixed(1) + "%"})) : null,
-    h("div", {class: "rmeta num" + (over ? " warn" : ""), text: head + (over ? " · over the estimate by " + fmtMin(el - est) : "")}),
-    p.last ? h("div", {class: "rl"}, h("span", {class: "label", text: p.state === "blocked" ? "Blocked" : "Latest"}), " ", inline(p.last), p.updated ? h("span", {class: "muted", text: " · " + rel(p.updated)}) : null) : null,
-    p.next ? h("div", {class: "rl"}, h("span", {class: "label", text: "Next"}), " ", inline(p.next)) : null,
-    chips);
+    h("div", {class: "rh"}, h("strong", {class: "ell", title: p.goal || "", text: p.goal || "Agent run"}), h("span", {class: "rs num", text: state})),
+    pct != null ? h("div", {class: "rbar" + (over ? " over" : ""), role: "progressbar", "aria-valuenow": Math.round(pct), "aria-valuemin": 0, "aria-valuemax": 100, "aria-label": "Run progress: " + steps + ", " + state}, h("i", {style: "width:" + pct.toFixed(1) + "%"})) : null,
+    h("div", {class: "rmeta num" + (over ? " warn" : "")}, meta(steps, fmtMin(el) + " elapsed" + (est ? " of about " + fmtMin(est) : ""), over ? "over the estimate by " + fmtMin(el - est) : null)));
 }
 /* saved status lines: parsed in Python (parts); legacy one-line forms are shown as written */
 function ckClass(c) { const g = String(c || "").charAt(0); return g === "✓" ? "ok" : g === "⚠" ? "warn" : g === "✗" ? "bad" : "na"; }
-function brandChip() { return h("span", {class: "sbrand", title: "Firefly DevKit status"}, "Firefly", h("span", {class: "chev", "aria-hidden": "true", text: "❯"}), "DevKit"); }
-function statusCard(raw, parts, meta) {
-  if (!parts) return h("div", {class: "statusline"}, meta ? h("span", {class: "who", text: meta}) : null, inline(stripMarker(raw)));
+/* the saved status block (Done, Check, Progress, Next), as one quiet list */
+function statusCard(raw, parts, meta_) {
+  if (!parts) return h("div", {class: "statusline"}, meta_ ? h("span", {class: "who", text: meta_}) : null, inline(stripMarker(raw)));
   const row = (k, v, cls) => v ? [h("dt", {text: k}), h("dd", {class: cls || null}, inline(v))] : null;
-  return h("div", {class: "sblock"},
-    h("div", {class: "sb-h"}, brandChip(), h("span", {class: "sb-chip", title: [parts.project, parts.branch].filter(Boolean).join(" · "), text: [parts.project, parts.branch].filter(Boolean).join(" · ")}),
-      parts.task ? h("span", {class: "sb-chip task", title: parts.task, text: parts.task}) : null, meta ? h("span", {class: "sb-meta", text: meta}) : null),
-    h("dl", {class: "sb-rows"}, row("Done", parts.done), row("Check", parts.check, "ck " + ckClass(parts.check)), row("Progress", parts.progress), row("Next", parts.next)));
+  return h("div", {class: "sblock"}, parts.task ? h("div", {class: "strong", text: parts.task}) : null,
+    h("dl", {class: "sb-rows"}, row("Done", parts.done), row("Check", parts.check, "ck " + ckClass(parts.check)), row("Progress", parts.progress), row("Next", parts.next)),
+    meta_ ? h("div", {class: "label", text: meta_}) : null);
 }
 function statusLine(raw, parts) {
   if (!parts) return inline(stripMarker(raw));
-  return frag(parts.task ? h("span", {class: "sl-task", text: parts.task + " · "}) : null, inline(parts.done || ""),
-    parts.check ? [" ", h("span", {class: "ck " + ckClass(parts.check), title: "Check: " + parts.check, text: parts.check.charAt(0)})] : null,
-    parts.next ? h("span", {class: "t2", text: " → " + parts.next}) : null);
+  return frag(parts.check ? [h("span", {class: "ck " + ckClass(parts.check), title: "Check: " + parts.check, text: parts.check.charAt(0)}), " "] : null, inline(parts.done || parts.task || ""),
+    parts.next ? h("span", {class: "t2", text: ". Next: " + parts.next}) : null);
 }
 function logText(x) { return x.parts ? frag(x.pre ? inline(stripMarker(x.pre) + " · ") : null, statusLine(x.text, x.parts)) : inline(stripMarker(x.text)); }
-function sessionBlock(s, who, asOf) {
+/* one live session, each fact once: where, the run (goal, progress, ETA), then Latest / Check / Next from a single source */
+function sessionBlock(s, who, asOf, hideProject) {
+  const p = s.progress || null, sp = s.status_parts || null, now = nowS();
+  const turn = s.turn_started ? now - s.turn_started : 0, tp90 = ((D.timing || {}).turns || {}).p90, slow = !!(tp90 && turn / 60 > tp90);
+  const blocked = !!(p && p.state === "blocked");
+  const latest = (p && p.last) || (sp && sp.done) || (!sp && s.status ? stripMarker(s.status) : "");
+  const next = (p && p.next) || (sp && sp.next) || "", check = sp && sp.check;
+  const goal = liveRun(s, asOf) || (sp && sp.task ? h("div", {class: "run"}, h("div", {class: "rh"}, h("strong", {class: "ell", text: sp.task}))) : null);
   return h("div", {class: "sess"},
-    h("div", {class: "sh"}, h("span", {class: "badge"}, h("span", {class: "dot d-live", "aria-hidden": "true"}), s.agent || "agent"),
-      s.project ? h("button", {class: "sp", type: "button", onclick: () => openProject(s.project), text: scopeName(s.project)}) : h("span", {class: "muted", text: "no project"}),
-      s.branch ? h("span", {class: "mono sb", text: "⎇ " + s.branch}) : null, h("span", {class: "t2 num ss", text: s.started ? "for " + dur(nowS() - s.started) : ""}), who ? h("span", {class: "t2 sw", text: who}) : null),
-    liveRun(s, asOf),
-    s.status ? statusCard(s.status, s.status_parts, "latest status") : null);
+    h("div", {class: "sh"}, hideProject ? null : s.project ? h("button", {class: "sp", type: "button", onclick: () => openProject(s.project), text: scopeName(s.project)}) : h("span", {text: "no project"}),
+      s.branch ? h("span", {class: "br", title: "Branch " + s.branch}, icon("branch"), s.branch) : null, h("span", {text: s.agent || "agent"}), who ? h("span", {text: who}) : null,
+      h("span", {class: "ss num", title: s.started ? "Started " + fmt(s.started) : null, text: s.started ? dur(now - s.started) : ""})),
+    goal,
+    latest || check || next ? h("dl", {class: "srows"}, latest ? [h("dt", {text: blocked ? "Blocked" : "Latest"}), h("dd", {class: blocked ? "bad" : null}, inline(latest), p && p.updated ? h("span", {class: "t2", text: " " + rel(p.updated)}) : null)] : null,
+      check ? [h("dt", {text: "Check"}), h("dd", {class: "ck " + ckClass(check)}, inline(check))] : null,
+      next ? [h("dt", {text: "Next"}), h("dd", null, inline(next))] : null) : null,
+    turn || s.subagents ? h("div", {class: "rmeta" + (slow ? " warn" : "")}, meta(turn ? "turn running for " + dur(turn) + (slow ? ", longer than 90% of turns here" : "") : null, s.subagents ? plural(s.subagents, "subagent") + " running" : null)) : null);
 }
-
 /* ---------------------------------------------------------------- navbar + filters */
 function renderNav() {
   const tabs = $("#tabs"); clear(tabs);
   const urgent = ACTIONS.filter(a => a.sev === "risk").length, colls = (D.collisions || []).length;
-  for (const [v, label, key] of VIEWS) tabs.append(h("button", {class: "tab", role: "tab", "aria-selected": String(S.view === v || (v === "overview" && S.view === "actions")), type: "button", onclick: () => go(v), title: label + " (g " + key + ")"},
-    label, v === "overview" && urgent ? h("span", {class: "n", "aria-label": urgent + " urgent", text: String(urgent)}) : null, v === "team" && colls ? h("span", {class: "n warn", "aria-label": colls + " collisions", text: String(colls)}) : null));
+  for (const [v, label, key] of VIEWS) tabs.append(h("button", {class: "tab" + (v === "activity" ? " sec" : ""), role: "tab", "aria-selected": String(S.view === v || (v === "overview" && S.view === "actions")), type: "button", onclick: () => go(v), title: label + " (g " + key + ")"},
+    label, v === "overview" && urgent ? h("span", {class: "n", role: "img", title: plural(urgent, "urgent item"), "aria-label": plural(urgent, "urgent item")}) : null,
+    v === "team" && colls ? h("span", {class: "n warn", role: "img", title: plural(colls, "collision"), "aria-label": plural(colls, "collision")}) : null));
   const q = $("#q"); if (document.activeElement !== q) q.value = S.q;
 }
 function renderFilters() {
@@ -1869,112 +2142,135 @@ function actionTarget(a) {
   if (a.kind === "collision") return () => go("team");
   return null;
 }
-function actionRow(a, i) {
-  const p = a.project && BYID.get(a.project), go_ = actionTarget(a);
-  return h("li", {class: "act", "data-nav": "", tabindex: "0", onkeydown: e => { if (e.key === "Enter" && go_) go_(); }, onclick: () => { if (go_) go_(); }},
-    h("span", {class: "sev " + a.sev, "aria-label": a.sev === "risk" ? "urgent" : a.sev === "warn" ? "attention" : "info", text: SEVICON[a.sev]}),
-    h("div", {style: "min-width:0"}, h("div", {class: "at"}, h("span", {class: "tag", text: KIND[a.kind] || a.kind}), a.url ? h("a", {href: a.url, target: "_blank", rel: "noopener noreferrer", onclick: e => e.stopPropagation(), text: a.title}) : h("span", {text: a.title})),
-      h("div", {class: "ad ell"}, p ? h("span", {class: "proj", text: p.name || p.id}) : null, p && a.detail ? " · " : null, inline(a.detail || ""))),
-    h("div", {class: "ar"}, cmdBtn(a.cmd, i === 0)));
+function actionHref(a) {
+  const tid = (/\b([TFBS]-[0-9a-z]{6,})\b/.exec(a.cmd || "") || [])[1];
+  if (tid && ITEMBY.has(tid)) return taskHref(tid);
+  if (a.project && (BYID.has(a.project) || MEMBEROF.has(a.project))) return link({view: "projects", id: a.project});
+  const slug = (/(?:initiative show|-i) ([\w.-]+)/.exec(a.cmd || "") || [])[1];
+  if (slug && BYINIT.has(slug)) return link({view: "initiatives", id: slug});
+  if (a.kind === "collision") return link({view: "team"});
+  return null;
 }
+const SEVL = {risk: "Urgent", warn: "Needs a look", info: "For information"};
+const GROUP = {"ci-failing": n => n + " of your PRs are failing CI", "changes-requested": n => "Changes requested on " + n + " of your PRs", "conflicts": n => n + " of your PRs have merge conflicts",
+  "review-waiting": n => n + " of your PRs are waiting for review", "review-requested": n => n + " PRs are waiting for your review", "blocked": n => n + " projects or initiatives are blocked",
+  "blocked-task": n => n + " of your tasks are blocked", "overdue": n => n + " tasks or initiatives are overdue", "idle-work": n => n + " checkouts have unsaved work left idle",
+  "layout": n => n + " repositories are outside the workspace layout", "stale-note": n => n + " handoff notes are behind the code", "expired-lock": n => n + " expired locks are still held", "collision": n => n + " collisions"};
+function actionWhere(a) {
+  const p = a.project && BYID.get(a.project), n = (/#\d+/.exec(a.title || "") || [])[0], name = p ? p.name || p.id : a.project ? String(a.project).split("/").pop() : "";
+  return n && name ? n + " in " + name : name || a.title;
+}
+function actionGroups(list) {
+  const out = [], by = new Map();
+  for (const a of list) { if (!by.has(a.kind)) { const g = {kind: a.kind, items: []}; by.set(a.kind, g); out.push(g); } by.get(a.kind).items.push(a); }
+  return out;
+}
+/* one thing that needs you: what, where, and a quiet copy icon (the first row of a screen gets the one amber button) */
+function actionRow(a, primary) {
+  const p = a.project && BYID.get(a.project), href = actionHref(a), go_ = actionTarget(a);
+  const title = a.url ? h("a", {class: "at", href: a.url, target: "_blank", rel: "noopener noreferrer", "data-nav": "", title: "Open on GitHub", text: a.title})
+    : href ? h("a", {class: "at", href, "data-nav": "", text: a.title}) : h("span", {class: "at", tabindex: "0", "data-nav": "", text: a.title});
+  return h("li", {class: "act", onclick: rowClick(() => { if (go_) go_(); })},
+    h("span", {class: "dot d-" + a.sev, role: "img", title: SEVL[a.sev], "aria-label": SEVL[a.sev]}),
+    h("div", {style: "min-width:0"}, title, h("div", {class: "ad"}, h("span", {text: KIND[a.kind] || a.kind}), p ? h("span", {class: "proj", text: p.name || p.id}) : null, a.detail ? h("span", {class: "ell"}, inline(a.detail)) : null)),
+    h("div", {class: "ar"}, primary ? cmdBtn(a.cmd, true, "Copy command") : icopy(a.cmd, "Copy command")));
+}
+function groupRow(g, primary) {
+  const a = g.items[0], n = g.items.length;
+  if (n === 1) return actionRow(a, primary);
+  const label = KIND[a.kind] || a.kind, href = link({view: "actions", kind: label}), num = (/#\d+/.exec(a.title || "") || [])[0];
+  const where = g.items.slice(0, 3).map(actionWhere).join(", ") + (n > 3 ? " and " + (n - 3) + " more" : "");
+  return h("li", {class: "act", onclick: rowClick(() => set({view: "actions", id: "", task: "", kind: label}, true))},
+    h("span", {class: "dot d-" + a.sev, role: "img", title: SEVL[a.sev], "aria-label": SEVL[a.sev]}),
+    h("div", {style: "min-width:0"}, h("a", {class: "at", href, "data-nav": "", text: (GROUP[a.kind] || (k => k + " " + label + " items"))(n)}), h("div", {class: "ad"}, h("span", {class: "ell", text: where}))),
+    h("div", {class: "ar"}, primary ? cmdBtn(a.cmd, true, "Copy command" + (num ? " for " + num : "")) : null));
+}
+/* Home: four figures, each with its context, linking to the filtered list */
 function kpiStrip() {
   const k = D.kpis || {}, colls = (D.collisions || []).length;
-  const tile = (n, label, sub, href, tone) => h("a", {class: "kpi" + (tone ? " " + tone : ""), href, role: "listitem"}, h("span", {class: "kv num", text: n == null ? "—" : String(n)}), h("span", {class: "kl", text: label}), h("span", {class: "ks", text: sub || ""}));
-  return h("div", {class: "kpis", role: "list", "aria-label": "Summary"},
-    tile(k.initiatives, k.initiatives === 1 ? "initiative" : "initiatives", (k.initiatives_active || 0) + " active", link({view: "initiatives"})),
-    tile(k.projects, k.projects === 1 ? "project" : "projects", k.not_cloned ? k.not_cloned + " not cloned here" : "all cloned here", link({view: "projects"})),
-    tile(k.open, k.open === 1 ? "open task" : "open tasks", plural(k.locks || 0, "lock") + " held", link({view: "tasks"})),
-    tile(k.doing, "doing", "claimed, in progress", link({view: "tasks", tst: "doing"})),
-    tile(k.blocked, "blocked", k.blocked ? "needs a decision" : "nothing blocked", link({view: "tasks", tst: "blocked"}), k.blocked ? "risk" : ""),
-    tile(k.people_active, k.people_active === 1 ? "person active" : "people active", "of " + plural(k.people || 0, "person", "people"), link({view: "team"})),
-    tile(k.live_sessions, k.live_sessions === 1 ? "live session" : "live sessions", colls ? plural(colls, "collision") : "no collisions", link({view: "team"}), colls ? "warn" : ""),
-    tile(k.prs_failing, k.prs_failing === 1 ? "PR failing CI" : "PRs failing CI", k.prs_failing ? "fix locally, push once" : "green or pending", link({view: "projects", ci: ["failing"]}), k.prs_failing ? "risk" : ""));
+  return stats([
+    [k.prs_failing || 0, k.prs_failing === 1 ? "PR failing CI" : "PRs failing CI", k.prs_failing ? "risk" : "", k.prs_failing ? "in " + plural(P.filter(p => p.ci.includes("failing")).length, "project") : "every open PR is green or running", link({view: "projects", ci: ["failing"]})],
+    [k.blocked || 0, k.blocked === 1 ? "blocked task" : "blocked tasks", k.blocked ? "risk" : "", "of " + (k.open || 0) + " open", link({view: "tasks", tst: "blocked"})],
+    [k.doing || 0, "doing", "", plural(k.locks || 0, "lock") + " held", link({view: "tasks", tst: "doing"})],
+    [k.live_sessions || 0, k.live_sessions === 1 ? "live session" : "live sessions", "", "by " + plural(k.people_active || 0, "person", "people") + (colls ? ", " + plural(colls, "collision") : ""), link({view: "team"})]]);
 }
 function needsPanel() {
-  const body = ACTIONS.length ? [h("ul", {class: "acts"}, ACTIONS.slice(0, 5).map(actionRow)), ACTIONS.length > 5 ? h("a", {class: "more-l pad", href: link({view: "actions"}), text: "All " + ACTIONS.length + " items that need you →"}) : null]
+  const groups = actionGroups(ACTIONS);
+  const body = ACTIONS.length ? h("ul", {class: "acts"}, groups.slice(0, 5).map((g, i) => groupRow(g, i === 0)))
     : empty("All clear", "No failing CI, reviews, blocked work, collisions, overdue tasks or idle work.");
-  return panel("Needs you", ACTIONS.length, ACTIONS.length > 5 ? h("a", {class: "btn sm ghost", href: link({view: "actions"})}, "All " + ACTIONS.length + " →") : null, body, {flush: !!ACTIONS.length});
+  return panel("Needs you", ACTIONS.length || null, ACTIONS.length ? h("a", {class: "more", href: link({view: "actions"}), text: "All " + ACTIONS.length}) : null, body, {flush: !!ACTIONS.length});
+}
+function collText(c, short) {
+  if (c.kind === "expired-lock") { const it = ITEMBY.get(c.id); return (it ? "“" + it.title + "”" : c.id) + " is still claimed by " + whoOf(c.holder) + "; the lock expired " + rel(iso(c.until)); }
+  return (short ? "" : "Two sessions on ") + scopeName(c.project) + ", branch " + (c.branch || "?") + ": " + (c.who || []).join(" and ");
 }
 function teamNow() {
   const colls = D.collisions || [], active = PEOPLE.filter(x => x.sessions.length).length;
   const rows = PEOPLE.slice(0, 6).map(x => {
     const s = x.sessions[0], p = s && s.progress;
-    return h("li", {class: "prow", "data-nav": "", tabindex: "0", onclick: () => go("team"), onkeydown: e => { if (e.key === "Enter") go("team"); }},
-      avatar(x.who),
-      h("div", {class: "pm"}, h("div", {class: "pw"}, h("strong", {class: "ell", text: x.who}), isMe(x.who) ? h("span", {class: "tag", text: "you"}) : null),
-        h("div", {class: "ps ell t2"}, s ? (s.agent || "agent") + " · " + scopeName(s.project || "") + (s.branch ? " ⎇ " + s.branch : "") + (x.sessions.length > 1 ? " · +" + (x.sessions.length - 1) + " more" : "") : "no live session · seen " + rel(x.updated)),
-        p ? h("div", {class: "pp"}, h("div", {class: "rbar sm" + (p.state === "blocked" ? " blocked" : ""), role: "progressbar", "aria-valuenow": p.steps ? Math.round(100 * (p.step || 0) / p.steps) : 0, "aria-valuemin": 0, "aria-valuemax": 100, "aria-label": "Run progress"}, h("i", {style: "width:" + (p.steps ? Math.min(100, 100 * (p.step || 0) / p.steps) : 0).toFixed(0) + "%"})),
-          h("span", {class: "num t2" + (p.state === "blocked" ? " bad" : ""), text: p.state === "blocked" ? "blocked" : (p.steps ? (p.step || 0) + "/" + p.steps : "step " + (p.step || 0)) + (p.eta_min != null ? " · ETA ~" + fmtMin(p.eta_min) : "")})) : null),
-      h("div", {class: "pr2"}, s && s.subagents ? h("span", {class: "rc", title: plural(s.subagents, "subagent") + " running", text: "⧉ " + s.subagents}) : null,
-        x.locks.length ? h("span", {class: "claim sm", title: plural(x.locks.length, "lock") + " held"}, lockIcon(), String(x.locks.length)) : null));
+    const pct = p ? (p.steps ? Math.min(100, 100 * (p.step || 0) / p.steps) : 0) : 0;
+    return h("li", {class: "prow", onclick: rowClick(() => go("team"))}, avatar(x.who),
+      h("div", {class: "pm"}, h("div", {class: "pw"}, linkTo(link({view: "team"}), x.who, "ell"), isMe(x.who) ? h("span", {class: "tag", text: "you"}) : null),
+        h("div", {class: "ps ell", text: s ? (s.agent || "agent") + " on " + scopeName(s.project || "") + (s.branch ? ", " + s.branch : "") + (x.sessions.length > 1 ? ", and " + plural(x.sessions.length - 1, "more session") : "") : "No live session, seen " + rel(x.updated)}),
+        p ? h("div", {class: "pp"}, h("div", {class: "rbar" + (p.state === "blocked" ? " blocked" : ""), role: "progressbar", "aria-valuenow": Math.round(pct), "aria-valuemin": 0, "aria-valuemax": 100, "aria-label": "Run progress"}, h("i", {style: "width:" + pct.toFixed(0) + "%"})),
+          h("span", {class: "num" + (p.state === "blocked" ? " bad" : ""), text: p.state === "blocked" ? "blocked" : (p.steps ? (p.step || 0) + " of " + p.steps : "step " + (p.step || 0)) + (p.eta_min != null ? ", about " + fmtMin(p.eta_min) + " left" : "")})) : null),
+      h("div", {class: "pr2"}, x.locks.length ? h("span", {class: "claim", title: plural(x.locks.length, "lock") + " held"}, lockIcon(), String(x.locks.length)) : null));
   });
-  const body = [colls.length ? h("div", {class: "cbar"}, colls.slice(0, 2).map(c => h("div", {class: "ci"}, h("span", {class: "sev warn", "aria-hidden": "true", text: "!"}), h("span", {class: "ell", title: c.text, text: c.text}))), colls.length > 2 ? h("a", {class: "more-l", href: link({view: "team"}), text: "+" + (colls.length - 2) + " more collisions →"}) : null) : null,
+  const body = [colls.length ? h("div", null, colls.slice(0, 2).map(c => h("div", {class: "warnline"}, h("span", {class: "dot d-warn", "aria-hidden": "true"}), h("span", {class: "ell", title: collText(c), text: collText(c)}))),
+      colls.length > 2 ? h("a", {class: "more-l pad", href: link({view: "team"}), text: plural(colls.length - 2, "more collision")}) : null) : null,
     rows.length ? h("ul", {class: "prows"}, rows) : empty("Nobody is working right now", "Presence appears when a session starts: ", h("code", {text: "dev claude <project>"})),
-    PEOPLE.length > 6 ? h("a", {class: "more-l pad", href: link({view: "team"}), text: "+" + plural(PEOPLE.length - 6, "more person", "more people") + " →"}) : null];
-  return panel("Team now", PEOPLE.length ? active + " active" : null, h("a", {class: "btn sm ghost", href: link({view: "team"})}, "Team →"), body, {flush: true});
+    PEOPLE.length > 6 ? h("a", {class: "more-l pad", href: link({view: "team"}), text: plural(PEOPLE.length - 6, "more person", "more people")}) : null];
+  return panel("Team now", PEOPLE.length ? active + " active" : null, h("a", {class: "more", href: link({view: "team"}), text: "Team"}), body, {flush: true});
 }
 function notCloned(x) { return x.members.filter(m => { const p = BYID.get(m.id); return p ? !p.local : !m.local; }).length; }
-function memberStatusBar(x) {
-  const order = ["active", "blocked", "paused", "done", "unknown"], c = {};
-  for (const m of x.members) { const st = ((BYID.get(m.id) || {}).status) || m.status || "unknown"; const k = order.includes(st) ? st : "unknown"; c[k] = (c[k] || 0) + 1; }
-  const tot = x.members.length || 1, keys = order.filter(k => c[k]);
-  if (!keys.length) return null;
-  return h("div", {class: "sbar-w"}, h("div", {class: "sbar", role: "img", "aria-label": "Member projects by status: " + keys.map(k => c[k] + " " + (STATUS[k] || [0, k])[1].toLowerCase()).join(", ")},
-    keys.map(k => h("i", {class: "sb-" + k, style: "width:" + (100 * c[k] / tot).toFixed(2) + "%", title: c[k] + " " + (STATUS[k] || [0, k])[1].toLowerCase()}))),
-    h("div", {class: "sleg"}, keys.map(k => h("span", null, h("i", {class: "sb-" + k, "aria-hidden": "true"}), c[k] + " " + (STATUS[k] || [0, k])[1].toLowerCase()))));
+function memberCounts(x) { const c = {blocked: 0, risk: 0}; for (const m of x.members) { const p = BYID.get(m.id), st = (p && p.status) || m.status; if (st === "blocked") c.blocked++; if (p && p.health.level === "risk") c.risk++; } return c; }
+function nextDate(x) {
+  const over = x.due && x.status !== "done" && x.due < lkey(new Date());
+  if (!x.due && !x.milestone) return h("span", {class: "t2", text: "No due date"});
+  return h("span", null, x.milestone ? h("span", {text: x.milestone + (x.due ? ", " : "")}) : null, x.due ? h("span", {class: over ? "bad" : "t2", text: over ? "overdue since " + shortDay(x.due) : "due " + shortDay(x.due)}) : null);
 }
-function initCard(x, compact) {
-  const nc = notCloned(x), n = x.members.length;
-  return h("article", {class: "icard" + (compact ? " compact" : ""), "data-nav": "", tabindex: "0", "aria-label": "Initiative " + x.title, onclick: () => openInitiative(x.id), onkeydown: e => { if (e.key === "Enter") openInitiative(x.id); }},
-    h("div", {class: "ic-h"}, h("span", {class: "dot " + (SDOT[x.status] || "d-info"), "aria-hidden": "true"}), h("h3", {class: "ell", text: x.title}), prioIcon(x.priority)),
-    h("div", {class: "ic-b"}, statusBadge(x.status), x.milestone ? h("span", {class: "badge ms", title: "Milestone: " + x.milestone, text: "◆ " + x.milestone}) : null, dueBadge(x.due, x.status === "done")),
-    !compact && x.goal ? h("p", {class: "ic-g", title: plain(x.goal)}, plain(x.goal)) : null,
-    progressBar(x, true),
-    h("div", {class: "ic-m"},
-      h("span", null, h("strong", {class: "num", text: String(n)}), n === 1 ? " project" : " projects", nc ? h("span", {class: "t2", text: nc === n ? " · none cloned here" : " · " + nc + " not cloned"}) : null),
-      h("span", null, h("strong", {class: "num", text: String(x.cnt.open)}), " open", x.cnt.doing ? h("span", {class: "t2", text: " · " + x.cnt.doing + " doing"}) : null, x.cnt.blocked ? h("span", {class: "bad", text: " · " + x.cnt.blocked + " blocked"}) : null)),
-    compact ? null : memberStatusBar(x),
-    h("div", {class: "ic-f"}, x.people.length ? avatars(x.people, 5) : h("span", {class: "muted", text: "nobody on it now"}), h("span", {class: "t2 num", text: x.last ? "active " + rel(x.last) : ""})));
+function workText(c) { return h("span", null, h("span", {class: "num", text: c.open + " open"}), c.blocked ? h("span", {class: "bad num", text: ", " + c.blocked + " blocked"}) : null); }
+/* Home: one row per initiative (status, progress, next date, open and blocked work) */
+function initRow(x) {
+  return h("li", {class: "inir", onclick: rowClick(() => openInitiative(x.id))},
+    h("div", {class: "nm"}, h("span", {class: "dot " + (SDOT[x.status] || "d-info"), role: "img", title: (STATUS[x.status] || STATUS.active)[1], "aria-label": (STATUS[x.status] || STATUS.active)[1]}), linkTo(link({view: "initiatives", id: x.id}), x.title, "ell")),
+    h("div", {class: "c2"}, progressBar(x)), h("div", {class: "c3 sub"}, nextDate(x)), h("div", {class: "c4 sub"}, workText(x.cnt)));
 }
 function initiativesPanel() {
   const list = INITS.slice().sort((a, b) => (SORDER[a.status] ?? 6) - (SORDER[b.status] ?? 6) || PRANK[a.priority] - PRANK[b.priority] || String(a.due || "9").localeCompare(String(b.due || "9")));
   const loose = P.filter(p => !MEMBEROF.has(p.id)).length;
-  const body = list.length ? [h("div", {class: "icards"}, list.slice(0, 6).map(x => initCard(x, true))),
-      h("div", {class: "sfoot t2"}, list.length > 6 ? h("a", {href: link({view: "initiatives"}), text: "+" + (list.length - 6) + " more initiatives · "}) : null,
-        loose ? h("a", {href: link({view: "projects", loose: true}), text: plural(loose, "project") + " outside initiatives →"}) : "Every project belongs to an initiative")]
+  const body = list.length ? [h("ul", {class: "inis"}, list.slice(0, 8).map(initRow)),
+      loose ? h("a", {class: "more-l pad", href: link({view: "projects", loose: true}), text: plural(loose, "project") + " outside initiatives"}) : null]
     : empty("No initiatives yet", "Group related projects into a programme with a goal, milestone and due date: ", h("code", {text: 'dev initiative new <slug> --title "…" --projects owner/a,owner/b'}));
-  return panel("Initiatives", INITS.length || null, h("a", {class: "btn sm ghost", href: link({view: "initiatives"})}, "All initiatives →"), body, {cls: "mb"});
+  return panel("Initiatives", INITS.length || null, h("a", {class: "more", href: link({view: "initiatives"}), text: "All initiatives"}), body, {flush: !!list.length});
 }
 function sincePanel() {
   const s = D.since || {}, N = 3;
   const col = (title, items, render, emptyText, href) => h("div", null, h("h3", null, title, h("span", {class: "n num", text: String(items.length)})),
-    items.length ? h("ul", null, items.slice(0, N).map(render), items.length > N ? h("li", null, h("a", {class: "k", href: href || link({view: "activity"}), text: "+" + (items.length - N) + " more →"})) : null) : h("p", {class: "k", style: "margin:0", text: emptyText}));
+    items.length ? h("ul", null, items.slice(0, N).map(render), items.length > N ? h("li", null, h("a", {class: "more", href: href || link({view: "activity"}), text: (items.length - N) + " more"})) : null) : h("p", {class: "k", style: "margin:0", text: emptyText}));
   const body = h("div", {class: "since"},
-    col("Sessions", s.sessions || [], x => h("li", null, h("span", {class: "k num", text: tm(x.ts) + " · " + [x.who, x.agent].filter(Boolean).join(" · ") + " · "}), h("button", {class: "lnk", type: "button", onclick: () => x.project && openScope(x.project), text: scopeName(x.project || "") || "—"}), h("div", {class: "ell t2", title: plain(stripMarker(x.text))}, logText(x))), "No agent sessions since yesterday."),
-    col("Commits", s.commits || [], ([pid, n]) => h("li", {style: "display:flex;gap:8px"}, h("button", {class: "lnk ell", style: "flex:1;text-align:left", type: "button", onclick: () => openProject(pid), text: scopeName(pid)}), h("span", {class: "num t2", text: String(n)})), "No commits since yesterday."),
-    col("Merged PRs", s.merged || [], x => h("li", {class: "ell"}, h("a", {href: x.url, target: "_blank", rel: "noopener noreferrer", text: "#" + x.number}), " ", x.title, h("span", {class: "k", text: " · " + x.repo.split("/").pop()})), "Nothing merged since yesterday."),
-    col("Completed tasks", s.done || [], x => h("li", {class: "ell"}, x.id && ITEMBY.has(x.id) ? h("button", {class: "lnk", type: "button", onclick: () => openTask(x.id), text: x.text}) : inline(x.text), h("span", {class: "k", text: " · " + scopeName(x.project) + (x.who ? " · " + x.who : "")})), "No tasks completed since yesterday.", link({view: "tasks", tst: "done"})));
-  return panel("Since yesterday", null, h("span", {class: "t2", style: "font-size:.8rem", text: "from " + fmtDay(s.from)}), body, {flush: true});
+    col("Sessions", s.sessions || [], x => h("li", {title: [x.who, x.agent].filter(Boolean).join(" with ")}, h("div", {class: "sl1"}, h("span", {class: "k num", text: tm(x.ts)}), h("button", {class: "lnk", type: "button", onclick: () => x.project && openScope(x.project), text: scopeName(x.project || "") || "—"})), h("div", {class: "ell", title: plain(stripMarker(x.text))}, logText(x))), "No agent sessions since yesterday."),
+    col("Commits", s.commits || [], ([pid, n]) => h("li", {style: "display:flex;gap:8px"}, h("button", {class: "lnk ell", style: "flex:1;text-align:left;font-weight:400", type: "button", onclick: () => openProject(pid), text: scopeName(pid)}), h("span", {class: "num k", text: String(n)})), "No commits since yesterday."),
+    col("Merged PRs", s.merged || [], x => h("li", {class: "ell"}, h("a", {href: x.url, target: "_blank", rel: "noopener noreferrer", text: "#" + x.number}), " ", x.title, h("span", {class: "k", text: " in " + x.repo.split("/").pop()})), "Nothing merged since yesterday."),
+    col("Completed tasks", s.done || [], x => h("li", {class: "ell"}, x.id && ITEMBY.has(x.id) ? h("button", {class: "lnk", style: "font-weight:400", type: "button", onclick: () => openTask(x.id), text: x.text}) : inline(x.text), h("span", {class: "k", text: " in " + scopeName(x.project)})), "No tasks completed since yesterday.", link({view: "tasks", tst: "done"})));
+  return panel("Since yesterday", null, h("span", {class: "t2", text: "from " + fmtDay(s.from)}), body);
 }
 function viewHome(main) {
-  const k = D.kpis || {};
-  main.append(h("div", {class: "head"}, h("h1", {text: "Today"}),
-    h("span", {class: "sub", text: (ACTIONS.length ? plural(ACTIONS.length, "item") + " need you" + (k.urgent ? " · " + k.urgent + " urgent" : "") : "Nothing is waiting on you") + " · " + plural(k.live_sessions || 0, "live session")}),
-    h("div", {class: "right t2", style: "font-size:.8rem", text: "Synced " + rel(D.generated) + " · " + D.host})));
+  const k = D.kpis || {}, n = ACTIONS.length, u = k.urgent || 0;
+  const title = u ? plural(u, "urgent item") + (u === 1 ? " needs you" : " need you") : n ? plural(n, "item") + (n === 1 ? " needs" : " need") + " a look" : "Nothing needs you";
+  main.append(h("div", {class: "head"}, h("h1", {text: title}), h("span", {class: "sub", text: "Synced " + rel(D.generated) + " on " + D.host})));
   main.append(kpiStrip());
   main.append(h("div", {class: "cols mb"}, needsPanel(), teamNow()));
-  main.append(initiativesPanel());
-  main.append(sincePanel());
+  main.append(h("div", {class: "stack-v"}, initiativesPanel(), sincePanel()));
 }
 function viewActions(main) {
   const kinds = new Map(); for (const a of ACTIONS) { const l = KIND[a.kind] || a.kind; kinds.set(l, (kinds.get(l) || 0) + 1); }
   const list = ACTIONS.filter(a => !S.kind || (KIND[a.kind] || a.kind) === S.kind);
   main.append(crumbs([["Home", link({view: "overview", kind: ""})], ["Needs you"]]));
-  main.append(h("div", {class: "head"}, h("h1", {text: "Everything that needs you"}), h("span", {class: "sub", text: plural(ACTIONS.length, "item") + ", most urgent first · each with the command that moves it forward"})));
+  main.append(h("div", {class: "head"}, h("h1", {text: "Everything that needs you"}), h("span", {class: "sub", text: plural(ACTIONS.length, "item") + ", most urgent first"})));
   if (kinds.size > 1) main.append(h("div", {class: "toolbar"}, seg("Kind", "kind", [["", "All", ACTIONS.length]].concat(Array.from(kinds.entries()).map(([l, n]) => [l, l, n])))));
-  main.append(panel("Needs you", list.length, null, list.length ? h("ul", {class: "acts"}, list.map(actionRow)) : empty("All clear"), {flush: !!list.length}));
+  main.append(list.length ? h("ul", {class: "acts"}, list.map((a, i) => actionRow(a, i === 0))) : h("div", {class: "panel"}, empty("All clear")));
 }
-
 /* ---------------------------------------------------------------- Initiatives: list -> #/initiatives/<slug> */
 function roadmap(items) {
   if (!items.length) return null;
@@ -1991,10 +2287,10 @@ function roadmap(items) {
     h("span", {class: "road-tl today", style: "left:" + pct(t0).toFixed(2) + "%", text: "Today"})))];
   for (const x of items.sort((a, b) => a.due.localeCompare(b.due))) {
     const p = pct(ts(x.due)), over = x.status !== "done" && x.due < lkey(new Date()), right = p > 72;
-    rows.push(h("div", {class: "road-row", "data-nav": "", tabindex: "0", onclick: x.open, onkeydown: e => { if (e.key === "Enter") x.open(); }},
+    rows.push(h("div", {class: "road-row", "data-nav": "", tabindex: "0", role: "link", "aria-label": x.label + ", due " + x.due, onclick: x.open, onkeydown: e => { if (e.key === "Enter") x.open(); }},
       h("span", {class: "road-l ell", title: x.label}, h("span", {class: "dot " + (SDOT[x.status] || "d-info"), "aria-hidden": "true"}), x.label),
       track([h("span", {class: "road-m" + (over ? " over" : x.status === "done" ? " done" : ""), style: "left:" + p.toFixed(2) + "%", title: (over ? "Overdue · " : "Due ") + x.due + (x.milestone ? " · " + x.milestone : "")}),
-        h("span", {class: "road-t" + (right ? " r" : ""), style: (right ? "right:" + (100 - p).toFixed(2) : "left:" + p.toFixed(2)) + "%", text: shortDay(x.due) + (x.milestone ? " · " + x.milestone : "") + (over ? " · overdue" : "")})])));
+        h("span", {class: "road-t" + (right ? " r" : ""), style: (right ? "right:" + (100 - p).toFixed(2) : "left:" + p.toFixed(2)) + "%", text: shortDay(x.due) + (x.milestone ? ": " + x.milestone : "") + (over ? " (overdue)" : "")})])));
   }
   return h("div", {class: "road", role: "list", "aria-label": "Milestones and due dates"}, rows);
 }
@@ -2004,59 +2300,70 @@ function sortInits(list) {
     due: (a, b) => due(a).localeCompare(due(b)), activity: (a, b) => (b.last_activity || 0) - (a.last_activity || 0)};
   return list.slice().sort(by[S.psort] || by.priority);
 }
+/* Initiatives: one quiet table that carries what the cards did (goal, progress, next date, work, members, people) */
 function initTable(list) {
-  return h("div", {class: "panel"}, h("div", {class: "tw st"}, h("table", {class: "t pt it"},
-    h("thead", null, h("tr", null, h("th", {class: "c-health"}), h("th", {text: "Initiative"}), h("th", {class: "c-st", text: "Status"}), h("th", {class: "c-prog", text: "Progress"}), h("th", {class: "c-last", text: "Milestone · due"}), h("th", {text: "Projects"}), h("th", {text: "Tasks"}), h("th", {class: "c-who", text: "People"}), h("th", {class: "c-act", text: "Last activity"}))),
-    h("tbody", null, list.map(x => { const nc = notCloned(x);
-      return h("tr", {"data-nav": "", tabindex: "0", onclick: () => openInitiative(x.id), onkeydown: e => { if (e.key === "Enter") openInitiative(x.id); }},
-        h("td", {class: "c-health"}, h("span", {class: "dot " + (SDOT[x.status] || "d-info"), "aria-hidden": "true"})),
-        h("td", {class: "c-name"}, h("span", {class: "pname", text: x.title}), h("span", {class: "powner", text: x.owner ? "owner " + x.owner : x.id})),
-        h("td", {class: "c-st"}, statusBadge(x.status), prioIcon(x.priority)), h("td", {class: "c-prog"}, progressBar(x)),
-        h("td", {class: "c-last"}, x.milestone ? h("span", {class: "t2", text: "◆ " + x.milestone + " "}) : null, dueBadge(x.due, x.status === "done") || (x.milestone ? null : h("span", {class: "muted", text: "—"}))),
-        h("td", {class: "num"}, String(x.members.length), nc ? h("span", {class: "t2", text: " · " + nc + " not cloned"}) : null),
-        h("td", {class: "num"}, String(x.cnt.open) + " open", x.cnt.blocked ? h("span", {class: "bad", text: " · " + x.cnt.blocked + " blocked"}) : null),
-        h("td", {class: "c-who"}, avatars(x.people, 3)), h("td", {class: "c-act num t2", text: rel(x.last)})); })))));
+  return h("div", {class: "tw st"}, h("table", {class: "t pt it"},
+    h("thead", null, h("tr", null, h("th", {class: "c-health"}, h("span", {class: "sr", text: "Status"})), h("th", {text: "Initiative"}), h("th", {class: "c-prog", text: "Progress"}), h("th", {class: "c-ms", text: "Next date"}), h("th", {class: "c-work", text: "Tasks"}), h("th", {class: "c-st", text: "Projects"}), h("th", {class: "c-who", text: "People"}), h("th", {class: "c-act", text: "Last activity"}))),
+    h("tbody", null, list.map(x => { const mc = memberCounts(x), l = (STATUS[x.status] || STATUS.active)[1];
+      return h("tr", {onclick: rowClick(() => openInitiative(x.id))},
+        h("td", {class: "c-health"}, h("span", {class: "dot " + (SDOT[x.status] || "d-info"), role: "img", title: l, "aria-label": l})),
+        h("td", {class: "c-name"}, linkTo(link({view: "initiatives", id: x.id}), x.title, "pname"), h("span", {class: "powner", title: plain(x.goal || ""), text: x.goal ? plain(x.goal) : l + (x.priority === "high" ? ", high priority" : "")})),
+        h("td", {class: "c-prog"}, progressBar(x)), h("td", {class: "c-ms"}, nextDate(x)), h("td", {class: "c-work"}, workText(x.cnt)),
+        h("td", {class: "c-st num"}, String(x.members.length), mc.blocked ? h("span", {class: "bad", text: " (" + mc.blocked + " blocked)"}) : null),
+        h("td", {class: "c-who"}, avatars(x.people, 3)), h("td", {class: "c-act num t2", text: rel(x.last)})); }))));
 }
 function viewInitiatives(main) {
   if (S.id) { viewInitiative(main); return; }
   const tk = tokens(S.q), all = INITS.filter(x => tk.every(t => x.hay.includes(t)));
   const list = sortInits(all.filter(x => !S.ist || x.status === S.ist));
   const inInit = new Set(INITS.flatMap(x => x.projects)), loose = P.filter(p => !MEMBEROF.has(p.id)).length;
-  main.append(h("div", {class: "head"}, h("h1", {text: "Initiatives"}), h("span", {class: "sub", text: plural(INITS.length, "initiative") + " · " + plural(inInit.size, "member project") + (loose ? " · " + loose + " outside initiatives" : "")})));
+  main.append(h("div", {class: "head"}, h("h1", {text: "Initiatives"}), h("span", {class: "sub", text: plural(INITS.length, "initiative") + " across " + plural(inInit.size, "project")})));
   const st = {}; for (const x of all) st[x.status] = (st[x.status] || 0) + 1;
   main.append(h("div", {class: "toolbar"}, seg("Status", "ist", [["", "All", all.length]].concat(Object.keys(st).sort((a, b) => (SORDER[a] ?? 6) - (SORDER[b] ?? 6)).map(k => [k, (STATUS[k] || [0, k])[1], st[k]]))),
-    h("span", {class: "spacer"}), selectBox("Sort", "psort", [["priority", "Sort: priority"], ["due", "Sort: due date"], ["progress", "Sort: progress"], ["activity", "Sort: activity"]]),
-    seg("Layout", "ilayout", [["cards", "Cards"], ["table", "Table"]])));
-  if (!list.length) { main.append(h("div", {class: "panel mb"}, empty(INITS.length ? "No initiative matches" : "No initiatives yet", INITS.length ? "Clear the search or the status filter." : ["Group related projects into a programme with goal, milestone and due date: ", h("code", {text: 'dev initiative new <slug> --title "…" --projects owner/a,owner/b'})]))); }
-  else main.append(S.ilayout === "table" ? initTable(list) : h("div", {class: "icards wide mb"}, list.map(x => initCard(x))));
+    h("span", {class: "spacer"}), selectBox("Sort", "psort", [["priority", "Sort by priority"], ["due", "Sort by due date"], ["progress", "Sort by progress"], ["activity", "Sort by activity"]])));
+  if (!list.length) main.append(h("div", {class: "panel mb"}, empty(INITS.length ? "No initiative matches" : "No initiatives yet", INITS.length ? "Clear the search or the status filter." : ["Group related projects into a programme with goal, milestone and due date: ", h("code", {text: 'dev initiative new <slug> --title "…" --projects owner/a,owner/b'})])));
+  else main.append(h("div", {class: "mb"}, initTable(list)));
   const dated = list.filter(x => x.due).map(x => ({label: x.title, due: x.due, milestone: x.milestone, status: x.status, open: () => openInitiative(x.id)}));
-  if (dated.length) main.append(panel("Milestones and due dates", dated.length, null, roadmap(dated.slice(0, 16)), {cls: "mb mt"}));
-  if (loose) main.append(h("p", {class: "t2 sfoot"}, h("a", {href: link({view: "projects", loose: true}), text: plural(loose, "project") + " are outside initiatives →"}), " Add one with ", h("code", {text: "dev initiative add <slug> <owner/repo>"})));
+  if (dated.length) main.append(panel("Milestones and due dates", dated.length, null, roadmap(dated.slice(0, 16)), {cls: "mb"}));
+  if (loose) main.append(h("p", {class: "t2", style: "font-size:var(--fs-1)"}, h("a", {href: link({view: "projects", loose: true}), text: plural(loose, "project") + " are outside initiatives."}), " Add one with ", h("code", {text: "dev initiative add <slug> <owner/repo>"}), "."));
 }
 const ITABS = [["overview", "Overview"], ["projects", "Projects"], ["tasks", "Tasks"], ["plans", "Plans"], ["sessions", "Sessions"], ["docs", "Docs & source"]];
 function viewInitiative(main) {
   const x = BYINIT.get(S.id);
-  if (!x) { main.append(crumbs([["Initiatives", link({view: "initiatives", id: ""})], [S.id]]), h("div", {class: "panel"}, empty("No initiative “" + S.id + "”", h("a", {href: link({view: "initiatives", id: ""})}, "All initiatives →")))); return; }
+  if (!x) { main.append(crumbs([["Initiatives", link({view: "initiatives", id: ""})], [S.id]]), h("div", {class: "panel"}, empty("No initiative “" + S.id + "”", h("a", {href: link({view: "initiatives", id: ""})}, "All initiatives")))); return; }
   const tab = ITABS.some(t => t[0] === S.tab) ? S.tab : "overview";
-  const pr = progOf(x), nc = notCloned(x), plansL = plansFor([x.scope]), sess = sessionsFor([x.scope].concat(x.projects), x.sessions);
+  const pr = progOf(x), nc = notCloned(x), plansL = plansFor([x.scope]), sess = sessionsFor([x.scope].concat(x.projects), x.sessions), mc = memberCounts(x);
+  const state = plain(x.state || ""), longState = state.length > 240;
+  const over = x.due && x.status !== "done" && x.due < lkey(new Date());
   main.append(crumbs([["Initiatives", link({view: "initiatives", id: "", tab: ""})], [x.title]]));
   main.append(h("header", {class: "phead"},
-    h("div", {class: "pt1"}, h("div", {class: "pt-t"}, h("h1", {text: x.title}),
-        h("div", {class: "bd"}, statusBadge(x.status), prioBadge(x.priority), x.milestone ? h("span", {class: "badge ms", title: "Milestone: " + x.milestone, text: "◆ " + x.milestone}) : null, dueBadge(x.due, x.status === "done"), x.tags.map(t => h("span", {class: "stk", text: "#" + t}))),
-        h("div", {class: "pmeta t2"}, [x.owner ? "Owner " + x.owner : null, plural(x.members.length, "project") + (nc ? " (" + (nc === x.members.length ? "none cloned here" : nc + " not cloned") + ")" : ""), x.last ? "active " + rel(x.last) : null].filter(Boolean).join(" · "))),
-      h("div", {class: "pt-p"}, progressBar(x, true), h("div", {class: "t2 why", text: pr.why}))),
-    h("div", {class: "go"}, cmdBtn("dev initiative show " + x.id, true), cmdBtn('dev task -i ' + x.id + ' add "…" --now'), x.note && FILEMAP.has(x.note) ? h("a", {class: "btn sm", href: link({view: "explorer", f: x.note, id: ""})}, "README in Explorer") : null)));
-  main.append(stats([[x.members.length, x.members.length === 1 ? "project" : "projects", "", nc ? nc + " not cloned on this Mac" : "all cloned", link({tab: "projects"})], [x.cnt.open, "open tasks", "", null, link({tab: "tasks"})],
-    [x.cnt.doing, "doing"], [x.cnt.blocked, "blocked", x.cnt.blocked ? "risk" : ""], [x.people.length, x.people.length === 1 ? "person on it" : "people on it"], [plansL.length, plansL.length === 1 ? "plan" : "plans", "", null, link({tab: "plans"})]]));
+    h("div", {class: "pt1"}, h("div", null, h("h1", {text: x.title})),
+      h("div", {class: "go"}, x.note && FILEMAP.has(x.note) ? h("a", {class: "btn ghost", href: link({view: "explorer", f: x.note, id: ""})}, "README") : null,
+        cmdMenu("Commands", [["Show it in the terminal", "dev initiative show " + x.id], ["Add a task", "dev task -i " + x.id + ' add "…" --now'], ["Add a member project", "dev initiative add " + x.id + " <owner/repo>"]]))),
+    h("div", {class: "pline"}, meta(statusBadge(x.status), x.priority === "high" ? "High priority" : x.priority === "low" ? "Low priority" : null,
+      x.milestone ? "Milestone: " + x.milestone : null, x.due ? h("span", {class: over ? "bad" : null, text: over ? "overdue since " + shortDay(x.due) : "due " + shortDay(x.due)}) : null,
+      x.owner ? "owner " + x.owner : null, x.last ? "active " + rel(x.last) : null)),
+    state ? h("p", {class: "lead", title: longState ? state : null}, inline(longState ? state.slice(0, 240).replace(/\s+\S*$/, "") + "…" : state)) : null,
+    h("div", {class: "pprog"}, progressBar(x, true), h("span", {text: pr.why}))));
+  main.append(stats([[x.members.length, x.members.length === 1 ? "project" : "projects", mc.blocked ? "risk" : "", (mc.blocked ? mc.blocked + " blocked, " : "") + (nc ? (nc === x.members.length ? "none cloned here" : nc + " not cloned here") : "all cloned here"), link({tab: "projects"})],
+    [x.cnt.open, "open tasks", "", x.cnt.doing + " doing", link({tab: "tasks"})],
+    [x.cnt.blocked, x.cnt.blocked === 1 ? "blocked task" : "blocked tasks", x.cnt.blocked ? "risk" : "", x.cnt.blocked ? "waiting on a decision" : "nothing blocked", link({tab: "tasks", tst: "blocked"})],
+    [x.people.length, x.people.length === 1 ? "person on it" : "people on it", "", x.people.length ? x.people.map(w => w.split("@")[0]).slice(0, 3).join(", ") : "nobody right now", link({view: "team", id: ""})]]));
   main.append(pageTabs([["overview", "Overview"], ["projects", "Projects", x.members.length], ["tasks", "Tasks", x.cnt.open], ["plans", "Plans", plansL.length], ["sessions", "Sessions", sess.length], ["docs", "Docs & source"]], tab));
   const tp = h("div", {class: "tabpanel", id: "tabpanel", role: "tabpanel", "aria-labelledby": "tab-" + tab});
   main.append(tp);
-  const part = (label, text) => text ? [h("div", {class: "label", style: "margin:12px 0 4px", text: label}), md(text)] : null;
+  const part = (label, text) => text ? [h("h3", {class: "sub3", text: label}), md(text)] : null;
   if (tab === "overview") {
     const doing = sortItems(x.items.filter(i => i.status === "doing" || i.status === "blocked"));
+    const stuck = x.members.map(m => BYID.get(m.id) || {id: m.id, name: m.id.split("/").pop(), status: m.status, health: {level: "ok", reasons: []}}).filter(p => p.status === "blocked" || p.health.level === "risk")
+      .sort((a, b) => (a.status === "blocked" ? 0 : 1) - (b.status === "blocked" ? 0 : 1));
     tp.append(h("div", {class: "cols"},
-      h("div", {class: "stack-v"}, panel("Goal, scope and state", null, null, (x.goal || x.scope || x.state) ? [part("Goal", x.goal), part("Scope", x.scope), part("Current state", x.state)] : empty("No goal written yet", "Edit ", h("code", {text: x.note || "initiatives/" + x.id + "/README.md"}), " or ask an agent for a handoff.")),
-        panel("In progress", doing.length, h("a", {class: "btn sm ghost", href: link({tab: "tasks"})}, "All tasks →"), doing.length ? h("ul", {class: "irows"}, doing.slice(0, 8).map(i => itemRow(i, {scope: true, home: x.scope}))) : empty("Nothing in progress", "Claim the next task: ", h("code", {text: "dev task -i " + x.id + " start <id>"})), {flush: !!doing.length})),
+      h("div", {class: "stack-v"},
+        panel("Doing or blocked", doing.length, h("a", {class: "more", href: link({tab: "tasks"})}, "All tasks"), doing.length ? h("ul", {class: "irows"}, doing.slice(0, 8).map(i => itemRow(i, {scope: true, home: x.scope}))) : empty("Nothing in progress", "Claim the next task: ", h("code", {text: "dev task -i " + x.id + " start <id>"})), {flush: !!doing.length}),
+        stuck.length ? panel("Projects that need attention", stuck.length, h("a", {class: "more", href: link({tab: "projects", mg: "status"})}, "All projects"),
+          h("ul", {class: "irows"}, stuck.slice(0, 6).map(p => h("li", {class: "irow", onclick: rowClick(() => openProject(p.id))}, h("span", {class: "dot " + (p.status === "blocked" ? "d-risk" : "d-warn"), "aria-hidden": "true"}),
+            h("div", {class: "im"}, linkTo(link({view: "projects", id: p.id}), p.name || p.id, "itl"), h("div", {class: "imeta", text: (p.status === "blocked" ? ["Blocked"] : []).concat(p.health.reasons.filter(r => !/marked blocked/.test(r))).join(", ")})), h("span"), h("span")))), {flush: true}) : null,
+        panel("Goal and scope", null, null, (x.goal || x.scopeText || longState) ? [part("Goal", x.goal), part("Scope", x.scopeText), longState ? part("Current state", x.state) : null] : empty("No goal written yet", "Edit ", h("code", {text: x.note || "initiatives/" + x.id + "/README.md"}), " or ask an agent for a handoff."))),
       h("div", {class: "stack-v"}, whoPanel(x.people, x.projects.concat([x.scope])),
         panel("Risks and decisions", null, null, (x.risks || x.decisions) ? [part("Risks", x.risks), part("Decisions", x.decisions)] : empty("Nothing recorded yet", "Risks and decisions live in the initiative README.")),
         x.links ? panel("Links", null, null, md(x.links)) : null)));
@@ -2067,19 +2374,20 @@ function viewInitiative(main) {
   else {
     const docs = (x.docs || []).filter(d => FILEMAP.has(d));
     tp.append(h("div", {class: "cols even"}, panel("Source", null, null, x.source ? md(x.source) : empty("No source archive recorded")),
-      panel("Documents", docs.length, x.note && FILEMAP.has(x.note) ? h("a", {class: "btn sm", href: link({view: "explorer", f: x.note, id: ""})}, "README") : null,
-        docs.length ? h("ul", {class: "tl-rows"}, docs.map(d => h("li", {class: "trow"}, h("a", {href: link({view: "explorer", f: d, id: ""}), text: d.split("/").slice(2).join("/") || d})))) : empty("No documents", "Add Markdown under ", h("code", {text: "initiatives/" + x.id + "/docs/"})))));
+      panel("Documents", docs.length, x.note && FILEMAP.has(x.note) ? h("a", {class: "more", href: link({view: "explorer", f: x.note, id: ""})}, "README") : null,
+        docs.length ? h("ul", {class: "tl-rows"}, docs.map(d => h("li", {class: "trow"}, h("a", {href: link({view: "explorer", f: d, id: ""}), text: d.split("/").slice(2).join("/") || d})))) : empty("No documents", "Add Markdown under ", h("code", {text: "initiatives/" + x.id + "/docs/"}))),
+      x.tags.length ? panel("Tags", x.tags.length, null, h("div", null, x.tags.map(t => h("span", {class: "stk", text: t})))) : null));
   }
 }
 function whoPanel(people, scopes) {
-  const set = new Set(scopes);
+  const set_ = new Set(scopes);
   const rows = people.map(w => { const x = BYWHO.get(w) || {sessions: [], locks: []};
-    const here = x.sessions.filter(s => set.has(s.project)), locks = ITEMS.filter(i => i.holder === w && i.open && i.lock === "held" && (set.has(i.scope) || scopes.includes(i.scope)));
-    return h("li", {class: "prow", "data-nav": "", tabindex: "0", onclick: () => go("team"), onkeydown: e => { if (e.key === "Enter") go("team"); }}, avatar(w),
-      h("div", {class: "pm"}, h("div", {class: "pw"}, h("strong", {class: "ell", text: w}), isMe(w) ? h("span", {class: "tag", text: "you"}) : null),
-        h("div", {class: "ps t2 ell", text: [here.length ? here.map(s => (s.agent || "agent") + " · " + scopeName(s.project) + (s.branch ? " ⎇ " + s.branch : "")).join(", ") : null, locks.length ? plural(locks.length, "claimed task") : null].filter(Boolean).join(" · ") || "—"})),
-      h("div", {class: "pr2"}, locks.length ? h("span", {class: "claim sm", title: plural(locks.length, "lock")}, lockIcon(), String(locks.length)) : null)); });
-  return panel("Who is on it", people.length || null, h("a", {class: "btn sm ghost", href: link({view: "team", id: ""})}, "Team →"), rows.length ? h("ul", {class: "prows"}, rows) : empty("Nobody right now", "People appear here when they hold a task lock or run a session in a member project."), {flush: !!rows.length});
+    const here = x.sessions.filter(s => set_.has(s.project)), locks = ITEMS.filter(i => i.holder === w && i.open && i.lock === "held" && set_.has(i.scope));
+    return h("li", {class: "prow", onclick: rowClick(() => go("team"))}, avatar(w),
+      h("div", {class: "pm"}, h("div", {class: "pw"}, linkTo(link({view: "team", id: ""}), w, "ell"), isMe(w) ? h("span", {class: "tag", text: "you"}) : null),
+        h("div", {class: "ps ell", text: [here.length ? here.map(s => (s.agent || "agent") + " on " + scopeName(s.project) + (s.branch ? ", " + s.branch : "")).join("; ") : null, !here.length && locks.length ? plural(locks.length, "claimed task") : null].filter(Boolean).join("") || "No live session here"})),
+      h("div", {class: "pr2"}, locks.length ? h("span", {class: "claim", title: plural(locks.length, "lock") + " held here"}, lockIcon(), String(locks.length)) : null)); });
+  return panel("Who is on it", people.length || null, h("a", {class: "more", href: link({view: "team", id: ""})}, "Team"), rows.length ? h("ul", {class: "prows"}, rows) : empty("Nobody right now", "People appear here when they hold a task lock or run a session in a member project."), {flush: !!rows.length});
 }
 function family(ids) {
   const toks = ids.map(id => String(id).split("/").pop().toLowerCase().split(/[-_.]/));
@@ -2091,11 +2399,11 @@ function miniStatus(list) {
   return h("span", {class: "mini", "aria-label": Object.entries(c).map(([k, n]) => n + " " + k).join(", ")}, Object.keys(c).sort((a, b) => (SORDER[a] ?? 6) - (SORDER[b] ?? 6)).map(k => h("span", {title: c[k] + " " + (STATUS[k] || [0, k])[1].toLowerCase()}, h("span", {class: "dot " + (SDOT[k] || "d-info"), "aria-hidden": "true"}), String(c[k]))));
 }
 function memberTable(list, allNc) {
-  return h("div", {class: "tw st"}, h("table", {class: "t pt mt"},
-    h("thead", null, h("tr", null, h("th", {class: "c-health"}), h("th", {text: "Project"}), h("th", {class: "c-st", text: "Status"}), h("th", {class: "c-prog", text: "Progress"}), h("th", {text: "In progress · latest"}), h("th", {class: "c-who", text: "Who"}), h("th", {class: "c-cta"}))),
-    h("tbody", null, list.map(d => h("tr", {"data-nav": "", tabindex: "0", onclick: () => openProject(d.id), onkeydown: e => { if (e.key === "Enter") openProject(d.id); }},
+  return h("div", {class: "tw st"}, h("table", {class: "t pt mtab"},
+    h("thead", null, h("tr", null, h("th", {class: "c-health"}), h("th", {text: "Project"}), h("th", {class: "c-st", text: "Status"}), h("th", {class: "c-prog", text: "Progress"}), h("th", {text: "In progress or latest status"}), h("th", {class: "c-who", text: "Who"}), h("th", {class: "c-cta"}))),
+    h("tbody", null, list.map(d => h("tr", {onclick: rowClick(() => openProject(d.id))},
       h("td", {class: "c-health"}, d.p ? healthDot(d.p) : h("span", {class: "dot d-info", role: "img", title: "No handoff note on this Mac yet", "aria-label": "no note"})),
-      h("td", {class: "c-name"}, h("span", {class: "pname", text: d.name}), h("span", {class: "powner", title: d.ws || d.id, text: d.ws || d.owner})),
+      h("td", {class: "c-name"}, linkTo(link({view: "projects", id: d.id}), d.name, "pname"), h("span", {class: "powner", title: d.ws || d.id, text: d.ws || d.owner})),
       h("td", {class: "c-st"}, statusBadge(d.st in STATUS ? d.st : "untracked")),
       h("td", {class: "c-prog"}, d.pct != null ? progressBar(d.p || {progress: d.pct, t: {}}) : h("span", {class: "muted", text: "—"})),
       h("td", {class: "c-now"}, d.doing.length ? h("div", {class: "slt"}, h("div", {class: "ell", title: d.doing[0].title}, istatusIcon(d.doing[0].status), " ", d.doing[0].title), d.doing.length > 1 ? h("div", {class: "who", text: "+" + (d.doing.length - 1) + " more in progress"}) : null)
@@ -2137,7 +2445,7 @@ function membersBlock(x) {
   input.addEventListener("input", debounce(() => { S.mq = input.value; history.replaceState(null, "", encode(S)); store.set("devkit.state", S); draw(); }, 120));
   draw();
   const nc = mem.filter(d => !d.local).length;
-  return h("div", {class: "stack-v"},
+  return h("div", {class: "stack-v", style: "gap:var(--s4)"},
     nc ? callout("info", nc === mem.length ? "None of these projects is cloned on this Mac" : nc + " of " + mem.length + " projects are not cloned on this Mac", "Their handoff notes, tasks and sessions come from the handoff repository. Clone the ones you work on; the copy icon on each row gives the command.", cmdBtn("dev clone <owner/repo>")) : null,
     h("div", {class: "toolbar"}, input, count, h("span", {class: "spacer"}), seg("Group by", "mg", groupings, g)), box);
 }
@@ -2186,7 +2494,7 @@ function sessionsBlock(list, showScope) {
     const k = lkey(new Date(it.ts * 1000));
     if (k !== day) { day = k; ul.append(h("li", {class: "day", text: fmtDay(it.ts)})); }
     ul.append(h("li", {class: "it"}, h("span", {class: "tm", text: tm(it.ts)}), it.who ? avatar(it.who) : h("span", {class: "ki", "aria-hidden": "true", text: "◇"}),
-      h("div", {style: "min-width:0"}, h("div", {class: "slw t2"}, [it.who, it.agent, it.branch ? "⎇ " + it.branch : ""].filter(Boolean).join(" · "), showScope && it.scope ? [" · ", scopeChip(it.scope)] : null), h("div", null, logText(it)))));
+      h("div", {style: "min-width:0"}, h("div", {class: "slw"}, meta(it.who, it.agent, it.branch ? h("span", {class: "meta"}, icon("branch"), it.branch) : null, showScope && it.scope ? scopeChip(it.scope) : null)), h("div", null, logText(it)))));
   }
   return h("div", {class: "panel"}, ul, list.length > n ? h("div", {class: "more"}, h("button", {class: "btn sm", type: "button", onclick: () => { SHOWN.sessions = n + 200; render(); }}, "Show " + Math.min(200, list.length - n) + " more")) : null);
 }
@@ -2209,12 +2517,12 @@ function projectTable(ps) {
   const th = (label, key, cls) => h("th", {scope: "col", class: cls || null, "aria-sort": S.sort === key ? "descending" : null}, key ? h("button", {type: "button", onclick: () => set({sort: key}, true), text: label + (S.sort === key ? " ↓" : "")}) : label);
   return h("div", {class: "tw st"}, h("table", {class: "t pt"},
     h("thead", null, h("tr", null, th("", "attention", "c-health"), th("Project", "name"), th("Status", "priority", "c-st"), h("th", {class: "c-prog", text: "Progress"}), th("In progress", "tasks"), h("th", {text: "Latest agent status"}), h("th", {text: "PRs"}), h("th", {class: "c-act", text: "7 days"}), th("Last activity", "activity", "c-last"), h("th", {class: "c-who", text: "Who"}))),
-    h("tbody", null, ps.map(p => h("tr", {"data-nav": "", tabindex: "0", onclick: () => openProject(p.id), onkeydown: e => { if (e.key === "Enter") openProject(p.id); }},
+    h("tbody", null, ps.map(p => h("tr", {onclick: rowClick(() => openProject(p.id))},
       h("td", {class: "c-health"}, healthDot(p)),
-      h("td", {class: "c-name"}, h("span", {class: "pname"}, p.name || p.id, ONPROJ.has(p.id) || p.live ? h("span", {class: "dot d-live", style: "margin-left:8px;vertical-align:1px", title: "Live session", "aria-label": "live session"}) : null, p.local ? null : h("span", {class: "tag", style: "margin-left:8px", title: "Handoff note only — clone with dev clone " + p.id, text: "not cloned"})), h("span", {class: "powner", text: p.owner + ((p.main || {}).branch ? " · " + p.main.branch : "")})),
+      h("td", {class: "c-name"}, h("span", {class: "pname"}, linkTo(link({view: "projects", id: p.id}), p.name || p.id), ONPROJ.has(p.id) || p.live ? h("span", {class: "dot d-live", style: "margin-left:8px;vertical-align:1px", title: "Live session", "aria-label": "live session"}) : null, p.local ? null : h("span", {class: "tag", style: "margin-left:8px", title: "Handoff note only — clone with dev clone " + p.id, text: "not cloned"})), h("span", {class: "powner", text: p.owner + ((p.main || {}).branch ? " · " + p.main.branch : "")})),
       h("td", {class: "c-st"}, statusBadge(p.status), prioIcon(p.priority)),
       h("td", {class: "c-prog"}, progressBar(p)), h("td", {class: "c-now"}, nowCell(p)), h("td", {class: "c-status"}, latest(p)), h("td", {class: "c-prs"}, prPills(p, 2)),
-      h("td", {class: "c-act"}, h("div", {style: "display:flex;gap:8px;align-items:center"}, sparkline(p, 30, 64, 16), h("span", {class: "num t2", style: "font-size:.75rem", text: String(sum7(p))}))),
+      h("td", {class: "c-act"}, h("div", {style: "display:flex;gap:8px;align-items:center"}, sparkline(p, 30, 64, 16), h("span", {class: "num t2", style: "font-size:var(--fs-1)", text: String(sum7(p))}))),
       h("td", {class: "c-last num t2", text: rel(p.last_activity)}), h("td", {class: "c-who"}, avatars(p.people, 3)))))));
 }
 function projectCard(p) {
@@ -2241,15 +2549,15 @@ function viewProjects(main) {
   for (const p of ps) for (const g of keyOf(p)) { if (!groups.has(g)) groups.set(g, []); groups.get(g).push(p); }
   for (const [g, list] of groups) {
     const body = S.layout === "cards" ? h("div", {class: "cards"}, list.map(projectCard)) : h("div", {class: "panel"}, projectTable(list));
-    main.append(g ? h("section", {class: "mb"}, h("div", {class: "label", style: "margin:8px 0", text: g + " · " + list.length}), body) : body);
+    main.append(g ? panel(g, list.length, null, body, {cls: "mb", flush: true}) : body);
   }
 }
 const PTABS = [["overview", "Overview"], ["tasks", "Tasks"], ["prs", "Pull requests"], ["worktrees", "Worktrees"], ["plans", "Plans"], ["sessions", "Sessions"], ["note", "Handoff note"]];
 function viewUnknownProject(main) {
   const id = S.id, inits = INITS.filter(x => x.projects.includes(id));
   main.append(crumbs([["Projects", link({view: "projects", id: "", tab: ""})], [id]]));
-  main.append(h("header", {class: "phead"}, h("div", {class: "pt1"}, h("div", {class: "pt-t"}, h("h1", {text: id.split("/").pop()}), h("div", {class: "pmeta t2", text: id})))));
-  main.append(callout("info", "Not cloned on this Mac and no handoff note yet", ["This project is a member of ", inits.length ? inits.map((x, i) => [i ? ", " : "", h("a", {href: link({view: "initiatives", id: x.id, tab: ""}), text: x.title})]) : "no initiative", ". Clone it to work on it; devkit creates its handoff note on the next sync."], cmdBtn("dev clone " + id, true)));
+  main.append(h("header", {class: "phead"}, h("div", {class: "pt1"}, h("div", null, h("h1", {text: id.split("/").pop()})), h("div", {class: "go"}, cmdBtn("dev clone " + id, true, "Copy dev clone"))),
+    h("div", {class: "pline"}, "Not cloned on this Mac and no handoff note yet. A member of ", inits.length ? inits.map((x, i) => [i ? ", " : "", h("a", {href: link({view: "initiatives", id: x.id, tab: ""}), text: x.title})]) : "no initiative", ". Clone it to work on it; devkit creates its note on the next sync.")));
 }
 function prTable(p) {
   if (!p.prsOpen.length) return h("div", {class: "panel"}, empty("No open pull requests", !p.local ? "PRs appear once the project is cloned and synced." : p.github ? ["Open one from your branch: ", h("code", {text: "gh pr create --fill"})] : "PR state is tracked for GitHub repositories."));
@@ -2257,7 +2565,7 @@ function prTable(p) {
   return h("div", {class: "panel"}, h("div", {class: "tw"}, h("table", {class: "t"}, h("thead", null, h("tr", null, ["CI", "Pull request", "Review", "Merge", "Size", "Updated", ""].map(x => h("th", {text: x})))),
     h("tbody", null, p.prsOpen.map(r => h("tr", null,
       h("td", null, h("span", {class: "badge"}, h("span", {class: "dot d-" + (r.checks || "unknown"), "aria-hidden": "true"}), (r.checks || "unknown"))),
-      h("td", null, h("a", {href: r.url || "#", target: "_blank", rel: "noopener noreferrer", text: "#" + r.number}), " ", h("span", {text: r.title || ""}), r.draft ? h("span", {class: "tag", style: "margin-left:6px", text: "draft"}) : null, h("div", {class: "t2 mono", style: "font-size:.72rem", text: r.branch || ""})),
+      h("td", null, h("a", {href: r.url || "#", target: "_blank", rel: "noopener noreferrer", text: "#" + r.number}), " ", h("span", {text: r.title || ""}), r.draft ? h("span", {class: "tag", style: "margin-left:6px", text: "draft"}) : null, h("div", {class: "t2 mono", style: "font-size:var(--fs-1)", text: r.branch || ""})),
       h("td", {class: "t2", text: r.review === "CHANGES_REQUESTED" ? "changes requested" : r.review === "APPROVED" ? "approved" : r.review === "REVIEW_REQUIRED" ? "review required" : "—"}),
       h("td", {class: r.mergeable === "CONFLICTING" ? "bad" : "t2", text: r.mergeable === "CONFLICTING" ? "⚠ conflicts" : r.mergeable === "MERGEABLE" ? "clean" : "—"}),
       h("td", {class: "num t2", text: r.size != null ? compact(r.size) : "—"}), h("td", {class: "num t2", text: rel(iso(r.updated))}),
@@ -2266,14 +2574,14 @@ function prTable(p) {
 function wtTable(p) {
   if (!p.wts.length) return h("div", {class: "panel"}, empty("No worktrees", p.local ? ["Parallel work on this repository: ", h("code", {text: "dev wt new <type>/<topic>"})] : "Worktrees appear once the project is cloned."));
   return h("div", {class: "panel"}, h("div", {class: "tw"}, h("table", {class: "t"}, h("thead", null, h("tr", null, ["Branch", "PR", "State", "Session", "Size", ""].map(x => h("th", {text: x})))),
-    h("tbody", null, p.wts.map(w => h("tr", null, h("td", {class: "mono", style: "font-size:.78rem", text: w.branch || "detached"}), h("td", {text: w.pr ? "#" + w.pr.number + " " + String(w.pr.state).toLowerCase() : "—"}),
+    h("tbody", null, p.wts.map(w => h("tr", null, h("td", {class: "mono", style: "font-size:var(--fs-1)", text: w.branch || "detached"}), h("td", {text: w.pr ? "#" + w.pr.number + " " + String(w.pr.state).toLowerCase() : "—"}),
       h("td", {text: w.missing ? "missing" : ((w.modified || 0) + (w.untracked || 0)) ? ((w.modified || 0) + (w.untracked || 0)) + " changed" : w.unpushed ? w.unpushed + " unpushed" : "clean"}),
       h("td", {text: w.active ? "live" : rel(w.last_activity)}), h("td", {class: "num", text: kb(w.size_kb)}), h("td", null, w.branch ? icopy("dev wt rm " + w.branch, "Remove") : null)))))));
 }
 function repoKv(p) {
   const m = p.main || {};
   return h("dl", {class: "kv"},
-    h("dt", {text: "Path"}), h("dd", {class: "mono", style: "font-size:.8rem;word-break:break-all", text: p.path || (p.local ? "—" : "not cloned · " + (p.canonical || ""))}),
+    h("dt", {text: "Path"}), h("dd", {class: "rpath"}, String(p.path || (p.local ? "—" : "not cloned, " + (p.canonical || ""))).split("/").map((x, i) => [i ? ["/", h("wbr")] : null, x])),
     p.remote ? [h("dt", {text: "Remote"}), h("dd", null, p.github ? h("a", {href: "https://github.com/" + p.github, target: "_blank", rel: "noopener noreferrer", text: p.remote}) : p.remote)] : null,
     p.local ? [h("dt", {text: "Branch"}), h("dd", {text: (m.branch || "—") + (m.modified || m.untracked ? " · " + ((m.modified || 0) + (m.untracked || 0)) + " changed" : " · clean") + (m.ahead ? " · ↑" + m.ahead : "") + (m.behind ? " · ↓" + m.behind : "")})] : null,
     m.last_commit ? [h("dt", {text: "Last commit"}), h("dd", {text: rel(m.last_commit_ts) + " · " + m.last_commit})] : null,
@@ -2285,9 +2593,9 @@ function repoKv(p) {
 function timeStats(t) {
   if (!t) return null;
   const tu = t.turns || {};
-  return stats([[tu.median != null ? fmtMin(tu.median) : "—", "median turn", "", tu.n ? "Over " + plural(tu.n, "turn") + " in 30 days" : "No turns recorded yet"],
-    [tu.p90 != null ? fmtMin(tu.p90) : "—", "p90 turn", "", "90% of turns finish within this"],
-    [t.ratio != null ? "×" + t.ratio : "—", "actual / estimate", t.ratio != null && t.ratio > 1.5 ? "warn" : "", t.runs ? "Median over " + plural(t.runs, "finished run") + " with an estimate (60 days)" : "No finished runs with an estimate yet"]]);
+  return stats([[tu.median != null ? fmtMin(tu.median) : "—", "median turn", "", tu.n ? "over " + plural(tu.n, "turn") + " in 30 days" : "no turns recorded yet"],
+    [tu.p90 != null ? fmtMin(tu.p90) : "—", "p90 turn", "", "9 in 10 turns finish within this"],
+    [t.ratio != null ? "×" + t.ratio : "—", "actual against estimate", t.ratio != null && t.ratio > 1.5 ? "warn" : "", t.runs ? "median of " + plural(t.runs, "finished run") + " with an estimate" : "no finished runs with an estimate yet"]], true);
 }
 function fmtSecs(s) { s = Math.max(0, s || 0); return s < 90 ? Math.round(s) + " s" : dur(s); }
 function slowTable(rows, showProject) {
@@ -2298,16 +2606,18 @@ function slowTable(rows, showProject) {
 }
 function timePanel(t, showProject, title) {
   if (!t) return null;
+  return panel(title || "Time", null, null, timeBody(t, showProject), {id: "time"});
+}
+function timeBody(t, showProject) {
   const sub = t.subagents || {}, has = (t.turns || {}).n || t.runs || (t.slow_tools || []).length || sub.n;
-  const body = has ? [timeStats(t),
-      t.ratio != null ? h("p", {class: "t2 tnote", text: t.ratio > 1 ? "Runs here take " + t.ratio + "× their estimate: new estimates are scaled by this ratio before the ETA is shown." : "Runs here finish within their estimate."}) : null,
-      (t.slow_tools || []).length ? [h("div", {class: "label", style: "margin:12px 0 4px", text: "Slowest commands · 7 days"}), slowTable(t.slow_tools.slice(0, 6), showProject)] : null,
-      sub.n ? [h("div", {class: "label", style: "margin:12px 0 4px", text: "Subagents · 7 days"}), h("p", {class: "t2", style: "margin:0 0 6px;font-size:.85rem", text: plural(sub.n, "subagent") + " · median " + fmtMin(sub.median) + " · p90 " + fmtMin(sub.p90)}),
-        slowTable((sub.top || []).slice(0, 4), showProject)] : null,
-      (t.recent_runs || []).length ? [h("div", {class: "label", style: "margin:12px 0 4px", text: "Recent runs: actual vs estimate"}), h("ul", {class: "tl-rows"}, t.recent_runs.slice(0, 5).map(r => h("li", {class: "trow"},
-        h("span", {class: "tx ell", title: r.what, text: r.what || "run"}), h("span", {class: "num t2" + (r.estimate && r.secs / 60 > r.estimate * 1.5 ? " bad" : ""), text: fmtMin(r.secs / 60) + " of ~" + fmtMin(r.estimate)}))))] : null]
-    : empty("No timing data yet", "devkit records turn, command, subagent and run durations as agents work; estimates get calibrated from them.");
-  return panel(title || "Time", null, null, body, {id: "time"});
+  if (!has) return empty("No timing data yet", "devkit records turn, command, subagent and run durations as agents work; estimates get calibrated from them.");
+  return [timeStats(t),
+    t.ratio != null ? h("p", {class: "tnote", text: t.ratio > 1 ? "Runs here take " + t.ratio + "× their estimate, so new estimates are scaled by this ratio before an ETA is shown." : "Runs here finish within their estimate."}) : null,
+    (t.slow_tools || []).length ? [h("h3", {class: "sub3", text: "Slowest commands, last 7 days"}), slowTable(t.slow_tools.slice(0, 6), showProject)] : null,
+    sub.n ? [h("h3", {class: "sub3", text: "Subagents, last 7 days"}), h("p", {class: "t2", style: "margin:0 0 6px;font-size:var(--fs-1)", text: plural(sub.n, "subagent") + ", median " + fmtMin(sub.median) + ", p90 " + fmtMin(sub.p90)}),
+      slowTable((sub.top || []).slice(0, 4), showProject)] : null,
+    (t.recent_runs || []).length ? [h("h3", {class: "sub3", text: "Recent runs: actual against estimate"}), h("ul", {class: "tl-rows"}, t.recent_runs.slice(0, 5).map(r => h("li", {class: "trow"},
+      h("span", {class: "tx ell", title: r.what, text: r.what || "run"}), h("span", {class: "num t2" + (r.estimate && r.secs / 60 > r.estimate * 1.5 ? " bad" : ""), text: fmtMin(r.secs / 60) + " of about " + fmtMin(r.estimate)}))))] : null];
 }
 function viewProject(main) {
   const p = BYID.get(S.id);
@@ -2315,19 +2625,22 @@ function viewProject(main) {
   const tab = PTABS.some(t => t[0] === S.tab) ? S.tab : "overview", ns = p.ns || {}, m = p.main || {};
   const plansL = plansFor([p.id]), sess = sessionsFor([p.id], p.sessions), here = ONPROJ.get(p.id) || [];
   const failing = p.prsOpen.filter(r => r.checks === "failing").length;
+  const lastSeen = Math.max(p.last_activity || 0, ...here.map(s => s.last_seen || s.started || 0));
+  const lv = p.health.level, hl = lv === "risk" ? "At risk" : lv === "warn" ? "Needs a look" : "Healthy";
   main.append(crumbs([["Projects", link({view: "projects", id: "", tab: ""})], [p.owner, link({view: "projects", id: "", tab: "", owner: [p.owner]})], [p.name || p.id]]));
   main.append(h("header", {class: "phead"},
-    h("div", {class: "pt1"}, h("div", {class: "pt-t"}, h("h1", null, healthDot(p), " ", p.name || p.id),
-        h("div", {class: "bd"}, statusBadge(p.status), prioBadge(p.priority), ns.milestone ? h("span", {class: "badge", text: "◆ " + ns.milestone}) : null, dueBadge(ns.due, p.status === "done"),
-          p.tags.map(t => h("span", {class: "stk", text: "#" + t})), here.length ? h("span", {class: "badge"}, h("span", {class: "dot d-live"}), plural(here.length, "live session")) : null, p.local ? null : h("span", {class: "tag", text: "not cloned"})),
-        h("div", {class: "pmeta t2"}, [p.owner, m.branch ? "⎇ " + m.branch : null, p.last_activity ? "active " + rel(p.last_activity) : null].filter(Boolean).join(" · "),
-          p.inits.length ? [" · member of ", p.inits.map((id, i) => [i ? ", " : "", h("a", {href: link({view: "initiatives", id, tab: ""}), text: (BYINIT.get(id) || {}).title || id})])] : null)),
-      h("div", {class: "pt-p"}, progressBar(p, true), h("div", {class: "t2 why", text: progOf(p).why}))),
-    p.health.reasons.length ? h("div", {class: "hreason " + p.health.level}, h("strong", {text: p.health.level === "risk" ? "At risk: " : "Needs a look: "}), p.health.reasons.join(" · ")) : null,
-    h("div", {class: "go"}, p.local ? [cmdBtn("dev claude " + p.id, true), cmdBtn("dev codex " + p.id), cmdBtn("dcd " + p.id)] : null, cmdBtn("dev handoff " + p.id))));
-  if (!p.local) main.append(callout("info", "Not cloned on this Mac", "The handoff note, tasks, plans and sessions come from the handoff repository. Clone it to work on it; PRs, worktrees and git activity appear after the next sync.", cmdBtn("dev clone " + p.id, true)));
-  main.append(stats([[p.cnt.open, "open tasks", "", null, link({tab: "tasks"})], [p.cnt.doing, "doing"], [p.cnt.blocked, "blocked", p.cnt.blocked ? "risk" : ""],
-    [p.prs, p.prs === 1 ? "open PR" : "open PRs", failing ? "risk" : "", failing ? failing + " failing CI" : null, link({tab: "prs"})], [p.wts.length, p.wts.length === 1 ? "worktree" : "worktrees", "", null, link({tab: "worktrees"})], [p.people.length, p.people.length === 1 ? "person here" : "people here"]]));
+    h("div", {class: "pt1"}, h("div", null, h("h1", null, healthDot(p), p.name || p.id)),
+      h("div", {class: "go"}, p.local ? cmdBtn("dev claude " + p.id, true, "Copy dev claude") : cmdBtn("dev clone " + p.id, true, "Copy dev clone"),
+        cmdMenu("More commands", p.local ? [["Start Codex", "dev codex " + p.id], ["Go to the checkout", "dcd " + p.id], ["Write the handoff", "dev handoff " + p.id]] : [["Write the handoff", "dev handoff " + p.id]]))),
+    h("div", {class: "pline"}, meta(statusBadge(p.status, true), p.priority === "high" ? "High priority" : null, ns.milestone ? "Milestone: " + ns.milestone : null, ns.due ? dueBadge(ns.due, p.status === "done") : null,
+      p.inits.length ? h("span", null, "in ", p.inits.map((id, i) => [i ? ", " : "", h("a", {href: link({view: "initiatives", id, tab: ""}), text: (BYINIT.get(id) || {}).title || id})])) : null,
+      m.branch ? h("span", {class: "meta", title: "Current branch"}, icon("branch"), m.branch) : null, lastSeen ? "active " + rel(lastSeen) : null, p.local ? null : "not cloned on this Mac")),
+    lv !== "ok" ? h("div", {class: "hreason"}, h("span", {class: "dot d-" + lv, "aria-hidden": "true"}), h("span", null, h("span", {class: lv === "risk" ? "bad" : "warn-t", text: hl + ": "}), p.health.reasons.join(", "))) : null,
+    h("div", {class: "pprog"}, progressBar(p, true), h("span", {text: progOf(p).why}))));
+  main.append(stats([[p.cnt.open, "open tasks", "", p.cnt.doing + " doing", link({tab: "tasks"})],
+    [p.cnt.blocked, p.cnt.blocked === 1 ? "blocked task" : "blocked tasks", p.cnt.blocked ? "risk" : "", p.cnt.blocked ? "waiting on a decision" : "nothing blocked", link({tab: "tasks", tst: "blocked"})],
+    [p.prs, p.prs === 1 ? "open PR" : "open PRs", failing ? "risk" : "", failing ? failing + " failing CI" : p.local ? "none failing" : "known after a clone", link({tab: "prs"})],
+    [here.length, here.length === 1 ? "live session" : "live sessions", "", plural(p.people.length, "person", "people") + " here"]]));
   main.append(pageTabs([["overview", "Overview"], ["tasks", "Tasks", p.cnt.open], ["prs", "Pull requests", p.prs], ["worktrees", "Worktrees", p.wts.length], ["plans", "Plans", plansL.length || (p.plans || []).length], ["sessions", "Sessions", sess.length], ["note", "Handoff note"]], tab));
   const tp = h("div", {class: "tabpanel", id: "tabpanel", role: "tabpanel", "aria-labelledby": "tab-" + tab}); main.append(tp);
   if (tab === "overview") {
@@ -2335,13 +2648,15 @@ function viewProject(main) {
     const tt = ((D.timing || {}).by_project || {})[p.id];
     tp.append(h("div", {class: "cols"},
       h("div", {class: "stack-v"},
-        here.length ? panel("Live now", here.length, null, h("div", {class: "sessl"}, here.map(s => sessionBlock(s, s.who, s.asOf)))) : null,
-        p.status_line ? panel("Latest status", null, h("span", {class: "t2", style: "font-size:.8rem", text: (p.status_line.agent || "agent") + " · " + rel(p.status_line.ts) + (p.status_line.branch ? " · ⎇ " + p.status_line.branch : "")}), statusCard(p.status_line.line, p.status_line.parts)) : null,
-        panel("In progress", doing.length, h("a", {class: "btn sm ghost", href: link({tab: "tasks"})}, "All tasks →"),
-          doing.length || next.length ? [doing.length ? h("ul", {class: "irows"}, doing.map(i => itemRow(i))) : null, next.length ? [h("div", {class: "label pad-l", text: "Up next"}), h("ul", {class: "irows"}, next.map(i => itemRow(i)))] : null]
+        here.length ? panel("Live now", here.length, null, h("div", {class: "sessl"}, here.map(s => sessionBlock(s, s.who, s.asOf, true)))) : null,
+        panel("Doing or blocked", doing.length, h("a", {class: "more", href: link({tab: "tasks"})}, "All tasks"),
+          doing.length || next.length ? [doing.length ? h("ul", {class: "irows"}, doing.map(i => itemRow(i))) : null, next.length ? [h("h3", {class: "sub3 pad", text: "Up next"}), h("ul", {class: "irows"}, next.map(i => itemRow(i)))] : null]
             : empty("Nothing in progress", "Plan the work: ", h("code", {text: "dev task -p " + p.id + ' add "…" --now'})), {flush: !!(doing.length || next.length)}),
-        ns.purpose || ns.state ? panel("Purpose and current state", null, h("a", {class: "btn sm ghost", href: link({tab: "note"})}, "Full note →"), [ns.purpose ? [h("div", {class: "label", style: "margin:4px 0", text: "Purpose"}), md(ns.purpose)] : null, ns.state ? [h("div", {class: "label", style: "margin:12px 0 4px", text: "Current state"}), md(ns.state)] : null]) : null),
-      h("div", {class: "stack-v"}, whoPanel(p.people, [p.id]), panel("Repository", null, null, repoKv(p)), tt ? timePanel(tt, false, "Time on this project") : null)));
+        ns.purpose || ns.state ? panel("Purpose and current state", null, h("a", {class: "more", href: link({tab: "note"})}, "Full note"), [ns.purpose ? md(ns.purpose) : null, ns.state ? [h("h3", {class: "sub3", text: "Current state"}), md(ns.state)] : null]) : null),
+      h("div", {class: "stack-v"},
+        p.status_line ? panel("Latest status", null, null, statusCard(p.status_line.line, p.status_line.parts, [p.status_line.agent || "agent", rel(p.status_line.ts), p.status_line.branch ? "on " + p.status_line.branch : ""].filter(Boolean).join(", "))) : null,
+        panel("Repository", null, null, repoKv(p)),
+        tt ? h("details", {class: "recent"}, h("summary", null, "How long work takes here"), timeBody(tt, false)) : null)));
   } else if (tab === "tasks") tp.append(itemsBlock(p.items, {scope: p.id}));
   else if (tab === "prs") tp.append(prTable(p));
   else if (tab === "worktrees") tp.append(wtTable(p));
@@ -2349,49 +2664,52 @@ function viewProject(main) {
   else if (tab === "sessions") tp.append(sessionsBlock(sess, false));
   else {
     const f = p.note && FILEMAP.get(p.note);
-    const part = (label, text) => text ? [h("div", {class: "label", style: "margin:12px 0 4px", text: label}), md(text)] : null;
-    tp.append(panel("Handoff note", null, h("span", {style: "display:flex;gap:8px"}, f ? h("a", {class: "btn sm", href: link({view: "explorer", f: p.note, id: "", tab: ""})}, "Open in Explorer") : null, cmdBtn("dev handoff " + p.id)),
+    const part = (label, text) => text ? [h("h3", {class: "sub3", text: label}), md(text)] : null;
+    tp.append(panel("Handoff note", null, h("span", {style: "display:flex;gap:8px"}, f ? h("a", {class: "more", href: link({view: "explorer", f: p.note, id: "", tab: ""})}, "Open in Explorer") : null, icopy("dev handoff " + p.id, "Copy the handoff command")),
       f ? md(f.text) : p.ns ? [part("Purpose", ns.purpose), part("Current state", ns.state), part("Decisions and gotchas", ns.decisions), part("Links", ns.links)] : empty("No handoff note yet", h("code", {text: "dev sync"}), " creates it; agents fill it in with the devkit handoff skill.")));
   }
 }
-
 /* ---------------------------------------------------------------- Team: one card per person (user@host) */
 function markerChip() { return h("span", {class: "mk", title: "The status-line marker every agent reply starts with"}, "[Firefly", h("span", {class: "chev", text: ">"}), " DevKit]"); }
+/* Team: one column per person; each live session once; locks as rows; history behind a disclosure */
 function personCard(x) {
   const claimed = x.claimed.map(id => ITEMBY.get(id)).filter(Boolean), lockIds = new Set(x.locks.map(l => l.id));
   const extra = claimed.filter(i => !lockIds.has(i.id));
-  const expired = claimed.filter(i => i.lock === "expired");
   const lockRow = (id, title, scope, until) => { const it = ITEMBY.get(id), exp = (it && it.lock === "expired") || (iso(until) && iso(until) < nowS());
-    return h("li", {class: "lrow" + (exp ? " exp" : ""), "data-nav": "", tabindex: "0", onclick: () => it ? openTask(id) : openScope(scope), onkeydown: e => { if (e.key === "Enter") it ? openTask(id) : openScope(scope); }},
-      lockIcon(), h("div", {class: "lm"}, h("div", {class: "lt ell", title: title, text: title}), h("div", {class: "ls t2 ell"}, h("span", {class: "iid mono", text: id}), " · " + scopeName(scope))),
-      h("span", {class: "num lu" + (exp ? " bad" : ""), text: exp ? "expired " + rel(iso(until)) : untilText(until)})); };
-  return h("article", {class: "pcard2 panel" + (isMe(x.who) ? " me" : ""), "aria-label": x.who},
+    const open = () => it ? openTask(id) : openScope(scope);
+    return h("li", {class: "lrow" + (exp ? " exp" : ""), onclick: rowClick(open)},
+      lockIcon(), h("div", {class: "lm"}, it ? h("a", {class: "lt rl", href: taskHref(id), "data-nav": "", onclick: e => { e.preventDefault(); openTask(id); }, text: title}) : linkTo("#", title, "lt"), h("div", {class: "ls ell", text: scopeName(scope)})),
+      h("span", {class: "num lu" + (exp ? " bad" : ""), text: exp ? "expired " + rel(iso(until)) : String(untilText(until)).replace(/^for /, "") + " left"})); };
+  const recent = x.recent.slice(0, 6);
+  return h("article", {class: "person", "aria-label": x.who},
     h("div", {class: "pc-h"}, avatar(x.who, true), h("div", {class: "pc-n"}, h("h3", null, h("span", {class: "ell", text: x.who}), isMe(x.who) ? h("span", {class: "tag", text: "you"}) : null),
-      h("div", {class: "t2", text: [x.sessions.length ? plural(x.sessions.length, "live session") : "no live session", plural(x.locks.length, "lock"), x.updated ? "presence " + rel(x.updated) : null].filter(Boolean).join(" · ")}))),
-    expired.length ? callout("warn", plural(expired.length, "expired lock") + " still held", "Anyone can release an expired lock; check with " + x.user + " first.", cmdBtn("dev task " + flagOf(expired[0].scope) + " release " + expired[0].id + ' --why "lock expired"')) : null,
-    x.sessions.length ? h("div", {class: "pc-s"}, h("div", {class: "label", text: "Live sessions"}), x.sessions.map(s => sessionBlock(s, null, x.updated))) : null,
-    x.locks.length || extra.length ? h("div", {class: "pc-s"}, h("div", {class: "label", text: "Locks and claimed tasks"}), h("ul", {class: "lrows"}, x.locks.map(l => lockRow(l.id, l.title, l.scope, l.until)), extra.map(i => lockRow(i.id, i.title, i.scope, i.lock_expires)))) : null,
-    x.recent.length ? h("div", {class: "pc-s"}, h("div", {class: "label", text: "Recent sessions"}), h("ul", {class: "rrows"}, x.recent.slice(0, 4).map(r => h("li", null, h("span", {class: "num t2", text: fmt(r.ts)}), " ", scopeChip(r.scope), " ", h("span", {class: "t2", text: [r.agent, r.branch ? "⎇ " + r.branch : ""].filter(Boolean).join(" · ")}), h("div", {class: "ell", title: plain(stripMarker(r.text))}, logText(r)))))) : null,
-    !x.sessions.length && !x.locks.length && !extra.length && !x.recent.length ? h("p", {class: "t2", style: "margin:0", text: "Nothing right now."}) : null);
+      h("div", {class: "t2", text: (x.sessions.length ? plural(x.sessions.length, "live session") : "No live session") + (x.updated ? ", seen " + rel(x.updated) : "")}))),
+    x.sessions.length ? h("div", {class: "sessl"}, x.sessions.map(s => sessionBlock(s, null, x.updated))) : null,
+    x.locks.length || extra.length ? h("div", {class: "pc-s"}, h("div", {class: "label", text: "Claimed tasks"}), h("ul", {class: "lrows"}, x.locks.map(l => lockRow(l.id, l.title, l.scope, l.until)), extra.map(i => lockRow(i.id, i.title, i.scope, i.lock_expires)))) : null,
+    recent.length ? h("details", {class: "recent"}, h("summary", null, "Recent sessions (" + recent.length + ")"),
+      h("ul", {class: "rrows"}, recent.map(r => h("li", null, h("div", {class: "slw"}, meta(fmt(r.ts), scopeChip(r.scope), r.agent, r.branch)), h("div", {class: "ell", title: plain(stripMarker(r.text))}, logText(r)))))) : null,
+    !x.sessions.length && !x.locks.length && !extra.length && !recent.length ? h("p", {class: "t2", style: "margin:0", text: "Nothing right now."}) : null);
 }
 function viewTeam(main) {
   const colls = D.collisions || [], live = PEOPLE.reduce((a, x) => a + x.sessions.length, 0), locks = ITEMS.filter(i => i.open && i.claimed_by).length;
-  main.append(h("div", {class: "head"}, h("h1", {text: "Team"}), h("span", {class: "sub", text: plural(PEOPLE.length, "person", "people") + " · " + plural(live, "live session") + " · " + plural(locks, "claimed task") + " · from presence files in the handoff repo"}),
-    h("div", {class: "right"}, providerChips())));
-  if (colls.length) main.append(panel("Collisions", colls.length, null, h("ul", {class: "acts"}, colls.map(c => h("li", {class: "act", "data-nav": "", tabindex: "0", onclick: () => c.id ? openTask(c.id) : openProject(c.project), onkeydown: e => { if (e.key === "Enter") c.id ? openTask(c.id) : openProject(c.project); }},
-    h("span", {class: "sev warn", "aria-hidden": "true", text: "!"}), h("div", {style: "min-width:0"}, h("div", {class: "at"}, h("span", {class: "tag", text: c.kind === "expired-lock" ? "Expired lock" : "Same branch"}), h("span", {text: c.kind === "expired-lock" ? c.id + " · " + scopeName(c.scope) : scopeName(c.project) + " ⎇ " + c.branch})), h("div", {class: "ad", text: c.text})),
-    h("div", {class: "ar"}, cmdBtn(c.kind === "expired-lock" ? "dev task " + flagOf(c.scope) + " release " + c.id + ' --why "lock expired"' : "dev team"))))), {cls: "mb", flush: true}));
+  main.append(h("div", {class: "head"}, h("h1", {text: "Team"}), h("span", {class: "sub", text: plural(PEOPLE.length, "person", "people") + ", " + plural(live, "live session") + ", " + plural(locks, "claimed task")})));
+  if (colls.length) main.append(panel("Collisions", colls.length, null, h("ul", {class: "acts"}, colls.map(c => {
+    const cmd = c.kind === "expired-lock" ? "dev task " + flagOf(c.scope) + " release " + c.id + ' --why "lock expired"' : "dev team";
+    const open = () => c.id ? openTask(c.id) : openProject(c.project);
+    return h("li", {class: "act", onclick: rowClick(open)}, h("span", {class: "dot d-warn", role: "img", title: "Needs a look", "aria-label": "Needs a look"}),
+      h("div", {style: "min-width:0"}, h("a", {class: "at", href: c.id ? taskHref(c.id) : link({view: "projects", id: c.project}), "data-nav": "", onclick: e => { e.preventDefault(); open(); }, text: c.kind === "expired-lock" ? "Expired lock still held" : "Two sessions on the same branch"}),
+        h("div", {class: "ad"}, h("span", {class: "ell", text: collText(c, true)}))),
+      h("div", {class: "ar"}, icopy(cmd, c.kind === "expired-lock" ? "Copy the release command" : "Copy command"))); })), {flush: true, cls: "mb"}));
   if (!PEOPLE.length) { main.append(h("div", {class: "panel"}, empty("No presence yet", "Each machine writes ", h("code", {text: "presence/<user>@<host>.json"}), " to the handoff repo while sessions run; ", h("code", {text: "dev team"}), " shows the same in the terminal."))); return; }
   main.append(h("div", {class: "people"}, PEOPLE.map(personCard)));
 }
-
 /* ---------------------------------------------------------------- Tasks: every work item, across scopes */
 function taskCard(it) {
   const first = taskCmds(it)[0];
-  return h("div", {class: "tc" + (it.status === "blocked" ? " blk" : ""), "data-nav": "", tabindex: "0", onclick: () => openTask(it.id), onkeydown: e => { if (e.key === "Enter") openTask(it.id); }},
-    h("div", {class: "tx"}, istatusIcon(it.status), " ", it.title),
+  return h("div", {class: "tc", onclick: rowClick(() => openTask(it.id))},
+    h("div", {class: "tx"}, istatusIcon(it.status), h("a", {class: "itl", href: taskHref(it.id), "data-nav": "", onclick: e => { e.preventDefault(); openTask(it.id); }, text: it.title})),
     first && it.open ? icopy(first[1], first[0]) : h("span"),
-    h("div", {class: "meta"}, h("span", {class: "iid mono", text: it.legacy ? "note" : it.id}), scopeChip(it.scope), claimChip(it, true), it.due ? dueBadge(it.due, !it.open) : null, prioIcon(it.priority)));
+    h("div", {class: "meta"}, h("span", {class: "iid", text: it.legacy ? "note" : it.id}), scopeChip(it.scope), claimChip(it, true), it.due ? dueBadge(it.due, !it.open) : null, prioIcon(it.priority)));
 }
 function viewTasks(main) {
   const all = allItems(), tk = tokens(S.q), who = S.who === "me" ? ME : S.who;
@@ -2399,7 +2717,7 @@ function viewTasks(main) {
   const items = base.filter(it => !S.tst || (S.tst === "done" ? !it.open : it.status === S.tst));
   const c = cnt(base);
   const scopeSel = h("select", {"aria-label": "Scope"}); scopeSel.append(h("option", {value: ""}, "All projects and initiatives"));
-  for (const x of INITS) scopeSel.append(h("option", {value: x.scope, selected: S.tp === x.scope}, "◆ " + x.title));
+  for (const x of INITS) scopeSel.append(h("option", {value: x.scope, selected: S.tp === x.scope}, "Initiative: " + x.title));
   for (const p of P.filter(p => p.items.length)) scopeSel.append(h("option", {value: p.id, selected: S.tp === p.id}, p.id));
   scopeSel.addEventListener("change", () => set({tp: scopeSel.value}, true));
   const whos = Array.from(new Set(all.filter(i => i.holder).map(i => i.holder))).sort();
@@ -2422,7 +2740,7 @@ function viewTasks(main) {
   for (const [b, label] of [["now", "Now"], ["next", "Next"], ["later", "Later"], ["done", "Closed"]]) {
     const list = b === "done" ? closed : sortItems(items.filter(i => i.open && i.bucket === b)), n = SHOWN[b] || 60;
     const col = h("section", {class: "col", "aria-label": label}, h("h3", null, h("span", {class: "dot", style: "background:var(--" + (b === "now" ? "mark" : b === "done" ? "good" : "deemph") + ")"}), label, h("span", {class: "n num", text: String(list.length)})));
-    if (!list.length) col.append(h("p", {class: "t2", style: "margin:4px 8px;font-size:.8rem", text: b === "now" ? "Nothing in progress — start one from Next." : "Empty."}));
+    if (!list.length) col.append(h("p", {class: "t2", style: "margin:4px 8px;font-size:var(--fs-1)", text: b === "now" ? "Nothing in progress — start one from Next." : "Empty."}));
     for (const it of list.slice(0, n)) col.append(taskCard(it));
     if (list.length > n) col.append(h("button", {class: "btn sm", type: "button", onclick: () => { SHOWN[b] = n + 200; render(); }, text: "Show " + Math.min(200, list.length - n) + " more"}));
     board.append(col);
@@ -2431,10 +2749,11 @@ function viewTasks(main) {
 }
 
 /* ---------------------------------------------------------------- Activity: timeline first */
+function partsText(parts) { return parts ? [parts.task, parts.done].filter(Boolean).join(": ") + (parts.check ? " (" + parts.check + ")" : "") + (parts.next ? ". Next: " + parts.next : "") : ""; }
 function timelineItems(ps, nDays) {
   const cutoff = nowS() - nDays * 86400, ids = new Set(ps.map(p => p.id)), items = [], logged = new Set((D.session_log || []).map(s => s.scope));
-  for (const x of PEOPLE) for (const s of x.sessions) { const ts = s.last_seen || s.started || 0; if (ts >= cutoff && (!s.project || ids.has(s.project))) items.push({ts, k: "◆", p: BYID.get(s.project), text: [x.who, s.agent || "agent", s.branch ? "`" + s.branch + "`" : "", s.progress && s.progress.goal ? s.progress.goal : "", s.status ? stripMarker(s.status) : "", "live"].filter(Boolean).join(" · ")}); }
-  for (const s of D.session_log || []) if (s.ts >= cutoff && (isInit(s.scope) || ids.has(s.scope))) items.push({ts: s.ts, k: "◇", p: BYID.get(s.scope), scope: isInit(s.scope) ? s.scope : null, text: [s.who, s.agent, s.branch ? "`" + s.branch + "`" : "", stripMarker(s.text)].filter(Boolean).join(" · ")});
+  for (const x of PEOPLE) for (const s of x.sessions) { const ts = s.last_seen || s.started || 0; if (ts >= cutoff && (!s.project || ids.has(s.project))) items.push({ts, k: "◆", p: BYID.get(s.project), text: [x.who, s.agent || "agent", s.branch ? "`" + s.branch + "`" : "", s.status_parts ? partsText(s.status_parts) : s.progress && s.progress.goal ? s.progress.goal : "", !s.status_parts && s.status ? stripMarker(s.status) : "", "live"].filter(Boolean).join(" · ")}); }
+  for (const s of D.session_log || []) if (s.ts >= cutoff && (isInit(s.scope) || ids.has(s.scope))) items.push({ts: s.ts, k: "◇", p: BYID.get(s.scope), scope: isInit(s.scope) ? s.scope : null, text: [s.who, s.agent, s.branch ? "`" + s.branch + "`" : "", s.parts ? [s.pre ? stripMarker(s.pre) : "", partsText(s.parts)].filter(Boolean).join(". ") : stripMarker(s.text)].filter(Boolean).join(" · ")});
   for (const p of ps) if (!logged.has(p.id)) for (const s of p.sessions) { const ts = sessTs(s); if (ts >= cutoff) items.push({ts, k: "◇", p, text: sessText(s)}); }
   for (const m of D.merged || []) if (m.ts >= cutoff) items.push({ts: m.ts, k: "⑃", text: "Merged [#" + m.number + "](" + m.url + ") " + m.title + " · " + m.repo});
   for (const it of ITEMS) { const ts = iso(it.updated); if (ts >= cutoff && (it.status === "done" || it.status === "blocked") && (isInit(it.scope) || ids.has(it.scope))) items.push({ts, k: it.status === "done" ? "✓" : "⊘", p: BYID.get(it.scope), scope: isInit(it.scope) ? it.scope : null, text: (it.status === "done" ? "Done " : "Blocked ") + it.id + " " + it.title + (it.updated_by ? " · " + it.updated_by : "")}); }
@@ -2442,6 +2761,7 @@ function timelineItems(ps, nDays) {
   for (const r of (D.canary || {}).records || []) if (!r.ok && r.ts >= cutoff) items.push({ts: r.ts, k: "✕", p: BYID.get(r.project), text: "Canary miss (" + r.agent + "): reply began “" + (r.excerpt || "") + "”"});
   return items.sort((a, b) => b.ts - a.ts);
 }
+const KI = {"◆": "session", "◇": "session", "⑃": "merge", "✓": "done", "⊘": "blocked", "⚙": "gear", "✕": "miss"};
 function timeline(ps, nDays, limit) {
   const items = timelineItems(ps, nDays).slice(0, limit || 200);
   if (!items.length) return empty("No activity in the last " + nDays + " days", "Agent sessions, merged PRs and operations appear here as they happen.");
@@ -2449,7 +2769,7 @@ function timeline(ps, nDays, limit) {
   for (const it of items) {
     const k = lkey(new Date(it.ts * 1000));
     if (k !== day) { day = k; ul.append(h("li", {class: "day", text: fmtDay(it.ts)})); }
-    ul.append(h("li", {class: "it"}, h("span", {class: "tm", text: tm(it.ts)}), h("span", {class: "ki", "aria-hidden": "true", text: it.k}),
+    ul.append(h("li", {class: "it"}, h("span", {class: "tm", text: tm(it.ts)}), h("span", {class: "ki", "aria-hidden": "true"}, icon(KI[it.k] || "session")),
       h("div", {style: "min-width:0"}, it.p ? h("a", {href: link({view: "projects", id: it.p.id}), class: "who", onclick: e => { e.preventDefault(); openProject(it.p.id); }, text: it.p.name || it.p.id}) : null, inline(it.text))));
   }
   return ul;
@@ -2505,9 +2825,9 @@ function viewExplorer(main) {
     $$("details", nav).forEach(d => { if (v) d.open = !!d.querySelector(".file:not([hidden])"); }); }, 120));
   const viewer = h("article", {class: "viewer panel", "aria-label": "File viewer"});
   const fq = h("input", {type: "search", placeholder: "Find in file…", value: S.fq, "aria-label": "Find in file"});
-  const cnt = h("span", {class: "t2 num", style: "font-size:.8rem"});
+  const cnt = h("span", {class: "t2 num", style: "font-size:var(--fs-1)"});
   const proj = projectFor(pick.path);
-  viewer.append(h("div", {class: "vh"}, h("span", {class: "path", text: pick.path}), h("span", {class: "t2", style: "font-size:.8rem", text: rel(pick.mtime) + " · " + (pick.size / 1024).toFixed(1) + " KB"}),
+  viewer.append(h("div", {class: "vh"}, h("span", {class: "path", text: pick.path}), h("span", {class: "t2", style: "font-size:var(--fs-1)", text: rel(pick.mtime) + " · " + (pick.size / 1024).toFixed(1) + " KB"}),
     h("span", {class: "spacer"}), fq, cnt, h("button", {class: "btn sm", type: "button", onclick: () => copy(D.handoff + "/" + pick.path)}, "Copy path"),
     proj ? h("button", {class: "btn sm", type: "button", onclick: () => openProject(proj.id)}, "Open project") : null,
     initFor(pick.path) ? h("button", {class: "btn sm", type: "button", onclick: () => openInitiative(initFor(pick.path).id)}, "Open initiative") : null));
@@ -2549,9 +2869,9 @@ function providerCard(key, p) {
   const dl = h("dl", {class: "kv"}, h("dt", {text: "Account"}), h("dd", {text: [p.auth_method, p.plan ? p.plan.charAt(0).toUpperCase() + p.plan.slice(1) + " plan" : ""].filter(Boolean).join(" · ") || "—"}),
     h("dt", {text: "Version"}), h("dd", {class: "num", text: p.version || "—"}), p.desktop != null ? [h("dt", {text: "Desktop app"}), h("dd", {text: p.desktop ? "installed" : "not installed"})] : null,
     p.login_expires ? [h("dt", {text: "Login expires"}), h("dd", {text: fmtDay(iso(p.login_expires))})] : null);
-  const quota = q.available === null || q.available === undefined && used == null ? h("p", {class: "t2", style: "font-size:.8rem;margin:8px 0 0", text: q.note || "Quota is not reported for this provider."})
+  const quota = q.available === null || q.available === undefined && used == null ? h("p", {class: "t2", style: "font-size:var(--fs-1);margin:8px 0 0", text: q.note || "Quota is not reported for this provider."})
     : [h("div", {class: "qbar", role: "progressbar", "aria-valuenow": Math.round(used || 0), "aria-valuemin": 0, "aria-valuemax": 100, "aria-label": "Quota used"}, h("i", {style: "width:" + Math.min(100, used || 0) + "%;background:var(--" + (exhausted || used >= 90 ? "critical" : used >= 70 ? "warning" : "good") + ")"})),
-       h("div", {class: "t2", style: "font-size:.8rem"}, (used != null ? Math.round(used) + "% of the " + (q.window_minutes ? (q.window_minutes >= 1440 ? Math.round(q.window_minutes / 1440) + "-day" : Math.round(q.window_minutes / 60) + "-hour") : "") + " window used" : ""), q.resets_at ? " · resets " + fmtDay(q.resets_at) + " " + tm(q.resets_at) : "")];
+       h("div", {class: "t2", style: "font-size:var(--fs-1)"}, (used != null ? Math.round(used) + "% of the " + (q.window_minutes ? (q.window_minutes >= 1440 ? Math.round(q.window_minutes / 1440) + "-day" : Math.round(q.window_minutes / 60) + "-hour") : "") + " window used" : ""), q.resets_at ? " · resets " + fmtDay(q.resets_at) + " " + tm(q.resets_at) : "")];
   return panel(p.name || key, null, h("span", {class: "prov"}, h("span", {class: "dot d-" + tone, "aria-hidden": "true"}), state), [dl, quota]);
 }
 function viewHealth(main) {
@@ -2559,10 +2879,10 @@ function viewHealth(main) {
   const pv = D.providers || {};
   const c = D.canary || {}, sum = c.summary || {}, recs = c.records || [], misses = recs.filter(r => !r.ok).slice(-40).reverse();
   const canaryBody = Object.keys(sum).length ? [h("div", {style: "display:grid;gap:12px"}, Object.keys(sum).map(a => { const [ok, tot] = sum[a], pct = Math.round(100 * ok / tot), tone = pct >= 95 ? "good" : pct >= 80 ? "warning" : "critical";
-      return h("div", null, h("div", {style: "display:flex;justify-content:space-between;font-size:.85rem"}, h("strong", {text: a.charAt(0).toUpperCase() + a.slice(1)}), h("span", {class: "num t2", text: pct + "% · " + ok + "/" + tot + " replies"})),
+      return h("div", null, h("div", {style: "display:flex;justify-content:space-between;font-size:var(--fs-1)"}, h("strong", {text: a.charAt(0).toUpperCase() + a.slice(1)}), h("span", {class: "num t2", text: pct + "% · " + ok + "/" + tot + " replies"})),
         h("div", {class: "qbar"}, h("i", {style: "width:" + pct + "%;background:var(--" + tone + ")"}))); })),
       misses.length ? h("div", {class: "tw", style: "margin-top:12px"}, h("table", {class: "t"}, h("thead", null, h("tr", null, ["When", "Agent", "Project", "Reply began with"].map(x => h("th", {text: x})))),
-        h("tbody", null, misses.map(r => h("tr", null, h("td", {class: "num", text: fmt(r.ts)}), h("td", {text: r.agent}), h("td", {text: r.project || "—"}), h("td", {class: "t2 ell", style: "max-width:320px", text: r.excerpt || ""})))))) : h("p", {class: "t2", style: "font-size:.85rem"}, "No deviations: every tracked reply started with the ", markerChip(), " status line.")]
+        h("tbody", null, misses.map(r => h("tr", null, h("td", {class: "num", text: fmt(r.ts)}), h("td", {text: r.agent}), h("td", {text: r.project || "—"}), h("td", {class: "t2 ell", style: "max-width:320px", text: r.excerpt || ""})))))) : h("p", {class: "t2", style: "font-size:var(--fs-1)"}, "No deviations: every tracked reply started with the ", markerChip(), " status line.")]
     : empty("No tracked replies yet", "Replies in sessions under ", h("code", {text: D.dev_root}), " are checked after every turn for the ", markerChip(), " status line.");
   main.append(h("div", {class: "cols even", style: "margin-bottom:16px"}, providerCard("claude", pv.claude), providerCard("codex", pv.codex)));
   const rules = D.guard_rules || [];
@@ -2575,24 +2895,24 @@ function viewHealth(main) {
     : empty("The guard has not blocked anything", "Blocked actions are grouped by rule here; a rule that keeps firing means an agent is fighting the workspace rules.");
   main.append(h("div", {class: "cols", style: "margin-bottom:16px"}, panel("Guard decisions by rule", rules.reduce((a, r) => a + r.count, 0), null, guardBody, {flush: !!rules.length}), panel("Instruction canary · 7 days", null, markerChip(), canaryBody)));
   const drift = D.drift;
-  const driftBody = drift == null ? h("p", {class: "t2", style: "font-size:.85rem;margin:0"}, "No drift report in this registry. ", h("code", {text: "dev config diff"}), " compares the devkit configuration with Claude Code and Codex.")
-    : !drift.length ? h("p", {class: "t2", style: "margin:0", text: "✓ Claude Code and Codex match the devkit configuration."})
-    : h("ul", {class: "tl-rows"}, drift.map(d => h("li", {class: "trow"}, h("span", {class: "dot d-warn", style: "margin-top:7px"}), h("span", {class: "tx mono", style: "font-size:.8rem", text: typeof d === "string" ? d : [d.tool || d.target, d.key, d.current !== undefined ? JSON.stringify(d.current) : "", "→", d.desired !== undefined ? JSON.stringify(d.desired) : ""].filter(Boolean).join(" ")}))));
+  const driftBody = drift == null ? h("p", {class: "t2", style: "font-size:var(--fs-1);margin:0"}, "No drift report in this registry. ", h("code", {text: "dev config diff"}), " compares the devkit configuration with Claude Code and Codex.")
+    : !drift.length ? h("p", {class: "t2", style: "margin:0", text: "Claude Code and Codex match the devkit configuration."})
+    : h("ul", {class: "tl-rows"}, drift.map(d => h("li", {class: "trow"}, h("span", {class: "dot d-warn", style: "margin-top:7px"}), h("span", {class: "tx mono", style: "font-size:var(--fs-1)", text: typeof d === "string" ? d : [d.tool || d.target, d.key, d.current !== undefined ? JSON.stringify(d.current) : "", "→", d.desired !== undefined ? JSON.stringify(d.desired) : ""].filter(Boolean).join(" ")}))));
   const wts = []; for (const p of P) for (const w of p.wts) wts.push([p, w]);
   const recl = wts.filter(([, w]) => w.pr && /MERGED|CLOSED/.test(w.pr.state) && !w.active);
   const wtBody = wts.length ? h("div", {class: "tw"}, h("table", {class: "t"}, h("thead", null, h("tr", null, ["Project", "Branch", "PR", "State", "Session", "Size"].map(x => h("th", {text: x})))),
-      h("tbody", null, wts.sort((a, b) => (b[1].size_kb || 0) - (a[1].size_kb || 0)).map(([p, w]) => h("tr", {"data-nav": "", tabindex: "0", onclick: () => openProject(p.id)},
-        h("td", {text: p.name || p.id}), h("td", {class: "mono", style: "font-size:.78rem", text: w.branch || "detached"}), h("td", {text: w.pr ? "#" + w.pr.number + " " + String(w.pr.state).toLowerCase() : "—"}),
+      h("tbody", null, wts.sort((a, b) => (b[1].size_kb || 0) - (a[1].size_kb || 0)).map(([p, w]) => h("tr", {onclick: rowClick(() => openProject(p.id))},
+        h("td", null, linkTo(link({view: "projects", id: p.id}), p.name || p.id)), h("td", {class: "mono", style: "font-size:var(--fs-1)", text: w.branch || "detached"}), h("td", {text: w.pr ? "#" + w.pr.number + " " + String(w.pr.state).toLowerCase() : "—"}),
         h("td", {text: w.missing ? "missing" : [w.modified ? w.modified + " modified" : "", w.untracked ? w.untracked + " untracked" : "", w.unpushed ? w.unpushed + " unpushed" : ""].filter(Boolean).join(" · ") || "clean"}),
         h("td", null, w.active ? h("span", {class: "badge"}, h("span", {class: "dot d-live"}), "Live") : rel(w.last_activity)), h("td", {class: "num", text: kb(w.size_kb)})))))) : empty("No worktrees", "Create one with ", h("code", {text: "dev wt new <type>/<topic>"}), " only when work must run in parallel.");
   const sizes = P.map(p => [p.name || p.id, (p.size_kb || 0) + p.wts.reduce((a, w) => a + (w.size_kb || 0), 0), p.id]).filter(r => r[1] > 0).sort((a, b) => b[1] - a[1]).slice(0, 12);
   main.append(h("div", {class: "cols", style: "margin-bottom:16px"}, panel("Worktrees", wts.length, recl.length ? cmdBtn("dev gc --apply") : null, wtBody, {flush: !!wts.length}),
     h("div", {class: "stack-v"}, panel("Configuration drift", drift ? drift.length : null, null, driftBody),
-      panel("Disk", null, null, sizes.length ? [rankedBars(sizes, kb, id => openProject(id)), h("p", {class: "t2", style: "font-size:.8rem;margin:10px 0 0"}, "Reclaim safely with ", h("code", {text: "dev gc"}), " (dry run).")] : empty("Not measured yet", "The hourly sync measures sizes.")))));
+      panel("Disk", null, null, sizes.length ? [rankedBars(sizes, kb, id => openProject(id)), h("p", {class: "t2", style: "font-size:var(--fs-1);margin:10px 0 0"}, "Reclaim safely with ", h("code", {text: "dev gc"}), " (dry run).")] : empty("Not measured yet", "The hourly sync measures sizes.")))));
 }
 function viewHealthV3(main) {
   viewHealth(main);
-  const tp = timePanel(D.timing, true, "Time · how long things really take");
+  const tp = timePanel(D.timing, true, "How long things take");
   const first = $(".cols.even", main);
   if (tp) { const w = h("div", {class: "mb"}, tp); if (first && first.nextSibling) main.insertBefore(w, first.nextSibling); else main.append(w); }
 }
@@ -2647,36 +2967,35 @@ function renderDrawer() {
   if (!it) { if (!dr.hidden) { dr.classList.remove("on"); scrim.classList.remove("on"); setTimeout(() => { if (!S.task) { dr.hidden = true; if ($("#palette").hidden && $("#sheet").hidden) scrim.hidden = true; } }, 200); if (lastFocus && lastFocus.focus && lastFocus.isConnected) lastFocus.focus({preventScroll: true}); } return; }
   if (dr.hidden) lastFocus = document.activeElement;
   clear(dr); dr.hidden = false; scrim.hidden = false; requestAnimationFrame(() => { dr.classList.add("on"); scrim.classList.add("on"); });
-  const closeBtn = h("button", {class: "btn icon", type: "button", onclick: closeDrawer, "aria-label": "Close (Esc)"}, "✕");
-  const ini = isInit(it.scope), cmds = taskCmds(it);
+  const closeBtn = h("button", {class: "btn icon ghost", type: "button", onclick: closeDrawer, "aria-label": "Close (Esc)", title: "Close (Esc)"}, icon("close"));
+  const ini = isInit(it.scope), cmds = taskCmds(it), exp = it.lock === "expired";
   const scopeHref = ini ? link({view: "initiatives", id: it.scope.slice(12), tab: "tasks", task: ""}) : link({view: "projects", id: it.scope, tab: "tasks", task: ""});
-  const exp = it.lock === "expired";
-  const lock = it.claimed_by ? callout(exp ? "warn" : "info", exp ? "Lock expired — still claimed by " + it.holder : "Claimed by " + (isMe(it.holder) ? "you (" + it.holder + ")" : it.holder),
-      [it.agent ? "Agent " + it.agent + " · " : "", it.claimed_at ? "since " + fmt(iso(it.claimed_at)) + " · " : "", it.lock_expires ? (exp ? "expired " : "lock until ") + fmt(iso(it.lock_expires)) + " (" + (exp ? rel(iso(it.lock_expires)) : untilText(it.lock_expires)) + ")" : "",
-        exp ? ". Anyone can release it; others cannot change the task while a lock is valid." : ". Others cannot change it until the lock is released or expires."].join(""))
-    : it.open ? callout("info", "Unclaimed", it.legacy ? "Checkbox tasks have no lock; the next dev sync imports them as work items." : "Start it to take the lock: other people and agents then see it as yours.", cmds[0] && !it.legacy ? cmdBtn(cmds[0][1], true) : null) : null;
   const head = h("div", {class: "dh"},
     h("div", {class: "r1"}, h("div", {style: "flex:1;min-width:0"}, crumbs([[ini ? "Initiatives" : "Projects", link({view: ini ? "initiatives" : "projects", id: "", tab: "", task: ""})], [scopeName(it.scope), scopeHref], [it.legacy ? "Note task" : it.id]]),
       h("h2", {id: "drawer-title", text: it.title})), closeBtn),
-    h("div", {class: "bd"}, istatusBadge(it.status), h("span", {class: "badge", title: "Bucket", text: (it.bucket || "next").replace(/^./, c => c.toUpperCase())}), typeTag(it.type), prioBadge(it.priority), it.due ? dueBadge(it.due, !it.open) : null, !it.legacy ? h("span", {class: "badge", title: "Version", text: "v" + it.version}) : null, claimChip(it)));
+    h("div", {class: "pline"}, meta(istatusBadge(it.status), (it.bucket || "next").replace(/^./, c => c.toUpperCase()), prioBadge(it.priority), typeTag(it.type), it.due ? dueBadge(it.due, !it.open) : null, !it.legacy ? "version " + it.version : null)));
+  const lockLine = it.claimed_by ? h("div", {class: "lockline"}, h("span", {class: exp ? "warn-t" : null}, lockIcon(), " ", exp ? "Lock expired, still claimed by " + it.holder : "Claimed by " + (isMe(it.holder) ? "you (" + it.holder + ")" : it.holder)),
+      h("span", {class: "t2", text: [it.agent ? "with " + it.agent : "", it.claimed_at ? "since " + fmt(iso(it.claimed_at)) : "", it.lock_expires ? (exp ? "expired " + rel(iso(it.lock_expires)) : "lock for " + String(untilText(it.lock_expires)).replace(/^for /, "") + " more") : ""].filter(Boolean).join(", ") +
+        (exp ? ". Anyone can release it." : ". Others cannot change it until the lock is released or expires.")}))
+    : it.open ? h("div", {class: "lockline"}, h("span", {text: "Unclaimed"}), h("span", {class: "t2", text: it.legacy ? "Checkbox tasks have no lock; the next dev sync imports them as work items." : "Start it to take the lock; other people and agents then see it as yours."})) : null;
+  const primary = it.open && !it.legacy && cmds.length ? cmds[0] : null, rest = primary ? cmds.slice(1) : cmds;
   const body = h("div", {class: "db"});
-  if (lock) body.append(lock);
+  body.append(h("div", {class: "stack-v", style: "gap:var(--s4)"}, lockLine, primary ? h("div", {class: "nextcmd"}, cmdBtn(primary[1], true, primary[0]), cmdCode(primary[1])) : null));
   if (it.body) body.append(panel("Description", null, null, md(it.body)));
-  body.append(panel("Commands", null, null, cmds.length ? [h("div", {class: "cmds"}, cmds.map(([label, c], i) => h("div", {class: "cmdr"}, h("span", {class: "t2", text: label}), cmdBtn(c, i === 0 && it.open)))), h("p", {class: "t2 tnote"}, "Changes of scope (move, block, cancel, edit) need ", h("code", {text: '--why "…"'}), ": the reason is versioned in the changelog and the commit.")]
+  body.append(panel(primary ? "Other commands" : "Commands", null, null, rest.length ? [h("div", {class: "cmds"}, rest.map(([label, c]) => cmdRow(label, c))), h("p", {class: "tnote"}, "Changes of scope (move, block, cancel, edit) need ", h("code", {text: '--why "…"'}), ": the reason is kept in the history and the commit.")]
     : empty("No commands", it.legacy ? "This checkbox has no number in dev task yet." : "")));
   if (!it.legacy) body.append(panel("Details", null, null, h("dl", {class: "kv"},
-    h("dt", {text: "Id"}), h("dd", {class: "mono", text: it.id}),
+    h("dt", {text: "Id"}), h("dd", {class: "num", text: it.id}),
     h("dt", {text: ini ? "Initiative" : "Project"}), h("dd", null, scopeChip(it.scope)),
     it.assignee ? [h("dt", {text: "Assignee"}), h("dd", {text: it.assignee})] : null,
-    h("dt", {text: "Created"}), h("dd", {text: [it.created ? fmt(iso(it.created)) : "", it.created_by].filter(Boolean).join(" · ") || "—"}),
-    h("dt", {text: "Updated"}), h("dd", {text: [it.updated ? fmt(iso(it.updated)) + " (" + rel(iso(it.updated)) + ")" : "", it.updated_by].filter(Boolean).join(" · ") || "—"}),
-    (it.links || []).length ? [h("dt", {text: "Links"}), h("dd", null, it.links.map(l => { const m = /^initiative:(.+)$/.exec(l); return m && BYINIT.has(m[1]) ? scopeChip("initiatives/" + m[1]) : h("span", {class: "stk", text: l}); }))] : null,
+    h("dt", {text: "Created"}), h("dd", {text: [it.created ? fmt(iso(it.created)) : "", it.created_by ? "by " + it.created_by : ""].filter(Boolean).join(" ") || "—"}),
+    h("dt", {text: "Updated"}), h("dd", {text: [it.updated ? fmt(iso(it.updated)) + " (" + rel(iso(it.updated)) + ")" : "", it.updated_by ? "by " + it.updated_by : ""].filter(Boolean).join(" ") || "—"}),
+    (it.links || []).length ? [h("dt", {text: "Links"}), h("dd", null, it.links.map((l, i) => { const m = /^initiative:(.+)$/.exec(l); return [i ? ", " : null, m && BYINIT.has(m[1]) ? scopeChip("initiatives/" + m[1]) : h("span", {text: l})]; }))] : null,
     it.path ? [h("dt", {text: "File"}), h("dd", null, h("code", {style: "word-break:break-all", text: it.path}), " ", icopy(D.handoff + "/" + it.path, "Copy path"))] : null)));
-  if (!it.legacy) body.append(panel("History", it.changelog.length, h("span", {class: "t2", style: "font-size:.78rem", text: "every version: who, when, why"}), changelog(it.changelog)));
+  if (!it.legacy) body.append(panel("History", it.changelog.length, null, changelog(it.changelog)));
   dr.append(head, body);
   closeBtn.focus({preventScroll: true});
 }
-
 /* ---------------------------------------------------------------- command palette + sheet */
 function fuzzy(q, s) { const toks = String(q || "").toLowerCase().split(/\s+/).filter(Boolean); if (!toks.length) return 1; let total = 0; s = s.toLowerCase(); for (const t of toks) { const sc = fuzzy1(t, s); if (!sc) return 0; total += sc; } return total; }
 function fuzzy1(q, s) { const i = s.indexOf(q); if (i >= 0) return 100 - Math.min(i, 80) + (i === 0 ? 20 : 0); let qi = 0, score = 0, prev = -2; for (let j = 0; j < s.length && qi < q.length; j++) if (s[j] === q[qi]) { score += prev === j - 1 ? 3 : 1; prev = j; qi++; } return qi === q.length ? score : 0; }
@@ -2725,7 +3044,7 @@ function openSheet() {
   const sh = $("#sheet"); const rows = [["/", "Search everything"], ["⌘K · Ctrl K", "Command palette"], ["g o · i · p · m · t", "Home · Initiatives · Projects · Team · Tasks"], ["g a · e · h", "Activity · Explorer · Health"], ["u", "Up: from a page back to its list"],
     ["← →", "Switch tabs (tab bar focused) · read the chart day by day"], ["j / k", "Next / previous item"], ["↵", "Open the focused item"], ["Esc", "Close the task drawer or palette, clear search"], ["?", "This sheet"]];
   clear(sh).append(h("h2", {text: "Keyboard shortcuts"}), h("dl", null, rows.map(([k, v]) => [h("dt", null, h("kbd", {text: k})), h("dd", {style: "margin:0", text: v})])),
-    h("p", {class: "t2", style: "margin:14px 0 0;font-size:.8rem", text: "The URL keeps the page, tab, task and filters — #/initiatives/<slug>, #/projects/<owner>/<repo>?tab=tasks&task=<id> — so you can bookmark or share any view. The page reloads itself every 2 minutes while visible."}),
+    h("p", {class: "t2", style: "margin:14px 0 0;font-size:var(--fs-1)", text: "The URL keeps the page, tab, task and filters — #/initiatives/<slug>, #/projects/<owner>/<repo>?tab=tasks&task=<id> — so you can bookmark or share any view. The page reloads itself every 2 minutes while visible."}),
     h("div", {style: "text-align:right;margin-top:10px"}, h("button", {class: "btn", type: "button", onclick: closeSheet}, "Close")));
   sh.hidden = false; $("#scrim").hidden = false; $("#scrim").classList.add("on"); $("button", sh).focus();
 }
@@ -2789,15 +3108,15 @@ function render() {
   fitTables(main);
   renderDrawer();
   if (fid) { const el = document.getElementById(fid); if (el && $("#drawer").hidden) el.focus({preventScroll: true}); }
-  if (page !== lastView) { lastView = page; document.title = pageTitle() + " · Firefly devkit"; }
+  if (page !== lastView) { if (lastView) window.scrollTo(0, 0); lastView = page; document.title = pageTitle() + " · Firefly devkit"; }
   const t = $("#ticker"); if (t) t.textContent = "Synced " + rel(D.generated);
 }
 (function boot() {
   const nav = $("#nav");
   nav.append(h("nav", {class: "tabs", id: "tabs", role: "tablist", "aria-label": "Views"}), h("span", {class: "spacer"}),
-    h("div", {class: "search", role: "search"}, h("span", {class: "ico", "aria-hidden": "true", text: "⌕"}), h("input", {id: "q", type: "search", placeholder: "Search projects, tasks, people, notes…", "aria-label": "Search everything", autocomplete: "off"}), h("kbd", {text: "/"})),
-    h("button", {class: "btn icon", id: "palbtn", type: "button", onclick: openPalette, "aria-label": "Command palette", title: "Command palette (⌘K)"}, "⌘"),
-    h("button", {class: "btn icon ghost", id: "theme", type: "button", onclick: toggleTheme, "aria-label": "Toggle theme", title: "Toggle theme"}, "◐"));
+    h("div", {class: "search", role: "search"}, h("span", {class: "ico", "aria-hidden": "true"}, icon("search")), h("input", {id: "q", type: "search", placeholder: "Search projects, tasks, people, notes…", "aria-label": "Search everything", autocomplete: "off"}), h("kbd", {text: "/"})),
+    h("button", {class: "btn ghost", id: "palbtn", type: "button", onclick: openPalette, "aria-label": "Command palette", title: "Command palette (⌘K)"}, h("kbd", {text: "⌘K"})),
+    h("button", {class: "btn icon ghost", id: "theme", type: "button", onclick: toggleTheme, "aria-label": "Toggle theme", title: "Toggle theme"}, icon("theme")));
   const q = $("#q");
   q.addEventListener("input", debounce(() => {
     const v = q.value.trim();
@@ -2806,7 +3125,7 @@ function render() {
     else set({q: v});
   }, 140));
   q.addEventListener("keydown", e => { if (e.key === "Enter") { const first = $("[data-nav]", $("#view")); if (first) first.focus(); } });
-  document.addEventListener("click", e => { $$(".facet[open]").forEach(d => { if (!d.contains(e.target)) d.open = false; }); }, true);
+  document.addEventListener("click", e => { $$(".facet[open],.cmenu[open]").forEach(d => { if (!d.contains(e.target)) d.open = false; }); }, true);
   window.addEventListener("resize", debounce(() => fitTables($("#view")), 150));
   document.addEventListener("toggle", e => { if (e.target && e.target.matches && e.target.matches("details")) fitTables(e.target); }, true);
   $("#scrim").addEventListener("click", () => { if (!$("#palette").hidden) closePalette(); else if (!$("#sheet").hidden) closeSheet(); else closeDrawer(); });
@@ -2814,306 +3133,13 @@ function render() {
   if (st) S = Object.assign({}, DEFAULT, st, {view: ROUTES.includes(st.view) ? st.view : st.view === "portfolio" ? "initiatives" : "overview"});
   if (!location.hash || location.hash !== encode(S)) history.replaceState(null, "", encode(S));
   render();
+  if (document.fonts && document.fonts.ready) document.fonts.ready.then(() => fitTables($("#view")));
   try { const y = sessionStorage.getItem("devkit.scroll"); if (y) { window.scrollTo(0, +y); sessionStorage.removeItem("devkit.scroll"); } } catch (e) {}
   setInterval(() => { const t = $("#ticker"); if (t) t.textContent = "Synced " + rel(D.generated); }, 30000);
   setInterval(() => { if (document.visibilityState === "visible" && $("#palette").hidden && !S.task && !/^(INPUT|SELECT|TEXTAREA)$/.test((document.activeElement || {}).tagName || "")) {
     try { sessionStorage.setItem("devkit.scroll", String(window.scrollY)); } catch (e) {} location.reload(); } }, 120000);
 })();
 })();
-"""
-
-CSS += r"""
-/* ---------- progress, initiatives, roadmap */
-.mb{margin-bottom:var(--s4)}
-.prog{display:inline-flex;align-items:center;gap:var(--s2);min-width:120px;width:100%;max-width:220px;vertical-align:middle}
-.prog.wide{max-width:none}
-.prog.none{min-width:0}
-.pbar{flex:1;height:6px;border-radius:999px;background:var(--mark-soft);overflow:hidden;min-width:48px}
-.pbar i{display:block;height:100%;border-radius:999px;background:var(--mark)}
-.prog .pv{font-size:var(--fs-xs);font-weight:700;color:var(--text);min-width:32px;text-align:right}
-.prog .pm{font-size:.7rem;color:var(--muted)}
-td.c-prog{width:150px} table.pt .prog{min-width:104px}
-.inis{display:grid}
-.ini{display:grid;gap:var(--s2);padding:var(--s3) var(--s4);border-bottom:1px solid var(--line-soft);cursor:pointer;min-width:0}
-.ini:last-child{border-bottom:0}
-.ini:hover{background:var(--hover)}
-.ini-h{display:grid;grid-template-columns:minmax(0,max-content) minmax(0,1fr) minmax(200px,280px);gap:var(--s2) var(--s3);align-items:center}
-.ini-h h3{margin:0;font-size:var(--fs-lg);font-weight:650;letter-spacing:-.015em;color:var(--heading);min-width:0}
-.ini-b{display:flex;gap:4px;flex-wrap:wrap;align-items:center}
-.ini-p{justify-self:end;width:100%}
-.ini-goal{color:var(--text-2);font-size:var(--fs-sm)}
-.ini-m{display:flex;flex-wrap:wrap;gap:6px}
-.ini-now{margin-top:2px}
-.mchip{display:inline-flex;align-items:center;gap:6px;height:26px;padding:0 10px;border-radius:999px;border:1px solid var(--line-soft);background:var(--surface-2);font-size:var(--fs-xs);font-weight:650;cursor:pointer;white-space:nowrap;margin:2px 4px 2px 0}
-.mchip:hover{border-color:var(--line)}
-.road{display:grid;padding:var(--s2) var(--s4) var(--s3)}
-.road-row{display:grid;grid-template-columns:minmax(120px,220px) minmax(0,1fr);gap:var(--s3);align-items:center;min-height:30px;border-radius:6px}
-.road-row[data-nav]{cursor:pointer}
-.road-row[data-nav]:hover{background:var(--hover)}
-.road-l{display:flex;align-items:center;gap:6px;font-size:var(--fs-sm);font-weight:650;padding-left:4px}
-.road-track{position:relative;height:30px;border-bottom:1px solid var(--line-soft)}
-.road-axis .road-track{height:22px;border-bottom:1px solid var(--axis)}
-.road-tick{position:absolute;top:0;bottom:0;width:1px;background:var(--grid)}
-.road-today{position:absolute;top:-2px;bottom:-2px;width:2px;background:var(--text-2);border-radius:2px;z-index:1}
-.road-tl{position:absolute;top:2px;transform:translateX(4px);font-size:.7rem;color:var(--muted);white-space:nowrap}
-.road-tl.today{color:var(--text);font-weight:700}
-.road-m{position:absolute;top:50%;width:11px;height:11px;margin:-6px 0 0 -6px;transform:rotate(45deg);background:var(--mark);border:2px solid var(--surface);border-radius:2px;z-index:2}
-.road-m.over{background:var(--critical)} .road-m.done{background:var(--good)}
-.road-t{position:absolute;top:50%;transform:translate(10px,-50%);font-size:.72rem;color:var(--text-2);white-space:nowrap;z-index:2}
-.road-t.r{transform:translate(-10px,-50%)}
-.stands{display:grid}
-.srow{display:grid;grid-template-columns:10px minmax(0,1fr) 240px 240px;gap:var(--s3);align-items:center;padding:var(--s2) 0;border-bottom:1px solid var(--line-soft);cursor:pointer;font-size:var(--fs-md)}
-.srow:hover{background:var(--hover)}
-.srow .sm{display:flex;gap:6px;align-items:center;justify-content:flex-end;font-size:var(--fs-xs);white-space:nowrap;overflow:hidden}
-.sfoot{font-size:var(--fs-sm);padding-top:var(--s2)}
-.wss{display:grid;gap:var(--s3)}
-.ws{padding:var(--s3);border:1px solid var(--line-soft);border-radius:10px;background:var(--surface-2)}
-.ws-h{display:flex;align-items:center;gap:var(--s2);flex-wrap:wrap}
-.ws-n{all:unset;cursor:pointer;font-weight:700;color:var(--heading)} .ws-n:hover{text-decoration:underline}
-@media (max-width:1024px){.ini-h{grid-template-columns:minmax(0,1fr)}.ini-p{justify-self:stretch}.ini-h h3{white-space:normal}}
-@media (max-width:768px){.srow{grid-template-columns:10px minmax(0,1fr) auto}.srow .prog{grid-column:2/-1;max-width:none}.srow .sm{grid-column:2/-1;justify-content:flex-start}
-  .road-row{grid-template-columns:96px minmax(0,1fr)}.road-t{display:none}td.c-prog{width:auto}table.pt td.c-prog{grid-column:2/-1}}
-"""
-
-CSS += r"""
-/* ---------- v3 components: breadcrumbs, page header, stats, tabs */
-:root{--nav-h:56px;--tabs-h:46px}
-/* grid containers size to min-content unless told otherwise: bound every single-column grid so long commands never widen the page */
-.stack-v,.db,.pcard2,.pc-s,.sess,.run,.pl,.cmds,.sessl{grid-template-columns:minmax(0,1fr)}
-.seg{max-width:100%;overflow-x:auto;scrollbar-width:none} .seg::-webkit-scrollbar{display:none} .seg button{flex:none}
-.toolbar select{max-width:100%;min-width:0}
-.tl .it>div,.rl,.rrows li,.cbody,.sess .statusline{overflow-wrap:anywhere}
-.ph .right{min-width:0;max-width:100%}
-.kv{grid-template-columns:auto minmax(0,1fr)} .kv dd{min-width:0;overflow-wrap:anywhere}
-.mt{margin-top:var(--s4)} .bad{color:var(--bad-text)} .spacer{flex:1}
-.lnk{all:unset;cursor:pointer;font-weight:650;color:var(--text)} .lnk:hover{text-decoration:underline} .lnk:focus-visible{outline:2px solid var(--focus);border-radius:4px}
-.crumbs ol{list-style:none;display:flex;flex-wrap:wrap;gap:2px 0;margin:0 0 var(--s2);padding:0;font-size:var(--fs-sm);color:var(--text-2)}
-.crumbs li{display:flex;align-items:center;min-width:0}
-.crumbs li+li::before{content:"›";margin:0 8px;color:var(--muted)}
-.crumbs a{color:var(--text-2);text-decoration:none} .crumbs a:hover{color:var(--text);text-decoration:underline}
-.crumbs [aria-current]{color:var(--heading);font-weight:650;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;max-width:60vw}
-.phead{display:grid;grid-template-columns:minmax(0,1fr);gap:var(--s3);margin:0 0 var(--s4)}
-.pt1>*{min-width:0} .phead .go .cmd{max-width:100%}
-.pt1{display:grid;grid-template-columns:minmax(0,1fr) minmax(240px,360px);gap:var(--s4);align-items:end}
-.pt-t{min-width:0}
-.phead h1{margin:0;font-size:var(--fs-title);font-weight:450;letter-spacing:-.035em;line-height:1.15;color:var(--heading);overflow-wrap:anywhere;display:flex;align-items:center;gap:10px}
-.phead h1 .hd{width:12px;height:12px}
-.phead .bd{display:flex;flex-wrap:wrap;gap:6px;margin-top:var(--s2)}
-.pmeta{font-size:var(--fs-sm);margin-top:var(--s2)}
-.pt-p .why{font-size:var(--fs-xs);margin-top:2px}
-.phead .go{display:flex;flex-wrap:wrap;gap:var(--s2)}
-.hreason{font-size:var(--fs-sm);color:var(--text-2);padding:6px 10px;border-radius:var(--rs);background:var(--surface-2);border-left:3px solid var(--warning)}
-.hreason.risk{border-left-color:var(--critical)}
-.stats{display:flex;flex-wrap:wrap;gap:0;margin:0 0 var(--s3);background:var(--surface);border:1px solid var(--line-soft);border-radius:var(--r);overflow:hidden}
-.stats .st{flex:1 1 120px;display:flex;flex-direction:column;gap:2px;padding:var(--s2) var(--s4);border-right:1px solid var(--line-soft);text-decoration:none;min-width:0}
-.stats .st:last-child{border-right:0}
-.stats a.st:hover{background:var(--hover)}
-.stats .sv{font-size:1.25rem;font-weight:650;letter-spacing:-.02em;color:var(--heading);line-height:1.2}
-.stats .sl{font-size:var(--fs-xs);color:var(--text-2)}
-.stats .st.risk .sv{color:var(--bad-text)} .stats .st.warn .sv{color:var(--warn-text)}
-.ptabs{position:sticky;top:var(--nav-h);z-index:20;display:flex;gap:2px;margin:0 0 var(--s4);border-bottom:1px solid var(--line);background:var(--page);overflow-x:auto;scrollbar-width:none;height:var(--tabs-h);align-items:flex-end}
-.ptabs::-webkit-scrollbar{display:none}
-.ptab{border:0;background:none;padding:0 var(--s3);height:calc(var(--tabs-h) - 2px);color:var(--text-2);font-weight:650;font-size:var(--fs-md);cursor:pointer;white-space:nowrap;display:flex;align-items:center;gap:6px;border-bottom:2px solid transparent;margin-bottom:-1px}
-.ptab:hover{color:var(--text);border-bottom-color:var(--line)}
-.ptab[aria-selected="true"]{color:var(--heading);border-bottom-color:var(--heading)}
-.ptab .n{font-size:.7rem;font-weight:700;color:var(--text-2);background:var(--surface-3);border-radius:999px;padding:0 7px;line-height:18px}
-.tabpanel{min-width:0}
-.tab .n.warn{background:var(--warning);color:#10110f}
-.seg .sn{margin-left:6px;font-size:.68rem;color:var(--muted);font-weight:700}
-.seg button[aria-pressed="true"] .sn{color:var(--text-2)}
-/* ---------- Home: KPI strip */
-.kpis{display:grid;grid-template-columns:repeat(8,minmax(0,1fr));gap:var(--s2);margin:0 0 var(--s4)}
-.kpi{display:flex;flex-direction:column;gap:1px;padding:var(--s3);background:var(--surface);border:1px solid var(--line-soft);border-radius:var(--r);text-decoration:none;min-width:0;transition:border-color .15s}
-.kpi:hover{border-color:var(--line)}
-.kpi .kv{font-size:1.55rem;font-weight:600;letter-spacing:-.03em;line-height:1.1;color:var(--heading)}
-.kpi .kl{font-size:var(--fs-sm);font-weight:650;color:var(--text);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
-.kpi .ks{font-size:var(--fs-xs);color:var(--muted);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
-.kpi.risk{border-left:3px solid var(--critical)} .kpi.risk .kv{color:var(--bad-text)}
-.kpi.warn{border-left:3px solid var(--warning)} .kpi.warn .kv{color:var(--warn-text)}
-.more-l.pad{padding:var(--s2) var(--s4);border-top:1px solid var(--line-soft)}
-/* ---------- callouts */
-.callout{display:flex;flex-wrap:wrap;gap:var(--s2) var(--s3);align-items:center;padding:var(--s3) var(--s4);border-radius:var(--r);border:1px solid var(--line-soft);background:var(--surface);margin:0 0 var(--s3)}
-.callout.warn{border-color:color-mix(in srgb,var(--warning) 55%,var(--line-soft));background:color-mix(in srgb,var(--warning) 7%,var(--surface))}
-.callout.risk{border-color:color-mix(in srgb,var(--critical) 55%,var(--line-soft))}
-.callout>.sev{flex:none} .callout .cbody{flex:1 1 260px;min-width:0;font-size:var(--fs-sm)} .callout .cbody strong{display:block;color:var(--heading);font-size:var(--fs-md)}
-.callout .cact{display:flex;gap:var(--s2);flex-wrap:wrap;justify-content:flex-end;margin-left:auto;max-width:100%;min-width:0} .callout .cmd{max-width:100%}
-.db .callout,.pcard2 .callout{margin:0}
-/* ---------- people: avatars, claim chips */
-.av{flex:none;display:inline-grid;place-items:center;width:26px;height:26px;border-radius:50%;background:var(--surface-3);color:var(--heading);font-size:.66rem;font-weight:800;letter-spacing:.02em;border:1px solid var(--line)}
-.av.lg{width:40px;height:40px;font-size:.85rem}
-.av.live{box-shadow:0 0 0 2px var(--page),0 0 0 4px var(--good)}
-.av.me{border-color:var(--heading)}
-.av.more{background:var(--surface-2);color:var(--text-2);font-weight:700}
-.avs{display:inline-flex;align-items:center}
-.avs{gap:6px} .avs .av{width:24px;height:24px;font-size:.6rem}
-.avs .av.live{box-shadow:0 0 0 1.5px var(--surface),0 0 0 3px var(--good)}
-.claim{display:inline-flex;align-items:center;gap:5px;height:22px;max-width:100%;padding:0 8px;border-radius:999px;border:1px solid var(--line);background:var(--surface-2);font-size:var(--fs-xs);font-weight:650;color:var(--text);white-space:nowrap;min-width:0}
-.claim .lk{flex:none;color:var(--text-2)} .claim .cw{min-width:0} .claim .cu{color:var(--muted);font-weight:600}
-.claim.mine{border-color:var(--text-2)} .claim.mine .lk{color:var(--heading)}
-.claim.exp{border-color:var(--warning);color:var(--warn-text);background:color-mix(in srgb,var(--warning) 8%,var(--surface))} .claim.exp .lk,.claim.exp .cu{color:var(--warn-text)}
-.claim.sm{height:20px;padding:0 6px}
-/* ---------- work items */
-.ist{flex:none;display:inline-grid;place-items:center;width:18px;height:18px;font-size:.8rem;line-height:1;color:var(--muted)}
-.ist.i-doing,.badge.i-doing .ic{color:var(--mark)} .ist.i-blocked,.badge.i-blocked .ic{color:var(--bad-text)} .ist.i-done,.badge.i-done .ic{color:var(--good-text)} .ist.i-cancelled{color:var(--muted)}
-.tag.ty-bug{color:var(--bad-text)} .tag.ty-feature,.tag.ty-spike{color:var(--text)}
-.irows{list-style:none;margin:0;padding:0}
-.irow{display:grid;grid-template-columns:20px minmax(0,1fr) minmax(0,auto) 26px;gap:var(--s1) var(--s3);align-items:center;padding:var(--s2) var(--s4);border-bottom:1px solid var(--line-soft);cursor:pointer;min-height:var(--row)}
-.irow:last-child{border-bottom:0} .irow:hover{background:var(--hover)}
-.irow.closed .itl{color:var(--text-2)} .irow.closed .i-done~* .itl{text-decoration:none}
-.irow .im{min-width:0} .irow .itl{font-weight:600;color:var(--heading);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;line-height:1.35}
-.imeta{display:flex;flex-wrap:wrap;gap:4px 8px;align-items:center;font-size:var(--fs-xs);color:var(--text-2);margin-top:1px}
-.imeta .mchip{height:20px;margin:0;padding:0 8px}
-.iid{font-size:.7rem;color:var(--muted)}
-.icl{min-width:0;display:flex;justify-content:flex-end}
-.mchip.sc{max-width:220px;overflow:hidden;text-overflow:ellipsis}
-.label.pad-l{display:block;padding:var(--s3) var(--s4) var(--s1)}
-/* ---------- changelog */
-.clog{list-style:none;margin:0;padding:0;position:relative}
-.clog li{display:grid;grid-template-columns:44px minmax(0,1fr);gap:var(--s3);padding:0 0 var(--s3);position:relative}
-.clog li::before{content:"";position:absolute;left:21px;top:24px;bottom:0;width:1px;background:var(--line-soft)}
-.clog li:last-child::before{display:none}
-.clog .cv{display:grid;place-items:center;height:22px;border-radius:999px;background:var(--surface-3);font-size:.7rem;font-weight:800;color:var(--text-2)}
-.clog li:first-child .cv{background:var(--heading);color:var(--page)}
-.clog .ch{font-size:var(--fs-md);color:var(--heading)}
-.clog .cm{display:flex;align-items:center;gap:6px;flex-wrap:wrap;font-size:var(--fs-xs);color:var(--text-2);margin-top:2px}
-.clog .cm .av{width:20px;height:20px;font-size:.55rem}
-.clog .cwhy{margin-top:4px;font-size:var(--fs-sm);padding:4px 10px;border-left:2px solid var(--line);color:var(--text)}
-/* ---------- initiative cards */
-.icards{display:grid;grid-template-columns:repeat(auto-fill,minmax(280px,1fr));gap:var(--s3)}
-.icards.wide{grid-template-columns:repeat(auto-fill,minmax(360px,1fr))}
-.icard{display:grid;grid-template-columns:minmax(0,1fr);gap:var(--s2);align-content:start;padding:var(--s3) var(--s4) var(--s4);background:var(--surface);border:1px solid var(--line-soft);border-radius:var(--r);cursor:pointer;min-width:0;transition:border-color .15s}
-.panel .icard{background:var(--surface-2)}
-.icard:hover,.icard:focus-visible{border-color:var(--line)}
-.ic-h{display:flex;align-items:center;gap:var(--s2);min-width:0}
-.ic-h h3{margin:0;font-size:var(--fs-lg);font-weight:650;letter-spacing:-.015em;color:var(--heading);min-width:0;flex:1}
-.ic-b{display:flex;flex-wrap:wrap;gap:4px;min-width:0}
-.badge.ms{display:inline-block;line-height:20px;max-width:100%;overflow:hidden;text-overflow:ellipsis}
-.pb .md{padding:0}
-.ic-g{margin:0;color:var(--text-2);font-size:var(--fs-sm);display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden}
-.ic-m{display:flex;flex-wrap:wrap;gap:4px var(--s4);font-size:var(--fs-sm);color:var(--text)}
-.ic-m strong{font-weight:700;color:var(--heading)}
-.ic-f{display:flex;align-items:center;justify-content:space-between;gap:var(--s2);font-size:var(--fs-xs);min-height:26px}
-.sbar{display:flex;height:6px;border-radius:999px;overflow:hidden;background:var(--surface-3);gap:1px}
-.sbar i,.sleg i{display:block;height:100%}
-.sb-active{background:var(--deemph)} .sb-blocked{background:var(--critical)} .sb-paused{background:var(--warning)} .sb-done{background:var(--deemph)} .sb-unknown{background:var(--surface-3);outline:1px solid var(--line)}
-.sleg{display:flex;flex-wrap:wrap;gap:2px 10px;font-size:.7rem;color:var(--text-2);margin-top:4px}
-.sleg span{display:inline-flex;align-items:center;gap:4px} .sleg i{width:8px;height:8px;border-radius:2px}
-/* ---------- team rows, runs, sessions */
-.prows{list-style:none;margin:0;padding:0}
-.prow{display:grid;grid-template-columns:26px minmax(0,1fr) auto;gap:var(--s3);align-items:center;padding:var(--s2) var(--s4);border-bottom:1px solid var(--line-soft);cursor:pointer}
-.prow:last-child{border-bottom:0} .prow:hover{background:var(--hover)}
-.prow .pm{min-width:0} .prow .pw{display:flex;align-items:center;gap:6px;min-width:0;font-size:var(--fs-md);color:var(--heading)}
-.prow .ps{font-size:var(--fs-xs)} .prow .pp{display:flex;align-items:center;gap:8px;margin-top:4px;font-size:var(--fs-xs)}
-.prow .pp .rbar{flex:1;max-width:160px;margin:0}
-.prow .pr2{display:flex;gap:6px;align-items:center}
-.cbar{display:grid;gap:4px;padding:var(--s2) var(--s4);border-bottom:1px solid var(--line-soft);background:color-mix(in srgb,var(--warning) 6%,var(--surface))}
-.cbar .ci{display:flex;gap:8px;align-items:center;font-size:var(--fs-sm);min-width:0} .cbar .sev{width:18px;height:18px;font-size:.62rem}
-.rbar{height:6px;border-radius:999px;background:var(--mark-soft);overflow:hidden;margin:6px 0 4px}
-.rbar i{display:block;height:100%;border-radius:999px;background:var(--mark)}
-.rbar.over i{background:var(--warning)} .rbar.blocked i,.run.blocked .rbar i{background:var(--critical)} .run.done .rbar i{background:var(--good)}
-.rbar.sm{height:4px}
-.run{display:grid;gap:2px;font-size:var(--fs-sm)}
-.run .rh{display:flex;align-items:center;gap:var(--s2);min-width:0} .run .rh strong{color:var(--heading);min-width:0;flex:1}
-.badge.r-blocked{border-color:var(--critical);color:var(--bad-text)} .badge.r-done{color:var(--good-text)}
-.run.blocked{padding-left:10px;border-left:3px solid var(--critical)}
-.rmeta{font-size:var(--fs-xs);color:var(--text-2)} .rmeta.warn{color:var(--warn-text)}
-.rl{font-size:var(--fs-sm);color:var(--text);line-height:1.4} .rl .label{margin-right:4px}
-.rchips{display:flex;flex-wrap:wrap;gap:6px;margin-top:4px}
-.rc{display:inline-flex;align-items:center;gap:6px;height:22px;padding:0 8px;border-radius:999px;background:var(--surface-3);font-size:var(--fs-xs);font-weight:650;color:var(--text);white-space:nowrap}
-.rc.warn{background:color-mix(in srgb,var(--warning) 16%,var(--surface));color:var(--warn-text)} .rc.muted{background:none;color:var(--muted);padding:0}
-.sessl{display:grid;gap:var(--s3)}
-.sess{display:grid;gap:var(--s2);padding:var(--s3);border:1px solid var(--line-soft);border-radius:10px;background:var(--surface-2);min-width:0}
-.sess .sh{display:flex;align-items:center;gap:var(--s2);flex-wrap:wrap;min-width:0;font-size:var(--fs-sm)}
-.sess .sp{all:unset;cursor:pointer;font-weight:700;color:var(--heading)} .sess .sp:hover{text-decoration:underline} .sess .sp:focus-visible{outline:2px solid var(--focus);border-radius:4px}
-.sess .sb{font-size:.75rem;color:var(--text-2)} .sess .ss{margin-left:auto;font-size:var(--fs-xs)} .sess .sw{font-size:var(--fs-xs)}
-.people{display:grid;grid-template-columns:repeat(auto-fill,minmax(420px,1fr));gap:var(--s4);align-items:start}
-.pcard2{display:grid;gap:var(--s3);padding:var(--s4)}
-.pcard2.me{border-color:var(--line)}
-.pc-h{display:flex;gap:var(--s3);align-items:center;min-width:0}
-.pc-n{min-width:0;flex:1} .pc-n h3{margin:0;display:flex;align-items:center;gap:8px;font-size:var(--fs-lg);font-weight:650;color:var(--heading);min-width:0} .pc-n .t2{font-size:var(--fs-sm)}
-.pc-s{display:grid;gap:var(--s2)}
-.lrows,.rrows{list-style:none;margin:0;padding:0;display:grid}
-.lrow{display:grid;grid-template-columns:12px minmax(0,1fr) auto;gap:var(--s2);align-items:center;padding:6px var(--s2);border-radius:8px;font-size:var(--fs-sm);cursor:pointer}
-.lrow .lm{min-width:0} .lrow .lt{font-weight:600;color:var(--heading)}
-.lrow:hover{background:var(--hover)} .lrow .lk{color:var(--text-2)} .lrow.exp .lk{color:var(--warn-text)} .lrow .ls,.lrow .lu{font-size:var(--fs-xs)}
-.rrows li{padding:6px 0;border-bottom:1px solid var(--line-soft);font-size:var(--fs-sm);min-width:0} .rrows li:last-child{border-bottom:0}
-.rrows .mchip{height:20px;margin:0}
-.slw{font-size:var(--fs-xs);display:flex;flex-wrap:wrap;align-items:center;gap:4px} .slw .mchip{height:20px;margin:0}
-.tl .it .av{width:22px;height:22px;font-size:.55rem}
-/* ---------- member projects, plans */
-.fin{height:34px;padding:0 12px;border-radius:999px;border:1px solid var(--line);background:var(--surface);min-width:240px;font-size:var(--fs-md);outline:none}
-.fin:focus{border-color:var(--focus);box-shadow:0 0 0 3px var(--mark-soft)}
-.mgrp>summary{display:flex;align-items:center;gap:var(--s3);min-height:48px;padding:var(--s2) var(--s4);cursor:pointer;list-style:none;border-radius:var(--r)}
-.mgrp>summary::-webkit-details-marker{display:none}
-.mgrp>summary::before{content:"▸";color:var(--muted);font-size:.75rem;transition:transform .12s}
-.mgrp[open]>summary::before{transform:rotate(90deg)}
-.mgrp[open]>summary{border-bottom:1px solid var(--line-soft);border-radius:var(--r) var(--r) 0 0}
-.mgrp .mg-n{font-weight:700;color:var(--heading);font-size:var(--fs-lg);text-transform:capitalize}
-.mgrp .count{color:var(--muted);font-weight:600;font-size:var(--fs-sm)}
-.mgrp .mg-c{margin-left:auto;font-size:var(--fs-xs)}
-.mini{display:inline-flex;gap:10px;font-size:var(--fs-xs);color:var(--text-2)} .mini>span{display:inline-flex;align-items:center;gap:4px}
-td.c-who{width:96px} td.c-cta{width:150px;text-align:right} .nc{display:inline-flex;gap:4px;align-items:center}
-table.mt td.c-name{max-width:300px}
-.plans{list-style:none;margin:0;padding:0}
-.pl{padding:var(--s3) var(--s4);border-bottom:1px solid var(--line-soft);display:grid;gap:var(--s2)} .pl:last-child{border-bottom:0}
-.pl-h{display:flex;flex-wrap:wrap;align-items:center;gap:var(--s2)} .pl-t{font-weight:650;color:var(--heading);text-decoration:none} a.pl-t:hover{text-decoration:underline}
-.pl-u{margin-left:auto;font-size:var(--fs-xs)}
-.badge.pl-approved{color:var(--good-text)} .badge.pl-superseded{color:var(--muted);text-decoration:line-through} .badge.pl-draft{color:var(--text)} .badge.pl-unversioned{color:var(--muted);border-style:dashed}
-.badge.warn-b{border-color:var(--warning);color:var(--warn-text)}
-.pl-log>summary{cursor:pointer;font-size:var(--fs-xs);color:var(--text-2);font-weight:650} .pl-log .clog{margin-top:var(--s2)}
-/* ---------- drawer (task), marker chip, commands */
-.drawer{width:min(720px,100vw)}
-.dh .crumbs ol{margin-bottom:4px}
-.cmds{display:grid;gap:6px}
-.cmdr{display:grid;grid-template-columns:minmax(120px,190px) minmax(0,1fr);gap:var(--s3);align-items:center;font-size:var(--fs-sm)}
-.cmdr .cmd{justify-self:stretch;height:auto;min-height:30px;padding-top:3px;padding-bottom:3px} .cmdr .cmd code{white-space:normal;overflow-wrap:anywhere}
-.tnote{font-size:var(--fs-xs);margin:var(--s3) 0 0}
-.mk{display:inline-block;line-height:18px;height:20px;padding:0 7px;border-radius:6px;border:1px solid var(--line);background:var(--surface-2);font-family:ui-monospace,"SF Mono",Menlo,Consolas,monospace;font-size:.72rem;font-weight:700;color:var(--heading);white-space:nowrap;vertical-align:1px}
-.mk .chev{color:var(--accent-text);margin:0 1px}
-.tc.blk{border-left:3px solid var(--critical)}
-/* the status block agents write: brand chip, project · branch and task chips, Done / Check / Progress / Next */
-.sblock{display:grid;grid-template-columns:minmax(0,1fr);gap:var(--s2);padding:var(--s3);border:1px solid var(--line-soft);border-radius:10px;background:var(--surface-2);min-width:0}
-.sess .sblock{background:var(--surface)}
-.sb-h{display:flex;flex-wrap:wrap;align-items:center;gap:6px;min-width:0}
-.sbrand{display:inline-flex;align-items:center;height:22px;padding:0 8px;border-radius:6px;background:var(--accent);color:var(--accent-ink);font-size:.72rem;font-weight:800;letter-spacing:.01em;white-space:nowrap}
-.sbrand .chev{margin:0 3px 0 2px}
-.sb-chip{display:inline-flex;align-items:center;height:22px;max-width:100%;padding:0 8px;border-radius:6px;background:var(--surface-3);color:var(--heading);font-size:.75rem;font-weight:700;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;min-width:0}
-.sb-chip.task{background:none;border:1px solid var(--line);color:var(--text);font-weight:650}
-.sb-meta{margin-left:auto;font-size:var(--fs-xs);color:var(--muted);white-space:nowrap}
-.sb-rows{display:grid;grid-template-columns:72px minmax(0,1fr);gap:3px var(--s3);margin:0;font-size:var(--fs-sm);line-height:1.45}
-.sb-rows dt{color:var(--text-2);font-size:.7rem;font-weight:700;letter-spacing:.05em;text-transform:uppercase;padding-top:2px}
-.sb-rows dd{margin:0;min-width:0;overflow-wrap:anywhere;color:var(--text)}
-.ck.ok{color:var(--good-text)} .ck.warn{color:var(--warn-text)} .ck.bad{color:var(--bad-text)} .ck.na{color:var(--muted)}
-.sb-rows dd.ck{font-weight:650}
-.sl-task{color:var(--text-2);font-weight:650}
-.slt .ck{font-weight:800}
-.tc .meta .mchip{height:20px;margin:0}
-.tc .tx{display:flex;gap:6px;align-items:flex-start} .tc .tx .ist{margin-top:1px}
-/* sticky table headers on wide screens (tables that fit), under the navbar and the page tabs */
-@media (min-width:1280px){main .tw.st{overflow:visible} main .tw.st.x{overflow-x:auto}
-  main .tw.st:not(.x) table.t th{top:var(--nav-h)} main .tabpanel .tw.st:not(.x) table.t th{top:calc(var(--nav-h) + var(--tabs-h))}}
-@media (max-width:1180px){.kpis{grid-template-columns:repeat(4,minmax(0,1fr))}.pt1{grid-template-columns:minmax(0,1fr)}.people{grid-template-columns:minmax(0,1fr)}td.c-who{display:none}}
-@media (max-width:768px){
-  :root{--nav-h:0px}
-  .nav{position:relative}
-  .kpis{grid-template-columns:repeat(2,minmax(0,1fr))}.kpi{padding:var(--s2) var(--s3)}.kpi .kv{font-size:1.3rem}
-  .phead h1{font-size:1.45rem}
-  .stats .st{flex:1 1 33%;border-bottom:1px solid var(--line-soft);padding:var(--s2) var(--s3)}.stats .sv{font-size:1.05rem}
-  .icards,.icards.wide{grid-template-columns:minmax(0,1fr)}
-  .irow{grid-template-columns:20px minmax(0,1fr) 26px;padding:var(--s2) var(--s3)}.irow .icl{grid-column:2;grid-row:2;justify-content:flex-start}.irow .icl:empty{display:none}
-  .irow>.icopy,.irow>span:last-child{grid-column:3;grid-row:1}
-  .fin{min-width:0;flex:1 1 100%}
-  .toolbar select{flex:1 1 140px;width:0}
-  .people{grid-template-columns:minmax(0,1fr)}.pcard2{padding:var(--s3)}
-  .cmdr{grid-template-columns:minmax(0,1fr)}
-  table.pt td.c-who,table.pt td.c-cta{grid-column:2/-1;text-align:left;width:auto}
-  .mgrp>summary{flex-wrap:wrap;gap:var(--s2)}.mgrp .mg-c{margin-left:0}
-  .db{padding:var(--s3) var(--s4) var(--s6)}.dh{padding:var(--s3) var(--s4) var(--s2)}
-  .ptab{padding:0 10px}
-  .ph{flex-wrap:wrap}.ph .right{margin-left:0;justify-content:flex-start}
-  table.pt td.c-who:has(>.muted:only-child),table.pt td.c-now:has(>.muted:only-child),table.pt td.c-prog:has(>.muted:only-child){display:none}
-  table.pt td.c-cta{text-align:left}
-}
 """
 
 HTML = """<!doctype html>
@@ -3143,7 +3169,7 @@ __CSS__
 </header>
 <div class="filters" id="filters" role="region" aria-label="Filters"></div>
 <main id="view" tabindex="-1"></main>
-<footer class="foot">__SPARK__ <span>__COPYRIGHT__</span><span>devkit __VERSION__</span><span id="ticker"></span><span>Generated on __HOST__ · __WHEN__</span><span>Data: __HANDOFF__</span><span>Press <kbd>?</kbd> for shortcuts</span></footer>
+<footer class="foot">__SPARK__ <span>__COPYRIGHT__</span><span>devkit __VERSION__</span><span id="ticker"></span><span>Generated on __HOST__, __WHEN__</span><span>Press <kbd>?</kbd> for shortcuts</span></footer>
 <div class="scrim" id="scrim" hidden></div>
 <aside class="drawer" id="drawer" role="dialog" aria-modal="true" aria-labelledby="drawer-title" hidden></aside>
 <div class="palette" id="palette" role="dialog" aria-modal="true" aria-label="Command palette" hidden></div>
@@ -3170,8 +3196,7 @@ def render(reg: dict, handoff: Path = None, now: float = None) -> str:
                      ("__LOGO_DARK__", _logo("firefly-logo-dark.svg", "ff-dark")),
                      ("__LOGO_LIGHT__", _logo("firefly-logo-light.svg", "ff-light")),
                      ("__SPARK__", SPARK), ("__FAVICON__", FAVICON), ("__VERSION__", _esc(core.VERSION)),
-                     ("__COPYRIGHT__", _esc(core.COPYRIGHT)), ("__HOST__", _esc(data["host"])), ("__WHEN__", _esc(when)),
-                     ("__HANDOFF__", _esc(data["handoff"]))):
+                     ("__COPYRIGHT__", _esc(core.COPYRIGHT)), ("__HOST__", _esc(data["host"])), ("__WHEN__", _esc(when))):
         page = page.replace(key, val)
     # script and data last, so placeholders inside them are never substituted
     return page.replace("__JS__", JS.replace("</", "<\\/")).replace("__DATA__", safe_json(data))

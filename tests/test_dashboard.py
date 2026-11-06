@@ -22,6 +22,7 @@ PAST = time.strftime("%Y-%m-%d", time.localtime(NOW - 5 * 86400))
 FUTURE = time.strftime("%Y-%m-%d", time.localtime(NOW + 20 * 86400))
 ISO = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(NOW - 3600))
 MARK = "[Firefly> DevKit]"           # the status-line marker agents write
+FAKE_PAT = "ghp_" + "0123456789abcdefABCDEF0123456789abcd"   # built at runtime: no token-shaped literal in the file
 LEGACY = "DevKit ·"                  # the legacy marker, still accepted
 SAVED = "widget · main ❯ Ship export ❯ export endpoint done ❯ ✓ 31 tests green ❯ ▸ 3/7 ❯ next → contract test"   # what devkit saves
 ME = f"me@{socket.gethostname().split('.')[0].lower()}"
@@ -218,11 +219,37 @@ class RenderTests(unittest.TestCase):
                        "function pageTabs", "function crumbs", "function fitTables", "function statusCard", "function statusLine", "function liveRun", "function timePanel", "function membersBlock",
                        "function roadmap", "function progOf", "function highlight", 'role: "tablist"', 'role: "tabpanel"'):
             self.assertIn(needle, js, needle)
-        for needle in ("prefers-reduced-motion", "@media print", "--logo-dark", "max-width:768px", ".ptabs{position:sticky", "main .tw.st:not(.x) table.t th", "main .tw.st.x{overflow-x:auto}", ".sblock{", ".sbrand{"):
+        for needle in ("function icon(", "function sessionBlock", "function actionGroups", "function cmdMenu", "function rowClick"):
+            self.assertIn(needle, js, needle)
+        for needle in ("prefers-reduced-motion", "@media print", "--logo-dark", "max-width:768px", ".ptabs{position:sticky", "main .tw.st:not(.x) table.t th", "main .tw.st.x{overflow-x:auto}", ".sblock{", ".figs{"):
             self.assertIn(needle, css, needle)
         self.assertNotIn("innerHTML", js)
         self.assertNotIn("insertAdjacentHTML", js)
         self.assertNotIn("document.write", js)
+
+    def test_design_system(self):
+        """v4: four type sizes, two weights, sentence case, no stripes, SVG icons, one amber accent per surface."""
+        css, js = dashboard.CSS, dashboard.JS
+        self.assertEqual(set(re.findall(r"font-size:([^;}\"]+)", css + js)), {"var(--fs-1)", "var(--fs-2)", "var(--fs-3)", "var(--fs-4)"})
+        self.assertEqual(set(re.findall(r"font-weight:(\d+)", css + js)), {"400", "600"})
+        self.assertNotIn("uppercase", css)
+        self.assertEqual(re.findall(r"border-(?:left|right):\s*[2-9]px", css), [], "no coloured side stripes")
+        for glyph in "⧉⎇⌕◐▲▼❚":                                            # icons are authored SVG, not Unicode glyphs
+            self.assertNotIn(glyph, js, glyph)
+        self.assertNotIn("backdrop-filter", css)
+        self.assertEqual(css.count("background:var(--accent)"), 1, "amber fills only the primary button")
+        self.assertIn("--accent:#ffb34a", dashboard.LIGHT)
+        self.assertIn("--accent:#ffb34a", dashboard.DARK)
+        # elevation is declared once: a shadow in light, a hairline in dark
+        self.assertIn("--elev-border:0 solid transparent", dashboard.LIGHT)
+        self.assertIn("--shadow:none", dashboard.DARK)
+
+    def test_rows_are_links(self):
+        """Clickable rows hold a real link (keyboard, screen readers, j/k) instead of being focusable themselves."""
+        js = dashboard.JS
+        self.assertEqual(re.findall(r'h\("(?:tr|li|article)", \{[^}]*tabindex: "0"', js), [])
+        self.assertIn('"data-nav": ""', js)
+        self.assertIn("function taskHref(", js)
 
     def test_routes(self):
         js = dashboard.JS
@@ -466,7 +493,7 @@ class TeamWorkTests(unittest.TestCase):
         recs = [{"ts": NOW - 3600, "kind": "turn", "secs": m * 60, "project": "acme/widget"} for m in (1, 2, 3, 4, 10)]
         recs += [{"ts": NOW - 3600, "kind": "run", "secs": 90 * 60, "estimate": 60, "project": "acme/widget", "what": "export"},
                  {"ts": NOW - 7200, "kind": "run", "secs": 30 * 60, "estimate": 30, "project": "acme/api", "what": "api"},
-                 {"ts": NOW - 60, "kind": "tool", "secs": 300, "project": "acme/widget", "what": "Bash: export GITHUB_TOKEN=ghp_0123456789abcdefABCDEF0123456789abcd && ./mvnw verify"},
+                 {"ts": NOW - 60, "kind": "tool", "secs": 300, "project": "acme/widget", "what": f"Bash: export GITHUB_TOKEN={FAKE_PAT} && ./mvnw verify"},
                  {"ts": NOW - 60, "kind": "tool", "secs": 5, "project": "acme/widget", "what": "Bash: ls"},
                  {"ts": NOW - 40 * 86400, "kind": "tool", "secs": 999, "what": "too old"},
                  {"ts": NOW - 60, "kind": "subagent", "secs": 120, "what": "Explore"}, {"ts": NOW - 60, "kind": "subagent", "secs": 600, "what": "review"}]
