@@ -158,6 +158,14 @@ class GuardBashTests(unittest.TestCase):
         self.assertEqual(self.bash('git worktree add "$(mktemp -d)/wt"'), "allow")
         self.assertEqual(self.bash("cd $SOMEWHERE && rm -rf build"), "allow")
 
+    def test_fd_redirections(self):
+        with TempState():
+            self.assertEqual(self.bash("git push -q origin main 2>&1 | tail -2"), "allow")
+            self.assertEqual(self.bash("git push origin feat/x >/dev/null 2>&1"), "allow")
+            self.assertEqual(self.bash("make build 2> build.log"), "allow")
+            self.assertEqual(self.bash("echo hi >&2"), "allow")
+            self.assertEqual(self.bash("git push origin claude/x 2>&1"), "deny")
+
     def test_heredoc_bodies_are_data(self):
         cmd = "cat > page.html <<'EOF'\n<iframe src=x></iframe> > /etc/passwd\nrm -rf ~\nEOF\necho done"
         self.assertEqual(self.bash(cmd), "allow")

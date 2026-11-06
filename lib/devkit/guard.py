@@ -205,7 +205,16 @@ def split_commands(cmd: str):
     except ValueError:
         return None
     segs, argv, redirs, expect_redir = [], [], [], False
-    for t in tokens:
+    for k, t in enumerate(tokens):
+        nxt = tokens[k + 1] if k + 1 < len(tokens) else ""
+        if t.isdigit() and nxt[:1] in ("<", ">"):
+            continue  # file-descriptor prefix: the 2 in 2>&1 / 2>file
+        if t and set(t) <= set("<>&-") and "&" in t and ("<" in t or ">" in t):
+            if nxt.isdigit() or nxt == "-":
+                expect_redir = None  # fd duplication: skip the fd number
+            else:
+                expect_redir = ">" in t
+            continue
         if t and set(t) <= set(";&|()"):
             if argv or redirs:
                 segs.append((argv, redirs))
