@@ -553,6 +553,29 @@ class UnknownProgramTests(GateCase):
         self.assertIn("never pre-approved", guard.preapproval_problem("unknown", "cmd-0123456789") or "")
 
 
+class GitPagerTests(GateCase):
+    # RT3: git runs its pager through the shell, so the pager's command is classified like any other
+
+    def test_a_pager_set_earlier_in_the_line_or_through_git_config_variables_is_classified(self):
+        for cmd in ("export GIT_PAGER='gh pr merge 12'; git -p log", "PAGER='gh pr merge 12'; git -p log",
+                    "GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=core.pager GIT_CONFIG_VALUE_0='gh pr merge 12' git -p log",
+                    "env GIT_PAGER='gh pr merge 12' git -p log", "git -C . -c pager.log='gh pr merge 12' -p log"):
+            with self.subTest(cmd=cmd):
+                self.assertEqual(self.acts(cmd), [("merge", 2, "12")])
+
+    def test_a_pager_read_from_a_variable_git_names_is_unknown(self):
+        for cmd in ("git --config-env=core.pager=P -p log", "git --config-env pager.log=P -p log"):
+            with self.subTest(cmd=cmd):
+                self.assertEqual([a for a, _, _ in self.acts(cmd)], ["unknown"])
+
+    def test_ordinary_pagers_and_git_options_stay_clear(self):
+        for cmd in ("git -c core.pager=cat log", "GIT_PAGER=cat git log", "PAGER='less -R' git log",
+                    "git --no-pager log", "git -c color.ui=always log", "git log --format='%h gh pr merge 12'",
+                    "GIT_PAGER='gh pr merge 12' ls"):
+            with self.subTest(cmd=cmd):
+                self.assertEqual(self.acts(cmd), [])
+
+
 class SettingTests(unittest.TestCase):
 
     def setUp(self):

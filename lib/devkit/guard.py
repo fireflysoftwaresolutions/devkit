@@ -4257,6 +4257,41 @@ def _segment_actions(argv, cwd, bodies, depth) -> list:
     return _found(found, argv, cwd) + more
 
 
+_ASSIGN = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*=")
+_PAGER_KEY = re.compile(r"^(?:core\.pager|pager\.[^=]+)$", re.I)
+
+
+def _git_pagers(argv, env) -> tuple:
+    """The pager command lines a git call may run through the shell (RT3): `-c core.pager=…`, `-c pager.<cmd>=…`, the
+    GIT_CONFIG_KEY_<n>/GIT_CONFIG_VALUE_<n> pairs, GIT_PAGER and PAGER -> (texts, unknown), where unknown is True when
+    a pager comes from a place the guard cannot read (--config-env, GIT_CONFIG_PARAMETERS)."""
+    texts, unknown, i = [], False, 1
+    while i < len(argv):
+        a, nxt = argv[i], argv[i + 1] if i + 1 < len(argv) else ""
+        if a == "-c":
+            key, _, val = nxt.partition("=")
+            if _PAGER_KEY.match(key):
+                texts.append(val)
+            i += 2
+        elif a == "--config-env" or a.startswith("--config-env="):  # the value is in a variable the guard cannot see
+            spec = a.partition("=")[2] if "=" in a else nxt
+            unknown = unknown or bool(_PAGER_KEY.match(spec.partition("=")[0]))
+            i += 1 if "=" in a else 2
+        elif a in ("-C", "--git-dir", "--work-tree", "--namespace"):
+            i += 2
+        elif a.startswith("-"):
+            i += 1
+        else:
+            break  # the subcommand: what follows is its own arguments
+    for name, val in env.items():
+        m = re.match(r"^GIT_CONFIG_KEY_(\d+)$", name)
+        if m and _PAGER_KEY.match(val):
+            texts.append(env.get(f"GIT_CONFIG_VALUE_{m.group(1)}", ""))
+    unknown = unknown or "pager" in env.get("GIT_CONFIG_PARAMETERS", "").lower()
+    texts += [env[n] for n in ("GIT_PAGER", "PAGER") if env.get(n)]
+    return [t for t in texts if t.strip()], unknown
+
+
 def _found(found, argv, cwd) -> list:
     """(action, target[, repo]) tuples of one segment -> the classifier's action records."""
     words = " ".join(argv)[:200]
@@ -4312,7 +4347,7 @@ def _text_actions(text, cwd, depth=0):
     segs = split_commands(text, ops=True)
     if segs is None:
         return None
-    bodies, out, gh_repo = heredoc_bodies(text), [], ""
+    bodies, out, gh_repo, shell_env = heredoc_bodies(text), [], "", {}
     for k, (argv0, _, op, here) in enumerate(segs):
         argv = _unwrap(argv0)
         # a program the shell names only when it runs (RT1): `env -S '…'` splits a string into a command, `$(…)` or
@@ -4320,12 +4355,15 @@ def _text_actions(text, cwd, depth=0):
         if _env_runs_string(argv0) or (argv and (_dynamic_name(argv[0]) or (argv == ["$"] and op == "("))):
             out += _found([_unknown(text)], argv0 or argv, cwd)
             continue
-        sets = [a[8:] for a in (argv0[:argv0.index(argv[0])] if argv and argv[0] in argv0 else argv0)
-                if a.startswith("GH_REPO=")]
+        pre = argv0[:argv0.index(argv[0])] if argv and argv[0] in argv0 else argv0
+        sets = [a[8:] for a in pre if a.startswith("GH_REPO=")]
+        assigns = dict(a.split("=", 1) for a in pre if _ASSIGN.match(a))
         if argv[:1] in (["export"], ["declare"], ["typeset"]):
             sets += [a[8:] for a in argv[1:] if a.startswith("GH_REPO=")]
+            assigns.update(a.split("=", 1) for a in argv[1:] if _ASSIGN.match(a))
         if not argv or argv[:1] in (["export"], ["declare"], ["typeset"]):
             gh_repo = sets[-1] if sets else gh_repo  # the shell keeps it for the gh calls that follow
+            shell_env.update(assigns)  # and a variable git reads, also when the user's shell already exports it
             continue
         name = os.path.basename(argv[0])
         if name in ("cd", "pushd"):
@@ -4337,6 +4375,15 @@ def _text_actions(text, cwd, depth=0):
         if more is None:
             return None
         out += more
+        if name == "git":  # the pager it runs through the shell is a command like any other (RT3)
+            pagers, unknown = _git_pagers(argv, {**shell_env, **assigns})
+            if unknown:
+                out += _found([_unknown(text)], argv0, cwd)
+            for pager in pagers:
+                more = _text_actions(pager, cwd, depth + 1)
+                if more is None:
+                    return None
+                out += more
         if name in _SHELLS and _reads_stdin(argv[1:]):
             scripts = list(here)
             prev = _unwrap(segs[k - 1][0]) if k else []

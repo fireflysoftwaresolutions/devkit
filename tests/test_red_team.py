@@ -123,7 +123,6 @@ class RedTeam(unittest.TestCase):
                 self.assertIsNotNone(self.main(cmd))
 
     # ------------------------------------------------------------------ RT3 (critical): git pager runs a command
-    @unittest.expectedFailure  # RT3
     def test_rt3_git_pager_runs_an_arbitrary_command_under_a_read(self):
         # git runs the pager as a child; -p forces it even without a tty, so these run gh merge while the guard sees a
         # `git log` read. core.pager/pager.<cmd> and the PAGER/GIT_PAGER env forms all set it.
