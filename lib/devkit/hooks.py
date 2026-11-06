@@ -12,6 +12,7 @@ errors, logs them to ~/.local/state/devkit/logs/hooks.log and exits 0.
 from __future__ import annotations
 
 import json
+import re
 import os
 import subprocess
 import sys
@@ -22,7 +23,7 @@ from pathlib import Path
 from . import core
 from .core import DEV, HANDOFF, STATE, tilde
 
-STOP_DEBOUNCE_S = 600
+STOP_DEBOUNCE_S = 120  # session line, lock renewal and presence at most every 2 min
 
 
 def _log(msg: str):
@@ -78,7 +79,10 @@ def _clone_node_modules(wt: Path, main: Path):
 def context_for(cwd: str, agent: str) -> str:
     from . import registry
     top = core.gitout(cwd, "rev-parse", "--show-toplevel")
-    lines = ["## devkit · workspace context", ""]
+    lines = ["## devkit · workspace context", "",
+             "For development work only (code, debugging, tests, builds, deploys, releases, developer tools). If a "
+             "request is something else (a recipe, a general question, consulting work with the Firefly consulting "
+             "kit), answer it normally: no status block and no devkit process.", ""]
     if top and core.is_temp(top):
         lines.append(f"Scratch repository in a temp dir ({tilde(top)}): not tracked in the handoff repo. "
                      f"Real projects live under {tilde(DEV)}/<owner>/<repo>.")
@@ -128,6 +132,74 @@ def context_for(cwd: str, agent: str) -> str:
         meta = f"status {ns['status']} · priority {ns['priority']}" + (f" · milestone {ns['milestone']}" if ns["milestone"] else "")
         lines.append(f"Project: {meta} · tasks: {len(ns['tasks']['now'])} now, {ns['tasks']['open']} open "
                      f"(`dev task` lists them; `dev task add|start|done` edits them)")
+    init_dir = HANDOFF / "initiatives"
+    if init_dir.exists():
+        for d in sorted(init_dir.iterdir()):
+            f2 = d / "README.md"
+            if not f2.exists():
+                continue
+            ins = notesmod.summarize(f2.read_text())
+            if p["id"] not in ins["projects"]:
+                continue
+            pct = f"{ins['progress']}%" if ins["progress"] is not None else "-"
+            ws = (ins["workstreams"].get(p["id"]) or "").replace("\n", " ")[:220]
+            lines.append(f"Initiative **{ins['title'] or d.name}** ({ins['status']}, {pct}; members: "
+                         f"{', '.join(ins['projects'])}). This project's workstream: {ws or '-'}. "
+                         f"Initiative Now: {'; '.join(ins['tasks']['now'][:3]) or '-'}. "
+                         f"Note: {tilde(f2)} (update it for cross-project facts; `dev task -i {d.name}`).")
+    try:
+        from . import work
+        me = work.actor(agent)
+        mine, theirs = [], []
+        scopes = [p["id"]] + [f"initiatives/{d.name}" for d in (HANDOFF / "initiatives").glob("*")
+                              if p["id"] in notesmod.summarize((d / "README.md").read_text())["projects"]] \
+            if (HANDOFF / "initiatives").exists() else [p["id"]]
+        for sc in scopes:
+            for it in work.all_items(sc):
+                holder, expired = work.lock_holder(it)
+                if holder and not expired:
+                    entry = f"{it['meta']['id']} “{it['meta']['title']}” ({sc})"
+                    (mine if holder.startswith(f"{me['user']}@{me['host']}") else theirs).append(f"{entry} — {holder}")
+        if mine:
+            lines.append("Your claimed tasks: " + "; ".join(x.rsplit(" — ", 1)[0] for x in mine[:6]))
+        if theirs:
+            lines.append("Claimed by others — do NOT work on these: " + "; ".join(theirs[:6]))
+        others = [t for t in work.team() if not (t["user"] == me["user"] and t["host"] == me["host"])]
+        busy = [f"{t['user']}@{t['host']} ({s_.get('agent')}, {s_.get('branch')})" for t in others
+                for s_ in t.get("sessions", []) if s_.get("project") == p["id"]]
+        if busy:
+            lines.append("Also working on this project right now: " + ", ".join(busy[:5]) +
+                         ". Coordinate through tasks (claim before you start) and pull before you push.")
+    except Exception:
+        pass
+    try:
+        from . import lessons
+        inits = [d.name for d in (HANDOFF / "initiatives").glob("*") if (d / "README.md").exists() and
+                 p["id"] in notesmod.summarize((d / "README.md").read_text())["projects"]] \
+            if (HANDOFF / "initiatives").exists() else []
+        known = lessons.context_lines(p["id"], inits)
+        if known:
+            lines.append("Known pitfalls (lessons from earlier mistakes; follow their prevention, and `dev lesson recur "
+                         "<id> --evidence …` if one happens again):")
+            lines += ["- " + x for x in known]
+    except Exception:
+        pass
+    try:
+        from . import delivery
+        dl = delivery.summary_line(p["id"])
+        lines.append(dl if dl else "Delivery policy: not recorded yet — `dev delivery` detects and recommends one "
+                                   "(`release-policy` skill) before the first release.")
+    except Exception:
+        pass
+    lang = (core.CFG.get("language") or "en-US")
+    if lang.lower() not in ("en-us", "en"):
+        lines.append(f"Language: this developer set devkit's language to {lang}: write replies, commits, PRs and docs "
+                     f"in it unless they ask otherwise.")
+    lines.append("Long work: `dev progress start \"<goal>\" --plan \"a; b; c\" --estimate 30m`, then `dev progress step` "
+                 "and an update to the developer every few minutes (`communicating` skill: templates for updates, "
+                 "decisions, PRs, handovers; plain American English).")
+    lines.append("devkit manual: the `using-devkit` skill (session protocol, which tool for which job, project and "
+                 "initiative rules, the status line).")
     lines.append(f"Handoff note: {tilde(note)} — read it before starting; update it with the devkit `handoff` skill "
                  f"before you finish or when the user says handoff/pause/wrap up.")
     body = registry.human_sections(p["id"])
@@ -146,24 +218,51 @@ def _note_hash(top: str) -> str:
     if not f.exists():
         return ""
     from . import notes as notesmod
+    from . import work
     sec = notesmod.sections(f.read_text())
     sec.pop("Session log", None)
-    return hashlib.sha1(json.dumps(sec, sort_keys=True).encode()).hexdigest()
+    sec.pop("Tasks", None)
+    sec["_items"] = sorted(f"{i['meta']['id']}:{i['meta'].get('version')}" for i in work.all_items(pid))
+    return hashlib.sha256(json.dumps(sec, sort_keys=True).encode()).hexdigest()
+
+
+def _register_session(agent: str, sid: str, cwd: str, data: dict = None) -> Path:
+    f = _session_file(agent, sid)
+    if not f.exists():
+        top = core.gitout(cwd, "rev-parse", "--show-toplevel")
+        f.parent.mkdir(parents=True, exist_ok=True)
+        from .canary import surface
+        f.write_text(json.dumps({"agent": agent, "session": sid, "cwd": cwd, "top": top, "started": time.time(),
+                                 "surface": surface(agent, data),
+                                 "head": core.gitout(top, "rev-parse", "HEAD") if top else "",
+                                 "branch": core.gitout(top, "branch", "--show-current") if top else "",
+                                 "note_hash": _note_hash(top) if top and not core.is_temp(top) else ""}))
+    return f
 
 
 def session_start(agent: str):
     data = _stdin_json()
     cwd = data.get("cwd") or os.getcwd()
     sid = data.get("session_id") or f"pid{os.getppid()}"
-    f = _session_file(agent, sid)
-    if not f.exists():
-        top = core.gitout(cwd, "rev-parse", "--show-toplevel")
-        f.parent.mkdir(parents=True, exist_ok=True)
-        f.write_text(json.dumps({"agent": agent, "session": sid, "cwd": cwd, "top": top, "started": time.time(),
-                                 "head": core.gitout(top, "rev-parse", "HEAD") if top else "",
-                                 "branch": core.gitout(top, "branch", "--show-current") if top else "",
-                                 "note_hash": _note_hash(top) if top and not core.is_temp(top) else ""}))
+    f = _register_session(agent, sid, cwd, data)
+    try:  # the project id (timing, progress) and DEVKIT_SESSION for this session's shell commands (Claude)
+        from . import progress
+        rec = core.read_json(f, {}) or {}
+        if not rec.get("project") and rec.get("top") and not core.is_temp(rec["top"]):
+            rec["project"] = progress._project(cwd)
+            f.write_text(json.dumps(rec))
+        env_file = os.environ.get("CLAUDE_ENV_FILE")
+        if env_file:
+            with open(env_file, "a") as fh:
+                fh.write(f"export DEVKIT_SESSION={agent}:{sid}\nexport DEVKIT_AGENT={agent}\n")
+    except Exception:
+        _log(f"session-start env {agent}: {traceback.format_exc()[-300:]}")
     _spawn(["config", "repair", "--quiet"])  # restore any devkit-managed setting changed outside devkit
+    try:
+        from . import work
+        work.request_sync("session start", delay=1)  # pull other machines' claims and publish this session
+    except Exception:
+        pass
     text = context_for(cwd, agent)
     if agent == "codex":
         print(json.dumps({"hookSpecificOutput": {"hookEventName": "SessionStart", "additionalContext": text}}))
@@ -182,8 +281,8 @@ def record_session(spec: str):
     if not s or not s.get("top"):
         return
     top = s["top"]
-    if not os.path.isdir(top):
-        return
+    if not os.path.isdir(top) or core.is_temp(top):
+        return  # scratch repositories are not tracked
     main = registry.main_of(Path(top)) or Path(top)
     remote = core.gitout(main, "config", "--get", "remote.origin.url")
     pid, _, _ = core.project_identity(main, remote)
@@ -204,7 +303,16 @@ def record_session(spec: str):
     if not core.note_path(pid).exists():
         p = registry.inspect_repo(main, with_prs=False)
         registry.update_note(p)
-    registry.add_session_line(pid, " · ".join(parts), sid[:12])
+    from . import work
+    a = work.actor(agent, sid)
+    key = f"<!-- s:{sid[:12]} -->"
+    line = " · ".join(parts[:1] + [f"{a['user']}@{a['host']}"] + parts[1:]) + f" {key}"
+    f = work.SESSIONS / pid / f"{time.strftime('%Y-%m')}.md"
+    if f.exists() and key in f.read_text():  # replace this session's line (Stop runs repeatedly)
+        txt = "\n".join(ln if key not in ln else f"- {line}" for ln in f.read_text().splitlines()) + "\n"
+        f.write_text(txt)
+    else:
+        work.log_session(pid, line)
 
 
 def _handoff_nudge(agent: str, data: dict, sess: dict):
@@ -224,6 +332,25 @@ def _handoff_nudge(agent: str, data: dict, sess: dict):
             f"`dev task add \"…\"`), Decisions and gotchas — then end your reply as usual.")
 
 
+def _plans_without_reason(sess: dict) -> list:
+    """Plan/spec files changed in this session whose version was not bumped (no `dev plan revise`)."""
+    started = sess.get("started") or 0
+    pdir = HANDOFF / "plans"
+    if not pdir.exists():
+        return []
+    from . import plans as plansmod
+    out = []
+    for f in pdir.rglob("*.md"):
+        try:
+            if f.stat().st_mtime <= started + 1:
+                continue
+        except OSError:
+            continue
+        if plansmod.needs_revision(f):
+            out.append(str(f.relative_to(HANDOFF)))
+    return out
+
+
 def stop(agent: str):
     data = _stdin_json()
     from . import canary
@@ -232,19 +359,88 @@ def stop(agent: str):
     out = {}
     if sf.exists():  # only sessions that started with devkit active (they loaded the global instructions)
         sess = core.read_json(sf, {}) or {}
-        res = canary.check(agent, data)
+        reasons = []
+        try:  # devkit's process is for development turns only (a recipe or a consulting deck gets nothing)
+            from . import scope
+            dev_turn = scope.decide(data, sess)
+        except Exception:
+            dev_turn = True
+        if not dev_turn:
+            _log(f"stop {agent}: not development work ({sess.get('turn_class') or 'no signal'}); devkit stays out")
+        res = canary.check(agent, data) if dev_turn else None
         if res:
             ok, pid, line = res
             if ok and line:
                 sess["status"] = line
                 branch = core.gitout(sess.get("top") or data.get("cwd") or ".", "branch", "--show-current")
                 canary.save_status(pid, agent, line, branch or sess.get("branch"))
-            elif not ok and agent == "claude":
-                out["systemMessage"] = canary.miss_message(agent, sid)
-        reason = _handoff_nudge(agent, data, sess)
-        if reason:
+            elif not ok:
+                from . import audit
+                audit.record("canary.miss", pid or "", "final message without the status block", "miss")
+                sess["canary_missed"] = True  # later prompts in this session get a reminder
+                if agent == "claude":
+                    out["systemMessage"] = canary.miss_message(agent, sid)
+                if core.CFG.get("canary", {}).get("enforce", True):
+                    text_ = data.get("last_assistant_message") or canary.last_assistant_text(
+                        data.get("transcript_path")) or ""
+                    reasons.append(canary.miss_reason(text_) + " Reply now with the block as the very first lines: "
+                                   "`**[Firefly> DevKit]** <project> · `<branch>` · <task>`, then the bullets "
+                                   "**Done:**, **Check:** (✓/⚠/✗ + evidence) and **Next:** (global instructions §0).")
+        elif data.get("stop_hook_active"):
+            text = data.get("last_assistant_message") or canary.last_assistant_text(data.get("transcript_path")) or ""
+            if canary.has_marker(text):  # the corrected reply after a reminder: keep it as the latest status
+                line = canary.status_text(text)
+                sess["status"] = line
+                top = sess.get("top") or ""
+                if top and not core.is_temp(top):
+                    from .registry import main_of
+                    m = main_of(Path(top)) or Path(top)
+                    pid_ = core.project_identity(m, core.gitout(m, "config", "--get", "remote.origin.url"))[0]
+                    canary.save_status(pid_, agent, line, core.gitout(top, "branch", "--show-current"))
+                    if sess.get("canary_missed"):
+                        canary.record_corrected(agent, sid, pid_, line)
+        try:
+            from . import skillguard
+            why = skillguard.on_stop(agent, data, sess) if dev_turn else None
+            if why:
+                reasons.append(why)
+        except Exception:
+            _log(f"stop skills {agent}: {traceback.format_exc()[-300:]}")
+        try:  # lessons the reply names were applied: that use keeps them alive
+            from . import lessons as _les
+            said = data.get("last_assistant_message") or ""
+            ids = sorted(set(re.findall(r"\bL-[0-9a-z]{9,}\b", said)))
+            if ids:
+                _les.track(ids, "applied")
+        except Exception:
+            pass
+        if dev_turn and not data.get("stop_hook_active") and not sess.get("lesson_nudged") and sess.get("top"):
+            try:
+                from . import lessons
+                fixes = lessons.fixed_in_session(sess["top"], sess.get("head"))
+                if fixes:
+                    sess["lesson_nudged"] = True
+                    reasons.append("devkit: this session fixed or reverted something (" + "; ".join(fixes[:3]) +
+                                   "). If it was a mistake that could happen again, record a lesson: `dev lesson add "
+                                   "\"<title>\" --cause \"…\" --prevent \"…\" --evidence \"commit …\"` (or "
+                                   "`dev lesson recur <id>` if a known pitfall repeated). Skip it for a trivial fix.")
+            except Exception:
+                _log(f"stop lessons {agent}: {traceback.format_exc()[-300:]}")
+        plans = _plans_without_reason(sess) if dev_turn else []
+        if plans and not data.get("stop_hook_active"):
+            reasons.append("devkit: you changed plan(s) without recording why: " + ", ".join(plans[:4]) +
+                           ". Run `dev plan revise <file> --why \"…\"` for each (it versions the plan and logs the "
+                           "reason), then finish.")
+        nudge = _handoff_nudge(agent, data, sess) if dev_turn else None
+        if nudge:
             sess["nudged"] = True
-            out.update({"decision": "block", "reason": reason})
+            reasons.append(nudge)
+        if reasons:
+            out.update({"decision": "block", "reason": " ".join(reasons)})
+        else:
+            from . import progress
+            progress.on_turn_end(agent, sid, sess)
+            sess["turn_started"] = None
         sf.write_text(json.dumps(sess))
     if out:
         print(json.dumps(out))
@@ -258,7 +454,7 @@ def stop(agent: str):
         mark.touch()
     except OSError:
         return
-    _spawn_sync(["--session", f"{agent}:{sid}", "--offline"])
+    _spawn_sync(["--session", f"{agent}:{sid}", "--offline", "--renew", agent])
 
 
 def config_change(agent: str):
@@ -275,6 +471,8 @@ def config_change(agent: str):
     ks = sorted({d.key for d in drift})
     keys = ", ".join(ks[:6]) + (f" (+{len(ks) - 6} more)" if len(ks) > 6 else "")
     _log(f"config-change blocked ({agent}): {keys}")
+    from . import audit
+    audit.record("config.blocked", path, keys, "blocked")
     policy._log(f"blocked change to devkit-managed keys: {keys}")
     _spawn(["config", "repair", "--quiet"])
     print(f"devkit manages these settings: {keys}. Change devkit's configuration instead "
@@ -307,20 +505,194 @@ def guard(agent: str):
     if os.environ.get("DEVKIT_GUARD", "").lower() == "off":
         return
     data = _stdin_json()
+    try:
+        from . import progress
+        progress.tool_started(data)
+    except Exception:
+        pass
     from . import guard as g
     verdict = g.check(data.get("tool_name") or "", data.get("tool_input") or {}, data.get("cwd") or os.getcwd(), agent)
     if not verdict:
+        if data.get("tool_name") in ("Agent", "Task"):  # subagent briefs get the skills their work requires
+            try:
+                from . import skillguard
+                updated = skillguard.on_agent_brief(agent, data.get("tool_input") or {})
+            except Exception:
+                updated = None
+            if updated:
+                _log(f"skills {agent}: appended required skills to a subagent brief")
+                print(json.dumps({"hookSpecificOutput": {"hookEventName": "PreToolUse", "permissionDecision": "allow",
+                                                         "updatedInput": updated}}))
         return
     decision, reason = verdict
     if agent == "codex" and decision == "ask":
         decision = "deny"
     _log(f"guard {agent} {decision}: {reason[:160]}")
+    from . import audit
+    tin = data.get("tool_input") or {}
+    audit.record(f"guard.{decision}", tin.get("command") or tin.get("file_path") or data.get("tool_name") or "",
+                 reason[:400], decision, tool=data.get("tool_name") or "")
     print(json.dumps({"hookSpecificOutput": {"hookEventName": "PreToolUse", "permissionDecision": decision,
                                              "permissionDecisionReason": reason}}))
 
 
+def _context_out(event: str, text: str):
+    if text:
+        print(json.dumps({"hookSpecificOutput": {"hookEventName": event, "additionalContext": text}}))
+
+
+def prompt(agent: str):
+    """UserPromptSubmit: start the turn clock; answer "how is it going?" from real progress records.
+
+    Safety net: a session without a devkit record never ran SessionStart (hook failure, an untrusted Codex hook,
+    an old client). Register it now and inject the full devkit context, so every session works with devkit."""
+    from . import progress
+    data = _stdin_json()
+    sid = data.get("session_id") or ""
+    extra = ""
+    if sid and not _session_file(agent, sid).exists():
+        cwd = data.get("cwd") or os.getcwd()
+        _register_session(agent, sid, cwd, data)
+        extra = context_for(cwd, agent)
+        _log(f"prompt {agent}: session {sid[:12]} had no SessionStart; devkit context injected")
+    raw = (data.get("prompt") or "").lstrip()
+    if raw.startswith(("<task-notification", "[SYSTEM NOTIFICATION", "<system-reminder", "<agent-message")) or \
+            "<task-notification>" in raw[:400]:
+        _context_out("UserPromptSubmit", extra)  # background events are not the developer's request
+        return
+    try:  # development or not? A follow-up with no signal keeps the previous turn's class
+        from . import scope
+        sf0 = _session_file(agent, sid) if sid else None
+        s0 = (core.read_json(sf0, {}) or {}) if sf0 and sf0.exists() else {}
+        cls = scope.resolve(raw, s0.get("turn_class"))
+        if sf0 and sf0.exists():
+            s0["turn_class"] = cls
+            sf0.write_text(json.dumps(s0))
+    except Exception:
+        cls = None
+    if cls == "other":  # a recipe, a general question, consulting work: no devkit context, reminders or skills
+        _log(f"prompt {agent}: not development work; devkit stays out of this turn")
+        _context_out("UserPromptSubmit", "")
+        return
+    try:
+        from . import lessons as _les
+        sfile = _session_file(agent, sid) if sid else None
+        _proj = ((core.read_json(sfile, {}) or {}).get("project") or "") if sfile and sfile.exists() else ""
+        _les.note_correction(data.get("prompt") or "", _proj)
+    except Exception:
+        pass
+    text = progress.on_prompt(agent, data)
+    try:
+        sf_ = _session_file(agent, sid) if sid else None
+        if sf_ and sf_.exists() and (core.read_json(sf_, {}) or {}).get("canary_missed"):
+            text = ("devkit · reminder: this session missed the status block before. Your final message (everything "
+                    "after your last tool call) opens with **[Firefly> DevKit]** <project> · `<branch>` · <task>, then "
+                    "Done / Check / Next (global instructions §0). Nothing above it: put the verdict, a correction or "
+                    "a comment on the last command below the block.") + ("\n\n" + text if text else "")
+    except Exception:
+        pass
+    skills = ""
+    try:
+        from . import skillguard
+        sf = _session_file(agent, sid) if sid else None
+        sess = (core.read_json(sf, {}) or {}) if sf and sf.exists() else {}
+        skills = skillguard.on_prompt(agent, data.get("prompt") or "", sess)
+    except Exception:
+        _log(f"prompt skills {agent}: {traceback.format_exc()[-300:]}")
+    _context_out("UserPromptSubmit", "\n\n".join(x for x in (extra, skills, text) if x))
+
+
+DELIVERY = re.compile(r"\bgit\s+(?:-C\s+\S+\s+)?(commit|push|merge|tag|rebase|cherry-pick|revert)\b|"
+                      r"\bgh\s+(pr\s+(create|merge)|release\s+create)\b")
+
+
+def post_tool(agent: str):
+    """PostToolUse: time slow calls; remind the agent to update the developer after a long silence; sync the
+    handoff repository right after a delivery event (commit, push, merge, tag, PR, release)."""
+    from . import progress
+    data = _stdin_json()
+    try:
+        cmd = (data.get("tool_input") or {}).get("command") or ""
+        if isinstance(cmd, list):
+            cmd = " ".join(cmd)
+        if data.get("tool_name") in ("Bash", "exec_command", "shell") and DELIVERY.search(cmd):
+            from . import work
+            work.request_sync("delivery: " + DELIVERY.search(cmd).group(0))
+    except Exception:
+        pass
+    _context_out("PostToolUse", progress.on_tool_done(agent, data))
+
+
+def subagent_start(agent: str):
+    from . import progress
+    progress.on_subagent(agent, _stdin_json(), True)
+
+
+def subagent_stop(agent: str):
+    from . import progress
+    progress.on_subagent(agent, _stdin_json(), False)
+
+
+QUOTA = STATE / "quota"
+
+
+def _branch_of(path: str):
+    """(repository name, branch) by reading .git directly: the status line must not spawn git."""
+    d = Path(path or ".").resolve()
+    for p in [d, *d.parents]:
+        g = p / ".git"
+        if g.exists():
+            try:
+                if g.is_file():  # a worktree: "gitdir: <main>/.git/worktrees/<name>"
+                    g = Path(g.read_text().split(":", 1)[1].strip())
+                head = (g / "HEAD").read_text().strip()
+            except OSError:
+                return p.name, ""
+            return p.name, head.rsplit("/", 1)[-1] if head.startswith("ref:") else head[:7]
+    return d.name, ""
+
+
+def statusline(agent: str):
+    """Claude Code's status line. Records the plan's usage windows (rate_limits: 5-hour and 7-day, the only place
+    Claude Code reports them) for doctor, the dashboard and the self-test, then draws one short line:
+    project · branch · model · context used · 5h and 7d usage."""
+    data = _stdin_json()
+    rl = data.get("rate_limits") or {}
+    if rl.get("five_hour") or rl.get("seven_day"):
+        try:
+            f = QUOTA / f"{agent}.json"
+            old = core.read_json(f, {}) or {}
+            rec = {"ts": int(time.time()), "five_hour": rl.get("five_hour"), "seven_day": rl.get("seven_day")}
+            if any(old.get(k) != rec[k] for k in ("five_hour", "seven_day")) or rec["ts"] - (old.get("ts") or 0) > 300:
+                QUOTA.mkdir(parents=True, exist_ok=True)
+                tmp = f.with_suffix(".tmp")
+                tmp.write_text(json.dumps(rec))
+                os.replace(tmp, f)
+        except Exception:
+            pass
+    ws = data.get("workspace") or {}
+    repo, branch = _branch_of(ws.get("current_dir") or data.get("cwd") or os.getcwd())
+    model = ((data.get("model") or {}).get("display_name") or "").replace("Claude ", "")
+    ctx = (data.get("context_window") or {}).get("used_percentage")
+    plain = os.environ.get("NO_COLOR")  # Claude Code renders ANSI colors in the status line
+    dim, amber, red, off = ("",) * 4 if plain else ("\033[2m", "\033[38;2;255;179;74m", "\033[31m", "\033[0m")
+
+    def pct(label, v):
+        if v is None:
+            return None
+        v = round(float(v))
+        tone = red if v >= 95 else amber if v >= 80 else ""
+        return f"{dim}{label}{off} {tone}{v}%{off if tone else ''}"
+    parts = [repo + (f" {dim}·{off} {branch}" if branch else ""), model or None, pct("ctx", ctx),
+             pct("5h", (rl.get("five_hour") or {}).get("used_percentage")),
+             pct("7d", (rl.get("seven_day") or {}).get("used_percentage"))]
+    print(f" {dim}·{off} ".join(p for p in parts if p))
+
+
 HANDLERS = {"session-start": session_start, "stop": stop, "session-end": session_end, "guard": guard,
-            "config-change": config_change, "instructions-loaded": instructions_loaded}
+            "config-change": config_change, "instructions-loaded": instructions_loaded, "prompt": prompt,
+            "post-tool": post_tool, "subagent-start": subagent_start, "subagent-stop": subagent_stop,
+            "statusline": statusline}
 
 
 def run(event: str, agent: str) -> int:

@@ -1,0 +1,138 @@
+{
+  "name": "session-lifecycle",
+  "kind": "sequence",
+  "title": "A session with devkit",
+  "desc": "Sequence of one agent session. At session start the devkit hooks pull the handoff repository, read the project's handoff note, tasks, locks, and the lessons that apply, and give the agent its workspace context. On each prompt the hooks start the turn clock and, when you ask how it is going, add the real progress records. On every tool call the guard allows the action or denies it with the right way to do it; after a commit, push, merge, tag, PR, or release the hooks sync the handoff repository within seconds, and after slow work they remind the agent to update you. Every final message starts with the status block; the Stop hook checks it, records the status, the session line and the lock renewal, and after a fix or revert asks once for a lesson. At session end devkit syncs the map and notes and pushes the private handoff repository to GitHub.",
+  "participants": [
+    {
+      "id": "you",
+      "label": "You",
+      "family": "neutral"
+    },
+    {
+      "id": "agent",
+      "label": "Agent",
+      "sub": "Claude Code · Codex"
+    },
+    {
+      "id": "hooks",
+      "label": "devkit hooks",
+      "family": "firefly"
+    },
+    {
+      "id": "handoff",
+      "label": "Handoff repo",
+      "family": "slate"
+    },
+    {
+      "id": "github",
+      "label": "GitHub",
+      "family": "steel"
+    }
+  ],
+  "messages": [
+    {
+      "divider": "Session start"
+    },
+    {
+      "from": "agent",
+      "to": "hooks",
+      "label": "SessionStart"
+    },
+    {
+      "from": "hooks",
+      "to": "handoff",
+      "label": "read note · tasks · locks · lessons"
+    },
+    {
+      "from": "hooks",
+      "to": "agent",
+      "label": "workspace context",
+      "style": "return"
+    },
+    {
+      "divider": "Work"
+    },
+    {
+      "from": "you",
+      "to": "agent",
+      "label": "request"
+    },
+    {
+      "from": "agent",
+      "to": "hooks",
+      "label": "UserPromptSubmit"
+    },
+    {
+      "from": "hooks",
+      "to": "agent",
+      "label": "progress records, if you ask",
+      "style": "return"
+    },
+    {
+      "from": "agent",
+      "to": "hooks",
+      "label": "PreToolUse: command or file write"
+    },
+    {
+      "from": "hooks",
+      "to": "agent",
+      "label": "allow, or deny with the right way",
+      "style": "return"
+    },
+    {
+      "from": "agent",
+      "to": "hooks",
+      "label": "PostToolUse: time it · sync deliveries"
+    },
+    {
+      "from": "hooks",
+      "to": "agent",
+      "label": "update the developer (~8 min)",
+      "style": "return"
+    },
+    {
+      "divider": "Every reply"
+    },
+    {
+      "from": "agent",
+      "to": "you",
+      "label": "status block, then the answer",
+      "style": "primary"
+    },
+    {
+      "from": "agent",
+      "to": "hooks",
+      "label": "Stop"
+    },
+    {
+      "from": "hooks",
+      "to": "handoff",
+      "label": "status · session line · locks"
+    },
+    {
+      "from": "hooks",
+      "to": "agent",
+      "label": "record a lesson? (after a fix)",
+      "style": "return"
+    },
+    {
+      "divider": "Session end"
+    },
+    {
+      "from": "agent",
+      "to": "hooks",
+      "label": "SessionEnd"
+    },
+    {
+      "from": "hooks",
+      "to": "handoff",
+      "label": "sync map · notes · tasks"
+    },
+    {
+      "from": "handoff",
+      "to": "github",
+      "label": "push (private)"
+    }
+  ]
+}

@@ -1,0 +1,73 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1208" height="1072" viewBox="0 0 1208 1072" role="img" aria-labelledby="dk-title dk-desc">
+<title id="dk-title">Two machines, one handoff repository</title>
+<desc id="dk-desc">Sequence of a task lock between two developers' machines. Maria's agent claims a task with dev task start: devkit pulls, writes the lock into the item's file and pushes it to the handoff repository on GitHub at once. Jordan's machine pulls at session start and on every sync, so Jordan's agent is told the task is claimed, and its own claim is refused. While Maria works, the Stop hook renews the lock and publishes presence and the session line. dev task done releases the lock and pushes at once; a lock that nobody renews for 8 hours is released by the hourly sync on any machine.</desc>
+<rect width="1208" height="1072" fill="#F3F1EB"/>
+<g font-family="Manrope, 'Manrope Variable', system-ui, -apple-system, 'Segoe UI', Arial, sans-serif">
+<circle cx="68" cy="74" r="4" fill="#FFB34A"/>
+<text x="80" y="78.5" font-size="12" font-weight="600" fill="#62645B" letter-spacing="0.48">TWO MACHINES, ONE HANDOFF REPOSITORY</text>
+<g transform="translate(140.0,104.0)">
+<line x1="0.0" y1="80.0" x2="0.0" y2="936.0" stroke="#D8D4CA" stroke-width="1.5" stroke-dasharray="4 4"/>
+<line x1="192.0" y1="80.0" x2="192.0" y2="936.0" stroke="#D8D4CA" stroke-width="1.5" stroke-dasharray="4 4"/>
+<line x1="464.0" y1="80.0" x2="464.0" y2="936.0" stroke="#D8D4CA" stroke-width="1.5" stroke-dasharray="4 4"/>
+<line x1="696.0" y1="80.0" x2="696.0" y2="936.0" stroke="#D8D4CA" stroke-width="1.5" stroke-dasharray="4 4"/>
+<line x1="920.0" y1="80.0" x2="920.0" y2="936.0" stroke="#D8D4CA" stroke-width="1.5" stroke-dasharray="4 4"/>
+<line x1="-76.0" y1="128.0" x2="1000.0" y2="128.0" stroke="#D8D4CA" stroke-width="1"/>
+<line x1="-76.0" y1="296.0" x2="1000.0" y2="296.0" stroke="#D8D4CA" stroke-width="1"/>
+<line x1="-76.0" y1="576.0" x2="1000.0" y2="576.0" stroke="#D8D4CA" stroke-width="1"/>
+<line x1="-76.0" y1="688.0" x2="1000.0" y2="688.0" stroke="#D8D4CA" stroke-width="1"/>
+<rect x="-76.0" y="117.0" width="61.9" height="22.0" rx="11" fill="#EAE7DF"/>
+<text x="-66.0" y="132.5" font-size="12" font-weight="600" fill="#62645B" text-anchor="start" letter-spacing="0.48">CLAIM</text>
+<path d="M0.0,192.0 L184.5,192.0" fill="none" stroke="#62645B" stroke-width="1.5" stroke-linejoin="round" stroke-linecap="round"/><polygon points="192.0,192.0 184.0,196.0 184.0,188.0" fill="#62645B"/>
+<rect x="41.9" y="162.0" width="108.1" height="22.0" rx="9" fill="#F3F1EB"/>
+<text x="96.0" y="177.0" font-size="13" font-weight="400" fill="#62645B" text-anchor="middle">dev task start 2</text>
+<path d="M192.0,248.0 L454.5,248.0" fill="none" stroke="#9D671F" stroke-width="2.5" stroke-linejoin="round" stroke-linecap="round"/><polygon points="464.0,248.0 454.0,253.0 454.0,243.0" fill="#9D671F"/>
+<rect x="234.6" y="218.0" width="186.9" height="22.0" rx="9" fill="#F3F1EB"/>
+<text x="328.0" y="233.0" font-size="13" font-weight="400" fill="#62645B" text-anchor="middle">pull, write lock, push at once</text>
+<rect x="-76.0" y="285.0" width="180.1" height="22.0" rx="11" fill="#EAE7DF"/>
+<text x="-66.0" y="300.5" font-size="12" font-weight="600" fill="#62645B" text-anchor="start" letter-spacing="0.48">EVERY OTHER MACHINE</text>
+<path d="M464.0,360.0 L688.5,360.0" fill="none" stroke="#62645B" stroke-width="1.5" stroke-linejoin="round" stroke-linecap="round"/><polygon points="696.0,360.0 688.0,364.0 688.0,356.0" fill="#62645B"/>
+<rect x="484.7" y="330.0" width="190.5" height="22.0" rx="9" fill="#F3F1EB"/>
+<text x="580.0" y="345.0" font-size="13" font-weight="400" fill="#62645B" text-anchor="middle">pull at session start and sync</text>
+<path d="M696.0,416.0 L920.0,416.0" fill="none" stroke="#62645B" stroke-width="1.5" stroke-linejoin="round" stroke-dasharray="6 5" stroke-linecap="butt"/><polyline points="912.0,420.0 920.0,416.0 912.0,412.0" fill="none" stroke="#62645B" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/>
+<rect x="722.9" y="386.0" width="170.1" height="22.0" rx="9" fill="#F3F1EB"/>
+<text x="808.0" y="401.0" font-size="13" font-weight="400" fill="#62645B" text-anchor="middle">context: claimed by maria</text>
+<path d="M920.0,472.0 L703.5,472.0" fill="none" stroke="#62645B" stroke-width="1.5" stroke-linejoin="round" stroke-linecap="round"/><polygon points="696.0,472.0 704.0,468.0 704.0,476.0" fill="#62645B"/>
+<rect x="753.9" y="442.0" width="108.1" height="22.0" rx="9" fill="#F3F1EB"/>
+<text x="808.0" y="457.0" font-size="13" font-weight="400" fill="#62645B" text-anchor="middle">dev task start 2</text>
+<path d="M696.0,528.0 L920.0,528.0" fill="none" stroke="#62645B" stroke-width="1.5" stroke-linejoin="round" stroke-dasharray="6 5" stroke-linecap="butt"/><polyline points="912.0,532.0 920.0,528.0 912.0,524.0" fill="none" stroke="#62645B" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/>
+<rect x="716.8" y="498.0" width="182.4" height="22.0" rx="9" fill="#F3F1EB"/>
+<text x="808.0" y="513.0" font-size="13" font-weight="400" fill="#62645B" text-anchor="middle">refused: claimed until 18:40</text>
+<rect x="-76.0" y="565.0" width="164.0" height="22.0" rx="11" fill="#EAE7DF"/>
+<text x="-66.0" y="580.5" font-size="12" font-weight="600" fill="#62645B" text-anchor="start" letter-spacing="0.48">WHILE MARIA WORKS</text>
+<path d="M192.0,640.0 L456.5,640.0" fill="none" stroke="#62645B" stroke-width="1.5" stroke-linejoin="round" stroke-linecap="round"/><polygon points="464.0,640.0 456.0,644.0 456.0,636.0" fill="#62645B"/>
+<rect x="212.7" y="610.0" width="230.6" height="22.0" rx="9" fill="#F3F1EB"/>
+<text x="328.0" y="625.0" font-size="13" font-weight="400" fill="#62645B" text-anchor="middle">renew lock · presence · session line</text>
+<rect x="-76.0" y="677.0" width="63.7" height="22.0" rx="11" fill="#EAE7DF"/>
+<text x="-66.0" y="692.5" font-size="12" font-weight="600" fill="#62645B" text-anchor="start" letter-spacing="0.48">FINISH</text>
+<path d="M0.0,752.0 L184.5,752.0" fill="none" stroke="#62645B" stroke-width="1.5" stroke-linejoin="round" stroke-linecap="round"/><polygon points="192.0,752.0 184.0,756.0 184.0,748.0" fill="#62645B"/>
+<rect x="40.0" y="722.0" width="112.0" height="22.0" rx="9" fill="#F3F1EB"/>
+<text x="96.0" y="737.0" font-size="13" font-weight="400" fill="#62645B" text-anchor="middle">dev task done 2</text>
+<path d="M192.0,808.0 L456.5,808.0" fill="none" stroke="#62645B" stroke-width="1.5" stroke-linejoin="round" stroke-linecap="round"/><polygon points="464.0,808.0 456.0,812.0 456.0,804.0" fill="#62645B"/>
+<rect x="255.0" y="778.0" width="146.1" height="22.0" rx="9" fill="#F3F1EB"/>
+<text x="328.0" y="793.0" font-size="13" font-weight="400" fill="#62645B" text-anchor="middle">release, push at once</text>
+<rect x="-76.0" y="0.0" width="152.0" height="80.0" rx="6.0" fill="#FFFFFF" stroke="#BFB8AB" stroke-width="1.5"/>
+<text x="0.0" y="34.0" font-size="16" font-weight="600" fill="#272820" text-anchor="middle">Maria's agent</text>
+<text x="0.0" y="56.0" font-size="13" font-weight="400" fill="#62645B" text-anchor="middle">laptop</text>
+<rect x="116.0" y="0.0" width="152.0" height="80.0" rx="6.0" fill="#D8DCDA" stroke="#6B8795" stroke-width="1.5"/>
+<text x="192.0" y="34.0" font-size="16" font-weight="600" fill="#272820" text-anchor="middle">Handoff clone</text>
+<text x="192.0" y="56.0" font-size="13" font-weight="400" fill="#39464B" text-anchor="middle">laptop</text>
+<rect x="396.0" y="0.0" width="136.0" height="80.0" rx="6.0" fill="#E6E8E6" stroke="#8D9391" stroke-width="1.5"/>
+<text x="464.0" y="34.0" font-size="16" font-weight="600" fill="#272820" text-anchor="middle">GitHub</text>
+<text x="464.0" y="56.0" font-size="13" font-weight="400" fill="#596060" text-anchor="middle">&lt;you&gt;/handoff</text>
+<rect x="620.0" y="0.0" width="152.0" height="80.0" rx="6.0" fill="#D8DCDA" stroke="#6B8795" stroke-width="1.5"/>
+<text x="696.0" y="34.0" font-size="16" font-weight="600" fill="#272820" text-anchor="middle">Handoff clone</text>
+<text x="696.0" y="56.0" font-size="13" font-weight="400" fill="#39464B" text-anchor="middle">desktop</text>
+<rect x="840.0" y="0.0" width="160.0" height="80.0" rx="6.0" fill="#FFFFFF" stroke="#BFB8AB" stroke-width="1.5"/>
+<text x="920.0" y="34.0" font-size="16" font-weight="600" fill="#272820" text-anchor="middle">Jordan's agent</text>
+<text x="920.0" y="56.0" font-size="13" font-weight="400" fill="#62645B" text-anchor="middle">desktop</text>
+<path d="M404.0,854.0 Q404.0,848.0 410.0,848.0 L966.0,848.0 L980.0,862.0 L980.0,898.0 Q980.0,904.0 974.0,904.0 L410.0,904.0 Q404.0,904.0 404.0,898.0 Z" fill="#EAE7DF" stroke="#D8D4CA" stroke-width="1"/><path d="M966.0,848.0 L966.0,862.0 L980.0,862.0" fill="none" stroke="#D8D4CA" stroke-width="1"/>
+<text x="692.0" y="870.0" font-size="13" font-weight="400" fill="#62645B" text-anchor="middle">No renewal for 8 h: the hourly sync on any</text>
+<text x="692.0" y="888.0" font-size="13" font-weight="400" fill="#62645B" text-anchor="middle">machine releases the lock</text>
+</g>
+</g>
+</svg>

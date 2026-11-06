@@ -1,7 +1,7 @@
 # Docker
 
 devkit runs Docker on [Colima](https://github.com/abiosoft/colima), a lightweight Linux VM, with the Docker CLI,
-Compose and Buildx from Homebrew. No Docker Desktop licence is needed.
+Compose, and Buildx from Homebrew. No Docker Desktop license is needed.
 
 ## Start and stop
 
@@ -18,7 +18,7 @@ dev docker autostart-on    # start Colima at login (brew services); autostart-of
 From `docker` in `~/.config/devkit/config.json`:
 
 | Setting | Default | Notes |
-|---|---|---|
+| --- | --- | --- |
 | `cpu` | `6` | Changeable on a later `colima start` |
 | `memory` | `12` (GB) | Changeable on a later start |
 | `disk` | `80` (GB) | Sparse, only used space is taken; can only grow |
@@ -73,4 +73,4 @@ The global instructions tell agents to start Docker with `dev docker up`, never 
 starting long-running containers the task does not need, and stop the containers they started. The automatic cleanup
 prunes only dangling images and build cache older than 7 days ([Disk and cleanup](disk-and-cleanup.md)).
 
-See also: [Configuration](configuration.md) · [Troubleshooting](troubleshooting.md)
+See also [Configuration](configuration.md) and [Troubleshooting](troubleshooting.md).

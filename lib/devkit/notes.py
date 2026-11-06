@@ -35,7 +35,9 @@ TASKS_HEADER = "## Tasks"
 BUCKETS = ("Now", "Next", "Later", "Done")
 STATUSES = ("active", "paused", "blocked", "done", "archived")
 PRIORITIES = ("high", "normal", "low")
-META_KEYS = ("status", "priority", "milestone", "due", "tags")
+META_KEYS = ("status", "priority", "milestone", "due", "tags", "progress")
+INITIATIVE_KEYS = ("kind", "title", "status", "priority", "owner", "milestone", "due", "progress", "projects", "tags",
+                   "source")
 TASK_RE = re.compile(r"^(\s*)- \[([ xX~])\] (.+)$")
 
 TEMPLATE = """---
@@ -73,6 +75,62 @@ _What works, what is half done, what is broken. Keep it true; rewrite rather tha
 """
 
 
+INITIATIVE_TEMPLATE = """---
+kind: initiative
+title: {title}
+status: active
+priority: normal
+owner: {owner}
+milestone:
+due:
+progress:
+projects: [{projects}]
+tags: []
+source: []
+---
+# {title}
+
+{auto_start}
+{auto_end}
+
+## Goal
+_The outcome, for whom, and how we will know it is done (1-3 sentences)._
+
+## Scope
+- _In scope / out of scope._
+
+## Current state
+_What is done and verified, what is half done, what is broken — across all member projects._
+
+## Workstreams
+{workstreams}
+## Tasks
+### Now
+### Next
+### Later
+### Done
+
+## Decisions and gotchas
+- _Cross-project decisions and contracts (APIs, events, versions) every member must respect._
+
+## Risks and open questions
+- _What could stop the initiative; what still needs a decision._
+
+## Links
+- _Specs, environments, boards, related initiatives._
+
+{log_header}
+<!-- Newest first, one line per session or milestone. -->
+"""
+
+
+def new_initiative(title: str, owner: str = "", projects=()) -> str:
+    ws = "".join(f"### {p}\n_Role in the initiative, state, next step._\n\n" for p in projects) or \
+        "### <owner/repo>\n_Role in the initiative, state, next step._\n\n"
+    return INITIATIVE_TEMPLATE.format(title=title, owner=owner, projects=", ".join(projects), workstreams=ws,
+                                      auto_start=AUTO_START, auto_end=AUTO_END, log_header=LOG_HEADER)
+
+
 def new_note(title: str) -> str:
     return TEMPLATE.format(title=title, auto_start=AUTO_START, auto_end=AUTO_END, log_header=LOG_HEADER)
 
@@ -106,7 +164,8 @@ def split_frontmatter(text: str):
 
 def render_frontmatter(meta: dict) -> str:
     lines = ["---"]
-    for k in list(META_KEYS) + [k for k in meta if k not in META_KEYS]:
+    order = INITIATIVE_KEYS if meta.get("kind") == "initiative" else META_KEYS
+    for k in list(order) + [k for k in meta if k not in order]:
         v = meta.get(k, [] if k == "tags" else "")
         if isinstance(v, list):
             v = "[" + ", ".join(v) + "]"
@@ -123,8 +182,10 @@ def set_meta(text: str, **kv) -> str:
             raise ValueError(f"priority must be one of {', '.join(PRIORITIES)}")
         if k == "due" and v and not re.match(r"^\d{4}-\d{2}-\d{2}$", v):
             raise ValueError("due must be YYYY-MM-DD")
-        if k == "tags" and isinstance(v, str):
+        if k in ("tags", "projects", "source") and isinstance(v, str):
             v = [t.strip() for t in v.split(",") if t.strip()]
+        if k == "progress" and v not in ("", None) and not str(v).rstrip("%").isdigit():
+            raise ValueError("progress must be a number from 0 to 100 (or empty to compute it from tasks)")
         meta[k] = v
     for k, default in (("status", "active"), ("priority", "normal")):
         meta.setdefault(k, default)
@@ -187,6 +248,9 @@ def tasks(text: str) -> list:
             bucket = b if b in BUCKETS else bucket
             continue
         m = TASK_RE.match(ln)
+        if not m and out and ln.startswith("  ") and ln.strip() and not ln.lstrip().startswith(("- ", "* ", "#")):
+            out[-1]["text"] += " " + ln.strip()  # a task wrapped over several lines
+            continue
         if m:
             mark = m.group(2).lower()
             done = mark == "x"
@@ -325,16 +389,59 @@ def prune_done(text: str, keep: int = 15) -> str:
 
 # --------------------------------------------------------------------------- summary for registry / dashboard
 
+def workstreams(text: str) -> dict:
+    """### subsections of ## Workstreams -> {project id: text}."""
+    body = sections(text).get("Workstreams", "")
+    out, cur, buf = {}, None, []
+    for ln in body.splitlines():
+        if ln.startswith("### "):
+            if cur:
+                out[cur] = meaningful("\n".join(buf))
+            cur, buf = ln[4:].strip(), []
+        elif cur:
+            buf.append(ln)
+    if cur:
+        out[cur] = meaningful("\n".join(buf))
+    return {k: v for k, v in out.items() if not k.startswith("<")}
+
+
+def progress_of(meta: dict, ts: list):
+    """-> (percent or None, source). Manual `progress:` in frontmatter wins; else done / (done + open) tasks."""
+    raw = str(meta.get("progress") or "").strip().rstrip("%")
+    if raw.isdigit():
+        return max(0, min(100, int(raw))), "manual"
+    done = len([t for t in ts if t["done"]])
+    total = len(ts)
+    return (round(100 * done / total), "tasks") if total else (None, "none")
+
+
 def summarize(text: str) -> dict:
     meta, _ = split_frontmatter(text)
     sec = sections(text)
     ts = tasks(text)
     open_ = [t for t in ts if not t["done"]]
+    pct, psrc = progress_of(meta, ts)
     sess = []
     for ln in (sec.get("Session log") or "").splitlines():
         if ln.startswith("- "):
             sess.append(re.sub(r"\s*<!--.*?-->\s*$", "", ln[2:]).strip())
+    projects = meta.get("projects") or []
+    if isinstance(projects, str):
+        projects = [p.strip() for p in projects.split(",") if p.strip()]
+    source = meta.get("source") or []
+    if isinstance(source, str):
+        source = [x.strip() for x in source.split(",") if x.strip()]
     return {
+        "kind": meta.get("kind") or "project",
+        "title": meta.get("title") or "",
+        "owner": meta.get("owner") or "",
+        "projects": [p.lower() for p in projects],
+        "source": source,
+        "progress": pct, "progress_source": psrc,
+        "goal": meaningful(sec.get("Goal", "")),
+        "scope": meaningful(sec.get("Scope", "")),
+        "workstreams": workstreams(text),
+        "risks": meaningful(sec.get("Risks and open questions", "")),
         "status": meta.get("status") or "active",
         "priority": meta.get("priority") or "normal",
         "milestone": meta.get("milestone") or "",

@@ -20,7 +20,7 @@ from .core import STATE, sh
 SELFTEST_PROMPT = (
     "This is an automated devkit self-test in a scratch repository. Do exactly these steps, then reply briefly:\n"
     "1. Run exactly: git checkout -b {agent}/devkit-selftest   (report whether it was allowed)\n"
-    "2. List the names of the skills or commands you can use whose names start with 'devkit'.\n"
+    "2. List the names of ALL the skills you can use whose names start with 'devkit' (every one, comma-separated).\n"
     "3. Say whether you received any workspace context when the session started.")
 
 
@@ -36,10 +36,33 @@ def _claude_status() -> dict:
         a = {}
     out.update(logged_in=bool(a.get("loggedIn")), auth_method=a.get("authMethod"), plan=a.get("subscriptionType"),
                api_provider=a.get("apiProvider"), login_expires=a.get("loginExpiresAt"), account=a.get("email"),
-               quota={"available": None, "note": "Claude Code does not expose quota numbers on the CLI; use /usage "
-                                                 "in a session. Self-tests report rate-limit errors when they occur."})
+               quota=claude_quota())
     out["desktop"] = Path("/Applications/Claude.app").exists()
     return out
+
+
+def claude_quota(now: float = None) -> dict:
+    """Claude's usage windows as recorded by devkit's status line (Claude Code reports them nowhere else)."""
+    import time as _t
+    now = now or _t.time()
+    rec = core.read_json(STATE / "quota" / "claude.json", {}) or {}
+    win = {k: rec.get(k) or {} for k in ("seven_day", "five_hour")}
+    live = {k: w for k, w in win.items() if w.get("used_percentage") is not None and (w.get("resets_at") or 0) > now}
+    if not live:
+        note = ("No usage reading yet: devkit records it from Claude Code's status line, so it appears after the "
+                "next Claude Code session in a terminal." if not rec else
+                f"The last reading ({core.ago(rec.get('ts'))}) has expired; it refreshes in the next Claude Code session.")
+        return {"available": None, "note": note}
+    main = live.get("seven_day") or live.get("five_hour")
+    worst = max(w["used_percentage"] for w in live.values())
+    full = next((k for k, w in live.items() if w["used_percentage"] >= 100), None)
+    return {"available": worst < 100, "used_percent": main["used_percentage"],
+            "window_minutes": 10080 if "seven_day" in live else 300,
+            "resets_at": (live[full] if full else main).get("resets_at"),
+            "secondary_used_percent": (live.get("five_hour") or {}).get("used_percentage") if "seven_day" in live else None,
+            "secondary_resets_at": (live.get("five_hour") or {}).get("resets_at") if "seven_day" in live else None,
+            "reached": {"seven_day": "weekly", "five_hour": "5-hour"}.get(full), "as_of": rec.get("ts"),
+            "source": "status line"}
 
 
 def _codex_status() -> dict:
@@ -165,12 +188,18 @@ def selftest(agent: str, model: str = None) -> dict:
     mine = [r for r in recs if sid and r.get("session") == sid[:12]]
     checks.append(("Stop hook + instructions (canary)", bool(mine) and all(r["ok"] for r in mine),
                    (mine[-1].get("status") or mine[-1].get("excerpt") or "")[:80] if mine else "no canary record"))
+    if mine and all(r["ok"] for r in mine):
+        fmt = [r.get("format") or [] for r in mine if "format_ok" in r]
+        checks.append(("status block format", bool(fmt) and not fmt[-1],
+                       "header + Done / Check / Next" if fmt and not fmt[-1] else "; ".join((fmt or [["not scored"]])[-1])))
     if agent == "claude" and sid:
         inst = STATE / "instructions" / f"claude-{sid}.jsonl"
         loaded = inst.exists() and str(core.CLAUDE_HOME / "CLAUDE.md") in inst.read_text()
         checks.append(("global instructions loaded", loaded, "~/.claude/CLAUDE.md (InstructionsLoaded)"))
-    sees = [n for n in ("handoff", "workspace", "delivery", "backend") if re.search(rf"devkit[:\-]?\s*{n}|{n}", reply or "", re.I)]
-    checks.append(("devkit plugin skills visible", len(sees) >= 3, ", ".join(sees) or "none mentioned"))
+    want = sorted(d.name for d in (core.DEVKIT_HOME / "plugin" / "skills").iterdir() if (d / "SKILL.md").exists())
+    sees = [n for n in want if re.search(rf"devkit[:\-]?\s*{re.escape(n)}|\b{re.escape(n)}\b", reply or "", re.I)]
+    checks.append(("devkit plugin skills visible", len(sees) >= max(3, len(want) - 2),
+                   f"{len(sees)}/{len(want)}: " + (", ".join(sees) or "none mentioned")))
     shutil.rmtree(scratch, ignore_errors=True)
     for p in (STATE / "sessions").glob(f"{agent}-{sid}*") if sid else []:
         p.unlink()

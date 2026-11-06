@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import os
 import re
+from pathlib import Path
 import shutil
 import sys
 
@@ -52,14 +53,16 @@ FIREFLY_MASK = [
 ]
 TRAIL = "·   ˚  ✦   ⋆  ·  ✧"
 _PAL24 = {"a": (140, 140, 165), "w": (185, 228, 255), "e": (255, 255, 255), "b": (96, 96, 124),
-          "g": (205, 255, 70), "s": (255, 214, 90)}
+          "g": (205, 255, 70), "s": (255, 214, 90),
+          # Firefly brand: amber is the light (the spark), paper and charcoal the ink, stone the quiet text
+          "amber": (255, 179, 74), "paper": (243, 241, 235), "charcoal": (16, 17, 15), "stone": (191, 184, 171)}
 _PAL256 = {"a": 245, "w": 153, "e": 231, "b": 240, "g": 154, "s": 221}
 # firefly lime -> cyan -> violet
 _STOPS = [(190, 255, 60), (0, 214, 255), (170, 90, 255)]
 _LINE256 = [154, 49, 45, 39, 63, 99]
 _SHADOW = set("╗╔╝╚║═")
 FRAME_INNER = 68
-TAGLINE = "one workspace · every repo in its place · agents that hand off"
+TAGLINE = "Every repo in its place. Every agent on the same page."
 TIPS = [
     "`dcd <query>` jumps into any project; `dwt <branch>` creates a worktree and jumps into it.",
     "`dev claude -w feat/x` starts Claude Code in its own worktree: parallel work without sibling copies.",
@@ -70,7 +73,7 @@ TIPS = [
     "Worktrees reuse node_modules copy-on-write when the lockfile matches: no reinstall, ~0 bytes.",
     "Personal agent rules go in ~/.config/devkit/AGENTS.personal.md; `dev install` merges them.",
     "`dev docker up` starts Colima with Rosetta, so amd64 images run on Apple silicon.",
-    "`dev canary` shows whether every Claude/Codex reply started with “DevKit ·”, proof they followed the rules.",
+    "`dev canary` shows whether every Claude/Codex reply started with “[Firefly> DevKit]”, proof they followed the rules.",
     "Branches are `<type>/<ticket>-<topic>`: feat/PROJ-142-invoice-export, fix/login-timeout, release/26.11.4.",
 ]
 
@@ -98,80 +101,59 @@ def _gradient(line: str, t0: float = 0.0, t1: float = 1.0) -> str:
     return "".join(_fg(_grad(t0 + (t1 - t0) * (i / max(1, n - 1))), ch) for i, ch in enumerate(line))
 
 
-def _logo_row(i: int) -> str:
-    line = BANNER[i]
-    if TRUECOLOR:
-        n = len(line)
-        out = []
-        for j, ch in enumerate(line):
-            if ch == " ":
-                out.append(" ")
-            elif ch in _SHADOW:
-                out.append(_fg(_grad(j / (n - 1), 0.45), ch))
-            else:
-                out.append(_fg(_grad(j / (n - 1)), ch, bold_=True))
-        return "".join(out)
-    if COLOR:
-        return f"\x1b[1;38;5;{_LINE256[i]}m{line}\x1b[0m"
-    return line
-
-
-def _firefly_row(i: int) -> str:
-    art, mask = FIREFLY[i], FIREFLY_MASK[i]
-    if not COLOR:
-        return art
-    out = []
-    for ch, m in zip(art, mask):
-        if m == " ":
-            out.append(ch)
-        elif TRUECOLOR:
-            out.append(_fg(_PAL24[m], ch, bold_=m in "ge"))
-        else:
-            out.append(f"\x1b[{'1;' if m in 'ge' else ''}38;5;{_PAL256[m]}m{ch}\x1b[0m")
-    return "".join(out)
-
-
-def _trail() -> str:
-    if TRUECOLOR:
-        n = len(TRAIL)
-        return "".join(_fg((255, int(214 - 90 * j / n), int(90 + 120 * j / n)), ch) for j, ch in enumerate(TRAIL))
-    return f"\x1b[38;5;221m{TRAIL}\x1b[0m" if COLOR else TRAIL
-
-
 def logo_inline() -> str:
     """Compact one-line logo for narrow terminals and sub-headers."""
     s = "✦ devkit"
     if TRUECOLOR:
-        return _fg(_PAL24["g"], "✦", True) + " " + bold(_gradient("devkit"))
+        return _fg(_PAL24["amber"], "✦", True) + " " + bold("devkit")
     return bold(cyan(s)) if COLOR else s
 
 
+ART_DIR = Path(__file__).resolve().parent / "art"
+
+
+def terminal_theme() -> str:
+    """dark | light — DEVKIT_THEME wins; else COLORFGBG ("fg;bg", bg 7/15 = light); default dark."""
+    t = os.environ.get("DEVKIT_THEME", "").lower()
+    if t in ("dark", "light"):
+        return t
+    bg = os.environ.get("COLORFGBG", "").split(";")[-1]
+    return "light" if bg in ("7", "15") else "dark"
+
+
+# The devkit wordmark in half blocks, drawn by hand on the Manrope letterforms; ✦ (amber) is the dot of the i.
+WORDMARK = [
+    "     ██                 ██       ✦  ██  ",
+    " ▄▄▄▄██  ▄▄▄▄▄  ▄▄   ▄▄ ██  ▄▄  ▄▄ ▄██▄▄",
+    "██   ██ ██▄▄▄██ ██   ██ ██▄█▀   ██  ██  ",
+    "██   ██ ██▀▀▀▀▀ ▀█▄ ▄█▀ ███▄    ██  ██  ",
+    "▀█▄▄▄██ ▀█▄▄▄▄   ▀███▀  ██ ▀█▄  ██  ▀█▄▄",
+]
+
+
+def wordmark() -> list:
+    """The wordmark rows, inked for the terminal's theme (paper on dark, charcoal on light)."""
+    dark = terminal_theme() == "dark"
+    if TRUECOLOR:
+        ink = _PAL24["paper"] if dark else _PAL24["charcoal"]
+        return [_fg(ink, r.replace("✦", "\x00"), False).replace("\x00", _fg(_PAL24["amber"], "✦", True) +
+                                                                       f"\x1b[38;2;{ink[0]};{ink[1]};{ink[2]}m")
+                for r in WORDMARK]
+    if COLOR:
+        return [r.replace("✦", yellow("✦")) for r in WORDMARK]
+    return list(WORDMARK)
+
+
 def banner(context: str = "", framed: bool = True) -> str:
-    """The devkit welcome art: firefly + 3D gradient logo in a double frame, version and copyright footer."""
+    """Welcome: the devkit wordmark, the tagline, then version, context and copyright in one quiet line."""
     from .core import COPYRIGHT, VERSION
-    footer_l = f"v{VERSION}" + (f" · {context}" if context else "")
-    if width() < FRAME_INNER + 6 or not framed:
-        return f"\n  {logo_inline()}  {dim(footer_l)}  {dim(COPYRIGHT)}\n"
-    W = FRAME_INNER
-
-    def pad(s, n=W):
-        return s + " " * max(0, n - visible_len(s))
-
-    edge = (lambda s: _gradient(s)) if TRUECOLOR else (gray if COLOR else (lambda s: s))
-    top = edge("╔" + "═" * W + "╗")
-    bot = edge("╚" + "═" * W + "╝")
-    side_l, side_r = edge("║"), edge("║")
-    rows = [" " * (W - len(TRAIL) - 3) + _trail() + "   "]
-    for i in range(6):
-        rows.append("  " + _firefly_row(i) + "   " + _logo_row(i))
-    rows.append("")
-    rows.append("  " + italic(dim(TAGLINE)) if COLOR else "  " + TAGLINE)
-    rows.append("  " + dim("─" * (W - 4)))
-    spark = _fg(_PAL24["g"], "✦", True) if TRUECOLOR else (yellow("✦") if COLOR else "*")
-    rows.append(f"  {spark} {bold(footer_l)}")
-    rows.append("  " + (_gradient(COPYRIGHT, 0.0, 1.0) if TRUECOLOR else dim(COPYRIGHT)))
-    body = [f"  {side_l}{pad(r)}{side_r}" for r in rows]
-    return "\n" + "\n".join(["  " + top] + body + ["  " + bot]) + "\n"
+    meta = f"v{VERSION}" + (f" · {context}" if context else "")
+    if width() < len(WORDMARK[0]) + 6:
+        return f"\n  {logo_inline()}  {dim(meta)}\n"
+    out = [""] + ["  " + r for r in wordmark()] + [""]
+    out.append("  " + (_fg(_PAL24["stone"], TAGLINE, False) if TRUECOLOR else TAGLINE))
+    out.append("  " + dim(f"{meta}  ·  {COPYRIGHT}"))
+    return "\n".join(out) + "\n"
 
 
 def greeting(name: str = "") -> str:
@@ -224,7 +206,10 @@ def table(rows, headers, max_widths=None, indent=2) -> str:
 
 
 def section(title: str) -> str:
-    return "\n" + bold(cyan("▸ ")) + bold(title)
+    """A heading: the title in bold and a quiet rule to the right (no marker, so it never reads as a selection)."""
+    total = min(width() - 4, 78)  # every heading's rule ends in the same column
+    rule = "─" * max(3, total - visible_len(title) - 1)
+    return "\n  " + bold(title) + " " + dim(rule)
 
 
 def kv(key: str, value, key_width=14) -> str:
@@ -237,3 +222,96 @@ def err(msg: str):
 
 def warn(msg: str):
     print(f"{WARN} {msg}", file=sys.stderr)
+
+
+def core_cfg() -> dict:
+    try:
+        from . import core
+        return core.CFG
+    except Exception:
+        return {}
+
+
+def status_pills(line: str, color: bool = None) -> str:
+    """A saved [Firefly> DevKit] status line drawn like a shell prompt: colored pills, then the segments."""
+    from .canary import segments
+    segs = segments(line or "")
+    if not segs:
+        return ""
+    color = (sys.stdout.isatty() and not os.environ.get("NO_COLOR")) if color is None else color
+    if not color:
+        return "[Firefly> DevKit] " + " ❯ ".join(segs)
+
+    def pill(text, bg, fg):
+        return f"\033[48;2;{bg[0]};{bg[1]};{bg[2]}m\033[38;2;{fg[0]};{fg[1]};{fg[2]}m {text} \033[0m"
+
+    amber, charcoal, ink, paper, graphite = (255, 179, 74), (16, 17, 15), (39, 40, 32), (243, 241, 235), (71, 74, 66)
+    spec = [("Firefly❯ DevKit", amber, charcoal), (segs[0], ink, paper)]
+    rest = segs[1:]
+    current = " · " in segs[0] and rest and rest[-1].lower().startswith("next")  # status-block form
+    if rest and (current or rest[0].startswith(("T-", "F-", "B-", "S-")) or rest[0] == "-"):
+        if rest[0] != "-":
+            spec.append((rest[0], graphite, paper))
+        rest = rest[1:]
+    if (core_cfg().get("ui") or {}).get("powerline"):  # Nerd Font arrows between pills, like powerlevel10k
+        pills = []
+        for i, (txt, bg, fg) in enumerate(spec):
+            pills.append(pill(txt, bg, fg))
+            nxt = spec[i + 1][1] if i + 1 < len(spec) else None
+            arrow = f"\033[38;2;{bg[0]};{bg[1]};{bg[2]}m" + (f"\033[48;2;{nxt[0]};{nxt[1]};{nxt[2]}m" if nxt else "")
+            pills.append(arrow + "\ue0b0\033[0m")
+    else:
+        pills = [pill(txt, bg, fg) for txt, bg, fg in spec]
+    styled = []
+    for s_ in rest:
+        g = s_[:1]
+        styled.append(green(s_) if g == "✓" else yellow(s_) if g == "⚠" else red(s_) if g == "✗" else
+                      cyan(s_) if s_.lower().startswith("next") else dim(s_) if g in "▸–" else s_)
+    return "".join(pills) + ("  " + dim(" ❯ ").join(styled) if styled else "")
+
+
+def status_block(line: str, color: bool = None, indent: str = "  ") -> str:
+    """A saved status drawn as the block agents write: a header pill row, then Done / Check / Progress / Next."""
+    from .canary import segments
+    segs = segments(line or "")
+    if not segs:
+        return ""
+    current = " · " in segs[0] and len(segs) >= 3 and segs[-1].lower().startswith("next")
+    if not current:
+        return indent + status_pills(line, color)
+    color = (sys.stdout.isatty() and not os.environ.get("NO_COLOR")) if color is None else color
+    where, task, rest = segs[0], segs[1], segs[2:]
+    nxt = rest.pop()[len("next →"):].strip() if rest and rest[-1].lower().startswith("next") else ""
+    prog = next((x[1:].strip() for x in rest if x.startswith("▸")), "")
+    rest = [x for x in rest if not x.startswith("▸")]
+    check = next((x for x in rest if x[:1] in "✓⚠✗–"), "")
+    done = " ".join(x for x in rest if x != check)
+    head = brand_pills([where] + ([task] if task != "-" else []), color)
+    rows = [("Done", done), ("Check", check), ("Progress", prog), ("Next", nxt)]
+    out = [indent + head]
+    for k, val in rows:
+        if not val:
+            continue
+        if color and k == "Check":
+            val = green(val) if val[:1] == "✓" else yellow(val) if val[:1] == "⚠" else red(val) if val[:1] == "✗" else val
+        out.append(f"{indent}  {dim(k.ljust(9)) if color else k.ljust(9)} {val}")
+    return "\n".join(out)
+
+
+
+def brand_pills(parts, color: bool = None) -> str:
+    """`Firefly❯ DevKit` followed by one pill per part (project · branch, task), like a shell prompt."""
+    color = (sys.stdout.isatty() and not os.environ.get("NO_COLOR")) if color is None else color
+    if not color:
+        return "[Firefly> DevKit] " + " · ".join(parts)
+    amber, charcoal, ink, paper, graphite = (255, 179, 74), (16, 17, 15), (39, 40, 32), (243, 241, 235), (71, 74, 66)
+    spec = [("Firefly❯ DevKit", amber, charcoal)] + [(p, ink if i == 0 else graphite, paper) for i, p in enumerate(parts)]
+    arrows = (core_cfg().get("ui") or {}).get("powerline")
+    out = []
+    for i, (txt, bg, fg) in enumerate(spec):
+        out.append(f"\033[48;2;{bg[0]};{bg[1]};{bg[2]}m\033[38;2;{fg[0]};{fg[1]};{fg[2]}m {txt} \033[0m")
+        if arrows:
+            nxt = spec[i + 1][1] if i + 1 < len(spec) else None
+            out.append(f"\033[38;2;{bg[0]};{bg[1]};{bg[2]}m" + (f"\033[48;2;{nxt[0]};{nxt[1]};{nxt[2]}m" if nxt else "")
+                       + "\ue0b0\033[0m")
+    return "".join(out)

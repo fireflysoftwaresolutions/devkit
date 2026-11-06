@@ -12,3 +12,6 @@ AGENTS.override.md
 # Tool caches some agent plugins create
 .serena/
 .impeccable/
+# Security scan reports written into the repository by agent plugins
+CLAUDE-SECURITY-*/
+threat-model-*/

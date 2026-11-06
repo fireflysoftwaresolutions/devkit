@@ -1,0 +1,35 @@
+{
+  "name": "lesson-lifecycle",
+  "kind": "flow",
+  "title": "The life of a lesson",
+  "desc": "Signals such as fix and revert commits, repeated guard refusals, missed status blocks, bouncing tasks, and corrections from the developer prompt a lesson. dev lesson add captures it in lessons/<scope>/ in the handoff repository. Every session recalls the open lessons that apply as known pitfalls. When one happens again, dev lesson recur counts the repeat, and a recurring lesson is turned into automation with dev lesson prevent (a test, lint rule, guard rule, required skill, or CI check). Every night dev sleep merges near-duplicates and forgets lessons that no longer help into lessons/archive/, from where dev lesson restore brings one back.",
+  "legend": [
+    {"label": "devkit", "family": "firefly"},
+    {"label": "automation", "family": "olive"},
+    {"label": "stored", "family": "slate"}
+  ],
+  "nodes": [
+    {"id": "signals", "label": "Signals", "sub": "fixes · reverts · refusals · corrections", "col": 1, "row": 0},
+    {"id": "capture", "label": "Capture", "sub": "dev lesson add", "col": 1, "row": 1, "family": "firefly"},
+    {"id": "store", "label": "lessons/<scope>/", "sub": "blameless · versioned", "col": 1, "row": 2, "family": "slate", "shape": "store"},
+    {"id": "recall", "label": "Recall", "sub": "known pitfalls in each session", "col": 0, "row": 3, "family": "firefly"},
+    {"id": "recur", "label": "Recur", "sub": "dev lesson recur", "col": 1, "row": 3, "family": "firefly"},
+    {"id": "prevent", "label": "Prevent", "sub": "test · lint · guard · skill · CI", "col": 2, "row": 3, "emphasis": true},
+    {"id": "sleep", "label": "Sleep", "sub": "dev sleep, every night", "col": 1, "row": 4, "family": "olive"},
+    {"id": "merge", "label": "Merge", "sub": "near-duplicates become one", "col": 0, "row": 5, "family": "olive"},
+    {"id": "archive", "label": "lessons/archive/", "sub": "forgotten, never deleted", "col": 1, "row": 5, "family": "slate", "shape": "store"},
+    {"id": "restore", "label": "Restore", "sub": "dev lesson restore --why", "col": 2, "row": 5, "family": "firefly"}
+  ],
+  "edges": [
+    {"from": "signals", "to": "capture", "label": "worth a lesson"},
+    {"from": "capture", "to": "store", "label": "one commit"},
+    {"from": "store", "to": "recall", "label": "session start", "from_side": "left", "to_side": "top", "route": "hv"},
+    {"from": "store", "to": "recur", "label": "happens again"},
+    {"from": "recur", "to": "prevent", "label": "automate it"},
+    {"from": "recur", "to": "sleep", "label": "usage · age"},
+    {"from": "sleep", "to": "merge", "label": "merge", "from_side": "left", "to_side": "top", "route": "hv"},
+    {"from": "sleep", "to": "archive", "label": "forget"},
+    {"from": "archive", "to": "restore", "label": "needed again"},
+    {"from": "restore", "to": "store", "label": "back", "style": "dashed", "from_side": "right", "to_side": "right", "via": [[2.6, 5], [2.6, 2]]}
+  ]
+}

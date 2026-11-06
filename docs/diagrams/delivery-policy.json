@@ -1,0 +1,151 @@
+{
+  "name": "delivery-policy",
+  "kind": "flow",
+  "title": "Delivery policy",
+  "desc": "dev delivery detects what a repository does today (version tags and files, release tools, changelog, CI, the test gate, branches, what it publishes and deploys), recommends a policy that keeps what works, and lists the gaps. dev delivery apply records the policy with a reason in policies/<scope>.json in the handoff repository, versioned with its history, and --tasks opens a work item for each gap. Every session then sees the policy in its context, the guard refuses tags that break it, and releases follow it with dev calver and the release-policy skill.",
+  "legend": [
+    {
+      "label": "devkit",
+      "family": "firefly"
+    },
+    {
+      "label": "stored",
+      "family": "slate"
+    }
+  ],
+  "nodes": [
+    {
+      "id": "repo",
+      "label": "Repository",
+      "sub": "tags · version files · CI · tools",
+      "col": 1,
+      "row": 0,
+      "family": "slate"
+    },
+    {
+      "id": "detect",
+      "label": "Detect",
+      "sub": "dev delivery",
+      "col": 1,
+      "row": 1,
+      "family": "firefly"
+    },
+    {
+      "id": "recommend",
+      "label": "Recommend",
+      "sub": "keep · SemVer · CalVer",
+      "col": 1,
+      "row": 2,
+      "family": "firefly"
+    },
+    {
+      "id": "gaps",
+      "label": "Gaps",
+      "sub": "each with its fix",
+      "col": 2,
+      "row": 2
+    },
+    {
+      "id": "record",
+      "label": "Record",
+      "sub": "dev delivery apply --why",
+      "col": 1,
+      "row": 3,
+      "emphasis": true
+    },
+    {
+      "id": "tasks",
+      "label": "Work items",
+      "sub": "one per gap",
+      "col": 2,
+      "row": 3,
+      "family": "slate"
+    },
+    {
+      "id": "policy",
+      "label": "policies/<scope>.json",
+      "sub": "versions · history",
+      "col": 1,
+      "row": 4,
+      "family": "slate",
+      "shape": "store"
+    },
+    {
+      "id": "context",
+      "label": "Session context",
+      "sub": "every session sees it",
+      "col": 0,
+      "row": 5
+    },
+    {
+      "id": "guard",
+      "label": "Guard",
+      "sub": "refuses tags that break it",
+      "col": 1,
+      "row": 5
+    },
+    {
+      "id": "release",
+      "label": "Release",
+      "sub": "dev calver · release-policy",
+      "col": 2,
+      "row": 5
+    }
+  ],
+  "edges": [
+    {
+      "from": "repo",
+      "to": "detect",
+      "label": "reads"
+    },
+    {
+      "from": "detect",
+      "to": "recommend",
+      "label": "keep what works"
+    },
+    {
+      "from": "detect",
+      "to": "gaps",
+      "label": "missing pieces",
+      "from_side": "right",
+      "to_side": "top",
+      "route": "hv"
+    },
+    {
+      "from": "recommend",
+      "to": "record",
+      "label": "you decide"
+    },
+    {
+      "from": "gaps",
+      "to": "tasks",
+      "label": "--tasks"
+    },
+    {
+      "from": "record",
+      "to": "policy",
+      "label": "one commit"
+    },
+    {
+      "from": "policy",
+      "to": "context",
+      "label": "session start",
+      "from_side": "left",
+      "to_side": "top",
+      "route": "hv"
+    },
+    {
+      "from": "policy",
+      "to": "guard",
+      "label": "git tag"
+    },
+    {
+      "from": "policy",
+      "to": "release",
+      "label": "next version",
+      "from_side": "right",
+      "to_side": "top",
+      "route": "hv"
+    }
+  ]
+}

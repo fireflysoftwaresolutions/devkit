@@ -1,0 +1,106 @@
+{
+  "name": "worktree-lifecycle",
+  "kind": "state",
+  "title": "Worktree lifecycle",
+  "desc": "A managed worktree is created only when the user asks or parallel work needs it, with dev wt new, under ~/Development/.worktrees. It is active while a session works in it and idle otherwise; idle worktrees have their build output pruned after seven days. Uncommitted or unpushed work always keeps a worktree. When its pull request is merged or closed, or its commits are already in the default branch, and it has been idle for a day, dev gc removes it and its local branch.",
+  "equal_widths": "all",
+  "nodes": [
+    {
+      "id": "start",
+      "initial": true,
+      "col": 0,
+      "row": 0
+    },
+    {
+      "id": "created",
+      "label": "Created",
+      "sub": "dev wt new <type>/<topic>",
+      "col": 1,
+      "row": 0
+    },
+    {
+      "id": "active",
+      "label": "Active",
+      "sub": "a session works in it",
+      "col": 2,
+      "row": 0
+    },
+    {
+      "id": "idle",
+      "label": "Idle",
+      "sub": "build output pruned at 7 days",
+      "col": 2,
+      "row": 1
+    },
+    {
+      "id": "kept",
+      "label": "Kept",
+      "sub": "while work could be lost",
+      "col": 2,
+      "row": 2,
+      "family": "olive"
+    },
+    {
+      "id": "merged",
+      "label": "Merged",
+      "sub": "PR merged or in main",
+      "col": 1,
+      "row": 1
+    },
+    {
+      "id": "removed",
+      "label": "Removed",
+      "sub": "dev gc · dev wt rm",
+      "col": 0,
+      "row": 1,
+      "emphasis": true
+    },
+    {
+      "id": "end",
+      "final": true,
+      "col": 0,
+      "row": 2
+    }
+  ],
+  "edges": [
+    {
+      "from": "start",
+      "to": "created",
+      "label": "asked · parallel work"
+    },
+    {
+      "from": "created",
+      "to": "active",
+      "label": "session starts"
+    },
+    {
+      "from": "active",
+      "to": "idle",
+      "label": "session ends",
+      "from_side": "bottom",
+      "to_side": "top"
+    },
+    {
+      "from": "idle",
+      "to": "kept",
+      "label": "uncommitted · unpushed",
+      "style": "dashed",
+      "from_side": "bottom",
+      "to_side": "top"
+    },
+    {
+      "from": "idle",
+      "to": "merged",
+      "label": "PR merged · 24 h idle"
+    },
+    {
+      "from": "merged",
+      "to": "removed",
+      "label": "safe to remove"
+    },
+    {
+      "from": "removed",
+      "to": "end"
+    }
+  ]
+}

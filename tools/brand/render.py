@@ -40,9 +40,30 @@ DEFS = f"""<defs>
 </defs>"""
 
 
+def wordmark(x, baseline, size, ink, glow=True, spark_factor=0.125):
+    """The devkit wordmark from Manrope outlines (assets/src/wordmark.json, made by wordmark.mjs), its i dotted
+    by the amber spark exactly at the centre of the original dot. Returns (svg, width_px)."""
+    import json
+    wm = json.loads((ROOT / "assets" / "src" / "wordmark.json").read_text())
+    k = size / wm["unitsPerEm"]
+    sp = wm["spark"]
+    sx, sy = x + sp["cx"] * k, baseline + sp["cy"] * k
+    s = spark_factor * sp["dot"] * k
+    svg = (f'<path transform="translate({x:.1f},{baseline:.1f}) scale({k:.5f})" d="{wm["d"]}" fill="{ink}"/>'
+           + spark(round(sx, 1), round(sy, 1), round(s, 2), glow=glow, glow_r=round(9 * s, 1)))
+    return svg, wm["width"] * k
+
+
+def a11y(title, desc):
+    """<title> and <desc> for an SVG: screen readers announce them and `dev docs check` requires them."""
+    esc = lambda s: s.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")  # noqa: E731
+    return f"<title>{esc(title)}</title>\n<desc>{esc(desc)}</desc>"
+
+
 def icon_svg(size=512):
     """App icon: a terminal prompt in paper on charcoal; the cursor's light trail ends in the amber spark."""
     return f"""<svg xmlns="http://www.w3.org/2000/svg" width="{size}" height="{size}" viewBox="0 0 512 512">
+{a11y("devkit", "The devkit icon: a terminal prompt in paper on charcoal, with the cursor's light trail ending in the amber spark.")}
 {DEFS}
 <rect width="512" height="512" rx="116" fill="{CHARCOAL}"/>
 <rect x="1.5" y="1.5" width="509" height="509" rx="115" fill="none" stroke="{GRAPHITE}" stroke-width="3"/>
@@ -59,7 +80,6 @@ def hero_svg(theme="dark", W=1600, H=520):
     m = 96                       # left margin
     base = 300                   # wordmark baseline
     size = 188                   # wordmark size
-    dot_x, dot_y = m + 2.133 * size, base - 0.705 * size  # spark dots the dotless i (tuned visually)
     trails = []
     for i, (w, op, dy, bend) in enumerate(((7, 1.0, 0, 0), (4, 0.75, 46, 40), (2.5, 0.5, 92, 70), (1.6, 0.35, 140, 95))):
         trails.append(f'<path d="M{W * 0.60:.0f} {H + 6 - dy * 0.05:.0f} C {W * 0.76:.0f} {H - 50 - bend:.0f}, '
@@ -69,16 +89,33 @@ def hero_svg(theme="dark", W=1600, H=520):
                     for x, y, r, o, b in ((1240, 108, 16, 0.35, 6), (1452, 300, 26, 0.18, 14), (1090, 210, 9, 0.30, 6),
                                           (1520, 120, 10, 0.25, 6), (1330, 400, 20, 0.12, 14)))
     return f"""<svg xmlns="http://www.w3.org/2000/svg" width="{W}" height="{H}" viewBox="0 0 {W} {H}">
+{a11y("devkit", "devkit: Every repo in its place. Every agent on the same page. By Firefly Software Solutions Inc.")}
 {DEFS}
 <rect width="{W}" height="{H}" fill="{bg}"/>
 {bokeh}
 {''.join(trails)}
 {spark(int(W * 0.885), 150, 4.2, glow_r=150)}
-<text x="{m}" y="{base}" font-family="Manrope" font-size="{size}" font-weight="500" letter-spacing="-9" fill="{ink}">devkıt</text>
-{spark(dot_x, dot_y, 2.25, glow_r=80)}
-<text x="{m + 6}" y="{base + 78}" font-family="Manrope" font-size="38" font-weight="400" letter-spacing="-0.6" fill="{sub}">One workspace for developers, Claude Code and Codex.</text>
+{wordmark(m, base, size, ink)[0]}
+<text x="{m + 6}" y="{base + 78}" font-family="Manrope" font-size="38" font-weight="400" letter-spacing="-0.6" fill="{sub}">Every repo in its place. Every agent on the same page.</text>
 <line x1="{m + 6}" y1="{H - 74}" x2="{m + 66}" y2="{H - 74}" stroke="{hair}" stroke-width="2"/>
 <text x="{m + 6}" y="{H - 40}" font-family="Manrope" font-size="22" font-weight="650" letter-spacing="0.6" fill="{label}">by Firefly Software Solutions Inc.</text>
+</svg>"""
+
+
+def lockup_svg(theme="dark"):
+    """Transparent lockup for terminal art: the prompt-and-spark mark + the devkıt wordmark with its spark."""
+    ink = PAPER if theme == "dark" else CHARCOAL
+    size, base, m = 200, 236, 300
+    return f"""<svg xmlns="http://www.w3.org/2000/svg" width="1100" height="300" viewBox="0 0 1100 300">
+{a11y("devkit", "The devkit lockup: the prompt-and-spark mark next to the devkit wordmark.")}
+{DEFS}
+<g transform="translate(-6,-14) scale(0.62)">
+<path d="M118 206 L196 268 L118 330" fill="none" stroke="{ink}" stroke-width="38" stroke-linecap="round" stroke-linejoin="round"/>
+<path d="M232 334 H318" stroke="{ink}" stroke-width="38" stroke-linecap="round"/>
+<path d="M300 334 C 352 330, 382 280, 380 204" fill="none" stroke="url(#trail)" stroke-width="16" stroke-linecap="round"/>
+{spark(372, 150, 8.5, glow=False)}
+</g>
+{wordmark(m, base, size, ink, glow=False, spark_factor=0.24)[0]}
 </svg>"""
 
 

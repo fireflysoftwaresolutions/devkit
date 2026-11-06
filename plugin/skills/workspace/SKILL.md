@@ -1,6 +1,6 @@
 ---
 name: workspace
-description: How to work with the ~/Development layout and the `dev` CLI — clone or create projects, run parallel work in managed git worktrees, find projects, clean up disk, start Docker, and enable a project's vendor AI tooling (Laravel Boost, Symfony AI Mate, FastAPI library-skills, Next.js MCP, Angular AI config). Use when cloning, creating, moving or locating a repository, when parallel work needs a worktree, when disk is full, or when setting up a new project's agent tooling.
+description: How to work with the ~/Development layout and the `dev` CLI—clone or create projects, run parallel work in managed git worktrees, find projects, clean up disk, start Docker, and enable a project's vendor AI tooling (Laravel Boost, Symfony AI Mate, FastAPI library-skills, Next.js MCP, Angular AI config). Use when cloning, creating, moving or locating a repository, when parallel work needs a worktree, when disk is full, or when setting up a new project's agent tooling.
 ---
 
 # devkit workspace
@@ -8,7 +8,7 @@ description: How to work with the ~/Development layout and the `dev` CLI — clo
 ## Layout
 
 | What | Where | Command |
-|---|---|---|
+| --- | --- | --- |
 | GitHub repo | `~/Development/<owner>/<repo>` (lowercase) | `dev clone <owner/repo>` |
 | GitLab, Bitbucket, Azure DevOps, self-hosted | `~/Development/<host>/<group>/<…>/<repo>` | `dev clone <https-or-ssh-url>` |
 | No remote yet | `~/Development/_local/<name>` | `dev new <name>` (`--github` creates it on GitHub) |
@@ -36,7 +36,7 @@ listed in `.worktreeinclude` (for example `.env`). Python: run `uv sync` in the 
 
 `dev gc` (dry run) shows merged/contained worktrees, regenerable build output in idle worktrees and stale temp;
 `dev gc --apply` reclaims it. It never touches uncommitted or unpushed work, live sessions, or main checkouts. The
-hourly background job applies the safe cases automatically. `dev du` reports usage, Docker included.
+nightly `gc` job applies the safe cases automatically. `dev du` reports usage, Docker included.
 
 ## Docker
 
@@ -47,10 +47,10 @@ hourly background job applies the safe cases automatically. `dev du` reports usa
 
 - **Laravel:** `composer require laravel/boost --dev && php artisan boost:install` (choose Claude Code and Codex).
 - **Symfony:** `composer require --dev symfony/ai-mate && vendor/bin/mate init`.
-- **FastAPI:** `uvx library-skills` (Codex) and `uvx library-skills --claude` (Claude) — version-matched skill.
+- **FastAPI:** `uvx library-skills` (Codex) and `uvx library-skills --claude` (Claude)—version-matched skill.
 - **Next.js 16+:** `claude mcp add -s local next-devtools -- npx next-devtools-mcp@latest` /
   `codex mcp add next-devtools -- npx next-devtools-mcp@latest` (set `NEXT_TELEMETRY_DISABLED=1`).
 - **New Angular app:** `ng new <name> --ai-config=claude-code,open-ai-codex`.
-- **Large Java codebase:** IntelliJ IDEA → Settings → AI → MCP Server → Auto-configure (Claude Code + Codex).
+- **Large Java codebase:** in IntelliJ IDEA, go to Settings → AI → MCP Server → Auto-configure (Claude Code + Codex).
 
 These write project files (AGENTS.md, .mcp.json, .codex/config.toml): show the user the diff before committing.

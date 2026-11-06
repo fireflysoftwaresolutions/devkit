@@ -9,11 +9,23 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "lib"))
 
-from devkit import canary, ci, core, guard, registry  # noqa: E402
+from devkit import ui, canary, ci, core, guard, registry  # noqa: E402
 
 DEV = core.DEV
 HOME = core.HOME
-OWNER = next(iter(sorted(core.owners())), "someowner")
+# Hermetic: the GitHub accounts that own top-level folders normally come from `gh`; tests use fixed ones so they run
+# the same on a developer's Mac and in CI (no GitHub sign-in there).
+OWNER = "acme-test"
+_REAL = (core.owners, core.github_user)
+
+
+def setUpModule():
+    core.owners = lambda: {OWNER, "otherorg"}
+    core.github_user = lambda: OWNER
+
+
+def tearDownModule():
+    core.owners, core.github_user = _REAL
 
 
 class TempState:
@@ -129,7 +141,19 @@ class GuardBashTests(unittest.TestCase):
         self.assertEqual(self.bash("rm -rf node_modules dist"), "allow")
         self.assertEqual(self.bash(f"rm -rf {core.TMP_ROOT}/some-scratch-repo"), "allow")
         self.assertEqual(self.bash("rm -rf /tmp/clone-to-inspect/.git"), "allow")
-        self.assertEqual(self.bash("rm -f notes.txt"), "allow")
+        self.assertEqual(self.bash("rm -f notes.txt"), "deny")  # steered to `dev rm` (recoverable)
+        self.assertEqual(self.bash("git stash"), "deny")
+        self.assertEqual(self.bash("git stash list"), "allow")
+        self.assertEqual(self.bash("gh pr merge 12 --squash"), "deny")
+        self.assertEqual(self.bash("DEVKIT_RAW_GH=1 gh pr merge 12 --squash"), "allow")
+        self.assertEqual(self.bash("DEVKIT_RAW_GH=1 gh pr merge 12 --admin"), "deny")
+        self.assertEqual(self.bash("gh release create v26.11.0"), "deny")
+        self.assertEqual(self.bash("DEVKIT_RAW_FS=1 rm -f notes.txt"), "allow")
+        self.assertEqual(self.bash(f"rm -f {core.TMP_ROOT}/scratch.txt"), "allow")
+        self.assertEqual(self.bash("rm -rf __pycache__ .pytest_cache"), "allow")
+        self.assertEqual(self.bash("find . -name '*.orig' -delete"), "deny")
+        self.assertEqual(self.bash("find . -name '*.log' | xargs rm"), "deny")
+        self.assertEqual(self.bash(f"find {core.TMP_ROOT}/x -delete"), "allow")
 
     def test_git_clean_ignored_denied(self):
         self.assertEqual(self.bash("git clean -fdx"), "deny")
@@ -328,20 +352,95 @@ jobs:
 
 class CanaryTests(unittest.TestCase):
     def test_marker_detection(self):
-        self.assertTrue(canary.has_marker("DevKit · kit · done"))
-        self.assertTrue(canary.has_marker("\n**DevKit** · x"))
-        self.assertFalse(canary.has_marker("Done. DevKit · later"))
+        self.assertTrue(canary.has_marker("[Firefly> DevKit] kit@main · done"))
+        self.assertTrue(canary.has_marker("\n**[Firefly> DevKit]** kit · x"))
+        self.assertTrue(canary.has_marker("`[firefly> devkit]` kit"))
+        self.assertTrue(canary.has_marker("DevKit · kit · done"))  # legacy marker, still accepted
+        self.assertFalse(canary.has_marker("Done. [Firefly> DevKit] later"))
+        self.assertFalse(canary.has_marker("[Firefly] DevKit kit"))
         self.assertFalse(canary.has_marker("Here is the fix"))
 
     def test_status_text_keeps_ids(self):
         self.assertEqual(canary.status_text("DevKit · _local/x_y@feat/a_b · done · `tests` ok · next: -"),
                          "_local/x_y@feat/a_b · done · tests ok · next: -")
         self.assertEqual(canary.status_text("**DevKit** · api@main · fixed"), "api@main · fixed")
+        self.assertEqual(canary.status_text("[Firefly> DevKit] api@main · fixed · tests ok · next: -"),
+                         "api@main · fixed · tests ok · next: -")
+        self.assertEqual(canary.status_text("**[Firefly> DevKit]** · api@main · fixed"), "api@main · fixed")
+
+    def test_canary_miss_reason_names_what_came_first(self):
+        late = "Both runtimes are fine.\n\n**[Firefly> DevKit]** x · `main` · y\n- **Done:** a\n- **Check:** ✓ b\n- **Next:** c"
+        self.assertFalse(canary.has_marker(late))
+        self.assertIn("1 line(s) come before it", canary.miss_reason(late))
+        self.assertIn('"Both runtimes are fine."', canary.miss_reason(late))
+        self.assertIn("no status block", canary.miss_reason("Waiting for the build."))
+
+    def test_canary_counts_by_surface(self):
+        import time as _t
+        with TempState():
+            canary.LOG.parent.mkdir(parents=True, exist_ok=True)
+            now = int(_t.time())
+            canary.LOG.write_text("".join(
+                '{"ts": %d, "agent": "claude", "ok": %s, "surface": "%s"}\n' % (now, ok, sf)
+                for ok, sf in (("true", "terminal"), ("true", "terminal"), ("false", "Claude Desktop"))))
+            self.assertEqual(canary.by_surface(1), {("claude", "terminal"): (2, 2), ("claude", "Claude Desktop"): (0, 1)})
+            self.assertIn("Claude Desktop 0/1", canary.summary_line(1))
+
+    def test_surface_detection(self):
+        import os as _os
+        saved = _os.environ.get("CLAUDE_CODE_ENTRYPOINT")
+        try:
+            _os.environ["CLAUDE_CODE_ENTRYPOINT"] = "claude-desktop"
+            self.assertEqual(canary.surface("claude"), "Claude Desktop")
+        finally:
+            if saved is None:
+                _os.environ.pop("CLAUDE_CODE_ENTRYPOINT", None)
+            else:
+                _os.environ["CLAUDE_CODE_ENTRYPOINT"] = saved
+        with tempfile.TemporaryDirectory() as d:
+            tp = Path(d) / "t.jsonl"
+            tp.write_text('{"type": "session_meta", "payload": {"originator": "codex_exec"}}\n')
+            self.assertEqual(canary.surface("codex", {"transcript_path": str(tp)}), "codex exec")
+            self.assertEqual(canary.surface("codex", {}), "unknown")
+
+    def test_canary_corrections_are_counted_apart(self):
+        with TempState():
+            canary.LOG.parent.mkdir(parents=True, exist_ok=True)
+            canary.LOG.write_text('{"ts": %d, "agent": "claude", "ok": false}\n' % int(__import__("time").time()))
+            canary.record_corrected("claude", "s1", "acme/api", "x · main ❯ fixed")
+            self.assertEqual(canary.summary(1), {"claude": (0, 1)})
+            self.assertEqual(canary.corrected(1), 1)
+            self.assertIn("1 corrected after a reminder", canary.summary_line(1))
+
+    def test_canary_status_block(self):
+        block = ("**[Firefly> DevKit]** api · `feat/x_y` · Invoice export\n"
+                 "- **Done:** added the CSV export endpoint.\n"
+                 "- **Check:** ✓ 12 tests pass\n"
+                 "- **Progress:** 2 of 3 steps · 20 min of ~30\n"
+                 "- **Next:** open the PR.\n\nDetails follow.")
+        self.assertTrue(canary.has_marker(block))
+        p = canary.parse_status(block)
+        self.assertEqual((p["project"], p["branch"], p["task"]), ("api", "feat/x_y", "Invoice export"))
+        self.assertEqual((p["check"], p["next"]), ("✓ 12 tests pass", "open the PR."))
+        line = canary.status_text(block)
+        self.assertEqual(line, "api · feat/x_y ❯ Invoice export ❯ added the CSV export endpoint. ❯ ✓ 12 tests pass ❯ "
+                               "▸ 2 of 3 steps · 20 min of ~30 ❯ next → open the PR.")
+        self.assertEqual(canary.format_issues(block), [])
+        self.assertIn("Check    ", ui.status_block(line, color=False))
+        self.assertIn("\033[48;2;255;179;74m", ui.status_block(line, color=True))
+        # older one-line forms are still understood, but scored as not following the format
+        old = "`[Firefly> DevKit]` `api ⎇ main` `T-fwk7a2xyz1` ❯ fixed ❯ ✓ tests ❯ next → push"
+        self.assertTrue(canary.has_marker(old))
+        self.assertEqual(canary.status_text(old), "api ⎇ main ❯ T-fwk7a2xyz1 ❯ fixed ❯ ✓ tests ❯ next → push")
+        self.assertTrue(canary.format_issues(old))
+        self.assertEqual(canary.status_text("DevKit · api@main · fixed"), "api@main · fixed")
+        bad = canary.format_issues("**[Firefly> DevKit]** api · `main` · x\n- **Done:** see T-fwk7a2xyz1\n- **Check:** ok")
+        self.assertTrue(any("Next" in x for x in bad) and any("✓" in x for x in bad) and any("IDs" in x for x in bad))
 
     def test_check_records(self):
         with TempState():
             cwd = str(DEV)
-            self.assertEqual(canary.check("codex", {"cwd": cwd, "last_assistant_message": "DevKit · ok"})[0], True)
+            self.assertEqual(canary.check("codex", {"cwd": cwd, "last_assistant_message": "[Firefly> DevKit] x@main · ok"})[0], True)
             self.assertEqual(canary.check("codex", {"cwd": cwd, "last_assistant_message": "no marker"})[0], False)
             self.assertIsNone(canary.check("codex", {"cwd": "/tmp", "last_assistant_message": "x"}))
             self.assertEqual(canary.summary(1), {"codex": (1, 2)})
@@ -391,6 +490,33 @@ class NoteTests(unittest.TestCase):
                 core.NOTES = old
                 core.note_path = orig
                 registry.note_path = orig
+
+
+
+@unittest.skipUnless(core.have("gitleaks"), "gitleaks not installed")
+class CommitSecretTests(unittest.TestCase):
+    """The guard checks what a commit will contain, also when `git add` runs in the same command."""
+
+    def test_add_then_commit_in_one_command(self):
+        fake = "ghp_" + "0123456789abcdefABCDEF0123456789abcd"  # built at runtime so this file holds no token
+        with tempfile.TemporaryDirectory() as d:
+            ident = ["-c", "user.email=t@example.com", "-c", "user.name=t"]
+            core.sh(["git", "init", "-q", d])
+            core.sh(["git", *ident, "-C", d, "commit", "-q", "--allow-empty", "-m", "init"])
+            Path(d, "a.py").write_text(f'TOKEN = "{fake}"\n')
+            Path(d, "b.py").write_text("x = 1\n")
+            saved = guard.is_temp
+            guard.is_temp = lambda p: False
+            try:
+                for cmd in ("git add a.py && git commit -m x", "git add -A && git commit -m x",
+                            "git add a.py; git commit -m 'feat: x'"):
+                    with self.subTest(cmd=cmd):
+                        self.assertEqual(decision("Bash", {"command": cmd}, cwd=d), "deny")
+                self.assertEqual(decision("Bash", {"command": "git add b.py && git commit -m x"}, cwd=d), "allow")
+                self.assertEqual(decision("Bash", {"command": "git commit -m x"}, cwd=d), "allow")
+            finally:
+                guard.is_temp = saved
+            self.assertEqual(core.gitout(d, "diff", "--cached", "--name-only"), "")  # the real index is untouched
 
 
 if __name__ == "__main__":

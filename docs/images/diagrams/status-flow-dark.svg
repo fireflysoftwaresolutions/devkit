@@ -1,0 +1,60 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1184" height="552" viewBox="0 0 1184 552" role="img" aria-labelledby="dk-title dk-desc">
+<title id="dk-title">Progress and the status block</title>
+<desc id="dk-desc">The agent records long work with dev progress, which keeps the run's steps, estimate and ETA and shares them with the team through presence, dev team and the dashboard. Every final message starts with the status block. After each turn the Stop hook reads the block, records whether the marker was there and how well the format was followed in the canary log, and stores the block as one compact line, which dev status, dev overview, the dashboard and the next session show.</desc>
+<rect width="1184" height="552" fill="#10110F"/>
+<g font-family="Manrope, 'Manrope Variable', system-ui, -apple-system, 'Segoe UI', Arial, sans-serif">
+<circle cx="68" cy="74" r="4" fill="#FFB34A"/>
+<text x="80" y="78.5" font-size="12" font-weight="600" fill="#BFB8AB" letter-spacing="0.48">PROGRESS AND THE STATUS BLOCK</text>
+<text x="1082.2" y="78.5" font-size="13" font-weight="400" fill="#BFB8AB">stored</text>
+<g transform="translate(1050.2,74)"><rect x="0" y="-7" width="24" height="14" rx="3" fill="#293235" stroke="#8EA3AB" stroke-width="1.5"/></g>
+<text x="990.7" y="78.5" font-size="13" font-weight="400" fill="#BFB8AB">devkit</text>
+<g transform="translate(958.7,74)"><rect x="0" y="-7" width="24" height="14" rx="3" fill="#2C2416" stroke="#FFB34A" stroke-width="1.5"/></g>
+<g transform="translate(68.0,104.0)">
+<path d="M228.0,40.0 L424.5,40.0" fill="none" stroke="#BFB8AB" stroke-width="1.5" stroke-linejoin="round" stroke-linecap="round"/><polygon points="432.0,40.0 424.0,44.0 424.0,36.0" fill="#BFB8AB"/>
+<rect x="281.2" y="28.0" width="97.5" height="24.0" rx="11.0" fill="#10110F"/>
+<text x="330.0" y="44.0" font-size="13" font-weight="400" fill="#BFB8AB" text-anchor="middle">records steps</text>
+<path d="M624.0,40.0 L784.5,40.0" fill="none" stroke="#BFB8AB" stroke-width="1.5" stroke-linejoin="round" stroke-linecap="round"/><polygon points="792.0,40.0 784.0,44.0 784.0,36.0" fill="#BFB8AB"/>
+<rect x="653.2" y="28.0" width="109.7" height="24.0" rx="11.0" fill="#10110F"/>
+<text x="708.0" y="44.0" font-size="13" font-weight="400" fill="#BFB8AB" text-anchor="middle">ETA · presence</text>
+<path d="M112.0,80.0 L112.0,144.5" fill="none" stroke="#BFB8AB" stroke-width="1.5" stroke-linejoin="round" stroke-linecap="round"/><polygon points="112.0,152.0 108.0,144.0 116.0,144.0" fill="#BFB8AB"/>
+<rect x="25.1" y="104.0" width="173.8" height="24.0" rx="11.0" fill="#10110F"/>
+<text x="112.0" y="120.0" font-size="13" font-weight="400" fill="#BFB8AB" text-anchor="middle">starts every final message</text>
+<path d="M228.0,192.0 L424.5,192.0" fill="none" stroke="#BFB8AB" stroke-width="1.5" stroke-linejoin="round" stroke-linecap="round"/><polygon points="432.0,192.0 424.0,196.0 424.0,188.0" fill="#BFB8AB"/>
+<rect x="283.4" y="180.0" width="93.2" height="24.0" rx="11.0" fill="#10110F"/>
+<text x="330.0" y="196.0" font-size="13" font-weight="400" fill="#BFB8AB" text-anchor="middle">after the turn</text>
+<path d="M624.0,192.0 L784.5,192.0" fill="none" stroke="#BFB8AB" stroke-width="1.5" stroke-linejoin="round" stroke-linecap="round"/><polygon points="792.0,192.0 784.0,196.0 784.0,188.0" fill="#BFB8AB"/>
+<rect x="681.5" y="180.0" width="53.0" height="24.0" rx="11.0" fill="#10110F"/>
+<text x="708.0" y="196.0" font-size="13" font-weight="400" fill="#BFB8AB" text-anchor="middle">stores</text>
+<path d="M528.0,232.0 L528.0,332.0 Q528.0,344.0 516.0,344.0 L235.5,344.0" fill="none" stroke="#BFB8AB" stroke-width="1.5" stroke-linejoin="round" stroke-linecap="round"/><polygon points="228.0,344.0 236.0,340.0 236.0,348.0" fill="#BFB8AB"/>
+<rect x="305.4" y="332.0" width="145.1" height="24.0" rx="11.0" fill="#10110F"/>
+<text x="378.0" y="348.0" font-size="13" font-weight="400" fill="#BFB8AB" text-anchor="middle">marker · format score</text>
+<path d="M920.0,232.0 L920.0,296.5" fill="none" stroke="#BFB8AB" stroke-width="1.5" stroke-linejoin="round" stroke-linecap="round"/><polygon points="920.0,304.0 916.0,296.0 924.0,296.0" fill="#BFB8AB"/>
+<rect x="884.4" y="256.0" width="71.2" height="24.0" rx="11.0" fill="#10110F"/>
+<text x="920.0" y="272.0" font-size="13" font-weight="400" fill="#BFB8AB" text-anchor="middle">drawn as</text>
+<rect x="-4.0" y="0.0" width="232.0" height="80.0" rx="6.0" fill="#1F201C" stroke="#4C4E45" stroke-width="1.5"/>
+<text x="112.0" y="34.0" font-size="16" font-weight="600" fill="#F3F1EB" text-anchor="middle">Agent</text>
+<text x="112.0" y="56.0" font-size="13" font-weight="400" fill="#BFB8AB" text-anchor="middle">Claude Code · Codex</text>
+<rect x="432.0" y="0.0" width="192.0" height="80.0" rx="6.0" fill="#2C2416" stroke="#FFB34A" stroke-width="1.5"/>
+<text x="528.0" y="34.0" font-size="16" font-weight="600" fill="#F3F1EB" text-anchor="middle">dev progress</text>
+<text x="528.0" y="56.0" font-size="13" font-weight="400" fill="#FFB34A" text-anchor="middle">start · step · block · done</text>
+<rect x="792.0" y="0.0" width="256.0" height="80.0" rx="6.0" fill="#1F201C" stroke="#4C4E45" stroke-width="1.5"/>
+<text x="920.0" y="34.0" font-size="16" font-weight="600" fill="#F3F1EB" text-anchor="middle">Team view</text>
+<text x="920.0" y="56.0" font-size="13" font-weight="400" fill="#BFB8AB" text-anchor="middle">dev team · dashboard</text>
+<rect x="-4.0" y="152.0" width="232.0" height="80.0" rx="6.0" fill="#1F201C" stroke="#4C4E45" stroke-width="1.5"/>
+<text x="112.0" y="186.0" font-size="16" font-weight="600" fill="#F3F1EB" text-anchor="middle">Status block</text>
+<text x="112.0" y="208.0" font-size="13" font-weight="400" fill="#BFB8AB" text-anchor="middle">Done · Check · Progress · Next</text>
+<rect x="432.0" y="152.0" width="192.0" height="80.0" rx="6.0" fill="#FFB34A" stroke="#FFB34A" stroke-width="2"/>
+<text x="528.0" y="186.0" font-size="16" font-weight="600" fill="#272820" text-anchor="middle">Stop hook</text>
+<text x="528.0" y="208.0" font-size="13" font-weight="400" fill="#272820" text-anchor="middle">parse · score · store</text>
+<rect x="792.0" y="152.0" width="256.0" height="80.0" rx="6.0" fill="#293235" stroke="#8EA3AB" stroke-width="1.5"/>
+<text x="920.0" y="186.0" font-size="16" font-weight="600" fill="#F3F1EB" text-anchor="middle">Latest status</text>
+<text x="920.0" y="208.0" font-size="13" font-weight="400" fill="#A4B4B9" text-anchor="middle">one compact line</text>
+<rect x="-4.0" y="304.0" width="232.0" height="80.0" rx="6.0" fill="#293235" stroke="#8EA3AB" stroke-width="1.5"/>
+<text x="112.0" y="338.0" font-size="16" font-weight="600" fill="#F3F1EB" text-anchor="middle">Canary log</text>
+<text x="112.0" y="360.0" font-size="13" font-weight="400" fill="#A4B4B9" text-anchor="middle">dev canary · dev doctor</text>
+<rect x="792.0" y="304.0" width="256.0" height="80.0" rx="6.0" fill="#1F201C" stroke="#4C4E45" stroke-width="1.5"/>
+<text x="920.0" y="338.0" font-size="16" font-weight="600" fill="#F3F1EB" text-anchor="middle">Shown in</text>
+<text x="920.0" y="360.0" font-size="13" font-weight="400" fill="#BFB8AB" text-anchor="middle">dev status · overview · next session</text>
+</g>
+</g>
+</svg>

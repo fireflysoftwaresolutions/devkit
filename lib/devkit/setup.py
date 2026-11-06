@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import json
 import os
+import sys
 import re
 import shutil
 import subprocess
@@ -33,7 +34,32 @@ def render(text: str) -> str:
 
 
 def load_conf(name: str):
-    return json.loads(render((CONF / name).read_text()))
+    """A devkit config file, with the values the user chose in `dev setup` (config.json) applied."""
+    data = json.loads(render((CONF / name).read_text()))
+    if name == "claude/settings.json":
+        cc = CFG["claude"]
+        data.setdefault("permissions", {})["defaultMode"] = cc.get("default_mode", "bypassPermissions")
+        if data["permissions"]["defaultMode"] != "bypassPermissions":
+            data.pop("skipDangerousModePermissionPrompt", None)
+        if not cc.get("fast_mode_per_session", True):
+            data.pop("fastModePerSessionOptIn", None)
+        for key, env in (("subagent_model", "CLAUDE_CODE_SUBAGENT_MODEL"), ("subagent_effort", "CLAUDE_CODE_SUBAGENT_EFFORT")):
+            if cc.get(key):  # empty = subagents inherit the session model (the vendor default; recommended)
+                data.setdefault("env", {})[env] = cc[key]
+    elif name == "codex/config.json":
+        cx = CFG["codex"]
+        data["settings"]["approval_policy"] = cx.get("approval_policy", "never")
+        data["settings"]["sandbox_mode"] = cx.get("sandbox_mode", "danger-full-access")
+        if cx.get("max_subagent_threads") is not None:
+            data["upsert"].setdefault("agents", {})["max_concurrent_threads_per_session"] = cx["max_subagent_threads"]
+        if cx.get("profiles") is False:
+            data["profiles"] = {}
+        elif isinstance(cx.get("profiles"), dict):
+            data["profiles"] = {**data.get("profiles", {}), **cx["profiles"]}
+        for key, field in (("subagent_model", "model"), ("subagent_effort", "model_reasoning_effort")):
+            if cx.get(key):
+                data["upsert"].setdefault("agents", {})[f"default_subagent_{'model' if field == 'model' else 'reasoning_effort'}"] = cx[key]
+    return data
 
 
 def backup(path: Path, keep: int = 10):
@@ -174,6 +200,24 @@ def _setup_git():
     done("shared git defaults included; global ignore covers agent artefacts (.claude/worktrees, …)")
 
 
+GITATTRIBUTES = """# devkit: safe merges between machines and developers
+sessions/** merge=union
+presence/*.json merge=ours
+PROJECTS.md merge=ours
+TASKS.md merge=ours
+ACTIVITY.md merge=ours
+registry.json merge=ours
+"""
+
+
+def handoff_merge_rules():
+    """Append-only logs merge as a union; generated views keep the local copy and are regenerated after a pull."""
+    f = HANDOFF / ".gitattributes"
+    if not f.exists() or "devkit: safe merges" not in f.read_text():
+        f.write_text((f.read_text() if f.exists() else "") + GITATTRIBUTES)
+    core.git(HANDOFF, "config", "merge.ours.driver", "true")
+
+
 def setup_handoff():
     step(f"Handoff repository ({core.handoff_repo()} → {tilde(HANDOFF)})")
     repo = core.handoff_repo()
@@ -215,6 +259,9 @@ def setup_handoff():
                 shutil.copy2(f, HANDOFF / f.name)
         remote = core.gitout(HANDOFF, "remote", "get-url", "origin")
         done(f"present · origin {remote or 'none'}")
+    if (HANDOFF / ".git").exists():
+        handoff_merge_rules()
+        done("multi-machine merge rules (sessions union · generated views ours)")
 
 
 def render_instructions() -> str:
@@ -246,7 +293,11 @@ def write_agent_instructions(quiet=False):
 def _fetch_source(src: dict) -> Path:
     repo, ref = src["repo"], src["ref"]
     dest = SKILLS_SRC / f"{repo.replace('/', '__')}@{ref[:12]}"
+    wanted = [p.rstrip("/") + "/" for p in src["skills"].values()]
     if (dest / ".devkit-complete").exists():
+        missing = [p for p in wanted if not (dest / p).exists()]
+        if missing:  # the same repo@ref is shared by several sources (e.g. optional groups): widen the checkout
+            core.git(dest, "sparse-checkout", "add", *missing, timeout=300)
         return dest
     if dest.exists():
         shutil.rmtree(dest)
@@ -256,8 +307,7 @@ def _fetch_source(src: dict) -> Path:
                     timeout=300)
     if rc != 0:
         raise RuntimeError(f"clone {repo}: {err}")
-    paths = list(src["skills"].values())
-    core.git(dest, "sparse-checkout", "set", "--no-cone", *[p.rstrip("/") + "/" for p in paths], timeout=120)
+    core.git(dest, "sparse-checkout", "set", "--no-cone", *wanted, timeout=120)
     rc, _, err = core.git(dest, "checkout", "-q", ref, timeout=300)
     if rc != 0:
         core.git(dest, "fetch", "-q", "origin", ref, timeout=300)
@@ -273,14 +323,81 @@ def install_skills(quiet=False):
         _install_skills()
 
 
+CLAUDE_APP = Path("/Applications/Claude.app")
+CHATGPT_APP = Path("/Applications/ChatGPT.app")
+CHATGPT_CODEX = CHATGPT_APP / "Contents/Resources/codex-cli/bin/codex"
+
+
+def _surface_sessions(agent: str, name: str, days: int = 30) -> list:
+    """devkit session records from one surface (Claude Desktop, ChatGPT app) in the last days, newest first."""
+    out, cut = [], time.time() - days * 86400
+    for f in (STATE / "sessions").glob(f"{agent}-*.json"):
+        rec = read_json(f, {}) or {}
+        if rec.get("surface") == name and (rec.get("started") or 0) > cut:
+            out.append(rec)
+    return sorted(out, key=lambda r: -(r.get("started") or 0))
+
+
+def app_checks(codex_plugins=None) -> list:
+    """The desktop apps run their own copies of the agents on the same configuration as the terminal:
+    Claude Desktop's Code tab reads ~/.claude, the ChatGPT app's Codex reads ~/.codex. Proof, not assumption."""
+    res = []
+    if CLAUDE_APP.exists():
+        bundled = sorted((Path.home() / "Library/Application Support/Claude/claude-code").glob("[0-9]*"))
+        ver = bundled[-1].name if bundled else "?"
+        recs = _surface_sessions("claude", "Claude Desktop")
+        try:
+            from . import canary
+            ok_r, n_r = canary.by_surface(7).get(("claude", "Claude Desktop"), (0, 0))
+        except Exception:
+            ok_r, n_r = 0, 0
+        seen = [f"{len(recs)} session(s) in 30 days"] if recs else []
+        seen += [f"{ok_r}/{n_r} replies with the status block in 7 days"] if n_r else []
+        res.append(("Claude Desktop", "Code tab", True,
+                    f"Claude Code {ver} with the same settings, hooks, plugin and skills as the terminal; " +
+                    ("; ".join(seen) if seen else "no Desktop session recorded yet"), ""))
+        try:
+            from . import desktop
+            st = desktop.status()
+            ok_ = bool(st.get("installed")) and bool(st.get("current")) and st.get("enabled") is not False
+            if not st.get("installed"):
+                detail = "not installed: devkit's tools for Desktop chat and Cowork"
+            else:
+                detail = f"{st.get('installed_version')}" + ("" if st.get("current") else f" (this checkout is "
+                                                                                          f"{st.get('version')})")
+                detail += "; turned off in Settings → Extensions" if st.get("enabled") is False else ", enabled"
+                lc = st.get("launcher") or {}
+                if lc and not lc.get("ok", True):
+                    ok_, detail = False, detail + f"; launcher: {lc.get('reason')}"
+            res.append(("Claude Desktop", "devkit extension", ok_, detail, "dev install --only desktop"))
+        except Exception:
+            pass
+    if CHATGPT_APP.exists() and CHATGPT_CODEX.exists():
+        _, v, _ = sh([str(CHATGPT_CODEX), "--version"], timeout=30)
+        _, listed, _ = sh([str(CHATGPT_CODEX), "plugin", "list"], timeout=120)
+        want = codex_plugins or []
+        bad = [p for p in want if not any(ln.startswith(p + " ") and "installed, enabled" in ln
+                                          for ln in listed.splitlines())]
+        recs = _surface_sessions("codex", "ChatGPT app")
+        res.append(("ChatGPT app", "Codex", not bad,
+                    f"{v.strip() or 'codex'}, same ~/.codex configuration; {len(want) - len(bad)}/{len(want)} plugins "
+                    f"enabled" + (f"; missing {', '.join(bad)}" if bad else "") +
+                    (f"; {len(recs)} session(s) with devkit in 30 days" if recs else ""), "dev install --only codex"))
+    return res
+
+
 def _install_skills():
     step("Skills (shared by Claude Code and Codex)")
     manifest = load_conf("skills.json")
     wanted = {}  # name -> directory to link
+    only = {}  # name -> the agents that get it (default: both)
     for d in sorted((DEVKIT_HOME / "agents" / "skills").iterdir()):
         if (d / "SKILL.md").exists():
             wanted[d.name] = d
+    groups = set((core.CFG.get("skills") or {}).get("groups") or [])
     for src in manifest["sources"]:
+        if src.get("group") and src["group"] not in groups and "all" not in groups:
+            continue
         try:
             root = _fetch_source(src)
         except RuntimeError as e:
@@ -297,15 +414,21 @@ def _install_skills():
             shutil.copytree(s, out, symlinks=True)
             (out / ".devkit-source").write_text(f"{src['repo']}@{src['ref']} {rel} license={src.get('license')}\n")
             wanted[name] = out
+            if src.get("agents"):  # e.g. a Claude plugin's skill given to Codex only, so Claude has no duplicate
+                only[name] = set(src["agents"])
+    pw = SKILLS_SHARE / "playwright-cli"  # installed by the packages step from `playwright-cli install --skills`
+    if (pw / "SKILL.md").exists():
+        wanted["playwright-cli"] = pw
     managed_f = STATE / "skills-managed.json"
-    previous = set(read_json(managed_f, []) or [])
-    for home in (CLAUDE_HOME / "skills", AGENTS_HOME / "skills"):
+    previous = set(read_json(managed_f, []) or [])  # a list, or {name: [agents]} since 26.11.0
+    for agent, home in (("claude", CLAUDE_HOME / "skills"), ("codex", AGENTS_HOME / "skills")):
         home.mkdir(parents=True, exist_ok=True)
-        for name in previous - set(wanted):
+        mine = {n: tg for n, tg in wanted.items() if agent in only.get(n, {"claude", "codex"})}
+        for name in previous - set(mine):
             link = home / name
-            if link.is_symlink():
+            if link.is_symlink() and str(os.readlink(link)).startswith(str(SKILLS_SHARE)):
                 link.unlink()
-        for name, target in wanted.items():
+        for name, target in mine.items():
             link = home / name
             if link.is_symlink():
                 if Path(os.readlink(link)) == target:
@@ -315,8 +438,10 @@ def _install_skills():
                 note(f"{tilde(link)} exists and is not managed by devkit — left untouched")
                 continue
             link.symlink_to(target)
-    managed_f.write_text(json.dumps(sorted(wanted)))
-    done(f"{len(wanted)} skills linked into {tilde(CLAUDE_HOME / 'skills')} and {tilde(AGENTS_HOME / 'skills')}")
+    managed_f.write_text(json.dumps({n: sorted(only.get(n, {"claude", "codex"})) for n in sorted(wanted)}))
+    both = [n for n in wanted if n not in only]
+    extra = "; " + ", ".join(f"{n} → {'/'.join(sorted(a))} only" for n, a in sorted(only.items())) if only else ""
+    done(f"{len(both)} skills linked into {tilde(CLAUDE_HOME / 'skills')} and {tilde(AGENTS_HOME / 'skills')}{extra}")
     print("    " + ui.dim(", ".join(sorted(wanted))))
 
 
@@ -336,6 +461,14 @@ def write_claude_settings(include_hooks=True):
     for p in plugins.get("disabled", []):
         ep[p] = False
     new["enabledPlugins"] = ep
+    sl = cur.get("statusLine") or {}
+    mine = "hook statusline" in str(sl.get("command") or "")
+    if (core.CFG.get("claude") or {}).get("statusline", True) and (not sl or mine):
+        # devkit's status line records Claude's usage windows (doctor, dashboard); a status line of yours is kept
+        new["statusLine"] = {"type": "command", "command": f"'{DEVKIT_HOME}/bin/dev' hook statusline --agent claude",
+                             "padding": 0}
+    elif mine and not (core.CFG.get("claude") or {}).get("statusline", True):
+        new.pop("statusLine", None)
     if new != cur:
         backup(f)
         f.parent.mkdir(parents=True, exist_ok=True)
@@ -351,8 +484,9 @@ def setup_claude():
     locked = policy.lock_status() != "off"
     write_claude_settings(include_hooks=not locked)
     plugins = load_conf("claude/plugins.json")
-    done("settings.json: bypassPermissions by default, no attribution, hooks (SessionStart/Stop/SessionEnd/"
-         "PreToolUse/ConfigChange/InstructionsLoaded)" + (" — hooks served by the managed lock" if locked else ""))
+    frag = load_conf("claude/settings.json")
+    done(f"settings.json: {frag['permissions']['defaultMode']} by default, no attribution, hooks: "
+         + ", ".join(sorted((frag.get('hooks') or {}).keys())))
     if locked and policy.lock_status() == "stale":
         note("the managed-settings lock is older than this configuration — run `dev config lock` to refresh it")
     if not core.have("claude"):
@@ -376,8 +510,15 @@ def setup_claude():
         rc, out, err = sh(["claude", "plugin", "install", p, "-s", "user", "-y"], timeout=300)
         done(f"installed {p}") if rc == 0 else fail(f"{p}: {(err or out)[-200:]}")
     sh(["claude", "plugin", "marketplace", "update", "firefly-devkit"], timeout=120)
-    rc, out, err = sh(["claude", "plugin", "update", "devkit@firefly-devkit"], timeout=120)
-    done(f"{len(plugins['plugins'])} plugins installed and enabled (devkit plugin refreshed to {core.VERSION})")
+    if plugin_copy_stale(CLAUDE_HOME / "plugins" / "cache" / "firefly-devkit" / "devkit"):
+        sh(["claude", "plugin", "marketplace", "update", "firefly-devkit"], timeout=120)
+        sh(["claude", "plugin", "uninstall", "devkit@firefly-devkit"], timeout=120)
+        rc, out, err = sh(["claude", "plugin", "install", "devkit@firefly-devkit", "-s", "user", "-y"], timeout=300)
+        if rc != 0 or plugin_copy_stale(CLAUDE_HOME / "plugins" / "cache" / "firefly-devkit" / "devkit"):
+            fail(f"devkit plugin copy is out of date in Claude Code: {(err or out)[-160:]}")
+        else:
+            done("devkit plugin reinstalled from this checkout (skills, commands, agents)")
+    done(f"{len(plugins['plugins'])} plugins installed and enabled")
     for name, spec in plugins.get("mcp", {}).items():
         rc, _, _ = sh(["claude", "mcp", "get", name], timeout=30)
         if rc == 0:
@@ -403,7 +544,7 @@ def write_codex_config(quiet=False):
         if (read_json(hooks_f, {}) or {}) != merged:
             backup(hooks_f)
             hooks_f.write_text(json.dumps(merged, indent=2) + "\n")
-        done(f"{tilde(hooks_f)}: SessionStart / PreToolUse / Stop / SessionEnd")
+        done(f"{tilde(hooks_f)}: " + " / ".join(ours))
         projects = {str(DEV): {"trust_level": "trusted"}}
         from . import registry
         mains, _, _ = registry.discover()
@@ -430,12 +571,69 @@ def write_codex_config(quiet=False):
             fail(f"codex app-server: {e}")
 
 
+def _toml_value(v) -> str:
+    return json.dumps(v) if isinstance(v, str) else ("true" if v is True else "false" if v is False else str(v))
+
+
+def write_codex_profiles(conf: dict):
+    """`codex --profile <name>` layers ~/.codex/<name>.config.toml over the user config. Codex's config API writes
+    only the user config, so devkit writes these small files itself (it owns them)."""
+    profiles = conf.get("profiles") or {}
+    for name, prof in profiles.items():
+        text = "# Managed by devkit (config/codex/config.json → profiles). Use: codex --profile " + name + "\n" + \
+               "".join(f"{k} = {_toml_value(v)}\n" for k, v in prof.items())
+        f = CODEX_HOME / f"{name}.config.toml"
+        if not f.exists() or f.read_text() != text:
+            f.write_text(text)
+    if profiles:
+        done("profiles: " + ", ".join(f"{n} ({p.get('model')}, {p.get('model_reasoning_effort')})"
+                                      for n, p in profiles.items()) + " — `codex --profile <name>`")
+
+
+def write_codex_agents(conf: dict):
+    """Custom agent roles (e.g. the read-only `scout`) as ~/.codex/agents/<name>.toml, auto-discovered by Codex."""
+    roles = conf.get("agents") or {}
+    if not roles:
+        return
+    d = CODEX_HOME / "agents"
+    d.mkdir(parents=True, exist_ok=True)
+    for name, role in roles.items():
+        text = "# Managed by devkit (config/codex/config.json → agents). Edit devkit's config, not this file.\n" + \
+               "".join(f"{k} = {_toml_value(v)}\n" for k, v in role.items())
+        f = d / f"{name}.toml"
+        if not f.exists() or f.read_text() != text:
+            f.write_text(text)
+    done(f"agent roles: {', '.join(roles)} (~/.codex/agents)")
+
+
+def plugin_copy_stale(cache_root: Path) -> bool:
+    """True when the agent's installed copy of the devkit plugin differs from this checkout's plugin/ folder.
+    Both Claude Code and Codex install a snapshot, and devkit's version does not change between commits."""
+    import filecmp
+    src = DEVKIT_HOME / "plugin"
+    copies = sorted(cache_root.glob("*")) if cache_root.exists() else []
+    if not copies:
+        return True
+    dst = copies[-1]
+
+    def differs(a: Path, b: Path) -> bool:
+        cmp = filecmp.dircmp(a, b, ignore=[".git", ".DS_Store", "__pycache__"])
+        if cmp.left_only or cmp.diff_files or cmp.funny_files:
+            return True
+        _, mismatch, errors = filecmp.cmpfiles(a, b, cmp.common_files, shallow=False)
+        return bool(mismatch or errors) or any(differs(a / d, b / d) for d in cmp.common_dirs)
+
+    return differs(src, dst)
+
+
 def setup_codex():
     step("Codex (CLI + ChatGPT app): settings, hooks, plugins, MCP")
     if not core.have("codex"):
         fail("codex CLI not found — `brew install --cask codex`, then re-run `dev install`")
         return
     write_codex_config()
+    write_codex_profiles(load_conf("codex/config.json"))
+    write_codex_agents(load_conf("codex/config.json"))
     plugins = load_conf("codex/plugins.json")
     _, mk, _ = sh(["codex", "plugin", "marketplace", "list"], timeout=60)
     for name, src in plugins.get("marketplaces", {}).items():
@@ -454,7 +652,38 @@ def setup_codex():
             continue
         rc, out, err = sh(["codex", "plugin", "add", p], timeout=300)
         done(f"installed {p}") if rc == 0 else fail(f"{p}: {(err or out)[-200:]}")
+    cache = CODEX_HOME / "plugins" / "cache" / "firefly-devkit" / "devkit"
+    if "devkit@firefly-devkit" in plugins["plugins"] and plugin_copy_stale(cache):
+        sh(["codex", "plugin", "marketplace", "upgrade", "firefly-devkit"], timeout=180)
+        sh(["codex", "plugin", "remove", "devkit@firefly-devkit"], timeout=120)
+        rc, out, err = sh(["codex", "plugin", "add", "devkit@firefly-devkit"], timeout=300)
+        if rc != 0 or plugin_copy_stale(cache):
+            fail(f"devkit plugin copy is out of date in Codex: {(err or out)[-160:]}")
+        else:
+            done("devkit plugin reinstalled from this checkout (skills, commands)")
     done(f"{len(plugins['plugins'])} plugins installed and enabled")
+
+
+def setup_tools():
+    """Homebrew packages for the configured stacks, git hosts and clouds (only what is missing)."""
+    step("Tools for your stacks, git hosts and clouds")
+    from . import toolchain, wizard
+    if not core.have("brew"):
+        fail("Homebrew not found — run install.sh")
+        return
+    groups = set(wizard.BASE_GROUPS) | set(CFG.get("stacks") or []) | set(toolchain.groups())
+    missing = wizard.missing_packages(groups)
+    if not missing:
+        done(f"all installed · {', '.join(sorted(groups))}")
+    elif not (CFG.get("packages") or {}).get("auto", True):
+        note(f"missing: {', '.join(missing[:8])} (packages.auto is off) — dev install --only tools with it on")
+        return
+    else:
+        rc = wizard.install_packages(CFG.get("stacks") or [], CFG.get("agents", {}).get("claude", True),
+                                     extra=toolchain.groups())
+        done("installed what was missing") if rc == 0 else fail("some packages failed — `brew bundle` output above")
+    for line in toolchain.postinstall(toolchain.selected()):
+        done(line)
 
 
 def setup_docker():
@@ -479,7 +708,25 @@ def setup_docker():
          f"{d['vm_type']}{' + rosetta' if d.get('rosetta') else ''}, {d['mount_type']})")
 
 
+def setup_docs_tools():
+    step("Documentation checks (markdownlint, lychee, Vale)")
+    from . import docs
+    have = {t: core.have(t) for t in ("markdownlint-cli2", "lychee", "vale")}
+    ok = docs.ensure_vale() if have["vale"] else False
+    done(", ".join(f"{t} {'✓' if v else '✗'}" for t, v in have.items()) + (" · Vale styles Google + write-good synced"
+                                                                         if ok else ""))
+
+
 def setup_launchd():
+    """Scheduled jobs (sync, sleep, gc, repair, audit, doctor, lessons) as launchd agents, from the devkit config."""
+    step("Scheduled jobs (launchd)")
+    from . import jobs
+    for state, name, detail in jobs.install(quiet=True):
+        (done if state in ("ok", "loaded", "legacy", "disabled") else fail)(f"{name}: {state}" +
+                                                                          (f" · {detail}" if detail else ""))
+
+
+def _legacy_setup_launchd():
     step("Background sync (launchd)")
     interval = int(CFG["sync"].get("interval_minutes", 60)) * 60
     log = STATE / "logs" / "sync.log"
@@ -518,13 +765,44 @@ def setup_launchd():
         done(f"{LAUNCHD_LABEL} loaded (every {interval // 60} min)")
 
 
+def setup_desktop():
+    """Claude Desktop: build devkit's extension (.mcpb) and open its installer when it is missing or outdated.
+    The Code tab needs nothing here: it runs Claude Code on ~/.claude, set up by the claude step."""
+    step("Claude Desktop: the devkit extension")
+    if not CLAUDE_APP.exists():
+        note("Claude Desktop is not installed — skipped")
+        return
+    from . import desktop
+    st = desktop.status()
+    if st.get("installed") and st.get("current"):
+        done(f"devkit {st.get('installed_version')} installed" + ("" if st.get("enabled") is not False else
+                                                                  " but turned off: Settings → Extensions → devkit"))
+        return
+    try:
+        rep = desktop.pack(validate=False, say=lambda *_: None)
+    except ValueError as e:
+        fail(f"could not build the extension: {e}")
+        return
+    bundle = rep["bundle"]
+    if not sys.stdin.isatty() or os.environ.get("DEVKIT_JOB"):
+        note(f"open {tilde(bundle)} to {'update' if st.get('installed') else 'install'} it in Claude Desktop")
+        return
+    sh(["open", "-a", "Claude", bundle], timeout=30)
+    done(f"opened {tilde(bundle)} in Claude Desktop: click Install"
+         + (f" (replaces {st.get('installed_version')})" if st.get("installed") else ""))
+
+
 def run_install(only=None):
     print(ui.banner("install"))
-    steps = [("config", ensure_config), ("cli", install_cli), ("git", setup_git), ("handoff", setup_handoff),
+    steps = [("config", ensure_config), ("tools", setup_tools), ("cli", install_cli), ("git", setup_git), ("handoff", setup_handoff),
              ("instructions", write_agent_instructions), ("skills", install_skills), ("claude", setup_claude),
-             ("codex", setup_codex), ("docker", setup_docker), ("launchd", setup_launchd)]
+             ("codex", setup_codex), ("desktop", setup_desktop), ("docker", setup_docker), ("docs", setup_docs_tools),
+             ("launchd", setup_launchd)]
     for name, fn in steps:
         if only and name not in only:
+            continue
+        if name in ("claude", "codex") and not CFG.get("agents", {}).get(name, True):
+            step(f"{'Claude Code' if name == 'claude' else 'Codex'}: skipped (disabled in `dev setup`)")
             continue
         try:
             fn()
@@ -585,10 +863,13 @@ def doctor() -> int:
         check("Agents", f"{tilde(target)}", ok, "generated from devkit" if ok else "missing or hand-written",
               "dev install --only instructions")
     managed = read_json(STATE / "skills-managed.json", []) or []
-    for home in (CLAUDE_HOME / "skills", AGENTS_HOME / "skills"):
-        broken = [n for n in managed if not (home / n / "SKILL.md").exists()]
-        check("Agents", f"skills in {tilde(home)}", managed and not broken, f"{len(managed) - len(broken)}/{len(managed)} linked",
-              "dev install --only skills")
+    if not isinstance(managed, dict):  # before 26.11.0: every skill went to both agents
+        managed = {n: ["claude", "codex"] for n in managed}
+    for agent, home in (("claude", CLAUDE_HOME / "skills"), ("codex", AGENTS_HOME / "skills")):
+        mine = [n for n, agents in managed.items() if agent in agents]
+        broken = [n for n in mine if not (home / n / "SKILL.md").exists()]
+        check("Agents", f"skills in {tilde(home)}", bool(mine) and not broken, f"{len(mine) - len(broken)}/{len(mine)} linked"
+              + (f"; missing {', '.join(broken[:3])}" if broken else ""), "dev install --only skills")
 
     s = read_json(CLAUDE_HOME / "settings.json", {}) or {}
     check("Claude", "bypassPermissions default", (s.get("permissions") or {}).get("defaultMode") == "bypassPermissions",
@@ -596,7 +877,8 @@ def doctor() -> int:
     att = s.get("attribution") or {}
     check("Claude", "no attribution", att.get("commit") == "" and att.get("pr") == "", json.dumps(att), "dev install --only claude")
     events = {e for e, gs in (s.get("hooks") or {}).items() for g in gs for h in g.get("hooks", []) if is_devkit_hook(h)}
-    check("Claude", "devkit hooks", {"SessionStart", "SessionEnd", "PreToolUse", "Stop"} <= events, ", ".join(sorted(events)),
+    check("Claude", "devkit hooks", {"SessionStart", "SessionEnd", "PreToolUse", "Stop", "UserPromptSubmit",
+                                     "PostToolUse"} <= events, ", ".join(sorted(events)),
           "dev install --only claude")
     want = load_conf("claude/plugins.json")
     _, listed, _ = sh(["claude", "plugin", "list"], timeout=60) if core.have("claude") else (1, "", "")
@@ -622,6 +904,15 @@ def doctor() -> int:
                 st = {h["eventName"]: h["trustStatus"] for h in hs}
                 check("Codex", "devkit hooks trusted", hs and all(v == "trusted" for v in st.values()),
                       ", ".join(f"{k}:{v}" for k, v in st.items()) or "none", "dev install --only codex")
+                try:
+                    avail = set(rpc.models())
+                    profs = load_conf("codex/config.json").get("profiles") or {}
+                    miss = sorted({p.get("model") for p in profs.values() if p.get("model")} - avail)
+                    check("Codex", "profile models available", not miss,
+                          ", ".join(f"{n}={p.get('model')}" for n, p in profs.items()) + (f"; not on this account: {miss}" if miss else ""),
+                          "set codex.profiles in ~/.config/devkit/config.json to models from `codex debug models`")
+                except Exception:
+                    pass
                 mcps = set((cfg.get("mcp_servers") or {}).keys())
                 wantm = set(load_conf("codex/plugins.json").get("mcp", {}))
                 check("Codex", "MCP servers", wantm <= mcps, ", ".join(sorted(wantm & mcps)) +
@@ -633,10 +924,14 @@ def doctor() -> int:
         bad = [p for p in wantp if not any(ln.startswith(p + " ") and "installed, enabled" in ln for ln in listed.splitlines())]
         check("Codex", "plugins", not bad, f"{len(wantp) - len(bad)}/{len(wantp)} enabled" +
               (f"; missing: {', '.join(bad)}" if bad else ""), "dev install --only codex")
+        for group, name, ok, detail, fix in app_checks(wantp):
+            check(group, name, ok, detail, fix)
 
     from . import providers
     pst = providers.status(include_account=False)
     for key in ("claude", "codex"):
+        if not CFG.get("agents", {}).get(key, True):
+            continue
         p = pst[key]
         check("Agents", f"{p['name']} installed + signed in", bool(p.get("installed") and p.get("logged_in")),
               f"{p.get('version') or 'missing'} · {p.get('auth_method') or '-'} · plan {p.get('plan') or '-'}",
@@ -654,10 +949,15 @@ def doctor() -> int:
     rc, out, _ = sh(["docker", "compose", "version", "--short"], timeout=20)
     check("Docker", "compose plugin", rc == 0, out or "not found", "dev install --only docker")
 
-    loaded = sh(["launchctl", "print", f"gui/{os.getuid()}/{LAUNCHD_LABEL}"])[0] == 0
-    last = read_json(STATE / "last-sync.json", {}) or {}
-    check("Automation", "launchd sync job", loaded, f"last run {core.ago(last.get('ts'))}" if last else "never ran",
-          "dev install --only launchd")
+    from . import jobs as _jobs
+    for jname, jj in _jobs.jobs().items():
+        if not jj.get("enabled"):
+            continue
+        lr = _jobs.last_run(jname) or {}
+        okj = _jobs.loaded(jname) and lr.get("rc") in (0, None)
+        check("Automation", f"job {jname}", okj, f"{_jobs.schedule_text(jj)} · last " +
+              (core.ago(lr["start"]) + (" ok" if lr.get("rc") == 0 else f" exit {lr.get('rc')}") if lr else "never"),
+              f"dev jobs show {jname}")
     from . import canary
     sm = canary.summary(7)
     tot = sum(t for _, t in sm.values())
@@ -666,6 +966,37 @@ def doctor() -> int:
           canary.summary_line(7), "`dev canary` lists deviations; check ~/.claude/CLAUDE.md and ~/.codex/AGENTS.md")
     st = os.statvfs(str(HOME))
     free_gb = st.f_bavail * st.f_frsize / 1024 ** 3
+    for agent_name, home in (("Claude", CLAUDE_HOME), ("Codex", CODEX_HOME)):
+        stale = plugin_copy_stale(home / "plugins" / "cache" / "firefly-devkit" / "devkit")
+        check(agent_name, "devkit plugin copy is current", not stale,
+              "matches plugin/ in this checkout" if not stale else "older than this checkout (skills or agents missing)",
+              f"dev install --only {agent_name.lower()}")
+    from . import toolchain
+    for key in toolchain.selected():
+        if key not in toolchain.ALL:
+            continue
+        r = toolchain.check(key)
+        label = toolchain.ALL[key][0]
+        group = "Hosts" if key in toolchain.HOSTS else "Clouds"
+        check(group, f"{label}", r["installed"] and r["signed_in"], r["detail"], r["fix"])
+    from . import skillguard
+    for agent_name in ("claude", "codex"):
+        gaps = skillguard.coverage(agent_name)
+        check("Agents", f"skills for every rule ({agent_name})", not gaps,
+              "all required skills installed" if not gaps else "; ".join(f"{r}: {', '.join(m)}" for r, m in gaps),
+              f"dev install --only skills,{agent_name}")
+    from . import policy as _pol
+    offs = _pol.project_overrides()
+    check("Agents", "no project switches devkit off", not offs,
+          "; ".join(f"{tilde(f)}: {w}" for f, w in offs[:3]) or "no .claude/.codex override disables devkit",
+          "remove the override (devkit must stay active), or change devkit's own config")
+    recent = [core.read_json(f, {}) or {} for f in (STATE / "sessions").glob("*.json")
+              if time.time() - f.stat().st_mtime < 7 * 86400] if (STATE / "sessions").exists() else []
+    by_agent = {}
+    for r in recent:
+        by_agent[r.get("agent")] = by_agent.get(r.get("agent"), 0) + 1
+    check("Agents", "sessions running with devkit (7d)", True,
+          ", ".join(f"{k}: {v}" for k, v in sorted(by_agent.items()) if k) or "none yet", "")
     check("Automation", "free disk", free_gb > 20, f"{free_gb:.0f} GB free", "dev gc --apply")
 
     group = None

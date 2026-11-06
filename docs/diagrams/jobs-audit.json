@@ -1,0 +1,158 @@
+{
+  "name": "jobs-audit",
+  "kind": "flow",
+  "title": "Scheduled jobs and the audit trail",
+  "desc": "launchd starts each scheduled job on its schedule as dev jobs exec <name>, which runs the job's dev command one at a time and with a timeout. The output goes to the job's log, the result (exit code, duration, last line) to the journal, and a job record to the audit trail, which also receives every changing dev command, guard decision, and handoff write. A failed job sends a notification. dev jobs and dev doctor read the journal, and the daily audit job publishes this machine's audit trail to audit/<user>@<host>/ in the handoff repository, where dev audit --team reads the whole team's.",
+  "legend": [
+    {
+      "label": "devkit",
+      "family": "firefly"
+    },
+    {
+      "label": "automation",
+      "family": "olive"
+    },
+    {
+      "label": "stored",
+      "family": "slate"
+    }
+  ],
+  "nodes": [
+    {
+      "id": "launchd",
+      "label": "launchd",
+      "sub": "com.devkit.job.<name>",
+      "col": 1,
+      "row": 0,
+      "family": "olive"
+    },
+    {
+      "id": "notify",
+      "label": "Notification",
+      "sub": "when a job fails",
+      "col": 0,
+      "row": 0
+    },
+    {
+      "id": "exec",
+      "label": "dev jobs exec <name>",
+      "sub": "dev <command> · timeout · one at a time",
+      "col": 1,
+      "row": 1,
+      "family": "firefly",
+      "emphasis": true
+    },
+    {
+      "id": "sources",
+      "label": "Everything else",
+      "sub": "dev commands · guard · hooks",
+      "col": 2,
+      "row": 0,
+      "family": "firefly"
+    },
+    {
+      "id": "log",
+      "label": "Log",
+      "sub": "logs/jobs/<name>.log",
+      "col": 0,
+      "row": 2,
+      "family": "slate",
+      "shape": "store"
+    },
+    {
+      "id": "journal",
+      "label": "Journal",
+      "sub": "jobs/journal.jsonl",
+      "col": 1,
+      "row": 2,
+      "family": "slate",
+      "shape": "store"
+    },
+    {
+      "id": "audit",
+      "label": "Audit trail",
+      "sub": "audit/YYYY-MM.jsonl",
+      "col": 2,
+      "row": 2,
+      "family": "slate",
+      "shape": "store"
+    },
+    {
+      "id": "views",
+      "label": "dev jobs · dev doctor",
+      "sub": "last run · next run · health",
+      "col": 1,
+      "row": 3,
+      "family": "firefly"
+    },
+    {
+      "id": "handoff",
+      "label": "Handoff repository",
+      "sub": "audit/<user>@<host>/",
+      "col": 2,
+      "row": 3,
+      "family": "slate",
+      "shape": "store"
+    }
+  ],
+  "edges": [
+    {
+      "from": "launchd",
+      "to": "exec",
+      "label": "on schedule"
+    },
+    {
+      "from": "exec",
+      "to": "notify",
+      "label": "failed",
+      "from_side": "left",
+      "to_side": "bottom",
+      "route": "hv"
+    },
+    {
+      "from": "exec",
+      "to": "log",
+      "label": "output",
+      "from_side": "left",
+      "to_side": "top",
+      "route": "hv"
+    },
+    {
+      "from": "exec",
+      "to": "journal",
+      "label": "exit · duration"
+    },
+    {
+      "from": "exec",
+      "to": "audit",
+      "label": "job record",
+      "from_side": "right",
+      "to_side": "left",
+      "via": [
+        [
+          1.5,
+          1
+        ],
+        [
+          1.5,
+          2
+        ]
+      ]
+    },
+    {
+      "from": "sources",
+      "to": "audit",
+      "label": "changes · decisions"
+    },
+    {
+      "from": "journal",
+      "to": "views",
+      "label": "read"
+    },
+    {
+      "from": "audit",
+      "to": "handoff",
+      "label": "audit job, daily"
+    }
+  ]
+}

@@ -1,0 +1,29 @@
+{
+  "name": "handoff-sync",
+  "kind": "sequence",
+  "title": "Two machines, one handoff repository",
+  "desc": "Sequence of a task lock between two developers' machines. Maria's agent claims a task with dev task start: devkit pulls, writes the lock into the item's file and pushes it to the handoff repository on GitHub at once. Jordan's machine pulls at session start and on every sync, so Jordan's agent is told the task is claimed, and its own claim is refused. While Maria works, the Stop hook renews the lock and publishes presence and the session line. dev task done releases the lock and pushes at once; a lock that nobody renews for 8 hours is released by the hourly sync on any machine.",
+  "participants": [
+    {"id": "maria", "label": "Maria's agent", "sub": "laptop"},
+    {"id": "mclone", "label": "Handoff clone", "sub": "laptop", "family": "slate"},
+    {"id": "github", "label": "GitHub", "sub": "<you>/handoff", "family": "steel"},
+    {"id": "jclone", "label": "Handoff clone", "sub": "desktop", "family": "slate"},
+    {"id": "jordan", "label": "Jordan's agent", "sub": "desktop"}
+  ],
+  "messages": [
+    {"divider": "Claim"},
+    {"from": "maria", "to": "mclone", "label": "dev task start 2"},
+    {"from": "mclone", "to": "github", "label": "pull, write lock, push at once", "style": "primary"},
+    {"divider": "Every other machine"},
+    {"from": "github", "to": "jclone", "label": "pull at session start and sync"},
+    {"from": "jclone", "to": "jordan", "label": "context: claimed by maria", "style": "return"},
+    {"from": "jordan", "to": "jclone", "label": "dev task start 2"},
+    {"from": "jclone", "to": "jordan", "label": "refused: claimed until 18:40", "style": "return"},
+    {"divider": "While Maria works"},
+    {"from": "mclone", "to": "github", "label": "renew lock · presence · session line"},
+    {"divider": "Finish"},
+    {"from": "maria", "to": "mclone", "label": "dev task done 2"},
+    {"from": "mclone", "to": "github", "label": "release, push at once"},
+    {"note": "No renewal for 8 h: the hourly sync on any machine releases the lock", "over": ["github", "jordan"]}
+  ]
+}

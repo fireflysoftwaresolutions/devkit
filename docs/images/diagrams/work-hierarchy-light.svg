@@ -1,0 +1,44 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1080" height="704" viewBox="0 0 1080 704" role="img" aria-labelledby="dk-title dk-desc">
+<title id="dk-title">How work is organized</title>
+<desc id="dk-desc">The portfolio is every initiative and project in the handoff repository. An initiative groups the projects that work toward one goal and holds the cross-project tasks; a project can also stand alone. Each scope, a project or an initiative, has its own work items, plans and session log.</desc>
+<rect width="1080" height="704" fill="#F3F1EB"/>
+<g font-family="Manrope, 'Manrope Variable', system-ui, -apple-system, 'Segoe UI', Arial, sans-serif">
+<circle cx="68" cy="74" r="4" fill="#FFB34A"/>
+<text x="80" y="78.5" font-size="12" font-weight="600" fill="#62645B" letter-spacing="0.48">HOW WORK IS ORGANIZED</text>
+<g transform="translate(68.0,104.0)">
+<path d="M420.0,40.0 L332.0,40.0 Q320.0,40.0 320.0,52.0 L320.0,168.0 Q320.0,180.0 308.0,180.0 L235.5,180.0" fill="none" stroke="#62645B" stroke-width="1.5" stroke-linejoin="round" stroke-linecap="round"/><polygon points="228.0,180.0 236.0,176.0 236.0,184.0" fill="#62645B"/>
+<rect x="291.2" y="98.0" width="57.6" height="24.0" rx="11.0" fill="#F3F1EB"/>
+<text x="320.0" y="114.0" font-size="13" font-weight="400" fill="#62645B" text-anchor="middle">groups</text>
+<path d="M668.0,40.0 L724.0,40.0 Q736.0,40.0 736.0,52.0 L736.0,180.0 Q736.0,192.0 748.0,192.0 L804.5,192.0" fill="none" stroke="#62645B" stroke-width="1.5" stroke-linejoin="round" stroke-linecap="round"/><polygon points="812.0,192.0 804.0,196.0 804.0,188.0" fill="#62645B"/>
+<rect x="716.3" y="104.0" width="39.4" height="24.0" rx="11.0" fill="#F3F1EB"/>
+<text x="736.0" y="120.0" font-size="13" font-weight="400" fill="#62645B" text-anchor="middle">lists</text>
+<path d="M228.0,204.0 L532.0,204.0 Q544.0,204.0 544.0,216.0 L544.0,296.5" fill="none" stroke="#62645B" stroke-width="1.5" stroke-linejoin="round" stroke-linecap="round"/><polygon points="544.0,304.0 540.0,296.0 548.0,296.0" fill="#62645B"/>
+<rect x="349.7" y="192.0" width="72.6" height="24.0" rx="11.0" fill="#F3F1EB"/>
+<text x="386.0" y="208.0" font-size="13" font-weight="400" fill="#62645B" text-anchor="middle">members</text>
+<path d="M112.0,232.0 L112.0,484.0 Q112.0,496.0 124.0,496.0 L412.5,496.0" fill="none" stroke="#62645B" stroke-width="1.5" stroke-linejoin="round" stroke-linecap="round"/><polygon points="420.0,496.0 412.0,500.0 412.0,492.0" fill="#62645B"/>
+<rect x="201.4" y="484.0" width="129.2" height="24.0" rx="11.0" fill="#F3F1EB"/>
+<text x="266.0" y="500.0" font-size="13" font-weight="400" fill="#62645B" text-anchor="middle">cross-project tasks</text>
+<path d="M544.0,384.0 L544.0,448.5" fill="none" stroke="#62645B" stroke-width="1.5" stroke-linejoin="round" stroke-linecap="round"/><polygon points="544.0,456.0 540.0,448.0 548.0,448.0" fill="#62645B"/>
+<rect x="490.7" y="408.0" width="106.7" height="24.0" rx="11.0" fill="#F3F1EB"/>
+<text x="544.0" y="424.0" font-size="13" font-weight="400" fill="#62645B" text-anchor="middle">their own tasks</text>
+<path d="M880.0,232.0 L880.0,484.0 Q880.0,496.0 868.0,496.0 L675.5,496.0" fill="none" stroke="#62645B" stroke-width="1.5" stroke-linejoin="round" stroke-linecap="round"/><polygon points="668.0,496.0 676.0,492.0 676.0,500.0" fill="#62645B"/>
+<rect x="833.1" y="352.0" width="93.7" height="24.0" rx="11.0" fill="#F3F1EB"/>
+<text x="880.0" y="368.0" font-size="13" font-weight="400" fill="#62645B" text-anchor="middle">its own tasks</text>
+<rect x="420.0" y="0.0" width="248.0" height="80.0" rx="6.0" fill="#FFFFFF" stroke="#BFB8AB" stroke-width="1.5"/>
+<text x="544.0" y="34.0" font-size="16" font-weight="600" fill="#272820" text-anchor="middle">Portfolio</text>
+<text x="544.0" y="56.0" font-size="13" font-weight="400" fill="#62645B" text-anchor="middle">dev overview · dev report</text>
+<rect x="-4.0" y="152.0" width="232.0" height="80.0" rx="6.0" fill="#FFB34A" stroke="#F0A33C" stroke-width="2"/>
+<text x="112.0" y="186.0" font-size="16" font-weight="600" fill="#272820" text-anchor="middle">Initiative</text>
+<text x="112.0" y="208.0" font-size="13" font-weight="400" fill="#272820" text-anchor="middle">initiatives/&lt;slug&gt;/README.md</text>
+<rect x="812.0" y="152.0" width="136.0" height="80.0" rx="6.0" fill="#FFFFFF" stroke="#BFB8AB" stroke-width="1.5"/>
+<text x="880.0" y="186.0" font-size="16" font-weight="600" fill="#272820" text-anchor="middle">Project</text>
+<text x="880.0" y="208.0" font-size="13" font-weight="400" fill="#62645B" text-anchor="middle">in no initiative</text>
+<rect x="420.0" y="304.0" width="248.0" height="80.0" rx="6.0" fill="#FFFFFF" stroke="#BFB8AB" stroke-width="1.5"/>
+<text x="544.0" y="338.0" font-size="16" font-weight="600" fill="#272820" text-anchor="middle">Member projects</text>
+<text x="544.0" y="360.0" font-size="13" font-weight="400" fill="#62645B" text-anchor="middle">projects/&lt;project id&gt;.md</text>
+<rect x="420.0" y="456.0" width="248.0" height="80.0" rx="6.0" fill="#D8DCDA" stroke="#6B8795" stroke-width="1.5"/>
+<text x="544.0" y="490.0" font-size="16" font-weight="600" fill="#272820" text-anchor="middle">Work and records</text>
+<text x="544.0" y="512.0" font-size="13" font-weight="400" fill="#39464B" text-anchor="middle">items · plans · sessions, per scope</text>
+</g>
+</g>
+</svg>

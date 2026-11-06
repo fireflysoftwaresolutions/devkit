@@ -15,7 +15,13 @@
     "NEXT_TELEMETRY_DISABLED": "1",
     "SUPERPOWERS_DISABLE_TELEMETRY": "1",
     "ENABLE_STOP_REVIEW": "0",
-    "ENABLE_COMMIT_REVIEW": "0"
+    "ENABLE_COMMIT_REVIEW": "0",
+    "CLAUDE_SECURITY_SCAN_TIP": "off",
+    "TRIVY_DISABLE_TELEMETRY": "true",
+    "TRIVY_SKIP_VERSION_CHECK": "true",
+    "SEMGREP_SEND_METRICS": "off",
+    "SYFT_CHECK_FOR_APP_UPDATE": "false",
+    "GRYPE_CHECK_FOR_APP_UPDATE": "false"
   },
   "hooks": {
     "SessionStart": [
@@ -31,7 +37,7 @@
     ],
     "PreToolUse": [
       {
-        "matcher": "Bash|Write|Edit|MultiEdit|NotebookEdit",
+        "matcher": "Bash|Write|Edit|MultiEdit|NotebookEdit|Agent|Task",
         "hooks": [
           {
             "type": "command",
@@ -85,6 +91,52 @@
           }
         ]
       }
+    ],
+    "UserPromptSubmit": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "'{{DEVKIT}}/bin/dev' hook prompt --agent claude",
+            "timeout": 10
+          }
+        ]
+      }
+    ],
+    "PostToolUse": [
+      {
+        "matcher": "Bash|Agent|Task|Write|Edit|MultiEdit|WebFetch|WebSearch",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "'{{DEVKIT}}/bin/dev' hook post-tool --agent claude",
+            "timeout": 10
+          }
+        ]
+      }
+    ],
+    "SubagentStart": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "'{{DEVKIT}}/bin/dev' hook subagent-start --agent claude",
+            "timeout": 5
+          }
+        ]
+      }
+    ],
+    "SubagentStop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "'{{DEVKIT}}/bin/dev' hook subagent-stop --agent claude",
+            "timeout": 5
+          }
+        ]
+      }
     ]
-  }
+  },
+  "fastModePerSessionOptIn": true
 }

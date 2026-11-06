@@ -148,10 +148,12 @@ def diff_instructions():
 
 def diff_skills():
     managed = read_json(STATE / "skills-managed.json", []) or []
+    if not isinstance(managed, dict):  # before 26.11.0: every skill went to both agents
+        managed = {n: ["claude", "codex"] for n in managed}
     out = []
-    for home in (CLAUDE_HOME / "skills", AGENTS_HOME / "skills"):
-        for n in managed:
-            if not (home / n / "SKILL.md").exists():
+    for agent, home in (("claude", CLAUDE_HOME / "skills"), ("codex", AGENTS_HOME / "skills")):
+        for n, agents in managed.items():
+            if agent in agents and not (home / n / "SKILL.md").exists():
                 out.append(Drift("skills", f"{tilde(home)}/{n}", MISSING, "linked"))
     return out
 
@@ -171,9 +173,28 @@ def diff_git():
     return out
 
 
+def project_overrides(root=None) -> list:
+    """Project-level agent settings under ~/Development that switch devkit off: [(file, what)]."""
+    from . import guard
+    root = Path(root or core.DEV)
+    out = []
+    for pattern in (".claude/settings.json", ".claude/settings.local.json", ".codex/config.toml"):
+        for depth in ("*/*/", "*/*/*/", "_local/*/", ".worktrees/*/*/*/"):
+            for f in root.glob(depth + pattern):
+                try:
+                    text = f.read_text(errors="ignore")
+                except OSError:
+                    continue
+                for rx, what in guard.DEVKIT_OFF:
+                    if rx.search(text):
+                        out.append((str(f), what))
+    return out
+
+
 def diff(include_codex=True):
-    out = diff_claude() + diff_instructions() + diff_skills() + diff_git()
-    if include_codex and core.have("codex"):
+    agents = core.CFG.get("agents", {})
+    out = (diff_claude() if agents.get("claude", True) else []) + diff_instructions() + diff_skills() + diff_git()
+    if include_codex and agents.get("codex", True) and core.have("codex"):
         out += diff_codex()
     return out
 
@@ -181,6 +202,8 @@ def diff(include_codex=True):
 # --------------------------------------------------------------------------- repair
 
 def _log(msg: str):
+    from . import audit
+    audit.record("config", msg[:80], msg)
     d = STATE / "logs"
     d.mkdir(parents=True, exist_ok=True)
     with (d / "config.log").open("a") as f:
@@ -222,7 +245,8 @@ def managed_payload() -> dict:
     from .setup import load_conf
     frag = load_conf("claude/settings.json")
     plugins = load_conf("claude/plugins.json")
-    payload = {k: v for k, v in frag.items()}
+    # fastModePerSessionOptIn stays a user setting: once managed, Claude Code refuses `/fast on` outside a terminal.
+    payload = {k: v for k, v in frag.items() if k not in ("fastModePerSessionOptIn",)}
     payload["enabledPlugins"] = {p: True for p in plugins["plugins"]}
     payload["_devkit"] = {"version": core.VERSION, "source": str(core.DEVKIT_HOME),
                           "note": "Managed by devkit. Change devkit's configuration, then `dev config lock` again."}

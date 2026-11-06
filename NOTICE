@@ -15,3 +15,20 @@ pinned commits listed in config/skills.json, the following agent skills, which r
 It also installs, through their official marketplaces and package managers, plugins and tools listed in
 config/claude/plugins.json, config/codex/plugins.json, Brewfile and config/npm-globals.txt, each under its own
 licence and terms.
+
+Third-party skills installed by devkit are fetched from their upstream repositories at pinned commits and keep their own licences (config/skills.json). In particular:
+- Trail of Bits skills (https://github.com/trailofbits/skills), © Trail of Bits, licensed CC-BY-SA-4.0: semgrep, fp-check, variant-analysis, property-based-testing and, when enabled, agentic-actions-auditor, supply-chain-risk-auditor, sarif-parsing, sharp-edges and codeql. They are used unmodified.
+- Dash0 OpenTelemetry skills (https://github.com/dash0hq/agent-skills), Apache-2.0.
+- HashiCorp Terraform skills (https://github.com/hashicorp/agent-skills), MPL-2.0 (optional group iac).
+- GitHub awesome-copilot skills (https://github.com/github/awesome-copilot), MIT: java-springboot, spring-boot-testing,
+  java-junit, documentation-writer, github-actions-hardening, dependabot, threat-model-analyst, spring-security,
+  spring-observability.
+- Anthropic knowledge-work-plugins (https://github.com/anthropics/knowledge-work-plugins), Apache-2.0: architecture,
+  system-design, incident-response; Anthropic skills (https://github.com/anthropics/skills): doc-coauthoring.
+- Supabase agent skills (https://github.com/supabase/agent-skills), MIT: supabase-postgres-best-practices (group postgres).
+- Grafana skills (https://github.com/grafana/skills), Apache-2.0: k6 (optional group load-testing).
+- PactFlow agent skills (https://github.com/pactflow/pactflow-agent-skills), MIT: pactflow (optional group contract-testing).
+- Sentry skills (https://github.com/getsentry/skills), Apache-2.0: skill-scanner (optional group skill-review).
+- mattpocock/skills (MIT), likec4 (MIT), vercel-labs/agent-skills (MIT) and angular/skills (MIT): see config/skills.json.
+- impeccable (https://github.com/pbakaus/impeccable), Apache-2.0, for Claude Code; Codex gets it from its plugin.
+- frontend-design (https://github.com/anthropics/claude-plugins-official), Apache-2.0, for Codex; Claude Code gets it from its plugin.

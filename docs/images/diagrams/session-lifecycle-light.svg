@@ -1,0 +1,90 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1232" height="1424" viewBox="0 0 1232 1424" role="img" aria-labelledby="dk-title dk-desc">
+<title id="dk-title">A session with devkit</title>
+<desc id="dk-desc">Sequence of one agent session. At session start the devkit hooks pull the handoff repository, read the project's handoff note, tasks, locks, and the lessons that apply, and give the agent its workspace context. On each prompt the hooks start the turn clock and, when you ask how it is going, add the real progress records. On every tool call the guard allows the action or denies it with the right way to do it; after a commit, push, merge, tag, PR, or release the hooks sync the handoff repository within seconds, and after slow work they remind the agent to update you. Every final message starts with the status block; the Stop hook checks it, records the status, the session line and the lock renewal, and after a fix or revert asks once for a lesson. At session end devkit syncs the map and notes and pushes the private handoff repository to GitHub.</desc>
+<rect width="1232" height="1424" fill="#F3F1EB"/>
+<g font-family="Manrope, 'Manrope Variable', system-ui, -apple-system, 'Segoe UI', Arial, sans-serif">
+<circle cx="68" cy="74" r="4" fill="#FFB34A"/>
+<text x="80" y="78.5" font-size="12" font-weight="600" fill="#62645B" letter-spacing="0.48">A SESSION WITH DEVKIT</text>
+<g transform="translate(132.0,104.0)">
+<line x1="0.0" y1="80.0" x2="0.0" y2="1304.0" stroke="#D8D4CA" stroke-width="1.5" stroke-dasharray="4 4"/>
+<line x1="240.0" y1="80.0" x2="240.0" y2="1304.0" stroke="#D8D4CA" stroke-width="1.5" stroke-dasharray="4 4"/>
+<line x1="520.0" y1="80.0" x2="520.0" y2="1304.0" stroke="#D8D4CA" stroke-width="1.5" stroke-dasharray="4 4"/>
+<line x1="784.0" y1="80.0" x2="784.0" y2="1304.0" stroke="#D8D4CA" stroke-width="1.5" stroke-dasharray="4 4"/>
+<line x1="968.0" y1="80.0" x2="968.0" y2="1304.0" stroke="#D8D4CA" stroke-width="1.5" stroke-dasharray="4 4"/>
+<line x1="-68.0" y1="128.0" x2="1036.0" y2="128.0" stroke="#D8D4CA" stroke-width="1"/>
+<line x1="-68.0" y1="352.0" x2="1036.0" y2="352.0" stroke="#D8D4CA" stroke-width="1"/>
+<line x1="-68.0" y1="800.0" x2="1036.0" y2="800.0" stroke="#D8D4CA" stroke-width="1"/>
+<line x1="-68.0" y1="1080.0" x2="1036.0" y2="1080.0" stroke="#D8D4CA" stroke-width="1"/>
+<rect x="-68.0" y="117.0" width="126.7" height="22.0" rx="11" fill="#EAE7DF"/>
+<text x="-58.0" y="132.5" font-size="12" font-weight="600" fill="#62645B" text-anchor="start" letter-spacing="0.48">SESSION START</text>
+<path d="M240.0,192.0 L512.5,192.0" fill="none" stroke="#62645B" stroke-width="1.5" stroke-linejoin="round" stroke-linecap="round"/><polygon points="520.0,192.0 512.0,196.0 512.0,188.0" fill="#62645B"/>
+<rect x="333.5" y="162.0" width="93.1" height="22.0" rx="9" fill="#F3F1EB"/>
+<text x="380.0" y="177.0" font-size="13" font-weight="400" fill="#62645B" text-anchor="middle">SessionStart</text>
+<path d="M520.0,248.0 L776.5,248.0" fill="none" stroke="#62645B" stroke-width="1.5" stroke-linejoin="round" stroke-linecap="round"/><polygon points="784.0,248.0 776.0,252.0 776.0,244.0" fill="#62645B"/>
+<rect x="543.9" y="218.0" width="216.2" height="22.0" rx="9" fill="#F3F1EB"/>
+<text x="652.0" y="233.0" font-size="13" font-weight="400" fill="#62645B" text-anchor="middle">read note · tasks · locks · lessons</text>
+<path d="M520.0,304.0 L240.0,304.0" fill="none" stroke="#62645B" stroke-width="1.5" stroke-linejoin="round" stroke-dasharray="6 5" stroke-linecap="butt"/><polyline points="248.0,300.0 240.0,304.0 248.0,308.0" fill="none" stroke="#62645B" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/>
+<rect x="315.8" y="274.0" width="128.5" height="22.0" rx="9" fill="#F3F1EB"/>
+<text x="380.0" y="289.0" font-size="13" font-weight="400" fill="#62645B" text-anchor="middle">workspace context</text>
+<rect x="-68.0" y="341.0" width="61.4" height="22.0" rx="11" fill="#EAE7DF"/>
+<text x="-58.0" y="356.5" font-size="12" font-weight="600" fill="#62645B" text-anchor="start" letter-spacing="0.48">WORK</text>
+<path d="M0.0,416.0 L232.5,416.0" fill="none" stroke="#62645B" stroke-width="1.5" stroke-linejoin="round" stroke-linecap="round"/><polygon points="240.0,416.0 232.0,420.0 232.0,412.0" fill="#62645B"/>
+<rect x="89.3" y="386.0" width="61.4" height="22.0" rx="9" fill="#F3F1EB"/>
+<text x="120.0" y="401.0" font-size="13" font-weight="400" fill="#62645B" text-anchor="middle">request</text>
+<path d="M240.0,472.0 L512.5,472.0" fill="none" stroke="#62645B" stroke-width="1.5" stroke-linejoin="round" stroke-linecap="round"/><polygon points="520.0,472.0 512.0,476.0 512.0,468.0" fill="#62645B"/>
+<rect x="314.6" y="442.0" width="130.8" height="22.0" rx="9" fill="#F3F1EB"/>
+<text x="380.0" y="457.0" font-size="13" font-weight="400" fill="#62645B" text-anchor="middle">UserPromptSubmit</text>
+<path d="M520.0,528.0 L240.0,528.0" fill="none" stroke="#62645B" stroke-width="1.5" stroke-linejoin="round" stroke-dasharray="6 5" stroke-linecap="butt"/><polyline points="248.0,524.0 240.0,528.0 248.0,532.0" fill="none" stroke="#62645B" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/>
+<rect x="288.5" y="498.0" width="182.9" height="22.0" rx="9" fill="#F3F1EB"/>
+<text x="380.0" y="513.0" font-size="13" font-weight="400" fill="#62645B" text-anchor="middle">progress records, if you ask</text>
+<path d="M240.0,584.0 L512.5,584.0" fill="none" stroke="#62645B" stroke-width="1.5" stroke-linejoin="round" stroke-linecap="round"/><polygon points="520.0,584.0 512.0,588.0 512.0,580.0" fill="#62645B"/>
+<rect x="267.7" y="554.0" width="224.6" height="22.0" rx="9" fill="#F3F1EB"/>
+<text x="380.0" y="569.0" font-size="13" font-weight="400" fill="#62645B" text-anchor="middle">PreToolUse: command or file write</text>
+<path d="M520.0,640.0 L240.0,640.0" fill="none" stroke="#62645B" stroke-width="1.5" stroke-linejoin="round" stroke-dasharray="6 5" stroke-linecap="butt"/><polyline points="248.0,636.0 240.0,640.0 248.0,644.0" fill="none" stroke="#62645B" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/>
+<rect x="275.6" y="610.0" width="208.9" height="22.0" rx="9" fill="#F3F1EB"/>
+<text x="380.0" y="625.0" font-size="13" font-weight="400" fill="#62645B" text-anchor="middle">allow, or deny with the right way</text>
+<path d="M240.0,696.0 L512.5,696.0" fill="none" stroke="#62645B" stroke-width="1.5" stroke-linejoin="round" stroke-linecap="round"/><polygon points="520.0,696.0 512.0,700.0 512.0,692.0" fill="#62645B"/>
+<rect x="260.9" y="666.0" width="238.1" height="22.0" rx="9" fill="#F3F1EB"/>
+<text x="380.0" y="681.0" font-size="13" font-weight="400" fill="#62645B" text-anchor="middle">PostToolUse: time it · sync deliveries</text>
+<path d="M520.0,752.0 L240.0,752.0" fill="none" stroke="#62645B" stroke-width="1.5" stroke-linejoin="round" stroke-dasharray="6 5" stroke-linecap="butt"/><polyline points="248.0,748.0 240.0,752.0 248.0,756.0" fill="none" stroke="#62645B" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/>
+<rect x="281.0" y="722.0" width="197.9" height="22.0" rx="9" fill="#F3F1EB"/>
+<text x="380.0" y="737.0" font-size="13" font-weight="400" fill="#62645B" text-anchor="middle">update the developer (~8 min)</text>
+<rect x="-68.0" y="789.0" width="112.6" height="22.0" rx="11" fill="#EAE7DF"/>
+<text x="-58.0" y="804.5" font-size="12" font-weight="600" fill="#62645B" text-anchor="start" letter-spacing="0.48">EVERY REPLY</text>
+<path d="M240.0,864.0 L9.5,864.0" fill="none" stroke="#9D671F" stroke-width="2.5" stroke-linejoin="round" stroke-linecap="round"/><polygon points="0.0,864.0 10.0,859.0 10.0,869.0" fill="#9D671F"/>
+<rect x="24.0" y="834.0" width="192.1" height="22.0" rx="9" fill="#F3F1EB"/>
+<text x="120.0" y="849.0" font-size="13" font-weight="400" fill="#62645B" text-anchor="middle">status block, then the answer</text>
+<path d="M240.0,920.0 L512.5,920.0" fill="none" stroke="#62645B" stroke-width="1.5" stroke-linejoin="round" stroke-linecap="round"/><polygon points="520.0,920.0 512.0,924.0 512.0,916.0" fill="#62645B"/>
+<rect x="358.0" y="890.0" width="44.0" height="22.0" rx="9" fill="#F3F1EB"/>
+<text x="380.0" y="905.0" font-size="13" font-weight="400" fill="#62645B" text-anchor="middle">Stop</text>
+<path d="M520.0,976.0 L776.5,976.0" fill="none" stroke="#62645B" stroke-width="1.5" stroke-linejoin="round" stroke-linecap="round"/><polygon points="784.0,976.0 776.0,980.0 776.0,972.0" fill="#62645B"/>
+<rect x="563.6" y="946.0" width="176.9" height="22.0" rx="9" fill="#F3F1EB"/>
+<text x="652.0" y="961.0" font-size="13" font-weight="400" fill="#62645B" text-anchor="middle">status · session line · locks</text>
+<path d="M520.0,1032.0 L240.0,1032.0" fill="none" stroke="#62645B" stroke-width="1.5" stroke-linejoin="round" stroke-dasharray="6 5" stroke-linecap="butt"/><polyline points="248.0,1028.0 240.0,1032.0 248.0,1036.0" fill="none" stroke="#62645B" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/>
+<rect x="287.3" y="1002.0" width="185.3" height="22.0" rx="9" fill="#F3F1EB"/>
+<text x="380.0" y="1017.0" font-size="13" font-weight="400" fill="#62645B" text-anchor="middle">record a lesson? (after a fix)</text>
+<rect x="-68.0" y="1069.0" width="110.5" height="22.0" rx="11" fill="#EAE7DF"/>
+<text x="-58.0" y="1084.5" font-size="12" font-weight="600" fill="#62645B" text-anchor="start" letter-spacing="0.48">SESSION END</text>
+<path d="M240.0,1144.0 L512.5,1144.0" fill="none" stroke="#62645B" stroke-width="1.5" stroke-linejoin="round" stroke-linecap="round"/><polygon points="520.0,1144.0 512.0,1148.0 512.0,1140.0" fill="#62645B"/>
+<rect x="335.7" y="1114.0" width="88.5" height="22.0" rx="9" fill="#F3F1EB"/>
+<text x="380.0" y="1129.0" font-size="13" font-weight="400" fill="#62645B" text-anchor="middle">SessionEnd</text>
+<path d="M520.0,1200.0 L776.5,1200.0" fill="none" stroke="#62645B" stroke-width="1.5" stroke-linejoin="round" stroke-linecap="round"/><polygon points="784.0,1200.0 776.0,1204.0 776.0,1196.0" fill="#62645B"/>
+<rect x="571.2" y="1170.0" width="161.7" height="22.0" rx="9" fill="#F3F1EB"/>
+<text x="652.0" y="1185.0" font-size="13" font-weight="400" fill="#62645B" text-anchor="middle">sync map · notes · tasks</text>
+<path d="M784.0,1256.0 L960.5,1256.0" fill="none" stroke="#62645B" stroke-width="1.5" stroke-linejoin="round" stroke-linecap="round"/><polygon points="968.0,1256.0 960.0,1260.0 960.0,1252.0" fill="#62645B"/>
+<rect x="826.4" y="1226.0" width="99.1" height="22.0" rx="9" fill="#F3F1EB"/>
+<text x="876.0" y="1241.0" font-size="13" font-weight="400" fill="#62645B" text-anchor="middle">push (private)</text>
+<rect x="-68.0" y="0.0" width="136.0" height="80.0" rx="6.0" fill="#FFFFFF" stroke="#BFB8AB" stroke-width="1.5"/>
+<text x="0.0" y="45.0" font-size="16" font-weight="600" fill="#272820" text-anchor="middle">You</text>
+<rect x="152.0" y="0.0" width="176.0" height="80.0" rx="6.0" fill="#FFFFFF" stroke="#BFB8AB" stroke-width="1.5"/>
+<text x="240.0" y="34.0" font-size="16" font-weight="600" fill="#272820" text-anchor="middle">Agent</text>
+<text x="240.0" y="56.0" font-size="13" font-weight="400" fill="#62645B" text-anchor="middle">Claude Code · Codex</text>
+<rect x="448.0" y="0.0" width="144.0" height="80.0" rx="6.0" fill="#FFF0D8" stroke="#F0A33C" stroke-width="1.5"/>
+<text x="520.0" y="45.0" font-size="16" font-weight="600" fill="#272820" text-anchor="middle">devkit hooks</text>
+<rect x="712.0" y="0.0" width="144.0" height="80.0" rx="6.0" fill="#D8DCDA" stroke="#6B8795" stroke-width="1.5"/>
+<text x="784.0" y="45.0" font-size="16" font-weight="600" fill="#272820" text-anchor="middle">Handoff repo</text>
+<rect x="900.0" y="0.0" width="136.0" height="80.0" rx="6.0" fill="#E6E8E6" stroke="#8D9391" stroke-width="1.5"/>
+<text x="968.0" y="45.0" font-size="16" font-weight="600" fill="#272820" text-anchor="middle">GitHub</text>
+</g>
+</g>
+</svg>

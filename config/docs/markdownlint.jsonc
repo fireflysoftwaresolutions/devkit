@@ -1,0 +1,14 @@
+// devkit default Markdown rules (used by `dev docs check` when a repository has no markdownlint config).
+{
+  "config": {
+    "default": true,
+    "MD013": false,                      // line length: prose wraps freely; tables and code stay readable
+    "MD033": { "allowed_elements": ["picture", "source", "img", "br", "details", "summary", "sub", "sup", "kbd", "div", "p", "a"] },
+    "MD041": false,                      // first line may be a <picture> hero banner
+    "MD024": { "siblings_only": true },  // same heading text allowed under different parents
+    "MD046": { "style": "fenced" },
+    "MD049": { "style": "underscore" },
+    "MD050": { "style": "asterisk" }
+  },
+  "ignores": ["**/node_modules/**", "**/.venv/**", "**/vendor/**", "**/dist/**", "**/CHANGELOG.md"]
+}

@@ -1,0 +1,68 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1072" height="728" viewBox="0 0 1072 728" role="img" aria-labelledby="dk-title dk-desc">
+<title id="dk-title">Scheduled jobs and the audit trail</title>
+<desc id="dk-desc">launchd starts each scheduled job on its schedule as dev jobs exec &lt;name&gt;, which runs the job's dev command one at a time and with a timeout. The output goes to the job's log, the result (exit code, duration, last line) to the journal, and a job record to the audit trail, which also receives every changing dev command, guard decision, and handoff write. A failed job sends a notification. dev jobs and dev doctor read the journal, and the daily audit job publishes this machine's audit trail to audit/&lt;user&gt;@&lt;host&gt;/ in the handoff repository, where dev audit --team reads the whole team's.</desc>
+<rect width="1072" height="728" fill="#10110F"/>
+<g font-family="Manrope, 'Manrope Variable', system-ui, -apple-system, 'Segoe UI', Arial, sans-serif">
+<circle cx="68" cy="74" r="4" fill="#FFB34A"/>
+<text x="80" y="78.5" font-size="12" font-weight="600" fill="#BFB8AB" letter-spacing="0.48">SCHEDULED JOBS AND THE AUDIT TRAIL</text>
+<text x="970.2" y="78.5" font-size="13" font-weight="400" fill="#BFB8AB">stored</text>
+<g transform="translate(938.2,74)"><rect x="0" y="-7" width="24" height="14" rx="3" fill="#293235" stroke="#8EA3AB" stroke-width="1.5"/></g>
+<text x="846.9" y="78.5" font-size="13" font-weight="400" fill="#BFB8AB">automation</text>
+<g transform="translate(814.9,74)"><rect x="0" y="-7" width="24" height="14" rx="3" fill="#2E3126" stroke="#959C7F" stroke-width="1.5"/></g>
+<text x="755.4" y="78.5" font-size="13" font-weight="400" fill="#BFB8AB">devkit</text>
+<g transform="translate(723.4,74)"><rect x="0" y="-7" width="24" height="14" rx="3" fill="#2C2416" stroke="#FFB34A" stroke-width="1.5"/></g>
+<g transform="translate(64.0,104.0)">
+<path d="M432.0,80.0 L432.0,144.5" fill="none" stroke="#BFB8AB" stroke-width="1.5" stroke-linejoin="round" stroke-linecap="round"/><polygon points="432.0,152.0 428.0,144.0 436.0,144.0" fill="#BFB8AB"/>
+<rect x="387.3" y="104.0" width="89.3" height="24.0" rx="11.0" fill="#10110F"/>
+<text x="432.0" y="120.0" font-size="13" font-weight="400" fill="#BFB8AB" text-anchor="middle">on schedule</text>
+<path d="M288.0,180.0 L100.0,180.0 Q88.0,180.0 88.0,168.0 L88.0,87.5" fill="none" stroke="#BFB8AB" stroke-width="1.5" stroke-linejoin="round" stroke-linecap="round"/><polygon points="88.0,80.0 92.0,88.0 84.0,88.0" fill="#BFB8AB"/>
+<rect x="63.7" y="118.0" width="48.6" height="24.0" rx="11.0" fill="#10110F"/>
+<text x="88.0" y="134.0" font-size="13" font-weight="400" fill="#BFB8AB" text-anchor="middle">failed</text>
+<path d="M288.0,204.0 L100.0,204.0 Q88.0,204.0 88.0,216.0 L88.0,300.5" fill="none" stroke="#BFB8AB" stroke-width="1.5" stroke-linejoin="round" stroke-linecap="round"/><polygon points="88.0,308.0 84.0,300.0 92.0,300.0" fill="#BFB8AB"/>
+<rect x="61.1" y="244.0" width="53.9" height="24.0" rx="11.0" fill="#10110F"/>
+<text x="88.0" y="260.0" font-size="13" font-weight="400" fill="#BFB8AB" text-anchor="middle">output</text>
+<path d="M432.0,232.0 L432.0,300.5" fill="none" stroke="#BFB8AB" stroke-width="1.5" stroke-linejoin="round" stroke-linecap="round"/><polygon points="432.0,308.0 428.0,300.0 436.0,300.0" fill="#BFB8AB"/>
+<rect x="383.1" y="258.0" width="97.7" height="24.0" rx="11.0" fill="#10110F"/>
+<text x="432.0" y="274.0" font-size="13" font-weight="400" fill="#BFB8AB" text-anchor="middle">exit · duration</text>
+<path d="M576.0,192.0 L692.0,192.0 Q704.0,192.0 704.0,204.0 L704.0,350.2 Q704.0,352.0 702.2,352.0 L700.5,352.0" fill="none" stroke="#BFB8AB" stroke-width="1.5" stroke-linejoin="round" stroke-linecap="round"/><polygon points="708.0,352.0 700.0,356.0 700.0,348.0" fill="#BFB8AB"/>
+<rect x="665.7" y="260.0" width="76.5" height="24.0" rx="11.0" fill="#10110F"/>
+<text x="704.0" y="276.0" font-size="13" font-weight="400" fill="#BFB8AB" text-anchor="middle">job record</text>
+<path d="M824.0,80.0 L824.0,300.5" fill="none" stroke="#BFB8AB" stroke-width="1.5" stroke-linejoin="round" stroke-linecap="round"/><polygon points="824.0,308.0 820.0,300.0 828.0,300.0" fill="#BFB8AB"/>
+<rect x="756.3" y="182.0" width="135.4" height="24.0" rx="11.0" fill="#10110F"/>
+<text x="824.0" y="198.0" font-size="13" font-weight="400" fill="#BFB8AB" text-anchor="middle">changes · decisions</text>
+<path d="M432.0,396.0 L432.0,464.5" fill="none" stroke="#BFB8AB" stroke-width="1.5" stroke-linejoin="round" stroke-linecap="round"/><polygon points="432.0,472.0 428.0,464.0 436.0,464.0" fill="#BFB8AB"/>
+<rect x="410.4" y="422.0" width="43.2" height="24.0" rx="11.0" fill="#10110F"/>
+<text x="432.0" y="438.0" font-size="13" font-weight="400" fill="#BFB8AB" text-anchor="middle">read</text>
+<path d="M824.0,396.0 L824.0,460.5" fill="none" stroke="#BFB8AB" stroke-width="1.5" stroke-linejoin="round" stroke-linecap="round"/><polygon points="824.0,468.0 820.0,460.0 828.0,460.0" fill="#BFB8AB"/>
+<rect x="772.5" y="420.0" width="103.1" height="24.0" rx="11.0" fill="#10110F"/>
+<text x="824.0" y="436.0" font-size="13" font-weight="400" fill="#BFB8AB" text-anchor="middle">audit job, daily</text>
+<rect x="288.0" y="0.0" width="288.0" height="80.0" rx="6.0" fill="#2E3126" stroke="#959C7F" stroke-width="1.5"/>
+<text x="432.0" y="34.0" font-size="16" font-weight="600" fill="#F3F1EB" text-anchor="middle">launchd</text>
+<text x="432.0" y="56.0" font-size="13" font-weight="400" fill="#B9BF9F" text-anchor="middle">com.devkit.job.&lt;name&gt;</text>
+<rect x="0.0" y="0.0" width="176.0" height="80.0" rx="6.0" fill="#1F201C" stroke="#4C4E45" stroke-width="1.5"/>
+<text x="88.0" y="34.0" font-size="16" font-weight="600" fill="#F3F1EB" text-anchor="middle">Notification</text>
+<text x="88.0" y="56.0" font-size="13" font-weight="400" fill="#BFB8AB" text-anchor="middle">when a job fails</text>
+<rect x="288.0" y="152.0" width="288.0" height="80.0" rx="6.0" fill="#FFB34A" stroke="#FFB34A" stroke-width="2"/>
+<text x="432.0" y="186.0" font-size="16" font-weight="600" fill="#272820" text-anchor="middle">dev jobs exec &lt;name&gt;</text>
+<text x="432.0" y="208.0" font-size="13" font-weight="400" fill="#272820" text-anchor="middle">dev &lt;command&gt; · timeout · one at a time</text>
+<rect x="708.0" y="0.0" width="232.0" height="80.0" rx="6.0" fill="#2C2416" stroke="#FFB34A" stroke-width="1.5"/>
+<text x="824.0" y="34.0" font-size="16" font-weight="600" fill="#F3F1EB" text-anchor="middle">Everything else</text>
+<text x="824.0" y="56.0" font-size="13" font-weight="400" fill="#FFB34A" text-anchor="middle">dev commands · guard · hooks</text>
+<path d="M0.0,316.0 A88.0,8 0 0 1 176.0,316.0 L176.0,388.0 A88.0,8 0 0 1 0.0,388.0 Z" fill="#293235" stroke="#8EA3AB" stroke-width="1.5"/><path d="M0.0,316.0 A88.0,8 0 0 0 176.0,316.0" fill="none" stroke="#8EA3AB" stroke-width="1.5"/>
+<text x="88.0" y="354.0" font-size="16" font-weight="600" fill="#F3F1EB" text-anchor="middle">Log</text>
+<text x="88.0" y="376.0" font-size="13" font-weight="400" fill="#A4B4B9" text-anchor="middle">logs/jobs/&lt;name&gt;.log</text>
+<path d="M288.0,316.0 A144.0,8 0 0 1 576.0,316.0 L576.0,388.0 A144.0,8 0 0 1 288.0,388.0 Z" fill="#293235" stroke="#8EA3AB" stroke-width="1.5"/><path d="M288.0,316.0 A144.0,8 0 0 0 576.0,316.0" fill="none" stroke="#8EA3AB" stroke-width="1.5"/>
+<text x="432.0" y="354.0" font-size="16" font-weight="600" fill="#F3F1EB" text-anchor="middle">Journal</text>
+<text x="432.0" y="376.0" font-size="13" font-weight="400" fill="#A4B4B9" text-anchor="middle">jobs/journal.jsonl</text>
+<path d="M708.0,316.0 A116.0,8 0 0 1 940.0,316.0 L940.0,388.0 A116.0,8 0 0 1 708.0,388.0 Z" fill="#293235" stroke="#8EA3AB" stroke-width="1.5"/><path d="M708.0,316.0 A116.0,8 0 0 0 940.0,316.0" fill="none" stroke="#8EA3AB" stroke-width="1.5"/>
+<text x="824.0" y="354.0" font-size="16" font-weight="600" fill="#F3F1EB" text-anchor="middle">Audit trail</text>
+<text x="824.0" y="376.0" font-size="13" font-weight="400" fill="#A4B4B9" text-anchor="middle">audit/YYYY-MM.jsonl</text>
+<rect x="288.0" y="472.0" width="288.0" height="80.0" rx="6.0" fill="#2C2416" stroke="#FFB34A" stroke-width="1.5"/>
+<text x="432.0" y="506.0" font-size="16" font-weight="600" fill="#F3F1EB" text-anchor="middle">dev jobs · dev doctor</text>
+<text x="432.0" y="528.0" font-size="13" font-weight="400" fill="#FFB34A" text-anchor="middle">last run · next run · health</text>
+<path d="M708.0,476.0 A116.0,8 0 0 1 940.0,476.0 L940.0,548.0 A116.0,8 0 0 1 708.0,548.0 Z" fill="#293235" stroke="#8EA3AB" stroke-width="1.5"/><path d="M708.0,476.0 A116.0,8 0 0 0 940.0,476.0" fill="none" stroke="#8EA3AB" stroke-width="1.5"/>
+<text x="824.0" y="514.0" font-size="16" font-weight="600" fill="#F3F1EB" text-anchor="middle">Handoff repository</text>
+<text x="824.0" y="536.0" font-size="13" font-weight="400" fill="#A4B4B9" text-anchor="middle">audit/&lt;user&gt;@&lt;host&gt;/</text>
+</g>
+</g>
+</svg>

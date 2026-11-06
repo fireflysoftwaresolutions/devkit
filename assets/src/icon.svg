@@ -1,4 +1,6 @@
 <svg xmlns="http://www.w3.org/2000/svg" width="512" height="512" viewBox="0 0 512 512">
+<title>devkit</title>
+<desc>The devkit icon: a terminal prompt in paper on charcoal, with the cursor's light trail ending in the amber spark.</desc>
 <defs>
   <radialGradient id="glow"><stop offset="0" stop-color="#FFB34A" stop-opacity="0.45"/>
     <stop offset="0.45" stop-color="#FFB34A" stop-opacity="0.12"/><stop offset="1" stop-color="#FFB34A" stop-opacity="0"/></radialGradient>

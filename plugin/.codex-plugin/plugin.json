@@ -1,7 +1,7 @@
 {
   "name": "devkit",
   "version": "26.11.0",
-  "description": "One workspace for developers, Claude Code and Codex: project context and handoff notes, tasks, a portfolio overview, local-first delivery (one push, one CI run), backend methodology, managed worktrees and a guard.",
+  "description": "Every repo in its place, every agent on the same page: project context and handoff notes, tasks, a portfolio overview, local-first delivery (one push, one CI run), backend methodology, managed worktrees and a guard.",
   "author": {
     "name": "Firefly Software Solutions Inc.",
     "email": "info@fireflysoftware.io",
@@ -25,7 +25,7 @@
   "skills": "./skills/",
   "interface": {
     "displayName": "devkit",
-    "shortDescription": "One workspace for you, Claude Code and Codex",
+    "shortDescription": "Every repo in its place. Every agent on the same page.",
     "longDescription": "devkit keeps every project in its place and every session in context: handoff notes and tasks per project, a portfolio overview and dashboard, local-first delivery with one push and one CI run, backend methodology, managed worktrees and a workspace guard. Installed and kept in sync by the `dev` CLI.",
     "developerName": "Firefly Software Solutions Inc.",
     "category": "Coding",

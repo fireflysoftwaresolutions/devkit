@@ -9,10 +9,21 @@ path=("$HOME/.local/bin" $path)
 export DOCKER_HOST="unix://$HOME/.colima/default/docker.sock"
 export TESTCONTAINERS_DOCKER_SOCKET_OVERRIDE=/var/run/docker.sock
 
+# Java: Homebrew's openjdk is keg-only; expose it (and JAVA_HOME) unless a JDK is already registered with macOS.
+if ! /usr/libexec/java_home >/dev/null 2>&1 && [[ -d /opt/homebrew/opt/openjdk ]]; then
+  export JAVA_HOME=/opt/homebrew/opt/openjdk/libexec/openjdk.jdk/Contents/Home
+  path=(/opt/homebrew/opt/openjdk/bin $path)
+elif [[ -z "$JAVA_HOME" ]]; then
+  export JAVA_HOME="$(/usr/libexec/java_home 2>/dev/null)"
+fi
+
 # Keep tools quiet and private.
 export NG_CLI_ANALYTICS=false
 export NEXT_TELEMETRY_DISABLED=1
 export SUPERPOWERS_DISABLE_TELEMETRY=1
+# Security tools run by people and agents: no telemetry, no update checks.
+export TRIVY_DISABLE_TELEMETRY=true TRIVY_SKIP_VERSION_CHECK=true SEMGREP_SEND_METRICS=off
+export SYFT_CHECK_FOR_APP_UPDATE=false GRYPE_CHECK_FOR_APP_UPDATE=false CLAUDE_SECURITY_SCAN_TIP=off
 
 # dcd <query>: cd into a project (fzf picker when several match).
 dcd() {

@@ -1,0 +1,166 @@
+{
+  "name": "handoff-note",
+  "kind": "flow",
+  "title": "Anatomy of a handoff note",
+  "desc": "A handoff note, projects/<project id>.md in the handoff repository, has seven parts in this order: frontmatter, the auto block, Purpose, Current state, Tasks, Decisions and gotchas, and Links. dev note set writes the frontmatter, dev sync writes the auto block, the agents' handoff skill writes the narrative sections, and the Tasks block is generated from the work items that dev task keeps in items/<scope>/. Session lines go to sessions/<scope>/ instead. Session context, dev overview and the dashboard read the note.",
+  "legend": [
+    {
+      "label": "devkit writes",
+      "family": "firefly"
+    },
+    {
+      "label": "generated",
+      "family": "slate"
+    },
+    {
+      "label": "metadata",
+      "family": "olive"
+    }
+  ],
+  "nodes": [
+    {
+      "id": "front",
+      "label": "Frontmatter",
+      "sub": "status · priority · milestone · due · tags",
+      "col": 1,
+      "row": 0,
+      "family": "olive"
+    },
+    {
+      "id": "auto",
+      "label": "Auto block",
+      "sub": "path · stack · commands · git · PRs",
+      "col": 1,
+      "row": 1,
+      "family": "slate"
+    },
+    {
+      "id": "purpose",
+      "label": "Purpose",
+      "col": 1,
+      "row": 2,
+      "sub": "what · who · where it runs"
+    },
+    {
+      "id": "state",
+      "label": "Current state",
+      "col": 1,
+      "row": 3,
+      "sub": "works · half done · broken"
+    },
+    {
+      "id": "tasks",
+      "label": "Tasks",
+      "sub": "generated from work items",
+      "col": 1,
+      "row": 4,
+      "family": "slate"
+    },
+    {
+      "id": "decisions",
+      "label": "Decisions and gotchas",
+      "col": 1,
+      "row": 5,
+      "sub": "why it is so · traps"
+    },
+    {
+      "id": "links",
+      "label": "Links",
+      "col": 1,
+      "row": 6,
+      "sub": "docs · environments · dashboards"
+    },
+    {
+      "id": "w_note",
+      "label": "dev note set",
+      "col": 2,
+      "row": 0,
+      "family": "firefly",
+      "sub": "status · priority · milestone"
+    },
+    {
+      "id": "w_sync",
+      "label": "dev sync",
+      "sub": "hourly · session end",
+      "col": 2,
+      "row": 1,
+      "family": "firefly"
+    },
+    {
+      "id": "w_agent",
+      "label": "Agents",
+      "sub": "handoff skill",
+      "col": 2,
+      "row": 3
+    },
+    {
+      "id": "w_task",
+      "label": "Work items",
+      "sub": "items/<scope>/ · dev task",
+      "col": 2,
+      "row": 4,
+      "family": "slate"
+    },
+    {
+      "id": "r_ctx",
+      "label": "Session context",
+      "sub": "every new session",
+      "col": 0,
+      "row": 2
+    },
+    {
+      "id": "r_view",
+      "label": "Overview · dashboard",
+      "sub": "dev overview · dev dashboard",
+      "col": 0,
+      "row": 5
+    }
+  ],
+  "groups": [
+    {
+      "id": "note",
+      "title": "projects/<project id>.md",
+      "nodes": [
+        "front",
+        "auto",
+        "purpose",
+        "state",
+        "tasks",
+        "decisions",
+        "links"
+      ]
+    }
+  ],
+  "edges": [
+    {
+      "from": "w_note",
+      "to": "front",
+      "label": "sets"
+    },
+    {
+      "from": "w_sync",
+      "to": "auto",
+      "label": "refreshes"
+    },
+    {
+      "from": "w_agent",
+      "to": "state",
+      "label": "rewrites"
+    },
+    {
+      "from": "w_task",
+      "to": "tasks",
+      "label": "generate"
+    },
+    {
+      "from": "note",
+      "to": "r_ctx",
+      "label": "digest"
+    },
+    {
+      "from": "note",
+      "to": "r_view",
+      "label": "summary"
+    }
+  ]
+}

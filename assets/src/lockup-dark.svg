@@ -1,0 +1,21 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1100" height="300" viewBox="0 0 1100 300">
+<title>devkit</title>
+<desc>The devkit lockup: the prompt-and-spark mark next to the devkit wordmark.</desc>
+<defs>
+  <radialGradient id="glow"><stop offset="0" stop-color="#FFB34A" stop-opacity="0.45"/>
+    <stop offset="0.45" stop-color="#FFB34A" stop-opacity="0.12"/><stop offset="1" stop-color="#FFB34A" stop-opacity="0"/></radialGradient>
+  <linearGradient id="trail" x1="0" y1="1" x2="1" y2="0"><stop offset="0" stop-color="#FFB34A" stop-opacity="0.2"/>
+    <stop offset="1" stop-color="#FFB34A" stop-opacity="1"/></linearGradient>
+  <linearGradient id="trailsoft" x1="0" y1="1" x2="1" y2="0"><stop offset="0" stop-color="#FFB34A" stop-opacity="0"/>
+    <stop offset="1" stop-color="#FFB34A" stop-opacity="0.55"/></linearGradient>
+  <filter id="blur6" x="-50%" y="-50%" width="200%" height="200%"><feGaussianBlur stdDeviation="6"/></filter>
+  <filter id="blur14" x="-50%" y="-50%" width="200%" height="200%"><feGaussianBlur stdDeviation="14"/></filter>
+</defs>
+<g transform="translate(-6,-14) scale(0.62)">
+<path d="M118 206 L196 268 L118 330" fill="none" stroke="#F3F1EB" stroke-width="38" stroke-linecap="round" stroke-linejoin="round"/>
+<path d="M232 334 H318" stroke="#F3F1EB" stroke-width="38" stroke-linecap="round"/>
+<path d="M300 334 C 352 330, 382 280, 380 204" fill="none" stroke="url(#trail)" stroke-width="16" stroke-linecap="round"/>
+<g fill="none" stroke="#FFB34A" stroke-width="12.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="372" cy="150" r="21.2"/><path d="M372.0 69.2 L372.0 99.0"/><path d="M372.0 201.0 L372.0 230.8"/><path d="M291.2 150.0 L321.0 150.0"/><path d="M423.0 150.0 L452.8 150.0"/><path d="M342.2 120.2 L342.3 120.2"/><path d="M401.8 120.2 L401.8 120.2"/><path d="M342.2 179.8 L342.3 179.8"/><path d="M401.8 179.8 L401.8 179.8"/></g>
+</g>
+<path transform="translate(300.0,236.0) scale(0.10000)" d="M569 30Q418 30 308.5 -45Q199 -120 139.5 -249.5Q80 -379 80 -541Q80 -704 140 -832.5Q200 -961 310.5 -1035.5Q421 -1110 573 -1110Q726 -1110 831 -1036Q850 -1022 867 -1006L867 -1440L1077 -1440L1077 0L891 0L891 -99Q863 -70 829 -46Q724 30 569 30ZM598 -159Q701 -159 766 -208Q831 -257 861 -343Q891 -429 891 -541Q891 -653 860.5 -739Q830 -825 766.5 -873Q703 -921 605 -921Q501 -921 434 -870Q367 -819 334.5 -733Q302 -647 302 -541Q302 -434 334.5 -347.5Q367 -261 432.5 -210Q498 -159 598 -159ZM1776 30Q1615 30 1493.5 -40.5Q1372 -111 1304.5 -237.5Q1237 -364 1237 -531Q1237 -708 1303.5 -838Q1370 -968 1489 -1039Q1608 -1110 1766 -1110Q1931 -1110 2047 -1033.5Q2163 -957 2220.5 -816Q2278 -675 2266 -481L1461 -481Q1473 -345 1538 -265Q1617 -167 1766 -167Q1864 -167 1935.5 -211.5Q2007 -256 2047 -339L2252 -274Q2189 -129 2061 -49.5Q1933 30 1776 30ZM2052 -644Q2038 -767 1986 -835Q1916 -925 1774 -925Q1617 -925 1538 -826Q1483 -757 1466 -644ZM2722 0L2330 -1080L2541 -1080L2828 -262L3115 -1080L3326 -1080L2934 0ZM3445 0L3446 -1440L3658 -1440L3658 -560L4082 -1080L4348 -1080L3900 -540L4394 0L4110 0L3658 -520L3658 0ZM4454 0L4454 -1080L4663 -1080L4663 0ZM5521 0Q5419 20 5321 17Q5223 14 5146 -21Q5069 -56 5030 -131Q4995 -198 4992.5 -267.5Q4990 -337 4990 -425L4990 -912L4783 -912L4783 -1080L4990 -1080L4990 -1380L5200 -1380L5200 -1080L5521 -1080L5521 -912L5200 -912L5200 -435Q5200 -370 5201.5 -322Q5203 -274 5222 -241Q5258 -179 5336.5 -170.5Q5415 -162 5521 -177Z" fill="#F3F1EB"/><g fill="none" stroke="#FFB34A" stroke-width="7.5" stroke-linecap="round" stroke-linejoin="round"><circle cx="755.9" cy="100.2" r="12.5"/><path d="M755.9 52.5 L755.9 70.1"/><path d="M755.9 130.3 L755.9 147.9"/><path d="M708.2 100.2 L725.8 100.2"/><path d="M786.0 100.2 L803.6 100.2"/><path d="M738.3 82.6 L738.4 82.6"/><path d="M773.5 82.6 L773.5 82.6"/><path d="M738.3 117.8 L738.4 117.8"/><path d="M773.5 117.8 L773.5 117.8"/></g>
+</svg>

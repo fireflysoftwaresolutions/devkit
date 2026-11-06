@@ -1,0 +1,123 @@
+{
+  "name": "delivery",
+  "kind": "flow",
+  "title": "Local-first delivery: one push, one CI run",
+  "desc": "Feature branches are integrated on one local integration or release branch, where dev ci --run runs the same commands as CI and records the evidence. Only when the local suite is green does dev push push the branch once and dev pr create open one pull request, so CI runs once. If CI fails, the failure is reproduced and fixed locally before the next push. A green CI run is merged with dev pr merge, tagged and released with dev release under a CalVer version, and the published artifact is verified.",
+  "legend": [
+    {
+      "label": "the one push",
+      "style": "primary"
+    },
+    {
+      "label": "fix locally",
+      "style": "dashed"
+    }
+  ],
+  "nodes": [
+    {
+      "id": "branches",
+      "label": "Feature branches",
+      "sub": "feat/… · fix/…",
+      "col": 0,
+      "row": 0
+    },
+    {
+      "id": "integration",
+      "label": "Integration branch",
+      "sub": "release/26.11.4 · local",
+      "col": 1,
+      "row": 0
+    },
+    {
+      "id": "local",
+      "label": "Local CI equivalent",
+      "sub": "dev ci --run · lint · tests · build",
+      "col": 2,
+      "row": 0
+    },
+    {
+      "id": "push",
+      "label": "One push, one PR",
+      "sub": "dev push · dev pr create",
+      "col": 2,
+      "row": 1
+    },
+    {
+      "id": "ci",
+      "label": "GitHub CI",
+      "sub": "runs once",
+      "col": 1,
+      "row": 1,
+      "family": "steel"
+    },
+    {
+      "id": "release",
+      "label": "Merge · tag · release",
+      "sub": "dev pr merge · dev release",
+      "col": 0,
+      "row": 1
+    },
+    {
+      "id": "verify",
+      "label": "Verify the artifact",
+      "sub": "download · install · smoke test",
+      "col": 0,
+      "row": 2
+    }
+  ],
+  "edges": [
+    {
+      "from": "branches",
+      "to": "integration",
+      "label": "merge locally"
+    },
+    {
+      "from": "integration",
+      "to": "local",
+      "label": "run"
+    },
+    {
+      "from": "local",
+      "to": "integration",
+      "label": "red: fix locally",
+      "style": "dashed",
+      "from_side": "top",
+      "to_side": "top",
+      "via": [
+        [
+          1.5,
+          -0.8
+        ]
+      ]
+    },
+    {
+      "from": "local",
+      "to": "push",
+      "label": "green",
+      "style": "primary"
+    },
+    {
+      "from": "push",
+      "to": "ci",
+      "style": "primary"
+    },
+    {
+      "from": "ci",
+      "to": "release",
+      "label": "green",
+      "style": "primary"
+    },
+    {
+      "from": "ci",
+      "to": "integration",
+      "label": "red: reproduce and fix locally",
+      "style": "dashed",
+      "from_side": "top",
+      "to_side": "bottom"
+    },
+    {
+      "from": "release",
+      "to": "verify"
+    }
+  ]
+}

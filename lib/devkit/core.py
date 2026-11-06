@@ -44,6 +44,21 @@ DEFAULTS = {
     "docker": {"cpu": 6, "memory": 12, "disk": 80, "vm_type": "vz", "rosetta": True,
                "mount_type": "virtiofs", "autostart": False},
     "editor": "code",
+    "agents": {"claude": True, "codex": True},
+    "claude": {"default_mode": "bypassPermissions"},
+    "codex": {"mode": "full", "approval_policy": "never", "sandbox_mode": "danger-full-access"},
+    "stacks": ["java", "python", "php", "node"],
+    "skills": {"groups": ["security-deep", "postgres", "observability"], "enforce": True, "rules": []},
+    "language": "en-US",
+    "hosts": ["github"],
+    "clouds": [],
+    "packages": {"auto": True},
+    "ui": {"powerline": False},
+    "progress": {"nudge_minutes": 8, "notify": True, "notify_after_minutes": 10, "slow_tool_seconds": 20},
+    "work": {"lock_hours": 8},
+    "lock": False,
+    "handoff": {"enforce": True},
+    "canary": {"enforce": True},
 }
 
 
