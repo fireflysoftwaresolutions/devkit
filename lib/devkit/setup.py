@@ -403,6 +403,7 @@ def setup_claude():
     locked = policy.lock_status() != "off"
     write_claude_settings(include_hooks=not locked)
     plugins = load_conf("claude/plugins.json")
+    frag = load_conf("claude/settings.json")
     done(f"settings.json: {frag['permissions']['defaultMode']} by default, no attribution, hooks: "
          + ", ".join(sorted((frag.get('hooks') or {}).keys())))
     if locked and policy.lock_status() == "stale":
