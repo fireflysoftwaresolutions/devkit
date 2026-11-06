@@ -57,6 +57,10 @@ COMMANDS = [
     ]),
     ("Delivery", [
         ("ci [--commands]", "Show what GitHub Actions runs, so you run it locally before the one push"),
+        ("branch new|rename|ls|clean", "Branches from an up-to-date main, with valid names; tidy merged ones"),
+        ("commit · push · rebase", "Conventional commits, push after local CI evidence (dev ci --run), rebase on main"),
+        ("pr create|ls|checks|merge", "PRs with the template, checks with failing logs, safe merges"),
+        ("release [--dry-run]", "Tag and publish by the delivery policy, with the CHANGELOG section"),
         ("ci status [--watch]", "Live CI/CD runs (GitHub, GitLab, Bitbucket, Azure): jobs, steps, elapsed, ETA"),
         ("calver [--next]", "Current and next CalVer version YY.MM.PATCH from the repository's tags"),
         ("sec scan [--history]", "Security: secrets (gitleaks), dependencies (osv-scanner), SAST (Semgrep), Trivy"),
@@ -803,10 +807,12 @@ def cmd_ci_status(a, top):
         if a.json:
             print(json.dumps(res, indent=1))
             return 0
+        running = [r for r in res["runs"] if r["status"] in cistatus.RUNNING]
+        quiet_wait = a.watch and not sys.stdout.isatty() and running  # agents: no output until the run ends
         if a.watch and sys.stdout.isatty():
             print("\033[2J\033[H", end="")
-        _print_ci_runs(res, a_=a)
-        running = [r for r in res["runs"] if r["status"] in cistatus.RUNNING]
+        if not quiet_wait:
+            _print_ci_runs(res, a_=a)
         if not a.watch or not running:
             failed = [r for r in res["runs"][:1] if r["status"] == "failed"]
             if failed and res.get("provider") == "github":
@@ -823,6 +829,10 @@ def cmd_ci(a):
     if not top:
         ui.err("not inside a repository")
         return 2
+    from . import gitx
+    r = gitx.ci_command(a, top)  # --run, --mark-passed, --evidence: local CI evidence for dev push
+    if r is not None:
+        return r
     if a.query == "status" or a.status:
         return cmd_ci_status(a, top)
     if a.commands:
@@ -1940,6 +1950,9 @@ def build_parser():
     p.add_argument("--limit", type=int, default=5)
     p.add_argument("--all-jobs", action="store_true", help="list every running job")
     p.add_argument("--json", action="store_true")
+    from . import gitx
+    gitx.add_ci_arguments(p)
+    gitx.register(add)
     add("doctor", cmd_doctor, "Verify the setup")
     add("install", cmd_install, "Apply configuration").add_argument(
         "--only", help="comma list: config,tools,cli,git,handoff,instructions,skills,claude,codex,docker,docs,launchd")
