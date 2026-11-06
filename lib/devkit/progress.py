@@ -526,6 +526,12 @@ def assign(which, label: str, cwd: str | None = None, now: float | None = None, 
     if not s:
         raise ValueError(f"no step “{which}” in the plan")
     _raci_assign(run, s, label, why, now)
+    owner = s.get("owner") or "main"
+    if owner != "main" and s.get("state") != "done" and not _label_matches(label, (run.get("agents") or {}).get(owner)
+                                                                            or {}):
+        old = ((run.get("agents") or {}).get(owner) or {}).get("persona") or owner
+        _log_change(run, s, s.get("state"), "pending", "main", f"reassigned from {old} to {label}", now)
+        s.update(owner="main", state="pending")  # the other member's lane no longer owns it
     s["label"] = label
     if scope:
         globs = [x.strip() for x in scope.split(",") if x.strip()]
@@ -1486,11 +1492,30 @@ def note_agent_launch(agent: str, data: dict, now: float | None = None):
     inp = data.get("tool_input") or {}
     label = inp.get("description") or inp.get("nickname") or inp.get("name") or \
         str(inp.get("message") or inp.get("prompt") or "").strip().split("\n")[0][:60]
+    now = now or time.time()
+    entry = {"label": str(label)[:80], "type": inp.get("subagent_type") or inp.get("agent_type") or "",
+             "ts": round(now, 1)}
     q = (s.get("pending_agents") or [])[-19:]
-    q.append({"label": str(label)[:80], "type": inp.get("subagent_type") or inp.get("agent_type") or "",
-              "ts": round(now or time.time(), 1)})
+    last = q[-1] if q else {}
+    if last.get("label") == entry["label"] and last.get("type") == entry["type"] and \
+            abs(now - (last.get("ts") or 0)) < 10:
+        return  # the same launch recorded twice
+    q.append(entry)
     s["pending_agents"] = q
     f.write_text(json.dumps(s))
+
+
+LAUNCH_TTL = 15 * 60  # a launch whose SubagentStart never came does not label a later subagent
+
+
+def _launch_description(data: dict) -> str:
+    """The description the Agent tool launched this subagent with: Claude Code keeps it in `<transcript>.meta.json`
+    next to the subagent's transcript. '' when there is none (Codex, an older client)."""
+    p = str(data.get("agent_transcript_path") or "")
+    if not p.endswith(".jsonl"):
+        return ""
+    meta = core.read_json(Path(p[:-len(".jsonl")] + ".meta.json"), {}) or {}
+    return str(meta.get("description") or "") if isinstance(meta, dict) else ""
 
 
 def on_subagent(agent: str, data: dict, started: bool, now: float | None = None):
@@ -1503,9 +1528,12 @@ def on_subagent(agent: str, data: dict, started: bool, now: float | None = None)
     aid = data.get("agent_id") or data.get("subagent_id") or "?"
     kind = data.get("agent_type") or data.get("subagent_type") or ""
     if started:
-        q = s.get("pending_agents") or []
-        i = next((j for j, x in enumerate(q) if not x.get("type") or not kind or x["type"] == kind), None)
-        label = q.pop(i)["label"] if i is not None else kind
+        q = [x for x in s.get("pending_agents") or [] if now - (x.get("ts") or now) < LAUNCH_TTL]
+        want = _launch_description(data)
+        i = next((j for j, x in enumerate(q) if want and x.get("label") == want[:80]), None)
+        if i is None:  # no launch record: the oldest recent launch of this type
+            i = next((j for j, x in enumerate(q) if not x.get("type") or not kind or x["type"] == kind), None)
+        label = q.pop(i)["label"] if i is not None else (want or kind)
         s["pending_agents"] = q
         subs[aid] = {"type": kind, "label": label, "started": now}
 

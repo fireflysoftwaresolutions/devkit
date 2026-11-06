@@ -167,6 +167,44 @@ class AssignmentTests(unittest.TestCase):
         run = pg.assign("build the JSON API server", "Neo", why="Tank is out; Neo pairs with Seraph", now=self.m(2))
         self.assertEqual(run["raci_overrides"][-1]["why"], "Tank is out; Neo pairs with Seraph")
 
+    def test_a_starting_subagent_gets_its_own_launch_label_not_a_stale_one(self):
+        pg.start("Work", plan=["installer", "dashboard server"], now=self.m(0))
+        pg.assign("dashboard server", "Tank", now=self.m(0))
+        launch = lambda d, at: pg.note_agent_launch("claude", {"session_id": "s1", "tool_input": {  # noqa: E731
+            "description": d, "subagent_type": "general-purpose"}}, now=at)
+        launch("Kid: curl installer", self.m(0))  # its SubagentStart never claimed it
+        launch("Tank: dashboard server", self.m(31))
+        launch("Tank: dashboard server", self.m(31) + 1)  # the same launch recorded twice: one entry
+        pg.on_subagent("claude", {"session_id": "s1", "agent_id": "t1", "agent_type": "general-purpose"}, True,
+                       now=self.m(31) + 2)
+        run = pg.load_run("claude", "s1")
+        self.assertEqual(run["agents"]["t1"]["label"], "Tank: dashboard server")
+        self.assertEqual(run["plan"][1]["owner"], "t1")
+        sess = json.loads((pg.SESSIONS / "claude-s1.json").read_text())
+        self.assertEqual(sess.get("pending_agents"), [])  # the stale entry expired, the duplicate was never kept
+        # two launches at once: each subagent claims the entry its own launch record names
+        launch("Sati: screens", self.m(40))
+        launch("Ghost: docs", self.m(40))
+        with tempfile.TemporaryDirectory() as d:
+            tr = Path(d) / "agent-g1.jsonl"
+            tr.write_text("")
+            (Path(d) / "agent-g1.meta.json").write_text(json.dumps({"toolUseId": "toolu_9", "description": "Ghost: docs"}))
+            pg.on_subagent("claude", {"session_id": "s1", "agent_id": "g1", "agent_type": "general-purpose",
+                                      "agent_transcript_path": str(tr)}, True, now=self.m(41))
+        self.assertEqual(pg.load_run("claude", "s1")["agents"]["g1"]["label"], "Ghost: docs")
+
+    def test_a_step_reassigned_away_from_a_running_member_leaves_its_lane(self):
+        pg.start("Work", plan=["installer", "dashboard server"], now=self.m(0))
+        pg.assign("installer", "Kid", now=self.m(0))
+        pg.note_agent_launch("claude", {"session_id": "s1", "tool_input": {"description": "Kid: installer"}})
+        pg.on_subagent("claude", {"session_id": "s1", "agent_id": "a1", "agent_type": "devkit:kid"}, True, now=self.m(1))
+        run = pg.assign("dashboard server", "Kid", now=self.m(2))  # a mistake: Kid's running lane takes it
+        self.assertEqual(run["plan"][1]["owner"], "a1")
+        run = pg.assign("dashboard server", "Tank", now=self.m(3))
+        self.assertEqual((run["plan"][1]["owner"], run["plan"][1]["state"], run["plan"][1]["label"]),
+                         ("main", "pending", "Tank"))
+        self.assertIn("reassigned from Kid to Tank", [c.get("why") for c in run.get("history") or []][-1] or "")
+
     def test_the_run_ends_only_when_the_accountable_member_approved(self):
         pg.start("API", plan=["build the JSON API server", "review"], now=self.m(0))
         pg.assign("build the JSON API server", "Tank", now=self.m(0))
