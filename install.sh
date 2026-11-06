@@ -10,7 +10,8 @@
 #   ./install.sh [--yes] [--skip-packages] [--no-setup]
 #
 # It makes sure Homebrew, git, Python, and the GitHub CLI are present, gets devkit, signs you in to GitHub, and
-# starts the setup wizard (`dev setup`). Safe to run again. `install.sh --help` lists the options.
+# starts the setup wizard (`dev setup`), whose `dev install` pins a read-only copy of devkit for the hooks and the
+# guard in ~/.local/share/devkit/releases. Safe to run again. `install.sh --help` lists the options.
 #
 # Everything is inside functions, and only the last line runs them: a download cut short runs nothing.
 
@@ -238,6 +239,9 @@ update_existing() {
 use_checkout() {
   step "devkit" "devkit itself: the checkout this script is in."
   ok "this checkout: $(tildify "$DEVKIT_HOME") ($(describe))"
+  if [ -z "$(git -C "$DEVKIT_HOME" tag --points-at HEAD 2>/dev/null | newest_release || true)" ]; then
+    note "not a release: dev install pins it for the hooks only after its tests pass here (bin/dev ci --run)"
+  fi
 }
 
 # Sets GITHUB=0 when the GitHub CLI is not signed in and there is no terminal to sign in from.
@@ -272,6 +276,21 @@ run_setup() {
   with_tty "$PY" "$DEVKIT_HOME/bin/dev" setup ${args[@]+"${args[@]}"} || SETUP_RC=$?
 }
 
+# The read-only copy of devkit that the wizard's `dev install` pinned for the hooks and the guard, from its record:
+# "<version> (<commit>) in <folder>", or nothing when devkit is not pinned.
+pinned_line() {
+  "$PY" -c 'import json, os, sys
+try:
+    r = json.load(open(sys.argv[1]))
+except (OSError, ValueError):
+    r = {}
+p = r.get("path") or "" if isinstance(r, dict) else ""
+if p and os.path.isfile(os.path.join(p, "bin", "dev")):
+    home = os.path.expanduser("~")
+    print("%s (%s) in %s" % (r.get("version"), (r.get("commit") or "")[:7], "~" + p[len(home):] if p.startswith(home + "/") else p))' \
+    "$HOME/.local/share/devkit/install.json" 2>/dev/null || true
+}
+
 # The agents chosen in the wizard, from its saved configuration.
 agents_line() {
   local names
@@ -283,7 +302,7 @@ print(" and ".join(n for k, n in (("claude", "Claude Code"), ("codex", "Codex"))
 }
 
 summary() {
-  local outcome="$1" where version again
+  local outcome="$1" where version again pinned
   where="$(tildify "$DEVKIT_HOME")"
   version="$(cat "$DEVKIT_HOME/VERSION" 2>/dev/null || printf 'unknown')"
   again="$where/install.sh"
@@ -294,13 +313,19 @@ summary() {
       printf '\n  %sWhat you have now%s\n' "$C_B" "$C_OFF"
       ok "devkit, and the tools for the kinds of projects you chose"
       ok "$(agents_line) with devkit's shared rules and its safety guard"
+      pinned="$(pinned_line)"
+      if [ -n "$pinned" ]; then
+        ok "the hooks and the guard run a read-only copy of devkit $pinned"
+      else
+        note "the hooks are not pinned yet: run dev install (dev doctor says what is missing)"
+      fi
       ok "a private GitHub repository for your project notes, tasks, and plans"
       printf '\n  %sWhat to do first%s\n' "$C_B" "$C_OFF"
       printf '  1. Open a new Terminal window (or run: exec zsh), so the dev command works.\n'
       printf '  2. dev doctor               checks that everything works\n'
       printf '  3. dev dashboard            shows your projects and tasks in the browser\n'
       printf '  4. dev new my-app, then dcd my-app, then claude (or codex) to start your first project\n'
-      printf '  %sLater, dev update moves devkit to the newest release.%s\n\n' "$C_DIM" "$C_OFF"
+      printf '  %sLater, dev update moves devkit to the newest release and pins it.%s\n\n' "$C_DIM" "$C_OFF"
       ;;
     no-setup)
       note "devkit is downloaded; nothing is configured yet (--no-setup)."

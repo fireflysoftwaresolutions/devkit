@@ -4,7 +4,8 @@
 
 pack     stage desktop/manifest.json (version from VERSION), the launcher, LICENSE, NOTICE and the icon; check the
          manifest's tools against `dev mcp`'s; validate with the pinned mcpb CLI when npx is available; write
-         dist/desktop/devkit-<version>.mcpb (a zip with manifest.json at its root)
+         devkit-<version>.mcpb (a zip with manifest.json at its root) to dist/desktop in a checkout, or to
+         ~/.local/share/devkit/desktop when devkit runs from its read-only pinned copy (what `dev install` uses)
 status   whether Claude Desktop has the extension installed, its version against this checkout, whether it is
          enabled, and which devkit checkout its launcher finds
 """
@@ -24,10 +25,15 @@ from .core import DEVKIT_HOME, tilde
 
 MCPB = "@anthropic-ai/mcpb@2.1.2"   # pinned: validate, pack and info
 SRC = DEVKIT_HOME / "desktop"
-DIST = DEVKIT_HOME / "dist" / "desktop"
 ICON = DEVKIT_HOME / "plugin" / "assets" / "logo.png"  # the devkit icon at 512 px (icon.png is the 128 px copy)
 EXT_ID = "local.mcpb.firefly-software-solutions-inc..devkit"
 FILES = ("manifest.json", "server/launcher.py", "icon.png", "LICENSE", "NOTICE")
+
+
+def dist_dir() -> Path:
+    """Where bundles are written: dist/desktop in a checkout; next to the pinned copies when devkit runs from one,
+    since that copy is read-only."""
+    return core.share_dir() / "desktop" if core.is_pinned(DEVKIT_HOME) else DEVKIT_HOME / "dist" / "desktop"
 
 
 def claude_dir() -> Path:
@@ -109,8 +115,8 @@ def _mcpb(*args, timeout=300):
 
 
 def pack(out_dir: Path = None, validate: bool = True, say=print) -> dict:
-    """Build dist/desktop/devkit-<version>.mcpb -> a report. Raises ValueError when a check fails."""
-    out_dir = Path(out_dir or DIST)
+    """Build devkit-<version>.mcpb in dist_dir() -> a report. Raises ValueError when a check fails."""
+    out_dir = Path(out_dir or dist_dir())
     out = out_dir / f"devkit-{core.VERSION}.mcpb"
     rep = {"bundle": str(out), "version": core.VERSION, "packed_by": "zip", "validate": None, "info": None}
     use_mcpb = validate and core.have("npx")
@@ -186,7 +192,8 @@ def status(base: Path = None) -> dict:
     settings = core.read_json(base / "Claude Extensions Settings" / f"{ext_id}.json", {}) if ext_id else {}
     settings = settings if isinstance(settings, dict) else {}
     home_setting = ((settings.get("userConfig") or {}).get("devkit_home") or "")
-    bundles = sorted(DIST.glob("devkit-*.mcpb"), key=lambda p: p.stat().st_mtime) if DIST.exists() else []
+    dist = dist_dir()
+    bundles = sorted(dist.glob("devkit-*.mcpb"), key=lambda p: p.stat().st_mtime) if dist.exists() else []
     out = {"claude_desktop": base.exists(), "installed": bool(ext_id), "id": ext_id or EXT_ID,
            "installed_version": ext.get("version"), "version": core.VERSION,
            "current": bool(ext_id) and ext.get("version") == core.VERSION,

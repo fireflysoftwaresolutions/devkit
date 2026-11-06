@@ -1,15 +1,25 @@
 # Copyright (c) 2026 Firefly Software Solutions Inc.
 # SPDX-License-Identifier: Apache-2.0
 """`dev install` (idempotent configuration of git, Claude Code, Codex, skills, Docker, launchd)
-and `dev doctor` (verification)."""
+and `dev doctor` (verification).
+
+`dev install` first pins devkit (spec C10): a `git archive` of the checkout's HEAD, read-only, with a manifest of
+SHA-256 checksums, in ~/.local/share/devkit/releases/<version>-<sha>/. It pins only a release (a tag v<VERSION> that
+origin has on the same commit) or a commit whose local test gate passed (`dev ci --run`), unless the developer passes
+`--unverified --why`. It then runs the rest of the install from that copy, so the hooks, ~/.local/bin/dev, the status
+line, the scheduled jobs and the Desktop extension run it and never the checkout."""
 from __future__ import annotations
 
+import hashlib
+import io
 import json
 import os
+import shlex
 import sys
 import re
 import shutil
 import subprocess
+import tarfile
 import time
 from pathlib import Path
 
@@ -30,7 +40,9 @@ BLOCK_START, BLOCK_END = "# >>> devkit >>>", "# <<< devkit <<<"
 # --------------------------------------------------------------------------- helpers
 
 def render(text: str) -> str:
-    return (text.replace("{{DEVKIT}}", str(DEVKIT_HOME)).replace("{{HOME}}", str(HOME))
+    """Fill a config template. {{DEVKIT}} is the copy the hooks run (core.runtime_home: the pinned install), also when
+    this code runs from a checkout, so no setting written here ever points at the checkout once devkit is pinned."""
+    return (text.replace("{{DEVKIT}}", str(core.runtime_home())).replace("{{HOME}}", str(HOME))
             .replace("{{DEV}}", str(DEV)).replace("{{UID}}", str(os.getuid())))
 
 
@@ -128,6 +140,443 @@ def merge_hooks(current: dict, ours: dict) -> dict:
     return out
 
 
+# --------------------------------------------------------------------------- the pinned install (spec C10, K2)
+
+PIN_KEEP = 3                 # pinned copies kept; one still in use is never removed
+TESTED = ("run", "resumed")  # local CI evidence from a run of the suite; an attestation (--ci-passed) is not enough
+
+
+class PinError(Exception):
+    """`dev install` refused to pin or switch the copy: the message says why and what to do instead."""
+
+
+def _audit(action: str, target: str, detail: str, outcome: str = "ok", **extra):
+    from . import audit
+    audit.record(action, target, detail, outcome=outcome, **extra)
+
+
+def _sha256(path) -> str:
+    h = hashlib.sha256()
+    with open(path, "rb") as fh:
+        for chunk in iter(lambda: fh.read(1 << 16), b""):
+            h.update(chunk)
+    return h.hexdigest()
+
+
+def _files(root: Path) -> dict:
+    """{relative path: Path} of every file under `root`, the manifest itself excepted."""
+    out = {}
+    for d, _, names in os.walk(root):
+        for n in names:
+            p = Path(d) / n
+            rel = p.relative_to(root).as_posix()
+            if rel != core.PIN_MANIFEST:
+                out[rel] = p
+    return out
+
+
+def _read_only(root: Path):
+    """Files 0444 (0555 when git has them executable, as bin/dev must be for the hooks to run it), folders 0555."""
+    for d, _, names in os.walk(root, topdown=False):
+        for n in names:
+            p = os.path.join(d, n)
+            os.chmod(p, 0o555 if os.lstat(p).st_mode & 0o100 else 0o444)
+        os.chmod(d, 0o555)
+
+
+def _remove_tree(path: Path):
+    """Delete a pinned copy or a leftover of one: its folders are read-only, so they are made writable first."""
+    for d, _, _ in os.walk(path):
+        try:
+            os.chmod(d, 0o755)
+        except OSError:
+            pass
+    shutil.rmtree(path, ignore_errors=True)
+
+
+def _precompile(lib: Path):
+    """Compile the copy's modules now: its folders become read-only, so Python could never cache them and every hook
+    would compile devkit again. Hash-checked .pyc files never outlive their source. A module that does not compile
+    is refused: the hooks would fail open on it. The `python3` on PATH gets its own bytecode when it differs. Apple's
+    /usr/bin/python3 caches bytecode outside the tree (sys.pycache_prefix), so under it the modules are only checked."""
+    import py_compile
+    if not lib.is_dir():
+        return
+    bad = []
+    for f in sorted(lib.rglob("*.py")):
+        try:
+            if getattr(sys, "pycache_prefix", None):
+                compile(f.read_bytes(), str(f), "exec", dont_inherit=True)
+            else:
+                py_compile.compile(str(f), doraise=True, invalidation_mode=py_compile.PycInvalidationMode.CHECKED_HASH)
+        except (py_compile.PyCompileError, SyntaxError, ValueError):
+            bad.append(f.relative_to(lib.parent).as_posix())
+    if bad:
+        raise PinError(f"{', '.join(bad[:4])} does not compile, and the hooks would fail open on it. Fix it, commit, "
+                       f"then run `dev install` again.")
+    other = shutil.which("python3")
+    if other and not other.startswith("/usr/bin/") and core.real(other) != core.real(sys.executable):
+        sh([other, "-m", "compileall", "-q", "--invalidation-mode", "checked-hash", str(lib)], timeout=180)
+
+
+def _release(source: Path, commit: str, version: str):
+    """-> (tag, "") when HEAD is the release v<VERSION> and origin has that tag on the same commit, else (None, why).
+    A tag made only in this checkout (by anyone, an agent too) is not a release."""
+    tag = f"v{version}"
+    if tag not in core.gitout(source, "tag", "--points-at", commit).split():
+        return None, f"it is not the release {tag}"
+    rc, out, err = core.git(source, "ls-remote", "origin", f"refs/tags/{tag}", f"refs/tags/{tag}^{{}}", timeout=60)
+    if rc != 0:
+        return None, f"origin could not confirm the tag {tag} ({(err or out).strip()[:160] or f'exit {rc}'})"
+    refs = {parts[1]: parts[0] for parts in (ln.split() for ln in out.splitlines()) if len(parts) == 2}
+    remote = refs.get(f"refs/tags/{tag}^{{}}") or refs.get(f"refs/tags/{tag}")  # annotated tags: the peeled commit
+    if remote != commit:
+        return None, (f"origin has no tag {tag}" if not remote else
+                      f"origin's {tag} is {remote[:7]}, not {commit[:7]}, so the local tag is not the release")
+    return tag, ""
+
+
+def _tested(source: Path, commit: str):
+    """-> (evidence, "") when the local test gate (`dev ci --run`) passed for exactly this commit's tree, else
+    (None, why). The evidence is the record `dev push` checks."""
+    from . import gitx
+    c = gitx.ctx(source)
+    ev = gitx.evidence(c, commit) if c else None
+    if ev and ev.get("how") in TESTED:
+        return ev, ""
+    if ev:
+        return None, f"its local CI record is {gitx.describe_evidence(ev)}, a claim, not a run of the suite"
+    return None, "no `dev ci --run` passed for this tree"
+
+
+def _verify_source(source: Path, commit: str, version: str, unverified_why: str = None) -> dict:
+    """How this commit earned its pin -> {"how": release|tests|unverified, "detail"}. Raises PinError when it did not."""
+    from . import gitx
+    tag, not_release = _release(source, commit, version)
+    if tag:
+        return {"how": "release", "detail": f"release {tag}, the same commit on origin"}
+    ev, not_tested = _tested(source, commit)
+    if ev:
+        return {"how": "tests", "detail": f"tests passed for this tree ({gitx.describe_evidence(ev)})",
+                "evidence_ts": ev.get("ts")}
+    why = (unverified_why or "").strip()
+    if why:
+        return {"how": "unverified", "detail": f"unverified: {why}", "why": why}
+    raise PinError(f"{commit[:7]} is not verified: {not_release}, and {not_tested}. The hooks and the guard run only a "
+                   f"release or a commit whose tests passed here. Run `bin/dev ci --run` in {tilde(source)}, then "
+                   f"`dev install`; or move to the newest release with `dev update`; or install it anyway with "
+                   f"`dev install --unverified --why \"<reason>\"` (recorded in the audit).")
+
+
+def _info(man: dict, path: Path, verified=None, reused=False) -> dict:
+    return {"name": path.name, "version": man.get("version"), "commit": man.get("commit"), "path": str(path),
+            "source": man.get("source"), "verified": verified or man.get("verified"),
+            "files": len(man.get("files") or {}), "reused": reused}
+
+
+def _build(source: Path, commit: str, tree: str, version: str, name: str, verified: dict) -> Path:
+    """git archive `commit` into a new read-only copy with its manifest; replaces a copy of the same name."""
+    root = core.pin_root()
+    root.mkdir(parents=True, exist_ok=True)
+    tmp, old = root / f".{name}.tmp-{os.getpid()}", None
+    _remove_tree(tmp)
+    tmp.mkdir()
+    try:
+        p = subprocess.run(["git", "-C", str(source), "archive", "--format=tar", commit], capture_output=True,
+                           timeout=300, env=core.GIT_ENV)
+        if p.returncode != 0:
+            raise PinError(f"git archive {commit[:7]} failed: {p.stderr.decode('utf-8', 'replace').strip()[-200:]}")
+        with tarfile.open(fileobj=io.BytesIO(p.stdout)) as tf:
+            members = tf.getmembers()
+            bad = [m.name for m in members if not (m.isfile() or m.isdir()) or m.name.startswith("/")
+                   or ".." in Path(m.name).parts]
+            if bad:
+                raise PinError(f"{commit[:7]} has entries a pinned copy cannot hold (links, or paths outside the "
+                               f"tree): {', '.join(bad[:4])}")
+            tf.extractall(str(tmp), members=members, **({"filter": "data"} if hasattr(tarfile, "data_filter") else {}))
+        _precompile(tmp / "lib")
+        man = {"name": name, "version": version, "commit": commit, "tree": tree, "source": str(source),
+               "created": round(time.time(), 3), "verified": verified,
+               "files": {rel: _sha256(f) for rel, f in sorted(_files(tmp).items())}}
+        (tmp / core.PIN_MANIFEST).write_text(json.dumps(man, indent=1, sort_keys=True) + "\n")
+        _read_only(tmp)
+        dest = root / name
+        if dest.exists():
+            old = root / f".{name}.old-{os.getpid()}"
+            os.rename(dest, old)
+        os.rename(tmp, dest)
+    except BaseException:
+        _remove_tree(tmp)
+        raise
+    if old:
+        _remove_tree(old)
+    return dest
+
+
+def pin(source=None, unverified_why: str = None) -> dict:
+    """Pin the HEAD of the devkit checkout `source` (default: core.source_home()) -> what was pinned (name, version,
+    commit, path, source, verified, files). Refused (PinError) when tracked files have uncommitted changes, or when
+    HEAD is neither a release nor tested and no `unverified_why` is given. The copy is always built from git; when one
+    of that commit had changed since it was pinned, that is audited (outcome "tampered")."""
+    source = Path(source or core.source_home())
+    where = tilde(source)
+    top = core.gitout(source, "rev-parse", "--show-toplevel")
+    if not top:
+        raise PinError(f"{where} is not a git checkout of devkit, so there is nothing to pin. Run `dev install` in a "
+                       f"devkit checkout (install.sh clones one).")
+    source = Path(top)
+    rc, dirty, err = core.git(source, "status", "--porcelain", "--untracked-files=no")
+    if rc != 0:
+        raise PinError(f"git status failed in {where}: {err}")
+    if dirty:
+        names = [ln[3:] for ln in dirty.splitlines() if ln.strip()]
+        cur = core.install_record().get("name")
+        raise PinError(f"{where} has uncommitted changes to {len(names)} tracked file(s) "
+                       f"({', '.join(names[:4])}{' …' if len(names) > 4 else ''}), so its HEAD is not what is on "
+                       f"disk. Commit them (then `bin/dev ci --run`) or discard them, and run `dev install` again"
+                       + (f"; `dev install --version {cur}` re-applies the installed copy." if cur else "."))
+    commit = core.gitout(source, "rev-parse", "--verify", "-q", "HEAD^{commit}")
+    tree = core.gitout(source, "rev-parse", "--verify", "-q", "HEAD^{tree}")
+    if not commit:
+        raise PinError(f"{where} has no commit yet, so there is nothing to pin.")
+    version = core.gitout(source, "show", f"{commit}:VERSION").strip()
+    if not re.fullmatch(r"[0-9A-Za-z][0-9A-Za-z.+_-]{0,39}", version):
+        raise PinError(f"{where} has no usable VERSION file at {commit[:7]}.")
+    verified = _verify_source(source, commit, version, unverified_why)
+    name = f"{version}-{commit[:7]}"
+    dest = core.pin_root() / name
+    if dest.exists():  # rebuilt from git all the same: a manifest rewritten to match a change would look intact
+        problems = verify_pin(dest)
+        rec = core.install_record()
+        if rec.get("manifest_sha256") and core.real(rec.get("path") or "") == core.real(dest) \
+                and (dest / core.PIN_MANIFEST).is_file() and _sha256(dest / core.PIN_MANIFEST) != rec["manifest_sha256"]:
+            problems.insert(0, f"changed {core.PIN_MANIFEST}")
+        if problems:
+            _audit("install.pin", name, "the copy had changed since it was pinned, rebuilt from git: "
+                   + "; ".join(problems[:6]), outcome="tampered")
+    dest = _build(source, commit, tree, version, name, verified)
+    man = read_json(dest / core.PIN_MANIFEST, {}) or {}
+    _audit("install.pin", name, verified["detail"], outcome="unverified" if verified["how"] == "unverified" else "ok",
+           commit=commit, verified=verified["how"])
+    return dict(_info(man, dest, verified), source=str(source))
+
+
+def verify_pin(path) -> list:
+    """What differs between a pinned copy and its manifest, one short line each ("changed lib/devkit/guard.py",
+    "missing …", "added …", "writable …"); empty when the copy is intact."""
+    path = Path(path)
+    man = read_json(path / core.PIN_MANIFEST)
+    if not isinstance(man, dict) or not isinstance(man.get("files"), dict):
+        return [f"no readable manifest ({core.PIN_MANIFEST})"]
+    out, found = [], _files(path)
+    for rel, want in sorted(man["files"].items()):
+        f = found.get(rel)
+        if f is None:
+            out.append(f"missing {rel}")
+        elif f.is_symlink() or _sha256(f) != want:
+            out.append(f"changed {rel}")
+    out += [f"added {rel}" for rel in sorted(set(found) - set(man["files"]))]
+    for d, _, names in os.walk(path):
+        for n in [d] + [os.path.join(d, x) for x in names]:
+            if os.lstat(n).st_mode & 0o222:
+                out.append(f"writable {Path(n).relative_to(path).as_posix()}")
+    return out
+
+
+def pinned_copies() -> list:
+    """[(manifest, path)] of every pinned copy, newest first."""
+    root = core.pin_root()
+    out = []
+    for d in sorted(root.iterdir()) if root.is_dir() else []:
+        man = read_json(d / core.PIN_MANIFEST, {}) if d.is_dir() and not d.name.startswith(".") else None
+        if isinstance(man, dict) and man.get("commit"):
+            out.append((man, d))
+    return sorted(out, key=lambda x: -(x[0].get("created") or 0))
+
+
+def pins_in_use() -> set:
+    """Real paths of the pinned copies something still runs: the installed one, this process, ~/.local/bin/dev, and
+    any copy that Claude's settings, Claude's managed settings, Codex's hooks or a launchd job names."""
+    from . import policy
+    roots = {str(core.pin_root()), core.real(core.pin_root())}
+    used = set()
+
+    def add(p):
+        rp = core.real(p)
+        base = core.real(core.pin_root()) + os.sep
+        if rp.startswith(base):
+            used.add(base + rp[len(base):].split(os.sep)[0])
+    rec = core.install_record()
+    if rec.get("path"):
+        add(rec["path"])
+    add(DEVKIT_HOME)
+    link = core.HOME / ".local" / "bin" / "dev"
+    if os.path.lexists(link):
+        add(os.path.realpath(link))
+    texts = [CLAUDE_HOME / "settings.json", CODEX_HOME / "hooks.json", policy.MANAGED_FILE]
+    texts += sorted((core.HOME / "Library" / "LaunchAgents").glob("com.devkit*.plist"))
+    pat = re.compile("(" + "|".join(re.escape(r) for r in roots) + r")/([^/'\"\s<>]+)")
+    for f in texts:
+        try:
+            text = Path(f).read_text()
+        except (OSError, UnicodeDecodeError):
+            continue
+        for m in pat.finditer(text):
+            add(core.pin_root() / m.group(2))
+    return used
+
+
+def prune_pins(keep: int = PIN_KEEP) -> list:
+    """Remove the pinned copies beyond the newest `keep`, never one in use (pins_in_use), and the leftovers of an
+    install that stopped half-way. -> the names removed."""
+    used, removed = pins_in_use(), []
+    for i, (_, d) in enumerate(pinned_copies()):
+        if i >= keep and core.real(d) not in used:
+            _remove_tree(d)
+            removed.append(d.name)
+    root = core.pin_root()
+    for d in root.glob(".*") if root.is_dir() else []:
+        if d.is_dir() and time.time() - d.lstat().st_mtime > 3600:
+            _remove_tree(d)
+    if removed:
+        _audit("install.prune", ", ".join(removed), f"kept the newest {keep} pinned copies and those in use")
+    return removed
+
+
+def record_install(info: dict) -> dict:
+    """Write ~/.local/share/devkit/install.json: which pinned copy is installed, from which checkout, and the
+    checksum of its manifest (so a replaced manifest is noticed too)."""
+    path = Path(info["path"])
+    rec = {"name": info["name"], "version": info["version"], "commit": info["commit"], "path": str(path),
+           "source": str(info.get("source") or ""), "verified": info.get("verified"),
+           "manifest_sha256": _sha256(path / core.PIN_MANIFEST), "installed_at": round(time.time(), 3)}
+    f = core.install_record_file()
+    f.parent.mkdir(parents=True, exist_ok=True)
+    tmp = f.with_name(f.name + ".tmp")
+    tmp.write_text(json.dumps(rec, indent=1) + "\n")
+    os.replace(tmp, f)
+    return rec
+
+
+def select_pin(version: str) -> dict:
+    """The newest intact pinned copy named `version` or `version-<sha>` -> its info (`dev install --version`)."""
+    copies = pinned_copies()
+    hits = [(m, d) for m, d in copies if d.name == version or d.name.startswith(version + "-")]
+    if not hits:
+        raise PinError(f"no pinned copy of {version}; there are: {', '.join(d.name for _, d in copies) or 'none'}.")
+    man, d = hits[0]
+    problems = verify_pin(d)
+    if problems:
+        raise PinError(f"{d.name} differs from its manifest ({'; '.join(problems[:4])}), so it is not used. Pin it "
+                       f"again from git: check out {man.get('version')} in the checkout, then run `dev install`.")
+    return _info(man, d, reused=True)
+
+
+def _choose_copy(only=None, unverified_why=None, version=None, as_pinned=False) -> Path:
+    """Which pinned copy this install runs from -> its path. Full installs pin the checkout (or switch to --version)
+    and record it; `--only` re-applies steps from the installed copy. Raises PinError."""
+    step("Pinned copy of devkit (what the hooks and the guard run)")
+    if as_pinned:  # the second half of `dev install`, started by the first in the copy it pinned
+        problems = verify_pin(DEVKIT_HOME) if core.is_pinned(DEVKIT_HOME) else ["it is not a pinned copy"]
+        if problems:
+            raise PinError(f"{tilde(DEVKIT_HOME)} is not an intact pinned copy ({'; '.join(problems[:4])}). Run "
+                           f"`dev install` in the devkit checkout.")
+        rec = core.install_record()
+        if not rec.get("path") or core.real(rec["path"]) != core.real(DEVKIT_HOME):
+            if only:
+                raise PinError(f"{DEVKIT_HOME.name} is not the installed copy: `dev install --version "
+                               f"{DEVKIT_HOME.name}` switches to it.")
+            record_install(_info(read_json(DEVKIT_HOME / core.PIN_MANIFEST, {}) or {}, DEVKIT_HOME))
+        done(f"running from {tilde(DEVKIT_HOME)}")
+        return DEVKIT_HOME
+    if only:
+        if version or unverified_why:
+            raise PinError("--version and --unverified choose the copy every step runs, so they go without --only.")
+        cur = core.runtime_home()
+        if not core.is_pinned(cur):
+            raise PinError("devkit is not pinned yet: run `dev install` (every step) first; it pins the checkout.")
+        problems = verify_pin(cur)
+        if problems:
+            raise PinError(f"the installed copy {cur.name} differs from its manifest ({'; '.join(problems[:4])}). "
+                           f"Run `dev install` to rebuild it from git.")
+        done(f"{', '.join(sorted(only))} from the installed copy {cur.name}; `dev install` pins the checkout's HEAD")
+        return cur
+    info = select_pin(version) if version else pin(None, unverified_why)
+    rec = record_install(info)
+    v = info.get("verified") or {}
+    done(f"devkit {rec['version']} ({rec['commit'][:7]}) {'switched to' if info.get('reused') else 'pinned'} in "
+         f"{tilde(rec['path'])}: {info['files']} files, read-only, SHA-256 manifest · {v.get('detail', '')}")
+    if v.get("how") == "unverified":
+        note("installed without verification; recorded in the audit (`dev audit`)")
+    return Path(rec["path"])
+
+
+def _hook_copies() -> list:
+    """[(where, devkit copy it runs)] for each devkit command in Claude's settings (hooks, status line), Claude's
+    managed settings, Codex's hooks and ~/.local/bin/dev."""
+    from . import policy
+    out = []
+
+    def copy_of(command: str) -> Path:
+        try:
+            exe = shlex.split(command)[0]
+        except (ValueError, IndexError):
+            exe = (command.split() or [""])[0]
+        return Path(exe).parent.parent
+
+    def scan(label: str, data):
+        for event, groups in sorted(((data or {}).get("hooks") or {}).items()):
+            for g in groups or []:
+                for h in (g or {}).get("hooks") or []:
+                    if is_devkit_hook(h):
+                        out.append((f"{label} {event}", copy_of(h["command"])))
+    s = read_json(CLAUDE_HOME / "settings.json", {}) or {}
+    scan("Claude", s)
+    sl = str((s.get("statusLine") or {}).get("command") or "")
+    if "hook statusline" in sl:
+        out.append(("Claude status line", copy_of(sl)))
+    if policy.MANAGED_FILE.exists():
+        scan("Claude managed settings", read_json(policy.MANAGED_FILE, {}))
+    scan("Codex", read_json(CODEX_HOME / "hooks.json", {}))
+    link = core.HOME / ".local" / "bin" / "dev"
+    if os.path.lexists(link):
+        out.append(("~/.local/bin/dev", Path(os.path.realpath(link)).parent.parent))
+    return out
+
+
+def pin_checks() -> list:
+    """The doctor's checks of the pinned install -> [(name, ok, detail, fix)]."""
+    rec = core.install_record()
+    path = Path(rec["path"]) if rec.get("path") else None
+    if not path or not core.is_pinned(path):
+        return [("hooks run a pinned copy", False, "not pinned: the hooks run whatever the settings name" +
+                 (f" ({tilde(path)} is gone)" if path else ""), "dev install")]
+    man = read_json(path / core.PIN_MANIFEST, {}) or {}
+    copies = _hook_copies()
+    off = [(w, c) for w, c in copies if core.real(c) != core.real(path)]
+    src = rec.get("source") or ""
+    detail = (f"{len(copies)} commands run {tilde(path)}" if not off else "; ".join(
+        f"{w} runs {tilde(c)}" + (" (the checkout)" if src and core.real(c) == core.real(src) else "")
+        for w, c in off[:4]) + (f" (+{len(off) - 4} more)" if len(off) > 4 else ""))
+    out = [("hooks run the pinned copy", bool(copies) and not off, detail if copies else "no devkit hooks found",
+            "dev install --only cli,claude,codex")]
+    same = man.get("version") == rec.get("version") and man.get("commit") == rec.get("commit")
+    out.append(("pinned copy is the installed version", same,
+                f"devkit {rec.get('version')} ({(rec.get('commit') or '')[:7]}) · "
+                f"{(rec.get('verified') or {}).get('detail', 'verification unknown')}" if same else
+                f"install.json says {rec.get('version')} ({(rec.get('commit') or '')[:7]}), the copy holds "
+                f"{man.get('version')} ({(man.get('commit') or '')[:7]})", "dev install"))
+    problems = verify_pin(path)
+    if rec.get("manifest_sha256") and (path / core.PIN_MANIFEST).is_file() \
+            and _sha256(path / core.PIN_MANIFEST) != rec["manifest_sha256"]:
+        problems.insert(0, f"changed {core.PIN_MANIFEST}")
+    out.append(("pinned copy matches its manifest", not problems,
+                f"{len(man.get('files') or {})} files, each as pinned, read-only" if not problems else
+                f"changed after `dev install` pinned it ({len(problems)}): " + "; ".join(problems[:4]),
+                "dev install (rebuilds the copy from git)"))
+    return out
+
+
 # --------------------------------------------------------------------------- steps
 
 def ensure_config():
@@ -152,7 +601,8 @@ def install_cli():
     bindir = HOME / ".local" / "bin"
     bindir.mkdir(parents=True, exist_ok=True)
     link = bindir / "dev"
-    target = DEVKIT_HOME / "bin" / "dev"
+    home = core.runtime_home()  # the pinned copy: `dev` typed in a shell runs what the hooks run
+    target = home / "bin" / "dev"
     if link.is_symlink() or link.exists():
         if link.resolve() != target.resolve():
             backup(link) if not link.is_symlink() else None
@@ -160,7 +610,7 @@ def install_cli():
     if not link.exists():
         link.symlink_to(target)
     done(f"{tilde(link)} → {tilde(target)}")
-    block = f'{BLOCK_START}\n[ -f "{DEVKIT_HOME}/shell/devkit.zsh" ] && source "{DEVKIT_HOME}/shell/devkit.zsh"\n{BLOCK_END}\n'
+    block = f'{BLOCK_START}\n[ -f "{home}/shell/devkit.zsh" ] && source "{home}/shell/devkit.zsh"\n{BLOCK_END}\n'
     text = ZSHRC.read_text() if ZSHRC.exists() else ""
     if BLOCK_START in text:
         new = re.sub(re.escape(BLOCK_START) + r".*?" + re.escape(BLOCK_END) + r"\n?", block, text, flags=re.S)
@@ -193,11 +643,16 @@ def _setup_git():
     done(f"user.name / user.email = {name} <{email}>")
     rc, _, err = sh(["gh", "auth", "setup-git"], timeout=30)
     done("gh is git's credential helper for github.com") if rc == 0 else fail(f"gh auth setup-git: {err}")
-    inc = str(CONF / "git" / "gitconfig")
+    conf = core.runtime_home() / "config"  # the pinned copy's; each new pin replaces the path of the one before
+    inc = str(conf / "git" / "gitconfig")
     _, includes, _ = sh(["git", "config", "--global", "--get-all", "include.path"])
+    for old in includes.splitlines():
+        if old != inc and old.endswith("/config/git/gitconfig") and (
+                core.is_under(old, core.pin_root()) or core.real(old) == core.real(core.source_home() / "config" / "git" / "gitconfig")):
+            sh(["git", "config", "--global", "--fixed-value", "--unset-all", "include.path", old])
     if inc not in includes.splitlines():
         sh(["git", "config", "--global", "--add", "include.path", inc])
-    sh(["git", "config", "--global", "core.excludesFile", str(CONF / "git" / "ignore")])
+    sh(["git", "config", "--global", "core.excludesFile", str(conf / "git" / "ignore")])
     done("shared git defaults included; global ignore covers agent artefacts (.claude/worktrees, …)")
 
 
@@ -237,7 +692,7 @@ def setup_handoff():
             core.git(HANDOFF, "init", "-q", "-b", "main")
             for f in tpl.iterdir():
                 if not (HANDOFF / f.name).exists():
-                    shutil.copy2(f, HANDOFF / f.name)
+                    shutil.copyfile(f, HANDOFF / f.name)  # not copy2: the pinned copy's modes are read-only
             for d in ("projects", "log", "plans"):
                 (HANDOFF / d).mkdir(exist_ok=True)
                 (HANDOFF / d / ".gitkeep").touch()
@@ -257,7 +712,7 @@ def setup_handoff():
     else:
         for f in tpl.iterdir():
             if not (HANDOFF / f.name).exists():
-                shutil.copy2(f, HANDOFF / f.name)
+                shutil.copyfile(f, HANDOFF / f.name)
         remote = core.gitout(HANDOFF, "remote", "get-url", "origin")
         done(f"present · origin {remote or 'none'}")
     if (HANDOFF / ".git").exists():
@@ -269,7 +724,7 @@ def render_instructions() -> str:
     base = (DEVKIT_HOME / "agents" / "AGENTS.md").read_text()
     personal_f = CONFIG_FILE.parent / "AGENTS.personal.md"
     personal = personal_f.read_text() if personal_f.exists() else ""
-    header = (f"{GENERATED_MARK} {core.VERSION} from {tilde(DEVKIT_HOME)}/agents/AGENTS.md"
+    header = (f"{GENERATED_MARK} {core.VERSION} from {tilde(core.source_home())}/agents/AGENTS.md"
               f"{' + ' + tilde(personal_f) if personal else ''}; edit those and run `dev install` -->\n")
     return header + render(base) + ("\n\n## Personal additions\n\n" + personal if personal else "")
 
@@ -379,8 +834,12 @@ def app_checks(codex_plugins=None) -> list:
                                                                                           f"{st.get('version')})")
                 detail += "; turned off in Settings → Extensions" if st.get("enabled") is False else ", enabled"
                 lc = st.get("launcher") or {}
+                rt = core.runtime_home()
                 if lc and not lc.get("ok", True):
                     ok_, detail = False, detail + f"; launcher: {lc.get('reason')}"
+                elif lc.get("home") and core.is_pinned(rt) and core.real(lc["home"]) != core.real(rt):
+                    ok_, detail = False, detail + (f"; it runs {tilde(lc['home'])}, not the pinned copy: clear its "
+                                                   f"devkit folder setting in Settings → Extensions")
             res.append(("Claude Desktop", "devkit extension", ok_, detail, "dev install --only desktop"))
             ok_b, detail_b = desktop.bypass_mode()
             if ok_b is not None:
@@ -482,7 +941,7 @@ def write_claude_settings(include_hooks=True):
     mine = "hook statusline" in str(sl.get("command") or "")
     if (core.CFG.get("claude") or {}).get("statusline", True) and (not sl or mine):
         # devkit's status line records Claude's usage windows (doctor, dashboard); a status line of yours is kept
-        new["statusLine"] = {"type": "command", "command": f"'{DEVKIT_HOME}/bin/dev' hook statusline --agent claude",
+        new["statusLine"] = {"type": "command", "command": f"'{core.runtime_home()}/bin/dev' hook statusline --agent claude",
                              "padding": 0}
     elif mine and not (core.CFG.get("claude") or {}).get("statusline", True):
         new.pop("statusLine", None)
@@ -696,8 +1155,10 @@ def build_codex_plugin() -> Path:
         _sh.rmtree(tmp)
     tmp.mkdir(parents=True)
     for name in (".codex-plugin", "assets", "skills"):
-        if (src / name).exists():
-            _sh.copytree(src / name, tmp / name)
+        if (src / name).exists():  # without the modes: the pinned copy is read-only, this build must stay writable
+            _sh.copytree(src / name, tmp / name, copy_function=_sh.copyfile)
+    for d, _, _ in os.walk(tmp):
+        os.chmod(d, 0o755)
     for cmd in sorted((src / "commands").glob("*.md")):
         text = cmd.read_text()
         m = re.match(r"---\s*\n(.*?)\n---\s*\n(.*)$", text, re.S)
@@ -919,8 +1380,24 @@ def setup_desktop():
          + (f" (replaces {st.get('installed_version')})" if st.get("installed") else ""))
 
 
-def run_install(only=None):
-    print(ui.banner("install"))
+def run_install(only=None, unverified_why=None, version=None, as_pinned=False) -> int:
+    """`dev install`. From a checkout it pins the checkout (or switches to `version`), then starts itself again from
+    that pinned copy (`--as-pinned`), which runs the steps, so every path they write names the copy; `only` re-applies
+    some steps from the installed copy without pinning. -> exit code (1 when the copy was refused)."""
+    if not as_pinned:
+        print(ui.banner("install"))
+    try:
+        target = _choose_copy(only, unverified_why, version, as_pinned)
+    except PinError as e:
+        fail(str(e))
+        _audit("install.pin", tilde(core.source_home()), str(e), outcome="refused")
+        return 1
+    if core.real(target) != core.real(DEVKIT_HOME):
+        argv = [sys.executable, str(target / "bin" / "dev"), "install", "--as-pinned"]
+        argv += ["--only", ",".join(sorted(only))] if only else []
+        sys.stdout.flush()
+        sys.stderr.flush()
+        os.execv(sys.executable, argv)
     steps = [("config", ensure_config), ("tools", setup_tools), ("cli", install_cli), ("git", setup_git), ("handoff", setup_handoff),
              ("instructions", write_agent_instructions), ("skills", install_skills), ("claude", setup_claude),
              ("codex", setup_codex), ("desktop", setup_desktop), ("docker", setup_docker), ("docs", setup_docs_tools),
@@ -935,7 +1412,13 @@ def run_install(only=None):
             fn()
         except Exception as e:  # keep going; doctor reports what is left
             fail(f"{name}: {e}")
+    if not only:
+        step("Pinned copies")
+        removed = prune_pins()
+        done(f"{len(pinned_copies())} kept in {tilde(core.pin_root())} (the newest {PIN_KEEP} and any in use)"
+             + (f"; removed {', '.join(removed)}" if removed else "") + " · rollback: `dev install --version <v>`")
     print(f"\n{ui.ARROW} Run {ui.bold('dev doctor')} to verify, and open a new terminal (or `exec zsh`).")
+    return 0
 
 
 # --------------------------------------------------------------------------- doctor
@@ -965,7 +1448,8 @@ def doctor() -> int:
     check("GitHub", "git uses gh credentials", "gh auth git-credential" in helper, helper.splitlines()[-1] if helper else "unset",
           "gh auth setup-git")
     exc = core.sh(["git", "config", "--global", "core.excludesFile"])[1]
-    check("GitHub", "global gitignore", exc == str(CONF / "git" / "ignore"), tilde(exc) if exc else "unset", "dev install --only git")
+    check("GitHub", "global gitignore", exc == str(core.runtime_home() / "config" / "git" / "ignore"),
+          tilde(exc) if exc else "unset", "dev install --only git")
 
     check("Workspace", "dev on PATH", shutil.which("dev") is not None, shutil.which("dev") or "missing", "dev install --only cli")
     check("Workspace", "shell integration", ZSHRC.exists() and BLOCK_START in ZSHRC.read_text(), tilde(ZSHRC), "dev install --only cli")
@@ -1010,6 +1494,9 @@ def doctor() -> int:
         broken = [n for n in mine if not (home / n / "SKILL.md").exists()]
         check("Agents", f"skills in {tilde(home)}", bool(mine) and not broken, f"{len(mine) - len(broken)}/{len(mine)} linked"
               + (f"; missing {', '.join(broken[:3])}" if broken else ""), "dev install --only skills")
+
+    for name, ok, detail, fix in pin_checks():
+        check("Pinned install", name, ok, detail, fix)
 
     s = read_json(CLAUDE_HOME / "settings.json", {}) or {}
     check("Claude", "bypassPermissions default", (s.get("permissions") or {}).get("defaultMode") == "bypassPermissions",

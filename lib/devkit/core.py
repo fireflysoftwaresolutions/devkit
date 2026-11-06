@@ -392,3 +392,59 @@ def write_if_changed(path: Path, text: str) -> bool:
     tmp.write_text(text)
     os.replace(tmp, path)
     return True
+
+
+# --------------------------------------------------------------------------- the pinned install (spec C10)
+#
+# `dev install` copies one commit of the devkit checkout, read-only and with a manifest of checksums, to
+# ~/.local/share/devkit/releases/<version>-<sha>/ and records it in ~/.local/share/devkit/install.json. The agents'
+# hooks, the status line, ~/.local/bin/dev and the scheduled jobs run that copy, so an edit in the checkout reaches
+# them only through the next `dev install`. `bin/dev` run from the checkout still runs the checkout.
+# The paths are functions of HOME so that tests can move HOME.
+
+PIN_MANIFEST = ".devkit-manifest.json"
+
+
+def share_dir() -> Path:
+    return HOME / ".local" / "share" / "devkit"
+
+
+def pin_root() -> Path:
+    return share_dir() / "releases"
+
+
+def install_record_file() -> Path:
+    return share_dir() / "install.json"
+
+
+def install_record() -> dict:
+    """What `dev install` installed last: version, commit, path of the pinned copy, source checkout ({} if none)."""
+    rec = read_json(install_record_file(), {})
+    return rec if isinstance(rec, dict) else {}
+
+
+def is_pinned(path=None) -> bool:
+    """True when `path` (default: the code that runs now) is a pinned copy: a folder of pin_root() with a manifest."""
+    p = Path(path or DEVKIT_HOME)
+    return p.resolve().parent == pin_root().resolve() and (p / PIN_MANIFEST).is_file()
+
+
+def runtime_home() -> Path:
+    """The devkit copy that hooks, the installed `dev`, the status line and the jobs run: this copy when it is pinned,
+    else the pinned copy that `dev install` recorded. Settings written from a checkout point there too, never at the
+    checkout. Before the first pinned install, the copy that runs now."""
+    if is_pinned(DEVKIT_HOME):
+        return DEVKIT_HOME
+    path = install_record().get("path")
+    return Path(path) if path and is_pinned(path) else DEVKIT_HOME
+
+
+def source_home() -> Path:
+    """The devkit checkout that `dev install` pins and `dev update` updates: this copy when it is a checkout; for a
+    pinned copy, the checkout it was made from."""
+    if not is_pinned(DEVKIT_HOME):
+        return DEVKIT_HOME
+    rec = install_record()
+    src = rec.get("source") if rec.get("path") and real(rec["path"]) == real(DEVKIT_HOME) else None
+    src = src or (read_json(DEVKIT_HOME / PIN_MANIFEST, {}) or {}).get("source")
+    return Path(src) if src else DEVKIT_HOME

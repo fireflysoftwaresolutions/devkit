@@ -92,8 +92,8 @@ COMMANDS = [
         ("guard check <cmd>|--write p", "Simulate what the guard decides for a command or a file write"),
         ("plugin validate", "Validate the devkit plugin with Claude Code's validator and Codex's parser"),
         ("desktop pack|status", "Claude Desktop extension: build the .mcpb bundle, check what is installed"),
-        ("install [--only step]", "Apply the devkit configuration (idempotent)"),
-        ("update", "Move devkit to the newest release (or pull its branch) and re-apply it"),
+        ("install [--only step]", "Pin the checkout read-only for the hooks, then apply the configuration"),
+        ("update", "Move devkit to the newest release (or pull its branch), pin it and re-apply it"),
         ("docker up|down|status|prune", "Run Docker on a Colima VM"),
         ("version", "Show the devkit version"),
     ]),
@@ -478,7 +478,7 @@ def cmd_adopt(a):
     _trust_codex(dest)
     gc._log(f"adopt · {p['id']}: {tilde(old_main)} → {tilde(dest)}")
     print(f"  {ui.WARN} Claude Desktop / Codex app chats opened at the old path should be restarted from {tilde(dest)}")
-    if core.real(old_main) == core.real(core.DEVKIT_HOME):
+    if core.real(old_main) == core.real(core.source_home()):
         import subprocess  # devkit moved itself: its paths are embedded in hooks, links and launchd — re-apply them
         print(f"  {ui.ARROW} devkit moved itself; re-applying its configuration from {tilde(dest)}")
         return subprocess.call([sys.executable, str(dest / "bin" / "dev"), "install"])
@@ -823,8 +823,15 @@ def cmd_doctor(a):
 
 def cmd_install(a):
     from . import setup
-    setup.run_install(only=set(a.only.split(",")) if a.only else None)
-    return 0
+    why = (a.why or "").strip()
+    if a.unverified and not why:
+        ui.err('--unverified needs --why "<reason>": it is recorded in the audit')
+        return 2
+    if why and not a.unverified:
+        ui.err("--why goes with --unverified (the reason to install a commit that is neither a release nor tested)")
+        return 2
+    return setup.run_install(only={x.strip() for x in a.only.split(",") if x.strip()} if a.only else None,
+                             unverified_why=why if a.unverified else None, version=a.version, as_pinned=a.as_pinned)
 
 
 RELEASE_TAG_RE = re.compile(r"^v(\d+)\.(\d+)\.(\d+)$")
@@ -872,12 +879,13 @@ def update_checkout(home: Path):
 
 
 def cmd_update(a):
-    print(f"{ui.ARROW} updating {tilde(core.DEVKIT_HOME)}")
-    rc, message, install = update_checkout(core.DEVKIT_HOME)
+    home = core.source_home()  # the checkout; `dev` itself may run from the pinned copy, which git never changes
+    print(f"{ui.ARROW} updating {tilde(home)}")
+    rc, message, install = update_checkout(home)
     print(f"  {ui.OK if rc == 0 else ui.FAIL} {message}")
     if rc != 0 or not install:
         return rc
-    os.execv(sys.executable, [sys.executable, str(core.DEVKIT_HOME / "bin" / "dev"), "install"])
+    os.execv(sys.executable, [sys.executable, str(home / "bin" / "dev"), "install"])  # pins the new release
 
 
 def cmd_docker(a):
@@ -2143,7 +2151,12 @@ def cmd_diagram(a):
 
 
 def cmd_version(a):
-    print(f"devkit {core.VERSION} · {tilde(core.DEVKIT_HOME)}\n{COPYRIGHT}")
+    where = tilde(core.DEVKIT_HOME)
+    if core.is_pinned():
+        where += f" (pinned copy of {tilde(core.source_home())})"
+    elif core.is_pinned(core.runtime_home()):
+        where += f" (checkout; the hooks run {tilde(core.runtime_home())})"
+    print(f"devkit {core.VERSION} · {where}\n{COPYRIGHT}")
     return 0
 
 
@@ -2528,8 +2541,14 @@ def build_parser():
     from . import crew
     crew.register(add)
     add("doctor", cmd_doctor, "Verify the setup")
-    add("install", cmd_install, "Apply configuration").add_argument(
-        "--only", help="comma list: config,tools,cli,git,handoff,instructions,skills,claude,codex,desktop,docker,docs,launchd")
+    p = add("install", cmd_install, "Pin devkit for the hooks, then apply the configuration")
+    p.add_argument("--only", help="comma list: config,tools,cli,git,handoff,instructions,skills,claude,codex,desktop,"
+                                  "docker,docs,launchd; re-applies them from the installed copy without pinning")
+    p.add_argument("--version", help="switch to a pinned copy kept from an earlier install (rollback), e.g. 26.11.2")
+    p.add_argument("--unverified", action="store_true",
+                   help="pin HEAD although it is neither a release nor tested (`dev ci --run`); needs --why")
+    p.add_argument("--why", help="the reason for --unverified, recorded in the audit")
+    p.add_argument("--as-pinned", action="store_true", help=argparse.SUPPRESS)  # the second half, from the copy
     p = add("docs", cmd_docs, "Check documentation: Markdown, links and anchors, prose, diagrams")
     p.add_argument("check", choices=["check"])
     p.add_argument("paths", nargs="*", help="files or folders (default: the whole repository)")
