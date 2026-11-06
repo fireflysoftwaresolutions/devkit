@@ -1,0 +1,118 @@
+{
+  "name": "status-flow",
+  "kind": "flow",
+  "title": "Progress and the status block",
+  "desc": "The agent records long work with dev progress, which keeps the run's steps, estimate and ETA and shares them with the team through presence, dev team and the dashboard. Every final message starts with the status block. After each turn the Stop hook reads the block, records whether the marker was there and how well the format was followed in the canary log, and stores the block as one compact line, which dev status, dev overview, the dashboard and the next session show.",
+  "legend": [
+    {
+      "label": "devkit",
+      "family": "firefly"
+    },
+    {
+      "label": "stored",
+      "family": "slate"
+    }
+  ],
+  "nodes": [
+    {
+      "id": "agent",
+      "label": "Agent",
+      "sub": "Claude Code · Codex",
+      "col": 0,
+      "row": 0
+    },
+    {
+      "id": "progress",
+      "label": "dev progress",
+      "sub": "start · step · block · done",
+      "col": 1,
+      "row": 0,
+      "family": "firefly"
+    },
+    {
+      "id": "team",
+      "label": "Team view",
+      "sub": "dev team · dashboard",
+      "col": 2,
+      "row": 0
+    },
+    {
+      "id": "block",
+      "label": "Status block",
+      "sub": "Done · Check · Progress · Next",
+      "col": 0,
+      "row": 1
+    },
+    {
+      "id": "stop",
+      "label": "Stop hook",
+      "sub": "parse · score · store",
+      "col": 1,
+      "row": 1,
+      "family": "firefly",
+      "emphasis": true
+    },
+    {
+      "id": "latest",
+      "label": "Latest status",
+      "sub": "one compact line",
+      "col": 2,
+      "row": 1,
+      "family": "slate"
+    },
+    {
+      "id": "canary",
+      "label": "Canary log",
+      "sub": "dev canary · dev doctor",
+      "col": 0,
+      "row": 2,
+      "family": "slate"
+    },
+    {
+      "id": "readers",
+      "label": "Shown in",
+      "sub": "dev status · overview · next session",
+      "col": 2,
+      "row": 2
+    }
+  ],
+  "edges": [
+    {
+      "from": "agent",
+      "to": "progress",
+      "label": "records steps"
+    },
+    {
+      "from": "progress",
+      "to": "team",
+      "label": "ETA · presence"
+    },
+    {
+      "from": "agent",
+      "to": "block",
+      "label": "starts every final message"
+    },
+    {
+      "from": "block",
+      "to": "stop",
+      "label": "after the turn"
+    },
+    {
+      "from": "stop",
+      "to": "latest",
+      "label": "stores"
+    },
+    {
+      "from": "stop",
+      "to": "canary",
+      "label": "marker · format score",
+      "from_side": "bottom",
+      "to_side": "right"
+    },
+    {
+      "from": "latest",
+      "to": "readers",
+      "label": "drawn as"
+    }
+  ]
+}

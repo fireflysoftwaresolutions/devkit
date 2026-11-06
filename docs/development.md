@@ -1,5 +1,8 @@
 # Developing devkit
 
+This guide is for people who change devkit itself: the code layout, the design principles, the tests, and how a
+release is made.
+
 Maintained by Andrés Contreras Guillén. © 2026 Firefly Software Solutions Inc. All rights reserved.
 
 ## Code layout
@@ -7,30 +10,48 @@ Maintained by Andrés Contreras Guillén. © 2026 Firefly Software Solutions Inc
 ```text
 bin/dev                 entry point (adds lib/ to sys.path, calls devkit.cli.main)
 lib/devkit/
-  core.py               paths, configuration, shell/git helpers, remote parsing and project ids, process detection
-  ui.py                 terminal colours, banner, greeting and tips, tables
-  registry.py           project discovery and inspection, PROJECTS.md, registry.json, handoff notes
-  guard.py              pre-tool-use workspace rules shared by Claude Code and Codex
-  hooks.py              hook entry points: session-start, stop, session-end, guard
-  canary.py             instruction canary checks and reports
-  ci.py                 GitHub Actions workflow reader for `dev ci`
-  gc.py                 safe disk reclamation
-  setup.py              `dev install` and `dev doctor`
-  codexrpc.py           JSON-RPC client for `codex app-server`
   cli.py                argument parsing and command implementations
+  core.py               paths, configuration and defaults, shell and git helpers, remote parsing, project ids
+  ui.py                 terminal colors, banner, tables, status pills and the status block
+  registry.py           project discovery and inspection, PROJECTS.md, TASKS.md, ACTIVITY.md, registry.json, notes
+  notes.py              handoff and initiative notes: structure, frontmatter, sections, summaries
+  work.py               work items, locks, versions, changelog, session logs, presence
+  plans.py              versioned plans and specs
+  progress.py           dev progress runs, ETA, calibration, timing, notifications, progress hooks
+  report.py             dev report and its health rules
+  migrate.py            dev handoff-import
+  hooks.py              hook entry points for every event
+  guard.py              pre-tool workspace rules shared by Claude Code and Codex
+  skillguard.py         required-skill rules: prompt reminders, subagent briefs, the Stop check
+  canary.py             status block parsing, format score and canary reports
+  policy.py             managed settings: diff, repair, the Claude Code lock, project overrides
+  security.py           dev sec scan and the pre-commit secret check
+  ci.py                 GitHub Actions workflow reader for dev ci
+  gc.py                 safe disk reclamation
+  docs.py               dev docs check
+  diagram.py            dev diagram: layout, routing, rendering and validation
+  dashboard.py          the HTML command center
+  providers.py          Claude Code and Codex status, quota and self-tests
+  setup.py              dev install and dev doctor
+  wizard.py             dev setup
+  codexrpc.py           JSON-RPC client for codex app-server
+  art/                  terminal art of the logo
 agents/AGENTS.md        global instructions rendered for Claude Code and Codex
-agents/skills/          devkit's own skills
-config/                 Claude Code, Codex, git and skill configuration applied by `dev install`
+plugin/                 the devkit plugin: skills, slash commands, the scout agent, icon
+config/                 Claude Code, Codex, git, docs, skill and skill-rule configuration applied by dev install
+templates/              plan, task, pull request and handoff templates
 shell/                  zsh integration and completion
-templates/handoff/      initial files of a new handoff repository
+tools/brand/            renders the icon, the plugin logo and the hero banners
+docs/                   these guides, diagram specs (docs/diagrams) and images
 tests/                  unit tests
 install.sh · Brewfile   bootstrap and toolchain
+.github/                devkit's own CI (Python 3.9 and 3.13 on macOS), PR template and Dependabot
 ```
 
 ## Design principles
 
 - **Standard library only, Python 3.9 compatible.** `dev` runs with Homebrew Python or the macOS system
-  `/usr/bin/python3`, with no virtualenv or dependencies.
+  `/usr/bin/python3`, with no virtualenv, or dependencies.
 - **Hooks fail open and return fast.** Every hook handler catches all errors, logs them and exits 0; slow work is
   spawned detached. A devkit bug must never block or break an agent session.
 - **Re-check before anything destructive.** Plans are recomputed right before acting: live processes, uncommitted and
@@ -40,7 +61,7 @@ install.sh · Brewfile   bootstrap and toolchain
   up first.
 - **Idempotent installs.** `dev install` can run any number of times and only changes what differs.
 - **Explain, don't just block.** Every guard denial tells the agent the right way to do the thing.
-- **No secrets** in the code, the configuration or the handoff repository.
+- **No secrets** in the code, the configuration, or the handoff repository.
 
 ## Running the tests
 
@@ -51,16 +72,18 @@ python3 -m unittest discover -s tests -v
 python3 -m py_compile lib/devkit/*.py && /usr/bin/python3 -m py_compile lib/devkit/*.py
 ```
 
-The tests cover guard decisions, remote parsing and project ids for several hosts, `git status` parsing, the CI
-workflow reader, the canary detector and transcript reader, and handoff-note session lines. Tests that need state
-use a temporary state folder.
+The tests cover guard decisions, remote parsing and project ids for different hosts, `git status` parsing, the CI
+workflow reader, the status block parser and format score, transcript reading, work items (locks, versions, reasons,
+delegation), plans, progress, and timing, status reports, required skills, the diagram engine, and the docs diagrams
+(stale renders and the width budget), and the dashboard's decisions and escaping. Tests that need state use a
+temporary state folder. GitHub CI runs the same suite on Python 3.9 and 3.13; run it locally first.
 
 ## Adding a command
 
 1. Write `cmd_<name>(a)` in `lib/devkit/cli.py`; return an exit code.
 2. Register it in `build_parser()` with its options.
 3. Add it to `COMMANDS` (grouped help) and to `shell/completions/_dev`.
-4. Document it in [Commands](commands.md) and, if relevant, in the devkit `workspace` skill.
+4. Document it in [Commands](commands.md) and, when agents use it, in the `using-devkit` or `workspace` skill.
 
 ## Adding a guard rule
 
@@ -71,19 +94,22 @@ use a temporary state folder.
 
 ## Release process
 
-1. Update `VERSION` (semantic versioning) and add a `CHANGELOG.md` entry.
-2. Run the tests on both Pythons (above).
-3. `dev install` on your machine and `dev doctor` — every check must pass.
-4. Commit, tag and publish:
+devkit follows its own delivery method: integrate locally, run the full suite, push once.
+
+1. Update `VERSION` with the next CalVer version (`dev calver --next`) and add a `CHANGELOG.md` entry.
+2. Run the tests on both Pythons (see [Running the tests](#running-the-tests)), `dev docs check` and
+   `dev diagram check docs/diagrams`.
+3. Run `dev install` on your machine, then `dev doctor` and `dev agents test`; every check must pass.
+4. Push the release branch once, open one PR, and watch CI (`gh pr checks --watch`).
+5. Merge, tag, and publish:
 
    ```bash
-   git commit -am "Release vX.Y.Z"
-   git tag -a vX.Y.Z -m "devkit vX.Y.Z"
-   git push && git push --tags
-   gh release create vX.Y.Z --title "devkit vX.Y.Z" --notes-file <(sed -n '/^## \[X.Y.Z\]/,/^## \[/p' CHANGELOG.md | sed '$d')
+   git tag -a vYY.MM.PATCH -m "devkit vYY.MM.PATCH"
+   git push origin vYY.MM.PATCH
+   gh release create vYY.MM.PATCH --title "devkit vYY.MM.PATCH" --notes-file <(sed -n '/^## \[YY.MM.PATCH\]/,/^## \[/p' CHANGELOG.md | sed '$d')
    ```
 
-5. Developers update with `dev update`.
+6. Developers update with `dev update`.
 
 ## Conventions
 
@@ -96,4 +122,4 @@ use a temporary state folder.
 - Module docstrings explain purpose and safety rules; user-facing messages are short and actionable.
 - Commit messages explain why, in the imperative; no AI attribution.
 
-See also: [Guard rules](guard.md) · [Agents](agents.md) · [the CHANGELOG](../CHANGELOG.md)
+See also [Guard rules](guard.md), [Agents](agents.md), and [the CHANGELOG](../CHANGELOG.md).

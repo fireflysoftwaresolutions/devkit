@@ -1,7 +1,7 @@
-<svg xmlns="http://www.w3.org/2000/svg" width="1184" height="1184" viewBox="0 0 1184 1184" role="img" aria-labelledby="dk-title dk-desc">
+<svg xmlns="http://www.w3.org/2000/svg" width="1184" height="1048" viewBox="0 0 1184 1048" role="img" aria-labelledby="dk-title dk-desc">
 <title id="dk-title">Anatomy of a handoff note</title>
-<desc id="dk-desc">A handoff note, projects/&lt;project id&gt;.md in the handoff repository, has eight parts in this order: frontmatter, the auto block, Purpose, Current state, Tasks, Decisions and gotchas, Links and the session log. dev note set writes the frontmatter, dev sync writes the auto block, the agents' handoff skill writes the narrative sections, dev task writes the tasks and the session hooks add a session line with branch, commits and the DevKit status line. Session context, dev overview and the dashboard read the note.</desc>
-<rect width="1184" height="1184" fill="#10110F"/>
+<desc id="dk-desc">A handoff note, projects/&lt;project id&gt;.md in the handoff repository, has seven parts in this order: frontmatter, the auto block, Purpose, Current state, Tasks, Decisions and gotchas, and Links. dev note set writes the frontmatter, dev sync writes the auto block, the agents' handoff skill writes the narrative sections, and the Tasks block is generated from the work items that dev task keeps in items/&lt;scope&gt;/. Session lines go to sessions/&lt;scope&gt;/ instead. Session context, dev overview and the dashboard read the note.</desc>
+<rect width="1184" height="1048" fill="#10110F"/>
 <g font-family="Manrope, 'Manrope Variable', system-ui, -apple-system, 'Segoe UI', Arial, sans-serif">
 <circle cx="68" cy="74" r="4" fill="#FFB34A"/>
 <text x="80" y="78.5" font-size="12" font-weight="600" fill="#BFB8AB" letter-spacing="0.48">ANATOMY OF A HANDOFF NOTE</text>
@@ -12,7 +12,7 @@
 <text x="815.2" y="78.5" font-size="13" font-weight="400" fill="#BFB8AB">devkit writes</text>
 <g transform="translate(783.2,74)"><rect x="0" y="-7" width="24" height="14" rx="3" fill="#2C2416" stroke="#FFB34A" stroke-width="1.5"/></g>
 <g transform="translate(64.0,152.0)">
-<rect x="376.0" y="-48.0" width="320.0" height="1016.0" rx="12" fill="#1A1B17" stroke="#2E302A" stroke-width="1"/>
+<rect x="376.0" y="-48.0" width="320.0" height="880.0" rx="12" fill="#1A1B17" stroke="#2E302A" stroke-width="1"/>
 <text x="392.0" y="-24.0" font-size="12" font-weight="600" fill="#BFB8AB" text-anchor="start" letter-spacing="0.48">PROJECTS/&lt;PROJECT ID&gt;.MD</text>
 <path d="M852.0,40.0 L679.5,40.0" fill="none" stroke="#BFB8AB" stroke-width="1.5" stroke-linejoin="round" stroke-linecap="round"/><polygon points="672.0,40.0 680.0,36.0 680.0,44.0" fill="#BFB8AB"/>
 <rect x="741.6" y="28.0" width="40.9" height="24.0" rx="11.0" fill="#10110F"/>
@@ -24,11 +24,8 @@
 <rect x="730.2" y="388.0" width="63.6" height="24.0" rx="11.0" fill="#10110F"/>
 <text x="762.0" y="404.0" font-size="13" font-weight="400" fill="#BFB8AB" text-anchor="middle">rewrites</text>
 <path d="M852.0,520.0 L679.5,520.0" fill="none" stroke="#BFB8AB" stroke-width="1.5" stroke-linejoin="round" stroke-linecap="round"/><polygon points="672.0,520.0 680.0,516.0 680.0,524.0" fill="#BFB8AB"/>
-<rect x="739.6" y="508.0" width="44.7" height="24.0" rx="11.0" fill="#10110F"/>
-<text x="762.0" y="524.0" font-size="13" font-weight="400" fill="#BFB8AB" text-anchor="middle">edits</text>
-<path d="M852.0,888.0 L679.5,888.0" fill="none" stroke="#BFB8AB" stroke-width="1.5" stroke-linejoin="round" stroke-linecap="round"/><polygon points="672.0,888.0 680.0,884.0 680.0,892.0" fill="#BFB8AB"/>
-<rect x="727.9" y="876.0" width="68.2" height="24.0" rx="11.0" fill="#10110F"/>
-<text x="762.0" y="892.0" font-size="13" font-weight="400" fill="#BFB8AB" text-anchor="middle">appends</text>
+<rect x="727.1" y="508.0" width="69.7" height="24.0" rx="11.0" fill="#10110F"/>
+<text x="762.0" y="524.0" font-size="13" font-weight="400" fill="#BFB8AB" text-anchor="middle">generate</text>
 <path d="M376.0,280.0 L231.5,280.0" fill="none" stroke="#BFB8AB" stroke-width="1.5" stroke-linejoin="round" stroke-linecap="round"/><polygon points="224.0,280.0 232.0,276.0 232.0,284.0" fill="#BFB8AB"/>
 <rect x="273.8" y="268.0" width="52.3" height="24.0" rx="11.0" fill="#10110F"/>
 <text x="300.0" y="284.0" font-size="13" font-weight="400" fill="#BFB8AB" text-anchor="middle">digest</text>
@@ -47,19 +44,15 @@
 <rect x="400.0" y="360.0" width="272.0" height="80.0" rx="6.0" fill="#1F201C" stroke="#4C4E45" stroke-width="1.5"/>
 <text x="536.0" y="394.0" font-size="16" font-weight="600" fill="#F3F1EB" text-anchor="middle">Current state</text>
 <text x="536.0" y="416.0" font-size="13" font-weight="400" fill="#BFB8AB" text-anchor="middle">works · half done · broken</text>
-<rect x="400.0" y="480.0" width="272.0" height="80.0" rx="6.0" fill="#1F201C" stroke="#4C4E45" stroke-width="1.5"/>
+<rect x="400.0" y="480.0" width="272.0" height="80.0" rx="6.0" fill="#293235" stroke="#8EA3AB" stroke-width="1.5"/>
 <text x="536.0" y="514.0" font-size="16" font-weight="600" fill="#F3F1EB" text-anchor="middle">Tasks</text>
-<text x="536.0" y="536.0" font-size="13" font-weight="400" fill="#BFB8AB" text-anchor="middle">Now · Next · Later · Done</text>
+<text x="536.0" y="536.0" font-size="13" font-weight="400" fill="#A4B4B9" text-anchor="middle">generated from work items</text>
 <rect x="400.0" y="600.0" width="272.0" height="80.0" rx="6.0" fill="#1F201C" stroke="#4C4E45" stroke-width="1.5"/>
 <text x="536.0" y="634.0" font-size="16" font-weight="600" fill="#F3F1EB" text-anchor="middle">Decisions and gotchas</text>
 <text x="536.0" y="656.0" font-size="13" font-weight="400" fill="#BFB8AB" text-anchor="middle">why it is so · traps</text>
 <rect x="400.0" y="720.0" width="272.0" height="80.0" rx="6.0" fill="#1F201C" stroke="#4C4E45" stroke-width="1.5"/>
 <text x="536.0" y="754.0" font-size="16" font-weight="600" fill="#F3F1EB" text-anchor="middle">Links</text>
 <text x="536.0" y="776.0" font-size="13" font-weight="400" fill="#BFB8AB" text-anchor="middle">docs · environments · dashboards</text>
-<rect x="400.0" y="840.0" width="272.0" height="96.0" rx="6.0" fill="#293235" stroke="#8EA3AB" stroke-width="1.5"/>
-<text x="536.0" y="873.0" font-size="16" font-weight="600" fill="#F3F1EB" text-anchor="middle">Session log</text>
-<text x="536.0" y="895.0" font-size="13" font-weight="400" fill="#A4B4B9" text-anchor="middle">branch · commits · [Firefly&gt; DevKit]</text>
-<text x="536.0" y="913.0" font-size="13" font-weight="400" fill="#A4B4B9" text-anchor="middle">status line</text>
 <rect x="852.0" y="0.0" width="200.0" height="80.0" rx="6.0" fill="#2C2416" stroke="#FFB34A" stroke-width="1.5"/>
 <text x="952.0" y="34.0" font-size="16" font-weight="600" fill="#F3F1EB" text-anchor="middle">dev note set</text>
 <text x="952.0" y="56.0" font-size="13" font-weight="400" fill="#FFB34A" text-anchor="middle">status · priority · milestone</text>
@@ -69,12 +62,9 @@
 <rect x="852.0" y="360.0" width="200.0" height="80.0" rx="6.0" fill="#1F201C" stroke="#4C4E45" stroke-width="1.5"/>
 <text x="952.0" y="394.0" font-size="16" font-weight="600" fill="#F3F1EB" text-anchor="middle">Agents</text>
 <text x="952.0" y="416.0" font-size="13" font-weight="400" fill="#BFB8AB" text-anchor="middle">handoff skill</text>
-<rect x="852.0" y="480.0" width="200.0" height="80.0" rx="6.0" fill="#2C2416" stroke="#FFB34A" stroke-width="1.5"/>
-<text x="952.0" y="514.0" font-size="16" font-weight="600" fill="#F3F1EB" text-anchor="middle">dev task</text>
-<text x="952.0" y="536.0" font-size="13" font-weight="400" fill="#FFB34A" text-anchor="middle">add · start · done</text>
-<rect x="852.0" y="848.0" width="200.0" height="80.0" rx="6.0" fill="#2C2416" stroke="#FFB34A" stroke-width="1.5"/>
-<text x="952.0" y="882.0" font-size="16" font-weight="600" fill="#F3F1EB" text-anchor="middle">Session hooks</text>
-<text x="952.0" y="904.0" font-size="13" font-weight="400" fill="#FFB34A" text-anchor="middle">commits · status line</text>
+<rect x="852.0" y="480.0" width="200.0" height="80.0" rx="6.0" fill="#293235" stroke="#8EA3AB" stroke-width="1.5"/>
+<text x="952.0" y="514.0" font-size="16" font-weight="600" fill="#F3F1EB" text-anchor="middle">Work items</text>
+<text x="952.0" y="536.0" font-size="13" font-weight="400" fill="#A4B4B9" text-anchor="middle">items/&lt;scope&gt;/ · dev task</text>
 <rect x="0.0" y="240.0" width="224.0" height="80.0" rx="6.0" fill="#1F201C" stroke="#4C4E45" stroke-width="1.5"/>
 <text x="112.0" y="274.0" font-size="16" font-weight="600" fill="#F3F1EB" text-anchor="middle">Session context</text>
 <text x="112.0" y="296.0" font-size="13" font-weight="400" fill="#BFB8AB" text-anchor="middle">every new session</text>

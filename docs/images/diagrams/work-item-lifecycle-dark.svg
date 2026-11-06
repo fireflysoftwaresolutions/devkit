@@ -1,0 +1,59 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1032" height="776" viewBox="0 0 1032 776" role="img" aria-labelledby="dk-title dk-desc">
+<title id="dk-title">Life of a work item</title>
+<desc id="dk-desc">A work item starts as todo when dev task add creates it. dev task start (or claim) takes an 8-hour lock and makes it doing; release or delegate gives the lock back and returns it to todo, and done releases the lock and closes the item. A lock that is not renewed for 8 hours expires: the item stays doing, unlocked, and anyone may claim it. block marks an item blocked, and release returns a blocked item to todo. cancel, with a reason, closes any open item.</desc>
+<rect width="1032" height="776" fill="#10110F"/>
+<g font-family="Manrope, 'Manrope Variable', system-ui, -apple-system, 'Segoe UI', Arial, sans-serif">
+<circle cx="68" cy="74" r="4" fill="#FFB34A"/>
+<text x="80" y="78.5" font-size="12" font-weight="600" fill="#BFB8AB" letter-spacing="0.48">LIFE OF A WORK ITEM</text>
+<g transform="translate(110.3,84.0)">
+<rect x="-24.0" y="128.0" width="584.0" height="312.0" rx="12" fill="#1A1B17" stroke="#2E302A" stroke-width="1" stroke-dasharray="6 4"/>
+<text x="-8.0" y="152.0" font-size="12" font-weight="600" fill="#BFB8AB" text-anchor="start" letter-spacing="0.48">OPEN</text>
+<path d="M88.0,44.0 L88.0,176.5" fill="none" stroke="#BFB8AB" stroke-width="1.5" stroke-linejoin="round" stroke-linecap="round"/><polygon points="88.0,184.0 84.0,176.0 92.0,176.0" fill="#BFB8AB"/>
+<rect x="68.6" y="102.0" width="38.7" height="24.0" rx="11.0" fill="#10110F"/>
+<text x="88.0" y="118.0" font-size="13" font-weight="400" fill="#BFB8AB" text-anchor="middle">add</text>
+<path d="M176.0,224.0 L352.5,224.0" fill="none" stroke="#BFB8AB" stroke-width="1.5" stroke-linejoin="round" stroke-linecap="round"/><polygon points="360.0,224.0 352.0,228.0 352.0,220.0" fill="#BFB8AB"/>
+<rect x="225.3" y="212.0" width="85.5" height="24.0" rx="11.0" fill="#1A1B17"/>
+<text x="268.0" y="228.0" font-size="13" font-weight="400" fill="#BFB8AB" text-anchor="middle">start · claim</text>
+<path d="M448.0,184.0 L448.0,176.0 Q448.0,168.0 440.0,168.0 L104.2,168.0 Q100.0,168.0 100.0,172.2 L100.0,176.5" fill="none" stroke="#BFB8AB" stroke-width="1.5" stroke-linejoin="round" stroke-dasharray="6 5" stroke-linecap="butt"/><polygon points="100.0,184.0 96.0,176.0 104.0,176.0" fill="#BFB8AB"/>
+<rect x="211.9" y="156.0" width="124.2" height="24.0" rx="11.0" fill="#1A1B17"/>
+<text x="274.0" y="172.0" font-size="13" font-weight="400" fill="#BFB8AB" text-anchor="middle">release · delegate</text>
+<path d="M536.0,224.0 L672.5,224.0" fill="none" stroke="#BFB8AB" stroke-width="1.5" stroke-linejoin="round" stroke-linecap="round"/><polygon points="680.0,224.0 672.0,228.0 672.0,220.0" fill="#BFB8AB"/>
+<rect x="584.9" y="212.0" width="46.3" height="24.0" rx="11.0" fill="#10110F"/>
+<text x="608.0" y="228.0" font-size="13" font-weight="400" fill="#BFB8AB" text-anchor="middle">done</text>
+<path d="M88.0,264.0 L88.0,328.5" fill="none" stroke="#BFB8AB" stroke-width="1.5" stroke-linejoin="round" stroke-linecap="round"/><polygon points="88.0,336.0 84.0,328.0 92.0,328.0" fill="#BFB8AB"/>
+<rect x="64.1" y="288.0" width="47.7" height="24.0" rx="11.0" fill="#1A1B17"/>
+<text x="88.0" y="304.0" font-size="13" font-weight="400" fill="#BFB8AB" text-anchor="middle">block</text>
+<path d="M0.0,376.0 L-8.0,376.0 Q-16.0,376.0 -16.0,368.0 L-16.0,228.2 Q-16.0,224.0 -11.8,224.0 L-7.5,224.0" fill="none" stroke="#BFB8AB" stroke-width="1.5" stroke-linejoin="round" stroke-dasharray="6 5" stroke-linecap="butt"/><polygon points="0.0,224.0 -8.0,228.0 -8.0,220.0" fill="#BFB8AB"/>
+<rect x="-46.3" y="288.0" width="60.6" height="24.0" rx="11.0" fill="#1A1B17"/>
+<text x="-16.0" y="304.0" font-size="13" font-weight="400" fill="#BFB8AB" text-anchor="middle">release</text>
+<path d="M448.0,264.0 L448.0,328.5" fill="none" stroke="#BFB8AB" stroke-width="1.5" stroke-linejoin="round" stroke-linecap="round"/><polygon points="448.0,336.0 444.0,328.0 452.0,328.0" fill="#BFB8AB"/>
+<rect x="404.1" y="288.0" width="87.7" height="24.0" rx="11.0" fill="#1A1B17"/>
+<text x="448.0" y="304.0" font-size="13" font-weight="400" fill="#BFB8AB" text-anchor="middle">lock expires</text>
+<path d="M536.0,376.0 L544.0,376.0 Q552.0,376.0 552.0,368.0 L552.0,240.2 Q552.0,236.0 547.8,236.0 L543.5,236.0" fill="none" stroke="#BFB8AB" stroke-width="1.5" stroke-linejoin="round" stroke-dasharray="6 5" stroke-linecap="butt"/><polygon points="536.0,236.0 544.0,232.0 544.0,240.0" fill="#BFB8AB"/>
+<rect x="528.1" y="294.0" width="47.7" height="24.0" rx="11.0" fill="#1A1B17"/>
+<text x="552.0" y="310.0" font-size="13" font-weight="400" fill="#BFB8AB" text-anchor="middle">claim</text>
+<path d="M264.0,440.0 L264.0,536.5" fill="none" stroke="#BFB8AB" stroke-width="1.5" stroke-linejoin="round" stroke-linecap="round"/><polygon points="264.0,544.0 260.0,536.0 268.0,536.0" fill="#BFB8AB"/>
+<rect x="217.9" y="480.0" width="92.3" height="24.0" rx="11.0" fill="#10110F"/>
+<text x="264.0" y="496.0" font-size="13" font-weight="400" fill="#BFB8AB" text-anchor="middle">cancel --why</text>
+<circle cx="88.0" cy="32.0" r="10" fill="#F3F1EB"/>
+<rect x="0.0" y="184.0" width="176.0" height="80.0" rx="40.0" fill="#1F201C" stroke="#4C4E45" stroke-width="1.5"/>
+<text x="88.0" y="218.0" font-size="16" font-weight="600" fill="#F3F1EB" text-anchor="middle">Todo</text>
+<text x="88.0" y="240.0" font-size="13" font-weight="400" fill="#BFB8AB" text-anchor="middle">unclaimed</text>
+<rect x="360.0" y="184.0" width="176.0" height="80.0" rx="40.0" fill="#FFB34A" stroke="#FFB34A" stroke-width="2"/>
+<text x="448.0" y="218.0" font-size="16" font-weight="600" fill="#272820" text-anchor="middle">Doing</text>
+<text x="448.0" y="240.0" font-size="13" font-weight="400" fill="#272820" text-anchor="middle">claimed: 8 h lock</text>
+<rect x="680.0" y="184.0" width="176.0" height="80.0" rx="40.0" fill="#2E3126" stroke="#959C7F" stroke-width="1.5"/>
+<text x="768.0" y="218.0" font-size="16" font-weight="600" fill="#F3F1EB" text-anchor="middle">Done</text>
+<text x="768.0" y="240.0" font-size="13" font-weight="400" fill="#B9BF9F" text-anchor="middle">lock released</text>
+<rect x="0.0" y="336.0" width="176.0" height="80.0" rx="40.0" fill="#1F201C" stroke="#4C4E45" stroke-width="1.5"/>
+<text x="88.0" y="370.0" font-size="16" font-weight="600" fill="#F3F1EB" text-anchor="middle">Blocked</text>
+<text x="88.0" y="392.0" font-size="13" font-weight="400" fill="#BFB8AB" text-anchor="middle">with a reason</text>
+<rect x="360.0" y="336.0" width="176.0" height="80.0" rx="40.0" fill="#1F201C" stroke="#4C4E45" stroke-width="1.5"/>
+<text x="448.0" y="370.0" font-size="16" font-weight="600" fill="#F3F1EB" text-anchor="middle">Doing, unlocked</text>
+<text x="448.0" y="392.0" font-size="13" font-weight="400" fill="#BFB8AB" text-anchor="middle">not renewed for 8 h</text>
+<rect x="176.0" y="544.0" width="176.0" height="80.0" rx="40.0" fill="#2E3126" stroke="#959C7F" stroke-width="1.5"/>
+<text x="264.0" y="578.0" font-size="16" font-weight="600" fill="#F3F1EB" text-anchor="middle">Cancelled</text>
+<text x="264.0" y="600.0" font-size="13" font-weight="400" fill="#B9BF9F" text-anchor="middle">with a reason</text>
+</g>
+</g>
+</svg>

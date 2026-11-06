@@ -2,7 +2,7 @@
   "name": "handoff-note",
   "kind": "flow",
   "title": "Anatomy of a handoff note",
-  "desc": "A handoff note, projects/<project id>.md in the handoff repository, has eight parts in this order: frontmatter, the auto block, Purpose, Current state, Tasks, Decisions and gotchas, Links and the session log. dev note set writes the frontmatter, dev sync writes the auto block, the agents' handoff skill writes the narrative sections, dev task writes the tasks and the session hooks add a session line with branch, commits and the DevKit status line. Session context, dev overview and the dashboard read the note.",
+  "desc": "A handoff note, projects/<project id>.md in the handoff repository, has seven parts in this order: frontmatter, the auto block, Purpose, Current state, Tasks, Decisions and gotchas, and Links. dev note set writes the frontmatter, dev sync writes the auto block, the agents' handoff skill writes the narrative sections, and the Tasks block is generated from the work items that dev task keeps in items/<scope>/. Session lines go to sessions/<scope>/ instead. Session context, dev overview and the dashboard read the note.",
   "legend": [
     {
       "label": "devkit writes",
@@ -51,9 +51,10 @@
     {
       "id": "tasks",
       "label": "Tasks",
-      "sub": "Now · Next · Later · Done",
+      "sub": "generated from work items",
       "col": 1,
-      "row": 4
+      "row": 4,
+      "family": "slate"
     },
     {
       "id": "decisions",
@@ -68,14 +69,6 @@
       "col": 1,
       "row": 6,
       "sub": "docs · environments · dashboards"
-    },
-    {
-      "id": "log",
-      "label": "Session log",
-      "sub": "branch · commits · [Firefly> DevKit] status line",
-      "col": 1,
-      "row": 7,
-      "family": "slate"
     },
     {
       "id": "w_note",
@@ -102,19 +95,11 @@
     },
     {
       "id": "w_task",
-      "label": "dev task",
-      "sub": "add · start · done",
+      "label": "Work items",
+      "sub": "items/<scope>/ · dev task",
       "col": 2,
       "row": 4,
-      "family": "firefly"
-    },
-    {
-      "id": "w_hooks",
-      "label": "Session hooks",
-      "sub": "commits · status line",
-      "col": 2,
-      "row": 7,
-      "family": "firefly"
+      "family": "slate"
     },
     {
       "id": "r_ctx",
@@ -142,8 +127,7 @@
         "state",
         "tasks",
         "decisions",
-        "links",
-        "log"
+        "links"
       ]
     }
   ],
@@ -166,12 +150,7 @@
     {
       "from": "w_task",
       "to": "tasks",
-      "label": "edits"
-    },
-    {
-      "from": "w_hooks",
-      "to": "log",
-      "label": "appends"
+      "label": "generate"
     },
     {
       "from": "note",

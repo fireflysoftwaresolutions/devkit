@@ -1,6 +1,6 @@
 # Dashboard
 
-`dev dashboard` opens the command centre. **Home** summarises everything on one screen. From there you drill into
+`dev dashboard` opens the command center. **Home** summarizes everything on one screen. From there you drill into
 an **initiative** or a **project** and down to a single **task**, and **Team** shows who is working on what across
 machines. Every item comes with the one command that moves it forward. The page is a view over the handoff
 repository, so it is as current as the last `dev sync`.
@@ -11,48 +11,68 @@ dev dashboard --no-open  # regenerate only
 dev dashboard --path     # print the file path
 ```
 
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="images/dashboard/home-1440-dark.webp">
+  <img src="images/dashboard/home-1440-light.webp" alt="The dashboard's Home view: a row of numbers (initiatives, projects, open tasks, doing, blocked, people active, live sessions, PRs failing CI), the Needs you list with a command for each item, Team now with each person's live session, progress, and locks, and initiative cards with status, progress, and due dates." width="100%">
+</picture>
+
 ## Views
 
 | View | Keys | The job it does |
-|---|---|---|
-| **Home** | `g o` | *A summary of everything, no long lists.* It has four parts. **KPI strip:** initiatives, projects (and how many are not cloned here), open tasks, doing, blocked, people active, live sessions and PRs failing CI; each tile links to the filtered list. **Needs you:** the top five of the action list with their commands, and a link to all of them. **Team now:** one row per person with their live session, run progress, ETA, subagents and locks, plus any collisions. Below these sit compact **initiative cards** (status, progress, milestone, due date, member projects, open, doing and blocked tasks, who is on it) and **Since yesterday** (sessions, commits, merged PRs, completed tasks). |
-| **Initiatives** | `g i` | Every initiative as a card (goal, progress, member projects by status, people) or a table, filtered by status and sorted by priority, due date, progress or activity. A milestones-and-due-dates roadmap follows, then a link to the projects outside any initiative. Click an initiative to open its page. |
-| **Projects** | `g p` | A dense table (cards optional) with the health dot, status and priority, progress, the task in progress and who holds it, the latest agent status, PRs with a CI dot each, 7-day activity, last activity and who is on it. It is sorted by *needs attention*, can be grouped by initiative, owner, status or priority, and filtered by the facet row. Click a project to open its page. |
+| --- | --- | --- |
+| **Home** | `g o` | _A summary of everything, no long lists._ It has four parts. **KPI strip:** initiatives, projects (and how many are not cloned here), open tasks, doing, blocked, people active, live sessions and PRs failing CI; each tile links to the filtered list. **Needs you:** the top five of the action list with their commands, and a link to all of them. **Team now:** one row per person with their live session, run progress, ETA, subagents, and locks, plus any collisions. Below these sit compact **initiative cards** (status, progress, milestone, due date, member projects, open, doing, and blocked tasks, who is on it) and **Since yesterday** (sessions, commits, merged PRs, completed tasks). |
+| **Initiatives** | `g i` | Every initiative as a card (goal, progress, member projects by status, people) or a table, filtered by status and sorted by priority, due date, progress, or activity. A milestones-and-due-dates roadmap follows, then a link to the projects outside any initiative. Click an initiative to open its page. |
+| **Projects** | `g p` | A dense table (cards optional) with the health dot, status, and priority, progress, the task in progress and who holds it, the latest agent status, PRs with a CI dot each, 7-day activity, last activity and who is on it. It is sorted by _needs attention_, can be grouped by initiative, owner, status, or priority, and filtered by the facet row. Click a project to open its page. |
 | **Team** | `g m` | One card per person (`user@host`) from the presence files in the handoff repo. Each shows their live sessions (agent, project, branch, how long it has run, progress of the current run and the latest status block), their locks with expiry, the tasks they hold and their recent session-log lines. **Collisions** are listed first: two sessions on the same project and branch, and expired locks that are still held, each with its command. |
-| **Tasks** | `g t` | Every work item across projects and initiatives, as a board (Now · Next · Later · Closed) or grouped by scope. Filter by status, scope and *claimed by*, including *claimed by me*. Every card shows the lock chip and opens the task drawer. |
-| **Activity** | `g a` | A timeline first: live sessions, the session logs of every project and initiative (who, agent, branch, status), completed and blocked tasks, merged PRs, operations and canary misses, over 7 or 30 days. A commits-per-day chart (with a table view) and the most active projects follow. |
+| **Tasks** | `g t` | Every work item across projects and initiatives, as a board (Now · Next · Later · Closed) or grouped by scope. Filter by status, scope, and who claimed it (anyone, or only you). Every card shows the lock chip and opens the task drawer. |
+| **Activity** | `g a` | A timeline first: live sessions, the session logs of every project and initiative (who, agent, branch, status), completed and blocked tasks, merged PRs, operations, and canary misses (the last 7 or 30 days). A commits-per-day chart (with a table view) and the most active projects follow. |
 | **Explorer** | `g e` | The handoff repository as a tree, with a safe Markdown viewer and find-in-file (`↵` / `⇧↵` step through matches). Up to 2 MB is embedded, newest first. |
-| **Health** | `g h` | Providers (sign-in, plan, quota and reset time) and **Time** (see below). Guard decisions grouped by rule, the instruction canary per agent, configuration drift, every worktree and disk usage per project. |
+| **Health** | `g h` | Providers (sign-in, plan, quota, and reset time) and **Time** (see below). Guard decisions grouped by rule, the instruction canary per agent, configuration drift, every worktree, and disk usage per project. |
 
-### Initiative page — `#/initiatives/<slug>`
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="images/dashboard/team-1440-dark.webp">
+  <img src="images/dashboard/team-1440-light.webp" alt="The Team view: collisions first (two sessions on the same branch, an expired lock that is still held), then one card per person with their live sessions, run progress, latest status block, and the locks and tasks they hold." width="100%">
+</picture>
+
+### Initiative page (`#/initiatives/<slug>`)
 
 The page opens with a breadcrumb and a header: status, priority, milestone, due date, owner, honest progress (and
 where it comes from), and the commands `dev initiative show <slug>` and `dev task -i <slug> add "…" --now`. A row of
 numbers comes next, then the tabs:
 
 | Tab | Content |
-|---|---|
-| Overview | Goal, scope and current state; what is in progress (doing and blocked, with lock chips); who is on it; risks and decisions; links |
-| Projects | The member projects in collapsible groups, searchable (name, status, workstream, task in progress, people). Group by family, status, owner, workstream or none. Each row has its status, progress, what is in progress or the latest status, who is on it and `dev clone <id>` when not cloned here. A 77-repository platform is a few groups, not a wall of chips |
+| --- | --- |
+| Overview | Goal, scope, and current state; what is in progress (doing and blocked, with lock chips); who is on it; risks and decisions; links |
+| Projects | The member projects in collapsible groups, searchable (name, status, workstream, task in progress, people). Group by family, status, owner, workstream, or none. Each row has its status, progress, what is in progress or the latest status, who is on it and `dev clone <id>` when not cloned here. A 77-repository platform is a few groups, not a wall of chips |
 | Tasks | The initiative's own items **plus member-project items linked to it** (`links: initiative:<slug>`, the same rule as `dev task -i`). Filter by status (open, doing, blocked, to do, closed) and source (initiative, from projects), grouped Now · Next · Later · Closed |
-| Plans | Versioned plans and specs from `plans/initiatives/<slug>/`: status (draft, approved, superseded), version, last change and who made it, the full history, and *edited · needs a revision* with the `dev plan revise … --why` command when the body changed without one |
-| Sessions | The session log of the initiative and its member projects, by day, with who, agent and branch |
+| Plans | Versioned plans and specs from `plans/initiatives/<slug>/`: status (draft, approved, superseded), version, last change and who made it, the full history, and _edited · needs a revision_ with the `dev plan revise … --why` command when the body changed without one |
+| Sessions | The session log of the initiative and its member projects, by day, with who, agent, and branch |
 | Docs & source | The source archives and the documents under `initiatives/<slug>/docs/` |
 
-### Project page — `#/projects/<owner>/<repo>`
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="images/dashboard/initiative-1440-dark.webp">
+  <img src="images/dashboard/initiative-1440-light.webp" alt="An initiative page: a header with status, priority, milestone, due date and progress computed from tasks, the dev initiative show and dev task -i commands, a row of numbers, and the Projects tab with member projects grouped by family, each with status, progress, what is in progress and who is on it." width="100%">
+</picture>
+
+### Project page (`#/projects/<owner>/<repo>`)
 
 The page opens with a breadcrumb (Projects › owner › name) and a header: health reasons, initiatives, progress and
 the launch commands (`dev claude`, `dev codex`, `dcd`, `dev handoff`). A project that is **not cloned on this Mac**
-shows a clear call to action with `dev clone <id>`; its note, tasks, plans and sessions still come from the handoff
-repo. Tabs: **Overview** (live sessions with their runs and status blocks, the latest status, what is in progress and
+shows a clear call to action with `dev clone <id>`; its note, tasks, plans, and sessions still come from the handoff
+repo. The tabs are **Overview** (live sessions with their runs and status blocks, the latest status, what is in progress and
 up next, purpose and state, who is on it, repository facts, time on this project), **Tasks**, **Pull requests** (CI,
-review, merge state, size, a command each), **Worktrees** (`dev wt rm`), **Plans**, **Sessions** and **Handoff note**
+review, merge state, size, a command each), **Worktrees** (`dev wt rm`), **Plans**, **Sessions**, and **Handoff note**
 (the full note, rendered).
 
 A member of an initiative that has no handoff note yet still gets a page: the not-cloned call to action and the
 initiatives that list it.
 
-### The task drawer — `?task=<id>`
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="images/dashboard/project-1440-dark.webp">
+  <img src="images/dashboard/project-1440-light.webp" alt="A project page: a header with health, initiatives, and progress, the launch commands, a row of numbers, the live sessions with their run progress and status blocks, who is on the project, repository facts, and time on this project." width="100%">
+</picture>
+
+### The task drawer (`?task=<id>`)
 
 Every task, wherever it appears (Home, an initiative or project page, Tasks, Team, search, the palette), opens the same
 drawer:
@@ -60,22 +80,27 @@ drawer:
 - **Lock state.** Who holds it, with which agent, since when, and until when. An expired lock is shown in amber with
   the release command.
 - **Commands.** `dev task -p <id>|-i <slug> start|done|release|move|block|cancel|history <task-id>`, with
-  `--why "…"` wherever the change must be explained. `-p` / `-i` come before the verb, as `dev task` expects.
-- **Details.** Id, project or initiative, assignee, created and updated (who and when), links and the item file in the
-  handoff repo.
+  `--why "…"` wherever the change must be explained. `-p` and `-i` work before or after the verb.
+- **Details.** Id, project or initiative, assignee, created and updated (who and when), links, and the item file in
+  the handoff repo.
 - **History.** Every version, newest first: version, operation, detail, who (user@host and agent), when, and why.
 
 Checkbox tasks from notes that have no work items yet are shown read-only, with their `dev task` number. The next
 `dev sync` imports them.
 
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="images/dashboard/drawer-1440-dark.webp">
+  <img src="images/dashboard/drawer-1440-light.webp" alt="The task drawer over a project page: the lock state (claimed by you, with the agent and the lock's end), the commands to mark it done, release the lock, move, block, cancel, or show the history, the task's details, and its version history." width="100%">
+</picture>
+
 ### Live runs and time
 
 Agents report progress on long runs (`dev progress start|step|block|done`). Wherever a live session appears (Home
-*Team now*, Team, the project page) it shows:
+_Team now_, Team, the project page) it shows:
 
 - a progress bar with step/steps, elapsed time against the estimate (the calibrated one when known) and the ETA;
 - the latest update and the next step. **Blocked** runs are red, with the blocking reason;
-- *N subagents running*, and how long the current turn has been running. That is flagged when it is longer than 90%
+- _N subagents running_, and how long the current turn has been running. That is flagged when it is longer than 90%
   of turns here.
 
 **Time** (Health, and per project on its page) shows how predictable the work is:
@@ -87,15 +112,15 @@ Agents report progress on long runs (`dev progress start|step|block|done`). Wher
 
 ### The status block
 
-Agents end every reply with a status block: `**[Firefly> DevKit]** <project> · <branch> · <task>` followed by
-**Done**, **Check** (✓ ⚠ ✗ – plus evidence), **Progress** and **Next**. devkit saves it as one line,
+Agents start every final message with the status block: a `**[Firefly> DevKit]** <project> · <branch> · <task>`
+header followed by **Done**, **Check** (a `✓`, `⚠`, `✗`, or `–` glyph, then the evidence), **Progress**, and **Next** (see
+[Concepts › The status block](concepts.md#the-status-block)). devkit saves it as one line,
 `<project> · <branch> ❯ <task> ❯ <done> ❯ <✓ check> [❯ ▸ <progress>] ❯ next → <next>`.
 
 The dashboard parses saved lines in Python (`status_parts`) and draws them as a small card: the amber `Firefly❯ DevKit`
-chip, a project · branch chip and a task chip, then labelled Done, Check (coloured by its glyph), Progress and Next
-rows. Tables and lists use a compact one-line form. Older lines keep rendering. The segmented form
-(`api ⎇ main ❯ T-… ❯ … ❯ next → …`) parses the same way. The legacy one-line form (`DevKit · x@main · …`) is shown as
-written, with the marker removed.
+chip, a project · branch chip and a task chip, then labeled Done, Check (colored by its glyph), Progress, and Next
+rows. Tables and lists use a compact one-line form. Lines saved in older one-line forms, including the legacy
+`DevKit ·` marker, keep rendering as written, with the marker removed.
 
 ## The action list
 
@@ -103,7 +128,7 @@ It is ordered by what blocks you most. Each item has its command, and the most i
 button on the page.
 
 | Order | Item | Command |
-|---|---|---|
+| --- | --- | --- |
 | 1 | One of **your** PRs is failing CI | `gh pr checks <n> -R <owner/repo> --watch` |
 | 2 | Changes requested on your PR | `gh pr view <n> -R <repo> --comments` |
 | 3 | Your PR has merge conflicts | `cd <its worktree> && git fetch origin && git rebase origin/<default>` (or `dcd … && gh pr checkout …`) |
@@ -112,7 +137,7 @@ button on the page.
 | 6 | A project or initiative is blocked · a task you hold is blocked | `dev handoff <id>` · `dev initiative show <slug>` · `dev task -p <id> show <task-id>` |
 | 7 | Overdue tasks and initiatives | `dev task -p <id> done <task-id>` · `dev task -i <slug> done <task-id>` · `dev initiative show <slug>` |
 | 8 | Uncommitted or unpushed work left idle | `cd <checkout> && git status -sb` |
-| 9 | Finished worktrees (PR merged or closed, clean) | `dev wt rm <branch>`, or `dev gc --apply` for several |
+| 9 | Finished worktrees (PR merged or closed, clean) | `dev wt rm <branch>`, or `dev gc --apply` for more than one |
 | 10 | A repo outside the layout · a handoff note behind the code | `dev adopt <path>` · `dev handoff <id>` |
 | 11 | Configuration drift · a provider not signed in | `dev config diff` · `claude` / `codex login` |
 
@@ -120,30 +145,30 @@ button on the page.
 
 - **Progress is honest.** It is the share of work items done, `done / (done + open)`, unless the note sets
   `progress:` manually, which the bar marks with ✎. Hover any bar to see which. With no tasks and no manual value it
-  shows *no tasks*, never a guess.
-- **Health.** A project is *at risk* (red) when one of its PRs fails CI or has changes requested, it is blocked, a
-  task is overdue, or it is past its due date. It *needs a look* (amber) for merge conflicts, idle uncommitted or
+  shows _no tasks_, never a guess.
+- **Health.** A project is _at risk_ (red) when one of its PRs fails CI or has changes requested, it is blocked, a
+  task is overdue, or it is past its due date. It _needs a look_ (amber) for merge conflicts, idle uncommitted or
   unpushed work, or a checkout outside the layout.
 - **People** are `user@host`. This Mac's own sessions come from the local registry, which is fresher than its
   presence file. Presence older than 24 hours is ignored.
 - **Lock chips** (🔒 who · agent · time left) appear wherever tasks appear. Yours are outlined; expired ones are
   amber.
 
-## Search, filters and the command palette
+## Search, filters, and the command palette
 
 - **Search** (`/`) covers initiatives, projects, people, tasks (by id or title), PRs, notes, plans, session logs and
   every Markdown file in the handoff repo. Results have type facets and highlighted matches. In Initiatives,
   Projects, Tasks and Activity it filters the view in place.
 - **Filters**: the project facet row (health, CI, status, priority, owner, stack, tag, live session, open PRs, not
-  cloned, outside initiatives) sits above Projects, Activity and Search. Pages use segmented controls for their own
+  cloned, outside initiatives) sits at the top of Projects, Activity, and Search. Pages use segmented controls for their own
   filters.
-- **Command palette** (`⌘K` / `Ctrl K`) jumps to any view, initiative, project, person, task, PR or file with fuzzy
+- **Command palette** (`⌘K` / `Ctrl K`) jumps to any view, initiative, project, person, task, PR, or file with fuzzy
   matching, and copies every command.
 
 ## Keyboard
 
 | Keys | Action |
-|---|---|
+| --- | --- |
 | `/` | Search |
 | `⌘K` · `Ctrl K` | Command palette |
 | `g` then `o` `i` `p` `m` `t` | Home · Initiatives · Projects · Team · Tasks |
@@ -163,7 +188,7 @@ defaults omitted. Ids keep their slashes and dots (`#/projects/gitlab.com/firefl
 versions (`#/portfolio`, `?p=<project>`, `?i=<initiative>`) still resolve.
 
 | Key | Values | Example |
-|---|---|---|
+| --- | --- | --- |
 | view (path) | `overview` `initiatives` `projects` `team` `tasks` `activity` `explorer` `health` `search` `actions` | `#/team` |
 | id (path) | an initiative slug · a project id | `#/initiatives/lending` · `#/projects/acme/api` |
 | `tab` | initiative: `projects` `tasks` `plans` `sessions` `docs` · project: `tasks` `prs` `worktrees` `plans` `sessions` `note` | `#/projects/acme/api?tab=prs` |
@@ -184,17 +209,17 @@ versions (`#/portfolio`, `?p=<project>`, `?i=<initiative>`) still resolve.
 ## Where it comes from
 
 | | |
-|---|---|
+| --- | --- |
 | File | `~/.local/state/devkit/dashboard/index.html`: one self-contained HTML file (inline CSS, JS and SVG) |
 | Regenerated | by `dev dashboard`, after every `dev sync` (session ends, debounced turn ends) and by the hourly background job |
-| Refresh | an open tab reloads every 2 minutes while visible (not while a task drawer is open), keeping its view, filters and scroll position |
-| Data | The registry (projects, git state, worktrees, PRs, initiatives, live sessions with progress, providers, drift). From the handoff repo: **work items** (`items/<scope>/<id>.md`, with lock and changelog), **presence** (`presence/<user>@<host>.json`), **session logs** (`sessions/<scope>/<YYYY-MM>.md`), **versioned plans** (`plans/<scope>/*.md`), notes and initiative READMEs. Also the PR cache, the instruction canary, guard decisions, the operations log, **timing records** and **active runs** |
+| Refresh | an open tab reloads every 2 minutes while visible (not while a task drawer is open), keeping its view, filters, and scroll position |
+| Data | The registry (projects, git state, worktrees, PRs, initiatives, live sessions with progress, providers, drift). From the handoff repo: **work items** (`items/<scope>/<id>.md`, with lock and changelog), **presence** (`presence/<user>@<host>.json`), **session logs** (`sessions/<scope>/<YYYY-MM>.md`), **versioned plans** (`plans/<scope>/*.md`), notes, and initiative READMEs. Also the PR cache, the instruction canary, guard decisions, the operations log, **timing records**, and **active runs** |
 
 The decisions are computed in Python (`lib/devkit/dashboard.py`) and unit-tested (`tests/test_dashboard.py`):
 
-- action priority and commands, project health, *since yesterday*, guard rule grouping, task numbering;
+- action priority and commands, project health, _since yesterday_, guard rule grouping, task numbering;
 - lock state, collisions, people, initiative-linked items and KPIs;
-- session-log and status-line parsing, plan status, timing summaries and credential masking.
+- session-log and status-line parsing, plan status, timing summaries, and credential masking.
 
 The page only renders them.
 
@@ -202,17 +227,19 @@ The page only renders them.
 
 The page follows the Firefly Software brand:
 
-- **Identity.** The official Firefly logo (paper colourway on dark, charcoal on light) next to the devkit spark;
+- **Identity.** The official Firefly logo (the paper version on dark, the charcoal one on light) next to the devkit spark;
   charcoal and paper surfaces; Manrope on the brand type scale.
 - **Amber**, the firefly's light, is reserved for the single most important action on each view, the status-block
   chip and data marks. Chart and progress marks use validated amber steps (`#c38530` dark, `#9d671f` light). Status
-  colours are fixed and always paired with an icon or a label.
+  colors are fixed and always paired with an icon or a label.
 - **Components.** Breadcrumbs, a sticky tab bar per page (arrow keys move between tabs), segmented controls, cards
   with a clear hierarchy, sticky table headers (a table wider than its panel scrolls inside it instead), consistent
   chips and badges, empty states that say what to do next, and instant rendering with no skeletons.
-- **Layout.** An 8 px spacing scale and a dense mode. Responsive at 1440, 1280, 1024, 768 and 390 px with no
+- **Layout.** An 8 px spacing scale and a dense mode. Responsive at 1440, 1280, 1024, 768, and 390 px with no
   horizontal page scroll. Keyboard-first with visible focus rings; respects reduced motion; prints cleanly. The theme
-  toggle (◐ or the palette) is remembered, and *Theme: follow system* resets it.
+  toggle (◐ or the palette) is remembered, and _Theme: follow system_ resets it.
+
+<img src="images/dashboard/home-390-dark.webp" alt="The Home view on a 390-pixel-wide phone screen in the dark theme: the numbers stack in two columns and the lists follow one after another." width="320">
 
 ## Privacy and security
 
@@ -222,4 +249,4 @@ Links are limited to `http(s)`, `mailto` and in-page anchors, and the embedded d
 lines in timing records are masked for tokens, passwords and long secrets before they reach the page. The tests
 render hostile content (`<img onerror>`, a `</script>` breakout) through every surface to keep it that way.
 
-See also: [Concepts](concepts.md) · [Commands](commands.md) · [Agents](agents.md) · [Delivery](delivery.md)
+See also [Concepts](concepts.md), [Commands](commands.md), [Teams and machines](teams.md), and [Agents](agents.md).

@@ -1,4 +1,6 @@
 <svg xmlns="http://www.w3.org/2000/svg" width="1600" height="520" viewBox="0 0 1600 520">
+<title>devkit</title>
+<desc>devkit: one workspace for developers, Claude Code and Codex. By Firefly Software Solutions Inc.</desc>
 <defs>
   <radialGradient id="glow"><stop offset="0" stop-color="#FFB34A" stop-opacity="0.45"/>
     <stop offset="0.45" stop-color="#FFB34A" stop-opacity="0.12"/><stop offset="1" stop-color="#FFB34A" stop-opacity="0"/></radialGradient>

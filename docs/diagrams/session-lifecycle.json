@@ -2,30 +2,131 @@
   "name": "session-lifecycle",
   "kind": "sequence",
   "title": "A session with devkit",
-  "desc": "Sequence of one agent session. At session start the devkit hooks read the project's handoff note, tasks and last status from the handoff repository and give the agent its workspace context. On every tool call the guard allows the action or denies it with the right way to do it. At the end of every reply the agent starts with the DevKit status line; the Stop hook checks it and records the status and the session line. At session end devkit syncs the map and notes and pushes the private handoff repository to GitHub.",
+  "desc": "Sequence of one agent session. At session start the devkit hooks read the project's handoff note, tasks, locks and last status from the handoff repository and give the agent its workspace context. On each prompt the hooks start the turn clock and, when you ask how it is going, add the real progress records. On every tool call the guard allows the action or denies it with the right way to do it, and after slow work the hooks remind the agent to update you. Every final message starts with the status block; the Stop hook checks it and records the status, the session line and the lock renewal. At session end devkit syncs the map and notes and pushes the private handoff repository to GitHub.",
   "participants": [
-    {"id": "you", "label": "You", "family": "neutral"},
-    {"id": "agent", "label": "Agent", "sub": "Claude Code · Codex"},
-    {"id": "hooks", "label": "devkit hooks", "family": "firefly"},
-    {"id": "handoff", "label": "Handoff repo", "family": "slate"},
-    {"id": "github", "label": "GitHub", "family": "steel"}
+    {
+      "id": "you",
+      "label": "You",
+      "family": "neutral"
+    },
+    {
+      "id": "agent",
+      "label": "Agent",
+      "sub": "Claude Code · Codex"
+    },
+    {
+      "id": "hooks",
+      "label": "devkit hooks",
+      "family": "firefly"
+    },
+    {
+      "id": "handoff",
+      "label": "Handoff repo",
+      "family": "slate"
+    },
+    {
+      "id": "github",
+      "label": "GitHub",
+      "family": "steel"
+    }
   ],
   "messages": [
-    {"divider": "Session start"},
-    {"from": "agent", "to": "hooks", "label": "SessionStart"},
-    {"from": "hooks", "to": "handoff", "label": "read note · tasks · last status"},
-    {"from": "hooks", "to": "agent", "label": "workspace context", "style": "return"},
-    {"divider": "Work"},
-    {"from": "you", "to": "agent", "label": "request"},
-    {"from": "agent", "to": "hooks", "label": "PreToolUse: command or file write"},
-    {"from": "hooks", "to": "agent", "label": "allow, or deny with the right way", "style": "return"},
-    {"divider": "Every reply"},
-    {"from": "agent", "to": "you", "label": "[Firefly> DevKit] status line", "style": "primary"},
-    {"from": "agent", "to": "hooks", "label": "Stop"},
-    {"from": "hooks", "to": "handoff", "label": "canary · status line · session line"},
-    {"divider": "Session end"},
-    {"from": "agent", "to": "hooks", "label": "SessionEnd"},
-    {"from": "hooks", "to": "handoff", "label": "sync map · notes · tasks"},
-    {"from": "handoff", "to": "github", "label": "push (private)"}
+    {
+      "divider": "Session start"
+    },
+    {
+      "from": "agent",
+      "to": "hooks",
+      "label": "SessionStart"
+    },
+    {
+      "from": "hooks",
+      "to": "handoff",
+      "label": "read note · tasks · locks · status"
+    },
+    {
+      "from": "hooks",
+      "to": "agent",
+      "label": "workspace context",
+      "style": "return"
+    },
+    {
+      "divider": "Work"
+    },
+    {
+      "from": "you",
+      "to": "agent",
+      "label": "request"
+    },
+    {
+      "from": "agent",
+      "to": "hooks",
+      "label": "UserPromptSubmit"
+    },
+    {
+      "from": "hooks",
+      "to": "agent",
+      "label": "progress records, if you ask",
+      "style": "return"
+    },
+    {
+      "from": "agent",
+      "to": "hooks",
+      "label": "PreToolUse: command or file write"
+    },
+    {
+      "from": "hooks",
+      "to": "agent",
+      "label": "allow, or deny with the right way",
+      "style": "return"
+    },
+    {
+      "from": "agent",
+      "to": "hooks",
+      "label": "PostToolUse: time the call"
+    },
+    {
+      "from": "hooks",
+      "to": "agent",
+      "label": "update the developer (~8 min)",
+      "style": "return"
+    },
+    {
+      "divider": "Every reply"
+    },
+    {
+      "from": "agent",
+      "to": "you",
+      "label": "status block, then the answer",
+      "style": "primary"
+    },
+    {
+      "from": "agent",
+      "to": "hooks",
+      "label": "Stop"
+    },
+    {
+      "from": "hooks",
+      "to": "handoff",
+      "label": "status · session line · locks"
+    },
+    {
+      "divider": "Session end"
+    },
+    {
+      "from": "agent",
+      "to": "hooks",
+      "label": "SessionEnd"
+    },
+    {
+      "from": "hooks",
+      "to": "handoff",
+      "label": "sync map · notes · tasks"
+    },
+    {
+      "from": "handoff",
+      "to": "github",
+      "label": "push (private)"
+    }
   ]
 }

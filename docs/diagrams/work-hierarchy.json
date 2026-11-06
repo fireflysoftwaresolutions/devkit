@@ -1,0 +1,84 @@
+{
+  "name": "work-hierarchy",
+  "kind": "flow",
+  "title": "How work is organized",
+  "desc": "The portfolio is every initiative and project in the handoff repository. An initiative groups the projects that work toward one goal and holds the cross-project tasks; a project can also stand alone. Each scope, a project or an initiative, has its own work items, plans and session log.",
+  "nodes": [
+    {
+      "id": "portfolio",
+      "label": "Portfolio",
+      "sub": "dev overview · dev report",
+      "col": 1,
+      "row": 0
+    },
+    {
+      "id": "init",
+      "label": "Initiative",
+      "sub": "initiatives/<slug>/README.md",
+      "col": 0,
+      "row": 1,
+      "family": "olive",
+      "emphasis": true
+    },
+    {
+      "id": "solo",
+      "label": "Project",
+      "sub": "in no initiative",
+      "col": 2,
+      "row": 1
+    },
+    {
+      "id": "members",
+      "label": "Member projects",
+      "sub": "projects/<project id>.md",
+      "col": 1,
+      "row": 2
+    },
+    {
+      "id": "work",
+      "label": "Work and records",
+      "sub": "items · plans · sessions, per scope",
+      "col": 1,
+      "row": 3,
+      "family": "slate"
+    }
+  ],
+  "edges": [
+    {
+      "from": "portfolio",
+      "to": "init",
+      "label": "groups"
+    },
+    {
+      "from": "portfolio",
+      "to": "solo",
+      "label": "lists"
+    },
+    {
+      "from": "init",
+      "to": "members",
+      "label": "members",
+      "from_side": "right",
+      "to_side": "top"
+    },
+    {
+      "from": "init",
+      "to": "work",
+      "label": "cross-project tasks",
+      "from_side": "bottom",
+      "to_side": "left"
+    },
+    {
+      "from": "members",
+      "to": "work",
+      "label": "their own tasks"
+    },
+    {
+      "from": "solo",
+      "to": "work",
+      "label": "its own tasks",
+      "from_side": "bottom",
+      "to_side": "right"
+    }
+  ]
+}
