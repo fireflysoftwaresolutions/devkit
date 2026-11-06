@@ -17,7 +17,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "lib"))
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from devkit import cli, core, crew, dispatch, progress as pg, raci  # noqa: E402
-from test_progress import launch  # noqa: E402
+from test_progress import boundary, launch  # noqa: E402
 
 # Real tasks and the member who should do them (the misroutes the developer found are the first rows).
 GOLDEN = [
@@ -142,6 +142,9 @@ class AssignmentTests(unittest.TestCase):
         audit.AUDIT = root / "audit"
         os.environ["DEVKIT_SESSION"] = "claude:s1"
         os.environ["DEVKIT_NO_NOTIFY"] = "1"
+        for p in boundary(root):  # Morpheus's calls, devkit's default configuration
+            p.start()
+            self.addCleanup(p.stop)
         pg.SESSIONS.mkdir(parents=True)
         (pg.SESSIONS / "claude-s1.json").write_text(json.dumps({"agent": "claude", "session": "s1",
                                                                  "started": self.T0, "project": "acme/api"}))

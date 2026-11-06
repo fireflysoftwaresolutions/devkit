@@ -13,8 +13,10 @@ from pathlib import Path
 from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "lib"))
+sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from devkit import audit, dispatch, progress as pg  # noqa: E402
+from test_progress import boundary  # noqa: E402
 
 
 class PlanDagTests(unittest.TestCase):
@@ -31,6 +33,9 @@ class PlanDagTests(unittest.TestCase):
         audit.AUDIT = root / "audit"
         self.env = mock.patch.dict(os.environ, {"DEVKIT_SESSION": "claude:dag", "DEVKIT_NO_NOTIFY": "1"})
         self.env.start()
+        for p in boundary(root):  # Morpheus's calls, devkit's default configuration
+            p.start()
+            self.addCleanup(p.stop)
         pg.SESSIONS.mkdir(parents=True)
         (pg.SESSIONS / "claude-dag.json").write_text(json.dumps({"agent": "claude", "session": "dag",
                                                                   "started": self.T0, "project": "acme/api"}))

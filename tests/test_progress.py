@@ -8,11 +8,18 @@ import tempfile
 import time
 import unittest
 from pathlib import Path
+from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "lib"))
 
-from devkit import canary  # noqa: E402
+from devkit import canary, core  # noqa: E402
 from devkit import progress as pg  # noqa: E402
+
+
+def boundary(root) -> list:
+    # what every progress test fakes, as patchers to start and stop: devkit's configuration (its defaults, never the
+    # developer's ~/.config/devkit)
+    return [mock.patch.dict(core.CFG, {"progress": {}, "work": {}})]
 
 
 class TempState:
@@ -27,6 +34,9 @@ class TempState:
         pg.RUNS, pg.TIMING, pg.SESSIONS = root / "runs", root / "timing", root / "sessions"
         pg.PENDING = pg.TIMING / "pending"
         pg.QUOTA = root / "quota"  # the real 5-hour usage never changes the parallel limit under test
+        self.boundary = boundary(root)
+        for p in self.boundary:
+            p.start()
         pg._publish = lambda: None
         os.environ["DEVKIT_SESSION"] = "claude:s1"
         os.environ["DEVKIT_NO_NOTIFY"] = "1"
@@ -40,6 +50,8 @@ class TempState:
         from devkit import audit
         audit.AUDIT = self.audit_saved
         pg.RUNS, pg.TIMING, pg.PENDING, pg.SESSIONS, pg.QUOTA, pg._publish, env = self.saved
+        for p in reversed(self.boundary):
+            p.stop()
         if env is None:
             os.environ.pop("DEVKIT_SESSION", None)
         else:

@@ -27,6 +27,9 @@ sys.path.insert(0, str(LIB))
 from devkit import audit, canary, hooks, scope  # noqa: E402
 from devkit import progress as pg  # noqa: E402
 
+sys.path.insert(0, str(TESTS))
+from test_progress import boundary  # noqa: E402
+
 # A SubagentStop hook in its own process, as Claude Code runs it: the session's record is read at the start, and the
 # report check (made slow here) runs before the hook writes. Every process reads before any of them writes.
 CHILD = r"""
@@ -87,6 +90,7 @@ class Records(unittest.TestCase):
                   mock.patch.object(hooks, "STATE", self.root),
                   mock.patch.object(hooks, "_spawn_sync", lambda args: None),
                   mock.patch.object(hooks, "_session_file", lambda agent, sid: pg.SESSIONS / f"{agent}-{sid}.json"),
+                  *boundary(self.root),  # Morpheus's calls, devkit's default configuration
                   mock.patch.dict(os.environ, {"DEVKIT_SESSION": "claude:s1", "DEVKIT_NO_NOTIFY": "1"})]
         for x in self.p:
             x.start()
