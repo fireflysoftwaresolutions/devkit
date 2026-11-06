@@ -271,8 +271,10 @@ def status_pills(line: str, color: bool = None) -> str:
     return "".join(pills) + ("  " + dim(" ❯ ").join(styled) if styled else "")
 
 
-def status_block(line: str, color: bool = None, indent: str = "  ") -> str:
-    """A saved status drawn as the block agents write: a header pill row, then Done / Check / Progress / Next."""
+def status_block(line: str, color: bool = None, indent: str = "  ", cols: int = None) -> str:
+    """A saved status drawn as the block agents write: a header pill row, then Done / Check / Progress / Crew / You /
+    Next, one row each. Crew lists one member per line; long values wrap under the value column."""
+    import textwrap
     from .canary import segments
     segs = segments(line or "")
     if not segs:
@@ -284,20 +286,31 @@ def status_block(line: str, color: bool = None, indent: str = "  ") -> str:
     where, task, rest = segs[0], segs[1], segs[2:]
     nxt = rest.pop()[len("next →"):].strip() if rest and rest[-1].lower().startswith("next") else ""
     prog = next((x[1:].strip() for x in rest if x.startswith("▸")), "")
-    rest = [x for x in rest if not x.startswith("▸")]
+    crew = next((x[len("crew:"):].strip() for x in rest if x.lower().startswith("crew:")), "")
+    you = next((x.split("→", 1)[1].strip() for x in rest if x.lower().startswith("you →")), "")
+    rest = [x for x in rest if not (x.startswith("▸") or x.lower().startswith(("crew:", "you →")))]
     check = next((x for x in rest if x[:1] in "✓⚠✗–"), "")
     done = " ".join(x for x in rest if x != check)
     head = brand_pills([where] + ([task] if task != "-" else []), color)
-    rows = [("Done", done), ("Check", check), ("Progress", prog), ("Next", nxt)]
+    rows = [("Done", [done]), ("Check", [check]), ("Progress", [prog]),
+            ("Crew", [m.strip() for m in crew.split(" · ") if m.strip()]), ("You", [you]), ("Next", [nxt])]
+    lead = f"{indent}  " + " " * 10  # where every value starts
+    room = max(30, (cols or width()) - len(lead))
     out = [indent + head]
-    for k, val in rows:
-        if not val:
+    for k, vals in rows:
+        vals = [v for v in vals if v]
+        if not vals:
             continue
-        if color and k == "Check":
-            val = green(val) if val[:1] == "✓" else yellow(val) if val[:1] == "⚠" else red(val) if val[:1] == "✗" else val
-        out.append(f"{indent}  {dim(k.ljust(9)) if color else k.ljust(9)} {val}")
+        label = f"{indent}  {dim(k.ljust(9)) if color else k.ljust(9)} "
+        first = True
+        for val in vals:
+            for piece in textwrap.wrap(val, room, break_on_hyphens=False) or [val]:
+                if color and k == "Check":
+                    piece = green(piece) if check[:1] == "✓" else yellow(piece) if check[:1] == "⚠" \
+                        else red(piece) if check[:1] == "✗" else piece
+                out.append((label if first else lead) + piece)
+                first = False
     return "\n".join(out)
-
 
 
 def brand_pills(parts, color: bool = None) -> str:
