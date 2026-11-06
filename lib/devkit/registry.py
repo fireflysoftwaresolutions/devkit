@@ -692,17 +692,32 @@ def add_session_line(pid: str, line: str, key: str) -> bool:
     return write_if_changed(f, "\n".join(lines) + "\n")
 
 
-def human_sections(pid: str, max_chars=5000) -> str:
-    """The agent-maintained part of a note (auto block removed), for SessionStart context."""
+def human_sections(pid: str, max_chars=4000) -> str:
+    """Compact digest of a note for session context: only sections with real content, open tasks, recent sessions."""
     f = note_path(pid)
     if not f.exists():
         return ""
-    text = f.read_text()
-    if AUTO_START in text and AUTO_END in text:
-        pre, rest = text.split(AUTO_START, 1)
-        text = pre + rest.split(AUTO_END, 1)[1]
-    text = re.sub(r"<!--.*?-->", "", text, flags=re.S)
-    text = re.sub(r"\n{3,}", "\n\n", text).strip()
+    ns = notesmod.summarize(f.read_text())
+    t = ns["tasks"]
+    parts = []
+    if ns["purpose"]:
+        parts.append("Purpose: " + ns["purpose"])
+    if ns["state"]:
+        parts.append("Current state:\n" + ns["state"])
+    if t["now"]:
+        parts.append("Tasks, Now:\n" + "\n".join("- " + x for x in t["now"]))
+    if t["next"]:
+        parts.append("Tasks, Next:\n" + "\n".join("- " + x for x in t["next"][:8])
+                     + (f"\n- … {len(t['next']) - 8} more (`dev task`)" if len(t["next"]) > 8 else ""))
+    if ns["decisions"]:
+        parts.append("Decisions and gotchas:\n" + ns["decisions"])
+    if ns["links"]:
+        parts.append("Links:\n" + ns["links"])
+    if ns["sessions"]:
+        parts.append("Recent sessions:\n" + "\n".join("- " + x for x in ns["sessions"][:5]))
+    if not parts:
+        return "(The note is still empty: fill Purpose and Current state as you learn the project.)"
+    text = "\n\n".join(parts)
     if len(text) > max_chars:
         text = text[:max_chars].rsplit("\n", 1)[0] + "\n… (truncated; read the full note)"
     return text

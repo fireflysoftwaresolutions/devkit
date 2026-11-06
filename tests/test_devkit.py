@@ -361,7 +361,10 @@ class NoteTests(unittest.TestCase):
                 self.assertNotIn("line-one-zz", text)
                 self.assertEqual(text.count("<!-- s:abc -->"), 1)
                 self.assertLess(text.index("other"), text.index("second"))
-                self.assertNotIn("dev:auto", registry.human_sections(pid))
+                digest = registry.human_sections(pid)
+                self.assertNotIn("dev:auto", digest)
+                self.assertNotIn("status: active", digest)
+                self.assertIn("Recent sessions", digest)
             finally:
                 registry.NOTES = old
                 core.NOTES = old
