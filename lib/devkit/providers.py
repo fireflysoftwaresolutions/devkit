@@ -25,6 +25,15 @@ SELFTEST_PROMPT = (
     "3. Say whether you received any workspace context when the session started.")
 
 
+
+def _appended(path: Path, offset: int) -> str:
+    """The text written to `path` after it was `offset` bytes long. The offset is a byte count (stat), so the slice is
+    taken on bytes: slicing the decoded text would skip new lines whenever earlier lines hold multi-byte characters."""
+    try:
+        return path.read_bytes()[offset:].decode("utf-8", "replace")
+    except OSError:
+        return ""
+
 def _claude_status() -> dict:
     out = {"installed": core.have("claude"), "name": "Claude Code"}
     if not out["installed"]:
@@ -181,10 +190,10 @@ def selftest(agent: str, model: str = None) -> dict:
     sess = STATE / "sessions" / f"{agent}-{sid}.json" if sid else None
     checks.append(("SessionStart hook (context)", bool(sess and sess.exists()), "session recorded by devkit"
                    if sess and sess.exists() else "no session record"))
-    new_log = log.read_text()[log_before:] if log.exists() else ""
+    new_log = _appended(log, log_before)
     blocked = f"{agent}/devkit-selftest" in new_log and f"guard {agent} deny" in new_log
     checks.append(("PreToolUse guard", blocked, "tool-prefixed branch blocked" if blocked else "no guard decision logged"))
-    new_canary = canary_f.read_text()[canary_before:] if canary_f.exists() else ""
+    new_canary = _appended(canary_f, canary_before)
     recs = [json.loads(ln) for ln in new_canary.splitlines() if ln.strip()]
     mine = [r for r in recs if sid and r.get("session") == sid[:12]]
     checks.append(("Stop hook + instructions (canary)", bool(mine) and all(r["ok"] for r in mine),

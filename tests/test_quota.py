@@ -64,5 +64,19 @@ class QuotaTests(unittest.TestCase):
         self.assertTrue(self._line({"model": {"display_name": "Claude Sonnet 5.5"}}).endswith("Sonnet 5.5"))
 
 
+
+class SelfTestLogTests(unittest.TestCase):
+    def test_reads_exactly_what_was_appended_after_multibyte_text(self):
+        from devkit import providers
+        with tempfile.TemporaryDirectory() as d:
+            log = Path(d) / "hooks.log"
+            log.write_text("guard claude deny: `cp` would overwrite … → use `dev cp` · ✓\n" * 50)
+            mark = log.stat().st_size  # bytes, as the self-test records it
+            with log.open("a") as fh:
+                fh.write("guard claude deny: Branch `claude/devkit-selftest` is prefixed\n")
+            self.assertEqual(providers._appended(log, mark),
+                             "guard claude deny: Branch `claude/devkit-selftest` is prefixed\n")
+            self.assertEqual(providers._appended(Path(d) / "missing.log", 0), "")
+
 if __name__ == "__main__":
     unittest.main()
