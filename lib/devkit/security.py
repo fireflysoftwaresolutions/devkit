@@ -29,12 +29,43 @@ def _run(args, cwd, timeout=900):
         return 124, "", str(e)
 
 
-def staged_secrets(cwd) -> list:
-    """Secrets in the staged changes (redacted findings), or [] — used by the guard before `git commit`."""
+def staged_secrets(cwd, adds=None, all_tracked=False) -> list:
+    """Secrets in what the commit will contain (redacted findings), or [] — used by the guard before `git commit`.
+
+    `adds` are the argument lists of `git add` commands that run earlier in the same shell command, and
+    `all_tracked` is `git commit -a`: they are applied to a temporary copy of the index, so `git add . && git commit`
+    is checked as well as an already staged change."""
+    import os
+    import shutil
+    import subprocess
+    import tempfile
     if not core.have("gitleaks") or not core.gitout(cwd, "rev-parse", "--show-toplevel"):
         return []
-    rc, out, _ = _run(["gitleaks", "git", "--staged", "--no-banner", "--redact", "--exit-code", "3",
-                       "--report-format", "json", "--report-path", "-", "."], cwd, timeout=20)
+    env = dict(os.environ, **core.GIT_ENV) if isinstance(core.GIT_ENV, dict) else dict(os.environ)
+    tmpdir = None
+    if adds or all_tracked:
+        tmpdir = tempfile.mkdtemp(prefix="devkit-index-")
+        index = core.gitout(cwd, "rev-parse", "--git-path", "index")
+        index = index if os.path.isabs(index) else os.path.join(core.gitout(cwd, "rev-parse", "--show-toplevel"), index)
+        tmp_index = os.path.join(tmpdir, "index")
+        if os.path.exists(index):
+            shutil.copy2(index, tmp_index)
+        env["GIT_INDEX_FILE"] = tmp_index
+        steps = [list(a) for a in adds or [] if not set(a) & {"-p", "--patch", "-i", "--interactive", "-e", "--edit"}]
+        if all_tracked:
+            steps.append(["-u"])
+        for a in steps:
+            subprocess.run(["git", "add", *a], cwd=cwd, env=env, capture_output=True, timeout=30)
+    try:
+        p = subprocess.run(["gitleaks", "git", "--staged", "--no-banner", "--redact", "--exit-code", "3",
+                            "--report-format", "json", "--report-path", "-", "."], cwd=cwd, env=env,
+                           capture_output=True, text=True, timeout=30)
+        rc, out = p.returncode, p.stdout
+    except (OSError, subprocess.TimeoutExpired):
+        return []
+    finally:
+        if tmpdir:
+            shutil.rmtree(tmpdir, ignore_errors=True)
     if rc != 3:
         return []
     try:

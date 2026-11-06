@@ -435,11 +435,13 @@ def _attribution(text: str):
     return None
 
 
-def check_git(argv, cwd, full_segment, envs=frozenset()):
+def check_git(argv, cwd, full_segment, envs=frozenset(), pending=None):
     cdir, sub, args = _git_split(argv)
     gcwd = str(resolve(cdir, cwd)) if cdir else cwd
     if gcwd == str(UNKNOWN):
         gcwd = None
+    if sub == "add" and pending is not None and gcwd:  # checked with the commit that follows in the same command
+        pending.append((gcwd, list(args)))
     if sub == "worktree" and args[:1] == ["add"]:
         nb = _opt_value(args[1:], ("-b", "-B"))
         v = branch_violation(nb) if nb else None
@@ -509,7 +511,9 @@ def check_git(argv, cwd, full_segment, envs=frozenset()):
             return a
         if sub == "commit" and gcwd and not os.environ.get("DEVKIT_SKIP_SECRET_SCAN"):
             from .security import staged_secrets
-            found = staged_secrets(gcwd)
+            commit_all = any(a == "--all" or (a.startswith("-") and not a.startswith("--") and "a" in a[1:])
+                             for a in args)
+            found = staged_secrets(gcwd, adds=[a for c, a in pending or [] if c == gcwd], all_tracked=commit_all)
             if found:
                 return deny("gitleaks found secret-like content in the staged changes: " + "; ".join(found[:5]) +
                             ". Remove it and load it from the environment or the secret manager (rotate it if it was "
@@ -578,6 +582,7 @@ def check_bash(cmd: str, cwd: str, agent: str):
         return _attribution(cmd) if re.search(r"\b(git|gh)\b", cmd) else None
     ecwd = cwd or os.getcwd()
     raw_segments = re.split(r"&&|\|\||;|\n|\|", cmd)
+    pending_adds = []
     for idx, (argv0, redirs) in enumerate(segs):
         envs = frozenset(a.split("=", 1)[0] for a in argv0[:len(argv0) - len(_strip_prefix(argv0))] if "=" in a)
         argv = _strip_prefix(argv0)
@@ -598,7 +603,8 @@ def check_bash(cmd: str, cwd: str, agent: str):
             continue
         res = None
         if name == "git":
-            res = check_git(argv, ecwd, seg_text + " " + (raw_segments[idx] if idx < len(raw_segments) else ""), envs)
+            res = check_git(argv, ecwd, seg_text + " " + (raw_segments[idx] if idx < len(raw_segments) else ""), envs,
+                            pending_adds)
         elif name == "gh":
             sub = argv[1:3]
             if sub == ["repo", "clone"]:

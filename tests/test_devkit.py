@@ -436,5 +436,32 @@ class NoteTests(unittest.TestCase):
                 registry.note_path = orig
 
 
+
+@unittest.skipUnless(core.have("gitleaks"), "gitleaks not installed")
+class CommitSecretTests(unittest.TestCase):
+    """The guard checks what a commit will contain, also when `git add` runs in the same command."""
+
+    def test_add_then_commit_in_one_command(self):
+        fake = "ghp_" + "0123456789abcdefABCDEF0123456789abcd"  # built at runtime so this file holds no token
+        with tempfile.TemporaryDirectory() as d:
+            ident = ["-c", "user.email=t@example.com", "-c", "user.name=t"]
+            core.sh(["git", "init", "-q", d])
+            core.sh(["git", *ident, "-C", d, "commit", "-q", "--allow-empty", "-m", "init"])
+            Path(d, "a.py").write_text(f'TOKEN = "{fake}"\n')
+            Path(d, "b.py").write_text("x = 1\n")
+            saved = guard.is_temp
+            guard.is_temp = lambda p: False
+            try:
+                for cmd in ("git add a.py && git commit -m x", "git add -A && git commit -m x",
+                            "git add a.py; git commit -m 'feat: x'"):
+                    with self.subTest(cmd=cmd):
+                        self.assertEqual(decision("Bash", {"command": cmd}, cwd=d), "deny")
+                self.assertEqual(decision("Bash", {"command": "git add b.py && git commit -m x"}, cwd=d), "allow")
+                self.assertEqual(decision("Bash", {"command": "git commit -m x"}, cwd=d), "allow")
+            finally:
+                guard.is_temp = saved
+            self.assertEqual(core.gitout(d, "diff", "--cached", "--name-only"), "")  # the real index is untouched
+
+
 if __name__ == "__main__":
     unittest.main()
