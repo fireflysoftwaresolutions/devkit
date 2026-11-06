@@ -23,7 +23,7 @@ from pathlib import Path
 from . import core
 from .core import DEV, HANDOFF, STATE, tilde
 
-STOP_DEBOUNCE_S = 600
+STOP_DEBOUNCE_S = 120  # session line, lock renewal and presence at most every 2 min
 
 
 def _log(msg: str):
@@ -253,6 +253,11 @@ def session_start(agent: str):
     except Exception:
         _log(f"session-start env {agent}: {traceback.format_exc()[-300:]}")
     _spawn(["config", "repair", "--quiet"])  # restore any devkit-managed setting changed outside devkit
+    try:
+        from . import work
+        work.request_sync("session start", delay=1)  # pull other machines' claims and publish this session
+    except Exception:
+        pass
     text = context_for(cwd, agent)
     if agent == "codex":
         print(json.dumps({"hookSpecificOutput": {"hookEventName": "SessionStart", "additionalContext": text}}))
@@ -569,10 +574,25 @@ def prompt(agent: str):
     _context_out("UserPromptSubmit", "\n\n".join(x for x in (extra, skills, text) if x))
 
 
+DELIVERY = re.compile(r"\bgit\s+(?:-C\s+\S+\s+)?(commit|push|merge|tag|rebase|cherry-pick|revert)\b|"
+                      r"\bgh\s+(pr\s+(create|merge)|release\s+create)\b")
+
+
 def post_tool(agent: str):
-    """PostToolUse: time slow calls; remind the agent to update the developer after a long silence."""
+    """PostToolUse: time slow calls; remind the agent to update the developer after a long silence; sync the
+    handoff repository right after a delivery event (commit, push, merge, tag, PR, release)."""
     from . import progress
-    _context_out("PostToolUse", progress.on_tool_done(agent, _stdin_json()))
+    data = _stdin_json()
+    try:
+        cmd = (data.get("tool_input") or {}).get("command") or ""
+        if isinstance(cmd, list):
+            cmd = " ".join(cmd)
+        if data.get("tool_name") in ("Bash", "exec_command", "shell") and DELIVERY.search(cmd):
+            from . import work
+            work.request_sync("delivery: " + DELIVERY.search(cmd).group(0))
+    except Exception:
+        pass
+    _context_out("PostToolUse", progress.on_tool_done(agent, data))
 
 
 def subagent_start(agent: str):

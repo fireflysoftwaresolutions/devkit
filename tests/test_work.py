@@ -175,6 +175,36 @@ class TemplateTests(unittest.TestCase):
         self.assertEqual(report.health("done", "", 100, {}, 0)[0], "done")
 
 
+class SyncRequestTests(unittest.TestCase):
+    def test_events_share_one_queued_sync(self):
+        import os
+        import subprocess
+        spawned = []
+        saved = (work.SYNC_PENDING, subprocess.Popen, os.environ.pop("DEVKIT_NO_AUTOSYNC", None))
+        with tempfile.TemporaryDirectory() as d:
+            work.SYNC_PENDING = Path(d) / "sync.pending"
+            subprocess.Popen = lambda *a, **k: spawned.append(a[0])
+            try:
+                self.assertTrue(work.request_sync("commit abc"))
+                self.assertFalse(work.request_sync("push"))
+                self.assertFalse(work.request_sync("task done"))
+                self.assertEqual(len(spawned), 1)
+                self.assertIn("--delay", spawned[0])
+                self.assertEqual(work.SYNC_PENDING.read_text().splitlines(), ["commit abc", "push", "task done"])
+            finally:
+                work.SYNC_PENDING, subprocess.Popen, env = saved
+                if env is not None:
+                    os.environ["DEVKIT_NO_AUTOSYNC"] = env
+
+    def test_sync_job_and_bulk_imports_do_not_request(self):
+        import os
+        os.environ["DEVKIT_NO_AUTOSYNC"] = "1"
+        try:
+            self.assertFalse(work.request_sync("bulk"))
+        finally:
+            del os.environ["DEVKIT_NO_AUTOSYNC"]
+
+
 class IsolationTests(unittest.TestCase):
     def setUp(self):  # the fixture repos live in a system temp dir; treat them as real projects here
         self._is_temp = guard.is_temp

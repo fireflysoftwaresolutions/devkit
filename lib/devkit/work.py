@@ -212,11 +212,37 @@ def _commit(paths, message: str, push: bool = True, wait: bool = False):
         core.git(HANDOFF, "pull", "-q", "--rebase", "--autostash", timeout=60)
         rc, _, _ = core.git(HANDOFF, "push", "-q", timeout=60)
         return rc == 0
+    request_sync(message[:80], delay=10)
+    return True
+
+
+SYNC_PENDING = core.STATE / "sync.pending"
+
+
+def request_sync(reason: str = "", delay: int = 15):
+    """Near-real-time handoff sync: one queued background run; events inside the delay share it."""
+    if os.environ.get("DEVKIT_NO_AUTOSYNC") or os.environ.get("DEVKIT_JOB") == "sync":
+        return False
+    now = time.time()
+    try:
+        SYNC_PENDING.parent.mkdir(parents=True, exist_ok=True)
+        if SYNC_PENDING.exists() and now - SYNC_PENDING.stat().st_mtime < 120:
+            with SYNC_PENDING.open("a") as fh:  # a run is already queued: it will carry this change too
+                fh.write(reason[:120] + "\n")
+            return False
+        SYNC_PENDING.write_text(reason[:120] + "\n")
+    except OSError:
+        pass
     import subprocess
     import sys
-    subprocess.Popen([sys.executable, str(core.DEVKIT_HOME / "bin" / "dev"), "sync", "--quiet", "--offline"],
-                     stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-                     start_new_session=True, close_fds=True)
+    log = core.STATE / "logs" / "sync.log"
+    try:
+        out = open(log, "a")
+    except OSError:
+        out = subprocess.DEVNULL
+    subprocess.Popen([sys.executable, str(core.DEVKIT_HOME / "bin" / "dev"), "sync", "--quiet", "--offline", "--delay",
+                      str(delay)], stdin=subprocess.DEVNULL, stdout=out, stderr=out, start_new_session=True,
+                     close_fds=True)
     return True
 
 

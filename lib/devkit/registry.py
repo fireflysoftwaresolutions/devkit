@@ -515,6 +515,10 @@ def build(with_prs=True, refresh_prs=False, with_sizes=False, refresh_sizes=Fals
         p["size_kb"] = sz.get(p["path"])
         for w in p["worktrees"]:
             w["size_kb"] = sz.get(w["path"])
+    pf = read_json(STATE / "handoff-push-failed.json", None)
+    if pf:
+        issues.append(("handoff", f"the handoff repository could not be pushed since {fmt_ts(pf.get('ts'))}: "
+                                  f"{(pf.get('error') or '')[:120]} → `dev sync`"))
     for p in projects:
         if not p["canonical_ok"]:
             issues.append(("layout", f"{p['id']} lives at {tilde(p['path'])}; canonical is {tilde(p['canonical'])} "

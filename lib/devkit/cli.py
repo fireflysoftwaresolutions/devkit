@@ -150,13 +150,26 @@ def commit_push(push=True, quiet=False):
         core.git(HANDOFF, "commit", "-q", "-m", f"sync: {n} file(s) from {os.uname().nodename.split('.')[0]}")
     if not push or not core.gitout(HANDOFF, "remote"):
         return
+    from . import audit
+    failed = STATE / "handoff-push-failed.json"
     core.git(HANDOFF, "fetch", "-q", "origin", timeout=60)
     if core.gitout(HANDOFF, "rev-list", "--count", "HEAD..@{u}") not in ("", "0"):
         core.git(HANDOFF, "pull", "-q", "--rebase", "--autostash", timeout=120)
-    if core.gitout(HANDOFF, "rev-list", "--count", "@{u}..HEAD") != "0":
+    ahead = core.gitout(HANDOFF, "rev-list", "--count", "@{u}..HEAD")
+    if ahead not in ("", "0"):
         rc, _, err = core.git(HANDOFF, "push", "-q", timeout=120)
-        if rc != 0 and not quiet:
-            ui.warn(f"handoff push failed: {err}")
+        if rc != 0:  # someone pushed in between: rebase on it and try once more
+            core.git(HANDOFF, "pull", "-q", "--rebase", "--autostash", timeout=120)
+            rc, _, err = core.git(HANDOFF, "push", "-q", timeout=120)
+        if rc == 0:
+            audit.record("handoff.push", core.handoff_repo(), f"{ahead} commit(s)")
+            if failed.exists():
+                failed.unlink()
+        else:
+            audit.record("handoff.push", core.handoff_repo(), err[:300], "failed")
+            failed.write_text(json.dumps({"ts": int(time.time()), "error": err[:300]}))
+            if not quiet:
+                ui.warn(f"handoff push failed: {err}")
 
 
 # --------------------------------------------------------------------------- dashboard & help
@@ -628,6 +641,15 @@ def cmd_wt(a):
 def cmd_sync(a):
     from . import hooks
     STATE.mkdir(parents=True, exist_ok=True)
+    reasons = []
+    if getattr(a, "delay", 0):  # a queued near-real-time run: let a burst of events settle, then take them all
+        time.sleep(min(int(a.delay), 120))
+        from . import work as _w
+        try:
+            reasons = [x for x in _w.SYNC_PENDING.read_text().splitlines() if x.strip()]
+            _w.SYNC_PENDING.unlink()
+        except OSError:
+            pass
     if a.session:
         with core.Lock("notes", wait=60):
             hooks.record_session(a.session)
@@ -2274,6 +2296,7 @@ def build_parser():
     p.add_argument("--no-push", action="store_true")
     p.add_argument("--quiet", action="store_true")
     p.add_argument("--renew", metavar="AGENT", help=argparse.SUPPRESS)
+    p.add_argument("--delay", type=int, default=0, help=argparse.SUPPRESS)
     p = add("gc", cmd_gc, "Reclaim disk safely")
     p.add_argument("--apply", action="store_true")
     p.add_argument("--auto-only", action="store_true", help="only what is safe without a person (the gc job)")
@@ -2352,5 +2375,13 @@ def main(argv=None) -> int:
         return 130
     finally:
         if track:
+            try:
+                here = core.tilde(os.getcwd())
+            except OSError:  # the folder was removed while the command ran (scratch folders)
+                here = "(removed folder)"
             audit.record("dev." + argv[0], " ".join(argv[1:])[:300], "", "ok" if rc == 0 else f"exit {rc}",
-                         duration=round(time.time() - start, 2), cwd=core.tilde(os.getcwd()))
+                         duration=round(time.time() - start, 2), cwd=here)
+            if rc == 0 and argv[0] in ("commit", "push", "pr", "release", "branch", "rebase", "wt", "adopt", "clone",
+                                       "new", "delivery", "initiative", "note"):
+                from . import work as _w
+                _w.request_sync(f"dev {' '.join(argv[:2])}")
