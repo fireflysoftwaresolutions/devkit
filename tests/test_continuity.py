@@ -688,6 +688,84 @@ class FailOpenTests(Base):
         self.assertTrue((self.root / "logs" / "hooks.log").exists())
 
 
+class ComplianceReview2Tests(Base):
+    """Change 5 of the compliance review, as its second review (C1-C5) requires it, on neutral fixtures: request text
+    lives only in checkpoint.prompts, another provider gets ids and senders, --provider only narrows, a kept request
+    goes 7 days after it was written, and a pending request is shown to the session itself only."""
+    EMPTY = "<summary>The session works on a release. Nothing else is recorded here.</summary>"
+
+    def raw(self, sid=SID, agent="claude") -> str:
+        return ct.record_path(agent, sid).read_text()
+
+    def compact(self, now):
+        ct.on_pre_compact("claude", self.payload("PreCompact.manual"), now=now)
+        ct.on_post_compact("claude", self.payload("PostCompact.manual", compact_summary=self.EMPTY), now=now + 5)
+
+    def test_c1_a_request_dropped_after_the_compaction_leaves_no_text_in_the_record_or_the_list(self):
+        self.make_run(lanes=())
+        self.prompt("rename the flag in `lib/flags.py` to MARKERKEPT", "d1", T0 - 300)
+        self.prompt("MARKERGONE a question with no code in it", "n1", T0 - 60, dev_turn=...)  # mid-turn compaction
+        self.compact(T0)
+        ct.on_stop("claude", self.payload("Stop", prompt_id="n1"), dev_turn=False, now=T0 + 30)
+        self.assertNotIn("MARKERGONE", self.raw())
+        r = self.rec()
+        outside = json.dumps({k: v for k, v in r.items() if k != "checkpoint"})
+        self.assertNotIn("MARKERKEPT", outside)  # missing and deliver keep ids and times only
+        got = ct.on_tool("claude", self.payload("PostToolUse.Bash"), now=T0 + 40)
+        self.assertIn("«rename the flag in `lib/flags.py` to MARKERKEPT» (missing `lib/flags.py`)", got)
+        self.assertNotIn("MARKERGONE", got)
+
+    def test_c1_clear_leaves_no_request_text_in_the_old_record(self):
+        self.make_run(lanes=())
+        self.prompt("MARKERCLEAR rename the flag in `lib/flags.py`", "d1", T0 - 300)
+        self.compact(T0)
+        ct.on_session_end("claude", self.payload("SessionEnd.clear"), now=T0 + 60)
+        self.assertEqual(self.texts(), [])
+        self.assertNotIn("MARKERCLEAR", self.raw())
+
+    def test_c2_another_provider_gets_the_ids_and_senders_but_no_free_text(self):
+        self.make_run()  # decision D1 from Tank, message M1 from Neo
+        self.prompt("MARKERREQUEST ship it", "d1", T0 - 300)
+        out = ct.brief("claude", SID, reason="manual", chat=True, provider="codex", now=T0)
+        for text in ("MARKERREQUEST", "Which icon set", "behind a flag", "A: flag"):
+            self.assertNotIn(text, out)
+        self.assertIn("decision D1 from Tank", out)
+        self.assertIn("M1 from Neo", out)
+        self.assertIn("Which icon set", ct.brief("claude", SID, reason="manual", chat=True, provider="claude", now=T0))
+
+    def test_c3_an_agent_reads_another_providers_session_without_its_text_whatever_provider_it_names(self):
+        # Seraph's review of 85e37de: a Claude session asked for a Codex session's brief with --provider codex
+        self.prompt("MARKERCODEX port the exporter", "x1", T0 - 100, sid="cx1", agent="codex")
+        claude_main = {"caller": "main", "agent": "claude", "session": SID, "how": "env", "calls": []}
+        with mock.patch.object(pg, "caller", lambda *a, **k: claude_main):
+            for argv in (["--provider", "codex"], ["--provider", "openai"], []):
+                with self.subTest(argv=argv):
+                    out = self.cli("brief", "--session", "codex:cx1", *argv)
+                    self.assertNotIn("MARKERCODEX", out)
+                    self.assertIn("Latest requests: 1 request", out)
+        codex_main = dict(claude_main, agent="codex", session="cx1", caller="unverified")
+        with mock.patch.object(pg, "caller", lambda *a, **k: codex_main):
+            self.assertIn("MARKERCODEX", self.cli("brief", "--session", "codex:cx1"))
+            self.assertNotIn("MARKERCODEX", self.cli("brief", "--session", "codex:cx1", "--provider", "claude"))
+
+    def test_c4_a_kept_request_goes_seven_days_after_it_was_written_while_the_record_changes(self):
+        day = 86400
+        self.prompt("MARKEROLD bump the version in `pyproject.toml`", "d1", T0 - 10 * day)
+        for i in range(9, 0, -1):  # one non-development turn a day: the record changes, so expire never runs
+            self.prompt("a question with no code in it", f"n{i}", T0 - i * day, dev_turn=False)
+        self.assertEqual(self.texts(), [])
+        self.prompt("MARKERNEW tag the release", "d2", T0)
+        self.assertIn("MARKERNEW", ct.brief("claude", SID, now=T0 + 6 * day))
+        self.assertNotIn("MARKERNEW", ct.brief("claude", SID, now=T0 + 8 * day))  # read before any write drops it
+
+    def test_c5_a_pending_request_is_shown_to_the_session_itself_only(self):
+        self.prompt("MARKERPENDING a question with no code in it", "n1", T0 - 10, dev_turn=...)
+        for chat, provider in ((True, "claude"), (False, "claude"), (True, None)):
+            with self.subTest(chat=chat, provider=provider):
+                self.assertNotIn("MARKERPENDING", ct.brief("claude", SID, chat=chat, provider=provider, now=T0))
+        self.assertIn("MARKERPENDING", ct.brief("claude", SID, reason="compact", now=T0))
+
+
 class CodexTests(Base):
     def test_codex_compaction_hooks_record_and_brief_without_a_summary(self):
         # built from the required fields of the codex 0.166 input schemas; unverified live until 2026-11-09

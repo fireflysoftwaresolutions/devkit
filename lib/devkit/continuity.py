@@ -27,9 +27,13 @@ would without continuity; no subprocess or git call while a lock is held; progre
   on_subagent_stop a last read of the member's transcript
   on_session_end   clear: the clear link, and the old checkpoint's prompts go
 
-Prompts (compliance review, change 5): redacted with audit.redact, cut to 1,000 characters and redacted again; kept
-only for turns Stop classes as development work (pending until then; dropped when the classifier fails); re-sent
-only to the session's own provider; `dev session forget` deletes them. Background notifications are never stored.
+Prompts (compliance review, change 5, and its second review C1-C5): redacted with audit.redact, cut to 1,000
+characters and redacted again; kept only for turns Stop classes as development work (pending until then; dropped
+when the classifier fails); held only in checkpoint.prompts ("Not in the summary" keeps a request's prompt_id and
+time, and its excerpt is built at delivery from the prompt still there); dropped by every write 7 days after they
+were written, and never shown after that; re-sent only to the session's own provider, which also alone sees the text
+of decisions and crew messages; a pending prompt only to the session itself; `--provider` only narrows who that is;
+`dev session forget` deletes them. Background notifications are never stored.
 """
 from __future__ import annotations
 
@@ -133,12 +137,20 @@ def _fail_open(default):
     return wrap
 
 
+def _fresh(prompts, now: float) -> list:
+    """The prompts written in the last 7 days (C4): an older one is never kept or shown, whenever it is read."""
+    return [p for p in prompts or [] if now - (p.get("ts") or 0) <= KEEP_DAYS * 86400]
+
+
 def _update(agent: str, sid: str, fn, now: float, create: bool = True):
-    """fn(record) under the session's lock (the run's path names it), then an atomic write. StateBusy propagates:
-    the caller drops its change whole (state audits it) and goes on."""
+    """fn(record) under the session's lock (the run's path names it), then an atomic write that drops the prompts
+    older than 7 days (C4). StateBusy propagates: the caller drops its change whole (state audits it) and goes on."""
     def change(r):
         if fn(r) is state.SKIP:
             return state.SKIP
+        cp = r.get("checkpoint")
+        if isinstance(cp, dict) and cp.get("prompts"):
+            cp["prompts"] = _fresh(cp["prompts"], now)
         r.update(v=1, agent=agent, session=sid, updated=round(now, 3))
     with state.hold(progress.run_path(agent, sid)):
         return state.update(record_path(agent, sid), change, create=create)
@@ -669,25 +681,61 @@ def _has_id(body: str, ident: str) -> bool:
     return bool(n) and re.search(r"(?<!\w)" + re.escape(n) + r"(?!\w)", body) is not None
 
 
-def missing(summary: str, items: list) -> list:
-    """The items the summary leaves out, as display labels. An item is {"label", "ids": [...]} (present when one
-    id appears exactly, as a whole word) or {"label", "text"} (a request: present when every anchor appears and at
-    least 60% of its 4-character shingles do). Text is NFKC, casefolded, whitespace collapsed; only the <summary>
-    body counts, never the <analysis>. Pure: no vocabulary, so it works the same in every language."""
+def _gaps(summary: str, items: list) -> list:
+    """[(item, index of the first anchor it misses, or None)] for the items the summary leaves out (`missing`)."""
     body = _norm(_summary_body(summary))
     have = _shingles(body)
     out = []
     for it in items or []:
         if "text" in it:
             text = it.get("text") or ""
-            gone = [a for a in anchors(text) if _norm(a) not in body]
+            gone = next((i for i, a in enumerate(anchors(text)) if _norm(a) not in body), None)
             sh = _shingles(_norm(text))
             share = len(sh & have) / len(sh) if sh else 1.0
-            if gone or share < PRESENT:
-                out.append(f"{it['label']} «{_excerpt(text)}»" + (f" (missing `{gone[0]}`)" if gone else ""))
+            if gone is not None or share < PRESENT:
+                out.append((it, gone))
         elif not any(_has_id(body, i) for i in it.get("ids") or []):
-            out.append(it["label"])
+            out.append((it, None))
     return out
+
+
+def _request_label(label: str, text: str, gone) -> str:
+    found = anchors(text) if gone is not None else []
+    return f"{label} «{_excerpt(text)}»" + (f" (missing `{found[gone]}`)" if gone is not None and
+                                              0 <= gone < len(found) else "")
+
+
+def missing(summary: str, items: list) -> list:
+    """The items the summary leaves out, as display labels. An item is {"label", "ids": [...]} (present when one
+    id appears exactly, as a whole word) or {"label", "text"} (a request: present when every anchor appears and at
+    least 60% of its 4-character shingles do). Text is NFKC, casefolded, whitespace collapsed; only the <summary>
+    body counts, never the <analysis>. Pure: no vocabulary, so it works the same in every language."""
+    return [_request_label(it["label"], it.get("text") or "", gone) if "text" in it else it["label"]
+            for it, gone in _gaps(summary, items)]
+
+
+def _refs(summary: str, items: list) -> list:
+    """What the record keeps of the items the summary leaves out (C1): a request by its prompt_id and time and the
+    index of the anchor it misses, never its text (that stays in checkpoint.prompts); any other item by its label."""
+    return [{"request": it.get("prompt_id") or "", "ts": it.get("ts"), "anchor": gone} if "text" in it
+            else {"label": it["label"]} for it, gone in _gaps(summary, items)]
+
+
+def _missing_now(rec: dict, refs: list, now: float) -> str:
+    """The "Not in the summary" text, built at delivery from the prompts the checkpoint still holds: a request
+    dropped since (not development work, /clear, 7 days) is left out, text and line."""
+    prompts = _fresh((rec.get("checkpoint") or {}).get("prompts"), now)
+    labels = []
+    for ref in refs or []:
+        if "label" in ref:
+            labels.append(ref["label"])
+            continue
+        p = next((x for x in prompts if x.get("ts") == ref.get("ts") and
+                  (x.get("prompt_id") or "") == (ref.get("request") or "")), None)
+        if p:
+            when = time.strftime("%H:%M", time.localtime(p.get("ts") or 0))
+            labels.append(_request_label(f"request of {when}", p.get("text") or "", ref.get("anchor")))
+    return _missing_text(labels)
 
 
 def _items(rec: dict, run) -> list:
@@ -703,7 +751,7 @@ def _items(rec: dict, run) -> list:
                       "ids": [i for i in ids if i]})
     for p in cp.get("prompts") or []:
         items.append({"label": f"request of {time.strftime('%H:%M', time.localtime(p.get('ts') or 0))}",
-                      "text": p.get("text") or ""})
+                      "text": p.get("text") or "", "prompt_id": p.get("prompt_id") or "", "ts": p.get("ts")})
     decs = _decisions(run) if run else cp.get("decisions") or []
     msgs = _messages(run) if run else cp.get("messages") or []
     items += [{"label": f"decision {d['id']}", "ids": [d["id"]]} for d in decs if d.get("id")]
@@ -750,6 +798,16 @@ def _prov(name):
     return _PROVIDER.get(str(name or "").lower())
 
 
+def _shows(agent: str, provider, chat: bool) -> bool:
+    """May this reader see the session's free text (requests, decision questions, crew messages)? `provider` None
+    is the session itself, unless the reader is a chat surface, which must name its provider; otherwise only the
+    session's own provider, and an unknown one never."""
+    if provider is None:
+        return not chat
+    p = _prov(provider)
+    return p is not None and p == _prov(agent)
+
+
 def _header(rec: dict, reason: str, agent: str, sid: str) -> str:
     c = next((x for x in reversed(rec.get("compactions") or []) if x.get("who") == "main"), None)
     d = (" " + _desc(c)) if c else ""
@@ -769,20 +827,20 @@ def brief(agent: str, sid: str, reason: str = "manual", chat: bool = False, now=
     """The continuity brief, at most 4 KB: header, latest requests (newest first, verbatim), run, crew working now,
     waiting, last status block, git and the rule. The run, lanes, decisions, messages and git come from the live
     records; the checkpoint gives the prompts and the status and stands in for a live record it cannot read.
-    Request text is shown only to the session's own provider (`provider` None: the session itself); `chat` cuts
-    each request to 200 characters. "" when there is nothing to carry over."""
+    Request, decision and message text is shown only to the session's own provider (`_shows`; `provider` None: the
+    session itself), a pending request only to the session itself, and a request older than 7 days to nobody;
+    another reader gets the count and times, ids and senders. `chat` cuts each request to 200 characters. "" when
+    there is nothing to carry over."""
     now = now or time.time()
     rec = read(agent, sid) or {}
     cp = rec.get("checkpoint") or {}
     run = _live_run(agent, sid)
-    prompts = list(cp.get("prompts") or [])
+    itself = provider is None and not chat
+    prompts = [p for p in _fresh(cp.get("prompts"), now) if itself or not p.get("pending")]
     if not run and not cp.get("run") and not prompts:
         return ""
     sess = _session(agent, sid)
-    if chat:
-        show = provider is not None and _prov(provider) == _prov(agent)
-    else:
-        show = provider is None or _prov(provider) == _prov(agent)
+    show = _shows(agent, provider, chat)
     # live first, the checkpoint for what it cannot read
     if run:
         plan = run.get("plan") or []
@@ -871,7 +929,7 @@ def brief(agent: str, sid: str, reason: str = "manual", chat: bool = False, now=
         out.append("Rule: your final message starts with the status block.")
         return "\n".join(out)
 
-    o = {"texts": True, "status": True, "next": True, "git": True, "older": None, "drop": 0, "cap": False}
+    o = {"texts": show, "status": True, "next": True, "git": True, "older": None, "drop": 0, "cap": False}
     steps = [("texts", False), ("status", False), ("next", False), ("git", False), ("older", 200)]
     steps += [("drop", i) for i in range(1, len(newest_first))] + [("cap", True)]
     text = render(o)
@@ -1033,7 +1091,7 @@ def _detect_and_take(agent: str, sid: str, who: str, path: str, now: float, pers
 
 
 def _render(agent: str, sid: str, taken: list, path: str, now: float) -> str:
-    out, kinds = [], set()
+    out, kinds, rec = [], set(), None
     for d in taken:
         k = d.get("kind")
         if k in kinds and k != "missing":
@@ -1043,8 +1101,9 @@ def _render(agent: str, sid: str, taken: list, path: str, now: float) -> str:
             out.append(brief(agent, sid, reason="late", now=now))
         elif k == "reminder":
             out.append(_reminder(agent, sid, d["who"], path))
-        elif k == "missing" and d.get("text"):
-            out.append(d["text"])
+        elif k == "missing" and d.get("items"):
+            rec = rec if rec is not None else (read(agent, sid) or {})
+            out.append(_missing_now(rec, d["items"], now))
     return "\n\n".join(x for x in out if x)
 
 
@@ -1179,10 +1238,9 @@ def on_post_compact(agent: str, data: dict, now=None) -> None:
     key, pair = _pair_of(agent, data)
     who = data.get("agent_id") or "main"
     summary = data.get("compact_summary") if agent == "claude" and who == "main" else None
-    labels = None
+    refs = None
     if isinstance(summary, str) and summary.strip():
-        labels = missing(summary, _items(read(agent, sid) or {}, _live_run(agent, sid)))
-    text = _missing_text(labels or [])
+        refs = _refs(summary, _items(read(agent, sid) or {}, _live_run(agent, sid)))[:20]
     fresh = []
 
     def change(r):
@@ -1192,10 +1250,10 @@ def on_post_compact(agent: str, data: dict, now=None) -> None:
             fresh.append(c)
         _seen(c, "post")
         c["closed"] = True
-        if labels is not None:
-            r["missing"] = {"for": c["id"], "ts": round(now, 3), "items": labels[:20]}
-            if text:
-                r.setdefault("deliver", []).append({"kind": "missing", "who": "main", "for": c["id"], "text": text})
+        if refs is not None:
+            r["missing"] = {"for": c["id"], "ts": round(now, 3), "items": refs}
+            if refs:
+                r.setdefault("deliver", []).append({"kind": "missing", "who": "main", "for": c["id"], "items": refs})
     _announce(agent, sid, fresh, _quietly(agent, sid, change, now))
     return None
 
@@ -1506,6 +1564,22 @@ def _print_compactions(path) -> int:
     return len(got.boundaries)
 
 
+def _reader(given, chat: bool, cwd: str):
+    """The provider `dev session brief` reads for (C3). An agent's command reads for that agent's own provider, and
+    --provider only narrows it: naming another one shows that reader nothing, never the other provider's text. A
+    chat surface (--for-chat) must name its provider: devkit_resume takes it from the MCP server, never the model.
+    The developer's shell: --provider as given (none: the session itself)."""
+    if chat and not given:
+        return None  # brief(chat=True, provider=None) shows no text
+    who = progress.caller(cwd)
+    own = who.get("agent") if who.get("caller") not in ("human", None) else None
+    if not own:
+        return given
+    if given and _prov(given) != _prov(own):
+        return "-"  # no provider: nothing to show
+    return own
+
+
 def cmd_session(a) -> int:
     cwd = os.getcwd()
     act = a.session_cmd
@@ -1541,11 +1615,7 @@ def cmd_session(a) -> int:
             agent, sid, how = progress.resolve_session(cwd)
             if how == "shell":
                 raise ValueError("no agent session here: give --session <agent>:<session id> or --latest")
-        provider = a.provider
-        if not a.for_chat and provider is None:
-            who = progress.caller(cwd)
-            provider = who.get("agent") if who.get("caller") not in ("human", None) else None
-        print(brief(agent, sid, reason="manual", chat=a.for_chat, provider=provider)
+        print(brief(agent, sid, reason="manual", chat=a.for_chat, provider=_reader(a.provider, a.for_chat, cwd))
               or "devkit: nothing to carry over for that session")
         return 0
     if act == "carry":
