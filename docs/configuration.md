@@ -69,13 +69,17 @@ Apply agent changes with `dev install --only claude` or `dev install --only code
 
 Apply group changes with `dev install --only skills`. Rule changes apply at the next prompt.
 
+A rule triggers on what the work does, never on the words of a prompt: `files` (globs of changed files), `commands`
+(command words the agent runs), and `activities` (kinds of work from `dev crew raci`). `content` is a pattern the
+matching files must also contain; with `content_files`, files of those globs match too when they contain it.
+
 ```json
 {
   "skills": {
     "rules": [
       { "id": "ui", "skills": { "claude": ["frontend-design"], "codex": ["impeccable", "frontend-design"] } },
-      { "id": "terraform", "why": "Terraform style and tests", "files": ["*.tf"],
-        "prompt": "\\bterraform\\b", "skills": { "claude": ["terraform-style-guide"], "codex": ["terraform-style-guide"] } }
+      { "id": "terraform", "why": "Terraform style and tests", "files": ["*.tf"], "activities": ["infrastructure"],
+        "skills": { "claude": ["terraform-style-guide"], "codex": ["terraform-style-guide"] } }
     ]
   }
 }
@@ -90,12 +94,32 @@ Apply group changes with `dev install --only skills`. Rule changes apply at the 
 | `progress.notify` | `true` | Desktop notifications when a run blocks or finishes, and when a long turn ends |
 | `progress.notify_after_minutes` | `10` | A turn at least this long sends a notification when it ends |
 | `progress.slow_tool_seconds` | `20` | Tool calls at least this slow are recorded for `dev time` |
-| `progress.max_parallel` | `4` | Crew members that may work at once; the guard refuses a further launch ([The crew](crew.md#guardrails)) |
+| `progress.max_parallel` | `4` | Crew members that may work at once, counting the helpers they launch; the guard refuses a further launch ([The crew](crew.md#guardrails)) |
+| `progress.quota_percent` | `90` | While the plan's recorded 5-hour usage is over this share, only one crew member may work at a time, until the window resets |
+| `progress.max_depth` | `2` | How many levels of agents may run below the main session: crew members, and the helpers they launch. A deeper launch is refused |
 | `progress.stale_agent_hours` | `6` | A crew member with no report for this long is closed as lost, and its step goes back to the main session |
 | `work.mode` | `guided` | `guided`: decisions that are the developer's wait for the developer; `auto`: the crew goes on with the recommended option and records it. A run can set its own (`--mode`) |
+| `crew.gates.enforce` | `true` | At SubagentStop, the crew gates send a member back once for each proof, skill, unfinished line, test that cannot fail, or lesson it still owes; `false` only records them in the audit trail (see [The crew › Every report is checked](crew.md#every-report-is-checked)) |
+| `crew.route_hint` | `true` | The prompt hook adds Morpheus's route for each request, a guess from the request's words (English only); `false` leaves it out |
 | `ui.powerline` | `false` | Draw Nerd Font arrows between the status pills in `dev status` and `dev overview` (needs a Nerd Font in your terminal) |
+| `dashboard.idle_minutes` | `30` | The live dashboard server stops after this many minutes with no page open and no request |
 | `handoff.enforce` | `true` | When a session made commits without updating the handoff note, the Stop hook asks the agent once to update it |
-| `canary.enforce` | `true` | When a final message lacks the status block, the Stop hook asks the agent to reply again with it |
+| `canary.enforce` | `true` | When a final message lacks the status block, the Stop hook asks the agent to reply again with it; at SubagentStop, a crew member without its status block or its `dev progress step` is sent back once |
+
+### Background AI
+
+Jobs that run with no agent session, such as `dev sleep` merging lessons written in different languages, can ask a
+small model, headless. It is off until you turn it on; `dev setup` asks once. Off, over its daily budget, or failing,
+the job compares the lessons' anchors instead.
+
+| Key | Default | Meaning |
+| --- | --- | --- |
+| `ai.enabled` | `false` | Let background jobs ask a model. Each call runs outside any repository, saves nothing, and has a timeout |
+| `ai.agent` | empty | `claude` or `codex`; empty uses the first one installed |
+| `ai.model.claude` · `ai.model.codex` | `haiku` · `gpt-6-luna` | The model each agent uses for these calls (`claude -p` with no tools, or `codex exec` with a read-only sandbox) |
+| `ai.daily_calls` | `20` | At most this many calls a day |
+| `ai.timeout` | `60` | Seconds before a call is given up |
+| `ai.asked` | — | Set by `dev setup` once you answered, so it does not ask again |
 
 ### Branch names
 
@@ -198,6 +222,9 @@ Never edit the generated files directly; the next install overwrites them, and `
 | `DEVKIT_NO_AUTOSYNC=1` | No queued background syncs from that process; bulk operations push once at the end |
 | `NO_COLOR` | Plain output without colors |
 | `DEVKIT_SESSION`, `DEVKIT_AGENT` | Set by devkit in Claude Code sessions (and `DEVKIT_AGENT=job` in scheduled jobs) so `dev progress`, the work-item changelog, and the audit trail know the session and agent; do not set them yourself |
+| `DEVKIT_JOB` | Set to the job's name while a scheduled job runs |
+| `CODEX_HOME` | Codex home (default `~/.codex`) |
+| `CLAUDE_CODE_TMPDIR` | Claude Code's temp root; devkit treats it as temp and purges it |
 
 **Who may point devkit elsewhere.** `HOME`, `DEVKIT_CONFIG`, and `DEV_ROOT` decide which state, configuration, and
 handoff repository devkit reads, so devkit takes a non-standard `DEVKIT_CONFIG` or `DEV_ROOT` only from a command you
@@ -206,9 +233,6 @@ ignores it with a warning on stderr and uses `~/.config/devkit/config.json` and 
 refuses these variables, and every other `DEVKIT_*` variable but the one-command escape hatches, in an agent's
 command (see [Guard rules › devkit's own state, configuration, and
 install](guard.md#devkits-own-state-configuration-and-install)).
-| `DEVKIT_JOB` | Set to the job's name while a scheduled job runs |
-| `CODEX_HOME` | Codex home (default `~/.codex`) |
-| `CLAUDE_CODE_TMPDIR` | Claude Code's temp root; devkit treats it as temp and purges it |
 
 The shell integration and the agents' environments also set `DOCKER_HOST`, `TESTCONTAINERS_DOCKER_SOCKET_OVERRIDE`,
 `NG_CLI_ANALYTICS=false`, `NEXT_TELEMETRY_DISABLED=1`, and `SUPERPOWERS_DISABLE_TELEMETRY=1`. Claude Code's

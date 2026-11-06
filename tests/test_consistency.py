@@ -54,9 +54,6 @@ KNOWN = {
     "D5": owned("R2-13 · Technical writer (Ghost) · T-fxrngz6uua0 docs follow-ups (hook events)",
                 "agents.md: PostToolUseFailure (claude)", "surfaces.md: Hooks column 1 (claude)",
                 "surfaces.md: Hooks column 2 (claude)", "surfaces.md: the Claude Code event list"),
-    "D6": owned("R2-13 · Technical writer (Ghost) · step 17 crew docs",
-                "ai", "crew.gates.enforce", "crew.route_hint", "dashboard.idle_minutes", "progress.max_depth",
-                "progress.quota_percent"),
     "D7": owned("R2-9 · the developer approves plan and scope once F6 accepts “developer” as an approver · "
                 "step 36 F6 step endings and approvals",
                 "plan: A morpheus in R", "scope: A hamann in R"),
