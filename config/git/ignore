@@ -1,0 +1,14 @@
+# Global gitignore managed by devkit (core.excludesFile). Agent and OS artefacts that must never be committed.
+.DS_Store
+.AppleDouble
+.LSOverride
+._*
+# Claude Code
+.claude/worktrees/
+.claude/settings.local.json
+CLAUDE.local.md
+# Codex
+AGENTS.override.md
+# Tool caches some agent plugins create
+.serena/
+.impeccable/

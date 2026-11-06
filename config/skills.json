@@ -1,0 +1,59 @@
+{
+  "_comment": "Third-party skills fetched at install time from upstream at a pinned commit, then linked into ~/.claude/skills and ~/.agents/skills (Codex). Bump a ref with `dev install --only skills` after review. Rationale per skill: docs/skills-and-plugins.md.",
+  "sources": [
+    {
+      "repo": "mattpocock/skills",
+      "ref": "4ae2317ddb22b046e26455e4f9c9b3aaaf62212d",
+      "license": "MIT",
+      "skills": {
+        "grill-with-docs": "skills/engineering/grill-with-docs",
+        "domain-modeling": "skills/engineering/domain-modeling",
+        "codebase-design": "skills/engineering/codebase-design",
+        "improve-codebase-architecture": "skills/engineering/improve-codebase-architecture"
+      }
+    },
+    {
+      "repo": "anthropics/knowledge-work-plugins",
+      "ref": "d900840716eb262e1feb17c6f4406c9ce0e06bcf",
+      "license": "Apache-2.0",
+      "skills": {
+        "architecture": "engineering/skills/architecture",
+        "system-design": "engineering/skills/system-design"
+      }
+    },
+    {
+      "repo": "likec4/likec4",
+      "ref": "3cce820fadd11839d6bd745cf611722085558065",
+      "license": "MIT",
+      "skills": { "likec4-dsl": "skills/likec4-dsl" }
+    },
+    {
+      "repo": "vercel-labs/agent-skills",
+      "ref": "1a2c79d4e6c4a2283dc2c614b6538cbe1ed5ca62",
+      "license": "MIT (SKILL.md frontmatter)",
+      "skills": {
+        "react-best-practices": "skills/react-best-practices",
+        "composition-patterns": "skills/composition-patterns"
+      }
+    },
+    {
+      "repo": "angular/skills",
+      "ref": "aa7775d9679246b690045c0a2bf4fca0b35e4939",
+      "license": "MIT (SKILL.md frontmatter, Google LLC)",
+      "skills": {
+        "angular-developer": "angular-developer",
+        "angular-new-app": "angular-new-app"
+      }
+    },
+    {
+      "repo": "github/awesome-copilot",
+      "ref": "96543145e9cb97711020b57b9d88f968062c4fc7",
+      "license": "MIT",
+      "skills": {
+        "java-springboot": "skills/java-springboot",
+        "spring-boot-testing": "skills/spring-boot-testing",
+        "java-junit": "skills/java-junit"
+      }
+    }
+  ]
+}

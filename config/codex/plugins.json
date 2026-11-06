@@ -1,0 +1,12 @@
+{
+  "_comment": "Codex plugins and MCP servers (CLI and the ChatGPT desktop app share ~/.codex). See docs/skills-and-plugins.md.",
+  "plugins": [
+    "superpowers@openai-curated-remote",
+    "impeccable@openai-curated-remote"
+  ],
+  "mcp": {
+    "context7": { "url": "https://mcp.context7.com/mcp" },
+    "chrome-devtools": { "command": "npx", "args": ["-y", "chrome-devtools-mcp@1.12.0", "--no-usage-statistics", "--no-performance-crux"] },
+    "angular-cli": { "command": "npx", "args": ["-y", "@angular/cli@22.2.6", "mcp"] }
+  }
+}

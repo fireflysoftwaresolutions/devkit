@@ -1,0 +1,51 @@
+{
+  "permissions": {
+    "defaultMode": "bypassPermissions"
+  },
+  "skipDangerousModePermissionPrompt": true,
+  "attribution": {
+    "commit": "",
+    "pr": ""
+  },
+  "cleanupPeriodDays": 14,
+  "env": {
+    "DOCKER_HOST": "unix://{{HOME}}/.colima/default/docker.sock",
+    "TESTCONTAINERS_DOCKER_SOCKET_OVERRIDE": "/var/run/docker.sock",
+    "NG_CLI_ANALYTICS": "false",
+    "NEXT_TELEMETRY_DISABLED": "1",
+    "SUPERPOWERS_DISABLE_TELEMETRY": "1",
+    "ENABLE_STOP_REVIEW": "0",
+    "ENABLE_COMMIT_REVIEW": "0"
+  },
+  "hooks": {
+    "SessionStart": [
+      {
+        "hooks": [
+          { "type": "command", "command": "'{{DEVKIT}}/bin/dev' hook session-start --agent claude", "timeout": 30 }
+        ]
+      }
+    ],
+    "PreToolUse": [
+      {
+        "matcher": "Bash|Write|Edit|MultiEdit|NotebookEdit",
+        "hooks": [
+          { "type": "command", "command": "'{{DEVKIT}}/bin/dev' hook guard --agent claude", "timeout": 15 }
+        ]
+      }
+    ],
+    "Stop": [
+      {
+        "hooks": [
+          { "type": "command", "command": "'{{DEVKIT}}/bin/dev' hook stop --agent claude", "timeout": 10 }
+        ]
+      }
+    ],
+    "SessionEnd": [
+      {
+        "hooks": [
+          { "type": "command", "command": "'{{DEVKIT}}/bin/dev' hook session-end --agent claude", "timeout": 10 }
+        ]
+      }
+    ]
+  }
+}

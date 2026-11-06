@@ -1,0 +1,7 @@
+# Global npm packages installed by install.sh (pinned major versions are resolved by npm).
+typescript
+pyright
+typescript-language-server
+intelephense
+@angular/cli
+@playwright/cli

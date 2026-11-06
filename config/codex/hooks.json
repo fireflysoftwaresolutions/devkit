@@ -1,0 +1,34 @@
+{
+  "hooks": {
+    "SessionStart": [
+      {
+        "matcher": "startup|resume|clear|compact",
+        "hooks": [
+          { "type": "command", "command": "'{{DEVKIT}}/bin/dev' hook session-start --agent codex", "timeout": 30, "statusMessage": "devkit: loading project context" }
+        ]
+      }
+    ],
+    "PreToolUse": [
+      {
+        "matcher": "^(Bash|apply_patch)$",
+        "hooks": [
+          { "type": "command", "command": "'{{DEVKIT}}/bin/dev' hook guard --agent codex", "timeout": 15 }
+        ]
+      }
+    ],
+    "Stop": [
+      {
+        "hooks": [
+          { "type": "command", "command": "'{{DEVKIT}}/bin/dev' hook stop --agent codex", "timeout": 10 }
+        ]
+      }
+    ],
+    "SessionEnd": [
+      {
+        "hooks": [
+          { "type": "command", "command": "'{{DEVKIT}}/bin/dev' hook session-end --agent codex", "timeout": 3 }
+        ]
+      }
+    ]
+  }
+}

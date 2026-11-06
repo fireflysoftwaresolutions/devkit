@@ -1,0 +1,18 @@
+{
+  "_comment": "Written into ~/.codex/config.toml through Codex's own config API (codex app-server config/batchWrite). Projects under dev_root are marked trusted by `dev install`.",
+  "settings": {
+    "approval_policy": "never",
+    "sandbox_mode": "danger-full-access"
+  },
+  "upsert": {
+    "shell_environment_policy": {
+      "set": {
+        "DOCKER_HOST": "unix://{{HOME}}/.colima/default/docker.sock",
+        "TESTCONTAINERS_DOCKER_SOCKET_OVERRIDE": "/var/run/docker.sock",
+        "NG_CLI_ANALYTICS": "false",
+        "NEXT_TELEMETRY_DISABLED": "1",
+        "SUPERPOWERS_DISABLE_TELEMETRY": "1"
+      }
+    }
+  }
+}

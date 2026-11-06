@@ -1,0 +1,29 @@
+# Shared git defaults for every devkit developer (included from ~/.gitconfig by `dev install`).
+# Identity (user.name / user.email) is NOT set here: `dev install` copies it from your GitHub account via gh.
+[init]
+	defaultBranch = main
+[push]
+	autoSetupRemote = true
+[fetch]
+	prune = true
+	pruneTags = true
+[pull]
+	rebase = true
+[rebase]
+	autoStash = true
+	updateRefs = true
+[rerere]
+	enabled = true
+[diff]
+	algorithm = histogram
+	colorMoved = default
+[merge]
+	conflictStyle = zdiff3
+[branch]
+	sort = -committerdate
+[tag]
+	sort = version:refname
+[worktree]
+	guessRemote = true
+[core]
+	autocrlf = input

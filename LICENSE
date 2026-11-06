@@ -1,0 +1,15 @@
+Copyright (c) 2026 Firefly Software Solutions Inc. All rights reserved.
+
+This software and its documentation ("devkit") are proprietary and confidential.
+
+Permission is granted to the persons and organisations explicitly authorised by the copyright holder to install,
+use and modify devkit for their internal software development. No other right is granted: redistribution,
+sublicensing, publication or sale, in whole or in part, requires the prior written permission of the copyright holder.
+
+Third-party components that devkit downloads or references at install time (agent skills, plugins, tools) are not
+part of devkit and remain under their own licences; see NOTICE.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE
+WARRANTIES OF MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE COPYRIGHT
+HOLDER BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY ARISING FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR
+ITS USE.

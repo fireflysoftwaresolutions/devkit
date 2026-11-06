@@ -1,0 +1,56 @@
+#compdef dev
+# zsh completion for devkit's `dev` command.
+
+_dev() {
+  local -a cmds projects
+  cmds=(
+    'ls:List projects'
+    'go:Print a project path'
+    'status:Project status'
+    'clone:Clone into ~/Development/<owner>/<repo>'
+    'new:Start a new project'
+    'adopt:Move a repo into the canonical layout'
+    'open:Open a project in your editor'
+    'claude:Start Claude Code in a project'
+    'codex:Start Codex in a project'
+    'handoff:Show or edit a handoff note'
+    'wt:Manage worktrees'
+    'ci:Show what CI runs, to run it locally'
+    'canary:Instruction-compliance report'
+    'sync:Refresh map and notes, push handoff repo'
+    'gc:Reclaim disk safely'
+    'du:Disk usage report'
+    'doctor:Verify the setup'
+    'install:Apply the devkit configuration'
+    'update:Update devkit'
+    'docker:Docker on Colima'
+    'version:Show version'
+    'help:Show help'
+  )
+  if (( CURRENT == 2 )); then
+    _describe 'command' cmds
+    return
+  fi
+  projects=(${(f)"$(dev __complete projects 2>/dev/null)"})
+  case "${words[2]}" in
+    go|status|open|handoff|claude|codex|ci)
+      _describe 'project' projects ;;
+    wt)
+      if (( CURRENT == 3 )); then
+        local -a sub; sub=('new:Create a managed worktree' 'ls:List worktrees' 'rm:Remove a worktree safely')
+        _describe 'worktree command' sub
+      elif [[ "${words[3]}" == rm ]]; then
+        local -a br; br=(${(f)"$(dev __complete branches 2>/dev/null)"}); _describe 'branch' br
+      fi ;;
+    docker)
+      local -a act; act=(up down status prune autostart-on autostart-off); _describe 'action' act ;;
+    install)
+      _arguments '--only[steps]:steps:(config cli git handoff instructions skills claude codex docker launchd)' ;;
+    gc)
+      _arguments '--apply[reclaim]' '-y[no prompt]' '-v[list kept items]' ;;
+    adopt)
+      _files -/ ;;
+  esac
+}
+
+_dev "$@"

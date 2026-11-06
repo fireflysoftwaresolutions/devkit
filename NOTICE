@@ -1,0 +1,17 @@
+devkit
+Copyright (c) 2026 Firefly Software Solutions Inc. All rights reserved.
+
+devkit does not bundle third-party code. At install time it downloads, from their upstream repositories at the
+pinned commits listed in config/skills.json, the following agent skills, which remain under their own licences:
+
+  mattpocock/skills                 grill-with-docs, domain-modeling, codebase-design,
+                                    improve-codebase-architecture                               MIT
+  anthropics/knowledge-work-plugins architecture, system-design                                 Apache-2.0
+  likec4/likec4                     likec4-dsl                                                  MIT
+  vercel-labs/agent-skills          react-best-practices, composition-patterns                  MIT (per SKILL.md)
+  angular/skills                    angular-developer, angular-new-app                          MIT (per SKILL.md, Google LLC)
+  github/awesome-copilot            java-springboot, spring-boot-testing, java-junit            MIT
+
+It also installs, through their official marketplaces and package managers, plugins and tools listed in
+config/claude/plugins.json, config/codex/plugins.json, Brewfile and config/npm-globals.txt, each under its own
+licence and terms.
