@@ -1128,9 +1128,11 @@ def _name_of(run, addr: str) -> str:
     return lane.get("persona") or lane.get("label") or "subagent"
 
 
-def crew_ask(text: str, to: str | None = None, from_agent: str | None = None, cwd: str | None = None, now: float | None = None) -> dict:
+def crew_ask(text: str, to: str | None = None, from_agent: str | None = None, cwd: str | None = None, now: float | None = None,
+             kind: str = "message") -> dict:
     """A question or request between crew members (default: to Morpheus, the main session). It reaches the recipient
-    with its next tool call (PostToolUse) or prompt."""
+    with its next tool call (PostToolUse) or prompt. The audit trail keeps its kind and length, never its text (crew
+    messages quote the developer's requests)."""
     now = now or time.time()
     from_agent = _as_lane(from_agent, cwd)
     agent, sid = current_session(cwd)
@@ -1141,8 +1143,8 @@ def crew_ask(text: str, to: str | None = None, from_agent: str | None = None, cw
         run = normalize(run)
         m = _post(run, from_agent or "main", _addr(run, to or ""), text, now)
         _save(run, touch_session=False)
-    _audit("crew.message", f"{m['from_name']} → {m['to_name']}", m["text"][:300], project=run.get("project") or "",
-           id=m["id"])
+    _audit("crew.message", f"{m['from_name']} → {m['to_name']}", "", project=run.get("project") or "", id=m["id"],
+           type=kind, count=len(m["text"]))
     return m
 
 
@@ -1173,7 +1175,8 @@ def crew_answer(msg_id: str, text: str, from_agent: str | None = None, cwd: str 
             raise ValueError(f"no message {msg_id}")
         q["answered"] = True
         _save(run, touch_session=False)
-    a = crew_ask(text, to=q["from"] if q["from"] != "main" else "main", from_agent=from_agent, cwd=cwd, now=now)
+    a = crew_ask(text, to=q["from"] if q["from"] != "main" else "main", from_agent=from_agent, cwd=cwd, now=now,
+                 kind="answer")
     with _tx(agent, sid):
         run = normalize(load_run(agent, sid) or {})
         for m in run.get("messages") or []:

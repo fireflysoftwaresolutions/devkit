@@ -689,6 +689,19 @@ class CrewMessageIdTests(unittest.TestCase):
             self.assertEqual(pg.crew_decision("And another?", options="yes | no", recommend="yes")["id"], "D202")
 
 
+class CrewMessageAuditTests(unittest.TestCase):
+    def test_a_message_is_audited_by_its_kind_and_length_never_its_text(self):
+        from devkit import audit
+        with TempState():
+            pg.start("Release", plan=["build"])
+            q = pg.crew_ask("may I change lib/x.py? " + "x" * 480, from_agent="a1")
+            pg.crew_answer(q["id"], "yes, keep it small")
+            recs = audit.query(action="crew.message")
+            self.assertEqual([((r.get("ref") or {}).get("type"), (r.get("evidence") or {}).get("count")) for r in recs],
+                             [("message", 503), ("answer", 18)])
+            self.assertFalse([r for r in recs if "lib/x.py" in r["detail"] or "keep it small" in r["detail"]])
+
+
 class CrewSafetyTests(unittest.TestCase):
     def test_a_subagent_cannot_act_as_morpheus_through_a_compound_command(self):
         from devkit import hooks
