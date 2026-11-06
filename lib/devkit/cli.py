@@ -1882,7 +1882,7 @@ def cmd_progress(a):
               + (f" · estimate {pg.fmt_min(run['estimate'])}" if run["estimate"] else ""))
         hints = []
         if cal["ratio"] and run["estimate"]:
-            hints.append(f"runs here take {cal['ratio']}× their estimate → plan for ~{pg.fmt_min(run['estimate_cal'])}")
+            hints.append(f"runs here take {cal['ratio']}× their estimate → plan for ~{_about(run['estimate_cal'])}")
         if cal["turn_median"]:
             hints.append(f"median turn {pg.fmt_min(cal['turn_median'])}, p90 {pg.fmt_min(cal['turn_p90'])}")
         if hints:
@@ -1973,9 +1973,19 @@ def cmd_progress(a):
     for who, s_ in others:
         p_ = s_["progress"]
         print(f"  {ui.ACTIVE} {who} · {s_.get('agent')} · {s_.get('project')} · {p_.get('goal')} — "
-              f"{p_.get('step')}/{p_.get('steps') or '?'}" + (f" · ETA ~{p_['eta_min']}m" if p_.get("eta_min") else ""))
+              f"{p_.get('step')}/{p_.get('steps') or '?'}" + (f" · ETA ~{_about(p_['eta_min'])}" if p_.get("eta_min")
+                                                               else ""))
     print()
     return 0
+
+
+def _about(m) -> str:
+    """An estimate or a time left, as the dashboard shows it (fmtAbout): to 5 minutes, and to the minute under 10,
+    so "~" claims no more precision than an estimate has. Measured times keep progress.fmt_min."""
+    from . import progress as pg
+    m = max(0.0, float(m or 0))
+    r = int(m + 0.5)  # halves round up, as Math.round does on the dashboard
+    return pg.fmt_min(r if r < 10 else int(m / 5 + 0.5) * 5)
 
 
 def cmd_report(a):

@@ -628,6 +628,16 @@ class SessionWiringTests(unittest.TestCase):
         self.assertEqual((a.session_cmd, a.latest, a.project), ("brief", True, "acme/api"))
 
 
+# --------------------------------------------------------------------------- estimates in dev progress (M264)
+
+
+class EstimateTests(unittest.TestCase):
+    # An estimate rounds like the dashboard's: to 5 minutes, and to the minute under 10 minutes.
+    def test_estimates_round_to_five_minutes_and_to_the_minute_under_ten(self):
+        self.assertEqual([cli._about(m) for m in (119, 27.4, 43, 12, 12.5, 7.4, 3.2)],
+                         ["2h00m", "25m", "45m", "10m", "15m", "7m", "3m"])
+
+
 # --------------------------------------------------------------------------- the audit trail
 
 
