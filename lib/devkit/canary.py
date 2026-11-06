@@ -244,10 +244,25 @@ def records(days: int = 7) -> list:
     return out
 
 
+def record_corrected(agent: str, sid: str, pid, line: str = ""):
+    """A missed reply that the agent corrected after the Stop hook's reminder (kept apart from first-time results)."""
+    try:
+        LOG.parent.mkdir(parents=True, exist_ok=True)
+        with LOG.open("a") as f:
+            f.write(json.dumps({"ts": round(time.time()), "agent": agent, "session": (sid or "")[:12], "project": pid,
+                                "ok": True, "corrected": True, "status": (line or "")[:200]}) + "\n")
+    except OSError:
+        pass
+
+
+def corrected(days: int = 7) -> int:
+    return sum(1 for r in records(days) if r.get("corrected"))
+
+
 def summary(days: int = 7) -> dict:
-    """{agent: (ok, total)} over the window."""
+    """{agent: (ok, total)} over the window, first replies only (corrections are counted apart)."""
     out = {}
-    for r in records(days):
+    for r in [r for r in records(days) if not r.get("corrected")]:
         ok, tot = out.get(r["agent"], (0, 0))
         out[r["agent"]] = (ok + (1 if r["ok"] else 0), tot + 1)
     return out
@@ -265,7 +280,9 @@ def summary_line(days: int = 7) -> str:
         return "no tracked replies yet"
     out = " · ".join(f"{a.capitalize()} {ok}/{tot} ({100 * ok // tot}%)" for a, (ok, tot) in sorted(s.items()))
     good, scored = format_rate(days)
-    return out + (f" · format {100 * good // scored}%" if scored else "")
+    fixed = corrected(days)
+    return out + (f" · format {100 * good // scored}%" if scored else "") + (f" · {fixed} corrected after a reminder"
+                                                                            if fixed else "")
 
 
 def prune(max_days: int = 90):

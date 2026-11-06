@@ -6,7 +6,8 @@ wins over both.
 
 ## 0. Instruction canary and status block: `[Firefly> DevKit]`
 
-Start the **final message of every turn** with this status block: a header line, then three short bullets (four
+Start the **final message of every turn, without exception**, with this status block. That includes short answers,
+questions back to the developer, status updates, replies while background work runs, and replies in any language: a header line, then three short bullets (four
 while a `dev progress` run is active). Leave a blank line after it, then write the rest of the message.
 
 ```markdown

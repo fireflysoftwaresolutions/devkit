@@ -368,6 +368,15 @@ class CanaryTests(unittest.TestCase):
                          "api@main · fixed · tests ok · next: -")
         self.assertEqual(canary.status_text("**[Firefly> DevKit]** · api@main · fixed"), "api@main · fixed")
 
+    def test_canary_corrections_are_counted_apart(self):
+        with TempState():
+            canary.LOG.parent.mkdir(parents=True, exist_ok=True)
+            canary.LOG.write_text('{"ts": %d, "agent": "claude", "ok": false}\n' % int(__import__("time").time()))
+            canary.record_corrected("claude", "s1", "acme/api", "x · main ❯ fixed")
+            self.assertEqual(canary.summary(1), {"claude": (0, 1)})
+            self.assertEqual(canary.corrected(1), 1)
+            self.assertIn("1 corrected after a reminder", canary.summary_line(1))
+
     def test_canary_status_block(self):
         block = ("**[Firefly> DevKit]** api · `feat/x_y` · Invoice export\n"
                  "- **Done:** added the CSV export endpoint.\n"

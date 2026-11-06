@@ -360,6 +360,7 @@ def stop(agent: str):
             elif not ok:
                 from . import audit
                 audit.record("canary.miss", pid or "", "final message without the status block", "miss")
+                sess["canary_missed"] = True  # later prompts in this session get a reminder
                 if agent == "claude":
                     out["systemMessage"] = canary.miss_message(agent, sid)
                 if core.CFG.get("canary", {}).get("enforce", True):
@@ -376,8 +377,10 @@ def stop(agent: str):
                 if top and not core.is_temp(top):
                     from .registry import main_of
                     m = main_of(Path(top)) or Path(top)
-                    canary.save_status(core.project_identity(m, core.gitout(m, "config", "--get", "remote.origin.url"))[0],
-                                       agent, line, core.gitout(top, "branch", "--show-current"))
+                    pid_ = core.project_identity(m, core.gitout(m, "config", "--get", "remote.origin.url"))[0]
+                    canary.save_status(pid_, agent, line, core.gitout(top, "branch", "--show-current"))
+                    if sess.get("canary_missed"):
+                        canary.record_corrected(agent, sid, pid_, line)
         try:
             from . import skillguard
             why = skillguard.on_stop(agent, data, sess)
@@ -547,6 +550,14 @@ def prompt(agent: str):
     except Exception:
         pass
     text = progress.on_prompt(agent, data)
+    try:
+        sf_ = _session_file(agent, sid) if sid else None
+        if sf_ and sf_.exists() and (core.read_json(sf_, {}) or {}).get("canary_missed"):
+            text = ("devkit · reminder: this session missed the status block once. Start your final message with "
+                    "**[Firefly> DevKit]** <project> · `<branch>` · <task>, then Done / Check / Next (global "
+                    "instructions §0), whatever the reply's length or language.") + ("\n\n" + text if text else "")
+    except Exception:
+        pass
     skills = ""
     try:
         from . import skillguard
