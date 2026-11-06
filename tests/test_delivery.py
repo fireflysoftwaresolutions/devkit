@@ -1,4 +1,5 @@
-# Copyright (c) 2026 Firefly Software Solutions Inc. All rights reserved.
+# Copyright (c) 2026 Firefly Software Solutions Inc.
+# SPDX-License-Identifier: Apache-2.0
 """Delivery policy: detection, recommendation, gaps, recording and the tag rule. Run: python3 -m unittest -v"""
 import json
 import sys

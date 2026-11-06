@@ -1,4 +1,5 @@
-# Copyright (c) 2026 Firefly Software Solutions Inc. All rights reserved.
+# Copyright (c) 2026 Firefly Software Solutions Inc.
+# SPDX-License-Identifier: Apache-2.0
 """Token-light, safe file commands for agents and people: rm, mv, cp, files, find, grep, diff.
 
 Claude Code and Codex call these through their shell tool, so the output follows four rules:

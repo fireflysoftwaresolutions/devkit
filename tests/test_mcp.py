@@ -1,4 +1,5 @@
-# Copyright (c) 2026 Firefly Software Solutions Inc. All rights reserved.
+# Copyright (c) 2026 Firefly Software Solutions Inc.
+# SPDX-License-Identifier: Apache-2.0
 """`dev mcp` (the MCP server), the Claude Desktop launcher and `dev desktop pack|status`. Hermetic: every process
 runs with a throwaway HOME, config and dev root, and nothing touches the network."""
 import json

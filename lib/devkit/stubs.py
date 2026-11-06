@@ -1,4 +1,5 @@
-# Copyright (c) 2026 Firefly Software Solutions Inc. All rights reserved.
+# Copyright (c) 2026 Firefly Software Solutions Inc.
+# SPDX-License-Identifier: Apache-2.0
 # devkit: allow-stub-words (this file defines the markers it looks for)
 """Unfinished work: stubs, placeholders and TODOs left in delivered code.
 

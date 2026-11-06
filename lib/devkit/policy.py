@@ -1,4 +1,5 @@
-# Copyright (c) 2026 Firefly Software Solutions Inc. All rights reserved.
+# Copyright (c) 2026 Firefly Software Solutions Inc.
+# SPDX-License-Identifier: Apache-2.0
 """What devkit manages in Claude Code and Codex, and keeping it that way.
 
   diff()      desired state (devkit config) vs what is installed, per target, as a list of Drift

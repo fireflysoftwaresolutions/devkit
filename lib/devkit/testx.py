@@ -1,4 +1,5 @@
-# Copyright (c) 2026 Firefly Software Solutions Inc. All rights reserved.
+# Copyright (c) 2026 Firefly Software Solutions Inc.
+# SPDX-License-Identifier: Apache-2.0
 """`dev test`: the tests that failed last time, then the tests a change can affect, and proof that new tests test it.
 
   dev test                       1) the last failures (stop if one still fails)  2) the blast radius of the changes

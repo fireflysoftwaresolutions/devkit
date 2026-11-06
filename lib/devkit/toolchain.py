@@ -1,4 +1,5 @@
-# Copyright (c) 2026 Firefly Software Solutions Inc. All rights reserved.
+# Copyright (c) 2026 Firefly Software Solutions Inc.
+# SPDX-License-Identifier: Apache-2.0
 """Git hosts, CI/CD and cloud providers a developer works with: which CLIs they need, whether those are installed
 and signed in, and what this Mac already shows (repositories under the workspace, config folders, CLIs).
 

@@ -1,4 +1,5 @@
-# Copyright (c) 2026 Firefly Software Solutions Inc. All rights reserved.
+# Copyright (c) 2026 Firefly Software Solutions Inc.
+# SPDX-License-Identifier: Apache-2.0
 """Skill enforcement: the right skills are loaded for the work being done (config/skill-rules.json).
 
 1. Prompt   UserPromptSubmit names the skills a request needs (rules matching the prompt) that are not loaded yet.

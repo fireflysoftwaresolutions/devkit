@@ -9,7 +9,7 @@
   },
   "homepage": "https://github.com/fireflysoftwaresolutions/devkit",
   "repository": "https://github.com/fireflysoftwaresolutions/devkit",
-  "license": "LicenseRef-Proprietary",
+  "license": "Apache-2.0",
   "keywords": [
     "devkit",
     "firefly",

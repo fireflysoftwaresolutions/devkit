@@ -1,4 +1,5 @@
-# Copyright (c) 2026 Firefly Software Solutions Inc. All rights reserved.
+# Copyright (c) 2026 Firefly Software Solutions Inc.
+# SPDX-License-Identifier: Apache-2.0
 """Who does what: routing work to the right crew member, delegation between members, and dispatch of ready work.
 
 Subagents cannot launch subagents in Claude Code (and Codex limits their depth), so the crew coordinates through the

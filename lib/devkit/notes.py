@@ -1,4 +1,5 @@
-# Copyright (c) 2026 Firefly Software Solutions Inc. All rights reserved.
+# Copyright (c) 2026 Firefly Software Solutions Inc.
+# SPDX-License-Identifier: Apache-2.0
 """Handoff notes: structure, parsing and safe programmatic edits.
 
 A note (`~/Development/.handoff/projects/<project id>.md`) is plain Markdown that

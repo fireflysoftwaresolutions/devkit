@@ -1,4 +1,5 @@
-# Copyright (c) 2026 Firefly Software Solutions Inc. All rights reserved.
+# Copyright (c) 2026 Firefly Software Solutions Inc.
+# SPDX-License-Identifier: Apache-2.0
 """`dev ci audit` and `dev ci init`: diagnose, fix and set up CI/CD pipelines on any of the four big hosts.
 
   GitHub Actions      .github/workflows/*.y*ml

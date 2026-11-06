@@ -1,4 +1,5 @@
-# Copyright (c) 2026 Firefly Software Solutions Inc. All rights reserved.
+# Copyright (c) 2026 Firefly Software Solutions Inc.
+# SPDX-License-Identifier: Apache-2.0
 """`dev branch|commit|rebase|push|pr|run|release|issue|git|gh` and the local-CI evidence.
 
 Offline: real temporary repositories with a bare "origin" (the GitHub URL is rewritten to it with insteadOf), and

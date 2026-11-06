@@ -1,4 +1,5 @@
-# Copyright (c) 2026 Firefly Software Solutions Inc. All rights reserved.
+# Copyright (c) 2026 Firefly Software Solutions Inc.
+# SPDX-License-Identifier: Apache-2.0
 """`dev dashboard`: the project command centre.
 
 One self-contained HTML file (inline CSS, JS and SVG; data embedded as JSON)

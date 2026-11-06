@@ -1,4 +1,5 @@
-# Copyright (c) 2026 Firefly Software Solutions Inc. All rights reserved.
+# Copyright (c) 2026 Firefly Software Solutions Inc.
+# SPDX-License-Identifier: Apache-2.0
 """Delivery policy: how a project versions, tests, releases and ships — detected, recommended, recorded, enforced.
 
 detect(repo)        what the repository does today: version scheme and source, release tooling, changelog, CI,

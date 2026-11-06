@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
-# Copyright (c) 2026 Firefly Software Solutions Inc. All rights reserved.
+# Copyright (c) 2026 Firefly Software Solutions Inc.
+# SPDX-License-Identifier: Apache-2.0
 """Render devkit's identity: app icon, plugin logo and the README hero banners (dark and light).
 
 Built from the Firefly brand's own elements (brand-kit: palette, Manrope, the spark and the light-trail system);

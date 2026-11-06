@@ -1,4 +1,5 @@
-# Copyright (c) 2026 Firefly Software Solutions Inc. All rights reserved.
+# Copyright (c) 2026 Firefly Software Solutions Inc.
+# SPDX-License-Identifier: Apache-2.0
 """Git and GitHub through `dev`, with the delivery rules built in and compact output.
 
   dev branch new|rename|ls|clean      branches from an up-to-date origin/<default>, named by the standard

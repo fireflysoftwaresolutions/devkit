@@ -1,4 +1,5 @@
-# Copyright (c) 2026 Firefly Software Solutions Inc. All rights reserved.
+# Copyright (c) 2026 Firefly Software Solutions Inc.
+# SPDX-License-Identifier: Apache-2.0
 """The audit trail: one record for everything devkit changes or decides.
 
 Recorded: every `dev` command that changes something (tasks, plans, lessons, policies, files through dev rm/mv/cp,

@@ -1,4 +1,5 @@
-# Copyright (c) 2026 Firefly Software Solutions Inc. All rights reserved.
+# Copyright (c) 2026 Firefly Software Solutions Inc.
+# SPDX-License-Identifier: Apache-2.0
 """Instruction canary ("Simon says").
 
 The global instructions (agents/AGENTS.md, section 0) tell every agent to start

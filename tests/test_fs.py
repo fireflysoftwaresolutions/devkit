@@ -1,4 +1,5 @@
-# Copyright (c) 2026 Firefly Software Solutions Inc. All rights reserved.
+# Copyright (c) 2026 Firefly Software Solutions Inc.
+# SPDX-License-Identifier: Apache-2.0
 """File commands: dev rm, mv, cp, files, find, grep, diff. Run: python3 -m unittest tests.test_fs -v
 
 Every test works in a throwaway workspace (a fake ~/Development with real git repositories in a temp dir)

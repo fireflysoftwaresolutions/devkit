@@ -1,4 +1,5 @@
-# Copyright (c) 2026 Firefly Software Solutions Inc. All rights reserved.
+# Copyright (c) 2026 Firefly Software Solutions Inc.
+# SPDX-License-Identifier: Apache-2.0
 """CI/CD pipelines: the YAML reader, `dev ci audit` on every host, the GitHub autofixes and `dev ci init`.
 
 Hermetic: no network and no external linters (they are mocked where a test needs them). Run: python3 -m unittest -v

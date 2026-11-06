@@ -1,4 +1,5 @@
-# Copyright (c) 2026 Firefly Software Solutions Inc. All rights reserved.
+# Copyright (c) 2026 Firefly Software Solutions Inc.
+# SPDX-License-Identifier: Apache-2.0
 """`dev test` (lib/devkit/testx.py) and `dev ci --run --resume`.
 
 Hermetic: tiny git repositories in temp dirs, devkit state and the prove temp root redirected, no network. A real

@@ -1,4 +1,5 @@
-# Copyright (c) 2026 Firefly Software Solutions Inc. All rights reserved.
+# Copyright (c) 2026 Firefly Software Solutions Inc.
+# SPDX-License-Identifier: Apache-2.0
 """`dev install` (idempotent configuration of git, Claude Code, Codex, skills, Docker, launchd)
 and `dev doctor` (verification)."""
 from __future__ import annotations

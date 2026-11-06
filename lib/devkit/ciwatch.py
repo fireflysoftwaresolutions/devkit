@@ -1,4 +1,5 @@
-# Copyright (c) 2026 Firefly Software Solutions Inc. All rights reserved.
+# Copyright (c) 2026 Firefly Software Solutions Inc.
+# SPDX-License-Identifier: Apache-2.0
 """Watch a CI/CD run to its end, and when it fails, say why and what to do: `dev ci watch`.
 
 After a push or a pull request, devkit follows the branch's pipeline runs (GitHub Actions, GitLab CI, Bitbucket

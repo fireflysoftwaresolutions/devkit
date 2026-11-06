@@ -1,4 +1,5 @@
-# Copyright (c) 2026 Firefly Software Solutions Inc. All rights reserved.
+# Copyright (c) 2026 Firefly Software Solutions Inc.
+# SPDX-License-Identifier: Apache-2.0
 """`dev crew`: the roster (config/crew.json), the generated Claude Code agents and Codex roles, briefs, crew messages,
 guided and auto mode with decisions, and the devkit_crew MCP tool. Hermetic: progress state lives in a temporary
 folder, agent files are written to a temporary folder, and nothing touches the network."""

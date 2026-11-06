@@ -1,4 +1,5 @@
-# Copyright (c) 2026 Firefly Software Solutions Inc. All rights reserved.
+# Copyright (c) 2026 Firefly Software Solutions Inc.
+# SPDX-License-Identifier: Apache-2.0
 """Work items, locks, history and presence — the multi-user, multi-machine layer of the handoff repo.
 
 Layout (all inside the handoff repository, shared by every developer and machine):

@@ -1,4 +1,5 @@
-# Copyright (c) 2026 Firefly Software Solutions Inc. All rights reserved.
+# Copyright (c) 2026 Firefly Software Solutions Inc.
+# SPDX-License-Identifier: Apache-2.0
 """`dev sec scan`: secrets, vulnerable dependencies, code patterns, and filesystem/IaC misconfiguration.
 
   gitleaks     secrets in the working tree and (with --history) the git history

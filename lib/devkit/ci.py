@@ -1,4 +1,5 @@
-# Copyright (c) 2026 Firefly Software Solutions Inc. All rights reserved.
+# Copyright (c) 2026 Firefly Software Solutions Inc.
+# SPDX-License-Identifier: Apache-2.0
 """`dev ci`: show what GitHub Actions will run, so it can be run locally first.
 
 A deliberately small, dependency-free reader for .github/workflows/*.yml: it

@@ -1,4 +1,5 @@
-# Copyright (c) 2026 Firefly Software Solutions Inc. All rights reserved.
+# Copyright (c) 2026 Firefly Software Solutions Inc.
+# SPDX-License-Identifier: Apache-2.0
 """`dev mcp`: devkit's tools for Claude Desktop (chat and Cowork) over the Model Context Protocol.
 
 A stdlib MCP server on stdio: JSON-RPC 2.0, one message per line. Every tool runs a `dev` command as a subprocess

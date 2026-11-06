@@ -1,4 +1,5 @@
-# Copyright (c) 2026 Firefly Software Solutions Inc. All rights reserved.
+# Copyright (c) 2026 Firefly Software Solutions Inc.
+# SPDX-License-Identifier: Apache-2.0
 """`dev desktop`: devkit's Claude Desktop extension, an MCPB bundle that runs `dev mcp`.
 
 pack     stage desktop/manifest.json (version from VERSION), the launcher, LICENSE, NOTICE and the icon; check the

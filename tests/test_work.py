@@ -1,4 +1,5 @@
-# Copyright (c) 2026 Firefly Software Solutions Inc. All rights reserved.
+# Copyright (c) 2026 Firefly Software Solutions Inc.
+# SPDX-License-Identifier: Apache-2.0
 """Work items, locks, history, plans and handoff isolation. Run: python3 -m unittest discover -s tests -v"""
 import sys
 import tempfile
