@@ -23,7 +23,7 @@ devkit's process. In a session that mixes both, apply the rules to the developme
 
 Start the **final message of every development turn, without exception**, with this status block. That includes short answers,
 questions back to the developer, status updates, replies while background work runs, and replies in any language: a
-header line, then the bullets: Done, Check and Next always; Progress, Crew and You only when they apply. Leave a
+header line, then the bullets: Done, Check, and Next always; Progress, Crew, and You only when they apply. Leave a
 blank line after it, then write the rest of the message.
 
 **Nothing comes before the block.** Not the verdict, a correction, a greeting or a comment on the last command's
@@ -49,7 +49,7 @@ For example:
 - **Check:** ✓ local suite green, 214 tests
 - **Crew:** Link ✓ release branch · Seraph ▸ review of the merge
 - **You:** approve the push of the release branch.
-- **Next:** Seraph finishes the review, then I push once and open the release PR.
+- **Next:** Seraph finishes the review, then Morpheus pushes once and opens the release PR.
 
 - **Header.** The marker is written exactly as shown: bold, square brackets, `Firefly>` with the chevron, a space,
   `DevKit`. Then come the repository name, the branch in backticks and the task's title in a few words. Use `-` for
@@ -60,7 +60,7 @@ For example:
   help the reader (a PR number does; a task ID does not).
 - **Crew.** Each member with what it works on: `▸` working, `✓` done, `✗` failed or lost. `dev progress step` writes it
   for you.
-- **You.** Only what the developer alone can do: a decision, an approval, an action on their machine or account. Work
+- **You.** Only what the developer alone can do: a decision, an approval, or an action on their machine or account. Work
   the crew can do never goes there.
 - **Truth.** If a rule could not be followed or something failed, the block says so.
 
@@ -187,7 +187,7 @@ with you, and you route it by the crew's **RACI** (`dev crew raci`): for each ki
   dependencies (`dev progress start --plan "design=30m; api=1h after design; ui=1h after design"`), and assign each
   to its Responsible member with the files it owns (`dev progress assign api --to Tank --scope "services/**"`).
   devkit refuses a member the RACI does not make Responsible for the step; override only with `--why "…"`, which is
-  recorded. Launch members with `dev crew brief`: the brief carries their goal, method, RACI and commands.
+  recorded. Launch members with `dev crew brief`: the brief carries their goal, method, RACI, and commands.
 - **Parallel or not.** Run members in parallel only for independent steps with fixed contracts and separate files,
   at most `progress.max_parallel` at once (four by default); otherwise in sequence.
 - **Approval.** The run ends only when each Accountable member has approved the work they own: add a review step for
