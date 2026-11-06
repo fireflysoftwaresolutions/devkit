@@ -17,6 +17,8 @@ from __future__ import annotations
 import fnmatch
 import re
 
+from . import approvals
+
 LETTERS = ("R", "A", "C", "I")
 MIN_SCORE = 3   # one phrase or two words; below it a task is not clearly one kind of work: no routing by
                 # the RACI and no refusals
@@ -61,8 +63,11 @@ def check(data: dict):
             errors.append(f"activity `{aid}`: missing `name`")
         if not isinstance(a.get("A"), str) or not a["A"]:
             errors.append(f"activity `{aid}`: `A` must be exactly one member")
-        elif a["A"] not in ids:
+        elif a["A"] not in ids and a["A"] != approvals.DEVELOPER:
             errors.append(f"activity `{aid}`: A `{a['A']}` is not a crew member")
+        if "A_fallback" in a and not (isinstance(a["A_fallback"], str) and a["A_fallback"] in ids):
+            errors.append(f"activity `{aid}`: `A_fallback` (who approves when its A did the work) must be a crew "
+                          f"member's id, not {a['A_fallback']!r}")
         for k in ("R", "C", "I"):
             v = a.get(k)
             if not isinstance(v, list) or not all(isinstance(x, str) for x in v):
@@ -164,10 +169,10 @@ def roles_of(member_id: str, roster=None) -> dict:
 
 
 def _name(mid: str, roster=None) -> str:
-    """The role first, then the name: "Backend engineer (Tank)"."""
+    """The role first, then the name: "Backend engineer (Tank)"; "the developer" for the developer as an approver."""
     m = next((x for x in _roster(roster).get("members") or [] if x.get("id") == mid), None)
     if not m:
-        return mid
+        return "the developer" if mid == approvals.DEVELOPER else mid
     return f"{m['title']} ({m['name']})" if m.get("title") else m.get("name") or mid
 
 
@@ -188,11 +193,6 @@ def names(ids, roster=None) -> str:
 def _lower(s: str) -> str:
     """“Back-end services and APIs” → “back-end services and APIs” (acronyms stay)."""
     return s[:1].lower() + s[1:] if s[:2] != s[:2].upper() else s
-
-
-def _takes(member_id: str, act: dict) -> bool:
-    """May this member take this kind of work: Responsible, Accountable or Consulted for it?"""
-    return member_id in (act.get("R") or []) or member_id == act.get("A") or member_id in (act.get("C") or [])
 
 
 def resolve_activity(ref: str, roster=None) -> dict:
@@ -277,15 +277,15 @@ def anchor(text: str = "", member=None, files=None, activity=None, roster=None):
 
 def check_assignment(member_id: str, text: str, roster=None, activity=None, files=None):
     """Why giving this task to this member breaks the RACI, or None. Only a declared activity refuses: the member
-    must be Responsible, Accountable or Consulted for it. Without one, the member's own Responsible kind of work is
-    the step's anchor (`anchor`), and the task's words, in whatever language, refuse nothing (C13.7; crew gap review
-    2, R2-2)."""
+    must be Responsible for it (approvals.takes; its Accountable or a Consulted member needs --why, R2-3). Without
+    one, the member's own Responsible kind of work is the step's anchor (`anchor`), and the task's words, in whatever
+    language, refuse nothing (C13.7; crew gap review 2, R2-2)."""
     if activity:
         try:
             act = resolve_activity(activity, roster)
         except ValueError as e:
             return str(e)
-        if _takes(member_id, act):
+        if approvals.takes(member_id, act):
             return None
         return _refusal(member_id, f"“{text}” is marked as {_lower(act['name'])} work (--activity {act['id']})",
                         act, roster)

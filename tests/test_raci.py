@@ -121,6 +121,19 @@ class RosterTests(unittest.TestCase):
         self.assertEqual(len(errors), 1, errors)
         self.assertIn("architect approves `research` and is consulted on it", errors[0])
 
+    def test_the_developer_may_approve_a_kind_of_work_and_a_fallback_approver_must_be_a_member(self):
+        # R2-9 and F6: "developer" is a valid A; A_fallback, who approves when the A did the work, is a member id
+        r = json.loads(crew.ROSTER.read_text())
+
+        def on(aid, **kv):
+            return dict(r, activities=[dict(a, **kv) if a["id"] == aid else a for a in r["activities"]])
+        self.assertEqual(raci.check(on("scope", A="developer"))[0], [])
+        self.assertEqual(raci.check(on("cicd", A_fallback="architect"))[0], [])
+        for bad in ("nobody", ["seraph"], ""):
+            with self.subTest(A_fallback=bad):
+                self.assertIn("activity `cicd`: `A_fallback`", " ".join(raci.check(on("cicd", A_fallback=bad))[0]))
+        self.assertIn("A `nobody` is not a crew member", " ".join(raci.check(on("scope", A="nobody"))[0]))
+
 
 class RoutingTests(unittest.TestCase):
     def test_real_tasks_go_to_the_member_the_raci_makes_responsible(self):
@@ -291,6 +304,17 @@ class AssignmentTests(unittest.TestCase):
         run = pg.step("API shipped", kind="done", why="a spike, thrown away", now=self.m(10))
         self.assertEqual(run["state"], "done")
         self.assertEqual(run["raci_overrides"][-1]["owed"], [["seraph", ["build the JSON API server"]]])
+
+    def test_the_approver_takes_its_own_kind_of_work_only_with_a_reason(self):
+        # R2-3: only the Responsible member takes a kind of work; the Keymaker approves CI/CD, so he needs --why
+        pg.start("CI", plan=["fix the pipeline"], now=self.m(0))
+        for who in ("The Keymaker", "Niobe"):  # its Accountable member, and a Consulted one
+            with self.subTest(member=who):
+                with self.assertRaises(pg.StepError) as e:
+                    pg.assign("fix the pipeline", who, activity="cicd", now=self.m(0))
+                self.assertIn("Release engineer (Link) does it", str(e.exception))
+        run = pg.assign("fix the pipeline", "The Keymaker", activity="cicd", why="Link is out today", now=self.m(0))
+        self.assertEqual(run["raci_overrides"][-1]["why"], "Link is out today")
 
 
 class MorpheusTests(unittest.TestCase):
@@ -476,6 +500,13 @@ class TeamCrewTests(unittest.TestCase):
         with self.assertRaises(ValueError) as e:  # validated before it is written
             crew.set_raci("backend", {"A": ["nobody"]}, "typo")
         self.assertIn("would break the crew", str(e.exception))
+
+    def test_the_team_can_make_the_developer_the_approver_of_a_kind_of_work(self):
+        # R2-9: scope is approved by the developer once F6 accepts "developer" as an approver
+        act = crew.set_raci("scope", {"A": ["developer"]}, "R2-9: the developer approves scope", by="ana@mbp")
+        self.assertEqual(act["A"], "developer")
+        self.assertIn("| Scope and priorities | Product owner (Councillor Hamann) | the developer |",
+                      (self.handoff / "crew" / "README.md").read_text())
 
     def test_the_generated_plugin_agents_ignore_the_team_changes(self):
         crew.set_member("tank", "goal", "A different goal.", "team wording", by="ana@mbp")
