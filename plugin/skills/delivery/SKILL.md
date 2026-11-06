@@ -45,6 +45,13 @@ dev pr checks --watch
 - Never merge the individual PRs one by one to "see what CI says." The integration PR supersedes them: when it is
   merged, GitHub marks them merged (their commits are included) or close them with a link.
 
+## CI is watched for you
+
+After `dev push`, `dev pr create`, `dev pr merge` or `dev release`, devkit follows the pipeline to the end in the
+background (`dev ci watch`) and tells this session how it ended: green, or red with the first error, its class and
+the one next action (`cicd` skill, section 6). Run `dev ci watch` yourself in the background when you want to be
+notified the moment it ends. Never poll.
+
 ## 3. When CI fails
 
 1. `dev run view <run-id> --failed`—read the actual error.

@@ -80,14 +80,22 @@ nothing falls between them.
 | --- | --- | --- | --- |
 | Plan | `dev plan new --kind plan\|spec\|spike\|bugfix\|adr` | Superpowers (brainstorming, writing-plans), `architecture` | [Templates](templates.md) |
 | Task | `dev task add`, `dev task start` | `using-devkit` | [Teams and machines](teams.md) |
-| Build | `dev progress`, `dev files`, `dev grep`, `dev diff` | the required skills for the work | [Skills and plugins](skills-and-plugins.md#required-skills) |
+| Build | `dev progress`, `dev crew`, `dev test`, `dev stubs`, `dev files`, `dev grep`, `dev diff` | the required skills for the work, `crew`, `testing` | [Skills and plugins](skills-and-plugins.md#required-skills), [The crew](crew.md), [Testing](testing.md) |
 | Test gate | `dev ci --run`, `dev sec scan` | `delivery`, `devsecops` | [Git and GitHub › Local CI evidence](git-and-github.md#local-ci-evidence) |
 | Review and PR | `/code-review`, `dev pr create` with the PR template | `communicating` | [Git and GitHub › Pull requests](git-and-github.md#pull-requests) |
 | Integrate | one `release/<version>` or `integration/<topic>` branch, `dev push` | `delivery` | [Delivery](delivery.md) |
 | Release | `dev pr merge`, `dev release`, `dev delivery` | `release-policy` | [Git and GitHub › Releases](git-and-github.md#releases) |
-| CI status | `dev pr checks --watch`, `dev ci status --watch` | `communicating` | [Commands](commands.md) |
+| CI status | `dev ci watch`, `dev ci status --watch`, `dev ci audit` | `cicd`, `communicating` | [CI/CD pipelines](ci-cd.md) |
 | Deploy | a tag and its pipeline (GitOps) | `delivery` | [Delivery](delivery.md) |
 | Handoff | `dev handoff --log`, `dev lesson add` | `handoff`, `learning-loop` | [Concepts › Handoff notes](#handoff-notes), [Lessons](lessons.md) |
+
+### Who does the work, and how long it takes
+
+When a task needs more than one kind of expertise, the main session leads devkit's crew as Morpheus: 25 specialist
+agents, each in its own lane, with its own files and time (see [The crew](crew.md)). Every run's plan has steps with
+estimates and dependencies; devkit counts only active time and gives the ETA as a range along the critical path, so
+parallel lanes shorten it and waiting for you does not (see
+[Progress and communication › Time and estimates](progress-and-communication.md#time-and-estimates)).
 
 ## The handoff repository
 

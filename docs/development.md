@@ -3,7 +3,8 @@
 This guide is for people who change devkit itself: the code layout, the design principles, the tests, and how a
 release is made.
 
-Maintained by Andrés Contreras Guillén. © 2026 Firefly Software Solutions Inc. All rights reserved.
+Maintained by Andrés Contreras Guillén. © 2026 Firefly Software Solutions Inc. Licensed under the Apache License 2.0;
+see [LICENSE](../LICENSE).
 
 ## Code layout
 
@@ -126,10 +127,11 @@ devkit follows its own delivery method: integrate locally, run the full suite, p
 
 ## Conventions
 
-- Every source file starts with the copyright header:
+- Every source file starts with the copyright and license header (`//` comments in JavaScript):
 
   ```python
-  # Copyright (c) 2026 Firefly Software Solutions Inc. All rights reserved.
+  # Copyright (c) 2026 Firefly Software Solutions Inc.
+  # SPDX-License-Identifier: Apache-2.0
   ```
 
 - Module docstrings explain purpose and safety rules; user-facing messages are short and actionable.

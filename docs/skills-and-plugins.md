@@ -32,13 +32,21 @@ agent's copy when it differs from the checkout.
 | `devsecops` | Threat modeling, secrets, dependencies and supply chain, SAST, CI hardening, containers and infrastructure, and `dev sec scan` |
 | `docs` | Documentation to the devkit standard: Diátaxis, Google style, American English, `dev docs check` |
 | `diagrams` | Branded, validated SVG diagrams with `dev diagram` |
+| `testing` | Tests that can fail for a real bug, a strategy per kind of code, TDD done right, running only what a change can break (`dev test`), flaky tests, mutation testing, diagnosing an existing suite (see [Testing](testing.md)) |
+| `cicd` | Fast, reliable, DevSecOps pipelines on GitHub Actions, GitLab, Bitbucket and Azure: `dev ci audit` and `dev ci init` (see [CI/CD pipelines](ci-cd.md)) |
+| `crew` | Leading devkit's crew: who to send, parallel or in sequence, briefs, lanes, scopes, messages, delegation, guided or automatic decisions (see [The crew](crew.md)) |
 
-Slash commands (in Codex, skills of the same name): `/devkit:status`, `/devkit:overview`, `/devkit:task`,
-`/devkit:handoff`, `/devkit:standup`, `/devkit:ship`, `/devkit:ci`, `/devkit:dashboard`, and `/devkit:doctor`.
+Slash commands: `/devkit:status`, `/devkit:overview`, `/devkit:task`, `/devkit:handoff`, `/devkit:standup`,
+`/devkit:ship`, `/devkit:ci`, `/devkit:dashboard`, `/devkit:doctor`, `/devkit:progress`, `/devkit:crew-status`,
+`/devkit:test`, and `/devkit:stubs`. Codex plugins have no slash commands (their manifest takes skills, hooks, apps,
+MCP servers, and scheduled tasks), so `dev install` builds Codex's own copy of the plugin in
+`~/.local/share/devkit/codex-marketplace/`, where each command is a skill of the same name and content; Codex and the
+ChatGPT app list them with the other skills.
 
-The plugin also brings the `scout` agent for Claude Code: a read-only lookup agent on a small model (see
-[Models and tokens › The scout agent](models-and-tokens.md#the-scout-agent)). Codex gets the same role from
-`~/.codex/agents/scout.toml`.
+The plugin also brings the crew: 25 specialist agents (`devkit:neo`, `devkit:trinity`, `devkit:seraph`, …),
+generated from `config/crew.json`, among them Sparks, the read-only lookup agent on a small model (`scout` still
+works as an alias; see [Models and tokens › Sparks, the scout agent](models-and-tokens.md#sparks-the-scout-agent)). Codex gets the
+same roles in `~/.codex/agents/`. See [The crew](crew.md).
 
 ## Required skills
 
@@ -49,18 +57,20 @@ skills they require, in `config/skill-rules.json`, and enforces the mapping in b
 
 | Rule | Claude Code | Codex | Matches (files, or a request about…) |
 | --- | --- | --- | --- |
-| `ui` | `frontend-design`, `impeccable` | the same | HTML, CSS, Sass, Less, TSX, JSX, Vue, and Svelte files, code in other languages that renders HTML or styles; UI, UX, frontend, dashboards, layout, screens |
+| `ui` | `frontend-design`, `impeccable` | the same | HTML, CSS, Sass, Less, TSX, JSX, Vue, and Svelte files, code in other languages that renders HTML or styles; UI, UX, frontend, CSS, layout, or a design verb with a dashboard, page, screen, component, or form ("improve the dashboard," not "open the dashboard") |
+| `testing` | `testing` | `testing` | Test files of every stack, `conftest.py`, test runner configs; tests, TDD, coverage, flaky tests, test suites |
 | `angular` | `angular-developer` | `angular-developer` | Components, `angular.json`, routes; Angular |
 | `react` | `react-best-practices` | `react-best-practices` | TSX and JSX files; React, Next.js |
 | `spring` | `java-springboot`, `backend` | the same | Java and Kotlin files that use `org.springframework`; Spring, Java |
 | `java-tests` | `java-junit`, `spring-boot-testing` | the same | `*Test.java`, `*Tests.java`, `*IT.java` |
 | `api` | `backend` | `backend` | OpenAPI, GraphQL, and protobuf files, controllers; APIs, endpoints, backends |
 | `database` | `supabase-postgres-best-practices`, `backend` | the same | SQL files and migration folders; migrations, schemas, Postgres, indexes |
-| `workflows` | `github-actions-hardening`, `delivery` | the same | `.github/workflows/` and `.github/actions/`; GitHub Actions, CI pipelines |
+| `workflows` | `cicd`, `github-actions-hardening`, `delivery` | the same | GitHub, GitLab, Bitbucket and Azure pipeline files; GitHub Actions, GitLab CI, Bitbucket Pipelines, Azure DevOps, CI/CD, pipelines, workflows |
 | `security` | `devsecops` | `devsecops` | Dockerfiles, security folders, Terraform; security, auth, secrets, vulnerabilities |
 | `docs` | `docs` | `docs` | `README.md`, `docs/**/*.md`, MDX, `CHANGELOG.md`, `CONTRIBUTING.md`; documentation, guides |
 | `diagrams` | `diagrams` | `diagrams` | Diagram specs, SVG, C4, and Mermaid files; diagrams |
 | `delivery` | `delivery`, `release-policy` | the same | `CHANGELOG.md`, `VERSION`, `cliff.toml`, release-please files; a request about releases, deployments, pushes, merges, pull requests, tags, versions, bumps, changelogs, hotfixes, or publishing |
+| `crew` | `crew`, `working-efficiently` | the same | A request about the crew, subagents, parallel agents, orchestration, or delegation |
 | `communicating` | `communicating` | `communicating` | A request about status reports, delegation, or handovers |
 | `learning` | `learning-loop` | `learning-loop` | A request about lessons, postmortems, retrospectives, root causes, or mistakes that repeat |
 

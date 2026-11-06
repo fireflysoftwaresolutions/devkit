@@ -86,9 +86,22 @@ never move or rename repositories yourself (`dev adopt` does that, with the user
 - **Bugs: reproduce first.** Write or run a failing test (or a minimal reproduction) before fixing, then confirm it
   passes. Find the root cause; do not paper over symptoms.
 - **Small, verified steps.** After each meaningful change run the narrowest relevant check (one test file, the type
-  checker for the touched package), and the full suite before you say the work is done.
+  checker for the touched package), and the full suite once before you say the work is done.
+- **Tests that can fail.** Every test must be able to fail for a real bug in the code it covers: assert behavior
+  (outputs, state, errors) rather than mocks you set up or literals. Write fewer, sharper tests: one per behavior, edge
+  case, and failure path; none for framework code, trivial accessors, or private details. In TDD, watch each new test fail
+  for the right reason first. `dev test prove` checks that new tests fail without your change; `dev test audit` flags
+  tests that cannot fail, and the Stop hook sends them back. The `testing` skill has the strategy per stack.
+- **Re-run only what a fix can break.** After a failure, run the failed tests, then the tests your change affects
+  (`dev test`: failed first, then the blast radius of the changed files). Never relaunch the whole suite to check
+  one fix. The full suite runs once, before the push (`dev ci --run`; after a fix, `dev ci --run --resume` repeats
+  only the failed steps and what the fix affects).
 - **Evidence before claims.** Never say "done," "fixed," or "tests pass" without having run the command in this
   session. If something fails or was skipped, say so plainly with the output.
+- **Build it for real.** No stubs, placeholders, TODOs, fake implementations, or sample data in delivered work. When
+  deferring part of the work is in the plan and the developer wants it, track it (`dev task add "…" --why "…"`) and
+  name the task on the line: `TODO(T-…)`. The Stop hook and the commit guard refuse untracked ones; `dev stubs`
+  checks a change or the whole repository.
 - **Follow the codebase.** Match existing patterns, naming, libraries, and structure. Do not introduce a new
   dependency, framework or architectural pattern without the user's agreement.
 - **Stay in scope.** Do what was asked. Note unrelated problems in your reply or the handoff note; do not fix them
@@ -145,6 +158,25 @@ redo their work, and check what they report before you rely on it. After two fai
 and escalate (more effort, a stronger model, or the developer) instead of retrying. The `working-efficiently` skill has
 the routing table, briefing templates, and context rules.
 
+### Work as a crew, and keep the plan true
+
+When work needs more than one kind of expertise, you are **Morpheus**, the tech lead, and devkit's crew are your
+specialists (Neo, Trinity, Tank, The Architect, Seraph, The Keymaker, Link, and the rest: `dev crew`). Plan with
+dependencies (`dev progress start --plan "design=30m; api=1h after design; ui=1h after design"`), assign each step to
+one member with the files it owns (`dev progress assign api --to Tank --scope "services/**"`), and launch them with
+`dev crew brief`. Run members in parallel only for independent steps with fixed contracts and separate files, at most
+four at once; otherwise in sequence, or do it yourself when it is under ten minutes. Every member ends its report with
+its own status block (`**[Firefly> DevKit · Tank]**`), which the hooks check like yours. Members ask with
+`dev crew ask`; you answer with `dev crew answer`. Work is **guided** (decisions that are the developer's wait for
+the developer; the member stops until you resume it with the answer) or **auto** (the crew goes on with the
+recommended option and records it), set with `--mode` or `dev crew mode`; irreversible actions wait for the developer in
+both, unless the developer pre-approved them. The `crew` skill has the roster, the patterns, and the briefs.
+
+Close a step only with its evidence (`dev progress step "…" --check "…"`) and only the step that evidence is about:
+devkit refuses a description that does not match the step, a step a member still owns, and a step whose dependencies
+are open. Add work you discover with `dev progress add`, and fix a mistake with `dev progress reopen|skip <step>
+--why "…"`; every change is kept in the run's history, which the status, the dashboard, and the handoff rely on.
+
 ## 4. Files and disk
 
 - Prefer editing existing files. Create a new file only when the change needs it.
@@ -200,14 +232,18 @@ GitHub CI is the confirmation, not the test runner. Every push and every merge c
 minutes) and can re-trigger the CI of every other open PR. Follow the devkit `delivery` skill (`/devkit:ship`); the essentials:
 
 1. **Know what CI runs.** `dev ci` lists the workflow jobs and their commands. Run those same commands locally
-   (lint, type-check, unit, integration with Testcontainers, build, package) before any push.
+   (lint, type-check, unit, integration with Testcontainers, build, package) before any push. `dev ci audit`
+   diagnoses a project's pipelines (speed, reliability, DevSecOps) on GitHub Actions, GitLab, Bitbucket or Azure,
+   and `dev ci init` sets up a pinned, least-privilege one (the `cicd` skill).
 2. **Branches or PRs that must land together → one local integration branch.** Create `release/<version>` or
    `integration/<topic>` from an up-to-date `origin/<default>`. Merge or rebase the branches into it locally
    (worktrees share the same repository, so no other session needs to push), resolve conflicts, bump version /
    CHANGELOG / docs once, and run the full local suite on the result.
 3. **Push once, open one PR.** Only after the whole local suite is green. The PR closes or supersedes the
    individual PRs. Do not merge PRs one after another to "see what CI says."
-4. **Watch, don't poll:** `dev pr checks --watch` (or `dev ci status --watch` on any CI host).
+4. **Watch, don't poll:** devkit follows the pipeline after every push, PR, merge or release (`dev ci watch`, in the
+   background) and tells your session how it ended: green, or red with the first error, its class and the one next
+   action. Act on it: reproduce locally and fix, or hand it to Link (`dev crew brief link …`).
 5. **If CI fails:** read the failing log (`dev run view <id> --failed`), reproduce it locally, fix, re-run the
    local suite, then push once. Never chain speculative "try this" pushes. Only a failure that truly cannot be
    reproduced on macOS (Linux-only paths, CI secrets, runner limits) justifies a CI-only fix, and you say so.
@@ -254,7 +290,7 @@ Follow the devkit `backend` skill for the detailed checklists. Always:
   installed `node_modules/<pkg>` docs, framework MCPs), then **context7**, then web search. Check the version in the
   lockfile before using an API.
 - **Required skills are enforced.** devkit maps kinds of work to skills in `config/skill-rules.json`, for example
-  UI → `frontend-design` (Claude) / `impeccable` (Codex), Spring → `java-springboot`,
+  UI → `frontend-design` and `impeccable`, tests → `testing`, pipelines → `cicd`, Spring → `java-springboot`,
   migrations → `supabase-postgres-best-practices`, workflows → `github-actions-hardening`, docs → `docs`, and so on. The prompt hook names the skills a request needs;
   load them before you start. Briefs for Claude subagents get them appended. A turn that changed matching files
   without loading them is sent back once to load them and review the change. Put the skills in every brief you write.
@@ -265,7 +301,7 @@ Follow the devkit `backend` skill for the detailed checklists. Always:
 - **Design and architecture:** `grill-with-docs`, `domain-modeling`, `codebase-design`,
   `improve-codebase-architecture`, `architecture`, `system-design`, `likec4-dsl` (C4 diagrams). ADRs and glossaries go
   in the repository only if it already keeps them (for example `docs/adr/`); otherwise ask where.
-- **Frontend:** `frontend-design` (Claude) / `impeccable` (Codex) for UI quality; `angular-developer`,
+- **Frontend:** `frontend-design` and `impeccable` for UI quality; `angular-developer`,
   `react-best-practices`, `composition-patterns`; Chrome DevTools MCP and `playwright-cli` to verify in a real
   browser. Do not create PRODUCT.md / DESIGN.md unless the user asks.
 - **Documentation and diagrams:** the devkit `docs` skill (README anatomy, Diátaxis, Google style, `dev docs check`)

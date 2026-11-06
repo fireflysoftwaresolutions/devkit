@@ -14,59 +14,99 @@ desktop notifications, timing reports, written templates for every kind of messa
 Agents run these commands; you can too. The global instructions and the `communicating` skill tell agents when.
 
 ```bash
-dev progress start "Export invoices as CSV" --plan "API endpoint; UI button; tests; docs" --estimate 1h
-dev progress step "API endpoint streams CSV" --check "12 tests pass" --next "UI button"
+dev progress start "Export invoices as CSV" --plan "api=30m; ui=30m after api; tests=20m after ui; docs=15m"
+dev progress step "the API endpoint streams CSV" --check "12 tests pass" --next "UI button"
 dev progress block "need the export permission name" --next "a decision from Finance"
 dev progress done "CSV export merged"
 dev progress                      # every run on this Mac, and the runs of other machines
 ```
 
-`dev progress step` prints the update to send, and the update is the status block itself, with the plan's checklist
-under it. An update that ends a turn therefore always starts the way the global instructions require:
+`dev progress step` prints the update to send, and the update is the status block itself, with the plan under it:
+each step's state, owner, and time. An update that ends a turn therefore always starts the way the global instructions
+require:
 
 ```markdown
 **[Firefly> DevKit]** billing · `feat/invoice-export` · Export invoices as CSV
-- **Done:** API endpoint streams CSV
+- **Done:** the API endpoint streams CSV
 - **Check:** ✓ 12 tests pass
-- **Progress:** 1/4 · 14m elapsed of ~1h00m · ETA ~38m
+- **Progress:** 1/4 · 24m active of ~1h35m · ETA ~1h00m–1h35m
 - **Next:** UI button
 
-✓ 1. API endpoint
-▸ 2. UI button
-○ 3. tests
-○ 4. docs
+✓ 1. api · 24m of ~30m
+▸ 2. ui · 0m of ~30m
+○ 3. tests · ~20m
+○ 4. docs · ~15m
 ```
 
-`--check` fills the Check bullet with the evidence for the step (`✓` is added when you give no glyph). Without it, Check
-reads `⚠ not verified at this step`. A blocked run shows `✗ blocked` and `Next: unblock: …`.
+`--check` fills the Check bullet with the evidence for the step (`✓` is added when you give no glyph). A blocked run
+shows `✗ blocked` and `Next: unblock: …`.
 
 | Command | What it records |
 | --- | --- |
-| `start "<goal>" [--steps N] [--plan "a; b; c"] [--estimate 30m]` | A run for the current session: goal, number of steps (or the named steps of `--plan`), estimate. It prints how long similar work took here |
-| `step "<what finished>" [--check "<evidence>"] [--next "…"]` | One more step done, its evidence, and what comes next; prints the update as a status block |
-| `block "<why>" [--next "<what is needed>"]` | The run is blocked; you get a desktop notification |
-| `done "<outcome>"` | The run is finished; the actual time is recorded against the estimate, and you get a desktop notification |
+| `start "<goal>" [--plan "a=30m; b=1h after a; c"] [--estimate 2h] [--steps N]` | A run for the current session: the goal and the plan. Each step can carry an estimate (`=30m`) and the steps it waits for (`after a, b`); steps without an estimate share what `--estimate` leaves. It prints how long similar work took here |
+| `step "<what finished>" --check "<evidence>" [--step <n or name>] [--next "…"]` | Closes the running step (or the one named), with its evidence; prints the update |
+| `add "<name>=<estimate> [after …]" [--why "…"]` | A step found during the work |
+| `assign <step> --to <member> [--scope "<globs>"]` | Hands a step to a crew member ([The crew](crew.md)); its time is that member's time |
+| `begin <step>` | Starts a step in parallel with the running one (work you do yourself) |
+| `reopen <step> --why "…"` · `skip <step> --why "…"` | Undoes a wrong close, or skips a step on purpose |
+| `history` | Every step change: when, from → to, by whom, why |
+| `block "<why>" [--next "…"]` | The run is blocked; you get a desktop notification |
+| `done "<outcome>"` | The run is finished; the actual time is recorded against the estimate; you get a notification |
 
 A run belongs to the agent session that started it. Claude Code sessions export `DEVKIT_SESSION` at session start, so
 devkit knows exactly which session runs the command. For Codex, devkit uses the most recent devkit session in the same
 repository (within 12 hours); from a plain shell, the run belongs to that shell.
 
-### How the ETA is computed
+### Keeping the plan true
 
-- **From the real pace.** Minutes left by pace = steps left × elapsed time ÷ steps done.
-- **From the estimate.** Minutes left by estimate = the calibrated estimate − elapsed time.
-- **Blended.** The ETA weighs the two, and trusts the pace more as steps complete. With no steps done it is the
-  estimate; from about two thirds of the steps on, it is the pace.
+The status, the dashboard, the handoff and the next session all read the plan, so devkit checks every change to it:
+
+- **Evidence.** Closing a step needs `--check "<evidence>"`, or `--no-check` when there is nothing to verify (the
+  update then shows ⚠).
+- **The right step.** The description must describe the step it closes: a close of "integrate dev test" with "time
+  model built" is refused, and devkit names the step it sounds like or suggests `dev progress add`. When more than one
+  step is running, name it with `--step`.
+- **Not someone else's step,** while the crew member who owns it is still working, and **not before its
+  dependencies** are done.
+- **Not finished with open steps:** `dev progress done` refuses while steps are pending; close or skip each one.
+- **Fixable and visible:** `reopen` and `skip` need a reason, and every change (by you, by a crew member, or by
+  devkit) is in `dev progress history`. The output of `step` ends with the exact change it made, for example
+  `changed: 2. ui running → done`.
+
+`--force` skips the checks when the description really does mean that step.
+
+Add a step when the work **starts**, not when it ends: `dev progress add "<step>=30m"`, then `dev progress begin
+<step>`. Time is measured per step from its start, so a step added after the fact gets no time of its own, and its
+minutes count for the step that was running.
+
+### Time and estimates
+
+devkit measures time the same way every time, so ETAs and calibration are comparable:
+
+- **Active time, not wall-clock time.** A run is worked on while the main agent's turn runs (from your prompt to
+  its final message) or a subagent works (from its start to its report). The union of those intervals is the active
+  time: waiting for you is not counted, and parallel agents are not counted twice. The update shows wall-clock time
+  next to it when they differ by five minutes or more.
+- **A step's time** is the active time between its start and its end; for a step owned by a crew member, that
+  member's own time.
+- **Pace** is actual ÷ estimate over the steps finished in this run, weighed against the project's history in
+  proportion to the evidence (a single step does not swing it), and kept between 0.5× and 2.5×. A step closed in
+  under a tenth of its estimate is bookkeeping and does not count.
+- **ETA** is the critical path through the plan: a step starts when the steps it waits for are done and its lane is
+  free; the main agent and each crew member are separate lanes that run in parallel. The ETA is the time the last
+  step ends, shown as a range: ±25% once finished steps set the pace, wider before.
+
+Every number is computed from recorded timestamps, and the tests run the model with a fixed clock.
 
 ### How estimates are calibrated
 
-When a run with an estimate finishes, devkit records its actual time. For the next run in the same project, it takes
-the median ratio of actual to estimated time over the finished runs of the last 60 days, and multiplies the new
-estimate by it. `dev progress start` says so:
+When a run with an estimate finishes, devkit records its active time, and each step records its own time against its
+estimate. For the next run in the same project, it takes the median ratio of actual to estimated time over the
+finished runs of the last 60 days, and uses it as the starting pace. `dev progress start` says so:
 
 ```text
-✓ run started · Export invoices as CSV · estimate 1h00m
-  runs here take 1.4× their estimate → plan for ~1h24m · median turn 3m, p90 11m
+✓ run started · Export invoices as CSV · estimate 1h35m
+  runs here take 1.4× their estimate → plan for ~2h13m · median turn 3m, p90 11m
 ```
 
 Agents are told to use that number, to re-plan at 1.5 times the estimate, and to say so.

@@ -115,14 +115,18 @@ stage's guide is in [Concepts › From plan to operate](docs/concepts.md#from-pl
 | Handoff | A private (or team) handoff repository with notes, the projects map, task boards, and activity, kept current by a sync after each session and every hour | [Concepts](docs/concepts.md#the-handoff-repository) |
 | Teams and machines | Versioned work items with locks that every machine sees, reasons for every change of scope, versioned plans, append-only session logs, presence, `dev team` | [Teams and machines](docs/teams.md) |
 | Initiatives | Cross-project goals with workstreams, cross-project tasks, honest progress, and adoption of older handoff repositories | [Initiatives](docs/initiatives.md) |
-| Progress and communication | `dev progress` with an ETA from the real pace, calibrated estimates, reminders, notifications, `dev time`, message templates, `dev report` | [Progress and communication](docs/progress-and-communication.md) |
+| Progress and communication | `dev progress` with active time, per-step estimates and dependencies, a critical-path ETA range, a plan that changes only with evidence, reminders, notifications, `dev time`, message templates, `dev report` | [Progress and communication](docs/progress-and-communication.md) |
+| The crew | 25 specialist agents and Morpheus, the main session that leads them, for Claude Code and Codex from one roster: lanes with their own time, file scopes the guard enforces, messages, routing and delegation, guided or automatic decisions, and a status block every member must end with | [The crew](docs/crew.md) |
 | Status block | Every reply starts with a `[Firefly> DevKit]` block (done, check, progress, next) that devkit checks, scores, and shows everywhere | [Concepts](docs/concepts.md#the-status-block) |
 | Dashboard | A self-contained HTML command center: home, initiatives, projects, team, tasks, activity, explorer, health | [Dashboard](docs/dashboard.md) |
-| Claude Desktop and ChatGPT | The same setup in Claude Desktop's Code tab and the ChatGPT app's Codex; a devkit extension with 14 tools for Desktop chat and Cowork | [Agents](docs/agents.md#claude-desktop-and-the-chatgpt-app) |
+| Claude Desktop and ChatGPT | The same setup in Claude Desktop's Code tab and the ChatGPT app's Codex; a devkit extension with 18 tools for Desktop chat and Cowork | [Agents](docs/agents.md#claude-desktop-and-the-chatgpt-app) |
 | Delivery | `dev ci`, local integration, one push and one CI run, CalVer, a push budget, and no blind re-runs | [Delivery](docs/delivery.md) |
 | Git and GitHub | `dev branch`, `commit`, `rebase`, `push`, `pr`, `run`, `release`, and `issue`: local CI evidence before every push, the PR template filled and checked, gated merges, releases by the policy, WIP commits instead of a shared stash | [Git and GitHub](docs/git-and-github.md) |
 | Delivery policy | `dev delivery` detects how a project versions, tests, and releases, recommends a policy, and records it; sessions see it and the guard enforces its tags | [Delivery › The delivery policy](docs/delivery.md#the-delivery-policy) |
 | CI/CD status | `dev ci status [--watch]` for GitHub Actions, GitLab CI, Bitbucket Pipelines, and Azure Pipelines: jobs, current step, elapsed time, and an ETA | [Commands › dev ci status](docs/commands.md#dev-ci-status---watch---branch-name----all-branches---all-jobs---limit-n---json) |
+| CI/CD pipelines | `dev ci audit` finds what makes a pipeline slow, unreliable, or unsafe on all four hosts, and `--fix` applies the safe GitHub fixes; `dev ci init` writes a pinned pipeline with security scans and signed releases; `dev ci watch` follows every run after a push and hands a failure, diagnosed, to Link | [CI/CD pipelines](docs/ci-cd.md) |
+| Testing | `dev test` runs the last failures first, then only what your changes can break; `dev test audit` finds tests that cannot fail, and `dev test prove` checks that new tests fail without the change; `dev ci --run --resume` repeats only what a fix affects | [Testing](docs/testing.md) |
+| Unfinished work | `dev stubs` finds TODOs, placeholders, and stubs without a task; the end of a turn and every commit refuse them | [Commands › Quality](docs/commands.md#quality) |
 | Files | `dev files`, `find`, `grep`, and `diff` with compact, capped output; `dev rm`, `mv`, and `cp` with the Trash, undo, and refusals instead of lost work | [Commands › Files](docs/commands.md#files) |
 | Lessons | Blameless lessons from mistakes, recalled as known pitfalls in every session, counted when they repeat, turned into automation, and consolidated every night by `dev sleep` | [Lessons](docs/lessons.md) |
 | Scheduled jobs and audit | Sync, sleep, cleanup, repair, audit, health, and lesson review as launchd jobs you can see and reschedule; an audit trail of everything devkit changed or decided, with secrets redacted | [Scheduled jobs and the audit trail](docs/jobs-and-audit.md) |
@@ -130,7 +134,7 @@ stage's guide is in [Concepts › From plan to operate](docs/concepts.md#from-pl
 | Security | `dev sec scan` (gitleaks, osv-scanner, Semgrep, Trivy, zizmor), a secret check before every commit, and the DevSecOps skills and plugins | [Skills and plugins](docs/skills-and-plugins.md), [Guard rules](docs/guard.md) |
 | Guard | A pre-tool hook that blocks what wastes time or disk or breaks shared records, and explains the right way | [Guard rules](docs/guard.md) |
 | Skills | A curated, pinned catalog for both agents, optional groups, and required skills enforced per kind of work | [Skills and plugins](docs/skills-and-plugins.md) |
-| Models and tokens | Your model stays yours; a read-only `scout` agent, Codex profiles, a cap on parallel threads, and routing rules | [Models and tokens](docs/models-and-tokens.md) |
+| Models and tokens | Your model stays yours; Sparks, the read-only scout; Codex profiles, a cap on parallel threads, and routing rules | [Models and tokens](docs/models-and-tokens.md) |
 | Templates | Plans, specs, spikes, bug fixes, ADRs, typed tasks, and a pull request description | [Templates](docs/templates.md) |
 | Docs and diagrams | `dev docs check`, plus validated, branded SVG diagrams in a dark and a light version | [Diagrams](docs/diagrams.md) |
 | Docker | Colima with Compose, Buildx, and Testcontainers | [Docker](docs/docker.md) |
@@ -144,11 +148,15 @@ devkit is also a plugin for **Claude Code** and **Codex**, installed automatical
   handoff repository is pushed within seconds.
 - **Kept informed.** Agents post a plan with an estimate, progress updates with an ETA, and a final report; the hooks
   answer "how is it going?" from real records and remind a quiet agent to update you.
+- **A crew.** 25 specialist agents (Neo, Trinity, Tank, The Architect, Seraph, Link, and the rest) that the main
+  session leads as Morpheus, in parallel lanes with their own files and time.
 - **Slash commands:** `/devkit:status` · `/devkit:overview` · `/devkit:task` · `/devkit:handoff` · `/devkit:standup` ·
-  `/devkit:ship` · `/devkit:ci` · `/devkit:dashboard` · `/devkit:doctor` (skills of the same name in Codex).
-- **Skills:** `using-devkit`, `handoff`, `communicating`, `working-efficiently`, `workspace`, `delivery`,
-  `release-policy`, `learning-loop`, `backend`, `devsecops`, `docs`, and `diagrams`, plus a curated, pinned set for architecture,
-  Angular, React, Spring, testing, security, and observability. Required skills are enforced for each kind of work.
+  `/devkit:progress` · `/devkit:crew-status` · `/devkit:test` · `/devkit:stubs` · `/devkit:ship` · `/devkit:ci` ·
+  `/devkit:dashboard` · `/devkit:doctor` (skills of the same name in Codex).
+- **Skills:** `using-devkit`, `handoff`, `communicating`, `working-efficiently`, `crew`, `workspace`, `delivery`,
+  `release-policy`, `testing`, `cicd`, `learning-loop`, `backend`, `devsecops`, `docs`, and `diagrams`, plus a curated,
+  pinned set for architecture, Angular, React, Spring, testing, security, and observability. Required skills are
+  enforced for each kind of work.
 - **Rules:** one set of global instructions for both agents: the status block on every turn, method, plain American
   English, progress and time, learning from mistakes, token use, files and disk, worktrees, branches, commits, delivery, backend practice, required
   skills, the team protocol, and handoff.
@@ -168,10 +176,10 @@ The ideas behind it are in [docs/concepts.md](docs/concepts.md).
 | Path | What |
 | --- | --- |
 | `bin/dev`, `lib/devkit/` | The `dev` CLI (Python 3.9+, standard library only) |
-| `plugin/` | The devkit plugin for Claude Code and Codex: skills, slash commands, the `scout` agent, identity |
+| `plugin/` | The devkit plugin for Claude Code and Codex: skills, slash commands, the crew's agents (generated from `config/crew.json`), identity |
 | `agents/AGENTS.md` | The global instructions generated into `~/.claude/CLAUDE.md` and `~/.codex/AGENTS.md` |
 | `config/` | What devkit manages, such as Claude and Codex settings, hooks, plugins, MCP servers, profiles, pinned skills, skill rules, git, and docs defaults |
-| `templates/` | Plan, spec, spike, bug-fix, and ADR templates; task templates; the pull request template; the handoff repository README |
+| `templates/` | Plan, spec, spike, bug-fix, and ADR templates; task templates; the pull request template; the handoff repository README; the pinned CI/CD pipelines of `dev ci init` (`templates/ci/`) |
 | `install.sh`, `Brewfile` | Bootstrap and toolchain |
 | `shell/` | zsh integration (`dcd`, `dwt`, completion, Docker environment) |
 | `tools/brand/` | Renders devkit's icon and banners from the Firefly brand elements |
@@ -186,8 +194,9 @@ The ideas behind it are in [docs/concepts.md](docs/concepts.md).
 | [Concepts](docs/concepts.md) | Layout, how work is organized, the handoff repository, worktrees, the guard, the status block, and the background sync |
 | [Teams and machines](docs/teams.md) | Work items and locks, reasons, and history, versioned plans, session logs, presence, merge rules |
 | [Initiatives](docs/initiatives.md) | Cross-project initiatives, progress, adopting an older handoff repository |
-| [Progress and communication](docs/progress-and-communication.md) | `dev progress`, ETA and calibration, notifications, `dev time`, message templates, status reports |
-| [Commands](docs/commands.md) | Every `dev` command and option, including git and GitHub, lessons, jobs, the file commands, and `dev ci status` |
+| [The crew](docs/crew.md) | The 25 specialist agents and Morpheus: who does what, lanes, scopes, messages, delegation, and guided or automatic decisions |
+| [Progress and communication](docs/progress-and-communication.md) | `dev progress`, the time model and ETA, notifications, `dev time`, message templates, status reports |
+| [Commands](docs/commands.md) | Every `dev` command and option, including git and GitHub, `dev progress`, `dev crew`, `dev test`, `dev stubs`, lessons, jobs, the file commands, and `dev ci` |
 | [Dashboard](docs/dashboard.md) | The HTML command center: views, pages, the task drawer, shortcuts, routes |
 | [Configuration](docs/configuration.md) | Every key of `~/.config/devkit/config.json`, personal rules, environment variables |
 | [Agents](docs/agents.md) | What is configured in Claude Code and Codex, hooks, devkit always on |
@@ -195,6 +204,8 @@ The ideas behind it are in [docs/concepts.md](docs/concepts.md).
 | [Models and tokens](docs/models-and-tokens.md) | Models, effort, subagents, the scout agent, Codex profiles |
 | [Templates](docs/templates.md) | Plans and specs, tasks, the pull request template |
 | [Git and GitHub](docs/git-and-github.md) | Branches, commits, local CI evidence, pushes, pull requests, CI runs, releases, and issues through `dev` |
+| [Testing](docs/testing.md) | `dev test`: failures first, then the blast radius; tests that can fail; TDD with devkit |
+| [CI/CD pipelines](docs/ci-cd.md) | `dev ci audit`, `--fix`, `dev ci init`, and `dev ci watch` on GitHub, GitLab, Bitbucket, and Azure |
 | [Delivery](docs/delivery.md) | Local-first GitOps: the delivery policy, one integration, one push, one CI run, following CI, releases |
 | [Lessons](docs/lessons.md) | Learning from mistakes: lessons, known pitfalls, prevention by automation, `dev sleep` |
 | [Scheduled jobs and the audit trail](docs/jobs-and-audit.md) | The background jobs and their schedules, logs, and journal; the audit trail |
@@ -209,5 +220,5 @@ The ideas behind it are in [docs/concepts.md](docs/concepts.md).
 
 devkit is designed and maintained by **Andrés Contreras Guillén** for **Firefly Software Solutions Inc.**
 
-Copyright © 2026 Firefly Software Solutions Inc. All rights reserved. Proprietary; see [LICENSE](LICENSE).
+Copyright © 2026 Firefly Software Solutions Inc. Licensed under the Apache License 2.0; see [LICENSE](LICENSE).
 Third-party skills and tools installed by devkit keep their own licenses; see [NOTICE](NOTICE).

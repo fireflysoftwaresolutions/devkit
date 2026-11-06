@@ -172,6 +172,26 @@ coverage folders), anything in a temp folder or the scratchpad, `rm` in a temp f
 variables the guard cannot see (`$VAR`, `$(…)`). Prefix the command with `DEVKIT_RAW_FS=1` to bypass these rules for
 that command; the protected paths in the previous table stay protected.
 
+### Unfinished work in a commit
+
+| Command | Decision |
+| --- | --- |
+| `git commit` or `dev commit` whose commit would take lines with `TODO`, `FIXME`, "not implemented" code, placeholders, or empty Python bodies that name no task, issue, or reason | deny, with each `file:line`, and how to track planned work: `TODO(T-…)` (see `dev stubs`) |
+
+The guard looks at what the commit would take: the staged changes, plus what a `git add <paths>`, `git add -A`, or
+`commit -a` in the same command would stage. A `dev commit --wip` commit is exempt (work in progress is the point).
+
+### The crew
+
+These rules apply while a progress run has crew members working ([The crew](crew.md)).
+
+| Action | Decision |
+| --- | --- |
+| A fifth crew member launched while four work (`progress.max_parallel`) | deny, with who is working |
+| A crew member edits a file outside the scope of its step (`dev progress assign … --scope`) | deny, and how to ask for more |
+| The main session edits a file inside a working member's scope | deny, and how to ask that member |
+| A crew member records a decision (`dev crew decide`) | refused by `dev crew`: only Morpheus records the developer's answers |
+
 ## Example messages
 
 ```text
@@ -222,6 +242,8 @@ The guard sees the command text, not the inner commands of `$( … )` substituti
 | `DEVKIT_TAG_ANY=1 git tag …` | one command | A tag outside the delivery policy is intended (or change the policy) |
 | `DEVKIT_RAW_GH=1 gh pr merge …` (or `gh release create`) | one command | You need gh's own merge or release, outside `dev pr merge` and `dev release`; `--admin` stays refused |
 | `DEVKIT_PIPE_OK=1` in a command that commits after a pipe | one command | The pipe's last command really is the check (prefer `set -o pipefail`) |
+| `DEVKIT_ALLOW_STUBS=1 git commit …` | one command | The developer accepts the unfinished work this commit takes |
+| `DEVKIT_SCOPE_OVERRIDE=1 claude` | the whole session | An emergency fix in a file a crew member owns while it works |
 | `DEVKIT_SKIP_SECRET_SCAN=1 claude` | the whole session | gitleaks reports false positives you cannot mark |
 | `DEVKIT_GUARD=off claude` (or `codex`) | the whole session | A session genuinely needs the guard off |
 

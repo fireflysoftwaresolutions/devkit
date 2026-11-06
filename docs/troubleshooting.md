@@ -55,11 +55,13 @@ dev install --only codex      # trusts devkit's hooks again through Codex's API
 
 Or review them in Codex with `/hooks` (CLI) or Settings → Hooks (app). Restart open Codex sessions.
 
-### A devkit skill or the scout agent is missing
+### A devkit skill or a crew agent is missing
 
 Both agents install a snapshot of the devkit plugin. `dev doctor` reports "devkit plugin copy is current" for each;
 when it fails, run `dev install --only claude` or `dev install --only codex`, which reinstalls the plugin from your
-checkout, then restart the agent.
+checkout, then restart the agent. Codex reads the crew's roles from `~/.codex/agents/`, which
+`dev install --only codex` writes. `dev crew sync --check` reports Claude agents that are out of date with
+`config/crew.json`.
 
 ### The status block is missing or scored as malformed
 
@@ -85,6 +87,41 @@ The Stop hook asks for one more pass, never in a loop, when:
 | A plan changed without a recorded reason | `dev plan revise <file> --why "…"` for each plan it names |
 | Files changed without a required skill | The agent loads the skill and reviews the change. `skills.enforce: false` turns this off |
 | Commits without a handoff update | The agent updates the note with the `handoff` skill. `handoff.enforce: false` turns this off |
+| Unfinished work without a task | Build it for real, or record the task and name it on the line; see [A commit is refused for unfinished work](#a-commit-is-refused-for-unfinished-work) |
+| New or changed tests that cannot fail | Fix each test that `dev test audit` names, or delete it; a meaningless assertion is not a fix |
+
+A crew member's report gets the same check at SubagentStop: without its own status block
+(`**[Firefly> DevKit · Tank]**`), the member is sent back once.
+
+### A crew member's edit is refused
+
+A member assigned a scope (`dev progress assign <step> --to <member> --scope "<globs>"`) edits only those files, so
+parallel members never write the same file. The refusal names the file and the scope:
+
+```text
+<file> is outside <member>'s scope (<globs>): another crew member may own it. Ask Morpheus to widen it:
+dev crew ask "may I change <file>? why: …"
+```
+
+The member asks, and Morpheus widens the scope or gives the file to its owner. Review-only and read-only members
+(Seraph, Agent Smith, The Merovingian, Persephone, The Oracle, Councillor Hamann, and Sparks) never edit: they report
+the change with `file:line` and the fix. The main session is refused too when it edits a file that a working member
+owns; it asks the member (`dev crew ask --to "<member>" "…"`) or waits. `DEVKIT_SCOPE_OVERRIDE=1` is for emergencies
+only. A member's own scratch files outside the repository are never refused.
+
+### `dev progress step` is refused
+
+A step closes only with its evidence, and only the step that evidence is about. The message says which rule applies:
+
+| Message | Fix |
+| --- | --- |
+| `"…" does not describe step "<name>"` | Name the right step with `--step "<name>"` (the message suggests one when it can), or add the work first with `dev progress add "<name>=<estimate>"` |
+| `step "<name>" waits for <steps>, not done yet` | Close those steps first; use `--force` only when the order really changed |
+| `step "<name>" belongs to <member>, still working on it` | It closes when the member finishes; use `--force` only when it is really done |
+| `step "<name>" is already done` | `dev progress reopen "<name>" --why "…"` |
+| `only Morpheus …` | A crew member asked to `assign`, `begin`, `reopen`, or `skip`: ask Morpheus with `dev crew ask` |
+
+Every change, including a forced one, is in `dev progress history`.
 
 ### Codex profile models are not available
 
@@ -207,6 +244,16 @@ The message `no CI provider for this remote` means the `origin` remote is on a h
 GitLab, Bitbucket, and Azure readers are tested against recorded API responses; report a host that answers
 differently.
 
+### `dev ci watch` reports no run or a timeout
+
+| Result | What it means | Fix |
+| --- | --- | --- |
+| `none` (exit `4`): no pipeline run appeared for this commit within 5 minutes | The branch has no CI for this event, the workflow's triggers skip it, or the host was unreachable (the message adds the host's error) | Check the triggers with `dev ci` or `dev ci audit`, and the sign-in with `dev ci status` |
+| `timeout` (exit `3`): still running after the watch limit | The run takes longer than `--timeout` (default 90 minutes) | Follow it with `dev ci status --watch`; if it hangs, `dev ci audit` reports jobs without a timeout |
+
+The automatic watcher runs only for main sessions, once per repository, branch, and commit, and not for temporary
+folders. Its log is `~/.local/state/devkit/logs/ci-watch.log`; `DEVKIT_NO_CI_WATCH=1` turns it off.
+
 ### `dev push` says there is no local CI evidence
 
 `dev push`, `dev pr create`, and `dev release` accept a commit only when the files it contains passed the local
@@ -226,6 +273,36 @@ exactly what it tested. When a check cannot run on your Mac, `dev ci --run` says
 
 Use `dev pr merge`, `dev release`, and `dev commit --wip`: they do the same with the checks devkit requires. When you
 really need gh's own command, prefix it with `DEVKIT_RAW_GH=1`; `gh pr merge --admin` is never allowed.
+
+## Tests and unfinished work
+
+### A commit is refused for unfinished work
+
+The guard checks what a `git commit` or `dev commit` would take (the staged changes, plus what a `git add` or `-a` in
+the same command would stage) and refuses it when a line leaves unfinished work: a `TODO`, `FIXME`, `XXX`, or `HACK`
+without a task, "not implemented" code, a placeholder, or a Python function whose body is only `...`. The message
+lists each line as `file:line rule: text`.
+
+1. Build the code for real.
+2. If deferring it is part of the plan, record the task (`dev task add "…" --why "…"`) and name it on the line:
+   `TODO(T-fwk6abc123): …`. An issue number (`#123`) or `devkit: allow-stub <reason>` works too.
+3. Check again with `dev stubs --staged`, then commit.
+
+A WIP commit (`dev commit --wip`) is not checked. When the developer accepts the unfinished work, prefix the commit
+with `DEVKIT_ALLOW_STUBS=1`.
+
+### `dev test` exits with 2: a selection ran 0 tests
+
+A selection that runs no test is a problem, never a pass:
+
+```text
+✗ selection problem: <runner> ran 0 tests for <what> (a selector that matches nothing is not a pass)
+  → selector: <selector> · changed: <files> · check the names, or see dev test plan
+```
+
+Check the path or test name for a typo, and run `dev test plan` to see what the changed files select and which runner
+owns each test. Exit `2` also means that no runner fits a path (`no test runner for: …`) or that `--runner` names one
+devkit does not know.
 
 ## Workspace
 

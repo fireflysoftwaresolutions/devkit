@@ -6,7 +6,8 @@ share a handoff repository, and lists every file devkit touches.
 ## Requirements
 
 - macOS on Apple silicon. `install.sh` installs Homebrew if it is missing.
-- A GitHub account with read access to the private `fireflysoftwaresolutions/devkit` repository.
+- A GitHub account. devkit's repository, `fireflysoftwaresolutions/devkit`, is public; your handoff repository stays
+  private.
 - A Claude account for Claude Code, a ChatGPT account for Codex, or both.
 
 ## Install on a new Mac
@@ -143,8 +144,8 @@ Details are in [Agents](agents.md) and [Configuration](configuration.md).
 
 ## Onboarding another developer
 
-1. **Access.** Make sure they are a member of the `fireflysoftwaresolutions` GitHub organization with read access to
-   the private `fireflysoftwaresolutions/devkit` repository.
+1. **Access.** devkit's repository is public, so they need only a GitHub account. To share a team handoff repository,
+   give them write access to it.
 2. **Install.** They follow [Install on a new Mac](#install-on-a-new-mac) with their own GitHub account.
 3. **Choose the handoff repository.** By default the wizard proposes a private `<their-login>/handoff`. To work as a
    team on one shared handoff repository, they enter its name instead (see

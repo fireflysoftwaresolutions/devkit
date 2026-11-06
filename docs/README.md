@@ -18,9 +18,12 @@ machine.
 | --- | --- |
 | [Teams and machines](teams.md) | Sharing a handoff repository: work items, locks, reasons, and history, delegation, versioned plans, session logs, presence, merge rules |
 | [Initiatives](initiatives.md) | Cross-project initiatives: creating them, who may write what, progress, adopting an older handoff repository |
+| [The crew](crew.md) | devkit's 25 specialist agents and Morpheus: who does what, parallel or in sequence, lanes, scopes, messages, delegation, guided or automatic decisions, the crew canary |
 | [Progress and communication](progress-and-communication.md) | `dev progress`, ETA and calibrated estimates, notifications, what the hooks add, `dev time`, the message templates, status reports |
 | [Dashboard](dashboard.md) | The HTML command center: views, initiative and project pages, the task drawer, search, shortcuts, routes |
 | [Git and GitHub](git-and-github.md) | `dev branch`, `commit`, `rebase`, `push`, `pr`, `run`, `release`, and `issue`: local CI evidence, the PR template, safe merges, releases by the policy |
+| [Testing](testing.md) | `dev test`: failed first, then the blast radius of your changes; `dev test audit` and `dev test prove`: tests that can fail; `dev ci --run --resume` |
+| [CI/CD pipelines](ci-cd.md) | `dev ci audit` and `dev ci init` on GitHub Actions, GitLab, Bitbucket, and Azure; `dev ci watch`: every run followed to the end, failures diagnosed |
 | [Delivery](delivery.md) | The delivery policy, local-first GitOps (one integration branch, one push, one CI run), following CI with `dev ci status`, releases |
 | [Lessons](lessons.md) | Learning from mistakes: recording, recalling, counting repeats, automating prevention, and `dev sleep` |
 | [Scheduled jobs and the audit trail](jobs-and-audit.md) | `dev jobs`: the background jobs, their schedules, logs, and journal; `dev audit`: everything devkit changed or decided |
@@ -32,11 +35,11 @@ machine.
 
 | Guide | What it covers |
 | --- | --- |
-| [Commands](commands.md) | Every `dev` command and option: git and GitHub, lessons, jobs and audit, the file commands, `dev ci status`, `dev delivery`, the `dcd` and `dwt` shell functions, and completion |
+| [Commands](commands.md) | Every `dev` command and option: git and GitHub, `dev progress` and `dev crew`, lessons, jobs and audit, the file commands, `dev test` and `dev stubs`, `dev ci status`, `watch`, `audit`, and `init`, `dev delivery`, the `dcd` and `dwt` shell functions, and completion |
 | [Configuration](configuration.md) | Every key of `~/.config/devkit/config.json`, personal agent rules, environment variables, the files that apply to everyone |
-| [Agents](agents.md) | What devkit configures in Claude Code and Codex, the global instructions, every hook, how devkit stays on |
+| [Agents](agents.md) | What devkit configures in Claude Code and Codex, the crew's agents and Codex roles, the global instructions, every hook, how devkit stays on |
 | [Skills and plugins](skills-and-plugins.md) | The devkit plugin, required skills, the curated catalog and optional groups, and what was left out |
-| [Models and tokens](models-and-tokens.md) | Models, effort, and subagents; the scout agent; Codex profiles; the routing rules |
+| [Models and tokens](models-and-tokens.md) | Models, effort, and subagents; Sparks, the scout; Codex profiles; the routing rules |
 | [Templates](templates.md) | Plan, spec, spike, bug-fix, and ADR templates; task templates; the pull request template |
 | [Guard rules](guard.md) | Every rule the guard enforces, per agent, with example messages, and escape hatches |
 | [Troubleshooting](troubleshooting.md) | Logs, common problems, and how to reset |
