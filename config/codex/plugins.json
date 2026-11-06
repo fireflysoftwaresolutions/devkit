@@ -6,7 +6,8 @@
   "plugins": [
     "devkit@firefly-devkit",
     "superpowers@openai-curated-remote",
-    "impeccable@openai-curated-remote"
+    "impeccable@openai-curated-remote",
+    "codex-security@openai-curated-remote"
   ],
   "mcp": {
     "context7": {

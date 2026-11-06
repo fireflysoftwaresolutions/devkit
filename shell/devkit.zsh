@@ -21,6 +21,9 @@ fi
 export NG_CLI_ANALYTICS=false
 export NEXT_TELEMETRY_DISABLED=1
 export SUPERPOWERS_DISABLE_TELEMETRY=1
+# Security tools run by people and agents: no telemetry, no update checks.
+export TRIVY_DISABLE_TELEMETRY=true TRIVY_SKIP_VERSION_CHECK=true SEMGREP_SEND_METRICS=off
+export SYFT_CHECK_FOR_APP_UPDATE=false GRYPE_CHECK_FOR_APP_UPDATE=false CLAUDE_SECURITY_SCAN_TIP=off
 
 # dcd <query>: cd into a project (fzf picker when several match).
 dcd() {

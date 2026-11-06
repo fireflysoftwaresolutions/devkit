@@ -310,7 +310,10 @@ def _install_skills():
     for d in sorted((DEVKIT_HOME / "agents" / "skills").iterdir()):
         if (d / "SKILL.md").exists():
             wanted[d.name] = d
+    groups = set((core.CFG.get("skills") or {}).get("groups") or [])
     for src in manifest["sources"]:
+        if src.get("group") and src["group"] not in groups and "all" not in groups:
+            continue
         try:
             root = _fetch_source(src)
         except RuntimeError as e:
@@ -638,7 +641,8 @@ def doctor() -> int:
     att = s.get("attribution") or {}
     check("Claude", "no attribution", att.get("commit") == "" and att.get("pr") == "", json.dumps(att), "dev install --only claude")
     events = {e for e, gs in (s.get("hooks") or {}).items() for g in gs for h in g.get("hooks", []) if is_devkit_hook(h)}
-    check("Claude", "devkit hooks", {"SessionStart", "SessionEnd", "PreToolUse", "Stop"} <= events, ", ".join(sorted(events)),
+    check("Claude", "devkit hooks", {"SessionStart", "SessionEnd", "PreToolUse", "Stop", "UserPromptSubmit",
+                                     "PostToolUse"} <= events, ", ".join(sorted(events)),
           "dev install --only claude")
     want = load_conf("claude/plugins.json")
     _, listed, _ = sh(["claude", "plugin", "list"], timeout=60) if core.have("claude") else (1, "", "")
@@ -710,6 +714,18 @@ def doctor() -> int:
           canary.summary_line(7), "`dev canary` lists deviations; check ~/.claude/CLAUDE.md and ~/.codex/AGENTS.md")
     st = os.statvfs(str(HOME))
     free_gb = st.f_bavail * st.f_frsize / 1024 ** 3
+    from . import policy as _pol
+    offs = _pol.project_overrides()
+    check("Agents", "no project switches devkit off", not offs,
+          "; ".join(f"{tilde(f)}: {w}" for f, w in offs[:3]) or "no .claude/.codex override disables devkit",
+          "remove the override (devkit must stay active), or change devkit's own config")
+    recent = [core.read_json(f, {}) or {} for f in (STATE / "sessions").glob("*.json")
+              if time.time() - f.stat().st_mtime < 7 * 86400] if (STATE / "sessions").exists() else []
+    by_agent = {}
+    for r in recent:
+        by_agent[r.get("agent")] = by_agent.get(r.get("agent"), 0) + 1
+    check("Agents", "sessions running with devkit (7d)", True,
+          ", ".join(f"{k}: {v}" for k, v in sorted(by_agent.items()) if k) or "none yet", "")
     check("Automation", "free disk", free_gb > 20, f"{free_gb:.0f} GB free", "dev gc --apply")
 
     group = None

@@ -5,6 +5,7 @@
   osv-scanner  known vulnerabilities in lockfiles and manifests (OSV database)
   semgrep      SAST rules (p/default; --config to change), metrics off
   trivy        HIGH/CRITICAL vulnerabilities, misconfiguration (Dockerfile, Terraform, Kubernetes) and secrets
+  zizmor       GitHub Actions workflows: template injection, untrusted triggers, unpinned actions, permissions
 
 Every tool is optional; a missing one is reported. Exit 1 when any scanner reports findings.
 Also used by the guard: `staged_secrets()` blocks a commit that contains a secret.
@@ -92,7 +93,7 @@ def scan(root: Path, history=False, verbose=False, sast_config="p/default") -> i
         report("dependencies", True, ui.dim("osv-scanner not installed — brew install osv-scanner"))
     # 3. SAST
     if core.have("semgrep"):
-        rc, out, err = _run(["semgrep", "scan", "--config", sast_config, "--metrics", "off", "--json", "--quiet",
+        rc, out, err = _run(["semgrep", "scan", "--config", sast_config, "--metrics", "off", "--disable-version-check", "--json", "--quiet",
                              *sum((["--exclude", s] for s in SKIP), [])], root)
         try:
             hits = json.loads(out or "{}").get("results", [])
@@ -107,7 +108,7 @@ def scan(root: Path, history=False, verbose=False, sast_config="p/default") -> i
         report("code (SAST)", True, ui.dim("semgrep not installed — brew install semgrep"))
     # 4. filesystem: vulns + misconfig + secrets
     if core.have("trivy"):
-        rc, out, err = _run(["trivy", "fs", "--quiet", "--scanners", "vuln,misconfig,secret", "--severity",
+        rc, out, err = _run(["trivy", "fs", "--disable-telemetry", "--skip-version-check", "--quiet", "--scanners", "vuln,misconfig,secret", "--severity",
                              "HIGH,CRITICAL", "--format", "json", "--exit-code", "0",
                              *sum((["--skip-dirs", s] for s in SKIP), []), str(root)], root)
         items = []
@@ -125,5 +126,27 @@ def scan(root: Path, history=False, verbose=False, sast_config="p/default") -> i
                items)
     else:
         report("filesystem & IaC", True, ui.dim("trivy not installed — brew install trivy"))
+    # 5. GitHub Actions workflows: injection, untrusted triggers, unpinned actions, excessive permissions
+    wf = root / ".github" / "workflows"
+    if wf.is_dir() and any(wf.glob("*.y*ml")):
+        if core.have("zizmor"):
+            rc, out, err = _run(["zizmor", "--offline", "--format", "json", "--min-severity", "medium", "."], root)
+            items = []
+            try:
+                for f in json.loads(out or "[]"):
+                    l0 = (f.get("locations") or [{}])[0]
+                    key = ((l0.get("symbolic") or {}).get("key") or {}).get("Local") or {}
+                    path = (key.get("verbatim_path") or key.get("given_path") or "").lstrip("./")
+                    row = (((l0.get("concrete") or {}).get("location") or {}).get("start_point") or {}).get("row")
+                    where = f"{path}:{row + 1}" if path and row is not None else path
+                    items.append(f"{(f.get('determinations') or {}).get('severity', '?')}  {where}  "
+                                 f"{f.get('ident')}: {f.get('desc', '')[:70]}")
+            except (ValueError, AttributeError):
+                if rc not in (0,) and not out:
+                    items.append((err or "zizmor failed").strip()[:160])
+            report("GitHub Actions (zizmor)", not items, "no findings" if not items else f"{len(items)} finding(s)",
+                   items)
+        else:
+            report("GitHub Actions", True, ui.dim("zizmor not installed — brew install zizmor"))
     print()
     return 1 if failed else 0

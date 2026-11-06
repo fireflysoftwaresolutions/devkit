@@ -1,5 +1,5 @@
 {
-  "_comment": "Third-party skills fetched at install time from upstream at a pinned commit, then linked into ~/.claude/skills and ~/.agents/skills (Codex). Bump a ref with `dev install --only skills` after review. Rationale per skill: docs/skills-and-plugins.md.",
+  "_comment": "Third-party skills fetched at install time from upstream at a pinned commit, then linked into ~/.claude/skills and ~/.agents/skills (Codex). Sources without `group` are always installed; a `group` source is installed when the group is listed in devkit config `skills.groups` (default: security-deep, postgres, observability). Bump a ref with `dev install --only skills` after review. Rationale per skill: docs/skills-and-plugins.md.",
   "sources": [
     {
       "repo": "mattpocock/skills",
@@ -18,7 +18,8 @@
       "license": "Apache-2.0",
       "skills": {
         "architecture": "engineering/skills/architecture",
-        "system-design": "engineering/skills/system-design"
+        "system-design": "engineering/skills/system-design",
+        "incident-response": "engineering/skills/incident-response"
       }
     },
     {
@@ -49,13 +50,18 @@
     },
     {
       "repo": "github/awesome-copilot",
-      "ref": "96543145e9cb97711020b57b9d88f968062c4fc7",
+      "ref": "3f6e39551b5782bbc6ba683074bb29f92ef982ab",
       "license": "MIT",
       "skills": {
         "java-springboot": "skills/java-springboot",
         "spring-boot-testing": "skills/spring-boot-testing",
         "java-junit": "skills/java-junit",
-        "documentation-writer": "skills/documentation-writer"
+        "documentation-writer": "skills/documentation-writer",
+        "github-actions-hardening": "skills/github-actions-hardening",
+        "dependabot": "skills/dependabot",
+        "threat-model-analyst": "skills/threat-model-analyst",
+        "spring-security": "skills/spring-security",
+        "spring-observability": "skills/spring-observability"
       }
     },
     {
@@ -64,6 +70,102 @@
       "license": "per anthropics/skills (Anthropic)",
       "skills": {
         "doc-coauthoring": "skills/doc-coauthoring"
+      }
+    },
+    {
+      "repo": "trailofbits/skills",
+      "ref": "470419e16f97e112d01fc32f4898aea1755015d9",
+      "license": "CC-BY-SA-4.0 (attribution in NOTICE)",
+      "skills": {
+        "semgrep": "plugins/static-analysis/skills/semgrep",
+        "fp-check": "plugins/fp-check/skills/fp-check",
+        "variant-analysis": "plugins/variant-analysis/skills/variant-analysis",
+        "property-based-testing": "plugins/property-based-testing/skills/property-based-testing"
+      }
+    },
+    {
+      "repo": "dash0hq/agent-skills",
+      "ref": "120c2a9f0bfd143ee9ccd911b95626ece33c37fe",
+      "license": "Apache-2.0",
+      "skills": {
+        "otel-instrumentation": "skills/otel-instrumentation",
+        "otel-semantic-conventions": "skills/otel-semantic-conventions"
+      }
+    },
+    {
+      "repo": "trailofbits/skills",
+      "ref": "470419e16f97e112d01fc32f4898aea1755015d9",
+      "license": "CC-BY-SA-4.0 (attribution in NOTICE)",
+      "group": "security-deep",
+      "skills": {
+        "agentic-actions-auditor": "plugins/agentic-actions-auditor/skills/agentic-actions-auditor",
+        "supply-chain-risk-auditor": "plugins/supply-chain-risk-auditor/skills/supply-chain-risk-auditor",
+        "sarif-parsing": "plugins/static-analysis/skills/sarif-parsing",
+        "sharp-edges": "plugins/sharp-edges/skills/sharp-edges"
+      }
+    },
+    {
+      "repo": "trailofbits/skills",
+      "ref": "470419e16f97e112d01fc32f4898aea1755015d9",
+      "license": "CC-BY-SA-4.0 (attribution in NOTICE); CodeQL needs GitHub Code Security for private code",
+      "group": "codeql",
+      "skills": {
+        "codeql": "plugins/static-analysis/skills/codeql"
+      }
+    },
+    {
+      "repo": "supabase/agent-skills",
+      "ref": "c9be0e931b7930f7d02126d04774d904c381e7d7",
+      "license": "MIT",
+      "group": "postgres",
+      "skills": {
+        "supabase-postgres-best-practices": "skills/supabase-postgres-best-practices"
+      }
+    },
+    {
+      "repo": "dash0hq/agent-skills",
+      "ref": "120c2a9f0bfd143ee9ccd911b95626ece33c37fe",
+      "license": "Apache-2.0",
+      "group": "observability",
+      "skills": {
+        "otel-collector": "skills/otel-collector"
+      }
+    },
+    {
+      "repo": "hashicorp/agent-skills",
+      "ref": "5e30fa5c867ba6777c37e4206babfd08049c396f",
+      "license": "MPL-2.0",
+      "group": "iac",
+      "skills": {
+        "terraform-style-guide": "plugins/terraform/skills/terraform-style-guide",
+        "terraform-test": "plugins/terraform/skills/terraform-test"
+      }
+    },
+    {
+      "repo": "grafana/skills",
+      "ref": "8fb72a527961f05e708f53d2a0500709e12d7970",
+      "license": "Apache-2.0",
+      "group": "load-testing",
+      "skills": {
+        "k6": "skills/grafana-k6/k6"
+      }
+    },
+    {
+      "repo": "pactflow/pactflow-agent-skills",
+      "ref": "1e980c8051a2b961b05ebd2951cf729b1b4a16b3",
+      "license": "MIT",
+      "group": "contract-testing",
+      "skills": {
+        "pactflow": "plugins/swagger-contract-testing/skills/pactflow"
+      }
+    },
+    {
+      "repo": "getsentry/skills",
+      "ref": "e94f22214528d69899d09c627b3315ddc3544816",
+      "license": "Apache-2.0",
+      "group": "skill-review",
+      "skills": {
+        "skill-scanner": "skills/skill-scanner"
       }
     }
   ]

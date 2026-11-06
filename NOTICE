@@ -15,3 +15,8 @@ pinned commits listed in config/skills.json, the following agent skills, which r
 It also installs, through their official marketplaces and package managers, plugins and tools listed in
 config/claude/plugins.json, config/codex/plugins.json, Brewfile and config/npm-globals.txt, each under its own
 licence and terms.
+
+Third-party skills installed by devkit are fetched from their upstream repositories at pinned commits and keep their own licences (config/skills.json). In particular:
+- Trail of Bits skills (https://github.com/trailofbits/skills), © Trail of Bits, licensed CC-BY-SA-4.0: semgrep, fp-check, variant-analysis, property-based-testing and, when enabled, agentic-actions-auditor, supply-chain-risk-auditor, sarif-parsing, sharp-edges and codeql. They are used unmodified.
+- Dash0 OpenTelemetry skills (https://github.com/dash0hq/agent-skills), Apache-2.0.
+- HashiCorp Terraform skills (https://github.com/hashicorp/agent-skills), MPL-2.0 (optional group iac).

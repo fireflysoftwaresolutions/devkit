@@ -171,6 +171,24 @@ def diff_git():
     return out
 
 
+def project_overrides(root=None) -> list:
+    """Project-level agent settings under ~/Development that switch devkit off: [(file, what)]."""
+    from . import guard
+    root = Path(root or core.DEV)
+    out = []
+    for pattern in (".claude/settings.json", ".claude/settings.local.json", ".codex/config.toml"):
+        for depth in ("*/*/", "*/*/*/", "_local/*/", ".worktrees/*/*/*/"):
+            for f in root.glob(depth + pattern):
+                try:
+                    text = f.read_text(errors="ignore")
+                except OSError:
+                    continue
+                for rx, what in guard.DEVKIT_OFF:
+                    if rx.search(text):
+                        out.append((str(f), what))
+    return out
+
+
 def diff(include_codex=True):
     agents = core.CFG.get("agents", {})
     out = (diff_claude() if agents.get("claude", True) else []) + diff_instructions() + diff_skills() + diff_git()

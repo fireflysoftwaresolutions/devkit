@@ -196,10 +196,7 @@ def _note_hash(top: str) -> str:
     return hashlib.sha256(json.dumps(sec, sort_keys=True).encode()).hexdigest()
 
 
-def session_start(agent: str):
-    data = _stdin_json()
-    cwd = data.get("cwd") or os.getcwd()
-    sid = data.get("session_id") or f"pid{os.getppid()}"
+def _register_session(agent: str, sid: str, cwd: str) -> Path:
     f = _session_file(agent, sid)
     if not f.exists():
         top = core.gitout(cwd, "rev-parse", "--show-toplevel")
@@ -208,6 +205,14 @@ def session_start(agent: str):
                                  "head": core.gitout(top, "rev-parse", "HEAD") if top else "",
                                  "branch": core.gitout(top, "branch", "--show-current") if top else "",
                                  "note_hash": _note_hash(top) if top and not core.is_temp(top) else ""}))
+    return f
+
+
+def session_start(agent: str):
+    data = _stdin_json()
+    cwd = data.get("cwd") or os.getcwd()
+    sid = data.get("session_id") or f"pid{os.getppid()}"
+    f = _register_session(agent, sid, cwd)
     try:  # the project id (timing, progress) and DEVKIT_SESSION for this session's shell commands (Claude)
         from . import progress
         rec = core.read_json(f, {}) or {}
@@ -443,9 +448,21 @@ def _context_out(event: str, text: str):
 
 
 def prompt(agent: str):
-    """UserPromptSubmit: start the turn clock; answer "how is it going?" from real progress records."""
+    """UserPromptSubmit: start the turn clock; answer "how is it going?" from real progress records.
+
+    Safety net: a session without a devkit record never ran SessionStart (hook failure, an untrusted Codex hook,
+    an old client). Register it now and inject the full devkit context, so every session works with devkit."""
     from . import progress
-    _context_out("UserPromptSubmit", progress.on_prompt(agent, _stdin_json()))
+    data = _stdin_json()
+    sid = data.get("session_id") or ""
+    extra = ""
+    if sid and not _session_file(agent, sid).exists():
+        cwd = data.get("cwd") or os.getcwd()
+        _register_session(agent, sid, cwd)
+        extra = context_for(cwd, agent)
+        _log(f"prompt {agent}: session {sid[:12]} had no SessionStart; devkit context injected")
+    text = progress.on_prompt(agent, data)
+    _context_out("UserPromptSubmit", "\n\n".join(x for x in (extra, text) if x))
 
 
 def post_tool(agent: str):

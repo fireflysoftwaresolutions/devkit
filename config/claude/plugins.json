@@ -15,7 +15,8 @@
     "pyright-lsp@claude-plugins-official",
     "jdtls-lsp@claude-plugins-official",
     "php-lsp@claude-plugins-official",
-    "claude-md-management@claude-plugins-official"
+    "claude-md-management@claude-plugins-official",
+    "claude-security@claude-plugins-official"
   ],
   "disabled": [],
   "mcp": {

@@ -48,6 +48,7 @@ DEFAULTS = {
     "claude": {"default_mode": "bypassPermissions"},
     "codex": {"mode": "full", "approval_policy": "never", "sandbox_mode": "danger-full-access"},
     "stacks": ["java", "python", "php", "node"],
+    "skills": {"groups": ["security-deep", "postgres", "observability"]},
     "lock": False,
     "handoff": {"enforce": True},
     "canary": {"enforce": True},

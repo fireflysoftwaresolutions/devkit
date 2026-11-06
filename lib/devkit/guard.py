@@ -673,10 +673,37 @@ def parse_patch_paths(patch: str):
     return out
 
 
+DEVKIT_OFF = [
+    (re.compile(r'"disableAllHooks"\s*:\s*true'), "disables every hook, including devkit's context, guard and canary"),
+    (re.compile(r'"devkit@firefly-devkit"\s*:\s*false'), "disables the devkit plugin"),
+    (re.compile(r'(^|\n)\s*(codex_)?hooks\s*=\s*false'), "turns Codex hooks off"),
+]
+
+
+def devkit_off(path: str, tool_input: dict):
+    """Agent settings files (project or user) must not switch devkit off; that is a decision for devkit's config."""
+    if not path:
+        return None
+    p = Path(path)
+    is_settings = (p.parent.name == ".claude" and p.name in ("settings.json", "settings.local.json")) or \
+        (p.parent.name == ".codex" and p.name in ("config.toml", "hooks.json"))
+    if not is_settings:
+        return None
+    texts = [tool_input.get("content") or "", tool_input.get("new_string") or ""]
+    texts += [e.get("new_string") or "" for e in tool_input.get("edits") or [] if isinstance(e, dict)]
+    for rx, what in DEVKIT_OFF:
+        if any(rx.search(x) for x in texts):
+            return ("deny", f"This change {what} for `{core.tilde(path)}`. devkit must stay active in every Claude and "
+                            f"Codex session. If it really should be off, change devkit's configuration "
+                            f"(~/.config/devkit/config.json, `dev config`) — ask the developer.")
+    return None
+
+
 def check(tool: str, tool_input: dict, cwd: str, agent: str):
     tool_input = tool_input or {}
     if tool in WRITE_TOOLS or "file_path" in tool_input or "notebook_path" in tool_input:
-        return check_write_path(tool_input.get("file_path") or tool_input.get("notebook_path"), cwd, agent)
+        path = tool_input.get("file_path") or tool_input.get("notebook_path")
+        return devkit_off(path, tool_input) or check_write_path(path, cwd, agent)
     cmd = tool_input.get("command") if isinstance(tool_input, dict) else None
     if isinstance(cmd, list):
         cmd = " ".join(shlex.quote(c) for c in cmd)
