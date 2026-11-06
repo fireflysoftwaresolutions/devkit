@@ -88,5 +88,15 @@ class ProviderTests(unittest.TestCase):
         self.assertEqual(more, 2)
 
 
+
+
+class HttpSchemeTests(unittest.TestCase):
+    def test_only_https_urls_are_opened(self):
+        from devkit import cistatus
+        for url in ("file:///etc/passwd", "http://gitlab.example.com/api/v4/projects", "ftp://x"):
+            with self.assertRaises(ValueError):
+                cistatus._http(url, {})
+
+
 if __name__ == "__main__":
     unittest.main()

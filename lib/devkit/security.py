@@ -98,8 +98,18 @@ def scan(root: Path, history=False, verbose=False, sast_config="p/default") -> i
             found = json.loads(out or "[]") if rc in (0, 3) else []
         except ValueError:
             found = []
+        skipped = 0
+        if found and not history:  # files git ignores (caches, builds, node_modules) are never committed
+            ignored = set(subprocess.run(["git", "-C", str(root), "check-ignore", "--stdin"], text=True,
+                                         input="\n".join(str(x.get("File")) for x in found), capture_output=True,
+                                         timeout=60).stdout.splitlines())
+            kept = [x for x in found if str(x.get("File")) not in ignored]
+            skipped, found = len(found) - len(kept), kept
+            if not found:
+                rc = 0
         report("secrets (gitleaks" + (", history)" if history else ")"), rc == 0,
-               "none found" if rc == 0 else f"{len(found)} finding(s)" if rc == 3 else f"error: {err.strip()[:80]}",
+               ("none found" if rc == 0 else f"{len(found)} finding(s)" if rc == 3 else f"error: {err.strip()[:80]}")
+               + (f" · {skipped} in git-ignored files skipped" if skipped else ""),
                [f"{x.get('RuleID')}  {x.get('File')}:{x.get('StartLine')}" for x in found])
     else:
         report("secrets", True, ui.dim("gitleaks not installed — brew install gitleaks"))

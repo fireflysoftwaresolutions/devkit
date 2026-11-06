@@ -67,8 +67,11 @@ def _cached(key: str, max_age: float, producer):
 
 
 def _http(url: str, headers: dict, timeout: float = 10):
+    if not url.startswith("https://"):  # API URLs are built from the remote; never file:// or plain http
+        raise ValueError(f"refusing a non-https URL: {url[:60]}")
     req = urllib.request.Request(url, headers={"Accept": "application/json", "User-Agent": "devkit", **headers})
-    with urllib.request.urlopen(req, timeout=timeout) as r:  # nosec B310: https URLs built from the remote
+    # https only (checked above)
+    with urllib.request.urlopen(req, timeout=timeout) as r:  # nosec B310 nosemgrep: dynamic-urllib-use-detected
         return json.loads(r.read().decode())
 
 
