@@ -24,9 +24,7 @@ def owned(owner, *items):
 # Drift that exists today, each with the review finding, its owner and the task or plan step that removes it.
 # Plan steps are those of the 26.11.3 run ("step 17 crew docs" is `dev progress` step 17).
 KNOWN = {
-    "D3": {**owned("R2-1 · Backend engineer (Tank) · step 62 language-neutral hooks",
-                   "crew.catalog", "lessons.for_call", "lessons.for_output"),
-           # the guard's F7 allowlist (ca3bdad), F8 escape hatches (165a8b4) and F5 gate (d9b2ef2) await their calls
+    "D3": {# the guard's F7 allowlist (ca3bdad), F8 escape hatches (165a8b4) and F5 gate (d9b2ef2) await their calls
            # from hooks.py (worktree_state has one: the crew gates read the worktree diff since a lane started);
            # progress.py calls target_matches and preapproval_problem through getattr until Tank imports them
            **owned("found by D3 · Backend engineer (Tank) · step F7 F8 hooks wiring",
