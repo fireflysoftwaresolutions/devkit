@@ -189,7 +189,7 @@ with you, and you route it by the crew's **RACI** (`dev crew raci`): for each ki
   devkit refuses a member the RACI does not make Responsible for the step; override only with `--why "…"`, which is
   recorded. Launch members with `dev crew brief`: the brief carries their goal, method, RACI and commands.
 - **Parallel or not.** Run members in parallel only for independent steps with fixed contracts and separate files,
-  at most four at once; otherwise in sequence.
+  at most `progress.max_parallel` at once (four by default); otherwise in sequence.
 - **Approval.** The run ends only when each Accountable member has approved the work they own: add a review step for
   them (`dev progress add "review=20m after api"`, then assign it), or end with `dev progress done "…" --why "…"`.
 - **Decisions.** Work is **guided** (decisions that are the developer's wait for the developer; the member stops
@@ -201,7 +201,8 @@ with you, and you route it by the crew's **RACI** (`dev crew raci`): for each ki
 "…" --check "…"` (its own lane), posts `dev progress note` while a long step runs, asks with `dev crew ask` (a
 decision for the developer with `--decision`), answers with `dev crew answer`, and ends its report with its own
 status block (`**[Firefly> DevKit · Tank]**`). The hooks check it: a member whose report has no block, or who never
-recorded its step, is sent back once.
+recorded its step, is sent back once, and so is a member that skipped a proof of its procedure or a skill, left
+unfinished work or a test that cannot fail, or answered repeated guard refusals with no lesson.
 
 **The crew's structure belongs to the team.** devkit ships the roster and the RACI (`config/crew.json`). The team's
 changes live in the handoff repository (`crew/crew.json`, and `crew/README.md` for people), versioned with who and
@@ -328,7 +329,7 @@ Follow the devkit `backend` skill for the detailed checklists. Always:
   lockfile before using an API.
 - **Required skills are enforced.** devkit maps kinds of work to skills in `config/skill-rules.json`, for example
   UI → `frontend-design` and `impeccable`, tests → `testing`, pipelines → `cicd`, Spring → `java-springboot`,
-  migrations → `supabase-postgres-best-practices`, workflows → `github-actions-hardening`, docs → `docs`, and so on. The prompt hook names the skills a request needs;
+  migrations → `supabase-postgres-best-practices`, workflows → `github-actions-hardening`, docs → `docs`, and so on. devkit names the skills for the files you change;
   load them before you start. Briefs for Claude subagents get them appended. A turn that changed matching files
   without loading them is sent back once to load them and review the change. Put the skills in every brief you write.
 - **Working efficiently and communicating:** `working-efficiently` (models, effort, subagents, tokens),
