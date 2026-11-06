@@ -555,7 +555,12 @@ def stop(agent: str):
                                    "`dev lesson recur <id>` if a known pitfall repeated). Skip it for a trivial fix.")
             except Exception:
                 _log(f"stop lessons {agent}: {traceback.format_exc()[-300:]}")
-        plans = _plans_without_reason(sess, _session_project(data, sess)) if dev_turn else []
+        try:  # crew members may be writing plans right now; their own `dev plan revise` records them
+            from . import progress as _pg
+            busy = _pg.crew_working(_pg.load_run(agent, sid) or {})
+        except Exception:
+            busy = []
+        plans = _plans_without_reason(sess, _session_project(data, sess)) if dev_turn and not busy else []
         if plans and not data.get("stop_hook_active"):
             reasons.append("devkit: you changed plan(s) without recording why: " + ", ".join(plans[:4]) +
                            ". Run `dev plan revise <file> --why \"…\"` for each (it versions the plan and logs the "

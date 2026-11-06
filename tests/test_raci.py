@@ -304,6 +304,13 @@ class MorpheusTests(unittest.TestCase):
         self.assertEqual(canary.format_issues(block), [])
         self.assertIn("you → decide", canary.status_text(block))
 
+    def test_the_plan_check_waits_while_crew_members_are_working(self):
+        run = {"agents": {"a1": {"persona": "Sati", "state": "running"}, "h1": {"label": "compaction", "state": "running"},
+                          "a2": {"persona": "Tank", "state": "done"}}}
+        self.assertEqual(pg.crew_working(run), ["Sati"])  # helpers and finished members do not count
+        run["agents"]["a1"]["state"] = "done"
+        self.assertEqual(pg.crew_working(run), [])
+
     def test_a_member_that_never_reported_through_devkit_owes_a_step(self):
         now = 10_000
         run = {"plan": [{"name": "the API", "owner": "a1", "state": "running"}],

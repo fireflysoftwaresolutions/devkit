@@ -1601,6 +1601,12 @@ def _on_subagent(agent: str, data: dict, started: bool, now: float | None = None
     f.write_text(json.dumps(s))
 
 
+def crew_working(run: dict) -> list:
+    """The crew members working right now in this run (running lanes with a persona); [] when none."""
+    return [lane.get("persona") for lane in (run.get("agents") or {}).values()
+            if lane.get("state") == "running" and lane.get("persona")]
+
+
 def lane_unreported(run: dict, aid: str, now: float | None = None, min_seconds: float = 180) -> bool:
     """A crew member who owns a plan step, worked at least `min_seconds`, and never used devkit's communication
     (`dev progress step|note` from its lane). Read-only members (no shell) report in their message instead."""
