@@ -28,7 +28,7 @@ COMMANDS = [
         ("open [query]", "Open a project in your editor"),
     ]),
     ("Portfolio", [
-        ("dashboard", "Open the HTML command centre: projects, tasks, activity, explorer, health"),
+        ("dashboard", "Open the live command centre: projects, tasks, background work, team, health"),
         ("overview [--json]", "Portfolio digest for you and your agents: status, Now tasks, last sessions"),
         ("standup [--days N]", "What happened in the last N days and what is in progress"),
         ("initiative [new|add|ls|show]", "Cross-project initiatives: member projects, workstreams, progress"),
@@ -1878,22 +1878,6 @@ def cmd_standup(a):
     return 0
 
 
-def cmd_dashboard(a):
-    try:
-        from . import dashboard
-    except ImportError:
-        ui.err("the HTML dashboard module is not installed in this devkit version")
-        return 1
-    reg = _reg(prs=True)
-    path = dashboard.write(reg)
-    if a.path or a.no_open:
-        print(path)
-    if not a.no_open and not a.path:
-        dashboard.open_in_browser(path)
-        print(f"{ui.OK} dashboard → {tilde(path)}")
-    return 0
-
-
 def cmd_config(a):
     from . import policy, setup
     act = a.config_cmd or "diff"
@@ -2460,9 +2444,8 @@ def build_parser():
     p.add_argument("--days", type=int, default=7)
     p.add_argument("--all", action="store_true", help="include archived projects")
     add("standup", cmd_standup, "Recent work and what is in progress").add_argument("--days", type=int, default=1)
-    p = add("dashboard", cmd_dashboard, "Open the HTML dashboard")
-    p.add_argument("--no-open", action="store_true")
-    p.add_argument("--path", action="store_true", help="print the file path only")
+    from . import dashserver
+    dashserver.add_arguments(add("dashboard", dashserver.cmd_dashboard, "Open the live dashboard (a local, read-only app)"))
     p = add("config", cmd_config, "Preview and enforce devkit-managed agent settings")
     p.add_argument("config_cmd", nargs="?", choices=["diff", "repair", "show", "edit", "validate", "lock", "unlock",
                                                      "status"])
