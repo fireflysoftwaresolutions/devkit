@@ -2566,7 +2566,7 @@ _RO_GIT_READ = frozenset({"status", "log", "show", "diff", "blame", "annotate", 
 _RO_GIT_GLOBAL = frozenset({"--no-pager", "-P", "--no-optional-locks", "--literal-pathspecs", "--no-replace-objects"})
 _RO_GH_READ = frozenset({"view", "list", "diff", "checks", "status"})
 _RO_DEV = {"status": None, "grep": None, "find": None, "files": None, "diff": None, "stubs": None, "help": None,
-           "version": None, "sec": ("scan",), "test": ("", "run", "plan", "audit"), "plan": ("show",),
+           "version": None, "sec": ("scan",), "test": ("", "run", "plan", "audit", "prove"), "plan": ("show",),
            "lesson": ("add", "recur"), "task": ("", "ls", "list", "show"), "ci": ("", "status", "ls", "list"),
            "delivery": ("", "show"), "audit": ("", "verify", "show", "stats", "config")}
 _AUDIT_VALUES = {"--days", "--since", "--until", "--action", "--actor", "-p", "--project", "--member", "--category",
