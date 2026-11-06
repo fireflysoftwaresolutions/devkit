@@ -323,6 +323,14 @@ class DigestTests(unittest.TestCase):
         self.assertEqual(d["projects"][0]["status_block"], "**[Firefly> DevKit]** api · `main` · Export")
         self.assertEqual(len(mcp._digest_overview(data, {"days": 7, "include_all": True})["projects"]), 3)
 
+    def test_audit_digest_names_who_from_the_schema_v2_actor(self):
+        # `dev audit --json` prints schema v2 records: user, host and agent live under `actor`, not at the top level
+        rec = {"v": 2, "id": "01J", "ts": 1793948774.0, "time": "2026-11-06T10:26:14Z", "action": "guard.deny",
+               "target": "git push", "outcome": "deny", "detail": "",
+               "actor": {"user": "ann", "host": "mac", "agent": "claude", "session": "s1"}}
+        d = mcp._digest_audit([rec], {"limit": 50})
+        self.assertEqual((d["records"][0]["who"], d["records"][0]["agent"]), ("ann@mac", "claude"))
+
 
 class ManifestTests(unittest.TestCase):
     def test_manifest_tools_match_the_server(self):

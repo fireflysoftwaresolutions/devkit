@@ -168,12 +168,14 @@ def _digest_audit(records, a):
     for r in records:
         k = str(r.get("action", "")).split(".")[0]
         counts[k] = counts.get(k, 0) + 1
-    shown = records[-limit:]
+    shown, out = records[-limit:], []
+    for r in shown:
+        who = r.get("actor") or {}  # schema v2 (docs/audit.md): who acted is under `actor`
+        out.append({"time": _iso(r.get("ts")), "who": f"{who.get('user')}@{who.get('host')}", "agent": who.get("agent"),
+                    "action": r.get("action"), "target": _short(r.get("target"), 200), "outcome": r.get("outcome"),
+                    "detail": _short(r.get("detail"), 200)})
     return {"total": len(records), "shown": len(shown),
-            "by_action": dict(sorted(counts.items(), key=lambda kv: -kv[1])[:15]),
-            "records": [{"time": _iso(r.get("ts")), "who": f"{r.get('user')}@{r.get('host')}", "agent": r.get("agent"),
-                         "action": r.get("action"), "target": _short(r.get("target"), 200),
-                         "outcome": r.get("outcome"), "detail": _short(r.get("detail"), 200)} for r in shown]}
+            "by_action": dict(sorted(counts.items(), key=lambda kv: -kv[1])[:15]), "records": out}
 
 
 _tool("devkit_overview", "Portfolio overview",
