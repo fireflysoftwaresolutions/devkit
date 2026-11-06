@@ -1,6 +1,6 @@
 ---
 name: crew
-description: How the main session leads devkit's crew of specialist agents (Matrix names, professional roles)—who to send for each kind of work, when to run them in parallel and when in sequence, how to brief them, and how devkit coordinates them on Claude Code, Claude Desktop, Codex and the ChatGPT app (plan steps with dependencies, one lane per agent with its own time, file scopes the guard enforces, messages between members, and a status block every member must end with). Use when work needs more than one kind of expertise, before launching any subagent, when planning parallel work, and when a crew member asks for a decision.
+description: How the main session leads devkit's crew of specialist agents (Matrix names, professional roles)—who to send for each kind of work, when to run them in parallel and when in sequence, how to brief them, and how devkit coordinates them on Claude Code, Claude Desktop, Codex and the ChatGPT app (plan steps with dependencies and a declared kind of work, the RACI, one lane per agent with its own time, file scopes and scratch folders the guard enforces, messages between members, and the checks every member's report must pass). Use when work needs more than one kind of expertise, before launching any subagent, when planning parallel work, and when a crew member asks for a decision.
 ---
 
 # Leading the crew
@@ -57,9 +57,11 @@ never a smarter answer.
 | Unknown interfaces between the parts | **First** The Architect fixes the contracts, **then** parallel build |
 | Hours of separate work, or the developer wants separate streams | Parallel **sessions** in worktrees (`dev wt new`), not subagents |
 
-Limits: at most 4 members working at once (Codex enforces it); never two members on the same files; never parallel
-work on a design that is not settled. Follow-ups go to the **same** member (Claude `SendMessage`, Codex `send_input`),
-which keeps its context: a fresh one would have to learn everything again.
+Limits: at most `progress.max_parallel` members working at once (4 by default), counting the helpers they launch;
+the limit drops to 1 while the 5-hour usage is over `progress.quota_percent`, and `dev crew next` shows the current
+one. Never two members on the same files; never parallel work on a design that is not settled. Follow-ups go to the
+**same** member (Claude `SendMessage`, Codex `send_input`), which keeps its context and its lane: a fresh one would
+have to learn everything again.
 
 Patterns that work:
 
@@ -71,13 +73,19 @@ Patterns that work:
 ## 3. Plan, assign, launch
 
 ```bash
-dev progress start "Invoice export" --plan "requirements=20m; design=30m after requirements; \
-  api=1h after design; ui=1h after design; tests=30m after api, ui; review=20m after tests"
-dev progress assign api --to Tank --scope "services/invoices/**,tests/invoices/**"
-dev progress assign ui  --to Trinity --scope "web/src/invoices/**"
-dev crew brief Tank "Add the CSV export endpoint" --scope "services/invoices/**,tests/invoices/**" --step api
+dev progress start "Invoice export" --plan "requirements=20m [requirements]; \
+  design=30m after requirements [architecture]; api=1h after design [backend]; ui=1h after design [frontend]; \
+  tests=30m after api, ui [testing]; review=20m after tests [review]"
+dev progress assign api --to Tank --scope "services/invoices/**,tests/invoices/**" --activity backend
+dev progress assign ui  --to Trinity --scope "web/src/invoices/**" --activity frontend
+dev crew brief Tank "Add the CSV export endpoint" --scope "services/invoices/**,tests/invoices/**" --step api \
+  --activity backend
+dev crew graph                       # the session as one graph: steps, lanes, decisions, approvals owed, messages
 ```
 
+- **Declare each step's kind of work:** `[id]` after a step in the plan (or in `dev progress add`), `--activity <id>`
+  on `assign` and `brief`. The ids are those of `dev crew raci`. The kind of work decides the RACI check, the
+  approver, and the skills, knowledge, and known pitfalls in the brief, whatever language the step is written in.
 - The plan's `after` dependencies and each lane (the main session, each member) give the ETA as a critical path:
   `api` and `ui` run in parallel, so the ETA counts the longer one, not both.
 - `assign` links a step to the member launched for it. Its time is that member's own time, and its `--scope` is the
@@ -93,18 +101,34 @@ files.
 
 ## 4. Who does what
 
-- `dev crew route "<task>"` names the best member with its reasons; `dev crew route --plan --apply` assigns every
-  unowned plan step. Routing is deterministic (keywords, role, files), so use it instead of guessing.
+- **The RACI decides.** For each kind of work, `dev crew raci <id>` names who does it (R), who approves it (A), and
+  who is consulted (C) or informed (I). Without a declared kind of work, devkit takes the member's Responsible kind,
+  then the files in scope; only then does it guess from English words, which can refuse a step written in another
+  language. `assign` refuses a member who is not Responsible unless `--why` is recorded, and `dev progress done`
+  waits until each Accountable member approved: add a review step for them.
+- `dev crew route "<task>"` suggests the best member with its reasons, from English keywords, role, and files;
+  `dev crew route --plan --apply` assigns every unowned plan step. Check its choice against the RACI.
 - Any member can hand work to another: `dev crew delegate "<task>" --to Dozer` (or `--to auto`). A working member
   gets it in its lane and may decline with a reason; otherwise you are told to launch it.
 - When dependencies clear, you get "ready to launch" with the exact command. Launch ready members together, within
-  four at once; `dev crew next` shows ready, queued, waiting, and busy.
+  the slot limit; `dev crew next` shows ready, queued, waiting, and busy.
 
 ## 5. While the crew works
 
 - **Progress per member:** each member records steps with `dev progress step "…"`. devkit sees the call comes from a
   subagent (`agent_id` in the hook input) and writes it to that member's lane, never to your plan. `dev progress`,
-  the dashboard and `dev crew` show every lane with its time.
+  the dashboard, `dev crew` and `dev crew graph` show every lane with its time. One launch makes one lane: a resumed
+  member keeps its lane, and a failed launch holds no slot.
+- **Who is calling:** devkit records every shell call with the agent that made it. Your own plan commands
+  (`dev progress start|assign|begin|reopen|skip|done`, `dev crew decide|mode`, `dev crew route --plan --apply`) count
+  as yours only when you type them: run through a script or `bash -c`, they are refused. A member runs its lane
+  commands on their own (not inside `&&`, a pipe, or `$(…)`); read-only crew commands run anywhere:
+  `dev crew graph`, `show`, `rules`, `history`, `next`, and `dev crew raci` without `--set`.
+- **Helpers:** a member may launch a helper for a narrow lookup or a slice of its own files. The helper gets the
+  member's tools and files, takes a slot, and no launch goes deeper than `progress.max_depth` (2). A member that needs
+  another specialist asks you.
+- **Scratch folders:** each member writes and deletes only in `scratchpad/<member id>/` or
+  `scratchpad/<member id>-<task>/` of the session scratchpad. Name a member's folder in its brief.
 - **Questions:** any member can ask anything: `dev crew ask "Should empty lines be skipped?"` (to Morpheus by
   default, or `--to Seraph`). The message reaches the recipient with its next action. Answer with
   `dev crew answer M1 "Yes, skip them"`. Answer quickly: a member waiting on you blocks a lane.
@@ -143,10 +167,16 @@ dev crew decide D1 "B: reject"                          # Morpheus records the d
 
 ## 7. When a member finishes
 
-1. **The report must start with the member's status block:**
-   `` **[Firefly> DevKit · Tank]** <project> · `<branch>` · <task> ``, then Done, Check, and Next. The SubagentStop
-   hook checks it, the way the Stop hook checks yours, and sends the member back once without it. `dev canary` counts
-   the crew apart (`crew 12/13`), so you always know the kit's rules still hold inside every agent.
+1. **devkit checks the report first.** The SubagentStop hook sends the member back once for each of these that
+   fails, with the missing items and the commands that fix them:
+   - the report starts with the member's status block,
+     `` **[Firefly> DevKit · Tank]** <project> · `<branch>` · <task> ``, then Done, Check, and Next;
+   - the member recorded its work with `dev progress step "…" --check "…"`;
+   - the crew gates, from its own transcript: the proofs of its procedure ran as commands, it loaded its skills, its
+     files hold no unfinished work, its new tests can fail, and two guard refusals got a lesson (`dev lesson add`).
+
+   `dev canary` counts the crew apart (`crew 12/13`), and `dev audit --action crew.gate` lists the gate findings. A
+   member's step still closes when it stops, whatever the gates found, so the next item is yours.
 2. **Check the work, don't trust the report:** read the diff (`git diff --stat`, then the files that matter), run the
    affected tests yourself (`dev test`), and spot-check a cited `file:line`.
 3. **Integrate** in your own lane. Run the full suite once at the end (`dev ci --run`), not after each member.
@@ -162,5 +192,6 @@ docs stay in American English unless the developer asks otherwise.
 ## Done when
 
 - Every step is done or deliberately skipped, and every lane is closed.
-- Every member's report carried its status block, and you checked its work.
+- Every member's report carried its status block and passed the crew gates, and you checked its work.
+- Each Accountable member approved the work they own (`dev progress done` says who is missing).
 - The full suite passed once, and the developer got one status block with what each member delivered.

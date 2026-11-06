@@ -52,6 +52,9 @@ background (`dev ci watch`) and tells this session how it ended: green, or red w
 the one next action (`cicd` skill, section 6). Run `dev ci watch` yourself in the background when you want to be
 notified the moment it ends. Never poll.
 
+When the fix is not trivial and you lead the crew, hand it to Link, the CI/CD and release engineer:
+`dev crew brief link "Fix the failed CI run: <job>, <class>" --activity cicd`. In auto mode this happens at once.
+
 ## 3. When CI fails
 
 1. `dev run view <run-id> --failed`—read the actual error.

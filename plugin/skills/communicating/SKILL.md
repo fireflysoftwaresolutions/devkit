@@ -15,6 +15,12 @@ them or for their team, follows the same rules:
   instructions §0); nothing comes before it, not even a correction or a note about the last command. Right below the
   block, lead with the answer: the outcome, the verdict, or the question. Details come after. Every template
   below goes under the block when it ends the turn.
+- **The block's bullets.** **Done**, **Check**, and **Next** always. **Progress** only while a `dev progress` run is
+  active. **Crew** only when crew members worked in this turn or are working, each with what it works on (`▸`
+  working, `✓` done, `✗` failed or lost): `Tank ▸ the API · Sati ✓ the screens`. **You** only when there is
+  something only the developer can do or decide: a decision, an approval, or an action on their own machine or
+  account.
+  Work the crew can do never goes in **You**.
 - **Write plainly.** Use short sentences, everyday words, and concrete nouns ("the login page times out after 30 s,"
   not "authentication flow latency issues"). Use active voice. Explain each acronym the first time you use it.
 - **Cut whatever says nothing.** No buzzwords: robust, seamless, leverage, comprehensive, cutting-edge, game-changing.
@@ -64,14 +70,16 @@ dev progress note "<what is happening>" --next "<what is next>"                 
 
 A note changes no step; `step` closes one. Never close a step to send an update.
 
-The update it prints is the status block, with the Progress bullet and the plan's checklist under it:
+The update it prints is the status block, with the Progress bullet, the Crew bullet when members have lanes, and the
+plan's checklist under it:
 
 ```markdown
 **[Firefly> DevKit]** billing · `feat/invoice-export` · Invoice export
 - **Done:** the CSV writer streams 10,000 rows in 1.2 s
 - **Check:** ✓ 12 new tests pass
 - **Progress:** 3/7 · 24m elapsed of ~40m · ETA ~15m
-- **Next:** wire the endpoint; the migration agent is running (6 min of ~10)
+- **Crew:** Dozer ▸ the export index migration (6 min of ~10) · Trinity ✓ the export button
+- **Next:** wire the endpoint once Dozer's migration lands
 ```
 
 ## 3. Status answer, when the developer asks "how is it going?" or "what's left?"
@@ -101,7 +109,7 @@ successful runs. Use `dev ci status --watch` to follow a run to the end instead 
 - **On launch, say what runs in the background.** Name it, say what it produces and when you expect it, for example:
   "3 agents running: A, B, C; I'll integrate as each finishes (~20m)." Then keep working on independent things.
 - **While you wait, the message still starts with the status block.** "Waiting for the build" is a final message
-  like any other: the block first, with what runs in **Next**.
+  like any other: the block first, with what runs in **Next**, and the crew members still working in **Crew**.
 - **On completion, relay the result briefly (one or two lines).** Say what it found or built, how you verified it,
   and what you plan to do with it. The developer cannot see subagent output.
 - **Never poll or sleep while waiting.** Use notifications (`run_in_background`, `gh pr checks --watch`). If a job
@@ -117,6 +125,7 @@ has one; otherwise:
 **[Firefly> DevKit]** <project> · `<branch>` · <task>
 - **Done:** <what you found that needs the decision>
 - **Check:** – a question, nothing to verify
+- **You:** decide <topic>: A or B (below)
 - **Next:** your decision on <topic>; meanwhile I <independent work>
 
 **Decision needed · <topic>** — <the question in one line>
@@ -258,7 +267,7 @@ structure, instead of free text.
 | Task | `dev task add "<title>" --type task\|feature\|bug\|spike --why "…" --done "…"` | Depends on the type: a Context, Why, Symptom, or Question section · Scope · Steps to reproduce · Done when (testable checkboxes) |
 | Steps of a run | `dev progress start "<goal>" --plan "step 1; step 2; step 3" --estimate 1h` | Checklist ✓ ▸ ○ with elapsed, estimate, and ETA |
 | Session activity | `dev handoff --log "<outcome; next>"` | `YYYY-MM-DD HH:MM · user@host · agent · branch · outcome · next` |
-| Status block | the start of every final message | `` **[Firefly> DevKit]** <project> · `<branch>` · <task> ``, then **Done:** · **Check:** ✓/⚠/✗ evidence · **Progress:** (when a run is active) · **Next:** |
+| Status block | the start of every final message | `` **[Firefly> DevKit]** <project> · `<branch>` · <task> ``, then **Done:** · **Check:** ✓/⚠/✗ evidence · **Progress:** (when a run is active) · **Crew:** (when members worked or work) · **You:** (when only the developer can act) · **Next:** |
 | Status report | `dev report [--days 7] [-i <initiative>]` | Summary table, then per initiative: health with reason · progress · milestone · done · in progress · next · blockers and risks · team |
 | PR, merge, review, handover | `dev pr create`, `dev task delegate` | Sections 9–12 of this skill |
 
