@@ -357,6 +357,23 @@ class RenderTests(unittest.TestCase):
         self.assertTrue(all(f'nonce="{nonce}"' in attrs for _, attrs in tags), tags)
         self.assertEqual(live.replace(f' nonce="{nonce}"', ""), self.html)      # the static page plus nonces, byte for byte
 
+    def test_live_mode_replaces_the_timed_reload_and_the_static_page_keeps_it(self):
+        # live (D.live, from the server): the event stream, partial fetches and an in-place re-render; the static
+        # export still reloads every 2 minutes and never opens a stream
+        js = dashboard.JS
+        boot = js[js.index("(function boot() {"):]
+        live_at, reload_at = boot.index("if (LIVE.on) { liveStart(); return; }"), boot.index("location.reload()")
+        self.assertLess(live_at, reload_at)                                   # live returns before the reload timer
+        self.assertEqual(js.count("new EventSource("), 1)
+        self.assertIn('new EventSource("/api/v1/events?since=" + ver)', js[js.index("function liveStart()"):])
+        self.assertIn('"only=" + areas.map(encodeURIComponent).join(",")', js)
+        self.assertIn('liveGet("/api/v1/files")', js)
+        derive = js[js.index("function derive() {"):js.index("\n}\nderive();")]
+        for name in ("ITEMS", "P", "PEOPLE", "RUNS", "INITS", "FILES", "ACTIONS", "W"):
+            self.assertIn(f"\n  {name} = ", derive, name)                      # every derived constant is re-derived
+        self.assertIn("D = LIVE.pending; LIVE.pending = null; derive(); IDX = null;", js)
+        self.assertEqual(re.findall(r"^const (?:ITEMS|P|PEOPLE|RUNS|INITS|FILES|ACTIONS|D) = ", js, re.M), [])
+
     def test_a_nonce_that_could_break_out_of_the_attribute_is_refused(self):
         for bad in ('abcdefghijklmnop" onload="alert(1)', "short"):
             with self.assertRaises(ValueError, msg=bad):
@@ -706,7 +723,7 @@ class DetailTests(unittest.TestCase):
     def test_ci_watches_newest_first_with_the_first_error_and_live_watchers(self):
         w = self.st / "ci" / "watch"
         w.mkdir(parents=True)
-        diag = {"run": "ci", "number": 9, "url": "https://x/9", "class": "test", "action": "reproduce it locally",
+        diag = {"run": "ci", "number": 9, "id": 4242, "url": "https://x/9", "class": "test", "action": "reproduce it locally",
                 "failed_jobs": [{"name": "unit", "step": "pytest"}], "excerpt": "E" * 2000}
         (w / "acme_widget-main.json").write_text(json.dumps({"ts": 100, "state": "passed", "repo": "acme/widget", "branch": "main",
                                                             "runs": [], "diagnoses": []}))
@@ -721,7 +738,7 @@ class DetailTests(unittest.TestCase):
         self.assertEqual([x["branch"] for x in ci["watches"]], ["fix/y", "main"])
         top = ci["watches"][0]
         self.assertEqual((top["class"], top["action"], len(top["first_error"])), ("test", "reproduce it locally", 600))
-        self.assertEqual(top["failures"][0]["jobs"], [{"name": "unit", "step": "pytest"}])
+        self.assertEqual((top["failures"][0]["id"], top["failures"][0]["jobs"]), (4242, [{"name": "unit", "step": "pytest"}]))
         self.assertTrue(ci["complete"])
         self.assertEqual(len(dashboard.ci_watches(excerpt=0)["watches"][0]["first_error"]), 2000)
         self.assertEqual(ci["watching"], [{"key": "widget-fix_y", "sha": "abc1234", "pid": os.getpid(), "since": 150}])

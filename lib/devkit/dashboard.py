@@ -942,7 +942,7 @@ def ci_watches(limit: int = CI_CAP, excerpt: int = CI_EXCERPT) -> dict:
         rec = core.read_json(f, None)
         if not isinstance(rec, dict):
             continue
-        fails = [{"run": x.get("run"), "number": x.get("number"), "url": x.get("url"), "class": x.get("class") or "unknown",
+        fails = [{"run": x.get("run"), "number": x.get("number"), "id": x.get("id"), "url": x.get("url"), "class": x.get("class") or "unknown",
                   "action": x.get("action") or "", "jobs": x.get("failed_jobs") or [],
                   "excerpt": (x.get("excerpt") or "")[:excerpt] if excerpt else x.get("excerpt") or ""}
                  for x in rec.get("diagnoses") or [] if isinstance(x, dict)]
@@ -2002,7 +2002,7 @@ JS = r"""
 "use strict";
 window.addEventListener("error", e => { const b = document.createElement("div"); b.className = "err"; b.id = "dk-error";
   b.textContent = "Dashboard error: " + (e.message || e.error); document.body.append(b); });
-const D = JSON.parse(document.getElementById("devkit-data").textContent);
+let D = JSON.parse(document.getElementById("devkit-data").textContent);   /* live mode swaps it for a newer snapshot */
 const VIEWS = [["overview", "Home", "o"], ["initiatives", "Initiatives", "i"], ["projects", "Projects", "p"], ["team", "Team", "m"], ["tasks", "Tasks", "t"], ["activity", "Activity", "a"], ["explorer", "Explorer", "e"], ["health", "Health", "h"]];
 const ROUTES = VIEWS.map(v => v[0]).concat(["search", "actions"]);
 const DEFAULT = {view: "overview", id: "", tab: "", task: "", q: "", status: [], priority: [], owner: [], stack: [], tag: [], ci: [], health: [],
@@ -2062,7 +2062,6 @@ function plural(n, w, p) { return n + " " + (n === 1 ? w : (p || w + "s")); }
 function stripMarker(line) { return String(line || "").replace(/^[\W_]*(?:\[\s*firefly\s*>\s*devkit\s*\]|devkit(?=[\s·:—*`]))[\s·:—*`]*/i, "").replace(/(status:\s*)(?:\*\*|`)?(?:\[\s*firefly\s*>\s*devkit\s*\]|devkit\s*·)(?:\*\*|`)?\s*/gi, "$1"); }
 function iso(s) { const t = Date.parse(s || ""); return isNaN(t) ? 0 : t / 1000; }
 /* the window behind a count: the guard log keeps the last N decisions, the session log two months, commits 30 days */
-const W = D.windows || {};
 function guardWindow() { return W.guard_since ? ", since " + shortDay(String(W.guard_since).slice(0, 10)) : ""; }
 function fmtMin(m) { m = Math.max(0, Math.round(m || 0)); return m >= 60 ? Math.floor(m / 60) + "h" + String(m % 60).padStart(2, "0") + "m" : m + "m"; }
 
@@ -2087,10 +2086,7 @@ function isInit(scope) { return String(scope).startsWith("initiatives/"); }
 function flagOf(scope) { return isInit(scope) ? "-i " + scope.slice(12) : "-p " + scope; }
 function cnt(items) { const c = {open: 0, todo: 0, doing: 0, blocked: 0, done: 0, cancelled: 0, total: items.length}; for (const x of items) { if (x.open) c.open++; if (c[x.status] != null) c[x.status]++; } return c; }
 
-const ITEMS = (D.items || []).map(x => Object.assign({}, x, {holder: whoOf(x.claimed_by), agent: agentOf(x.claimed_by), open: OPEN.includes(x.status)}));
-const ITEMBY = new Map(ITEMS.map(x => [x.id, x]));
-const BYSCOPE = new Map();
-for (const x of ITEMS) { if (!BYSCOPE.has(x.scope)) BYSCOPE.set(x.scope, []); BYSCOPE.get(x.scope).push(x); }
+let ITEMS, ITEMBY, BYSCOPE, P, BYID, PEOPLE, BYWHO, ONPROJ, RUNS, INITS, BYINIT, MEMBEROF, FILES, FILEMAP, ACTIONS, W;
 /* scopes without work items still show their note checkboxes (legacy) as read-only items */
 function legacy(scope, t, tidx) {
   const out = []; let k = 0;
@@ -2102,46 +2098,8 @@ function legacy(scope, t, tidx) {
   }
   return out;
 }
-const P = (D.projects || []).map((p, i) => {
-  const ns = p.note_summary || null;
-  const t = (ns && ns.tasks) || {now: [], next: [], later: [], done_recent: [], open: 0, done: 0, overdue: []};
-  const id = p.id || p.name || "project-" + i;
-  const owner = id.includes("/") ? id.slice(0, id.lastIndexOf("/")) : "(local)";
-  const wts = p.worktrees || [], prsOpen = p.prs_open || [];
-  const live = (p.main && p.main.active ? 1 : 0) + wts.filter(w => w.active).length;
-  const o = Object.assign({}, p, {id, ns, t, owner, wts, live, status: ns ? (ns.status || "active") : "untracked", priority: (ns && ns.priority) || "normal", tags: (ns && ns.tags) || [],
-    stack: p.stack || [], prsOpen, prs: prsOpen.length, act: p.activity || {}, sessions: (ns && ns.sessions) || [], health: p.health || {level: "ok", reasons: []},
-    ci: Array.from(new Set(prsOpen.map(r => r.checks || "unknown"))), tidx: p.task_index || {}, local: p.local !== false, inits: p.initiatives || []});
-  o.items = BYSCOPE.get(id) || legacy(id, t, o.tidx);
-  o.cnt = cnt(o.items);
-  o.hay = [id, p.name, o.stack.join(" "), (p.main || {}).branch, o.tags.join(" "), ns && ns.purpose, ns && ns.state, o.items.filter(x => x.open).map(x => x.id + " " + x.title).join(" "),
-    p.status_line && p.status_line.line, prsOpen.map(r => "#" + r.number + " " + r.title).join(" ")].filter(Boolean).join(" \n ").toLowerCase();
-  return o;
-});
-const BYID = new Map(P.map(p => [p.id, p]));
-const PEOPLE = (D.people || []).map(x => Object.assign({}, x, {sessions: x.sessions || [], locks: x.locks || [], claimed: x.claimed || [], recent: x.recent || []}));
-if (!PEOPLE.length) { const live = (D.sessions || []).filter(s => s.active); if (live.length) PEOPLE.push({who: ME || D.host, user: ME.split("@")[0], host: D.host, updated: D.generated, sessions: live, locks: [], claimed: [], recent: []}); }
-const BYWHO = new Map(PEOPLE.map(x => [x.who, x]));
-const ONPROJ = new Map();
-for (const x of PEOPLE) for (const s of x.sessions) if (s.project) { if (!ONPROJ.has(s.project)) ONPROJ.set(s.project, []); ONPROJ.get(s.project).push(Object.assign({who: x.who, asOf: x.updated}, s)); }
-const RUNS = D.runs || [];
 function runOf(s) { return RUNS.find(r => r.session && r.session === s.session && r.agent === s.agent) || null; }
 function peopleOn(scopes, items) { const out = new Set(); for (const sc of scopes) for (const s of ONPROJ.get(sc) || []) out.add(s.who); for (const it of items) if (it.open && it.holder && it.lock !== "expired") out.add(it.holder); return Array.from(out); }
-for (const p of P) p.people = peopleOn([p.id], p.items);
-const INITS = (D.initiatives || []).map(x => {
-  const t = x.tasks || {};
-  const tk = {now: t.now || [], next: t.next || [], later: t.later || [], done_recent: t.done_recent || [], open: t.open || 0, done: t.done || 0, overdue: t.overdue || []};
-  const scope = "initiatives/" + x.id, linked = (x.linked_items || []).map(id => ITEMBY.get(id)).filter(Boolean);
-  const items = linked.length || BYSCOPE.has(scope) ? linked : legacy(scope, tk, x.task_index || {});
-  const projects = x.projects || [], members = x.members || [];
-  const last = Math.max(x.last_activity || 0, ...projects.map(id => (BYID.get(id) || {}).last_activity || 0));
-  return Object.assign({}, x, {t: tk, scope, scopeText: x.scope || "", items, cnt: cnt(items), members, projects, tidx: x.task_index || {}, status: x.status || "active", priority: x.priority || "normal",
-    title: x.title || x.id, tags: x.tags || [], sessions: x.sessions || [], last, people: peopleOn(projects.concat([scope]), items),
-    hay: [x.id, x.title, x.goal, x.scope, x.state, projects.join(" "), items.filter(i => i.open).map(i => i.id + " " + i.title).join(" "), (x.tags || []).join(" ")].filter(Boolean).join(" \n ").toLowerCase()});
-});
-const BYINIT = new Map(INITS.map(x => [x.id, x]));
-const MEMBEROF = new Map();
-for (const x of INITS) for (const id of x.projects) { if (!MEMBEROF.has(id)) MEMBEROF.set(id, []); MEMBEROF.get(id).push(x.id); }
 function allItems() { const out = ITEMS.slice(); for (const p of P) if (p.items.length && p.items[0].legacy) out.push(...p.items); for (const x of INITS) if (x.items.length && x.items[0].legacy) out.push(...x.items); return out; }
 function progOf(x) {
   const t = x.t || {}, done = t.done || 0, total = (t.open || 0) + done;
@@ -2162,9 +2120,56 @@ function progressBar(x, wide) {
 }
 function dueBadge(due, done) { if (!due) return null; const over = !done && due < lkey(new Date());
   return h("span", {class: "due" + (over ? " over" : ""), title: over ? "Past its due date (" + due + ")" : "Due " + due, text: over ? "overdue since " + shortDay(due) : "due " + shortDay(due)}); }
-const FILES = D.files || [];
-const FILEMAP = new Map(FILES.map(f => [f.path, f]));
-const ACTIONS = D.actions || [];
+/* everything derived from the data, in one place: live mode re-runs it when a newer snapshot arrives */
+function derive() {
+  W = D.windows || {};
+  ITEMS = (D.items || []).map(x => Object.assign({}, x, {holder: whoOf(x.claimed_by), agent: agentOf(x.claimed_by), open: OPEN.includes(x.status)}));
+  ITEMBY = new Map(ITEMS.map(x => [x.id, x]));
+  BYSCOPE = new Map();
+  for (const x of ITEMS) { if (!BYSCOPE.has(x.scope)) BYSCOPE.set(x.scope, []); BYSCOPE.get(x.scope).push(x); }
+  P = (D.projects || []).map((p, i) => {
+    const ns = p.note_summary || null;
+    const t = (ns && ns.tasks) || {now: [], next: [], later: [], done_recent: [], open: 0, done: 0, overdue: []};
+    const id = p.id || p.name || "project-" + i;
+    const owner = id.includes("/") ? id.slice(0, id.lastIndexOf("/")) : "(local)";
+    const wts = p.worktrees || [], prsOpen = p.prs_open || [];
+    const live = (p.main && p.main.active ? 1 : 0) + wts.filter(w => w.active).length;
+    const o = Object.assign({}, p, {id, ns, t, owner, wts, live, status: ns ? (ns.status || "active") : "untracked", priority: (ns && ns.priority) || "normal", tags: (ns && ns.tags) || [],
+      stack: p.stack || [], prsOpen, prs: prsOpen.length, act: p.activity || {}, sessions: (ns && ns.sessions) || [], health: p.health || {level: "ok", reasons: []},
+      ci: Array.from(new Set(prsOpen.map(r => r.checks || "unknown"))), tidx: p.task_index || {}, local: p.local !== false, inits: p.initiatives || []});
+    o.items = BYSCOPE.get(id) || legacy(id, t, o.tidx);
+    o.cnt = cnt(o.items);
+    o.hay = [id, p.name, o.stack.join(" "), (p.main || {}).branch, o.tags.join(" "), ns && ns.purpose, ns && ns.state, o.items.filter(x => x.open).map(x => x.id + " " + x.title).join(" "),
+      p.status_line && p.status_line.line, prsOpen.map(r => "#" + r.number + " " + r.title).join(" ")].filter(Boolean).join(" \n ").toLowerCase();
+    return o;
+  });
+  BYID = new Map(P.map(p => [p.id, p]));
+  PEOPLE = (D.people || []).map(x => Object.assign({}, x, {sessions: x.sessions || [], locks: x.locks || [], claimed: x.claimed || [], recent: x.recent || []}));
+  if (!PEOPLE.length) { const live = (D.sessions || []).filter(s => s.active); if (live.length) PEOPLE.push({who: ME || D.host, user: ME.split("@")[0], host: D.host, updated: D.generated, sessions: live, locks: [], claimed: [], recent: []}); }
+  BYWHO = new Map(PEOPLE.map(x => [x.who, x]));
+  ONPROJ = new Map();
+  for (const x of PEOPLE) for (const s of x.sessions) if (s.project) { if (!ONPROJ.has(s.project)) ONPROJ.set(s.project, []); ONPROJ.get(s.project).push(Object.assign({who: x.who, asOf: x.updated}, s)); }
+  RUNS = D.runs || [];
+  for (const p of P) p.people = peopleOn([p.id], p.items);
+  INITS = (D.initiatives || []).map(x => {
+    const t = x.tasks || {};
+    const tk = {now: t.now || [], next: t.next || [], later: t.later || [], done_recent: t.done_recent || [], open: t.open || 0, done: t.done || 0, overdue: t.overdue || []};
+    const scope = "initiatives/" + x.id, linked = (x.linked_items || []).map(id => ITEMBY.get(id)).filter(Boolean);
+    const items = linked.length || BYSCOPE.has(scope) ? linked : legacy(scope, tk, x.task_index || {});
+    const projects = x.projects || [], members = x.members || [];
+    const last = Math.max(x.last_activity || 0, ...projects.map(id => (BYID.get(id) || {}).last_activity || 0));
+    return Object.assign({}, x, {t: tk, scope, scopeText: x.scope || "", items, cnt: cnt(items), members, projects, tidx: x.task_index || {}, status: x.status || "active", priority: x.priority || "normal",
+      title: x.title || x.id, tags: x.tags || [], sessions: x.sessions || [], last, people: peopleOn(projects.concat([scope]), items),
+      hay: [x.id, x.title, x.goal, x.scope, x.state, projects.join(" "), items.filter(i => i.open).map(i => i.id + " " + i.title).join(" "), (x.tags || []).join(" ")].filter(Boolean).join(" \n ").toLowerCase()});
+  });
+  BYINIT = new Map(INITS.map(x => [x.id, x]));
+  MEMBEROF = new Map();
+  for (const x of INITS) for (const id of x.projects) { if (!MEMBEROF.has(id)) MEMBEROF.set(id, []); MEMBEROF.get(id).push(x.id); }
+  FILES = D.files || [];
+  FILEMAP = new Map(FILES.map(f => [f.path, f]));
+  ACTIONS = D.actions || [];
+}
+derive();
 function initFor(path) { const m = /^initiatives\/([^/]+)\//.exec(path); return m ? BYINIT.get(m[1]) : null; }
 function projectFor(path) { let best = null; for (const p of P) if ((path === "projects/" + p.id + ".md" || path.startsWith("plans/" + p.id + "/")) && (!best || p.id.length > best.id.length)) best = p; return best; }
 
@@ -3426,6 +3431,7 @@ function fileTree() {
 }
 function viewExplorer(main) {
   main.append(h("div", {class: "head"}, h("h1", {text: "Explorer"}), h("span", {class: "sub", text: "The handoff repository · " + D.handoff})));
+  if (!FILES.length && D.live && !D.files) { main.append(h("div", {class: "panel"}, empty("Loading the files…", "The live page loads the handoff repository's Markdown after the first screen."))); return; }
   if (!FILES.length) { main.append(h("div", {class: "panel"}, empty("The handoff repository has no Markdown files yet", "Run ", h("code", {text: "dev sync"}), " to generate the map and the notes."))); return; }
   const tree = fileTree();
   const pick = S.f && FILEMAP.has(S.f) ? FILEMAP.get(S.f) : (FILEMAP.get("PROJECTS.md") || FILES[0]);
@@ -3618,7 +3624,7 @@ function renderModal() {
   const closeBtn = h("button", {class: "btn icon ghost", type: "button", onclick: closeModal, "aria-label": "Close (Esc)", title: "Close (Esc)"}, icon("close"));
   clear(dlg).append(h("header", {class: "mh"}, h("div", {class: "mh-t"}, parts.head), closeBtn), h("div", {class: "mbody"}, parts.body), parts.foot ? h("footer", {class: "mf"}, parts.foot) : null);
   if (!dlg.open) dlg.showModal();
-  closeBtn.focus({preventScroll: true});
+  if (!LIVE.quiet) closeBtn.focus({preventScroll: true});   /* a live refresh keeps the reader's focus and place */
 }
 function mtitle(text) { return h("h2", {id: "modal-title", text}); }
 function taskModal(id) {
@@ -3827,7 +3833,65 @@ function render() {
   renderModal();
   if (fid) { const el = document.getElementById(fid); if (el && !$("#modal").open) el.focus({preventScroll: true}); }
   if (page !== lastView) { if (lastView) window.scrollTo(0, 0); lastView = page; document.title = pageTitle() + " · Firefly devkit"; }
-  const t = $("#ticker"); if (t) t.textContent = "Synced " + rel(D.generated);
+  liveTicker();
+}
+/* ---------------------------------------------------------------- live mode (the page served by `dev dashboard`): the event stream says a newer
+   snapshot exists and which areas changed; the page fetches only those, swaps the data, re-derives and re-renders in place, keeping the route,
+   filters, scroll position and the open dialog. While the reader types or has a menu open, the swap waits. The static export has none of this. */
+const LIVE = {on: !!D.live, state: "", pending: null, busy: false, again: null, quiet: false, retry: 0, at: 0};
+const LIVE_GAP = 2000;   /* at most one in-place re-render every 2 s, however often agents write */
+function liveTicker() {
+  const t = $("#ticker"); if (!t) return;
+  if (!LIVE.on) { t.textContent = "Synced " + rel(D.generated); return; }
+  t.textContent = {live: "Live", wait: "Reconnecting…", "signed-out": "Signed out: run dev dashboard"}[LIVE.state] || "Connecting…";
+  t.setAttribute("data-live", LIVE.state || "connecting");
+}
+function userBusy() {
+  const a = document.activeElement, tag = (a && a.tagName) || "";
+  return !$("#palette").hidden || !!$(".facet[open],.cmenu[open]") || (/^(INPUT|SELECT|TEXTAREA)$/.test(tag) && a.id !== "q");
+}
+function applyLive() {
+  if (!LIVE.pending) return;
+  const wait = userBusy() ? 1000 : LIVE.at + LIVE_GAP - Date.now();
+  if (wait > 0) { clearTimeout(LIVE.retry); LIVE.retry = setTimeout(applyLive, wait); return; }
+  LIVE.at = Date.now();
+  D = LIVE.pending; LIVE.pending = null; derive(); IDX = null;
+  const dlg = $("#modal"), body = dlg && dlg.open ? $(".mbody", dlg) : null, y = window.scrollY, my = body ? body.scrollTop : 0;
+  LIVE.quiet = true;
+  try { render(); } finally { LIVE.quiet = false; }
+  window.scrollTo(0, y);
+  const nb = dlg && dlg.open ? $(".mbody", dlg) : null; if (nb) nb.scrollTop = my;
+}
+async function liveGet(path) {
+  const r = await fetch(path, {cache: "no-store", credentials: "same-origin", headers: {Accept: "application/json"}});
+  if (r.status === 401) { LIVE.state = "signed-out"; liveTicker(); throw new Error("signed out"); }
+  if (!r.ok) throw new Error(path + " answered " + r.status);
+  return r.json();
+}
+async function liveUpdate(changed) {
+  if (LIVE.busy) { LIVE.again = (LIVE.again || []).concat(changed); return; }
+  LIVE.busy = true;
+  try {
+    const all = changed.includes("*"), areas = changed.filter(k => k !== "files" && k !== "*");
+    const next = Object.assign({}, LIVE.pending || D);
+    if (all || areas.length) Object.assign(next, await liveGet("/api/v1/dashboard?" + (all ? "omit=files" : "only=" + areas.map(encodeURIComponent).join(","))));
+    if (all || changed.includes("files")) { const f = await liveGet("/api/v1/files"); next.files = f.files || []; next.files_meta = f.meta || {}; }
+    LIVE.pending = next; applyLive();
+  } catch (e) { /* the next event, or the reconnect, tries again */ }
+  finally { LIVE.busy = false; if (LIVE.again) { const a = LIVE.again; LIVE.again = null; liveUpdate(a); } }
+}
+function liveStart() {
+  if (!LIVE.on || !window.EventSource) return;
+  let ver = D.snapshot || 0;
+  const es = new EventSource("/api/v1/events?since=" + ver);
+  es.addEventListener("open", () => { LIVE.state = "live"; liveTicker(); });
+  es.addEventListener("error", () => { if (LIVE.state !== "signed-out") { LIVE.state = "wait"; liveTicker(); } });
+  es.addEventListener("snapshot", e => {
+    let m = null; try { m = JSON.parse(e.data); } catch (x) { return; }
+    LIVE.state = "live"; liveTicker();
+    if (m && m.version > ver) { ver = m.version; liveUpdate(m.changed && m.changed.length ? m.changed : ["*"]); }
+  });
+  if (!D.files) liveUpdate(["files"]);   /* the first paint leaves the explorer's file contents out: they load now */
 }
 (function boot() {
   const nav = $("#nav");
@@ -3856,6 +3920,7 @@ function render() {
   render();
   if (document.fonts && document.fonts.ready) document.fonts.ready.then(() => fitTables($("#view")));
   try { const y = sessionStorage.getItem("devkit.scroll"); if (y) { window.scrollTo(0, +y); sessionStorage.removeItem("devkit.scroll"); } } catch (e) {}
+  if (LIVE.on) { liveStart(); return; }   /* live: the event stream replaces the timed reload */
   setInterval(() => { const t = $("#ticker"); if (t) t.textContent = "Synced " + rel(D.generated); }, 30000);
   setInterval(() => { if (document.visibilityState === "visible" && $("#palette").hidden && !S.task && !S.modal && !/^(INPUT|SELECT|TEXTAREA)$/.test((document.activeElement || {}).tagName || "")) {
     try { sessionStorage.setItem("devkit.scroll", String(window.scrollY)); } catch (e) {} location.reload(); } }, 120000);
