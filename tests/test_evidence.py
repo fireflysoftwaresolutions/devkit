@@ -235,6 +235,17 @@ class GrantTests(EvidenceCase):
         self.assertEqual(grant("push", "feat/x", consume=False, now=m(2))["source"], "E2")
         self.assertIsNotNone(grant("push", "feat/x", now=m(2)))  # peeking used nothing
 
+    def test_a_grant_or_an_action_without_a_repository_matches_none(self):
+        self.typed("grant push feat/x", m(1))
+        self.assertIsNone(grant("push", "feat/x", repo="", consume=False, now=m(2)))  # git -C /tmp push, gh api in ~
+        rec = json.loads(self.state.sess.read_text())
+        self.state.sess.write_text(json.dumps({k: v for k, v in rec.items() if k != "project"}))
+        run = pg.load_run("claude", "s1")
+        run["project"] = ""
+        pg._save(run, touch_session=False)
+        self.typed("grant push feat/y", m(3))  # captured where devkit knows no project
+        self.assertIsNone(grant("push", "feat/y", consume=False, now=m(4)))
+
     def test_grant_expires_after_30_minutes(self):
         self.typed("grant push feat/x", m(0))
         self.assertIsNotNone(grant("push", "feat/x", consume=False, now=m(29)))

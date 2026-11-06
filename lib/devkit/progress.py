@@ -1824,7 +1824,8 @@ def _target_covers(action: str, pattern: str, target: str) -> bool:
 
 
 def _same_repo(have, want) -> bool:
-    return not have or not want or str(have).lower() == str(want).lower()
+    """A grant holds in its own repository only: both known and the same (a missing one grants nothing, P2)."""
+    return bool(have) and bool(want) and str(have).lower() == str(want).lower()
 
 
 def _opened(id_, source, uses_left, expires) -> dict:
