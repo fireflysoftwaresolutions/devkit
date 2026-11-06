@@ -10,8 +10,56 @@ active in every session.
 | Claude Desktop, Code tab (local sessions) | the same `~/.claude/` files | the same steps |
 | Codex CLI | `~/.codex/`, `~/.agents/skills/` | `dev install --only codex,instructions,skills` |
 | Codex in the ChatGPT desktop app | the same `~/.codex/` files | the same steps |
+| Claude Desktop chat and Cowork | the devkit extension (`.mcpb`) | `dev install --only desktop` |
 
 Claude Desktop SSH or cloud sessions and Codex cloud tasks run elsewhere and do not load this local configuration.
+
+## Claude Desktop and the ChatGPT app
+
+Both apps bundle their own copy of the agent, and both copies read the same configuration as the terminal:
+
+- **Claude Desktop's Code tab** runs its bundled Claude Code on `~/.claude`: the same settings, hooks, devkit plugin
+  and skills. A session there behaves like one in the terminal.
+- **The ChatGPT app's Codex** runs its bundled Codex on `~/.codex`: the same hooks (trusted), plugins, skills and
+  profiles.
+- **Claude Desktop's chat and Cowork** do not run Claude Code. devkit reaches them through its own extension, which
+  shows in **Settings → Extensions** with the devkit name and icon.
+
+`dev doctor` checks all of this with evidence: the bundled versions, the plugins the ChatGPT app's Codex sees, the
+extension's version and state, and the sessions recorded from each surface.
+
+Plugins uploaded in Claude Desktop (**Customize → Plugins**) sync into every Claude Code session, so devkit does not
+upload its plugin there, because Claude Code would then get every devkit skill twice.
+
+### The devkit extension
+
+The extension is an MCP server packed as an MCPB bundle (`dist/desktop/devkit-<version>.mcpb`, about 50 KB). It
+holds a small launcher, not devkit itself: the launcher finds your devkit checkout and runs `dev mcp`, so updating
+devkit updates the tools without reinstalling the extension. The launcher looks for the checkout in the extension's
+**devkit folder** setting, then the `~/.local/bin/dev` link that setup creates, then
+`~/Development/fireflysoftwaresolutions/devkit`. Without a checkout, its only tool explains how to install devkit.
+
+| Tool | What it answers or does |
+| --- | --- |
+| `devkit_overview` | Every project and initiative: status, Now tasks, latest status |
+| `devkit_project_status` | One project: branch, worktrees, PRs, CI, tasks, handoff |
+| `devkit_tasks` | A project's or initiative's work items |
+| `devkit_standup` · `devkit_report` | What happened recently; the status report with health |
+| `devkit_ci_status` | Live CI runs on any host, with jobs, steps, and ETA |
+| `devkit_lessons` · `devkit_delivery_policy` | Known pitfalls; the recorded delivery policy |
+| `devkit_team` · `devkit_doctor` · `devkit_audit` · `devkit_jobs` | Who works on what; health; the audit trail; scheduled jobs |
+| `devkit_task_add` · `devkit_task_update` | Add a task; start, finish, block, unblock or release one (through `dev task`, so it is audited) |
+
+Install or update it:
+
+```bash
+dev install --only desktop     # builds the bundle and opens it in Claude Desktop; click Install
+dev desktop status             # installed version, enabled, and whether the launcher finds devkit
+dev desktop pack               # build and validate the bundle only (mcpb validate)
+```
+
+Every tool runs a `dev` command without a shell, with a timeout, and passes your text only as arguments. Writes go
+through `dev task`, so the guard and the audit trail apply, recorded as `claude-desktop`.
 
 ## Global instructions
 

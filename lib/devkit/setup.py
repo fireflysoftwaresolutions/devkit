@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import json
 import os
+import sys
 import re
 import shutil
 import subprocess
@@ -352,8 +353,17 @@ def app_checks(codex_plugins=None) -> list:
         try:
             from . import desktop
             st = desktop.status()
-            res.append(("Claude Desktop", "devkit extension", bool(st.get("installed")) and st.get("current", True),
-                        st.get("detail") or "", "dev install --only desktop"))
+            ok_ = bool(st.get("installed")) and bool(st.get("current")) and st.get("enabled") is not False
+            if not st.get("installed"):
+                detail = "not installed: devkit's tools for Desktop chat and Cowork"
+            else:
+                detail = f"{st.get('installed_version')}" + ("" if st.get("current") else f" (this checkout is "
+                                                                                          f"{st.get('version')})")
+                detail += "; turned off in Settings → Extensions" if st.get("enabled") is False else ", enabled"
+                lc = st.get("launcher") or {}
+                if lc and not lc.get("ok", True):
+                    ok_, detail = False, detail + f"; launcher: {lc.get('reason')}"
+            res.append(("Claude Desktop", "devkit extension", ok_, detail, "dev install --only desktop"))
         except Exception:
             pass
     if CHATGPT_APP.exists() and CHATGPT_CODEX.exists():
@@ -749,11 +759,39 @@ def _legacy_setup_launchd():
         done(f"{LAUNCHD_LABEL} loaded (every {interval // 60} min)")
 
 
+def setup_desktop():
+    """Claude Desktop: build devkit's extension (.mcpb) and open its installer when it is missing or outdated.
+    The Code tab needs nothing here: it runs Claude Code on ~/.claude, set up by the claude step."""
+    step("Claude Desktop: the devkit extension")
+    if not CLAUDE_APP.exists():
+        note("Claude Desktop is not installed — skipped")
+        return
+    from . import desktop
+    st = desktop.status()
+    if st.get("installed") and st.get("current"):
+        done(f"devkit {st.get('installed_version')} installed" + ("" if st.get("enabled") is not False else
+                                                                  " but turned off: Settings → Extensions → devkit"))
+        return
+    try:
+        rep = desktop.pack(validate=False, say=lambda *_: None)
+    except ValueError as e:
+        fail(f"could not build the extension: {e}")
+        return
+    bundle = rep["bundle"]
+    if not sys.stdin.isatty() or os.environ.get("DEVKIT_JOB"):
+        note(f"open {tilde(bundle)} to {'update' if st.get('installed') else 'install'} it in Claude Desktop")
+        return
+    sh(["open", "-a", "Claude", bundle], timeout=30)
+    done(f"opened {tilde(bundle)} in Claude Desktop: click Install"
+         + (f" (replaces {st.get('installed_version')})" if st.get("installed") else ""))
+
+
 def run_install(only=None):
     print(ui.banner("install"))
     steps = [("config", ensure_config), ("tools", setup_tools), ("cli", install_cli), ("git", setup_git), ("handoff", setup_handoff),
              ("instructions", write_agent_instructions), ("skills", install_skills), ("claude", setup_claude),
-             ("codex", setup_codex), ("docker", setup_docker), ("docs", setup_docs_tools), ("launchd", setup_launchd)]
+             ("codex", setup_codex), ("desktop", setup_desktop), ("docker", setup_docker), ("docs", setup_docs_tools),
+             ("launchd", setup_launchd)]
     for name, fn in steps:
         if only and name not in only:
             continue

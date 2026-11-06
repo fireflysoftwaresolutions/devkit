@@ -5,7 +5,7 @@ Recorded: every `dev` command that changes something (tasks, plans, lessons, pol
 git and GitHub actions, installs, config repairs and locks, jobs, gc, sleep), every guard refusal, blocked settings
 change and missed status block, every write to the handoff repository, and every scheduled job run.
 
-Where: ~/.local/state/devkit/audit/YYYY-MM.jsonl on this machine (append-only), published by the sync job to the
+Where: ~/.local/state/devkit/audit/YYYY-MM.jsonl on this machine (append-only), published daily by the `audit` job to the
 handoff repository as audit/<user>@<host>/YYYY-MM.jsonl so the team has one history. Secrets are redacted before a
 record is written. Query with `dev audit`.
 """
@@ -29,14 +29,14 @@ SECRET = re.compile(r"(?i)(gh[pousr]_[0-9a-z]{20,}|github_pat_[0-9a-z_]{20,}|xox
 # dev commands that only read; everything else is audited
 READ_ONLY = {"help", "ls", "go", "status", "open", "overview", "standup", "dashboard", "team", "report", "time",
              "files", "find", "grep", "diff", "canary", "du", "doctor", "version", "agents", "calver", "audit",
-             "__complete", "hook", "guard", "plugin", "docs", "diagram", "ci"}
+             "__complete", "hook", "guard", "plugin", "docs", "diagram", "ci", "mcp"}
 READ_SUB = {("task", "ls"), ("task", "show"), ("task", "history"), ("task", None), ("plan", "ls"), ("plan", None),
             ("lesson", "ls"), ("lesson", "show"), ("lesson", "scan"), ("lesson", "review"), ("lesson", None),
             ("progress", None), ("progress", "time"), ("delivery", None), ("initiative", "ls"), ("initiative", "show"),
             ("wt", "ls"), ("config", "diff"), ("config", "status"), ("config", "show"), ("config", "validate"),
             ("jobs", "ls"), ("jobs", None), ("jobs", "show"), ("jobs", "logs"), ("jobs", "journal"), ("pr", "ls"),
             ("pr", "view"), ("pr", "checks"), ("pr", "diff"), ("run", "ls"), ("run", "view"), ("branch", "ls"),
-            ("issue", "ls"), ("issue", "view"), ("sec", "scan")}
+            ("issue", "ls"), ("issue", "view"), ("sec", "scan"), ("desktop", "status")}
 
 
 def redact(text: str) -> str:

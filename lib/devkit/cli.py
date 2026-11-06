@@ -65,6 +65,9 @@ COMMANDS = [
         ("commit · push · rebase", "Conventional commits, push after local CI evidence (dev ci --run), rebase on main"),
         ("pr create|ls|checks|merge", "PRs with the template, checks with failing logs, safe merges"),
         ("release [--dry-run]", "Tag and publish by the delivery policy, with the CHANGELOG section"),
+        ("run ls|view --failed|rerun", "CI runs, failing logs trimmed; rerun only with --flaky \"reason\""),
+        ("issue ls|view|create", "Issues, compact"),
+        ("git … · gh …", "Escape hatches to git and gh, with the same policy checks"),
         ("ci status [--watch]", "Live CI/CD runs (GitHub, GitLab, Bitbucket, Azure): jobs, steps, elapsed, ETA"),
         ("calver [--next]", "Current and next CalVer version YY.MM.PATCH from the repository's tags"),
         ("sec scan [--history]", "Security: secrets (gitleaks), dependencies (osv-scanner), SAST (Semgrep), Trivy"),
@@ -84,6 +87,7 @@ COMMANDS = [
         ("config diff|repair|lock|…", "Preview and enforce the agent settings devkit manages"),
         ("guard check <cmd>|--write p", "Simulate what the guard decides for a command or a file write"),
         ("plugin validate", "Validate the devkit plugin with Claude Code's validator and Codex's parser"),
+        ("desktop pack|status", "Claude Desktop extension: build the .mcpb bundle, check what is installed"),
         ("install [--only step]", "Apply the devkit configuration (idempotent)"),
         ("update", "Pull the latest devkit and re-apply it"),
         ("docker up|down|status|prune", "Run Docker on a Colima VM"),
@@ -940,10 +944,18 @@ def cmd_canary(a):
     if not rs:
         print("  no tracked replies yet (replies in sessions under ~/Development are checked after every turn)")
         return 0
+    surf = canary.by_surface(a.days)
     for agent, (ok, tot) in sorted(canary.summary(a.days).items()):
         pct = 100 * ok // tot
         mark = ui.OK if pct >= 95 else ui.WARN if pct >= 80 else ui.FAIL
         print(f"  {mark} {agent.capitalize():<8} {ok}/{tot} replies carried the marker ({pct}%)")
+        for (ag, where), (sok, stot) in sorted(surf.items()):
+            if ag == agent and len([k for k in surf if k[0] == agent]) > 1:
+                print(f"      {ui.dim(where.ljust(16))} {sok}/{stot} ({100 * sok // stot}%)")
+    fixed = canary.corrected(a.days)
+    if fixed:
+        print(f"  {ui.dim(f'{fixed} miss(es) corrected after the Stop hook reminder (not counted above)')}")
+    print(ui.dim("  checked on development turns only; a recipe or consulting work is not scored"))
     misses = [r for r in rs if not r["ok"]]
     if misses:
         print(ui.section(f"Deviations ({len(misses)})"))
@@ -2000,6 +2012,11 @@ def cmd_hook(a):
     return hooks.run(a.event, a.agent)
 
 
+def cmd_mcp(a):
+    from . import mcp
+    return mcp.serve()
+
+
 def cmd_complete(a):
     if a.kind == "projects":
         reg = core.read_json(HANDOFF / "registry.json", {}) or {}
@@ -2321,9 +2338,12 @@ def build_parser():
     from . import gitx
     gitx.add_ci_arguments(p)
     gitx.register(add)
+    add("mcp", cmd_mcp, "Serve devkit's tools over MCP on stdio (the Claude Desktop extension runs this)")
+    from . import desktop
+    desktop.register(add)
     add("doctor", cmd_doctor, "Verify the setup")
     add("install", cmd_install, "Apply configuration").add_argument(
-        "--only", help="comma list: config,tools,cli,git,handoff,instructions,skills,claude,codex,docker,docs,launchd")
+        "--only", help="comma list: config,tools,cli,git,handoff,instructions,skills,claude,codex,desktop,docker,docs,launchd")
     p = add("docs", cmd_docs, "Check documentation: Markdown, links and anchors, prose, diagrams")
     p.add_argument("check", choices=["check"])
     p.add_argument("paths", nargs="*", help="files or folders (default: the whole repository)")

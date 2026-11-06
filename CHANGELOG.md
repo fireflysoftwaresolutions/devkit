@@ -263,6 +263,11 @@ The first release.
   `dev gh`; `dev pr create --dry-run` prints the body alone on stdout; the wizard's sync interval sets the sync job.
 - The guard protects the handoff repository's `audit/` folder.
 
+- **Claude Desktop extension.** devkit ships an MCPB extension (`dev install --only desktop`, `dev desktop
+  pack|status`) with its name and icon: 14 tools (overview, project status, tasks, standup, report, CI, lessons,
+  delivery policy, team, doctor, audit, jobs, task add and update) for Desktop chat and Cowork, served by `dev mcp`
+  from your checkout. `dev doctor` checks it next to the Code tab and the ChatGPT app's Codex.
+
 ### Security
 
 - **The guard**, a pre-tool hook for both agents, enforces the workspace layout, managed worktrees, and canonical
