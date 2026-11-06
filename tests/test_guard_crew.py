@@ -30,8 +30,8 @@ def verdict(cmd, cwd=CWD):
     return v[0] if v else "allow"
 
 
-def refusal(cmd, scope=None, cwd=CWD):
-    v = guard.crew_shell_verdict(cmd, cwd, scope)
+def refusal(cmd, scope=None, cwd=CWD, member=None):
+    v = guard.crew_shell_verdict(cmd, cwd, scope, member)
     return v[1] if v else None
 
 
@@ -205,6 +205,43 @@ class MemberWriteTests(unittest.TestCase):
         scope = [str(Path(core.HANDOFF)) + "/**"]
         self.assertFalse(self.exempt(other, scope))
         self.assertFalse(self.exempt(note, scope))
+
+
+class ScratchFolderTests(unittest.TestCase):
+    """Morpheus (M85, L-fxs9q5evz83): in the session scratchpad each crew member writes and deletes only in its own
+    folder, scratchpad/<member>/; other members' files and the shared top level are not its to change."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.pad = Path(self.tmp.name) / "claude-501" / "-Users-x" / "962d6aba-c6a8-44ab-9e02-1d15272468e1" / "scratchpad"
+        (self.pad / "keymaker").mkdir(parents=True)
+        (self.pad / "tank").mkdir()
+        (self.pad / "notes.py").write_text("x")
+        (self.pad / "tank" / "f3.py").write_text("x")
+
+    def refused(self, cmd):
+        return refusal(cmd, cwd=str(self.pad), member="keymaker")
+
+    def test_a_member_works_in_its_own_folder(self):
+        for cmd in ("rm keymaker/a.py", "echo x > keymaker/n.md", "mkdir -p keymaker/dk", "rm -rf keymaker/dk",
+                    f"cp {CWD}/lib/devkit/guard.py keymaker/", "dev rm keymaker/old.json", "cat notes.py tank/f3.py"):
+            with self.subTest(cmd=cmd):
+                self.assertIsNone(self.refused(cmd))
+
+    def test_another_members_files_and_the_top_level_are_refused(self):
+        for cmd in ("rm *.py", "rm notes.py", "rm -rf tank", "mv tank/f3.py keymaker/", "echo x > tank/f3.py",
+                    "dev rm notes.py", f"rm -rf {self.pad}", "find . -name '*.json' -delete", "touch shared.md",
+                    "cd tank && rm f3.py", "bash -c 'rm tank/f3.py'"):
+            with self.subTest(cmd=cmd):
+                self.assertIn("scratchpad/keymaker/", self.refused(cmd) or "")
+
+    def test_the_file_tools_follow_the_same_folders(self):
+        self.assertTrue(guard.member_write_exempt(str(self.pad / "keymaker" / "x.md"), CWD, None, "keymaker"))
+        self.assertFalse(guard.member_write_exempt(str(self.pad / "tank" / "x.md"), CWD, None, "keymaker"))
+        self.assertIn("scratchpad/keymaker/", guard.scratch_refusal(str(self.pad / "notes.py"), "keymaker") or "")
+        self.assertIsNone(guard.scratch_refusal(str(self.pad / "keymaker" / "x.md"), "keymaker"))
+        self.assertIsNone(guard.scratch_refusal(str(Path(self.tmp.name) / "other" / "x"), "keymaker"))  # no owner
 
 
 class ShellParsingTests(unittest.TestCase):

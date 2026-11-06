@@ -1409,10 +1409,13 @@ class _Shell:
                         f"`dev` command that owns the record. {_TAIL}")
         return None
 
+    def child(self, text, cwd, names=()):
+        return _Shell(text, cwd, self.mentions, self.depth + 1, self.exported | set(names))
+
     def nested(self, text, cwd, same_shell=False, names=()):
         if not text or self.depth >= 4:
             return None
-        inner = _Shell(text, cwd, self.mentions, self.depth + 1, self.exported | set(names))
+        inner = self.child(text, cwd, names)
         v = inner.run()
         self.unresolved += inner.unresolved
         if same_shell:  # source and eval run in this shell: what they export stays set
@@ -2012,12 +2015,58 @@ def _sync_verdict(argv, cwd, scope):
                 f"\"…\"`), or run `dev crew sync --check` and report what differs.")
 
 
-def crew_shell_verdict(cmd: str, cwd, scope=None):
+# Each crew member has its own folder in the session scratchpad, scratchpad/<member id>/ (Morpheus, M85): a member that
+# cleans up the shared top level or another member's folder deletes their work (L-fxs9q5evz83). Temp folders outside a
+# session scratchpad have no owner.
+_SCRATCHPAD = re.compile(r"^(.*?/claude-\d+/[^/]+/[0-9A-Fa-f-]{36}/scratchpad)(?:/([^/]+))?(/.*)?$")
+_SCRATCH_TREE = re.compile(r"/claude-\d+(?:/[^/]+(?:/[0-9A-Fa-f-]{36})?)?/?$")
+
+
+def scratch_refusal(path, member, holds=False):
+    """Why crew member `member` may not write or delete `path`, which is in the session scratchpad outside
+    scratchpad/<member>/ (holds: the command also changes what is inside `path`, as rm -r does); None otherwise."""
+    if not member or not path:
+        return None
+    p = real(str(path))
+    m = _SCRATCHPAD.match(p)
+    if m and m.group(2) == member:
+        return None
+    if not m and not (holds and _SCRATCH_TREE.search(p)):
+        return None
+    pad = m.group(1) if m else p
+    return (f"{tilde(p)} is not in your scratch folder. In the session scratchpad each crew member writes and deletes "
+            f"only in scratchpad/{member}/ ({tilde(pad)}/{member}/); the shared top level and the other members' "
+            f"folders hold their work (L-fxs9q5evz83). Put your files in your folder, and ask Morpheus about others.")
+
+
+class _ScratchShell(_Shell):
+    """Walks a crew member's shell command for writes and deletes outside its scratch folder; the protected-state
+    checks already ran in guard.check."""
+
+    def __init__(self, cmd, cwd, member, depth=0):
+        super().__init__(cmd, cwd, depth=depth)
+        self.member = member
+
+    def child(self, text, cwd, names=()):
+        return _ScratchShell(text, cwd, self.member, self.depth + 1)
+
+    def target(self, t, cwd, verb="write", holds=False, track=True):
+        p = resolve(t, cwd)
+        why = scratch_refusal(p, self.member, holds) if p != UNKNOWN else None
+        return deny(why) if why else None
+
+
+def crew_shell_verdict(cmd: str, cwd, scope=None, member=None):
     """For a crew member's shell command that devkit did not route to its lane: ("deny", why) when it runs a
-    `dev progress` or `dev crew` call that would act as Morpheus or change the team's crew, or `dev crew sync` that
-    writes outside the member's step scope; None otherwise. `scope`: the step scope, globs or layers of globs."""
+    `dev progress` or `dev crew` call that would act as Morpheus or change the team's crew, `dev crew sync` that
+    writes outside the member's step scope, or writes or deletes in the session scratchpad outside the member's own
+    folder; None otherwise. `scope`: the step scope, globs or layers of globs; `member`: the member's id."""
     if not cmd or not str(cmd).strip():
         return None
+    if member:
+        v = _ScratchShell(cmd, cwd or os.getcwd(), member).run()
+        if v:
+            return v
     calls = shell_calls(cmd, cwd or os.getcwd())
     if calls is None:  # the shell would read it another way than the tokenizer: judge the words, refuse a lane name
         return deny(LANE_REASON) if _LANE_TEXT.search(cmd) else None
@@ -2054,16 +2103,26 @@ def bulk_rewrite(cmd: str, cwd=None) -> bool:
     return False
 
 
-def member_write_exempt(path, cwd, scope=None) -> bool:
+def _in_checkout(path) -> bool:
+    """True when `path` lies in a git checkout (a worktree or a repository in a temp folder keeps its scope)."""
+    d = os.path.dirname(real(path))
+    while d and not os.path.isdir(d):
+        d = os.path.dirname(d)
+    return bool(d and core.gitout(d, "rev-parse", "--show-toplevel"))
+
+
+def member_write_exempt(path, cwd, scope=None, member=None) -> bool:
     """True when a crew member may write `path` with a file tool whatever its tool level or step scope: a scratch file
-    (a temp folder outside the repository it works in), or a plan of its own project in the handoff repository
-    (plans/<project>/) that every layer of its step scope names. That is how a review-only member such as The Oracle
-    writes the spec it was asked for."""
+    (a temp folder outside the repository it works in; in the session scratchpad only its own folder when `member` is
+    given), or a plan of its own project in the handoff repository (plans/<project>/) that every layer of its step
+    scope names. That is how a review-only member such as The Oracle writes the spec it was asked for."""
     if not path:
         return False
     ap = os.path.normpath(os.path.join(str(cwd), str(path)))
-    top = core.gitout(cwd, "rev-parse", "--show-toplevel")
-    if is_temp(ap) and not (top and is_under(Path(real(ap)), Path(real(top)))):
+    if _SCRATCHPAD.match(real(ap)):  # the session scratchpad: the member's own folder
+        return not scratch_refusal(ap, member)
+    top = core.gitout(cwd, "rev-parse", "--show-toplevel") or str(cwd)  # as the hooks' scope check counts it
+    if core.is_temp(ap) and not is_under(Path(real(ap)), Path(real(top))) and not _in_checkout(ap):
         return True
     pid = current_project(cwd)
     if not pid or not is_under(Path(real(ap)), Path(real(core.HANDOFF)) / "plans" / pid):
