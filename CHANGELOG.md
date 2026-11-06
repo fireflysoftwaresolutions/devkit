@@ -3,9 +3,62 @@
 All notable changes to devkit. Versions follow CalVer `YY.MM.PATCH` (PATCH restarts at 0 each month); tags are
 `vYY.MM.PATCH`. Sections follow [Keep a Changelog](https://keepachangelog.com/).
 
-## [Unreleased]
+## [26.11.3] - Unreleased
+
+Not released yet: the date is set when the release is tagged. This release installs devkit with one command, runs its
+hooks from a pinned copy, gives you a live dashboard, puts the crew under one enforced RACI (who is Responsible,
+Accountable, Consulted, and Informed for each kind of work), protects devkit's own state from agents, and makes the
+audit trail verifiable and exportable.
+
+### What changes for you
+
+devkit refuses more in this release. Each refusal says why and names the command to use instead.
+
+- **You run `dev install`, `dev update`, and `install.sh` yourself, in a terminal.** Agents are refused them.
+  `dev install` refuses a checkout with uncommitted tracked changes or code that does not compile, and pins only a
+  published release or a commit whose `bin/dev ci --run` passed; `--unverified --why "…"` overrides that, and the
+  override is audited.
+- **Agents cannot change devkit's state, configuration, or install.** Writes to `~/.local/state/devkit`,
+  `~/.config/devkit/config.json`, and `~/.local/share/devkit`, `dev config set safeguards.*` or `audit.*`, and
+  `dev config edit` are refused to every agent. You change safeguards in a terminal. A `DEVKIT_*` variable added to
+  the `env` block of a Claude Code settings file (user, project, or local) is refused and removed.
+- **devkit cannot be pointed elsewhere by an agent.** The guard refuses `HOME`, `DEVKIT_CONFIG`, `DEV_ROOT`, or
+  `DEVKIT_SESSION` set for `dev`, and a swapped `dev` link or another `dev` earlier on the `PATH`. devkit reads a
+  non-standard `DEVKIT_CONFIG` or `DEV_ROOT` only from a command you run in a terminal with no agent among its parent processes.
+- **Two escape hatches moved.** `dev commit`, `dev push`, `dev pr create`, and `dev release` no longer read
+  `DEVKIT_SKIP_SECRET_SCAN` or `DEVKIT_LOCAL_CI_PASSED` from their environment. Pass `--ci-passed` (recorded as
+  attested), or let a real `dev ci --run` lift the push budget. In the main session, a plain `git commit` or
+  `git push` prefixed with the variable still works.
+- **A decision is yours only in your own words.** It counts when you answer the question dialog, or type a line of
+  your own: `approve D3`, `approve D3: B`, or `grant push feat/invoice-export`. Without that, an answer Morpheus
+  records is marked unverified, and an irreversible decision stays pending. `dev crew mode auto --approve` takes one
+  target per action (`push feat/*`) and never pre-approves publish or deploy.
+- **Only Morpheus plans and decides.** `dev progress start`, `assign`, `begin`, `reopen`, `skip`, and `done`, and
+  `dev crew decide` and `mode`, are refused from a crew member and from a script. A second `dev progress start` on a
+  live run needs `--replace --why "…"`.
+- **The RACI is enforced.** `dev progress assign` refuses a member who is not Responsible for the step's kind of work,
+  and `dev progress done` refuses to end a run before each Accountable member approved; `--why "…"` overrides both
+  and is recorded. `dev progress start` and `add` refuse unknown, ambiguous, or duplicate step names and dependency
+  cycles, and no step starts before its dependencies are done.
+- **Crew members are held tighter.** They are refused every escape hatch (`DEVKIT_*` variables, `env -i`,
+  `--ci-passed`, `--no-verify`, `dev config set`, new secret-scan exceptions). A review or read-only member's shell
+  runs only a read-only allowlist; add your project's own checks with `safeguards.readonly_commands`. Members never
+  merge, release, tag, publish, deploy, write through an API, or force-push. A push or a pull request needs a step
+  grant (`dev progress assign --allow push,pr`); until the hooks pass that grant on (see Coming in 26.11.3), members
+  do not push or open pull requests at all. In the session scratchpad, each member writes only in its own
+  `scratchpad/<member>/` folder.
+- **Running a devkit hook by hand is refused** in every session, because a hook event typed through a shell could
+  forge your prompt or answer.
+- **Audit records are kept 13 months**, on this Mac and in the handoff copy; this Mac used to keep two years.
+  `dev config validate` refuses an `audit.retention.floor_months` under 3.
+- **`dev ls`, `dev du`, and `dev status` show what is on this Mac.** A footer counts the other projects of the
+  portfolio, and `dev ls --all` lists them with the `dev clone` command for each.
+- **`dev dashboard` starts a local server** and opens a one-time sign-in link instead of writing a file.
+  `dev dashboard --export <file>` writes the static page.
 
 ### Added
+
+#### Install and update
 
 - **A one-line install:** `curl -fsSL https://raw.githubusercontent.com/fireflysoftwaresolutions/devkit/main/install.sh | bash`
   installs Homebrew, git, Python, and the GitHub CLI when they are missing, clones the newest devkit release into
@@ -19,34 +72,188 @@ All notable changes to devkit. Versions follow CalVer `YY.MM.PATCH` (PATCH resta
   see at each step. Pressing Return at every question gives a working setup: the GitHub sign-in uses HTTPS and the
   browser, so it asks no questions about protocols or tokens, and the wizard's first screen says what devkit and the
   handoff repository are.
-- The PostToolUse hook shows the status block right after a call that usually ends a turn (a subagent launch, a
-  monitor, a background command, or a closing `dev` command), with the project and branch filled in. A note
-  written after the last tool call no longer lands above the block, so the Stop hook does not have to send
-  the turn back.
-- `dev doctor` reads Claude Desktop's own switch for bypass mode in the Code tab (Settings → Code → Allow bypass
-  permissions mode) and says whether it is allowed, off, or not offered for the signed-in account.
+- **A pinned, read-only copy runs the hooks and the guard.** `dev install` copies the checkout's commit to
+  `~/.local/share/devkit/releases/<version>-<sha>`, read-only and with a SHA-256 manifest. The hooks, the status line,
+  `~/.local/bin/dev`, the scheduled jobs, and the Desktop launcher run that copy, so an edit to the checkout, broken
+  or malicious, no longer changes the guard of every session at once. `dev doctor` fails on a changed copy or a hook
+  that runs elsewhere, `dev install --version <version>` rolls back, and the newest three copies and any in use are
+  kept. `dev update` pins the new release.
+- **First-task tutorials for every surface:** Claude Code (Terminal and the IDEs), Claude Desktop's Code tab, Codex
+  CLI, and Codex in the ChatGPT app, plus a page on Claude Desktop chat and Cowork. Each shows what you see on the way:
+  the status block, progress updates, approvals, the crew graph, and the dashboard. Where to use devkit compares the
+  surfaces. Codex is not verified live yet.
+
+#### The live dashboard
+
+- **`dev dashboard` is a live, read-only app on this Mac.** It starts a local server (or reuses one of the same
+  version), opens a one-time sign-in link, and pushes each change to the open page, which updates in place: the
+  route, the filters, the scroll position, and an open drawer stay. `--no-open` prints the link, `--status` and
+  `--stop` manage the server, and `--export <file>` and `--path` write the static page. The server stops after 30
+  minutes with no open page (`dashboard.idle_minutes`). It answers only GET and HEAD on 127.0.0.1, with a token or a
+  same-site cookie, under a content security policy that allows only its own scripts.
+- **Background work:** decisions waiting for you first, every run with its steps and owners, CI results with the
+  first error and the next action, and scheduled jobs with their failed, overdue, and not-scheduled states.
+- **One drawer for every detail,** the connected task (who has it, what blocks it, what is next), the crew with
+  role-first names, and a live indicator with reconnecting and offline banners. No data is never "on track," every
+  count names its window, and a contradiction shows where it occurs, with its fix. The navigation never scrolls
+  sideways, from 320 to 1,600 pixels wide.
+
+#### The crew
+
+- **A RACI for every kind of work, led by Morpheus.** Each of 34 kinds of work has one Responsible member, one
+  Accountable member, and the members Consulted and Informed (`dev crew raci`). Morpheus routes every development
+  request by it. Nobody approves their own kind of work: the Security engineer approves CI/CD, the Code reviewer
+  approves security code, the Product owner approves UX, The Keymaker approves compliance, and Morpheus approves
+  incidents.
+- **Roles first:** every mention of a member reads like _Backend engineer (Tank)_.
+- **A procedure for every member:** phases, the skills and devkit commands to use, a gate, and a proof that devkit
+  checks. Each brief carries the knowledge of its kind of work (skills and devkit guides), the stack skills of its
+  files, and the known pitfalls for the task.
+- **Kinds of work in any language.** A step's kind of work comes from what you declare (`--activity` on
+  `dev progress assign`, `[id]` in a plan spec), then from the member's role, then from its files. Words are only the
+  last guess and never refuse work. Lessons work the same way: they carry anchors (files, commands, kinds of work,
+  error signatures, stack), set with `dev lesson add --file`, `--command`, and `--error`, or `dev lesson anchor`.
+- **The crew gates.** When a member stops, devkit reads its transcript and sends it back once for a missing proof, a
+  skill it did not load, unfinished work, a test that cannot fail, or a missing lesson after repeated refusals.
+  `crew.gates.enforce: false` only records them.
+- **Lanes, helpers, and slots.** Each member's lane binds to its own launch, so members launched together never take
+  each other's name or step. A member may launch narrow helpers, which get its tools and files, take a slot, and stop
+  at `progress.max_depth` (2). The parallel limit counts launches and resumed agents, and drops to one while the
+  5-hour usage is over `progress.quota_percent` (90).
+- **Who is calling.** A call ledger records which agent made each shell call, so a `dev` command knows whether
+  Morpheus or a member ran it, and two sessions in one repository each update their own run.
+- New commands: `dev crew graph` (the live session as one graph; `--mermaid`, `--json`), `dev crew rules` (every
+  crew rule and the check that enforces it), `dev crew raci --set`, `dev crew set`, and `dev crew history` (the team's
+  changes, kept in the handoff repository with who and why), `dev crew decisions --ask`, `dev task reopen --why`, and
+  `dev agents rules [--section]`.
+- The status block gains optional **Crew** and **You** bullets, and `dev status` shows each on its own rows.
+- Claude Desktop chat and Cowork get the full global rules through the extension's new `devkit_rules` tool.
+
+#### The terminal
+
+- **Project aliases:** `dev alias <alias> [project]`, `dev alias rm <alias>`, and `dev alias` to list them, shared
+  with the team through the handoff repository. Names match by exact id or alias, then repository name, then start,
+  then any part; a tie lists every match with its command instead of guessing. `dev status`, `go`, `open`,
+  `wt new --repo`, `claude`, and `codex` accept them.
+- **A new `dev status`:** it shows Needs you first, then Right now, the last update in full, details, and the footer. It wraps
+  at 100 columns, fits 80, and reads the same with `NO_COLOR`; `--json` returns the same data.
+- **`dev config` is a report:** each difference says whether it is new in this devkit version, changed outside
+  devkit, or removed outside devkit, and names the fix. `dev config --check` prints one line and exits 1 on a
+  difference.
+- devkit keeps the whole status block of a final message (up to 8,000 characters), not its first 700.
+- Shell completion covers every command and the verbs of `dev task`, `progress`, `crew`, and `agents`.
+- `dev doctor` checks that the skills the crew names are installed for each agent. The setup wizard offers optional
+  skill groups for the tools you pick, such as `iac` for Terraform.
+
+#### The audit trail
+
+- **Schema v2:** every record has a sortable id, who acted (and the crew member, lane, and launch), the project,
+  branch, run, and step, a category and severity, the reason for an override, and its evidence. Older records still
+  read. See [The audit trail](docs/audit.md).
+- **A hash chain:** each record is linked to the one before it, and `dev audit verify` reports the first edited,
+  removed, or inserted record, using the published copy as the anchor.
+- **Retention you set:** `audit.retention.local_months`, `team_months`, and `floor_months`, `audit.hold` for a legal
+  hold, and `audit.level` (`security`, `changes`, or `all`). A team policy in the handoff repository can only raise
+  them.
+- **Queries and exports:** `dev audit show`, `stats`, and `config`, filters by date, project, member, category,
+  severity, outcome, and text, `dev audit export` as JSONL, CSV, OCSF, or CEF, and `audit.forward` to a file or
+  syslog.
+- **Personal data:** the audit trail page says what is recorded and never recorded, who receives it, how long it is
+  kept, and how the people recorded use their GDPR rights.
 
 ### Changed
 
 - A first `dev setup` on a Mac with no projects asks which languages to set up, with Python and Node preselected,
-  instead of installing Java, PHP, Node and Python without asking.
+  instead of installing Java, PHP, Node, and Python without asking.
 - Claude Code: `attribution.sessionUrl` is `false`, so cloud and Remote Control sessions add no `Claude-Session`
   trailer either; the deprecated `includeCoAuthoredBy` key is removed; and `BASH_DEFAULT_TIMEOUT_MS` is 5 minutes,
   so a test suite or a build in the foreground is not cut off at 2.
 - Codex: `analytics.enabled` is `false`. `dev doctor` also reads whether your Codex account adds commit and PR
   attribution (an account setting, not a `config.toml` key) from your newest session.
+- `dev doctor` reads Claude Desktop's own switch for bypass mode in the Code tab (Settings → Code → Allow bypass
+  permissions mode) and says whether it is allowed, off, or not offered for the signed-in account.
 - `dev update` follows releases: a checkout at a release tag moves to the newest `vYY.MM.PATCH` tag (compared as
   numbers, so 26.11.10 is newer than 26.11.2) and then runs `dev install`; at the newest release already, it says so
   and changes nothing. A checkout on a branch still gets `git pull --ff-only`. It refuses, with nothing changed, while
   tracked files have local changes or when the checkout is at a commit that is neither a release nor a branch.
 - The wizard's line prompts say so when no terminal can answer and every question takes its default. Without a
   GitHub sign-in, the wizard says why it needs one and prints the exact command.
+- The PostToolUse hook shows the status block right after a call that usually ends a turn (a subagent launch, a
+  monitor, a background command, or a closing `dev` command), with the project and branch filled in. A note
+  written after the last tool call no longer lands before the block, so the Stop hook does not have to send
+  the turn back.
+- **Lessons are recalled by what a call does.** A session gets the catalog of kinds of work, skills, and lesson
+  anchors at its start. A tool call is reminded of the lessons anchored on its command or file, and its output of
+  those whose error signature it shows, each at most once an hour; every refusal names the lessons of the call it
+  refuses. `dev sleep` merges lessons that share anchors, and with background AI on (`ai.*`, opt-in, with a daily
+  budget), a small model also merges lessons written in different languages.
+- Skill rules trigger on files, commands, and declared kinds of work, and a turn counts as development work from
+  what it did, never from your words.
+- The dashboard counts a run as working while the run or any of its crew lanes reported in the last 30 minutes,
+  "of about" is the plan's current total (active time plus the time left), lists show a step's title without codes
+  such as F4, and a member's step that stopped without evidence shows as unverified, for Morpheus to check, never
+  under Needs you.
 
 ### Fixed
 
 - `install.sh` works on Intel Macs: it finds Homebrew in `/usr/local` as well as `/opt/homebrew`, and runs the wizard
   with Homebrew's Python from `brew --prefix` instead of a fixed `/opt/homebrew/bin/python3`. On Apple Silicon, it adds
   Homebrew to `~/.zprofile` when Homebrew was not on the `PATH`, so new terminals find `brew`, `gh`, and the toolchain.
+  The shell profile and `dev setup` also find Java and Docker's CLI plugins under Homebrew's real prefix.
+- Hooks and `dev` commands no longer lose each other's changes: one lock per session covers its session and run
+  records, so of 8 crew questions asked at once, all 8 are kept (it was 1), and an ended session no longer comes back.
+- Crew members launched together no longer swap names, lanes, or steps.
+- A step assigned to a member who is already working waits for its dependencies instead of starting.
+- The Stop hook waits while crew members are still working on a plan, instead of sending Morpheus back each turn.
+- Crew message and decision ids stay unique past 200, so an answer no longer reaches the wrong member.
+- A crew member working in a worktree of the same repository can edit the files of its scope.
+- Read-only crew commands (`graph`, `show`, `raci`), commit messages, and heredocs that only mention a lane command
+  are no longer refused to members.
+- The prompt hook no longer logs an error on every prompt and loses the turn's class.
+- A reply with no tool calls (a status question, "continue") counts as the previous turn's kind, so a missing status
+  block there is scored.
+- `dev doctor` informs, instead of failing, about a crew skill from an optional group you have not turned on.
+- The `devkit_audit` tool shows who acted again, and `devkit_task_update` says that it changes tasks and that only
+  the audit trail, not the guard, covers it.
+- `dev status` shows a saved status block's Crew and You lines on their own rows and wraps long values.
+
+### Security
+
+- The guard sees what a command really runs: through wrapper flags that take a value (`nice -n 5`, `env -u X`,
+  `sudo -u me`, `exec -a x`), interpreter flags (`python3 -u bin/dev`), arithmetic shifts that looked like heredocs,
+  git and gh aliases, shell scripts run by their path, and `git push --repo=<url>`. `env -S` is refused, because the
+  guard cannot see the command it runs.
+- Writes with a relative path from devkit's state or configuration folder, or from a folder that holds them, are
+  refused.
+- A `WebFetch` URL that carries a secret is refused.
+- The audit redactor closes the 14 gaps a probe of 32 fake secrets found (among them names like
+  `AWS_SECRET_ACCESS_KEY`, quoted values, `--password` flags, PGP private keys, and Stripe, GitLab, Hugging Face,
+  Google OAuth, Docker, Slack, and Azure tokens), and also knows Bearer tokens, JWTs, npm and PyPI tokens, Google API
+  keys, and URL credentials. Crew message text and
+  the user name in home folders never reach a record, and older records are cleaned the same way when read.
+- The dashboard server checks the `Host` header, sends `base-uri` and `form-action` rules in its content security
+  policy, keeps its token out of process arguments, and reads files only inside the handoff repository.
+
+### Removed
+
+- The word lists: skill rules no longer match your prompt (15 patterns removed), the prompt hook no longer looks for
+  corrections in it, and `dev lesson scan` no longer lists corrections.
+- The static-file-only `dev dashboard`: the static page is `dev dashboard --export <file>`.
+
+### Coming in 26.11.3
+
+These parts are committed as code but not switched on yet; they land before the release is tagged.
+
+- **Continuity through compaction and resume:** a checkpoint of the run, the crew working now, the decisions
+  waiting, and your latest requests, given back to the session after a compaction, `claude --resume`, or `/clear`,
+  with `dev session brief`, `carry`, `compactions`, and `forget`.
+- **The main session's gate for irreversible actions:** a push of a feature branch or a new pull request is recorded,
+  and a merge, release, tag push, publish, deploy, force push, or push to the default branch needs your grant (`grant <action> <target>`). It audits only for its first
+  week on a Mac, then enforces (`safeguards.irreversible_main`).
+- **Explicit approvals per step:** each finished step owes a verdict from its approver, recorded after the work,
+  nobody approves their own step, and a member's step ends done only with its evidence.
+- **More crew limits:** a member's file scope for shell writes, the rules for the MCP tools members use, step grants
+  for a member's push or pull request, and a `guard.bypass` audit record for each escape hatch the main session uses.
 
 ## [26.11.2] - 2026-11-06
 
