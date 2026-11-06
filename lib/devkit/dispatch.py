@@ -171,7 +171,7 @@ def delegate(task: str, to: str = "auto", files=None, scope: str = "", after: st
     _log_change(run, s, None, "pending", from_agent or "main", f"delegated by {by} to {m['name']}", now)
     lane_id = next((k for k, v in (run.get("agents") or {}).items() if v.get("state") == "running"
                     and progress._label_matches(m["name"], v)), None)
-    if lane_id and lane_id != from_agent and not s.get("after"):
+    if lane_id and lane_id != from_agent and not progress.deps_open(run, s):  # a step that waits does not start
         s.update(owner=lane_id, state="running", started=now)
         if s.get("scope"):
             run["agents"][lane_id]["scope"] = sorted(set((run["agents"][lane_id].get("scope") or []) + s["scope"]))
@@ -216,14 +216,13 @@ def ready(run, now: float | None = None) -> dict:
     """{"launch": [steps ready to launch], "waiting": [(step, why)], "busy": [lanes working], "free": n}."""
     run = normalize(run)
     plan = run.get("plan") or []
-    done = {s["name"] for s in plan if s.get("state") in ("done", "skipped")}
     busy = progress.running_agents(run)
     free = max(0, progress.cfg()["max_parallel"] - len(busy))
     launch, waiting = [], []
     for s in plan:
         if s.get("state") not in ("pending", "blocked") or not s.get("label") or (s.get("owner") or "main") != "main":
             continue
-        deps = [a for a in s.get("after") or [] if a not in done]
+        deps = progress.deps_open(run, s)  # the plan's one dependency rule: done or skipped satisfies a step
         if s.get("waiting"):
             waiting.append((s, f"decision {s['waiting']}"))
         elif deps:

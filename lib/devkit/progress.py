@@ -171,6 +171,149 @@ def _new_step(name, est=None):
             "started": None, "finished": None}
 
 
+# --------------------------------------------------------------------------- the plan's dependencies (a DAG)
+#
+# A step's `after` lists, by name, the steps it waits for: the plan is a directed acyclic graph, and the functions
+# below are the only place that decides about it. Every transition that starts, owns or closes a step asks them.
+#   entering   start and add resolve each `after` to one step of the plan and refuse a name that is not a step, a
+#              name that matches several, two steps with one name, and a cycle (spelled out step by step)
+#   done       a dependency is satisfied when its step is done or skipped (DONE)
+#   waiting    a step with an open dependency (deps_open) is never started: start and the main lane's advance pass it
+#              over, begin refuses it, assign and a subagent's start leave it pending (the subagent's lane runs
+#              without it, and Morpheus is told), and the launch queue (dispatch.ready) holds it back
+#   closing    check_close refuses a step whose dependencies are open (--force when the order really changed)
+#   reopening  the reopened (or un-skipped) step's dependents, direct and further down, that are done or running stay
+#              so, flagged `recheck` (their work used the old version); a main-lane step that now waits for it goes
+#              back to pending. The flag clears when that dependent is reopened itself, to be redone. A reopened
+#              step a member did goes back to Morpheus, still assigned to that member, so it can be launched again.
+# A name in `after` that is not a step of the plan cannot be entered; in a run edited by hand it is not counted.
+
+DONE = ("done", "skipped")
+
+
+def _by_name(plan) -> dict:
+    return {s["name"]: s for s in plan or []}
+
+
+def deps_open(run, s) -> list:
+    """The steps `s` waits for that are not done or skipped yet, in the order of its `after`."""
+    steps = _by_name((run or {}).get("plan"))
+    return [a for a in s.get("after") or [] if a in steps and steps[a].get("state") not in DONE]
+
+
+def ready(run) -> list:
+    """The pending steps whose dependencies are all done or skipped, in plan order."""
+    return [s for s in (run or {}).get("plan") or [] if s.get("state") == "pending" and not deps_open(run, s)]
+
+
+def _cycle(plan):
+    """The first dependency cycle, as names [a, b, …, a] (a waits for b, …, which waits for a), or None."""
+    steps, color = _by_name(plan), {}
+
+    def visit(name, path):
+        color[name] = "open"
+        for a in steps[name].get("after") or []:
+            if a not in steps:
+                continue
+            if color.get(a) == "open":
+                return path[path.index(a):] + [a]
+            if not color.get(a):
+                found = visit(a, path + [a])
+                if found:
+                    return found
+        color[name] = "closed"
+        return None
+
+    for s in plan or []:
+        if not color.get(s["name"]):
+            found = visit(s["name"], [s["name"]])
+            if found:
+                return found
+    return None
+
+
+def _cycle_error(cyc) -> "StepError":
+    links = ", ".join(f"“{a}” waits for “{b}”" for a, b in zip(cyc, cyc[1:]))
+    return StepError(f"the plan's dependencies form a cycle: {links}. Remove one of these `after`s.")
+
+
+def _duplicate_name(plan):
+    seen = set()
+    for s in plan or []:
+        if s["name"].lower() in seen:
+            return s["name"]
+        seen.add(s["name"].lower())
+    return None
+
+
+def validate_plan(plan) -> None:
+    """Refuse a plan the dependency engine cannot run: two steps with one name, a dependency that is not a step of the
+    plan, or a cycle. Raises StepError naming the problem."""
+    dup = _duplicate_name(plan)
+    if dup:
+        raise StepError(f"two steps are named “{dup}”: give each step its own name, so `after` can name it")
+    steps = _by_name(plan)
+    for s in plan or []:
+        for a in s.get("after") or []:
+            if a not in steps:
+                raise StepError(f"“{s['name']}” waits for “{a}”, which is not a step of the plan")
+    cyc = _cycle(plan)
+    if cyc:
+        raise _cycle_error(cyc)
+
+
+def topo_order(plan) -> list:
+    """The steps in an order that respects their dependencies and stays as close to the plan's order as it can: the
+    next step is always the first one in plan order whose dependencies are placed. A valid plan order comes back
+    unchanged. Raises StepError on a cycle."""
+    steps, placed, left, out = _by_name(plan), set(), list(plan or []), []
+    while left:
+        i = next((i for i, s in enumerate(left)
+                  if all(a in placed or a not in steps for a in s.get("after") or [])), None)
+        if i is None:
+            raise _cycle_error(_cycle(left) or [])
+        s = left.pop(i)
+        out.append(s)
+        placed.add(s["name"])
+    return out
+
+
+def _resolve_after(plan, s, refs) -> list:
+    """`after` as written (a step's name, its number, or a part of its name that only one step has) -> the names of
+    the steps of `plan` it means. Raises StepError for one that is not a step of the plan or matches several."""
+    out = []
+    for ref in refs or []:
+        r = str(ref).strip()
+        hit = [x for x in plan if x["name"].lower() == r.lower()]
+        if not hit and r.isdigit() and 1 <= int(r) <= len(plan):
+            hit = [plan[int(r) - 1]]
+        if not hit:
+            hit = [x for x in plan if x is not s and r.lower() in x["name"].lower()]
+        if not hit:
+            raise StepError(f"“{s['name']}” waits for “{r}”, which is not a step of the plan: "
+                            + "; ".join(f"{i}. {x['name']}" for i, x in enumerate(plan, 1)))
+        if len(hit) > 1:
+            raise StepError(f"“{s['name']}” waits for “{r}”, which matches several steps ("
+                            + ", ".join(f"“{x['name']}”" for x in hit) + "): name the one you mean")
+        if hit[0]["name"] not in out:
+            out.append(hit[0]["name"])
+    return out
+
+
+def _build_steps(items, plan) -> list:
+    """parse_plan items -> their new steps, with `after` resolved against `plan` plus the new steps. The plan they make
+    together is validated (validate_plan) before anything changes: on error, `plan` is untouched."""
+    new = [_new_step(n, e) for n, e, _ in items]
+    full = list(plan or []) + new
+    dup = _duplicate_name(full)
+    if dup:
+        raise StepError(f"two steps are named “{dup}”: give each step its own name, so `after` can name it")
+    for s, (_, _, after) in zip(new, items):
+        s["after"] = _resolve_after(full, s, after)
+    validate_plan(full)
+    return new
+
+
 def normalize(run: dict) -> dict:
     """Bring a run to the current shape (runs written before 26.11.1 had a step counter and a list of names)."""
     if not run:
@@ -313,12 +456,15 @@ def schedule(run, now=None) -> list:
     now = now or time.time()
     p, _ = pace(run, now)
     plan = run.get("plan") or []
-    by_name = {s["name"]: s for s in plan}
-    finish, lane_free, out = {}, {}, []
-    for s in plan:
-        if s.get("state") in ("done", "skipped"):
-            finish[s["name"]] = 0.0
-            out.append((s, 0.0))
+    by_name = _by_name(plan)
+    try:
+        order = topo_order(plan)  # a step is scheduled after the steps it waits for, wherever the plan lists it
+    except StepError:
+        order = plan  # a run edited by hand into a cycle: plan order, with the pessimistic guess below
+    finish, lane_free, ends = {}, {}, {}
+    for s in order:
+        if s.get("state") in DONE:
+            finish[s["name"]] = ends[id(s)] = 0.0
             continue
         dur = (s.get("est") or 0) * p
         if s.get("state") == "running":
@@ -331,9 +477,8 @@ def schedule(run, now=None) -> list:
         start = 0.0 if s.get("state") == "running" else max(ready, lane_free.get(lane, 0.0))
         end = start + dur
         lane_free[lane] = max(lane_free.get(lane, 0.0), end)
-        finish[s["name"]] = end
-        out.append((s, end))
-    return out
+        finish[s["name"]] = ends[id(s)] = end
+    return [(s, ends[id(s)]) for s in plan]
 
 
 def eta(run: dict, now: float | None = None) -> float:
@@ -413,17 +558,15 @@ def start(goal: str, steps: int = 0, estimate: str = "", cwd: str | None = None,
     items = parse_plan(plan)
     if not items and steps:
         items = [(f"step {i + 1}", None, []) for i in range(steps)]
+    new = _build_steps(items, [])  # an unknown dependency or a cycle is refused before anything is saved
     run = {"v": 2, "agent": agent, "session": sid, "project": project, "goal": goal, "estimate": est,
            "estimate_cal": round(est * cal["ratio"], 1) if est and cal["ratio"] else est, "cal_ratio": cal["ratio"],
            "started": now, "state": "running", "updates": [], "intervals": [], "agents": {},
-           "plan": [_new_step(n, e) for n, e, _ in items], "messages": [], "decisions": [],
+           "plan": new, "messages": [], "decisions": [],
            "mode": mode if mode in ("guided", "auto") else ((core.CFG.get("work") or {}).get("mode") or "guided")}
-    for s, (_, _, after) in zip(run["plan"], items):
-        s["after"] = [x["name"] for x in (_find_step(run, a) for a in after) if x and x is not s]
     _allocate(run)
     run["steps"], run["step"] = len(run["plan"]), 0
-    if run["plan"]:
-        run["plan"][0].update(state="running", started=now)
+    _advance_main(run, now)  # the first step that waits for nothing
     if sess.get("turn_started") and (sess.get("turn_started") or 0) >= (sess.get("turn_ended") or 0):
         _open(run, "turn", "main", now)  # started inside a turn: that turn is active time
     _save(run)
@@ -463,12 +606,11 @@ def _finish_step(run, s, now, agent, sid):
 
 
 def _advance_main(run, now):
-    """Keep one main step running: the first pending one not handed to a subagent."""
+    """Keep one main step running: the first ready one (its dependencies done) not handed to a subagent."""
     plan = run.get("plan") or []
     if any(s.get("state") == "running" and (s.get("owner") or "main") == "main" for s in plan):
         return
-    nxt = next((s for s in plan if s.get("state") == "pending" and (s.get("owner") or "main") == "main"
-                and not s.get("label")), None)
+    nxt = next((s for s in ready(run) if (s.get("owner") or "main") == "main" and not s.get("label")), None)
     if nxt:
         nxt.update(state="running", started=now)
 
@@ -543,10 +685,8 @@ def assign(which, label: str, cwd: str | None = None, now: float | None = None, 
                                     f"owns while working ({', '.join(lane.get('scope'))}). Give each member "
                                     f"different files, or wait until they finish.")
         s["scope"] = globs
-    deps_open = [a for a in s.get("after") or [] if any(x["name"] == a and x.get("state") not in ("done", "skipped")
-                                                         for x in run.get("plan") or [])]
-    lane_id = None if deps_open else next((k for k, v in (run.get("agents") or {}).items()
-                                           if v.get("state") == "running" and _label_matches(label, v)), None)
+    lane_id = None if deps_open(run, s) else next((k for k, v in (run.get("agents") or {}).items()
+                                                   if v.get("state") == "running" and _label_matches(label, v)), None)
     if lane_id:
         s.update(owner=lane_id, state="running", started=s.get("started") or now)
         if s.get("scope"):
@@ -674,15 +814,21 @@ def crew_ask(text: str, to: str | None = None, from_agent: str | None = None, cw
     if not run:
         raise ValueError("no progress run in this session: Morpheus starts one with dev progress start")
     run = normalize(run)
-    msgs = run.setdefault("messages", [])
-    m = {"id": f"M{len(msgs) + 1}", "ts": round(now), "from": from_agent or "main", "to": _addr(run, to or ""),
-         "text": text.strip()[:1500], "delivered": False}
-    m["from_name"], m["to_name"] = _name_of(run, m["from"]), _name_of(run, m["to"])
-    msgs.append(m)
-    run["messages"] = msgs[-200:]
+    m = _post(run, from_agent or "main", _addr(run, to or ""), text, now)
     _save(run, touch_session=False)
     _audit("crew.message", f"{m['from_name']} → {m['to_name']}", m["text"][:300], project=run.get("project") or "",
            id=m["id"])
+    return m
+
+
+def _post(run, frm: str, to: str, text: str, now: float, from_name: str = "") -> dict:
+    """Add a message to the run (the caller saves it). -> the message."""
+    msgs = run.setdefault("messages", [])
+    m = {"id": f"M{len(msgs) + 1}", "ts": round(now), "from": frm, "to": to, "text": text.strip()[:1500],
+         "delivered": False}
+    m["from_name"], m["to_name"] = from_name or _name_of(run, frm), _name_of(run, to)
+    msgs.append(m)
+    run["messages"] = msgs[-200:]
     return m
 
 
@@ -902,6 +1048,11 @@ def begin(which, cwd: str | None = None, now: float | None = None, from_agent: s
     if not s:
         raise ValueError(f"no step “{which}” in the plan")
     if s.get("state") != "done":
+        waiting = deps_open(run, s)
+        if waiting:
+            raise StepError(f"step “{s['name']}” waits for {', '.join(waiting)}, not done yet: it starts when "
+                            f"{'that is' if len(waiting) == 1 else 'they are'} done. If the order really changed, "
+                            f"skip what it waits for: dev progress skip \"{waiting[0]}\" --why \"…\"")
         s.update(state="running", started=s.get("started") or now)
     _save(run)
     return run
@@ -977,8 +1128,7 @@ def check_close(run, target, text, explicit, force=False):
         raise StepError(f"step “{target['name']}” belongs to {who.get('persona') or who.get('label') or 'a subagent'}, "
                         f"still working on it; it closes when that agent finishes. Use --force only if it is "
                         f"really done.")
-    waiting = [a for a in target.get("after") or [] if any(x["name"] == a and x.get("state") not in ("done", "skipped")
-                                                            for x in plan)]
+    waiting = deps_open(run, target)
     if waiting:
         raise StepError(f"step “{target['name']}” waits for {', '.join(waiting)}, not done yet. Close those first, "
                         f"or use --force if the order changed.")
@@ -1013,11 +1163,10 @@ def add_step(spec: str, cwd: str | None = None, now: float | None = None, why: s
             run["updates"].append({"ts": round(now), "kind": "agent", "agent": from_agent, "text": f"added: {name}"})
         _save(run)
         return run
-    for name, est, after in items:
+    for name, _, _ in items:
         if _find_step(run, name) and _find_step(run, name)["name"].lower() == name.lower():
             raise StepError(f"step “{name}” is already in the plan")
-        s = _new_step(name, est)
-        s["after"] = [x["name"] for x in (_find_step(run, a) for a in after) if x]
+    for s in _build_steps(items, run["plan"]):  # an unknown dependency or a cycle is refused: the plan stays as it is
         run["plan"].append(s)
         _log_change(run, s, None, "pending", "main", why or "added during the work", now)
     _allocate(run)
@@ -1048,7 +1197,12 @@ def reopen(which, why: str, cwd: str | None = None, now: float | None = None, sk
         if old not in ("done", "skipped", "blocked"):
             raise StepError(f"step “{s['name']}” is {old}, not closed")
         s.update(state="pending", finished=None)
-        if (s.get("owner") or "main") == "main":
+        s.pop("recheck", None)  # it is redone now
+        if (s.get("owner") or "main") != "main":
+            s["owner"] = "main"  # back to Morpheus, still assigned to its member: dev crew next launches it again
+        if old in DONE:
+            _recheck_dependents(run, s, now)
+        if not s.get("label") and not deps_open(run, s):
             for x in run["plan"]:  # the reopened step becomes the main lane's current one
                 if x is not s and x.get("state") == "running" and (x.get("owner") or "main") == "main":
                     x["state"] = "pending"
@@ -1063,6 +1217,28 @@ def reopen(which, why: str, cwd: str | None = None, now: float | None = None, sk
     _advance_main(run, now)
     _save(run)
     return run
+
+
+def _recheck_dependents(run, s, now):
+    """`s` was done (or skipped) and is open again. Its dependents, direct and further down, that are done or running
+    stay so, flagged `recheck`: their work used the old version. A main-lane step running on `s` waits for it again."""
+    plan = run.get("plan") or []
+    down, frontier = [], [s["name"]]
+    while frontier:
+        name = frontier.pop(0)
+        for x in plan:
+            if name in (x.get("after") or []) and x is not s and all(x is not d for d in down):
+                down.append(x)
+                frontier.append(x["name"])
+    for x in down:
+        if x.get("state") not in ("done", "running"):
+            continue  # not started: it simply waits
+        x["recheck"] = (x.get("recheck") or []) + ([s["name"]] if s["name"] not in (x.get("recheck") or []) else [])
+        _audit("plan.recheck", x["name"], f"{s['name']} was reopened", project=run.get("project") or "",
+               run=run.get("goal", "")[:80])
+        if x.get("state") == "running" and (x.get("owner") or "main") == "main" and deps_open(run, x):
+            _log_change(run, x, "running", "pending", "main", f"waits again for {s['name']} (reopened)", now)
+            x["state"] = "pending"
 
 
 def note(text: str, nxt: str = "", cwd: str | None = None, from_agent: str | None = None,
@@ -1261,11 +1437,17 @@ def render_update(run: dict, branch: str | None = None, now: float | None = None
         lines.append("")
         for i, s in enumerate(plan, 1):
             mark = {"done": "✓", "running": "▸", "blocked": "■", "skipped": "–"}.get(s.get("state"), "○")
-            who = ""
-            if (s.get("owner") or "main") != "main":
-                who = f" · {agents.get(s['owner'], {}).get('label') or 'subagent'}"
-            elif s.get("label"):
-                who = f" · waiting for {s['label']}"
+            main = (s.get("owner") or "main") == "main"
+            waits = deps_open(run, s) if s.get("state") in ("pending", "blocked") else []
+            parts = [] if main else [agents.get(s["owner"], {}).get("label") or "subagent"]
+            if waits:
+                parts.append("waiting for " + ", ".join(waits) + (f", then {s['label']}" if main and s.get("label")
+                                                                  else ""))
+            elif main and s.get("label"):
+                parts.append(f"waiting for {s['label']}")
+            if s.get("recheck"):
+                parts.append(f"recheck: {', '.join(s['recheck'])} reopened")
+            who = "".join(f" · {p}" for p in parts)
             if s.get("state") in ("done", "running"):
                 tm = f" · {fmt_min(step_minutes(run, s, now))} of ~{fmt_min(s.get('est') or 0)}"
             else:
@@ -1567,13 +1749,23 @@ def _on_subagent(agent: str, data: dict, started: bool, now: float | None = None
             lane["persona"] = persona(kind, label)
             _audit("crew.start", lane["persona"] or label or kind, label, project=run.get("project") or "",
                    agent_id=aid[:16], type=kind)
+            held = []
             for st in run.get("plan") or []:  # the step assigned to this crew member (dev progress assign)
-                if st.get("label") and st.get("state") != "done" and (st.get("owner") or "main") == "main" \
+                if st.get("label") and st.get("state") not in DONE and (st.get("owner") or "main") == "main" \
                         and _label_matches(st["label"], lane):
+                    if deps_open(run, st):
+                        held.append(st)  # launched too early: the step keeps waiting for its dependencies
+                        continue
                     st.update(owner=aid, state="running", started=st.get("started") or now)
                     if st.get("scope"):
                         lane["scope"] = st["scope"]
                     break
+            else:
+                for st in held:
+                    w, who = ", ".join(deps_open(run, st)), lane["persona"] or label or "a subagent"
+                    _post(run, "devkit", "main", f"{who} started, but “{st['name']}” waits for {w}, not done yet: "
+                          f"the step stays pending and this lane runs without it. When {w} is done, link it: "
+                          f"dev progress assign \"{st['name']}\" --to \"{st['label']}\"", now, from_name="devkit")
         _run_event(agent, sid, link)
     else:
         v = subs.pop(aid, None)
