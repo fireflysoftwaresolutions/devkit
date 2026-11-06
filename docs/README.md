@@ -9,8 +9,22 @@ machine.
 
 | Guide | What it covers |
 | --- | --- |
-| [Getting started](getting-started.md) | Installing on a new Mac, the setup wizard, onboarding another developer, the first-day checklist, updating, what devkit touches |
+| [Getting started](getting-started.md) | Your first install step by step, even without a terminal habit; the setup wizard, the pinned copy, onboarding another developer, the first-day checklist, updating, what devkit touches |
+| [Where to use devkit](surfaces.md) | The six surfaces compared: hooks, guard, crew, routing, skills in briefs, and status block checks on each, and which tutorial to follow |
 | [Concepts](concepts.md) | Workspace layout, project ids, how work is organized, from plan to operate, the handoff repository and notes, worktrees, the guard, the status block, and background sync and scheduled jobs |
+
+## Tutorials: your first task
+
+Each tutorial opens a project, gives the crew a first task, and explains everything you see on the way: the status
+block, progress updates, approvals, the crew graph, and the dashboard.
+
+| Tutorial | Where you work |
+| --- | --- |
+| [Claude Code](tutorials/claude-code.md) | Claude Code in Terminal, VS Code, or a JetBrains IDE |
+| [Claude Desktop's Code tab](tutorials/claude-desktop.md) | The Code tab of Claude Desktop, where development happens in the app |
+| [Codex CLI](tutorials/codex-cli.md) | Codex in Terminal (not verified live yet) |
+| [Codex in the ChatGPT app](tutorials/chatgpt-codex.md) | Codex in the ChatGPT desktop app (not verified live yet) |
+| [Claude Desktop chat and Cowork](tutorials/desktop-chat-and-cowork.md) | Status, plans, and reports through the devkit extension; code changes go to the Code tab |
 
 ## Work with devkit
 
@@ -20,7 +34,7 @@ machine.
 | [Initiatives](initiatives.md) | Cross-project initiatives: creating them, who may write what, progress, adopting an older handoff repository |
 | [The crew](crew.md) | devkit's 25 specialist agents and Morpheus: who does what, parallel or in sequence, lanes, scopes, messages, delegation, guided or automatic decisions, the crew canary |
 | [Progress and communication](progress-and-communication.md) | `dev progress`, ETA and calibrated estimates, notifications, what the hooks add, `dev time`, the message templates, status reports |
-| [Dashboard](dashboard.md) | The HTML command center: views, initiative and project pages, the task drawer, search, shortcuts, routes |
+| [Dashboard](dashboard.md) | The live command center: `dev dashboard` and its server, the views, Background work, the crew, drawers, live and honest states, search, shortcuts, routes |
 | [Git and GitHub](git-and-github.md) | `dev branch`, `commit`, `rebase`, `push`, `pr`, `run`, `release`, and `issue`: local CI evidence, the PR template, safe merges, releases by the policy |
 | [Testing](testing.md) | `dev test`: failed first, then the blast radius of your changes; `dev test audit` and `dev test prove`: tests that can fail; `dev ci --run --resume` |
 | [CI/CD pipelines](ci-cd.md) | `dev ci audit` and `dev ci init` on GitHub Actions, GitLab, Bitbucket, and Azure; `dev ci watch`: every run followed to the end, failures diagnosed |
@@ -41,14 +55,14 @@ machine.
 | [Skills and plugins](skills-and-plugins.md) | The devkit plugin, required skills, the curated catalog and optional groups, and what was left out |
 | [Models and tokens](models-and-tokens.md) | Models, effort, and subagents; Sparks, the scout; Codex profiles; the routing rules |
 | [Templates](templates.md) | Plan, spec, spike, bug-fix, and ADR templates; task templates; the pull request template |
-| [Guard rules](guard.md) | Every rule the guard enforces, per agent, with example messages, and escape hatches |
-| [Troubleshooting](troubleshooting.md) | Logs, common problems, and how to reset |
+| [Guard rules](guard.md) | Every rule the guard enforces, per agent, including devkit's own state and the forged-environment rules, with example messages, and escape hatches |
+| [Troubleshooting](troubleshooting.md) | Logs, common problems (pin refusals and rollback included), and how to reset |
 
 ## Maintain devkit
 
 | Guide | What it covers |
 | --- | --- |
-| [Developing devkit](development.md) | Code layout, design principles, tests, the release process |
+| [Developing devkit](development.md) | Code layout, design principles, tests, trying a change through the pinned copy, the release process |
 
 ## Quick reference
 

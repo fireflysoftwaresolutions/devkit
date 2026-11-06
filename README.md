@@ -56,8 +56,13 @@ The installer makes sure Homebrew, git, Python, and the GitHub CLI are present, 
 `~/Development/fireflysoftwaresolutions/devkit`, signs you in to GitHub, and starts the setup wizard. The wizard asks
 for your workspace, your handoff repository (yours, or one your team shares), which agents to configure, your stacks
 and the Docker VM, shows the plan, and applies it: the toolchain for your stacks, git signed in with your GitHub
-identity, Claude Code and Codex, the devkit plugin and the curated skills in both, and the scheduled jobs. It is safe to
-run again, and `dev update` later moves devkit to the newest release.
+identity, Claude Code and Codex, the devkit plugin and the curated skills in both, and the scheduled jobs. The hooks
+and the guard then run a read-only, checksummed copy of that release, so no edit can switch them off by accident. It is
+safe to run again, and `dev update` later moves devkit to the newest release and pins it.
+
+New to the terminal? [Your first install, step by step](docs/getting-started.md#your-first-install-step-by-step)
+explains every screen, and the [tutorials](docs/surfaces.md) walk through a first task in Claude Code, Claude
+Desktop's Code tab, Codex CLI, or Codex in the ChatGPT app.
 
 To read the script before you run it:
 
@@ -86,7 +91,7 @@ wizard change on your Mac, and how to undo each change, is listed in
 
 ```text
 dev                          your workspace at a glance
-dev dashboard                the command center in the browser: initiatives, projects, team, tasks, activity, health
+dev dashboard                the live command center: tasks, background work, team and crew, projects, initiatives
 dev overview                 every initiative and project: status, progress, Now tasks, latest status
 dcd billing                  jump into a project                     dwt feat/invoice-export   …or into a new worktree
 dev task                     the project's board                      dev task add "Export invoices as CSV" --type feature --now
@@ -116,7 +121,7 @@ dev doctor                   verify the whole setup                   dev agents
 
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="docs/images/dashboard/home-1440-dark.webp">
-  <img src="docs/images/dashboard/home-1440-light.webp" alt="The devkit dashboard's Home view: the title says how many urgent items need you, four figures follow (PRs failing CI, blocked tasks, doing, live sessions), then the Needs you list with one amber copy button on the first row, Team now with each person's live session, progress, and locks, and one row per initiative with progress, milestone, and open and blocked tasks." width="100%">
+  <img src="docs/images/dashboard/home-1440-light.webp" alt="The devkit dashboard's Home view: the title says 5 urgent items need you; four stat tiles with a segmented bar each (what needs you, initiatives, projects, and open tasks by state); the Needs you list with a decision waiting, a failed CI run, and a PR failing CI; Team now with a progress bar per running session; four Since yesterday counters with sparklines; and one card per initiative with a progress ring and a due-date pill." width="100%">
 </picture>
 
 All commands are in [docs/commands.md](docs/commands.md).
@@ -214,14 +219,16 @@ The ideas behind it are in [docs/concepts.md](docs/concepts.md).
 
 | Guide | For |
 | --- | --- |
-| [Getting started](docs/getting-started.md) | Install on a new Mac, the setup wizard, onboard a developer, update, uninstall |
+| [Getting started](docs/getting-started.md) | Your first install step by step, the setup wizard, the pinned copy, onboard a developer, update, uninstall |
+| [Where to use devkit](docs/surfaces.md) | The surfaces compared: what devkit does in Claude Code, Claude Desktop, Codex CLI, and the ChatGPT app |
+| Tutorials | A first task with the crew in [Claude Code](docs/tutorials/claude-code.md), [Claude Desktop's Code tab](docs/tutorials/claude-desktop.md), [Codex CLI](docs/tutorials/codex-cli.md), and [Codex in the ChatGPT app](docs/tutorials/chatgpt-codex.md); [Claude Desktop chat and Cowork](docs/tutorials/desktop-chat-and-cowork.md) for status and plans |
 | [Concepts](docs/concepts.md) | Layout, how work is organized, the handoff repository, worktrees, the guard, the status block, and the background sync |
 | [Teams and machines](docs/teams.md) | Work items and locks, reasons, and history, versioned plans, session logs, presence, merge rules |
 | [Initiatives](docs/initiatives.md) | Cross-project initiatives, progress, adopting an older handoff repository |
 | [The crew](docs/crew.md) | The 25 specialist agents and Morpheus: who does what, lanes, scopes, messages, delegation, and guided or automatic decisions |
 | [Progress and communication](docs/progress-and-communication.md) | `dev progress`, the time model and ETA, notifications, `dev time`, message templates, status reports |
 | [Commands](docs/commands.md) | Every `dev` command and option, including git and GitHub, `dev progress`, `dev crew`, `dev test`, `dev stubs`, lessons, jobs, the file commands, and `dev ci` |
-| [Dashboard](docs/dashboard.md) | The HTML command center: views, pages, the task drawer, shortcuts, routes |
+| [Dashboard](docs/dashboard.md) | The live command center: the server, views, Background work, the crew, drawers, shortcuts, routes |
 | [Configuration](docs/configuration.md) | Every key of `~/.config/devkit/config.json`, personal rules, environment variables |
 | [Agents](docs/agents.md) | What is configured in Claude Code and Codex, hooks, devkit always on |
 | [Skills and plugins](docs/skills-and-plugins.md) | The devkit plugin, required skills, the curated catalog, what was left out |
@@ -237,7 +244,7 @@ The ideas behind it are in [docs/concepts.md](docs/concepts.md).
 | [Diagrams](docs/diagrams.md) | `dev diagram` and the diagram design rules |
 | [Disk and cleanup](docs/disk-and-cleanup.md) | `dev gc` safety rules and automatic cleanup |
 | [Docker](docs/docker.md) | Colima, Compose, Buildx, Testcontainers |
-| [Troubleshooting](docs/troubleshooting.md) | Logs, common problems, resetting |
+| [Troubleshooting](docs/troubleshooting.md) | Logs, common problems, pin refusals and rollback, resetting |
 | [Developing devkit](docs/development.md) | Code layout, tests, brand assets, release process |
 
 ## Credits and license
