@@ -127,6 +127,8 @@ class GuardBashTests(unittest.TestCase):
         self.assertEqual(self.bash("rm -rf .git"), "deny")
         self.assertEqual(self.bash("rm -rf *", cwd=str(DEV)), "deny")
         self.assertEqual(self.bash("rm -rf node_modules dist"), "allow")
+        self.assertEqual(self.bash(f"rm -rf {core.TMP_ROOT}/some-scratch-repo"), "allow")
+        self.assertEqual(self.bash("rm -rf /tmp/clone-to-inspect/.git"), "allow")
         self.assertEqual(self.bash("rm -f notes.txt"), "allow")
 
     def test_git_clean_ignored_denied(self):
@@ -155,6 +157,12 @@ class GuardBashTests(unittest.TestCase):
         self.assertEqual(self.bash('echo x > "$OUT/file.txt"', agent="codex"), "allow")
         self.assertEqual(self.bash('git worktree add "$(mktemp -d)/wt"'), "allow")
         self.assertEqual(self.bash("cd $SOMEWHERE && rm -rf build"), "allow")
+
+    def test_heredoc_bodies_are_data(self):
+        cmd = "cat > page.html <<'EOF'\n<iframe src=x></iframe> > /etc/passwd\nrm -rf ~\nEOF\necho done"
+        self.assertEqual(self.bash(cmd), "allow")
+        self.assertEqual(self.bash("python3 - <<EOF\nprint('git push --force')\nEOF"), "allow")
+        self.assertEqual(self.bash("cat <<EOF > ~/Desktop/x.txt\nhi\nEOF", agent="codex"), "deny")
 
     def test_unparseable_is_allowed(self):
         self.assertEqual(self.bash("echo 'unterminated"), "allow")
@@ -316,6 +324,11 @@ class CanaryTests(unittest.TestCase):
         self.assertTrue(canary.has_marker("\n**DevKit** · x"))
         self.assertFalse(canary.has_marker("Done. DevKit · later"))
         self.assertFalse(canary.has_marker("Here is the fix"))
+
+    def test_status_text_keeps_ids(self):
+        self.assertEqual(canary.status_text("DevKit · _local/x_y@feat/a_b · done · `tests` ok · next: -"),
+                         "_local/x_y@feat/a_b · done · tests ok · next: -")
+        self.assertEqual(canary.status_text("**DevKit** · api@main · fixed"), "api@main · fixed")
 
     def test_check_records(self):
         with TempState():

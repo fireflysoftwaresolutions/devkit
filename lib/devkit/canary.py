@@ -79,7 +79,10 @@ def status_text(text: str) -> str:
     """The useful part of the marker line: `DevKit · <project>@<branch> · <outcome> · <verification> · next: …`."""
     first = next((ln for ln in (text or "").splitlines() if ln.strip()), "")
     m = STATUS_RE.match(first.strip())
-    return re.sub(r"[*_`]+", "", m.group(1)).strip(" ·") if m else ""
+    if not m:
+        return ""
+    line = re.sub(r"\*\*|`", "", m.group(1))           # bold / code markers, not underscores inside ids
+    return line.strip(" ·*").strip()
 
 
 def check(agent: str, data: dict):

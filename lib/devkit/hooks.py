@@ -237,7 +237,8 @@ def stop(agent: str):
             ok, pid, line = res
             if ok and line:
                 sess["status"] = line
-                canary.save_status(pid, agent, line, sess.get("branch"))
+                branch = core.gitout(sess.get("top") or data.get("cwd") or ".", "branch", "--show-current")
+                canary.save_status(pid, agent, line, branch or sess.get("branch"))
             elif not ok and agent == "claude":
                 out["systemMessage"] = canary.miss_message(agent, sid)
         reason = _handoff_nudge(agent, data, sess)

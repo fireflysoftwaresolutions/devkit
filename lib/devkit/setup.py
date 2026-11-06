@@ -634,6 +634,18 @@ def doctor() -> int:
         check("Codex", "plugins", not bad, f"{len(wantp) - len(bad)}/{len(wantp)} enabled" +
               (f"; missing: {', '.join(bad)}" if bad else ""), "dev install --only codex")
 
+    from . import providers
+    pst = providers.status(include_account=False)
+    for key in ("claude", "codex"):
+        p = pst[key]
+        check("Agents", f"{p['name']} installed + signed in", bool(p.get("installed") and p.get("logged_in")),
+              f"{p.get('version') or 'missing'} · {p.get('auth_method') or '-'} · plan {p.get('plan') or '-'}",
+              f"install {p['name']} and sign in")
+        q = p.get("quota") or {}
+        if q.get("available") is not None:
+            check("Agents", f"{p['name']} quota", bool(q.get("available")),
+                  f"{q.get('used_percent')}% used · resets {core.fmt_ts(q.get('resets_at'))}",
+                  "wait for the reset or add credits")
     from .cli import plugin_checks
     for name, ok, detail in plugin_checks():
         check("Plugin", name, ok, detail if isinstance(detail, str) else " ".join(detail), "dev plugin validate")

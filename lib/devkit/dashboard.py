@@ -103,21 +103,26 @@ def derived_issues(reg: dict, now: float = None) -> list:
         ns = p.get("note_summary") or {}
         tasks = ns.get("tasks") or {}
         if ns.get("status") == "blocked":
-            state = (ns.get("state") or "").strip().splitlines()
+            state = [re.sub(r"^\s*([-*+]|\d+\.)\s*(\[[ xX~]\]\s*)?", "", ln).strip()
+                     for ln in (ns.get("state") or "").splitlines() if ln.strip()]
             out.append({"kind": "blocked", "project": pid,
                         "text": f"{pid} is blocked" + (f" — {state[0][:140]}" if state else "")})
         for t in tasks.get("overdue") or []:
-            out.append({"kind": "overdue", "project": pid, "text": f"Overdue in {pid}: {t}"})
+            due = re.search(r"\bdue:(\d{4}-\d{2}-\d{2})\b", t)
+            text = re.sub(r"\s*\bdue:\d{4}-\d{2}-\d{2}\b", "", t)
+            out.append({"kind": "overdue", "project": pid,
+                        "text": f"Overdue in {pid}: {text}" + (f" (due {due.group(1)})" if due else "")})
         if ns:
             last = max([_session_ts(s) for s in ns.get("sessions") or []] or [0])
             la = p.get("last_activity") or 0
             recent = sum(v for k, v in (p.get("activity") or {}).items()
                          if k >= time.strftime("%Y-%m-%d", time.localtime(now - 7 * 86400)))
             if la and recent and la - last > 3 * 86400:
-                when = time.strftime("%Y-%m-%d", time.localtime(last)) if last else "never"
+                since = (f"has no session since {time.strftime('%Y-%m-%d', time.localtime(last))}" if last
+                         else "has no session in its log yet")
                 out.append({"kind": "stale-note", "project": pid,
-                            "text": f"Handoff note of {pid} not updated by a session since {when}, "
-                                    f"but the repo has {recent} commit(s) this week"})
+                            "text": f"Handoff note of {pid} {since}, but the repo has {recent} commit(s) this week "
+                                    f"— ask the agent for a handoff"})
         for w in p.get("worktrees") or []:
             pr = w.get("pr") or {}
             if pr.get("state") in ("MERGED", "CLOSED") and not w.get("active"):
@@ -249,14 +254,16 @@ kbd{border:1px solid var(--line);border-bottom-width:2px;border-radius:5px;paddi
 .brand .spark{width:26px;height:26px;color:var(--accent);flex:none}
 .brand .word{font-weight:700;font-size:1.15rem;letter-spacing:-.03em;color:var(--heading)}
 .brand .sub{font-size:.8rem;color:var(--text-2);white-space:nowrap}
+@media (max-width:1560px){.brand .sub{display:none}}
+[hidden]{display:none!important}
 .tabs{display:flex;gap:2px;overflow-x:auto;scrollbar-width:none;margin-left:8px}
 .tabs::-webkit-scrollbar{display:none}
-.tab{border:0;background:none;padding:7px 12px;border-radius:999px;color:var(--text-2);font-weight:600;font-size:.88rem;cursor:pointer;white-space:nowrap}
+.tab{border:0;background:none;padding:7px 11px;border-radius:999px;color:var(--text-2);font-weight:600;font-size:.88rem;cursor:pointer;white-space:nowrap}
 .tab:hover{background:var(--surface-2);color:var(--text)}
 .tab[aria-selected="true"]{background:var(--surface);color:var(--heading);box-shadow:inset 0 0 0 1px var(--line)}
 .tab .k{margin-left:6px;font-size:.7rem;color:var(--muted)}
 .spacer{flex:1}
-.search{position:relative;flex:0 1 360px;min-width:180px}
+.search{position:relative;flex:0 1 300px;min-width:160px}
 .search input{width:100%;padding:8px 36px 8px 34px;border-radius:999px;border:1px solid var(--line);background:var(--surface);outline:none}
 .search input:focus{border-color:var(--focus);box-shadow:0 0 0 3px var(--mark-soft)}
 .search .ico{position:absolute;left:12px;top:50%;transform:translateY(-50%);color:var(--muted);pointer-events:none}
@@ -324,7 +331,9 @@ h2.sec .label{margin-left:auto}
 .toolbar .count{font-size:.9rem;color:var(--text-2);margin-right:auto}
 .toolbar select{padding:6px 10px;border-radius:999px;border:1px solid var(--line);background:var(--surface);font-size:.84rem}
 .cards{display:grid;grid-template-columns:repeat(auto-fill,minmax(330px,1fr));gap:14px}
-.pcard{position:relative;display:flex;flex-direction:column;gap:10px;background:var(--surface);border:1px solid var(--line-soft);border-radius:16px;padding:16px;cursor:pointer;text-align:left;transition:border-color .15s,box-shadow .15s,transform .15s}
+.cards>*,.grid>*,.kpis>*,.board>*{min-width:0}
+.statusline,.lastsess,.tcard{overflow-wrap:anywhere}
+.pcard{position:relative;min-width:0;display:flex;flex-direction:column;gap:10px;background:var(--surface);border:1px solid var(--line-soft);border-radius:16px;padding:16px;cursor:pointer;text-align:left;transition:border-color .15s,box-shadow .15s,transform .15s}
 .pcard:hover,.pcard:focus-visible{border-color:var(--line);box-shadow:var(--shadow);transform:translateY(-1px)}
 .pcard .top-row{display:flex;align-items:flex-start;gap:8px}
 .pcard .title{font-weight:650;font-size:1.02rem;letter-spacing:-.02em;color:var(--heading);word-break:break-word}
@@ -340,7 +349,8 @@ h2.sec .label{margin-left:auto}
 .tasklist .box.done{background:var(--text-2);border-color:var(--text-2)}
 .meter{height:6px;border-radius:999px;background:var(--mark-soft);overflow:hidden}
 .meter i{display:block;height:100%;border-radius:999px;background:var(--mark)}
-.pfoot{display:flex;align-items:center;gap:12px;font-size:.76rem;color:var(--text-2);margin-top:auto}
+.pfoot{display:flex;align-items:center;gap:10px;font-size:.76rem;color:var(--text-2);margin-top:auto;white-space:nowrap}
+.pfoot>span{white-space:nowrap}
 .pfoot .spk{margin-right:auto}
 .lastsess{font-size:.76rem;color:var(--muted);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 .dense .pcard{padding:12px;gap:6px}
@@ -362,8 +372,8 @@ table.t tr[data-nav]{cursor:pointer} table.t tr[data-nav]:hover td{background:va
 .col h3 .n{margin-left:auto;color:var(--muted);font-weight:600;font-size:.8rem}
 .tcard{display:block;width:100%;text-align:left;background:var(--surface);border:1px solid var(--line-soft);border-radius:12px;padding:10px 12px;margin-bottom:8px;cursor:pointer;font-size:.86rem}
 .tcard:hover,.tcard:focus-visible{border-color:var(--line)}
-.tcard .proj{display:flex;gap:6px;align-items:center;margin-top:6px;font-size:.74rem;color:var(--text-2)}
-.due{font-size:.72rem;font-weight:650;padding:0 6px;border-radius:6px;background:var(--surface-3)}
+.tcard .proj{display:flex;flex-wrap:wrap;gap:4px 6px;align-items:center;margin-top:6px;font-size:.74rem;color:var(--text-2)}
+.due{font-size:.72rem;font-weight:650;padding:0 6px;border-radius:6px;background:var(--surface-3);white-space:nowrap}
 .due.over{color:var(--bad-text)}
 /* charts */
 figure.chart{margin:0}
@@ -443,6 +453,7 @@ mark.cur{outline:2px solid var(--accent)}
 .drawer .dh{position:sticky;top:0;z-index:2;display:flex;gap:12px;align-items:flex-start;padding:18px 22px 14px;background:var(--page);border-bottom:1px solid var(--line-soft)}
 .drawer .dh h2{margin:0;font-size:1.55rem;font-weight:450;letter-spacing:-.035em;line-height:1.2;color:var(--heading);word-break:break-word}
 .drawer .db{padding:16px 22px 40px;display:grid;gap:14px}
+.drawer .md{padding:0;font-size:.9rem}
 .drawer .sect h3{margin:0 0 8px;font-size:.78rem;font-weight:650;letter-spacing:.06em;text-transform:uppercase;color:var(--text-2)}
 .cmd{display:flex;align-items:center;gap:8px;background:var(--surface);border:1px solid var(--line-soft);border-radius:10px;padding:6px 6px 6px 12px;font-family:ui-monospace,Menlo,monospace;font-size:.8rem}
 .cmd span{flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
@@ -476,7 +487,8 @@ mark.cur{outline:2px solid var(--accent)}
   .top{flex-wrap:wrap;gap:8px 10px;padding:10px 14px}.tabs{order:3;width:100%;margin:0}.search{order:2;flex:1 1 100%}.meta .tick{display:none}
   .filters{position:static;padding:8px 14px;overflow-x:auto;flex-wrap:nowrap}main{padding:16px 14px 48px}
   .explorer{grid-template-columns:1fr}.tree{position:static;max-height:none}.viewer .vh{position:static}
-  .board{grid-template-columns:1fr}.cards{grid-template-columns:1fr}.kpis{grid-template-columns:repeat(2,minmax(0,1fr))}
+  .board{grid-template-columns:1fr}.cards{grid-template-columns:minmax(0,1fr)}.kpis{grid-template-columns:repeat(2,minmax(0,1fr))}
+  .pfoot{flex-wrap:wrap;white-space:normal}.meta .tick{display:none}#palbtn{display:none}.toolbar select{max-width:46vw}
   .hbar{grid-template-columns:minmax(90px,38%) 1fr auto}
 }
 @media (prefers-reduced-motion:reduce){*,*::before,*::after{transition:none!important;animation:none!important;scroll-behavior:auto!important}}
@@ -637,21 +649,22 @@ function inline(text, q) {
   while ((m = re.exec(src))) {
     if (m.index > last) frag.append(document.createTextNode(src.slice(last, m.index)));
     if (m[1]) frag.append(h("code", {text: m[1].slice(1, -1)}));
-    else if (m[2]) frag.append(h("strong", {text: m[2].slice(2, -2)}));
+    else if (m[2]) frag.append(h("strong", null, inline(m[2].slice(2, -2))));
     else if (m[3]) frag.append(link(m[4], m[5]));
     else if (m[6]) frag.append(link(m[7], m[7]));
     else if (m[8]) frag.append(link(m[8], m[8]));
-    else if (m[9]) frag.append(h("em", {text: m[9].replace(/^_|_$/g, "")}));
+    else if (m[9]) frag.append(h("em", null, inline(m[9].trim().replace(/^_|_$/g, ""))));
     last = re.lastIndex;
   }
   if (last < src.length) frag.append(document.createTextNode(src.slice(last)));
   return frag;
 }
 function link(label, url) {
-  if (/^https?:|^mailto:/i.test(url)) return h("a", {href: url, target: "_blank", rel: "noopener noreferrer", text: label});
+  const kids = label === url ? [label] : [inline(label)];
+  if (/^https?:|^mailto:/i.test(url)) return h("a", {href: url, target: "_blank", rel: "noopener noreferrer"}, kids);
   const path = String(url).replace(/^\.\//, "").replace(/#.*$/, "");
-  if (FILEMAP.has(path)) return h("a", {href: encode(Object.assign({}, S, {view: "explorer", f: path, fq: ""})), text: label});
-  return h("span", {text: label});
+  if (FILEMAP.has(path)) return h("a", {href: encode(Object.assign({}, S, {view: "explorer", f: path, fq: ""}))}, kids);
+  return h("span", null, kids);
 }
 function md(text) {
   const root = h("div", {class: "md"});
@@ -728,7 +741,7 @@ function tip(x, y, node) { const t = $("#tip"); clear(t).append(node); t.hidden 
   t.style.left = Math.max(8, left) + "px"; t.style.top = Math.max(8, top) + "px"; }
 function untip() { $("#tip").hidden = true; }
 function sparkline(p, n) {
-  const ks = days(n || 30), vals = ks.map(k => p.act[k] || 0), max = Math.max(1, ...vals), w = 120, hh = 26, bw = w / ks.length;
+  const ks = days(n || 30), vals = ks.map(k => p.act[k] || 0), max = Math.max(1, ...vals), w = 96, hh = 24, bw = w / ks.length;
   const total = vals.reduce((a, b) => a + b, 0);
   const svg = sv("svg", {class: "spk", width: w, height: hh, viewBox: "0 0 " + w + " " + hh, role: "img", "aria-label": total + " commits in the last " + ks.length + " days"});
   vals.forEach((v, i) => { const bh = v ? Math.max(2, (v / max) * (hh - 2)) : 1; svg.append(sv("rect", {x: (i * bw + 0.5).toFixed(1), y: (hh - bh).toFixed(1), width: Math.max(1, bw - 1.5).toFixed(1), height: bh.toFixed(1), rx: v ? 1 : 0, class: i >= ks.length - 7 ? "cur" : null})); });
@@ -864,7 +877,7 @@ function attention(ps, limit) {
   const ids = new Set(ps.map(p => p.id));
   const items = ISSUES.filter(x => !x.project || ids.has(x.project));
   if (!items.length) return h("p", {class: "t2", text: "Nothing needs attention. ✓"});
-  const icon = {blocked: "⊘", overdue: "⏰", reclaimable: "♻", "stale-note": "✎", layout: "⌂", worktree: "⑂", work: "!", error: "⊘"};
+  const icon = {blocked: "⊘", overdue: "◷", reclaimable: "↺", "stale-note": "✎", layout: "⌂", worktree: "⑂", work: "!", error: "⊘"};
   const ul = h("ul", {class: "attn"});
   for (const it of items.slice(0, limit || 999)) {
     ul.append(h("li", {class: "k-" + it.kind}, h("span", {class: "ic", "aria-hidden": "true", text: icon[it.kind] || "•"}), h("span", {class: "kind", text: it.kind.replace("-", " ")}),
@@ -900,6 +913,10 @@ function nowBoard(ps, limit) {
   return h("div", null, rows.slice(0, limit).map(([p, t]) => taskCard(p, t, "Now")),
     rows.length > limit ? h("button", {class: "btn sm ghost", type: "button", onclick: () => go("tasks"), text: "All " + rows.length + " in progress →"}) : null);
 }
+function dueOf(t) { const m = /\bdue:(\d{4}-\d{2}-\d{2})\b/.exec(t); return m ? m[1] : ""; }
+function taskText(t) { return String(t).replace(/\s*\bdue:\d{4}-\d{2}-\d{2}\b/, ""); }
+function taskLine(t, cls) { const due = dueOf(t), over = due && due < lkey(new Date());
+  return h("li", null, h("span", {class: "box " + (cls || ""), "aria-hidden": "true"}), h("span", null, inline(taskText(t)), due ? h("span", {class: "due" + (over ? " over" : ""), style: "margin-left:6px", text: (over ? "overdue " : "due ") + due}) : null)); }
 function taskCard(p, t, bucket) {
   const due = /\bdue:(\d{4}-\d{2}-\d{2})\b/.exec(t), over = due && due[1] < lkey(new Date());
   return h("button", {class: "tcard", type: "button", "data-nav": "", onclick: () => openProject(p.id, "tasks")},
@@ -942,10 +959,10 @@ function projectCard(p) {
     p.stack.length ? h("div", null, p.stack.map(s => h("span", {class: "stack", text: s}))) : null,
     p.git === false ? null : h("div", {class: "gitline"}, h("span", {class: "mono", text: "⎇ " + (m.branch || "—")}), h("span", {text: st.join(" · ") || "clean"}), m.pr ? h("span", {text: "PR #" + m.pr.number + " " + String(m.pr.state).toLowerCase()}) : null),
     p.status_line ? h("div", {class: "statusline"}, h("span", {class: "who", text: (p.status_line.agent || "agent") + " · " + rel(p.status_line.ts)}), inline(stripMarker(p.status_line.line))) : null,
-    p.t.now.length ? h("ul", {class: "tasklist", "aria-label": "In progress"}, p.t.now.slice(0, 3).map(t => h("li", null, h("span", {class: "box doing", "aria-hidden": "true"}), h("span", null, inline(t))))) : null,
+    p.t.now.length ? h("ul", {class: "tasklist", "aria-label": "In progress"}, p.t.now.slice(0, 3).map(t => taskLine(t, "doing"))) : null,
     total ? h("div", null, h("div", {class: "gitline", style: "justify-content:space-between"}, h("span", {text: p.t.open + " open · " + p.t.done + " done"}), h("span", {class: "num", text: pct + "%"})),
       h("div", {class: "meter", role: "progressbar", "aria-valuenow": pct, "aria-valuemin": 0, "aria-valuemax": 100, "aria-label": "Tasks done"}, h("i", {style: "width:" + pct + "%"}))) : null,
-    p.sessions[0] ? h("div", {class: "lastsess", title: p.sessions[0], text: "Last session: " + p.sessions[0]}) : null,
+    p.sessions[0] ? h("div", {class: "lastsess", title: p.sessions[0]}, "Last session " + rel(sessTs(p.sessions[0])) + " · ", inline(sessText(p.sessions[0]))) : null,
     h("div", {class: "pfoot"}, h("span", {class: "spk"}, sparkline(p, 30)), h("span", {class: "num", text: act30 + " commits/30d"}), p.prs ? h("span", {text: p.prs + " PR"}) : null,
       p.wts.length ? h("span", {text: p.wts.length + " wt"}) : null, h("span", {text: kb(p.size_kb)})));
 }
@@ -1135,8 +1152,9 @@ function search(q) {
   }
   return out.sort((a, b) => b[0] - a[0]).map(x => x[1]);
 }
+function plain(t) { return String(t || "").replace(/<!--[\s\S]*?-->/g, " ").replace(/\[([^\]]+)\]\([^)]*\)/g, "$1").replace(/[*`]+/g, "").replace(/(^|\s)[-+]\s(\[[ xX~]\]\s)?/g, "$1").replace(/^#+\s*/gm, "").replace(/\s+/g, " ").trim(); }
 function snippet(text, q) {
-  const tk = tokens(q); const lc = text.toLowerCase(); let i = -1; for (const t of tk) { i = lc.indexOf(t); if (i >= 0) break; }
+  text = plain(text); const tk = tokens(q); const lc = text.toLowerCase(); let i = -1; for (const t of tk) { i = lc.indexOf(t); if (i >= 0) break; }
   if (i < 0) return text.slice(0, 160); const s = Math.max(0, i - 70); return (s ? "…" : "") + text.slice(s, s + 180).replace(/\s+/g, " ") + (s + 180 < text.length ? "…" : "");
 }
 function viewSearch(main) {
@@ -1179,7 +1197,7 @@ function renderDrawer() {
   if (!p.ns) body.append(sect("note", "Handoff note", h("p", {class: "t2"}, "No handoff note yet. ", h("code", {text: "dev sync"}), " creates it; agents fill it in with the devkit-handoff skill.")));
   if (ns.purpose) body.append(sect("purpose", "Purpose", md(ns.purpose)));
   if (ns.state) body.append(sect("state", "Current state", md(ns.state)));
-  const tlist = (label, items, cls) => items.length ? [h("div", {class: "label", style: "margin:8px 0 4px", text: label + " · " + items.length}), h("ul", {class: "tasklist"}, items.map(t => h("li", null, h("span", {class: "box " + cls, "aria-hidden": "true"}), h("span", null, inline(t)))))] : null;
+  const tlist = (label, items, cls) => items.length ? [h("div", {class: "label", style: "margin:8px 0 4px", text: label + " · " + items.length}), h("ul", {class: "tasklist"}, items.map(t => taskLine(t, cls)))] : null;
   body.append(sect("tasks", "Tasks", p.t.open + p.t.done ? [tlist("Now", p.t.now, "doing"), tlist("Next", p.t.next, ""), tlist("Later", p.t.later, ""), tlist("Done (recent)", p.t.done_recent, "done")] : h("p", {class: "t2"}, "No tasks. ", h("code", {text: "dev task add \"…\" --now -p " + p.id}))));
   if (ns.decisions) body.append(sect("decisions", "Decisions and gotchas", md(ns.decisions)));
   if (ns.links) body.append(sect("links", "Links", md(ns.links)));
@@ -1200,7 +1218,13 @@ function renderDrawer() {
 
 /* ---------------------------------------------------------------- command palette */
 function fuzzy(q, s) {
-  if (!q) return 1; q = q.toLowerCase(); s = s.toLowerCase(); const i = s.indexOf(q); if (i >= 0) return 100 - i + (i === 0 ? 20 : 0);
+  const toks = String(q || "").toLowerCase().split(/\s+/).filter(Boolean); if (!toks.length) return 1;
+  let total = 0; s = s.toLowerCase();
+  for (const t of toks) { const sc = fuzzy1(t, s); if (!sc) return 0; total += sc; }
+  return total;
+}
+function fuzzy1(q, s) {
+  const i = s.indexOf(q); if (i >= 0) return 100 - Math.min(i, 80) + (i === 0 ? 20 : 0);
   let qi = 0, score = 0, prev = -2; for (let j = 0; j < s.length && qi < q.length; j++) if (s[j] === q[qi]) { score += prev === j - 1 ? 3 : 1; prev = j; qi++; }
   return qi === q.length ? score : 0;
 }
@@ -1301,10 +1325,10 @@ function tick() { const t = $("#ticker"); if (t) { t.textContent = "Updated " + 
     h("nav", {class: "tabs", id: "tabs", role: "tablist", "aria-label": "Views"}),
     h("span", {class: "spacer"}),
     h("div", {class: "search", role: "search"}, h("span", {class: "ico", "aria-hidden": "true", text: "⌕"}), h("input", {id: "q", type: "search", placeholder: "Search projects, tasks, notes, plans…", "aria-label": "Search everything", autocomplete: "off"}), h("kbd", {text: "/"})),
-    h("button", {class: "btn", type: "button", onclick: openPalette, "aria-label": "Command palette", title: "Command palette (⌘K)"}, h("kbd", {text: "⌘K"})),
+    h("button", {class: "btn", id: "palbtn", type: "button", onclick: openPalette, "aria-label": "Command palette", title: "Command palette (⌘K)"}, h("kbd", {text: "⌘K"})),
     h("div", {class: "meta"}, h("button", {class: "pill", id: "canary", type: "button", onclick: () => go("health")}), h("span", {class: "tick", id: "ticker"})),
     h("button", {class: "btn ghost", id: "theme", type: "button", onclick: toggleTheme, "aria-label": "Toggle theme", title: "Toggle theme"}, "◐"));
-  const brand = $(".brand", app); brand.innerHTML = $("#spark-tpl").innerHTML; brand.append(h("span", {class: "word", text: "devkit"}), h("span", {class: "sub", text: "Project command centre"}));
+  const brand = $(".brand", app); brand.append($("#spark-tpl").content.cloneNode(true)); brand.append(h("span", {class: "word", text: "devkit"}), h("span", {class: "sub", text: "Project command centre"}));
   const q = $("#q");
   q.addEventListener("input", debounce(() => {
     const v = q.value.trim();

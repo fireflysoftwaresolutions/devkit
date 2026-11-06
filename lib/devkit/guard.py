@@ -175,8 +175,28 @@ def _newlines_to_semicolons(cmd: str) -> str:
     return "".join(out)
 
 
+HEREDOC_RE = re.compile(r"<<-?\s*(['\"]?)([A-Za-z_][A-Za-z0-9_]*)\1")
+
+
+def strip_heredocs(cmd: str) -> str:
+    """Drop heredoc bodies (they are data, not commands): keep the line with `<<EOF`, skip to the terminator."""
+    lines, out, i = cmd.split("\n"), [], 0
+    while i < len(lines):
+        ln = lines[i]
+        out.append(ln)
+        m = HEREDOC_RE.search(ln)
+        i += 1
+        if m:
+            term = m.group(2)
+            while i < len(lines) and lines[i].strip() != term:
+                i += 1
+            i += 1  # skip the terminator line
+    return "\n".join(out)
+
+
 def split_commands(cmd: str):
     """-> list of (argv, redirect_targets). None when the command cannot be tokenised."""
+    cmd = strip_heredocs(cmd)
     try:
         lex = shlex.shlex(_newlines_to_semicolons(cmd), posix=True, punctuation_chars=";&|()<>")
         lex.whitespace_split = True
@@ -318,6 +338,8 @@ def check_rm(args, cwd):
             continue
         if any(real(t) == real(p) for p in PROTECTED_RM):
             return deny(f"Refusing to recursively delete protected path {tilde(t)}.")
+        if is_temp(t):
+            continue  # scratch area: throwaway clones and repos may be deleted
         if t.name == ".git":
             return deny("Refusing to delete a .git directory (this destroys the repository history).")
         if is_under(t, DEV) and real(t) != real(DEV):

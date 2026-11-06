@@ -55,6 +55,7 @@ COMMANDS = [
     ]),
     ("Environment", [
         ("doctor", "Verify the whole setup (git, gh, Claude, Codex, skills, Docker, automation)"),
+        ("agents [test [claude|codex]]", "Claude Code and Codex: installed, signed in, plan, quota; live self-tests"),
         ("config diff|repair|lock|…", "Preview and enforce the agent settings devkit manages"),
         ("guard check <cmd>|--write p", "Simulate what the guard decides for a command or a file write"),
         ("plugin validate", "Validate the devkit plugin with Claude Code's validator and Codex's parser"),
@@ -526,8 +527,25 @@ def cmd_sync(a):
             if any(ok_ and m.startswith("removed") for ok_, m in results):
                 core._CWDS = None
                 reg = registry.build(with_prs=True, refresh_prs=False, with_sizes=False)
+        if a.scheduled:
+            try:
+                from . import providers
+                reg["providers"] = providers.status(include_account=False)
+            except Exception:
+                pass
+            try:
+                from . import policy
+                reg["drift"] = [d.as_dict() for d in policy.diff()]
+            except Exception:
+                pass
         with core.Lock("notes", wait=60):
             changed = registry.write_outputs(reg)
+        try:
+            from . import dashboard
+            dashboard.write(reg)
+        except Exception as e:  # never let the view break the sync
+            if not a.quiet:
+                ui.warn(f"dashboard: {e}")
         if a.session and a.finish:
             agent, _, sid = a.session.partition(":")
             for suffix in (".json", ".stop"):
@@ -1059,6 +1077,59 @@ def cmd_calver(a):
     return 0
 
 
+def _quota_text(q: dict) -> str:
+    if not q:
+        return "-"
+    if q.get("available") is None:
+        return ui.dim("not exposed by the CLI")
+    used = q.get("used_percent")
+    reset = core.fmt_ts(q.get("resets_at")) if q.get("resets_at") else "-"
+    txt = f"{used}% of the {int((q.get('window_minutes') or 0) / 1440) or '?'}-day window used · resets {reset}"
+    return (ui.red("exhausted · ") + txt) if not q.get("available") else (ui.yellow(txt) if (used or 0) >= 80 else txt)
+
+
+def cmd_agents(a):
+    from . import providers
+    if a.action == "test":
+        targets = ["claude", "codex"] if a.agent in (None, "all") else [a.agent]
+        rc = 0
+        for t in targets:
+            print(ui.section(f"Self-test · {t} (a short real session in a scratch repo)"))
+            res = providers.selftest(t, model=a.model)
+            for name, ok, detail in res["checks"]:
+                print(f"  {ui.OK if ok else ui.FAIL} {name:<34} {ui.dim(str(detail))}")
+            if res.get("skipped"):
+                print(f"  {ui.WARN} skipped: {res['skipped']}")
+            elif a.verbose and res.get("reply"):
+                print(ui.dim("\n  reply: " + res["reply"][:600].replace("\n", "\n         ")))
+            rc |= 0 if res["ok"] else 1
+        return rc
+    st = providers.status()
+    if a.json:
+        print(json.dumps(st, indent=1, ensure_ascii=False))
+        return 0
+    for key in ("claude", "codex"):
+        p = st[key]
+        print(ui.section(p["name"]))
+        if not p.get("installed"):
+            print(f"  {ui.FAIL} not installed")
+            continue
+        print(ui.kv("installed", f"{p.get('version')}" + ("  · desktop app present" if p.get("desktop") else ""), 12))
+        signed = p.get("logged_in")
+        print(ui.kv("signed in", (ui.green("yes") if signed else ui.red("no")) +
+                    f" · {p.get('auth_method') or '-'} · plan {p.get('plan') or '-'}" +
+                    (f" · {p['account']}" if p.get("account") else ""), 12))
+        if p.get("login_expires"):
+            print(ui.kv("login until", p["login_expires"][:10], 12))
+        print(ui.kv("quota", _quota_text(p.get("quota")), 12))
+        last = core.read_json(STATE / f"selftest-{key}.json", None)
+        if last:
+            print(ui.kv("self-test", (ui.green("passed") if last["ok"] else ui.red("failed")) +
+                        f" {ago(last.get('ts'))} — dev agents test {key}", 12))
+    print()
+    return 0
+
+
 def cmd_version(a):
     print(f"devkit {core.VERSION} · {tilde(core.DEVKIT_HOME)}\n{COPYRIGHT}")
     return 0
@@ -1148,6 +1219,12 @@ def build_parser():
     p.add_argument("config_cmd", nargs="?", choices=["diff", "repair", "show", "edit", "validate", "lock", "unlock",
                                                      "status"])
     p.add_argument("--quiet", action="store_true")
+    p = add("agents", cmd_agents, "Claude Code and Codex: install, sign-in, plan, quota, self-test")
+    p.add_argument("action", nargs="?", choices=["status", "test"], default="status")
+    p.add_argument("agent", nargs="?", choices=["claude", "codex", "all"])
+    p.add_argument("--json", action="store_true")
+    p.add_argument("--model", help="model for the self-test session")
+    p.add_argument("-v", "--verbose", action="store_true", help="show the agent's reply")
     add("calver", cmd_calver, "Current and next CalVer version (YY.MM.PATCH)").add_argument(
         "--next", action="store_true", help="print only the next version")
     p = add("plugin", cmd_plugin, "Validate the devkit plugin for Claude Code and Codex")
