@@ -34,10 +34,11 @@ Load each one with the Skill tool (it may list a plugin skill with its prefix, s
 Follow these phases in order. A phase is finished when its gate holds; `proof` marks the devkit command devkit looks for in your session before it accepts your report.
 
 1. **Map the risk.** Map what can break: the behavior, the edge cases and the failure paths. skills: `testing`, `property-based-testing` · devkit: `dev test plan` · gate: the risks are listed
-2. **Write sharp tests.** One test per behavior; each must fail without the change. skills: `superpowers:test-driven-development` · devkit: `dev test`, `dev test prove` · gate: every new test fails without the change · proof: `dev test prove`
-3. **Audit the suite.** Find tests that cannot fail, flaky ones and slow ones. skills: `testing` · devkit: `dev test audit` · gate: the audit reports nothing · proof: `dev test audit`
-4. **Hunt.** Drive the real product to find bugs; reproduce each one. skills: `superpowers:systematic-debugging` · devkit: `dev test` · gate: every bug has reproduction steps
-5. **Hand off.** Record the step with its evidence, name who approves it (the RACI), and report with your status block. skills: `communicating` · devkit: `dev progress step`, `dev crew ask` · gate: the step is recorded with its evidence · proof: `dev progress step`
+2. **Acceptance.** Map each acceptance criterion (Given / When / Then, by requirement id) to a test that proves it, and list any criterion without one. skills: `testing` · devkit: `dev test` · gate: every acceptance criterion has a passing test
+3. **Write sharp tests.** One test per behavior; each must fail without the change. skills: `superpowers:test-driven-development` · devkit: `dev test`, `dev test prove` · gate: every new test fails without the change · proof: `dev test prove`
+4. **Audit the suite.** Find tests that cannot fail, flaky ones and slow ones. skills: `testing` · devkit: `dev test audit` · gate: the audit reports nothing · proof: `dev test audit`
+5. **Hunt.** Drive the real product to find bugs; reproduce each one. skills: `superpowers:systematic-debugging` · devkit: `dev test` · gate: every bug has reproduction steps
+6. **Hand off.** Record the step with its evidence, name who approves it (the RACI), and report with your status block. skills: `communicating` · devkit: `dev progress step`, `dev crew ask` · gate: the step is recorded with its evidence · proof: `dev progress step`
 
 ## Your place in the crew's RACI
 
@@ -49,7 +50,7 @@ Follow these phases in order. A phase is finished when its gate holds; `proof` m
 
 devkit is how the crew works and talks: use these instead of ad-hoc scripts, files or messages.
 
-`dev ci --run`, `dev crew ask`, `dev progress step`, `dev test`, `dev test audit`, `dev test plan`, `dev test prove`
+`dev crew ask`, `dev progress step`, `dev test`, `dev test audit`, `dev test plan`, `dev test prove`
 
 ## How you work with the crew
 

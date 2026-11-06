@@ -2,7 +2,9 @@
 
 These rules apply to every project and on every surface devkit installs them on: Claude Code (the terminal, the
 Code tab of Claude Desktop, the IDEs) through `~/.claude/CLAUDE.md`, Codex (the CLI, the IDEs, the ChatGPT app)
-through `~/.codex/AGENTS.md`, and Claude Desktop's chat and Cowork through the devkit extension. A repository's own
+through `~/.codex/AGENTS.md`, and Claude Desktop's chat and Cowork through the devkit extension. In Claude Desktop,
+development happens in the **Code** tab, where devkit's guard, hooks and crew run; chat and Cowork only report and
+plan, and send code changes to the Code tab. A repository's own
 AGENTS.md / CLAUDE.md adds to them and wins on project specifics (build commands, style). The user's explicit request
 in the session wins over both.
 

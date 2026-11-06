@@ -84,7 +84,7 @@
         },
         {
           "phase": "Plan",
-          "do": "Plan one step per kind of work with dependencies and estimates, assign each to its member with the files it owns, and post the plan with the ETA.",
+          "do": "Plan one step per kind of work with dependencies and estimates, tag each step with its kind of work, assign each to its Responsible member with the files it owns, add a docs step for the Technical writer (Ghost) when users will notice the change, and post the plan with the ETA.",
           "skills": [
             "superpowers:writing-plans",
             "working-efficiently",
@@ -412,7 +412,8 @@
         "diagrams",
         "superpowers:writing-plans",
         "improve-codebase-architecture",
-        "communicating"
+        "communicating",
+        "threat-model-analyst"
       ],
       "tools": "build",
       "tier": "strong",
@@ -467,6 +468,17 @@
             "superpowers:brainstorming"
           ],
           "gate": "each option has its trade-offs"
+        },
+        {
+          "phase": "Threats",
+          "do": "Model the threats with the Security engineer (The Keymaker) before the contracts: assets, entry points, trust boundaries and abuse cases, and the mitigations the contracts must carry.",
+          "skills": [
+            "threat-model-analyst"
+          ],
+          "devkit": [
+            "dev crew ask"
+          ],
+          "gate": "every entry point has a threat and a mitigation"
         },
         {
           "phase": "Contracts",
@@ -565,8 +577,7 @@
       "devkit": [
         "dev crew ask",
         "dev progress step",
-        "dev sec scan",
-        "dev task add"
+        "dev sec scan"
       ],
       "done_when": [
         "every claim has a source",
@@ -669,7 +680,6 @@
         "dev progress step",
         "dev stubs",
         "dev test",
-        "dev test audit",
         "dev test prove"
       ],
       "done_when": [
@@ -791,7 +801,6 @@
       "goal": "Screens that match the design, work on every screen size and for every user, and stay fast.",
       "devkit": [
         "dev crew ask",
-        "dev dashboard",
         "dev progress step",
         "dev stubs",
         "dev test",
@@ -836,12 +845,9 @@
         },
         {
           "phase": "Browser check",
-          "do": "Check in a real browser at 1440 px and 390 px, dark and light, with the keyboard and with no console errors; screenshot each state.",
+          "do": "Check in a real browser at 1440 px and 390 px, dark and light, with the keyboard and with no console errors; screenshot each state (with Chrome DevTools or `playwright-cli`).",
           "skills": [
             "impeccable"
-          ],
-          "devkit": [
-            "dev dashboard"
           ],
           "gate": "the screens pass at both widths in both themes"
         },
@@ -918,7 +924,6 @@
       ],
       "goal": "APIs and services that keep their contract, fail safely, and are covered by tests against real dependencies.",
       "devkit": [
-        "dev ci --run",
         "dev crew ask",
         "dev docker up",
         "dev plan revise",
@@ -936,7 +941,7 @@
       "procedure": [
         {
           "phase": "Contract",
-          "do": "Write or update the contract first (OpenAPI, schema, events); keep it backward compatible; consult the Software architect (The Architect) on changes.",
+          "do": "Write or update the contract first (OpenAPI, schema, events); keep it backward compatible; consult the Software architect (The Architect) on changes and the Security engineer (The Keymaker) when it touches auth, data or outside input.",
           "skills": [
             "backend"
           ],
@@ -1069,7 +1074,6 @@
       ],
       "goal": "Schema changes that never lose data or stop the service, and queries that stay fast as the data grows.",
       "devkit": [
-        "dev ci --run",
         "dev crew ask",
         "dev docker up",
         "dev progress step",
@@ -1432,7 +1436,6 @@
       "devkit": [
         "dev crew ask",
         "dev docs check",
-        "dev doctor",
         "dev progress step",
         "dev stubs",
         "dev test",
@@ -1546,7 +1549,6 @@
       "goal": "People understand what they see and can do their task without help.",
       "devkit": [
         "dev crew ask",
-        "dev dashboard",
         "dev plan new",
         "dev plan revise",
         "dev progress step"
@@ -1562,9 +1564,6 @@
           "do": "Start from the user's task and the real content, not from components.",
           "skills": [
             "frontend-design"
-          ],
-          "devkit": [
-            "dev dashboard"
           ],
           "gate": "the user's task is written for each screen"
         },
@@ -1583,12 +1582,9 @@
         },
         {
           "phase": "Critique",
-          "do": "Critique built screens in a real browser, ranked by impact, with the fix for each finding.",
+          "do": "Critique built screens in a real browser, ranked by impact, with the fix for each finding (with Chrome DevTools or `playwright-cli`).",
           "skills": [
             "impeccable"
-          ],
-          "devkit": [
-            "dev dashboard"
           ],
           "gate": "the critique is ranked with fixes"
         },
@@ -1647,7 +1643,6 @@
       ],
       "goal": "Tests that catch real bugs, run only what a change can break, and never flake.",
       "devkit": [
-        "dev ci --run",
         "dev crew ask",
         "dev progress step",
         "dev test",
@@ -1672,6 +1667,17 @@
             "dev test plan"
           ],
           "gate": "the risks are listed"
+        },
+        {
+          "phase": "Acceptance",
+          "do": "Map each acceptance criterion (Given / When / Then, by requirement id) to a test that proves it, and list any criterion without one.",
+          "skills": [
+            "testing"
+          ],
+          "devkit": [
+            "dev test"
+          ],
+          "gate": "every acceptance criterion has a passing test"
         },
         {
           "phase": "Write sharp tests",
@@ -1788,7 +1794,7 @@
         },
         {
           "phase": "Check",
-          "do": "Correctness first, then tests, security, performance and fit with the codebase.",
+          "do": "Correctness first, then the acceptance criteria (each has a passing test), tests, security, performance and fit with the codebase.",
           "skills": [
             "testing",
             "sharp-edges"
@@ -1877,7 +1883,6 @@
       "devkit": [
         "dev ci audit",
         "dev crew ask",
-        "dev guard check",
         "dev progress step",
         "dev sec scan",
         "dev test"
@@ -1899,13 +1904,10 @@
         },
         {
           "phase": "Review",
-          "do": "Check authentication, authorization per operation, input validation, secrets and least privilege; approve, or send back with the fixes, the infrastructure changes and red-team findings you are accountable for.",
+          "do": "Check authentication, authorization per operation, input validation, secrets and least privilege, and that devkit's own guard covers the new commands (`dev guard check` simulates it); approve, or send back with the fixes, the infrastructure changes and red-team findings you are accountable for.",
           "skills": [
             "sharp-edges",
             "supply-chain-risk-auditor"
-          ],
-          "devkit": [
-            "dev guard check"
           ],
           "gate": "each control is checked"
         },
@@ -1988,9 +1990,7 @@
       "goal": "Weaknesses are found by the crew before anyone else finds them.",
       "devkit": [
         "dev crew ask",
-        "dev guard check",
-        "dev progress step",
-        "dev sec scan"
+        "dev progress step"
       ],
       "done_when": [
         "every finding has a reproduction",
@@ -2011,9 +2011,6 @@
           "do": "Attack the running system in a safe environment: injection, bypasses, escalation, abuse of limits.",
           "skills": [
             "variant-analysis"
-          ],
-          "devkit": [
-            "dev guard check"
           ],
           "gate": "each attack ran"
         },
@@ -2116,7 +2113,7 @@
         },
         {
           "phase": "Map",
-          "do": "Check each against its obligations and map it to a control.",
+          "do": "Check each license with the package manager's license tool and each data flow against its obligations; map each to a control.",
           "skills": [
             "devsecops"
           ],
@@ -2214,10 +2211,8 @@
         "dev ci --run",
         "dev ci --run --resume",
         "dev ci audit",
-        "dev ci watch",
         "dev crew ask",
         "dev delivery",
-        "dev pr checks",
         "dev pr merge",
         "dev progress step",
         "dev release",
@@ -2342,9 +2337,7 @@
       ],
       "goal": "Infrastructure that is reproducible from git, observable, and safe to change.",
       "devkit": [
-        "dev ci --run",
         "dev crew ask",
-        "dev docker up",
         "dev progress step",
         "dev sec scan"
       ],
@@ -2555,8 +2548,7 @@
       "devkit": [
         "dev crew ask",
         "dev progress step",
-        "dev test",
-        "dev time"
+        "dev test"
       ],
       "done_when": [
         "the cause is proven with a measurement",
@@ -2569,9 +2561,6 @@
           "do": "Reproduce the slowness with a measurement: percentiles, CPU, memory, queries.",
           "skills": [
             "otel-instrumentation"
-          ],
-          "devkit": [
-            "dev time"
           ],
           "gate": "the problem is measured"
         },
@@ -2790,9 +2779,7 @@
       "goal": "Questions about the product are answered with data whose definition everyone shares.",
       "devkit": [
         "dev crew ask",
-        "dev progress step",
-        "dev report",
-        "dev time"
+        "dev progress step"
       ],
       "done_when": [
         "the metric has a written definition",
@@ -2818,9 +2805,6 @@
           "do": "Show the answer with its time window, sample size and caveats.",
           "skills": [
             "communicating"
-          ],
-          "devkit": [
-            "dev report"
           ],
           "gate": "every number states its window"
         },
@@ -2983,7 +2967,6 @@
       ],
       "goal": "Fast, checkable facts so the crew does not spend strong-model time on lookups.",
       "devkit": [
-        "dev files",
         "dev find",
         "dev grep"
       ],
@@ -3158,7 +3141,7 @@
       "R": [
         "sati"
       ],
-      "A": "sati",
+      "A": "hamann",
       "C": [
         "trinity",
         "oracle"
@@ -3197,10 +3180,12 @@
       "A": "seraph",
       "C": [
         "sati",
-        "tank"
+        "tank",
+        "keymaker"
       ],
       "I": [
-        "mouse"
+        "mouse",
+        "ghost"
       ],
       "signals": [
         "frontend",
@@ -3239,7 +3224,8 @@
       ],
       "I": [
         "trinity",
-        "mouse"
+        "mouse",
+        "ghost"
       ],
       "signals": [
         "backend",
@@ -3276,7 +3262,8 @@
       "A": "seraph",
       "C": [
         "tank",
-        "merovingian"
+        "merovingian",
+        "keymaker"
       ],
       "I": [
         "morpheus"
@@ -3312,10 +3299,12 @@
       "A": "seraph",
       "C": [
         "architect",
-        "mouse"
+        "mouse",
+        "keymaker"
       ],
       "I": [
-        "morpheus"
+        "morpheus",
+        "ghost"
       ],
       "signals": [
         "feature",
@@ -3340,10 +3329,12 @@
       "A": "seraph",
       "C": [
         "sati",
-        "tank"
+        "tank",
+        "keymaker"
       ],
       "I": [
-        "mouse"
+        "mouse",
+        "ghost"
       ],
       "signals": [
         "ios",
@@ -3398,10 +3389,12 @@
       "A": "seraph",
       "C": [
         "link",
-        "ghost"
+        "ghost",
+        "keymaker"
       ],
       "I": [
-        "morpheus"
+        "morpheus",
+        "ghost"
       ],
       "signals": [
         "cli",
@@ -3465,7 +3458,7 @@
       "R": [
         "keymaker"
       ],
-      "A": "keymaker",
+      "A": "seraph",
       "C": [
         "smith",
         "persephone"
@@ -3582,13 +3575,14 @@
       "R": [
         "link"
       ],
-      "A": "link",
+      "A": "keymaker",
       "C": [
         "niobe",
         "keymaker"
       ],
       "I": [
-        "morpheus"
+        "morpheus",
+        "ghost"
       ],
       "signals": [
         "ci",
@@ -3619,7 +3613,8 @@
         "ghost"
       ],
       "I": [
-        "hamann"
+        "hamann",
+        "ghost"
       ],
       "signals": [
         "release",
@@ -3666,7 +3661,10 @@
         "load balancer",
         "sre",
         "monitoring",
-        "alerts"
+        "alerts",
+        "opentelemetry",
+        "tracing",
+        "observability"
       ]
     },
     {
@@ -3723,11 +3721,7 @@
         "profile",
         "memory leak",
         "cpu",
-        "throughput",
-        "optimize",
-        "observability",
-        "tracing",
-        "opentelemetry"
+        "throughput"
       ]
     },
     {

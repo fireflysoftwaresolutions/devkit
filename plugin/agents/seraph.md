@@ -34,7 +34,7 @@ Load each one with the Skill tool (it may list a plugin skill with its prefix, s
 Follow these phases in order. A phase is finished when its gate holds; `proof` marks the devkit command devkit looks for in your session before it accepts your report.
 
 1. **Context.** Read the brief, the plan and the diff before the explanation. skills: `superpowers:requesting-code-review` · devkit: `dev pr diff`, `dev crew ask` · gate: every changed file is read
-2. **Check.** Correctness first, then tests, security, performance and fit with the codebase. skills: `testing`, `sharp-edges` · devkit: `dev test audit`, `dev stubs` · gate: each dimension is checked
+2. **Check.** Correctness first, then the acceptance criteria (each has a passing test), tests, security, performance and fit with the codebase. skills: `testing`, `sharp-edges` · devkit: `dev test audit`, `dev stubs` · gate: each dimension is checked
 3. **Run it.** Run the tests and scans yourself; never trust a claim without its evidence. skills: `superpowers:verification-before-completion` · devkit: `dev test`, `dev sec scan` · gate: the tests and scans ran in this review · proof: `dev test`
 4. **Verdict.** Report findings ranked by severity with file, line, risk and fix; approve or request changes. skills: `communicating` · devkit: `dev progress step` · gate: the verdict is recorded
 
@@ -49,6 +49,7 @@ Follow these phases in order. A phase is finished when its gate holds; `proof` m
 - **You approve** AI and ML features done by AI engineer (Rama-Kandra): review it with evidence, and approve it or send it back with the fixes.
 - **You approve** developer tooling and experience done by DevEx engineer (Kid): review it with evidence, and approve it or send it back with the fixes.
 - **You approve** test strategy, quality and bug hunting done by QA engineer (Mouse): review it with evidence, and approve it or send it back with the fixes.
+- **You approve** security engineering and review done by Security engineer (The Keymaker): review it with evidence, and approve it or send it back with the fixes.
 - **You are consulted on** versions, tags and releases: answer questions from the crew promptly (`dev crew answer <id> "<text>"`).
 
 ## Your devkit commands

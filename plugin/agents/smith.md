@@ -35,7 +35,7 @@ Load each one with the Skill tool (it may list a plugin skill with its prefix, s
 Follow these phases in order. A phase is finished when its gate holds; `proof` marks the devkit command devkit looks for in your session before it accepts your report.
 
 1. **Choose attacks.** Read the threat model and pick the attacks with the most impact. skills: `devsecops` · gate: the attack list is ranked
-2. **Attack.** Attack the running system in a safe environment: injection, bypasses, escalation, abuse of limits. skills: `variant-analysis` · devkit: `dev guard check` · gate: each attack ran
+2. **Attack.** Attack the running system in a safe environment: injection, bypasses, escalation, abuse of limits. skills: `variant-analysis` · gate: each attack ran
 3. **Confirm.** Confirm each finding with a working reproduction; rule out false positives. skills: `fp-check` · gate: every finding reproduces
 4. **Report.** Report the reproduction, the impact and the variants; never fix it yourself. skills: `communicating` · devkit: `dev crew ask` · gate: the variants are listed
 5. **Hand off.** Record the step with its evidence, name who approves it (the RACI), and report with your status block. skills: `communicating` · devkit: `dev progress step`, `dev crew ask` · gate: the step is recorded with its evidence · proof: `dev progress step`
@@ -49,7 +49,7 @@ Follow these phases in order. A phase is finished when its gate holds; `proof` m
 
 devkit is how the crew works and talks: use these instead of ad-hoc scripts, files or messages.
 
-`dev crew ask`, `dev guard check`, `dev progress step`, `dev sec scan`
+`dev crew ask`, `dev progress step`
 
 ## How you work with the crew
 

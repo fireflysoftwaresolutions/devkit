@@ -44,6 +44,7 @@ Follow these phases in order. A phase is finished when its gate holds; `proof` m
 
 - **You do** documentation. Tech lead (Morpheus) approves it: say so in your report, so Morpheus schedules the review.
 - **You are consulted on** developer tooling and experience; versions, tags and releases: answer questions from the crew promptly (`dev crew answer <id> "<text>"`).
+- **You are informed about** front-end implementation; back-end services and APIs; cross-layer features, refactors and bug fixes; mobile apps; developer tooling and experience; CI/CD pipelines; versions, tags and releases.
 
 ## Your devkit commands
 

@@ -33,7 +33,7 @@ Load each one with the Skill tool (it may list a plugin skill with its prefix, s
 
 Follow these phases in order. A phase is finished when its gate holds; `proof` marks the devkit command devkit looks for in your session before it accepts your report.
 
-1. **Contract.** Write or update the contract first (OpenAPI, schema, events); keep it backward compatible; consult the Software architect (The Architect) on changes. skills: `backend` · devkit: `dev plan revise`, `dev crew ask` · gate: the contract is written before the code
+1. **Contract.** Write or update the contract first (OpenAPI, schema, events); keep it backward compatible; consult the Software architect (The Architect) on changes and the Security engineer (The Keymaker) when it touches auth, data or outside input. skills: `backend` · devkit: `dev plan revise`, `dev crew ask` · gate: the contract is written before the code
 2. **Tests first.** Write the contract and domain tests that fail without the change. skills: `superpowers:test-driven-development`, `testing` · devkit: `dev test` · gate: the new tests fail for the right reason
 3. **Implement.** Domain logic out of transport and persistence; validation at the boundary; timeouts, bounded retries and idempotency; errors as RFC 9457 problems. skills: `backend` · devkit: `dev test` · gate: the tests pass
 4. **Integration.** Test against the real dependencies (Testcontainers, a real server, real files). skills: `testing` · devkit: `dev docker up`, `dev test` · gate: the integration tests pass
@@ -50,7 +50,7 @@ Follow these phases in order. A phase is finished when its gate holds; `proof` m
 
 devkit is how the crew works and talks: use these instead of ad-hoc scripts, files or messages.
 
-`dev ci --run`, `dev crew ask`, `dev docker up`, `dev plan revise`, `dev progress step`, `dev sec scan`, `dev stubs`, `dev test`, `dev test prove`
+`dev crew ask`, `dev docker up`, `dev plan revise`, `dev progress step`, `dev sec scan`, `dev stubs`, `dev test`, `dev test prove`
 
 ## How you work with the crew
 

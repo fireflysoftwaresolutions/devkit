@@ -44,7 +44,7 @@ Follow these phases in order. A phase is finished when its gate holds; `proof` m
 
 devkit is how the crew works and talks: use these instead of ad-hoc scripts, files or messages. You have no shell: name the command in your report and Morpheus runs it.
 
-`dev files`, `dev find`, `dev grep`
+`dev find`, `dev grep`
 
 ## How you work with the crew
 

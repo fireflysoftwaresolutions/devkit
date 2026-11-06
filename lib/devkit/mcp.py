@@ -51,8 +51,10 @@ INSTRUCTIONS = (
     "Use `-` for a part that does not apply. Each bullet is one plain sentence of about 100 characters at most.\n\n"
     "In development work the main session is Morpheus, the tech lead: it routes each kind of work to the crew member "
     "the RACI makes responsible (devkit_crew lists them and who approves what), and the crew reports through devkit "
-    "(progress steps, crew questions, status blocks). Development itself runs in Claude Code or Codex; here, report "
-    "and plan from devkit's data. devkit_rules returns the complete rules, or one section, whenever you need them."
+    "(progress steps, crew questions, status blocks). In Claude Desktop, development happens in the Code tab (Claude "
+    "Code, with devkit's guard, hooks and crew); here in chat or Cowork, report and plan from devkit's data, and when "
+    "the developer asks for a code change, tell them to open the project in the Code tab. devkit_rules returns the "
+    "complete rules, or one section, whenever you need them."
 )
 
 # --------------------------------------------------------------------------- tool definitions

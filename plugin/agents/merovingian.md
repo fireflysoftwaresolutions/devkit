@@ -35,7 +35,7 @@ Load each one with the Skill tool (it may list a plugin skill with its prefix, s
 
 Follow these phases in order. A phase is finished when its gate holds; `proof` marks the devkit command devkit looks for in your session before it accepts your report.
 
-1. **Measure.** Reproduce the slowness with a measurement: percentiles, CPU, memory, queries. skills: `otel-instrumentation` · devkit: `dev time` · gate: the problem is measured
+1. **Measure.** Reproduce the slowness with a measurement: percentiles, CPU, memory, queries. skills: `otel-instrumentation` · gate: the problem is measured
 2. **Find the cause.** Profile and trace to the cause; rule out the others with data. skills: `superpowers:systematic-debugging`, `otel-semantic-conventions` · gate: the cause is proven
 3. **Recommend.** Recommend the fix with its expected gain; the Tech lead (Morpheus) assigns it. skills: `communicating` · devkit: `dev crew ask` · gate: the expected gain is stated
 4. **Measure again.** Measure after the fix and report before and after. devkit: `dev test` · gate: the gain is measured
@@ -50,7 +50,7 @@ Follow these phases in order. A phase is finished when its gate holds; `proof` m
 
 devkit is how the crew works and talks: use these instead of ad-hoc scripts, files or messages.
 
-`dev crew ask`, `dev progress step`, `dev test`, `dev time`
+`dev crew ask`, `dev progress step`, `dev test`
 
 ## How you work with the crew
 

@@ -47,7 +47,7 @@ Follow these phases in order. A phase is finished when its gate holds; `proof` m
 
 devkit is how the crew works and talks: use these instead of ad-hoc scripts, files or messages.
 
-`dev crew ask`, `dev progress step`, `dev sec scan`, `dev task add`
+`dev crew ask`, `dev progress step`, `dev sec scan`
 
 ## How you work with the crew
 

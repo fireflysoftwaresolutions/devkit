@@ -222,9 +222,9 @@ class RenderTests(unittest.TestCase):
         for m in crew.members(r, include_main=False):
             with self.subTest(member=m["id"]):
                 text = crew.render_claude(m, r)
-                # a full definition (goal, method, RACI, commands, done-when), still well under 2k tokens
+                # a full definition (goal, procedure, RACI, commands, done-when), still about 2k tokens at most
                 self.assertLess(len(text.splitlines()), 100)
-                self.assertLess(len(text), 7000)
+                self.assertLess(len(text), 8000)
                 self.assertTrue(canary.MARKER_RE.match(crew.status_header(m, "api", "main", "parser")))
 
     def test_the_main_session_role_gets_no_agent_and_scout_is_an_alias(self):

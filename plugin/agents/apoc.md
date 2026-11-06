@@ -36,7 +36,7 @@ Follow these phases in order. A phase is finished when its gate holds; `proof` m
 
 1. **Define.** Write the question and the metric's exact definition before querying. gate: the definition is written
 2. **Query.** Query read-only from the right source and check for gaps and duplicates. skills: `supabase-postgres-best-practices` · gate: the data is checked
-3. **Answer.** Show the answer with its time window, sample size and caveats. skills: `communicating` · devkit: `dev report` · gate: every number states its window
+3. **Answer.** Show the answer with its time window, sample size and caveats. skills: `communicating` · gate: every number states its window
 4. **Hand off.** Record the step with its evidence, name who approves it (the RACI), and report with your status block. skills: `communicating` · devkit: `dev progress step`, `dev crew ask` · gate: the step is recorded with its evidence · proof: `dev progress step`
 
 ## Your place in the crew's RACI
@@ -47,7 +47,7 @@ Follow these phases in order. A phase is finished when its gate holds; `proof` m
 
 devkit is how the crew works and talks: use these instead of ad-hoc scripts, files or messages.
 
-`dev crew ask`, `dev progress step`, `dev report`, `dev time`
+`dev crew ask`, `dev progress step`
 
 ## How you work with the crew
 
