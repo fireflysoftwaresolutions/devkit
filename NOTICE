@@ -30,3 +30,5 @@ Third-party skills installed by devkit are fetched from their upstream repositor
 - PactFlow agent skills (https://github.com/pactflow/pactflow-agent-skills), MIT: pactflow (optional group contract-testing).
 - Sentry skills (https://github.com/getsentry/skills), Apache-2.0: skill-scanner (optional group skill-review).
 - mattpocock/skills (MIT), likec4 (MIT), vercel-labs/agent-skills (MIT) and angular/skills (MIT): see config/skills.json.
+- impeccable (https://github.com/pbakaus/impeccable), Apache-2.0, for Claude Code; Codex gets it from its plugin.
+- frontend-design (https://github.com/anthropics/claude-plugins-official), Apache-2.0, for Codex; Claude Code gets it from its plugin.

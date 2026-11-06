@@ -2,6 +2,30 @@
   "_comment": "Third-party skills fetched at install time from upstream at a pinned commit, then linked into ~/.claude/skills and ~/.agents/skills (Codex). Sources without `group` are always installed; a `group` source is installed when the group is listed in devkit config `skills.groups` (default: security-deep, postgres, observability). Bump a ref with `dev install --only skills` after review. Rationale per skill: docs/skills-and-plugins.md.",
   "sources": [
     {
+      "repo": "anthropics/claude-plugins-official",
+      "ref": "cb421c81df4274fd28fd1ead817bc6ffea723fed",
+      "license": "Apache-2.0",
+      "agents": [
+        "codex"
+      ],
+      "_why": "Claude gets frontend-design from its plugin; Codex gets the same skill here",
+      "skills": {
+        "frontend-design": "plugins/frontend-design/skills/frontend-design"
+      }
+    },
+    {
+      "repo": "pbakaus/impeccable",
+      "ref": "414603bf14c7a344edb466bb1f85690c77ce8b7d",
+      "license": "Apache-2.0",
+      "agents": [
+        "claude"
+      ],
+      "_why": "Codex gets impeccable from its plugin; Claude gets the same skill (tag skill-v4.8.0) here",
+      "skills": {
+        "impeccable": ".claude/skills/impeccable"
+      }
+    },
+    {
       "repo": "mattpocock/skills",
       "ref": "4ae2317ddb22b046e26455e4f9c9b3aaaf62212d",
       "license": "MIT",

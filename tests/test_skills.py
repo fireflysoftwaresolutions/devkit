@@ -30,8 +30,11 @@ class SkillRuleTests(unittest.TestCase):
         text = sg.on_prompt("claude", "Redesign the dashboard UI and update the docs", {})
         self.assertIn("frontend-design", text)
         self.assertIn("docs", text)
-        self.assertEqual(sg.on_prompt("claude", "Redesign the dashboard UI", {"skills_loaded": ["frontend-design"]}), "")
+        self.assertEqual(sg.on_prompt("claude", "Redesign the dashboard UI",
+                                      {"skills_loaded": ["frontend-design", "impeccable"]}), "")
+        self.assertIn("impeccable", sg.on_prompt("claude", "Redesign the dashboard UI", {"skills_loaded": ["frontend-design"]}))
         self.assertIn("impeccable", sg.on_prompt("codex", "mejora la interfaz", {}))
+        self.assertIn("frontend-design", sg.on_prompt("codex", "mejora la interfaz", {}))
         self.assertIn("docs", sg.on_prompt("claude", "documenta el cambio", {}))
 
     def test_brief_gets_required_skills(self):
@@ -39,7 +42,7 @@ class SkillRuleTests(unittest.TestCase):
         self.assertIn("## devkit · required skills", upd["prompt"])
         self.assertIn("`frontend-design`", upd["prompt"])
         self.assertIsNone(sg.on_agent_brief("claude", upd))  # not appended twice
-        self.assertIsNone(sg.on_agent_brief("claude", {"prompt": "Use frontend-design to rework the layout"}))
+        self.assertIsNone(sg.on_agent_brief("claude", {"prompt": "Use frontend-design and impeccable to rework the layout"}))
         self.assertIsNone(sg.on_agent_brief("codex", {"prompt": "Rework the dashboard layout"}))
 
     def test_rules_for_files_by_path_and_content(self):

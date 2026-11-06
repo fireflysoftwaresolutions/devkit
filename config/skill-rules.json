@@ -3,7 +3,7 @@
   "rules": [
     {
       "id": "ui",
-      "why": "UI quality: information hierarchy, layout, typography, color, accessibility",
+      "why": "UI quality: frontend-design for the direction, impeccable for hierarchy, layout, typography, color and the audit",
       "files": [
         "*.html",
         "*.css",
@@ -30,9 +30,11 @@
       "prompt": "\\b(ui|ux|frontend|front-end|dashboard|landing( page)?|css|layout|web page|screen|interfaz|pantalla|diseño visual)\\b",
       "skills": {
         "claude": [
-          "frontend-design"
+          "frontend-design",
+          "impeccable"
         ],
         "codex": [
+          "frontend-design",
           "impeccable"
         ]
       }

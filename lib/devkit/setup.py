@@ -326,6 +326,7 @@ def _install_skills():
     step("Skills (shared by Claude Code and Codex)")
     manifest = load_conf("skills.json")
     wanted = {}  # name -> directory to link
+    only = {}  # name -> the agents that get it (default: both)
     for d in sorted((DEVKIT_HOME / "agents" / "skills").iterdir()):
         if (d / "SKILL.md").exists():
             wanted[d.name] = d
@@ -349,18 +350,21 @@ def _install_skills():
             shutil.copytree(s, out, symlinks=True)
             (out / ".devkit-source").write_text(f"{src['repo']}@{src['ref']} {rel} license={src.get('license')}\n")
             wanted[name] = out
+            if src.get("agents"):  # e.g. a Claude plugin's skill given to Codex only, so Claude has no duplicate
+                only[name] = set(src["agents"])
     pw = SKILLS_SHARE / "playwright-cli"  # installed by the packages step from `playwright-cli install --skills`
     if (pw / "SKILL.md").exists():
         wanted["playwright-cli"] = pw
     managed_f = STATE / "skills-managed.json"
     previous = set(read_json(managed_f, []) or [])
-    for home in (CLAUDE_HOME / "skills", AGENTS_HOME / "skills"):
+    for agent, home in (("claude", CLAUDE_HOME / "skills"), ("codex", AGENTS_HOME / "skills")):
         home.mkdir(parents=True, exist_ok=True)
-        for name in previous - set(wanted):
+        mine = {n: tg for n, tg in wanted.items() if agent in only.get(n, {"claude", "codex"})}
+        for name in previous - set(mine):
             link = home / name
-            if link.is_symlink():
+            if link.is_symlink() and str(os.readlink(link)).startswith(str(SKILLS_SHARE)):
                 link.unlink()
-        for name, target in wanted.items():
+        for name, target in mine.items():
             link = home / name
             if link.is_symlink():
                 if Path(os.readlink(link)) == target:
@@ -371,7 +375,9 @@ def _install_skills():
                 continue
             link.symlink_to(target)
     managed_f.write_text(json.dumps(sorted(wanted)))
-    done(f"{len(wanted)} skills linked into {tilde(CLAUDE_HOME / 'skills')} and {tilde(AGENTS_HOME / 'skills')}")
+    both = [n for n in wanted if n not in only]
+    extra = "; " + ", ".join(f"{n} → {'/'.join(sorted(a))} only" for n, a in sorted(only.items())) if only else ""
+    done(f"{len(both)} skills linked into {tilde(CLAUDE_HOME / 'skills')} and {tilde(AGENTS_HOME / 'skills')}{extra}")
     print("    " + ui.dim(", ".join(sorted(wanted))))
 
 
