@@ -209,24 +209,6 @@ def context_for(cwd: str, agent: str) -> str:
     return "\n".join(lines)
 
 
-def _note_hash(top: str) -> str:
-    """Hash of the human sections of the project's note (to tell whether the session updated it)."""
-    import hashlib
-    from .registry import main_of
-    main = main_of(Path(top)) or Path(top)
-    pid = core.project_identity(main, core.gitout(main, "config", "--get", "remote.origin.url"))[0]
-    f = core.note_path(pid)
-    if not f.exists():
-        return ""
-    from . import notes as notesmod
-    from . import work
-    sec = notesmod.sections(f.read_text())
-    sec.pop("Session log", None)
-    sec.pop("Tasks", None)
-    sec["_items"] = sorted(f"{i['meta']['id']}:{i['meta'].get('version')}" for i in work.all_items(pid))
-    return hashlib.sha256(json.dumps(sec, sort_keys=True).encode()).hexdigest()
-
-
 def _register_session(agent: str, sid: str, cwd: str, data: dict = None) -> Path:
     f = _session_file(agent, sid)
     if not f.exists():
@@ -236,8 +218,7 @@ def _register_session(agent: str, sid: str, cwd: str, data: dict = None) -> Path
         f.write_text(json.dumps({"agent": agent, "session": sid, "cwd": cwd, "top": top, "started": time.time(),
                                  "surface": surface(agent, data),
                                  "head": core.gitout(top, "rev-parse", "HEAD") if top else "",
-                                 "branch": core.gitout(top, "branch", "--show-current") if top else "",
-                                 "note_hash": _note_hash(top) if top and not core.is_temp(top) else ""}))
+                                 "branch": core.gitout(top, "branch", "--show-current") if top else ""}))
     return f
 
 
@@ -316,21 +297,88 @@ def record_session(spec: str):
         work.log_session(pid, line)
 
 
+HANDOFF_CHECK = STATE / "handoff-check"  # per project: the hash of the note's human sections and when it changed
+GENERATED_SECTIONS = ("Session log", "Tasks")
+
+
+def _human_digest(text: str) -> str:
+    """The note without the sections devkit writes itself."""
+    import hashlib
+    from . import notes as notesmod
+    sec = notesmod.sections(text)
+    for k in GENERATED_SECTIONS:
+        sec.pop(k, None)
+    return hashlib.sha256(json.dumps(sec, sort_keys=True).encode()).hexdigest()
+
+
+def _human_changed_at(note: Path, digest: str) -> float:
+    """When the note's human sections took their current form: walk the handoff repository's history of the note back
+    to the revision where they differ. A note outside git (or with an uncommitted human edit) falls back to its file
+    time."""
+    repo = core.gitout(note.parent, "rev-parse", "--show-toplevel")
+    if not repo:
+        return note.stat().st_mtime
+    rel = os.path.relpath(note.resolve(), Path(repo).resolve())
+    since = None
+    for ln in core.gitout(repo, "log", "-n", "60", "--format=%ct %H", "--", rel).splitlines():
+        ts, _, sha = ln.partition(" ")
+        if not ts.isdigit() or _human_digest(core.gitout(repo, "show", f"{sha}:{rel}")) != digest:
+            break
+        since = float(ts)
+    return since if since is not None else note.stat().st_mtime
+
+
+def handoff_staleness(top: str, note: Path, state_file: Path, email: str, now: float) -> list:
+    """Commits on HEAD by `email` newer than the last change of the note's human sections (Current state, Next
+    steps, Decisions…) -> their hashes. A task or session line written by devkit is not a change; a teammate's commit
+    pulled in is not this developer's work. The first time a note is seen, the handoff history says when it changed."""
+    if not note.exists():
+        return []
+    digest = _human_digest(note.read_text())
+    st = core.read_json(state_file, {}) or {}
+    if st.get("hash") != digest:
+        st = {"hash": digest, "changed": now if st else _human_changed_at(note, digest)}
+        state_file.parent.mkdir(parents=True, exist_ok=True)
+        state_file.write_text(json.dumps(st))
+    out = []
+    for ln in core.gitout(top, "log", "-n", "300", "--format=%ct%x09%ce%x09%h", "HEAD").splitlines():
+        ts, ce, sha = (ln.split("\t") + ["", "", ""])[:3]
+        if not ts.isdigit() or int(ts) <= st["changed"]:
+            break  # newest first: everything below is older than the note's last change
+        if ce.lower() == email.lower():
+            out.append(sha)
+    return out
+
+
 def _handoff_nudge(agent: str, data: dict, sess: dict):
-    """Once per session: commits were made but the handoff note was not touched → ask the agent to update it."""
-    if data.get("stop_hook_active") or sess.get("nudged") or not sess.get("top") or core.is_temp(sess["top"]):
+    """End of every development turn: the commits made since the handoff note last really changed → update the note
+    and the tasks now, not only at the end. The repository is where the session works now (it may have started
+    outside one, as Claude Desktop sessions do), and the check re-arms after each update."""
+    if data.get("stop_hook_active") or not core.CFG.get("handoff", {}).get("enforce", True):
         return None
-    if not core.CFG.get("handoff", {}).get("enforce", True):
+    top = core.gitout(data.get("cwd") or os.getcwd(), "rev-parse", "--show-toplevel") or sess.get("top") or ""
+    if not top or core.is_temp(top):
         return None
-    head = sess.get("head")
-    if not head:
+    from .registry import main_of
+    from . import work
+    main = main_of(Path(top)) or Path(top)
+    pid = core.project_identity(main, core.gitout(main, "config", "--get", "remote.origin.url"))[0]
+    email = core.gitout(top, "config", "user.email")
+    if not pid or not email:
         return None
-    n = len(core.gitout(sess["top"], "log", "--format=%h", f"{head}..HEAD").splitlines())
-    if n == 0 or _note_hash(sess["top"]) != sess.get("note_hash", ""):
+    stale = handoff_staleness(top, core.note_path(pid), HANDOFF_CHECK / (pid.replace("/", "__") + ".json"), email,
+                              time.time())
+    if not stale:
         return None
-    return (f"devkit: this session made {n} commit(s) but the project's handoff note was not updated. Before you "
-            f"finish, update it with the devkit handoff skill (/devkit:handoff) — Current state, Tasks (`dev task done <n>` / "
-            f"`dev task add \"…\"`), Decisions and gotchas — then end your reply as usual.")
+    a = work.actor(agent, sess.get("session") or "")
+    mine = [i["meta"]["id"] for i in work.all_items(pid) if i["meta"].get("status") == "doing" and
+            str(i["meta"].get("claimed_by") or "").startswith(f"{a['user']}@{a['host']}")]
+    tasks = (f"Tasks: keep {', '.join(mine)} current (`dev task done <id>` once verified; `dev task add \"…\" --why "
+             f"\"…\"` for follow-ups)." if mine else
+             "Tasks: claim the work item for this work (`dev task start <id>`) or add it (`dev task add \"…\" --now`).")
+    return (f"devkit: {len(stale)} commit(s) in {pid} are newer than its handoff note. Update the note now with the "
+            f"devkit handoff skill (/devkit:handoff): Current state, Next steps, Decisions and gotchas, short and true. "
+            f"{tasks} devkit asks again after every turn with new commits, so the note never falls behind.")
 
 
 def _plans_without_reason(sess: dict) -> list:
@@ -503,7 +551,6 @@ def stop(agent: str):
                            "reason), then finish.")
         nudge = _handoff_nudge(agent, data, sess) if dev_turn else None
         if nudge:
-            sess["nudged"] = True
             reasons.append(nudge)
         if reasons:
             out.update({"decision": "block", "reason": " ".join(reasons)})
