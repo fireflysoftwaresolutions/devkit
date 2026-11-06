@@ -129,6 +129,41 @@ class ClassifyTests(GateCase):
         _git(self.repo, "checkout", "-q", "main")
         self.assertEqual(self.acts("git push"), [("push-destructive", 2, "main")])
 
+    def test_a_git_alias_runs_what_it_stands_for(self):
+        _git(self.repo, "config", "alias.ship", "!gh pr merge 12")
+        _git(self.repo, "config", "alias.up", "push origin main")
+        _git(self.repo, "config", "alias.st", "status")
+        for cmd, act in (("git -c alias.p=push p origin main", ("push-destructive", 2, "main")),
+                         ("git ship", ("merge", 2, "12")), ("git up", ("push-destructive", 2, "main")),
+                         ("bash -c 'git -c alias.x=\"!gh pr merge 12\" x'", ("merge", 2, "12"))):
+            with self.subTest(cmd=cmd):
+                self.assertEqual(self.acts(cmd), [act])
+        for cmd in ("git st", "git -c alias.l=log l -3", "git nosuchalias"):
+            with self.subTest(cmd=cmd):
+                self.assertEqual(self.acts(cmd), [])
+
+    def test_a_gh_alias_and_a_shell_script_run_by_its_path_are_read(self):
+        conf = Path(self.tmp.name) / "gh"
+        conf.mkdir()
+        (conf / "config.yml").write_text("git_protocol: https\naliases:\n    m: pr merge\n"
+                                         "    rel: '!gh release create v9.9.9'\n    co: pr checkout\n")
+        script = Path(self.repo) / "helper.sh"
+        script.write_text("#!/usr/bin/env bash\nset -e\ngh pr merge 12\n")
+        script.chmod(0o755)
+        (Path(self.repo) / "notes.txt").write_text("gh pr merge 12\n")
+        with mock.patch.dict(os.environ, {"GH_CONFIG_DIR": str(conf)}):
+            for cmd, act in (("gh m 12", ("merge", 2, "12")), ("gh rel", ("release", 2, "v9.9.9")),
+                             ("./helper.sh", ("merge", 2, "12")), (f"{script}", ("merge", 2, "12"))):
+                with self.subTest(cmd=cmd):
+                    self.assertEqual(self.acts(cmd), [act])
+            for cmd in ("gh co 12", "./notes.txt", "gh nosuchalias"):
+                with self.subTest(cmd=cmd):
+                    self.assertEqual(self.acts(cmd), [])
+
+    def test_with_repo_every_other_word_of_a_push_is_a_refspec(self):
+        self.assertEqual(self.acts("git push --repo=https://github.com/o/r.git main"), [("push-destructive", 2, "main")])
+        self.assertEqual(self.acts("git push --repo https://github.com/o/r.git feat/x"), [("push", 1, "feat/x")])
+
     def test_a_push_to_a_repository_on_this_disk_is_not_an_action(self):
         bare = Path(self.tmp.name) / "mirror.git"
         subprocess.run(["git", "init", "-q", "--bare", str(bare)], check=True, capture_output=True)

@@ -3213,9 +3213,10 @@ def _push_actions(args, cwd) -> list:
     if "n" in shorts or "h" in shorts or {"--dry-run", "--help"} & longs:
         return []
     pos = _positionals(args, {"-o", "--push-option", "--repo", "--receive-pack", "--exec"})
-    if _local_remote(cwd, pos[0] if pos else ""):
+    repo_opt = _opt_value(args, ("--repo",))  # with --repo, every other word is a refspec
+    if _local_remote(cwd, repo_opt or (pos[0] if pos else "")):
         return []
-    refspecs = pos[1:]
+    refspecs = pos if repo_opt else pos[1:]
     force = "f" in shorts or "--force" in longs or bool(longs & {"--force-with-lease", "--force-if-includes"})
     delete = "d" in shorts or "--delete" in longs
     out = []
@@ -3252,6 +3253,45 @@ def _push_actions(args, cwd) -> list:
         else:
             out.append(("push", name))
     return out
+
+
+_GIT_BUILTIN = frozenset(
+    "add am annotate apply archive bisect blame branch bundle cat-file check-ignore checkout cherry cherry-pick citool "
+    "clean clone commit commit-tree config count-objects credential describe diff diff-tree difftool fetch "
+    "filter-branch for-each-ref format-patch fsck gc grep gui hash-object help init instaweb log ls-files ls-remote "
+    "ls-tree maintenance merge merge-base mergetool mv name-rev notes p4 pull push range-diff read-tree rebase reflog "
+    "remote repack replace request-pull reset restore rev-list rev-parse revert rm send-email shortlog show show-ref "
+    "sparse-checkout stash status submodule svn switch symbolic-ref tag update-index update-ref var verify-commit "
+    "version whatchanged worktree write-tree lfs".split())
+
+
+_SHEBANG_SH = re.compile(r"^#!\s*\S*/(?:env\s+(?:-\S+\s+)*)?(?:ba|z|da|k)?sh\b")
+_GH_BUILTIN = frozenset(
+    "alias api attestation auth browse cache codespace completion config copilot extension gist gpg-key help issue "
+    "label org pr preview project release repo ruleset run search secret ssh-key status variable workflow "
+    "version".split())
+
+
+def _gh_alias(group: str) -> str:
+    """What a gh alias stands for (gh's config.yml, `aliases:`), or '' for a gh command or no such alias."""
+    if not group or group in _GH_BUILTIN or group.startswith("-"):
+        return ""
+    base = os.environ.get("GH_CONFIG_DIR") or str(core.HOME / ".config" / "gh")
+    text = _read_small(Path(base) / "config.yml")
+    m = re.search(r"^aliases:[ \t]*\n((?:[ \t]+.*\n?)*)", text, re.M)
+    hit = re.search(r"^[ \t]+[\"']?" + re.escape(group) + r"[\"']?:[ \t]*(.+?)[ \t]*$", m.group(1), re.M) if m else None
+    return hit.group(1).strip().strip("'\"") if hit else ""
+
+
+def _git_alias(argv, sub, cwd) -> str:
+    """What a git subcommand that is an alias stands for (`-c alias.x=…` on the command, else the repository's or the
+    user's config), or ''. git never lets an alias replace a built-in command, so those are not looked up."""
+    if not sub or sub in _GIT_BUILTIN or sub.startswith("-"):
+        return ""
+    for k, a in enumerate(argv[1:-1], 1):
+        if a == "-c" and argv[k + 1].lower().startswith(f"alias.{sub.lower()}="):
+            return argv[k + 1].split("=", 1)[1]
+    return core.gitout(cwd, "config", "--get", f"alias.{sub}") if cwd else ""
 
 
 def _pr_sel(sel: str) -> str:
@@ -3670,10 +3710,25 @@ def _segment_actions(argv, cwd, bodies, depth) -> list:
     elif name == "git":
         cdir, sub, args = _git_split(argv)
         gcwd = str(resolve(cdir, cwd)) if cdir else cwd
+        alias = _git_alias(argv, sub, gcwd if gcwd != str(UNKNOWN) else None)
         if sub == "push":
             found, cwd = _push_actions(args, gcwd if gcwd != str(UNKNOWN) else None), gcwd
+        elif alias and depth < 4:  # an alias runs another git command, or a shell command with `!`
+            rest = " ".join(shlex.quote(a) for a in args)
+            if alias.startswith("!"):
+                more = _text_actions(alias[1:] + " " + rest, gcwd, depth + 1) or []
+            else:
+                pre = argv[:len(argv) - len(args) - 1]
+                more = _text_actions(" ".join(shlex.quote(a) for a in pre) + " " + alias + " " + rest, cwd,
+                                     depth + 1) or []
     elif name == "gh":
-        found = _gh_actions(argv[1:], cwd)
+        alias = _gh_alias(argv[1] if len(argv) > 1 else "")
+        if alias and depth < 4:  # `gh alias set m 'pr merge'`, then `gh m 12`
+            rest = " ".join(shlex.quote(a) for a in argv[2:])
+            more = _text_actions((alias[1:] if alias.startswith("!") else "gh " + alias) + " " + rest, cwd,
+                                 depth + 1) or []
+        else:
+            found = _gh_actions(argv[1:], cwd)
     elif name in ("ssh", "autossh"):  # what follows the host is a command line the remote shell runs
         rest = _positionals(argv[1:], _SSH_VALUES)[1:]
         more = (_text_actions(" ".join(rest), cwd, depth + 1) or []) if rest else []
@@ -3682,6 +3737,10 @@ def _segment_actions(argv, cwd, bodies, depth) -> list:
         if not found and _INTERP.match(name) and not _repo_script(argv, cwd):
             for text in _code_texts(_program(argv, cwd, bodies)[0]):
                 more += _text_actions(text, cwd, depth + 1) or []
+        if not found and "/" in argv[0] and name not in _SHELLS and not _INTERP.match(name):
+            script = _read_small(resolve(argv[0], cwd), 1 << 18)  # a shell script run by its path: what it runs
+            if _SHEBANG_SH.match(script):
+                more += _text_actions(script, cwd, depth + 1) or []
         found = found or _opaque_actions(name, argv, cwd)
     words = " ".join(argv)[:200]
     return [{"action": f[0], "tier": TIERS[f[0]], "target": f[1], "repo": (f[2] if len(f) > 2 and f[2] else "") or
