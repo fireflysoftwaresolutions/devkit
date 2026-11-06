@@ -19,7 +19,9 @@ Record one when any of these happens and could happen again:
 - **The guard refused the same kind of command twice.** `dev lesson scan` lists these.
 - **The developer corrected you,** for example "that is not how we…" or "you forgot…".
 
-Skip trivial typos and one-off environment hiccups.
+Skip trivial typos and one-off environment hiccups. Apply the durable bar first: if this lesson disappeared, would
+someone reading the final code still repeat the mistake? If not, the code or its test already holds the knowledge,
+so don't write a lesson.
 
 ## How to write it (blameless, specific, short)
 
@@ -62,6 +64,27 @@ Then record the prevention: `dev lesson prevent <id> --by test --ref "tests/test
 
 Changes to devkit itself (a guard rule, skill rule or global rule) go through a devkit PR. Lessons in
 `lessons/global/` are the backlog for those PRs.
+
+If two ways of doing the same thing caused the mistake, the first prevention is to keep one of them: report the
+consolidation as work (`dev task add … --why`). The last rung is a written rule. For Claude, `/revise-claude-md` (the
+claude-md-management plugin) proposes it for the project's CLAUDE.md, and the developer approves it.
+
+## Use, decay and forgetting
+
+devkit counts how each lesson is used: when it is shown in a session, named in a reply, repeated (`recur`) or looked
+up. A lesson that keeps being used stays strong; one that is shown again and again and never used, or that nobody
+needs for months, fades. Every day the background sync runs `dev sleep`, which works like a brain at night:
+
+- **Merge:** near-duplicate lessons become one, and their evidence and counts are added together.
+- **Forget:** lessons that are retired, prevented long ago or no longer used are archived in `lessons/archive/`.
+  They are never deleted; `dev lesson restore <id> --why "…"` brings one back.
+- **Cap:** each scope keeps at most 25 active lessons, and the weakest go first.
+- **Promote:** the same pattern seen in several projects is proposed as one global lesson.
+- **Tidy:** devkit's own old records (timing, runs, sessions, caches, logs) are trimmed.
+
+Prevented lessons leave the session context because the automation remembers them; they stay searchable. Give a
+lesson `--retire-when "…"` when an outside change will make it obsolete, for example a library version or an
+upstream fix. `dev sleep --dry-run` shows what the next night would do.
 
 ## Review
 

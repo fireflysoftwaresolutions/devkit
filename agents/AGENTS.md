@@ -115,7 +115,8 @@ The session context lists known pitfalls (lessons from earlier mistakes): follow
 bug, revert a change, hit the same guard refusal twice or are corrected by the developer, record a short, blameless
 lesson: `dev lesson add "…" --cause "…" --prevent "…"`. If a known pitfall repeats, run `dev lesson recur <id>`, and
 turn recurring lessons into automation (a test, lint, guard or skill rule, or CI check) with
-`dev lesson prevent`. The `learning-loop` skill has the details.
+`dev lesson prevent`. Lessons that are not used fade: `dev sleep` (daily) merges duplicates and archives what no
+longer helps; nothing is deleted. The `learning-loop` skill has the details.
 
 ### Spend tokens where they buy quality
 

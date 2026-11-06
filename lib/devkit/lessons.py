@@ -11,7 +11,12 @@ The loop:
   recall    the session context lists the open lessons that apply (project, its initiatives, global)
   recur     `dev lesson recur` counts a repeat; a lesson that recurs is a candidate for automation
   prevent   `dev lesson prevent --by test|lint|guard|skill|ci|rule --ref …`: automation beats prose
-  review    `dev lessons review` lists recurring, unprevented and stale lessons
+  review    `dev lesson review` lists recurring, unprevented and stale lessons
+  use       every time a lesson is shown in a session, applied (named in a reply), repeated or looked up, its usage is
+            counted (per machine: lessons/usage/<user>@<host>.json, summed across the team)
+  sleep     `dev sleep` (daily, from the background sync) consolidates like a brain at night: strength decays unless
+            a lesson is used; weak, prevented or retired lessons are forgotten into lessons/archive/ (restorable);
+            near-duplicates are merged; the active set per scope is capped
 """
 from __future__ import annotations
 
@@ -28,7 +33,7 @@ KINDS = ("bug", "mistake", "process", "tooling", "security", "performance", "des
 SEVERITIES = ("low", "medium", "high")
 PREVENTIONS = ("test", "lint", "type", "guard", "skill", "ci", "rule", "doc")
 FIELDS = ("id", "title", "scope", "kind", "severity", "status", "occurrences", "prevention", "prevention_ref",
-          "tags", "first_seen", "last_seen", "version", "created_by", "updated", "updated_by")
+          "retire_when", "tags", "first_seen", "last_seen", "version", "created_by", "updated", "updated_by")
 SECTIONS = ("What happened", "Root cause", "Fix", "Prevention", "Detection", "Evidence")
 
 
@@ -77,11 +82,15 @@ def load(path: Path) -> dict:
     return les
 
 
-def all_lessons(scope: str = None) -> list:
-    base = _dir(scope) if scope else LESSONS
+def all_lessons(scope: str = None, archived: bool = False) -> list:
+    base = (LESSONS / "archive" / scope if archived else _dir(scope)) if scope else \
+        (LESSONS / "archive" if archived else LESSONS)
     if not base.exists():
         return []
-    return [load(f) for f in sorted(base.rglob("L-*.md"))]
+    files = sorted(base.rglob("L-*.md"))
+    if not archived:
+        files = [f for f in files if "archive" not in f.relative_to(LESSONS).parts[:1]]
+    return [load(f) for f in files]
 
 
 def find(selector: str, scope: str = None) -> dict:
@@ -106,7 +115,7 @@ def _log(les: dict, a: dict, op: str, why: str = ""):
 
 def add(scope: str, title: str, kind: str = "mistake", severity: str = "medium", happened: str = "", cause: str = "",
         fix: str = "", prevention: str = "", detection: str = "", evidence=None, tags=None, why: str = "",
-        a=None) -> dict:
+        a=None, retire_when: str = "") -> dict:
     if kind not in KINDS:
         raise ValueError(f"kind must be one of {', '.join(KINDS)}")
     if severity not in SEVERITIES:
@@ -119,6 +128,7 @@ def add(scope: str, title: str, kind: str = "mistake", severity: str = "medium",
     now = work.now_iso()
     les = {"meta": {"id": lid, "title": title.strip(), "scope": scope, "kind": kind, "severity": severity,
                     "status": "open", "occurrences": 1, "prevention": "rule", "prevention_ref": "",
+                    "retire_when": retire_when.strip(),
                     "tags": list(tags or []), "first_seen": now[:10], "last_seen": now[:10], "version": 1,
                     "created_by": f"{a['user']}@{a['host']}", "updated": now, "updated_by": f"{a['user']}@{a['host']}"},
            "sections": {"What happened": happened, "Root cause": cause, "Fix": fix, "Prevention": prevention,
@@ -173,25 +183,104 @@ def retire(les: dict, why: str, a=None) -> dict:
 
 # --------------------------------------------------------------------------- recall
 
-def _score(les: dict) -> float:
+# --------------------------------------------------------------------------- usage and strength
+
+USAGE_LOCAL = STATE / "lessons-usage.json"
+HALF_LIFE_DAYS = 45.0
+
+
+def _usage_local() -> dict:
+    return core.read_json(USAGE_LOCAL, {}) or {}
+
+
+def track(ids, kind: str):
+    """Count a use of these lessons on this machine. kind: shown | applied | recur | lookup."""
+    if not ids:
+        return
+    u = _usage_local()
+    now = int(time.time())
+    for lid in ids:
+        e = u.setdefault(lid, {})
+        e[kind] = int(e.get(kind) or 0) + 1
+        e[f"{kind}_last"] = now
+    try:
+        USAGE_LOCAL.parent.mkdir(parents=True, exist_ok=True)
+        USAGE_LOCAL.write_text(json.dumps(u, indent=1))
+    except OSError:
+        pass
+
+
+def publish_usage(a=None) -> bool:
+    """lessons/usage/<user>@<host>.json: this machine's counts, so the team's usage can be summed (written by sync)."""
+    a = a or work.actor("human")
+    f = LESSONS / "usage" / f"{a['user']}@{a['host']}.json"
+    data = _usage_local()
+    if not data:
+        return False
+    old = core.read_json(f, None)
+    if old == data:
+        return False
+    f.parent.mkdir(parents=True, exist_ok=True)
+    f.write_text(json.dumps(data, indent=1, sort_keys=True) + "\n")
+    return True
+
+
+def usage() -> dict:
+    """Team-wide usage: counts summed over machines, latest timestamps kept."""
+    total = {}
+    files = list((LESSONS / "usage").glob("*.json")) if (LESSONS / "usage").exists() else []
+    mine = _usage_local()
+    sources = [core.read_json(f, {}) or {} for f in files] or [mine]
+    for src in sources:
+        for lid, e in src.items():
+            t = total.setdefault(lid, {})
+            for k, v in e.items():
+                t[k] = max(int(t.get(k) or 0), int(v)) if k.endswith("_last") else int(t.get(k) or 0) + int(v)
+    return total
+
+
+def strength(les: dict, use: dict = None, now: float = None) -> float:
+    """How alive a lesson is: severity × evidence, refreshed by use, decaying with a 45-day half-life."""
+    now = now or time.time()
     m = les["meta"]
+    e = (use or {}).get(m["id"], {})
     sev = {"high": 3, "medium": 2, "low": 1}.get(m.get("severity"), 1)
-    age_days = max(0.0, (time.time() - work.parse_iso((m.get("last_seen") or "2000-01-01") + "T00:00:00Z")) / 86400)
-    status = {"open": 1.0, "prevented": 0.35, "retired": 0.0}.get(m.get("status"), 0.5)
-    return status * sev * (1 + min(5, m["occurrences"] - 1)) / (1 + age_days / 60)
+    last = max(work.parse_iso((m.get("last_seen") or "2000-01-01") + "T00:00:00Z"),
+               work.parse_iso(m.get("updated") or "2000-01-01T00:00:00Z"),
+               float(e.get("applied_last") or 0), float(e.get("recur_last") or 0), float(e.get("lookup_last") or 0))
+    age = max(0.0, (now - last) / 86400)
+    hits = int(e.get("applied") or 0) + 2 * int(e.get("recur") or 0) + int(e.get("lookup") or 0)
+    shown = int(e.get("shown") or 0)
+    ignored = max(0, shown - 3 * (hits + 1))  # shown often but never used: it is not helping
+    base = sev * (1 + min(5, m["occurrences"] - 1)) * (1 + min(10, hits) / 4) / (1 + min(20, ignored) / 10)
+    return base * 0.5 ** (age / HALF_LIFE_DAYS)
+
+
+def _score(les: dict) -> float:
+    status = {"open": 1.0, "prevented": 0.35, "retired": 0.0, "dormant": 0.0}.get(les["meta"].get("status"), 0.5)
+    return status * strength(les, _USAGE_CACHE.get("u") or usage())
+
+
+_USAGE_CACHE = {}
 
 
 def relevant(project: str, initiatives=(), limit: int = 5) -> list:
     """Lessons a session on this project should know: its own, its initiatives', and global ones."""
     pool = all_lessons(project) + [x for s in initiatives for x in all_lessons(f"initiatives/{s}")] + \
         all_lessons("global")
-    pool = [x for x in pool if x["meta"].get("status") != "retired"]
-    return sorted(pool, key=_score, reverse=True)[:limit]
+    pool = [x for x in pool if x["meta"].get("status") == "open"]  # prevented: the automation remembers it
+    _USAGE_CACHE["u"] = usage()
+    try:
+        return sorted(pool, key=_score, reverse=True)[:limit]
+    finally:
+        _USAGE_CACHE.clear()
 
 
 def context_lines(project: str, initiatives=(), limit: int = 4) -> list:
     out = []
-    for les in relevant(project, initiatives, limit):
+    picked = relevant(project, initiatives, limit)
+    track([x["meta"]["id"] for x in picked], "shown")
+    for les in picked:
         m = les["meta"]
         rule = (les["sections"].get("Prevention") or "").splitlines()[0][:160]
         tag = "" if m.get("status") == "open" else f" [{m.get('status')} by {m.get('prevention')}]"
@@ -245,7 +334,16 @@ def signals(project: str = None, repo=None, days: int = 14) -> list:
                         "dev doctor; check the instructions load (dev canary)"))
     except Exception:
         pass
-    # 4. reopened or repeatedly blocked tasks
+    # 4. corrections from the developer (queued by the prompt hook)
+    if SIGNALS_FILE.exists():
+        for ln in SIGNALS_FILE.read_text().splitlines()[-200:]:
+            try:
+                r = json.loads(ln)
+            except ValueError:
+                continue
+            if r.get("ts", 0) >= since and (not project or r.get("project") in ("", project)):
+                out.append(("correction", r.get("text", "")[:120], 'dev lesson add "<what the agent got wrong>" …'))
+    # 5. reopened or repeatedly blocked tasks
     if project:
         for it in work.all_items(project):
             reopen = [c for c in it.get("changelog") or [] if " reopen" in c or "unblock" in c]
@@ -253,6 +351,24 @@ def signals(project: str = None, repo=None, days: int = 14) -> list:
                 out.append(("task", f"{it['meta']['id']} “{it['meta']['title']}” went back {len(reopen)} times",
                             "dev lesson add … --evidence \"task " + it["meta"]["id"] + "\""))
     return out
+
+
+CORRECTION = re.compile(r"(?i)^\s*(no[,.!]|that'?s (wrong|not)|you forgot|te (olvidaste|dije)|otra vez|de nuevo|"
+                        r"eso (no|est[aá] mal)|not like that|así no|asi no|wrong\b|incorrect)")
+SIGNALS_FILE = STATE / "lesson-signals.jsonl"
+
+
+def note_correction(prompt: str, project: str = ""):
+    """The developer corrected the agent: queue it for `dev lesson scan` (never written as a lesson automatically)."""
+    if not prompt or not CORRECTION.search(prompt[:200]):
+        return False
+    try:
+        SIGNALS_FILE.parent.mkdir(parents=True, exist_ok=True)
+        with SIGNALS_FILE.open("a") as fh:
+            fh.write(json.dumps({"ts": int(time.time()), "project": project, "text": prompt.strip()[:200]}) + "\n")
+    except OSError:
+        return False
+    return True
 
 
 def review(scope: str = None) -> dict:
@@ -278,3 +394,117 @@ def fixed_in_session(top: str, start_head: str) -> list:
 
 def stats_json() -> str:
     return json.dumps(review()["counts"])
+
+
+# --------------------------------------------------------------------------- sleep: consolidate and forget
+
+ARCHIVE = "archive"
+MAX_ACTIVE_PER_SCOPE = 25
+
+
+def _words(les: dict) -> set:
+    text = " ".join([les["meta"]["title"], les["sections"].get("Root cause", ""), les["sections"].get("Prevention", "")])
+    stop = {"the", "a", "an", "and", "or", "of", "to", "in", "on", "for", "with", "is", "it", "be", "not", "that",
+            "this", "by", "at", "as", "was", "are", "when", "from", "its", "into", "so"}
+    return {w for w in re.findall(r"[a-z0-9]{3,}", text.lower()) if w not in stop}
+
+
+def similarity(a: dict, b: dict) -> float:
+    wa, wb = _words(a), _words(b)
+    return len(wa & wb) / len(wa | wb) if wa and wb else 0.0
+
+
+def archive(les: dict, why: str, a=None) -> dict:
+    """Forget: move to lessons/archive/<scope>/ with the reason (git keeps it; `dev lesson restore` brings it back)."""
+    a = a or work.actor("devkit")
+    les = update(les, "forgotten", why, a, status=les["meta"].get("status") if les["meta"].get("status") == "retired"
+                 else "dormant")
+    dest = LESSONS / ARCHIVE / les["meta"]["scope"] / les["path"].name
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    core.git(HANDOFF, "mv", str(les["path"]), str(dest))
+    if les["path"].exists():  # not tracked yet
+        les["path"].rename(dest)
+    les["path"] = dest
+    work._commit([dest], f"{les['meta']['id']}: forgotten (archived) — {why}")
+    return les
+
+
+def restore(selector: str, why: str, a=None) -> dict:
+    items = all_lessons(archived=True)
+    hits = [x for x in items if x["meta"]["id"].lower() == selector.lower() or selector.lower() in x["meta"]["title"].lower()]
+    if len(hits) != 1:
+        raise ValueError(f"“{selector}” matches {len(hits)} archived lessons")
+    les = hits[0]
+    dest = _dir(les["meta"]["scope"]) / les["path"].name
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    core.git(HANDOFF, "mv", str(les["path"]), str(dest))
+    if les["path"].exists():
+        les["path"].rename(dest)
+    les["path"] = dest
+    return update(les, "restored", why or "needed again", a, status="open")
+
+
+def consolidate(dry_run: bool = False, now: float = None, a=None) -> list:
+    """One night's sleep. -> [(action, lesson id, detail)]; with dry_run nothing changes."""
+    now = now or time.time()
+    use = usage()
+    acts = []
+    items = all_lessons()
+
+    def days(iso):
+        return (now - work.parse_iso(iso)) / 86400 if iso else 9999
+
+    # 1. merge near-duplicates (same scope, or a project lesson that repeats a global one)
+    gone = set()
+    for i, x in enumerate(items):
+        for y in items[i + 1:]:
+            if x["meta"]["id"] in gone or y["meta"]["id"] in gone:
+                continue
+            same = x["meta"]["scope"] == y["meta"]["scope"] or "global" in (x["meta"]["scope"], y["meta"]["scope"])
+            if same and similarity(x, y) >= 0.6:
+                keep, drop = sorted((x, y), key=lambda z: (z["meta"]["scope"] != "global", -strength(z, use, now)))
+                acts.append(("merge", drop["meta"]["id"], f"into {keep['meta']['id']} ({similarity(x, y):.0%} alike)"))
+                gone.add(drop["meta"]["id"])
+                if not dry_run:
+                    ev = "\n".join(v for v in (keep["sections"].get("Evidence"), drop["sections"].get("Evidence"),
+                                                f"- merged {drop['meta']['id']}") if v and v != "_—_")
+                    keep_ = update(keep, f"merged {drop['meta']['id']}", "near-duplicate", a,
+                                   occurrences=keep["meta"]["occurrences"] + drop["meta"]["occurrences"], Evidence=ev)
+                    keep["meta"] = keep_["meta"]
+                    archive(drop, f"merged into {keep['meta']['id']}", a)
+    items = [x for x in items if x["meta"]["id"] not in gone]
+    # 2. forget what no longer helps
+    for x in items:
+        m, st = x["meta"], strength(x, use, now)
+        idle = min(days((m.get("last_seen") or "2000-01-01") + "T00:00:00Z"), days(m.get("updated")))
+        reason = None
+        if m.get("status") == "retired" and days(m.get("updated")) > 30:
+            reason = "retired more than 30 days ago"
+        elif m.get("status") == "prevented" and idle > 90 and st < 1.0:
+            reason = f"prevented by {m.get('prevention')} and unused for {int(idle)} days: the automation remembers it"
+        elif m.get("status") == "open" and idle > 180 and st < 0.5:
+            reason = f"not seen or used for {int(idle)} days (strength {st:.2f})"
+        if reason:
+            acts.append(("forget", m["id"], reason))
+            if not dry_run:
+                archive(x, reason, a)
+    # 3. cap the active set per scope (weakest go dormant first)
+    by_scope = {}
+    for x in items:
+        if x["meta"]["id"] not in {i for _, i, _ in acts}:
+            by_scope.setdefault(x["meta"]["scope"], []).append(x)
+    for scope, xs in by_scope.items():
+        if len(xs) > MAX_ACTIVE_PER_SCOPE:
+            for x in sorted(xs, key=lambda z: strength(z, use, now))[:len(xs) - MAX_ACTIVE_PER_SCOPE]:
+                acts.append(("forget", x["meta"]["id"], f"over the {MAX_ACTIVE_PER_SCOPE}-lesson cap for {scope}"))
+                if not dry_run:
+                    archive(x, f"over the active cap for {scope}", a)
+    # 4. a pattern seen in two or more projects belongs in the global lessons
+    proj = [x for x in items if x["meta"]["scope"] not in ("global",) and not x["meta"]["scope"].startswith("initiatives/")
+            and x["meta"]["id"] not in {i for _, i, _ in acts}]
+    for i, x in enumerate(proj):
+        for y in proj[i + 1:]:
+            if x["meta"]["scope"] != y["meta"]["scope"] and similarity(x, y) >= 0.5:
+                acts.append(("promote", x["meta"]["id"], f"also seen in {y['meta']['scope']} ({y['meta']['id']}): "
+                             f"consider one global lesson"))
+    return acts

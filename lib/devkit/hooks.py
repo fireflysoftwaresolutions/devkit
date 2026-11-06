@@ -12,6 +12,7 @@ errors, logs them to ~/.local/state/devkit/logs/hooks.log and exits 0.
 from __future__ import annotations
 
 import json
+import re
 import os
 import subprocess
 import sys
@@ -382,6 +383,14 @@ def stop(agent: str):
                 reasons.append(why)
         except Exception:
             _log(f"stop skills {agent}: {traceback.format_exc()[-300:]}")
+        try:  # lessons the reply names were applied: that use keeps them alive
+            from . import lessons as _les
+            said = data.get("last_assistant_message") or ""
+            ids = sorted(set(re.findall(r"\bL-[0-9a-z]{9,}\b", said)))
+            if ids:
+                _les.track(ids, "applied")
+        except Exception:
+            pass
         if not data.get("stop_hook_active") and not sess.get("lesson_nudged") and sess.get("top"):
             try:
                 from . import lessons
@@ -522,6 +531,13 @@ def prompt(agent: str):
             "<task-notification>" in raw[:400]:
         _context_out("UserPromptSubmit", extra)  # background events are not the developer's request
         return
+    try:
+        from . import lessons as _les
+        sfile = _session_file(agent, sid) if sid else None
+        _proj = ((core.read_json(sfile, {}) or {}).get("project") or "") if sfile and sfile.exists() else ""
+        _les.note_correction(data.get("prompt") or "", _proj)
+    except Exception:
+        pass
     text = progress.on_prompt(agent, data)
     skills = ""
     try:

@@ -44,6 +44,7 @@ COMMANDS = [
         ("time [--days 7]", "How long things take: turns, slow commands, subagents, estimate accuracy"),
         ("handoff-import <dir> --slug s", "Adopt an old handoff repository as an initiative (from a staging folder)"),
         ("lesson add|ls|scan|review", "Learn from mistakes: lessons recalled in every session, repeats automated"),
+        ("sleep [--dry-run]", "Consolidate and forget (daily): unused lessons fade, duplicates merge, old records go"),
         ("report [--days 7]", "Status report for initiatives and projects (Markdown, for the team or management)"),
     ]),
     ("Agents", [
@@ -600,6 +601,13 @@ def cmd_sync(a):
                 reg["drift"] = [d.as_dict() for d in policy.diff()]
             except Exception:
                 pass
+        try:
+            from . import sleep as _sleep
+            if a.scheduled and _sleep.due():
+                _sleep.run(quiet=True)
+        except Exception as e:
+            if not a.quiet:
+                ui.warn(f"sleep: {e}")
         try:
             from . import work
             if a.renew:
@@ -1308,13 +1316,19 @@ def cmd_lesson(a):
             scope = _lesson_scope(a)
             les = lessons.add(scope, " ".join(a.title), kind=a.kind, severity=a.severity, happened=a.happened or "",
                               cause=a.cause or "", fix=a.fix or "", prevention=a.prevent or "",
-                              detection=a.detect or "", evidence=a.evidence or [], tags=a.tag or [], why=a.why or "")
+                              detection=a.detect or "", evidence=a.evidence or [], tags=a.tag or [], why=a.why or "",
+                              retire_when=a.retire_when or "")
             print(f"{ui.OK} {les['meta']['id']} recorded in {scope} → {tilde(les['path'])}")
             print(ui.dim("  automate it when you can: dev lesson prevent " + les["meta"]["id"] +
                          " --by test|lint|guard|skill|ci --ref … --why …"))
             return 0
+        if act == "restore":
+            les = lessons.restore(" ".join(a.selector), a.why or "")
+            print(f"{ui.OK} {les['meta']['id']} restored to {les['meta']['scope']}")
+            return 0
         if act in ("show", "recur", "prevent", "retire"):
             les = lessons.find(" ".join(a.selector))
+            lessons.track([les["meta"]["id"]], "recur" if act == "recur" else "lookup")
             if act == "recur":
                 les = lessons.recur(les, a.evidence or "", a.why or "")
                 print(f"{ui.OK} {les['meta']['id']} happened {les['meta']['occurrences']}× — "
@@ -1385,6 +1399,12 @@ def cmd_lesson(a):
         st = {"open": ui.yellow("open"), "prevented": ui.green(f"prevented·{m.get('prevention')}"),
               "retired": ui.dim("retired")}.get(m.get("status"), m.get("status"))
         print(f"  {ui.dim(m['id'])} {st:<20} ×{m['occurrences']} {m['title']}  {ui.dim(m['scope'] + ' · ' + m['severity'])}")
+    return 0
+
+
+def cmd_sleep(a):
+    from . import sleep
+    sleep.run(dry_run=a.dry_run, quiet=a.quiet)
     return 0
 
 
@@ -1984,9 +2004,10 @@ def build_parser():
     x.add_argument("--detect", help="how to notice it early")
     x.add_argument("--evidence", action="append", help="commit, PR, CI run, task (repeat)")
     x.add_argument("--tag", action="append")
+    x.add_argument("--retire-when", help="the outside condition that makes it obsolete (a tool version, an issue)")
     x.add_argument("--why")
     for verb, h_ in (("show", "a lesson with its history"), ("recur", "it happened again (counts repeats)"),
-                     ("retire", "no longer applies (needs --why)")):
+                     ("retire", "no longer applies (needs --why)"), ("restore", "bring back a forgotten lesson")):
         x = lsp.add_parser(verb, help=h_)
         x.add_argument("selector", nargs="+")
         x.add_argument("--evidence")
@@ -2004,6 +2025,9 @@ def build_parser():
         sub.add_argument("-p", "--project", default=argparse.SUPPRESS)
         sub.add_argument("-i", "--initiative", default=argparse.SUPPRESS)
         sub.add_argument("--global", dest="global_", action="store_true", default=argparse.SUPPRESS)
+    p = add("sleep", cmd_sleep, "Consolidate and forget: lessons decay unless used, duplicates merge, old records go")
+    p.add_argument("--dry-run", action="store_true", help="show what would change")
+    p.add_argument("--quiet", action="store_true")
     p = add("report", cmd_report, "Status report (Markdown): health, progress, done, in progress, next, risks, team")
     p.add_argument("--days", type=int, default=7)
     p.add_argument("-i", "--initiative")
