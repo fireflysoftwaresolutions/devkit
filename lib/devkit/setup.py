@@ -346,10 +346,16 @@ def app_checks(codex_plugins=None) -> list:
         bundled = sorted((Path.home() / "Library/Application Support/Claude/claude-code").glob("[0-9]*"))
         ver = bundled[-1].name if bundled else "?"
         recs = _surface_sessions("claude", "Claude Desktop")
+        try:
+            from . import canary
+            ok_r, n_r = canary.by_surface(7).get(("claude", "Claude Desktop"), (0, 0))
+        except Exception:
+            ok_r, n_r = 0, 0
+        seen = [f"{len(recs)} session(s) in 30 days"] if recs else []
+        seen += [f"{ok_r}/{n_r} replies with the status block in 7 days"] if n_r else []
         res.append(("Claude Desktop", "Code tab", True,
-                    f"Claude Code {ver} with the same settings, hooks, plugin and skills as the terminal" +
-                    (f"; {len(recs)} session(s) with devkit in 30 days" if recs else
-                     "; no Desktop session recorded since devkit started tracking surfaces"), ""))
+                    f"Claude Code {ver} with the same settings, hooks, plugin and skills as the terminal; " +
+                    ("; ".join(seen) if seen else "no Desktop session recorded yet"), ""))
         try:
             from . import desktop
             st = desktop.status()
@@ -857,10 +863,13 @@ def doctor() -> int:
         check("Agents", f"{tilde(target)}", ok, "generated from devkit" if ok else "missing or hand-written",
               "dev install --only instructions")
     managed = read_json(STATE / "skills-managed.json", []) or []
-    for home in (CLAUDE_HOME / "skills", AGENTS_HOME / "skills"):
-        broken = [n for n in managed if not (home / n / "SKILL.md").exists()]
-        check("Agents", f"skills in {tilde(home)}", managed and not broken, f"{len(managed) - len(broken)}/{len(managed)} linked",
-              "dev install --only skills")
+    if not isinstance(managed, dict):  # before 26.11.0: every skill went to both agents
+        managed = {n: ["claude", "codex"] for n in managed}
+    for agent, home in (("claude", CLAUDE_HOME / "skills"), ("codex", AGENTS_HOME / "skills")):
+        mine = [n for n, agents in managed.items() if agent in agents]
+        broken = [n for n in mine if not (home / n / "SKILL.md").exists()]
+        check("Agents", f"skills in {tilde(home)}", bool(mine) and not broken, f"{len(mine) - len(broken)}/{len(mine)} linked"
+              + (f"; missing {', '.join(broken[:3])}" if broken else ""), "dev install --only skills")
 
     s = read_json(CLAUDE_HOME / "settings.json", {}) or {}
     check("Claude", "bypassPermissions default", (s.get("permissions") or {}).get("defaultMode") == "bypassPermissions",
