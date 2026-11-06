@@ -71,7 +71,9 @@ COMMANDS = [
         ("issue ls|view|create", "Issues, compact"),
         ("git … · gh …", "Escape hatches to git and gh, with the same policy checks"),
         ("stubs [--staged|--all]", "Unfinished work: stubs, placeholders, TODOs without a task (also checked on commit)"),
-        ("crew [show|brief|route|delegate|next|ask|mode|decide]", "The specialist agents: who does what, briefs, routing, delegation, decisions"),
+        ("crew [show|brief|route|delegate|next|ask|mode|decide|graph|rules|raci]",
+         "The specialist agents: who does what, briefs, routing, delegation, decisions, the live graph, the rules, "
+         "the RACI"),
         ("ci status [--watch]", "Live CI/CD runs (GitHub, GitLab, Bitbucket, Azure): jobs, steps, elapsed, ETA"),
         ("calver [--next]", "Current and next CalVer version YY.MM.PATCH from the repository's tags"),
         ("sec scan [--history]", "Security: secrets (gitleaks), dependencies (osv-scanner), SAST (Semgrep), Trivy"),
@@ -1395,8 +1397,12 @@ def cmd_progress(a):
     if act in ("assign", "begin", "add", "reopen", "skip"):
         try:
             if act == "assign":
+                extra = {}
+                if getattr(a, "activity", None):  # the kind of work, whatever language the step is written in
+                    from . import raci
+                    extra["activity"] = raci.resolve_activity(a.activity)["id"]
                 run = pg.assign(a.which, " ".join(a.to), scope=getattr(a, "scope", "") or "", from_agent=from_agent,
-                                why=getattr(a, "why", "") or "")
+                                why=getattr(a, "why", "") or "", **extra)
             elif act == "begin":
                 run = pg.begin(a.which, from_agent=from_agent)
             elif act == "add":
@@ -2332,6 +2338,8 @@ def build_parser():
     x.add_argument("--to", nargs="+", required=True, help="the subagent's description or name, e.g. Neo")
     x.add_argument("--scope", help="the files it owns, comma-separated globs; the guard keeps its edits inside them")
     x.add_argument("--why", help="assign a member the crew's RACI does not make Responsible (recorded)")
+    x.add_argument("--activity", help="the step's kind of work, an id from dev crew raci (backend, ux, …): it decides "
+                                      "the RACI check and the approver, in any language")
     x = gsp.add_parser("begin", help="mark a plan step as started (parallel work you do yourself)")
     x.add_argument("which", help="step number or part of its name")
     x = gsp.add_parser("add", help="add a step found during the work: \"name=30m after other\"")

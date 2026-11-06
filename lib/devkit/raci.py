@@ -6,9 +6,14 @@ exactly one member), who is consulted before or during it (C), and who is inform
 It lives in `config/crew.json` (`activities`), with the team's changes from the handoff repository on top
 (`crew/crew.json`, see `crew.load`). Morpheus classifies a task with it (`classify`), routes it to the Responsible
 member, refuses an assignment that breaks it (`check_assignment`), and does not end a run until every Accountable
-member has approved the work they own (`approvals_missing`)."""
+member has approved the work they own (`approvals_missing`).
+
+Developers write in any language, so a step's kind of work rests on anchors that do not depend on words (`anchor`):
+an explicit activity id (`--activity`, `[id]` in a plan spec), then the assigned member's Responsible activity, then
+the files in the step's scope (`dispatch.FILE_HINTS`). The English `signals` are only the last, fallback guess."""
 from __future__ import annotations
 
+import fnmatch
 import re
 
 LETTERS = ("R", "A", "C", "I")
@@ -165,33 +170,133 @@ def _lower(s: str) -> str:
     return s[:1].lower() + s[1:] if s[:2] != s[:2].upper() else s
 
 
-def check_assignment(member_id: str, text: str, roster=None):
-    """Why giving this task to this member breaks the RACI, or None. Only a task that is clearly one kind of work
-    is checked; a member Responsible, Accountable or Consulted for it, or Responsible for a kind of work that scores
-    close to it, may take it."""
+def _takes(member_id: str, act: dict) -> bool:
+    """May this member take this kind of work: Responsible, Accountable or Consulted for it?"""
+    return member_id in (act.get("R") or []) or member_id == act.get("A") or member_id in (act.get("C") or [])
+
+
+def resolve_activity(ref: str, roster=None) -> dict:
+    """An activity by its id or its name ("backend", "Back-end services and APIs"), or ValueError naming the ids."""
+    r = str(ref or "").strip()
+    a = activity(r.lower(), roster) or next((x for x in activities(roster)
+                                          if str(x.get("name") or "").lower() == r.lower()), None)
+    if not a:
+        raise ValueError(f"no kind of work “{ref}”: use one of {', '.join(x['id'] for x in activities(roster))}")
+    return a
+
+
+_TAG = re.compile(r"\[([A-Za-z0-9_-]+)\]")
+
+
+def split_activity(spec: str):
+    """A plan spec's explicit kind of work: "api=1h after design [backend]" -> ("api=1h after design", "backend")."""
+    spec = str(spec or "")
+    m = _TAG.search(spec)
+    if not m:
+        return spec.strip(), ""
+    return re.sub(r"\s+", " ", spec[:m.start()] + " " + spec[m.end():]).strip(), m.group(1).lower()
+
+
+def member_activity(member_id: str, text: str = "", roster=None):
+    """The kind of work a member's step is: its only Responsible activity, else the one the words name best, else its
+    first."""
+    own = roles_of(member_id, roster)["R"]
+    if len(own) <= 1:
+        return own[0] if own else None
+    ids = {a["id"] for a in own}
+    return next((a for a, _, _ in classify(text, roster, limit=len(activities(roster))) if a["id"] in ids), own[0])
+
+
+def file_activities(files, roster=None, text: str = "") -> list:
+    """[(activity, number of files)] the files in a step's scope say, most files first (`dispatch.FILE_HINTS`: the
+    member whose files they are, then that member's kind of work)."""
+    from .dispatch import FILE_HINTS
+    counts, order = {}, []
+    for f in files or []:
+        f = str(f or "").strip()
+        if not f:
+            continue
+        who = next((w for globs, w in FILE_HINTS if any(fnmatch.fnmatch(f, g) or fnmatch.fnmatch(f.split("/")[-1], g)
+                                                         for g in globs)), None)
+        a = member_activity(who, text, roster) if who else None
+        if a:
+            if a["id"] not in counts:
+                order.append(a)
+            counts[a["id"]] = counts.get(a["id"], 0) + 1
+    return sorted(((a, counts[a["id"]]) for a in order), key=lambda x: -x[1])
+
+
+def anchor(text: str = "", member=None, files=None, activity=None, roster=None):
+    """The kind of work a step is -> (activity, source), source one of explicit, member, files, words; (None, "")
+    when nothing says. In order: an explicit activity id; the assigned member's Responsible activity; the files in
+    scope; the words. A member given work its words clearly name as someone else's (an override, recorded with
+    --why) does not change the work's kind, so the work's own approver still signs."""
+    if activity:
+        try:
+            return resolve_activity(activity, roster), "explicit"
+        except ValueError:
+            pass
+    if member and check_assignment(member, text, roster, files=files) is None:
+        a = member_activity(member, text, roster)
+        if a:
+            return a, "member"
+    fa = file_activities(files, roster, text)
+    if fa:
+        return fa[0][0], "files"
+    b = best(text, roster)
+    return (b[0], "words") if b else (None, "")
+
+
+def check_assignment(member_id: str, text: str, roster=None, activity=None, files=None):
+    """Why giving this task to this member breaks the RACI, or None. In order: an explicit activity decides (the
+    member must be Responsible, Accountable or Consulted for it); files in scope that are the member's own kind of
+    work confirm it; otherwise a task whose words clearly are one kind of work is checked, and a member Responsible
+    for a kind of work that scores close to it may take it."""
+    if activity:
+        try:
+            act = resolve_activity(activity, roster)
+        except ValueError as e:
+            return str(e)
+        if _takes(member_id, act):
+            return None
+        return _refusal(member_id, f"“{text}” is marked as {_lower(act['name'])} work (--activity {act['id']})",
+                        act, roster)
+    if any(_takes(member_id, a) for a, _ in file_activities(files, roster, text)):
+        return None
     ranked = classify(text, roster, limit=len(activities(roster)) or 1)
     if not ranked or ranked[0][1] < MIN_SCORE:
         return None
     top, score, hits = ranked[0]
-    if member_id in (top.get("R") or []) or member_id == top.get("A") or member_id in (top.get("C") or []):
+    if _takes(member_id, top):
         return None
     mine = max((s for a, s, _ in ranked if member_id in (a.get("R") or [])), default=0)
     if mine and mine >= score - MARGIN:
         return None
+    return _refusal(member_id, f"“{text}” is {_lower(top['name'])} work ({', '.join(hits[:3])})", top, roster)
+
+
+def _refusal(member_id: str, what: str, top: dict, roster=None) -> str:
     own = [_lower(a["name"]) for a in roles_of(member_id, roster)["R"]]
-    return (f"“{text}” is {_lower(top['name'])} work ({', '.join(hits[:3])}): {names(top.get('R'), roster)} does it "
-            f"and {_name(top.get('A'), roster)} approves it (the crew's RACI). {_name(member_id, roster)} is "
-            f"Responsible for {', '.join(own) or 'nothing'}. Assign it with `--to {handle((top.get('R') or [''])[0], roster)}`, "
-            f"split the step, or override with --why \"<reason>\".")
+    return (f"{what}: {names(top.get('R'), roster)} does it and {_name(top.get('A'), roster)} approves it (the crew's "
+            f"RACI). {_name(member_id, roster)} is Responsible for {', '.join(own) or 'nothing'}. Assign it with "
+            f"`--to {handle((top.get('R') or [''])[0], roster)}`, split the step, or override with --why \"<reason>\".")
 
 
 def step_activity(step: dict, roster=None):
-    """The activity a plan step was classified as (stored on the step), or classified now from its name."""
+    """The kind of work a plan step is: the one stored on it, else from its anchors (`anchor`): the member its label
+    names, the files in its scope, then its words."""
     aid = step.get("activity")
     if aid:
-        return activity(aid, roster)
-    b = best(" ".join(str(step.get(k) or "") for k in ("name", "desc", "what")), roster)
-    return b[0] if b else None
+        a = activity(aid, roster)
+        if a:
+            return a
+    mid = None
+    if step.get("label"):
+        from . import crew
+        m = crew._for_label(step["label"], roster)
+        mid = m["id"] if m else None
+    text = " ".join(str(step.get(k) or "") for k in ("name", "desc", "what", "task") if step.get(k))
+    return anchor(text, member=mid, files=step.get("scope"), roster=roster)[0]
 
 
 def approvals_missing(run: dict, members_of_steps, roster=None) -> list:
