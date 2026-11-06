@@ -190,6 +190,11 @@ class RenderTests(unittest.TestCase):
         self.assertIn('class="ff ff-light"', self.html)
         self.assertIn(core.COPYRIGHT.replace("&", "&amp;"), self.html)
 
+    def test_only_open_url_opens_a_tab_and_it_goes_through_safe_url(self):
+        js = dashboard.JS
+        self.assertEqual(js.count("window.open("), 1, "a URL from the data must open through openUrl, never directly")
+        self.assertIn('function openUrl(u) { const s = safeUrl(u); if (s !== "#") window.open(s, "_blank", "noopener"); }', js)
+
     def test_everything_is_escaped(self):
         self.assertNotIn(EVIL, self.html)
         self.assertNotIn(BREAKOUT, self.html)
@@ -1030,6 +1035,20 @@ class PageBehaviorTests(unittest.TestCase):
         d = json.loads(json.dumps(self.data))
         change(d)
         return dashboard.page(d)
+
+    def test_a_javascript_url_in_the_data_is_never_opened(self):
+        """A PR's url is data: the search result and the command palette open it only through safeUrl, so a
+        javascript: URL opens nothing, also in the static export where no CSP applies."""
+        def bad(d):
+            next(p for p in d["projects"] if p["id"] == "acme/widget")["prs_open"][0]["url"] = "javascript:alert(1)"
+        out = self.probe("""const opened = []; window.open = u => { opened.push(String(u)); return null; };
+            await go("#/search?q=PR%2022"); $$("main .results .res").find(b => text(b).includes("#22")).click();
+            await go("#/search?q=PR%2017"); $$("main .results .res").find(b => text(b).includes("#17")).click();
+            document.dispatchEvent(new KeyboardEvent("keydown", {key: "k", metaKey: true, bubbles: true})); await tick(100);
+            const inp = $("#palette input"); inp.value = "#22"; inp.dispatchEvent(new Event("input", {bubbles: true})); await tick(100);
+            $$("#pal-list li").find(li => text(li).includes("#22")).click(); await tick(100);
+            out.opened = opened;""", page=self.variant(bad))
+        self.assertEqual(out["opened"], ["https://github.com/acme/widget/pull/17"])  # the safe one opens; javascript: never
 
     def test_background_work_puts_what_waits_for_you_first(self):
         out = self.probe("""out.sections = $$("main section[id]").map(s => s.id); out.waiting = text($("#waiting")); out.runs = $$("#runs .rcard").map(text);

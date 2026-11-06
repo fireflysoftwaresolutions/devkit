@@ -2167,6 +2167,8 @@ function append(el, kids) {
 }
 function sv(tag, attrs, ...kids) { const el = document.createElementNS(SVGNS, tag); for (const k in attrs || {}) if (attrs[k] != null) el.setAttribute(k, attrs[k]); return append(el, kids); }
 function safeUrl(u) { u = String(u || "").trim(); return /^(https?:|mailto:|#)/i.test(u) ? u : "#"; }
+// a URL from the data opens in a new tab only when safeUrl lets it through; anything else (javascript:, data:) opens nothing
+function openUrl(u) { const s = safeUrl(u); if (s !== "#") window.open(s, "_blank", "noopener"); }
 function clear(el) { while (el.firstChild) el.removeChild(el.firstChild); return el; }
 function debounce(fn, ms) { let t; return (...a) => { clearTimeout(t); t = setTimeout(() => fn(...a), ms); }; }
 function frag(...kids) { return append(document.createDocumentFragment(), kids); }
@@ -4243,7 +4245,7 @@ function viewSearch(main) {
   if (!shown.length) { main.append(h("div", {class: "panel"}, empty("Nothing found", "Try fewer words or clear filters. Search covers initiatives, projects, people, tasks, PRs, notes, plans, sessions and every Markdown file in the handoff repo."))); return; }
   const box = h("div", {class: "results panel"});
   for (const r of shown.slice(0, 300)) {
-    const run = () => r.url ? window.open(r.url, "_blank", "noopener") : r.tid ? openTask(r.tid) : r.file ? set({view: "explorer", id: "", f: r.file, fq: S.q}, true) : r.iid ? openInitiative(r.iid) : r.who ? go("team") : r.scope ? openScope(r.scope, "sessions") : openProject(r.pid);
+    const run = () => r.url ? openUrl(r.url) : r.tid ? openTask(r.tid) : r.file ? set({view: "explorer", id: "", f: r.file, fq: S.q}, true) : r.iid ? openInitiative(r.iid) : r.who ? go("team") : r.scope ? openScope(r.scope, "sessions") : openProject(r.pid);
     const el = h("button", {class: "res", type: "button", "data-nav": "", onclick: run},
       h("div", {class: "rt"}, h("span", {class: "tag", text: r.type}), h("span", {class: "ell"}, inline(r.title.slice(0, 200)))), h("div", {class: "rs"}, r.pid && r.type !== "project" && BYID.has(r.pid) ? (BYID.get(r.pid).name || r.pid) + " · " : "", snippet(r.text, S.q)));
     highlight(el, S.q); box.append(el);
@@ -4739,7 +4741,7 @@ function paletteItems() {
   for (const p of P) {
     items.push({grp: "Project", label: p.id, hint: p.health.level === "ok" ? p.status : p.health.reasons[0], run: () => openProject(p.id)});
     for (const c of p.local ? ["dcd ", "dev claude ", "dev codex ", "dev handoff "] : ["dev clone "]) items.push({grp: "Command", label: "Copy: " + c + p.id, run: () => copy(c + p.id)});
-    for (const r of p.prsOpen) items.push({grp: "PR", label: "#" + r.number + " " + (r.title || ""), hint: (CHECKS[r.checks] || "") + " · " + p.name, run: () => window.open(r.url, "_blank", "noopener")});
+    for (const r of p.prsOpen) items.push({grp: "PR", label: "#" + r.number + " " + (r.title || ""), hint: (CHECKS[r.checks] || "") + " · " + p.name, run: () => openUrl(r.url)});
   }
   for (const it of allItems().filter(i => i.open).slice(0, 1500)) items.push({grp: "Task", label: (it.legacy ? "" : it.id + " ") + it.title, hint: scopeName(it.scope) + (it.holder ? " · " + it.holder : ""), run: () => openTask(it.id)});
   for (const f of FILES) items.push({grp: "File", label: f.path, run: () => set({view: "explorer", id: "", f: f.path, fq: "", task: ""}, true)});
