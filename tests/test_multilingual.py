@@ -127,16 +127,23 @@ class AnchorTests(unittest.TestCase):
                 self.assertEqual(raci.step_activity({"name": name, "scope": files}, r)["id"], want)
                 self.assertEqual(raci.anchor(name, files=files, roster=r), (raci.activity(want, r), "files"))
 
-    def test_files_of_the_members_own_kind_confirm_an_assignment_the_words_would_refuse(self):
+    def test_only_the_declared_kind_of_work_refuses_an_assignment_never_its_files_or_words(self):
+        # since R2-2 (d60931e) the words refuse nothing in any language: backend work is declared, as in test_raci
         r = _roster()
-        self.assertIsNotNone(raci.check_assignment("kid", "build the JSON API server", r))
-        self.assertIsNone(raci.check_assignment("kid", "build the JSON API server", r, files=["bin/**"]))
-        self.assertIsNotNone(raci.check_assignment("kid", "build the JSON API server", r, files=["services/**"]))
+        for text in ("build the JSON API server", "construye el servidor de la API JSON"):
+            with self.subTest(text=text):
+                self.assertIsNotNone(raci.check_assignment("kid", text, r, activity="backend"))
+                self.assertIsNone(raci.check_assignment("kid", text, r, files=["bin/**"]))
+                self.assertIsNotNone(raci.check_assignment("kid", text, r, activity="backend", files=["services/**"]))
 
     def test_an_override_keeps_the_kind_of_work_so_its_own_approver_signs(self):
+        # the override names the kind of work it overrides (--activity cicd --why "…"), and that kind's approver signs
         r = _roster()
-        a, source = raci.anchor("fix the failing GitHub Actions workflow", member="kid", roster=r)
-        self.assertEqual((a["id"], a["A"], source), ("cicd", "keymaker", "words"))
+        for text in ("fix the failing GitHub Actions workflow", "arregla el workflow de GitHub Actions que falla"):
+            with self.subTest(text=text):
+                self.assertIsNotNone(raci.check_assignment("kid", text, r, activity="cicd"))
+                a, source = raci.anchor(text, member="kid", activity="cicd", roster=r)
+                self.assertEqual((a["id"], a["A"], source), ("cicd", "keymaker", "explicit"))
 
     def test_a_member_with_several_kinds_of_work_gets_the_one_its_step_names(self):
         r = _roster()
