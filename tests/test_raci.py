@@ -305,8 +305,9 @@ class AssignmentTests(unittest.TestCase):
         self.assertEqual(run["state"], "done")
         self.assertEqual(run["raci_overrides"][-1]["owed"], [["seraph", ["build the JSON API server"]]])
 
-    def test_the_approver_takes_its_own_kind_of_work_only_with_a_reason(self):
-        # R2-3: only the Responsible member takes a kind of work; the Keymaker approves CI/CD, so he needs --why
+    def test_the_approver_takes_its_own_kind_of_work_only_with_a_reason_and_another_member_approves_it(self):
+        # R2-3: only the Responsible member takes a kind of work; the Keymaker approves CI/CD, so he needs --why, and
+        # the run end then owes the Code reviewer's approval, never his own
         pg.start("CI", plan=["fix the pipeline"], now=self.m(0))
         for who in ("The Keymaker", "Niobe"):  # its Accountable member, and a Consulted one
             with self.subTest(member=who):
@@ -315,6 +316,10 @@ class AssignmentTests(unittest.TestCase):
                 self.assertIn("Release engineer (Link) does it", str(e.exception))
         run = pg.assign("fix the pipeline", "The Keymaker", activity="cicd", why="Link is out today", now=self.m(0))
         self.assertEqual(run["raci_overrides"][-1]["why"], "Link is out today")
+        launch("a1", "devkit:keymaker", "The Keymaker: fix the pipeline", self.m(1))
+        pg.on_subagent("claude", {"session_id": "s1", "agent_id": "a1", "agent_type": "devkit:keymaker",
+                                  "last_assistant_message": DONE}, False, now=self.m(9))
+        self.assertEqual(pg.approvals_owed(pg.load_run("claude", "s1")), [("seraph", ["fix the pipeline"])])
 
 
 class MorpheusTests(unittest.TestCase):

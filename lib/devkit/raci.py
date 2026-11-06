@@ -5,8 +5,8 @@ exactly one member), who is consulted before or during it (C), and who is inform
 
 It lives in `config/crew.json` (`activities`), with the team's changes from the handoff repository on top
 (`crew/crew.json`, see `crew.load`). Morpheus classifies a task with it (`classify`), routes it to the Responsible
-member, refuses an assignment that breaks it (`check_assignment`), and does not end a run until every Accountable
-member has approved the work they own (`approvals_missing`).
+member and refuses an assignment that breaks it (`check_assignment`). Who approves each finished step, and whether
+they have, is approvals.py's (F6): the run ends only when each one has.
 
 Developers write in any language, so a step's kind of work rests on anchors that do not depend on words (`anchor`):
 an explicit activity id (`--activity`, `[id]` in a plan spec), then the assigned member's Responsible activity, then
@@ -314,35 +314,6 @@ def step_activity(step: dict, roster=None):
         mid = m["id"] if m else None
     text = " ".join(str(step.get(k) or "") for k in ("name", "desc", "what", "task") if step.get(k))
     return anchor(text, member=mid, files=step.get("scope"), roster=roster)[0]
-
-
-def approvals_missing(run: dict, members_of_steps, roster=None) -> list:
-    """[(approver id, [step names])] for the Accountable members who have not approved the work they own.
-
-    A done step needs its activity's A to have finished a step of their own in the same run (their review), unless
-    the A is the member who did the step or Morpheus (the main session, who signs off by ending the run).
-    `members_of_steps(step) -> member id or None` says who did each step."""
-    done = [s for s in run.get("plan") or [] if s.get("state") == "done"]
-    did = {}
-    for s in done:
-        mid = members_of_steps(s)
-        if mid:
-            did.setdefault(mid, []).append(s)
-    from . import crew
-    main = next((m["id"] for m in crew.members(roster) if m.get("main")), "morpheus")
-    owed = {}
-    for s in done:
-        a = step_activity(s, roster)
-        if not a:
-            continue
-        acc = a.get("A")
-        who = members_of_steps(s) or main
-        if not acc or acc in (who, main):
-            continue
-        if any(x is not s for x in did.get(acc, [])):
-            continue
-        owed.setdefault(acc, []).append(s.get("name") or "?")
-    return sorted(owed.items())
 
 
 def matrix(roster=None) -> list:
