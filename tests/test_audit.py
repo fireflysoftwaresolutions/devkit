@@ -24,6 +24,77 @@ from devkit import audit, core, progress  # noqa: E402
 LIB = Path(__file__).resolve().parents[1] / "lib"
 NOV6 = time.mktime((2026, 11, 6, 12, 0, 0, 0, 0, -1))
 
+# The compliance review's redactor probe (Persephone, 32 cases). Every value is made up, and each is assembled at
+# runtime so that the secret scan of this file never sees a whole credential. (name, text, part that must not survive)
+A36 = "A1b2C3d4E5f6G7h8I9j0" + "K1l2M3n4O5p6Q7r8"
+FAKE40 = "Zx9Wv8Ut7Sr6Qp5On4Ml3" + "Kj2Ih1Gf0EdCbA9876"
+PEM_BODY = "MIIEowIBAAKCAQEAfake" + "fakefakefakefakefakefake0123456789"
+VALUE = "S3cretFake" + "Value99"
+PASS = "S3cret" + "FakePass"
+PK = "PRIVATE" + " KEY"
+
+
+def _pem(kind: str, end: bool = True) -> str:
+    head = f"-----BEGIN {kind}{PK}"
+    return f"{head}-----\n{PEM_BODY}\n-----END {kind}{PK}-----" if end else f"{head}-----\n{PEM_BODY}"
+
+
+PROBE = [
+    ("github ghp_", "token ghp_" + A36, A36[4:]),
+    ("github_pat_", "github_pat_11ABCDEFG0" + A36, A36[8:]),
+    ("slack xoxb", "xoxb-" + "1234567890-0987654321-FakeFakeFake", "0987654321-FakeFakeFake"),
+    ("openai sk-proj", "sk-proj-" + A36, A36[4:]),
+    ("anthropic sk-ant", "sk-ant-api03-" + A36, A36[4:]),
+    ("aws AKIA", "AKIA" + "ABCDEFGHIJKLMNOP", "EFGHIJKLMNOP"),
+    ("aws secret env", "AWS_SECRET_ACCESS_KEY=" + FAKE40, FAKE40[4:]),
+    ("django SECRET_KEY", "SECRET_KEY=" + FAKE40, FAKE40[4:]),
+    ("npm_", "npm_" + A36, A36[4:]),
+    ("pypi-", "pypi-AgEIcHlwaS5vcmc" + A36, A36[4:]),
+    ("google AIza", "AIza" + "SyFakeFakeFakeFakeFakeFakeFakeFake1", "FakeFakeFakeFakeFake"),
+    ("jwt", "eyJhbGciOiJIUzI1NiJ9." + "eyJzdWIiOiIxMjM0NTY3ODkwIn0." + "FakeSignatureFakeSig", "FakeSignatureFakeSig"),
+    ("bearer header", "Authorization: Bearer " + "abcdefghijklmnop1234", "abcdefghijklmnop1234"),
+    ("basic header", "Authorization: Basic " + "dXNlcjpwYXNzd29yZGZha2U=", "dXNlcjpwYXNzd29yZGZha2U="),
+    ("pem rsa whole", _pem("RSA "), PEM_BODY),
+    ("pem openssh", _pem("OPENSSH "), PEM_BODY),
+    ("pem pkcs8 cut", _pem("", end=False), PEM_BODY),
+    ("pem pgp block", _pem("PGP ").replace(PK + "-----", PK + " BLOCK-----"), PEM_BODY),
+    ("url https user:pass", f"https://deploy:{PASS}@git.example.com/repo.git", PASS),
+    ("url postgres", f"postgres://app:{PASS}@db.example.com:5432/app", PASS),
+    ("url empty user", f"redis://:{PASS}@cache.example.com:6379", PASS),
+    ("url pass with slash", "https://deploy:S3cret/FakePass@git.example.com/x", "S3cret/FakePass"),
+    ("json client_secret", '{"client_secret": "' + VALUE + '"}', VALUE),
+    ("json password", '{"password":"' + VALUE + '"}', VALUE),
+    ("cli --password", f"mysql --password {VALUE} -h db", VALUE),
+    ("env TOKEN=", "MY_API_TOKEN=" + VALUE, VALUE),
+    ("stripe sk_live_", "sk_" + "live_" + A36, A36[4:]),
+    ("gitlab glpat-", "glpat-" + "FakeFakeFake12345678", "FakeFake12345678"),
+    ("huggingface hf_", "hf_" + A36, A36[4:]),
+    ("google oauth ya29", "ya29." + "a0Af" + A36, A36[4:]),
+    ("slack webhook", "https://hooks.slack.com/services/" + "T00000000/B00000000/FakeFakeFakeFakeFake1234",
+     "FakeFakeFakeFakeFake1234"),
+    ("azure AccountKey", "DefaultEndpointsProtocol=https;AccountName=x;AccountKey=" + FAKE40 + "==", FAKE40[4:]),
+]
+
+# each rule the review added: one more credential of its shape, and text that only looks like one and must not change
+LOOKALIKES = [
+    ("key with a prefix or suffix", "export DB_PASSWORD_PROD=" + VALUE, VALUE,
+     ["secrets: 0 found", "passwordless: true", "max_tokens: 4096", "the secretary: Ana", "TOKENS: 12"]),
+    ("quoted key and value", "{'apiKey': '" + VALUE + " and more'}", VALUE,
+     ['{"user": "ana", "tokens": 12}', "password reset: done"]),
+    ("command-line flag", "gh auth login --with-token --api-key " + VALUE, VALUE,
+     ["docker login --password-stdin ghcr.io", "claude --max-tokens 4096", "--token-file ~/.config/x"]),
+    ("PGP private key block", _pem("PGP ").replace(PK + "-----", PK + " BLOCK-----"), PEM_BODY,
+     ["-----BEGIN PGP PUBLIC KEY BLOCK-----\nmQINBFakePublicKey"]),
+    ("URL password with an @", "https://ci:Fake@Pass99" + "@git.example.com/r", "Fake@Pass99",
+     ["http://localhost:4873/@scope/pkg", "https://registry.npmjs.org/@types/node", "https://ana@example.com/x",
+      "git@github.com:acme/app.git", "http://example.com:8080?to=a@b.example"]),
+    ("vendor tokens", "rk_" + "live_" + A36 + " dckr_" + "pat_" + A36 + " sk_" + "test_" + A36, A36[4:],
+     ["hf_hub_download(repo)", "see sk_live in the Stripe docs", "ya29 is Google's prefix", "glpat- tokens expire"]),
+    ("Slack webhook path", "https://hooks.slack.com/services/" + "T1/B2/FakeFakeFakeFakeFake9876", "FakeFake9876",
+     ["https://hooks.slack.com/ is Slack's webhook host"]),
+    ("Azure account key", "SharedAccessKey=" + FAKE40, FAKE40[4:], ["AccountName=devstore;EndpointSuffix=core.windows.net"]),
+]
+
 
 class AuditCase(unittest.TestCase):
     # every test gets its own audit folder, handoff repository and audit settings; the real trail is never touched
@@ -117,6 +188,27 @@ class RedactionTests(AuditCase):
         self.assertNotIn("ACME-123456", out)
         self.assertNotIn("client-zorro", out)
         self.assertEqual(audit.redact("plain words stay"), "plain words stay")
+
+    def test_the_compliance_probe_secrets_are_all_redacted(self):
+        # the review's 32 probe cases: none survives, the output is stable, and SECRET knows the raw shape but finds
+        # nothing once it is redacted (the K7 fixture contract every other store relies on)
+        for name, text, body in PROBE:
+            with self.subTest(case=name):
+                self.assertIsNotNone(audit.SECRET.search(text))
+                out = audit.redact(text, extra=[])
+                self.assertNotIn(body, out)
+                self.assertIn("[redacted]", out)
+                self.assertEqual(audit.redact(out, extra=[]), out)
+                self.assertIsNone(audit.SECRET.search(out))
+
+    def test_each_new_rule_catches_its_shape_and_spares_its_look_alikes(self):
+        for name, text, body, alikes in LOOKALIKES:
+            with self.subTest(rule=name):
+                out = audit.redact(text, extra=[])
+                self.assertNotIn(body, out)
+                self.assertIsNone(audit.SECRET.search(out))
+                for plain in alikes:
+                    self.assertEqual(audit.redact(plain, extra=[]), plain)
 
     def test_no_prompt_text_reaches_a_record(self):
         audit.record("canary.miss", "devkit", "final message without the status block", "recorded",

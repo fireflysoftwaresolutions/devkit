@@ -50,27 +50,47 @@ V = 2
 # value already redacted is never matched again, so redact(redact(x)) == redact(x) and SECRET finds nothing in it.
 
 MARK = "…[redacted]"
-_NOT_DONE = r"(?!…\[redacted\])"
+_NOT_DONE = r"(?!…?\[redacted\])"  # also the bare "[redacted]" other stores write: a value already gone
+# a key that names a secret, alone or inside a longer name (AWS_SECRET_ACCESS_KEY, client_secret, apiKey). What
+# follows the keyword must start a new part of the name (_, -, or a capital in camelCase), so secrets:, tokens:,
+# secretary: and passwordless: stay. No leading \w*: the match starts at the keyword and keeps the text before it.
+_KEY = (r"(?:secret|token|passw(?:or)?d|api[_-]?key|access[_-]?key|private[_-]?key|account[_-]?key)"
+        r"(?:(?:[_-]|(?-i:[A-Z](?=[a-z])))\w{0,64})?")
+# Every rule runs in linear time: no nested unbounded quantifiers, and a bounded length wherever a match could
+# otherwise scan far from each starting point.
 _RULES = [
-    # a private key loses its whole body, up to its END line (or the end of the text when it was cut)
-    (r"-----BEGIN (?P<kt>[A-Z0-9 ]*)PRIVATE KEY-----" + _NOT_DONE + r"(?s:.*?)(?:-----END (?P=kt)PRIVATE KEY-----|\Z)",
-     r"-----BEGIN \g<kt>PRIVATE KEY-----" + MARK),
-    # a password in a URL: https://user:secret@host
-    (r"(?i:\b(?P<u>[a-z][a-z0-9+.-]*://[^/\s:@]+:)" + _NOT_DONE + r"[^/\s@]+@)", r"\g<u>" + MARK + "@"),
+    # a private key loses its whole body, up to its END line (or the end of the text when it was cut); PGP keys end
+    # their header with BLOCK
+    (r"-----BEGIN (?P<kt>[A-Z0-9 ]*)PRIVATE KEY(?P<kb>(?: BLOCK)?)-----" + _NOT_DONE +
+     r"(?s:.*?)(?:-----END (?P=kt)PRIVATE KEY(?P=kb)-----|\Z)", r"-----BEGIN \g<kt>PRIVATE KEY\g<kb>-----" + MARK),
+    # a password in a URL: https://user:secret@host, redis://:secret@host. The user may be empty and the password may
+    # hold / or @: it runs to the last @ before the host. host:port/path is not a password
+    (r"(?i:\b(?P<u>[a-z][a-z0-9+.-]{0,32}://[^/\s:@]{0,256}:)" + _NOT_DONE +
+     r"(?!\d{1,5}(?:[/?#\s]|\Z))\S{1,256}?@(?=[^\s/@?#]*(?:[/?#\s]|\Z)))", r"\g<u>" + MARK + "@"),
     (r"(?i:\b(?P<b>bearer)\s+" + _NOT_DONE + r"[A-Za-z0-9._~+/=-]{8,})", r"\g<b> " + MARK),
     (r"(?i:\b(?P<ba>authorization\s*[:=]\s*basic)\s+" + _NOT_DONE + r"[A-Za-z0-9+/=]{8,})", r"\g<ba> " + MARK),
     (r"\beyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}", "eyJ" + MARK),  # a JWT
     (r"(?i:\b(?:gh[pousr]_[0-9a-z]{20,}|github_pat_[0-9a-z_]{20,}|xox[abpr]-[0-9a-z-]{10,}|sk-[0-9a-z_-]{20,}|"
-     r"AKIA[0-9A-Z]{16}|npm_[0-9a-z]{36,}|pypi-[0-9a-z_-]{16,}|AIza[0-9a-z_-]{35}))", None),  # tokens: keep 4 chars
-    (r"(?i:(?P<k>password|passwd|secret|token|api[_-]?key)(?P<s>\s*[=:]\s*)" + _NOT_DONE + r"[^\s…]\S*)",
-     r"\g<k>\g<s>" + MARK),
+     r"AKIA[0-9A-Z]{16}|npm_[0-9a-z]{36,}|pypi-[0-9a-z_-]{16,}|AIza[0-9a-z_-]{35}|"
+     r"[sr]k_(?:live|test)_[0-9a-z]{16,}|glpat-[0-9a-z_-]{20,}|hf_[0-9a-z]{30,}|ya29\.[0-9a-z_-]{20,}|"
+     r"dckr_pat_[0-9a-z_-]{20,}))", None),  # tokens (Stripe, GitLab, Hugging Face, Google OAuth, Docker): keep 4
+    (r"(?i:(?P<sw>hooks\.slack\.com/services/)" + _NOT_DONE + r"[a-z0-9_/-]{8,})", r"\g<sw>" + MARK),
+    # a command-line flag that takes a secret: --password x, --github-token=x (not --password-stdin, --token-file)
+    (r"(?i:(?P<f>--(?:[a-z0-9]{1,32}-){0,4}(?:password|passwd|token|secret|api-?key|access-key|private-key))"
+     r"(?P<fs>[ =][\"']?)" + _NOT_DONE + r"[^\s…\"'-][^\s\"']*)", r"\g<f>\g<fs>" + MARK),
+    # key = "value", "key": "value", key: 'value': a quoted value loses everything up to its closing quote
+    (r"(?i:(?P<k>" + _KEY + r")(?P<s>[\"']?\s*[=:]\s*[\"'])" + _NOT_DONE +
+     r"(?:(?<=\")[^\"\n]{1,512}|(?<=')[^'\n]{1,512}))", r"\g<k>\g<s>" + MARK),
+    # key=value, KEY: value
+    (r"(?i:(?P<k>" + _KEY + r")(?P<s>[\"']?\s*[=:]\s*)" + _NOT_DONE + r"[^\s…\"']\S*)", r"\g<k>\g<s>" + MARK),
 ]
 _COMPILED = [(re.compile(p), rep) for p, rep in _RULES]
+_BACKREFS = {"kt": "[A-Z0-9 ]*", "kb": "(?: BLOCK)?"}
 
 
 def _plain(pattern: str) -> str:
     """A rule's pattern without its named groups, so that every rule fits in one expression."""
-    pattern = re.sub(r"\(\?P=kt\)", "[A-Z0-9 ]*", pattern)
+    pattern = re.sub(r"\(\?P=([a-z]+)\)", lambda m: _BACKREFS[m.group(1)], pattern)
     return re.sub(r"\(\?P<[a-z]+>", "(?:", pattern)
 
 
