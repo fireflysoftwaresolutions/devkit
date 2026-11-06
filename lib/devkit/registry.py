@@ -521,9 +521,16 @@ def build(with_prs=True, refresh_prs=False, with_sizes=False, refresh_sizes=Fals
                 issues.append(("work", f"{p['id']}: uncommitted work idle {int(idle_d)}d in {tilde(w['path'])}"))
             if w.get("unpushed") and not w.get("active") and idle_d > 2:
                 issues.append(("work", f"{p['id']}: {w['unpushed']} unpushed commit(s) on {w.get('branch')}"))
+    projects += note_only_projects({p["id"] for p in projects})
     for p in projects:
+        p.setdefault("local", True)
         enrich(p)
-    projects.sort(key=lambda p: (p["id"].startswith("_local/"), p["id"]))
+        ns = p.get("note_summary") or {}
+        p["progress"], p["progress_source"] = ns.get("progress"), ns.get("progress_source", "none")
+    inits = initiatives(projects)
+    for p in projects:
+        p["initiatives"] = [i["id"] for i in inits if p["id"] in i["projects"]]
+    projects.sort(key=lambda p: (p["id"].startswith("_local/"), not p.get("local", True), p["id"]))
     try:
         from . import providers
         prov = providers.cached()
@@ -531,7 +538,8 @@ def build(with_prs=True, refresh_prs=False, with_sizes=False, refresh_sizes=Fals
         prov = {}
     return {"version": 1, "host": socket.gethostname().split(".")[0], "dev_root": str(DEV),
             "generated": int(time.time()), "projects": projects, "issues": issues,
-            "sessions": live_sessions(), "providers": prov, "github_user": core.github_user()}
+            "sessions": live_sessions(), "providers": prov, "github_user": core.github_user(),
+            "initiatives": inits}
 
 
 def commit_activity(path: str, days: int = 30) -> dict:
@@ -565,7 +573,7 @@ def enrich(p: dict):
     """Add handoff-note summary, activity, latest agent status line and plans to a registry entry."""
     f = note_path(p["id"])
     p["note_summary"] = notesmod.summarize(f.read_text()) if f.exists() else None
-    if p.get("main") and p.get("git", True) is not False:
+    if p.get("main") and p.get("git", True) is not False and p.get("path"):
         p["activity"] = commit_activity(p["path"])
     p["status_line"] = status_line(p["id"])
     p["plans"] = plans_for(p["id"])
@@ -580,6 +588,61 @@ def ops_log(limit: int = 60) -> list:
                 out.append(ln[2:])
             if len(out) >= limit:
                 return out
+    return out
+
+
+INITIATIVES = HANDOFF / "initiatives"
+
+
+def initiative_path(slug: str) -> Path:
+    return INITIATIVES / slug / "README.md"
+
+
+def note_only_projects(known: set) -> list:
+    """Projects that have a handoff note but no checkout on this machine (cloned elsewhere, or not yet)."""
+    out = []
+    if not NOTES.exists():
+        return out
+    for f in sorted(NOTES.rglob("*.md")):
+        pid = str(f.relative_to(NOTES))[:-3]
+        if pid in known:
+            continue
+        owner, _, name = pid.rpartition("/")
+        out.append({"id": pid, "owner": owner or None, "name": name, "path": None, "remote": "", "github":
+                    pid if pid.count("/") == 1 and not pid.startswith("_local/") else None, "local": False,
+                    "canonical": str(core.canonical_path(pid)), "canonical_ok": True, "stack": [], "commands": [],
+                    "main": {}, "worktrees": [], "prs_open": [], "prs_known": False,
+                    "note": str(f.relative_to(HANDOFF)), "last_activity": int(f.stat().st_mtime)})
+    return out
+
+
+def initiatives(projects: list) -> list:
+    """Initiatives (initiatives/<slug>/README.md) with member status and progress."""
+    out = []
+    if not INITIATIVES.exists():
+        return out
+    by_id = {p["id"]: p for p in projects}
+    for d in sorted(x for x in INITIATIVES.iterdir() if x.is_dir()):
+        f = d / "README.md"
+        if not f.exists():
+            continue
+        ns = notesmod.summarize(f.read_text())
+        members = []
+        for pid in ns["projects"]:
+            p = by_id.get(pid) or {}
+            pn = p.get("note_summary") or {}
+            members.append({"id": pid, "status": pn.get("status", "unknown"), "local": p.get("local", False) if p else False,
+                            "progress": p.get("progress"), "now": (pn.get("tasks") or {}).get("now", [])[:3],
+                            "status_line": p.get("status_line"), "workstream": ns["workstreams"].get(pid, "")})
+        out.append({"id": d.name, "title": ns["title"] or d.name, "status": ns["status"], "priority": ns["priority"],
+                    "milestone": ns["milestone"], "due": ns["due"], "progress": ns["progress"],
+                    "progress_source": ns["progress_source"], "projects": ns["projects"], "members": members,
+                    "goal": ns["goal"], "scope": ns["scope"], "state": ns["state"], "risks": ns["risks"],
+                    "decisions": ns["decisions"], "links": ns["links"], "tasks": ns["tasks"],
+                    "sessions": ns["sessions"], "tags": ns["tags"], "owner": ns["owner"], "source": ns["source"],
+                    "note": str(f.relative_to(HANDOFF)), "last_activity": int(f.stat().st_mtime),
+                    "docs": sorted(str(x.relative_to(HANDOFF)) for x in (d / "docs").rglob("*.md"))
+                    if (d / "docs").exists() else []})
     return out
 
 
@@ -649,6 +712,16 @@ def render_map(reg: dict) -> str:
         out += [f"**Instruction canary (7 days):** {canary.summary_line(7)} — replies starting with `DevKit ·`", ""]
     except Exception:
         pass
+    inits = reg.get("initiatives") or []
+    if inits:
+        out += ["## Initiatives", "", "| Initiative | Status | Progress | Milestone | Due | Projects | Now |",
+                "|---|---|---|---|---|---|---|"]
+        for i in inits:
+            pct = f"{i['progress']}%" + (" (manual)" if i["progress_source"] == "manual" else "") \
+                if i["progress"] is not None else "-"
+            out.append(f"| [{i['title']}]({i['note']}) | {i['status']} · {i['priority']} | {pct} | {i['milestone'] or '-'} "
+                       f"| {i['due'] or '-'} | {', '.join(i['projects']) or '-'} | {'; '.join(i['tasks']['now'][:2]) or '-'} |")
+        out.append("")
     if reg["issues"]:
         out += ["## Needs attention", ""] + [f"- **{k}** — {m}" for k, m in reg["issues"]] + [""]
     groups = {}
@@ -664,8 +737,10 @@ def render_map(reg: dict) -> str:
             branch = co.get("branch") or "-"
             ns = p.get("note_summary") or {}
             st = ns.get("status", "-") + (" ·" + ns["priority"] if ns.get("priority") not in (None, "normal") else "")
-            tk = f"{len(ns['tasks']['now'])} now / {ns['tasks']['open']} open" if ns else "-"
-            out.append(f"| [{p['name']}]({p['remote'] or tilde(p['path'])}) | {st} | {tk} | "
+            tk = (f"{len(ns['tasks']['now'])} now / {ns['tasks']['open']} open"
+                  + (f" · {p['progress']}%" if p.get("progress") is not None else "")) if ns else "-"
+            where = p["remote"] or (tilde(p["path"]) if p.get("path") else f"https://github.com/{p['id']}")
+            out.append(f"| [{p['name']}]({where}){'' if p.get('local', True) else ' · not cloned'} | {st} | {tk} | "
                        f"{', '.join(p['stack']) or '-'} | `{branch}` | {_state(co)} | {wt} | "
                        f"{len(p['prs_open']) if p.get('prs_known') else '-'} | {fmt_ts(p['last_activity'])} | "
                        f"{human_kb(p.get('size_kb'))} | [note]({p['note']}) |")
@@ -798,6 +873,11 @@ def render_tasks(reg: dict) -> str:
         rows.append((ns["priority"] != "high", ns["status"] != "active", p["id"], p, ns))
     if not rows:
         return "\n".join(out + ["No open tasks. Add one with `dev task add \"…\" --now`."])
+    for i in reg.get("initiatives") or []:
+        if i["tasks"]["open"]:
+            rows.append((i["priority"] != "high", i["status"] != "active", "initiative: " + i["title"], {"id": i["id"]},
+                         {"tasks": i["tasks"], "status": i["status"], "priority": i["priority"],
+                          "milestone": i["milestone"], "due": i["due"]}))
     total_now = sum(len(r[4]["tasks"]["now"]) for r in rows)
     total_open = sum(r[4]["tasks"]["open"] for r in rows)
     out += [f"**{total_open} open tasks** · **{total_now} in progress (Now)** across {len(rows)} projects", ""]

@@ -20,7 +20,7 @@ from .core import CONFIG_FILE, DEVKIT_HOME, HOME, STATE
 
 STACKS = {"java": "Java / Spring (JDK, Maven, Gradle, jdtls)", "python": "Python (uv, pyright)",
           "php": "PHP (php, Composer, intelephense)", "node": "Node / TypeScript / Angular / React (pnpm, tsc, ng)"}
-BASE_GROUPS = ("core", "docker", "agents", "docs")
+BASE_GROUPS = ("core", "docker", "agents", "docs", "security")
 CLAUDE_MODES = {"bypassPermissions": "no prompts; the devkit guard protects the workspace (recommended)",
                 "acceptEdits": "edits without prompts, commands ask", "default": "ask before every tool"}
 CODEX_MODES = {"full": ("never", "danger-full-access", "no prompts, full access; the devkit guard protects (recommended)"),
@@ -203,6 +203,7 @@ def run(assume_yes=False, skip_packages=False) -> int:
             print(f"  {ui.WARN} some packages failed; continuing with the configuration")
     py = sys.executable
     subprocess.call([py, str(DEVKIT_HOME / "bin" / "dev"), "install"])
+    _post_install(p, use_claude, use_codex)
     if lock:
         subprocess.call([py, str(DEVKIT_HOME / "bin" / "dev"), "config", "lock"])
     print(f"\n  {ui.ARROW} Verifying …")
@@ -210,6 +211,21 @@ def run(assume_yes=False, skip_packages=False) -> int:
     print(f"\n  {ui.bold('Next:')} open a new terminal (or `exec zsh`), then `dev` — and in any project, start "
           f"Claude Code or Codex as usual. `dev agents test` runs a live check of both agents.\n")
     return rc
+
+
+def _post_install(p, use_claude, use_codex):
+    """Offer the interactive steps a script cannot do alone: sign-ins and starting Docker."""
+    from . import providers
+    st = providers.status(include_account=False)
+    if use_claude and st["claude"].get("installed") and not st["claude"].get("logged_in"):
+        if p.yesno("Claude Code is not signed in. Sign in now (opens the browser)?", True) and not p.yes:
+            subprocess.call(["claude", "auth", "login"])
+    if use_codex and st["codex"].get("installed") and not st["codex"].get("logged_in"):
+        if p.yesno("Codex is not signed in. Sign in now (opens the browser)?", True) and not p.yes:
+            subprocess.call(["codex", "login"])
+    if core.have("colima") and core.sh(["colima", "status"], timeout=20)[0] != 0:
+        if p.yesno("Start Docker (Colima VM) now?", not p.yes):
+            subprocess.call([sys.executable, str(DEVKIT_HOME / "bin" / "dev"), "docker", "up"])
 
 
 # --------------------------------------------------------------------------- packages

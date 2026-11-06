@@ -18,6 +18,8 @@ ok()   { printf '  \033[32m✓\033[0m %s\n' "$*"; }
 
 step "Homebrew"
 if ! command -v brew >/dev/null 2>&1; then
+  # Homebrew's official installer (https://brew.sh): the documented way to install it on a new Mac.
+  # nosemgrep: bash.curl.security.curl-pipe-bash.curl-pipe-bash
   /bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)"
 fi
 [[ -x /opt/homebrew/bin/brew ]] && eval "$(/opt/homebrew/bin/brew shellenv)"

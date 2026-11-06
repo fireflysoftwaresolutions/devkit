@@ -50,6 +50,7 @@ DEFAULTS = {
     "stacks": ["java", "python", "php", "node"],
     "lock": False,
     "handoff": {"enforce": True},
+    "canary": {"enforce": True},
 }
 
 

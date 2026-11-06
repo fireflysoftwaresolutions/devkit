@@ -1299,8 +1299,12 @@ def check_svg(path) -> list:
     """Checks for any SVG file: viewBox, title, no scripts/external refs, type size, and text contrast measured
     against the filled shape painted underneath each text (painter's order, translate() transforms)."""
     P = []
+    raw = Path(path).read_text(errors="ignore")
+    if "<!DOCTYPE" in raw or "<!ENTITY" in raw:
+        return ["svg: DOCTYPE/ENTITY declarations are not allowed (entity expansion risk)"]
     try:
-        root = ET.parse(str(path)).getroot()
+        # Safe: DTDs and entities are rejected above, and ElementTree never fetches external resources.
+        root = ET.fromstring(raw)  # nosemgrep: python.lang.security.use-defused-xml-parse.use-defused-xml-parse
     except ET.ParseError as e:
         return [f"svg: not well-formed ({e})"]
     ns = "{http://www.w3.org/2000/svg}"

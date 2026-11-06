@@ -31,8 +31,15 @@ cask "codex"
 # @docs
 brew "vale"
 brew "lychee"
+cask "font-manrope"
+# @security
+brew "gitleaks"
+brew "osv-scanner"
+brew "trivy"
+brew "semgrep"
+brew "syft"
+brew "cosign"
 # @brand  (maintainers only: tools/brand/render.py)
 brew "librsvg"
 brew "webp"
 brew "chafa"
-cask "font-manrope"

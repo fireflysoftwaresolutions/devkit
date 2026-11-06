@@ -47,6 +47,7 @@ COMMANDS = [
     ("Delivery", [
         ("ci [--commands]", "Show what GitHub Actions runs, so you run it locally before the one push"),
         ("calver [--next]", "Current and next CalVer version YY.MM.PATCH from the repository's tags"),
+        ("sec scan [--history]", "Security: secrets (gitleaks), dependencies (osv-scanner), SAST (Semgrep), Trivy"),
         ("docs check [--online]", "Check docs: Markdown structure, links and anchors, prose (Vale), diagrams"),
         ("diagram render|check|new", "Branded, validated SVG diagrams (flow, C4, state, sequence, ER, timeline)"),
     ]),
@@ -72,6 +73,16 @@ COMMANDS = [
 
 
 # --------------------------------------------------------------------------- helpers
+
+def run(args) -> int:
+    """Run a program in the foreground with an argument list (never a shell); returns its exit code."""
+    import subprocess
+    try:
+        return subprocess.call([str(x) for x in args])
+    except OSError as e:
+        ui.err(f"{args[0]}: {e}")
+        return 127
+
 
 def _reg(prs=True, refresh=False, sizes=False):
     return registry.build(with_prs=prs, refresh_prs=refresh, with_sizes=sizes)
@@ -261,7 +272,7 @@ def cmd_clone(a):
         args = ["gh", "repo", "clone", owner_repo, str(dest)]
     else:
         args = ["git", "clone", url, str(dest)]
-    rc = os.spawnvp(os.P_WAIT, args[0], args)
+    rc = run(args)
     if rc != 0:
         return rc
     _trust_codex(dest)
@@ -278,7 +289,7 @@ def cmd_new(a):
             ui.err(f"{tilde(dest)} already exists")
             return 2
         vis = "--public" if a.public else "--private"
-        rc = os.spawnvp(os.P_WAIT, "gh", ["gh", "repo", "create", f"{owner}/{a.name}", vis, "--add-readme"])
+        rc = run(["gh", "repo", "create", f"{owner}/{a.name}", vis, "--add-readme"])
         if rc != 0:
             return rc
         return cmd_clone(argparse.Namespace(repo=f"{owner}/{a.name}"))
@@ -365,7 +376,7 @@ def cmd_adopt(a):
 def cmd_open(a):
     p = _resolve(_reg(prs=False), a.query)
     editor = CFG.get("editor") or os.environ.get("EDITOR", "code")
-    return os.spawnvp(os.P_WAIT, editor, [editor, p["path"]])
+    return run([editor, p["path"]])
 
 
 # --------------------------------------------------------------------------- agents
@@ -407,7 +418,7 @@ def cmd_handoff(a):
         print(f)
     elif a.edit:
         editor = os.environ.get("EDITOR") or CFG.get("editor") or "vi"
-        return os.spawnvp(os.P_WAIT, editor, [editor, str(f)])
+        return run([editor, str(f)])
     else:
         print(f.read_text())
     return 0
@@ -687,25 +698,25 @@ def cmd_docker(a):
             if d.get("rosetta") and d["vm_type"] == "vz":
                 args.append("--vz-rosetta")
             print(f"{ui.ARROW} {' '.join(args)}")
-            rc = os.spawnvp(os.P_WAIT, "colima", args)
+            rc = run(args)
             if rc != 0:
                 return rc
         rc, out, _ = core.sh(["docker", "info", "--format", "{{.ServerVersion}} · {{.NCPU}} CPU · {{.MemTotal}} bytes · {{.OperatingSystem}}"], timeout=30)
         print(f"{ui.OK} docker {out}" if rc == 0 else f"{ui.FAIL} docker is not reachable")
         return 0 if rc == 0 else 1
     if a.action == "down":
-        return os.spawnvp(os.P_WAIT, "colima", ["colima", "stop"])
+        return run(["colima", "stop"])
     if a.action == "status":
-        os.spawnvp(os.P_WAIT, "colima", ["colima", "status"])
+        run(["colima", "status"])
         if core.sh(["docker", "info"], timeout=10)[0] == 0:
-            os.spawnvp(os.P_WAIT, "docker", ["docker", "system", "df"])
+            run(["docker", "system", "df"])
         return 0
     if a.action == "prune":
-        os.spawnvp(os.P_WAIT, "docker", ["docker", "system", "prune", "-f"])
-        return os.spawnvp(os.P_WAIT, "docker", ["docker", "builder", "prune", "-f"])
+        run(["docker", "system", "prune", "-f"])
+        return run(["docker", "builder", "prune", "-f"])
     if a.action in ("autostart-on", "autostart-off"):
         verb = "start" if a.action.endswith("on") else "stop"
-        return os.spawnvp(os.P_WAIT, "brew", ["brew", "services", verb, "colima"])
+        return run(["brew", "services", verb, "colima"])
     return 2
 
 
@@ -723,7 +734,7 @@ def cmd_ci(a):
     print(ci.render(Path(top), ui))
     if a.runs:
         print(ui.section("Recent runs"))
-        os.spawnvp(os.P_WAIT, "gh", ["gh", "run", "list", "--limit", "8"])
+        run(["gh", "run", "list", "--limit", "8"])
     return 0
 
 
@@ -1022,7 +1033,7 @@ def cmd_config(a):
         return _config_validate()
     if act == "edit":
         editor = os.environ.get("EDITOR") or CFG.get("editor") or "vi"
-        os.spawnvp(os.P_WAIT, editor, [editor, str(core.CONFIG_FILE)])
+        run([editor, str(core.CONFIG_FILE)])
         if _config_validate() != 0:
             return 2
         print(f"{ui.ARROW} run `dev config diff` to preview, `dev install` to apply")
@@ -1236,6 +1247,14 @@ def cmd_docs(a):
     return docs.check(Path(top), paths=a.paths or None, online=a.online, fix=a.fix, prose=not a.no_prose)
 
 
+def cmd_sec(a):
+    from . import security
+    top = core.gitout(os.getcwd(), "rev-parse", "--show-toplevel") or os.getcwd()
+    if a.query:
+        top = _resolve(_reg(prs=False), a.query)["path"]
+    return security.scan(Path(top), history=a.history, verbose=a.verbose, sast_config=a.config)
+
+
 def cmd_diagram(a):
     from . import diagram
     return diagram.main(a.rest)
@@ -1401,6 +1420,12 @@ def build_parser():
     p.add_argument("--online", action="store_true", help="also check external links")
     p.add_argument("--fix", action="store_true", help="apply markdownlint's automatic fixes")
     p.add_argument("--no-prose", action="store_true", help="skip Vale")
+    p = add("sec", cmd_sec, "Security scan: secrets, dependencies, SAST, filesystem and IaC")
+    p.add_argument("scan", choices=["scan"])
+    p.add_argument("query", nargs="?", help="project (default: the one you are in)")
+    p.add_argument("--history", action="store_true", help="also scan the git history for secrets")
+    p.add_argument("--config", default="p/default", help="Semgrep rule set (default p/default)")
+    p.add_argument("-v", "--verbose", action="store_true")
     p = add("diagram", cmd_diagram, "Branded SVG diagrams from JSON specs (render · check · new)")
     p.add_argument("rest", nargs=argparse.REMAINDER, help="render <spec|dir> [--out DIR] [--png] · check <spec|svg|dir> · new <kind> <name>")
     p = add("setup", cmd_setup, "Installation and configuration wizard")

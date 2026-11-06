@@ -128,6 +128,21 @@ def context_for(cwd: str, agent: str) -> str:
         meta = f"status {ns['status']} · priority {ns['priority']}" + (f" · milestone {ns['milestone']}" if ns["milestone"] else "")
         lines.append(f"Project: {meta} · tasks: {len(ns['tasks']['now'])} now, {ns['tasks']['open']} open "
                      f"(`dev task` lists them; `dev task add|start|done` edits them)")
+    init_dir = HANDOFF / "initiatives"
+    if init_dir.exists():
+        for d in sorted(init_dir.iterdir()):
+            f2 = d / "README.md"
+            if not f2.exists():
+                continue
+            ins = notesmod.summarize(f2.read_text())
+            if p["id"] not in ins["projects"]:
+                continue
+            pct = f"{ins['progress']}%" if ins["progress"] is not None else "-"
+            ws = (ins["workstreams"].get(p["id"]) or "").replace("\n", " ")[:220]
+            lines.append(f"Initiative **{ins['title'] or d.name}** ({ins['status']}, {pct}; members: "
+                         f"{', '.join(ins['projects'])}). This project's workstream: {ws or '-'}. "
+                         f"Initiative Now: {'; '.join(ins['tasks']['now'][:3]) or '-'}. "
+                         f"Note: {tilde(f2)} (update it for cross-project facts; `dev task -i {d.name}`).")
     lines.append(f"Handoff note: {tilde(note)} — read it before starting; update it with the devkit `handoff` skill "
                  f"before you finish or when the user says handoff/pause/wrap up.")
     body = registry.human_sections(p["id"])
@@ -148,7 +163,7 @@ def _note_hash(top: str) -> str:
     from . import notes as notesmod
     sec = notesmod.sections(f.read_text())
     sec.pop("Session log", None)
-    return hashlib.sha1(json.dumps(sec, sort_keys=True).encode()).hexdigest()
+    return hashlib.sha256(json.dumps(sec, sort_keys=True).encode()).hexdigest()
 
 
 def session_start(agent: str):
@@ -232,6 +247,7 @@ def stop(agent: str):
     out = {}
     if sf.exists():  # only sessions that started with devkit active (they loaded the global instructions)
         sess = core.read_json(sf, {}) or {}
+        reasons = []
         res = canary.check(agent, data)
         if res:
             ok, pid, line = res
@@ -239,12 +255,30 @@ def stop(agent: str):
                 sess["status"] = line
                 branch = core.gitout(sess.get("top") or data.get("cwd") or ".", "branch", "--show-current")
                 canary.save_status(pid, agent, line, branch or sess.get("branch"))
-            elif not ok and agent == "claude":
-                out["systemMessage"] = canary.miss_message(agent, sid)
-        reason = _handoff_nudge(agent, data, sess)
-        if reason:
+            elif not ok:
+                if agent == "claude":
+                    out["systemMessage"] = canary.miss_message(agent, sid)
+                if core.CFG.get("canary", {}).get("enforce", True):
+                    reasons.append("Your final message must start with the DevKit status line (global instructions, "
+                                   "section 0). Reply now with that line: `DevKit · <project>@<branch> · <what you did "
+                                   "or found> · <verification> · next: <next step>`.")
+        elif data.get("stop_hook_active"):
+            text = data.get("last_assistant_message") or canary.last_assistant_text(data.get("transcript_path")) or ""
+            if canary.has_marker(text):  # the corrected reply after a reminder: keep it as the latest status
+                line = canary.status_text(text)
+                sess["status"] = line
+                top = sess.get("top") or ""
+                if top and not core.is_temp(top):
+                    from .registry import main_of
+                    m = main_of(Path(top)) or Path(top)
+                    canary.save_status(core.project_identity(m, core.gitout(m, "config", "--get", "remote.origin.url"))[0],
+                                       agent, line, core.gitout(top, "branch", "--show-current"))
+        nudge = _handoff_nudge(agent, data, sess)
+        if nudge:
             sess["nudged"] = True
-            out.update({"decision": "block", "reason": reason})
+            reasons.append(nudge)
+        if reasons:
+            out.update({"decision": "block", "reason": " ".join(reasons)})
         sf.write_text(json.dumps(sess))
     if out:
         print(json.dumps(out))
