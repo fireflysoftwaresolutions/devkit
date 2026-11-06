@@ -406,6 +406,62 @@ def body(m: dict, roster=None, alias=None) -> str:
     return "\n".join(out)
 
 
+# --------------------------------------------------------------------------- the enforcement matrix
+
+# Every rule a crew member or Morpheus is given, the devkit check that enforces it, and its state. "enforced" names
+# the function that does it (tests check it exists); "planned" names the plan step that adds it; "guidance" says why
+# it cannot be checked mechanically. `dev crew rules` prints it.
+ENFORCEMENT = (
+    ("A member's report starts with its own status block", "SubagentStop: the crew canary", "devkit.hooks.subagent_stop", "enforced"),
+    ("A member records its work with dev progress step", "SubagentStop: lane without updates", "devkit.progress.lane_unreported", "enforced"),
+    ("A member edits only the files of its scope", "PreToolUse: Edit, Write, MultiEdit, apply_patch", "devkit.hooks._scope_violation", "enforced"),
+    ("A member's file scope also holds for shell writes", "PreToolUse: read-only shell allowlist", "F7 read-only shell allowlist", "planned"),
+    ("Review-only and read-only members never edit", "PreToolUse: the edit tools", "devkit.hooks._scope_violation", "enforced"),
+    ("A step goes to the member the RACI makes Responsible", "dev progress assign", "devkit.raci.check_assignment", "enforced"),
+    ("The RACI holds in any language", "kind-of-work tags, files and commands", "multilingual matching", "planned"),
+    ("A run ends only after each Accountable member approved", "dev progress done", "devkit.progress.approvals_owed", "enforced"),
+    ("An approval is an explicit verdict after the work", "dev progress done", "F6 step endings and approvals", "planned"),
+    ("A step closes only with its evidence", "dev progress step and SubagentStop", "F6 step endings and approvals", "planned"),
+    ("No step starts before its dependencies are done", "every step transition", "plan dependency engine", "planned"),
+    ("At most four members work in parallel", "PreToolUse: Agent launches", "devkit.hooks._crew_limits", "enforced"),
+    ("Nested and resumed subagents count too", "launch ledger", "F3 nested agents", "planned"),
+    ("Only Morpheus plans, assigns, decides and changes the mode", "dev progress and dev crew from a lane", "devkit.progress._main_only", "enforced"),
+    ("Morpheus-only commands cannot be reached through bash -c or scripts", "the call ledger", "F4 caller identity", "planned"),
+    ("Irreversible actions wait for the developer's word", "PreToolUse: the irreversible-action gate", "F5 evidence and irreversible gate", "planned"),
+    ("A member runs the proofs its procedure names", "SubagentStop: the crew gates", "crew gates at SubagentStop", "planned"),
+    ("A member loads the skills its brief names", "SubagentStop: the crew gates", "crew gates at SubagentStop", "planned"),
+    ("No stubs or untracked TODOs in a member's changes", "SubagentStop: the crew gates", "crew gates at SubagentStop", "planned"),
+    ("A member's new tests can fail", "SubagentStop: the crew gates", "crew gates at SubagentStop", "planned"),
+    ("A member records a lesson after a repeated refusal", "SubagentStop: the crew gates", "crew gates at SubagentStop", "planned"),
+    ("Members get the known pitfalls for their task", "dev crew brief and the Claude launch hook", "devkit.lessons.for_task", "enforced"),
+    ("Members get the knowledge of their kind of work", "dev crew brief and the Claude launch hook", "devkit.crew.brief_skills", "enforced"),
+    ("Agents cannot write devkit's state or configuration", "PreToolUse: protected paths", "K1 protect devkit state and config", "planned"),
+    ("Escape hatches are refused to members and audited", "PreToolUse: flags and variables", "F8 escape hatches and tool coverage", "planned"),
+    ("The guard runs from a verified copy, not the checkout", "dev install", "pinned install", "planned"),
+    ("Team changes to the crew carry a reason", "dev crew set and dev crew raci --set", "devkit.crew._team_write", "enforced"),
+    ("Questions and decisions go through dev crew ask", "a member's report and messages", "a report may also name its questions", "guidance"),
+)
+
+
+def enforcement(plan_steps=None) -> list:
+    """The matrix as rows, with a check that every enforced rule's function exists and every planned rule names
+    a step of `plan_steps` (when given). -> [(rule, where, ref, state, ok)]."""
+    import importlib
+    out = []
+    for rule, where, ref, state in ENFORCEMENT:
+        ok = True
+        if state == "enforced":
+            mod, _, fn = ref.rpartition(".")
+            try:
+                ok = callable(getattr(importlib.import_module(mod), fn, None))
+            except ImportError:
+                ok = False
+        elif state == "planned" and plan_steps is not None:
+            ok = ref in plan_steps
+        out.append((rule, where, ref, state, ok))
+    return out
+
+
 def _raci_section(m: dict, roster) -> list:
     """The member's place in the crew's RACI, in the words it acts on."""
     from . import raci
@@ -1278,6 +1334,21 @@ def cmd_crew(a) -> int:
         print(f"{ui.OK} {m['name']}: {a.field} changed for the whole team ({core.tilde(overlay_path())})")
         print(ui.dim("  the members get it in their briefs; Codex roles with dev install --only codex"))
         return 0
+    if act == "rules":
+        try:
+            from . import progress
+            run = progress.normalize(progress.load_run(*progress.current_session()) or {})
+            steps = {s["name"] for s in run.get("plan") or []} or None
+        except Exception:
+            steps = None
+        rows = enforcement(steps)
+        mark = {"enforced": ui.OK, "planned": ui.WARN, "guidance": "·"}
+        print(ui.table([[mark[st] + " " + st, rule, where, ref + ("" if ok else "  ✗ missing")]
+                        for rule, where, ref, st, ok in rows],
+                       ["STATE", "RULE", "WHERE", "CHECK OR PLAN STEP"], max_widths={1: 52, 2: 36, 3: 40}))
+        n = {s: sum(1 for r in rows if r[3] == s) for s in ("enforced", "planned", "guidance")}
+        print(ui.dim(f"  {n['enforced']} enforced · {n['planned']} planned · {n['guidance']} guidance"))
+        return 0 if all(r[4] for r in rows) else 1
     if act == "history":
         log = read_overlay().get("changelog") or []
         if not log:
@@ -1355,6 +1426,7 @@ def register(add):
     x.add_argument("value", nargs="+", help='the new value; list fields take "a; b; c"; procedure takes JSON')
     x.add_argument("--why", required=True, help="the reason, kept in the crew's history")
     sp.add_parser("history", help="the team's changes to the crew, with who and why")
+    sp.add_parser("rules", help="every crew rule, the devkit check that enforces it, and its state")
     x = sp.add_parser("show", help="everything about one member")
     x.add_argument("name", nargs="+", help="id or name, e.g. neo, Oracle, \"The Keymaker\"")
     x = sp.add_parser("brief", help="a ready-to-paste brief for a member, with the spawn line")

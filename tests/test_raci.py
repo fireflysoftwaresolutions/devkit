@@ -386,6 +386,19 @@ class ProcedureTests(unittest.TestCase):
         self.assertNotIn("java-springboot", tank["skills"])
 
 
+class EnforcementTests(unittest.TestCase):
+    def test_every_enforced_rule_points_at_real_code_and_every_planned_one_is_named(self):
+        rows = crew.enforcement()
+        self.assertGreaterEqual(len(rows), 25)
+        for rule, where, ref, state, ok in rows:
+            with self.subTest(rule=rule):
+                self.assertIn(state, ("enforced", "planned", "guidance"))
+                self.assertTrue(ok, f"{ref} does not exist")
+                self.assertTrue(where and ref)
+        missing = crew.enforcement({"other step"})  # a planned rule whose step is not in the plan is flagged
+        self.assertTrue(any(not ok for _, _, _, state, ok in missing if state == "planned"))
+
+
 class TeamCrewTests(unittest.TestCase):
     """The team's changes live in the handoff repository: versioned, with who and why, and merged everywhere."""
 
