@@ -18,10 +18,14 @@ this skill is the how.
 3. Unsure about the portfolio? `dev overview` (add `--json` to compute with it).
 
 **During**
-- Record work as it happens: `dev task add "…" --now` when you start something new, `dev task start <n>` when you
-  pick up a planned task, `dev task done <n>` only after verifying it, `dev task add "…" --later` for follow-ups you
-  discover. Initiative-level work uses `-i <slug>`.
-- Plans and specs go to `~/Development/.handoff/plans/<project id>/` (Superpowers writes there too).
+- Claim before you work: `dev task start <n>` takes the lock and pushes it, so other developers' agents see it.
+  Never work on a task the context lists as claimed by someone else — pick another one or tell the user.
+- Record work as it happens: `dev task add "…" --now --claim` for new work, `dev task done <n>` only after verifying
+  it, `dev task release <n>` if you stop without finishing, `dev task add "…" --later` for follow-ups you discover.
+  Changes of scope need a reason: `dev task edit|move|cancel|block <n> --why "…"`. Initiative-level work uses `-i`.
+- Plans and specs go to `~/Development/.handoff/plans/<project id>/` (`dev plan new "…"`; Superpowers writes there
+  too). After you change one, `dev plan revise <file> --why "…"` — the Stop hook insists.
+- Work items, session logs and presence are written through `dev` only (versions, locks, history, attribution).
 - Before pushing: `dev ci` (what CI runs) → run it locally → push once (`delivery` skill, `/devkit:ship`).
 
 **Finish**
@@ -44,6 +48,8 @@ this skill is the how.
 | Ship | `dev ci`, `dev calver`, `/devkit:ship` | `delivery` |
 | Document | `dev docs check`, `dev diagram render` | `docs`, `documentation-writer`, `doc-coauthoring`, `diagrams` |
 | Hand off | `dev handoff`, `dev task`, `/devkit:handoff` | `handoff` |
+| Coordinate with others | `dev team`, `dev task start|release`, `dev task show <n>` (history) | — |
+| Plans and specs | `dev plan new|revise --why|approve|ls` | Superpowers writing-plans |
 | Where are we | `dev status`, `dev overview`, `dev standup`, `/devkit:status` | — |
 | Something is off | `dev doctor`, `dev config diff`, `dev guard check "<cmd>"` | — |
 

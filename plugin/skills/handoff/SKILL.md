@@ -14,7 +14,8 @@ Every project has one note: `~/Development/.handoff/projects/<owner>/<repo>.md` 
   **Never edit inside it.**
 - `## Purpose` — what the project is, who uses it, where it runs. 1–3 lines. Fill it once, fix it when wrong.
 - `## Current state` — what works, what is half done, what is broken, right now. Rewrite; do not append history.
-- `## Next steps` — numbered, concrete, ordered. The first item is what the next session should do first.
+- `## Tasks` — generated from the work items. Change tasks with `dev task` (add, start, done, move, edit with
+  `--why`), never by editing this block.
 - `## Decisions and gotchas` — non-obvious facts: why X was chosen, traps, flaky tests, env quirks, credentials
   *location* (never secret values).
 - `## Session log` — newest first, one line per session. devkit adds the branch and commit list automatically
@@ -25,8 +26,8 @@ Every project has one note: `~/Development/.handoff/projects/<owner>/<repo>.md` 
 1. Read the note (and the auto block for branch/PR facts).
 2. Check reality: `git status`, `git log --oneline -10`, open PRs (`gh pr list --author @me`), failing tests if any.
 3. Edit the sections above in place. Short sentences, concrete file paths and commands, no filler.
-4. Add your session line directly under `## Session log`:
-   `- YYYY-MM-DD HH:MM · <agent> · <branch> · <one-sentence outcome; what is next>`
+4. Add your one-line summary: `dev handoff --log "<outcome; what is next>" --agent <claude|codex>` (it goes to the
+   append-only session log with your user, machine and agent). devkit adds the branch, commits and status line.
 5. If plans or specs were written, link them (`~/Development/.handoff/plans/<owner>/<repo>/<file>.md`).
 6. Do not commit or push the handoff repo yourself: `dev sync` (automatic at session end and hourly) does it.
 

@@ -207,11 +207,19 @@ each) → tasks (Now / Next / Later / Done), plans and sessions.** The devkit `u
 - **Initiatives** hold the goal, scope, one workstream per member project, cross-project tasks, decisions and
   contracts (APIs, events, versions) every member must respect. `dev initiative ls|show`, `dev task -i <slug>`.
 
+- **Team protocol (several developers, laptops and agents share the handoff repo):** claim a task before you work on
+  it (`dev task start <n>` — the lock is pushed at once), never work on a task claimed by someone else (the session
+  context lists them), and finish with `dev task done <n>` or `dev task release <n>`. Changes of scope (edit, move,
+  cancel, block) need `--why "…"`: the reason is versioned in the item's changelog and its commit. After editing a
+  plan or spec run `dev plan revise <file> --why "…"`. Work items, session logs and presence are written only through
+  `dev`, never by hand. `dev team` shows who is working on what.
+
 Use it, keep it current:
 
 - `dev overview` — every project: status, priority, Now tasks, latest status line, last session (`--json` for tools).
-- `dev status` / `dev task` — the current project and its tasks; `dev task add "…" --now|--later`,
-  `dev task start|done <n>`; `dev note set status=blocked priority=high milestone="…" due=YYYY-MM-DD`.
+- `dev status` / `dev task` — the current project and its work items; `dev task add "…" --now|--later
+  [--type feature|bug|spike] [--why "…"]`, `dev task start|done|release <n>`, `dev task show <n>` (with history);
+  `dev note set status=blocked priority=high milestone="…" due=YYYY-MM-DD`; `dev plan new|revise|approve`.
 - `dev standup` — what happened recently; `dev dashboard` — the visual command centre (for the user).
 - Slash commands in Claude Code: `/devkit:status`, `/devkit:overview`, `/devkit:task`, `/devkit:handoff`,
   `/devkit:standup`, `/devkit:ship`, `/devkit:ci`, `/devkit:doctor` (Codex has the same as skills).
