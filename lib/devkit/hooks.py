@@ -359,10 +359,8 @@ def _handoff_nudge(agent: str, data: dict, sess: dict):
     top = core.gitout(data.get("cwd") or os.getcwd(), "rev-parse", "--show-toplevel") or sess.get("top") or ""
     if not top or core.is_temp(top):
         return None
-    from .registry import main_of
     from . import work
-    main = main_of(Path(top)) or Path(top)
-    pid = core.project_identity(main, core.gitout(main, "config", "--get", "remote.origin.url"))[0]
+    pid = _session_project(data, sess)
     email = core.gitout(top, "config", "user.email")
     if not pid or not email:
         return None
@@ -381,10 +379,23 @@ def _handoff_nudge(agent: str, data: dict, sess: dict):
             f"{tasks} devkit asks again after every turn with new commits, so the note never falls behind.")
 
 
-def _plans_without_reason(sess: dict) -> list:
-    """Plan/spec files changed in this session whose version was not bumped (no `dev plan revise`)."""
+def _session_project(data: dict, sess: dict) -> str:
+    """The project this session works on now: the repository of its current folder (it may have started outside one),
+    else the one it started in. "" outside any project (a portfolio session)."""
+    top = core.gitout(data.get("cwd") or os.getcwd(), "rev-parse", "--show-toplevel") or sess.get("top") or ""
+    if not top or core.is_temp(top):
+        return ""
+    from .registry import main_of
+    main = main_of(Path(top)) or Path(top)
+    return core.project_identity(main, core.gitout(main, "config", "--get", "remote.origin.url"))[0] or ""
+
+
+def _plans_without_reason(sess: dict, pid=None) -> list:
+    """Plan/spec files changed in this session whose version was not bumped (no `dev plan revise`). Only the plans of
+    the session's project (`pid`): another session may be changing another project's plans at the same time. Without
+    a project (a portfolio session), every plan."""
     started = sess.get("started") or 0
-    pdir = HANDOFF / "plans"
+    pdir = HANDOFF / "plans" / pid if pid else HANDOFF / "plans"
     if not pdir.exists():
         return []
     from . import plans as plansmod
@@ -544,7 +555,7 @@ def stop(agent: str):
                                    "`dev lesson recur <id>` if a known pitfall repeated). Skip it for a trivial fix.")
             except Exception:
                 _log(f"stop lessons {agent}: {traceback.format_exc()[-300:]}")
-        plans = _plans_without_reason(sess) if dev_turn else []
+        plans = _plans_without_reason(sess, _session_project(data, sess)) if dev_turn else []
         if plans and not data.get("stop_hook_active"):
             reasons.append("devkit: you changed plan(s) without recording why: " + ", ".join(plans[:4]) +
                            ". Run `dev plan revise <file> --why \"…\"` for each (it versions the plan and logs the "

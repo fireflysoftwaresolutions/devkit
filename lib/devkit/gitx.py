@@ -1282,6 +1282,17 @@ def _tree_diff(top, old, new):
     return [f for f in out.split("\0") if f] if rc == 0 else None
 
 
+# steps that read every file, documents included: a docs-only change can change their result (a leaked key in a
+# README, a broken link, a style finding), so the docs shortcut never applies to them
+READS_EVERY_FILE = re.compile(r"\b(?:gitleaks|trufflehog|detect-secrets|ggshield|trivy|semgrep|osv-scanner|"
+                              r"markdownlint(?:-cli2?)?|vale|lychee|cspell|codespell|prettier|"
+                              r"dev\s+(?:docs\s+check|sec\s+scan))\b")
+
+
+def _reads_every_file(cmd: str) -> bool:
+    return bool(READS_EVERY_FILE.search(cmd or ""))
+
+
 def _resume_plan(c, s, rec, tree, cache):
     """-> ("kept" | "partial" | "full", detail) for one step on `tree`, from its last recorded result."""
     from . import testx
@@ -1304,7 +1315,7 @@ def _resume_plan(c, s, rec, tree, cache):
     key = ("radius", rec["tree"])
     if key not in cache:
         cache[key] = testx.blast_radius(c.top, changed)
-    if cache[key]["mode"] == "none":
+    if cache[key]["mode"] == "none" and not _reads_every_file(s["run"]):
         return "kept", "only docs changed since"
     return "full", f"{len(changed)} file(s) changed since"
 

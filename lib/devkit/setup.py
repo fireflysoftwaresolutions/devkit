@@ -274,6 +274,17 @@ def render_instructions() -> str:
     return header + render(base) + ("\n\n## Personal additions\n\n" + personal if personal else "")
 
 
+def instructions_state(target: Path) -> str:
+    """missing | hand-written | outdated (an older devkit or rules wrote it) | current (what dev install writes now)."""
+    try:
+        text = target.read_text()
+    except OSError:
+        return "missing"
+    if GENERATED_MARK not in text[:200]:
+        return "hand-written"
+    return "current" if text == render_instructions() else "outdated"
+
+
 def write_agent_instructions(quiet=False):
     with quiet_mode(quiet):
         step("Global agent instructions (Claude CLAUDE.md, Codex AGENTS.md)")
@@ -594,6 +605,25 @@ def write_codex_profiles(conf: dict):
 CODEX_ROLE_MARK = "# Managed by devkit"
 
 
+def codex_role_text(role: dict) -> str:
+    """The exact file devkit writes for one Codex role (doctor compares the installed one with it)."""
+    return (f"{CODEX_ROLE_MARK} (config/crew.json, config/codex/config.json). Edit devkit's config, not this file.\n" +
+            "".join(f"{k} = {_toml_value(v)}\n" for k, v in role.items()))
+
+
+def stale_codex_roles(d: Path, roles: dict) -> list:
+    """Role names whose ~/.codex/agents/<name>.toml is missing or differs from what this checkout writes."""
+    out = []
+    for name, role in sorted(roles.items()):
+        f = d / f"{name}.toml"
+        try:
+            if f.read_text() != codex_role_text(role):
+                out.append(name)
+        except OSError:
+            out.append(name)
+    return out
+
+
 def write_codex_agents(conf: dict):
     """Agent roles as ~/.codex/agents/<name>.toml, auto-discovered by Codex: the crew (config/crew.json, Sparks and
     its scout alias included), plus any extra roles in config/codex/config.json "agents". Roles devkit wrote earlier
@@ -612,8 +642,7 @@ def write_codex_agents(conf: dict):
     d = CODEX_HOME / "agents"
     d.mkdir(parents=True, exist_ok=True)
     for name, role in roles.items():
-        text = f"{CODEX_ROLE_MARK} (config/crew.json, config/codex/config.json). Edit devkit's config, not this file.\n" + \
-               "".join(f"{k} = {_toml_value(v)}\n" for k, v in role.items())
+        text = codex_role_text(role)
         f = d / f"{name}.toml"
         if not f.exists() or f.read_text() != text:
             f.write_text(text)
@@ -674,7 +703,10 @@ def plugin_copy_stale(cache_root: Path, src: Path = None) -> bool:
     snapshot, and devkit's version does not change between commits."""
     import filecmp
     src = src or DEVKIT_HOME / "plugin"
-    copies = sorted(cache_root.glob("*")) if cache_root.exists() else []
+
+    def version_key(p: Path):  # 26.11.10 is newer than 26.11.2: compare numbers, not text
+        return [(0, int(x), "") if x.isdigit() else (1, 0, x) for x in re.split(r"[.\-+]", p.name)]
+    copies = sorted((c for c in cache_root.glob("*") if c.is_dir()), key=version_key) if cache_root.exists() else []
     if not copies:
         return True
     dst = copies[-1]
@@ -926,18 +958,20 @@ def doctor() -> int:
           "dev adopt <path> (when no sessions are open in it)")
 
     for target in (CLAUDE_HOME / "CLAUDE.md", CODEX_HOME / "AGENTS.md"):
-        ok = target.exists() and GENERATED_MARK in target.read_text()[:200]
-        check("Agents", f"{tilde(target)}", ok, "generated from devkit" if ok else "missing or hand-written",
+        state = instructions_state(target)
+        check("Agents", f"{tilde(target)}", state == "current",
+              {"current": f"current: devkit {core.VERSION}'s rules", "outdated": "out of date: an older devkit wrote it",
+               "hand-written": "hand-written, not devkit's", "missing": "missing"}[state],
               "dev install --only instructions")
     try:
         from . import crew
         stale = crew.sync(check=True)
         check("Agents", "crew agents", not stale, f"{len(crew.load()['members']) - 1} members generated from "
               f"config/crew.json" if not stale else f"out of date: {', '.join(map(str, stale[:4]))}", "dev crew sync")
-        roles_dir = CODEX_HOME / "agents"
-        missing = [i for i in crew.codex_roles() if not (roles_dir / f"{i}.toml").exists()]
-        check("Codex", "crew roles", not missing, "all crew roles in ~/.codex/agents" if not missing else
-              f"missing: {', '.join(missing[:5])}", "dev install --only codex")
+        roles = crew.codex_roles()
+        stale = stale_codex_roles(CODEX_HOME / "agents", roles)
+        check("Codex", "crew roles", not stale, f"{len(roles)} roles in ~/.codex/agents, current" if not stale else
+              f"missing or out of date: {', '.join(stale[:5])}", "dev install --only codex")
     except Exception as e:
         check("Agents", "crew agents", False, f"crew: {e}", "dev crew sync")
     managed = read_json(STATE / "skills-managed.json", []) or []

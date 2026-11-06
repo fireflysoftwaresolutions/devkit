@@ -3,7 +3,7 @@
 All notable changes to devkit. Versions follow CalVer `YY.MM.PATCH` (PATCH restarts at 0 each month); tags are
 `vYY.MM.PATCH`. Sections follow [Keep a Changelog](https://keepachangelog.com/).
 
-## [Unreleased]
+## [26.11.2] - 2026-11-06
 
 ### Added
 
@@ -18,6 +18,14 @@ All notable changes to devkit. Versions follow CalVer `YY.MM.PATCH` (PATCH resta
 
 - `dev agents test` reads the hooks log from the byte offset it recorded, so the guard check no longer reports
   "no guard decision logged" when earlier lines hold multi-byte characters.
+- `dev ci --run --resume` reruns the steps that read every file (secret, filesystem, and docs scans) after a
+  docs-only change: a document can leak a key too. Builds and code linters still keep the docs shortcut.
+- The Stop hook asks for `dev plan revise` only for the plans of the project the session works in. With two sessions
+  open, it no longer sends one back over a plan the other changed in another project.
+- `dev doctor` compares the installed instructions (`~/.claude/CLAUDE.md`, `~/.codex/AGENTS.md`) and the Codex crew
+  roles with what this devkit writes, so an outdated install shows as out of date instead of passing because the
+  files exist.
+- The installed-plugin check compares the newest copy by version number, so 26.11.10 counts as newer than 26.11.2.
 
 ## [26.11.1] - 2026-11-06
 
