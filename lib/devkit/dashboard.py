@@ -932,7 +932,9 @@ LIGHT = """
   --line:#d8d4ca; --line-soft:#e3dfd6; --text:#272820; --strong:#10110f; --text-2:#62645b;
   --mark:#474a42; --track:#dedad0; --grid:#e3dfd6; --axis:#c9c4b8; --deemph:#bfb8ab;
   --accent:#ffb34a; --accent-hover:#ffbe63; --accent-ink:#10110f; --focus:#855414;
-  --good:#2f9e44; --warn:#d99a0b; --bad:#d03b3b; --warning:#d99a0b; --critical:#d03b3b;
+  --good:#0ca30c; --warn:#fab219; --bad:#d03b3b; --warning:#fab219; --critical:#d03b3b;
+  --s-ok:#0ca30c; --s-warn:#fab219; --s-risk:#d03b3b; --s-done:#8f8a7e; --s-none:#dedad0;
+  --h0:#e6e2d9; --h1:#aaa394; --h2:#857f71; --h3:#56584f; --h4:#272820; --card:#fbfaf7; --card-hover:#fffefa;
   --good-text:#1d6b2f; --warn-text:#7a5200; --bad-text:#a52a2a; --hl:rgba(255,179,74,.45);
   --overlay:rgba(16,17,15,.32); --shadow:0 2px 6px rgba(16,17,15,.06),0 16px 32px rgba(16,17,15,.10); --elev-border:0 solid transparent;
   --logo-dark:none; --logo-light:block;
@@ -943,7 +945,9 @@ DARK = """
   --line:#474a42; --line-soft:#2b2d28; --text:#f3f1eb; --strong:#ffffff; --text-2:#bfb8ab;
   --mark:#bfb8ab; --track:#30322c; --grid:#2b2d28; --axis:#474a42; --deemph:#62645b;
   --accent:#ffb34a; --accent-hover:#ffc06b; --accent-ink:#10110f; --focus:#ffb34a;
-  --good:#3cb25a; --warn:#fab219; --bad:#e5534b; --warning:#fab219; --critical:#e5534b;
+  --good:#0ca30c; --warn:#fab219; --bad:#d03b3b; --warning:#fab219; --critical:#d03b3b;
+  --s-ok:#0ca30c; --s-warn:#fab219; --s-risk:#d03b3b; --s-done:#77796f; --s-none:#30322c;
+  --h0:#22231f; --h1:#5f6158; --h2:#8d8a7f; --h3:#bfb8ab; --h4:#f3f1eb; --card:#181915; --card-hover:#1e1f1b;
   --good-text:#6fd08a; --warn-text:#fab219; --bad-text:#f29b95; --hl:rgba(255,179,74,.32);
   --overlay:rgba(0,0,0,.6); --shadow:none; --elev-border:1px solid #474a42;
   --logo-dark:block; --logo-light:none;
@@ -953,7 +957,7 @@ CSS = r"""
 *,*::before,*::after{box-sizing:border-box}
 /* one scale for space, four type sizes (13 / 15 / 18 / 28 px), two weights (400 / 600) */
 :root{--s1:4px;--s2:8px;--s3:12px;--s4:16px;--s5:24px;--s6:32px;--s7:48px;--s8:64px;
-  --fs-1:.8125rem;--fs-2:.9375rem;--fs-3:1.125rem;--fs-4:1.75rem;--r:10px;--rs:6px;--row:44px;--nav-h:56px;--tabs-h:44px;--wide:1280px;
+  --fs-1:.8125rem;--fs-2:.9375rem;--fs-3:1.125rem;--fs-4:1.75rem;--r:10px;--rs:6px;--row:44px;--nav-h:56px;--tabs-h:44px;--wide:1600px;
   --mono:ui-monospace,"SF Mono",Menlo,Consolas,monospace;--ease:cubic-bezier(.2,.8,.2,1)}
 html{-webkit-text-size-adjust:100%;scrollbar-color:var(--line) transparent}
 body{margin:0;background:var(--page);color:var(--text);font:400 var(--fs-2)/1.5 "Manrope","Manrope Variable",system-ui,-apple-system,"Segoe UI",Arial,sans-serif}
@@ -1182,7 +1186,8 @@ table.pt .prs{flex-wrap:nowrap}
 .phead .go{display:flex;flex-wrap:wrap;gap:var(--s2);align-items:center;justify-content:flex-end}
 .pline{font-size:var(--fs-2);color:var(--text-2)}
 .pline .stat{color:var(--text)}
-.pline .msl{display:inline-block;max-width:52ch;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;vertical-align:bottom}
+.pline>.meta{display:flex}
+.pline .msl{display:inline-block;max-width:min(52ch,100%);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;vertical-align:bottom}
 .lead{margin:0;max-width:70ch;color:var(--text);font-size:var(--fs-2)}
 .lead p{margin:0}
 .pprog{display:flex;align-items:center;gap:var(--s3);max-width:520px;font-size:var(--fs-1);color:var(--text-2)}
@@ -1213,7 +1218,7 @@ table.pt .prs{flex-wrap:nowrap}
 .callout .cbody{flex:1 1 260px;min-width:0;font-size:var(--fs-1);color:var(--text-2)}
 .callout .cbody strong{display:block;color:var(--strong);font-size:var(--fs-2);font-weight:600}
 .callout .cact{display:flex;gap:var(--s2);flex-wrap:wrap;margin-left:auto;max-width:100%;min-width:0}
-.db .callout,.person .callout{margin:0}
+.mbody .callout,.person .callout{margin:0}
 /* ---------- Team: one column per person, each session once */
 .people{display:grid;grid-template-columns:repeat(auto-fill,minmax(340px,1fr));gap:var(--s7) var(--s6);align-items:start}
 .person{display:grid;grid-template-columns:minmax(0,1fr);gap:var(--s4);padding-top:var(--s4);border-top:1px solid var(--line);min-width:0}
@@ -1293,21 +1298,12 @@ table.pt .prs{flex-wrap:nowrap}
 /* ---------- drawer, palette, sheet: one elevation each (shadow in light, hairline in dark) */
 .scrim{position:fixed;inset:0;background:var(--overlay);z-index:60;opacity:0;transition:opacity .18s var(--ease)}
 .scrim.on{opacity:1}
-.drawer{position:fixed;top:0;right:0;bottom:0;width:min(640px,100vw);z-index:70;background:var(--raised);border-left:var(--elev-border);box-shadow:var(--shadow);overflow:auto;transform:translateX(100%);transition:transform .22s var(--ease)}
-.drawer.on{transform:none}
-.dh{position:sticky;top:0;z-index:3;background:var(--raised);border-bottom:1px solid var(--line-soft);padding:var(--s5) var(--s6) var(--s4)}
-.dh .r1{display:flex;gap:var(--s3);align-items:flex-start}
-.dh h2{margin:0;font-size:var(--fs-4);font-weight:400;letter-spacing:-.025em;line-height:1.2;color:var(--strong);overflow-wrap:anywhere;text-wrap:balance}
-.dh .crumbs ol{margin-bottom:var(--s2)}
-.dh .pline{margin-top:var(--s2);font-size:var(--fs-1)}
-.db{padding:var(--s5) var(--s6) var(--s7);display:grid;grid-template-columns:minmax(0,1fr);gap:var(--s6)}
-.db .panel{scroll-margin-top:150px}
 .lockline{font-size:var(--fs-2);color:var(--text)}
 .lockline .t2{display:block;font-size:var(--fs-1);margin-top:2px}
 .nextcmd{display:grid;gap:var(--s2);justify-items:start}
 .nextcmd code{color:var(--text-2);overflow-wrap:anywhere}
 .tnote{font-size:var(--fs-1);color:var(--text-2);margin:var(--s3) 0 0}
-.drawer .md{padding:0}
+dialog.modal .md{padding:0}
 .kv{display:grid;grid-template-columns:auto minmax(0,1fr);gap:6px var(--s5);font-size:var(--fs-1);margin:0}
 .kv dt{color:var(--text-2)} .kv dd{margin:0;min-width:0;overflow-wrap:anywhere;color:var(--text)}
 .palette{position:fixed;inset:10vh 0 auto 0;margin:0 auto;width:min(680px,94vw);z-index:90;background:var(--raised);border:var(--elev-border);border-radius:14px;box-shadow:var(--shadow);overflow:hidden}
@@ -1452,6 +1448,139 @@ a.rl,a.at,a.itl{color:inherit;text-decoration:none} a.rl:hover,a.at:hover,a.itl:
   table.t td.c-cta .icopy{opacity:0;transition:opacity .12s} table.t tr:hover td.c-cta .icopy,table.t tr:focus-within td.c-cta .icopy{opacity:1}}
 .since .sl1{display:flex;gap:var(--s2);align-items:baseline;min-width:0} .since .sl1 .lnk{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .rpath{font-family:var(--mono);font-size:var(--fs-1)}
+/* ---------- v5 app shell: header, a main area that grows, the footer at the bottom of short pages */
+body{display:flex;flex-direction:column;min-height:100vh;min-height:100dvh}
+.filters{width:100%}
+#view{flex:1 0 auto;width:100%}
+.foot{margin-top:auto}
+/* a 12-column grid up to 1600 px */
+.g12{display:grid;grid-template-columns:repeat(12,minmax(0,1fr));gap:var(--s5);align-items:start}
+.g12>*{min-width:0}
+.sp-2{grid-column:span 2}.sp-3{grid-column:span 3}.sp-4{grid-column:span 4}.sp-5{grid-column:span 5}.sp-6{grid-column:span 6}.sp-8{grid-column:span 8}.sp-12{grid-column:1/-1}
+.g12.tiles{margin:0 0 var(--s6)}
+.g12.home{row-gap:var(--s5)}
+.view-home .head{margin-bottom:var(--s5)}
+/* status and magnitude colors (dataviz: fixed status palette, one-hue ramp); fills only, text stays in text tokens */
+.k-ok{fill:var(--s-ok);background:var(--s-ok)} .k-warn{fill:var(--s-warn);background:var(--s-warn)} .k-risk{fill:var(--s-risk);background:var(--s-risk)}
+.k-done{fill:var(--s-done);background:var(--s-done)} .k-none{fill:var(--s-none);background:var(--s-none)} .k-mark{fill:var(--mark);background:var(--mark)}
+.dot.k-ok,.dot.k-warn,.dot.k-risk,.dot.k-done,.dot.k-none,.dot.k-mark{display:inline-block}
+.stat{display:inline-flex;align-items:center;gap:6px;white-space:nowrap}
+/* stat tiles */
+.stile{display:grid;grid-template-columns:minmax(0,1fr);align-content:start;gap:var(--s2);padding:var(--s3) var(--s4) var(--s4);border-radius:12px;background:var(--card);text-decoration:none;color:inherit;min-width:0}
+a.stile:hover{background:var(--card-hover)}
+.stile .s-l,.ctr .s-l,.mfigs .s-l{font-size:var(--fs-1);color:var(--text-2)}
+.stile .s-v,.ctr .s-v{display:flex;align-items:baseline;gap:var(--s2);min-width:0}
+.stile .s-v b{font-size:var(--fs-4);font-weight:600;line-height:1.1;color:var(--strong);letter-spacing:-.02em}
+.stile.wordv .s-v b{font-size:var(--fs-3)}
+.stile.row{grid-template-columns:minmax(0,1fr) auto;align-items:end}.stile.row>.s-l,.stile.row>.s-v{grid-column:1}.stile.row>.spark{grid-column:2;grid-row:1/3;align-self:end}
+.stile .s-v .t2{font-size:var(--fs-1)}
+.stile .stat{white-space:normal;align-items:baseline} .stile .stat .dot{transform:translateY(-1px)} .stile .s-v{flex-wrap:wrap}
+.stile .waffle{max-width:100%;height:auto}
+/* thin segmented bar and legend */
+.segbar{display:flex;gap:2px;height:8px;border-radius:4px;overflow:hidden;background:var(--s-none);min-width:0}
+.segbar.empty{background:var(--track)}
+.segbar i{display:block;min-width:3px;height:100%}
+.lgd{display:flex;flex-wrap:wrap;gap:2px var(--s3);list-style:none;margin:0;padding:0;font-size:var(--fs-1);color:var(--text-2)}
+.lgd li{display:inline-flex;align-items:center;gap:5px;white-space:nowrap}
+.lgd i{width:8px;height:8px;border-radius:2px;flex:none}
+.lgd b{font-weight:600;color:var(--text)}
+.ph .right .lgd{margin-right:var(--s3)}
+/* rings, waffles, sparklines, CI strips, lock rings, pills, session bars */
+.ring{flex:none;display:block}
+.ring .r-t{fill:none;stroke:var(--track)} .ring .r-a{fill:none;stroke:var(--mark);stroke-linecap:round}
+.ring .r-v{font-size:var(--fs-1);font-weight:600;fill:var(--strong)} .ring.lg .r-v{font-size:var(--fs-3)}
+.ring.sm .r-v{letter-spacing:-.04em}
+.waffle{display:block;flex:none}
+.spark{display:block;flex:none;overflow:visible}
+.spark rect{fill:var(--deemph)} .spark rect.zero{fill:var(--track)} .spark rect.cur{fill:var(--mark)}
+.ci{display:inline-flex;align-items:center;gap:4px;flex-wrap:wrap;min-width:0}
+.ci i{width:8px;height:8px;border-radius:50%;flex:none}
+.ci b{font-size:var(--fs-1);font-weight:400}
+.lockr{display:inline-flex;flex:none;color:var(--text-2)}
+.lockr .r-t{fill:none;stroke:var(--track)} .lockr .r-a{fill:none;stroke:var(--mark)} .lockr .lk-b{fill:currentColor} .lockr .lk-s{fill:none;stroke:currentColor;stroke-width:1.4}
+.lockr.exp{color:var(--warn-text)} .lockr.exp .r-t{stroke:var(--s-warn)}
+.lockc{display:inline-flex;align-items:center;gap:4px;font-size:var(--fs-1);color:var(--text-2)} .lockc b{font-weight:600;color:var(--text)} .lockc.exp{color:var(--warn-text)}
+.pill{display:inline-flex;align-items:center;height:22px;padding:0 8px;border-radius:999px;background:var(--wash);color:var(--text);font-size:var(--fs-1);white-space:nowrap}
+.pill.soon{box-shadow:inset 0 0 0 1px var(--line)} .pill.over{background:var(--s-risk);color:#fff} .pill.none{color:var(--text-2);background:none;padding:0}
+.sbars{display:grid;grid-template-columns:minmax(0,1fr);gap:6px;min-width:0}
+.sbar{all:unset;display:grid;grid-template-columns:minmax(0,1fr);gap:3px;cursor:pointer;min-width:0;border-radius:4px}
+.sbar:focus-visible{outline:2px solid var(--focus);outline-offset:2px}
+.sbar .sb-l{display:flex;justify-content:space-between;gap:var(--s2);font-size:var(--fs-1);color:var(--text);min-width:0}
+.sbar .sb-b{display:block;height:4px;border-radius:2px;background:var(--track);overflow:hidden}
+.sbar .sb-b i{display:block;height:100%;background:var(--mark)} .sbar.blocked .sb-b i{background:var(--s-risk)} .sbar.blocked .sb-l .t2{color:var(--bad-text)}
+.sbar:hover .sb-l>.ell{text-decoration:underline}
+.warnchip{display:inline-flex;align-items:center;gap:6px;font-size:var(--fs-1);color:var(--text);text-decoration:none;white-space:nowrap} .warnchip:hover{text-decoration:underline}
+.cnt{min-width:24px;height:22px;padding:0 7px;border-radius:999px;background:var(--wash);font-size:var(--fs-1);color:var(--text);display:inline-grid;place-items:center;align-self:center}
+.clamp2{display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden}
+.clamp3{display:-webkit-box;-webkit-line-clamp:3;-webkit-box-orient:vertical;overflow:hidden}
+/* since-yesterday counters */
+.ctrs{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:var(--s3)}
+.ctrs.col1{grid-template-columns:minmax(0,1fr);gap:var(--s4)}
+.ctr{all:unset;display:grid;grid-template-columns:minmax(0,1fr) auto;grid-template-areas:"l l" "v s";align-items:end;gap:var(--s1) var(--s3);padding:var(--s3) var(--s4);border-radius:12px;background:var(--card);cursor:pointer;min-width:0}
+.ctr:hover{background:var(--card-hover)} .ctr:focus-visible{outline:2px solid var(--focus);outline-offset:2px}
+.ctr .s-l{grid-area:l} .ctr .s-v{grid-area:v} .ctr .spark{grid-area:s}
+.ctr .s-v b{font-size:var(--fs-4);font-weight:600;line-height:1.1;color:var(--strong)}
+/* initiative cards, project tiles, person cards */
+.icards{display:grid;grid-template-columns:repeat(auto-fill,minmax(260px,1fr));gap:var(--s4)}
+.icards.home{grid-template-columns:repeat(auto-fill,minmax(230px,1fr))}
+.icard{display:grid;grid-template-columns:minmax(0,1fr);gap:var(--s3);align-content:start;padding:var(--s4);border-radius:12px;background:var(--card);cursor:pointer;min-width:0}
+.icard:hover,.ptile:hover,.pcard3:hover{background:var(--card-hover)}
+.icard .ic-h{display:flex;gap:var(--s3);align-items:center;min-width:0}
+.icard .ic-n{display:grid;gap:2px;min-width:0}
+.icard .ic-n .stat{font-size:var(--fs-1);gap:6px}
+.icard .ic-n .stat .num{margin-left:var(--s2)}
+.icard .waffle{max-width:100%;height:auto}
+.icard .ic-f{display:flex;align-items:center;justify-content:space-between;gap:var(--s2);min-height:26px}
+.ptiles{display:grid;grid-template-columns:repeat(auto-fill,minmax(230px,1fr));gap:var(--s3)}
+.ptiles.sm{grid-template-columns:repeat(auto-fill,minmax(200px,1fr))}
+.ptile{display:grid;grid-template-columns:minmax(0,1fr);gap:var(--s3);padding:var(--s3) var(--s4);border-radius:12px;background:var(--card);cursor:pointer;min-width:0}
+.ptile .pt-h{display:flex;align-items:center;gap:var(--s2);min-width:0}
+.ptile .pt-n{display:grid;min-width:0;flex:1;font-size:var(--fs-1)} .ptile .pt-n .strong{font-size:var(--fs-2)}
+.ptile .pt-f{display:flex;align-items:center;justify-content:space-between;gap:var(--s2);min-height:24px}
+.people{grid-template-columns:repeat(auto-fill,minmax(320px,1fr));gap:var(--s4)}
+.pcard3{display:grid;grid-template-columns:minmax(0,1fr);gap:var(--s4);padding:var(--s4);border-radius:12px;background:var(--card);cursor:pointer;min-width:0}
+.pcard3 .pc-h{display:flex;gap:var(--s3);align-items:center;min-width:0}
+.pcard3 .pc-n{flex:1;min-width:0} .pcard3 h3{margin:0;display:flex;gap:var(--s2);align-items:center;font-size:var(--fs-3);font-weight:600;min-width:0}
+.pcard3 h3 .rl{color:var(--strong)}
+.prow .sbars{margin-top:6px}
+/* page headers */
+.mh-row{display:flex;gap:var(--s4);align-items:center;min-width:0}
+.mh-tt{display:grid;grid-template-columns:minmax(0,1fr);gap:var(--s1);min-width:0;flex:1 1 auto}
+.phead .mh-tt h1{margin:0}
+.reasons{list-style:none;margin:0;padding:0;display:grid;gap:4px;font-size:var(--fs-1)}
+.reasons li{display:flex;gap:var(--s2);align-items:baseline} .reasons .dot{transform:translateY(-1px)}
+/* activity heatmap */
+.heat-box{overflow-x:auto}
+.heat{display:block;max-width:100%;height:auto}
+.heat .ax{fill:var(--text-2);font-size:var(--fs-1)}
+.heat .h0,.heat-l .h0{fill:var(--h0);background:var(--h0)} .heat .h1,.heat-l .h1{fill:var(--h1);background:var(--h1)} .heat .h2,.heat-l .h2{fill:var(--h2);background:var(--h2)}
+.heat .h3,.heat-l .h3{fill:var(--h3);background:var(--h3)} .heat .h4,.heat-l .h4{fill:var(--h4);background:var(--h4)}
+.heat-l{display:flex;align-items:center;gap:4px;margin-top:var(--s2);font-size:var(--fs-1);color:var(--text-2)} .heat-l i{width:12px;height:12px;border-radius:3px}
+/* the quick-look modal */
+dialog.modal{width:min(760px,calc(100vw - 32px));max-height:calc(100dvh - 48px);padding:0;border:var(--elev-border);border-radius:16px;background:var(--raised);color:var(--text);box-shadow:var(--shadow);overflow:auto;overscroll-behavior:contain}
+dialog.modal::backdrop{background:var(--overlay)}
+dialog.modal:focus{outline:none}
+.mh{position:sticky;top:0;z-index:3;display:flex;gap:var(--s3);align-items:flex-start;padding:var(--s5) var(--s5) var(--s4);background:var(--raised);border-bottom:1px solid var(--line-soft)}
+.mh-t{flex:1;min-width:0;display:grid;gap:var(--s1)}
+.mh h2{margin:0;font-size:var(--fs-4);font-weight:400;letter-spacing:-.025em;line-height:1.2;color:var(--strong);overflow-wrap:anywhere;text-wrap:balance}
+.mh .crumbs ol{margin:0}
+.mbody{display:grid;grid-template-columns:minmax(0,1fr);gap:var(--s5);padding:var(--s5)}
+.mf{position:sticky;bottom:0;z-index:3;display:flex;flex-wrap:wrap;gap:var(--s2);justify-content:flex-end;padding:var(--s3) var(--s5);background:var(--raised);border-top:1px solid var(--line-soft)}
+.msec{display:grid;grid-template-columns:minmax(0,1fr);gap:var(--s2);min-width:0}
+.msec-h{display:flex;align-items:baseline;gap:var(--s2)} .msec-h h3{margin:0;font-size:var(--fs-2);font-weight:600;color:var(--strong)} .msec-h .count{color:var(--text-2)}
+.msec .waffle{max-width:100%;height:auto}
+.mfigs{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:var(--s4)} .mfigs>div{display:grid;gap:var(--s2);align-content:start;min-width:0}
+.lockline{display:flex;gap:var(--s3);align-items:flex-start;font-size:var(--fs-2)} .lockline .t2{font-size:var(--fs-1);margin-top:2px}
+.nextcmd{display:grid;gap:var(--s1);padding:var(--s3) var(--s4);border-radius:10px;background:var(--wash)} .nextcmd code{color:var(--text)}
+@media (prefers-reduced-motion:no-preference){dialog.modal[open]{animation:m-in .18s var(--ease)} dialog.modal[open]::backdrop{animation:b-in .18s linear}
+  @keyframes m-in{from{opacity:0;transform:translateY(8px)}} @keyframes b-in{from{opacity:0}}}
+@media (prefers-reduced-motion:reduce){dialog.modal[open]{animation:b-in .12s linear} @keyframes b-in{from{opacity:0}}}
+/* the 12-column grid steps down: 6 columns, then one */
+@media (max-width:1180px){.sp-2,.sp-3{grid-column:span 6}.sp-4,.sp-5{grid-column:span 6}.sp-8,.full-md{grid-column:1/-1}}
+@media (max-width:768px){.g12>*{grid-column:1/-1}.g12>.stile{grid-column:span 6}.ctrs{grid-template-columns:repeat(2,minmax(0,1fr))}
+  .mfigs{grid-template-columns:minmax(0,1fr)} dialog.modal{width:calc(100vw - 16px);max-height:calc(100dvh - 16px);border-radius:14px}
+  .mh{padding:var(--s4)}.mbody{padding:var(--s4)}.mf{padding:var(--s3) var(--s4)} .mh-row{gap:var(--s3)}
+  .stile .s-v b,.ctr .s-v b{font-size:var(--fs-3)}}
 /* sticky table headers on wide screens (tables that fit), under the navbar and the page tabs */
 @media (min-width:1280px){main .tw.st{overflow:visible} main .tw.st.x{overflow-x:auto}
   main .tw.st:not(.x) table.t th{top:var(--nav-h)} main .tabpanel .tw.st:not(.x) table.t th{top:calc(var(--nav-h) + var(--tabs-h))}}
@@ -1484,7 +1613,6 @@ a.rl,a.at,a.itl{color:inherit;text-decoration:none} a.rl:hover,a.at:hover,a.itl:
   .fin{min-width:0;flex:1 1 100%}
   .toolbar select{flex:1 1 140px;width:0}
   .cmdr{grid-template-columns:minmax(0,1fr) 28px}.cmdr>.t2{grid-column:1/-1}
-  .db{padding:var(--s4) var(--s4) var(--s6)}.dh{padding:var(--s4) var(--s4) var(--s3)}
   .ph{flex-wrap:wrap}
   .mgrp>summary{flex-wrap:wrap;gap:var(--s2)}.mgrp .mg-c{margin-left:0}
   table.pt thead{display:none}
@@ -1498,13 +1626,12 @@ a.rl,a.at,a.itl{color:inherit;text-decoration:none} a.rl:hover,a.at:hover,a.itl:
 }
 @media (prefers-reduced-motion:reduce){
   *,*::before,*::after{scroll-behavior:auto!important}
-  .drawer{transform:none;opacity:0;transition:opacity .15s linear}.drawer.on{opacity:1}
   .toast{transform:translate(-50%,0);transition:opacity .15s linear}
   .recent>summary::before,.mgrp>summary::before,.tree summary::before,.bar{transition:none}
 }
 @media print{
   :root{--page:#fff;--raised:#fff;--shadow:none}
-  .nav,.filters,.drawer,.scrim,.palette,.sheet,.toast,.btn,.icopy,.seg,.cmenu,.toolbar select,.tree input,.viewer .vh input{display:none!important}
+  .nav,.filters,.modal,.scrim,.palette,.sheet,.toast,.btn,.icopy,.seg,.cmenu,.toolbar select,.tree input,.viewer .vh input{display:none!important}
   main{max-width:none;padding:0}.panel,.pcard,.person{break-inside:avoid}
   .explorer{grid-template-columns:1fr}.tree{display:none}a{text-decoration:none}
 }
@@ -1519,9 +1646,9 @@ const D = JSON.parse(document.getElementById("devkit-data").textContent);
 const VIEWS = [["overview", "Home", "o"], ["initiatives", "Initiatives", "i"], ["projects", "Projects", "p"], ["team", "Team", "m"], ["tasks", "Tasks", "t"], ["activity", "Activity", "a"], ["explorer", "Explorer", "e"], ["health", "Health", "h"]];
 const ROUTES = VIEWS.map(v => v[0]).concat(["search", "actions"]);
 const DEFAULT = {view: "overview", id: "", tab: "", task: "", q: "", status: [], priority: [], owner: [], stack: [], tag: [], ci: [], health: [],
-  live: false, prs: false, nc: false, loose: false, sort: "attention", group: "none", layout: "table", dense: false, f: "", fq: "",
-  range: 7, types: [], tp: "", tmode: "board", who: "", tst: "", ist: "", psort: "priority", ilayout: "cards", mq: "", mg: "", src: "all", kind: ""};
-const PAGEKEYS = {tab: "", task: "", mq: "", mg: "", src: "all", tst: ""};
+  live: false, prs: false, nc: false, loose: false, sort: "attention", group: "none", layout: "cards", dense: false, f: "", fq: "",
+  range: 7, types: [], tp: "", tmode: "board", who: "", tst: "", ist: "", psort: "priority", ilayout: "cards", mq: "", mg: "", src: "all", kind: "", modal: ""};
+const PAGEKEYS = {tab: "", task: "", modal: "", mq: "", mg: "", src: "all", tst: ""};
 const $ = (s, r = document) => r.querySelector(s);
 const $$ = (s, r = document) => Array.from(r.querySelectorAll(s));
 const SVGNS = "http://www.w3.org/2000/svg";
@@ -1707,15 +1834,17 @@ function decode(hash) {
   return st;
 }
 function link(patch) { const keep = !("view" in patch) || patch.view === S.view; return encode(Object.assign({}, DEFAULT, {view: S.view, id: keep ? S.id : ""}, patch)); }
+let RS = null;   /* the state of the last full render: a change of the modal alone redraws only the modal */
+function onlyModal(a, b) { if (!a) return false; for (const k of Object.keys(DEFAULT)) if (k !== "modal" && k !== "task" && JSON.stringify(a[k]) !== JSON.stringify(b[k])) return false; return true; }
 function set(patch, push) {
   Object.assign(S, patch);
   const hs = encode(S);
   if (push && location.hash !== hs) { location.hash = hs; return; }
   if (location.hash !== hs) history.replaceState(null, "", hs);
-  store.set("devkit.state", S); render();
+  store.set("devkit.state", S); if (onlyModal(RS, S)) renderModal(); else render();
 }
 let lastView = "";
-window.addEventListener("hashchange", () => { const st = decode(location.hash); if (st) { S = st; store.set("devkit.state", S); render(); } });
+window.addEventListener("hashchange", () => { const st = decode(location.hash); if (st) { S = st; store.set("devkit.state", S); if (onlyModal(RS, S)) renderModal(); else render(); } });
 
 /* ---------------------------------------------------------------- filtering (project facets) */
 function tokens(q) { return String(q || "").toLowerCase().split(/\s+/).filter(Boolean); }
@@ -1855,7 +1984,130 @@ function cmdMenu(label, rows) {
     h("div", {class: "menu", role: "group", "aria-label": label}, h("div", {class: "cmds"}, rows.filter(Boolean).map(([l, c]) => cmdRow(l, c)))));
   return det;
 }
-function toast(msg) { const t = $("#toast"); t.textContent = msg; t.classList.add("on"); clearTimeout(toast.t); toast.t = setTimeout(() => t.classList.remove("on"), 1800); }
+/* ---------------------------------------------------------------- visuals: inline SVG and CSS only. Every visual has an accessible name
+   (role=img + aria-label) and every mark a tooltip with its exact value (data-tip: hover, and focus where the visual is focusable).
+   Colors follow the dataviz rules: the fixed status palette (always with a label, legend or tooltip), neutral ink for progress,
+   a one-hue warm-grey ramp for magnitude, text never in a data color. */
+const HS = {ok: "On track", warn: "At risk", risk: "Off track", done: "Done", none: "No data"};
+const HORDER = ["risk", "warn", "ok", "done", "none"];
+function hstate(p) {
+  if (!p) return "none";
+  const st = p.status, lv = p.health ? p.health.level : "ok";
+  if (st === "done" || st === "archived") return "done";
+  if (st === "blocked" || lv === "risk") return "risk";
+  if (st === "paused" || lv === "warn") return "warn";
+  if (st === "untracked" || st === "unknown") return "none";
+  return "ok";
+}
+function memberState(m) { const p = BYID.get(m.id); return p ? hstate(p) : hstate({status: m.status || "unknown"}); }
+/* an initiative is off track when blocked or overdue, at risk when paused, due within a week or holding blocked tasks */
+function istate(x) {
+  if (x.status === "done" || x.status === "archived") return "done";
+  const today = lkey(new Date()), week = lkey(new Date(Date.now() + 7 * 864e5));
+  if (x.status === "blocked" || (x.due && x.due < today)) return "risk";
+  if (x.status === "paused" || (x.due && x.due <= week) || x.cnt.blocked) return "warn";
+  return "ok";
+}
+function tally(keys) { const c = {}; for (const k of keys) c[k] = (c[k] || 0) + 1; return c; }
+function tallyText(c) { return HORDER.filter(k => c[k]).map(k => c[k] + " " + HS[k].toLowerCase()).join(", ") || "none"; }
+function hparts(c) { return HORDER.map(k => [k, c[k] || 0, HS[k]]); }
+/* a thin segmented bar (one whole split into parts): 2px surface gaps, rounded ends, no text; a legend or label names the parts */
+function segBar(parts, label) {
+  const tot = parts.reduce((a, p) => a + p[1], 0);
+  const el = h("div", {class: "segbar" + (tot ? "" : " empty"), role: "img", "aria-label": label + ": " + (parts.filter(p => p[1]).map(p => p[1] + " " + p[2].toLowerCase()).join(", ") || "none")});
+  for (const [k, n, name] of parts) if (n) el.append(h("i", {class: "k-" + k, style: "flex:" + n + " 1 0", "data-tip": name + ": " + n + " of " + tot + " (" + Math.round(100 * n / tot) + "%)"}));
+  return el;
+}
+function legend(parts) { return h("ul", {class: "lgd", "aria-hidden": "true"}, parts.filter(p => p[1]).map(([k, n, name]) => h("li", null, h("i", {class: "k-" + k}), h("b", {class: "num", text: String(n)}), name.toLowerCase()))); }
+/* a progress ring with the number inside */
+function ring(pct, size, label, focusable) {
+  size = size || 44; const sw = size >= 56 ? 6 : 4, r = (size - sw) / 2, c = 2 * Math.PI * r, m = size / 2, v = pct == null ? 0 : Math.max(0, Math.min(100, pct));
+  return sv("svg", {class: "ring" + (size >= 56 ? " lg" : size < 40 ? " sm" : ""), width: size, height: size, viewBox: "0 0 " + size + " " + size, role: "img", "aria-label": label, "data-tip": label, tabindex: focusable ? "0" : null},
+    sv("circle", {cx: m, cy: m, r, class: "r-t", "stroke-width": sw}),
+    v > 0 ? sv("circle", {cx: m, cy: m, r, class: "r-a", "stroke-width": sw, "stroke-dasharray": (c * v / 100).toFixed(2) + " " + c.toFixed(2), transform: "rotate(-90 " + m + " " + m + ")"}) : null,
+    sv("text", {x: m, y: m, class: "r-v", "text-anchor": "middle", dy: "0.35em"}, pct == null ? "–" : Math.round(v) + (size >= 56 ? "%" : "")));
+}
+function progRing(x, size, focusable) { const pr = progOf(x); return ring(pr.pct, size, pr.pct == null ? "No progress yet (no tasks)" : "Progress " + pr.pct + "%: " + pr.why, focusable); }
+/* a waffle: one square per member project, colored by state, grouped worst first */
+function waffle(items, label, cell, cols, focusable) {
+  cell = cell || 8; const g = 2, n = Math.max(1, items.length); cols = Math.max(1, Math.min(n, cols || 24));
+  const rows = Math.ceil(n / cols), w = cols * (cell + g) - g, hh = rows * (cell + g) - g;
+  const sorted = items.slice().sort((a, b) => HORDER.indexOf(a[0]) - HORDER.indexOf(b[0]) || String(a[1]).localeCompare(String(b[1])));
+  return sv("svg", {class: "waffle", width: w, height: hh, viewBox: "0 0 " + w + " " + hh, role: "img", "aria-label": label, tabindex: focusable ? "0" : null, "data-tip": focusable ? label : null},
+    sorted.map(([s, name], i) => sv("rect", {x: (i % cols) * (cell + g), y: Math.floor(i / cols) * (cell + g), width: cell, height: cell, rx: cell > 8 ? 2 : 1.5, class: "k-" + s, "data-tip": name + ": " + HS[s].toLowerCase()})));
+}
+function memberWaffle(x, cell, cols, focusable) {
+  const items = x.members.map(m => [memberState(m), String(m.id).split("/").pop()]);
+  return items.length ? waffle(items, plural(items.length, "member project") + ": " + tallyText(tally(items.map(i => i[0]))), cell, cols, focusable) : h("span", {class: "t2", text: "No member projects"});
+}
+/* a sparkline: one column per day (the de-emphasis hue), today in ink */
+function spark(series, label, unit, focusable) {
+  const n = series.length, bw = 5, g = 2, H = 24, w = n * (bw + g) - g, max = Math.max(1, ...series.map(s => s[1])), tot = series.reduce((a, s) => a + s[1], 0);
+  const name = label + ": " + plural(tot, unit) + " in " + n + " days, " + series[n - 1][1] + " today";
+  return sv("svg", {class: "spark", width: w, height: H, viewBox: "0 0 " + w + " " + H, role: "img", "aria-label": name, tabindex: focusable ? "0" : null, "data-tip": focusable ? name : null},
+    series.map(([k, v], i) => { const bh = v ? Math.max(3, Math.round(v / max * H)) : 2;
+      return sv("rect", {x: i * (bw + g), y: H - bh, width: bw, height: bh, rx: 1, class: i === n - 1 ? "cur" : v ? "" : "zero", "data-tip": shortDay(k) + ": " + plural(v, unit)}); }));
+}
+function commitSeries(ps, n) { return days(n).map(k => [k, ps.reduce((a, p) => a + (p.act[k] || 0), 0)]); }
+function sessionSeries(scopes, n) { const c = {}; for (const s of D.session_log || []) if (!scopes || scopes.has(s.scope)) { const k = lkey(new Date(s.ts * 1000)); c[k] = (c[k] || 0) + 1; } return days(n).map(k => [k, c[k] || 0]); }
+function doneSeries(items, n) { const c = {}; for (const it of items) if (it.status === "done" && it.updated) { const k = lkey(new Date(iso(it.updated) * 1000)); c[k] = (c[k] || 0) + 1; } return days(n).map(k => [k, c[k] || 0]); }
+function mergedSeries(n) { const c = {}; for (const m of D.merged || []) { const k = lkey(new Date(m.ts * 1000)); c[k] = (c[k] || 0) + 1; } return days(n).map(k => [k, c[k] || 0]); }
+/* a CI strip: one dot per open PR, failing first */
+const CIK = {passing: "ok", failing: "risk", pending: "warn"};
+function ciStrip(p, max) {
+  const prs = p.prsOpen || []; max = max || 10;
+  if (!prs.length) return h("span", {class: "ci none", role: "img", "aria-label": "No open PRs"});
+  const rank = {failing: 0, pending: 1, passing: 2}, sorted = prs.slice().sort((a, b) => (rank[a.checks] ?? 3) - (rank[b.checks] ?? 3));
+  const c = tally(sorted.map(r => r.checks || "unknown"));
+  return h("span", {class: "ci", role: "img", "aria-label": plural(prs.length, "open PR") + ": " + Object.entries(c).map(([k, n]) => n + " " + (CHECKS[k] || k).replace(/^CI /, "")).join(", ")},
+    sorted.slice(0, max).map(r => h("i", {class: "k-" + (CIK[r.checks] || "none"), "data-tip": "#" + r.number + " " + (CHECKS[r.checks] || "CI unknown") + (r.title ? ": " + r.title : "")})),
+    sorted.length > max ? h("b", {class: "t2", text: "+" + (sorted.length - max)}) : null);
+}
+/* a lock with a countdown ring: the share of the lock's time that is left */
+function lockRing(start, until, who) {
+  const now = nowS(), t1 = iso(until), t0 = iso(start) || (t1 ? t1 - 8 * 3600 : now), left = t1 ? t1 - now : 0, f = t1 ? Math.max(0, Math.min(1, left / Math.max(1, t1 - t0))) : 0, exp = !!t1 && left <= 0;
+  const r = 8.5, c = 2 * Math.PI * r, text = (who ? who + ": " : "") + (exp ? "lock expired " + rel(t1) : t1 ? "lock " + dur(left) + " left (until " + fmt(t1) + ")" : "locked");
+  return h("span", {class: "lockr" + (exp ? " exp" : ""), role: "img", "aria-label": text, "data-tip": text},
+    sv("svg", {width: 20, height: 20, viewBox: "0 0 20 20", "aria-hidden": "true", focusable: "false"},
+      sv("circle", {cx: 10, cy: 10, r, class: "r-t", "stroke-width": 2}),
+      f > 0 ? sv("circle", {cx: 10, cy: 10, r, class: "r-a", "stroke-width": 2, "stroke-dasharray": (c * f).toFixed(2) + " " + c.toFixed(2), transform: "rotate(-90 10 10)"}) : null,
+      sv("rect", {x: 6.5, y: 9, width: 7, height: 5.5, rx: 1.2, class: "lk-b"}), sv("path", {d: "M8 9V7.6a2 2 0 0 1 4 0V9", class: "lk-s"})));
+}
+/* a due-date pill: overdue in red, due within a week marked */
+function duePill(due, done, none) {
+  if (!due) return none ? h("span", {class: "pill none", text: none}) : null;
+  const today = lkey(new Date()), dd = Math.round((new Date(due + "T12:00:00") - new Date(today + "T12:00:00")) / 864e5), over = !done && dd < 0;
+  const text = over ? "Overdue " + (-dd) + " d" : !done && dd === 0 ? "Due today" : shortDay(due);
+  return h("span", {class: "pill" + (over ? " over" : !done && dd <= 7 ? " soon" : ""), "data-tip": (over ? "Overdue since " : done ? "Was due " : "Due ") + fmtDay(new Date(due + "T12:00:00").getTime() / 1000), text});
+}
+/* a running session: what it works on, a thin progress bar, steps; opens the session in a modal */
+function sessBar(s, who, i) {
+  const p = s.progress || null, blocked = !!(p && p.state === "blocked"), pct = p ? (p.steps ? Math.min(100, 100 * (p.step || 0) / p.steps) : 0) : null;
+  const what = (p && p.goal) || (s.status_parts && s.status_parts.task) || scopeName(s.project || "") || "Session";
+  const text = what + ", " + scopeName(s.project || "") + (s.branch ? " on " + s.branch : "") + ", " + (s.agent || "agent") + (p ? (blocked ? ": blocked" : p.steps ? ": " + (p.step || 0) + " of " + p.steps + " steps" + (p.eta_min != null ? ", about " + fmtMin(p.eta_min) + " left" : "") : "") : "");
+  return h("button", {class: "sbar" + (blocked ? " blocked" : ""), type: "button", "aria-label": text, "data-tip": text, onclick: e => { e.stopPropagation(); openModal("session", who + "~" + i); }},
+    h("span", {class: "sb-l"}, h("span", {class: "ell", text: scopeName(s.project || "") || s.agent || "session"}), h("span", {class: "num t2", text: p ? (blocked ? "blocked" : p.steps ? (p.step || 0) + "/" + p.steps : "") : ""})),
+    h("span", {class: "sb-b"}, pct != null ? h("i", {style: "width:" + pct.toFixed(0) + "%"}) : null));
+}
+/* a stat tile: label, value, one visual, its legend */
+function statTile(o) {
+  return h(o.href ? "a" : "div", {class: "stile" + (o.cls ? " " + o.cls : ""), href: o.href || null, "data-nav": o.href ? "" : null},
+    h("span", {class: "s-l", text: o.label}), h("span", {class: "s-v"}, h("b", {class: "num", text: String(o.value)}), o.unit ? h("span", {class: "t2", text: o.unit}) : null),
+    o.viz || null, o.legend || null);
+}
+function modalHref(kind, id) { return encode(Object.assign({}, S, {modal: kind + ":" + id, task: ""})); }
+function modalLink(kind, id, text, cls) { return h("a", {class: "rl" + (cls ? " " + cls : ""), href: modalHref(kind, id), "data-nav": "", onclick: e => { e.preventDefault(); openModal(kind, id); }, text}); }
+/* the tooltip: hover over any [data-tip], or focus one; it lives in the top layer while a modal is open */
+function showTip(el) {
+  const t = el.getAttribute("data-tip"); if (!t) return;
+  const box = $("#tip"), host = layerHost(); if (box.parentNode !== host) host.append(box);
+  const r = el.getBoundingClientRect(); tip(r.left + r.width / 2 - 14, r.bottom - 8, document.createTextNode(t));
+}
+document.addEventListener("pointerover", e => { const el = e.target.closest && e.target.closest("[data-tip]"); if (el) showTip(el); });
+document.addEventListener("pointerout", e => { const el = e.target.closest && e.target.closest("[data-tip]"); if (el && !(e.relatedTarget && el.contains(e.relatedTarget))) untip(); });
+document.addEventListener("focusin", e => { const el = e.target.closest && e.target.closest("[data-tip]"); if (el) showTip(el); else untip(); });
+document.addEventListener("scroll", () => untip(), true);
+function toast(msg) { const t = $("#toast"), host = layerHost(); if (t.parentNode !== host) host.append(t); t.textContent = msg; t.classList.add("on"); clearTimeout(toast.t); toast.t = setTimeout(() => t.classList.remove("on"), 1800); }
 function copy(text) {
   const done = () => toast("Copied · " + text);
   const fallback = () => { const ta = h("textarea", {style: "position:fixed;opacity:0"}); ta.value = text; document.body.append(ta); ta.select(); try { document.execCommand("copy"); done(); } catch (e) { toast("Copy failed — select the command instead"); } ta.remove(); };
@@ -2004,51 +2256,6 @@ function changelog(lines) {
         e.why ? h("div", {class: "cwhy"}, h("span", {class: "label", text: "Why:"}), inline(e.why)) : null)); }));
 }
 /* ---------------------------------------------------------------- column chart (single series) with tooltip, keyboard, table twin */
-function activityChart(projects, n, title, height) {
-  const ks = days(n);
-  const series = ks.map(k => { const per = []; let total = 0; for (const p of projects) { const v = p.act[k] || 0; if (v) { per.push([p.id, v]); total += v; } } per.sort((a, b) => b[1] - a[1]); return {k, total, per}; });
-  const total = series.reduce((a, s) => a + s.total, 0);
-  const box = h("div", {class: "chartbox"});
-  let tableOn = false, active = -1;
-  const tbtn = h("button", {class: "btn sm", type: "button", "aria-pressed": "false", onclick: () => { tableOn = !tableOn; tbtn.setAttribute("aria-pressed", String(tableOn)); draw(); }}, "Table");
-  function show(i, evt) {
-    active = i; const s = series[i]; if (!s) return;
-    $$(".bar", box).forEach((b, j) => b.classList.toggle("dim", b.dataset.i !== String(i)));
-    const node = h("div", null, h("strong", {text: plural(s.total, "commit")}), h("div", {class: "t2", text: shortDay(s.k)}),
-      s.per.length ? h("ul", null, s.per.slice(0, 6).map(([id, v]) => h("li", null, h("span", {text: id}), h("span", {class: "num", text: String(v)})))) : null);
-    let x, y; if (evt && evt.clientX != null) { x = evt.clientX; y = evt.clientY; } else { const r = box.querySelectorAll(".hit")[i].getBoundingClientRect(); x = r.left + r.width / 2; y = r.top + 10; }
-    tip(x, y, node);
-  }
-  function hide() { active = -1; $$(".bar", box).forEach(b => b.classList.remove("dim")); untip(); }
-  function draw() {
-    clear(box); untip();
-    if (tableOn) { box.append(h("div", {class: "tw"}, h("table", {class: "t"}, h("thead", null, h("tr", null, h("th", {text: "Day"}), h("th", {text: "Commits"}), h("th", {text: "Projects"}))),
-      h("tbody", null, series.slice().reverse().map(s => h("tr", null, h("td", {text: shortDay(s.k)}), h("td", {class: "num", text: String(s.total)}), h("td", {class: "t2", text: s.per.map(([id, v]) => id + " " + v).join(", ") || "—"}))))))); return; }
-    const W = Math.max(260, box.clientWidth || 600), H = height || 150, padL = 30, padB = 22, padT = 14, iw = W - padL - 6, ih = H - padB - padT;
-    const max = niceMax(Math.max(1, ...series.map(s => s.total))), band = iw / series.length, bw = Math.min(24, Math.max(3, band * 0.6));
-    const svg = sv("svg", {viewBox: "0 0 " + W + " " + H, width: W, height: H, role: "img", tabindex: "0", "aria-label": (title || "Commits per day") + ": " + total + " commits over " + n + " days. Arrow keys read each day."});
-    for (let g = 0; g <= 2; g++) { const v = (max / 2) * g, y = padT + ih - (v / max) * ih;
-      svg.append(sv("line", {x1: padL, x2: W - 6, y1: y.toFixed(1), y2: y.toFixed(1), stroke: g ? "var(--grid)" : "var(--axis)", "stroke-width": 1}));
-      svg.append(sv("text", {x: padL - 6, y: (y + 4).toFixed(1), "text-anchor": "end", class: "ax"}, compact(Math.round(v)))); }
-    const maxI = series.reduce((bi, s, i) => s.total > series[bi].total ? i : bi, 0);
-    const every = Math.ceil(series.length / Math.max(2, Math.floor(iw / 64)));
-    series.forEach((s, i) => {
-      const cx = padL + band * i + band / 2, x = cx - bw / 2;
-      if (s.total) { const bh = Math.max(2, (s.total / max) * ih), y = padT + ih - bh, r = Math.min(4, bw / 2, bh);
-        svg.append(sv("path", {class: "bar", "data-i": i, d: "M" + x + "," + (padT + ih) + "V" + (y + r) + "Q" + x + "," + y + " " + (x + r) + "," + y + "H" + (x + bw - r) + "Q" + (x + bw) + "," + y + " " + (x + bw) + "," + (y + r) + "V" + (padT + ih) + "Z"}));
-        if (i === maxI) svg.append(sv("text", {x: cx, y: y - 4, "text-anchor": "middle", class: "vlabel"}, String(s.total))); }
-      if (i % every === 0 || i === series.length - 1) svg.append(sv("text", {x: cx, y: H - 6, "text-anchor": "middle", class: "ax"}, shortDay(s.k)));
-      const hit = sv("rect", {class: "hit", x: padL + band * i, y: padT, width: band, height: ih, fill: "transparent"});
-      hit.addEventListener("pointermove", e => show(i, e)); hit.addEventListener("pointerleave", hide); svg.append(hit);
-    });
-    svg.addEventListener("keydown", e => { if (e.key === "ArrowRight" || e.key === "ArrowLeft") { e.preventDefault(); const j = active < 0 ? series.length - 1 : Math.max(0, Math.min(series.length - 1, active + (e.key === "ArrowRight" ? 1 : -1))); show(j); } else if (e.key === "Escape") hide(); });
-    svg.addEventListener("blur", hide);
-    box.append(svg);
-  }
-  requestAnimationFrame(draw);
-  if (window.ResizeObserver) { const ro = new ResizeObserver(debounce(() => { if (box.isConnected) draw(); else ro.disconnect(); }, 120)); ro.observe(box); }
-  return {node: box, total, toggle: tbtn};
-}
 function rankedBars(rows, fmtv, onclick) {
   const max = Math.max(1, ...rows.map(r => r[1]));
   return h("div", {class: "hbar"}, rows.map(([label, v, id]) => [
@@ -2197,19 +2404,25 @@ function groupRow(g, primary) {
     h("div", {class: "ar"}, primary ? cmdBtn(a.cmd, true, "Copy command" + (num ? " for " + num : "")) : null));
 }
 /* Home: four figures, each with its context, linking to the filtered list */
+/* Home tiles: where things stand, each a number and one part-to-whole bar with its legend */
 function kpiStrip() {
-  const k = D.kpis || {}, colls = (D.collisions || []).length;
-  return stats([
-    [k.prs_failing || 0, k.prs_failing === 1 ? "PR failing CI" : "PRs failing CI", k.prs_failing ? "risk" : "", k.prs_failing ? "in " + plural(P.filter(p => p.ci.includes("failing")).length, "project") : "every open PR is green or running", link({view: "projects", ci: ["failing"]})],
-    [k.blocked || 0, k.blocked === 1 ? "blocked task" : "blocked tasks", k.blocked ? "risk" : "", "of " + (k.open || 0) + " open", link({view: "tasks", tst: "blocked"})],
-    [k.doing || 0, "doing", "", plural(k.locks || 0, "lock") + " held", link({view: "tasks", tst: "doing"})],
-    [k.live_sessions || 0, k.live_sessions === 1 ? "live session" : "live sessions", "", "by " + plural(k.people_active || 0, "person", "people") + (colls ? ", " + plural(colls, "collision") : ""), link({view: "team"})]]);
+  const k = D.kpis || {}, sev = tally(ACTIONS.map(a => a.sev)), ic = tally(INITS.map(istate)), pc = tally(P.map(hstate));
+  const sevParts = [["risk", sev.risk || 0, "Urgent"], ["warn", sev.warn || 0, "Needs a look"], ["done", sev.info || 0, "For information"]];
+  const taskParts = [["mark", k.doing || 0, "Doing"], ["risk", k.blocked || 0, "Blocked"], ["none", Math.max(0, (k.open || 0) - (k.doing || 0) - (k.blocked || 0)), "To do"]];
+  return [
+    statTile({label: "Needs you", value: ACTIONS.length, href: link({view: "actions"}), viz: segBar(sevParts, "What needs you"), legend: legend(sevParts), cls: "sp-3"}),
+    statTile({label: "Initiatives", value: INITS.length, href: link({view: "initiatives"}), viz: segBar(hparts(ic), "Initiatives"), legend: legend(hparts(ic)), cls: "sp-3"}),
+    statTile({label: "Projects", value: P.length, href: link({view: "projects"}), viz: segBar(hparts(pc), "Projects"), legend: legend(hparts(pc)), cls: "sp-3"}),
+    statTile({label: "Open tasks", value: k.open || 0, href: link({view: "tasks"}), viz: segBar(taskParts, "Open tasks"), legend: legend(taskParts), cls: "sp-3"})];
 }
 function needsPanel() {
   const groups = actionGroups(ACTIONS);
-  const body = ACTIONS.length ? h("ul", {class: "acts"}, groups.slice(0, 5).map((g, i) => groupRow(g, i === 0)))
-    : empty("All clear", "No failing CI, reviews, blocked work, collisions, overdue tasks or idle work.");
-  return panel("Needs you", ACTIONS.length || null, ACTIONS.length ? h("a", {class: "more", href: link({view: "actions"}), text: "All " + ACTIONS.length}) : null, body, {flush: !!ACTIONS.length});
+  const row = g => { const a = g.items[0], n = g.items.length, one = n === 1, kind = one ? "action" : "actions", id = one ? actKey(a) : (KIND[a.kind] || a.kind);
+    return h("li", {class: "act", onclick: rowClick(() => openModal(kind, id))}, h("span", {class: "dot k-" + (a.sev === "risk" ? "risk" : a.sev === "warn" ? "warn" : "done"), role: "img", title: SEVL[a.sev], "aria-label": SEVL[a.sev]}),
+      h("div", {style: "min-width:0"}, modalLink(kind, id, one ? a.title : (GROUP[a.kind] || (m => m + " " + id + " items"))(n), "at ell"), h("div", {class: "ad"}, h("span", {class: "ell", text: one ? actionWhere(a) : g.items.slice(0, 3).map(actionWhere).join(", ") + (n > 3 ? " and " + (n - 3) + " more" : "")}))),
+      n > 1 ? h("span", {class: "cnt num", "aria-hidden": "true", text: String(n)}) : h("span")); };
+  return panel("Needs you", ACTIONS.length || null, ACTIONS.length ? h("a", {class: "more", href: link({view: "actions"}), text: "All " + ACTIONS.length}) : null,
+    ACTIONS.length ? h("ul", {class: "acts"}, groups.slice(0, 3).map(row)) : empty("All clear", "No failing CI, reviews, blocked work, collisions, overdue tasks or idle work."), {flush: !!ACTIONS.length, cls: "sp-4"});
 }
 function collText(c, short) {
   if (c.kind === "expired-lock") { const it = ITEMBY.get(c.id); return (it ? "“" + it.title + "”" : c.id) + " is still claimed by " + whoOf(c.holder) + "; the lock expired " + rel(iso(c.until)); }
@@ -2217,21 +2430,12 @@ function collText(c, short) {
 }
 function teamNow() {
   const colls = D.collisions || [], active = PEOPLE.filter(x => x.sessions.length).length;
-  const rows = PEOPLE.slice(0, 6).map(x => {
-    const s = x.sessions[0], p = s && s.progress;
-    const pct = p ? (p.steps ? Math.min(100, 100 * (p.step || 0) / p.steps) : 0) : 0;
-    return h("li", {class: "prow", onclick: rowClick(() => go("team"))}, avatar(x.who),
-      h("div", {class: "pm"}, h("div", {class: "pw"}, linkTo(link({view: "team"}), x.who, "ell"), isMe(x.who) ? h("span", {class: "tag", text: "you"}) : null),
-        h("div", {class: "ps ell", text: s ? (s.agent || "agent") + " on " + scopeName(s.project || "") + (s.branch ? ", " + s.branch : "") + (x.sessions.length > 1 ? ", and " + plural(x.sessions.length - 1, "more session") : "") : "No live session, seen " + rel(x.updated)}),
-        p ? h("div", {class: "pp"}, h("div", {class: "rbar" + (p.state === "blocked" ? " blocked" : ""), role: "progressbar", "aria-valuenow": Math.round(pct), "aria-valuemin": 0, "aria-valuemax": 100, "aria-label": "Run progress"}, h("i", {style: "width:" + pct.toFixed(0) + "%"})),
-          h("span", {class: "num" + (p.state === "blocked" ? " bad" : ""), text: p.state === "blocked" ? "blocked" : (p.steps ? (p.step || 0) + " of " + p.steps : "step " + (p.step || 0)) + (p.eta_min != null ? ", about " + fmtMin(p.eta_min) + " left" : "")})) : null),
-      h("div", {class: "pr2"}, x.locks.length ? h("span", {class: "claim", title: plural(x.locks.length, "lock") + " held"}, lockIcon(), String(x.locks.length)) : null));
-  });
-  const body = [colls.length ? h("div", null, colls.slice(0, 2).map(c => h("div", {class: "warnline"}, h("span", {class: "dot d-warn", "aria-hidden": "true"}), h("span", {class: "ell", title: collText(c), text: collText(c)}))),
-      colls.length > 2 ? h("a", {class: "more-l pad", href: link({view: "team"}), text: plural(colls.length - 2, "more collision")}) : null) : null,
-    rows.length ? h("ul", {class: "prows"}, rows) : empty("Nobody is working right now", "Presence appears when a session starts: ", h("code", {text: "dev claude <project>"})),
-    PEOPLE.length > 6 ? h("a", {class: "more-l pad", href: link({view: "team"}), text: plural(PEOPLE.length - 6, "more person", "more people")}) : null];
-  return panel("Team now", PEOPLE.length ? active + " active" : null, h("a", {class: "more", href: link({view: "team"}), text: "Team"}), body, {flush: true});
+  const rows = PEOPLE.slice(0, 4).map(x => h("li", {class: "prow", onclick: rowClick(() => openModal("person", x.who))}, avatar(x.who),
+    h("div", {class: "pm"}, h("div", {class: "pw"}, modalLink("person", x.who, x.who, "ell"), isMe(x.who) ? h("span", {class: "tag", text: "you"}) : null),
+      x.sessions.length ? h("div", {class: "sbars"}, x.sessions.slice(0, 2).map((s, i) => sessBar(s, x.who, i))) : h("div", {class: "ps", text: "No live session, seen " + rel(x.updated)})),
+    x.locks.length ? h("span", {class: "lockc", role: "img", "aria-label": plural(x.locks.length, "lock") + " held", "data-tip": plural(x.locks.length, "lock") + " held"}, lockIcon(), h("b", {class: "num", text: String(x.locks.length)})) : h("span")));
+  return panel("Team now", PEOPLE.length ? active + " active" : null, [colls.length ? h("a", {class: "warnchip", href: link({view: "team"}), "data-tip": colls.map(c => collText(c)).join("\n")}, h("span", {class: "dot k-warn", "aria-hidden": "true"}), plural(colls.length, "collision")) : null, h("a", {class: "more", href: link({view: "team"}), text: "Team"})],
+    rows.length ? h("ul", {class: "prows"}, rows) : empty("Nobody is working right now", "Presence appears when a session starts: ", h("code", {text: "dev claude <project>"})), {flush: true, cls: "sp-4"});
 }
 function notCloned(x) { return x.members.filter(m => { const p = BYID.get(m.id); return p ? !p.local : !m.local; }).length; }
 function memberCounts(x) { const c = {blocked: 0, risk: 0}; for (const m of x.members) { const p = BYID.get(m.id), st = (p && p.status) || m.status; if (st === "blocked") c.blocked++; if (p && p.health.level === "risk") c.risk++; } return c; }
@@ -2243,37 +2447,40 @@ function nextDate(x) {
 }
 function workText(c) { return h("span", null, h("span", {class: "num", text: c.open + " open"}), c.blocked ? h("span", {class: "bad num", text: ", " + c.blocked + " blocked"}) : null); }
 /* Home: one row per initiative (status, progress, next date, open and blocked work) */
-function initRow(x) {
-  return h("li", {class: "inir", onclick: rowClick(() => openInitiative(x.id))},
-    h("div", {class: "nm"}, h("span", {class: "dot " + (SDOT[x.status] || "d-info"), role: "img", title: (STATUS[x.status] || STATUS.active)[1], "aria-label": (STATUS[x.status] || STATUS.active)[1]}), linkTo(link({view: "initiatives", id: x.id}), x.title, "ell")),
-    h("div", {class: "c2"}, progressBar(x)), h("div", {class: "c3 sub"}, nextDate(x)), h("div", {class: "c4 sub"}, workText(x.cnt)));
+/* an initiative card: the progress ring, the member waffle, the due pill and the people */
+function initCard(x, compact) {
+  const st = istate(x), c = x.cnt;
+  return h("article", {class: "icard" + (compact ? " compact" : ""), onclick: rowClick(() => openModal("initiative", x.id))},
+    h("div", {class: "ic-h"}, progRing(x, compact ? 44 : 52), h("div", {class: "ic-n"}, modalLink("initiative", x.id, x.title, "strong clamp2"),
+      h("span", {class: "stat t2"}, h("span", {class: "dot k-" + st, "aria-hidden": "true"}), HS[st], compact ? null : h("span", {class: "num", text: c.open + " open" + (c.blocked ? ", " + c.blocked + " blocked" : "")})))),
+    memberWaffle(x, compact ? 7 : 8, compact ? 26 : 28),
+    h("div", {class: "ic-f"}, duePill(x.due, x.status === "done", "No due date"), x.people.length ? avatars(x.people, compact ? 3 : 5) : null));
 }
 function initiativesPanel() {
-  const list = INITS.slice().sort((a, b) => (SORDER[a.status] ?? 6) - (SORDER[b.status] ?? 6) || PRANK[a.priority] - PRANK[b.priority] || String(a.due || "9").localeCompare(String(b.due || "9")));
-  const loose = P.filter(p => !MEMBEROF.has(p.id)).length;
-  const body = list.length ? [h("ul", {class: "inis"}, list.slice(0, 8).map(initRow)),
-      loose ? h("a", {class: "more-l pad", href: link({view: "projects", loose: true}), text: plural(loose, "project") + " outside initiatives"}) : null]
-    : empty("No initiatives yet", "Group related projects into a programme with a goal, milestone and due date: ", h("code", {text: 'dev initiative new <slug> --title "…" --projects owner/a,owner/b'}));
-  return panel("Initiatives", INITS.length || null, h("a", {class: "more", href: link({view: "initiatives"}), text: "All initiatives"}), body, {flush: !!list.length});
+  const list = INITS.slice().sort((a, b) => HORDER.indexOf(istate(a)) - HORDER.indexOf(istate(b)) || PRANK[a.priority] - PRANK[b.priority] || String(a.due || "9").localeCompare(String(b.due || "9")));
+  const mc = tally(INITS.flatMap(x => x.members.map(memberState)));
+  return panel("Initiatives", INITS.length || null, [legend(hparts(mc).filter(p => p[0] !== "none" || p[1])), h("a", {class: "more", href: link({view: "initiatives"}), text: "All initiatives"})],
+    list.length ? h("div", {class: "icards home"}, list.slice(0, 6).map(x => initCard(x, true)))
+      : empty("No initiatives yet", "Group related projects into a programme with a goal, milestone and due date: ", h("code", {text: 'dev initiative new <slug> --title "…" --projects owner/a,owner/b'})), {cls: "sp-12"});
 }
+/* since yesterday: four counters, each with its 14-day trend; the lists open in a modal */
 function sincePanel() {
-  const s = D.since || {}, N = 3;
-  const col = (title, items, render, emptyText, href) => h("div", null, h("h3", null, title, h("span", {class: "n num", text: String(items.length)})),
-    items.length ? h("ul", null, items.slice(0, N).map(render), items.length > N ? h("li", null, h("a", {class: "more", href: href || link({view: "activity"}), text: (items.length - N) + " more"})) : null) : h("p", {class: "k", style: "margin:0", text: emptyText}));
-  const body = h("div", {class: "since"},
-    col("Sessions", s.sessions || [], x => h("li", {title: [x.who, x.agent].filter(Boolean).join(" with ")}, h("div", {class: "sl1"}, h("span", {class: "k num", text: tm(x.ts)}), h("button", {class: "lnk", type: "button", onclick: () => x.project && openScope(x.project), text: scopeName(x.project || "") || "—"})), h("div", {class: "ell", title: plain(stripMarker(x.text))}, logText(x))), "No agent sessions since yesterday."),
-    col("Commits", s.commits || [], ([pid, n]) => h("li", {style: "display:flex;gap:8px"}, h("button", {class: "lnk ell", style: "flex:1;text-align:left;font-weight:400", type: "button", onclick: () => openProject(pid), text: scopeName(pid)}), h("span", {class: "num k", text: String(n)})), "No commits since yesterday."),
-    col("Merged PRs", s.merged || [], x => h("li", {class: "ell", title: "#" + x.number + " " + x.title}, h("a", {href: x.url, target: "_blank", rel: "noopener noreferrer", text: "#" + x.number}), " ", x.title, h("span", {class: "k", text: " in " + x.repo.split("/").pop()})), "Nothing merged since yesterday."),
-    col("Completed tasks", s.done || [], x => h("li", {class: "sl1", title: x.text + " in " + scopeName(x.project)}, x.id && ITEMBY.has(x.id) ? h("button", {class: "lnk", style: "font-weight:400", type: "button", onclick: () => openTask(x.id), text: x.text}) : h("span", {class: "ell"}, inline(x.text)), h("span", {class: "k ell sc2", text: "in " + scopeName(x.project)})), "No tasks completed since yesterday.", link({view: "tasks", tst: "done"})));
-  return panel("Since yesterday", null, h("span", {class: "t2", text: "from " + fmtDay(s.from)}), body);
+  const s = D.since || {}, items = allItems();
+  const ctr = (which, label, n, series, unit) => h("button", {class: "ctr", type: "button", onclick: () => openModal("since", which), "aria-label": label + ": " + n + " since yesterday. Open the list"},
+    h("span", {class: "s-l", text: label}), h("span", {class: "s-v"}, h("b", {class: "num", text: String(n)})), spark(series, label + " per day", unit));
+  return panel("Since yesterday", null, h("span", {class: "t2", text: "from " + fmtDay(s.from)}),
+    h("div", {class: "ctrs"},
+      ctr("sessions", "Sessions", (s.sessions || []).length, sessionSeries(null, 14), "session"),
+      ctr("commits", "Commits", (s.commits || []).reduce((a, c) => a + c[1], 0), commitSeries(P, 14), "commit"),
+      ctr("merged", "Merged PRs", (s.merged || []).length, mergedSeries(14), "merged PR"),
+      ctr("done", "Tasks done", (s.done || []).length, doneSeries(items, 14), "task")), {cls: "sp-4 full-md"});
 }
 function viewHome(main) {
   const k = D.kpis || {}, n = ACTIONS.length, u = k.urgent || 0;
   const title = u ? plural(u, "urgent item") + (u === 1 ? " needs you" : " need you") : n ? plural(n, "item") + (n === 1 ? " needs" : " need") + " a look" : "Nothing needs you";
   main.append(h("div", {class: "head"}, h("h1", {text: title}), h("span", {class: "sub", text: "Synced " + rel(D.generated) + " on " + D.host})));
-  main.append(kpiStrip());
-  main.append(h("div", {class: "cols mb"}, needsPanel(), teamNow()));
-  main.append(h("div", {class: "stack-v"}, initiativesPanel(), sincePanel()));
+  main.classList.add("view-home");
+  main.append(h("div", {class: "g12 home"}, kpiStrip(), needsPanel(), teamNow(), sincePanel(), initiativesPanel()));
 }
 function viewActions(main) {
   const kinds = new Map(); for (const a of ACTIONS) { const l = KIND[a.kind] || a.kind; kinds.set(l, (kinds.get(l) || 0) + 1); }
@@ -2318,9 +2525,9 @@ function initTable(list) {
   return h("div", {class: "tw st"}, h("table", {class: "t pt it"},
     h("thead", null, h("tr", null, h("th", {class: "c-health"}, h("span", {class: "sr", text: "Status"})), h("th", {text: "Initiative"}), h("th", {class: "c-prog", text: "Progress"}), h("th", {class: "c-ms", text: "Next date"}), h("th", {class: "c-work", text: "Tasks"}), h("th", {class: "c-st", text: "Projects"}), h("th", {class: "c-who", text: "People"}), h("th", {class: "c-act", text: "Last activity"}))),
     h("tbody", null, list.map(x => { const mc = memberCounts(x), l = (STATUS[x.status] || STATUS.active)[1];
-      return h("tr", {onclick: rowClick(() => openInitiative(x.id))},
+      return h("tr", {onclick: rowClick(() => openModal("initiative", x.id))},
         h("td", {class: "c-health"}, h("span", {class: "dot " + (SDOT[x.status] || "d-info"), role: "img", title: l, "aria-label": l})),
-        h("td", {class: "c-name"}, linkTo(link({view: "initiatives", id: x.id}), x.title, "pname"), h("span", {class: "powner", title: plain(x.goal || ""), text: x.goal ? plain(x.goal) : l + (x.priority === "high" ? ", high priority" : "")})),
+        h("td", {class: "c-name"}, modalLink("initiative", x.id, x.title, "pname"), h("span", {class: "powner", title: plain(x.goal || ""), text: x.goal ? plain(x.goal) : l + (x.priority === "high" ? ", high priority" : "")})),
         h("td", {class: "c-prog"}, progressBar(x)), h("td", {class: "c-ms"}, nextDate(x)), h("td", {class: "c-work"}, workText(x.cnt)),
         h("td", {class: "c-st num"}, String(x.members.length), mc.blocked ? h("span", {class: "bad", text: " (" + mc.blocked + " blocked)"}) : null),
         h("td", {class: "c-who"}, avatars(x.people, 3)), h("td", {class: "c-act num t2", text: rel(x.last)})); }))));
@@ -2333,10 +2540,11 @@ function viewInitiatives(main) {
   main.append(h("div", {class: "head"}, h("h1", {text: "Initiatives"}), h("span", {class: "sub", text: plural(INITS.length, "initiative") + " across " + plural(inInit.size, "project")})));
   const st = {}; for (const x of all) st[x.status] = (st[x.status] || 0) + 1;
   main.append(h("div", {class: "toolbar"}, seg("Status", "ist", [["", "All", all.length]].concat(Object.keys(st).sort((a, b) => (SORDER[a] ?? 6) - (SORDER[b] ?? 6)).map(k => [k, (STATUS[k] || [0, k])[1], st[k]]))),
-    h("span", {class: "spacer"}), selectBox("Sort", "psort", [["priority", "Sort by priority"], ["due", "Sort by due date"], ["progress", "Sort by progress"], ["activity", "Sort by activity"]])));
+    h("span", {class: "spacer"}), legend(hparts(tally(INITS.flatMap(x => x.members.map(memberState))))), selectBox("Sort", "psort", [["priority", "Sort by priority"], ["due", "Sort by due date"], ["progress", "Sort by progress"], ["activity", "Sort by activity"]]),
+    seg("Layout", "ilayout", [["cards", "Cards"], ["table", "Table"]])));
   if (!list.length) main.append(h("div", {class: "panel mb"}, empty(INITS.length ? "No initiative matches" : "No initiatives yet", INITS.length ? "Clear the search or the status filter." : ["Group related projects into a programme with goal, milestone and due date: ", h("code", {text: 'dev initiative new <slug> --title "…" --projects owner/a,owner/b'})])));
-  else main.append(h("div", {class: "mb"}, initTable(list)));
-  const dated = list.filter(x => x.due).map(x => ({label: x.title, due: x.due, milestone: x.milestone, status: x.status, open: () => openInitiative(x.id)}));
+  else main.append(h("div", {class: "mb"}, S.ilayout === "table" ? initTable(list) : h("div", {class: "icards"}, list.map(x => initCard(x)))));
+  const dated = list.filter(x => x.due).map(x => ({label: x.title, due: x.due, milestone: x.milestone, status: x.status, open: () => openModal("initiative", x.id)}));
   if (dated.length) main.append(panel("Milestones and due dates", dated.length, null, roadmap(dated.slice(0, 16)), {cls: "mb"}));
   if (loose) main.append(h("p", {class: "t2", style: "font-size:var(--fs-1)"}, h("a", {href: link({view: "projects", loose: true}), text: plural(loose, "project") + " are outside initiatives."}), " Add one with ", h("code", {text: "dev initiative add <slug> <owner/repo>"}), "."));
 }
@@ -2345,39 +2553,34 @@ function viewInitiative(main) {
   const x = BYINIT.get(S.id);
   if (!x) { main.append(crumbs([["Initiatives", link({view: "initiatives", id: ""})], [S.id]]), h("div", {class: "panel"}, empty("No initiative “" + S.id + "”", h("a", {href: link({view: "initiatives", id: ""})}, "All initiatives")))); return; }
   const tab = ITABS.some(t => t[0] === S.tab) ? S.tab : "overview";
-  const pr = progOf(x), nc = notCloned(x), plansL = plansFor([x.scope]), sess = sessionsFor([x.scope].concat(x.projects), x.sessions), mc = memberCounts(x);
-  const state = plain(x.state || ""), longState = state.length > 240;
-  const over = x.due && x.status !== "done" && x.due < lkey(new Date());
+  const plansL = plansFor([x.scope]), sess = sessionsFor([x.scope].concat(x.projects), x.sessions), st = istate(x), c = x.cnt, mc = tally(x.members.map(memberState));
   main.append(crumbs([["Initiatives", link({view: "initiatives", id: "", tab: ""})], [x.title]]));
   main.append(h("header", {class: "phead"},
-    h("div", {class: "pt1"}, h("div", null, h("h1", {text: x.title})),
+    h("div", {class: "pt1"}, h("div", {class: "mh-row"}, progRing(x, 64, true), h("div", {class: "mh-tt"}, h("h1", {text: x.title}),
+        h("div", {class: "pline"}, meta(h("span", {class: "stat"}, h("span", {class: "dot k-" + st, "aria-hidden": "true"}), HS[st]), duePill(x.due, x.status === "done", "No due date"),
+          x.milestone ? h("span", {class: "msl", title: "Milestone: " + x.milestone, text: x.milestone}) : null, x.owner ? "owner " + x.owner : null)))),
       h("div", {class: "go"}, x.note && FILEMAP.has(x.note) ? h("a", {class: "btn ghost", href: link({view: "explorer", f: x.note, id: ""})}, "README") : null,
-        cmdMenu("Commands", [["Show it in the terminal", "dev initiative show " + x.id], ["Add a task", "dev task -i " + x.id + ' add "…" --now'], ["Add a member project", "dev initiative add " + x.id + " <owner/repo>"]]))),
-    h("div", {class: "pline"}, meta(statusBadge(x.status), x.priority === "high" ? "High priority" : x.priority === "low" ? "Low priority" : null,
-      x.milestone ? h("span", {class: "msl", title: "Milestone: " + x.milestone, text: "Milestone: " + x.milestone}) : null, x.due ? h("span", {class: over ? "bad" : null, text: over ? "overdue since " + shortDay(x.due) : "due " + shortDay(x.due)}) : null,
-      x.owner ? "owner " + x.owner : null, x.last ? "active " + rel(x.last) : null)),
-    state ? h("p", {class: "lead", title: longState ? state : null}, inline(longState ? state.slice(0, 240).replace(/\s+\S*$/, "") + "…" : state)) : null,
-    h("div", {class: "pprog"}, progressBar(x, true), h("span", {text: pr.why}))));
-  main.append(stats([[x.members.length, x.members.length === 1 ? "project" : "projects", mc.blocked ? "risk" : "", (mc.blocked ? mc.blocked + " blocked, " : "") + (nc ? (nc === x.members.length ? "none cloned here" : nc + " not cloned here") : "all cloned here"), link({tab: "projects"})],
-    [x.cnt.open, "open tasks", "", x.cnt.doing + " doing", link({tab: "tasks"})],
-    [x.cnt.blocked, x.cnt.blocked === 1 ? "blocked task" : "blocked tasks", x.cnt.blocked ? "risk" : "", x.cnt.blocked ? "waiting on a decision" : "nothing blocked", link({tab: "tasks", tst: "blocked"})],
-    [x.people.length, x.people.length === 1 ? "person on it" : "people on it", "", x.people.length ? x.people.map(w => w.split("@")[0]).slice(0, 3).join(", ") : "nobody right now", link({view: "team", id: ""})]]));
-  main.append(pageTabs([["overview", "Overview"], ["projects", "Projects", x.members.length], ["tasks", "Tasks", x.cnt.open], ["plans", "Plans", plansL.length], ["sessions", "Sessions", sess.length], ["docs", "Docs & source"]], tab));
+        cmdMenu("Commands", [["Show it in the terminal", "dev initiative show " + x.id], ["Add a task", "dev task -i " + x.id + ' add "…" --now'], ["Add a member project", "dev initiative add " + x.id + " <owner/repo>"]])))));
+  const taskParts = [["mark", c.doing, "Doing"], ["risk", c.blocked, "Blocked"], ["none", c.todo, "To do"]];
+  main.append(h("div", {class: "g12 tiles"},
+    statTile({label: "Member projects", value: x.members.length, href: link({tab: "projects"}), viz: memberWaffle(x, 8, 32), legend: legend(hparts(mc)), cls: "sp-4"}),
+    statTile({label: "Open tasks", value: c.open, href: link({tab: "tasks"}), viz: segBar(taskParts, "Open tasks"), legend: legend(taskParts), cls: "sp-3"}),
+    statTile({label: "Done, 14 days", value: doneSeries(x.items, 14).reduce((a, d) => a + d[1], 0), viz: spark(doneSeries(x.items, 14), "Tasks done per day", "task", true), cls: "sp-3"}),
+    statTile({label: "People on it", value: x.people.length, href: link({view: "team", id: ""}), viz: x.people.length ? avatars(x.people, 6) : h("span", {class: "t2", text: "Nobody right now"}), cls: "sp-2"})));
+  main.append(pageTabs([["overview", "Overview"], ["projects", "Projects", x.members.length], ["tasks", "Tasks", c.open], ["plans", "Plans", plansL.length], ["sessions", "Sessions", sess.length], ["docs", "Docs & source"]], tab));
   const tp = h("div", {class: "tabpanel", id: "tabpanel", role: "tabpanel", "aria-labelledby": "tab-" + tab});
   main.append(tp);
   const part = (label, text) => text ? [h("h3", {class: "sub3", text: label}), md(text)] : null;
   if (tab === "overview") {
     const doing = sortItems(x.items.filter(i => i.status === "doing" || i.status === "blocked"));
-    const stuck = x.members.map(m => BYID.get(m.id) || {id: m.id, name: m.id.split("/").pop(), status: m.status, health: {level: "ok", reasons: []}}).filter(p => p.status === "blocked" || p.health.level === "risk")
-      .sort((a, b) => (a.status === "blocked" ? 0 : 1) - (b.status === "blocked" ? 0 : 1));
-    tp.append(h("div", {class: "cols"},
-      h("div", {class: "stack-v"},
+    const stuck = x.members.map(m => BYID.get(m.id) || {id: m.id, name: m.id.split("/").pop(), status: m.status, health: {level: "ok", reasons: []}}).filter(p => hstate(p) === "risk");
+    tp.append(h("div", {class: "g12"},
+      h("div", {class: "stack-v sp-8"},
         panel("Doing or blocked", doing.length, h("a", {class: "more", href: link({tab: "tasks"})}, "All tasks"), doing.length ? h("ul", {class: "irows"}, doing.slice(0, 8).map(i => itemRow(i, {scope: true, home: x.scope}))) : empty("Nothing in progress", "Claim the next task: ", h("code", {text: "dev task -i " + x.id + " start <id>"})), {flush: !!doing.length}),
-        stuck.length ? panel("Projects that need attention", stuck.length, h("a", {class: "more", href: link({tab: "projects", mg: "status"})}, "All projects"),
-          h("ul", {class: "irows"}, stuck.slice(0, 6).map(p => h("li", {class: "irow", onclick: rowClick(() => openProject(p.id))}, h("span", {class: "dot " + (p.status === "blocked" ? "d-risk" : "d-warn"), "aria-hidden": "true"}),
-            h("div", {class: "im"}, linkTo(link({view: "projects", id: p.id}), p.name || p.id, "itl"), h("div", {class: "imeta", text: (p.status === "blocked" ? ["Blocked"] : []).concat(p.health.reasons.filter(r => !/marked blocked/.test(r))).join(", ")})), h("span"), h("span")))), {flush: true}) : null,
-        panel("Goal and scope", null, null, (x.goal || x.scopeText || longState) ? [part("Goal", x.goal), part("Scope", x.scopeText), longState ? part("Current state", x.state) : null] : empty("No goal written yet", "Edit ", h("code", {text: x.note || "initiatives/" + x.id + "/README.md"}), " or ask an agent for a handoff."))),
-      h("div", {class: "stack-v"}, whoPanel(x.people, x.projects.concat([x.scope])),
+        stuck.length ? panel("Off-track projects", stuck.length, h("a", {class: "more", href: link({tab: "projects", mg: "status"})}, "All projects"),
+          h("div", {class: "ptiles sm"}, stuck.slice(0, 8).map(p => BYID.has(p.id) ? projectCard(p) : h("article", {class: "ptile", onclick: rowClick(() => openProject(p.id))}, h("div", {class: "pt-h"}, h("span", {class: "dot k-risk", "aria-hidden": "true"}), h("div", {class: "pt-n"}, linkTo(link({view: "projects", id: p.id}), p.name || p.id, "strong ell"))))))) : null,
+        (x.goal || x.scopeText || x.state) ? panel("Goal and state", null, null, [part("Goal", x.goal), part("Scope", x.scopeText), part("Current state", x.state)]) : null),
+      h("div", {class: "stack-v sp-4"}, whoPanel(x.people, x.projects.concat([x.scope])),
         panel("Risks and decisions", null, null, (x.risks || x.decisions) ? [part("Risks", x.risks), part("Decisions", x.decisions)] : empty("Nothing recorded yet", "Risks and decisions live in the initiative README.")),
         x.links ? panel("Links", null, null, md(x.links)) : null)));
   } else if (tab === "projects") tp.append(membersBlock(x));
@@ -2530,22 +2733,21 @@ function projectTable(ps) {
   const th = (label, key, cls) => h("th", {scope: "col", class: cls || null, "aria-sort": S.sort === key ? "descending" : null}, key ? h("button", {type: "button", onclick: () => set({sort: key}, true), text: label + (S.sort === key ? " ↓" : "")}) : label);
   return h("div", {class: "tw st"}, h("table", {class: "t pt"},
     h("thead", null, h("tr", null, th("", "attention", "c-health"), th("Project", "name"), th("Status", "priority", "c-st"), h("th", {class: "c-prog", text: "Progress"}), th("In progress", "tasks"), h("th", {text: "Latest agent status"}), h("th", {text: "PRs"}), h("th", {class: "c-act", text: "7 days"}), th("Last activity", "activity", "c-last"), h("th", {class: "c-who", text: "Who"}))),
-    h("tbody", null, ps.map(p => h("tr", {onclick: rowClick(() => openProject(p.id))},
+    h("tbody", null, ps.map(p => h("tr", {onclick: rowClick(() => openModal("project", p.id))},
       h("td", {class: "c-health"}, healthDot(p)),
-      h("td", {class: "c-name"}, h("span", {class: "pname"}, linkTo(link({view: "projects", id: p.id}), p.name || p.id), ONPROJ.has(p.id) || p.live ? h("span", {class: "dot d-live", style: "margin-left:8px;vertical-align:1px", title: "Live session", "aria-label": "live session"}) : null, p.local ? null : h("span", {class: "tag", style: "margin-left:8px", title: "Handoff note only — clone with dev clone " + p.id, text: "not cloned"})), h("span", {class: "powner", text: p.owner + ((p.main || {}).branch ? " · " + p.main.branch : "")})),
+      h("td", {class: "c-name"}, h("span", {class: "pname"}, modalLink("project", p.id, p.name || p.id), ONPROJ.has(p.id) || p.live ? h("span", {class: "dot d-live", style: "margin-left:8px;vertical-align:1px", title: "Live session", "aria-label": "live session"}) : null, p.local ? null : h("span", {class: "tag", style: "margin-left:8px", title: "Handoff note only — clone with dev clone " + p.id, text: "not cloned"})), h("span", {class: "powner", text: p.owner + ((p.main || {}).branch ? " · " + p.main.branch : "")})),
       h("td", {class: "c-st"}, statusBadge(p.status), prioIcon(p.priority)),
       h("td", {class: "c-prog"}, progressBar(p)), h("td", {class: "c-now"}, nowCell(p)), h("td", {class: "c-status"}, latest(p)), h("td", {class: "c-prs"}, prPills(p, 2)),
       h("td", {class: "c-act"}, h("div", {style: "display:flex;gap:8px;align-items:center"}, sparkline(p, 30, 64, 16), h("span", {class: "num t2", style: "font-size:var(--fs-1)", text: String(sum7(p))}))),
       h("td", {class: "c-last num t2", text: rel(p.last_activity)}), h("td", {class: "c-who"}, avatars(p.people, 3)))))));
 }
+/* a project tile: status dot, name, progress ring, CI strip, 14-day commits */
 function projectCard(p) {
-  const d = p.items.filter(i => i.status === "doing" || i.status === "blocked");
-  return h("button", {class: "pcard", type: "button", "data-nav": "", onclick: () => openProject(p.id), "aria-label": "Open " + p.id},
-    h("div", {class: "r1"}, healthDot(p), h("span", {class: "nm ell", text: p.name || p.id}), ONPROJ.has(p.id) ? h("span", {class: "dot d-live", title: "Live session"}) : null, h("span", {class: "bd"}, statusBadge(p.status), prioBadge(p.priority))),
-    progressBar(p, true),
-    d.length ? h("div", {class: "slt ell"}, istatusIcon(d[0].status), " ", d[0].title) : null,
-    p.status_line ? h("div", {class: "statusline"}, h("span", {class: "who", text: (p.status_line.agent || "agent") + " · " + rel(p.status_line.ts)}), statusLine(p.status_line.line, p.status_line.parts)) : null,
-    h("div", {class: "r3"}, prPills(p), avatars(p.people, 3), h("span", {style: "margin-left:auto;display:flex;gap:8px;align-items:center"}, sparkline(p, 30, 64, 16), rel(p.last_activity), p.local ? null : h("span", {class: "tag", text: "not cloned"}))));
+  const st = hstate(p);
+  return h("article", {class: "ptile", onclick: rowClick(() => openModal("project", p.id))},
+    h("div", {class: "pt-h"}, h("span", {class: "dot k-" + st, role: "img", title: HS[st] + (p.health.reasons.length ? ": " + p.health.reasons.join(", ") : ""), "aria-label": HS[st]}),
+      h("div", {class: "pt-n"}, modalLink("project", p.id, p.name || p.id, "strong ell"), h("span", {class: "t2 ell", text: p.local ? p.owner : p.owner + ", not cloned"})), progRing(p, 36)),
+    h("div", {class: "pt-f"}, ciStrip(p, 6), spark(commitSeries([p], 14), "Commits per day", "commit")));
 }
 function viewProjects(main) {
   if (S.id) { viewProject(main); return; }
@@ -2554,14 +2756,14 @@ function viewProjects(main) {
   main.append(h("div", {class: "toolbar"}, h("span", {class: "count"}, ["risk", "warn"].map(l => { const n = ps.filter(p => p.health.level === l).length; return n ? h("span", {style: "margin-right:12px"}, h("span", {class: "dot d-" + l, style: "margin-right:6px"}), n + (l === "risk" ? " at risk" : " need a look")) : null; })),
     selectBox("Group by", "group", [["none", "No grouping"], ["initiative", "Group: initiative"], ["owner", "Group: owner"], ["status", "Group: status"], ["priority", "Group: priority"]]),
     selectBox("Sort by", "sort", [["attention", "Sort: needs attention"], ["activity", "Sort: last activity"], ["priority", "Sort: priority"], ["tasks", "Sort: open tasks"], ["name", "Sort: name"], ["size", "Sort: size"]]),
-    seg("Layout", "layout", [["table", "Table"], ["cards", "Cards"]]),
+    seg("Layout", "layout", [["cards", "Tiles"], ["table", "Table"]]),
     h("button", {class: "btn sm", type: "button", "aria-pressed": String(S.dense), onclick: () => set({dense: !S.dense}, true)}, "Dense")));
   if (!ps.length) { main.append(h("div", {class: "panel"}, empty("No projects match", facetCount() || S.q ? h("button", {class: "btn", type: "button", onclick: () => set(Object.assign({q: ""}, CLEAR), true)}, "Clear search and filters") : ["Clone one with ", h("code", {text: "dev clone owner/repo"})]))); return; }
   const groups = new Map();
   const keyOf = p => S.group === "owner" ? [p.owner] : S.group === "status" ? [(STATUS[p.status] || [0, p.status])[1]] : S.group === "priority" ? [PRIO[p.priority] ? PRIO[p.priority][1] : p.priority] : S.group === "initiative" ? (MEMBEROF.get(p.id) || ["—"]).map(id => id === "—" ? "Outside initiatives" : (BYINIT.get(id) || {}).title || id) : [""];
   for (const p of ps) for (const g of keyOf(p)) { if (!groups.has(g)) groups.set(g, []); groups.get(g).push(p); }
   for (const [g, list] of groups) {
-    const body = S.layout === "cards" ? h("div", {class: "cards"}, list.map(projectCard)) : h("div", {class: "panel"}, projectTable(list));
+    const body = S.layout === "table" ? h("div", {class: "panel"}, projectTable(list)) : h("div", {class: "ptiles"}, list.map(projectCard));
     main.append(g ? panel(g, list.length, null, body, {cls: "mb", flush: true}) : body);
   }
 }
@@ -2637,36 +2839,35 @@ function viewProject(main) {
   if (!p) { viewUnknownProject(main); return; }
   const tab = PTABS.some(t => t[0] === S.tab) ? S.tab : "overview", ns = p.ns || {}, m = p.main || {};
   const plansL = plansFor([p.id]), sess = sessionsFor([p.id], p.sessions), here = ONPROJ.get(p.id) || [];
-  const failing = p.prsOpen.filter(r => r.checks === "failing").length;
-  const lastSeen = Math.max(p.last_activity || 0, ...here.map(s => s.last_seen || s.started || 0));
-  const lv = p.health.level, hl = lv === "risk" ? "At risk" : lv === "warn" ? "Needs a look" : "Healthy";
+  const lastSeen = Math.max(p.last_activity || 0, ...here.map(s => s.last_seen || s.started || 0)), st = hstate(p);
   main.append(crumbs([["Projects", link({view: "projects", id: "", tab: ""})], [p.owner, link({view: "projects", id: "", tab: "", owner: [p.owner]})], [p.name || p.id]]));
   main.append(h("header", {class: "phead"},
-    h("div", {class: "pt1"}, h("div", null, h("h1", null, healthDot(p), p.name || p.id)),
+    h("div", {class: "pt1"}, h("div", {class: "mh-row"}, progRing(p, 64, true), h("div", {class: "mh-tt"}, h("h1", {text: p.name || p.id}),
+        h("div", {class: "pline"}, meta(h("span", {class: "stat", title: p.health.reasons.join(", ") || null}, h("span", {class: "dot k-" + st, "aria-hidden": "true"}), HS[st]),
+          p.inits.length ? h("span", null, "in ", p.inits.map((id, i) => [i ? ", " : "", h("a", {href: link({view: "initiatives", id, tab: ""}), text: (BYINIT.get(id) || {}).title || id})])) : null,
+          m.branch ? h("span", {class: "meta", title: "Current branch"}, icon("branch"), m.branch) : null, ns.due ? duePill(ns.due, p.status === "done") : null, lastSeen ? "active " + rel(lastSeen) : null, p.local ? null : "not cloned here")))),
       h("div", {class: "go"}, p.local ? cmdBtn("dev claude " + p.id, true, "Copy dev claude") : cmdBtn("dev clone " + p.id, true, "Copy dev clone"),
         cmdMenu("More commands", p.local ? [["Start Codex", "dev codex " + p.id], ["Go to the checkout", "dcd " + p.id], ["Write the handoff", "dev handoff " + p.id]] : [["Write the handoff", "dev handoff " + p.id]]))),
-    h("div", {class: "pline"}, meta(statusBadge(p.status, true), p.priority === "high" ? "High priority" : null, ns.milestone ? h("span", {class: "msl", title: "Milestone: " + ns.milestone, text: "Milestone: " + ns.milestone}) : null, ns.due ? dueBadge(ns.due, p.status === "done") : null,
-      p.inits.length ? h("span", null, "in ", p.inits.map((id, i) => [i ? ", " : "", h("a", {href: link({view: "initiatives", id, tab: ""}), text: (BYINIT.get(id) || {}).title || id})])) : null,
-      m.branch ? h("span", {class: "meta", title: "Current branch"}, icon("branch"), m.branch) : null, lastSeen ? "active " + rel(lastSeen) : null, p.local ? null : "not cloned on this Mac")),
-    lv !== "ok" ? h("div", {class: "hreason"}, h("span", {class: "dot d-" + lv, "aria-hidden": "true"}), h("span", null, h("span", {class: lv === "risk" ? "bad" : "warn-t", text: hl + ": "}), p.health.reasons.join(", "))) : null,
-    h("div", {class: "pprog"}, progressBar(p, true), h("span", {text: progOf(p).why}))));
-  main.append(stats([[p.cnt.open, "open tasks", "", p.cnt.doing + " doing", link({tab: "tasks"})],
-    [p.cnt.blocked, p.cnt.blocked === 1 ? "blocked task" : "blocked tasks", p.cnt.blocked ? "risk" : "", p.cnt.blocked ? "waiting on a decision" : "nothing blocked", link({tab: "tasks", tst: "blocked"})],
-    [p.prs, p.prs === 1 ? "open PR" : "open PRs", failing ? "risk" : "", failing ? failing + " failing CI" : p.local ? "none failing" : "known after a clone", link({tab: "prs"})],
-    [here.length, here.length === 1 ? "live session" : "live sessions", "", plural(p.people.length, "person", "people") + " here"]]));
+    p.health.reasons.length ? h("ul", {class: "reasons"}, p.health.reasons.map(r => h("li", null, h("span", {class: "dot k-" + (p.health.level === "risk" ? "risk" : "warn"), "aria-hidden": "true"}), r))) : null));
+  const taskParts = [["mark", p.cnt.doing, "Doing"], ["risk", p.cnt.blocked, "Blocked"], ["none", p.cnt.todo, "To do"]];
+  main.append(h("div", {class: "g12 tiles"},
+    statTile({label: "Open tasks", value: p.cnt.open, href: link({tab: "tasks"}), viz: segBar(taskParts, "Open tasks"), legend: legend(taskParts), cls: "sp-3"}),
+    statTile({label: "Open PRs", value: p.prs, href: link({tab: "prs"}), viz: ciStrip(p, 14), cls: "sp-3"}),
+    statTile({label: "Commits, 14 days", value: commitSeries([p], 14).reduce((a, d) => a + d[1], 0), viz: spark(commitSeries([p], 14), "Commits per day", "commit", true), cls: "sp-3"}),
+    statTile({label: "Live sessions", value: here.length, viz: here.length ? h("div", {class: "sbars"}, here.map(s => { const x = BYWHO.get(s.who), i = x ? x.sessions.indexOf(x.sessions.find(z => z.session === s.session && z.agent === s.agent)) : -1; return sessBar(s, s.who, Math.max(0, i)); })) : h("span", {class: "t2", text: "Nobody here now"}), cls: "sp-3"})));
   main.append(pageTabs([["overview", "Overview"], ["tasks", "Tasks", p.cnt.open], ["prs", "Pull requests", p.prs], ["worktrees", "Worktrees", p.wts.length], ["plans", "Plans", plansL.length || (p.plans || []).length], ["sessions", "Sessions", sess.length], ["note", "Handoff note"]], tab));
   const tp = h("div", {class: "tabpanel", id: "tabpanel", role: "tabpanel", "aria-labelledby": "tab-" + tab}); main.append(tp);
   if (tab === "overview") {
     const doing = sortItems(p.items.filter(i => i.status === "doing" || i.status === "blocked")), next = sortItems(p.items.filter(i => i.status === "todo")).slice(0, 4);
     const tt = ((D.timing || {}).by_project || {})[p.id];
-    tp.append(h("div", {class: "cols"},
-      h("div", {class: "stack-v"},
+    tp.append(h("div", {class: "g12"},
+      h("div", {class: "stack-v sp-8"},
         here.length ? panel("Live now", here.length, null, h("div", {class: "sessl"}, here.map(s => sessionBlock(s, s.who, s.asOf, true)))) : null,
         panel("Doing or blocked", doing.length, h("a", {class: "more", href: link({tab: "tasks"})}, "All tasks"),
           doing.length || next.length ? [doing.length ? h("ul", {class: "irows"}, doing.map(i => itemRow(i))) : null, next.length ? [h("h3", {class: "sub3 pad", text: "Up next"}), h("ul", {class: "irows"}, next.map(i => itemRow(i)))] : null]
             : empty("Nothing in progress", "Plan the work: ", h("code", {text: "dev task -p " + p.id + ' add "…" --now'})), {flush: !!(doing.length || next.length)}),
         ns.purpose || ns.state ? panel("Purpose and current state", null, h("a", {class: "more", href: link({tab: "note"})}, "Full note"), [ns.purpose ? md(ns.purpose) : null, ns.state ? [h("h3", {class: "sub3", text: "Current state"}), md(ns.state)] : null]) : null),
-      h("div", {class: "stack-v"},
+      h("div", {class: "stack-v sp-4"},
         p.status_line ? panel("Latest status", null, null, statusCard(p.status_line.line, p.status_line.parts, [p.status_line.agent || "agent", rel(p.status_line.ts), p.status_line.branch ? "on " + p.status_line.branch : ""].filter(Boolean).join(", "))) : null,
         panel("Repository", null, null, repoKv(p)),
         tt ? h("details", {class: "recent"}, h("summary", null, "How long work takes here"), timeBody(tt, false)) : null)));
@@ -2685,23 +2886,14 @@ function viewProject(main) {
 /* ---------------------------------------------------------------- Team: one card per person (user@host) */
 function markerChip() { return h("span", {class: "mk", title: "The status-line marker every agent reply starts with"}, "[Firefly", h("span", {class: "chev", text: ">"}), " DevKit]"); }
 /* Team: one column per person; each live session once; locks as rows; history behind a disclosure */
+/* a person card: avatar with a live dot, one bar per running session, locks; details in the person modal */
 function personCard(x) {
-  const claimed = x.claimed.map(id => ITEMBY.get(id)).filter(Boolean), lockIds = new Set(x.locks.map(l => l.id));
-  const extra = claimed.filter(i => !lockIds.has(i.id));
-  const lockRow = (id, title, scope, until) => { const it = ITEMBY.get(id), exp = (it && it.lock === "expired") || (iso(until) && iso(until) < nowS());
-    const open = () => it ? openTask(id) : openScope(scope);
-    return h("li", {class: "lrow" + (exp ? " exp" : ""), onclick: rowClick(open)},
-      lockIcon(), h("div", {class: "lm"}, it ? h("a", {class: "lt rl", href: taskHref(id), "data-nav": "", onclick: e => { e.preventDefault(); openTask(id); }, text: title}) : linkTo("#", title, "lt"), h("div", {class: "ls ell", text: scopeName(scope)})),
-      h("span", {class: "num lu" + (exp ? " bad" : ""), text: exp ? "expired " + rel(iso(until)) : String(untilText(until)).replace(/^for /, "") + " left"})); };
-  const recent = x.recent.slice(0, 6);
-  return h("article", {class: "person", "aria-label": x.who},
-    h("div", {class: "pc-h"}, avatar(x.who, true), h("div", {class: "pc-n"}, h("h3", null, h("span", {class: "ell", text: x.who}), isMe(x.who) ? h("span", {class: "tag", text: "you"}) : null),
-      h("div", {class: "t2", text: (x.sessions.length ? plural(x.sessions.length, "live session") : "No live session") + (x.updated ? ", seen " + rel(x.updated) : "")}))),
-    x.sessions.length ? h("div", {class: "sessl"}, x.sessions.map(s => sessionBlock(s, null, x.updated))) : null,
-    x.locks.length || extra.length ? h("div", {class: "pc-s"}, h("div", {class: "label", text: "Claimed tasks"}), h("ul", {class: "lrows"}, x.locks.map(l => lockRow(l.id, l.title, l.scope, l.until)), extra.map(i => lockRow(i.id, i.title, i.scope, i.lock_expires)))) : null,
-    recent.length ? h("details", {class: "recent"}, h("summary", null, "Recent sessions (" + recent.length + ")"),
-      h("ul", {class: "rrows"}, recent.map(r => h("li", null, h("div", {class: "slw"}, meta(fmt(r.ts), scopeChip(r.scope), r.agent, r.branch)), h("div", {class: "ell", title: plain(stripMarker(r.text))}, logText(r)))))) : null,
-    !x.sessions.length && !x.locks.length && !extra.length && !recent.length ? h("p", {class: "t2", style: "margin:0", text: "Nothing right now."}) : null);
+  const claimed = x.claimed.map(id => ITEMBY.get(id)).filter(Boolean), exp = claimed.filter(i => i.lock === "expired").length;
+  return h("article", {class: "pcard3", onclick: rowClick(() => openModal("person", x.who))},
+    h("div", {class: "pc-h"}, avatar(x.who, true), h("div", {class: "pc-n"}, h("h3", null, modalLink("person", x.who, x.who, "ell"), isMe(x.who) ? h("span", {class: "tag", text: "you"}) : null),
+      h("div", {class: "t2", text: (x.sessions.length ? plural(x.sessions.length, "live session") : "No live session") + (x.updated ? ", seen " + rel(x.updated) : "")})),
+      claimed.length ? h("span", {class: "lockc" + (exp ? " exp" : ""), role: "img", "aria-label": plural(claimed.length, "claimed task") + (exp ? ", " + exp + " with an expired lock" : ""), "data-tip": plural(claimed.length, "claimed task") + (exp ? ", " + exp + " with an expired lock" : "")}, lockIcon(), h("b", {class: "num", text: String(claimed.length)})) : null),
+    x.sessions.length ? h("div", {class: "sbars"}, x.sessions.map((s, i) => sessBar(s, x.who, i))) : null);
 }
 function viewTeam(main) {
   const colls = D.collisions || [], live = PEOPLE.reduce((a, x) => a + x.sessions.length, 0), locks = ITEMS.filter(i => i.open && i.claimed_by).length;
@@ -2709,7 +2901,7 @@ function viewTeam(main) {
   if (colls.length) main.append(panel("Collisions", colls.length, null, h("ul", {class: "acts"}, colls.map(c => {
     const cmd = c.kind === "expired-lock" ? "dev task " + flagOf(c.scope) + " release " + c.id + ' --why "lock expired"' : "dev team";
     const open = () => c.id ? openTask(c.id) : openProject(c.project);
-    return h("li", {class: "act", onclick: rowClick(open)}, h("span", {class: "dot d-warn", role: "img", title: "Needs a look", "aria-label": "Needs a look"}),
+    return h("li", {class: "act", onclick: rowClick(open)}, h("span", {class: "dot k-warn", role: "img", title: "Needs a look", "aria-label": "Needs a look"}),
       h("div", {style: "min-width:0"}, h("a", {class: "at", href: c.id ? taskHref(c.id) : link({view: "projects", id: c.project}), "data-nav": "", onclick: e => { e.preventDefault(); open(); }, text: c.kind === "expired-lock" ? "Expired lock still held" : "Two sessions on the same branch"}),
         h("div", {class: "ad"}, h("span", {class: "ell", text: collText(c, true)}))),
       h("div", {class: "ar"}, icopy(cmd, c.kind === "expired-lock" ? "Copy the release command" : "Copy command"))); })), {flush: true, cls: "mb"}));
@@ -2787,17 +2979,51 @@ function timeline(ps, nDays, limit) {
   }
   return ul;
 }
-function viewActivity(main) {
-  const ps = filtered(true), n = S.range === 30 ? 30 : 7;
-  const chart = activityChart(ps, n, "Commits per day", 140);
-  const rows = ps.map(p => [p.name || p.id, days(n).reduce((a, k) => a + (p.act[k] || 0), 0), p.id]).filter(r => r[1] > 0).sort((a, b) => b[1] - a[1]).slice(0, 10);
-  main.append(h("div", {class: "head"}, h("h1", {text: "Activity"}), h("span", {class: "sub", text: "Sessions, merged PRs and operations · " + ps.length + " projects"}),
-    h("div", {class: "right"}, h("div", {class: "seg", role: "group", "aria-label": "Range"}, [7, 30].map(r => h("button", {type: "button", "aria-pressed": String(n === r), onclick: () => set({range: r}, true)}, "Last " + r + " days"))))));
-  main.append(h("div", {class: "cols"}, panel("Timeline", null, null, timeline(ps, n), {flush: true}),
-    h("div", {class: "stack-v"}, panel("Commits per day", chart.total, chart.toggle, chart.node),
-      panel("Most active", rows.length, null, rows.length ? rankedBars(rows, v => String(v), id => openProject(id)) : empty("No commits in this range")))));
+/* a calendar heatmap: one square per day (13 weeks), a one-hue ramp, the day's commits, sessions and finished tasks on hover */
+function heatmap(nWeeks) {
+  const end = new Date(D.generated * 1000); end.setHours(12, 0, 0, 0);
+  const start = new Date(end); start.setDate(end.getDate() - ((end.getDay() + 6) % 7) - (nWeeks - 1) * 7);
+  const per = {}, add = (k, f) => { const d = per[k] || (per[k] = {c: 0, s: 0, t: 0}); d[f]++; };
+  for (const p of P) for (const [k, v] of Object.entries(p.act)) { const d = per[k] || (per[k] = {c: 0, s: 0, t: 0}); d.c += v; }
+  for (const s of D.session_log || []) add(lkey(new Date(s.ts * 1000)), "s");
+  for (const it of ITEMS) if (it.status === "done" && it.updated) add(lkey(new Date(iso(it.updated) * 1000)), "t");
+  const cells = [], d = new Date(start);
+  while (d <= end) { const k = lkey(d), v = per[k] || {c: 0, s: 0, t: 0}; cells.push({k, d: new Date(d), v, n: v.c + v.s + v.t}); d.setDate(d.getDate() + 1); }
+  const nz = cells.map(c => c.n).filter(Boolean).sort((a, b) => a - b), q = f => nz.length ? nz[Math.min(nz.length - 1, Math.floor(f * nz.length))] : 0;
+  const cut = [q(0.25), q(0.5), q(0.75)], lvl = n => !n ? 0 : n <= cut[0] ? 1 : n <= cut[1] ? 2 : n <= cut[2] ? 3 : 4;
+  const C = 18, G = 4, L = 32, T = 20, w = L + nWeeks * (C + G), hh = T + 7 * (C + G);
+  const tot = cells.reduce((a, c) => ({c: a.c + c.v.c, s: a.s + c.v.s, t: a.t + c.v.t}), {c: 0, s: 0, t: 0});
+  const best = cells.reduce((a, c) => c.n > a.n ? c : a, cells[0]);
+  const svg = sv("svg", {class: "heat", width: w, height: hh, viewBox: "0 0 " + w + " " + hh, role: "img", tabindex: "0",
+    "aria-label": "Activity per day over " + nWeeks + " weeks: " + plural(tot.c, "commit") + ", " + plural(tot.s, "session") + ", " + plural(tot.t, "task") + " done" + (best && best.n ? "; busiest " + fmtDay(best.d.getTime() / 1000) : ""), "data-tip": "Use the table view to read every day"});
+  ["Mon", "Wed", "Fri"].forEach((l, i) => svg.append(sv("text", {x: 0, y: T + (i * 2) * (C + G) + C - 3, class: "ax"}, l)));
+  let lastM = -1;
+  cells.forEach((c, i) => { const col = Math.floor(i / 7), row = i % 7;
+    if (row === 0 && c.d.getMonth() !== lastM) { lastM = c.d.getMonth(); svg.append(sv("text", {x: L + col * (C + G), y: 12, class: "ax"}, c.d.toLocaleDateString(undefined, {month: "short"}))); }
+    svg.append(sv("rect", {x: L + col * (C + G), y: T + row * (C + G), width: C, height: C, rx: 3, class: "h" + lvl(c.n), "data-tip": fmtDay(c.d.getTime() / 1000) + ": " + [plural(c.v.c, "commit"), plural(c.v.s, "session"), plural(c.v.t, "task") + " done"].join(", ")})); });
+  const lg = h("div", {class: "heat-l", "aria-hidden": "true"}, "Less", [0, 1, 2, 3, 4].map(l => h("i", {class: "h" + l})), "More");
+  return {svg, lg, cells, tot};
 }
-
+function viewActivity(main) {
+  const ps = filtered(true), n = S.range === 30 ? 30 : 7, hm = heatmap(26);
+  const rows = ps.map(p => [p.name || p.id, days(n).reduce((a, k) => a + (p.act[k] || 0), 0), p.id]).filter(r => r[1] > 0).sort((a, b) => b[1] - a[1]).slice(0, 10);
+  let tableOn = false;
+  const box = h("div", {class: "heat-box"});
+  const tbtn = h("button", {class: "btn sm", type: "button", "aria-pressed": "false", onclick: () => { tableOn = !tableOn; tbtn.setAttribute("aria-pressed", String(tableOn)); paint(); }}, "Table");
+  function paint() { append(clear(box), [tableOn ? h("div", {class: "tw"}, h("table", {class: "t"}, h("thead", null, h("tr", null, ["Day", "Commits", "Sessions", "Tasks done"].map(x => h("th", {text: x})))),
+      h("tbody", null, hm.cells.slice().reverse().filter(c => c.n).map(c => h("tr", null, h("td", {text: fmtDay(c.d.getTime() / 1000)}), h("td", {class: "num", text: String(c.v.c)}), h("td", {class: "num", text: String(c.v.s)}), h("td", {class: "num", text: String(c.v.t)})))))) : [hm.svg, hm.lg]]); }
+  paint();
+  main.append(h("div", {class: "head"}, h("h1", {text: "Activity"}), h("span", {class: "sub", text: ps.length + " projects"}),
+    h("div", {class: "right"}, h("div", {class: "seg", role: "group", "aria-label": "Range"}, [7, 30].map(r => h("button", {type: "button", "aria-pressed": String(n === r), onclick: () => set({range: r}, true)}, "Last " + r + " days"))))));
+  main.append(h("div", {class: "g12"},
+    panel("Every day, 26 weeks", null, tbtn, [box, h("p", {class: "tnote", text: "Commits are kept for 30 days; sessions and finished tasks come from the handoff repository."})], {cls: "sp-8"}),
+    h("div", {class: "sp-4 ctrs col1"},
+      statTile({label: "Commits, 26 weeks", value: hm.tot.c, viz: spark(commitSeries(ps, 14), "Commits per day", "commit", true), cls: "row"}),
+      statTile({label: "Sessions, 26 weeks", value: hm.tot.s, viz: spark(sessionSeries(null, 14), "Sessions per day", "session", true), cls: "row"}),
+      statTile({label: "Tasks done, 26 weeks", value: hm.tot.t, viz: spark(doneSeries(ITEMS, 14), "Tasks done per day", "task", true), cls: "row"})),
+    panel("Timeline", null, null, timeline(ps, n), {flush: true, cls: "sp-8"}),
+    panel("Most active, last " + n + " days", rows.length, null, rows.length ? rankedBars(rows, v => String(v), id => openModal("project", id)) : empty("No commits in this range"), {cls: "sp-4"})));
+}
 /* ---------------------------------------------------------------- Explorer */
 function fileTree() {
   const tree = {workspace: [], log: [], owners: new Map(), inits: new Map()};
@@ -2887,8 +3113,8 @@ function providerCard(key, p) {
        h("div", {class: "t2", style: "font-size:var(--fs-1)"}, (used != null ? Math.round(used) + "% of the " + (q.window_minutes ? (q.window_minutes >= 1440 ? Math.round(q.window_minutes / 1440) + "-day" : Math.round(q.window_minutes / 60) + "-hour") : "") + " window used" : ""), q.resets_at ? " · resets " + fmtDay(q.resets_at) + " " + tm(q.resets_at) : "")];
   return panel(p.name || key, null, h("span", {class: "prov"}, h("span", {class: "dot d-" + tone, "aria-hidden": "true"}), state), [dl, quota]);
 }
-function viewHealth(main) {
-  main.append(h("div", {class: "head"}, h("h1", {text: "Health"}), h("span", {class: "sub", text: "Agents, guard, configuration and disk"})));
+function viewHealth(main, tiles) {
+  if (!tiles) main.append(h("div", {class: "head"}, h("h1", {text: "Health"}), h("span", {class: "sub", text: "Agents, guard, configuration and disk"})));
   const pv = D.providers || {};
   const c = D.canary || {}, sum = c.summary || {}, recs = c.records || [], misses = recs.filter(r => !r.ok).slice(-40).reverse();
   const canaryBody = Object.keys(sum).length ? [h("div", {style: "display:grid;gap:12px"}, Object.keys(sum).map(a => { const [ok, tot] = sum[a], pct = Math.round(100 * ok / tot), tone = pct >= 95 ? "good" : pct >= 80 ? "warning" : "critical";
@@ -2923,13 +3149,25 @@ function viewHealth(main) {
     h("div", {class: "stack-v"}, panel("Configuration drift", drift ? drift.length : null, null, driftBody),
       panel("Disk", null, null, sizes.length ? [rankedBars(sizes, kb, id => openProject(id)), h("p", {class: "t2", style: "font-size:var(--fs-1);margin:10px 0 0"}, "Reclaim safely with ", h("code", {text: "dev gc"}), " (dry run).")] : empty("Not measured yet", "The hourly sync measures sizes.")))));
 }
+/* Health: status tiles first (agents, guard, canary, drift, worktrees, disk), the detail below */
 function viewHealthV3(main) {
-  viewHealth(main);
+  const pv = D.providers || {}, c = D.canary || {}, sum = c.summary || {}, rules = D.guard_rules || [], drift = D.drift;
+  const wts = []; for (const p of P) for (const w of p.wts) wts.push(w);
+  const recl = wts.filter(w => w.pr && /MERGED|CLOSED/.test(w.pr.state) && !w.active).length, disk = P.reduce((a, p) => a + (p.size_kb || 0) + p.wts.reduce((b, w) => b + (w.size_kb || 0), 0), 0);
+  const prov = key => { const p = pv[key]; if (!p || !p.installed) return null; const q = p.quota || {}, used = q.used_percent;
+    const tone = p.logged_in === false ? "warn" : q.available === false ? "risk" : "ok", word = p.logged_in === false ? "Not signed in" : q.available === false ? "Quota used up" : "Signed in";
+    return statTile({label: p.name || key, value: word, viz: used != null ? segBar([[tone === "risk" ? "risk" : used >= 70 ? "warn" : "mark", Math.round(used), "Used"], ["none", Math.max(0, 100 - Math.round(used)), "Left"]], "Quota") : h("span", {class: "stat t2"}, h("span", {class: "dot k-" + tone, "aria-hidden": "true"}), q.note || "Quota not reported"), cls: "sp-2 wordv"}); };
+  const can = Object.keys(sum).map(a => [a, sum[a][0], sum[a][1]]), ok = can.reduce((a, x) => a + x[1], 0), all = can.reduce((a, x) => a + x[2], 0);
+  main.append(h("div", {class: "head"}, h("h1", {text: "Health"}), h("span", {class: "sub", text: "Agents, guard, configuration and disk"})));
+  main.append(h("div", {class: "g12 tiles"}, prov("claude"), prov("codex"),
+    statTile({label: "Guard decisions", value: rules.reduce((a, r) => a + r.count, 0), viz: segBar(rules.slice(0, 4).map((r, i) => [i ? "none" : "mark", r.count, r.label]), "Guard decisions by rule"), cls: "sp-2"}),
+    statTile({label: "Status block, 7 days", value: all ? Math.round(100 * ok / all) + "%" : "—", viz: all ? segBar([["ok", ok, "Started with it"], ["risk", all - ok, "Missed"]], "Replies in 7 days") : h("span", {class: "t2", text: "No replies yet"}), legend: all ? legend([["ok", ok, "Started with it"], ["risk", all - ok, "Missed"]]) : null, cls: "sp-2"}),
+    statTile({label: "Configuration drift", value: drift == null ? "—" : drift.length, viz: h("span", {class: "stat t2"}, h("span", {class: "dot k-" + (drift && drift.length ? "warn" : "ok"), "aria-hidden": "true"}), drift == null ? "Not reported" : drift.length ? "Run dev config diff" : "Matches devkit"), cls: "sp-2"}),
+    statTile({label: "Worktrees", value: wts.length, unit: disk ? kb(disk) + " on disk" : null, viz: h("span", {class: "stat t2"}, h("span", {class: "dot k-" + (recl ? "warn" : "ok"), "aria-hidden": "true"}), recl ? plural(recl, "finished worktree") + " to reclaim" : "Nothing to reclaim"), cls: "sp-2"})));
+  viewHealth(main, true);
   const tp = timePanel(D.timing, true, "How long things take");
-  const first = $(".cols.even", main);
-  if (tp) { const w = h("div", {class: "mb"}, tp); if (first && first.nextSibling) main.insertBefore(w, first.nextSibling); else main.append(w); }
+  if (tp) main.append(h("div", {class: "mt"}, tp));
 }
-
 /* ---------------------------------------------------------------- global search */
 let IDX = null;
 function buildIndex() {
@@ -2975,40 +3213,122 @@ function viewSearch(main) {
 
 /* ---------------------------------------------------------------- task drawer: metadata, lock, history, commands */
 let lastFocus = null;
-function renderDrawer() {
-  const dr = $("#drawer"), scrim = $("#scrim"), it = S.task && ITEMBY.get(S.task);
-  if (!it) { if (!dr.hidden) { dr.classList.remove("on"); scrim.classList.remove("on"); setTimeout(() => { if (!S.task) { dr.hidden = true; if ($("#palette").hidden && $("#sheet").hidden) scrim.hidden = true; } }, 200); if (lastFocus && lastFocus.focus && lastFocus.isConnected) lastFocus.focus({preventScroll: true}); } return; }
-  if (dr.hidden) lastFocus = document.activeElement;
-  clear(dr); dr.hidden = false; scrim.hidden = false; requestAnimationFrame(() => { dr.classList.add("on"); scrim.classList.add("on"); });
-  const closeBtn = h("button", {class: "btn icon ghost", type: "button", onclick: closeDrawer, "aria-label": "Close (Esc)", title: "Close (Esc)"}, icon("close"));
-  const ini = isInit(it.scope), cmds = taskCmds(it), exp = it.lock === "expired";
-  const scopeHref = ini ? link({view: "initiatives", id: it.scope.slice(12), tab: "tasks", task: ""}) : link({view: "projects", id: it.scope, tab: "tasks", task: ""});
-  const head = h("div", {class: "dh"},
-    h("div", {class: "r1"}, h("div", {style: "flex:1;min-width:0"}, crumbs([[ini ? "Initiatives" : "Projects", link({view: ini ? "initiatives" : "projects", id: "", tab: "", task: ""})], [scopeName(it.scope), scopeHref], [it.legacy ? "Note task" : it.id]]),
-      h("h2", {id: "drawer-title", text: it.title})), closeBtn),
-    h("div", {class: "pline"}, meta(istatusBadge(it.status), (it.bucket || "next").replace(/^./, c => c.toUpperCase()), prioBadge(it.priority), typeTag(it.type), it.due ? dueBadge(it.due, !it.open) : null, !it.legacy ? "version " + it.version : null)));
-  const lockLine = it.claimed_by ? h("div", {class: "lockline"}, h("span", {class: exp ? "warn-t" : null}, lockIcon(), " ", exp ? "Lock expired, still claimed by " + it.holder : "Claimed by " + (isMe(it.holder) ? "you (" + it.holder + ")" : it.holder)),
-      h("span", {class: "t2", text: [it.agent ? "with " + it.agent : "", it.claimed_at ? "since " + fmt(iso(it.claimed_at)) : "", it.lock_expires ? (exp ? "expired " + rel(iso(it.lock_expires)) : "lock for " + String(untilText(it.lock_expires)).replace(/^for /, "") + " more") : ""].filter(Boolean).join(", ") +
-        (exp ? ". Anyone can release it." : ". Others cannot change it until the lock is released or expires.")}))
-    : it.open ? h("div", {class: "lockline"}, h("span", {text: "Unclaimed"}), h("span", {class: "t2", text: it.legacy ? "Checkbox tasks have no lock; the next dev sync imports them as work items." : "Start it to take the lock; other people and agents then see it as yours."})) : null;
-  const primary = it.open && !it.legacy && cmds.length ? cmds[0] : null, rest = primary ? cmds.slice(1) : cmds;
-  const body = h("div", {class: "db"});
-  body.append(h("div", {class: "stack-v", style: "gap:var(--s4)"}, lockLine, primary ? h("div", {class: "nextcmd"}, cmdBtn(primary[1], true, primary[0]), cmdCode(primary[1])) : null));
-  if (it.body) body.append(panel("Description", null, null, md(it.body)));
-  body.append(panel(primary ? "Other commands" : "Commands", null, null, rest.length ? [h("div", {class: "cmds"}, rest.map(([label, c]) => cmdRow(label, c))), h("p", {class: "tnote"}, "Changes of scope (move, block, cancel, edit) need ", h("code", {text: '--why "…"'}), ": the reason is kept in the history and the commit.")]
-    : empty("No commands", it.legacy ? "This checkbox has no number in dev task yet." : "")));
-  if (!it.legacy) body.append(panel("Details", null, null, h("dl", {class: "kv"},
-    h("dt", {text: "Id"}), h("dd", {class: "num", text: it.id}),
-    h("dt", {text: ini ? "Initiative" : "Project"}), h("dd", null, scopeChip(it.scope)),
-    it.assignee ? [h("dt", {text: "Assignee"}), h("dd", {text: it.assignee})] : null,
-    h("dt", {text: "Created"}), h("dd", {text: [it.created ? fmt(iso(it.created)) : "", it.created_by ? "by " + it.created_by : ""].filter(Boolean).join(" ") || "—"}),
-    h("dt", {text: "Updated"}), h("dd", {text: [it.updated ? fmt(iso(it.updated)) + " (" + rel(iso(it.updated)) + ")" : "", it.updated_by ? "by " + it.updated_by : ""].filter(Boolean).join(" ") || "—"}),
-    (it.links || []).length ? [h("dt", {text: "Links"}), h("dd", null, it.links.map((l, i) => { const m = /^initiative:(.+)$/.exec(l); return [i ? ", " : null, m && BYINIT.has(m[1]) ? scopeChip("initiatives/" + m[1]) : h("span", {text: l})]; }))] : null,
-    it.path ? [h("dt", {text: "File"}), h("dd", null, h("code", {style: "word-break:break-all", text: it.path}), " ", icopy(D.handoff + "/" + it.path, "Copy path"))] : null)));
-  if (!it.legacy) body.append(panel("History", it.changelog.length, null, changelog(it.changelog)));
-  dr.append(head, body);
+/* ---------------------------------------------------------------- quick-look modals: one native <dialog> (focus trap, Esc, focus returned to the
+   trigger), a deep link per item (?modal=<kind>:<id>, and ?task=<id> for tasks), the next action as the one primary button */
+function modalKey() { return S.task ? "task:" + S.task : S.modal || ""; }
+function openModal(kind, id) { untip(); set({modal: kind + ":" + id, task: ""}, true); }
+function closeModal() { untip(); set({modal: "", task: ""}, true); }
+function layerHost() { const d = $("#modal"); return d && d.open ? d : document.body; }
+function msec(title, body, right) { return h("section", {class: "msec", "aria-label": title}, h("div", {class: "msec-h"}, h("h3", {text: title}), right || null), body); }
+function renderModal() {
+  const dlg = $("#modal"), key = modalKey(), i = key.indexOf(":"), kind = i > 0 ? key.slice(0, i) : "", id = i > 0 ? key.slice(i + 1) : "";
+  for (const el of [$("#tip"), $("#toast")]) if (el.parentNode !== document.body) document.body.append(el);
+  untip();
+  const parts = MODALS[kind] ? MODALS[kind](id) : null;
+  if (!parts) {
+    if (dlg.open) { dlg.close(); if (lastFocus && lastFocus.isConnected) lastFocus.focus({preventScroll: true}); }
+    lastFocus = null; return;
+  }
+  if (!dlg.open) lastFocus = document.activeElement;
+  const closeBtn = h("button", {class: "btn icon ghost", type: "button", onclick: closeModal, "aria-label": "Close (Esc)", title: "Close (Esc)"}, icon("close"));
+  clear(dlg).append(h("header", {class: "mh"}, h("div", {class: "mh-t"}, parts.head), closeBtn), h("div", {class: "mbody"}, parts.body), parts.foot ? h("footer", {class: "mf"}, parts.foot) : null);
+  if (!dlg.open) dlg.showModal();
   closeBtn.focus({preventScroll: true});
 }
+function mtitle(text) { return h("h2", {id: "modal-title", text}); }
+function taskModal(id) {
+  const it = ITEMBY.get(id); if (!it) return null;
+  const ini = isInit(it.scope), cmds = taskCmds(it), exp = it.lock === "expired";
+  const scopeHref = ini ? link({view: "initiatives", id: it.scope.slice(12), tab: "tasks"}) : link({view: "projects", id: it.scope, tab: "tasks"});
+  const primary = it.open && !it.legacy && cmds.length ? cmds[0] : null, rest = primary ? cmds.slice(1) : cmds;
+  const lock = it.claimed_by ? h("div", {class: "lockline"}, lockRing(it.claimed_at, it.lock_expires, it.holder),
+      h("div", null, h("div", {class: exp ? "warn-t" : null, text: exp ? "Lock expired, still claimed by " + it.holder : "Claimed by " + (isMe(it.holder) ? "you (" + it.holder + ")" : it.holder)}),
+        h("div", {class: "t2", text: [it.agent ? "with " + it.agent : "", it.claimed_at ? "since " + fmt(iso(it.claimed_at)) : ""].filter(Boolean).join(", ") + (exp ? ". Anyone can release it." : ". Others cannot change it until the lock ends.")})))
+    : it.open ? h("div", {class: "lockline t2", text: it.legacy ? "A checkbox in the note: no lock yet; the next dev sync imports it." : "Unclaimed: start it to take the lock."}) : null;
+  return {head: [crumbs([[scopeName(it.scope), scopeHref], [it.legacy ? "Note task" : it.id]]), mtitle(it.title),
+      h("div", {class: "pline"}, meta(istatusBadge(it.status), (it.bucket || "next").replace(/^./, c => c.toUpperCase()), prioBadge(it.priority), typeTag(it.type), duePill(it.due, !it.open), !it.legacy ? "version " + it.version : null))],
+    body: [lock, primary ? h("div", {class: "nextcmd"}, h("span", {class: "label", text: "Next step: " + primary[0]}), cmdCode(primary[1])) : null,
+      it.body ? msec("Description", md(it.body)) : null,
+      rest.length ? msec(primary ? "Other commands" : "Commands", [h("div", {class: "cmds"}, rest.map(([label, c]) => cmdRow(label, c))), h("p", {class: "tnote"}, "Changes of scope need ", h("code", {text: '--why "…"'}), ": the reason is kept in the history.")]) : null,
+      !it.legacy ? msec("Details", h("dl", {class: "kv"}, h("dt", {text: "Id"}), h("dd", {class: "num", text: it.id}), h("dt", {text: ini ? "Initiative" : "Project"}), h("dd", null, scopeChip(it.scope)),
+        it.assignee ? [h("dt", {text: "Assignee"}), h("dd", {text: it.assignee})] : null,
+        h("dt", {text: "Created"}), h("dd", {text: [it.created ? fmt(iso(it.created)) : "", it.created_by ? "by " + it.created_by : ""].filter(Boolean).join(" ") || "—"}),
+        h("dt", {text: "Updated"}), h("dd", {text: [it.updated ? fmt(iso(it.updated)) + " (" + rel(iso(it.updated)) + ")" : "", it.updated_by ? "by " + it.updated_by : ""].filter(Boolean).join(" ") || "—"}),
+        it.path ? [h("dt", {text: "File"}), h("dd", null, h("code", {style: "word-break:break-all", text: it.path}), " ", icopy(D.handoff + "/" + it.path, "Copy path"))] : null)) : null,
+      !it.legacy && it.changelog.length ? msec("History", changelog(it.changelog), h("span", {class: "count num", text: String(it.changelog.length)})) : null],
+    foot: [h("a", {class: "btn", href: scopeHref}, ini ? "Open initiative" : "Open project"), primary ? cmdBtn(primary[1], true, primary[0]) : null]};
+}
+function initModal(slug) {
+  const x = BYINIT.get(slug); if (!x) return null;
+  const st = istate(x), c = x.cnt, mc = tally(x.members.map(memberState));
+  return {head: [h("div", {class: "mh-row"}, progRing(x, 64, true), h("div", {class: "mh-tt"}, mtitle(x.title),
+      h("div", {class: "pline"}, meta(h("span", {class: "stat"}, h("span", {class: "dot k-" + st, "aria-hidden": "true"}), HS[st]), duePill(x.due, x.status === "done", "No due date"), x.owner ? "owner " + x.owner : null))))],
+    body: [msec("Member projects", [memberWaffle(x, 12, 30, true), legend(hparts(mc))], h("span", {class: "count num", text: String(x.members.length)})),
+      msec("Tasks", [segBar([["mark", c.doing, "Doing"], ["risk", c.blocked, "Blocked"], ["none", c.todo, "To do"]], "Open tasks"), legend([["mark", c.doing, "Doing"], ["risk", c.blocked, "Blocked"], ["none", c.todo, "To do"], ["done", c.done, "Done"]])], h("span", {class: "count num", text: c.open + " open"})),
+      x.state ? msec("Current state", h("p", {class: "lead clamp3", title: plain(x.state)}, inline(plain(x.state)))) : null,
+      h("dl", {class: "kv"}, x.milestone ? [h("dt", {text: "Milestone"}), h("dd", {text: x.milestone})] : null, x.goal ? [h("dt", {text: "Goal"}), h("dd", {class: "clamp3", title: plain(x.goal), text: plain(x.goal)})] : null,
+        h("dt", {text: "People"}), h("dd", null, x.people.length ? avatars(x.people, 6) : h("span", {class: "t2", text: "Nobody right now"})))],
+    foot: [cmdBtn("dev initiative show " + slug, false, "Copy show command"), h("a", {class: "btn primary", href: link({view: "initiatives", id: slug})}, "Open full page")]};
+}
+function projectModal(id) {
+  const p = BYID.get(id); if (!p) return null;
+  const st = hstate(p), doing = sortItems(p.items.filter(i => i.status === "doing" || i.status === "blocked")), m = p.main || {};
+  return {head: [h("div", {class: "mh-row"}, progRing(p, 64, true), h("div", {class: "mh-tt"}, mtitle(p.name || p.id),
+      h("div", {class: "pline"}, meta(h("span", {class: "stat"}, h("span", {class: "dot k-" + st, "aria-hidden": "true"}), HS[st]), p.owner, m.branch ? h("span", {class: "meta"}, icon("branch"), m.branch) : null, p.local ? null : "not cloned here"))))],
+    body: [p.health.reasons.length ? h("ul", {class: "reasons"}, p.health.reasons.map(r => h("li", null, h("span", {class: "dot k-" + (p.health.level === "risk" ? "risk" : "warn"), "aria-hidden": "true"}), r))) : null,
+      h("div", {class: "mfigs"},
+        h("div", null, h("span", {class: "s-l", text: "Open PRs: " + p.prs}), ciStrip(p, 16)),
+        h("div", null, h("span", {class: "s-l", text: "Commits, 14 days"}), spark(commitSeries([p], 14), "Commits per day", "commit", true)),
+        h("div", null, h("span", {class: "s-l", text: "Tasks"}), segBar([["mark", p.cnt.doing, "Doing"], ["risk", p.cnt.blocked, "Blocked"], ["none", p.cnt.todo, "To do"]], "Open tasks"), h("span", {class: "t2 num", text: p.cnt.open + " open"}))),
+      doing.length ? msec("Doing or blocked", h("ul", {class: "irows"}, doing.slice(0, 5).map(i => itemRow(i))), h("span", {class: "count num", text: String(doing.length)})) : null,
+      p.status_line ? msec("Latest status", statusCard(p.status_line.line, p.status_line.parts, [p.status_line.agent || "agent", rel(p.status_line.ts)].join(", "))) : null],
+    foot: [h("a", {class: "btn", href: link({view: "projects", id})}, "Open full page"), p.local ? cmdBtn("dev claude " + id, true, "Copy dev claude") : cmdBtn("dev clone " + id, true, "Copy dev clone")]};
+}
+function personModal(who) {
+  const x = BYWHO.get(who); if (!x) return null;
+  const claimed = x.claimed.map(id => ITEMBY.get(id)).filter(Boolean), exp = claimed.find(i => i.lock === "expired");
+  return {head: [h("div", {class: "mh-row"}, avatar(who, true), h("div", {class: "mh-tt"}, mtitle(who), h("div", {class: "pline", text: (x.sessions.length ? plural(x.sessions.length, "live session") : "No live session") + (x.updated ? ", seen " + rel(x.updated) : "")})))],
+    body: [x.sessions.length ? msec("Live sessions", h("div", {class: "sbars"}, x.sessions.map((s, i) => sessBar(s, who, i)))) : null,
+      claimed.length ? msec("Claimed tasks", h("ul", {class: "lrows"}, claimed.map(it => h("li", {class: "lrow", onclick: rowClick(() => openTask(it.id))}, lockRing(it.claimed_at, it.lock_expires),
+        h("div", {class: "lm"}, h("a", {class: "lt rl", href: taskHref(it.id), "data-nav": "", onclick: e => { e.preventDefault(); openTask(it.id); }, text: it.title}), h("div", {class: "ls ell", text: scopeName(it.scope)}))))), h("span", {class: "count num", text: String(claimed.length)})) : null,
+      x.recent.length ? msec("Recent sessions", h("ul", {class: "rrows"}, x.recent.slice(0, 5).map(r => h("li", null, h("div", {class: "slw"}, meta(fmt(r.ts), scopeChip(r.scope), r.agent)), h("div", {class: "ell", title: plain(stripMarker(r.text))}, logText(r)))))) : null],
+    foot: [h("a", {class: "btn", href: link({view: "team"})}, "Open Team"), exp ? cmdBtn("dev task " + flagOf(exp.scope) + " release " + exp.id + ' --why "lock expired"', true, "Copy release command") : null]};
+}
+function sessionModal(key) {
+  const j = key.lastIndexOf("~"), who = key.slice(0, j), x = BYWHO.get(who), s = x && x.sessions[+key.slice(j + 1)];
+  if (!s) return null;
+  const known = s.project && (BYID.has(s.project) || MEMBEROF.has(s.project));
+  return {head: [mtitle(scopeName(s.project || "") || "Session"), h("div", {class: "pline"}, meta(who, s.agent || "agent", s.branch ? h("span", {class: "meta"}, icon("branch"), s.branch) : null))],
+    body: [sessionBlock(s, null, x.updated, true)],
+    foot: [h("a", {class: "btn", href: modalHref("person", who)}, "More from " + who.split("@")[0]), known ? h("a", {class: "btn primary", href: link({view: "projects", id: s.project})}, "Open project") : null]};
+}
+function actKey(a) { let hh = 5381; const s = a.title + "|" + (a.project || "") + "|" + a.cmd; for (let i = 0; i < s.length; i++) hh = ((hh << 5) + hh + s.charCodeAt(i)) | 0; return a.kind + "~" + (hh >>> 0).toString(36); }
+function actionModal(key) {
+  const a = ACTIONS.find(x => actKey(x) === key); if (!a) return null;
+  const p = a.project && BYID.get(a.project), href = actionHref(a);
+  return {head: [mtitle(a.title), h("div", {class: "pline"}, meta(h("span", {class: "stat"}, h("span", {class: "dot k-" + (a.sev === "risk" ? "risk" : a.sev === "warn" ? "warn" : "done"), "aria-hidden": "true"}), SEVL[a.sev]), KIND[a.kind] || a.kind, p ? p.name || p.id : null))],
+    body: [a.detail ? h("p", {class: "lead"}, inline(a.detail)) : null, p && /ci-failing|conflicts|review/.test(a.kind) ? msec("Open PRs of " + (p.name || p.id), ciStrip(p, 20)) : null,
+      h("div", {class: "nextcmd"}, h("span", {class: "label", text: "The command that moves it forward"}), cmdCode(a.cmd))],
+    foot: [a.url ? h("a", {class: "btn", href: a.url, target: "_blank", rel: "noopener noreferrer"}, "Open on GitHub") : null, href ? h("a", {class: "btn", href}, p ? "Open " + (p.name || p.id) : "Open") : null, cmdBtn(a.cmd, true, "Copy command")]};
+}
+function actionsModal(label) {
+  const list = ACTIONS.filter(a => (KIND[a.kind] || a.kind) === label); if (!list.length) return null;
+  return {head: [mtitle((GROUP[list[0].kind] || (n => n + " " + label + " items"))(list.length)), h("div", {class: "pline", text: SEVL[list[0].sev]})],
+    body: [h("ul", {class: "acts"}, list.map(a => h("li", {class: "act", onclick: rowClick(() => openModal("action", actKey(a)))}, h("span", {class: "dot d-" + a.sev, "aria-hidden": "true"}),
+      h("div", {style: "min-width:0"}, modalLink("action", actKey(a), a.title, "at"), h("div", {class: "ad"}, h("span", {class: "ell", text: actionWhere(a) + (a.detail ? ": " + plain(a.detail) : "")}))), h("div", {class: "ar"}, icopy(a.cmd, "Copy command")))))],
+    foot: [h("a", {class: "btn", href: link({view: "actions", kind: label})}, "Open the full list"), cmdBtn(list[0].cmd, true, "Copy the first command")]};
+}
+function sinceModal(which) {
+  const s = D.since || {}, T = {sessions: "Sessions since yesterday", commits: "Commits since yesterday", merged: "Merged PRs since yesterday", done: "Tasks completed since yesterday"};
+  if (!T[which]) return null;
+  const list = which === "sessions" ? h("ul", {class: "rrows"}, (s.sessions || []).map(x => h("li", null, h("div", {class: "slw"}, meta(fmt(x.ts), x.who, x.agent, h("button", {class: "lnk", type: "button", onclick: () => { closeModal(); x.project && openScope(x.project); }, text: scopeName(x.project || "") || "—"}))), h("div", {class: "ell", title: plain(stripMarker(x.text))}, logText(x)))))
+    : which === "commits" ? rankedBars((s.commits || []).map(([pid, n]) => [scopeName(pid), n, pid]), v => String(v), pid => { closeModal(); openProject(pid); })
+    : which === "merged" ? h("ul", {class: "rrows"}, (s.merged || []).map(x => h("li", {class: "ell"}, h("a", {href: x.url, target: "_blank", rel: "noopener noreferrer", text: "#" + x.number}), " ", x.title, h("span", {class: "t2", text: " in " + x.repo.split("/").pop()}))))
+    : h("ul", {class: "rrows"}, (s.done || []).map(x => h("li", {class: "ell"}, x.id && ITEMBY.has(x.id) ? modalLinkTask(x.id, x.text) : inline(x.text), h("span", {class: "t2", text: " in " + scopeName(x.project) + (x.who ? ", by " + x.who : "")}))));
+  return {head: [mtitle(T[which]), h("div", {class: "pline", text: "from " + fmtDay(s.from)})], body: [list], foot: [h("a", {class: "btn", href: link({view: "activity"})}, "Open Activity")]};
+}
+function modalLinkTask(id, text) { return h("a", {class: "rl", href: taskHref(id), onclick: e => { e.preventDefault(); openTask(id); }, text}); }
+const MODALS = {task: taskModal, initiative: initModal, project: projectModal, person: personModal, session: sessionModal, action: actionModal, actions: actionsModal, since: sinceModal};
 /* ---------------------------------------------------------------- command palette + sheet */
 function fuzzy(q, s) { const toks = String(q || "").toLowerCase().split(/\s+/).filter(Boolean); if (!toks.length) return 1; let total = 0; s = s.toLowerCase(); for (const t of toks) { const sc = fuzzy1(t, s); if (!sc) return 0; total += sc; } return total; }
 function fuzzy1(q, s) { const i = s.indexOf(q); if (i >= 0) return 100 - Math.min(i, 80) + (i === 0 ? 20 : 0); let qi = 0, score = 0, prev = -2; for (let j = 0; j < s.length && qi < q.length; j++) if (s[j] === q[qi]) { score += prev === j - 1 ? 3 : 1; prev = j; qi++; } return qi === q.length ? score : 0; }
@@ -3032,7 +3352,7 @@ function paletteItems() {
   return items;
 }
 function openPalette() {
-  const pal = $("#palette"); if (!pal.hidden) return; lastFocus = document.activeElement;
+  const pal = $("#palette"); if (!pal.hidden) return; if ($("#modal").open) closeModal(); lastFocus = document.activeElement;
   const all = paletteItems(); let sel = 0, shown = [];
   const input = h("input", {type: "text", placeholder: "Jump to a project, PR, task, file or view — or copy a command", "aria-label": "Command", "aria-controls": "pal-list", role: "combobox", "aria-expanded": "true", autocomplete: "off"});
   const list = h("ul", {id: "pal-list", role: "listbox"});
@@ -3072,7 +3392,7 @@ function openProject(id, tab) {
 function openInitiative(id, tab) { if (!BYINIT.has(id)) { toast("No initiative " + id); return; } set(Object.assign({}, PAGEKEYS, {view: "initiatives", id, tab: tab || ""}), true); window.scrollTo(0, 0); }
 function openScope(scope, tab) { if (isInit(scope)) openInitiative(scope.slice(12), tab); else openProject(scope, tab); }
 function openTask(id) { if (!ITEMBY.has(id)) { toast("No task " + id); return; } set({task: id}, true); }
-function closeDrawer() { set({task: ""}, true); }
+function closeDrawer() { closeModal(); }
 function toggleTheme() {
   const cur = document.documentElement.dataset.theme || (matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light");
   const next = cur === "dark" ? "light" : "dark"; document.documentElement.dataset.theme = next; store.set("devkit.theme", next);
@@ -3083,19 +3403,18 @@ document.addEventListener("keydown", e => {
   const tag = (e.target && e.target.tagName) || "", typing = /^(INPUT|TEXTAREA|SELECT)$/.test(tag) || (e.target && e.target.isContentEditable);
   if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === "k") { e.preventDefault(); if ($("#palette").hidden) openPalette(); else closePalette(); return; }
   if (e.key === "Escape") {
-    if (!$("#palette").hidden) { closePalette(); return; } if (!$("#sheet").hidden) { closeSheet(); return; } if (S.task) { closeDrawer(); return; }
+    if (!$("#palette").hidden) { closePalette(); return; } if (!$("#sheet").hidden) { closeSheet(); return; } if (S.task || S.modal) { closeModal(); return; }
     if (e.target.id === "q" && S.q) { set({q: "", view: S.view === "search" ? store.get("devkit.prevView", "overview") : S.view}, true); return; }
     if (typing) e.target.blur(); return;
   }
-  if (!$("#drawer").hidden && e.key === "Tab") { const f = $$("#drawer button, #drawer a[href], #drawer [tabindex]").filter(x => !x.disabled && x.offsetParent !== null); if (f.length) { const i = f.indexOf(document.activeElement); if (e.shiftKey && i <= 0) { e.preventDefault(); f[f.length - 1].focus(); } else if (!e.shiftKey && i === f.length - 1) { e.preventDefault(); f[0].focus(); } } }
   if (typing || e.metaKey || e.ctrlKey || e.altKey) return;
   if (e.key === "/") { e.preventDefault(); $("#q").focus(); $("#q").select(); return; }
   if (e.key === "?") { e.preventDefault(); openSheet(); return; }
   if (gAt && Date.now() - gAt < 1200) { gAt = 0; const v = VIEWS.find(x => x[2] === e.key.toLowerCase()); if (v) { e.preventDefault(); go(v[0]); } return; }
   if (e.key === "g") { gAt = Date.now(); return; }
-  if (e.key === "u" && !S.task) { if (S.id) { e.preventDefault(); go(S.view); } else if (S.view === "actions") go("overview"); return; }
+  if (e.key === "u" && !S.task && !S.modal) { if (S.id) { e.preventDefault(); go(S.view); } else if (S.view === "actions") go("overview"); return; }
   if (e.key === "j" || e.key === "k") {
-    e.preventDefault(); const scope = !$("#drawer").hidden ? $("#drawer") : $("#view");
+    e.preventDefault(); const scope = $("#modal").open ? $("#modal") : $("#view");
     const items = $$("[data-nav]", scope).filter(x => x.offsetParent !== null); if (!items.length) return;
     const i = items.indexOf(document.activeElement); const n = items[i < 0 ? 0 : Math.max(0, Math.min(items.length - 1, i + (e.key === "j" ? 1 : -1)))];
     n.focus(); n.scrollIntoView({block: "nearest"});
@@ -3116,11 +3435,12 @@ function render() {
   const page = S.view + "/" + S.id;
   document.body.classList.toggle("dense", !!S.dense);
   renderNav(); renderFilters();
-  const main = clear($("#view"));
+  const main = clear($("#view")); main.className = "";
   (VIEWFN[S.view] || viewHome)(main);
   fitTables(main);
-  renderDrawer();
-  if (fid) { const el = document.getElementById(fid); if (el && $("#drawer").hidden) el.focus({preventScroll: true}); }
+  RS = Object.assign({}, S);
+  renderModal();
+  if (fid) { const el = document.getElementById(fid); if (el && !$("#modal").open) el.focus({preventScroll: true}); }
   if (page !== lastView) { if (lastView) window.scrollTo(0, 0); lastView = page; document.title = pageTitle() + " · Firefly devkit"; }
   const t = $("#ticker"); if (t) t.textContent = "Synced " + rel(D.generated);
 }
@@ -3141,15 +3461,18 @@ function render() {
   document.addEventListener("click", e => { $$(".facet[open],.cmenu[open]").forEach(d => { if (!d.contains(e.target)) d.open = false; }); }, true);
   window.addEventListener("resize", debounce(() => fitTables($("#view")), 150));
   document.addEventListener("toggle", e => { if (e.target && e.target.matches && e.target.matches("details")) fitTables(e.target); }, true);
-  $("#scrim").addEventListener("click", () => { if (!$("#palette").hidden) closePalette(); else if (!$("#sheet").hidden) closeSheet(); else closeDrawer(); });
-  const st = decode(location.hash) || store.get("devkit.state", null);
+  $("#scrim").addEventListener("click", () => { if (!$("#palette").hidden) closePalette(); else if (!$("#sheet").hidden) closeSheet(); });
+  const dlg = $("#modal");
+  dlg.addEventListener("cancel", e => { e.preventDefault(); closeModal(); });
+  dlg.addEventListener("click", e => { if (e.target === dlg) closeModal(); });
+  const st = decode(location.hash) || Object.assign({}, store.get("devkit.state", null) || {}, {modal: "", task: ""});
   if (st) S = Object.assign({}, DEFAULT, st, {view: ROUTES.includes(st.view) ? st.view : st.view === "portfolio" ? "initiatives" : "overview"});
   if (!location.hash || location.hash !== encode(S)) history.replaceState(null, "", encode(S));
   render();
   if (document.fonts && document.fonts.ready) document.fonts.ready.then(() => fitTables($("#view")));
   try { const y = sessionStorage.getItem("devkit.scroll"); if (y) { window.scrollTo(0, +y); sessionStorage.removeItem("devkit.scroll"); } } catch (e) {}
   setInterval(() => { const t = $("#ticker"); if (t) t.textContent = "Synced " + rel(D.generated); }, 30000);
-  setInterval(() => { if (document.visibilityState === "visible" && $("#palette").hidden && !S.task && !/^(INPUT|SELECT|TEXTAREA)$/.test((document.activeElement || {}).tagName || "")) {
+  setInterval(() => { if (document.visibilityState === "visible" && $("#palette").hidden && !S.task && !S.modal && !/^(INPUT|SELECT|TEXTAREA)$/.test((document.activeElement || {}).tagName || "")) {
     try { sessionStorage.setItem("devkit.scroll", String(window.scrollY)); } catch (e) {} location.reload(); } }, 120000);
 })();
 })();
@@ -3184,7 +3507,7 @@ __CSS__
 <main id="view" tabindex="-1"></main>
 <footer class="foot">__SPARK__ <span>__COPYRIGHT__</span><span>devkit __VERSION__</span><span id="ticker"></span><span>Generated on __HOST__, __WHEN__</span><span>Press <kbd>?</kbd> for shortcuts</span></footer>
 <div class="scrim" id="scrim" hidden></div>
-<aside class="drawer" id="drawer" role="dialog" aria-modal="true" aria-labelledby="drawer-title" hidden></aside>
+<dialog class="modal" id="modal" aria-labelledby="modal-title" aria-modal="true"></dialog>
 <div class="palette" id="palette" role="dialog" aria-modal="true" aria-label="Command palette" hidden></div>
 <div class="sheet" id="sheet" role="dialog" aria-modal="true" aria-label="Keyboard shortcuts" hidden></div>
 <div class="tip" id="tip" role="tooltip" hidden></div>

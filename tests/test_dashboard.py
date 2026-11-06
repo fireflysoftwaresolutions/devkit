@@ -217,7 +217,7 @@ class RenderTests(unittest.TestCase):
         for needle in ("function openPalette", "function encode(", "function decode(", "hashchange", "localStorage",
                        "function viewHome", "function viewInitiatives", "function viewInitiative", "function viewProjects", "function viewProject",
                        "function viewTeam", "function viewTasks", "function viewActivity", "function viewExplorer", "function viewHealth",
-                       "function viewSearch", "function viewActions", "function renderDrawer", "function taskCmds", "function changelog",
+                       "function viewSearch", "function viewActions", "function renderModal", "function taskCmds", "function changelog",
                        "function pageTabs", "function crumbs", "function fitTables", "function statusCard", "function statusLine", "function liveRun", "function timePanel", "function membersBlock",
                        "function roadmap", "function progOf", "function highlight", 'role: "tablist"', 'role: "tabpanel"'):
             self.assertIn(needle, js, needle)
@@ -257,8 +257,55 @@ class RenderTests(unittest.TestCase):
         self.assertIn('h("span", {class: "ms ell", text: x.milestone})', js)             # one truncated line
         self.assertIn('"Milestone: " + x.milestone', js)                                 # the full text on hover
         self.assertIn('"No due date"', js)
-        self.assertIn(".inir .nd{display:flex", css)                                     # Home: one line per initiative
         self.assertIn(".c-who{display:none}", css)                                       # a hidden column hides its header too
+
+    def test_app_shell_and_footer(self):
+        """A full-height column: the main area grows and the footer sits at the bottom of short pages; a 12-column grid to 1600 px."""
+        css = dashboard.CSS
+        self.assertIn("body{display:flex;flex-direction:column;min-height:100vh;min-height:100dvh}", css)
+        self.assertIn("#view{flex:1 0 auto;width:100%}", css)
+        self.assertIn(".foot{margin-top:auto}", css)
+        self.assertIn("--wide:1600px", css)
+        self.assertIn(".g12{display:grid;grid-template-columns:repeat(12,minmax(0,1fr))", css)
+        self.assertIn('<main id="view"', dashboard.HTML)
+        self.assertLess(dashboard.HTML.index('<main id="view"'), dashboard.HTML.index('<footer class="foot">'))
+
+    def test_dialog_accessibility(self):
+        """Quick looks are one native <dialog>: labelled, modal (focus trap), Esc and the backdrop close it, focus returns to the
+        trigger, and every modal has a deep link."""
+        js, html = dashboard.JS, dashboard.HTML
+        self.assertIn('<dialog class="modal" id="modal" aria-labelledby="modal-title" aria-modal="true"></dialog>', html)
+        self.assertIn("dlg.showModal()", js)
+        self.assertIn('dlg.addEventListener("cancel", e => { e.preventDefault(); closeModal(); });', js)
+        self.assertIn('dlg.addEventListener("click", e => { if (e.target === dlg) closeModal(); });', js)
+        self.assertIn("if (lastFocus && lastFocus.isConnected) lastFocus.focus({preventScroll: true});", js)
+        self.assertIn('h("h2", {id: "modal-title", text})', js)
+        self.assertIn('"aria-label": "Close (Esc)"', js)
+        self.assertIn('modal: ""};', js)                                                  # a route key: ?modal=<kind>:<id>
+        self.assertIn('set({modal: kind + ":" + id, task: ""}, true)', js)
+        for kind in ("task", "initiative", "project", "person", "session", "action", "actions", "since"):
+            self.assertIn(kind + ": ", js[js.index("const MODALS = {"):js.index("const MODALS = {") + 260], kind)
+        self.assertIn("dialog.modal::backdrop", dashboard.CSS)
+        self.assertNotIn('id="drawer"', html)
+
+    def test_visuals_are_named(self):
+        """Every SVG is either a named image (role=img + aria-label) or decorative (aria-hidden); visuals carry tooltips
+        (hover and focus), and the status colors come from the fixed dataviz palette."""
+        js, css = dashboard.JS, dashboard.CSS
+        calls = [m.start() for m in re.finditer(r'sv\("svg", \{', js)]
+        self.assertGreaterEqual(len(calls), 7)
+        for i in calls:
+            attrs = js[i:js.index("}", i)]
+            self.assertTrue(('role: "img"' in attrs and '"aria-label"' in attrs) or '"aria-hidden"' in attrs, attrs[:120])
+        for fn in ("function ring(", "function waffle(", "function spark(", "function segBar(", "function heatmap(", "function ciStrip(",
+                   "function lockRing(", "function duePill(", "function statTile(", "function sessBar("):
+            self.assertIn(fn, js, fn)
+        self.assertIn('document.addEventListener("focusin"', js)
+        self.assertIn('document.addEventListener("pointerover"', js)
+        self.assertGreaterEqual(js.count('"data-tip"'), 12)
+        for token in ("--s-ok:#0ca30c", "--s-warn:#fab219", "--s-risk:#d03b3b"):
+            self.assertIn(token, dashboard.LIGHT)
+            self.assertIn(token, dashboard.DARK)
 
     def test_rows_are_links(self):
         """Clickable rows hold a real link (keyboard, screen readers, j/k) instead of being focusable themselves."""
