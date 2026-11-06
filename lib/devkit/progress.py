@@ -1549,6 +1549,7 @@ def messages_context(agent: str, sid: str, me: str) -> str:
 
 GRANT_TTL = 30 * 60  # seconds a `grant <action> <target>` stays usable
 HUMAN_KEEP = 50  # evidence entries kept per session
+HUMAN_IDS_KEEP = 2000  # ids of the prompts and answers evidence came from, kept per session (B3: each counts once)
 QUESTION_TOOLS = ("AskUserQuestion",)  # Codex's request_user_input joins when its payload is known (spec F0, S3)
 GRANT_CLASSES = ("push", "pr", "push-destructive", "pr-write", "merge", "release", "publish", "deploy", "api-write",
                  "external-message", "delete-data", "migrate-production", "spend")  # C6's classes and IRREVERSIBLE
@@ -1617,14 +1618,41 @@ def _decision(run, did):
     return next((x for x in (run or {}).get("decisions") or [] if x["id"].lower() == str(did).lower()), None)
 
 
-def _keep_human(agent: str, sid: str, new: list, extra=None):
+def _seen_ids(sess: dict) -> set:
+    """The prompt and question tool ids this session recorded evidence from: the kept entries' and the longer list."""
+    return set((sess or {}).get("human_ids") or []) | {str(h.get("transcript_uuid") or "")
+                                                       for h in (sess or {}).get("human") or [] if isinstance(h, dict)}
+
+
+def _refuse_replay(agent: str, sid: str, uid: str, what: str):
+    _audit("crew.evidence-refused", what[:200], f"replayed: the session recorded the evidence of {uid[:80]} already, "
+           f"and a prompt or an answer counts once (B3)", "refused", session=f"{agent}:{sid}"[:60])
+
+
+def _keep_human(agent: str, sid: str, new: list, extra=None) -> list:
+    """Keep the developer's new evidence entries (and `extra` fields) on the session record -> the entries kept. A
+    prompt or a question tool answer is evidence once (B3): an entry whose id (prompt_id, tool_use_id) the session
+    recorded before is dropped and audited as a replay, under the session's lock, so two copies of one event keep
+    one. The ids outlive the entries (HUMAN_IDS_KEEP), so an old grant's prompt cannot come back either."""
+    kept, replayed = [], []
+
     def fn(s):
-        s["human"] = ((s.get("human") or []) + new)[-HUMAN_KEEP:]
+        seen = _seen_ids(s)
+        kept[:], replayed[:] = [], []
+        for e in new:
+            uid = str(e.get("transcript_uuid") or "")
+            (replayed if uid and uid in seen else kept).append(e)
+        s["human"] = ((s.get("human") or []) + kept)[-HUMAN_KEEP:]
+        ids = [str(e["transcript_uuid"]) for e in kept if e.get("transcript_uuid")]
+        s["human_ids"] = list(dict.fromkeys((s.get("human_ids") or []) + ids))[-HUMAN_IDS_KEEP:]
         s.update(extra or {})
     state.update(session_path(agent, sid), fn, create=False)
-    for e in new:
+    for e in replayed:
+        _refuse_replay(agent, sid, str(e.get("transcript_uuid")), f"{e.get('channel')} {e.get('covers')}")
+    for e in kept:
         _audit("crew.evidence", e["covers"], e["excerpt"], channel=e["channel"], transcript_uuid=e["transcript_uuid"],
                session=f"{agent}:{sid}", answer=e.get("answer") or "")
+    return kept
 
 
 _SESSION_ID = re.compile(r"[A-Za-z0-9_-]{1,80}")
@@ -1685,6 +1713,9 @@ def on_human_prompt(agent: str, data: dict, now: float | None = None) -> list:
     run = load_run(agent, sid)
     live = run if run and run.get("goal") and run.get("state") != "done" else None
     uuid, tp, new = data.get("prompt_id") or "", harness_transcript(agent, sid), []
+    if uuid and str(uuid) in _seen_ids(sess):  # the same prompt again (B3): `dev hook prompt` fed its event back
+        _refuse_replay(agent, sid, str(uuid), "a prompt")
+        return []
     repo = sess.get("project") or (live or {}).get("project") or ""  # a grant holds in this repository only
     for ln in _own_lines(text):
         mt = _APPROVE_LINE.match(ln)
@@ -1703,7 +1734,7 @@ def on_human_prompt(agent: str, data: dict, now: float | None = None) -> list:
             new.append(_entry(agent, "E2", d["id"], text.strip(), uuid, tp, live, now, answer="", plain=True,
                               repo=repo, session=sid))
     if new or (tp and sess.get("transcript") != tp):
-        _keep_human(agent, sid, new, {"transcript": tp} if tp else None)
+        new = _keep_human(agent, sid, new, {"transcript": tp} if tp else None)
     return new
 
 
@@ -1721,6 +1752,9 @@ def on_question(agent: str, data: dict, now: float | None = None) -> list:
         return []
     if _foreign_transcript(agent, sid, data.get("transcript_path")):
         _refuse_forged(agent, sid, data.get("transcript_path"), "a question tool answer")
+        return []
+    if data.get("tool_use_id") and str(data["tool_use_id"]) in _seen_ids(sess):  # the same answer again (B3)
+        _refuse_replay(agent, sid, str(data["tool_use_id"]), "a question tool answer")
         return []
     qs = [q for q in (data.get("tool_input") or {}).get("questions") or [] if isinstance(q, dict)]
     resp = data.get("tool_response") if isinstance(data.get("tool_response"), dict) else {}
@@ -1741,7 +1775,7 @@ def on_question(agent: str, data: dict, now: float | None = None) -> list:
     if shown:
         _mark_shown(agent, sid, shown, now)
     if new:
-        _keep_human(agent, sid, new)
+        new = _keep_human(agent, sid, new)
     return new
 
 
@@ -1804,10 +1838,10 @@ def confirmed(e: dict, sid: str = "") -> bool:
     """Does the session's own transcript (harness_transcript, from the session id: `sid` or the entry's) show this
     entry as the developer's own act? E2: a prompt record with its prompt id, origin human, outside any subagent,
     holding the line. E1: the question tool's result for its tool_use_id with that answer. An entry that carries
-    another transcript's path is refused (B1). Codex transcripts are not read yet (spec F0, S3): its entries rest on
-    the hook alone."""
+    another transcript's path is refused (B1). Codex transcripts are not read yet (spec F0, S3), so a Codex entry has
+    nothing but its hook event behind it and is never confirmed (The Keymaker): it opens nothing."""
     if e.get("agent") == "codex":
-        return True
+        return False
     uuid, path = str(e.get("transcript_uuid") or ""), harness_transcript("claude", sid or e.get("session") or "")
     if not uuid or not path:
         return False

@@ -776,6 +776,63 @@ class CrewSafetyTests(unittest.TestCase):
         self.assertIn("'add \"export\" for $USER; rm -rf /'", line)
 
 
+class EvidenceReplayTests(unittest.TestCase):
+    # B3 (B-fy1q867o3pp, Seraph's batch 4): an agent pipes the developer's original prompt or question tool answer into
+    # `dev hook prompt` again. The transcript still holds the real record, so only the id it carries can tell a replay
+    def setUp(self):
+        self.state = TempState().__enter__()
+        self.addCleanup(self.state.__exit__, None, None, None)
+        root = Path(self.state.tmp.name)
+        self.transcript = root / ".claude" / "projects" / "-repo" / "s1.jsonl"  # the harness's own (B1)
+        self.transcript.parent.mkdir(parents=True)
+        self.transcript.write_text("")
+        p = mock.patch.object(core, "CLAUDE_HOME", root / ".claude")
+        p.start()
+        self.addCleanup(p.stop)
+        pg.start("Release", plan=["build", "ship"])
+
+    def write(self, rec):
+        with self.transcript.open("a") as fh:
+            fh.write(json.dumps(rec) + "\n")
+
+    def prompt(self, text, pid):
+        return pg.on_human_prompt("claude", {"session_id": "s1", "prompt": text, "prompt_id": pid,
+                                             "transcript_path": str(self.transcript)})
+
+    def grant(self, consume=True):
+        return pg.use_grant("claude", "s1", action="push", target="feat/x", repo="acme/api", consume=consume)
+
+    def test_a_replayed_prompt_grants_nothing_after_its_grant_was_used(self):
+        self.write({"type": "user", "promptId": "prompt-001", "uuid": "u-1", "isSidechain": False,
+                    "origin": {"kind": "human"}, "message": {"role": "user", "content": "grant push feat/x"}})
+        self.assertEqual(len(self.prompt("grant push feat/x", "prompt-001")), 1)
+        self.assertIsNotNone(self.grant())  # the developer's push uses it
+        self.assertEqual(self.prompt("grant push feat/x", "prompt-001"), [])  # replayed: nothing recorded
+        self.assertIsNone(self.grant(consume=False))
+        refused = [r for r in __import__("devkit.audit").audit.records(1, "crew.evidence-refused")]
+        self.assertIn("prompt-001", " ".join(r["detail"] for r in refused))
+
+    def test_a_replayed_question_answer_records_nothing(self):
+        d = pg.crew_decision("Skip empty lines or reject the file?", options="A: skip | B: reject", recommend="A")
+        q = pg.ask_text(d)
+        result = {"questions": [{"question": q, "options": [{"label": "A: skip"}, {"label": "B: reject"}]}],
+                  "answers": {q: "B: reject"}}
+        self.write({"type": "user", "uuid": "u-2", "isSidechain": False, "toolUseResult": result,
+                    "message": {"role": "user", "content": [{"type": "tool_result", "tool_use_id": "toolu_q1",
+                                                             "content": "answered"}]}})
+        data = {"session_id": "s1", "tool_name": "AskUserQuestion", "tool_use_id": "toolu_q1",
+                "tool_input": {"questions": result["questions"]}, "tool_response": result,
+                "transcript_path": str(self.transcript)}
+        self.assertEqual(len(pg.on_question("claude", data)), 1)
+        self.assertEqual(pg.on_question("claude", data), [])
+        human = json.loads(self.state.sess.read_text()).get("human") or []
+        self.assertEqual([h["transcript_uuid"] for h in human], ["toolu_q1"])
+
+    def test_a_codex_entry_is_never_confirmed_by_the_hook_alone(self):
+        # The Keymaker: devkit reads no Codex transcript yet, so a Codex entry has nothing behind it but the hook event
+        self.assertFalse(pg.confirmed({"agent": "codex", "channel": "E2", "transcript_uuid": "p-1", "covers": "D1"}))
+
+
 class HookCallsTests(unittest.TestCase):
     def test_the_hooks_call_only_devkit_functions_that_exist(self):
         # Seraph M111 (4): the prompt hook called scope.resolve, lessons.note_correction and skillguard.on_prompt after
