@@ -168,6 +168,9 @@ def context_for(cwd: str, agent: str) -> str:
                          ". Coordinate through tasks (claim before you start) and pull before you push.")
     except Exception:
         pass
+    lines.append("Long work: `dev progress start \"<goal>\" --plan \"a; b; c\" --estimate 30m`, then `dev progress step` "
+                 "and an update to the developer every few minutes (`communicating` skill: templates for updates, "
+                 "decisions, PRs, handovers; plain American English).")
     lines.append("devkit manual: the `using-devkit` skill (session protocol, which tool for which job, project and "
                  "initiative rules, the status line).")
     lines.append(f"Handoff note: {tilde(note)} — read it before starting; update it with the devkit `handoff` skill "
