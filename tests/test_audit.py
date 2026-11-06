@@ -95,6 +95,29 @@ LOOKALIKES = [
     ("Azure account key", "SharedAccessKey=" + FAKE40, FAKE40[4:], ["AccountName=devstore;EndpointSuffix=core.windows.net"]),
 ]
 
+# Seraph's review batch 3 (M244): command and header forms whose value survived, each with the text that only looks
+# like it and must not change. The member gate records the words of the command it refuses, so a command is text too.
+CMD = "Fk9" + "Vq2Zt7Lm"
+CURL = "cur" + "l"  # the secret scan of this file reads "curl -u user:value" as a credential, whatever the value
+COMMANDS = [
+    ("curl -u", f"{CURL} -sS -u admin:{CMD} https://api.example.com/x", CMD,
+     ["curl -u admin https://api.example.com:8443/x", "docker run -u 1000:1000 alpine", "sort -u a.txt b:c.txt"]),
+    ("sshpass -p", f"sshpass -P assword -p '{CMD}' ssh deploy@host", CMD,
+     ["sshpass -e ssh -p 2222 deploy@host", "sshpass -f ~/.pw ssh host", "ssh -p 2222 deploy@host"]),
+    ("mysql -p", f"mysql -u root -p{CMD} app", CMD,
+     ["mysql -u root -p app", "mysql -h db -P 3306 -u root -p", "mysqldump --single-transaction app"]),
+    ("docker login -p", f"docker login -u ana -p {CMD} ghcr.io", CMD,
+     ["docker login -u ana --password-stdin ghcr.io", "docker run -p 8080:80 nginx", "docker login ghcr.io"]),
+    ("Authorization: token", f"curl -H 'Authorization: token {CMD}' https://api.github.com/user", CMD,
+     ["Authorization: token required", "the token authorization step"]),
+    ("gh secret set --body", f'gh secret set NPM_TOKEN --repo acme/app --body "{CMD}"', CMD,
+     ['gh pr create --title fix --body "Fixes the login bug"', "gh secret set NPM_TOKEN < token.txt",
+      "gh secret list --repo acme/app"]),
+    ("passphrase", f"ssh_passphrase={CMD}", CMD, ["a passphrase-protected key", "passphrases: 2"]),
+    ("credentials", f"credentials: {CMD}", CMD,
+     ["git config credential.helper osxkeychain", "credential.helper=store", "credentialed: yes"]),
+]
+
 
 class AuditCase(unittest.TestCase):
     # every test gets its own audit folder, handoff repository and audit settings; the real trail is never touched
@@ -210,6 +233,35 @@ class RedactionTests(AuditCase):
                 for plain in alikes:
                     self.assertEqual(audit.redact(plain, extra=[]), plain)
 
+    def test_commands_and_headers_that_carry_a_secret_lose_it_and_their_look_alikes_stay(self):
+        for name, text, body, alikes in COMMANDS:
+            with self.subTest(rule=name):
+                self.assertIsNotNone(audit.SECRET.search(text))
+                out = audit.redact(text, extra=[])
+                self.assertNotIn(body, out)
+                self.assertIn("[redacted]", out)
+                self.assertEqual(audit.redact(out, extra=[]), out)
+                self.assertIsNone(audit.SECRET.search(out))
+                for plain in alikes:
+                    self.assertEqual(audit.redact(plain, extra=[]), plain)
+        # what the gate refuses reaches the trail through the real record
+        audit.record("crew.gate", f"gh secret set NPM_TOKEN --body {CMD}", f"refused: sshpass -p {CMD} ssh host",
+                     "deny")
+        self.assertNotIn(CMD, (audit.AUDIT / time.strftime("%Y-%m.jsonl")).read_text())
+
+    def test_the_redactor_runs_in_linear_time(self):
+        # 64 KB of text that makes each command rule start a scan at every word; a rule that backtracks takes minutes
+        n = 1 << 16
+        texts = ["curl -u " * (n // 8), "sshpass -P x " * (n // 13), "mysql -u " * (n // 9),
+                 "docker login -u " * (n // 16), "Authorization: token " + "a" * n, "gh secret set X " * (n // 16),
+                 "passphrase credentials " * (n // 23), "https://u:" + "@" * n, "a" * n]
+        start = time.perf_counter()
+        for t in texts:
+            audit.redact(t, extra=[])
+            audit.SECRET.search(t)
+        elapsed = time.perf_counter() - start
+        self.assertLess(elapsed, 2.0, f"{elapsed:.2f}s for {len(texts)} texts of 64 KB")
+
     def test_no_prompt_text_reaches_a_record(self):
         audit.record("canary.miss", "devkit", "final message without the status block", "recorded",
                      prompt="please ship the secret roadmap", text="the secret roadmap")
@@ -292,11 +344,33 @@ class SchemaTests(AuditCase):
             with self.subTest(action=action):
                 self.assertTrue(audit.registered(action), f"{action} is not in audit.ACTIONS")
 
+    def test_the_gate_and_scope_records_keep_their_fields(self):
+        # guard._gate_record, guard.bypass and Tank's scope.write detection pass these; EXTRAS dropped them
+        audit.record("guard.irreversible", "git push origin main", "push", "deny", irreversible="push", tier=2,
+                     repo="acme/app", member="tank", setting="enforce", grant="G3", source="E2", rule="tier-2")
+        audit.record("guard.bypass", "git push", "the developer's hatch", "allow", flag="DEVKIT_ALLOW_PUSH",
+                     rule="hatch")
+        audit.record("scope.write", "a-seraph", "a read-only lane wrote files", "recorded",
+                     paths=["lib/a.py", "lib/b.py"], certainty="likely")
+        audit.record("run.orphaned", "Release", "its session ended", "orphaned")
+        gate, hatch, write, run = (audit.query(action=a)[-1] for a in
+                                   ("guard.irreversible", "guard.bypass", "scope.write", "run.orphaned"))
+        keys = ("irreversible", "tier", "repo", "setting", "grant", "source")
+        self.assertEqual({k: gate["ref"].get(k) for k in keys},
+                         {"irreversible": "push", "tier": 2, "repo": "acme/app", "setting": "enforce", "grant": "G3",
+                          "source": "E2"})
+        self.assertEqual(hatch["evidence"]["flag"], "DEVKIT_ALLOW_PUSH")
+        self.assertEqual((write["category"], write["severity"], write["evidence"]),
+                         ("security", "notice", {"file": "lib/a.py, lib/b.py", "check": "likely"}))
+        self.assertEqual((run["category"], run["severity"]), ("lifecycle", "notice"))
+
     def test_every_keyword_the_code_passes_is_declared(self):
         found = {}
         for f in sorted((LIB / "devkit").glob("*.py")):
             s = f.read_text()
-            for m in re.finditer(r"(?:audit\.record|\b_audit)\(", s):
+            # guard.py writes through its own wrapper, _record(action, …, **extra); fs.py's _record is another thing
+            wrapper = r"|(?<!def )\b_record" if f.name == "guard.py" else ""
+            for m in re.finditer(r"(?:audit\.record|\b_audit" + wrapper + r")\(", s):
                 i, depth = m.end(), 1
                 while depth and i < len(s):
                     depth += {"(": 1, ")": -1}.get(s[i], 0)
@@ -357,6 +431,72 @@ class PersonalDataTests(AuditCase):
             with self.subTest(target=target):
                 audit.record("dev.crew", target, "", "ok")
                 self.assertEqual(audit.query(action="dev.crew")[-1]["target"], target)
+
+    def test_developer_evidence_keeps_the_lines_length_and_hash_and_an_answer_only_when_it_is_an_option(self):
+        # compliance review 2, section 3: accountability needs who approved what, when and how; not the words
+        opts = ["A: ship", "B: wait for Acme"]
+        cases = [  # (covers, the line or the question tool's excerpt, answer, what ref.answer keeps)
+            ("D3", "approve D3: ship it Friday, Acme agreed", "ship it Friday, Acme agreed",
+             "[free text: 27 characters]"),
+            ("D4", "approve D4: b:  WAIT for acme", "b:  WAIT for acme", "B: wait for Acme"),
+            ("D5", "D5 · Ship the Acme roadmap now? = Other: after the Acme call", "Other: after the Acme call",
+             "[free text: 26 characters]"),
+            ("push feat/x", "grant push feat/x", "", None),
+        ]
+        for covers, line, answer, kept in cases:
+            with self.subTest(covers=covers):
+                audit.record("crew.evidence", covers, line, channel="E2", transcript_uuid="prompt-9",
+                             session="claude:s1", answer=answer, options=opts)
+                r = audit.query(action="crew.evidence")[-1]
+                digest = __import__("hashlib").sha256(line.encode()).hexdigest()
+                self.assertEqual((r["target"], r["detail"]),
+                                 (covers, f"[approval line not recorded: {len(line)} characters, sha256 {digest}]"))
+                self.assertEqual(r["ref"].get("answer"), kept)
+                self.assertEqual((r["evidence"]["channel"], r["evidence"]["transcript_uuid"]), ("E2", "prompt-9"))
+        raw = (audit.AUDIT / time.strftime("%Y-%m.jsonl")).read_text()
+        for words in ("Friday", "roadmap", "Acme call", "A: ship", "options"):
+            self.assertNotIn(words, raw)
+        # without the decision's options, no answer is kept as said
+        audit.record("crew.evidence", "D6", "approve D6: A: ship", answer="A: ship")
+        self.assertEqual(audit.query(action="crew.evidence")[-1]["ref"]["answer"], "[free text: 7 characters]")
+
+    def test_records_sealed_under_older_rules_are_cleaned_on_read_and_still_verify(self):
+        # compliance review 2, section 3: 285 v2 records sealed before f5c49a6 hold message text or a home path, and
+        # lift returned them as stored. Seal records the way that code did, beside one the current code writes.
+        old = [("crew.message", "Neo → Persephone", "Ana wants the Acme roadmap by Friday", {"ref": {"id": "M3"}}),
+               ("dev.crew", "ask --to persephone is the Acme roadmap fine", "", {}),
+               ("dev.rm", "/Users/fixture-user/Development/acme/build", f"{CURL} -u admin:{CMD} https://x.example",
+                {"evidence": {"cwd": "/Users/fixture-user/Development"}}),
+               ("crew.evidence", "D2", "approve D2: after the Acme roadmap call", {"ref": {"answer": "after the "
+                                                                                          "Acme roadmap call"}})]
+        for action, target, detail, more in old:
+            ts = round(time.time(), 3)
+            audit._append({"v": 2, "id": audit.new_id(ts), "ts": ts, "time": audit.iso(ts),
+                           "actor": {"user": "fixture-user", "host": "fixture-host", "agent": "claude", "session": ""},
+                           "action": action, "category": "change", "severity": "info", "target": target,
+                           "detail": detail, "outcome": "ok", **more})
+        audit.record("crew.message", "Neo → Morpheus", "the Acme roadmap again", id="M4")
+        audit.record("dev.crew", "answer M4 the Acme roadmap is fine", "", "ok")
+        stored = (audit.AUDIT / time.strftime("%Y-%m.jsonl")).read_bytes()
+        recs = audit.query(days=1)
+        for fmt in audit.FORMATS:
+            with self.subTest(format=fmt):
+                out = audit.render(fmt, recs)
+                for words in ("roadmap", "/Users/fixture-user", CMD):
+                    self.assertNotIn(words, out)
+        sealed = [r for r in recs if r["actor"]["user"] == "fixture-user"]
+        self.assertEqual([r.get("cleaned") for r in sealed], [True] * 4)
+        self.assertEqual(sealed[3]["ref"], {"answer": "[free text: 27 characters]"})  # never checked against options
+        self.assertEqual((sealed[0]["detail"], sealed[0]["ref"]), ("[message text not recorded: 36 characters]",
+                                                                   {"id": "M3"}))
+        self.assertEqual(sealed[1]["target"], "ask --to persephone [message text not recorded: 24 characters]")
+        self.assertEqual((sealed[2]["target"], sealed[2]["evidence"]), ("~/Development/acme/build",
+                                                                        {"cwd": "~/Development"}))
+        new = [r for r in recs if r["actor"]["user"] != "fixture-user" and r["action"] != "audit.config"]
+        stored_new = [json.loads(ln) for ln in stored.splitlines()][-2:]
+        self.assertEqual(new, stored_new)  # a record the current rules wrote reads back as stored, unmarked
+        self.assertEqual((audit.AUDIT / time.strftime("%Y-%m.jsonl")).read_bytes(), stored)
+        self.assertTrue(audit.verify(team=False)["ok"])  # the chain still covers the stored bytes
 
     def test_run_step_and_branch_from_the_session_are_redacted(self):
         os.environ["DEVKIT_SESSION"] = "claude:sess-2"

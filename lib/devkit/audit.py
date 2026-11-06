@@ -20,9 +20,10 @@ Where: ~/.local/state/devkit/audit/YYYY-MM.jsonl on this machine (append-only, 0
 daily by the `audit` job to the handoff repository as audit/<user>@<host>/YYYY-MM.jsonl. Kept for
 audit.retention.local_months here and team_months there, never under floor_months (at least 3), and not pruned at all
 under audit.hold; the team policy (<handoff>/policy/audit.json) raises any of them. Pruning the handoff copy removes
-files from its working copy only: git history keeps every published month. Secrets, crew message text and home folders
-never reach a record (docs/audit.md, Personal data). Query with `dev audit`; export with `dev audit export` (JSONL,
-CSV, OCSF, CEF).
+files from its working copy only: git history keeps every published month. Crew message text, the developer's
+approval lines and home folders never reach a record written now, and secrets are redacted as far as the redactor
+knows their shape; records sealed before these rules are cleaned whenever they are read (docs/audit.md, Personal
+data). Query with `dev audit`; export with `dev audit export` (JSONL, CSV, OCSF, CEF).
 """
 from __future__ import annotations
 
@@ -56,8 +57,12 @@ _NOT_DONE = r"(?!…?\[redacted\])"  # also the bare "[redacted]" other stores w
 # a key that names a secret, alone or inside a longer name (AWS_SECRET_ACCESS_KEY, client_secret, apiKey). What
 # follows the keyword must start a new part of the name (_, -, or a capital in camelCase), so secrets:, tokens:,
 # secretary: and passwordless: stay. No leading \w*: the match starts at the keyword and keeps the text before it.
-_KEY = (r"(?:secret|token|passw(?:or)?d|api[_-]?key|access[_-]?key|private[_-]?key|account[_-]?key)"
-        r"(?:(?:[_-]|(?-i:[A-Z](?=[a-z])))\w{0,64})?")
+_KEY = (r"(?:secret|token|passw(?:or)?d|passphrase|credentials?|api[_-]?key|access[_-]?key|private[_-]?key|"
+        r"account[_-]?key)(?:(?:[_-]|(?-i:[A-Z](?=[a-z])))\w{0,64})?")
+# what a command passes as one argument: a quoted value whole, else up to the next space
+_ARG = _NOT_DONE + r"(?:\"[^\"\n]{1,256}\"|'[^'\n]{1,256}'|[^\s\"']{1,256})"
+# the arguments between a command and the flag that carries its secret: the same command only, and not far
+_ARGS = r"[^\n|;&]{0,200}?"
 # Every rule runs in linear time: no nested unbounded quantifiers, and a bounded length wherever a match could
 # otherwise scan far from each starting point.
 _RULES = [
@@ -80,6 +85,21 @@ _RULES = [
     # a command-line flag that takes a secret: --password x, --github-token=x (not --password-stdin, --token-file)
     (r"(?i:(?P<f>--(?:[a-z0-9]{1,32}-){0,4}(?:password|passwd|token|secret|api-?key|access-key|private-key))"
      r"(?P<fs>[ =][\"']?)" + _NOT_DONE + r"[^\s…\"'-][^\s\"']*)", r"\g<f>\g<fs>" + MARK),
+    # short flags that take a secret in the commands that use them (review batch 3); elsewhere -u, -p and -b are a
+    # user id, a port or a branch. curl -u user:password keeps the user
+    (r"(?P<cu>\bcurl\b" + _ARGS + r"\s(?:-[uU]|--user|--proxy-user)(?:\s+|=)?[\"']?[^\s:\"']{1,128}:)" + _NOT_DONE +
+     r"[^\s\"']{1,256}", r"\g<cu>" + MARK),
+    # sshpass -p password: -f, -d and -P take an argument of their own, -e and -v none
+    (r"(?P<sp>\bsshpass(?:\s+(?:-[fdP]\s*[^\s-]\S{0,255}|-[evhV]\b)){0,4}\s+-p\s*)" + _ARG, r"\g<sp>" + MARK),
+    # the MySQL and MariaDB clients: -p<password> attached (-p alone asks for it, and -p name names the database)
+    (r"(?P<my>\b(?:mysql(?:dump|admin|import|show|check|pump)?|mariadb(?:-dump|-admin)?)\b" + _ARGS +
+     r"\s-p)(?=[^\s-])" + _ARG, r"\g<my>" + MARK),
+    (r"(?P<dl>\b(?:(?:docker|podman|buildah|nerdctl|oras|skopeo)\s+login|helm\s+registry\s+login)\b" + _ARGS +
+     r"\s-p(?:\s+|=)?)" + _ARG, r"\g<dl>" + MARK),
+    (r"(?P<gs>\bgh\s+secret\s+set\b" + _ARGS + r"\s(?:--body|-b)(?:\s+|=)?)" + _ARG, r"\g<gs>" + MARK),
+    # GitHub's `Authorization: token X`: X has a digit, or is long, so "token required" stays
+    (r"(?i:\b(?P<at>authorization\s*[:=]\s*[\"']?token)\s+" + _NOT_DONE +
+     r"(?:(?=[a-z._~+/=-]{0,255}[0-9])[a-z0-9._~+/=-]{8,}|[a-z0-9._~+/=-]{20,}))", r"\g<at> " + MARK),
     # key = "value", "key": "value", key: 'value': a quoted value loses everything up to its closing quote
     (r"(?i:(?P<k>" + _KEY + r")(?P<s>[\"']?\s*[=:]\s*[\"'])" + _NOT_DONE +
      r"(?:(?<=\")[^\"\n]{1,512}|(?<=')[^'\n]{1,512}))", r"\g<k>\g<s>" + MARK),
@@ -129,14 +149,22 @@ def redact(text, extra=None) -> str:
 #
 # A record says who acted and what changed. It never holds what people wrote to each other (crew messages quote the
 # developer's requests), nor the OS user name inside a home path (compliance review, section 2). Every text field
-# passes through here when a record is built, and v1 records when they are read, so an export never carries them.
+# passes through here when a record is built, and every record when it is read (lift), so a query or an export
+# shows none of them, even from a record sealed before a rule existed.
 
 # another person's home folder too (a v1 record from another machine); /Users/Shared names nobody
 _HOMES = re.compile(r"(?<![\w.~-])/(?:Users|home)/(?!Shared(?![^/\s]))[^/\s:'\"`]+")
 # actions whose detail is the text of a message: only its length is recorded
 MESSAGE_ACTIONS = {"crew.message"}
+# the developer's evidence for a decision or a grant (compliance review 2, section 3): its detail is the line they
+# typed or the question tool's question and label, so only its length and SHA-256 are recorded; `answer` stays only
+# when it is one of the decision's options. `covers`, the channel, the transcript uuid and the chain say the rest
+EVIDENCE_ACTIONS = {"crew.evidence"}
 # `dev crew ask|answer` arguments that name someone or something; every other argument is message text
 _CREW_NAMES = ("--to", "--recommend", "--irreversible", "--target")
+# what replaces a text: a record read again keeps it as it is, so cleaning on read never counts a marker's length
+_UNTEXT = re.compile(r"\[message text not recorded: \d+\+? characters\]")
+_UNLINE = re.compile(r"\[approval line not recorded: \d+ characters, sha256 [0-9a-f]{64}\]")
 
 
 def _home(s: str) -> str:
@@ -153,6 +181,20 @@ def _clean(text, rx) -> str:
 
 def _untext(n: int, cut: bool) -> str:
     return f"[message text not recorded: {n}{'+' if cut else ''} characters]"
+
+
+def _unline(s: str) -> str:
+    return f"[approval line not recorded: {len(s)} characters, sha256 {hashlib.sha256(s.encode('utf-8')).hexdigest()}]"
+
+
+def _option(answer, options) -> str:
+    """A crew.evidence answer as it may be stored: the decision's option it names (same words, any case or spacing),
+    else its length only."""
+    said = " ".join(str(answer).split()).casefold()
+    for o in options if isinstance(options, (list, tuple)) else []:
+        if said and said == " ".join(str(o).split()).casefold():
+            return str(o)
+    return f"[free text: {len(str(answer))} characters]"
 
 
 def _crew_args(target: str) -> str:
@@ -178,14 +220,21 @@ def _crew_args(target: str) -> str:
             text.append(t)
         n += 1
     body = " ".join(text)
+    if _UNTEXT.fullmatch(body):
+        return target  # already recorded this way
     return " ".join(keep + ([_untext(len(body), len(target) >= 300)] if body else []))  # cli.py cuts at 300
 
 
 def _field(action: str, name: str, text, rx) -> str:
-    """A record's target or detail as it may be stored: no message text, no secret, no home folder."""
+    """A record's target or detail as it may be stored: no message text, no approval line, no secret, no home
+    folder. A text already replaced by its marker stays as it is."""
     s = text if isinstance(text, str) else str(text if text is not None else "")
     if name == "detail" and action in MESSAGE_ACTIONS:
+        if _UNTEXT.fullmatch(s):
+            return s
         return _untext(len(s), len(s) >= 300) if s else ""  # progress cuts a message at 300 before it gets here
+    if name == "detail" and action in EVIDENCE_ACTIONS:
+        return s if _UNLINE.fullmatch(s) or not s else _unline(s)
     if name == "target" and action == "dev.crew":
         s = _crew_args(s)
     return _clean(s, rx)
@@ -259,6 +308,9 @@ ACTIONS = {
     "state": ("lifecycle", "warning"), "install": ("lifecycle", "notice"),
     "caller": ("security", "warning"), "caller.unverified": ("security", "notice"),
     "calls": ("lifecycle", "notice"), "progress": ("decision", "notice"), "session": ("lifecycle", "info"),
+    "run": ("lifecycle", "notice"),  # a run orphaned by its ended session, or taken back by its resumed one
+    "scope.write": ("security", "notice"),  # a review or read-only lane's shell call wrote files (F7); a caller sure
+    #                                         of it passes severity="warning"
 }
 
 # a caller's keyword -> where it goes in the record; callers pass nothing else (anything else is dropped)
@@ -271,9 +323,14 @@ EXTRAS = {
     "exit": "evidence.exit", "duration": "evidence.duration", "cwd": "evidence.cwd", "tool": "evidence.tool",
     "rule": "evidence.rule", "rules": "evidence.rule", "count": "evidence.count", "file": "evidence.file",
     "channel": "evidence.channel", "transcript_uuid": "evidence.transcript_uuid", "verified": "evidence.check",
+    "flag": "evidence.flag", "paths": "evidence.file", "certainty": "evidence.check",
     "id": "ref.id", "by": "ref.by", "was": "ref.was", "type": "ref.type", "result": "ref.result",
     "answer": "ref.answer", "asked_by": "ref.asked_by", "irreversible": "ref.irreversible", "mode": "ref.mode",
     "overrides": "ref.overrides", "routed": "ref.routed", "session": "ref.session",
+    # the irreversible-action gate (guard._gate_record): tier 1 or 2, setting audit or enforce, the grant's id, its
+    # source (E1, E2, step or preapproval) and the owner/repo acted on (gh -R can name another)
+    "tier": "ref.tier", "setting": "ref.setting", "grant": "ref.grant", "source": "ref.source", "repo": "ref.repo",
+    "options": "",  # crew.evidence: the decision's options, read by build to keep an answer that is one; never stored
 }
 RAISE = {"tampered": "critical"}  # a caller's outcome word that makes the record more severe
 EVIDENCE_KEYS = {p.split(".", 1)[1] for p in EXTRAS.values() if p.startswith("evidence.")}
@@ -481,6 +538,9 @@ def build(action: str, target="", detail="", outcome="ok", extra: dict = None, c
     rx = _extra_rules(cfg["redact"]["extra"])
     ts = round(now or time.time(), 3)
     extra = dict(extra or {})
+    options = extra.pop("options", None)
+    if str(action) in EVIDENCE_ACTIONS and extra.get("answer") not in (None, ""):
+        extra["answer"] = _option(extra["answer"], options)
     out, code, raw = outcome_of(outcome)
     cat, sev = kind(action)
     rec = {"v": V, "id": new_id(ts), "ts": ts, "time": iso(ts), "actor": actor(), "action": str(action)[:80],
@@ -760,13 +820,36 @@ def _changes(argv: list) -> bool:
 _V1_CORE = {"ts", "user", "host", "agent", "session", "action", "target", "detail", "outcome"}
 
 
+def _reclean(r: dict, rx) -> dict:
+    """A v2 record as a reader sees it: its text fields cleaned with today's rules, which records sealed before them
+    did not get (crew message text and home folders before 26.11.3, secrets the redactor learned since). The stored
+    line and its hash stay as they are, so `verify` still checks them; a view that differs is marked `cleaned`."""
+    action, out = str(r.get("action") or ""), dict(r)
+    for k in ("target", "detail"):
+        if isinstance(r.get(k), str):
+            out[k] = _field(action, k, r[k], rx)[:_CUT[k]]
+    for k in ("why", "project", "branch", "run", "step"):
+        if isinstance(r.get(k), str):
+            out[k] = _clean(r[k], rx)[:_CUT.get(k)]
+    for group in ("evidence", "ref", "crew"):
+        if isinstance(r.get(group), dict):
+            out[group] = {k: _clean(v, rx)[:300] if isinstance(v, str) else v for k, v in r[group].items()}
+    if action in EVIDENCE_ACTIONS and not _UNLINE.fullmatch(str(r.get("detail") or "")) and \
+            (out.get("ref") or {}).get("answer"):
+        out["ref"] = {**out["ref"], "answer": _option(out["ref"]["answer"], None)}  # never checked against options
+    if out != r:
+        out["cleaned"] = True
+    return out
+
+
 def lift(r: dict, line: bytes = b"", extra=None) -> dict:
-    """A record as schema v2 reads it: v2 records as they are (sealed by their hash), v1 records mapped (v stays 1,
-    no chain) and cleaned as a v2 record is when it is written: no secret, message text or home folder, so no query
-    or export shows them. `extra`: the compiled audit.redact.extra patterns (default: the built-in rules only)."""
-    if r.get("v") == V:
-        return r
+    """A record as schema v2 reads it, cleaned as a record is when it is written today: no secret, message text,
+    approval line or home folder, so no query or export shows them. v2 records keep their fields (`cleaned` when
+    that changed one: their hash covers the stored line); v1 records are mapped (v stays 1, no chain).
+    `extra`: the compiled audit.redact.extra patterns (default: the built-in rules only)."""
     rx = extra if extra is not None else []
+    if r.get("v") == V:
+        return _reclean(r, rx)
     ts = float(r.get("ts") or 0)
     out, code, raw = outcome_of(r.get("outcome"))
     cat, sev = kind(r.get("action"))
@@ -1180,7 +1263,8 @@ def to_ocsf(r: dict) -> dict:
                       "app_name": a.get("agent") or ""},
             "device": {"hostname": a.get("host") or "", "type_id": 0},
             "unmapped": {k: r[k] for k in ("category", "project", "branch", "run", "step", "crew", "target", "detail",
-                                           "why", "evidence", "ref", "prev", "hash", "v") if r.get(k) not in (None, "")}}
+                                           "why", "evidence", "ref", "prev", "hash", "v", "cleaned")
+                         if r.get(k) not in (None, "")}}
 
 
 def _cef_head(s) -> str:

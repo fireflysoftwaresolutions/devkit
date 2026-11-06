@@ -30,8 +30,10 @@ Every prune is itself recorded as `audit.prune`, with the months and the number 
 
 Pruning removes month files from the handoff repository's **working copy only**. Git history keeps every published
 month until that history is rewritten, so today `team_months` does not delete anything from git. `dev audit config`
-says so on its `git history` line. A procedure to purge pruned months from the history is planned; it must run before
-the first published month (2026-11) passes `team_months`, which at 13 months is 2027-12.
+says so on its `git history` line. A procedure to purge pruned months, and the text of
+[records written before 26.11.3](#records-written-before-26113), from the history is planned. It must run before
+anyone else gets access to the handoff repository, or before the first published month (2026-11) passes
+`team_months` (at 13 months, 2027-12), whichever comes first.
 
 Each machine prunes only its own folder. The folder of a retired machine stays until that cleanup also covers other
 machines' folders (planned for 26.11.4).
@@ -60,17 +62,38 @@ devkit records only what the purpose needs (data minimization, article 5(1)(c)):
 - **What happened:** the action, its target and details, the outcome, the project, branch, run and step, the reason
   given for an override (`why`), and evidence such as the command, the commit, or the exit code.
 
-A record never holds:
+devkit keeps these out of every record it writes:
 
-- **Prompt text or message text.** A crew message is recorded by its id, sender, recipient, and length, and
+- **Prompt text and message text.** A crew message is recorded by its id, sender, recipient, and length, and
   `dev crew ask` and `dev crew answer` by their naming arguments (`--to`, the message id) and the length of the text.
   Crew messages often quote the developer's requests, so their text stays in the session's own records.
-- **Secrets.** Tokens, keys, passwords, and credentials in URLs are redacted before a record is written, in every text
-  field: the target, the details, the reason, the run and step names, and the branch.
+- **The developer's approval lines.** Evidence for a decision or a grant (`crew.evidence`) keeps what it covers (the
+  decision id, or a grant's action and target), the channel, and the id of the developer's message in the
+  transcript. Of the line itself (`approve D<n>: …`, or the question and answer from the question tool) it keeps only
+  the length and the SHA-256. It keeps the answer only when that answer is one of the decision's options; free text
+  becomes `[free text: N characters]`.
 - **The user name in a home folder.** `/Users/<name>/…` and `/home/<name>/…` become `~/…`.
 
-Records written in the older v1 format are cleaned the same way whenever they are read, so a query or an export never
-shows what a new record would not hold.
+Secrets are redacted, as far as the redactor knows their shape. Tokens, keys, passwords, passphrases, credentials,
+passwords in URLs, and the secrets that common commands take (`curl -u`, `mysql -p`, `sshpass -p`, `docker login -p`,
+`gh secret set --body`) are redacted in every text field before a record is written: the target, the details, the
+reason, the run and step names, and the branch. The redactor matches known shapes, so a secret in a shape it does
+not know can still reach a record. Add a pattern for it with `audit.redact.extra`.
+
+### Records written before 26.11.3
+
+Records written before 26.11.3 can hold what the preceding rules now keep out. That covers records in the older v1
+format, and v2 records sealed before the fix, some of which hold crew message text or a home path. devkit cleans every
+record with the current rules whenever it reads one, so `dev audit`, `dev audit show`, and `dev audit export` do not
+show that text. A v2 record that the cleaning changed is marked `"cleaned": true`. Its `hash` still covers the stored
+line, which is what `dev audit verify` checks.
+
+The stored lines still hold the text, in three places:
+
+- On this machine, in `~/.local/state/devkit/audit/`, until the re-seal planned for 26.11.4 (`dev audit reseal`)
+  rewrites them with the current rules and records the migration.
+- In the handoff repository's working copy, until the first publish after that re-seal.
+- In the handoff repository's git history, until the purge described in [What git keeps](#what-git-keeps).
 
 ### The rights of the people recorded
 
@@ -90,6 +113,8 @@ access:
 1. Screen the change for a DPIA, with your organization's data protection officer if it has one.
 2. Write a legitimate-interest assessment: why the team needs the records, and how the people recorded are protected.
 3. Tell the people recorded what is collected and why (the table at the start of this section).
+4. Purge the history first ([What git keeps](#what-git-keeps)): until then, git still holds the message text of
+   records written before 26.11.3.
 
 The planned design for shared repositories (26.11.4) publishes, per month file, a seal (the chain's last hash and the
 record count) plus the refusal, security, and configuration records, instead of every record. The seal still lets
@@ -138,12 +163,14 @@ dev audit show 01M6SFPEZ2
 | `target` · `detail` | yes | What the action was about and how, redacted. At most 300 and 600 characters |
 | `outcome` | yes | `ok`, `blocked`, `failed`, or `recorded` |
 | `why` | for an override | The reason given with `--why`, redacted. At most 300 characters |
-| `evidence` | when there is some | `command`, `commit`, `check`, `exit`, `duration`, `cwd`, `tool`, `rule`, `count`, `file`, `channel`, and `transcript_uuid` |
-| `ref` | when there is some | Links to other records and decisions: `id`, `by`, `was`, `type`, `result`, `answer`, `asked_by`, `irreversible`, `mode`, `overrides`, `routed`, and `session` |
+| `evidence` | when there is some | `command`, `commit`, `check`, `exit`, `duration`, `cwd`, `tool`, `rule`, `count`, `file`, `flag` (an escape hatch's name), `channel`, and `transcript_uuid` |
+| `ref` | when there is some | Links to other records and decisions: `id`, `by`, `was`, `type`, `result`, `answer`, `asked_by`, `irreversible`, `mode`, `overrides`, `routed`, and `session`; for the irreversible-action gate, `tier` (1 or 2), `setting` (`audit` or `enforce`), `grant` (the grant's id), `source` (`E1`, `E2`, `step`, or `preapproval`), and `repo` (the `owner/repo` acted on) |
 | `prev` · `hash` | yes | The hash chain, see [Verify the chain](#verify-the-chain) |
 
-A record has no other fields: devkit drops whatever a caller passes outside this list. Records written in the older
-v1 format (`ts`, `user`, `host`, `agent`, `session`, `action`, `target`, `detail`, `outcome` at the top level) are
+A stored record has no other fields: devkit drops whatever a caller passes outside this list. A record read back
+can also carry `"cleaned": true` (see [Records written before 26.11.3](#records-written-before-26113)). Records
+written in the older v1 format (`ts`, `user`, `host`, `agent`, `session`, `action`, `target`, `detail`, `outcome` at
+the top level) are
 still read in the v2 shape (with `v` set to `1`, an id that starts with `V1`, and no chain fields), cleaned, and
 exported like the rest, but they are not part of the chain.
 
@@ -234,7 +261,7 @@ agent), `-p` or `--project`, `--member`, `--category`, `--severity`, `--outcome`
 
 | Format | What you get |
 | --- | --- |
-| `jsonl` (default) | One record per line, exactly as stored |
+| `jsonl` (default) | One record per line, as stored. A record cleaned on read carries `"cleaned": true` and no longer matches its `hash`; `dev audit verify` checks the stored line |
 | `csv` | A header row, then one row per record: `id`, `time`, `user`, `host`, `agent`, `session`, `member`, `role`, `lane`, `project`, `branch`, `run`, `step`, `action`, `category`, `severity`, `outcome`, `target`, `detail`, `why`, `evidence`, `ref`, and `hash`. A cell that starts with `=`, `+`, `-`, or `@` gets a leading `'`, so a spreadsheet never runs it as a formula |
 | `ocsf` | One OCSF 1.3.0 Base Event per line (class 0, activity Other), with the severity and status mapped and devkit's own fields under `unmapped` |
 | `cef` | One CEF line per record: `CEF:0\|Firefly Software Solutions\|devkit\|<version>\|<action>\|<target>\|<severity>`, then the time, user, host, action, category, outcome, and detail, with the id, project, member, step, why, and hash as custom strings |
