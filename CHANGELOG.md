@@ -25,6 +25,7 @@ All notable changes to devkit. Versions follow CalVer `YY.MM.PATCH` (PATCH resta
 - `dev doctor` compares the installed instructions (`~/.claude/CLAUDE.md`, `~/.codex/AGENTS.md`) and the Codex crew
   roles with what this devkit writes, so an outdated install shows as out of date instead of passing because the
   files exist.
+- The installed-plugin check compares the newest copy by version number, so 26.11.10 counts as newer than 26.11.2.
 
 ## [26.11.1] - 2026-11-06
 

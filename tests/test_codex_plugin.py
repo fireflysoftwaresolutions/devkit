@@ -57,6 +57,16 @@ class InstalledCurrencyTests(unittest.TestCase):
             f.write_text(setup.render_instructions().replace("dev progress note", "dev progress step", 1))
             self.assertEqual(setup.instructions_state(f), "outdated")  # an older devkit wrote it
 
+    def test_the_newest_plugin_copy_is_compared_by_version_not_by_text(self):
+        with tempfile.TemporaryDirectory() as d:
+            src, cache = Path(d) / "src", Path(d) / "cache"
+            (src / "skills").mkdir(parents=True)
+            (src / "skills" / "a.md").write_text("new\n")
+            for v, body in (("26.11.2", "old\n"), ("26.11.10", "new\n")):
+                (cache / v / "skills").mkdir(parents=True)
+                (cache / v / "skills" / "a.md").write_text(body)
+            self.assertFalse(setup.plugin_copy_stale(cache, src))  # 26.11.10 is the newest, and it is current
+
     def test_stale_crew_roles_are_named(self):
         from devkit import crew
         roles = crew.codex_roles()

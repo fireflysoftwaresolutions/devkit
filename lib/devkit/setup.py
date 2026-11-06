@@ -703,7 +703,10 @@ def plugin_copy_stale(cache_root: Path, src: Path = None) -> bool:
     snapshot, and devkit's version does not change between commits."""
     import filecmp
     src = src or DEVKIT_HOME / "plugin"
-    copies = sorted(cache_root.glob("*")) if cache_root.exists() else []
+
+    def version_key(p: Path):  # 26.11.10 is newer than 26.11.2: compare numbers, not text
+        return [(0, int(x), "") if x.isdigit() else (1, 0, x) for x in re.split(r"[.\-+]", p.name)]
+    copies = sorted((c for c in cache_root.glob("*") if c.is_dir()), key=version_key) if cache_root.exists() else []
     if not copies:
         return True
     dst = copies[-1]
