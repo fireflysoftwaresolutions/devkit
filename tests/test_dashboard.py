@@ -810,6 +810,58 @@ class DetailTests(unittest.TestCase):
         self.assertEqual(([q["id"] for q in runs[0]["questions"]], [x["id"] for x in runs[0]["decisions"]]), (["M1"], ["D1"]))
         self.assertEqual(runs[0]["plan"][1]["after"], ["api"])
 
+    def crew_run(self, now):
+        # the live release run of 2026-11-06 in small: the lead's own last update is 78 minutes old, a crew lane reports
+        from devkit import progress
+        progress.RUNS.mkdir(exist_ok=True)
+        run = {"v": 2, "agent": "claude", "session": "s1", "project": "acme/widget", "goal": "Release 26.11.3", "state": "running",
+               "started": now - 9600, "estimate": 60, "estimate_cal": 25.8,
+               "intervals": [[now - 9600, now - 4680, "turn", "main"], [now - 2880, None, "agent", "a2"]],
+               "plan": [{"name": "F4 caller identity", "title": "knowing who ran each command", "state": "running", "owner": "a2", "est": 60,
+                         "started": now - 2880}],
+               "agents": {"a2": {"label": "Tank: F4 caller identity", "persona": "Tank", "state": "running", "started": now - 2880,
+                                 "updates": [{"ts": now - 180, "kind": "note", "text": "ledger written"}]}},
+               "updates": [{"ts": now - 4680, "kind": "step", "text": "design done"},
+                           {"ts": now - 180, "kind": "agent", "agent": "a2", "text": "ledger written"}],
+               "history": [], "decisions": [], "messages": [{"id": "M1", "ts": now - 240, "from": "a2", "to": "main", "text": "may I touch cli.py?"}]}
+        (progress.RUNS / "claude-s1.json").write_text(json.dumps(run))
+        return run
+
+    def test_a_run_is_seen_when_its_crew_reports_though_the_lead_is_quiet(self):
+        from devkit import progress
+        now = time.time()
+        run = self.crew_run(now)
+        r = dashboard._runs(now, "testmac")[0]
+        self.assertAlmostEqual(r["updated"], now - 4680, delta=1)                    # the lead's own last update stays what it was
+        self.assertAlmostEqual(r["seen"], now - 180, delta=1)                        # the lane's note 3 minutes ago is a sign of life
+        self.assertAlmostEqual(dashboard.run_detail("claude-s1", now=now)["seen"], now - 180, delta=1)
+        run["agents"]["a2"]["last_seen"] = now - 60                                  # a lane's last hook (contract C3) counts too
+        (progress.RUNS / "claude-s1.json").write_text(json.dumps(run))
+        self.assertAlmostEqual(dashboard._runs(now, "testmac")[0]["seen"], now - 60, delta=1)
+
+    def test_of_about_is_the_plans_current_total_not_the_first_estimate(self):
+        from devkit import progress
+        progress.RUNS.mkdir()
+        now = time.time()
+        # one open turn for two hours: 120 active minutes. "design" took its 60-minute estimate (pace 1.0); "build" has used its
+        # 60 minutes and keeps 15% of them (9); "release" needs its 30: 39 minutes left, so the plan's total is 120 + 39 = 159
+        run = {"v": 2, "agent": "claude", "session": "s2", "goal": "Release", "state": "running", "started": now - 7200, "estimate": 60,
+               "estimate_cal": 25.8, "intervals": [[now - 7200, None, "turn", "main"]],
+               "plan": [{"name": "design", "state": "done", "owner": "main", "est": 60, "started": now - 7200, "finished": now - 3600},
+                        {"name": "build", "state": "running", "owner": "main", "est": 60, "after": ["design"], "started": now - 3600},
+                        {"name": "release", "state": "pending", "owner": "main", "est": 30, "after": ["build"]}],
+               "agents": {}, "updates": [], "history": [], "decisions": [], "messages": []}
+        (progress.RUNS / "claude-s2.json").write_text(json.dumps(run))
+        r = dashboard._runs(now, "testmac")[0]
+        self.assertEqual((r["total_min"], r["eta_min"], r["estimate_cal"]), (159, 39, 25.8))
+        self.assertEqual(dashboard.run_detail("claude-s2", now=now)["total_min"], 159)
+
+    def test_a_step_keeps_its_plain_title_for_the_page(self):
+        now = time.time()
+        self.crew_run(now)
+        self.assertEqual(dashboard._runs(now, "testmac")[0]["plan"][0]["title"], "knowing who ran each command")
+        self.assertEqual(dashboard.run_detail("claude-s1", now=now)["steps"][0]["title"], "knowing who ran each command")
+
     def test_explorer_files_stay_inside_the_handoff_repository(self):
         h = self.root / "handoff"
         make_handoff(h)
@@ -972,6 +1024,12 @@ class PageBehaviorTests(unittest.TestCase):
         self.assertIsNone(out.get("probeError"), out.get("probeError"))
         self.assertIsNone(out.get("pageError"), out.get("pageError"))
         return out
+
+    def variant(self, change):
+        # the fixture's page with one change to a copy of its data
+        d = json.loads(json.dumps(self.data))
+        change(d)
+        return dashboard.page(d)
 
     def test_background_work_puts_what_waits_for_you_first(self):
         out = self.probe("""out.sections = $$("main section[id]").map(s => s.id); out.waiting = text($("#waiting")); out.runs = $$("#runs .rcard").map(text);
@@ -1147,6 +1205,75 @@ class PageBehaviorTests(unittest.TestCase):
         for view, w in out["w"].items():
             self.assertLessEqual(w, 390, view)
         self.assertLess(max(out["cells"]), 3 * out["line"] + 20)                                 # words wrap whole, never letter by letter
+
+    def test_a_run_whose_crew_reports_is_running_though_its_lead_was_quiet(self):
+        # the live run of 2026-11-06: the lead's last update 47 min ago, a lane reported 3 min ago, the session not in presence
+        def change(d):
+            d["runs"][1].update(seen=int(time.time() - 180), agents=[{"label": "Neo: importer mapping", "state": "running", "min": 20}])
+        out = self.probe("""out.cards = $$("#runs .rcard").map(text); out.dot = $('#tabs [data-view="background"] .n').getAttribute("aria-label");
+            await go("#/health"); out.flags = $$("section[aria-label=Contradictions] li").map(text);""", hash_="#/background", page=self.variant(change))
+        card = next(c for c in out["cards"] if c.startswith("Migrate the importer"))
+        self.assertTrue(card.startswith("Migrate the importer for T-a4 Running · 15m–25m left"), card)
+        self.assertNotIn("Stopped reporting", card + out["dot"])
+        self.assertFalse([f for f in out["flags"] if "No update for" in f], out["flags"])
+
+    def test_of_about_is_the_plans_current_total_beside_the_time_left(self):
+        # the live card read "4h09m active of about 26m" beside "3h14m–5h04m left": 26m was the first estimate, calibrated
+        def change(d):
+            d["runs"][1].update(seen=int(time.time() - 180), active_min=256, wall_min=256, eta_min=236, eta_lo=189, eta_hi=295.2,
+                                estimate=60, estimate_cal=25.8, total_min=492)
+        out = self.probe("""out.card = text($$("#runs .rcard").find(c => text(c).startsWith("Migrate the importer"))); await go("#/background?modal=run%3Acodex-old"); out.figs = text($("#modal .mfigs"));""",
+                         hash_="#/background", page=self.variant(change))
+        self.assertIn("4h16m active of about 8h12m", out["card"])                               # 256 active + 236 left
+        self.assertIn("3h09m–4h55m left", out["card"])
+        self.assertNotIn("of about 26m", out["card"] + out["figs"])
+        self.assertIn("Time 4h16m active of about 8h12m first estimate 26m", out["figs"])
+        self.assertIn("Left 3h09m–4h55m", out["figs"])
+
+    def test_lists_show_what_a_step_does_and_never_its_code(self):
+        def change(d):
+            plan, lanes = d["runs"][0]["plan"], d["runs"][0]["agents"]
+            plan[1].update(name="F4 caller identity", title="knowing who ran each command", owner="Tank: F4 caller identity")
+            plan[2]["after"] = ["F4 caller identity"]
+            plan[3]["name"] = "K1 protect devkit state"                                          # no title: its name without the code
+            lanes[0]["label"] = "Tank: F4 caller identity"
+        out = self.probe("""out.card = text($("#runs .rcard")); await go("#/team?tab=crew"); out.working = $$("#tabpanel .prows li").map(text);
+            await go("#/background?modal=run%3Aclaude-rel"); const m = $("#modal"); out.steps = $$("li", $$("ol.steps", m)[0]).map(text);
+            out.codes = $$("ol.steps .sc", m).map(text); out.crew = $$("li", $$("ol.steps", m)[1]).map(text);""", hash_="#/background", page=self.variant(change))
+        self.assertIn("▸ Running: knowing who ran each command · Backend engineer (Tank)", out["card"])
+        self.assertIn("○ To do: protect devkit state · Technical writer (Ghost)", out["card"])
+        self.assertIn("“dashboard ui” is running before “knowing who ran each command” finished.", out["card"])
+        self.assertTrue(out["working"][0].startswith("■ Backend engineer (Tank) knowing who ran each command · "), out["working"][0])
+        for shown in [out["card"]] + out["working"] + out["crew"]:
+            self.assertIsNone(re.search(r"\b(F4|K1)\b", shown), shown)                              # codes stay with the crew
+        self.assertIn("knowing who ran each command", out["steps"][1])
+        self.assertEqual(out["codes"], ["F4 caller identity", "K1"])                             # the drawer keeps them, dim
+
+    def test_decisions_say_the_tech_lead_records_the_answer(self):
+        out = self.probe("""out.waiting = text($("#waiting")); await go("#/background?modal=run%3Aclaude-rel"); out.drawer = text($("#waiting-for-you"));""",
+                         hash_="#/background")
+        self.assertIn("answer in that session; Tech lead (Morpheus) records it", out["waiting"])
+        self.assertIn("Answer in the session; Tech lead (Morpheus) records it.", out["drawer"])
+
+    def test_a_step_that_stopped_without_evidence_waits_for_the_tech_lead_in_amber(self):
+        # contract C3: a lane that stops without evidence leaves its step unverified; Morpheus closes or reopens it
+        def change(d):
+            d["runs"][0]["plan"][3].update(state="unverified", owner="Ghost: crew docs", persona="Ghost")
+            d["runs"][0]["agents"].append({"label": "Ghost: crew docs", "state": "unverified", "min": 12})
+        out = self.probe("""const w = document.createElement("span"); w.className = "warn-t"; document.body.append(w); out.amber = getComputedStyle(w).color;
+            const row = $$("#runs .rcard .rsteps li").find(li => text(li).includes("crew docs")); out.row = text(row); out.cls = row && row.className; out.color = row && getComputedStyle($(".g", row)).color;
+            await go("#/team?tab=crew"); const g = $$("#tabpanel .prows li").find(li => text(li).includes("Ghost")); out.working = text(g) || ""; out.wcolor = g && getComputedStyle($(".g", g)).color;
+            await go("#/background?modal=run%3Aclaude-rel"); const m = $("#modal"); out.step = text($$("li", $$("ol.steps", m)[0])[3]); out.lane = $$("li", $$("ol.steps", m)[1]).map(text).find(t => t.includes("Ghost"));
+            await go("#/actions"); out.needs = text($("main"));""", hash_="#/background", page=self.variant(change))
+        self.assertEqual(out["row"], "! Tech lead (Morpheus) checks it: crew docs · Technical writer (Ghost) Tech lead (Morpheus) checks it")
+        self.assertEqual((out["cls"], out["color"], out["wcolor"]), ("unverified", out["amber"], out["amber"]))
+        self.assertIn("Technical writer (Ghost) crew docs", out["working"])
+        self.assertIn("Tech lead (Morpheus) checks it", out["working"])
+        self.assertIn("Tech lead (Morpheus) checks it", out["step"])
+        self.assertIn("Tech lead (Morpheus) checks it", out["lane"])
+        for shown in (out["row"], out["working"], out["step"], out["lane"]):
+            self.assertNotIn("Blocked", shown)
+        self.assertNotIn("crew docs", out["needs"])                                              # Morpheus checks it; nothing asks the developer
 
 
 class LivePageTests(unittest.TestCase):

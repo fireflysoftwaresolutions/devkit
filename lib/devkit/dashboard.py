@@ -763,6 +763,38 @@ def _timing(now: float) -> dict:
         return timing_summary([], now)
 
 
+def run_seen(run: dict) -> int:
+    """The run's latest sign of life: a report by the run or by any of its lanes (updates of every kind, lane updates,
+    crew messages, step changes, decisions), a turn or a lane starting or ending, or a lane's last hook (`last_seen`,
+    contract C3). The lead's own last update alone misses a crew at work. 0 when there is none."""
+    ts = [run.get("started")]
+    for key in ("updates", "history", "messages", "decisions"):
+        ts += [x.get("ts") for x in run.get(key) or [] if isinstance(x, dict)]
+    ts += [x.get("decided") for x in run.get("decisions") or [] if isinstance(x, dict)]
+    for lane in (run.get("agents") or {}).values():
+        if isinstance(lane, dict):
+            ts += [lane.get("started"), lane.get("finished"), lane.get("last_seen")]
+            ts += [u.get("ts") for u in lane.get("updates") or [] if isinstance(u, dict)]
+    for iv in run.get("intervals") or []:
+        if isinstance(iv, (list, tuple)):
+            ts += list(iv[:2])
+    return int(max((t for t in ts if isinstance(t, (int, float)) and not isinstance(t, bool)), default=0))
+
+
+def plan_total(run: dict, now: float):
+    """Minutes the whole run takes by its plan as it stands: the active time so far plus the time left on the plan's
+    critical path, so "of about" and "left" always agree. None for a run without a plan (its estimate is its total)
+    and for a finished run (its active time is the total)."""
+    from . import progress
+    if not isinstance(run, dict) or run.get("state") == "done" or not run.get("plan"):
+        return None
+    try:
+        run = progress.normalize(run)
+        return round(progress.active_minutes(run, now=now) + progress.eta(run, now))
+    except (KeyError, TypeError, ValueError, ZeroDivisionError):
+        return None
+
+
 def _runs(now: float, host: str = "") -> list:
     """Agent runs with live progress on this machine (running, blocked, or finished in the last hour)."""
     try:
@@ -783,9 +815,11 @@ def _runs(now: float, host: str = "") -> list:
             if isinstance(raw, dict):
                 lane = lanes.get(raw.get("owner")) or {}
                 s.update(label=raw.get("label") or "", persona=lane.get("persona") or "", after=raw.get("after") or [],
-                         scope=raw.get("scope") or lane.get("scope") or "", waiting=raw.get("waiting") or "")
+                         scope=raw.get("scope") or lane.get("scope") or "", waiting=raw.get("waiting") or "",
+                         title=raw.get("title") or "")
         b.update({"id": run_id(r), "agent": r.get("agent"), "session": r.get("session"), "project": r.get("project"),
                   "mode": r.get("mode") or "", "host": host, "estimate_cal": r.get("estimate_cal"), "finished": r.get("finished"),
+                  "seen": run_seen(r), "total_min": plan_total(r, now),
                   "decisions": [{k: d.get(k) for k in ("id", "ts", "question", "options", "recommend", "irreversible", "from_name")}
                                 for d in r.get("decisions") or [] if isinstance(d, dict) and d.get("state") == "pending"],
                   "questions": [{k: m.get(k) for k in ("id", "ts", "from_name", "text")} for m in r.get("messages") or []
@@ -1125,7 +1159,7 @@ def run_detail(rid: str, now: float = None):
             continue
         owner, name = s.get("owner") or "main", s.get("name") or ""
         lane = lanes.get(owner) or {}
-        steps.append({"name": name, "state": s.get("state"), "owner": owner,
+        steps.append({"name": name, "title": s.get("title") or "", "state": s.get("state"), "owner": owner,
                       "owner_label": "main" if owner == "main" else lane.get("persona") or lane.get("label") or "subagent",
                       "label": s.get("label") or "", "desc": s.get("desc") or "", "scope": s.get("scope") or lane.get("scope"),
                       "after": s.get("after") or [], "est": s.get("est"), "est_auto": bool(s.get("est_auto")),
@@ -1143,6 +1177,7 @@ def run_detail(rid: str, now: float = None):
             "active_min": safe(lambda: round(progress.active_minutes(run, now=run.get("finished") or now), 1)),
             "wall_min": safe(lambda: round(progress.wall_minutes(run, now), 1)),
             "eta_min": safe(lambda: round(progress.eta(run, now))) if running else None, "eta_lo": lo, "eta_hi": hi,
+            "seen": run_seen(run), "total_min": plan_total(run, now),
             "headline": safe(lambda: progress.headline(run, now), ""), "steps": steps,
             "lanes": [{"id": k, "label": a.get("label") or "", "type": a.get("type") or "", "persona": a.get("persona") or "",
                        "state": a.get("state"), "started": a.get("started"), "finished": a.get("finished"),
@@ -1617,7 +1652,7 @@ table.pt .prs{flex-wrap:nowrap}
 .rsteps{list-style:none;margin:2px 0 0;padding:0;display:grid;gap:1px;font-size:var(--fs-1)}
 .rsteps li{display:grid;grid-template-columns:1.1em minmax(0,1fr) auto;gap:var(--s2);align-items:baseline;color:var(--text-2)}
 .rsteps .g{color:var(--text-2)} .rsteps li.running{color:var(--text)} .rsteps li.running .g{color:var(--mark-strong,var(--text))}
-.rsteps li.blocked,.rsteps li.blocked .g{color:var(--bad-text)} .rsteps .who{color:var(--text-2)} .rsteps .m{font-variant-numeric:tabular-nums}
+.rsteps li.blocked,.rsteps li.blocked .g{color:var(--bad-text)} .rsteps li.unverified,.rsteps li.unverified .g{color:var(--warn-text)} .rsteps .who{color:var(--text-2)} .rsteps .m{font-variant-numeric:tabular-nums}
 .lanes{display:flex;flex-wrap:wrap;gap:4px var(--s2);margin-top:2px;font-size:var(--fs-1);color:var(--text-2)}
 .lanes span{white-space:nowrap} .lanes .on{color:var(--text)} .lanes .lost{color:var(--warn-text)}
 .srows{display:grid;grid-template-columns:52px minmax(0,1fr);gap:2px var(--s3);margin:2px 0 0;font-size:var(--fs-1);line-height:1.45}
@@ -1997,6 +2032,7 @@ table.t .cl{display:none}
 .steps .sx dt{color:var(--text-2)} .steps .sx dd{margin:0;min-width:0;overflow-wrap:anywhere;color:var(--text)}
 .steps .sx .wide{grid-column:1/-1}
 .steps li.running .g{color:var(--strong)} .steps li.blocked .g,.steps li.waiting .g{color:var(--bad-text)} .steps li.done .g{color:var(--good-text)}
+.steps li.unverified .g,.steps li.unverified .tm{color:var(--warn-text)} .steps .sc{font-family:var(--mono)}
 .conns{list-style:none;margin:0;padding:0}
 .conn{display:grid;grid-template-columns:16px 84px minmax(0,1fr);gap:2px var(--s3);padding:var(--s2) 0;border-bottom:1px solid var(--line-soft);font-size:var(--fs-1);align-items:baseline;min-width:0}
 .conn:last-child{border-bottom:0} .conn>.i{color:var(--text-2);align-self:center} .conn .k{color:var(--text-2)} .conn .v{min-width:0;overflow-wrap:anywhere} .conn .how,.conn .xs{grid-column:3;color:var(--text-2);min-width:0}
@@ -2305,6 +2341,18 @@ function stepWho(s) {
   if (!s.owner || s.owner === "main") return s.label ? who(s.label) : roleName(mainMember());
   return who(s.owner_label && s.owner_label !== "main" ? s.owner_label : s.owner, s.persona);
 }
+/* what a step does, for lists: its title, else its name without a leading code ("F4 caller identity" → "caller identity").
+   Codes such as F4, R2-3, LC-F6 or "F7 and F8" stay with the crew: the run drawer shows them dim */
+const STEPCODE = /^[A-Z][A-Z0-9-]*\d(?:\s*(?:,|\+|&|and)\s*[A-Z][A-Z0-9-]*\d)*[:.]?\s+(?=\S)/;
+function plainStep(name) { const s = String(name || "").trim(), m = STEPCODE.exec(s); return m ? s.slice(m[0].length) : s; }
+function stepTitle(s) { return String((s && s.title) || "").trim() || plainStep(s && s.name); }
+function stepCode(s) {
+  const n = String((s && s.name) || "").trim(); if (String((s && s.title) || "").trim()) return n === stepTitle(s) ? "" : n;
+  const p = plainStep(n); return p === n ? "" : n.slice(0, n.length - p.length).trim().replace(/[:.]$/, "");
+}
+function laneStep(label) { const l = String(label || ""); return l.includes(":") ? plainStep(l.slice(l.indexOf(":") + 1).trim()) : ""; }
+/* a step whose member stopped without evidence is unverified (contract C3): amber, the tech lead checks it, the developer is not asked */
+function stepWord(st) { return st === "unverified" ? ["!", roleName(mainMember()) + " checks it"] : STEPW[st] || STEPW.pending; }
 function when(ts) { return ts ? h("time", {datetime: new Date(ts * 1000).toISOString(), title: fmt(ts), text: rel(ts)}) : h("span", {text: "—"}); }
 function clock(ts) { if (!ts) return "—"; const d = new Date(ts * 1000), age = nowS() - ts; return (lkey(d) === lkey(new Date()) && age >= 0 ? "" : age > 6 * 86400 || age < -6 * 86400 ? shortDay(lkey(d)) + " " : d.toLocaleDateString(undefined, {weekday: "short"}) + " ") + tm(ts); }
 function jobDur(s) { return s == null ? "—" : s < 90 ? Math.max(0, Math.round(s)) + " s" : fmtMin(s / 60); }
@@ -2373,7 +2421,10 @@ function watchWhere(wt) {
 const RUNTONE = {waiting: "risk", blocked: "risk", lost: "warn", running: "mark", done: "ok"};
 function pending(r) { return (r.decisions || []).filter(d => !d.state || d.state === "pending"); }
 function runLive(r) { return PEOPLE.some(x => x.sessions.some(s => s.session === r.session && s.agent === r.agent)); }
-function runQuiet(r) { return Math.max(0, (nowS() - (r.updated || r.started || 0)) / 60); }
+/* a run works while the run or any of its lanes reported in the last 30 minutes (`seen`: steps, notes, crew messages, lane
+   starts and stops), or while its session is live; the lead's own last update alone misses a crew at work */
+function runSeen(r) { return Math.max(r.updated || 0, r.seen || 0, r.started || 0); }
+function runQuiet(r) { return Math.max(0, (nowS() - runSeen(r)) / 60); }
 function runState(r) {
   if (pending(r).length) return "waiting";
   if (r.state === "blocked") return "blocked";
@@ -2390,11 +2441,14 @@ function runStateText(r, st) {
   st = st || runState(r);
   if (st === "waiting") return "Blocked · waiting for you";
   if (st === "blocked") return "Blocked";
-  if (st === "lost") return "Stopped reporting · last update " + rel(r.updated || r.started);
+  if (st === "lost") return "Stopped reporting · last update " + rel(runSeen(r));
   if (st === "done") return "Done · " + rel(r.finished || r.updated);
   const e = etaText(r); return "Running" + (e ? " · " + e : "");
 }
-function runEst(r) { return r.estimate_cal || r.estimate || 0; }
+/* "of about": the plan's current total (active so far plus the time left), the number beside "left"; a run without a
+   plan, or a finished one, keeps its estimate */
+function runEst(r) { return r.total_min != null ? r.total_min : r.estimate_cal || r.estimate || 0; }
+function runFirstEst(r) { return r.estimate_cal || r.estimate || 0; }
 function runTime(r) {
   const act = r.active_min || 0, wall = r.wall_min || 0, est = runEst(r);
   const plan = r.plan || r.steps || [], done = plan.filter(s => s.state === "done" || s.state === "skipped").length;
@@ -2407,15 +2461,15 @@ function flagNodes(f) { return f.parts.map(p => typeof p === "string" ? p : h("c
 function runFlags(r, det) {
   const out = [], plan = det ? det.steps || [] : r.plan || [], by = new Map(plan.map(s => [s.name, s]));
   for (const s of plan) if (s.state === "running") for (const a of s.after || []) { const d = by.get(a);
-    if (d && d.state !== "done" && d.state !== "skipped") out.push({code: "C4", parts: ["“" + s.name + "” is running before “" + a + "” finished."], fix: "Check the plan's order with the run's owner."}); }
+    if (d && d.state !== "done" && d.state !== "skipped") out.push({code: "C4", parts: ["“" + stepTitle(s) + "” is running before “" + stepTitle(d) + "” finished."], fix: "Check the plan's order with the run's owner."}); }
   const lanes = det ? (det.lanes || []).filter(l => l.state === "running").map(l => [l.persona, l.label]) : (r.agents || []).filter(a => a.state === "running").map(a => ["", a.label]);
   const groups = new Map();
-  for (const [persona, label] of lanes) { const m = member(persona) || member(label), l = String(label || ""), step = l.includes(":") ? l.slice(l.indexOf(":") + 1).trim() : l;
+  for (const [persona, label] of lanes) { const m = member(persona) || member(label), l = String(label || ""), step = laneStep(l) || plainStep(l);
     const k = (m ? m.id : persona || l) + "|" + step.toLowerCase(); groups.set(k, (groups.get(k) || []).concat([[m, step]])); }
   for (const g of groups.values()) if (g.length > 1 && g[0][1]) out.push({code: "C5", parts: ["Two " + (g[0][0] ? roleName(g[0][0]) : "subagent") + " lanes run “" + g[0][1] + "”. One may be a stale launch."]});
   if (runState(r) === "lost") out.push({code: "C6", parts: ["No update for " + Math.round(runQuiet(r)) + " min and its session is not live."], fix: "It may have ended without finishing; the step stays open until someone closes it."});
   if (r.state === "done") { const open = plan.filter(s => s.state !== "done" && s.state !== "skipped");
-    if (open.length) out.push({code: "C7", parts: ["Finished with " + plural(open.length, "step") + " not done: " + open.map(s => s.name).join(", ") + "."]}); }
+    if (open.length) out.push({code: "C7", parts: ["Finished with " + plural(open.length, "step") + " not done: " + open.map(stepTitle).join(", ") + "."]}); }
   for (const id of taskIds(r.goal)) if (ITEMBY.get(id).status === "done") out.push({code: "C11", parts: ["The goal names " + id + ", which is done."]});
   return out;
 }
@@ -2968,7 +3022,7 @@ function counts(fn) { const m = new Map(); for (const p of P) for (const v of []
 function liveRun(s, asOf) {
   const p = s.progress || null, run = runOf(s), now = nowS();
   if (!p) return null;
-  const el = p.started ? (now - p.started) / 60 : 0, est = (run && run.estimate_cal) || p.estimate || 0;
+  const el = p.started ? (now - p.started) / 60 : 0, est = run ? runEst(run) : p.estimate || 0;
   const left = p.eta_min != null && p.state === "running" ? Math.max(0, p.eta_min - (now - (asOf || D.rendered || now)) / 60) : null;
   const pct = p.steps ? Math.min(100, 100 * (p.step || 0) / p.steps) : est ? Math.min(100, 100 * el / est) : null;
   const over = est && (p.active_min != null ? p.active_min : el) > est && p.state === "running";
@@ -2980,20 +3034,20 @@ function liveRun(s, asOf) {
   const range = p.eta_lo != null && p.eta_hi != null && p.state === "running"
     ? (fmtMin(p.eta_lo) === fmtMin(p.eta_hi) ? "about " + fmtMin(p.eta_hi) : fmtMin(p.eta_lo) + "–" + fmtMin(p.eta_hi)) + " left" : null;
   const state2 = p.state === "blocked" ? "blocked" : p.state === "done" ? "done" : range || state;
-  const plan = p.plan || [], glyph = {done: "✓", running: "▸", blocked: "■", skipped: "–", pending: "○"};
-  const shown = plan.filter(x => x.state === "running" || x.state === "blocked")
+  const plan = (run && run.plan) || p.plan || [], glyph = {done: "✓", running: "▸", blocked: "■", skipped: "–", pending: "○", unverified: "!"};
+  const shown = plan.filter(x => ["running", "blocked", "unverified"].includes(x.state))
     .concat(plan.filter(x => x.state === "pending").slice(0, 2));
   const doneN = plan.filter(x => x.state === "done" || x.state === "skipped").length;
   const stepList = shown.length ? h("ul", {class: "rsteps", "aria-label": "Plan steps"},
     shown.map(x => h("li", {class: x.state},
       h("span", {class: "g", "aria-hidden": "true", text: glyph[x.state] || "○"}),
-      h("span", {class: "ell", title: x.name + " · " + stepWho(x)}, x.name, x.owner && x.owner !== "main" ? h("span", {class: "who", text: " · " + stepWho(x)}) : null),
-      h("span", {class: "m num", text: x.state === "running" ? fmtMin(x.min || 0) + " of ~" + fmtMin(x.est || 0) : "~" + fmtMin(x.est || 0)}))),
+      h("span", {class: "ell", title: stepTitle(x) + " · " + stepWho(x)}, stepTitle(x), x.owner && x.owner !== "main" ? h("span", {class: "who", text: " · " + stepWho(x)}) : null),
+      h("span", {class: "m num", text: x.state === "running" ? fmtMin(x.min || 0) + " of ~" + fmtMin(x.est || 0) : x.state === "unverified" ? stepWord(x.state)[1] : "~" + fmtMin(x.est || 0)}))),
     doneN ? h("li", {class: "more"}, h("span", {class: "g", text: "✓"}), h("span", {text: doneN + " done"}), h("span")) : null) : null;
   const lanes = (p.agents || []).length ? h("div", {class: "lanes", "aria-label": "Crew"},
-    p.agents.map(a => h("span", {class: a.state === "running" ? "on" : a.state === "lost" ? "lost" : "",
-      title: a.state === "lost" ? "stopped reporting" : a.state},
-      (a.state === "running" ? "▸ " : a.state === "lost" ? "! " : "✓ ") + who(a.label) + " " + fmtMin(a.min || 0)))) : null;
+    p.agents.map(a => h("span", {class: a.state === "running" ? "on" : a.state === "lost" || a.state === "unverified" ? "lost" : "",
+      title: a.state === "lost" ? "stopped reporting" : a.state === "unverified" ? stepWord(a.state)[1] : a.state},
+      (a.state === "running" ? "▸ " : a.state === "lost" || a.state === "unverified" ? "! " : "✓ ") + who(a.label) + " " + fmtMin(a.min || 0)))) : null;
   return h("div", {class: "run " + (p.state || "running")},
     h("div", {class: "rh"}, h("strong", {class: "ell", title: p.goal || "", text: p.goal || "Agent run"}), h("span", {class: "rs num", text: state2})),
     pct != null ? h("div", {class: "rbar" + (over ? " over" : ""), role: "progressbar", "aria-valuenow": Math.round(pct), "aria-valuemin": 0, "aria-valuemax": 100, "aria-label": "Run progress: " + steps + ", " + state}, h("i", {style: "width:" + pct.toFixed(1) + "%"})) : null,
@@ -3667,12 +3721,13 @@ function sect(id, title, count, right, body) {
 function toSection(id) { return e => { e.preventDefault(); const el = document.getElementById(id + "-h"); if (el) { el.scrollIntoView({block: "start"}); el.focus({preventScroll: true}); } }; }
 function runCard(r) {
   const st = runState(r), t = runTime(r), plan = r.plan || [], pct = t.total ? 100 * t.done / t.total : t.est ? Math.min(100, 100 * t.act / t.est) : 0;
-  const pend = plan.filter(s => s.state === "pending"), shown = plan.filter(s => s.state === "running" || s.state === "blocked").concat(pend.slice(0, 2));
+  const pend = plan.filter(s => s.state === "pending"), shown = plan.filter(s => ["running", "blocked", "unverified"].includes(s.state)).concat(pend.slice(0, 2));
   const nDone = plan.filter(s => s.state === "done").length, nSkip = plan.filter(s => s.state === "skipped").length, more = pend.length - Math.min(2, pend.length);
   const by = new Map(plan.map(s => [s.name, s])), dec = pending(r)[0], qs = r.questions || [], qOld = qs.length ? Math.min(...qs.map(q => q.ts || nowS())) : 0;
   const sess = sessOfRun(r), branch = (sess && sess.branch) || r.branch, eta = etaText(r);
   const stepTxt = s => { const wait = (s.after || []).find(a => by.has(a) && !["done", "skipped"].includes(by.get(a).state));
-    return s.state === "running" ? fmtMin(s.min || 0) + " of ~" + fmtMin(s.est || 0) : s.state === "blocked" ? (s.waiting ? "waiting for you" : "blocked") : wait ? "waits for “" + wait + "”" : s.est ? "~" + fmtMin(s.est) : ""; };
+    return s.state === "running" ? fmtMin(s.min || 0) + " of ~" + fmtMin(s.est || 0) : s.state === "blocked" ? (s.waiting ? "waiting for you" : "blocked") : s.state === "unverified" ? stepWord(s.state)[1]
+      : wait ? "waits for “" + stepTitle(by.get(wait)) + "”" : s.est ? "~" + fmtMin(s.est) : ""; };
   const blockedStep = plan.find(s => s.state === "blocked");
   return h("article", {class: "rcard " + st, "data-key": "run~" + r.id, "data-sig": [st, t.done, r.step, r.updated].join("|"), "data-open": "run:" + r.id, onclick: rowClick(() => openModal("run", r.id))},
     h("div", {class: "rh"}, modalLink("run", r.id, r.goal || "Agent run"), h("span", {class: "rst", text: runStateText(r, st)})),
@@ -3680,13 +3735,13 @@ function runCard(r) {
     h("div", {class: "rbar" + (t.over ? " over" : ""), role: "progressbar", "aria-valuenow": Math.round(pct), "aria-valuemin": 0, "aria-valuemax": 100, "aria-label": "Run progress",
       "aria-valuetext": t.steps + (eta ? ", " + eta.replace("–", " to ").replace(/m\b/g, " minutes") : "")}, h("i", {style: "width:" + pct.toFixed(1) + "%"})),
     h("div", {class: "rmeta num" + (t.over ? " warn" : "")}, meta(t.steps, t.text, t.over ? "over the estimate by " + fmtMin(t.over) : null)),
-    shown.length ? h("ol", {class: "rsteps", "aria-label": "Steps in progress and next"}, shown.map(s => { const g = (STEPW[s.waiting ? "waiting" : s.state] || STEPW.pending);
-      return h("li", {class: s.state}, h("span", {class: "g", "aria-hidden": "true", text: g[0]}), h("span", {class: "ell", title: s.name + " · " + stepWho(s)}, h("span", {class: "sr", text: g[1] + ": "}), s.name, h("span", {class: "who"}, h("span", {class: "sep", text: " · "}), stepWho(s))),
+    shown.length ? h("ol", {class: "rsteps", "aria-label": "Steps in progress and next"}, shown.map(s => { const g = stepWord(s.waiting ? "waiting" : s.state);
+      return h("li", {class: s.state}, h("span", {class: "g", "aria-hidden": "true", text: g[0]}), h("span", {class: "ell", title: stepTitle(s) + " · " + stepWho(s)}, h("span", {class: "sr", text: g[1] + ": "}), stepTitle(s), h("span", {class: "who"}, h("span", {class: "sep", text: " · "}), stepWho(s))),
         h("span", {class: "m num", text: stepTxt(s)})); })) : null,
     plan.length && (more || nDone || nSkip) ? h("div", {class: "rmeta", text: [more ? "○ " + more + " more to do" : "", nDone ? "✓ " + nDone + " done" : "", nSkip ? "– " + nSkip + " skipped" : ""].filter(Boolean).join(" · ")}) : null,
     qs.length ? h("div", {class: "rmeta" + (nowS() - qOld > 900 ? " warn" : ""), text: plural(qs.length, "open question") + " to " + roleName(mainMember()) + ", oldest " + rel(qOld)}) : null,
     st === "waiting" && dec ? h("div", {class: "rmeta bad", text: who(dec.from_name || "main") + " waits for your answer to " + dec.id + "."}) : null,
-    st === "blocked" && blockedStep ? h("div", {class: "rmeta bad", text: "“" + blockedStep.name + "” is blocked" + (r.last ? ": " + r.last : "") + "."}) : null,
+    st === "blocked" && blockedStep ? h("div", {class: "rmeta bad", text: "“" + stepTitle(blockedStep) + "” is blocked" + (r.last ? ": " + r.last : "") + "."}) : null,
     runFlags(r).filter(f => ["C4", "C5", "C6", "C7"].includes(f.code)).map(f => h("div", {class: "warnline"}, stateDot("warn"), h("span", {style: "min-width:0"}, flagNodes(f)))),
     r.last || r.next ? h("dl", {class: "srows"}, r.last ? [h("dt", {text: "Latest"}), h("dd", {text: r.last})] : null, r.next ? [h("dt", {text: "Next"}), h("dd", {text: r.next})] : null) : null,
     r.remote ? h("div", {class: "rmeta", text: "Last presence update " + rel(r.asOf)}) : null);
@@ -3745,7 +3800,7 @@ function viewBackground(main) {
     stateDot("risk", "Waiting for you"), h("div", {style: "min-width:0"}, h("a", {class: "at", href: modalHref("run", r.id), "data-nav": "", onclick: e => { e.preventDefault(); openRunAt(r.id); }, text: d.question || d.id}),
       h("div", {class: "ad", style: "display:block", text: who(d.from_name || "main") + " asks" + ((d.options || []).length ? " · Options: " + d.options.join(", ") : "") + (d.recommend ? " · Recommended: " + d.recommend : "")}),
       d.irreversible ? h("div", {class: "ad", style: "display:block"}, h("span", {class: "tag", text: "Irreversible: " + d.irreversible})) : null,
-      h("div", {class: "ad", style: "display:block", text: "Run “" + (r.goal || r.id) + "” · " + (r.project ? scopeName(r.project) : "no project") + " · " + agentName(r.agent) + " · waiting " + rel(d.ts).replace(/ ago$/, "") + " · answer in that session; Morpheus records it"})),
+      h("div", {class: "ad", style: "display:block", text: "Run “" + (r.goal || r.id) + "” · " + (r.project ? scopeName(r.project) : "no project") + " · " + agentName(r.agent) + " · waiting " + rel(d.ts).replace(/ ago$/, "") + " · answer in that session; " + roleName(mainMember()) + " records it"})),
     h("div", {class: "ar"}, h("a", {class: "btn sm", href: modalHref("run", r.id), onclick: e => { e.preventDefault(); e.stopPropagation(); openRunAt(r.id); }}, "Open the run")))))));
   main.append(sect("runs", "Runs", runs.length ? running + " running" : null, RRUNS.length ? h("span", {class: "t2", style: "font-size:var(--fs-1)", text: "On this Mac, and other machines' last update"}) : null,
     runs.length ? h("div", {class: "rgrid"}, runs.map(runCard)) : empty("No agent runs right now.", "Runs appear when an agent starts one with ", h("code", {text: "dev progress start"}), ". Finished runs stay here for an hour.")));
@@ -3770,16 +3825,17 @@ function crewLanes(recent) {
   for (const r of RUNS.concat(RRUNS)) {
     const plan = r.plan || [], decs = pending(r);
     for (const a of r.agents || []) {
-      const step = plan.find(s => s.owner === a.label && (s.state === "running" || s.state === "blocked")) || plan.find(s => s.owner === a.label);
+      const step = plan.find(s => s.owner === a.label && ["running", "blocked", "unverified"].includes(s.state)) || plan.find(s => s.owner === a.label);
       const m = member(step && step.persona) || member(a.label), asks = m && decs.find(d => { const dm = member(d.from_name); return dm && dm.id === m.id; });
-      const st = a.state === "lost" ? "lost" : (step && step.waiting) || asks ? "waiting" : a.state === "running" ? "running" : "done";
+      const st = a.state === "lost" ? "lost" : (step && step.waiting) || asks ? "waiting" : a.state === "unverified" || (step && step.state === "unverified") ? "unverified"
+        : a.state === "running" ? "running" : "done";
       if (st === "done" && !recent) continue;
       if (st === "done" && r.state !== "done" && !recent) continue;
-      out.push({m, label: a.label, run: r, step: step ? step.name : String(a.label || "").includes(":") ? a.label.slice(a.label.indexOf(":") + 1).trim() : "", st, min: a.min || 0, dec: asks ? asks.id : "",
-        word: st === "waiting" ? "Waiting for you" + (asks ? " · " + asks.id : "") : st === "lost" ? "Stopped reporting" : st === "running" ? "Working" : "Done"});
+      out.push({m, label: a.label, run: r, step: step ? stepTitle(step) : laneStep(a.label), st, min: a.min || 0, dec: asks ? asks.id : "",
+        word: st === "waiting" ? "Waiting for you" + (asks ? " · " + asks.id : "") : st === "lost" ? "Stopped reporting" : st === "unverified" ? stepWord(st)[1] : st === "running" ? "Working" : "Done"});
     }
   }
-  const rank = {waiting: 0, lost: 1, running: 2, done: 3};
+  const rank = {waiting: 0, unverified: 1, lost: 2, running: 3, done: 4};
   return out.sort((a, b) => rank[a.st] - rank[b.st] || b.min - a.min);
 }
 function laneWho(l) { return l.m ? roleName(l.m) : who(l.label); }
@@ -3788,15 +3844,15 @@ function workingNow() {
   return panel("Working now", lanes.length, null, lanes.length ? h("ul", {class: "prows"}, lanes.map(l => {
     const name = laneWho(l), text = name + ", " + l.word.toLowerCase() + (l.step ? " on " + l.step : "") + ", " + fmtMin(l.min).replace(/m$/, " minutes");
     return h("li", {class: "prow", style: "grid-template-columns:16px minmax(0,1fr) auto", "data-key": "lane~" + l.run.id + "~" + l.label, "data-sig": l.st + "|" + (l.step || ""), "data-open": "run:" + l.run.id, onclick: rowClick(() => openModal("run", l.run.id))},
-      h("span", {class: "g " + (l.st === "waiting" ? "bad" : l.st === "lost" ? "warn-t" : ""), "aria-hidden": "true", text: (STEPW[l.st] || STEPW.running)[0]}),
+      h("span", {class: "g " + (l.st === "waiting" ? "bad" : l.st === "lost" || l.st === "unverified" ? "warn-t" : ""), "aria-hidden": "true", text: (l.st === "unverified" ? stepWord(l.st) : STEPW[l.st] || STEPW.running)[0]}),
       h("div", {class: "pm"}, h("div", {class: "pw"}, h("a", {class: "rl ell", href: modalHref("run", l.run.id), "data-nav": "", "aria-label": text, onclick: e => { e.preventDefault(); openModal("run", l.run.id); }, text: name})),
         h("div", {class: "ps", text: [l.step, "“" + (l.run.goal || "") + "”", l.run.project ? scopeName(l.run.project) : "", l.run.remote ? "on " + l.run.host : ""].filter(Boolean).join(" · ")})),
-      h("span", {class: "t2 num" + (l.st === "waiting" ? " bad" : l.st === "lost" ? " warn-t" : ""), style: "font-size:var(--fs-1);white-space:nowrap", text: l.word + (l.st === "waiting" ? "" : " · " + fmtMin(l.min))}));
+      h("span", {class: "t2 num" + (l.st === "waiting" ? " bad" : l.st === "lost" || l.st === "unverified" ? " warn-t" : ""), style: "font-size:var(--fs-1);white-space:nowrap", text: l.word + (l.st === "waiting" ? "" : " · " + fmtMin(l.min))}));
   })) : empty("No crew member is working right now.", "Members work on the steps of a run; when one starts, it shows here."), {flush: !!lanes.length, cls: "mb"});
 }
 function memberNow(m, lanes) {
   if (m.main) { const r = RUNS.find(x => x.state === "running"); return r ? "Leads " + (r.goal || "a run") : "—"; }
-  const l = lanes.find(z => z.m && z.m.id === m.id); return l ? (l.st === "waiting" ? "■ " : l.st === "lost" ? "! " : "● ") + (l.step || l.word) : "—";
+  const l = lanes.find(z => z.m && z.m.id === m.id); return l ? (l.st === "waiting" ? "■ " : l.st === "lost" || l.st === "unverified" ? "! " : "● ") + (l.step || l.word) : "—";
 }
 function crewTab(box) {
   if (!CREW.length) { box.append(h("div", {class: "panel"}, empty("The crew roster could not be read.", "Run ", h("code", {text: "dev crew"}), " to see what is wrong."))); return; }
@@ -4337,17 +4393,19 @@ function runModal(id) {
       agentName(x.agent), remote ? "on " + x.host : null, updatedNote(det)))];
   if (det.state === "loading") return {head, body: [skeleton()], busy: true};
   const pct = tm_.total ? 100 * tm_.done / tm_.total : 0, cal = x.estimate_cal && x.estimate && x.estimate_cal !== x.estimate ? x.estimate_cal / x.estimate : 0;
+  const first = runFirstEst(x), planned = x.total_min != null && fmtMin(first) !== fmtMin(x.total_min);   /* "of about" is the plan's total, not the first estimate */
   const figs = h("div", {class: "mfigs"},
     h("div", null, h("span", {class: "s-l", text: "Progress"}), h("span", {class: "strong num", text: tm_.steps}),
       h("div", {class: "rbar" + (tm_.over ? " over" : ""), role: "progressbar", "aria-valuenow": Math.round(pct), "aria-valuemin": 0, "aria-valuemax": 100, "aria-valuetext": tm_.steps}, h("i", {style: "width:" + pct.toFixed(1) + "%"}))),
-    h("div", null, h("span", {class: "s-l", text: "Time"}), h("span", {class: "num", text: tm_.text + (cal ? ": estimated " + fmtMin(x.estimate) + ", ×" + cal.toFixed(1) + " from this project's runs" : "")}),
+    h("div", null, h("span", {class: "s-l", text: "Time"}), h("span", {class: "num", text: tm_.text + (cal && !planned ? ": estimated " + fmtMin(x.estimate) + ", ×" + cal.toFixed(1) + " from this project's runs" : "")}),
+      planned && first ? h("span", {class: "t2 num", text: "first estimate " + fmtMin(first)}) : null,
       tm_.over ? h("span", {class: "warn-t", text: "over the estimate by " + fmtMin(tm_.over)}) : null),
     h("div", null, h("span", {class: "s-l", text: "Left"}), h("span", {class: "num", text: etaText(x).replace(/ left$/, "") || (x.state === "done" ? "Done" : "No estimate")}),
       x.pace && Math.abs(x.pace - 1) >= 0.05 ? h("span", {class: "t2", text: "pace " + (+x.pace).toFixed(1) + "× the estimate"}) : null));
   const stepLine = s => {
-    const dec = open.find(z => z.step === s.name), w = s.waiting || dec ? "waiting" : s.state, sw = STEPW[w] || STEPW.pending, ev = (s.evidence || []).slice(-1)[0];
+    const dec = open.find(z => z.step === s.name), w = s.waiting || dec ? "waiting" : s.state, sw = stepWord(w), ev = (s.evidence || []).slice(-1)[0], code = stepCode(s);
     const scope = [].concat(s.scope || []).filter(Boolean), files = scope.length === 1 ? String(scope[0]).split(/[\s,]+/).filter(Boolean) : scope;
-    const after = (s.after || []).map(a => { const o = steps.find(z => z.name === a); return (o ? (STEPW[o.state] || STEPW.pending)[0] : "○") + " " + a; });
+    const after = (s.after || []).map(a => { const o = steps.find(z => z.name === a); return o ? stepWord(o.state)[0] + " " + stepTitle(o) : "○ " + a; });
     const hist = (s.evidence || []).map(e => ({ts: e.ts, text: [e.kind, e.text, e.check, e.next ? "next: " + e.next : ""].filter(Boolean).join(" · ")}))
       .concat((s.history || []).map(e => ({ts: e.ts, text: (e.from || "") + " → " + (e.to || "") + " · " + who(e.by || "main") + (e.why ? " · " + e.why : "")}))).sort((a, b) => (b.ts || 0) - (a.ts || 0));
     const rows = [s.desc ? h("dd", {class: "wide", text: s.desc}) : null,
@@ -4359,7 +4417,8 @@ function runModal(id) {
       hist.length ? h("dd", {class: "wide"}, h("details", {class: "recent", "data-key": "ev~" + s.name}, h("summary", null, "Evidence and history (" + hist.length + ")"),
         h("ul", {class: "rrows"}, hist.map(e => h("li", null, h("span", {class: "t2", text: fmt(e.ts) + " · "}), e.text))))) : null].filter(Boolean);
     return h("li", {class: w}, h("span", {class: "sn", text: String(steps.indexOf(s) + 1)}), h("span", {class: "g", "aria-hidden": "true", text: sw[0]}),
-      h("span", {class: "nm"}, h("span", {class: "sr", text: sw[1] + ": "}), s.name, h("span", {class: "ow", text: " · " + stepWho(s)})),
+      h("span", {class: "nm"}, h("span", {class: "sr", text: sw[1] + ": "}), stepTitle(s), h("span", {class: "ow", text: " · " + stepWho(s)}),
+        code ? h("span", {class: "ow"}, " · ", h("span", {class: "sc", title: "The step's name in dev progress", text: code})) : null),
       h("span", {class: "tm num", text: sw[1] + (stepTime(s) ? " · " + stepTime(s) : "")}), rows.length ? h("dl", {class: "sx"}, rows) : null);
   };
   const f = SHOWN.stepf || "all", nOpen = steps.filter(s => s.state !== "done" && s.state !== "skipped").length;
@@ -4367,10 +4426,10 @@ function runModal(id) {
   const segF = h("div", {class: "seg", role: "group", "aria-label": "Show steps"}, [["all", "All", steps.length], ["open", "Open", nOpen], ["done", "Done", steps.length - nOpen]].map(([v, l, n]) =>
     h("button", {type: "button", "aria-pressed": String(f === v), onclick: () => { SHOWN.stepf = v; rerenderModal(); }}, l, h("span", {class: "sn num", text: String(n)}))));
   const laneRow = l => {
-    const lst = l.state === "running" ? "running" : l.state === "lost" ? "lost" : l.state === "waiting" ? "waiting" : "done", sw = lst === "running" ? ["▸", "Working"] : STEPW[lst];
+    const lst = ["running", "lost", "waiting", "unverified"].includes(l.state) ? l.state : "done", sw = lst === "running" ? ["▸", "Working"] : stepWord(lst);
     const own = steps.filter(s => (l.id && s.owner === l.id) || (!l.id && s.owner === l.label)), ups = (l.updates || []).slice().reverse(), scope = [].concat(l.scope || []).filter(Boolean);
     return h("li", {class: lst}, h("span", {class: "sn"}), h("span", {class: "g", "aria-hidden": "true", text: sw[0]}),
-      h("span", {class: "nm"}, h("span", {class: "sr", text: sw[1] + ": "}), who(l.label, l.persona), own.length ? h("span", {class: "ow", text: " · " + own.map(s => s.name).join(", ")}) : null),
+      h("span", {class: "nm"}, h("span", {class: "sr", text: sw[1] + ": "}), who(l.label, l.persona), own.length ? h("span", {class: "ow", text: " · " + own.map(stepTitle).join(", ")}) : null),
       h("span", {class: "tm num", text: sw[1] + " · " + fmtMin(l.min || 0) + (l.done ? " · " + l.done + " done" : "")}),
       ups.length || scope.length ? h("dl", {class: "sx"}, scope.length ? [h("dt", {text: "Files"}), h("dd", {text: scope.join(", ")})] : null,
         ups.length ? [h("dt", {text: "Latest"}), h("dd", null, ups[0].text || "", " ", h("span", {class: "t2", text: rel(ups[0].ts)}))] : null,
@@ -4392,7 +4451,7 @@ function runModal(id) {
       h("ul", {class: "acts"}, open.map(z => h("li", {class: "act"}, stateDot("risk"), h("div", {style: "min-width:0"}, h("div", {class: "strong"}, z.id + "  ", z.question || ""),
         h("div", {class: "ad", style: "display:block", text: (z.options || []).map(o => o + (o === z.recommend ? " (recommended)" : "")).join(" · ")}),
         z.irreversible ? h("div", {class: "ad bad", style: "display:block", text: "Irreversible: " + z.irreversible + ". Auto mode never takes it without your approval."}) : null,
-        h("div", {class: "ad", style: "display:block", text: "Asked by " + who(z.from_name || "main") + " " + rel(z.ts) + "." + (z.step ? " It blocks “" + z.step + "”." : "") + " Answer in the session; Morpheus records it."})), h("span"))))) : null,
+        h("div", {class: "ad", style: "display:block", text: "Asked by " + who(z.from_name || "main") + " " + rel(z.ts) + "." + (z.step ? " It blocks “" + stepTitle(steps.find(q => q.name === z.step) || {name: z.step}) + "”." : "") + " Answer in the session; " + roleName(mainMember()) + " records it."})), h("span"))))) : null,
     msec("Steps", steps.length ? h("ol", {class: "steps"}, shownSteps.map(stepLine)) : empty("No steps planned", "The run has a goal but no plan yet."), h("span", {style: "display:flex;gap:8px;align-items:center;margin-left:auto"}, h("span", {class: "count num", text: String(steps.length)}), steps.length ? segF : null)),
     msec("Crew", lanes.length ? h("ol", {class: "steps"}, lanes.map(laneRow)) : empty("Only the main session worked on this run."), lanes.length ? h("span", {class: "count num", text: plural(lanes.length, "lane")}) : null),
     d || qs.length ? msec("Questions between the crew", qs.length ? h("ul", {class: "rrows"}, qs.filter(qOpen).concat(qs.filter(q => !qOpen(q)).reverse()).map(qRow)) : empty("No questions between the crew."), qs.length ? h("span", {class: "count num", text: qs.length + " · " + qs.filter(qOpen).length + " open"}) : null) : null,
@@ -4558,14 +4617,14 @@ function taskModal(id) {
   if (x.status === "done" || x.status === "cancelled") whoHas.push((x.status === "done" ? "Done" : "Cancelled") + " by " + (x.updated_by || "someone") + " " + rel(iso(x.updated)) + ".");
   else if (x.claimed_by && !exp) whoHas.push((isMe(x.holder) ? "You (" + x.holder + ")" : x.holder) + (x.agent ? " with " + agentName(x.agent) : "") + (x.claimed_at ? ", since " + clock(iso(x.claimed_at)) : "") + "." + (x.lock_expires ? " The lock ends in " + dur(iso(x.lock_expires) - nowS()) + "." : ""));
   else if (x.claimed_by) whoHas.push("The lock expired " + rel(iso(x.lock_expires)) + "; " + x.holder + " still holds it. Anyone can release it.");
-  if (run) whoHas.push((rstep ? stepWho(rstep) : roleName(mainMember())) + " works on it in “" + (run.goal || run.id) + "”" + (rstep ? " (step “" + rstep.name + "”)" : "") + ".");
+  if (run) whoHas.push((rstep ? stepWho(rstep) : roleName(mainMember())) + " works on it in “" + (run.goal || run.id) + "”" + (rstep ? " (step “" + stepTitle(rstep) + "”)" : "") + ".");
   if (!whoHas.length) whoHas.push(x.open ? (x.legacy ? "Nobody: a checkbox in the note has no lock. The next dev sync imports it." : "Nobody. Start it to take the lock.") : "Nobody.");
   const blocks = [];
   if (x.status === "blocked") { const e = (x.changelog || []).map(parseLog).find(z => /block/i.test(z.op) || /blocked/i.test(z.detail)); blocks.push("Blocked" + (e && e.why ? ": " + e.why.replace(/[.\s]+$/, "") : "") + "."); }
   if (run) for (const z of pending(run)) blocks.push("Waiting for your answer to " + z.id + " in “" + (run.goal || run.id) + "”.");
   for (const c of conns.filter(c => c.kind === "pr" && / CI failing/.test(c.text))) { const n = (/#(\d+)/.exec(c.text) || [])[1], w = ciLatest().find(z => z.state === "failed" && (d ? d.prs || [] : []).some(r => r.number == n && r.branch === z.branch));
     blocks.push("Pull request #" + n + " is failing CI" + (w ? " (" + ciClass(w) + ")" : "") + "."); }
-  if (rstep) for (const a of rstep.after || []) { const o = (run.plan || run.steps || []).find(s => s.name === a); if (o && o.state !== "done" && o.state !== "skipped") blocks.push("It waits for step “" + a + "”, which is " + (STEPW[o.state] || STEPW.pending)[1].toLowerCase() + "."); }
+  if (rstep) for (const a of rstep.after || []) { const o = (run.plan || run.steps || []).find(s => s.name === a); if (o && o.state !== "done" && o.state !== "skipped") blocks.push("It waits for step “" + stepTitle(o) + "”, which is " + (o.state === "unverified" ? "waiting for " + roleName(mainMember()) + " to check it" : stepWord(o.state)[1].toLowerCase()) + "."); }
   if (!blocks.length) blocks.push("Nothing recorded.");
   const nextStep = run ? (run.plan || run.steps || []).find(s => s.state === "running" || s.state === "pending") : null;
   const nextText = run && run.next ? sentence(run.next) : nextStep ? "The run's next step: “" + nextStep.name + "”." : primary ? sentence(primary[0]) : x.open ? "Nothing planned." : "Nothing: it is " + (x.status === "done" ? "done." : x.status + ".");
