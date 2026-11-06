@@ -166,6 +166,15 @@ See [Git and GitHub](git-and-github.md).
 | `audit.retention.local_months` | `13` | Months of audit records kept on this machine: a full year plus one month. A value under `floor_months` is raised to it |
 | `audit.retention.team_months` | `13` | Months of this machine's records kept in the handoff copy, which more people can read. Pruning removes files from the working copy only; git history keeps every published month. See [The audit trail › Retention](audit.md#retention) |
 | `audit.retention.floor_months` | `3` | The least any retention may be, and the hard minimum itself: `dev config validate` refuses 1 or 2. For fewer records, set `audit.level` to `security` instead |
+| `audit.hold` | `false` | A legal hold: `true` stops all pruning on this machine and in the handoff copy |
+| `audit.level` | `changes` | How much is recorded: `security` (refusals, security and configuration records, overrides), `changes` (everything devkit records), or `all` (also read-only commands). See [The audit trail › Levels](audit.md#levels-how-much-is-recorded) |
+| `audit.forward` | `""` | Also sends each new record to an absolute path to a file (JSON lines), `syslog`, or `syslog://host:port` (CEF lines). See [The audit trail › Query and export](audit.md#query-and-export) |
+| `audit.redact.extra` | `[]` | More regular expressions for the redactor, for secrets only your team uses |
+
+Only you change `audit.*`, in a terminal: agents are refused `dev config set audit.*`. The team policy,
+`policy/audit.json` in the handoff repository, can raise the retention and the level and add redaction patterns for
+every machine; it can never lower or remove them. `dev config validate` checks every value; `dev audit config` shows the
+effective ones.
 
 ```json
 {
@@ -179,6 +188,17 @@ See [Git and GitHub](git-and-github.md).
 ```
 
 Run `dev jobs install` after editing these keys by hand.
+
+### Safeguards
+
+Only you change these, in a terminal (`dev config edit`): the guard refuses `dev config set safeguards.*` and
+`dev config edit` to every agent.
+
+| Key | Default | Meaning |
+| --- | --- | --- |
+| `safeguards.readonly_commands` | `[]` | More command prefixes that review and read-only crew members may run, such as `"make lint"`, on top of devkit's read-only allowlist (readers, git and gh reads, devkit's reading commands, and the common checks such as `pytest`, `ruff check`, and `tsc --noEmit`) |
+| `safeguards.irreversible_member` | `enforce` | `audit` only records the irreversible actions crew members try instead of refusing them; any other value enforces |
+| `safeguards.irreversible_main` | audits for the gate's first week on this Mac, then `enforce` | The same for the main session's gate, which is coming in 26.11.3 (see the [CHANGELOG](../CHANGELOG.md)) |
 
 ### For another developer
 
@@ -205,12 +225,12 @@ Never edit the generated files directly; the next install overwrites them, and `
 | `DEV_ROOT` | Overrides `dev_root`, only when you set it in your own terminal (see the note after this table) |
 | `DEVKIT_CONFIG` | Path of the config file (default `~/.config/devkit/config.json`), only when you set it in your own terminal |
 | `DEVKIT_GUARD=off` | In the environment of the agent process (`DEVKIT_GUARD=off claude`), turns the guard off for that whole session (see [Guard rules](guard.md#escape-hatches)) |
-| `DEVKIT_LOCAL_CI_PASSED=1` | Prefix of a `git push`: says the full local suite just passed, lifting the push budget for that push. `dev push`, `dev pr create`, and `dev release` accept it like `--ci-passed` |
+| `DEVKIT_LOCAL_CI_PASSED=1` | Prefix of a plain `git push` in the main session: says the full local suite just passed, lifting the push budget for that push. `dev push`, `dev pr create`, and `dev release` do not read it from their environment: pass `--ci-passed` (recorded as attested), or let the evidence of a real `dev ci --run` lift the budget |
 | `DEVKIT_FLAKY=1` | Prefix of `gh run rerun`: says the failure is a proven flaky test (prefer `dev run rerun <id> --flaky "…"`) |
 | `DEVKIT_RAW_GH=1` | Prefix of `gh pr merge` or `gh release create`: runs gh's own command instead of `dev pr merge` or `dev release`; `--admin` stays refused |
 | `DEVKIT_PIPE_OK=1` | In a command that commits, pushes, or tags after a pipe: says the pipe's last command is the real check (prefer `set -o pipefail`) |
 | `DEVKIT_CROSS_PROJECT=1` | Prefix of `dev task`, `dev note`, or `dev handoff`, or in the agent's environment: lets a project session change another project's records when you asked for it |
-| `DEVKIT_SKIP_SECRET_SCAN=1` | In the agent's environment: the guard does not run gitleaks before `git commit` |
+| `DEVKIT_SKIP_SECRET_SCAN=1` | Prefix of a plain `git commit` in the main session: the guard does not run gitleaks before that commit. `dev commit` does not read it from its environment |
 | `DEVKIT_RAW_FS=1` | Prefix of `rm`, `find -delete`, `xargs rm`, `git clean -f`, or an overwriting `cp` or `mv`: lets the command delete or overwrite directly instead of through `dev rm`, `dev mv`, or `dev cp` |
 | `DEVKIT_TAG_ANY=1` | Prefix of `git tag`: allows a tag that breaks the recorded delivery policy |
 | `GITLAB_TOKEN` | `dev ci status` for GitLab when `glab` is not installed (`GITLAB_PRIVATE_TOKEN` works too) |
