@@ -1,4 +1,5 @@
-# Copyright (c) 2026 Firefly Software Solutions Inc. All rights reserved.
+# Copyright (c) 2026 Firefly Software Solutions Inc.
+# SPDX-License-Identifier: Apache-2.0
 """Hook entry points for Claude Code and Codex (`dev hook <event> --agent claude|codex`).
 
   session-start  inject project context (handoff note, git state, commands) and record the session start
@@ -741,6 +742,8 @@ def _scope_violation(agent: str, data: dict):
         for p_ in [x for x in paths if x]:
             ap = os.path.normpath(p_ if os.path.isabs(p_) else os.path.join(cwd, p_))
             rel = os.path.relpath(ap, top)
+            if rel.startswith("..") and core.is_temp(ap):
+                continue  # the member's own scratch files (session scratchpad, temp dirs): no other member owns them
             if not any(fnmatch.fnmatch(rel, g) or fnmatch.fnmatch(rel, g.rstrip("/") + "/**") or rel.startswith(
                     g.rstrip("*").rstrip("/") + "/") or rel == g for g in scope):
                 return (f"{rel} is outside {name}'s scope ({', '.join(scope)}): another crew member may own it. "

@@ -1,4 +1,5 @@
-# Copyright (c) 2026 Firefly Software Solutions Inc. All rights reserved.
+# Copyright (c) 2026 Firefly Software Solutions Inc.
+# SPDX-License-Identifier: Apache-2.0
 """Progress, timing and predictability. Run: python3 -m unittest discover -s tests -v"""
 import json
 import os
@@ -327,6 +328,10 @@ class CrewCoordinationTests(unittest.TestCase):
             self.assertIn("outside Neo's scope", why)
             self.assertIn("dev crew ask", why)
             self.assertIsNone(hooks._scope_violation("claude", dict(edit("lib/ui/app.ts"), agent_id=None)))  # main
+            with tempfile.TemporaryDirectory() as scratch:  # scratch files outside the repository are not shared
+                self.assertIsNone(hooks._scope_violation("claude", edit(os.path.join(scratch, "notes.md"))))
+            other = os.path.expanduser("~/Development/acme/billing/src/app.py")  # another repository is not scratch
+            self.assertIn("outside Neo's scope", hooks._scope_violation("claude", edit(other)))
 
     def test_crew_reports_are_checked_like_the_main_canary(self):
         with TempState(), tempfile.TemporaryDirectory() as d:
