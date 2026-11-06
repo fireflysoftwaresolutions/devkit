@@ -1,0 +1,50 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1168" height="552" viewBox="0 0 1168 552" role="img" aria-labelledby="dk-title dk-desc">
+<title id="dk-title">Worktree lifecycle</title>
+<desc id="dk-desc">A managed worktree is created only when the user asks or parallel work needs it, with dev wt new, under ~/Development/.worktrees. It is active while a session works in it and idle otherwise; idle worktrees have their build output pruned after seven days. Uncommitted or unpushed work always keeps a worktree. When its pull request is merged or closed, or its commits are already in the default branch, and it has been idle for a day, dev gc removes it and its local branch.</desc>
+<rect width="1168" height="552" fill="#F3F1EB"/>
+<g font-family="Manrope, 'Manrope Variable', system-ui, -apple-system, 'Segoe UI', Arial, sans-serif">
+<circle cx="68" cy="74" r="4" fill="#FFB34A"/>
+<text x="80" y="78.5" font-size="12" font-weight="600" fill="#62645B" letter-spacing="0.48">WORKTREE LIFECYCLE</text>
+<g transform="translate(60.0,104.0)">
+<path d="M124.0,40.0 L404.5,40.0" fill="none" stroke="#62645B" stroke-width="1.5" stroke-linejoin="round" stroke-linecap="round"/><polygon points="412.0,40.0 404.0,44.0 404.0,36.0" fill="#62645B"/>
+<rect x="198.0" y="28.0" width="140.0" height="24.0" rx="11.0" fill="#F3F1EB"/>
+<text x="268.0" y="44.0" font-size="13" font-weight="400" fill="#62645B" text-anchor="middle">asked · parallel work</text>
+<path d="M628.0,40.0 L820.5,40.0" fill="none" stroke="#62645B" stroke-width="1.5" stroke-linejoin="round" stroke-linecap="round"/><polygon points="828.0,40.0 820.0,44.0 820.0,36.0" fill="#62645B"/>
+<rect x="678.5" y="28.0" width="99.0" height="24.0" rx="11.0" fill="#F3F1EB"/>
+<text x="728.0" y="44.0" font-size="13" font-weight="400" fill="#62645B" text-anchor="middle">session starts</text>
+<path d="M936.0,80.0 L936.0,144.5" fill="none" stroke="#62645B" stroke-width="1.5" stroke-linejoin="round" stroke-linecap="round"/><polygon points="936.0,152.0 932.0,144.0 940.0,144.0" fill="#62645B"/>
+<rect x="888.4" y="104.0" width="95.3" height="24.0" rx="11.0" fill="#F3F1EB"/>
+<text x="936.0" y="120.0" font-size="13" font-weight="400" fill="#62645B" text-anchor="middle">session ends</text>
+<path d="M936.0,232.0 L936.0,296.5" fill="none" stroke="#62645B" stroke-width="1.5" stroke-linejoin="round" stroke-dasharray="6 5" stroke-linecap="butt"/><polygon points="936.0,304.0 932.0,296.0 940.0,296.0" fill="#62645B"/>
+<rect x="853.5" y="256.0" width="164.9" height="24.0" rx="11.0" fill="#F3F1EB"/>
+<text x="936.0" y="272.0" font-size="13" font-weight="400" fill="#62645B" text-anchor="middle">uncommitted · unpushed</text>
+<path d="M828.0,192.0 L635.5,192.0" fill="none" stroke="#62645B" stroke-width="1.5" stroke-linejoin="round" stroke-linecap="round"/><polygon points="628.0,192.0 636.0,188.0 636.0,196.0" fill="#62645B"/>
+<rect x="654.2" y="180.0" width="147.6" height="24.0" rx="11.0" fill="#F3F1EB"/>
+<text x="728.0" y="196.0" font-size="13" font-weight="400" fill="#62645B" text-anchor="middle">PR merged · 24 h idle</text>
+<path d="M412.0,192.0 L227.5,192.0" fill="none" stroke="#62645B" stroke-width="1.5" stroke-linejoin="round" stroke-linecap="round"/><polygon points="220.0,192.0 228.0,188.0 228.0,196.0" fill="#62645B"/>
+<rect x="263.0" y="180.0" width="105.9" height="24.0" rx="11.0" fill="#F3F1EB"/>
+<text x="316.0" y="196.0" font-size="13" font-weight="400" fill="#62645B" text-anchor="middle">safe to remove</text>
+<path d="M112.0,232.0 L112.0,324.5" fill="none" stroke="#62645B" stroke-width="1.5" stroke-linejoin="round" stroke-linecap="round"/><polygon points="112.0,332.0 108.0,324.0 116.0,324.0" fill="#62645B"/>
+<circle cx="112.0" cy="40.0" r="10" fill="#272820"/>
+<rect x="412.0" y="0.0" width="216.0" height="80.0" rx="40.0" fill="#FFFFFF" stroke="#BFB8AB" stroke-width="1.5"/>
+<text x="520.0" y="34.0" font-size="16" font-weight="600" fill="#272820" text-anchor="middle">Created</text>
+<text x="520.0" y="56.0" font-size="13" font-weight="400" fill="#62645B" text-anchor="middle">dev wt new &lt;type&gt;/&lt;topic&gt;</text>
+<rect x="828.0" y="0.0" width="216.0" height="80.0" rx="40.0" fill="#FFFFFF" stroke="#BFB8AB" stroke-width="1.5"/>
+<text x="936.0" y="34.0" font-size="16" font-weight="600" fill="#272820" text-anchor="middle">Active</text>
+<text x="936.0" y="56.0" font-size="13" font-weight="400" fill="#62645B" text-anchor="middle">a session works in it</text>
+<rect x="828.0" y="152.0" width="216.0" height="80.0" rx="40.0" fill="#FFFFFF" stroke="#BFB8AB" stroke-width="1.5"/>
+<text x="936.0" y="186.0" font-size="16" font-weight="600" fill="#272820" text-anchor="middle">Idle</text>
+<text x="936.0" y="208.0" font-size="13" font-weight="400" fill="#62645B" text-anchor="middle">build output pruned at 7 days</text>
+<rect x="828.0" y="304.0" width="216.0" height="80.0" rx="40.0" fill="#DBDBCF" stroke="#7A8460" stroke-width="1.5"/>
+<text x="936.0" y="338.0" font-size="16" font-weight="600" fill="#272820" text-anchor="middle">Kept</text>
+<text x="936.0" y="360.0" font-size="13" font-weight="400" fill="#4A5040" text-anchor="middle">while work could be lost</text>
+<rect x="412.0" y="152.0" width="216.0" height="80.0" rx="40.0" fill="#FFFFFF" stroke="#BFB8AB" stroke-width="1.5"/>
+<text x="520.0" y="186.0" font-size="16" font-weight="600" fill="#272820" text-anchor="middle">Merged</text>
+<text x="520.0" y="208.0" font-size="13" font-weight="400" fill="#62645B" text-anchor="middle">PR merged or in main</text>
+<rect x="4.0" y="152.0" width="216.0" height="80.0" rx="40.0" fill="#FFB34A" stroke="#F0A33C" stroke-width="2"/>
+<text x="112.0" y="186.0" font-size="16" font-weight="600" fill="#272820" text-anchor="middle">Removed</text>
+<text x="112.0" y="208.0" font-size="13" font-weight="400" fill="#272820" text-anchor="middle">dev gc · dev wt rm</text>
+<circle cx="112.0" cy="344.0" r="11" fill="none" stroke="#272820" stroke-width="2"/><circle cx="112.0" cy="344.0" r="6" fill="#272820"/>
+</g>
+</g>
+</svg>

@@ -30,7 +30,8 @@ COMMANDS = [
         ("dashboard", "Open the HTML command centre: projects, tasks, activity, explorer, health"),
         ("overview [--json]", "Portfolio digest for you and your agents: status, Now tasks, last sessions"),
         ("standup [--days N]", "What happened in the last N days and what is in progress"),
-        ("task [add|start|done|ls]", "Project tasks (Now / Next / Later / Done) in the handoff note"),
+        ("initiative [new|add|ls|show]", "Cross-project initiatives: member projects, workstreams, progress"),
+        ("task [add|start|done|ls]", "Tasks (Now / Next / Later / Done) of a project, or of an initiative with -i"),
         ("note set k=v …", "Project status, priority, milestone, due date, tags"),
     ]),
     ("Agents", [
@@ -47,6 +48,7 @@ COMMANDS = [
         ("ci [--commands]", "Show what GitHub Actions runs, so you run it locally before the one push"),
         ("calver [--next]", "Current and next CalVer version YY.MM.PATCH from the repository's tags"),
         ("docs check [--online]", "Check docs: Markdown structure, links and anchors, prose (Vale), diagrams"),
+        ("diagram render|check|new", "Branded, validated SVG diagrams (flow, C4, state, sequence, ER, timeline)"),
     ]),
     ("Tracking and disk", [
         ("canary", "How often Claude/Codex replies carried the “DevKit ·” instruction marker"),
@@ -746,11 +748,82 @@ def cmd_canary(a):
 
 
 def _note_project(a):
+    """The note to edit: an initiative (-i) or a project (-p, default: the one you are in)."""
+    slug = getattr(a, "initiative", None)
+    if slug:
+        f = registry.initiative_path(slug)
+        if not f.exists():
+            ui.err(f"no initiative “{slug}” — `dev initiative ls`")
+            sys.exit(2)
+        return {"id": f"initiative:{slug}"}, f
     reg = _reg(prs=False)
     p = _resolve(reg, getattr(a, "project", None))
     f = core.note_path(p["id"])
-    registry.update_note(p)
+    if p.get("local", True) and p.get("path"):
+        registry.update_note(p)
     return p, f
+
+
+def cmd_initiative(a):
+    from . import notes
+    act = a.init_cmd or "ls"
+    if act == "new":
+        f = registry.initiative_path(a.slug)
+        if f.exists():
+            ui.err(f"initiative {a.slug} already exists: {tilde(f)}")
+            return 2
+        projects = [p.strip().lower() for p in (a.projects or "").split(",") if p.strip()]
+        f.parent.mkdir(parents=True, exist_ok=True)
+        f.write_text(notes.new_initiative(a.title or a.slug.replace("-", " ").title(), core.github_user(), projects))
+        print(f"{ui.OK} initiative {ui.bold(a.slug)} → {tilde(f)}")
+        return 0
+    if act in ("add", "rm"):
+        f = registry.initiative_path(a.slug)
+        if not f.exists():
+            ui.err(f"no initiative “{a.slug}”")
+            return 2
+        text = f.read_text()
+        meta, _ = notes.split_frontmatter(text)
+        cur = [p.lower() for p in (meta.get("projects") or [])]
+        pid = a.project.lower()
+        cur = sorted(set(cur) | {pid}) if act == "add" else [p for p in cur if p != pid]
+        text = notes.set_meta(text, projects=cur)
+        if act == "add" and f"### {pid}" not in text:
+            text = text.replace("## Tasks\n", f"### {pid}\n_Role in the initiative, state, next step._\n\n## Tasks\n", 1)
+        with core.Lock("notes", wait=30):
+            core.write_if_changed(f, text)
+        print(f"{ui.OK} {a.slug}: projects = {', '.join(cur) or '-'}")
+        return 0
+    reg = registry.build(with_prs=False)
+    inits = reg["initiatives"]
+    if act == "show":
+        i = next((x for x in inits if x["id"] == a.slug), None)
+        if not i:
+            ui.err(f"no initiative “{a.slug}”")
+            return 2
+        print(ui.section(f"{i['title']}  {ui.dim(i['status'] + ' · ' + i['priority'])}"))
+        pct = f"{i['progress']}% ({i['progress_source']})" if i["progress"] is not None else "-"
+        print(ui.kv("progress", pct) + (f"   milestone {i['milestone']}" if i["milestone"] else "") +
+              (f"   due {i['due']}" if i["due"] else ""))
+        if i["goal"]:
+            print(ui.kv("goal", i["goal"][:200]))
+        for m in i["members"]:
+            print(f"  {ui.ACTIVE if m.get('local') else ui.IDLE} {m['id']:<44} {m['status']:<8} "
+                  f"{(str(m['progress']) + '%') if m['progress'] is not None else '':>5}  "
+                  f"{ui.dim((m['workstream'] or '').splitlines()[0][:70] if m['workstream'] else '')}")
+        for t in i["tasks"]["now"]:
+            print(f"  {ui.cyan('▸')} {t}")
+        print(ui.kv("note", tilde(HANDOFF / i["note"])))
+        return 0
+    if not inits:
+        hint = 'no initiatives yet — dev initiative new <slug> --title "…" --projects owner/a,owner/b'
+        print(f"  {ui.dim(hint)}")
+        return 0
+    rows = [[ui.bold(i["id"]), i["status"], i["priority"],
+             f"{i['progress']}%" if i["progress"] is not None else "-", i["milestone"] or "-", i["due"] or "-",
+             str(len(i["projects"])), str(i["tasks"]["open"])] for i in inits]
+    print(ui.table(rows, ["INITIATIVE", "STATUS", "PRIORITY", "PROGRESS", "MILESTONE", "DUE", "PROJECTS", "OPEN"]))
+    return 0
 
 
 def cmd_task(a):
@@ -804,7 +877,7 @@ def cmd_note(a):
             ui.err(f"expected key=value, got “{item}” (keys: {', '.join(notes.META_KEYS)})")
             return 2
         k, v = item.split("=", 1)
-        if k not in notes.META_KEYS:
+        if k not in notes.META_KEYS and not (getattr(a, "initiative", None) and k in notes.INITIATIVE_KEYS):
             ui.err(f"unknown key “{k}” (keys: {', '.join(notes.META_KEYS)})")
             return 2
         kv[k] = v
@@ -839,8 +912,11 @@ def overview_data(days=7):
                     "last_activity": p.get("last_activity"), "path": p["path"]})
     order = {"blocked": 0, "active": 1, "paused": 2, "done": 3, "archived": 4}
     out.sort(key=lambda x: (order.get(x["status"], 9), x["priority"] != "high", -(x["last_activity"] or 0)))
+    for x in out:
+        p = next((q for q in reg["projects"] if q["id"] == x["id"]), {})
+        x["progress"], x["local"], x["initiatives"] = p.get("progress"), p.get("local", True), p.get("initiatives", [])
     return {"generated": reg.get("generated"), "days": days, "projects": out, "issues": reg.get("issues", []),
-            "canary": canary.summary_line(7)}
+            "canary": canary.summary_line(7), "initiatives": reg.get("initiatives", [])}
 
 
 def cmd_overview(a):
@@ -848,7 +924,20 @@ def cmd_overview(a):
     if a.json:
         print(json.dumps(data, indent=1, ensure_ascii=False))
         return 0
-    print(ui.section(f"Portfolio · {len(data['projects'])} projects · canary {data['canary']}"))
+    print(ui.section(f"Portfolio · {len(data.get('initiatives', []))} initiatives · {len(data['projects'])} projects"
+                     f" · canary {data['canary']}"))
+    for i in data.get("initiatives", []):
+        pct = f"{i['progress']}%" if i["progress"] is not None else "–"
+        bar = ""
+        if i["progress"] is not None:
+            n = int(i["progress"] / 10)
+            bar = ui.green("█" * n) + ui.dim("░" * (10 - n))
+        print(f"\n  {ui.bold('◆ ' + i['title'])}  {i['status']} · {i['priority']}  {bar} {pct}"
+              + (f"  {ui.dim('milestone ' + i['milestone'])}" if i["milestone"] else "")
+              + (f"  {ui.dim('due ' + i['due'])}" if i["due"] else ""))
+        print("    " + ui.dim(" · ".join(m["id"] + ("" if m.get("local") else " (not cloned)") for m in i["members"])))
+        for t in i["tasks"]["now"][:3]:
+            print(f"    {ui.cyan('▸')} {t}")
     for x in data["projects"]:
         if x["status"] in ("archived",) and not a.all:
             continue
@@ -1147,6 +1236,11 @@ def cmd_docs(a):
     return docs.check(Path(top), paths=a.paths or None, online=a.online, fix=a.fix, prose=not a.no_prose)
 
 
+def cmd_diagram(a):
+    from . import diagram
+    return diagram.main(a.rest)
+
+
 def cmd_version(a):
     print(f"devkit {core.VERSION} · {tilde(core.DEVKIT_HOME)}\n{COPYRIGHT}")
     return 0
@@ -1208,8 +1302,9 @@ def build_parser():
     p.add_argument("--path", action="store_true")
     p.add_argument("--log", metavar="TEXT", help="append a line to the session log")
     p.add_argument("--agent", default="human", help="who is logging (human, claude, codex)")
-    p = add("task", cmd_task, "Project tasks in the handoff note")
+    p = add("task", cmd_task, "Project or initiative tasks in the handoff repo")
     p.add_argument("-p", "--project", help="project (default: the one you are in)")
+    p.add_argument("-i", "--initiative", help="an initiative instead of a project")
     p.add_argument("--all", action="store_true", help="show every Done task")
     tsp = p.add_subparsers(dest="task_cmd")
     t = tsp.add_parser("add", help="add a task")
@@ -1223,8 +1318,22 @@ def build_parser():
     tsp.add_parser("ls", help="list tasks")
     p = add("note", cmd_note, "Project metadata in the handoff note")
     p.add_argument("set", choices=["set"])
-    p.add_argument("pairs", nargs="+", help="status=… priority=… milestone=… due=YYYY-MM-DD tags=a,b")
+    p.add_argument("pairs", nargs="+", help="status=… priority=… milestone=… due=YYYY-MM-DD tags=a,b progress=0-100")
     p.add_argument("-p", "--project")
+    p.add_argument("-i", "--initiative")
+    p = add("initiative", cmd_initiative, "Cross-project initiatives (integrations, platforms, programmes)")
+    isp = p.add_subparsers(dest="init_cmd")
+    x = isp.add_parser("new", help="create an initiative")
+    x.add_argument("slug")
+    x.add_argument("--title")
+    x.add_argument("--projects", help="comma-separated project ids (owner/repo)")
+    for verb in ("add", "rm"):
+        x = isp.add_parser(verb, help=f"{verb} a member project")
+        x.add_argument("slug")
+        x.add_argument("project")
+    isp.add_parser("ls", help="list initiatives")
+    x = isp.add_parser("show", help="an initiative with its member projects")
+    x.add_argument("slug")
     p = add("overview", cmd_overview, "Portfolio digest")
     p.add_argument("--json", action="store_true")
     p.add_argument("--days", type=int, default=7)
@@ -1292,6 +1401,8 @@ def build_parser():
     p.add_argument("--online", action="store_true", help="also check external links")
     p.add_argument("--fix", action="store_true", help="apply markdownlint's automatic fixes")
     p.add_argument("--no-prose", action="store_true", help="skip Vale")
+    p = add("diagram", cmd_diagram, "Branded SVG diagrams from JSON specs (render · check · new)")
+    p.add_argument("rest", nargs=argparse.REMAINDER, help="render <spec|dir> [--out DIR] [--png] · check <spec|svg|dir> · new <kind> <name>")
     p = add("setup", cmd_setup, "Installation and configuration wizard")
     p.add_argument("-y", "--yes", action="store_true", help="accept every default (non-interactive)")
     p.add_argument("--skip-packages", action="store_true", help="do not install Homebrew/npm packages")

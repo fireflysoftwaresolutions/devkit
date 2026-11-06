@@ -1,0 +1,187 @@
+{
+  "name": "handoff-note",
+  "kind": "flow",
+  "title": "Anatomy of a handoff note",
+  "desc": "A handoff note, projects/<project id>.md in the handoff repository, has eight parts in this order: frontmatter, the auto block, Purpose, Current state, Tasks, Decisions and gotchas, Links and the session log. dev note set writes the frontmatter, dev sync writes the auto block, the agents' handoff skill writes the narrative sections, dev task writes the tasks and the session hooks add a session line with branch, commits and the DevKit status line. Session context, dev overview and the dashboard read the note.",
+  "legend": [
+    {
+      "label": "devkit writes",
+      "family": "firefly"
+    },
+    {
+      "label": "generated",
+      "family": "slate"
+    },
+    {
+      "label": "metadata",
+      "family": "olive"
+    }
+  ],
+  "nodes": [
+    {
+      "id": "front",
+      "label": "Frontmatter",
+      "sub": "status · priority · milestone · due · tags",
+      "col": 1,
+      "row": 0,
+      "family": "olive"
+    },
+    {
+      "id": "auto",
+      "label": "Auto block",
+      "sub": "path · stack · commands · git · PRs",
+      "col": 1,
+      "row": 1,
+      "family": "slate"
+    },
+    {
+      "id": "purpose",
+      "label": "Purpose",
+      "col": 1,
+      "row": 2,
+      "sub": "what · who · where it runs"
+    },
+    {
+      "id": "state",
+      "label": "Current state",
+      "col": 1,
+      "row": 3,
+      "sub": "works · half done · broken"
+    },
+    {
+      "id": "tasks",
+      "label": "Tasks",
+      "sub": "Now · Next · Later · Done",
+      "col": 1,
+      "row": 4
+    },
+    {
+      "id": "decisions",
+      "label": "Decisions and gotchas",
+      "col": 1,
+      "row": 5,
+      "sub": "why it is so · traps"
+    },
+    {
+      "id": "links",
+      "label": "Links",
+      "col": 1,
+      "row": 6,
+      "sub": "docs · environments · dashboards"
+    },
+    {
+      "id": "log",
+      "label": "Session log",
+      "sub": "branch · commits · DevKit status line",
+      "col": 1,
+      "row": 7,
+      "family": "slate"
+    },
+    {
+      "id": "w_note",
+      "label": "dev note set",
+      "col": 2,
+      "row": 0,
+      "family": "firefly",
+      "sub": "status · priority · milestone"
+    },
+    {
+      "id": "w_sync",
+      "label": "dev sync",
+      "sub": "hourly · session end",
+      "col": 2,
+      "row": 1,
+      "family": "firefly"
+    },
+    {
+      "id": "w_agent",
+      "label": "Agents",
+      "sub": "handoff skill",
+      "col": 2,
+      "row": 3
+    },
+    {
+      "id": "w_task",
+      "label": "dev task",
+      "sub": "add · start · done",
+      "col": 2,
+      "row": 4,
+      "family": "firefly"
+    },
+    {
+      "id": "w_hooks",
+      "label": "Session hooks",
+      "sub": "commits · status line",
+      "col": 2,
+      "row": 7,
+      "family": "firefly"
+    },
+    {
+      "id": "r_ctx",
+      "label": "Session context",
+      "sub": "every new session",
+      "col": 0,
+      "row": 2
+    },
+    {
+      "id": "r_view",
+      "label": "Overview · dashboard",
+      "sub": "dev overview · dev dashboard",
+      "col": 0,
+      "row": 5
+    }
+  ],
+  "groups": [
+    {
+      "id": "note",
+      "title": "projects/<project id>.md",
+      "nodes": [
+        "front",
+        "auto",
+        "purpose",
+        "state",
+        "tasks",
+        "decisions",
+        "links",
+        "log"
+      ]
+    }
+  ],
+  "edges": [
+    {
+      "from": "w_note",
+      "to": "front",
+      "label": "sets"
+    },
+    {
+      "from": "w_sync",
+      "to": "auto",
+      "label": "refreshes"
+    },
+    {
+      "from": "w_agent",
+      "to": "state",
+      "label": "rewrites"
+    },
+    {
+      "from": "w_task",
+      "to": "tasks",
+      "label": "edits"
+    },
+    {
+      "from": "w_hooks",
+      "to": "log",
+      "label": "appends"
+    },
+    {
+      "from": "note",
+      "to": "r_ctx",
+      "label": "digest"
+    },
+    {
+      "from": "note",
+      "to": "r_view",
+      "label": "summary"
+    }
+  ]
+}

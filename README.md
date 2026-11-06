@@ -80,21 +80,10 @@ devkit is also a plugin for **Claude Code** and **Codex**, installed automatical
 
 ## How it fits together
 
-```mermaid
-flowchart LR
-  subgraph Agents["Claude Code · CLI + Desktop   |   Codex · CLI + ChatGPT app"]
-    I["Global instructions"]
-    P["devkit plugin<br/>skills · /devkit: commands"]
-    H["Hooks<br/>session-start · guard · stop · session-end · config-change"]
-  end
-  D["devkit repo<br/>dev CLI · rules · config"] -->|dev install / repair| Agents
-  H -->|context| R["~/Development/&lt;owner&gt;/&lt;repo&gt;<br/>~/Development/&lt;host&gt;/&lt;group&gt;/&lt;repo&gt;"]
-  H -->|sessions · status lines · tasks| O["~/Development/.handoff<br/>PROJECTS · TASKS · ACTIVITY · notes · plans"]
-  L["hourly sync"] --> O
-  L -->|safe gc| W["worktrees · build output · temp"]
-  O -->|push| G[("private repo<br/>&lt;you&gt;/handoff")]
-  O --> V["dev dashboard · dev overview"]
-```
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/images/diagrams/architecture-dark.svg">
+  <img src="docs/images/diagrams/architecture-light.svg" alt="How devkit fits together: the devkit repo installs rules, the devkit plugin and hooks into Claude Code (CLI and Desktop) and Codex (CLI and the ChatGPT app); the agents work in your repositories and exchange context and session records with the private handoff repo, which an hourly sync keeps current; repositories and the handoff repo are pushed to GitHub, and the dashboard and overview read the handoff repo." width="100%">
+</picture>
 
 Concepts: [docs/concepts.md](docs/concepts.md).
 

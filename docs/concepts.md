@@ -151,28 +151,9 @@ results are in `dev canary`, on the dashboard, in `dev doctor` (fails below 90% 
 
 Syncs take a lock, so they never run concurrently, and commit only when something changed.
 
-```mermaid
-sequenceDiagram
-    autonumber
-    participant U as You
-    participant A as Claude Code / Codex
-    participant H as dev hook
-    participant R as ~/Development/.handoff
-    participant G as GitHub (handoff repo)
-    U->>A: open a session in ~/Development/acme/widget
-    A->>H: SessionStart
-    H->>R: refresh the project's auto block
-    H-->>A: context: project, branch, commands, worktrees, handoff note
-    loop every tool call
-        A->>H: PreToolUse (Bash, Write, Edit, apply_patch)
-        H-->>A: allow, or deny/ask with the right way to do it
-    end
-    A->>H: Stop (end of each turn)
-    H->>H: canary: did the reply start with "DevKit ·"?
-    H-)R: debounced background sync (session line, map)
-    A->>H: SessionEnd
-    H-)R: final sync for the session
-    R->>G: commit and push
-```
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="images/diagrams/session-lifecycle-dark.svg">
+  <img src="images/diagrams/session-lifecycle-light.svg" alt="A session with devkit: at session start the hooks read the handoff note, tasks and last status and give the agent its context; the guard allows or denies each tool call with the right way; every reply starts with the DevKit status line, which the Stop hook records with the session line; at session end devkit syncs and pushes the private handoff repo to GitHub." width="100%">
+</picture>
 
 See also: [Commands](commands.md) · [Agents](agents.md) · [Guard rules](guard.md)

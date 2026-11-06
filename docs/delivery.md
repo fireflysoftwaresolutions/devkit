@@ -5,21 +5,10 @@ cycle (often 30 minutes or more), and each merge to the default branch can re-tr
 PR. devkit's method, taught to both agents by the global instructions and the devkit `delivery` skill:
 **integrate and verify locally, push once, get one CI run.**
 
-```mermaid
-flowchart TD
-    A[Work on a branch, small verified steps] --> B{Several branches or PRs<br/>must land together?}
-    B -- no --> D[Run what CI runs locally<br/>dev ci]
-    B -- yes --> C[Local integration branch<br/>release/version or integration/topic<br/>merge branches, bump version, CHANGELOG]
-    C --> D
-    D --> E{Local suite green?}
-    E -- no --> A
-    E -- yes --> F[Push once, open one PR]
-    F --> G[gh pr checks --watch]
-    G --> H{CI green?}
-    H -- yes --> I[Merge, tag, release,<br/>verify the published artefact]
-    H -- no --> J[gh run view --log-failed<br/>reproduce locally, fix,<br/>full local suite]
-    J --> F
-```
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="images/diagrams/delivery-dark.svg">
+  <img src="images/diagrams/delivery-light.svg" alt="Local-first delivery: feature branches are merged on one local integration branch and checked with the local equivalent of CI; only a green local run is pushed once as one PR, so CI runs once; a red CI run is reproduced and fixed locally; a green run is merged, tagged with a CalVer version, released and verified." width="100%">
+</picture>
 
 ## 1. Know the pipeline
 

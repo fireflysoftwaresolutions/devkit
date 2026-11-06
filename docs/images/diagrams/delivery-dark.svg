@@ -1,0 +1,56 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1072" height="584" viewBox="0 0 1072 584" role="img" aria-labelledby="dk-title dk-desc">
+<title id="dk-title">Local-first delivery: one push, one CI run</title>
+<desc id="dk-desc">Feature branches are integrated on one local integration or release branch, which runs the same commands as CI locally. Only when the local suite is green is the branch pushed once and opened as one pull request, so CI runs once. If CI fails, the failure is reproduced and fixed locally before the next push. A green CI run is merged, tagged with a CalVer version and released, and the published artefact is verified.</desc>
+<rect width="1072" height="584" fill="#10110F"/>
+<g font-family="Manrope, 'Manrope Variable', system-ui, -apple-system, 'Segoe UI', Arial, sans-serif">
+<circle cx="68" cy="74" r="4" fill="#FFB34A"/>
+<text x="80" y="78.5" font-size="12" font-weight="600" fill="#BFB8AB" letter-spacing="0.48">LOCAL-FIRST DELIVERY: ONE PUSH, ONE CI RUN</text>
+<text x="952.8" y="78.5" font-size="13" font-weight="400" fill="#BFB8AB">fix locally</text>
+<g transform="translate(920.8,74)"><line x1="0" y1="0" x2="24" y2="0" stroke="#BFB8AB" stroke-width="1.5" stroke-dasharray="6 5"/></g>
+<text x="818.2" y="78.5" font-size="13" font-weight="400" fill="#BFB8AB">the one push</text>
+<g transform="translate(786.2,74)"><line x1="0" y1="0" x2="24" y2="0" stroke="#FFB34A" stroke-width="2.5"/></g>
+<g transform="translate(64.0,156.8)">
+<path d="M224.0,40.0 L368.5,40.0" fill="none" stroke="#BFB8AB" stroke-width="1.5" stroke-linejoin="round" stroke-linecap="round"/><polygon points="376.0,40.0 368.0,44.0 368.0,36.0" fill="#BFB8AB"/>
+<rect x="251.9" y="28.0" width="96.1" height="24.0" rx="11.0" fill="#10110F"/>
+<text x="300.0" y="44.0" font-size="13" font-weight="400" fill="#BFB8AB" text-anchor="middle">merge locally</text>
+<path d="M568.0,40.0 L716.5,40.0" fill="none" stroke="#BFB8AB" stroke-width="1.5" stroke-linejoin="round" stroke-linecap="round"/><polygon points="724.0,40.0 716.0,44.0 716.0,36.0" fill="#BFB8AB"/>
+<rect x="628.2" y="28.0" width="35.7" height="24.0" rx="11.0" fill="#10110F"/>
+<text x="646.0" y="44.0" font-size="13" font-weight="400" fill="#BFB8AB" text-anchor="middle">run</text>
+<path d="M832.0,0.0 L832.0,-28.8 Q832.0,-40.8 820.0,-40.8 L484.0,-40.8 Q472.0,-40.8 472.0,-28.8 L472.0,-7.5" fill="none" stroke="#BFB8AB" stroke-width="1.5" stroke-linejoin="round" stroke-dasharray="6 5" stroke-linecap="butt"/><polygon points="472.0,0.0 468.0,-8.0 476.0,-8.0" fill="#BFB8AB"/>
+<rect x="602.8" y="-52.8" width="98.4" height="24.0" rx="11.0" fill="#10110F"/>
+<text x="652.0" y="-36.8" font-size="13" font-weight="400" fill="#BFB8AB" text-anchor="middle">red: fix locally</text>
+<path d="M832.0,80.0 L832.0,142.5" fill="none" stroke="#FFB34A" stroke-width="2.5" stroke-linejoin="round" stroke-linecap="round"/><polygon points="832.0,152.0 827.0,142.0 837.0,142.0" fill="#FFB34A"/>
+<rect x="806.6" y="104.0" width="50.8" height="24.0" rx="11.0" fill="#10110F"/>
+<text x="832.0" y="120.0" font-size="13" font-weight="400" fill="#BFB8AB" text-anchor="middle">green</text>
+<path d="M724.0,192.0 L577.5,192.0" fill="none" stroke="#FFB34A" stroke-width="2.5" stroke-linejoin="round" stroke-linecap="round"/><polygon points="568.0,192.0 578.0,187.0 578.0,197.0" fill="#FFB34A"/>
+<path d="M376.0,192.0 L233.5,192.0" fill="none" stroke="#FFB34A" stroke-width="2.5" stroke-linejoin="round" stroke-linecap="round"/><polygon points="224.0,192.0 234.0,187.0 234.0,197.0" fill="#FFB34A"/>
+<rect x="274.6" y="180.0" width="50.8" height="24.0" rx="11.0" fill="#10110F"/>
+<text x="300.0" y="196.0" font-size="13" font-weight="400" fill="#BFB8AB" text-anchor="middle">green</text>
+<path d="M472.0,152.0 L472.0,87.5" fill="none" stroke="#BFB8AB" stroke-width="1.5" stroke-linejoin="round" stroke-dasharray="6 5" stroke-linecap="butt"/><polygon points="472.0,80.0 476.0,88.0 468.0,88.0" fill="#BFB8AB"/>
+<rect x="377.0" y="104.0" width="189.9" height="24.0" rx="11.0" fill="#10110F"/>
+<text x="472.0" y="120.0" font-size="13" font-weight="400" fill="#BFB8AB" text-anchor="middle">red: reproduce and fix locally</text>
+<path d="M112.0,232.0 L112.0,272.5" fill="none" stroke="#BFB8AB" stroke-width="1.5" stroke-linejoin="round" stroke-linecap="round"/><polygon points="112.0,280.0 108.0,272.0 116.0,272.0" fill="#BFB8AB"/>
+<rect x="0.0" y="0.0" width="224.0" height="80.0" rx="6.0" fill="#1F201C" stroke="#4C4E45" stroke-width="1.5"/>
+<text x="112.0" y="34.0" font-size="16" font-weight="600" fill="#F3F1EB" text-anchor="middle">Feature branches</text>
+<text x="112.0" y="56.0" font-size="13" font-weight="400" fill="#BFB8AB" text-anchor="middle">feat/… · fix/…</text>
+<rect x="376.0" y="0.0" width="192.0" height="80.0" rx="6.0" fill="#1F201C" stroke="#4C4E45" stroke-width="1.5"/>
+<text x="472.0" y="34.0" font-size="16" font-weight="600" fill="#F3F1EB" text-anchor="middle">Integration branch</text>
+<text x="472.0" y="56.0" font-size="13" font-weight="400" fill="#BFB8AB" text-anchor="middle">release/26.11.4 · local</text>
+<rect x="724.0" y="0.0" width="216.0" height="80.0" rx="6.0" fill="#1F201C" stroke="#4C4E45" stroke-width="1.5"/>
+<text x="832.0" y="34.0" font-size="16" font-weight="600" fill="#F3F1EB" text-anchor="middle">Local CI equivalent</text>
+<text x="832.0" y="56.0" font-size="13" font-weight="400" fill="#BFB8AB" text-anchor="middle">dev ci · lint · tests · build</text>
+<rect x="724.0" y="152.0" width="216.0" height="80.0" rx="6.0" fill="#1F201C" stroke="#4C4E45" stroke-width="1.5"/>
+<text x="832.0" y="186.0" font-size="16" font-weight="600" fill="#F3F1EB" text-anchor="middle">One push, one PR</text>
+<text x="832.0" y="208.0" font-size="13" font-weight="400" fill="#BFB8AB" text-anchor="middle">gh pr create · checks --watch</text>
+<rect x="376.0" y="152.0" width="192.0" height="80.0" rx="6.0" fill="#222726" stroke="#7C8583" stroke-width="1.5"/>
+<text x="472.0" y="186.0" font-size="16" font-weight="600" fill="#F3F1EB" text-anchor="middle">GitHub CI</text>
+<text x="472.0" y="208.0" font-size="13" font-weight="400" fill="#A7AEAC" text-anchor="middle">runs once</text>
+<rect x="0.0" y="152.0" width="224.0" height="80.0" rx="6.0" fill="#1F201C" stroke="#4C4E45" stroke-width="1.5"/>
+<text x="112.0" y="186.0" font-size="16" font-weight="600" fill="#F3F1EB" text-anchor="middle">Merge · tag · release</text>
+<text x="112.0" y="208.0" font-size="13" font-weight="400" fill="#BFB8AB" text-anchor="middle">vYY.MM.PATCH</text>
+<rect x="0.0" y="280.0" width="224.0" height="80.0" rx="6.0" fill="#1F201C" stroke="#4C4E45" stroke-width="1.5"/>
+<text x="112.0" y="314.0" font-size="16" font-weight="600" fill="#F3F1EB" text-anchor="middle">Verify the artefact</text>
+<text x="112.0" y="336.0" font-size="13" font-weight="400" fill="#BFB8AB" text-anchor="middle">download · install · smoke test</text>
+</g>
+</g>
+</svg>

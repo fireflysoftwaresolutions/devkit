@@ -1,0 +1,145 @@
+{
+  "name": "architecture",
+  "kind": "flow",
+  "title": "How devkit fits together",
+  "desc": "The devkit repository installs rules, the devkit plugin and hooks into the agents: Claude Code (CLI and Desktop) and Codex (CLI and the ChatGPT app). The agents work in your repositories under ~/Development and, through the hooks, read context from and record sessions in the private handoff repository, which an hourly sync keeps current. Repositories and the handoff repository are pushed to GitHub; the dashboard and the overview read the handoff repository.",
+  "legend": [
+    {
+      "label": "devkit",
+      "family": "focal"
+    },
+    {
+      "label": "your data",
+      "family": "slate"
+    },
+    {
+      "label": "automation",
+      "family": "olive"
+    },
+    {
+      "label": "third party",
+      "family": "steel"
+    }
+  ],
+  "nodes": [
+    {
+      "id": "devkit",
+      "label": "devkit repo",
+      "sub": "dev CLI · rules · plugin · config",
+      "col": 0.5,
+      "row": 0,
+      "emphasis": true
+    },
+    {
+      "id": "claude",
+      "label": "Claude Code",
+      "sub": "CLI + Desktop",
+      "col": 0,
+      "row": 1
+    },
+    {
+      "id": "codex",
+      "label": "Codex",
+      "sub": "CLI + ChatGPT app",
+      "col": 1,
+      "row": 1
+    },
+    {
+      "id": "repos",
+      "label": "Your repositories",
+      "sub": "~/Development/<owner>/<repo>",
+      "col": 0,
+      "row": 2
+    },
+    {
+      "id": "handoff",
+      "label": "Handoff repo",
+      "sub": "notes · tasks · map · log",
+      "col": 1,
+      "row": 2,
+      "family": "slate"
+    },
+    {
+      "id": "sync",
+      "label": "Hourly sync",
+      "sub": "launchd · dev sync",
+      "col": 2,
+      "row": 2,
+      "family": "olive"
+    },
+    {
+      "id": "github",
+      "label": "GitHub",
+      "sub": "code · private handoff",
+      "col": 0.5,
+      "row": 3,
+      "family": "steel"
+    },
+    {
+      "id": "views",
+      "label": "Dashboard · overview",
+      "sub": "dev dashboard · dev overview",
+      "col": 1.5,
+      "row": 3
+    }
+  ],
+  "groups": [
+    {
+      "id": "agents",
+      "title": "Agents · rules, plugin, hooks",
+      "nodes": [
+        "claude",
+        "codex"
+      ]
+    }
+  ],
+  "edges": [
+    {
+      "from": "devkit",
+      "to": "agents",
+      "label": "installs"
+    },
+    {
+      "from": "agents",
+      "to": "repos",
+      "label": "work in",
+      "from_side": "bottom",
+      "to_side": "top"
+    },
+    {
+      "from": "agents",
+      "to": "handoff",
+      "label": "context · sessions",
+      "both": true,
+      "from_side": "bottom",
+      "to_side": "top"
+    },
+    {
+      "from": "sync",
+      "to": "handoff",
+      "label": "map · tasks · gc"
+    },
+    {
+      "from": "repos",
+      "to": "github",
+      "label": "one push",
+      "from_side": "bottom",
+      "to_side": "top"
+    },
+    {
+      "from": "handoff",
+      "to": "github",
+      "label": "push",
+      "from_side": "bottom",
+      "to_side": "top"
+    },
+    {
+      "from": "handoff",
+      "to": "views",
+      "label": "reads",
+      "from_side": "bottom",
+      "to_side": "top"
+    }
+  ],
+  "equal_widths": "all"
+}
