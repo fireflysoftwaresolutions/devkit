@@ -141,7 +141,13 @@ class GuardBashTests(unittest.TestCase):
         self.assertEqual(self.bash("rm -rf node_modules dist"), "allow")
         self.assertEqual(self.bash(f"rm -rf {core.TMP_ROOT}/some-scratch-repo"), "allow")
         self.assertEqual(self.bash("rm -rf /tmp/clone-to-inspect/.git"), "allow")
-        self.assertEqual(self.bash("rm -f notes.txt"), "allow")
+        self.assertEqual(self.bash("rm -f notes.txt"), "deny")  # steered to `dev rm` (recoverable)
+        self.assertEqual(self.bash("DEVKIT_RAW_FS=1 rm -f notes.txt"), "allow")
+        self.assertEqual(self.bash(f"rm -f {core.TMP_ROOT}/scratch.txt"), "allow")
+        self.assertEqual(self.bash("rm -rf __pycache__ .pytest_cache"), "allow")
+        self.assertEqual(self.bash("find . -name '*.orig' -delete"), "deny")
+        self.assertEqual(self.bash("find . -name '*.log' | xargs rm"), "deny")
+        self.assertEqual(self.bash(f"find {core.TMP_ROOT}/x -delete"), "allow")
 
     def test_git_clean_ignored_denied(self):
         self.assertEqual(self.bash("git clean -fdx"), "deny")

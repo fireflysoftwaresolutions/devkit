@@ -4,6 +4,9 @@ brew "git"
 brew "gh"
 brew "jq"
 brew "ripgrep"
+brew "fd"            # gitignore-aware file listing (dev find)
+brew "ast-grep"      # structural code search (dev grep --ast)
+brew "difftastic"    # syntax-aware diffs (dev diff --syntax)
 brew "git-cliff"     # release notes from Conventional Commits (dev release)
 brew "fzf"
 brew "python"

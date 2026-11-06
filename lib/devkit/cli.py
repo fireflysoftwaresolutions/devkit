@@ -36,6 +36,10 @@ COMMANDS = [
         ("plan new|revise|approve|ls", "Versioned plans and specs; every change records who and why"),
         ("team", "Who is working on what, on every machine; who holds which task"),
         ("progress [start|step|done]", "Live progress of agent work with ETA; `dev time` for how long things take"),
+        ("files [path]", "Compact, gitignore-aware tree with git status and sizes (token-light)"),
+        ("find <pattern> · grep <regex>", "Find files and search code with capped, compact output"),
+        ("diff [args]", "Token-light git diff: stat first, short hunks, lock and generated files folded"),
+        ("rm · mv · cp", "Safe file operations: Trash with undo, git-aware, refuse in-use or unsaved work"),
         ("report [--days 7]", "Status report for initiatives and projects (Markdown, for the team or management)"),
     ]),
     ("Agents", [
@@ -50,6 +54,7 @@ COMMANDS = [
     ]),
     ("Delivery", [
         ("ci [--commands]", "Show what GitHub Actions runs, so you run it locally before the one push"),
+        ("ci status [--watch]", "Live CI/CD runs (GitHub, GitLab, Bitbucket, Azure): jobs, steps, elapsed, ETA"),
         ("calver [--next]", "Current and next CalVer version YY.MM.PATCH from the repository's tags"),
         ("sec scan [--history]", "Security: secrets (gitleaks), dependencies (osv-scanner), SAST (Semgrep), Trivy"),
         ("docs check [--online]", "Check docs: Markdown structure, links and anchors, prose (Vale), diagrams"),
@@ -746,14 +751,57 @@ def cmd_docker(a):
     return 2
 
 
+def _print_ci_runs(res, now=None):
+    from . import cistatus
+    name = {"github": "GitHub Actions", "gitlab": "GitLab CI", "bitbucket": "Bitbucket Pipelines",
+            "azure": "Azure Pipelines"}.get(res.get("provider"), "CI")
+    print(ui.section(f"{name} · {res.get('repo') or '-'}" + (f" · {res['branch']}" if res.get("branch") else "")))
+    if res.get("error"):
+        print(f"  {ui.WARN} {res['error']}")
+        return
+    if not res["runs"]:
+        print("  no runs")
+        return
+    color = {"success": ui.green, "failed": ui.red, "running": ui.cyan, "queued": ui.yellow}
+    for r in res["runs"]:
+        print("  " + color.get(r["status"], ui.dim)(cistatus.describe(r, now)) +
+              (ui.dim(f"  {r['branch']}") if not res.get("branch") and r.get("branch") else ""))
+        for j in r.get("jobs") or []:
+            print("      " + color.get(j["status"], ui.dim)(cistatus.describe_job(j)))
+        if r["status"] in cistatus.RUNNING and r.get("url"):
+            print("      " + ui.dim(r["url"]))
+
+
+def cmd_ci_status(a, top):
+    from . import cistatus
+    branch = None if a.all_branches else (a.branch or core.gitout(top, "branch", "--show-current") or None)
+    while True:
+        res = cistatus.runs_for(top, branch, limit=a.limit, detail=True, max_age=0 if a.watch else 20)
+        if a.json:
+            print(json.dumps(res, indent=1))
+            return 0
+        if a.watch and sys.stdout.isatty():
+            print("\033[2J\033[H", end="")
+        _print_ci_runs(res)
+        running = [r for r in res["runs"] if r["status"] in cistatus.RUNNING]
+        if not a.watch or not running:
+            failed = [r for r in res["runs"][:1] if r["status"] == "failed"]
+            if failed and res.get("provider") == "github":
+                print(ui.dim(f"\n  failing log: gh run view {failed[0]['id']} --log-failed"))
+            return 1 if failed else 0
+        time.sleep(15)
+
+
 def cmd_ci(a):
     from . import ci
     top = core.gitout(os.getcwd(), "rev-parse", "--show-toplevel")
-    if a.query:
+    if a.query and a.query != "status":
         top = _resolve(_reg(prs=False), a.query)["path"]
     if not top:
         ui.err("not inside a repository")
         return 2
+    if a.query == "status" or a.status:
+        return cmd_ci_status(a, top)
     if a.commands:
         print("\n\n".join(ci.local_commands(Path(top))))
         return 0
@@ -1669,6 +1717,8 @@ def build_parser():
     p.add_argument("-i", "--initiative")
     p.add_argument("-p", "--project")
     p.add_argument("-o", "--out", help="write to a file instead of stdout")
+    from . import fs
+    fs.register(add)
     add("team", cmd_team, "Who is working on what, across machines and developers").add_argument(
         "--hours", type=float, default=24)
     p = add("initiative", cmd_initiative, "Cross-project initiatives (integrations, platforms, programmes)")
@@ -1739,10 +1789,16 @@ def build_parser():
     p = add("canary", cmd_canary, "Instruction-compliance canary report")
     p.add_argument("--days", type=int, default=7)
     p.add_argument("--limit", type=int, default=20)
-    p = add("ci", cmd_ci, "Show what GitHub Actions runs, to run it locally first")
-    p.add_argument("query", nargs="?")
+    p = add("ci", cmd_ci, "What CI runs (to run it locally first), and `dev ci status`: live runs on any host")
+    p.add_argument("query", nargs="?", help="a project, or `status`")
     p.add_argument("--commands", action="store_true", help="print only the run commands")
     p.add_argument("--runs", action="store_true", help="also list recent CI runs")
+    p.add_argument("--status", action="store_true", help="live runs with job and step progress and an ETA")
+    p.add_argument("--branch", help="runs of this branch (default: the current branch)")
+    p.add_argument("--all-branches", action="store_true")
+    p.add_argument("--watch", action="store_true", help="refresh every 15 s until no run is in progress")
+    p.add_argument("--limit", type=int, default=5)
+    p.add_argument("--json", action="store_true")
     add("doctor", cmd_doctor, "Verify the setup")
     add("install", cmd_install, "Apply configuration").add_argument(
         "--only", help="comma list: config,cli,git,handoff,instructions,skills,claude,codex,docker,launchd")

@@ -389,11 +389,39 @@ def check_clone(url, dest, cwd):
                 "throwaway look. " + LAYOUT_HINT)
 
 
-def check_rm(args, cwd):
+RAW_FS_HINT = ("Use `dev rm <paths>` instead: it moves them to the Trash with a manifest (`dev rm --undo` restores "
+               "them), refuses files that are open or hold unsaved work, stages tracked deletions like `git rm`, and "
+               "tells you the exact flag when you really mean it. To bypass, prefix the command with DEVKIT_RAW_FS=1.")
+
+
+def _is_build_output(t: Path) -> bool:
+    from .gc import ARTEFACTS
+    return t.name in ARTEFACTS or t.name in ("__pycache__", ".pytest_cache", ".mypy_cache", ".ruff_cache", "coverage",
+                                              ".gradle", ".parcel-cache", ".cache")
+
+
+def steer_rm(args, cwd, envs=frozenset()):
+    """Plain rm outside scratch areas goes through `dev rm` (recoverable, checked)."""
+    if "DEVKIT_RAW_FS" in envs:
+        return None
+    targets = [a for a in args if not a.startswith("-") or a == "-"]
+    if not targets:
+        return None
+    for a in targets:
+        t = resolve(a, cwd)
+        if t == UNKNOWN:  # depends on shell state ($VAR, cd $X) the guard cannot see: not flagged, like other rules
+            continue
+        if _is_build_output(Path(a.rstrip("/"))) or is_temp(t) or _is_build_output(t):
+            continue
+        return deny(f"`rm {a}` deletes permanently. " + RAW_FS_HINT)
+    return None
+
+
+def check_rm(args, cwd, envs=frozenset()):
     flags = [a for a in args if a.startswith("-")]
     recursive = any(a in ("--recursive",) or (not a.startswith("--") and ("r" in a or "R" in a)) for a in flags)
     if not recursive:
-        return None
+        return steer_rm(args, cwd, envs)
     for a in [a for a in args if not a.startswith("-")]:
         if a in ("*", "./*", ".", "..") and cwd and str(cwd) != str(UNKNOWN) and \
                 any(real(cwd) == real(p) for p in [HOME, DEV] + list(_owner_dirs())):
@@ -416,7 +444,7 @@ def check_rm(args, cwd):
                             f"unpushed work and keeps git metadata consistent), not rm -rf.")
             if (t / ".git").is_dir():
                 return deny(f"{tilde(t)} is a repository checkout. Deleting it can lose unpushed work; ask the user.")
-    return None
+    return steer_rm(args, cwd, envs)
 
 
 def _owner_dirs():
@@ -496,6 +524,15 @@ def check_git(argv, cwd, full_segment, envs=frozenset(), pending=None):
                 if v:
                     return deny(v.replace("Rename it:", "Rename it before pushing:"))
         return check_push_budget(gcwd, args, envs)
+    if sub == "clean" and any(re.match(r"^-[a-zA-Z]*f", a) or a == "--force" for a in args) and \
+            not any(re.match(r"^-[a-zA-Z]*n", a) or a == "--dry-run" for a in args) and \
+            "DEVKIT_RAW_FS" not in envs and gcwd and not is_temp(Path(gcwd)):
+        rc, out, _ = core.git(gcwd, "clean", "-n", *[a for a in args if not re.match(r"^-[a-zA-Z]*f", a) and a != "--force"])
+        n = len([ln for ln in out.splitlines() if ln.strip()]) if rc == 0 else 0
+        if n:
+            return deny(f"`git clean -f` would permanently delete {n} untracked path(s) in {tilde(gcwd)} (untracked work "
+                        f"cannot be recovered from git). Review them with `git clean -n`, then remove them with "
+                        f"`dev rm --discard <paths>` (recoverable from the Trash). To bypass, prefix with DEVKIT_RAW_FS=1.")
     if sub == "clean" and any(re.match(r"^-[a-zA-Z]*[xX]", a) for a in args):
         return deny("`git clean -x/-X` deletes ignored files too (.env, local config, caches). Use `git clean -fd` "
                     "for untracked files only, or remove specific paths.")
@@ -624,8 +661,20 @@ def check_bash(cmd: str, cwd: str, agent: str):
                 res = _attribution(cmd)
         elif name == "dev" and len(argv) > 1 and argv[1] in ("task", "note", "handoff", "initiative"):
             res = check_dev_cross(argv[1:], ecwd, envs)
-        elif name == "rm":
-            res = check_rm(argv[1:], ecwd)
+        elif name in ("rm", "unlink"):
+            res = check_rm(argv[1:], ecwd, envs) if name == "rm" else steer_rm(argv[1:], ecwd, envs)
+        elif name == "find" and ("-delete" in argv or any(x in argv for x in ("-exec", "-execdir")) and
+                                 any(os.path.basename(x) in ("rm", "unlink") for x in argv)) and \
+                "DEVKIT_RAW_FS" not in envs:
+            roots = [a for a in argv[1:] if not a.startswith("-") and a not in ("(", ")", "!")][:1] or ["."]
+            t = resolve(roots[0], ecwd)
+            if t == UNKNOWN or not is_temp(t):
+                res = deny("`find … -delete` / `-exec rm` deletes permanently whatever matches. List the matches with "
+                           "`dev find <pattern>`, then delete them with `dev rm <paths>` (recoverable). To bypass, "
+                           "prefix the command with DEVKIT_RAW_FS=1.")
+        elif name == "xargs" and any(os.path.basename(x) in ("rm", "unlink") for x in argv[1:]) and \
+                "DEVKIT_RAW_FS" not in envs and not is_temp(Path(ecwd)):
+            res = deny("`xargs rm` deletes permanently whatever it is fed. " + RAW_FS_HINT)
         elif name in ("mkdir", "touch"):
             for a in [a for a in argv[1:] if not a.startswith("-")]:
                 v = layout_violation(resolve(a, ecwd), creating_dir=(name == "mkdir"))
@@ -637,6 +686,14 @@ def check_bash(cmd: str, cwd: str, agent: str):
             if len(pos) >= 2:
                 dest = resolve(pos[-1], ecwd)
                 v = layout_violation(dest, creating_dir=True)
+                safe = any(a in ("-n", "-i", "--no-clobber", "--interactive") or
+                           (a.startswith("-") and not a.startswith("--") and ("n" in a or "i" in a))
+                           for a in argv[1:] if a.startswith("-"))
+                if not v and name in ("cp", "mv") and not safe and "DEVKIT_RAW_FS" not in envs and \
+                        dest != UNKNOWN and dest.is_file() and not is_temp(dest):
+                    v = (f"`{name}` would overwrite {tilde(dest)} without a copy. Use `dev {name}` (refuses to overwrite; "
+                         f"with --force the old version goes to the Trash and `dev rm --undo` restores it), or add -n. "
+                         f"To bypass, prefix the command with DEVKIT_RAW_FS=1.")
                 if v:
                     res = deny(v)
                 elif dest != UNKNOWN and not dest.is_dir() and BACKUP_RE.search(dest.name) and is_under(dest, DEV):
