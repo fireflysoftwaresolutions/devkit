@@ -20,7 +20,8 @@ this skill is the how.
 **During**
 - Claim before you work: `dev task start <n>` takes the lock and pushes it, so other developers' agents see it.
   Never work on a task the context lists as claimed by someone else — pick another one or tell the user.
-- Record work as it happens: `dev task add "…" --now --claim` for new work, `dev task done <n>` only after verifying
+- Record work as it happens: `dev task add "…" --type task|feature|bug|spike --why "…" --done "<criterion>" --now
+  --claim` for new work (it gets a structured description), `dev task done <n>` only after verifying
   it, `dev task release <n>` if you stop without finishing, `dev task add "…" --later` for follow-ups you discover.
   Changes of scope need a reason: `dev task edit|move|cancel|block <n> --why "…"`. Initiative-level work uses `-i`.
 - Plans and specs go to `~/Development/.handoff/plans/<project id>/` (`dev plan new "…"`; Superpowers writes there
@@ -50,7 +51,9 @@ this skill is the how.
 | Hand off | `dev handoff`, `dev task`, `/devkit:handoff` | `handoff` |
 | Coordinate with others | `dev team`, `dev task start|release`, `dev task show <n>` (history) | — |
 | Keep the developer informed | `dev progress start|step|block|done`, `dev time` | `communicating` |
-| Plans and specs | `dev plan new|revise --why|approve|ls` | Superpowers writing-plans |
+| Plans and specs | `dev plan new "…" --kind plan|spec|spike|bugfix|adr`, `dev plan revise --why`, `approve`, `ls` | Superpowers writing-plans, `communicating` (formats) |
+| Hand work to a teammate | `dev task delegate <n> --to <login> --why "…"` | `communicating` |
+| Report status | `dev report [--days 7] [-i <slug>]`, `dev standup` | `communicating` |
 | Where are we | `dev status`, `dev overview`, `dev standup`, `/devkit:status` | — |
 | Something is off | `dev doctor`, `dev config diff`, `dev guard check "<cmd>"` | — |
 
