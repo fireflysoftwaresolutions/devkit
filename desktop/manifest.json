@@ -81,7 +81,11 @@
     },
     {
       "name": "devkit_crew",
-      "description": "The crew of specialist agents and, during a run, who works now, open messages and decisions waiting for you."
+      "description": "The crew of specialist agents with the RACI (who does and approves each kind of work) and, during a run, who works now, open messages and decisions waiting for you."
+    },
+    {
+      "name": "devkit_rules",
+      "description": "devkit's global rules for agents, or one section: the status block, Morpheus and the crew's RACI, Git, delivery and the handoff."
     },
     {
       "name": "devkit_doctor",

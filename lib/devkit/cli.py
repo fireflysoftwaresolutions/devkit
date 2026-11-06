@@ -2022,8 +2022,34 @@ def _quota_text(q: dict) -> str:
 
 
 def cmd_agents(a):
+def rules_text(section: str = "") -> str:
+    """devkit's global rules as `dev install` writes them, or one section ("0", "3", "crew", "status block")."""
+    from . import setup
+    text = setup.render_instructions().split("\n", 1)[1]  # without the generated-by line
+    if not section:
+        return text
+    want = section.strip().lower()
+    parts = re.split(r"(?m)^(?=## )", text)
+    for p in parts:
+        head = p.split("\n", 1)[0].lower()
+        if head.startswith(f"## {want}.") or (not want.isdigit() and want in head):
+            return p.strip()
+    subs = re.split(r"(?m)^(?=### )", text)
+    for p in subs:
+        if p.startswith("### ") and want in p.split("\n", 1)[0].lower():
+            return re.split(r"(?m)^## ", p)[0].strip()
+    raise ValueError(f"no section {section!r}: give its number (0-12) or words from its title")
+
+
     from . import providers
     if a.action == "test":
+    if a.action == "rules":
+        try:
+            print(rules_text(getattr(a, "section", "") or ""))
+        except ValueError as e:
+            ui.err(str(e))
+            return 2
+        return 0
         targets = ["claude", "codex"] if a.agent in (None, "all") else [a.agent]
         rc = 0
         for t in targets:
@@ -2394,12 +2420,13 @@ def build_parser():
                                                      "status"])
     p.add_argument("--quiet", action="store_true")
     p = add("agents", cmd_agents, "Claude Code and Codex: install, sign-in, plan, quota, self-test")
-    p.add_argument("action", nargs="?", choices=["status", "test"], default="status")
+    p.add_argument("action", nargs="?", choices=["status", "test", "rules"], default="status")
     p.add_argument("agent", nargs="?", choices=["claude", "codex", "all"])
     p.add_argument("--json", action="store_true")
     p.add_argument("--model", help="model for the self-test session")
     p.add_argument("-v", "--verbose", action="store_true", help="show the agent's reply")
     add("calver", cmd_calver, "Current and next CalVer version (YY.MM.PATCH)").add_argument(
+    p.add_argument("--section", help="rules: one section, by number (0-12) or words from its title")
         "--next", action="store_true", help="print only the next version")
     p = add("plugin", cmd_plugin, "Validate the devkit plugin for Claude Code and Codex")
     p.add_argument("action", choices=["validate"])

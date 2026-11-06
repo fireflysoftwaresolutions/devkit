@@ -45,8 +45,14 @@ INSTRUCTIONS = (
     "**[Firefly> DevKit]** <project> · `<branch>` · <the task, in a few plain words>\n"
     "- **Done:** <what was done or found, one sentence>\n"
     "- **Check:** <✓ verified | ⚠ partly or not verified | ✗ failed | – nothing to verify> <the evidence>\n"
+    "- **Crew:** <who in the crew worked on what> (only when crew members worked)\n"
+    "- **You:** <what only the developer can do or decide now> (only when there is something)\n"
     "- **Next:** <the next step, and who takes it>\n"
-    "Use `-` for a part that does not apply. Each bullet is one plain sentence of about 100 characters at most."
+    "Use `-` for a part that does not apply. Each bullet is one plain sentence of about 100 characters at most.\n\n"
+    "In development work the main session is Morpheus, the tech lead: it routes each kind of work to the crew member "
+    "the RACI makes responsible (devkit_crew lists them and who approves what), and the crew reports through devkit "
+    "(progress steps, crew questions, status blocks). Development itself runs in Claude Code or Codex; here, report "
+    "and plan from devkit's data. devkit_rules returns the complete rules, or one section, whenever you need them."
 )
 
 # --------------------------------------------------------------------------- tool definitions
@@ -102,6 +108,15 @@ def _iso(ts) -> str:
 def _short(text, n=240) -> str:
     text = " ".join(str(text or "").split())
     return text if len(text) <= n else text[:n - 1] + "…"
+
+
+def _digest_crew(d, a):
+    """The crew for a reply: who each member is (role first) and the RACI. The agent-facing method, commands and
+    definition of done stay out (they are in each member's brief)."""
+    if not isinstance(d, dict):
+        return d
+    keep = ("id", "title", "name", "role", "main", "summary", "goal", "use_when", "not_for", "tools", "tier", "spawn")
+    return dict(d, members=[{k: m[k] for k in keep if k in m} for m in d.get("members") or []])
 
 
 def _digest_overview(d, a):
@@ -263,7 +278,15 @@ _tool("devkit_crew", "Crew",
       "own), the plan steps assigned to each member, who is ready to launch, queued or waiting and why, open crew "
       "messages, the mode (guided: the developer decides; auto: the crew goes on and records) with its approvals, "
       "and the decisions waiting for the developer.",
-      {}, lambda a: ["crew", "--json", "--latest"], READ, json_out=True)
+      {}, lambda a: ["crew", "--json", "--latest"], READ, json_out=True, digest=_digest_crew)
+
+_tool("devkit_rules", "devkit rules",
+      "devkit's global rules for agents, exactly as Claude Code and Codex get them: the status block, the workspace, "
+      "how to work, Morpheus and the crew's RACI, Git, delivery, the handoff and the guard. Give `section` (a number "
+      "from 0 to 12, or words from a title such as \"status block\" or \"crew\") for one part.",
+      {"section": {"type": "string", "minLength": 1, "maxLength": 60,
+                   "description": "Optional: one section by number (0-12) or words from its title."}},
+      lambda a: ["agents", "rules"] + (["--section", a["section"]] if a.get("section") else []), READ)
 
 _tool("devkit_doctor", "Doctor",
       "Checks the whole devkit setup on this Mac (toolchain, GitHub sign-in and git identity, workspace and handoff "
