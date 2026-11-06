@@ -520,6 +520,37 @@ class MainTests(GateCase):
         self.assertIsNone(self.main("ls 'unclosed", setting="enforce"))
 
 
+class UnknownProgramTests(GateCase):
+    # RT1/RT2: a program whose name the shell or an interpreter builds at run time is "unknown", tier 2, with a target
+    # that names that one command, so a typed grant opens it and nothing else
+
+    def test_a_program_named_at_run_time_is_unknown_tier_2_and_its_target_names_the_command(self):
+        first = self.acts("$X pr merge 12")
+        self.assertEqual([(a, t) for a, t, _ in first], [("unknown", 2)])
+        self.assertRegex(first[0][2], r"^cmd-[0-9a-f]{10}$")
+        self.assertEqual(self.acts("$X pr merge 12"), first)
+        self.assertNotEqual(self.acts("$X pr merge 13")[0][2], first[0][2])
+
+    def test_literal_names_test_builtins_and_programs_that_only_print_stay_known(self):
+        for cmd in ("[ -f x ] && gh pr view 12", "[[ -n x ]]", "git status", "python3 -c \"print(1)\"",
+                    "python3 -c \"print('gh pr merge 12')\"", "echo $HOME"):
+            with self.subTest(cmd=cmd):
+                self.assertEqual(self.acts(cmd), [])
+
+    def test_the_main_session_is_told_how_to_clear_it_and_a_grant_of_that_command_opens_it(self):
+        target = self.acts("$X pr merge 12")[0][2]
+        why = self.main("$X pr merge 12")
+        self.assertIn(f"grant unknown {target}", why or "")
+        self.assertIn("Write the program's name out", why or "")
+        store = Store({f"unknown {target}": 1})
+        self.assertIsNone(self.main("$X pr merge 12", grant=store))
+        self.assertEqual(store.left[f"unknown {target}"], 0)
+        self.assertIsNotNone(self.main("$X pr merge 13", grant=Store({f"unknown {target}": 1})))
+
+    def test_an_unknown_program_is_never_pre_approved(self):
+        self.assertIn("never pre-approved", guard.preapproval_problem("unknown", "cmd-0123456789") or "")
+
+
 class SettingTests(unittest.TestCase):
 
     def setUp(self):

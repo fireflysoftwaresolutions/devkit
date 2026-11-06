@@ -102,7 +102,6 @@ class RedTeam(unittest.TestCase):
         self.assertIsNotNone(self.main("gh pr merge 12"))
 
     # ------------------------------------------------------------------ RT1 (critical): program name built at runtime
-    @unittest.expectedFailure  # RT1
     def test_rt1_a_command_whose_name_is_built_at_runtime_hides_the_action(self):
         # a substitution, a parameter expansion, a shell variable and env --split-string all resolve to `gh` only when
         # the shell runs it, so the classifier sees a program it cannot name and finds no action
@@ -114,7 +113,6 @@ class RedTeam(unittest.TestCase):
                 self.assertIsNotNone(self.main(cmd))
 
     # ------------------------------------------------------------------ RT2 (critical): obfuscated interpreter spawn
-    @unittest.expectedFailure  # RT2
     def test_rt2_an_obfuscated_interpreter_spawn_runs_tier_two(self):
         # getattr+string-concat evades the spawn regex, so the gh merge inside the program is never parsed; perl exec
         # with a list and no parentheses is not recognized as a spawn either

@@ -3503,14 +3503,40 @@ def webfetch_verdict(tool_input):
 # rules, required reviews and publishing from CI (P5).
 
 TIERS = {"push": 1, "pr": 1, "push-destructive": 2, "pr-write": 2, "merge": 2, "release": 2, "publish": 2,
-         "deploy": 2, "api-write": 2, "external-message": 2}
-NEVER_PREAPPROVED = frozenset({"publish", "deploy"})  # a deploy may reach production: the developer grants each one
+         "deploy": 2, "api-write": 2, "external-message": 2, "unknown": 2}
+# a deploy may reach production, and an unknown program may be anything: the developer grants each one
+NEVER_PREAPPROVED = frozenset({"publish", "deploy", "unknown"})
 AUDIT_WEEK_S = 7 * 86400
 GATE_START = "irreversible-gate.json"  # in STATE: when the gate first ran on this Mac (the main session's audit week)
 _WHAT = {"push": "pushes {t}", "pr": "opens a PR from {t}", "push-destructive": "rewrites or deletes {t} on the remote",
          "pr-write": "writes to {t} on GitHub", "merge": "merges PR {t}", "release": "releases {t}",
          "publish": "publishes {t}", "deploy": "deploys to {t}", "api-write": "writes to {t} through its API",
-         "external-message": "sends, creates or deletes something outside this machine through {t}"}
+         "external-message": "sends, creates or deletes something outside this machine through {t}",
+         "unknown": "runs a program whose name is only known when it runs, so it may be any action, tier 2 "
+                    "included (command {t})"}
+# a program name the shell builds when it runs (RT1, RT2): a substitution, a parameter expansion, a variable, a glob or
+# a brace list; `[` and `[[` are the test builtins
+_DYNAMIC_NAME = re.compile(r"[$`*?\[{]")
+# interpreter code that can call a function it names with a string it builds (getattr, __import__, eval, a variable
+# call), so a spawn the _SPAWNS table cannot see may hide in it (RT2)
+_DYNAMIC_CODE = re.compile(
+    r"\b(?:getattr|__import__|importlib|eval|compile|__builtins__|__dict__|__getattribute__|globals|vars|locals)\b|"
+    r"\b(?:Function|Reflect)\s*[.(]|\bglobalThis\s*\[|\brequire\s*\(\s*[^'\"\s)]|\bimport\s*\(\s*[^'\"\s)]|"
+    r"\bprocess\s*\.\s*(?:binding|dlopen)\b|\b(?:public_send|__send__|instance_eval|class_eval)\b|\.send\s*\(|"
+    r"\bcall_user_func\w*|\$\w+\s*\(|&\s*\{|\bdo\s+[\"'$]")
+# perl's and ruby's exec and system with a list and no parentheses: exec "gh","pr","merge","12"
+_BARE_LIST = re.compile(r"\b(?:exec|system)\s+((?:'[^'\n]*'|\"[^\"\n]*\")(?:\s*,\s*(?:'[^'\n]*'|\"[^\"\n]*\"))*)")
+
+
+def _unknown(text) -> tuple:
+    """An action the guard cannot name: tier 2, with a target that names this exact command, so one typed grant
+    covers it and no other."""
+    import hashlib
+    return ("unknown", "cmd-" + hashlib.sha256(str(text).encode()).hexdigest()[:10])
+
+
+def _dynamic_name(word) -> bool:
+    return word not in ("[", "[[") and bool(_DYNAMIC_NAME.search(word))
 _LOCAL_HOST = re.compile(r"^(?:localhost|127(?:\.\d{1,3}){3}|0\.0\.0\.0|::1|\[::1\]|[\w.-]+\.localhost)$", re.I)
 _OPAQUE_NAME = re.compile(r"(?:^|[:_./-])(release|publish|deploy|push|ship)(?=$|[:_./-])", re.I)
 _OPAQUE_CLASS = {"release": "release", "ship": "release", "publish": "publish", "deploy": "deploy", "push": "push"}
@@ -4122,11 +4148,12 @@ def _opaque_actions(name, argv, cwd) -> list:
 
 def _code_texts(code) -> list:
     """The command lines an interpreter's program may hand to a shell or a process: its string literals and its lists
-    of string literals, when the program can start a process at all."""
-    if not code or not (_SPAWNS.search(code) or _SPAWNS_QUOTED.search(code)):
+    of string literals, when the program can start a process at all (or call a function it names at run time)."""
+    if not code or not (_SPAWNS.search(code) or _SPAWNS_QUOTED.search(code) or _DYNAMIC_CODE.search(code)
+                        or _BARE_LIST.search(code)):
         return []
     texts = [next((g for g in m.groups() if g is not None), "") for m in _STR_LIT.finditer(code)]
-    for m in _LIST_LIT.finditer(code):
+    for m in [*_LIST_LIT.finditer(code), *_BARE_LIST.finditer(code)]:
         items = re.findall(r"'([^'\n]*)'|\"([^\"\n]*)\"", m.group(1))
         texts.append(" ".join(shlex.quote(a or b) for a, b in items))
     return [t for t in texts if t.strip()]
@@ -4204,16 +4231,24 @@ def _segment_actions(argv, cwd, bodies, depth) -> list:
     else:
         found = _publish_actions(name, argv, cwd) or _deploy_actions(name, argv, cwd) or _http_actions(name, argv)
         if not found and _INTERP.match(name) and not _repo_script(argv, cwd):
-            for text in _code_texts(_program(argv, cwd, bodies)[0]):
+            code = _program(argv, cwd, bodies)[0]
+            for text in _code_texts(code):
                 more += _text_actions(text, cwd, depth + 1) or []
+            if code and _DYNAMIC_CODE.search(code):  # it may build the name of what it runs (RT2)
+                found = [_unknown(" ".join(argv))]
         if not found and "/" in argv[0] and name not in _SHELLS and not _INTERP.match(name):
             script = _read_small(resolve(argv[0], cwd), 1 << 18)  # a shell script run by its path: what it runs
             if _SHEBANG_SH.match(script):
                 more += _text_actions(script, cwd, depth + 1) or []
         found = found or _opaque_actions(name, argv, cwd)
+    return _found(found, argv, cwd) + more
+
+
+def _found(found, argv, cwd) -> list:
+    """(action, target[, repo]) tuples of one segment -> the classifier's action records."""
     words = " ".join(argv)[:200]
     return [{"action": f[0], "tier": TIERS[f[0]], "target": f[1], "repo": (f[2] if len(f) > 2 and f[2] else "") or
-             _repo_of(cwd), "words": words} for f in found] + more
+             _repo_of(cwd), "words": words} for f in found]
 
 
 def _argv_actions(argv, cwd, bodies, depth):
@@ -4265,8 +4300,13 @@ def _text_actions(text, cwd, depth=0):
     if segs is None:
         return None
     bodies, out, gh_repo = heredoc_bodies(text), [], ""
-    for k, (argv0, _, _, here) in enumerate(segs):
+    for k, (argv0, _, op, here) in enumerate(segs):
         argv = _unwrap(argv0)
+        # a program the shell names only when it runs (RT1): `env -S '…'` splits a string into a command, `$(…)` or
+        # backticks in the command word print its name, a variable or a glob expands to it
+        if _env_runs_string(argv0) or (argv and (_dynamic_name(argv[0]) or (argv == ["$"] and op == "("))):
+            out += _found([_unknown(text)], argv0 or argv, cwd)
+            continue
         sets = [a[8:] for a in (argv0[:argv0.index(argv[0])] if argv and argv[0] in argv0 else argv0)
                 if a.startswith("GH_REPO=")]
         if argv[:1] in (["export"], ["declare"], ["typeset"]):
@@ -4424,6 +4464,11 @@ UNPARSED_REASON = ("The guard cannot parse this command, and it names an irrever
 
 
 def _main_reason(a) -> str:
+    if a["action"] == "unknown":
+        return (f"`{a['words']}` {_what(a)}: the guard cannot see which program runs (spec C6). Write the program's "
+                f"name out as a plain word (`gh pr merge 12`, not `$(…) pr merge 12`, a variable or a string a "
+                f"program builds), so the guard can classify it. If it must run as it is, ask the developer first; "
+                f"they approve this exact command by typing this line on its own: `grant unknown {a['target']}`.")
     if _UNKNOWABLE.search(a["target"]):
         return (f"`{a['words']}` {_what(a)} in {a['repo'] or 'this repository'}, which cannot be undone, and its target "
                 f"is only known when it runs, so no grant can cover it (spec C6). Write the target out (the PR number, "
