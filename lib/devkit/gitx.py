@@ -425,9 +425,14 @@ def no_evidence(c, action: str, rev="HEAD") -> int:
 def describe_evidence(ev) -> str:
     if not ev:
         return "none"
-    how = {"run": "dev ci --run", "attested": "attested", "marked": "dev ci --mark-passed"}.get(ev.get("how"),
-                                                                                                ev.get("how"))
+    how = {"run": "dev ci --run", "attested": "attested", "marked": "dev ci --mark-passed",
+           "resumed": "dev ci --run --resume"}.get(ev.get("how"), ev.get("how"))
     steps = f", {len(ev.get('steps') or [])} steps" if ev.get("steps") else ""
+    if ev.get("how") == "resumed":
+        st = ev.get("steps") or []
+        part = [x for x in st if x.get("how") == "partial"]
+        steps += f" ({len(part)} partial, {sum(x.get('tests') or 0 for x in part)} tests; " \
+                 f"{sum(1 for x in st if x.get('how') == 'kept')} kept)"
     return f"{how}{steps}, {_age(ev.get('ts'))}"
 
 
@@ -1202,12 +1207,16 @@ def add_ci_arguments(p):
     g.add_argument("--dry-run", action="store_true", help="with --run: show the plan without running it")
     g.add_argument("--keep-going", action="store_true", help="with --run: do not stop at the first failure")
     g.add_argument("--step-timeout", type=int, default=30, metavar="MIN", help="with --run: minutes per step")
+    g.add_argument("--resume", action="store_true",
+                   help="with --run: re-run failed and never-run steps, and passed steps the changes since can affect; "
+                        "a test step re-runs only its failed and affected tests (whole when the change is global)")
     return p
 
 
 def ci_command(a, top):
     """Call from cmd_ci once `top` is known: an exit code when a local-evidence flag is set, else None."""
-    if not (getattr(a, "run", False) or getattr(a, "mark_passed", False) or getattr(a, "evidence", False)):
+    if not (getattr(a, "run", False) or getattr(a, "mark_passed", False) or getattr(a, "evidence", False)
+            or getattr(a, "resume", False)):
         return None
     c = ctx(top)
     if c is None:
@@ -1229,7 +1238,8 @@ def ci_command(a, top):
         ok(f"local CI recorded as passed for tree {tree[:7]} at {(ev['sha'] or 'HEAD')[:7]}{dirty} · "
            f"dev push will accept it")
         return 0
-    return run_local_ci(c, dry_run=a.dry_run, keep_going=a.keep_going, step_timeout=a.step_timeout)
+    return run_local_ci(c, dry_run=a.dry_run, keep_going=a.keep_going, step_timeout=a.step_timeout,
+                        resume=getattr(a, "resume", False))
 
 
 def _fmt_secs(s) -> str:
@@ -1237,7 +1247,68 @@ def _fmt_secs(s) -> str:
     return f"{s // 60}m{s % 60:02d}s" if s >= 60 else f"{s}s"
 
 
-def run_local_ci(c, dry_run=False, keep_going=False, step_timeout=30) -> int:
+def _steps_file(c) -> Path:
+    return _ci_dir() / "steps" / f"{_key(c)}.json"
+
+
+def step_records(c) -> dict:
+    """The last result of every local CI step: {"<job> › <step>": {rc, tree, sha, secs, how, failed_tests, …}}."""
+    data = core.read_json(_steps_file(c), {})
+    return (data.get("steps") or {}) if isinstance(data, dict) else {}
+
+
+def _save_step(c, key, rec) -> None:
+    f = _steps_file(c)
+    f.parent.mkdir(parents=True, exist_ok=True)
+    data = core.read_json(f, {}) or {}
+    data.setdefault("steps", {})[key] = rec
+    data["repo"] = c.pid
+    tmp = f.with_suffix(".tmp")
+    tmp.write_text(json.dumps(data, indent=1))
+    os.replace(tmp, f)
+
+
+def _step_key(s) -> str:
+    return f"{s['job']} › {s['name']}"
+
+
+def _tree_diff(top, old, new):
+    """Files that differ between two recorded trees; None when one of them is gone (pruned)."""
+    if old == new:
+        return []
+    rc, out, _ = core.sh(["git", "-C", top, "diff-tree", "-r", "--name-only", "--no-renames", "-z", old, new],
+                         timeout=120, env=core.GIT_ENV)
+    return [f for f in out.split("\0") if f] if rc == 0 else None
+
+
+def _resume_plan(c, s, rec, tree, cache):
+    """-> ("kept" | "partial" | "full", detail) for one step on `tree`, from its last recorded result."""
+    from . import testx
+    if not rec or rec.get("command") != s["run"] or not rec.get("tree"):
+        return "full", ("never run" if not rec else "its command changed")
+    if rec["tree"] not in cache:
+        cache[rec["tree"]] = _tree_diff(c.top, rec["tree"], tree)
+    changed = cache[rec["tree"]]
+    if changed is None:
+        return "full", "the tree it ran on is gone"
+    runner = testx.recognize(s["run"], s["cwd"], c.top)
+    if rec.get("rc") != 0:
+        if runner and rec.get("failed") and not runner["failfast"]:
+            return "partial", {"runner": runner, "failed": rec["failed"], "changed": changed}
+        return "full", "failed last time"
+    if not changed:
+        return "kept", "same tree"
+    if runner:
+        return "partial", {"runner": runner, "failed": [], "changed": changed}
+    key = ("radius", rec["tree"])
+    if key not in cache:
+        cache[key] = testx.blast_radius(c.top, changed)
+    if cache[key]["mode"] == "none":
+        return "kept", "only docs changed since"
+    return "full", f"{len(changed)} file(s) changed since"
+
+
+def run_local_ci(c, dry_run=False, keep_going=False, step_timeout=30, resume=False) -> int:
     jobs = plan(c.top)
     if not jobs:
         return fail("no GitHub Actions workflows to run here",
@@ -1248,17 +1319,29 @@ def run_local_ci(c, dry_run=False, keep_going=False, step_timeout=30) -> int:
                if s["skip"] and s["skip"] != "setup"]
     setup = sum(1 for j in jobs for s in j["steps"] if s["skip"] == "setup")
     blocking = [x for x in skipped if x[3]]
+    records = step_records(c) if resume else {}
+    if resume and not records:
+        info("nothing recorded yet: --resume runs every step")
+        resume = False
     if dry_run:
+        tree, cache = (work_tree(c.top) if resume else None), {}
         print(ui.section(f"Local CI plan · {len(runnable)} step(s) · {len(skipped)} skipped · {setup} setup action(s)"))
         for s in runnable:
             cwd = "" if s["cwd"] == c.top else f"  (in {os.path.relpath(s['cwd'], c.top)})"
-            print(f"  $ {s['job']} › {s['name']}{ui.dim(cwd)}")
+            how = ""
+            if resume and tree:
+                d, detail = _resume_plan(c, s, records.get(_step_key(s)), tree, cache)
+                how = f"  resume: {d}" + (f" ({detail})" if isinstance(detail, str) else
+                                          " (failed and affected tests; whole step if the change is global)")
+            print(f"  $ {s['job']} › {s['name']}{ui.dim(cwd + how)}")
         for job, step, why, blk in skipped:
             print(f"  {ui.WARN if blk else '–'} {job} › {step}  {ui.dim(why)}")
         return 0
     import shutil
     import tempfile
+    from . import testx
     tree = work_tree(c.top)
+    sha, head_tree = _head(c.top)
     shim = None
     if not shutil.which("python") and shutil.which("python3"):
         shim = tempfile.mkdtemp(prefix="devkit-ci-")  # setup-python gives CI a `python`; macOS has python3 only
@@ -1268,34 +1351,90 @@ def run_local_ci(c, dry_run=False, keep_going=False, step_timeout=30) -> int:
     logs.mkdir(parents=True, exist_ok=True)
     for f in logs.glob("*.log"):
         f.unlink()
-    results, failed, t_all = [], [], time.time()
+    results, failed, t_all, cache = [], [], time.time(), {}
     for n, s in enumerate(runnable, 1):
+        key = _step_key(s)
         env = dict(os.environ, CI="true")
         env.update({k: v for k, v in s["env"].items() if "${{" not in v})
         if shim:
             env["PATH"] = shim + os.pathsep + env.get("PATH", "")
         log = logs / f"{n:02d}-{_slug(s['job'] + '-' + s['name'])[:50]}.log"
-        t0 = time.time()
-        try:
-            with open(log, "w") as fh:
-                rc = subprocess.run(["bash", "--noprofile", "--norc", "-eo", "pipefail", "-c", s["run"]],
-                                    cwd=s["cwd"], stdout=fh, stderr=subprocess.STDOUT, env=env,
-                                    timeout=step_timeout * 60).returncode
-        except subprocess.TimeoutExpired:
-            rc = 124
-        except OSError as e:
-            log.write_text(str(e))
-            rc = 127
-        secs = time.time() - t0
-        results.append({"job": s["job"], "step": s["name"], "rc": rc, "secs": round(secs, 1),
-                        "command": s["run"].splitlines()[0][:120] if s["run"] else ""})
-        print(f"  {ui.OK if rc == 0 else ui.FAIL} {s['job']} › {s['name']}  {ui.dim(_fmt_secs(secs))}")
+        label = f"{s['job']} › {s['name']}"
+        command = s["run"].splitlines()[0][:120] if s["run"] else ""
+        rec = records.get(key)
+        decision, detail = _resume_plan(c, s, rec, tree, cache) if resume and tree else ("full", None)
+        res = None
+        if decision == "partial":
+            runner = detail["runner"]
+            runner["env"] = dict(runner.get("env") or {})
+            p = testx.partial(c.top, runner, failed=detail["failed"], changed=detail["changed"],
+                              env=dict(env, **runner["env"]), timeout=step_timeout * 60, log=log)
+            if "skip" in p:
+                decision, detail = "kept", p["skip"]
+            elif "whole" in p:
+                info(f"{label}: the whole step ({p['whole']})")
+                decision = "full"
+            else:
+                res = p["result"]
+        if decision == "kept":
+            base = rec.get("base") or {"sha": rec.get("sha"), "tree": rec.get("tree")}
+            results.append({"job": s["job"], "step": s["name"], "rc": 0, "secs": 0, "command": command, "how": "kept",
+                            "sha": rec.get("sha"), "tree": rec.get("tree"), "base_sha": base.get("sha"),
+                            "partials": rec.get("partials") or []})
+            print(f"  {ui.OK} {label}  {ui.dim('kept: passed on ' + (rec.get('sha') or '?')[:7] + ' · ' + detail)}")
+            continue
+        if res is not None:
+            rc, secs, n_tests = (1 if res["failures"] else 0), res["secs"], res["count"]
+            base = rec.get("base") or {"sha": rec.get("sha"), "tree": rec.get("tree")}
+            partials = ((rec.get("partials") or []) + [{"sha": sha, "tree": tree, "tests": res["count"]}])[-5:]
+            print(f"  {ui.OK if rc == 0 else ui.FAIL} {label}  "
+                  f"{ui.dim(f're-ran {n_tests} failed or affected test(s) · {_fmt_secs(secs)}')}")
+            for fx in res["failures"][:10]:
+                where = f"{fx['file']}:{fx['line']}" if fx["file"] and fx["line"] else fx["file"] or fx["id"]
+                print(f"      {where}  {fx['id']}")
+                if fx["message"]:
+                    print(f"        {ui.dim(fx['message'][:200])}")
+            new = {"job": s["job"], "step": s["name"], "command": s["run"], "rc": rc, "tree": tree, "sha": sha,
+                   "clean": tree == head_tree, "secs": round(secs, 1), "ts": int(time.time()), "how": "partial",
+                   "tests": res["count"], "runner": res["runner"], "base": base, "partials": partials,
+                   "failed_tests": [fx["id"] for fx in res["failures"]],
+                   "failed": [{"id": fx["id"], "file": fx["file"]} for fx in res["failures"]]}
+            results.append({"job": s["job"], "step": s["name"], "rc": rc, "secs": round(secs, 1), "command": command,
+                            "how": "partial", "tests": res["count"], "sha": sha, "tree": tree,
+                            "base_sha": base.get("sha"), "base_tree": base.get("tree"), "partials": partials})
+        else:
+            t0 = time.time()
+            try:
+                with open(log, "w") as fh:
+                    rc = subprocess.run(["bash", "--noprofile", "--norc", "-eo", "pipefail", "-c", s["run"]],
+                                        cwd=s["cwd"], stdout=fh, stderr=subprocess.STDOUT, env=env,
+                                        timeout=step_timeout * 60).returncode
+            except subprocess.TimeoutExpired:
+                rc = 124
+            except OSError as e:
+                log.write_text(str(e))
+                rc = 127
+            secs = time.time() - t0
+            runner = testx.recognize(s["run"], s["cwd"], c.top)
+            fails = testx.step_failures(runner, log.read_text(errors="replace"), c.top, t0) \
+                if rc != 0 and runner else None
+            new = {"job": s["job"], "step": s["name"], "command": s["run"], "rc": rc, "tree": tree, "sha": sha,
+                   "clean": tree == head_tree, "secs": round(secs, 1), "ts": int(time.time()), "how": "full",
+                   "runner": runner["name"] if runner else None,
+                   "failed_tests": [fx["id"] for fx in fails] if fails else None, "failed": fails,
+                   "base": {"sha": sha, "tree": tree}, "partials": []}
+            results.append({"job": s["job"], "step": s["name"], "rc": rc, "secs": round(secs, 1), "command": command,
+                            "how": "full", "sha": sha, "tree": tree})
+            print(f"  {ui.OK if rc == 0 else ui.FAIL} {label}  {ui.dim(_fmt_secs(secs))}")
+            if rc != 0:
+                tail = [ln.rstrip()[:200] for ln in log.read_text(errors="replace").splitlines() if ln.strip()][-20:]
+                for ln in tail:
+                    print(f"      {ui.dim(ui.ANSI_RE.sub('', ln))}")
+                print(f"      {ui.dim('exit ' + str(rc) + ' · full log: ' + core.tilde(log))}")
+        if tree:
+            _save_step(c, key, new)
         if rc != 0:
             failed.append(s)
-            tail = [ln.rstrip()[:200] for ln in log.read_text(errors="replace").splitlines() if ln.strip()][-20:]
-            for ln in tail:
-                print(f"      {ui.dim(ui.ANSI_RE.sub('', ln))}")
-            print(f"      {ui.dim('exit ' + str(rc) + ' · full log: ' + core.tilde(log))}")
             if not keep_going:
                 break
     took = _fmt_secs(time.time() - t_all)
@@ -1303,16 +1442,25 @@ def run_local_ci(c, dry_run=False, keep_going=False, step_timeout=30) -> int:
         shutil.rmtree(shim, ignore_errors=True)
     for job, step, why, blk in skipped:
         print(f"  {ui.WARN if blk else '–'} {job} › {step}  {ui.dim(why)}")
+    again = "dev ci --run --resume again (it re-runs only what failed or changed)" if resume else \
+        "fix it, then dev ci --run --resume (only what failed or changed)"
     if failed:
         return fail(f"local CI failed: {len(failed)} of {len(results)} step(s) ({took}) · no evidence recorded",
-                    "fix it, then dev ci --run again")
+                    again)
     if blocking:
         return fail(f"{len(results)} step(s) passed ({took}), but {len(blocking)} check(s) could not run here · "
                     f"no evidence recorded",
                     'run them yourself, then: dev ci --mark-passed --note "<command>: <result>"')
     if not tree or work_tree(c.top) != tree:
         return fail("files changed while the suite ran · no evidence recorded", "dev ci --run again")
-    record_evidence(c, "run", tree, steps=results, took=took)
+    how = "run" if all(r["how"] == "full" for r in results) else "resumed"
+    record_evidence(c, how, tree, steps=results, took=took)
+    if how == "resumed":
+        kinds = {k: sum(1 for r in results if r["how"] == k) for k in ("full", "partial", "kept")}
+        tests = sum(r.get("tests") or 0 for r in results)
+        ok(f"local CI passed (resumed): {kinds['full']} full, {kinds['partial']} partial ({tests} test(s)), "
+           f"{kinds['kept']} kept in {took} · evidence recorded for tree {tree[:7]} · dev push accepts it")
+        return 0
     ok(f"local CI passed: {len(results)} step(s) in {took}" + (f" · {len(skipped)} skipped" if skipped else "") +
        f" · evidence recorded for tree {tree[:7]} · dev push accepts it")
     return 0
@@ -1384,9 +1532,11 @@ SECTION_ALIASES = {
 }
 STRINGS = {
     "en": {"local_ci": "Local CI", "passed": "passed", "steps": "steps", "attested": "suite passed (attested)",
-           "task": "Task", "ticket": "Ticket"},
+           "task": "Task", "ticket": "Ticket", "full_on": "full on", "tests_on": "affected tests on",
+           "unaffected": "unaffected since"},
     "es": {"local_ci": "CI local", "passed": "superado", "steps": "pasos", "attested": "suite superada (confirmado)",
-           "task": "Tarea", "ticket": "Ticket"},
+           "task": "Tarea", "ticket": "Ticket", "full_on": "completo en", "tests_on": "pruebas afectadas en",
+           "unaffected": "sin cambios que le afecten desde entonces"},
 }
 _HEADING = re.compile(r"^(#{1,6})\s+(.+?)\s*#*\s*$")
 _PLACEHOLDER = re.compile(r"<(?!https?://|!--)[^<>\n]+>")
@@ -1500,6 +1650,10 @@ def _verify_line(ev, T) -> str:
     if not ev:
         return ""
     sha = (ev.get("sha") or "")[:7]
+    if ev.get("how") == "resumed":
+        steps = ev.get("steps") or []
+        parts = "; ".join(_resumed_step(x, T) for x in steps)
+        return f"- {T['local_ci']}: `dev ci --run --resume` → {T['passed']} ({len(steps)} {T['steps']}): {parts} @ {sha}"
     if ev.get("how") == "run":
         names = ", ".join(s["step"] for s in (ev.get("steps") or [])[:4])
         more = f" +{len(ev['steps']) - 4}" if len(ev.get("steps") or []) > 4 else ""
@@ -1508,6 +1662,17 @@ def _verify_line(ev, T) -> str:
     if ev.get("note") and not ev["note"].startswith("dev "):
         return f"- {T['local_ci']}: {ev['note']} @ {sha}"
     return f"- {T['local_ci']}: {T['attested']} @ {sha}"
+
+
+def _resumed_step(x, T) -> str:
+    """One step of resumed evidence: 'Unit: full on abc1234 + 37 affected tests on def5678'."""
+    base = (x.get("base_sha") or x.get("sha") or "")[:7]
+    chain = "".join(f" + {p.get('tests')} {T['tests_on']} {(p.get('sha') or '')[:7]}" for p in x.get("partials") or [])
+    if x.get("how") == "full":
+        return f"{x['step']}: {T['full_on']} {(x.get('sha') or '')[:7]}"
+    if x.get("how") == "kept":
+        return f"{x['step']}: {T['full_on']} {base}{chain} ({T['unaffected']})"
+    return f"{x['step']}: {T['full_on']} {base}{chain}"
 
 
 def _fill(lines, start, end, items, drop) -> list:
