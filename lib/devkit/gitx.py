@@ -2665,11 +2665,10 @@ def cmd_issue(a) -> int:
 
 # --------------------------------------------------------------------------- dev git … · dev gh … (escape hatches)
 
-# The hatches `dev git` and `dev gh` pass on from their environment to the guard. Never the push budget's and the secret
-# scan's (spec F8, rule 4): dev's environment is not the command the guard parsed, so those two come only from a
-# command's own prefix at PreToolUse (`DEVKIT_SKIP_SECRET_SCAN=1 git commit`, a recorded use) or, for the budget,
-# from a real local run's evidence.
-ACK_VARS = ("DEVKIT_FLAKY", "DEVKIT_CROSS_PROJECT")
+# `dev git` and `dev gh` pass no escape hatch from their environment to the guard (spec F8, rule 4; decided for
+# 26.11.3 for DEVKIT_FLAKY and DEVKIT_CROSS_PROJECT too): dev's environment is not the command the guard parsed, and an
+# exported hatch would lift a rule for every later call. A hatch is a command's own prefix at PreToolUse
+# (`DEVKIT_FLAKY=1 gh run rerun 5`, a recorded use), or, for the push budget, a real local run's evidence.
 
 
 def _agent() -> str:
@@ -2677,7 +2676,7 @@ def _agent() -> str:
 
 
 def _guard_cmd(argv, cwd):
-    acks = [f"{k}=1" for k in ACK_VARS if os.environ.get(k)]
+    acks = []
     if list(argv[:1]) == ["gh"] and list(argv[1:3]) in (["pr", "merge"], ["release", "create"]):
         acks.append("DEVKIT_RAW_GH=1")  # devkit gates these itself below (checks, reviews, policy); `--admin` stays refused
     return guard.check_bash(" ".join(shlex.quote(x) for x in acks + list(argv)), cwd, _agent())
@@ -2705,7 +2704,7 @@ def git_push_policy(args, cwd, ci_passed: bool = False):
     `ci_passed`: the command's own --ci-passed, which stands for local CI evidence but never lifts the push budget."""
     c = ctx(cwd)
     text = "git push " + " ".join(args)
-    acks = {k for k in ACK_VARS if os.environ.get(k)}
+    acks = set()
     force = any(x in ("--force", "-f") or (re.match(r"^-[a-zA-Z]*f[a-zA-Z]*$", x) and not x.startswith("--"))
                 for x in args) or any(x.startswith("+") for x in args if not x.startswith("-"))
     if force:

@@ -92,7 +92,7 @@ class Sandbox:
         self.root = Path(self.tmp.name).resolve()
         self.saved_git_env = {k: core.GIT_ENV.get(k) for k in ISOLATE}
         core.GIT_ENV.update(ISOLATE)
-        self.saved_os = {k: os.environ.pop(k, None) for k in gitx.ACK_VARS + ("DEVKIT_AGENT",)}
+        self.saved_os = {k: os.environ.pop(k, None) for k in ("DEVKIT_FLAKY", "DEVKIT_CROSS_PROJECT", "DEVKIT_AGENT")}
         self.saved = (core.STATE, core.HANDOFF, gitx.GH, gitx.EXEC, gitx.SLEEP, gitx._me, gitx._handoff_log,
                       gitx.TEMPLATE_DIR, cistatus.runs_for, delivery.POLICIES)
         core.STATE = self.root / "state"
@@ -1149,6 +1149,17 @@ class PassthroughTests(unittest.TestCase):
             self.assertEqual(s.execs, [])
             self.assertEqual(dev("gh", "pr", "list")[0], 0)
             self.assertEqual(s.execs[-1][0], ["gh", "pr", "list"])
+
+    def test_dev_git_and_dev_gh_take_no_hatch_from_their_environment(self):
+        # dev's environment is not the command the guard parsed: an exported DEVKIT_FLAKY=1 let every later
+        # `dev gh run rerun` through (decided for 26.11.3: the hatches are a command's own prefix, never dev's env)
+        with Sandbox() as s:
+            s.branch("feat/rerun")
+            with mock.patch.dict(os.environ, {"DEVKIT_FLAKY": "1", "DEVKIT_CROSS_PROJECT": "1"}):
+                rc, _, err = dev("gh", "run", "rerun", "5", "--failed")
+            self.assertEqual(rc, 2)
+            self.assertIn("Re-running CI without a change", err)
+            self.assertEqual(s.execs, [])
 
 
 

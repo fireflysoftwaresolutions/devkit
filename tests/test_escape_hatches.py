@@ -273,7 +273,6 @@ class ParsedHatchTests(unittest.TestCase):
             rc = gitx.git_push_policy(["origin", "feat/x"], repo)
         self.assertEqual(rc, 2)
         self.assertIn("no local CI evidence", err.getvalue())
-        self.assertEqual(gitx.ACK_VARS, ("DEVKIT_FLAKY", "DEVKIT_CROSS_PROJECT"))
 
     def test_the_stub_gate_takes_its_hatch_only_as_a_commit_prefix_or_a_dev_commit_flag(self):
         for cmd in ("DEVKIT_ALLOW_STUBS=1 git commit -m x", "dev commit --wip", "bin/dev commit --wip -m x",
