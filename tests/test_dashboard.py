@@ -2,13 +2,16 @@
 # SPDX-License-Identifier: Apache-2.0
 """Tests for the dashboard (decisions in Python, safe rendering). Run: python3 -m unittest discover -s tests -v"""
 import json
+import os
 import re
 import socket
+import subprocess
 import sys
 import tempfile
 import time
 import unittest
 from pathlib import Path
+from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "lib"))
 
@@ -622,6 +625,192 @@ class TeamWorkTests(unittest.TestCase):
         self.assertEqual(r("gh auth login --token abc123"), "gh auth login --token ***")
         self.assertEqual(r("password=hunter2 ./run"), "password=*** ./run")
         self.assertEqual(r("git clone fireflyframework-org-redesign-handoff-really-long"), "git clone fireflyframework-org-redesign-handoff-really-long")
+
+
+def local_ts(y, mo, d, hh, mm):
+    return time.mktime((y, mo, d, hh, mm, 0, 0, 0, -1))
+
+
+class DetailTests(unittest.TestCase):
+    """The data the page lacked: honest project states, jobs, CI watches, whole runs and items, explorer files."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.root = Path(self.tmp.name)
+        self.state = TempState()
+        self.st = self.state.__enter__()
+        from devkit import jobs, progress
+        self.patches = [mock.patch.object(progress, "RUNS", self.st / "runs"),
+                        mock.patch.object(jobs, "JOURNAL", self.st / "jobs" / "journal.jsonl"),
+                        mock.patch.object(jobs, "LOGS", self.st / "logs" / "jobs"),
+                        mock.patch.object(jobs, "AGENTS_DIR", self.root / "LaunchAgents")]
+        for p in self.patches:
+            p.start()
+
+    def tearDown(self):
+        for p in self.patches:
+            p.stop()
+        self.state.__exit__()
+        self.tmp.cleanup()
+
+    def test_a_project_without_git_or_pr_data_is_not_known(self):
+        widget, remote_only = registry()["projects"]
+        self.assertTrue(dashboard.project_health(widget, NOW)["known"])
+        h = dashboard.project_health(remote_only, NOW)
+        self.assertEqual((h["level"], h["known"]), ("ok", False))     # nothing wrong, and nothing to show it is right
+        plain = {"id": "_local/x", "git": False, "main": {}, "prs_open": []}
+        self.assertFalse(dashboard.project_health(plain, NOW)["known"])
+        self.assertIn('if (p.health && p.health.known === false) return "none";', dashboard.JS)
+
+    def test_jobs_show_the_last_and_next_run_and_failures(self):
+        from devkit import jobs
+        now = local_ts(2026, 11, 6, 10, 0)
+        defs = {"sync": {"enabled": True, "every": 60, "about": "map", "cmd": ["sync"], "timeout": 20},
+                "gc": {"enabled": True, "at": "04:00", "cmd": ["gc"], "timeout": 30},
+                "lessons": {"enabled": False, "weekly": "fri 16:00", "cmd": ["lesson"], "timeout": 5}}
+        jobs.JOURNAL.parent.mkdir(parents=True)
+        jobs.JOURNAL.write_text("".join(json.dumps(r) + "\n" for r in [
+            {"job": "sync", "start": now - 7200, "end": now - 7100, "rc": 0, "duration": 100, "summary": "ok"},
+            {"job": "gc", "start": now - 3 * 3600, "end": now - 3 * 3600 + 5, "rc": 0, "duration": 5, "summary": "freed 1 GB"},
+            {"job": "sync", "start": now - 3600, "end": now - 3500, "rc": 1, "duration": 100, "summary": "push failed"}]))
+        jobs.AGENTS_DIR.mkdir()
+        (jobs.AGENTS_DIR / "com.devkit.job.sync.plist").write_text("x")
+        with mock.patch.object(jobs, "jobs", lambda: defs), mock.patch("time.time", lambda: now):
+            out = {j["name"]: j for j in dashboard.jobs_summary(now)}
+        self.assertEqual((out["sync"]["state"], out["sync"]["runs"], out["sync"]["failed"]), ("failed", 2, 1))
+        self.assertEqual(out["sync"]["last"]["summary"], "push failed")
+        self.assertEqual(out["sync"]["next"], round(now - 3600 + 3600))        # every 60 min from the last start
+        self.assertEqual(out["gc"]["next"], round(local_ts(2026, 11, 7, 4, 0)))  # 04:00 has passed today
+        self.assertEqual((out["lessons"]["state"], out["lessons"]["next"]), ("off", None))
+        self.assertEqual([out[n]["installed"] for n in ("sync", "gc")], [True, False])
+
+    def test_one_job_has_its_history_newest_first_and_its_log_tail(self):
+        from devkit import jobs
+        now = time.time()
+        defs = {"sync": {"enabled": True, "every": 60, "cmd": ["sync"], "timeout": 20}}
+        jobs.JOURNAL.parent.mkdir(parents=True)
+        jobs.JOURNAL.write_text("".join(json.dumps({"job": "sync", "start": now - 60 * k, "rc": 0, "summary": f"run {k}"}) + "\n"
+                                        for k in (3, 2, 1)))
+        jobs.LOGS.mkdir(parents=True)
+        (jobs.LOGS / "sync.log").write_text("\n".join(f"line {i}" for i in range(250)) + "\n")
+        with mock.patch.object(jobs, "jobs", lambda: defs), mock.patch.object(jobs, "loaded", lambda n: True):
+            one = dashboard.jobs_detail("sync")
+            self.assertIsNone(dashboard.jobs_detail("nope"))
+            self.assertIsNone(dashboard.jobs_detail("../sync"))
+            every = dashboard.jobs_detail()
+        self.assertEqual([r["summary"] for r in one["history"]], ["run 1", "run 2", "run 3"])
+        self.assertEqual((len(one["log"]), one["log"][0], one["log"][-1]), (200, "line 50", "line 249"))
+        self.assertTrue(one["loaded"])
+        self.assertEqual(([j["name"] for j in every["jobs"]], every["complete"]), (["sync"], True))
+
+    def test_ci_watches_newest_first_with_the_first_error_and_live_watchers(self):
+        w = self.st / "ci" / "watch"
+        w.mkdir(parents=True)
+        diag = {"run": "ci", "number": 9, "url": "https://x/9", "class": "test", "action": "reproduce it locally",
+                "failed_jobs": [{"name": "unit", "step": "pytest"}], "excerpt": "E" * 2000}
+        (w / "acme_widget-main.json").write_text(json.dumps({"ts": 100, "state": "passed", "repo": "acme/widget", "branch": "main",
+                                                            "runs": [], "diagnoses": []}))
+        (w / "acme_widget-fix_y.json").write_text(json.dumps({"ts": 200, "state": "failed", "repo": "acme/widget", "branch": "fix/y",
+                                                             "sha": "abc1234", "runs": [{"name": "ci", "number": 9}], "diagnoses": [diag]}))
+        os.utime(w / "acme_widget-main.json", (100, 100))
+        dead = subprocess.Popen([sys.executable, "-c", "pass"])
+        dead.wait()
+        (w / "widget-fix_y-abc1234.lock").write_text(f"{os.getpid()} 150")
+        (w / "widget-main-def5678.lock").write_text(f"{dead.pid} 140")
+        ci = dashboard.ci_watches()
+        self.assertEqual([x["branch"] for x in ci["watches"]], ["fix/y", "main"])
+        top = ci["watches"][0]
+        self.assertEqual((top["class"], top["action"], len(top["first_error"])), ("test", "reproduce it locally", 600))
+        self.assertEqual(top["failures"][0]["jobs"], [{"name": "unit", "step": "pytest"}])
+        self.assertTrue(ci["complete"])
+        self.assertEqual(len(dashboard.ci_watches(excerpt=0)["watches"][0]["first_error"]), 2000)
+        self.assertEqual(ci["watching"], [{"key": "widget-fix_y", "sha": "abc1234", "pid": os.getpid(), "since": 150}])
+
+    def test_an_item_is_whole_with_everything_that_names_it(self):
+        from devkit import progress
+        h = self.root / "handoff"
+        make_handoff(h)
+        log = [f"v{n} · {iso(NOW - n)} · me@testmac (claude) · note: entry {n}" for n in range(100, 0, -1)]
+        item(h, "acme/widget", "T-big", "Long task", "doing", "now", "me@testmac (claude:sess12345678)", NOW + 3600, ["initiative:lending"], log=log)
+        f = h / "items/acme/widget/T-big.md"
+        f.write_text(f.read_text().replace("Body " + EVIL, "x" * 10_000))
+        (h / "plans/acme/widget/export.md").write_text("# Export plan\n\nCovers T-big.\n")
+        (h / "sessions/acme/widget/2026-11.md").write_text(f"# Sessions\n\n- {time.strftime('%Y-%m-%d %H:%M', time.localtime(NOW))} · me@testmac · claude · `main` · worked on T-big\n")
+        (self.st / "sessions").mkdir()
+        (self.st / "sessions" / "claude-sess12345678-rest.json").write_text(json.dumps({"branch": "feat/export", "top": "/w/export"}))
+        progress.RUNS.mkdir()
+        (progress.RUNS / "claude-other.json").write_text(json.dumps({"v": 2, "agent": "claude", "session": "other", "goal": "Ship T-big",
+                                                                     "state": "running", "started": NOW - 600, "plan": [], "intervals": []}))
+        reg = registry()
+        reg["projects"][0]["worktrees"].append({"path": "/w/export", "branch": "feat/export"})
+        reg["projects"][0]["prs_open"].append(pr(40, branch="feat/export"))
+        reg["projects"][0]["path"] = None
+        d = dashboard.item_detail("T-big", handoff=h, reg=reg, now=NOW)
+        self.assertEqual((len(d["body"]), len(d["changelog"])), (10_000, 100))
+        self.assertEqual(d["links"], [{"kind": "initiative", "target": "lending", "text": "initiative:lending"}])
+        self.assertEqual((d["lock"]["state"], d["lock"]["session"]), ("held", "sess12345678"))
+        self.assertEqual(d["plans"], [{"path": "plans/acme/widget/export.md", "title": "Export plan"}])
+        self.assertEqual(len(d["sessions"]), 1)
+        self.assertEqual(d["branches"], [{"branch": "feat/export", "worktree": "/w/export", "match": "the holder's session works on it"}])
+        self.assertEqual([(p["number"], p["match"]) for p in d["prs"]], [(40, "the PR's branch is linked")])
+        self.assertEqual((d["run"]["id"], d["run"]["match"]), ("claude-other", "its goal or a step has the id"))
+        for bad in ("T-nope", "../../etc/passwd", "T-big/../x", ""):
+            self.assertIsNone(dashboard.item_detail(bad, handoff=h, reg=reg), bad)
+
+    def test_a_run_is_whole_with_evidence_history_lanes_decisions_and_questions(self):
+        from devkit import progress
+        progress.RUNS.mkdir()
+        now = time.time()
+        run = {"v": 2, "agent": "claude", "session": "s1", "project": "acme/widget", "goal": "Ship", "state": "running", "mode": "auto",
+               "started": now - 1200, "estimate": 40, "intervals": [[now - 1200, None, "turn", "main"]],
+               "plan": [{"name": "api", "state": "done", "owner": "a1", "est": 20, "started": now - 1200, "finished": now - 600},
+                        {"name": "ui", "state": "running", "owner": "main", "est": 20, "after": ["api"], "started": now - 600}],
+               "agents": {"a1": {"label": "Tank: the API", "persona": "Tank", "state": "done", "scope": "lib/**", "started": now - 1200, "finished": now - 600}},
+               "updates": [{"ts": now - 600, "kind": "step", "text": "api done", "check": "12 tests green", "step": "api"},
+                           {"ts": now - 300, "kind": "note", "text": "styling", "step": "ui"}],
+               "history": [{"ts": now - 600, "step": "api", "from": "running", "to": "done", "by": "a1"}],
+               "decisions": [{"id": "D1", "state": "pending", "question": "Keep the old URL?"}],
+               "messages": [{"id": "M1", "from": "a1", "to": "main", "text": "may I touch cli.py?"}]}
+        (progress.RUNS / "claude-s1.json").write_text(json.dumps(run))
+        d = dashboard.run_detail("claude-s1", now=now)
+        api, ui = d["steps"]
+        self.assertEqual((api["owner_label"], api["scope"], ui["after"]), ("Tank", "lib/**", ["api"]))
+        self.assertEqual([e["check"] for e in api["evidence"]], ["12 tests green"])
+        self.assertEqual(ui["evidence"], [])                                          # a note is not evidence
+        self.assertEqual([x["to"] for x in api["history"]], ["done"])
+        self.assertEqual((d["lanes"][0]["persona"], d["mode"]), ("Tank", "auto"))
+        self.assertEqual((d["decisions"][0]["id"], d["questions"][0]["text"]), ("D1", "may I touch cli.py?"))
+        self.assertIsNotNone(d["eta_lo"])
+        for bad in ("claude-nope", "../runs/claude-s1", "..", ""):
+            self.assertIsNone(dashboard.run_detail(bad), bad)
+        runs = dashboard._runs(now, "testmac")
+        self.assertEqual((runs[0]["id"], runs[0]["host"], runs[0]["mode"]), ("claude-s1", "testmac", "auto"))
+        self.assertEqual(([q["id"] for q in runs[0]["questions"]], [x["id"] for x in runs[0]["decisions"]]), (["M1"], ["D1"]))
+        self.assertEqual(runs[0]["plan"][1]["after"], ["api"])
+
+    def test_explorer_files_stay_inside_the_handoff_repository(self):
+        h = self.root / "handoff"
+        make_handoff(h)
+        (self.root / "secret.md").write_text("secret")
+        (h / "projects" / "link.md").symlink_to(self.root / "secret.md")
+        (h / ".git").mkdir()
+        (h / ".git" / "x.md").write_text("git")
+        (h / "registry.json").write_text("{}")
+        self.assertEqual(dashboard.file_detail("projects/acme/widget.md", h)["text"], (h / "projects/acme/widget.md").read_text())
+        for bad in ("../secret.md", "projects/link.md", ".git/x.md", "registry.json", "/etc/passwd", "../../etc/passwd", "", "a\x00b"):
+            self.assertIsNone(dashboard.file_detail(bad, h), bad)
+
+    def test_counts_state_their_window(self):
+        h = self.root / "handoff"
+        make_handoff(h)
+        (self.st / "logs").mkdir()
+        (self.st / "logs" / "hooks.log").write_text("2026-11-01 10:00 guard claude deny: Branch `x`\n2026-11-03 09:00 guard codex ask: git stash\n")
+        d = dashboard.collect(registry(), handoff=h, now=NOW)
+        self.assertEqual((d["windows"]["guard_since"], d["windows"]["guard_capped"]), ("2026-11-01 10:00", False))
+        self.assertEqual(d["windows"]["sessions_since"], min(s["ts"] for s in d["session_log"]))
+        self.assertEqual(d["windows"]["commits_days"], 30)
+        for k in ("jobs", "ci", "crew"):
+            self.assertIn(k, d)
 
 
 if __name__ == "__main__":

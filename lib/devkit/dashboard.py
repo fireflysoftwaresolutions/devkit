@@ -256,7 +256,10 @@ def project_health(p: dict, now: float = None) -> dict:
     if ns.get("due") and ns["due"] < time.strftime("%Y-%m-%d", time.localtime(now)) and ns.get("status") not in ("done", "archived"):
         risk.append(f"past its due date ({ns['due']})")
     level = "risk" if risk else "warn" if warn else "ok"
-    return {"level": level, "reasons": risk + warn}
+    # "ok" is a claim about the repository: without a checkout's git state or the PR list there is nothing to back it
+    known = bool(p.get("prs_known")) or (p.get("local", True) is not False and p.get("git", True) is not False
+                                         and bool(m.get("branch")))
+    return {"level": level, "reasons": risk + warn, "known": known}
 
 
 def _task_flag(scope: str) -> str:
@@ -760,7 +763,7 @@ def _timing(now: float) -> dict:
         return timing_summary([], now)
 
 
-def _runs(now: float) -> list:
+def _runs(now: float, host: str = "") -> list:
     """Agent runs with live progress on this machine (running, blocked, or finished in the last hour)."""
     try:
         from . import progress
@@ -775,8 +778,19 @@ def _runs(now: float) -> list:
             b = progress.brief(r)
         except (KeyError, TypeError, ValueError):
             continue
-        b.update({"agent": r.get("agent"), "session": r.get("session"), "project": r.get("project"),
-                  "estimate_cal": r.get("estimate_cal"), "finished": r.get("finished"),
+        lanes = r.get("agents") or {}
+        for s, raw in zip(b.get("plan") or [], r.get("plan") or []):
+            if isinstance(raw, dict):
+                lane = lanes.get(raw.get("owner")) or {}
+                s.update(label=raw.get("label") or "", persona=lane.get("persona") or "", after=raw.get("after") or [],
+                         scope=raw.get("scope") or lane.get("scope") or "", waiting=raw.get("waiting") or "")
+        b.update({"id": run_id(r), "agent": r.get("agent"), "session": r.get("session"), "project": r.get("project"),
+                  "mode": r.get("mode") or "", "host": host, "estimate_cal": r.get("estimate_cal"), "finished": r.get("finished"),
+                  "decisions": [{k: d.get(k) for k in ("id", "ts", "question", "options", "recommend", "irreversible", "from_name")}
+                                for d in r.get("decisions") or [] if isinstance(d, dict) and d.get("state") == "pending"],
+                  "questions": [{k: m.get(k) for k in ("id", "ts", "from_name", "text")} for m in r.get("messages") or []
+                                if isinstance(m, dict) and m.get("to") == "main" and not m.get("answered")
+                                and not m.get("reply_to") and m.get("from") != "ci"][-20:],
                   "updates": [{k: u.get(k) for k in ("ts", "kind", "text", "next")} for u in (r.get("updates") or [])[-8:]]})
         out.append(b)
     return out[:20]
@@ -831,6 +845,333 @@ def _ops():
         return []
 
 
+# --------------------------------------------------------------------------- jobs, CI watches, details on demand
+
+# How much history each count can see: the page states these windows instead of implying more history than devkit keeps
+WINDOWS = {"commits_days": 30, "merged_days": 30, "canary_days": 7, "timing_days": 60, "runs_hours": 12,
+           "jobs_days": 30, "guard_events": 400}
+ITEM_ID_RE = re.compile(r"[A-Za-z][A-Za-z0-9_-]{0,79}")
+RUN_ID_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,159}")
+JOB_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9_-]{0,39}")
+CI_EXCERPT = 600          # characters of a failure's first error in the page data (the CI endpoint has it whole)
+CI_CAP = 100              # watched pipelines listed (newest first)
+
+
+def run_id(r: dict) -> str:
+    """A progress run's id: the name of its file, <agent>-<session>."""
+    return f"{r.get('agent')}-{r.get('session')}"
+
+
+def _windows(events: list, slog: list) -> dict:
+    return dict(WINDOWS, guard_since=events[0].get("ts", "") if events else "",
+                guard_capped=len(events) >= WINDOWS["guard_events"],
+                sessions_since=min((s["ts"] for s in slog if s.get("ts")), default=0))
+
+
+def _job_run(r):
+    return {k: r.get(k) for k in ("start", "end", "rc", "duration", "summary")} if r else None
+
+
+def jobs_summary(now: float = None) -> list:
+    """Scheduled jobs (`dev jobs`): schedule, the last run and the next, failures in the window. Cheap: the journal
+    only (launchd's view is in `jobs_detail`)."""
+    now = now or time.time()
+    try:
+        from . import jobs as jm
+        defs, runs = jm.jobs(), jm.journal(WINDOWS["jobs_days"])
+    except Exception:
+        return []
+    by = {}
+    for r in runs:
+        by.setdefault(r.get("job"), []).append(r)
+    out = []
+    for name, j in sorted(defs.items()):
+        rs = by.get(name) or []
+        last = rs[-1] if rs else None
+        enabled = bool(j.get("enabled", True))
+        if not enabled:
+            nxt = None
+        elif j.get("every"):  # from the last start, not from now: the value stays put between snapshots
+            nxt = round(last["start"] + int(j["every"]) * 60) if last and last.get("start") else None
+        else:
+            try:
+                nxt = jm.next_run(j, now)
+            except (ValueError, KeyError):
+                nxt = None
+        failed = [r for r in rs if r.get("rc") not in (0, None)]
+        state = ("off" if not enabled else "never" if not last else "skipped" if last.get("rc") is None
+                 else "ok" if last.get("rc") == 0 else "failed")
+        out.append({"name": name, "about": j.get("about") or "", "schedule": jm.schedule_text(j), "enabled": enabled,
+                    "notify": j.get("notify") or "", "timeout_min": j.get("timeout"), "next": round(nxt) if nxt else None,
+                    "installed": (jm.AGENTS_DIR / f"{jm.LABEL.format(name)}.plist").exists(),
+                    "last": _job_run(last), "state": state, "runs": len(rs), "failed": len(failed)})
+    return out
+
+
+def jobs_detail(name: str = None, now: float = None):
+    """All jobs with launchd's view (loaded or not), or one job with its runs in the window and the last 200 lines
+    of its log. None for a job that does not exist."""
+    from . import jobs as jm
+    summary = {j["name"]: j for j in jobs_summary(now)}
+    if name is not None and (not JOB_RE.fullmatch(name) or name not in summary):
+        return None
+    out = []
+    for n in ([name] if name is not None else list(summary)):
+        rec = dict(summary[n], loaded=jm.loaded(n))  # launchd's view: one launchctl call per job
+        if name is not None:
+            log = jm.LOGS / f"{n}.log"
+            rec.update(history=[_job_run(r) for r in jm.journal(WINDOWS["jobs_days"], n)][::-1],
+                       log=jm._last_lines(log, 200), log_path=core.tilde(log))
+        out.append(rec)
+    return out[0] if name is not None else {"jobs": out, "complete": True, "window_days": WINDOWS["jobs_days"]}
+
+
+def ci_watches(limit: int = CI_CAP, excerpt: int = CI_EXCERPT) -> dict:
+    """The pipelines devkit watched after a push (`dev ci watch`), newest first: run, state, first error, its class
+    and the one next action. `excerpt` characters of each first error (0: whole)."""
+    d = core.STATE / "ci" / "watch"
+
+    def mtime(p):
+        try:
+            return p.stat().st_mtime
+        except OSError:
+            return 0
+    files = sorted(d.glob("*.json"), key=mtime, reverse=True) if d.is_dir() else []
+    out = []
+    for f in files[:limit]:
+        rec = core.read_json(f, None)
+        if not isinstance(rec, dict):
+            continue
+        fails = [{"run": x.get("run"), "number": x.get("number"), "url": x.get("url"), "class": x.get("class") or "unknown",
+                  "action": x.get("action") or "", "jobs": x.get("failed_jobs") or [],
+                  "excerpt": (x.get("excerpt") or "")[:excerpt] if excerpt else x.get("excerpt") or ""}
+                 for x in rec.get("diagnoses") or [] if isinstance(x, dict)]
+        first = fails[0] if fails else {}
+        out.append({"repo": rec.get("repo"), "branch": rec.get("branch"), "sha": rec.get("sha"), "state": rec.get("state"),
+                    "ts": rec.get("ts"), "minutes": rec.get("minutes"), "provider": rec.get("provider"),
+                    "error": rec.get("error"), "runs": rec.get("runs") or [], "failures": fails,
+                    "class": first.get("class", ""), "action": first.get("action", ""),
+                    "first_error": first.get("excerpt", "")})
+    return {"watches": out, "complete": len(files) <= limit, "total": len(files), "watching": ci_watching(d)}
+
+
+def ci_watching(d: Path = None, now: float = None) -> list:
+    """Watchers still following a pipeline: a lock (<repo>-<branch>-<sha>.lock: "<pid> <since>") younger than 3 h
+    whose process is alive. The key is the repository folder and branch with unsafe characters replaced."""
+    d, now = d or core.STATE / "ci" / "watch", now or time.time()
+    out = []
+    for f in sorted(d.glob("*.lock")) if d.is_dir() else []:
+        try:
+            pid_s, since_s = (f.read_text().split() + ["0", "0"])[:2]
+            pid, since = int(pid_s), int(since_s)
+            if now - f.stat().st_mtime > 3 * 3600 or pid <= 1:
+                continue
+            os.kill(pid, 0)
+        except PermissionError:
+            pass  # alive, another user's process
+        except (OSError, ValueError):
+            continue
+        key, _, sha = f.stem.rpartition("-")
+        out.append({"key": key, "sha": sha, "pid": pid, "since": since})
+    return out
+
+
+def crew_roster() -> dict:
+    """devkit's crew (config/crew.json, with the team's changes): who they are, and the RACI by kind of work."""
+    try:
+        from . import crew, raci
+        roster = crew.load()
+        return {"members": [{k: m.get(k) for k in ("id", "name", "title", "tier", "tools", "summary", "main")}
+                            for m in crew.members(roster)],
+                "activities": [{k: a.get(k) for k in ("id", "name", "R", "A", "C", "I")} for a in raci.activities(roster)]}
+    except Exception:
+        return {"members": [], "activities": []}
+
+
+def _links(v) -> list:
+    if isinstance(v, str):
+        v = [x.strip() for x in v.strip("[]").split(",") if x.strip()]
+    return [{"kind": k if t else "link", "target": t or k, "text": x}
+            for x in v or [] for k, _, t in [str(x).partition(":")]]
+
+
+def item_detail(item_id: str, handoff: Path = None, reg: dict = None, now: float = None):
+    """A work item, whole: front matter, full body and changelog, links, lock, the plans and sessions that name it,
+    its branches, PRs and commits, and the progress run working on it. None when there is no such item."""
+    from . import work
+    if not item_id or not ITEM_ID_RE.fullmatch(item_id):
+        return None
+    now = now or time.time()
+    base = Path(handoff) if handoff else core.HANDOFF
+    root = base / "items"
+    f = next((p for p in sorted(root.rglob(f"{item_id}.md")) if p.is_file()), None) if root.is_dir() else None
+    if f is None:
+        return None
+    it = work.parse(f.read_text(errors="replace"))
+    m = it.get("meta") or {}
+    if (m.get("id") or f.stem) != item_id:
+        return None
+    scope, low = m.get("scope") or str(f.parent.relative_to(root)), item_id.lower()
+    holder = m.get("claimed_by") or ""
+    cm = re.search(r"\(([^:)]+)(?::([^)]+))?\)", holder)
+    agent, sess = (cm.group(1), cm.group(2) or "") if cm else ("", "")
+    plans = []
+    for p in sorted((base / "plans").rglob("*.md")) if (base / "plans").is_dir() else []:
+        try:
+            text = p.read_text(errors="replace")
+        except OSError:
+            continue
+        if item_id in text:
+            title = next((ln[2:].strip() for ln in text.splitlines() if ln.startswith("# ")), p.stem)
+            plans.append({"path": str(p.relative_to(base)), "title": title})
+    sessions = [s for s in read_session_log(base, months=12, limit=100_000) if item_id in s.get("text", "")]
+    reg = reg or {}
+    proj = next((p for p in reg.get("projects") or [] if isinstance(p, dict) and p.get("id") == scope), None) or {}
+    # the holder's session (devkit's session record) tells the branch and checkout the claim is worked on
+    held = {}
+    if agent and sess and RUN_ID_RE.fullmatch(f"{agent}-{sess}"):
+        sd = core.STATE / "sessions"
+        sf = next(iter(sorted(sd.glob(f"{agent}-{sess}*.json"))), None) if sd.is_dir() else None
+        held = (core.read_json(sf, {}) or {}) if sf else {}
+    checkouts = [(proj.get("main") or {}, proj.get("path"))] + [(w, w.get("path")) for w in proj.get("worktrees") or []]
+    branches, names = [], set()
+    for co, path in checkouts:
+        b = co.get("branch")
+        why = "the branch name has the id" if b and low in b.lower() else \
+            "the holder's session works on it" if b and b == held.get("branch") else ""
+        if why and b not in names:
+            names.add(b)
+            branches.append({"branch": b, "worktree": path, "match": why})
+    if held.get("branch") and held["branch"] not in names:
+        names.add(held["branch"])
+        branches.append({"branch": held["branch"], "worktree": held.get("top") or held.get("cwd") or "",
+                         "match": "the holder's session works on it"})
+
+    def pr_match(branch, title):
+        return ("the PR's branch is linked" if branch in names else
+                "the branch or title has the id" if low in f"{branch} {title}".lower() else "")
+    prs, seen = [], set()
+    for pr in proj.get("prs_open") or []:
+        why = pr_match(pr.get("branch"), pr.get("title"))
+        if why:
+            seen.add(pr.get("number"))
+            prs.append(dict(pr, state="OPEN", match=why))
+    for pr in pr_cache().get(scope) or []:
+        why = pr_match(pr.get("headRefName"), pr.get("title")) if isinstance(pr, dict) else ""
+        if why and pr.get("number") not in seen:
+            seen.add(pr.get("number"))
+            prs.append({"number": pr.get("number"), "title": pr.get("title"), "branch": pr.get("headRefName"),
+                        "state": pr.get("state"), "url": pr.get("url"), "updated": pr.get("updatedAt"), "match": why})
+    ci = [dict(w, match="a watched pipeline of a linked branch") for w in ci_watches()["watches"]
+          if w.get("branch") in names and (w.get("repo") or "").lower() in (scope.lower(), scope.split("/")[-1].lower())]
+    commits = []
+    if proj.get("path") and proj.get("local", True) is not False and proj.get("git", True) is not False:
+        out = core.gitout(proj["path"], "log", "--all", "-n", "100", "-i", "-F", f"--grep={item_id}",
+                          "--format=%H%x09%ct%x09%an%x09%s", timeout=5)
+        for ln in out.splitlines():
+            sha, ts, who, subject = (ln.split("\t", 3) + ["", "", ""])[:4]
+            commits.append({"sha": sha, "ts": int(ts) if ts.isdigit() else 0, "author": who, "subject": subject,
+                            "match": "the commit message has the id"})
+    from . import progress
+    runs = []
+    for rf in progress.RUNS.glob("*.json") if progress.RUNS.is_dir() else []:
+        r = core.read_json(rf, None)
+        if not isinstance(r, dict):
+            continue
+        why = ("the holder's session runs it" if agent and sess and r.get("agent") == agent
+               and str(r.get("session") or "").startswith(sess) else
+               "its goal or a step has the id" if item_id in (r.get("goal") or "") or any(
+                   item_id in (x.get("name") or "") for x in r.get("plan") or [] if isinstance(x, dict)) else "")
+        if why:
+            try:
+                runs.append(dict(progress.brief(r, now), id=run_id(r), agent=r.get("agent"), session=r.get("session"),
+                                 match=why))
+            except (KeyError, TypeError, ValueError):  # a malformed run must not hide the item
+                continue
+    runs.sort(key=lambda x: -(x.get("started") or 0))
+    expired = bool(holder) and work.parse_iso(m.get("lock_expires") or "") < now
+    return {"id": item_id, "title": m.get("title") or it.get("title") or item_id, "scope": scope,
+            "type": m.get("type") or "task", "status": m.get("status") or "todo", "meta": m,
+            "body": it.get("body") or "", "changelog": it.get("changelog") or [], "links": _links(m.get("links")),
+            "lock": {"holder": holder, "agent": agent, "session": sess, "expires": m.get("lock_expires") or "",
+                     "state": ("expired" if expired else "held") if holder else ""},
+            "plans": plans, "sessions": sessions[:200], "sessions_complete": len(sessions) <= 200,
+            "branches": branches, "prs": prs, "ci": ci, "commits": commits, "commits_complete": len(commits) < 100,
+            "run": runs[0] if runs else None, "runs": runs[:10], "path": str(f.relative_to(base))}
+
+
+def run_detail(rid: str, now: float = None):
+    """A progress run, whole: goal, mode, estimate, active time, ETA range, every step (state, owner, scope, dependencies,
+    estimate, actual, evidence, history), lanes, decisions and crew questions. None when there is no such run."""
+    from . import progress
+    if not rid or not RUN_ID_RE.fullmatch(rid) or ".." in rid:
+        return None
+    f = progress.RUNS / f"{rid}.json"
+    run = core.read_json(f, None) if f.is_file() else None
+    if not isinstance(run, dict) or not run.get("plan") and not run.get("goal"):
+        return None
+    now = now or time.time()
+    run = progress.normalize(run)
+    lanes, updates, hist = run.get("agents") or {}, run.get("updates") or [], run.get("history") or []
+
+    def safe(fn, default=None):
+        try:
+            return fn()
+        except (KeyError, TypeError, ValueError, ZeroDivisionError):
+            return default
+    steps = []
+    for s in run.get("plan") or []:
+        if not isinstance(s, dict):
+            continue
+        owner, name = s.get("owner") or "main", s.get("name") or ""
+        lane = lanes.get(owner) or {}
+        steps.append({"name": name, "state": s.get("state"), "owner": owner,
+                      "owner_label": "main" if owner == "main" else lane.get("persona") or lane.get("label") or "subagent",
+                      "label": s.get("label") or "", "desc": s.get("desc") or "", "scope": s.get("scope") or lane.get("scope"),
+                      "after": s.get("after") or [], "est": s.get("est"), "est_auto": bool(s.get("est_auto")),
+                      "min": safe(lambda: round(progress.step_minutes(run, s, now), 1), 0.0),
+                      "started": s.get("started"), "finished": s.get("finished"),
+                      "evidence": [{k: u.get(k) for k in ("ts", "kind", "text", "check", "next")} for u in updates
+                                   if u.get("step") == name and (u.get("check") or u.get("kind") in ("step", "done", "blocked"))],
+                      "history": [x for x in hist if x.get("step") == name]})
+    running = run.get("state") == "running"
+    lo, hi = safe(lambda: progress.eta_range(run, now), (None, None)) if running else (None, None)
+    return {"id": rid, "agent": run.get("agent"), "session": run.get("session"), "project": run.get("project"),
+            "goal": run.get("goal"), "mode": progress.mode_of(run), "state": run.get("state"),
+            "started": run.get("started"), "finished": run.get("finished"), "estimate": run.get("estimate"),
+            "estimate_cal": run.get("estimate_cal"),
+            "active_min": safe(lambda: round(progress.active_minutes(run, now=run.get("finished") or now), 1)),
+            "wall_min": safe(lambda: round(progress.wall_minutes(run, now), 1)),
+            "eta_min": safe(lambda: round(progress.eta(run, now))) if running else None, "eta_lo": lo, "eta_hi": hi,
+            "headline": safe(lambda: progress.headline(run, now), ""), "steps": steps,
+            "lanes": [{"id": k, "label": a.get("label") or "", "type": a.get("type") or "", "persona": a.get("persona") or "",
+                       "state": a.get("state"), "started": a.get("started"), "finished": a.get("finished"),
+                       "scope": a.get("scope"), "done": a.get("done") or 0,
+                       "min": safe(lambda: round(progress.active_minutes(run, a.get("started"), a.get("finished") or now, now, k), 1)),
+                       "updates": (a.get("updates") or [])[-20:]} for k, a in lanes.items() if isinstance(a, dict)],
+            "decisions": run.get("decisions") or [], "questions": run.get("messages") or [], "history": hist,
+            "updates": updates}
+
+
+def file_detail(rel: str, handoff: Path = None):
+    """One Markdown file of the handoff repository (the Explorer); None for anything else: a path that resolves outside
+    the repository (.., symlinks), inside .git, or not a Markdown file."""
+    if not rel or "\x00" in rel or rel.startswith("/"):
+        return None
+    base = Path(handoff or core.HANDOFF).resolve()
+    try:
+        p = (base / rel).resolve()
+    except (OSError, RuntimeError):
+        return None
+    if base not in p.parents or p.suffix != ".md" or ".git" in p.relative_to(base).parts or not p.is_file():
+        return None
+    try:
+        st, text = p.stat(), p.read_text(errors="replace")
+    except OSError:
+        return None
+    return {"path": str(p.relative_to(base)), "mtime": int(st.st_mtime), "size": st.st_size, "text": text}
+
+
 def _project(p: dict, now: float) -> dict:
     keep = ("id", "owner", "name", "path", "remote", "github", "default_branch", "canonical", "canonical_ok",
             "stack", "commands", "prs_open", "prs_known", "size_kb", "last_activity", "note", "note_summary",
@@ -864,7 +1205,7 @@ def collect(reg: dict, handoff: Path = None, now: float = None) -> dict:
     handoff = Path(handoff) if handoff else core.HANDOFF
     files, meta = explorer_files(handoff)
     cache = pr_cache()
-    events = guard_events()
+    events = guard_events(WINDOWS["guard_events"])
     items = read_items(handoff, now)
     team = read_presence(handoff, reg, now=now)
     slog = read_session_log(handoff)
@@ -874,13 +1215,14 @@ def collect(reg: dict, handoff: Path = None, now: float = None) -> dict:
     acts = build_actions(reg, now, items, colls)
     for x in ppl:
         x["sessions"] = [_with_status(s) for s in x["sessions"]]
+    host = reg.get("host") or os.uname().nodename.split(".")[0]
     return {
         "v": 3,
         "version": core.VERSION,
         "copyright": core.COPYRIGHT,
         "generated": int(reg.get("generated") or now),
         "rendered": int(now),
-        "host": reg.get("host") or os.uname().nodename.split(".")[0],
+        "host": host,
         "me": reg.get("github_user") or "",
         "dev_root": core.tilde(reg.get("dev_root") or core.DEV),
         "handoff": core.tilde(handoff),
@@ -897,7 +1239,7 @@ def collect(reg: dict, handoff: Path = None, now: float = None) -> dict:
         "since": since_yesterday(reg, cache, now, items, slog, me),
         "who": me,
         "timing": _timing(now),
-        "runs": _runs(now),
+        "runs": _runs(now, host),
         "merged": merged_prs(cache, now - 30 * 86400)[:200],
         "sessions": [_with_status(s) for s in reg.get("sessions") or []],
         "providers": reg.get("providers") or {},
@@ -908,6 +1250,10 @@ def collect(reg: dict, handoff: Path = None, now: float = None) -> dict:
         "guard": events[-120:],
         "guard_rules": guard_rules(events),
         "drift": reg.get("drift"),
+        "jobs": jobs_summary(now),
+        "ci": ci_watches(),
+        "crew": crew_roster(),
+        "windows": _windows(events, slog),
         "files": files,
         "files_meta": meta,
     }
@@ -1715,6 +2061,9 @@ function kb(k) { if (k == null) return "—"; return k >= 1048576 ? (k / 1048576
 function plural(n, w, p) { return n + " " + (n === 1 ? w : (p || w + "s")); }
 function stripMarker(line) { return String(line || "").replace(/^[\W_]*(?:\[\s*firefly\s*>\s*devkit\s*\]|devkit(?=[\s·:—*`]))[\s·:—*`]*/i, "").replace(/(status:\s*)(?:\*\*|`)?(?:\[\s*firefly\s*>\s*devkit\s*\]|devkit\s*·)(?:\*\*|`)?\s*/gi, "$1"); }
 function iso(s) { const t = Date.parse(s || ""); return isNaN(t) ? 0 : t / 1000; }
+/* the window behind a count: the guard log keeps the last N decisions, the session log two months, commits 30 days */
+const W = D.windows || {};
+function guardWindow() { return W.guard_since ? ", since " + shortDay(String(W.guard_since).slice(0, 10)) : ""; }
 function fmtMin(m) { m = Math.max(0, Math.round(m || 0)); return m >= 60 ? Math.floor(m / 60) + "h" + String(m % 60).padStart(2, "0") + "m" : m + "m"; }
 
 /* ---------------------------------------------------------------- data model: work items, projects, initiatives, people */
@@ -2011,6 +2360,7 @@ function hstate(p) {
   if (st === "blocked" || lv === "risk") return "risk";
   if (st === "paused" || lv === "warn") return "warn";
   if (st === "untracked" || st === "unknown") return "none";
+  if (p.health && p.health.known === false) return "none";   /* no git state and no PR list: nothing backs "on track" */
   return "ok";
 }
 function memberState(m) { const p = BYID.get(m.id); return p ? hstate(p) : hstate({status: m.status || "unknown"}); }
@@ -3053,8 +3403,8 @@ function viewActivity(main) {
   main.append(h("div", {class: "g12"},
     panel("Every day, 26 weeks", null, tbtn, [box, h("p", {class: "tnote", text: "Commits are kept for 30 days; sessions and finished tasks come from the handoff repository."})], {cls: "sp-8"}),
     h("div", {class: "sp-4 ctrs col1"},
-      statTile({label: "Commits, 26 weeks", value: hm.tot.c, viz: spark(commitSeries(ps, 14), "Commits per day", "commit", true), cls: "row"}),
-      statTile({label: "Sessions, 26 weeks", value: hm.tot.s, viz: spark(sessionSeries(null, 14), "Sessions per day", "session", true), cls: "row"}),
+      statTile({label: "Commits, " + (W.commits_days || 30) + " days", value: hm.tot.c, viz: spark(commitSeries(ps, 14), "Commits per day", "commit", true), cls: "row"}),
+      statTile({label: W.sessions_since ? "Sessions since " + shortDay(lkey(new Date(W.sessions_since * 1000))) : "Sessions", value: hm.tot.s, viz: spark(sessionSeries(null, 14), "Sessions per day", "session", true), cls: "row"}),
       statTile({label: "Tasks done, 26 weeks", value: hm.tot.t, viz: spark(doneSeries(ITEMS, 14), "Tasks done per day", "task", true), cls: "row"})),
     panel("Timeline", null, null, timeline(ps, n), {flush: true, cls: "sp-8"}),
     panel("Most active, last " + n + " days", rows.length, null, rows.length ? rankedBars(rows, v => String(v), id => openModal("project", id)) : empty("No commits in this range"), {cls: "sp-4"})));
@@ -3167,7 +3517,7 @@ function viewHealth(main, tiles) {
         h("td", {class: "t2", style: "white-space:nowrap", text: Object.entries(r.agents).map(([a, n]) => a + " " + n).join(" · ")}), h("td", {class: "num t2", style: "white-space:nowrap", text: r.last.slice(5)}),
         h("td", {class: "t2", style: "max-width:0;width:100%"}, h("div", {class: "ell", title: r.example}, r.example)))))))
     : empty("The guard has not blocked anything", "Blocked actions are grouped by rule here; a rule that keeps firing means an agent is fighting the workspace rules.");
-  main.append(h("div", {class: "cols", style: "margin-bottom:16px"}, panel("Guard decisions by rule", rules.reduce((a, r) => a + r.count, 0), null, guardBody, {flush: !!rules.length}), panel("Instruction canary · 7 days", null, markerChip(), canaryBody)));
+  main.append(h("div", {class: "cols", style: "margin-bottom:16px"}, panel("Guard decisions by rule" + guardWindow(), rules.reduce((a, r) => a + r.count, 0), null, guardBody, {flush: !!rules.length}), panel("Instruction canary · 7 days", null, markerChip(), canaryBody)));
   const drift = D.drift;
   const driftBody = drift == null ? h("p", {class: "t2", style: "font-size:var(--fs-1);margin:0"}, "No drift report in this registry. ", h("code", {text: "dev config diff"}), " compares the devkit configuration with Claude Code and Codex.")
     : !drift.length ? h("p", {class: "t2", style: "margin:0", text: "Claude Code and Codex match the devkit configuration."})
@@ -3195,7 +3545,7 @@ function viewHealthV3(main) {
   const can = Object.keys(sum).map(a => [a, sum[a][0], sum[a][1]]), ok = can.reduce((a, x) => a + x[1], 0), all = can.reduce((a, x) => a + x[2], 0);
   main.append(h("div", {class: "head"}, h("h1", {text: "Health"}), h("span", {class: "sub", text: "Agents, guard, configuration and disk"})));
   main.append(h("div", {class: "g12 tiles"}, prov("claude"), prov("codex"),
-    statTile({label: "Guard decisions", value: rules.reduce((a, r) => a + r.count, 0), viz: segBar(rules.slice(0, 4).map((r, i) => [i ? "none" : "mark", r.count, r.label]), "Guard decisions by rule"), cls: "sp-2"}),
+    statTile({label: "Guard decisions" + guardWindow(), value: rules.reduce((a, r) => a + r.count, 0), viz: segBar(rules.slice(0, 4).map((r, i) => [i ? "none" : "mark", r.count, r.label]), "Guard decisions by rule"), cls: "sp-2"}),
     statTile({label: "Status block, 7 days", value: all ? Math.round(100 * ok / all) + "%" : "—", viz: all ? segBar([["ok", ok, "Started with it"], ["risk", all - ok, "Missed"]], "Replies in 7 days") : h("span", {class: "t2", text: "No replies yet"}), legend: all ? legend([["ok", ok, "Started with it"], ["risk", all - ok, "Missed"]]) : null, cls: "sp-2"}),
     statTile({label: "Configuration drift", value: drift == null ? "—" : drift.length, viz: h("span", {class: "stat t2"}, h("span", {class: "dot k-" + (drift && drift.length ? "warn" : "ok"), "aria-hidden": "true"}), drift == null ? "Not reported" : drift.length ? "Run dev config diff" : "Matches devkit"), cls: "sp-2"}),
     statTile({label: "Worktrees", value: wts.length, unit: disk ? kb(disk) + " on disk" : null, viz: h("span", {class: "stat t2"}, h("span", {class: "dot k-" + (recl ? "warn" : "ok"), "aria-hidden": "true"}), recl ? plural(recl, "finished worktree") + " to reclaim" : "Nothing to reclaim"), cls: "sp-2"})));
