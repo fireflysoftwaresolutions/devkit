@@ -165,6 +165,10 @@ def selftest(agent: str, model: str = None) -> dict:
     mine = [r for r in recs if sid and r.get("session") == sid[:12]]
     checks.append(("Stop hook + instructions (canary)", bool(mine) and all(r["ok"] for r in mine),
                    (mine[-1].get("status") or mine[-1].get("excerpt") or "")[:80] if mine else "no canary record"))
+    if mine and all(r["ok"] for r in mine):
+        fmt = [r.get("format") or [] for r in mine if "format_ok" in r]
+        checks.append(("status block format", bool(fmt) and not fmt[-1],
+                       "header + Done / Check / Next" if fmt and not fmt[-1] else "; ".join((fmt or [["not scored"]])[-1])))
     if agent == "claude" and sid:
         inst = STATE / "instructions" / f"claude-{sid}.jsonl"
         loaded = inst.exists() and str(core.CLAUDE_HOME / "CLAUDE.md") in inst.read_text()
