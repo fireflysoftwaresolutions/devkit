@@ -72,7 +72,102 @@ DEFAULTS = {
     "handoff": {"enforce": True},
     "canary": {"enforce": True},
     "dashboard": {"idle_minutes": 30},  # the live dashboard server stops after this long with no page open
+    # the audit trail (docs/audit.md). The team policy (<handoff>/policy/audit.json) sets a floor: a machine may
+    # record more and keep longer, never less. Only the developer changes these, in a terminal (spec C11).
+    "audit": {
+        "publish": True,            # the daily job copies this machine's records to the handoff repository
+        "level": "changes",         # security | changes | all (all: also read-only commands)
+        "retention": {"local_months": 13, "team_months": 24, "floor_months": 3},
+        "hold": False,              # a legal hold: nothing is pruned, here or in the handoff copy
+        "forward": "",              # "" | a file (JSONL lines) | "syslog" | "syslog://host:port" (CEF lines)
+        "redact": {"extra": []},    # more regular expressions for the redactor
+    },
 }
+
+AUDIT_LEVELS = ("security", "changes", "all")  # from the fewest records to the most
+
+
+def _months_ok(v) -> bool:
+    return isinstance(v, int) and not isinstance(v, bool) and 1 <= v <= 1200
+
+
+def _patterns_ok(v) -> bool:
+    return isinstance(v, list) and all(isinstance(p, str) and p for p in v)
+
+
+def _bad_patterns(v: list) -> list:
+    bad = []
+    for p in v:
+        try:
+            re.compile(p)
+        except re.error as e:
+            bad.append(f"{p!r} ({e})")
+    return bad
+
+
+def _forward_ok(v) -> bool:
+    if not isinstance(v, str):
+        return False
+    if v in ("", "syslog"):
+        return True
+    if v.startswith("syslog://"):
+        return bool(re.fullmatch(r"syslog://[A-Za-z0-9.-]+:\d{1,5}", v))
+    return v.startswith(("/", "~"))
+
+
+# the audit section's keys -> (the check, what the value must be)
+AUDIT_RULES = {
+    ("publish",): (lambda v: isinstance(v, bool), "true or false"),
+    ("level",): (lambda v: v in AUDIT_LEVELS, "security, changes or all"),
+    ("hold",): (lambda v: isinstance(v, bool), "true or false"),
+    ("forward",): (_forward_ok, '"" (off), an absolute file path, "syslog" or "syslog://host:port"'),
+    ("retention", "local_months"): (_months_ok, "a whole number of months from 1 to 1200"),
+    ("retention", "team_months"): (_months_ok, "a whole number of months from 1 to 1200"),
+    ("retention", "floor_months"): (_months_ok, "a whole number of months from 1 to 1200"),
+    ("redact", "extra"): (_patterns_ok, "a list of regular expressions"),
+}
+
+
+def audit_config(raw, fill: bool = True):
+    """An audit section checked against AUDIT_RULES -> (values, errors). `fill`: every key, a default where the
+    value is missing or wrong; else only the keys `raw` sets with a valid value (a team policy's floor)."""
+    values = json.loads(json.dumps(DEFAULTS["audit"])) if fill else {}
+    errors = []
+    if raw is None:
+        return values, errors
+    if not isinstance(raw, dict):
+        return values, ["audit must be an object"]
+    groups = {path[0] for path in AUDIT_RULES if len(path) == 2}
+    for key, val in raw.items():
+        if key in groups:
+            if not isinstance(val, dict):
+                errors.append(f"audit.{key} must be an object")
+                continue
+            items = [((key, k), v) for k, v in val.items()]
+        else:
+            items = [((key,), val)]
+        for path, v in items:
+            name = "audit." + ".".join(path)
+            rule = AUDIT_RULES.get(path)
+            if not rule:
+                errors.append(f"unknown key {name}")
+                continue
+            if not rule[0](v):
+                errors.append(f"{name} must be {rule[1]} (got {json.dumps(v, ensure_ascii=False)[:40]})")
+                continue
+            if path == ("redact", "extra") and _bad_patterns(v):  # the valid patterns still apply
+                errors += [f"{name}: {b} is not a regular expression" for b in _bad_patterns(v)]
+                v = [p for p in v if not _bad_patterns([p])]
+            if len(path) == 2:
+                values.setdefault(path[0], {})[path[1]] = v
+            else:
+                values[path[0]] = v
+    return values, errors
+
+
+def config_errors(cfg: dict) -> list:
+    """What is wrong in the checked sections of a devkit configuration (today: audit). -> [message]"""
+    return audit_config((cfg or {}).get("audit"))[1] if "audit" in (cfg or {}) else []
 
 
 def deep_merge(base: dict, extra: dict) -> dict:

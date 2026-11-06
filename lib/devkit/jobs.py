@@ -41,7 +41,8 @@ DEFAULT_JOBS = {
            "cmd": ["gc", "--apply", "--yes", "--auto-only"], "at": "04:00", "timeout": 30},
     "repair": {"about": "Restores devkit-managed agent settings and Codex hook trust if anything drifted",
                "cmd": ["config", "repair", "--quiet"], "every": 360, "timeout": 5},
-    "audit": {"about": "Publishes this machine's audit trail to the handoff repo and prunes local copies over 2 years",
+    "audit": {"about": "Publishes this machine's audit trail to the handoff repo and prunes it by audit.retention "
+                       "(records audit.prune)",
               "cmd": ["audit", "--publish", "--quiet"], "at": "05:00", "timeout": 5},
     "doctor": {"about": "Weekly health check of the whole setup; notifies when a check fails",
                "cmd": ["doctor"], "weekly": "mon 09:00", "timeout": 10},
