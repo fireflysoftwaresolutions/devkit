@@ -820,6 +820,12 @@ def doctor() -> int:
         check(agent_name, "devkit plugin copy is current", not stale,
               "matches plugin/ in this checkout" if not stale else "older than this checkout (skills or agents missing)",
               f"dev install --only {agent_name.lower()}")
+    from . import skillguard
+    for agent_name in ("claude", "codex"):
+        gaps = skillguard.coverage(agent_name)
+        check("Agents", f"skills for every rule ({agent_name})", not gaps,
+              "all required skills installed" if not gaps else "; ".join(f"{r}: {', '.join(m)}" for r, m in gaps),
+              f"dev install --only skills,{agent_name}")
     from . import policy as _pol
     offs = _pol.project_overrides()
     check("Agents", "no project switches devkit off", not offs,

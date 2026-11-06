@@ -1,0 +1,265 @@
+{
+  "_comment": "Which skills a kind of work requires. devkit enforces them: (1) the prompt hook tells the agent which skills to load for the request, (2) briefs for Claude subagents get the skills appended, (3) the Stop hook refuses to finish a turn that changed matching files without loading the skills, once per skill per session. `files` are globs on changed paths; `content` is a regex checked in changed files that match `files`; `prompt` is a regex on the developer's request or a subagent brief. Extend or override with `skills.rules` in ~/.config/devkit/config.json; turn enforcement off with `skills.enforce: false`.",
+  "rules": [
+    {
+      "id": "ui",
+      "why": "UI quality: information hierarchy, layout, typography, color, accessibility",
+      "files": [
+        "*.html",
+        "*.css",
+        "*.scss",
+        "*.sass",
+        "*.less",
+        "*.tsx",
+        "*.jsx",
+        "*.vue",
+        "*.svelte",
+        "*.component.html",
+        "*.component.scss"
+      ],
+      "content_files": [
+        "*.py",
+        "*.ts",
+        "*.js",
+        "*.go",
+        "*.rb",
+        "*.java",
+        "*.php"
+      ],
+      "content": "<style[\\s>]|<!doctype html|className=|styled\\.|@Component\\(",
+      "prompt": "\\b(ui|ux|frontend|front-end|dashboard|landing( page)?|css|layout|web page|screen|interfaz|pantalla|diseño visual)\\b",
+      "skills": {
+        "claude": [
+          "frontend-design"
+        ],
+        "codex": [
+          "impeccable"
+        ]
+      }
+    },
+    {
+      "id": "angular",
+      "why": "Angular conventions: standalone components, signals, control flow, OnPush",
+      "files": [
+        "*.component.ts",
+        "*.component.html",
+        "angular.json",
+        "*.routes.ts"
+      ],
+      "prompt": "\\bangular\\b",
+      "skills": {
+        "claude": [
+          "angular-developer"
+        ],
+        "codex": [
+          "angular-developer"
+        ]
+      }
+    },
+    {
+      "id": "react",
+      "why": "React and Next.js performance and composition patterns",
+      "files": [
+        "*.tsx",
+        "*.jsx"
+      ],
+      "prompt": "\\b(react|next\\.?js)\\b",
+      "skills": {
+        "claude": [
+          "react-best-practices"
+        ],
+        "codex": [
+          "react-best-practices"
+        ]
+      }
+    },
+    {
+      "id": "spring",
+      "why": "Spring Boot application code: validation, ProblemDetail errors, data access, configuration",
+      "files": [
+        "*.java",
+        "*.kt"
+      ],
+      "content": "org\\.springframework",
+      "prompt": "\\b(spring( boot)?|java)\\b",
+      "skills": {
+        "claude": [
+          "java-springboot",
+          "backend"
+        ],
+        "codex": [
+          "java-springboot",
+          "backend"
+        ]
+      }
+    },
+    {
+      "id": "java-tests",
+      "why": "JUnit 5, AssertJ, Testcontainers and Spring Boot test slices",
+      "files": [
+        "*Test.java",
+        "*Tests.java",
+        "*IT.java"
+      ],
+      "skills": {
+        "claude": [
+          "java-junit",
+          "spring-boot-testing"
+        ],
+        "codex": [
+          "java-junit",
+          "spring-boot-testing"
+        ]
+      }
+    },
+    {
+      "id": "api",
+      "why": "Contract first, RFC 9457 errors, compatibility, pagination, idempotency",
+      "files": [
+        "openapi*.yaml",
+        "openapi*.yml",
+        "openapi*.json",
+        "*.graphql",
+        "*Controller.java",
+        "*controller.ts",
+        "*.proto"
+      ],
+      "prompt": "\\b(api|endpoint|rest|graphql|grpc|backend|microservice)\\b",
+      "skills": {
+        "claude": [
+          "backend"
+        ],
+        "codex": [
+          "backend"
+        ]
+      }
+    },
+    {
+      "id": "database",
+      "why": "Postgres schema, migrations, indexes and locking",
+      "files": [
+        "*.sql",
+        "**/db/migration/**",
+        "**/migrations/**",
+        "**/alembic/**",
+        "*.changelog.xml"
+      ],
+      "prompt": "\\b(migration|schema|postgres|sql|index|database|base de datos)\\b",
+      "skills": {
+        "claude": [
+          "supabase-postgres-best-practices",
+          "backend"
+        ],
+        "codex": [
+          "supabase-postgres-best-practices",
+          "backend"
+        ]
+      }
+    },
+    {
+      "id": "workflows",
+      "why": "GitHub Actions security (injection, triggers, pinning, permissions) and the one-push delivery flow",
+      "files": [
+        ".github/workflows/*.yml",
+        ".github/workflows/*.yaml",
+        ".github/actions/**"
+      ],
+      "prompt": "\\b(github actions|workflow|ci pipeline|pipeline de ci)\\b",
+      "skills": {
+        "claude": [
+          "github-actions-hardening",
+          "delivery"
+        ],
+        "codex": [
+          "github-actions-hardening",
+          "delivery"
+        ]
+      }
+    },
+    {
+      "id": "security",
+      "why": "Threat modelling, secure defaults and devkit's security scans",
+      "files": [
+        "Dockerfile",
+        "*.Dockerfile",
+        "**/security/**",
+        "*.tf"
+      ],
+      "prompt": "\\b(security|seguridad|auth\\w*|login|oauth|oidc|jwt|secret|vulnerab\\w*|threat|permission|encrypt\\w*)\\b",
+      "skills": {
+        "claude": [
+          "devsecops"
+        ],
+        "codex": [
+          "devsecops"
+        ]
+      }
+    },
+    {
+      "id": "docs",
+      "why": "Documentation structure (Diátaxis), Google style, American English, dev docs check",
+      "files": [
+        "README.md",
+        "docs/**/*.md",
+        "*.mdx",
+        "CHANGELOG.md",
+        "CONTRIBUTING.md"
+      ],
+      "prompt": "\\b(docs?|document\\w*|readme|guide|gu[ií]a|tutorial)\\b",
+      "skills": {
+        "claude": [
+          "docs"
+        ],
+        "codex": [
+          "docs"
+        ]
+      }
+    },
+    {
+      "id": "diagrams",
+      "why": "Validated, branded SVG diagrams in dark and light",
+      "files": [
+        "docs/diagrams/*.json",
+        "*.svg",
+        "*.c4",
+        "*.likec4",
+        "*.mmd"
+      ],
+      "prompt": "\\b(diagram\\w*|diagrama\\w*|c4|architecture picture)\\b",
+      "skills": {
+        "claude": [
+          "diagrams"
+        ],
+        "codex": [
+          "diagrams"
+        ]
+      }
+    },
+    {
+      "id": "delivery",
+      "why": "Local integration, one push, one CI run, CalVer releases",
+      "prompt": "\\b(release|deploy\\w*|push|merge|pull request|\\bpr\\b|publish|versi[oó]n|tag)\\b",
+      "skills": {
+        "claude": [
+          "delivery"
+        ],
+        "codex": [
+          "delivery"
+        ]
+      }
+    },
+    {
+      "id": "communicating",
+      "why": "Templates for status, decisions, PRs, handovers and reports in plain American English",
+      "prompt": "\\b(status report|report|reporte|informe|delegate|handover|hand off|teammate|compa[nñ]ero|message for|mensaje)\\b",
+      "skills": {
+        "claude": [
+          "communicating"
+        ],
+        "codex": [
+          "communicating"
+        ]
+      }
+    }
+  ]
+}

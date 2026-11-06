@@ -36,6 +36,13 @@ this skill is the how.
    the status block: `` **[Firefly> DevKit]** <project> · `<branch>` · <task> ``, then the bullets **Done:**,
    **Check:** (✓/⚠/✗ with the evidence) and **Next:** (global instructions §0 has the rules).
 
+## Required skills
+
+devkit knows which skills each kind of work needs (`config/skill-rules.json` in the devkit repo, extended by
+`skills.rules` in the developer's config). Load the skills the prompt hook names before you start, put them in every
+subagent brief, and expect the Stop hook to send you back once if you changed UI, Spring, migration, workflow, docs
+or diagram files without them.
+
 ## Which tool for which job
 
 | Job | devkit | Skills |

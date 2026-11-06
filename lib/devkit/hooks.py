@@ -352,6 +352,13 @@ def stop(agent: str):
                     m = main_of(Path(top)) or Path(top)
                     canary.save_status(core.project_identity(m, core.gitout(m, "config", "--get", "remote.origin.url"))[0],
                                        agent, line, core.gitout(top, "branch", "--show-current"))
+        try:
+            from . import skillguard
+            why = skillguard.on_stop(agent, data, sess)
+            if why:
+                reasons.append(why)
+        except Exception:
+            _log(f"stop skills {agent}: {traceback.format_exc()[-300:]}")
         plans = _plans_without_reason(sess)
         if plans and not data.get("stop_hook_active"):
             reasons.append("devkit: you changed plan(s) without recording why: " + ", ".join(plans[:4]) +
@@ -437,6 +444,16 @@ def guard(agent: str):
     from . import guard as g
     verdict = g.check(data.get("tool_name") or "", data.get("tool_input") or {}, data.get("cwd") or os.getcwd(), agent)
     if not verdict:
+        if data.get("tool_name") in ("Agent", "Task"):  # subagent briefs get the skills their work requires
+            try:
+                from . import skillguard
+                updated = skillguard.on_agent_brief(agent, data.get("tool_input") or {})
+            except Exception:
+                updated = None
+            if updated:
+                _log(f"skills {agent}: appended required skills to a subagent brief")
+                print(json.dumps({"hookSpecificOutput": {"hookEventName": "PreToolUse", "permissionDecision": "allow",
+                                                         "updatedInput": updated}}))
         return
     decision, reason = verdict
     if agent == "codex" and decision == "ask":
@@ -466,7 +483,15 @@ def prompt(agent: str):
         extra = context_for(cwd, agent)
         _log(f"prompt {agent}: session {sid[:12]} had no SessionStart; devkit context injected")
     text = progress.on_prompt(agent, data)
-    _context_out("UserPromptSubmit", "\n\n".join(x for x in (extra, text) if x))
+    skills = ""
+    try:
+        from . import skillguard
+        sf = _session_file(agent, sid) if sid else None
+        sess = (core.read_json(sf, {}) or {}) if sf and sf.exists() else {}
+        skills = skillguard.on_prompt(agent, data.get("prompt") or "", sess)
+    except Exception:
+        _log(f"prompt skills {agent}: {traceback.format_exc()[-300:]}")
+    _context_out("UserPromptSubmit", "\n\n".join(x for x in (extra, skills, text) if x))
 
 
 def post_tool(agent: str):

@@ -220,6 +220,11 @@ Follow the devkit `backend` skill for the detailed checklists. Always:
 - **Library and framework docs:** prefer the vendor's version-matched source (Angular CLI MCP, the project's
   installed `node_modules/<pkg>` docs, framework MCPs), then **context7**, then web search. Check the version in the
   lockfile before using an API.
+- **Required skills are enforced.** devkit maps kinds of work to skills (`config/skill-rules.json`): UI → `frontend-design`
+  (Claude) / `impeccable` (Codex), Spring → `java-springboot`, migrations → `supabase-postgres-best-practices`,
+  workflows → `github-actions-hardening`, docs → `docs`, and so on. The prompt hook names the skills a request needs;
+  load them before you start. Briefs for Claude subagents get them appended. A turn that changed matching files
+  without loading them is sent back once to load them and review the change. Put the skills in every brief you write.
 - **Working efficiently and communicating:** `working-efficiently` (models, effort, subagents, tokens),
   `communicating` (updates, decisions, PRs, handovers, formats), `using-devkit` (which `dev` command for which job).
 - **Code intelligence:** use the LSP tools (TypeScript, Python, Java, PHP) to find definitions, references and type
