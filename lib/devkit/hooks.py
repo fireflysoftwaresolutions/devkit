@@ -143,6 +143,8 @@ def context_for(cwd: str, agent: str) -> str:
                          f"{', '.join(ins['projects'])}). This project's workstream: {ws or '-'}. "
                          f"Initiative Now: {'; '.join(ins['tasks']['now'][:3]) or '-'}. "
                          f"Note: {tilde(f2)} (update it for cross-project facts; `dev task -i {d.name}`).")
+    lines.append("devkit manual: the `using-devkit` skill (session protocol, which tool for which job, project and "
+                 "initiative rules, the status line).")
     lines.append(f"Handoff note: {tilde(note)} — read it before starting; update it with the devkit `handoff` skill "
                  f"before you finish or when the user says handoff/pause/wrap up.")
     body = registry.human_sections(p["id"])

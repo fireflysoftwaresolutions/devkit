@@ -169,6 +169,9 @@ Follow the devkit `backend` skill for the detailed checklists. Always:
 - **Documentation and diagrams:** the devkit `docs` skill (README anatomy, Diátaxis, Google style, `dev docs check`)
   with `documentation-writer` and `doc-coauthoring`; the devkit `diagrams` skill for every diagram (SVG via
   `dev diagram render`, validated with `dev diagram check`, dark and light). Update docs in the same branch as the code.
+- **Security (DevSecOps):** the devkit `devsecops` skill — threat model features that touch auth, data, money,
+  files or infrastructure; `dev sec scan` (secrets, dependencies, SAST, filesystem and IaC) before a release and after
+  dependency changes; least-privilege, SHA-pinned GitHub Actions. The guard refuses commits that contain secrets.
 - **Reviews:** before saying a substantial change is ready, run the built-in review (`/code-review` in Claude Code,
   `/review` in Codex) or a security review for auth, input handling and secrets.
 
@@ -189,9 +192,22 @@ Follow the devkit `backend` skill for the detailed checklists. Always:
 - **Containers:** `dev docker up` starts Docker (Colima). Never prune volumes; never pull images or start long-running
   containers the task does not need, and stop the ones you started.
 
-## 11. Projects, tasks and handoff (keep the next session from starting cold)
+## 11. Projects, initiatives, tasks and handoff (keep the next session from starting cold)
 
-The handoff repository is the single source of truth for project state. Use it, keep it current:
+The handoff repository is the single source of truth for the state of all work. The hierarchy:
+**portfolio → initiatives (cross-project programmes, integrations, platforms; optional) → projects (one repository
+each) → tasks (Now / Next / Later / Done), plans and sessions.** The devkit `using-devkit` skill is the full manual.
+
+- **One project per session.** Write only your project's note (`projects/<project id>.md`) and plans
+  (`plans/<project id>/`). Never edit another project's note: put cross-project facts in a shared initiative you are a
+  member of, or tell the user. Initiatives (`initiatives/<slug>/README.md`) are updated only by member projects.
+  `PROJECTS.md`, `TASKS.md`, `ACTIVITY.md`, `registry.json` and `log/` are generated: never edit them. The guard
+  enforces all of this; portfolio-level sessions (started in `~/Development` or the handoff repo) may work across
+  projects when the user asks.
+- **Initiatives** hold the goal, scope, one workstream per member project, cross-project tasks, decisions and
+  contracts (APIs, events, versions) every member must respect. `dev initiative ls|show`, `dev task -i <slug>`.
+
+Use it, keep it current:
 
 - `dev overview` — every project: status, priority, Now tasks, latest status line, last session (`--json` for tools).
 - `dev status` / `dev task` — the current project and its tasks; `dev task add "…" --now|--later`,
