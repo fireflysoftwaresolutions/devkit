@@ -102,6 +102,9 @@ class TurnActionTests(unittest.TestCase):
     def test_decide_reads_the_session_and_transcript(self):
         p = self._t([_claude_prompt("dame una receta"), _claude_tool("WebSearch", {"query": "receta"})])
         self.assertFalse(scope.decide({"transcript_path": p}, {"turn_class": OTHER}))
+        self.assertFalse(scope.decide({"transcript_path": p}, {"turn_class": None}))  # outside a repository
+        self.assertTrue(scope.decide({"transcript_path": p}, {"turn_class": None, "top": "/repo"}))  # "how is it going?"
+        self.assertFalse(scope.decide({"transcript_path": p}, {"turn_class": OTHER, "top": "/repo"}))  # a recipe in a repo
         self.assertTrue(scope.decide({"transcript_path": p}, {"turn_class": DEV}))
         os.environ["DEVKIT_SCOPE"] = "all"
         try:

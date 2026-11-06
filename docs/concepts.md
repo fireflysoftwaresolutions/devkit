@@ -250,7 +250,8 @@ devkit decides per turn, in two steps:
 1. **The request.** The prompt hook classifies it as development, other, or no signal. A follow-up with no signal
    (for example _continue_ or _yes_) keeps the previous turn's class. For a request of the other class, the hook adds
    nothing to the context.
-2. **What the turn did.** The Stop hook looks at the turn's tool calls. A turn with no signal counts as development
+2. **Where and what the turn did.** Inside a repository, a request with no signal at all (a status question)
+   counts as development. Otherwise the Stop hook looks at the turn's tool calls. A turn with no signal counts as development
    when it edited files in a repository or ran development commands. An "other" turn counts only when it did
    something strong: a commit, a push, a tag, or a test or build run. A deck built inside a repository stays
    consulting work.

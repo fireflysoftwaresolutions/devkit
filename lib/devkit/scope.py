@@ -9,6 +9,7 @@ consulting work done with the Firefly consulting kit) gets a normal answer and d
 Decided per turn, in two steps:
   prompt   classify(prompt) -> "dev" | "other" | None. A follow-up with no signal ("continue", "yes") inherits
            the previous turn's class.
+  repo     with no signal at all, a session inside a repository counts as development ("how is it going?").
   actions  at Stop, what the turn did. A turn of unknown class becomes development when it edited files in a
            repository or ran development commands; an "other" turn only through strong actions (commits, pushes,
            tags, test or build runs), so a deck built inside a repository stays consulting work.
@@ -193,4 +194,7 @@ def decide(data: dict, sess: dict) -> bool:
     """The Stop hook's question: should devkit's process (status block, skills) apply to the turn that just ended?"""
     if os.environ.get("DEVKIT_SCOPE") == "all":
         return True
-    return is_dev_turn(sess.get("turn_class"), turn_actions(data.get("transcript_path")))
+    cls = sess.get("turn_class")
+    if cls is None and sess.get("top"):  # no signal inside a repository ("how is it going?"): development
+        cls = DEV
+    return is_dev_turn(cls, turn_actions(data.get("transcript_path")))

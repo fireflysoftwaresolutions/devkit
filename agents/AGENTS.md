@@ -9,7 +9,8 @@ reviewing, debugging, testing, building, deploying or releasing software; settin
 repositories, CI and devkit; and questions about a codebase. They do not apply to anything else, for example a
 recipe, a general question, or consulting work done with the Firefly consulting kit (decks, documents, research,
 proposals; developing the kit itself is development work). Answer those normally, without the status block or
-devkit's process. In a session that mixes both, apply the rules to the development turns only.
+devkit's process. In a session that mixes both, apply the rules to the development turns only. When a request gives no clear signal
+(a status question, "continue"), work inside a repository counts as development.
 
 ## 0. Instruction canary and status block: `[Firefly> DevKit]`
 

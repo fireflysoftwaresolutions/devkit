@@ -177,7 +177,7 @@ def format_issues(text: str) -> list:
 
 
 SURFACES = {"cli": "terminal", "claude-desktop": "Claude Desktop", "claude-vscode": "VS Code", "sdk-ts": "SDK",
-            "sdk-py": "SDK", "codex_cli_rs": "terminal", "codex_exec": "codex exec", "codex_vscode": "VS Code"}
+            "sdk-py": "SDK", "sdk-cli": "claude -p", "codex_cli_rs": "terminal", "codex_exec": "codex exec", "codex_vscode": "VS Code"}
 
 
 def surface(agent: str, data: dict = None) -> str:
