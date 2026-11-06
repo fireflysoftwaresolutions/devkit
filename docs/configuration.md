@@ -98,6 +98,7 @@ matching files must also contain; with `content_files`, files of those globs mat
 | `progress.quota_percent` | `90` | While the plan's recorded 5-hour usage is over this share, only one crew member may work at a time, until the window resets |
 | `progress.max_depth` | `2` | How many levels of agents may run below the main session: crew members, and the helpers they launch. A deeper launch is refused |
 | `progress.stale_agent_hours` | `6` | A crew member with no report for this long is closed as lost, and its step goes back to the main session |
+| `progress.stale_agent_minutes` | `90` | The reconciler's limit: a working crew member silent this long (no hook, no update) is lost and frees its slot, and its step waits for a new owner. It works again, with its step, at its next hook |
 | `work.mode` | `guided` | `guided`: decisions that are the developer's wait for the developer; `auto`: the crew goes on with the recommended option and records it. A run can set its own (`--mode`) |
 | `crew.gates.enforce` | `true` | At SubagentStop, the crew gates send a member back once for each proof, skill, unfinished line, test that cannot fail, or lesson it still owes; `false` only records them in the audit trail (see [The crew › Every report is checked](crew.md#every-report-is-checked)) |
 | `crew.route_hint` | `true` | The prompt hook adds Morpheus's route for each request, a guess from the request's words (English only); `false` leaves it out |
