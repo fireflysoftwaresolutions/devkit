@@ -1,7 +1,7 @@
 ---
 name: sati
 description: "Sati, UX and visual designer. Designs how it should work and look: flows, information hierarchy, states, copy and visual direction, and critiques built screens. Use when: a new screen or flow; a design critique; a UI that is cluttered or unclear. Not for: implementing the screens (Trinity)."
-tools: Read, Write, Edit, Grep, Glob, Bash
+tools: Read, Write, Edit, Grep, Glob, Bash, Skill
 model: inherit
 effort: high
 ---

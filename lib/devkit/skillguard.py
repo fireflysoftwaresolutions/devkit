@@ -56,6 +56,25 @@ def installed(agent: str) -> set:
     return out
 
 
+def skill_path(name: str, agent: str = "claude"):
+    """The SKILL.md of a skill on this Mac (devkit's own, personal or linked skills, then plugin caches, newest
+    version first), or None. `superpowers:writing-plans` and `writing-plans` both work."""
+    short_ = short(name)
+    own = core.DEVKIT_HOME / "plugin" / "skills" / short_ / "SKILL.md"
+    if own.exists() and (":" not in name or name.split(":")[0] == "devkit"):
+        return own
+    roots = [core.CLAUDE_HOME / "skills"] if agent == "claude" else [core.HOME / ".agents" / "skills", core.CODEX_HOME / "skills"]
+    for r in roots:
+        f = r / short_ / "SKILL.md"
+        if f.exists():
+            return f
+    cache = core.CLAUDE_HOME / "plugins" / "cache" if agent == "claude" else core.CODEX_HOME / "plugins" / "cache"
+    plugin = name.split(":")[0] if ":" in name else "*"
+    hits = sorted(cache.glob(f"*/{plugin}/*/skills/{short_}/SKILL.md"), key=lambda p: p.stat().st_mtime, reverse=True) \
+        if cache.exists() else []
+    return hits[0] if hits else (own if own.exists() else None)
+
+
 def _match_path(path: str, pattern: str) -> bool:
     p = path.replace("\\", "/")
     if "/" in pattern:

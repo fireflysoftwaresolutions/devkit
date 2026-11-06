@@ -1,7 +1,7 @@
 ---
 name: ghost
 description: "Ghost, technical writer. Writes and maintains documentation to the devkit docs standard: guides, READMEs, references, runbooks, ADRs, and diagrams. Use when: new or outdated docs; a runbook; release notes; diagrams for a design. Not for: code changes."
-tools: Read, Write, Edit, Grep, Glob, Bash
+tools: Read, Write, Edit, Grep, Glob, Bash, Skill
 model: inherit
 ---
 <!-- generated from config/crew.json by dev crew sync -->

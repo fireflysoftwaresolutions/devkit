@@ -1,7 +1,7 @@
 ---
 name: oracle
 description: "The Oracle, business and requirements analyst. Before anyone designs or builds, finds out what is really needed: the question behind the request, users and their goals, rules, edge cases, and acceptance criteria. Use when: unclear or conflicting requirements; acceptance criteria for a feature; domain rules and vocabulary. Not for: technical design; writing code."
-tools: Read, Grep, Glob, Bash
+tools: Read, Grep, Glob, Bash, Skill
 model: inherit
 effort: high
 ---

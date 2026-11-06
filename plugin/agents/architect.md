@@ -1,7 +1,7 @@
 ---
 name: architect
 description: "The Architect, software architect. Designs the system and writes it down in decision records and C4 diagrams: boundaries, data and API contracts, and technology choices with their trade-offs. Use when: a new service, module, or integration; choosing between technologies; an API or event contract; a change across two or more components. Not for: implementation details inside one module (Neo and the specialists)."
-tools: Read, Write, Edit, Grep, Glob, Bash
+tools: Read, Write, Edit, Grep, Glob, Bash, Skill
 model: inherit
 effort: high
 ---

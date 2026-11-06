@@ -1,7 +1,7 @@
 ---
 name: smith
 description: "Agent Smith, adversarial tester (red team). Tries to break the system the way an attacker or a hostile input would: abuse cases, injection, privilege escalation, race conditions, and failure modes. Use when: before releasing a sensitive feature; after a security fix, to try to bypass it; hardening an exposed API. Not for: fixing what the attack finds: report it, and Morpheus assigns the fix."
-tools: Read, Grep, Glob, Bash
+tools: Read, Grep, Glob, Bash, Skill
 model: inherit
 effort: high
 ---

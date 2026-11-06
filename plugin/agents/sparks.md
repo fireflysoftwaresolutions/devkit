@@ -1,7 +1,7 @@
 ---
 name: sparks
 description: "Sparks, fast read-only lookup scout. Finds facts fast: files, symbols, call sites, config values and log lines, returned as path:line with short excerpts. Use when: where is X defined or used; which files mention Y; what a config value is. Not for: judgment, review, or design."
-tools: Read, Grep, Glob
+tools: Read, Grep, Glob, Skill
 model: haiku
 effort: low
 omitClaudeMd: true

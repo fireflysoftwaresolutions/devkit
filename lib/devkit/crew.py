@@ -26,8 +26,8 @@ CODEX_CONF = core.DEVKIT_HOME / "config" / "codex" / "config.json"
 MARK = "<!-- generated from config/crew.json by dev crew sync -->"
 
 # tools level -> the Claude Code agent's `tools` (None: no restriction, the key is omitted)
-TOOLS = {"all": None, "build": "Read, Write, Edit, Grep, Glob, Bash", "review": "Read, Grep, Glob, Bash",
-         "read": "Read, Grep, Glob"}
+TOOLS = {"all": None, "build": "Read, Write, Edit, Grep, Glob, Bash, Skill", "review": "Read, Grep, Glob, Bash, Skill",
+         "read": "Read, Grep, Glob, Skill"}  # Skill: every member loads the skills its procedure and brief name
 CLAUDE_MODEL = {"strong": "inherit", "standard": "inherit", "fast": "haiku"}
 CLAUDE_EFFORT = {"strong": "high", "fast": "low"}  # standard: the session's default effort, like Codex
 REQUIRED = ("id", "name", "title", "role", "summary", "personality", "use_when", "skills", "tools", "tier", "returns",
@@ -754,6 +754,28 @@ def _dq(s) -> str:
     return '"' + re.sub(r'(["\\$`])', r"\\\1", str(s)) + '"'
 
 
+def _brief_activity(m: dict, task: str, step=None, roster=None):
+    """The kind of work a brief is for: the plan step's recorded activity, else the task's (the RACI), else the
+    member's own first Responsible activity. Language-neutral when the step carries its activity."""
+    from . import raci
+    try:
+        if step is not None and str(step).strip():
+            from . import progress
+            run = progress.normalize(progress.load_run(*progress.current_session()) or {})
+            s = progress._find_step(run, step)
+            if s:
+                a = raci.step_activity(s, roster)
+                if a:
+                    return a
+        top = raci.best(task, roster)
+        if top:  # the knowledge follows the work, whoever does it
+            return top[0]
+        own = raci.roles_of(m["id"], roster)["R"]
+        return own[0] if own else None
+    except Exception:
+        return None
+
+
 def brief_skills(m: dict, task: str = "", globs=None, agent: str = "claude"):
     """The skills a member loads for one task: its own, plus those devkit's skill rules (config/skill-rules.json)
     require for the task's words and the files in its scope, so a Spring task brings the Java skills and a Python
@@ -804,9 +826,21 @@ def brief_text(m: dict, task: str, scope: str = "", step=None, roster=None, cwd=
                  '`dev crew ask "<question>"`.')
     b += ["", "## Skills to load first", ""]
     skills, why = brief_skills(m, task, globs)
-    b.append(("Load each with the Skill tool, or read its SKILL.md when the Skill tool does not list it: "
-              + ", ".join(f"`{s}`" for s in skills) + "." + (f" ({'; '.join(why)})" if why else ""))
-             if skills else "None.")
+    from . import raci
+    act = _brief_activity(m, task, step, roster)
+    know = (act or {}).get("knowledge") or {}
+    for s in know.get("skills") or []:
+        if s not in skills:
+            skills.append(s)
+            why.append(f"{s}: {raci._lower(act['name'])}")
+    b.append(("Load each with the Skill tool, or read its SKILL.md at the path shown when the Skill tool does not "
+              "list it" + (f" ({'; '.join(why)})" if why else "") + ":" if skills else "None."))
+    if skills:
+        from . import skillguard
+        b += [f"- `{s}`" + (f": `{core.tilde(p)}`" if (p := skillguard.skill_path(s)) else "") for s in skills]
+    if know.get("docs"):
+        b += ["", "## Read first", "", f"devkit's guides for {raci._lower(act['name'])}; follow them:"]
+        b += [f"- `{core.tilde(core.DEVKIT_HOME / d)}`" for d in know["docs"] if (core.DEVKIT_HOME / d).exists()]
     if m.get("procedure"):
         b += ["", "## Procedure", "", "Follow your procedure's phases (your agent instructions); before you report, "
               "devkit checks that you ran: " + (", ".join(f"`{p}`" for p in proofs(m)) or "nothing in particular") + "."]

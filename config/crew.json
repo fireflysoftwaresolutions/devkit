@@ -1,5 +1,5 @@
 {
-  "_comment": "devkit's crew: one source for the Claude Code agents (plugin/agents/<id>.md, spawned as devkit:<id>) and the Codex agent roles (~/.codex/agents/<id>.toml, spawned by agent type). Morpheus is the main session's role when it coordinates; everyone else is a subagent. tools: all = read, write and run; build = all but no web; review = read and run commands, never edit; read = read-only files and search. tier: strong = the session's model (judgment, design, security, review); standard = the session's model at default effort; fast = the small fast model (mechanical lookups). Edit names, personalities or skills here, then run `dev crew sync`. Each member has a short `title` (the role developers see first, before the name), a goal, a procedure (phases with skills, devkit commands, a gate and a proof), the devkit commands it uses, and its definition of done. `activities` is the RACI: for each kind of work, R does it, A approves it (one member), C is consulted, I is informed; `signals` are the words that classify a task. Routing, step assignment, member launches and the end of a run follow it.",
+  "_comment": "devkit's crew: one source for the Claude Code agents (plugin/agents/<id>.md, spawned as devkit:<id>) and the Codex agent roles (~/.codex/agents/<id>.toml, spawned by agent type). Morpheus is the main session's role when it coordinates; everyone else is a subagent. tools: all = read, write and run; build = all but no web; review = read and run commands, never edit; read = read-only files and search. tier: strong = the session's model (judgment, design, security, review); standard = the session's model at default effort; fast = the small fast model (mechanical lookups). Edit names, personalities or skills here, then run `dev crew sync`. Each member has a short `title` (the role developers see first, before the name), a goal, a procedure (phases with skills, devkit commands, a gate and a proof), the devkit commands it uses, and its definition of done. `activities` is the RACI: for each kind of work, R does it, A approves it (one member), C is consulted, I is informed; `signals` are the words that classify a task. Routing, step assignment, member launches and the end of a run follow it. Each activity's `knowledge` lists the skills and devkit guides every brief for that kind of work carries.",
   "language_rule": "Write to the developer in their language: devkit config `language`, default American English. Code, commits, PRs and docs stay in American English unless the developer asks otherwise.",
   "members": [
     {
@@ -3015,7 +3015,19 @@
         "integrate the branches",
         "how is it going",
         "orchestrate"
-      ]
+      ],
+      "knowledge": {
+        "skills": [
+          "crew",
+          "communicating",
+          "working-efficiently",
+          "superpowers:writing-plans"
+        ],
+        "docs": [
+          "docs/crew.md",
+          "docs/progress-and-communication.md"
+        ]
+      }
     },
     {
       "id": "scope",
@@ -3041,7 +3053,15 @@
         "roadmap",
         "trade-off",
         "value"
-      ]
+      ],
+      "knowledge": {
+        "skills": [
+          "communicating"
+        ],
+        "docs": [
+          "docs/initiatives.md"
+        ]
+      }
     },
     {
       "id": "requirements",
@@ -3072,7 +3092,16 @@
         "clarify",
         "ambiguous",
         "functional spec"
-      ]
+      ],
+      "knowledge": {
+        "skills": [
+          "domain-modeling",
+          "doc-coauthoring"
+        ],
+        "docs": [
+          "docs/templates.md"
+        ]
+      }
     },
     {
       "id": "research",
@@ -3100,7 +3129,14 @@
         "spike",
         "options for",
         "state of the art"
-      ]
+      ],
+      "knowledge": {
+        "skills": [
+          "architecture",
+          "working-efficiently"
+        ],
+        "docs": []
+      }
     },
     {
       "id": "architecture",
@@ -3133,7 +3169,18 @@
         "coupling",
         "design the system",
         "design the module"
-      ]
+      ],
+      "knowledge": {
+        "skills": [
+          "architecture",
+          "system-design",
+          "codebase-design",
+          "diagrams"
+        ],
+        "docs": [
+          "docs/diagrams.md"
+        ]
+      }
     },
     {
       "id": "ux",
@@ -3169,7 +3216,16 @@
         "diseño",
         "pantalla",
         "pantallas"
-      ]
+      ],
+      "knowledge": {
+        "skills": [
+          "frontend-design",
+          "impeccable"
+        ],
+        "docs": [
+          "docs/dashboard.md"
+        ]
+      }
     },
     {
       "id": "frontend",
@@ -3208,7 +3264,17 @@
         "responsive",
         "live updates",
         "javascript"
-      ]
+      ],
+      "knowledge": {
+        "skills": [
+          "frontend-design",
+          "impeccable",
+          "testing"
+        ],
+        "docs": [
+          "docs/testing.md"
+        ]
+      }
     },
     {
       "id": "backend",
@@ -3251,7 +3317,17 @@
         "express",
         "nestjs",
         "server-sent events"
-      ]
+      ],
+      "knowledge": {
+        "skills": [
+          "backend",
+          "testing",
+          "devsecops"
+        ],
+        "docs": [
+          "docs/testing.md"
+        ]
+      }
     },
     {
       "id": "database",
@@ -3288,7 +3364,17 @@
         "table",
         "database migration",
         "add a migration"
-      ]
+      ],
+      "knowledge": {
+        "skills": [
+          "supabase-postgres-best-practices",
+          "backend",
+          "testing"
+        ],
+        "docs": [
+          "docs/testing.md"
+        ]
+      }
     },
     {
       "id": "feature",
@@ -3318,7 +3404,17 @@
         "exception",
         "end to end",
         "implement"
-      ]
+      ],
+      "knowledge": {
+        "skills": [
+          "testing",
+          "superpowers:test-driven-development",
+          "superpowers:systematic-debugging"
+        ],
+        "docs": [
+          "docs/testing.md"
+        ]
+      }
     },
     {
       "id": "mobile",
@@ -3346,7 +3442,17 @@
         "kotlin",
         "app store",
         "play store"
-      ]
+      ],
+      "knowledge": {
+        "skills": [
+          "testing",
+          "frontend-design",
+          "impeccable"
+        ],
+        "docs": [
+          "docs/testing.md"
+        ]
+      }
     },
     {
       "id": "ai",
@@ -3378,7 +3484,17 @@
         "ai feature",
         "chatbot",
         "support bot"
-      ]
+      ],
+      "knowledge": {
+        "skills": [
+          "testing",
+          "backend",
+          "devsecops"
+        ],
+        "docs": [
+          "docs/models-and-tokens.md"
+        ]
+      }
     },
     {
       "id": "tooling",
@@ -3417,7 +3533,18 @@
         "homebrew",
         "setup wizard",
         "chore"
-      ]
+      ],
+      "knowledge": {
+        "skills": [
+          "testing",
+          "workspace",
+          "using-devkit"
+        ],
+        "docs": [
+          "docs/development.md",
+          "docs/testing.md"
+        ]
+      }
     },
     {
       "id": "testing",
@@ -3450,7 +3577,17 @@
         "end-to-end tests",
         "works as expected",
         "verify the behavior"
-      ]
+      ],
+      "knowledge": {
+        "skills": [
+          "testing",
+          "superpowers:test-driven-development",
+          "property-based-testing"
+        ],
+        "docs": [
+          "docs/testing.md"
+        ]
+      }
     },
     {
       "id": "security",
@@ -3489,7 +3626,17 @@
         "owasp",
         "least privilege",
         "dns rebinding"
-      ]
+      ],
+      "knowledge": {
+        "skills": [
+          "devsecops",
+          "threat-model-analyst",
+          "sharp-edges"
+        ],
+        "docs": [
+          "docs/guard.md"
+        ]
+      }
     },
     {
       "id": "redteam",
@@ -3514,7 +3661,17 @@
         "abuse",
         "bypass",
         "try to break"
-      ]
+      ],
+      "knowledge": {
+        "skills": [
+          "devsecops",
+          "variant-analysis",
+          "fp-check"
+        ],
+        "docs": [
+          "docs/guard.md"
+        ]
+      }
     },
     {
       "id": "review",
@@ -3536,7 +3693,17 @@
         "review before merge",
         "review before merging",
         "review"
-      ]
+      ],
+      "knowledge": {
+        "skills": [
+          "testing",
+          "superpowers:verification-before-completion"
+        ],
+        "docs": [
+          "docs/testing.md",
+          "docs/git-and-github.md"
+        ]
+      }
     },
     {
       "id": "compliance",
@@ -3567,7 +3734,14 @@
         "check the licenses",
         "license check",
         "licenses of"
-      ]
+      ],
+      "knowledge": {
+        "skills": [
+          "devsecops",
+          "supply-chain-risk-auditor"
+        ],
+        "docs": []
+      }
     },
     {
       "id": "cicd",
@@ -3599,7 +3773,18 @@
         "failing build",
         "ci failure",
         "runner"
-      ]
+      ],
+      "knowledge": {
+        "skills": [
+          "cicd",
+          "github-actions-hardening",
+          "delivery"
+        ],
+        "docs": [
+          "docs/ci-cd.md",
+          "docs/delivery.md"
+        ]
+      }
     },
     {
       "id": "release",
@@ -3626,7 +3811,17 @@
         "calver",
         "semver",
         "hotfix"
-      ]
+      ],
+      "knowledge": {
+        "skills": [
+          "delivery",
+          "release-policy"
+        ],
+        "docs": [
+          "docs/delivery.md",
+          "docs/git-and-github.md"
+        ]
+      }
     },
     {
       "id": "infrastructure",
@@ -3665,7 +3860,16 @@
         "opentelemetry",
         "tracing",
         "observability"
-      ]
+      ],
+      "knowledge": {
+        "skills": [
+          "devsecops",
+          "otel-instrumentation"
+        ],
+        "docs": [
+          "docs/docker.md"
+        ]
+      }
     },
     {
       "id": "incident",
@@ -3694,7 +3898,17 @@
         "postmortem",
         "degraded",
         "on-call"
-      ]
+      ],
+      "knowledge": {
+        "skills": [
+          "incident-response",
+          "learning-loop",
+          "communicating"
+        ],
+        "docs": [
+          "docs/lessons.md"
+        ]
+      }
     },
     {
       "id": "performance",
@@ -3722,7 +3936,14 @@
         "memory leak",
         "cpu",
         "throughput"
-      ]
+      ],
+      "knowledge": {
+        "skills": [
+          "otel-instrumentation",
+          "superpowers:systematic-debugging"
+        ],
+        "docs": []
+      }
     },
     {
       "id": "migration",
@@ -3749,7 +3970,17 @@
         "migrate to",
         "migrate from",
         "end of life"
-      ]
+      ],
+      "knowledge": {
+        "skills": [
+          "backend",
+          "testing",
+          "improve-codebase-architecture"
+        ],
+        "docs": [
+          "docs/testing.md"
+        ]
+      }
     },
     {
       "id": "data-analysis",
@@ -3777,7 +4008,13 @@
         "data question",
         "report on usage",
         "data analysis"
-      ]
+      ],
+      "knowledge": {
+        "skills": [
+          "supabase-postgres-best-practices"
+        ],
+        "docs": []
+      }
     },
     {
       "id": "docs",
@@ -3803,7 +4040,17 @@
         "write the docs",
         "update the docs",
         "document the"
-      ]
+      ],
+      "knowledge": {
+        "skills": [
+          "docs",
+          "diagrams",
+          "documentation-writer"
+        ],
+        "docs": [
+          "docs/diagrams.md"
+        ]
+      }
     },
     {
       "id": "lookup",
@@ -3824,7 +4071,11 @@
         "look up",
         "list all",
         "who calls"
-      ]
+      ],
+      "knowledge": {
+        "skills": [],
+        "docs": []
+      }
     }
   ]
 }

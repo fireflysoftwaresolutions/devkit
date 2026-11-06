@@ -169,8 +169,8 @@ class RosterTests(unittest.TestCase):
 # --------------------------------------------------------------------------- rendering
 
 class RenderTests(unittest.TestCase):
-    TOOLS = {"all": None, "build": "Read, Write, Edit, Grep, Glob, Bash", "review": "Read, Grep, Glob, Bash",
-             "read": "Read, Grep, Glob"}
+    TOOLS = {"all": None, "build": "Read, Write, Edit, Grep, Glob, Bash, Skill", "review": "Read, Grep, Glob, Bash, Skill",
+             "read": "Read, Grep, Glob, Skill"}
 
     def test_frontmatter_for_every_tools_and_tier_combination(self):
         for tools, allowed in self.TOOLS.items():

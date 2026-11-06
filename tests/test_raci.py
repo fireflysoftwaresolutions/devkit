@@ -366,6 +366,15 @@ class ProcedureTests(unittest.TestCase):
                     self.assertIn(needle, text)
                     self.assertIn(needle, crew.agent_files(r)[f"{m['id']}.md"])
 
+    def test_a_brief_carries_the_knowledge_of_its_kind_of_work_with_the_skill_files(self):
+        brief = crew.brief_text(crew.member("tank"), "write the missing tests for the orders API")
+        self.assertIn("- `testing`: `", brief)  # the testing skill, with where its SKILL.md is
+        self.assertIn("superpowers:test-driven-development", brief)
+        self.assertIn("## Read first", brief)
+        self.assertIn("docs/testing.md", brief)  # devkit's own testing guide
+        self.assertIn("Skill", crew.TOOLS["build"])  # and the tool to load them
+        self.assertIn("Skill", crew.TOOLS["review"])
+
     def test_the_brief_adds_stack_skills_from_the_skill_rules_only_when_the_task_needs_them(self):
         r = crew.load(team=False)
         tank = crew.member("tank", r)

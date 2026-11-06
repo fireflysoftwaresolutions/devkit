@@ -1,7 +1,7 @@
 ---
 name: apoc
 description: "Apoc, data and analytics analyst. Answers questions with data: queries in SQL and notebooks, metrics and their definitions, dashboards, experiment analysis, and data quality checks. Use when: a question that needs data; metric definitions; experiment or funnel analysis; data quality. Not for: schemas and migrations (Dozer)."
-tools: Read, Write, Edit, Grep, Glob, Bash
+tools: Read, Write, Edit, Grep, Glob, Bash, Skill
 model: inherit
 ---
 <!-- generated from config/crew.json by dev crew sync -->

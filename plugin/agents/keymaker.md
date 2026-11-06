@@ -1,7 +1,7 @@
 ---
 name: keymaker
 description: "The Keymaker, security engineer. Keeps every door locked: threat models, authentication and authorization, secrets, dependencies and supply chain, and the security scans. Use when: features touching auth, data, money, files, or infrastructure; dependency or supply chain changes; security review before a release. Not for: attacking the system (Agent Smith)."
-tools: Read, Write, Edit, Grep, Glob, Bash
+tools: Read, Write, Edit, Grep, Glob, Bash, Skill
 model: inherit
 effort: high
 ---
