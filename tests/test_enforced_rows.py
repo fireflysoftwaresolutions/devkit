@@ -54,7 +54,8 @@ class ApprovalsOwedTests(EnforcedRowCase):
         pg.start("API", plan=["build the JSON API server"], now=m(0))
         pg.assign("build the JSON API server", "Tank", now=m(0))
         launch("a1", "devkit:tank", "Tank: build the JSON API server", m(1))
-        pg.on_subagent("claude", {"session_id": "s1", "agent_id": "a1", "agent_type": "devkit:tank"}, False, now=m(9))
+        pg.on_subagent("claude", {"session_id": "s1", "agent_id": "a1", "agent_type": "devkit:tank",
+                                  "last_assistant_message": "**[Firefly> DevKit · Crew member]** api · `main` · step\n- **Done:** the step\n- **Check:** ✓ its tests pass\n- **Next:** Morpheus"}, False, now=m(9))  # with its evidence (F6)
         self.assertEqual(pg.approvals_owed(pg.load_run("claude", "s1")), [("seraph", ["build the JSON API server"])])
         with self.assertRaises(pg.StepError) as e:
             pg.step("API shipped", kind="done", force=True, now=m(10))

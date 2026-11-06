@@ -1353,7 +1353,7 @@ def set_mode(mode: str, approve: str = "", cwd: str | None = None, now: float | 
 
 
 def crew_decision(question: str, options=None, recommend: str = "", irreversible: str = "", from_agent: str | None = None,
-                  cwd: str | None = None, now: float | None = None, target: str = "") -> dict:
+                  cwd: str | None = None, now: float | None = None, target: str = "", approves: str = "") -> dict:
     """A decision point. -> the decision record. In auto mode a reversible decision is taken at once with the
     recommendation; in guided mode, or for an irreversible action not pre-approved, it waits for the developer: the
     asking member's lane waits and its step is blocked until Morpheus records the answer (crew_decide). `target`:
@@ -1381,6 +1381,12 @@ def crew_decision(question: str, options=None, recommend: str = "", irreversible
         d = {"id": _next_id(decs, "D"), "ts": round(now), "question": question.strip()[:800], "options": opts,
              "recommend": rec, "irreversible": act, "target": target, "from": from_agent or "main",
              "from_name": _name_of(run, from_agent or "main"), "state": "pending", "answer": "", "by": ""}
+        if approves:  # the developer's answer approves these steps (approvals.verdicts), verified by C5 evidence
+            from . import approvals
+            try:
+                d["approves"] = approvals.decision_steps(run, approves)
+            except approvals.ApprovalError as e:
+                raise StepError(str(e))
         auto = mode_of(run) == "auto" and (not act or act in approved_actions(run, now))
         if auto and rec:
             d.update(state="decided", answer=rec, by="auto", decided=round(now))
@@ -2191,7 +2197,7 @@ def reopen(which, why: str, cwd: str | None = None, now: float | None = None, sk
                 raise StepError(f"step “{s['name']}” is already {old}")
             s.update(state="skipped", finished=now)
         else:
-            if old not in ("done", "skipped", "blocked"):
+            if old not in ("done", "skipped", "blocked", "unverified"):
                 raise StepError(f"step “{s['name']}” is {old}, not closed")
             s.update(state="pending", finished=None)
             s.pop("recheck", None)  # it is redone now
@@ -2264,28 +2270,40 @@ def note(text: str, nxt: str = "", cwd: str | None = None, from_agent: str | Non
 
 
 def member_of_step(run: dict, s: dict):
-    """The crew member who did a step: its lane's persona, or Morpheus for the main session's own steps."""
-    from . import crew
-    owner = s.get("owner") or "main"
-    if owner == "main":
-        return "morpheus"
-    lane = (run.get("agents") or {}).get(owner) or {}
-    m = crew._for_label(lane.get("persona") or lane.get("label") or s.get("label") or "")
-    return m["id"] if m else None
+    """The crew member who did a step: its lane's member, or Morpheus for the main session's own steps
+    (approvals.doer)."""
+    from . import approvals
+    return approvals.doer(run, s)
 
 
 def approvals_owed(run: dict) -> list:
-    """[(Accountable member id, [step names])] still to approve the run's finished work. [] when the roster cannot
-    be read (the check never blocks on a broken roster)."""
+    """[(approver id, [step names])] still to approve the run's finished work (approvals.owed: an explicit verdict
+    after the work, never the doer's). [] when the roster cannot be read (the check never blocks on a broken
+    roster)."""
     try:
-        from . import raci
-        return raci.approvals_missing(run, lambda s: member_of_step(run, s))
+        from . import approvals
+        return approvals.owed(run, lambda s: member_of_step(run, s))
     except Exception:
         return []
 
 
+def _approve(run: dict, by: str, approves: str, check: str, now: float):
+    """`dev progress step --approves "<steps>"`: `by`'s verdict on the named steps, from the step's Check (spec F6,
+    R2-3). ApprovalError becomes StepError."""
+    from . import approvals
+    try:
+        approvals.record(run, by, approves, approvals.verdict_of(check), now, check=check,
+                         doer_of=lambda s: member_of_step(run, s))
+    except approvals.ApprovalError as e:
+        raise StepError(str(e))
+
+
 def step(text: str, nxt: str = "", cwd: str | None = None, kind: str = "step", check: str = "", which=None,
-         from_agent: str | None = None, now: float | None = None, force: bool = False, why: str = "") -> dict:
+         from_agent: str | None = None, now: float | None = None, force: bool = False, why: str = "",
+         approves: str = "") -> dict:
+    """Record a step of the run: Morpheus's closes a plan step, a member's goes to its lane; `approves` names the
+    finished steps the Check approves or sends back (approvals.record). kind "done" ends the run, refused while an
+    approval is owed or a step is flagged recheck, unless `why` (approvals.end_check)."""
     now = now or time.time()
     agent, sid = current_session(cwd)
     from_agent = _as_lane(from_agent, cwd)
@@ -2308,6 +2326,13 @@ def step(text: str, nxt: str = "", cwd: str | None = None, kind: str = "step", c
                                                                     "check": check}]
             if kind == "step":
                 lane["done"] = (lane.get("done") or 0) + 1
+            if approves:
+                from . import crew
+                mem = crew._for_lane(lane)
+                if not mem:
+                    raise StepError("this lane names no crew member, so it approves nothing: report the verdict, and "
+                                    "the step's approver records it")
+                _approve(run, mem["id"], approves, check, now)
             run["updates"].append({"ts": round(now), "kind": "agent", "agent": from_agent, "text": text, "check": check})
             run["updates"] = run["updates"][-40:]
             _save(run)
@@ -2337,6 +2362,8 @@ def step(text: str, nxt: str = "", cwd: str | None = None, kind: str = "step", c
             old_state = target.get("state")
             _finish_step(run, target, now, agent, sid)
             _log_change(run, target, old_state, "done", "main", check or text, now)
+            if approves:
+                _approve(run, "morpheus", approves, check, now)
             _advance_main(run, now)
             run["state"] = "running"
         elif kind == "blocked":
@@ -2350,16 +2377,13 @@ def step(text: str, nxt: str = "", cwd: str | None = None, kind: str = "step", c
             if waiting and not force:
                 raise StepError("decisions still waiting for the developer: " + ", ".join(
                     f"{d['id']} ({d['question'][:60]})" for d in waiting) + ". Ask, then dev crew decide <id> \"…\".")
-            owed = approvals_owed(run)
-            if owed and not why:
-                from . import raci
-                raise StepError("the work is not approved yet (the crew's RACI): " + "; ".join(
-                    f"{raci.names([acc])} approves {', '.join('“' + x + '”' for x in steps)}" for acc, steps in owed) +
-                    ". Add a review step for each (dev progress add \"review=20m\" then dev progress assign review --to "
-                    f"{raci.handle(owed[0][0])}), or end with --why \"<reason>\".")
-            if owed:
-                run.setdefault("raci_overrides", []).append({"ts": round(now), "step": "(end of run)", "why": why,
-                                                             "owed": [[a, s_] for a, s_ in owed]})
+            from . import approvals
+            try:
+                over = approvals.end_check(run, why, now, lambda s_: member_of_step(run, s_))
+            except approvals.ApprovalError as e:
+                raise StepError(str(e))
+            if over:
+                run.setdefault("raci_overrides", []).append(over)
             open_ = [s for s in plan if s.get("state") not in ("done", "skipped") and s.get("state") != "running"]
             if open_ and not force:
                 raise StepError("not finished: " + ", ".join(f"“{s['name']}” ({s.get('state')})" for s in open_) +
@@ -2505,8 +2529,8 @@ def active_runs(max_age_h: float = 12) -> list:
     out = []
     for f in RUNS.glob("*.json") if RUNS.exists() else []:
         r = core.read_json(f, None)
-        if r and time.time() - f.stat().st_mtime < max_age_h * 3600:
-            out.append(r)
+        if r and r.get("state") != "orphaned" and time.time() - f.stat().st_mtime < max_age_h * 3600:
+            out.append(r)  # an orphaned run (its session ended, approvals.reconcile) is not live
     return sorted(out, key=lambda r: -r.get("started", 0))
 
 
@@ -2585,6 +2609,73 @@ def on_prompt(agent: str, data: dict):
         ctx.append("- no progress records in this session: reconstruct from your work so far, and start one "
                    "(`dev progress start \"<goal>\" --steps N --estimate 30m`) for long work.")
     return "\n".join(ctx)
+
+
+LAST_SEEN_EVERY = 60  # seconds: a member's hooks refresh its lane's last_seen at most this often
+
+
+def reconcile_hook(agent: str, data: dict, now: float | None = None) -> list:
+    """Every hook of the session (spec C7, C3): the agent whose hook this is was seen (its lane's `last_seen`), and
+    the reconciler's transitions are made on the session's own run (approvals.reconcile, then apply on the freshly
+    read run; launch transitions on the session record). The facts are read outside the lock. -> transitions made"""
+    from . import approvals
+    sid = data.get("session_id") or "-"
+    now = now or time.time()
+    run = load_run(agent, sid)
+    if not isinstance(run, dict) or run.get("state") not in approvals.LIVE:
+        return []
+    sess = state.read(session_path(agent, sid))
+    aid = str(data.get("agent_id") or "")
+    lane = (run.get("agents") or {}).get(aid) if aid else None
+    seen = bool(lane) and now - float(lane.get("last_seen") or 0) >= LAST_SEEN_EVERY
+    fx = approvals.facts(run, sess, now, meta=approvals.meta_reader(data.get("transcript_path")))
+    if aid in fx["lanes"]:
+        fx["lanes"][aid]["last_seen"] = now
+    lim = approvals.limits()
+    moves = approvals.reconcile(run, fx, now, lim)
+    if not (seen or moves):
+        return []
+    made = []
+    with _tx(agent, sid):
+        doc = load_run(agent, sid)
+        if not isinstance(doc, dict) or doc.get("state") not in approvals.LIVE:
+            return []
+        ln = (doc.get("agents") or {}).get(aid) if aid else None
+        if ln is not None and seen:
+            ln["last_seen"] = round(now, 1)
+        made = approvals.apply(doc, approvals.reconcile(doc, fx, now, lim), now)
+        if made or seen:
+            _save(doc, touch_session=False)
+    launches = [m for m in moves if m["kind"] == "launch"]
+    if launches:
+        with state.hold(session_path(agent, sid)):
+            s = state.load(session_path(agent, sid))
+            if isinstance(s, dict):
+                done = approvals.apply_session(s, launches, now)
+                if done:
+                    state.replace(session_path(agent, sid), s)
+                    made += done
+    if made:
+        approvals.audit_moves(doc, made)
+    return made
+
+
+def resume_orphaned(agent: str, sid: str, now: float | None = None) -> bool:
+    """A resumed session takes back its run the reconciler orphaned when the session ended (spec C8). -> resumed"""
+    now = now or time.time()
+    with _tx(agent, sid):
+        run = load_run(agent, sid)
+        if not isinstance(run, dict) or run.get("state") != "orphaned":
+            return False
+        was = run.pop("orphaned", None) or {}
+        run["state"] = "running"
+        run.setdefault("history", []).append({"ts": round(now), "step": "(run)", "from": "orphaned", "to": "running",
+                                              "by": "devkit", "why": f"its session resumed (orphaned: "
+                                              f"{str(was.get('why') or 'its session ended')[:120]})"})
+        _save(run, touch_session=False)
+    _audit("run.running", run.get("goal") or "run", "its session resumed", "running", project=run.get("project") or "",
+           by="devkit", was="orphaned")
+    return True
 
 
 def tool_started(data: dict):
@@ -3124,6 +3215,11 @@ def on_subagent(agent: str, data: dict, started: bool, now: float | None = None)
         return _on_subagent(agent, data, started, now)
 
 
+def _stop_report(data: dict) -> str:
+    """A SubagentStop's report: the member's last message (SubagentStart sends none)."""
+    return str(data.get("last_assistant_message") or "")
+
+
 def _on_subagent(agent: str, data: dict, started: bool, now: float | None = None):
     """SubagentStart: the agent binds to its launch when something names it already (the launch's result came
     first), else gets a provisional lane while a launch waits, and no lane as a helper; a known agent resumes its
@@ -3139,6 +3235,7 @@ def _on_subagent(agent: str, data: dict, started: bool, now: float | None = None
     aid = str(data.get("agent_id") or data.get("subagent_id") or "?")
     kind = data.get("agent_type") or data.get("subagent_type") or ""
     _attach(agent, sid, s, data, aid, kind, now, start=started, resume=started)  # a stop never resumes a lane
+    report = "" if started else _stop_report(data)
     if not started:
         v = subs.pop(aid, None)
         if v:
@@ -3158,11 +3255,8 @@ def _on_subagent(agent: str, data: dict, started: bool, now: float | None = None
                        f"{active_minutes(run, lane.get('started'), now, now, aid):.1f} active minutes",
                        project=run.get("project") or "", agent_id=aid[:16])
             for st in run.get("plan") or []:
-                if st.get("owner") == aid and st.get("state") != "done":
-                    old_state = st.get("state")
-                    _finish_step(run, st, now, agent, sid)
-                    _log_change(run, st, old_state, "done", aid, f"{(lane or {}).get('persona') or 'subagent'} "
-                                                                 f"finished", now)
+                if st.get("owner") == aid and st.get("state") not in DONE:
+                    _end_member_step(run, st, lane or {}, aid, report, now, agent, sid)
             run["step"] = sum(1 for x in run.get("plan") or [] if x.get("state") in ("done", "skipped"))
             _advance_main(run, now)
         _run_event(agent, sid, finish)
@@ -3205,6 +3299,30 @@ def scope_written(agent: str, sid: str, aid: str, paths: list, now: float | None
            paths=paths[:20], certainty=certainty, count=len(paths), project=run.get("project") or "",
            **({"severity": "warning"} if certainty == "certain" else {}))
     return writes
+
+
+def _end_member_step(run: dict, st: dict, lane: dict, aid: str, report: str, now: float, agent: str, sid: str):
+    """A member's step at its SubagentStop (spec F6, R2-4): done with the evidence of its report's Check or its last
+    `dev progress step --check` (approvals.ending), and a review step's Check is its verdict on the work it follows
+    (approvals.from_review); otherwise unverified, for Morpheus to close with evidence or reopen. A review or
+    read-only lane whose shell wrote files (scope_writes) ends unverified whatever it reports."""
+    from . import approvals
+    old = st.get("state")
+    state_, why, check = approvals.ending(lane, report)
+    writes = lane.get("scope_writes") or {}
+    if state_ == "done" and writes.get("paths"):
+        state_, why = "unverified", f"its shell call wrote {', '.join(writes['paths'][:3])} ({writes.get('certainty')})"
+    who = lane.get("persona") or "subagent"
+    if state_ != "done":
+        st["state"] = "unverified"
+        _log_change(run, st, old, "unverified", aid, f"{who} stopped; unverified: {why}", now)
+        return
+    _finish_step(run, st, now, agent, sid)
+    _log_change(run, st, old, "done", aid, f"{who} finished; {why}", now)
+    try:
+        approvals.from_review(run, st, check, now, doer_of=lambda s_: member_of_step(run, s_))
+    except approvals.ApprovalError as e:  # a review that may approve nothing: its step still ends
+        _audit("crew.approval-refused", st.get("name") or "", str(e)[:300], "refused", project=run.get("project") or "")
 
 
 def crew_working(run: dict) -> list:

@@ -13,7 +13,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "lib"))
 
-from devkit import cli, crew, raci  # noqa: E402
+from devkit import approvals, cli, crew, raci  # noqa: E402
 
 # Every row of The Oracle's misroutes table (29 tasks: 21 written in English, 8 in Spanish), each in both languages,
 # with the kind of work the model declares for it and the member who should do it.
@@ -116,7 +116,7 @@ class AnchorTests(unittest.TestCase):
             with self.subTest(step=name):
                 self.assertEqual(raci.step_activity({"name": name, "label": "Tank"}, r)["id"], "backend")
         run = {"plan": [{"name": "api", "label": "Tank", "state": "done"}]}
-        self.assertEqual(raci.approvals_missing(run, lambda s: "tank", r), [("seraph", ["api"])])
+        self.assertEqual(approvals.owed(run, lambda s: "tank", r), [("seraph", ["api"])])
 
     def test_the_files_in_scope_name_the_kind_of_work_when_nothing_else_does(self):
         r = _roster()

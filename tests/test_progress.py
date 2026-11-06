@@ -210,8 +210,9 @@ class TimeModelTests(unittest.TestCase):
             run = pg.step("parser half done", from_agent="a1", now=self.m(25))
             self.assertEqual(run["plan"][2]["state"], "running")
             self.assertEqual(run["agents"]["a1"]["done"], 1)
-            # when the subagent stops, its step is done with its own time
-            pg.on_subagent("claude", {"session_id": "s1", "agent_id": "a1", "agent_type": "devkit:neo"}, False)
+            # when the subagent stops with its evidence (its report's Check), its step is done with its own time
+            pg.on_subagent("claude", {"session_id": "s1", "agent_id": "a1", "agent_type": "devkit:neo",
+                                      "last_assistant_message": "**[Firefly> DevKit · Crew member]** api · `main` · step\n- **Done:** the step\n- **Check:** ✓ its tests pass\n- **Next:** Morpheus"}, False)
             run = pg.load_run("claude", "s1")
             self.assertEqual(run["plan"][1]["state"], "done")
             self.assertEqual(run["agents"]["a1"]["state"], "done")

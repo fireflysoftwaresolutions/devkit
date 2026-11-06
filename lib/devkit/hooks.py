@@ -245,9 +245,15 @@ def session_start(agent: str):
     f = _register_session(agent, sid, cwd, data)
     try:  # the agent's own process: a `dev` command below it finds this session by its parents (spec C4)
         from . import progress
+        from . import approvals
         pid = progress.agent_pid()
-        if pid and (state.read(f) or {}).get("pid") != pid:
-            state.update(f, lambda d: d.update(pid=pid), create=False)
+        rec_ = state.read(f) or {}
+        more = {"transcript": data["transcript_path"]} if data.get("transcript_path") else {}
+        if pid and rec_.get("pid") != pid:
+            more.update(pid=pid, pid_start=approvals.pid_start(pid))  # ps, before the lock
+        if more and any(rec_.get(k) != v for k, v in more.items()):
+            state.update(f, lambda d: d.update(more), create=False)
+        progress.resume_orphaned(agent, sid)
     except Exception:
         _log(f"session-start pid {agent}: {traceback.format_exc()[-300:]}")
     try:  # the project id (timing, progress) and DEVKIT_SESSION for this session's shell commands (Claude)
@@ -853,6 +859,17 @@ def _check_writes(agent: str, data: dict):
         g.failopen("scope-write", ex)
 
 
+def _reconcile(agent: str, data: dict):
+    """The reconciler at every hook of the session (spec C7; progress.reconcile_hook). Never raises."""
+    if _headless():
+        return
+    try:
+        from . import progress
+        progress.reconcile_hook(agent, data)
+    except Exception:
+        _log(f"reconcile {agent}: {traceback.format_exc()[-300:]}")
+
+
 def _close_call(data: dict):
     """The call's entry leaves the ledger: it ran (PostToolUse, PostToolUseFailure) or never will (refused)."""
     if data.get("tool_name") in SHELL_TOOLS:
@@ -1441,6 +1458,7 @@ def guard(agent: str):
             progress.tool_started(data)
     except Exception:
         pass
+    _reconcile(agent, data)
     if data.get("agent_id") and not headless:  # late binding (spec D2): this call already runs with its launch's step and scope
         try:
             from . import progress
@@ -1592,6 +1610,7 @@ def prompt(agent: str):
     data = _stdin_json()
     sid = data.get("session_id") or ""
     extra = ""
+    _reconcile(agent, data)
     if sid and not _session_file(agent, sid).exists():
         cwd = data.get("cwd") or os.getcwd()
         _register_session(agent, sid, cwd, data)
@@ -1730,6 +1749,7 @@ def post_tool(agent: str):
     data = _stdin_json()
     _check_writes(agent, data)
     _close_call(data)
+    _reconcile(agent, data)
     try:
         if data.get("tool_name") in ("Agent", "Task"):  # the launch names the agent it started: an exact binding
             progress.launch_result(agent, data)

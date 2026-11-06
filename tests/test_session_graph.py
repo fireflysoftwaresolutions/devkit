@@ -50,8 +50,14 @@ def launch(aid, kind, label, at):
                      now=at)
 
 
+# a finished member's report: its Check is the evidence its step ends done with (F6, R2-4)
+DONE = ("**[Firefly> DevKit · Crew member]** api · `main` · step\n- **Done:** the step\n- **Check:** ✓ its tests pass\n"
+        "- **Next:** Morpheus")
+
+
 def stop(aid, kind, at):
-    pg.on_subagent("claude", {"session_id": "s1", "agent_id": aid, "agent_type": kind}, False, now=at)
+    pg.on_subagent("claude", {"session_id": "s1", "agent_id": aid, "agent_type": kind, "last_assistant_message": DONE},
+                   False, now=at)
 
 
 def checkout_run(goal="Checkout flow (F-fxcheckout1)"):
@@ -221,7 +227,9 @@ class SessionGraphTests(unittest.TestCase):
         task = by_kind["task"][0]["id"]
         self.assertIn((task, "run", "tracks"), edges)
         self.assertEqual(g["work_items"], "linked")
-        dec, appr, msg = by_kind["decision"][0], by_kind["approval"][0], by_kind["message"][0]
+        dec, msg = by_kind["decision"][0], by_kind["message"][0]
+        # F6: the developer also approves step 1, architecture work Morpheus did and approves (approvals.approver)
+        appr = next(a for a in by_kind["approval"] if a["member"] == "seraph")
         self.assertEqual((dec["ref"], dec["recommend"]), ("D1", "A"))
         self.assertIn((lanes["a2"]["id"], dec["id"], "asks"), edges)
         self.assertEqual((appr["member"], appr["steps"]), ("seraph", ["s2"]))

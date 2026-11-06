@@ -24,6 +24,8 @@ def owned(owner, *items):
 # Drift that exists today, each with the review finding, its owner and the task or plan step that removes it.
 # Plan steps are those of the 26.11.3 run ("step 17 crew docs" is `dev progress` step 17).
 KNOWN = {
+    "D3": owned("found by D3 · DevEx engineer (Kid) · F6 wiring moved approvals_owed to approvals.owed, its last "
+                "caller: remove it from raci.py", "raci.approvals_missing"),
     "D7": owned("R2-9 · the developer approves plan and scope once F6 accepts “developer” as an approver · "
                 "step 36 F6 step endings and approvals",
                 "plan: A morpheus in R", "scope: A hamann in R"),

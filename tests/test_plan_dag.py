@@ -62,8 +62,9 @@ class PlanDagTests(unittest.TestCase):
         pg.launch_result("claude", {"session_id": "dag", "tool_use_id": f"toolu_{aid}",
                                     "tool_response": {"agentId": aid}}, now=at)
 
-    def stop(self, aid, kind, at):
-        pg.on_subagent("claude", {"session_id": "dag", "agent_id": aid, "agent_type": kind}, False, now=at)
+    def stop(self, aid, kind, at):  # with its report's Check ✓: the step ends done (F6)
+        pg.on_subagent("claude", {"session_id": "dag", "agent_id": aid, "agent_type": kind,
+                                  "last_assistant_message": "**[Firefly> DevKit · Crew member]** api · `main` · step\n- **Done:** the step\n- **Check:** ✓ its tests pass\n- **Next:** Morpheus"}, False, now=at)
 
     # ------------------------------------------------------------------ entering the plan: start and add
 

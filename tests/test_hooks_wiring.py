@@ -312,5 +312,122 @@ class HarnessTranscriptTests(WiringCase):
         self.assertTrue(pg.confirmed(dict(e, transcript="")))
 
 
+# F6 (Neo's M185, M186; plan step "F6 wiring"): how a member's step ends, who approves it and when the run may end,
+# and the reconciler at every hook (lib/devkit/approvals.py).
+
+REPORT = ("**[Firefly> DevKit · {who}]** api · `main` · {task}\n- **Done:** {task}\n- **Check:** {check}\n"
+          "- **Next:** Morpheus")
+
+
+class StepEndingTests(WiringCase):
+    def setUp(self):
+        super().setUp()
+        pg.start("Work", plan="api=10m; review=10m after api")
+        pg.assign("api", "Tank")
+        launch("a_tank", "devkit:tank", "Tank: api")
+
+    def stop(self, aid, kind, report, later=0):
+        pg.on_subagent("claude", {"session_id": "s1", "agent_id": aid, "agent_type": kind,
+                                  "last_assistant_message": report}, False, now=time.time() + later)
+        return {s["name"]: s for s in pg.load_run("claude", "s1")["plan"]}
+
+    def test_a_members_step_ends_done_only_with_evidence(self):
+        plan = self.stop("a_tank", "devkit:tank", "Finished the API, all good.")
+        self.assertEqual(plan["api"]["state"], "unverified")
+        self.assertIn("no evidence", pg.load_run("claude", "s1")["history"][-1]["why"])
+
+    def test_a_review_step_that_checks_approves_the_work_it_follows(self):
+        self.stop("a_tank", "devkit:tank", REPORT.format(who="Backend engineer (Tank)", task="api", check="✓ 9 tests"))
+        self.assertEqual(pg.approvals_owed(pg.load_run("claude", "s1")), [("seraph", ["api"])])
+        pg.assign("review", "Seraph")
+        launch("a_seraph", "devkit:seraph", "Seraph: review")
+        plan = self.stop("a_seraph", "devkit:seraph", REPORT.format(who="Code reviewer (Seraph)", task="review",
+                                                                    check="✓ read the diff, 9 tests pass"), later=60)
+        self.assertEqual(plan["review"]["state"], "done")
+        run = pg.load_run("claude", "s1")
+        self.assertEqual([(a["by"], a["steps"], a["verdict"]) for a in run.get("approvals") or []],
+                         [("seraph", ["api"], "approved")])
+        self.assertEqual(pg.approvals_owed(run), [])
+
+    def test_a_read_only_lane_that_wrote_files_ends_unverified_whatever_its_report_says(self):
+        self.stop("a_tank", "devkit:tank", REPORT.format(who="Backend engineer (Tank)", task="api", check="✓ 9 tests"))
+        pg.assign("review", "Seraph")
+        launch("a_seraph", "devkit:seraph", "Seraph: review")
+        pg.scope_written("claude", "s1", "a_seraph", ["lib/api.py"])
+        plan = self.stop("a_seraph", "devkit:seraph", REPORT.format(who="Code reviewer (Seraph)", task="review",
+                                                                    check="✓ all good"))
+        self.assertEqual(plan["review"]["state"], "unverified")
+        self.assertEqual(pg.load_run("claude", "s1").get("approvals") or [], [])
+
+    def test_a_member_approves_with_its_step_check(self):
+        self.stop("a_tank", "devkit:tank", REPORT.format(who="Backend engineer (Tank)", task="api", check="✓ 9 tests"))
+        launch("a_seraph", "devkit:seraph", "Seraph: a look at the api")
+        pg.step("read the api diff", check="✓ the errors are problem details", approves="api", from_agent="a_seraph")
+        self.assertEqual([(a["by"], a["steps"]) for a in pg.load_run("claude", "s1")["approvals"]],
+                         [("seraph", ["api"])])
+        with self.assertRaises(pg.StepError):  # nobody approves their own work
+            pg.step("approve my api", check="✓ mine", approves="api", from_agent="a_tank")
+
+    def test_a_step_flagged_recheck_keeps_the_run_from_ending(self):
+        self.stop("a_tank", "devkit:tank", REPORT.format(who="Backend engineer (Tank)", task="api", check="✓ 9 tests"))
+        with pg._tx("claude", "s1"):
+            run = pg.load_run("claude", "s1")
+            run["plan"][1].update(state="done", finished=time.time(), recheck=["api"])
+            run["approvals"] = [{"ts": time.time() + 1, "by": "seraph", "steps": ["api"], "verdict": "approved"}]
+            pg._save(run)
+        with self.assertRaises(pg.StepError) as e:
+            pg.step("all done", kind="done")
+        self.assertIn("recheck", str(e.exception))
+
+    def test_a_decision_names_the_steps_it_approves(self):
+        self.stop("a_tank", "devkit:tank", REPORT.format(who="Backend engineer (Tank)", task="api", check="✓ 9 tests"))
+        d = pg.crew_decision("Approve the api?", options="approve|changes", approves="api")
+        self.assertEqual(d["approves"], ["api"])
+        with self.assertRaises(pg.StepError):
+            pg.crew_decision("Approve the screens?", options="approve|changes", approves="screens")
+
+    def test_an_unverified_step_can_be_reopened(self):
+        self.stop("a_tank", "devkit:tank", "no block")
+        with pg._tx("claude", "s1"):  # as the stop or the reconciler leaves it
+            run = pg.load_run("claude", "s1")
+            run["plan"][0]["state"] = "unverified"
+            pg._save(run)
+        run = pg.reopen("api", why="redo it with evidence")
+        self.assertEqual(next(s for s in run["plan"] if s["name"] == "api")["state"], "pending")
+
+
+class ReconcilerHookTests(WiringCase):
+    def test_a_silent_member_is_lost_at_the_next_hook_and_works_again_at_its_own(self):
+        pg.start("Work", plan=["api"])
+        pg.assign("api", "Tank")
+        launch("a_tank", "devkit:tank", "Tank: api", at=time.time() - 100 * 60)  # 100 minutes ago, never heard of
+        self.hook("prompt", {"session_id": "s1", "hook_event_name": "UserPromptSubmit", "cwd": str(self.root),
+                             "prompt": "go on"})
+        run = pg.load_run("claude", "s1")
+        self.assertEqual((run["agents"]["a_tank"]["state"], run["plan"][0]["state"]), ("lost", "pending"))
+        with pg._tx("claude", "s1"):  # its next hook comes a minute later
+            run["agents"]["a_tank"]["lost_at"] -= 60
+            pg._save(run)
+        self.hook("guard", self.bash("ls", aid="a_tank"))
+        run = pg.load_run("claude", "s1")
+        self.assertEqual((run["agents"]["a_tank"]["state"], run["plan"][0]["state"]), ("running", "running"))
+        self.assertGreater(run["agents"]["a_tank"]["last_seen"], time.time() - 60)
+
+    def test_session_start_keeps_the_transcript_and_resumes_its_orphaned_run(self):
+        pg.start("Work", plan=["api"])
+        with pg._tx("claude", "s1"):
+            run = pg.load_run("claude", "s1")
+            run.update(state="orphaned", orphaned={"ts": time.time(), "why": "its session ended"})
+            pg._save(run)
+        self.assertEqual(pg.active_runs(), [])  # an orphaned run is not live
+        with mock.patch.object(hooks, "context_for", lambda cwd, agent: "## devkit · workspace context"), \
+                mock.patch.object(hooks, "_spawn", lambda *a, **k: None), \
+                mock.patch("devkit.work.request_sync", lambda *a, **k: None):
+            self.hook("session-start", {"session_id": "s1", "hook_event_name": "SessionStart", "source": "resume",
+                                        "cwd": str(self.root), "transcript_path": "/tmp/s1.jsonl"})
+        self.assertEqual(json.loads(pg.session_path("claude", "s1").read_text()).get("transcript"), "/tmp/s1.jsonl")
+        self.assertEqual(pg.load_run("claude", "s1")["state"], "running")
+
+
 if __name__ == "__main__":
     unittest.main()
