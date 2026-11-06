@@ -53,6 +53,19 @@ class MemberHatchTests(unittest.TestCase):
                 self.assertIn("escape hatch", member(cmd) or "")
         self.assertEqual(main_session("DEVKIT_RAW_GH=1 gh pr merge 12"), "allow")  # the main session keeps them
 
+    def test_the_headless_marker_is_a_hatch_no_agent_hands_to_devkit_or_a_nested_session(self):
+        # DEVKIT_HEADLESS (ai.ask's own model call) makes the hooks only judge tools and record nothing (Tank, M221):
+        # refused to members in every form, and refused to the main session wherever it reaches devkit or an agent
+        h = "DEVKIT" + "_HEADLESS=1"
+        for cmd in (h + " claude -p hi", "export " + h + "; codex exec hi", h + " dev crew decide D1 yes",
+                    "env " + h + " bin/dev status", h + " ls"):
+            with self.subTest(cmd=cmd):
+                self.assertIsNotNone(member(cmd))
+        for cmd in (h + " claude -p hi", "export " + h + "; codex exec hi", h + " dev crew decide D1 yes",
+                    "env " + h + " bin/dev status"):
+            with self.subTest(cmd=cmd):
+                self.assertEqual(main_session(cmd), "deny")
+
     def test_a_member_may_not_clear_or_unset_the_environment(self):
         for cmd in ("env -i PATH=/bin ls", "env - ls", "env -u HOME ls", "env --unset=PATH ls",
                     "env --ignore-environment ls", "bash -c 'env -i ls'"):
