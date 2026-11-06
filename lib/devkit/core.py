@@ -11,7 +11,9 @@ import fcntl
 import json
 import os
 import re
+import stat
 import subprocess
+import sys
 import time
 from pathlib import Path
 
@@ -37,8 +39,6 @@ def brew_prefix() -> str:
 os.environ["PATH"] = ":".join(dict.fromkeys(_EXTRA_PATH + os.environ.get("PATH", "").split(":")))
 
 # --------------------------------------------------------------------------- config
-
-CONFIG_FILE = Path(os.environ.get("DEVKIT_CONFIG", str(HOME / ".config" / "devkit" / "config.json")))
 
 DEFAULTS = {
     "dev_root": "~/Development",
@@ -92,8 +92,12 @@ def load_config() -> dict:
             cfg = deep_merge(cfg, json.loads(CONFIG_FILE.read_text()))
         except (OSError, ValueError):
             pass
-    if os.environ.get("DEV_ROOT"):
-        cfg["dev_root"] = os.environ["DEV_ROOT"]
+    root = os.environ.get("DEV_ROOT")
+    if root and expand(root) != expand(cfg["dev_root"]):
+        if set_by_developer():
+            cfg["dev_root"] = root
+        else:  # the handoff (policies, plans, tasks) lives below it, so it is configuration like DEVKIT_CONFIG
+            _refuse_env("DEV_ROOT", root, f"the dev_root of {CONFIG_FILE}")
     return cfg
 
 
@@ -101,6 +105,93 @@ def expand(p) -> Path:
     return Path(os.path.expanduser(os.path.expandvars(str(p))))
 
 
+# ---- who set DEVKIT_CONFIG or DEV_ROOT (spec C11, K1)
+#
+# An agent's command can set them, and so can a nested session it starts; devkit would then read a configuration, a
+# handoff and approvals nobody gave. devkit takes a DEVKIT_CONFIG outside ~/.config/devkit/config.json, or a DEV_ROOT
+# other than the configured dev_root, only from the developer: a process in a terminal (it has a controlling
+# terminal), with no agent among its parent processes and no agent's marker in its environment. The agents' shell
+# commands and devkit's hooks have no controlling terminal and run below the agent, so theirs never count; devkit
+# then reads the standard file, says so on stderr and drops the variable for the processes it starts. The guard
+# refuses the same assignments in an agent's command text; this check covers what the text does not show.
+
+AGENT_MARKERS = ("CLAUDECODE", "CLAUDE_CODE_ENTRYPOINT", "CLAUDE_PID", "CODEX_SANDBOX", "CODEX_THREAD_ID",
+                 "DEVKIT_SESSION", "DEVKIT_AGENT", "DEVKIT_FROM_AGENT")
+_LOOKUP = object()
+
+
+def is_agent_process(args: str) -> bool:
+    """True when a command line is an agent: Claude Code, Codex, or their desktop apps (by the executable's name)."""
+    words = (args or "").split()
+    if not words:
+        return False
+    exe = os.path.basename(words[0]).casefold()
+    if exe in ("claude", "codex") or "/claude/versions/" in words[0]:
+        return True
+    return exe.startswith("node") and any("claude-code" in w or "@openai/codex" in w for w in words[1:3])
+
+
+def _ancestry():
+    """Command lines of this process's parents, nearest first, up to launchd; None when `ps` gives no answer."""
+    try:
+        out = subprocess.run(["ps", "-axo", "pid=,ppid=,args="], capture_output=True, text=True, timeout=10).stdout
+    except (OSError, subprocess.SubprocessError):
+        return None
+    procs = {}
+    for ln in out.splitlines():
+        parts = ln.split(None, 2)
+        if len(parts) >= 2 and parts[0].isdigit() and parts[1].isdigit():
+            procs[int(parts[0])] = (int(parts[1]), parts[2] if len(parts) > 2 else "")
+    if not procs:
+        return None
+    chain, pid = [], os.getppid()
+    while pid > 1 and pid in procs and len(chain) < 64:
+        pid, args = procs[pid]
+        chain.append(args)
+    return chain
+
+
+def _has_terminal() -> bool:
+    try:
+        os.close(os.open("/dev/tty", os.O_RDONLY))
+        return True
+    except OSError:
+        return False
+
+
+def set_by_developer(environ=None, ancestry=_LOOKUP, terminal=None) -> bool:
+    """True when this process runs in the developer's terminal: no agent marker in its environment, no agent among
+    its parents (ancestry: their command lines; None when unknown), and a controlling terminal."""
+    env = os.environ if environ is None else environ
+    if any(env.get(k) for k in AGENT_MARKERS):
+        return False
+    chain = _ancestry() if ancestry is _LOOKUP else ancestry
+    if chain is None or any(is_agent_process(a) for a in chain):
+        return False
+    return _has_terminal() if terminal is None else bool(terminal)
+
+
+def _refuse_env(name: str, value: str, instead: str):
+    print(f"devkit: ignoring {name}={value}: devkit takes it only from the developer, in a terminal, not from an "
+          f"agent's command or hook (spec C11). Using {instead}.", file=sys.stderr)
+    os.environ.pop(name, None)
+
+
+def config_file(environ=None, home=None) -> Path:
+    """The configuration file devkit reads: DEVKIT_CONFIG when it names the standard place or the developer set it
+    in a terminal (set_by_developer), else ~/.config/devkit/config.json."""
+    env = os.environ if environ is None else environ
+    std = Path(home or HOME) / ".config" / "devkit" / "config.json"
+    val = env.get("DEVKIT_CONFIG")
+    if not val or os.path.realpath(expand(val)).casefold() == os.path.realpath(std).casefold():
+        return std
+    if set_by_developer(env):
+        return expand(val)
+    _refuse_env("DEVKIT_CONFIG", val, str(std))
+    return std
+
+
+CONFIG_FILE = config_file()
 CFG = load_config()
 DEV = expand(CFG["dev_root"])
 HANDOFF = expand(CFG["handoff_dir"]) if CFG.get("handoff_dir") else DEV / ".handoff"
@@ -114,6 +205,29 @@ RESERVED_TOP = {HANDOFF.name, ".worktrees", ".tmp", "_local"}
 CLAUDE_HOME = HOME / ".claude"
 CODEX_HOME = expand(os.environ.get("CODEX_HOME", str(HOME / ".codex")))
 AGENTS_HOME = HOME / ".agents"
+
+
+def devkit_roots(home=None) -> list:
+    """devkit's state, configuration and install folders: ~/.local/state/devkit, ~/.config/devkit and
+    ~/.local/share/devkit. What lies below them decides what the guard and the gates allow (spec C11)."""
+    h = Path(home) if home else HOME
+    return [h / ".local" / "state" / "devkit", h / ".config" / "devkit", h / ".local" / "share" / "devkit"]
+
+
+def ensure_roots(home=None):
+    """Create devkit's three roots, readable and writable by the developer's account only (0700): a root's mode
+    protects every file below it from the Mac's other accounts. devkit calls it whenever it starts, `dev install`
+    included. Never raises: a root it cannot create or change keeps what it has."""
+    for root in devkit_roots(home):
+        try:
+            root.mkdir(parents=True, exist_ok=True)
+            if stat.S_IMODE(root.stat().st_mode) != 0o700:
+                os.chmod(root, 0o700)
+        except OSError:
+            pass
+
+
+ensure_roots()
 
 # --------------------------------------------------------------------------- shell
 
@@ -415,6 +529,26 @@ def pin_root() -> Path:
 
 def install_record_file() -> Path:
     return share_dir() / "install.json"
+
+
+def dev_link() -> Path:
+    """The `dev` a shell finds: the link that `dev install` points at the pinned copy's bin/dev."""
+    return HOME / ".local" / "bin" / "dev"
+
+
+def dev_commands() -> list:
+    """Every place a shell can find `dev`: the link and `dev` in each other folder on PATH (real folder paths), except
+    folders in the workspace or a temp folder, where a repository's own bin/dev is code under review."""
+    out, seen = [], set()
+    for d in [str(dev_link().parent)] + os.environ.get("PATH", "").split(os.pathsep):
+        if not d or not os.path.isabs(d):
+            continue
+        rd = real(d)
+        if rd in seen or is_under(rd, DEV) or is_temp(rd):
+            continue
+        seen.add(rd)
+        out.append(Path(rd) / "dev")
+    return out
 
 
 def install_record() -> dict:

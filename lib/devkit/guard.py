@@ -28,6 +28,12 @@ CONFIG_ROOTS = [HOME / d for d in (".claude", ".codex", ".agents", ".config", ".
 PROTECTED_RM = [Path("/"), HOME, DEV, core.HANDOFF, WT_ROOT, LOCAL, core.DEVKIT_HOME] + \
                [HOME / d for d in ("Library", "Documents", "Desktop", "Downloads", "Pictures", "Movies", "Music",
                                    ".claude", ".codex", ".agents", ".config", ".ssh", ".local", "Applications")]
+
+
+def protected_rm() -> list:
+    """Folders `rm -r` never deletes. After `dev install`, core.DEVKIT_HOME is the pinned copy when the guard runs from
+    it, so the checkout, the copy the hooks run and the folder of pinned releases are named apart."""
+    return PROTECTED_RM + [core.DEVKIT_HOME, core.source_home(), core.runtime_home(), core.pin_root()]
 BACKUP_RE = re.compile(r"(\.(bak|orig|backup|old|rej)|~|[._ -](old|backup|copy|bak)(\.[A-Za-z0-9]+)?|\s\(\d+\)(\.[A-Za-z0-9]+)?)$",
                        re.I)
 ATTRIBUTION = ["co-authored-by: claude", "co-authored-by: codex", "co-authored-by: chatgpt", "co-authored-by: openai",
@@ -445,7 +451,7 @@ def check_rm(args, cwd, envs=frozenset()):
         t = resolve(a, cwd)
         if t == UNKNOWN:
             continue
-        if any(real(t) == real(p) for p in PROTECTED_RM):
+        if any(real(t) == real(p) for p in protected_rm()):
             return deny(f"Refusing to recursively delete protected path {tilde(t)}.")
         if is_temp(t):
             continue  # scratch area: throwaway clones and repos may be deleted
@@ -826,8 +832,7 @@ READ_TOOLS = {"Read", "Grep", "Glob", "LS", "NotebookRead"}
 
 
 def protected_roots() -> list:
-    h = core.HOME
-    return [h / ".local" / "state" / "devkit", h / ".config" / "devkit", h / ".local" / "share" / "devkit"]
+    return core.devkit_roots()
 
 
 def _under_ci(p: str, root: str) -> bool:
@@ -908,8 +913,19 @@ def _mark():
 
 # ---- DEVKIT_* keys in settings files
 
-_KEY_JSON = re.compile(r'"(DEVKIT_[A-Za-z0-9_]*)"\s*:\s*("(?:[^"\\]|\\.)*"|[^,}\s]+)')
-_KEY_TOML = re.compile(r'(?:^|[\s{,])["\']?(DEVKIT_[A-Za-z0-9_]*)["\']?\s*=\s*("[^"\n]*"|\'[^\'\n]*\'|[^\s,}]+)', re.M)
+# DEV_ROOT counts with the DEVKIT_* variables: the handoff (policies, plans, tasks) lives below it
+_KEY = r"(DEVKIT_[A-Za-z0-9_]*|DEV_ROOT)"
+_KEY_TEXT = re.compile(r"DEVKIT_[A-Za-z0-9_]*|\bDEV_ROOT\b")
+_KEY_JSON = re.compile(r'"' + _KEY + r'"\s*:\s*("(?:[^"\\]|\\.)*"|[^,}\s]+)')
+_KEY_TOML = re.compile(r'(?:^|[\s{,])["\']?' + _KEY + r'["\']?\s*=\s*("[^"\n]*"|\'[^\'\n]*\'|[^\s,}]+)', re.M)
+_KEY_SHELL = re.compile(r"(?:^|[;&|\s])(?:export\s+|declare\s+-\w+\s+|typeset\s+-\w+\s+|readonly\s+)?" + _KEY +
+                        r"=(\S*)|(?:^|[;&|\s])(?:setenv|set\s+-\w+|launchctl\s+setenv)\s+" + _KEY + r"\s+(\S*)", re.M)
+_SHELL_RC = {".zshrc", ".zshenv", ".zprofile", ".zlogin", ".bashrc", ".bash_profile", ".bash_login", ".profile",
+             ".kshrc", ".cshrc", ".tcshrc", ".login", ".envrc"}
+
+
+def _is_key(name) -> bool:
+    return str(name).startswith("DEVKIT_") or str(name) == "DEV_ROOT"
 
 
 def is_settings_file(path) -> bool:
@@ -919,15 +935,39 @@ def is_settings_file(path) -> bool:
         (d == ".codex" and (n.endswith(".toml") or n == "hooks.json"))
 
 
+def is_shell_env_file(path) -> bool:
+    """A shell startup file (~/.zshrc, ~/.profile, fish's config, direnv's .envrc): what it exports reaches the
+    developer's terminals and every agent session started from them, so the developer's terminal stops being proof."""
+    p = Path(str(path))
+    n = p.name.casefold()
+    return n in _SHELL_RC or (n.endswith(".fish") and "fish" in (p.parent.name.casefold(),
+                                                                 p.parent.parent.name.casefold()))
+
+
+def env_file_kind(*paths):
+    """'json', 'toml' or 'shell' for a settings or shell startup file (any of the spellings given), else None."""
+    for path in paths:
+        if path and str(path) != str(UNKNOWN):
+            if is_settings_file(path):
+                return "toml" if Path(str(path)).suffix.casefold() == ".toml" else "json"
+            if is_shell_env_file(path):
+                return "shell"
+    return None
+
+
 def _unescape(text) -> str:
     # "DEVKIT_GUARD" is the same JSON key as "DEVKIT_GUARD"
     return re.sub(r"\\u([0-9a-fA-F]{4})", lambda m: chr(int(m.group(1), 16)), str(text or ""))
 
 
-def devkit_env(text: str, toml: bool = False) -> dict:
-    """The DEVKIT_* variables a settings file's text sets, {name: value}."""
+def devkit_env(text: str, toml: bool = False, shell: bool = False) -> dict:
+    """The DEVKIT_* variables (and DEV_ROOT) a settings or shell startup file's text sets, {name: value}."""
     if not text:
         return {}
+    if shell:
+        body = "\n".join(ln for ln in text.splitlines() if not ln.lstrip().startswith("#"))
+        return {(m.group(1) or m.group(3)): (m.group(2) if m.group(1) else m.group(4)) or ""
+                for m in _KEY_SHELL.finditer(body)}
     if not toml:
         try:
             data = json.loads(text)
@@ -935,8 +975,7 @@ def devkit_env(text: str, toml: bool = False) -> dict:
             data = None
         if isinstance(data, dict):
             env = data.get("env")
-            return {k: json.dumps(v) for k, v in env.items() if str(k).startswith("DEVKIT_")} \
-                if isinstance(env, dict) else {}
+            return {k: json.dumps(v) for k, v in env.items() if _is_key(k)} if isinstance(env, dict) else {}
     out = {}
     for m in (_KEY_TOML if toml else _KEY_JSON).finditer(_unescape(text)):
         v = m.group(2)
@@ -980,48 +1019,114 @@ def _settings_after(before: str, tool_input: dict):
 
 
 def _settings_reason(path, keys) -> str:
-    return (f"This changes {', '.join(list(keys)[:4]) or 'a DEVKIT_* variable'} in the env block of {tilde(path)}. "
-            f"DEVKIT_* variables switch devkit's safeguards for every hook, so agents may not set, change or remove "
-            f"them in a settings file (spec C11). If the work needs one, ask the developer and say why. {_TAIL}")
+    where = f"{tilde(path)}" if is_shell_env_file(path) else f"the env block of {tilde(path)}"
+    return (f"This changes {', '.join(list(keys)[:4]) or 'a DEVKIT_* variable'} in {where}. DEVKIT_* variables "
+            f"switch devkit's safeguards for every hook, and DEV_ROOT moves its handoff, so agents may not set, change "
+            f"or remove them in a settings or shell startup file (spec C11). If the work needs one, ask the developer "
+            f"and say why. {_TAIL}")
 
 
-def settings_env_violation(path, tool_input: dict):
-    """A Write or Edit that sets, changes or removes a DEVKIT_* variable in a settings file's env block."""
-    if not path or not is_settings_file(path):
+def settings_env_violation(path, tool_input: dict, *spellings):
+    """A Write or Edit that sets, changes or removes a DEVKIT_* variable or DEV_ROOT in a settings file's env block
+    or a shell startup file (`spellings`: other names of the same file, such as the path before links)."""
+    kind = env_file_kind(path, *spellings) if path else None
+    if not kind:
         return None
-    toml = Path(str(path)).suffix.casefold() == ".toml"
+    toml, shell = kind == "toml", kind == "shell"
     before = _read_small(path, 1 << 20)
     after = _settings_after(before, tool_input or {})
     if after is None:  # the edit does not match the file as it is: judge the new text alone
         es = tool_input.get("edits") if isinstance(tool_input.get("edits"), list) else [tool_input]
         new = "\n".join(str(e.get("new_string") or "") for e in es if isinstance(e, dict))
-        changed = sorted(devkit_env(new, toml)) or (["DEVKIT_*"] if "DEVKIT_" in _unescape(new) else [])
+        changed = sorted(devkit_env(new, toml, shell)) or (["DEVKIT_*"] if _KEY_TEXT.search(_unescape(new)) else [])
     else:
-        a, b = devkit_env(after, toml), devkit_env(before, toml)
+        a, b = devkit_env(after, toml, shell), devkit_env(before, toml, shell)
         changed = sorted(k for k in set(a) | set(b) if a.get(k) != b.get(k))
     return deny(_settings_reason(path, changed)) if changed else None
 
 
 def protected_write(path, cwd, tool_input=None):
-    """Write, Edit, MultiEdit, NotebookEdit: devkit's state, configuration and install, and DEVKIT_* settings keys."""
+    """Write, Edit, MultiEdit, NotebookEdit: devkit's state, configuration and install, the `dev` a shell finds, and
+    DEVKIT_* keys in settings and shell startup files."""
     if not path:
         return None
+    lp = _lexical(path, cwd)
+    if is_dev_command(lp):
+        return deny(dev_command_reason(lp, "write"))
     p = resolve(path, cwd)
     if is_protected(p):
         return deny(protected_reason(p))
-    return settings_env_violation(p if p != UNKNOWN else path, tool_input or {})
+    return settings_env_violation(p if p != UNKNOWN else path, tool_input or {}, lp, path)
 
 
 def protected_patch(patch: str, cwd):
-    """apply_patch: Add, Update, Delete and Move all count, and an added DEVKIT_* line in a settings file."""
+    """apply_patch: Add, Update, Delete and Move all count, and an added DEVKIT_* line in a settings or shell startup
+    file."""
     added = _unescape("\n".join(ln[1:] for ln in patch.splitlines() if ln.startswith("+")))
     for op, path in parse_patch_paths(patch):
+        lp = _lexical(path, cwd)
+        if is_dev_command(lp):
+            return deny(dev_command_reason(lp, "delete" if op == "delete" else "write"))
         p = resolve(path, cwd)
         if is_protected(p):
             return deny(protected_reason(p, "delete" if op == "delete" else "write"))
-        if op != "delete" and is_settings_file(p) and "DEVKIT_" in added:
-            return deny(_settings_reason(p, sorted(set(re.findall(r"DEVKIT_[A-Za-z0-9_]*", added)))))
+        if op != "delete" and env_file_kind(p, lp) and _KEY_TEXT.search(added):
+            return deny(_settings_reason(p, sorted(set(_KEY_TEXT.findall(added)))))
     return None
+
+
+# ---- the `dev` a shell finds (K1 follow-up 1)
+
+def _lexical(path, cwd) -> Path:
+    """Like resolve(), but the last component is not followed: the path of a link itself, not of what it points at."""
+    p = os.path.expanduser(os.path.expandvars(str(path)))
+    if "$" in p or "`" in p:
+        return UNKNOWN
+    if not os.path.isabs(p):
+        if cwd is None or str(cwd) == str(UNKNOWN):
+            return UNKNOWN
+        p = os.path.join(cwd, p)
+    head, tail = os.path.split(os.path.normpath(p))
+    return Path(os.path.join(real(head), tail)) if tail and tail not in (".", "..") else Path(real(p))
+
+
+@functools.lru_cache(maxsize=4)
+def _dev_cmds(home: str, path: str, dev: str) -> tuple:
+    return tuple(str(c).casefold() for c in core.dev_commands())
+
+
+def _dev_command_paths() -> tuple:
+    return _dev_cmds(str(core.HOME), os.environ.get("PATH", ""), str(core.DEV))
+
+
+@functools.lru_cache(maxsize=4)
+def _dev_cmd_re(paths: tuple):
+    alts = "|".join(re.escape(p) for p in paths) or r"(?!x)x"
+    return re.compile(r"(?<![\w./-])(?:" + alts + r")(?![\w.-])", re.I)
+
+
+def _dev_command_text():
+    """Matches program text that names one of the `dev` a shell finds, by its full path."""
+    return _dev_cmd_re(_dev_command_paths())
+
+
+def is_dev_command(p: Path) -> bool:
+    """True when `p`, taken as it is (a link not followed), is where a shell finds `dev`: ~/.local/bin/dev, which
+    `dev install` links to the pinned copy, or `dev` in another folder on PATH."""
+    return p != UNKNOWN and str(p).casefold() in _dev_command_paths()
+
+
+def holds_dev_command(p: Path) -> bool:
+    """True when the folder holds a `dev` a shell finds (~/.local/bin, ~/.local): moving or deleting it takes it along."""
+    s = str(p).casefold().rstrip(os.sep)
+    return p != UNKNOWN and any(c.startswith(s + os.sep) for c in _dev_command_paths())
+
+
+def dev_command_reason(p, verb="replace") -> str:
+    return (f"{tilde(p)} is where a shell finds `dev`: `dev install` links ~/.local/bin/dev to the pinned copy, and a "
+            f"`dev` earlier on PATH would run instead of it, for the developer, the hooks' shells and the jobs. Agents "
+            f"may not {verb} it (spec C11, K1). `dev doctor` shows where it points; the developer fixes it in a "
+            f"terminal with `dev install --only cli`. Reading it is fine (`readlink`, `ls -l`). {_TAIL}")
 
 
 # ---- the shell
@@ -1057,6 +1162,94 @@ _CODE_WRITES = re.compile(
 _CODE_INPUTS = re.compile(r"environ|getenv|\bENV\[|\$ENV\{|process\.env|sys\.argv|\bARGV\b|process\.argv")
 _SETTINGS_NAME = re.compile(r"settings(?:\.local)?\.json|managed-settings\.json|config\.toml|hooks\.json")
 _VARPATH = re.compile(r"^\$\{?[A-Za-z_]")
+_DEV_LINK_TEXT = re.compile(r"\.local\W{1,8}bin\W{1,8}dev(?![\w.-])")
+
+# ---- a forged HOME, DEVKIT_CONFIG, DEV_ROOT or DEVKIT_* variable for devkit (K1 follow-ups 2 and 3)
+#
+# devkit finds its state, configuration and handoff through HOME, DEVKIT_CONFIG and DEV_ROOT, and its DEVKIT_*
+# variables say who is calling (DEVKIT_SESSION, DEVKIT_FROM_AGENT) and how its safeguards behave. Set by an agent for
+# a devkit call, they point devkit at a state tree it never wrote: an approval nobody gave, another session's lane.
+# The guard refuses them for `dev` (any path), python -m devkit…, a program that imports devkit, and a nested agent
+# session (its hooks run devkit). The one-command hatches that docs/guard.md lists stay: they say nothing about where
+# devkit reads. devkit itself also refuses a DEVKIT_CONFIG or DEV_ROOT that the developer did not set in a terminal
+# (core.set_by_developer), for what the command text does not show.
+
+ENV_HATCHES = frozenset({"DEVKIT_LOCAL_CI_PASSED", "DEVKIT_FLAKY", "DEVKIT_CROSS_PROJECT", "DEVKIT_RAW_FS",
+                         "DEVKIT_TAG_ANY", "DEVKIT_RAW_GH", "DEVKIT_PIPE_OK", "DEVKIT_ALLOW_STUBS"})
+_AGENT_CLIS = {"claude", "codex"}
+_ASSIGN = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*=")
+_EXPORTERS = {"export", "declare", "typeset", "readonly", "local"}
+_DEVKIT_PY = re.compile(r"\b(?:from|import)\s+devkit\b")
+_ENV_NAME = re.compile(r"\b(HOME|DEV_ROOT|DEVKIT_[A-Za-z0-9_]*)\b")
+_ENV_SET_CODE = re.compile(
+    r"environ\s*\[\s*['\"](?:HOME|DEV_ROOT|DEVKIT_\w+)['\"]\s*\]\s*=(?!=)|(?:putenv|setenv)\s*\(\s*['\"](?:HOME|"
+    r"DEV_ROOT|DEVKIT_\w+)|['\"](?:HOME|DEV_ROOT|DEVKIT_\w+)['\"]\s*:|\b(?:HOME|DEV_ROOT|DEVKIT_\w+)\s*=(?!=)"
+    r"|process\.env\.(?:HOME|DEV_ROOT|DEVKIT_\w+)\s*=(?!=)|\bENV\s*\[\s*['\"](?:HOME|DEV_ROOT|DEVKIT_\w+)['\"]\s*\]\s*=(?!=)")
+_DEV_RUN_CODE = re.compile(r"['\"](?:[^'\"\s]*/)?dev(?:['\"]\s*[,\])]|\s+\w)|\bbin/dev\b|\bdevkit\b")
+INSTALL_REASON = ("`dev install` and `dev update` change what every hook, the guard and `dev` itself run: they pin a "
+                  "new devkit copy and rewrite the agents' settings (spec C10, K1). The developer runs them, in a "
+                  "terminal. Ask them, and say which commit should be pinned and why; `dev doctor` shows what is "
+                  f"installed now. {_TAIL}")
+
+
+def _env_split(argv0):
+    """-> (names, argv): the variables a segment sets for the command it runs (VAR=…, env VAR=…, sudo VAR=…, also
+    after timeout or uv run), and that command."""
+    argv = _unwrap(argv0)
+    return {a.split("=", 1)[0] for a in argv0[:len(argv0) - len(argv)] if _ASSIGN.match(a)}, argv
+
+
+def _exports(name, args) -> set:
+    """The variables `export`, `declare`, `setenv` or fish's `set -x` set in the shell; '?' for one the guard cannot
+    see (`export $(cat file)`)."""
+    if name in _EXPORTERS:
+        pos = [a for a in args if not a.startswith(("-", "+"))]
+    elif name == "setenv" or (name == "set" and any(a.startswith("-") and "x" in a for a in args)):
+        pos = [a for a in args if not a.startswith("-")][:1]
+    else:
+        return set()
+    return {"?" if not a.split("=", 1)[0] or "$" in a.split("=", 1)[0] or "`" in a else a.split("=", 1)[0]
+            for a in pos}
+
+
+def _forged(names) -> list:
+    """The names among `names` that point devkit elsewhere: HOME, DEV_ROOT, DEVKIT_* but the hatches, '?' (unseen)."""
+    return sorted(n for n in names if n in ("HOME", "DEV_ROOT", "?") or
+                  (n.startswith("DEVKIT_") and n not in ENV_HATCHES))
+
+
+def forged_env_reason(names, what) -> str:
+    named = [n for n in names if n != "?"]
+    head = (f"This sets {', '.join(named[:4])} for {what}" if named else
+            f"This sets variables the guard cannot see (`export $(…)`, `env $(…)`) for {what}")
+    return (f"{head}. devkit finds its state, configuration and handoff through HOME, DEVKIT_CONFIG and DEV_ROOT, and "
+            f"its DEVKIT_* variables say who calls it, so another value points it at records it never wrote, such "
+            f"as an approval nobody gave (spec C11, K1). Run the command without it. If the work needs another "
+            f"configuration or a scratch home, ask the developer to run it in a terminal; a test sets its temporary "
+            f"HOME inside the test. The one-command hatches (DEVKIT_RAW_FS, DEVKIT_LOCAL_CI_PASSED, …) still work. "
+            f"{_TAIL}")
+
+
+def _repo_script(argv, cwd) -> bool:
+    """True when an interpreter runs a script file inside the workspace (a repository's own code, such as a test)
+    rather than inline code, its input or a file elsewhere."""
+    for a in argv[1:]:
+        if a in ("-", "--", "-c", "-e", "-E", "--eval", "-p", "--print", "-r", "-m") or \
+                (a.startswith("-") and not a.startswith("--") and a[-1:] in ("c", "e", "m")):
+            return False
+        if a.startswith("-"):
+            continue
+        t = resolve(a, cwd)
+        return t != UNKNOWN and is_under(t, DEV) and not is_temp(t)
+    return False
+
+
+def _devkit_installer(p: Path) -> bool:
+    """True when `p` is devkit's install.sh, in the checkout or a pinned copy."""
+    if p == UNKNOWN or p.name != "install.sh":
+        return False
+    homes = {real(h) for h in (core.DEVKIT_HOME, core.source_home(), core.runtime_home())}
+    return real(p.parent) in homes or core.is_pinned(p.parent)
 
 
 def heredoc_bodies(cmd: str) -> list:
@@ -1092,16 +1285,21 @@ def _pathlike(a: str) -> bool:
 
 
 class _Shell:
-    """Walks one shell command for writes to protected paths; `unresolved` collects targets it cannot resolve."""
+    """Walks one shell command for writes to protected paths; `unresolved` collects targets it cannot resolve, and
+    `exported` the variables the shell has set so far (export, bare assignments: they reach later commands)."""
 
-    def __init__(self, cmd: str, cwd, outer_mentions=False, depth=0):
+    def __init__(self, cmd: str, cwd, outer_mentions=False, depth=0, exported=()):
         self.cmd, self.cwd, self.depth = cmd, cwd, depth
         self.mentions = outer_mentions or bool(_mark().search(cmd))
-        self.keys = sorted(set(re.findall(r"DEVKIT_[A-Za-z0-9_]*", _unescape(cmd))))
+        self.keys = sorted(set(_KEY_TEXT.findall(_unescape(cmd))))
         self.bodies = heredoc_bodies(cmd)
         self.unresolved = []
+        self.exported = set(exported)
 
     def target(self, t, cwd, verb="write", holds=False, track=True):
+        lp = _lexical(t, cwd)
+        if is_dev_command(lp) or (holds and holds_dev_command(lp)):
+            return deny(dev_command_reason(lp, verb))
         p = resolve(t, cwd)
         if p == UNKNOWN:
             if track and t:
@@ -1109,7 +1307,9 @@ class _Shell:
             return None
         if is_protected(p) or (holds and holds_protected(p)):
             return deny(protected_reason(p, verb))
-        if is_settings_file(p) and self.keys:
+        if holds and holds_dev_command(p):
+            return deny(dev_command_reason(p, verb))
+        if env_file_kind(p, lp) and self.keys:
             return deny(_settings_reason(p, self.keys))
         return None
 
@@ -1142,14 +1342,18 @@ class _Shell:
                 return v
             prefix = argv0[:len(argv0) - len(_strip_prefix(argv0))]
             assigns = [a.split("=", 1)[1] for a in prefix if re.match(r"^[A-Za-z_][A-Za-z0-9_]*=", a)]
-            argv = _unwrap(argv0)
-            if not argv:
+            names, argv = _env_split(argv0)
+            if not argv:  # `HOME=/x;` changes the shell's own variable, which an exported HOME passes on
+                self.exported |= names
                 continue
             name = os.path.basename(argv[0])
+            if argv[0][:1] in ("$", "`") and any(os.path.basename(h) == "env" for h in argv0[:len(argv0) - len(argv)]):
+                self.exported.add("?")  # `env $(…) dev`: the tokenizer splits it; what it sets is not visible
             if name in ("cd", "pushd"):
                 cwd = str(core.HOME) if len(argv) == 1 else cwd if argv[1] == "-" else str(resolve(argv[1], cwd))
                 continue
-            v = self.segment(name, argv, assigns, cwd)
+            self.exported |= _exports(name, argv[1:])
+            v = self.segment(name, argv, assigns, cwd, names)
             if v:
                 return v
         if self.unresolved and self.mentions:
@@ -1159,29 +1363,74 @@ class _Shell:
                         f"`dev` command that owns the record. {_TAIL}")
         return None
 
-    def nested(self, text, cwd):
+    def nested(self, text, cwd, same_shell=False, names=()):
         if not text or self.depth >= 4:
             return None
-        inner = _Shell(text, cwd, self.mentions, self.depth + 1)
+        inner = _Shell(text, cwd, self.mentions, self.depth + 1, self.exported | set(names))
         v = inner.run()
         self.unresolved += inner.unresolved
+        if same_shell:  # source and eval run in this shell: what they export stays set
+            self.exported |= inner.exported
         return v
 
-    def segment(self, name, argv, assigns, cwd):
+    def devkit_call(self, name, argv, cwd):
+        """What reads devkit's state and configuration in this command, or None: `dev` (any path, python bin/dev,
+        python -m devkit…), a program that imports devkit, or an agent session (its hooks run devkit)."""
+        if _dev_args(argv) is not None:
+            return "a devkit command"
+        if name in _AGENT_CLIS:
+            return f"a nested {name} session, whose hooks run devkit"
+        if _INTERP.match(name) and len(argv) > 1:
+            if argv[1] == "-m" and len(argv) > 2 and argv[2].split(".")[0] == "devkit":
+                return "a devkit command"
+            code = _program(argv, cwd, self.bodies)[0]
+            if code and _DEVKIT_PY.search(code):
+                return "a program that imports devkit"
+        return None
+
+    def forged_env(self, name, argv, cwd, names):
+        """A segment that runs devkit with HOME, DEV_ROOT or a DEVKIT_* variable other than the hatches set by this
+        command, or an interpreter program that sets one in its environment and runs devkit (K1 follow-ups 2, 3)."""
+        if name == "launchctl" and argv[1:2] == ["setenv"] and len(argv) > 2 and \
+                (_forged({argv[2]}) or argv[2] in ENV_HATCHES):
+            return deny(f"`launchctl setenv {argv[2]}` sets it for every app and job launchd starts from now on, the "
+                        f"agents' desktop apps and devkit's jobs included, and devkit reads it there (spec C11, K1). "
+                        f"Agents may not. {_TAIL}")
+        what = self.devkit_call(name, argv, cwd)
+        if what:
+            bad = _forged(set(names) | self.exported)
+            if bad:
+                return deny(forged_env_reason(bad, what))
+        if _INTERP.match(name) and not _repo_script(argv, cwd):
+            code = _program(argv, cwd, self.bodies)[0]
+            if code and _DEV_RUN_CODE.search(code):
+                bad = _forged({n for m in _ENV_SET_CODE.finditer(code) for n in _ENV_NAME.findall(m.group(0))})
+                if bad:
+                    return deny(forged_env_reason(bad, f"the devkit command this {name} program runs"))
+        return None
+
+    def segment(self, name, argv, assigns, cwd, names=()):
         args = argv[1:]
+        v = self.forged_env(name, argv, cwd, names)
+        if v:
+            return v
         dev = _dev_args(argv)
         if dev is not None:
             return self.dev(dev, cwd)
+        installer = argv[0] if name == "install.sh" else next(
+            (a for a in args if not a.startswith(("-", "+"))), "") if name in _SHELLS else ""
+        if installer and _devkit_installer(resolve(installer, cwd)):
+            return deny(INSTALL_REASON)
         if name in _SHELLS:
             for text in _shell_inputs(args, cwd, self.bodies):
-                v = self.nested(text, cwd)
+                v = self.nested(text, cwd, names=names)
                 if v:
                     return v
             return None
         if name in ("source", ".") and args:
-            return self.nested(_read_small(resolve(args[0], cwd)), cwd)
+            return self.nested(_read_small(resolve(args[0], cwd)), cwd, same_shell=True)
         if name == "eval":
-            return self.nested(" ".join(args), cwd)
+            return self.nested(" ".join(args), cwd, same_shell=True)
         if name == "xargs":
             return self.xargs(args, cwd)
         if name == "find":
@@ -1213,6 +1462,8 @@ class _Shell:
         return self.targets([c for c in _candidates(args) if inside or _pathlike(c)], cwd)
 
     def dev(self, args, cwd):
+        if args[:1] in (["install"], ["update"]) and not {"-h", "--help"} & set(args[1:]):
+            return deny(INSTALL_REASON)
         if args[:2] == ["config", "set"] and any(a.casefold().startswith("safeguards") for a in args[2:]):
             return deny(SAFEGUARDS_REASON)
         if args[:2] == ["config", "edit"]:
@@ -1252,11 +1503,12 @@ class _Shell:
                 v = self.targets([str(dp / os.path.basename(s.rstrip("/"))) for s in srcs], cwd)
                 if v:
                     return v
-            if is_settings_file(dp):
-                toml = dp.suffix.casefold() == ".toml"
-                now = devkit_env(_read_small(dp, 1 << 20), toml)
+            kind = env_file_kind(dp, _lexical(d, cwd))
+            if kind:
+                toml, shell = kind == "toml", kind == "shell"
+                now = devkit_env(_read_small(dp, 1 << 20), toml, shell)
                 for s in srcs:
-                    new = devkit_env(_read_small(resolve(s, cwd), 1 << 20), toml)
+                    new = devkit_env(_read_small(resolve(s, cwd), 1 << 20), toml, shell)
                     if new != now:
                         return deny(_settings_reason(dp, sorted(k for k in set(new) | set(now)
                                                                 if new.get(k) != now.get(k))))
@@ -1266,13 +1518,13 @@ class _Shell:
         i, takes = 0, {"-I", "-n", "-P", "-L", "-d", "-E", "-s", "-a", "-J", "-R", "-S"}
         while i < len(args) and args[i].startswith("-"):
             i += 2 if args[i] in takes else 1
-        inner = args[i:]
+        names, inner = _env_split(args[i:])
         if not inner:
             return None
         name = os.path.basename(inner[0])
         if name not in _READERS:  # it adds paths read from its input, which the guard cannot see
             self.unresolved.append(f"xargs {name}")
-        return self.segment(name, inner, [], cwd)
+        return self.segment(name, inner, [], cwd, names)
 
     def find(self, args, cwd):
         acts = {"-delete", "-exec", "-execdir", "-ok", "-okdir", "-fprint", "-fprint0", "-fprintf", "-fls"}
@@ -1292,7 +1544,11 @@ class _Shell:
             if a in ("-exec", "-execdir", "-ok", "-okdir") and k + 1 < len(args):
                 inner = args[k + 1:]
                 inner = inner[:next((j for j, x in enumerate(inner) if x in (";", "+")), len(inner))]
+                inames, inner = _env_split(inner)
                 iname = os.path.basename(inner[0]) if inner else ""
+                v = self.forged_env(iname, inner, cwd, inames) if inner else None
+                if v:
+                    return v
                 inplace = iname in ("sed", "yq") and any(x.startswith("-i") or x.startswith("--in") for x in inner)
                 writes = writes or iname not in _READERS or inplace
         return self.targets(roots or ["."], cwd, "change or delete", holds=True) if writes else None
@@ -1312,7 +1568,8 @@ class _Shell:
             return None
         named = [c for c in _candidates(rest) + assigns if _pathlike(c)]
         hit = _mark().search(code) or any(is_protected(resolve(c, cwd)) for c in named) or \
-            (self.mentions and _CODE_INPUTS.search(code)) or ("DEVKIT_" in _unescape(code) and _SETTINGS_NAME.search(code))
+            (self.mentions and _CODE_INPUTS.search(code)) or ("DEVKIT_" in _unescape(code) and _SETTINGS_NAME.search(code)) \
+            or _DEV_LINK_TEXT.search(code) or _dev_command_text().search(code)
         if not hit:
             return None
         return deny(f"This {name} program writes files and names devkit's state, configuration or install, or a "
