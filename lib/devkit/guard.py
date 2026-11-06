@@ -13,6 +13,8 @@ Pure functions; the hook wrapper fails open on any error.
 """
 from __future__ import annotations
 
+import functools
+import json
 import os
 import re
 import shlex
@@ -647,6 +649,9 @@ PIPE_GATE = re.compile(r"\|(?!\|)[^|&;\n]*&&\s*(?:[A-Z_]+=\S*\s+)*(?:git\s+(?:-C
 def check_bash(cmd: str, cwd: str, agent: str):
     if not cmd or not cmd.strip():
         return None
+    v = protected_bash(cmd, cwd or os.getcwd())
+    if v:
+        return v
     if PIPE_GATE.search(cmd) and "pipefail" not in cmd and "DEVKIT_PIPE_OK" not in cmd:
         return deny("This commits, pushes or tags after a pipeline (`… | … && git commit`): the `&&` sees the exit "
                     "code of the pipe's last command, so a failing check before the pipe still lets it run. Run the "
@@ -808,10 +813,643 @@ def devkit_off(path: str, tool_input: dict):
     return None
 
 
+# --------------------------------------------------------------------------- protected state (spec C11, K1)
+#
+# devkit's state (runs, sessions, the call ledger, audit), its configuration and its pinned install decide what the
+# guard and the gates allow, so no agent tool call may write them: not the file tools, not a shell, not `dev config set
+# safeguards.*`. devkit's own commands write them in their own process (`dev progress`, the hooks), which never passes
+# through this guard. A DEVKIT_* variable in a settings file's env block would switch safeguards for every hook, so
+# agents may not set, change or remove one there. The developer changes safeguards in a terminal. The shell rules
+# read the command text: they stop the plain ways in, they are not a sandbox.
+
+READ_TOOLS = {"Read", "Grep", "Glob", "LS", "NotebookRead"}
+
+
+def protected_roots() -> list:
+    h = core.HOME
+    return [h / ".local" / "state" / "devkit", h / ".config" / "devkit", h / ".local" / "share" / "devkit"]
+
+
+def _under_ci(p: str, root: str) -> bool:
+    # macOS folders are case-insensitive: ~/.Local/State/devkit is ~/.local/state/devkit
+    p, r = p.casefold(), root.casefold().rstrip(os.sep)
+    return p == r or p.startswith(r + os.sep)
+
+
+def _subagent_meta(s: str) -> bool:
+    q = Path(s)
+    return q.name.casefold().endswith(".meta.json") and q.parent.name.casefold() == "subagents" and \
+        _under_ci(s, real(core.CLAUDE_HOME / "projects"))
+
+
+def is_protected(p: Path) -> bool:
+    """True when the resolved path is devkit's state, configuration or install, or a subagent's launch record."""
+    if p == UNKNOWN:
+        return False
+    s = str(p)
+    return any(_under_ci(s, real(r)) for r in protected_roots()) or \
+        s.casefold() == real(core.CONFIG_FILE).casefold() or _subagent_meta(s)
+
+
+def holds_protected(p: Path) -> bool:
+    """True when the folder holds devkit's state, configuration or install (~/.local/state, ~): moving, linking or
+    deleting it takes them along."""
+    return p != UNKNOWN and any(_under_ci(real(r), str(p)) for r in protected_roots())
+
+
+_STATE_OWNERS = {
+    "runs": ("plan and progress records", "`dev progress` (start, step, note, assign, reopen, skip, done)"),
+    "sessions": ("session records", "`dev status` to read them (devkit's hooks keep them current)"),
+    "audit": ("audit log", "`dev audit` to read it (nothing edits it)"),
+    "trash": ("Trash", "`dev rm --undo` to restore from it"),
+    "trash.jsonl": ("Trash manifest", "`dev rm --undo` to restore from it"),
+    "ci-pushes.json": ("push budget", "`dev push`, which counts pushes itself"),
+}
+_TAIL = "Only the developer changes safeguards, in a terminal."
+
+
+def protected_reason(p: Path, verb: str = "write") -> str:
+    s, tail = str(p), " " + _TAIL
+    state, config, share = (real(r) for r in protected_roots())
+    if not is_protected(p):
+        head = f"{tilde(p)} holds devkit's state, configuration or install"
+        use = "the `dev` command that owns the record you mean to change (`dev help` lists them)"
+    elif _under_ci(s, config) or s.casefold() == real(core.CONFIG_FILE).casefold():
+        head, tail = f"{tilde(p)} belongs to devkit's configuration", ""
+        use = ("a terminal: only the developer changes devkit's configuration and its safeguards, there "
+               "(`dev config edit`). Ask them, with what to change and why")
+    elif _under_ci(s, share):
+        head = f"{tilde(p)} belongs to devkit's installed copy (the pinned release, skills, tools)"
+        use = "the source in the devkit repository, then `dev install`"
+    elif _subagent_meta(s):
+        head = f"{tilde(p)} is a subagent launch record, which Claude Code writes when it launches one"
+        use = "the Agent tool"
+    else:
+        first = s[len(state):].lstrip(os.sep).split(os.sep)[0].casefold()
+        what, use = _STATE_OWNERS.get(first, ("state", "the `dev` command that owns it (`dev help` lists them)"))
+        head = f"{tilde(p)} belongs to devkit's {what}"
+    return (f"{head}. Agents may not {verb} devkit's state, configuration or install (spec C11); devkit's own "
+            f"commands write them. Instead, use {use}. Reading is fine (the Read tool, `cat`, `jq`).{tail}")
+
+
+@functools.lru_cache(maxsize=4)
+def _mark_for(home: str, config_file: str):
+    alts = [r"\.local\W{1,8}state\W{1,8}devkit(?![\w-])", r"\.local\W{1,8}share\W{1,8}devkit(?![\w-])",
+            r"\.config\W{1,8}devkit(?![\w-])", r"XDG_(?:STATE|CONFIG|DATA)_HOME\W{1,8}devkit(?![\w-])",
+            r"subagents\W{1,8}[^\s'\"]*\.meta\.json", r"\bcore\.(?:STATE|CONFIG_FILE|share_dir)\b"]
+    alts += [re.escape(real(r)) for r in protected_roots()] + [re.escape(real(config_file))]
+    return re.compile("|".join(alts), re.I)
+
+
+def _mark():
+    """Matches text that names devkit's state, configuration or install, in any spelling the guard can recognise."""
+    return _mark_for(str(core.HOME), str(core.CONFIG_FILE))
+
+
+# ---- DEVKIT_* keys in settings files
+
+_KEY_JSON = re.compile(r'"(DEVKIT_[A-Za-z0-9_]*)"\s*:\s*("(?:[^"\\]|\\.)*"|[^,}\s]+)')
+_KEY_TOML = re.compile(r'(?:^|[\s{,])["\']?(DEVKIT_[A-Za-z0-9_]*)["\']?\s*=\s*("[^"\n]*"|\'[^\'\n]*\'|[^\s,}]+)', re.M)
+
+
+def is_settings_file(path) -> bool:
+    p = Path(str(path))
+    n, d = p.name.casefold(), p.parent.name.casefold()
+    return (d == ".claude" and n in ("settings.json", "settings.local.json")) or n == "managed-settings.json" or \
+        (d == ".codex" and (n.endswith(".toml") or n == "hooks.json"))
+
+
+def _unescape(text) -> str:
+    # "DEVKIT_GUARD" is the same JSON key as "DEVKIT_GUARD"
+    return re.sub(r"\\u([0-9a-fA-F]{4})", lambda m: chr(int(m.group(1), 16)), str(text or ""))
+
+
+def devkit_env(text: str, toml: bool = False) -> dict:
+    """The DEVKIT_* variables a settings file's text sets, {name: value}."""
+    if not text:
+        return {}
+    if not toml:
+        try:
+            data = json.loads(text)
+        except ValueError:
+            data = None
+        if isinstance(data, dict):
+            env = data.get("env")
+            return {k: json.dumps(v) for k, v in env.items() if str(k).startswith("DEVKIT_")} \
+                if isinstance(env, dict) else {}
+    out = {}
+    for m in (_KEY_TOML if toml else _KEY_JSON).finditer(_unescape(text)):
+        v = m.group(2)
+        try:
+            v = json.dumps(json.loads(v))
+        except ValueError:
+            pass
+        out[m.group(1)] = v
+    return out
+
+
+def _read_small(p, limit: int = 1 << 19) -> str:
+    try:
+        p = Path(str(p))
+        if p != UNKNOWN and p.is_file() and p.stat().st_size <= limit:
+            return p.read_text(errors="replace")
+    except (OSError, ValueError):
+        pass
+    return ""
+
+
+def _settings_after(before: str, tool_input: dict):
+    """The settings file's text after this Write, Edit or MultiEdit, or None when the edit does not apply to it."""
+    if "content" in tool_input:
+        return str(tool_input.get("content") or "")
+    edits = tool_input.get("edits") if isinstance(tool_input.get("edits"), list) else [tool_input]
+    text = before
+    for e in edits:
+        if not isinstance(e, dict):
+            return None
+        old, new = str(e.get("old_string") or ""), str(e.get("new_string") or "")
+        if not old:
+            if text:
+                return None
+            text = new
+            continue
+        if old not in text:
+            return None
+        text = text.replace(old, new) if e.get("replace_all") else text.replace(old, new, 1)
+    return text
+
+
+def _settings_reason(path, keys) -> str:
+    return (f"This changes {', '.join(list(keys)[:4]) or 'a DEVKIT_* variable'} in the env block of {tilde(path)}. "
+            f"DEVKIT_* variables switch devkit's safeguards for every hook, so agents may not set, change or remove "
+            f"them in a settings file (spec C11). If the work needs one, ask the developer and say why. {_TAIL}")
+
+
+def settings_env_violation(path, tool_input: dict):
+    """A Write or Edit that sets, changes or removes a DEVKIT_* variable in a settings file's env block."""
+    if not path or not is_settings_file(path):
+        return None
+    toml = Path(str(path)).suffix.casefold() == ".toml"
+    before = _read_small(path, 1 << 20)
+    after = _settings_after(before, tool_input or {})
+    if after is None:  # the edit does not match the file as it is: judge the new text alone
+        es = tool_input.get("edits") if isinstance(tool_input.get("edits"), list) else [tool_input]
+        new = "\n".join(str(e.get("new_string") or "") for e in es if isinstance(e, dict))
+        changed = sorted(devkit_env(new, toml)) or (["DEVKIT_*"] if "DEVKIT_" in _unescape(new) else [])
+    else:
+        a, b = devkit_env(after, toml), devkit_env(before, toml)
+        changed = sorted(k for k in set(a) | set(b) if a.get(k) != b.get(k))
+    return deny(_settings_reason(path, changed)) if changed else None
+
+
+def protected_write(path, cwd, tool_input=None):
+    """Write, Edit, MultiEdit, NotebookEdit: devkit's state, configuration and install, and DEVKIT_* settings keys."""
+    if not path:
+        return None
+    p = resolve(path, cwd)
+    if is_protected(p):
+        return deny(protected_reason(p))
+    return settings_env_violation(p if p != UNKNOWN else path, tool_input or {})
+
+
+def protected_patch(patch: str, cwd):
+    """apply_patch: Add, Update, Delete and Move all count, and an added DEVKIT_* line in a settings file."""
+    added = _unescape("\n".join(ln[1:] for ln in patch.splitlines() if ln.startswith("+")))
+    for op, path in parse_patch_paths(patch):
+        p = resolve(path, cwd)
+        if is_protected(p):
+            return deny(protected_reason(p, "delete" if op == "delete" else "write"))
+        if op != "delete" and is_settings_file(p) and "DEVKIT_" in added:
+            return deny(_settings_reason(p, sorted(set(re.findall(r"DEVKIT_[A-Za-z0-9_]*", added)))))
+    return None
+
+
+# ---- the shell
+
+SAFEGUARDS_REASON = ("`dev config set safeguards.…` changes devkit's safeguards, and only the developer changes them, "
+                     "in a terminal (spec C11). Ask them: name the setting, the value and why. `dev config show` "
+                     "prints the current values.")
+_SHELLS = {"bash", "sh", "zsh", "dash", "ksh", "fish"}
+_INTERP = re.compile(r"^(?:python[0-9.]*|pypy[0-9.]*|node|nodejs|deno|bun|perl[0-9.]*|ruby|php|osascript|lua|tclsh|"
+                     r"Rscript|swift|awk|gawk|mawk|nawk)$")
+_READERS = {"cat", "head", "tail", "less", "more", "bat", "ls", "stat", "file", "wc", "grep", "egrep", "fgrep", "rg",
+            "ag", "ack", "jq", "diff", "cmp", "comm", "md5", "md5sum", "shasum", "sha1sum", "sha256sum", "cksum", "du",
+            "df", "realpath", "readlink", "basename", "dirname", "test", "[", "[[", "echo", "printf", "hexdump", "xxd",
+            "od", "strings", "column", "cut", "tr", "nl", "fold", "paste", "tree", "lsof", "true", "false", "type",
+            "which", "export", "declare", "local", "readonly", "typeset", "set", "unset", "alias", "popd", "wait",
+            "sleep", "date", "pwd", "whoami", "id", "uname", "env", "printenv"}
+_CREATORS = {"tee", "touch", "mkdir", "mkfifo", "truncate"}  # write the paths they name
+_CHANGERS = {"rm", "rmdir", "unlink", "shred", "srm", "ln", "chmod", "chown", "chgrp", "chflags", "xattr", "setfacl"}
+_COPIERS = {"cp", "gcp", "install", "ditto", "rsync", "scp"}
+_MOVERS = {"mv", "gmv"}
+_DEV_READ = {"files", "find", "grep", "diff", "status", "show", "ls", "du", "time", "overview", "standup", "help",
+             "version", "doctor"}
+_CODE_WRITES = re.compile(
+    r"\bopen\s*\([^)]*['\"][rbtU]*[wax+][rbt+]*['\"]|\bmode\s*=\s*['\"][^'\"]*[wax+]"
+    r"|\.(?:write_text|write_bytes|touch|unlink|rename|rmdir|mkdir|chmod|symlink_to|hardlink_to)\s*\("
+    r"|\bos\.(?:remove|unlink|rename|renames|replace|rmdir|removedirs|mkdir|makedirs|chmod|chown|truncate|symlink|"
+    r"link|utime|open|write|system|popen|exec\w*|spawn\w*)\b|\bshutil\.(?:copy\w*|move|rmtree)\b|\bsubprocess\b"
+    r"|\bexec\s*\(|\b(?:writeFile|appendFile|createWriteStream|copyFile|cpSync|renameSync|unlinkSync|rmSync|"
+    r"rmdirSync|mkdirSync|truncateSync|symlinkSync|linkSync|chmodSync|openSync|writeSync|child_process|execSync|"
+    r"spawnSync|execFile)\w*|\bFile\.(?:write|open|delete|unlink|rename|symlink|link|chmod)\b|\bIO\.(?:write|"
+    r"binwrite)\b|\bFileUtils\b|\bfile_put_contents\b|\bsystem\s*\(|\bdo shell script\b"
+    r"|\bopen\s*\(?\s*(?:my\s+)?\$?\w+\s*,\s*['\"]?\s*(?:\+?[>|]|>>)|\bunlink\b|\brename\b|\bprint\s*>{1,2}\s*\S")
+_CODE_INPUTS = re.compile(r"environ|getenv|\bENV\[|\$ENV\{|process\.env|sys\.argv|\bARGV\b|process\.argv")
+_SETTINGS_NAME = re.compile(r"settings(?:\.local)?\.json|managed-settings\.json|config\.toml|hooks\.json")
+_VARPATH = re.compile(r"^\$\{?[A-Za-z_]")
+
+
+def heredoc_bodies(cmd: str) -> list:
+    """The heredoc bodies and here-strings of a command: the text an interpreter or shell reads from its input."""
+    lines, out, i = cmd.split("\n"), [], 0
+    while i < len(lines):
+        m = HEREDOC_RE.search(lines[i])
+        i += 1
+        if m:
+            body = []
+            while i < len(lines) and lines[i].strip() != m.group(2):
+                body.append(lines[i])
+                i += 1
+            i += 1
+            out.append("\n".join(body))
+    out += [next(g for g in m.groups() if g is not None) for m in
+            re.finditer(r"<<<\s*(?:'([^']*)'|\"((?:[^\"\\]|\\.)*)\"|(\S+))", cmd)]
+    return out
+
+
+def _candidates(args) -> list:
+    out = []
+    for a in args:
+        if not a.startswith("-") and a:
+            out.append(a)
+        if "=" in a:  # --output=PATH, of=PATH
+            out.append(a.split("=", 1)[1])
+    return out
+
+
+def _pathlike(a: str) -> bool:
+    return "/" in a or a.startswith(("~", ".")) or bool(_VARPATH.match(a))
+
+
+class _Shell:
+    """Walks one shell command for writes to protected paths; `unresolved` collects targets it cannot resolve."""
+
+    def __init__(self, cmd: str, cwd, outer_mentions=False, depth=0):
+        self.cmd, self.cwd, self.depth = cmd, cwd, depth
+        self.mentions = outer_mentions or bool(_mark().search(cmd))
+        self.keys = sorted(set(re.findall(r"DEVKIT_[A-Za-z0-9_]*", _unescape(cmd))))
+        self.bodies = heredoc_bodies(cmd)
+        self.unresolved = []
+
+    def target(self, t, cwd, verb="write", holds=False, track=True):
+        p = resolve(t, cwd)
+        if p == UNKNOWN:
+            if track and t:
+                self.unresolved.append(t)
+            return None
+        if is_protected(p) or (holds and holds_protected(p)):
+            return deny(protected_reason(p, verb))
+        if is_settings_file(p) and self.keys:
+            return deny(_settings_reason(p, self.keys))
+        return None
+
+    def targets(self, ts, cwd, verb="write", holds=False, track=True):
+        for t in ts:
+            v = self.target(t, cwd, verb, holds, track)
+            if v:
+                return v
+        return None
+
+    def run(self):
+        segs = split_commands(self.cmd)
+        if segs is None:
+            if self.mentions and re.search(r">|\b(tee|cp|mv|rm|ln|sed|python|perl|ruby|node|dd|install)\b", self.cmd):
+                return deny("This command names devkit's state, configuration or install, writes files, and the guard "
+                            "cannot parse it to see where (spec C11: agents may not write them). Split it into "
+                            f"simple commands. {_TAIL}")
+            return None
+        cwd = self.cwd
+        for argv0, redirs in segs:
+            argv0, clobber, k = list(argv0), [], 0
+            while k < len(argv0):  # `>|` reaches argv as a token; the next token is its target
+                if argv0[k] in (">|", ">>|"):
+                    clobber.append(argv0[k + 1] if k + 1 < len(argv0) else "")
+                    del argv0[k:k + 2]
+                    continue
+                k += 1
+            v = self.targets(list(redirs) + clobber, cwd)
+            if v:
+                return v
+            prefix = argv0[:len(argv0) - len(_strip_prefix(argv0))]
+            assigns = [a.split("=", 1)[1] for a in prefix if re.match(r"^[A-Za-z_][A-Za-z0-9_]*=", a)]
+            argv = _unwrap(argv0)
+            if not argv:
+                continue
+            name = os.path.basename(argv[0])
+            if name in ("cd", "pushd"):
+                cwd = str(core.HOME) if len(argv) == 1 else cwd if argv[1] == "-" else str(resolve(argv[1], cwd))
+                continue
+            v = self.segment(name, argv, assigns, cwd)
+            if v:
+                return v
+        if self.unresolved and self.mentions:
+            return deny(f"This command writes to `{self.unresolved[0]}`, which depends on a variable or a subshell the "
+                        f"guard cannot see, and it names devkit's state, configuration or install (spec C11: agents "
+                        f"may not write them). Write the path out in full if it is not devkit's; otherwise use the "
+                        f"`dev` command that owns the record. {_TAIL}")
+        return None
+
+    def nested(self, text, cwd):
+        if not text or self.depth >= 4:
+            return None
+        inner = _Shell(text, cwd, self.mentions, self.depth + 1)
+        v = inner.run()
+        self.unresolved += inner.unresolved
+        return v
+
+    def segment(self, name, argv, assigns, cwd):
+        args = argv[1:]
+        dev = _dev_args(argv)
+        if dev is not None:
+            return self.dev(dev, cwd)
+        if name in _SHELLS:
+            for text in _shell_inputs(args, cwd, self.bodies):
+                v = self.nested(text, cwd)
+                if v:
+                    return v
+            return None
+        if name in ("source", ".") and args:
+            return self.nested(_read_small(resolve(args[0], cwd)), cwd)
+        if name == "eval":
+            return self.nested(" ".join(args), cwd)
+        if name == "xargs":
+            return self.xargs(args, cwd)
+        if name == "find":
+            return self.find(args, cwd)
+        if _INTERP.match(name):
+            return self.interpreter(argv, assigns, cwd)
+        if name in _COPIERS or name in _MOVERS:
+            return self.copy(name, args, cwd)
+        if name in _CREATORS:
+            return self.targets(_candidates(args), cwd)
+        if name in _CHANGERS:
+            return self.targets(_candidates(args), cwd, "change or delete", holds=True)
+        if name == "dd":
+            return self.targets([a[3:] for a in args if a.startswith("of=")], cwd)
+        if name in ("sed", "yq"):
+            inplace = any(a == "--in-place" or a.startswith(("--in-place=", "--inplace")) or
+                          (a.startswith("-") and not a.startswith("--") and "i" in a[1:]) for a in args)
+            return self.targets(_candidates(args), cwd) if inplace else None
+        if name == "sort":
+            out = _opt_value(args, ("-o", "--output"))
+            return self.target(out, cwd) if out else None
+        if name == "uniq":
+            pos = [a for a in args if not a.startswith("-")]
+            return self.target(pos[1], cwd) if len(pos) > 1 else None
+        if name in _READERS:
+            return None
+        # anything else (editors, sqlite3, git, curl, tar, …) may write the paths it is given
+        inside = is_protected(Path(cwd)) if cwd and str(cwd) != str(UNKNOWN) else False
+        return self.targets([c for c in _candidates(args) if inside or _pathlike(c)], cwd)
+
+    def dev(self, args, cwd):
+        if args[:2] == ["config", "set"] and any(a.casefold().startswith("safeguards") for a in args[2:]):
+            return deny(SAFEGUARDS_REASON)
+        if args[:2] == ["config", "edit"]:
+            return deny(protected_reason(Path(real(core.CONFIG_FILE)), "edit"))
+        if args[:1] in (["rm"], ["mv"], ["cp"]):
+            return self.segment(args[0], args, [], cwd)
+        if args[:1] and args[0] in _DEV_READ:
+            return None
+        # devkit's own commands write the state in their process; only a path argument that lands in it is refused
+        return self.targets([c for c in _candidates(args[1:]) if _pathlike(c)], cwd, track=False)
+
+    def copy(self, name, args, cwd):
+        pos = [a for a in args if not a.startswith("-")]
+        tdir = _opt_value(args, ("-t", "--target-directory"))
+        if name == "install" and "-d" in args:
+            return self.targets(pos, cwd)
+        if tdir:
+            dests, srcs = [tdir], [p for p in pos if p != tdir]
+        elif len(pos) >= 2:
+            dests, srcs = pos[-1:], pos[:-1]
+        else:
+            return None
+        links = name in ("cp", "gcp") and any(a in ("--link", "--symbolic-link") or (
+            a.startswith("-") and not a.startswith("--") and ("l" in a or "s" in a)) for a in args)
+        if name in _MOVERS or links:  # a move deletes the source; a link is a way in
+            v = self.targets(srcs, cwd, "move" if name in _MOVERS else "link", holds=True)
+            if v:
+                return v
+        for d in dests:
+            v = self.target(d, cwd)
+            if v:
+                return v
+            dp = resolve(d, cwd)
+            if dp == UNKNOWN:
+                continue
+            if dp.is_dir():
+                v = self.targets([str(dp / os.path.basename(s.rstrip("/"))) for s in srcs], cwd)
+                if v:
+                    return v
+            if is_settings_file(dp):
+                toml = dp.suffix.casefold() == ".toml"
+                now = devkit_env(_read_small(dp, 1 << 20), toml)
+                for s in srcs:
+                    new = devkit_env(_read_small(resolve(s, cwd), 1 << 20), toml)
+                    if new != now:
+                        return deny(_settings_reason(dp, sorted(k for k in set(new) | set(now)
+                                                                if new.get(k) != now.get(k))))
+        return None
+
+    def xargs(self, args, cwd):
+        i, takes = 0, {"-I", "-n", "-P", "-L", "-d", "-E", "-s", "-a", "-J", "-R", "-S"}
+        while i < len(args) and args[i].startswith("-"):
+            i += 2 if args[i] in takes else 1
+        inner = args[i:]
+        if not inner:
+            return None
+        name = os.path.basename(inner[0])
+        if name not in _READERS:  # it adds paths read from its input, which the guard cannot see
+            self.unresolved.append(f"xargs {name}")
+        return self.segment(name, inner, [], cwd)
+
+    def find(self, args, cwd):
+        acts = {"-delete", "-exec", "-execdir", "-ok", "-okdir", "-fprint", "-fprint0", "-fprintf", "-fls"}
+        if not any(a in acts for a in args):
+            return None
+        roots = []
+        for a in args:
+            if a.startswith("-") or a in ("(", ")", "!", ","):
+                break
+            roots.append(a)
+        writes = "-delete" in args
+        for k, a in enumerate(args):
+            if a in ("-fprint", "-fprint0", "-fprintf", "-fls") and k + 1 < len(args):
+                v = self.target(args[k + 1], cwd)
+                if v:
+                    return v
+            if a in ("-exec", "-execdir", "-ok", "-okdir") and k + 1 < len(args):
+                inner = args[k + 1:]
+                inner = inner[:next((j for j, x in enumerate(inner) if x in (";", "+")), len(inner))]
+                iname = os.path.basename(inner[0]) if inner else ""
+                inplace = iname in ("sed", "yq") and any(x.startswith("-i") or x.startswith("--in") for x in inner)
+                writes = writes or iname not in _READERS or inplace
+        return self.targets(roots or ["."], cwd, "change or delete", holds=True) if writes else None
+
+    def interpreter(self, argv, assigns, cwd):
+        code, rest, module, inplace = _program(argv, cwd, self.bodies)
+        name = os.path.basename(argv[0])
+        if module is not None:
+            pos = [a for a in rest if not a.startswith("-")]
+            return self.targets(pos[1:2] if module == "json.tool" else [c for c in _candidates(rest) if _pathlike(c)],
+                                cwd, track=False)
+        if inplace:
+            v = self.targets([a for a in rest if not a.startswith("-")], cwd)
+            if v:
+                return v
+        if not code or not _CODE_WRITES.search(code):
+            return None
+        named = [c for c in _candidates(rest) + assigns if _pathlike(c)]
+        hit = _mark().search(code) or any(is_protected(resolve(c, cwd)) for c in named) or \
+            (self.mentions and _CODE_INPUTS.search(code)) or ("DEVKIT_" in _unescape(code) and _SETTINGS_NAME.search(code))
+        if not hit:
+            return None
+        return deny(f"This {name} program writes files and names devkit's state, configuration or install, or a "
+                    f"DEVKIT_* setting (spec C11: agents may not write them; devkit's own commands do). Use the `dev` "
+                    f"command that owns the record (`dev progress`, `dev task`, …). To read a record, open it "
+                    f"without 'w' or 'a' and print it. {_TAIL}")
+
+
+def _unwrap(argv):
+    """The command a segment really runs: without env/sudo/nohup prefixes, `timeout N`, `uv run`, `npx`."""
+    while True:
+        argv = _strip_prefix(argv)
+        if not argv:
+            return argv
+        n = os.path.basename(argv[0])
+        if n in ("timeout", "gtimeout"):
+            rest = argv[1:]
+            while rest and rest[0].startswith("-"):
+                rest = rest[1:]
+            argv = rest[1:]
+        elif (n in ("uv", "poetry", "pipenv", "pdm", "hatch", "rye") and argv[1:2] == ["run"]) or \
+                (n == "pnpm" and argv[1:2] in (["exec"], ["dlx"])):
+            argv = argv[2:]
+            while argv and argv[0].startswith("-"):
+                argv = argv[1:]
+        elif n in ("npx", "bunx", "uvx", "pnpx"):
+            argv = argv[1:]
+            while argv and argv[0].startswith("-"):
+                argv = argv[1:]
+        else:
+            return argv
+
+
+def _dev_args(argv):
+    """The arguments of a `dev` call (dev, bin/dev, python3 bin/dev, python3 -m devkit.cli), else None."""
+    n = os.path.basename(argv[0])
+    if n == "dev":
+        return argv[1:]
+    if _INTERP.match(n) and len(argv) > 1:
+        if os.path.basename(argv[1]) == "dev":
+            return argv[2:]
+        if argv[1:3] in (["-m", "devkit"], ["-m", "devkit.cli"]):
+            return argv[3:]
+    return None
+
+
+def _shell_inputs(args, cwd, bodies) -> list:
+    """The scripts a shell runs: its -c string, a script file, or its input (the command's heredocs)."""
+    i = 0
+    while i < len(args):
+        a = args[i]
+        if a == "--":
+            i += 1
+            break
+        if a.startswith("-") and not a.startswith("--") and "c" in a[1:]:
+            return [args[i + 1]] if i + 1 < len(args) else []
+        if a in ("-o", "+o", "-O", "+O", "--rcfile", "--init-file"):
+            i += 2
+            continue
+        if a.startswith(("-", "+")):
+            i += 1
+            continue
+        break
+    if i < len(args):
+        return [_read_small(resolve(args[i], cwd))]
+    return list(bodies)
+
+
+def _program(argv, cwd, bodies):
+    """-> (code, args, module, in_place): the program text an interpreter runs (inline, a script file or its input)."""
+    fam = re.sub(r"[0-9.]+$", "", os.path.basename(argv[0]).casefold())
+    args, code, script, module, inplace, i = argv[1:], [], None, None, False, 0
+    while i < len(args):
+        a, nxt = args[i], args[i + 1] if i + 1 < len(args) else ""
+        short = a.startswith("-") and not a.startswith("--") and len(a) > 1
+        if fam in ("awk", "gawk", "mawk", "nawk"):
+            if a == "-f":
+                script, i = nxt, i + 2
+                continue
+            if a in ("-v", "-F"):
+                i += 2
+                continue
+            if a.startswith("-"):
+                i += 1
+                continue
+            if not code and script is None:
+                code.append(a)
+            i += 1
+            break
+        if fam in ("python", "pypy"):
+            if short and a.endswith("c"):
+                code.append(nxt)
+                i += 2
+                break
+            if a == "-m":
+                module, i = nxt, i + 2
+                break
+        elif fam in ("perl", "ruby") and short and a[-1] in "eE" or \
+                a in {"node": ("-e", "--eval", "-p", "--print"), "bun": ("-e", "--eval", "-p", "--print"),
+                      "nodejs": ("-e", "--eval", "-p", "--print"), "deno": ("eval",), "php": ("-r",),
+                      "osascript": ("-e",), "lua": ("-e",), "rscript": ("-e",), "swift": ("-e",)}.get(fam, ()):
+            code.append(nxt)
+            inplace = inplace or (fam in ("perl", "ruby") and "i" in a[1:-1])
+            i += 2
+            continue
+        if short and fam in ("perl", "ruby") and "i" in a[1:]:
+            inplace = True
+        if a.startswith("-"):
+            i += 1
+            continue
+        if not code and script is None:
+            script, i = a, i + 1
+        break
+    rest = args[i:]
+    if script and script != "-":
+        code.append(_read_small(resolve(script, cwd)))
+    elif not code and module is None:
+        code += list(bodies)
+    return "\n".join(code), rest, module, inplace
+
+
+def protected_bash(cmd: str, cwd):
+    """Deny a shell command that writes devkit's state, configuration or install, runs `dev config set
+    safeguards.*`, or sets a DEVKIT_* key in a settings file (spec C11)."""
+    if not cmd or not cmd.strip():
+        return None
+    return _Shell(cmd, cwd).run()
+
+
 def check(tool: str, tool_input: dict, cwd: str, agent: str):
     tool_input = tool_input or {}
     if tool in WRITE_TOOLS or "file_path" in tool_input or "notebook_path" in tool_input:
         path = tool_input.get("file_path") or tool_input.get("notebook_path")
+        if tool not in READ_TOOLS:
+            v = protected_write(path, cwd, tool_input)
+            if v:
+                return v
         return devkit_off(path, tool_input) or check_write_path(path, cwd, agent)
     cmd = tool_input.get("command") if isinstance(tool_input, dict) else None
     if isinstance(cmd, list):
@@ -819,6 +1457,9 @@ def check(tool: str, tool_input: dict, cwd: str, agent: str):
     if not isinstance(cmd, str):
         return None
     if tool == "apply_patch" or cmd.lstrip().startswith("*** Begin Patch"):
+        v = protected_patch(cmd, cwd)
+        if v:
+            return v
         for op, path in parse_patch_paths(cmd):
             if op == "delete":
                 continue
