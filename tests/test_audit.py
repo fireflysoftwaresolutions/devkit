@@ -432,7 +432,7 @@ class PersonalDataTests(AuditCase):
                 audit.record("dev.crew", target, "", "ok")
                 self.assertEqual(audit.query(action="dev.crew")[-1]["target"], target)
 
-    def test_developer_evidence_keeps_the_lines_length_and_hash_and_an_answer_only_when_it_is_an_option(self):
+    def test_developer_evidence_keeps_the_lines_length_and_an_answer_only_when_it_is_an_option(self):
         # compliance review 2, section 3: accountability needs who approved what, when and how; not the words
         opts = ["A: ship", "B: wait for Acme"]
         cases = [  # (covers, the line or the question tool's excerpt, answer, what ref.answer keeps)
@@ -448,9 +448,9 @@ class PersonalDataTests(AuditCase):
                 audit.record("crew.evidence", covers, line, channel="E2", transcript_uuid="prompt-9",
                              session="claude:s1", answer=answer, options=opts)
                 r = audit.query(action="crew.evidence")[-1]
-                digest = __import__("hashlib").sha256(line.encode()).hexdigest()
+                # the length only: a hash of a short option is guessable (The Keymaker, M287)
                 self.assertEqual((r["target"], r["detail"]),
-                                 (covers, f"[approval line not recorded: {len(line)} characters, sha256 {digest}]"))
+                                 (covers, f"[approval line not recorded: {len(line)} characters]"))
                 self.assertEqual(r["ref"].get("answer"), kept)
                 self.assertEqual((r["evidence"]["channel"], r["evidence"]["transcript_uuid"]), ("E2", "prompt-9"))
         raw = (audit.AUDIT / time.strftime("%Y-%m.jsonl")).read_text()
@@ -468,7 +468,9 @@ class PersonalDataTests(AuditCase):
                ("dev.rm", "/Users/fixture-user/Development/acme/build", f"{CURL} -u admin:{CMD} https://x.example",
                 {"evidence": {"cwd": "/Users/fixture-user/Development"}}),
                ("crew.evidence", "D2", "approve D2: after the Acme roadmap call", {"ref": {"answer": "after the "
-                                                                                          "Acme roadmap call"}})]
+                                                                                          "Acme roadmap call"}}),
+               ("crew.evidence", "D7", "[approval line not recorded: 19 characters, sha256 " + "ab" * 32 + "]",
+                {"ref": {"answer": "B: wait for Acme"}})]  # as 6677b15 wrote it
         for action, target, detail, more in old:
             ts = round(time.time(), 3)
             audit._append({"v": 2, "id": audit.new_id(ts), "ts": ts, "time": audit.iso(ts),
@@ -485,8 +487,10 @@ class PersonalDataTests(AuditCase):
                 for words in ("roadmap", "/Users/fixture-user", CMD):
                     self.assertNotIn(words, out)
         sealed = [r for r in recs if r["actor"]["user"] == "fixture-user"]
-        self.assertEqual([r.get("cleaned") for r in sealed], [True] * 4)
+        self.assertEqual([r.get("cleaned") for r in sealed], [True] * 5)
         self.assertEqual(sealed[3]["ref"], {"answer": "[free text: 27 characters]"})  # never checked against options
+        self.assertEqual((sealed[4]["detail"], sealed[4]["ref"]),
+                         ("[approval line not recorded: 19 characters]", {"answer": "B: wait for Acme"}))
         self.assertEqual((sealed[0]["detail"], sealed[0]["ref"]), ("[message text not recorded: 36 characters]",
                                                                    {"id": "M3"}))
         self.assertEqual(sealed[1]["target"], "ask --to persephone [message text not recorded: 24 characters]")

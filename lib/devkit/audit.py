@@ -157,14 +157,16 @@ _HOMES = re.compile(r"(?<![\w.~-])/(?:Users|home)/(?!Shared(?![^/\s]))[^/\s:'\"`
 # actions whose detail is the text of a message: only its length is recorded
 MESSAGE_ACTIONS = {"crew.message"}
 # the developer's evidence for a decision or a grant (compliance review 2, section 3): its detail is the line they
-# typed or the question tool's question and label, so only its length and SHA-256 are recorded; `answer` stays only
-# when it is one of the decision's options. `covers`, the channel, the transcript uuid and the chain say the rest
+# typed or the question tool's question and label, so only its length is recorded (a hash of a short option is
+# guessable: The Keymaker, M287); `answer` stays only when it is one of the decision's options. `covers`, the
+# channel, the transcript uuid (which verify checks) and the chain say the rest
 EVIDENCE_ACTIONS = {"crew.evidence"}
 # `dev crew ask|answer` arguments that name someone or something; every other argument is message text
 _CREW_NAMES = ("--to", "--recommend", "--irreversible", "--target")
 # what replaces a text: a record read again keeps it as it is, so cleaning on read never counts a marker's length
 _UNTEXT = re.compile(r"\[message text not recorded: \d+\+? characters\]")
-_UNLINE = re.compile(r"\[approval line not recorded: \d+ characters, sha256 [0-9a-f]{64}\]")
+# 6677b15 also wrote the line's SHA-256: such a marker reads back with its length only
+_UNLINE = re.compile(r"\[approval line not recorded: (\d+) characters(?:, sha256 [0-9a-f]{64})?\]")
 
 
 def _home(s: str) -> str:
@@ -184,7 +186,8 @@ def _untext(n: int, cut: bool) -> str:
 
 
 def _unline(s: str) -> str:
-    return f"[approval line not recorded: {len(s)} characters, sha256 {hashlib.sha256(s.encode('utf-8')).hexdigest()}]"
+    m = _UNLINE.fullmatch(s)
+    return f"[approval line not recorded: {m.group(1) if m else len(s)} characters]"
 
 
 def _option(answer, options) -> str:
@@ -234,7 +237,7 @@ def _field(action: str, name: str, text, rx) -> str:
             return s
         return _untext(len(s), len(s) >= 300) if s else ""  # progress cuts a message at 300 before it gets here
     if name == "detail" and action in EVIDENCE_ACTIONS:
-        return s if _UNLINE.fullmatch(s) or not s else _unline(s)
+        return _unline(s) if s else ""
     if name == "target" and action == "dev.crew":
         s = _crew_args(s)
     return _clean(s, rx)

@@ -70,8 +70,9 @@ devkit keeps these out of every record it writes:
 - **The developer's approval lines.** Evidence for a decision or a grant (`crew.evidence`) keeps what it covers (the
   decision id, or a grant's action and target), the channel, and the id of the developer's message in the
   transcript. Of the line itself (`approve D<n>: …`, or the question and answer from the question tool) it keeps only
-  the length and the SHA-256. It keeps the answer only when that answer is one of the decision's options; free text
-  becomes `[free text: N characters]`.
+  the length: a hash of a short answer could be guessed, and `dev audit verify` finds the developer's message by its
+  id. It keeps the answer only when that answer is one of the decision's options; free text becomes
+  `[free text: N characters]`.
 - **The user name in a home folder.** `/Users/<name>/…` and `/home/<name>/…` become `~/…`.
 
 Secrets are redacted, as far as the redactor knows their shape. Tokens, keys, passwords, passphrases, credentials,
