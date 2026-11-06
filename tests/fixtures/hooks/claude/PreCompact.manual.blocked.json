@@ -1,0 +1,9 @@
+{
+ "custom_instructions": null,
+ "cwd": "/Users/dev/Development/.tmp/f10/repo",
+ "hook_event_name": "PreCompact",
+ "prompt_id": "c105626a-1236-461c-9825-4f2fd989d990",
+ "session_id": "8f6d96ec-ae34-4d6f-9063-b0e8e1b00a57",
+ "transcript_path": "/Users/dev/.claude/projects/-Users-dev-Development--tmp-f10-repo/8f6d96ec-ae34-4d6f-9063-b0e8e1b00a57.jsonl",
+ "trigger": "manual"
+}
