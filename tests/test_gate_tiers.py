@@ -509,6 +509,9 @@ class MainTests(GateCase):
             return r[1] if r else None
         self.assertIn("grant external-message mcp__slack__post_message", v("mcp__slack__post_message", Store()) or "")
         self.assertIsNone(v("mcp__slack__post_message", Store({"external-message mcp__slack__post_message": 1})))
+        for tool in ("mcp__github__merge_pull_request", "mcp__github__push_files", "mcp__ci__approve_deployment"):
+            with self.subTest(tool=tool):  # RT7: they act outside this machine as a send does
+                self.assertIn(f"grant external-message {tool}", v(tool, Store()) or "")
         for tool in ("mcp__claude_ai_Google_Drive__search_files", "mcp__devkit__devkit_task_update",
                      "mcp__chrome-devtools__click", "Bash"):
             with self.subTest(tool=tool):

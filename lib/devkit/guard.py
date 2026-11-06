@@ -3616,7 +3616,10 @@ _YARN_BUILTIN = frozenset("add install remove upgrade up info init publish pack 
                           "dedupe".split())
 _STR_LIT = re.compile(r"'''(.*?)'''|\"\"\"(.*?)\"\"\"|'((?:\\.|[^'\\\n])*)'|\"((?:\\.|[^\"\\\n])*)\"|`([^`]*)`", re.S)
 _LIST_LIT = re.compile(r"[\[(]\s*((?:(?:'[^'\n]*'|\"[^\"\n]*\")\s*,\s*)+(?:'[^'\n]*'|\"[^\"\n]*\"))\s*,?\s*[\])]")
-_MCP_EXTERNAL = frozenset({"create", "delete", "remove", "upload", "share", "post", "reply", "comment"})
+# verbs that act outside this machine: merge, push and approve too (RT7: a PR merged, files pushed, a deployment
+# approved through a connected server), which mcp_kind counts as a local write
+_MCP_EXTERNAL = frozenset({"create", "delete", "remove", "upload", "share", "post", "reply", "comment", "merge", "push",
+                           "approve"})
 
 
 @functools.lru_cache(maxsize=64)

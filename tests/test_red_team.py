@@ -161,7 +161,6 @@ class RedTeam(unittest.TestCase):
                 self.assertIsNotNone(self.check(cmd))
 
     # ------------------------------------------------------------------ RT7 (medium): MCP external write verbs
-    @unittest.expectedFailure  # RT7
     def test_rt7_mcp_write_verbs_that_act_externally_are_allowed_for_members(self):
         # create/delete/send/publish/share/upload are caught, but merge/push/approve are classified as a local write,
         # so a member could merge a PR, push, or approve a deployment through a connected MCP server
