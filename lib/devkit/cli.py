@@ -716,10 +716,11 @@ def cmd_sync(a):
                 ui.warn(f"dashboard: {e}")
         if a.session and a.finish:
             agent, _, sid = a.session.partition(":")
+            from . import state as _state
             for suffix in (".json", ".stop"):
                 f = STATE / "sessions" / f"{agent}-{sid}{suffix}"
-                if f.exists():
-                    f.unlink()
+                if f.exists():  # under the record's lock, so a hook that already read it cannot write it back
+                    _state.remove(f) if suffix == ".json" else f.unlink()
         commit_push(push=CFG["sync"].get("push", True) and not a.no_push, quiet=a.quiet)
         (STATE / "last-sync.json").write_text(json.dumps({"ts": time.time(), "changed": changed,
                                                          "gc": [m for _, m in results]}))

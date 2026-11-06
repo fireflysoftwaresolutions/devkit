@@ -413,6 +413,8 @@ def body(m: dict, roster=None, alias=None) -> str:
 # it cannot be checked mechanically. `dev crew rules` prints it.
 ENFORCEMENT = (
     ("A member's report starts with its own status block", "SubagentStop: the crew canary", "devkit.hooks.subagent_stop", "enforced"),
+    ("Session and run records never lose a concurrent write", "every hook and dev command (one lock per session)",
+     "devkit.state.update", "enforced"),
     ("A member records its work with dev progress step", "SubagentStop: lane without updates", "devkit.progress.lane_unreported", "enforced"),
     ("A member edits only the files of its scope", "PreToolUse: Edit, Write, MultiEdit, apply_patch", "devkit.hooks._scope_violation", "enforced"),
     ("A member's file scope also holds for shell writes", "PreToolUse: read-only shell allowlist", "F7 read-only shell allowlist", "planned"),
