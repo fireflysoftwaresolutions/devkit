@@ -312,6 +312,32 @@ class CrewCoordinationTests(unittest.TestCase):
                            now=self.m(5))
             self.assertIn("Review the parser", pg.on_tool_done("claude", {"session_id": "s1", "agent_id": "a2"}))
 
+    def test_scope_follows_the_member_into_a_worktree_of_the_same_repository(self):
+        import subprocess
+        from devkit import hooks
+        with TempState(), tempfile.TemporaryDirectory() as d:
+            main, wt, other = Path(d) / "api", Path(d) / "wt", Path(d) / "other"
+            for r in (main, other):
+                subprocess.run(["git", "init", "-q", str(r)], check=True)
+                subprocess.run(["git", "-C", str(r), "-c", "user.email=a@example.com", "-c", "user.name=a", "commit",
+                                "-q", "--allow-empty", "-m", "init"], check=True)
+            subprocess.run(["git", "-C", str(main), "worktree", "add", "-q", "-b", "feat/x", str(wt)], check=True)
+            pg.start("Feature", plan=["installer"], now=self.m(0))
+            pg.assign("installer", "Kid", scope="install.sh,tests/test_install*.py", now=self.m(0))
+            pg.note_agent_launch("claude", {"session_id": "s1", "tool_input": {"description": "Kid: installer"}})
+            pg.on_subagent("claude", {"session_id": "s1", "agent_id": "a1", "agent_type": "devkit:kid"}, True,
+                           now=self.m(1))
+            edit = lambda p: {"session_id": "s1", "agent_id": "a1", "tool_name": "Edit", "cwd": str(main),  # noqa: E731
+                              "tool_input": {"file_path": str(p)}}
+            from unittest import mock
+            real_temp = hooks.core.is_temp  # the fixture lives in a temp folder; real worktrees do not
+            mock.patch.object(hooks.core, "is_temp", lambda p: real_temp(p) and not str(p).startswith(d)).start()
+            self.addCleanup(mock.patch.stopall)
+            self.assertIsNone(hooks._scope_violation("claude", edit(wt / "install.sh")))
+            self.assertIsNone(hooks._scope_violation("claude", edit(wt / "tests" / "test_install_curl.py")))  # new folder
+            self.assertIn("outside Kid's scope", hooks._scope_violation("claude", edit(wt / "lib" / "cli.py")))
+            self.assertIn("outside Kid's scope", hooks._scope_violation("claude", edit(other / "install.sh")))
+
     def test_scope_keeps_parallel_agents_apart(self):
         from devkit import hooks
         with TempState(), tempfile.TemporaryDirectory() as repo:

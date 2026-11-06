@@ -766,6 +766,24 @@ def _crew_limits(agent: str, data: dict):
     return None
 
 
+def _repo_top_of(path: str) -> str:
+    """The git top level (real path) of the nearest existing folder of `path`; '' outside any repository."""
+    d = os.path.dirname(os.path.realpath(path))
+    while d and not os.path.isdir(d):
+        d = os.path.dirname(d)
+    top = core.gitout(d, "rev-parse", "--show-toplevel") if d else ""
+    return os.path.realpath(top) if top else ""
+
+
+def _same_repository(a: str, b: str) -> bool:
+    """Two checkouts of one repository (the main checkout and its worktrees share a git common dir)."""
+    def common(x):
+        c = core.gitout(x, "rev-parse", "--path-format=absolute", "--git-common-dir")
+        return os.path.realpath(c) if c else ""
+    ca = common(a)
+    return bool(ca) and ca == common(b)
+
+
 def _scope_violation(agent: str, data: dict):
     """A crew member assigned a scope (dev progress assign … --scope "globs") edits only those files, so parallel
     agents never write the same file. -> the refusal, or None."""
@@ -800,6 +818,10 @@ def _scope_violation(agent: str, data: dict):
         for p_ in [x for x in paths if x]:
             ap = os.path.normpath(p_ if os.path.isabs(p_) else os.path.join(cwd, p_))
             rel = os.path.relpath(ap, top)
+            if rel.startswith(".."):  # a worktree of the same repository: the scope's paths are relative to it
+                wt = _repo_top_of(ap)
+                if wt and _same_repository(wt, top):
+                    rel = os.path.relpath(os.path.realpath(ap), wt)
             if rel.startswith("..") and core.is_temp(ap):
                 continue  # the member's own scratch files (session scratchpad, temp dirs): no other member owns them
             if not any(fnmatch.fnmatch(rel, g) or fnmatch.fnmatch(rel, g.rstrip("/") + "/**") or rel.startswith(
