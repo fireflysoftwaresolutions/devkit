@@ -670,6 +670,25 @@ class GuidedAndAutoTests(unittest.TestCase):
                 pg.set_mode("auto", approve="launch-missiles")
 
 
+class CrewMessageIdTests(unittest.TestCase):
+    def test_message_and_decision_ids_stay_unique_past_the_kept_200(self):
+        with TempState():
+            pg.start("Release", plan=["build"])
+            for i in range(205):
+                pg.crew_ask(f"note {i}", from_agent="a1")
+            last = pg.crew_ask("the last question", to="main", from_agent="a2")
+            msgs = pg.load_run("claude", "s1")["messages"]
+            self.assertEqual(len({m["id"] for m in msgs}), len(msgs))
+            self.assertEqual(last["id"], "M206")
+            reply = pg.crew_answer(last["id"], "yes")  # reaches the member who asked, and nobody else
+            run = pg.load_run("claude", "s1")
+            self.assertEqual([(m["id"], m["to"]) for m in run["messages"] if m.get("reply_to")], [(reply["id"], "a2")])
+            run["decisions"] = [{"id": f"D{i}", "state": "decided"} for i in range(1, 201)]
+            pg._save(run, touch_session=False)
+            self.assertEqual(pg.crew_decision("One more?", options="yes | no", recommend="yes")["id"], "D201")
+            self.assertEqual(pg.crew_decision("And another?", options="yes | no", recommend="yes")["id"], "D202")
+
+
 class CrewSafetyTests(unittest.TestCase):
     def test_a_subagent_cannot_act_as_morpheus_through_a_compound_command(self):
         from devkit import hooks

@@ -1146,10 +1146,16 @@ def crew_ask(text: str, to: str | None = None, from_agent: str | None = None, cw
     return m
 
 
+def _next_id(items: list, prefix: str) -> str:
+    """The id after the highest one kept: the lists keep their last 200 entries, so a count would repeat ids."""
+    nums = [int(x["id"][len(prefix):]) for x in items if str(x.get("id") or "")[len(prefix):].isdigit()]
+    return f"{prefix}{max(nums, default=0) + 1}"
+
+
 def _post(run, frm: str, to: str, text: str, now: float, from_name: str = "") -> dict:
     """Add a message to the run (the caller saves it). -> the message."""
     msgs = run.setdefault("messages", [])
-    m = {"id": f"M{len(msgs) + 1}", "ts": round(now), "from": frm, "to": to, "text": text.strip()[:1500],
+    m = {"id": _next_id(msgs, "M"), "ts": round(now), "from": frm, "to": to, "text": text.strip()[:1500],
          "delivered": False}
     m["from_name"], m["to_name"] = from_name or _name_of(run, frm), _name_of(run, to)
     msgs.append(m)
@@ -1358,7 +1364,7 @@ def crew_decision(question: str, options=None, recommend: str = "", irreversible
         if target and (not act or len(target.split()) != 1):
             raise StepError("--target goes with --irreversible and names one thing: a branch, a tag, a PR number")
         decs = run.setdefault("decisions", [])
-        d = {"id": f"D{len(decs) + 1}", "ts": round(now), "question": question.strip()[:800], "options": opts,
+        d = {"id": _next_id(decs, "D"), "ts": round(now), "question": question.strip()[:800], "options": opts,
              "recommend": rec, "irreversible": act, "target": target, "from": from_agent or "main",
              "from_name": _name_of(run, from_agent or "main"), "state": "pending", "answer": "", "by": ""}
         auto = mode_of(run) == "auto" and (not act or act in approved_actions(run, now))
