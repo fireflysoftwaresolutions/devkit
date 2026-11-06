@@ -386,8 +386,10 @@ usual. `dev agents test` runs a live check of both agents.
 """
 
 
-def line_mode(saved=None, yes=True, typed=None):
-    """Run `dev setup` through the line prompts with detection and commands stubbed: (rc, config, output, calls)."""
+def line_mode(saved=None, yes=True, typed=None, clouds=("aws",)):
+    """Run `dev setup` through the line prompts with detection and commands stubbed: (rc, config, output, calls).
+    `clouds`: the cloud and infrastructure tools this Mac shows."""
+    seen = {"hosts": ["github", "gitlab"], "clouds": list(clouds), "evidence": {"gitlab": "x", "aws": "y"}}
     with tempfile.TemporaryDirectory() as d:
         cfgf = Path(d) / "config.json"
         if saved is not None:
@@ -399,8 +401,7 @@ def line_mode(saved=None, yes=True, typed=None):
                 mock.patch.object(core, "have", lambda t: t in ("gh", "brew")), \
                 mock.patch.object(providers, "status", lambda include_account=True: {
                     "claude": {"installed": True, "logged_in": True}, "codex": {"installed": True, "logged_in": False}}), \
-                mock.patch.object(toolchain, "detect", lambda: {"hosts": ["github", "gitlab"], "clouds": ["aws"],
-                                                                "evidence": {"gitlab": "x", "aws": "y"}}), \
+                mock.patch.object(toolchain, "detect", lambda: seen), \
                 mock.patch("subprocess.call", lambda argv, **kw: calls.append(list(argv)) or 0), \
                 mock.patch("builtins.input", lambda prompt="": (print(prompt, end=""), next(answers))[1]), \
                 mock.patch("sys.stdin", _Stdin(not yes)), mock.patch("sys.stdout", io.StringIO()) as out:
@@ -453,11 +454,33 @@ class LineModeTests(unittest.TestCase):
             self.assertEqual(lines.call_count, 3)
 
 
-def fake_survey(saved=None, stacks=None):
+TERRAFORM_SKILLS = "Add the agent skills for OpenTofu / Terraform (terraform-style-guide, terraform-test)?"
+
+
+class OptionalSkillGroupTests(unittest.TestCase):
+    # b1993f1: skills.optional groups (iac for terraform) are offered for the tools picked, never installed by default
+    def test_terraform_is_offered_its_skill_group_and_yes_adds_it_to_the_default_groups(self):
+        rc, cfg, out, _ = line_mode(clouds=("aws", "terraform"))
+        self.assertEqual(rc, 0)
+        self.assertIn(f"{TERRAFORM_SKILLS} → yes", out)
+        self.assertEqual(cfg["skills"], {"groups": core.DEFAULTS["skills"]["groups"] + ["iac"]})
+        self.assertIn("aws, terraform · agent skills: iac", out)  # the plan says it
+
+    def test_a_declined_offer_stays_declined_on_a_rerun(self):
+        saved = dict(SAVED, clouds=["terraform"], skills={"groups": ["postgres"]})
+        rc, cfg, out, _ = line_mode(saved=saved, clouds=("terraform",))
+        self.assertIn(f"{TERRAFORM_SKILLS} → no", out)
+        self.assertEqual(cfg["skills"], {"groups": ["postgres"]})
+        rc, cfg, out, _ = line_mode(saved=dict(saved, clouds=[], skills={"groups": ["postgres", "iac"]}), clouds=())
+        self.assertNotIn("agent skills for", out)  # terraform not picked: not asked, and the saved groups stay
+        self.assertEqual(cfg["skills"], {"groups": ["postgres", "iac"]})
+
+
+def fake_survey(saved=None, stacks=None, clouds=()):
     return {"cpus": 8, "ram": 16, "macos": "26.1", "arch": "arm64", "brew": True,
             "gh": {"login": "ada", "name": "\x1b[31mAda Lovelace", "id": 1},
             "providers": {"claude": {"installed": True, "logged_in": True}, "codex": {"installed": True, "logged_in": True}},
-            "config": saved, "seen": {"hosts": ["github", "gitlab"], "clouds": [], "evidence": {"gitlab": "glab"}},
+            "config": saved, "seen": {"hosts": ["github", "gitlab"], "clouds": list(clouds), "evidence": {"gitlab": "glab"}},
             "stacks_found": {"counts": stacks if stacks is not None else {"java": 2, "node": 1}, "repos": 3},
             "docker": {"colima": True, "running": True}}
 
@@ -465,7 +488,7 @@ def fake_survey(saved=None, stacks=None):
 class InteractiveTests(unittest.TestCase):
     """The interactive wizard driven in-process with scripted keys (detection and commands stubbed)."""
 
-    def run_wizard(self, keys: bytes, saved=None, stacks=None, skip=True):
+    def run_wizard(self, keys: bytes, saved=None, stacks=None, skip=True, clouds=()):
         with tempfile.TemporaryDirectory() as d:
             cfgf, state = Path(d) / "config.json", Path(d) / "state"
             if saved is not None:
@@ -479,7 +502,7 @@ class InteractiveTests(unittest.TestCase):
                 return 0
             term = FakeTerm(keys)
             with mock.patch.object(wizard, "CONFIG_FILE", cfgf), mock.patch.object(wizard, "STATE", state), \
-                    mock.patch.object(wizard, "survey", lambda: fake_survey(saved, stacks)), \
+                    mock.patch.object(wizard, "survey", lambda: fake_survey(saved, stacks, clouds)), \
                     mock.patch.object(wizard, "_exec", fake_exec), \
                     mock.patch.object(wizard, "package_status", lambda groups: []), \
                     mock.patch.object(providers, "status", lambda include_account=True: fake_survey()["providers"]), \
@@ -555,6 +578,20 @@ class InteractiveTests(unittest.TestCase):
         rc, cfg, text, _ = self.run_wizard(ENTER + DOWN + DOWN + ENTER, saved=saved)
         self.assertIn("No changes from your saved setup", text)
         self.assertEqual(rc, 1)
+
+    def test_terraform_found_gets_its_skill_group_offered_in_the_clouds_section(self):
+        # Recommended: what was found, the offer accepted, and the review says so
+        rc, cfg, text, _ = self.run_wizard(ENTER + ENTER, clouds=("terraform",))
+        self.assertEqual(cfg["skills"]["groups"], core.DEFAULTS["skills"]["groups"] + ["iac"])
+        self.assertIn("OpenTofu / Terraform · agent skills: iac", text)
+        # Customize: the question follows the clouds, and No keeps the default groups
+        keys = (DOWN + ENTER + ENTER * 2 + ENTER * 3 + ENTER + ENTER + ENTER  # to the clouds, terraform kept
+                + b"n" + ENTER * 3 + b"n" + b"n" + ENTER + ENTER + b"n"   # no skills; docker; automation
+                + ENTER)                                                  # apply
+        rc, cfg, text, _ = self.run_wizard(keys, clouds=("terraform",))
+        self.assertIn(TERRAFORM_SKILLS, text)
+        self.assertEqual(rc, 0)
+        self.assertEqual(cfg["skills"]["groups"], core.DEFAULTS["skills"]["groups"])
 
 
 class DefaultsAndDetectionTests(unittest.TestCase):

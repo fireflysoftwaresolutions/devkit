@@ -135,8 +135,57 @@ def run(assume_yes=False, skip_packages=False) -> int:
 
 # --------------------------------------------------------------------------- shared by both front ends
 
+def _setup_cfg(saved) -> dict:
+    """devkit's defaults with the saved config on top: what the wizard reads, never the running config."""
+    return core.deep_merge(core.DEFAULTS, saved or {})
+
+
+def offered_groups(clouds, saved) -> list:
+    """The optional skill groups (`skills.optional`) the wizard offers for these tools: ["iac"] for terraform."""
+    return core.offered_skill_groups(clouds, _setup_cfg(saved))
+
+
+def saved_group_answers(saved) -> dict:
+    """{group: on} for each optional group the saved setup was offered (its tools were picked and skills.groups was
+    saved): a rerun keeps a decline. Groups never offered have no answer, and their offer starts at yes."""
+    groups = ((saved or {}).get("skills") or {}).get("groups")
+    if groups is None:
+        return {}
+    return {g: g in groups for g in offered_groups((saved or {}).get("clouds") or [], saved)}
+
+
+def accepted_groups(a, saved) -> list:
+    """The optional groups offered for the answers' tools that the developer accepted (yes unless answered no)."""
+    return [g for g in offered_groups(a["clouds"], saved) if (a.get("skill_groups") or {}).get(g, True)]
+
+
+def skill_question(group: str, clouds, saved) -> str:
+    """The offer's question, naming the tools and the group's skills from config/skills.json."""
+    when = ((_setup_cfg(saved).get("skills") or {}).get("optional") or {}).get(group) or []
+    try:
+        sources = json.loads((DEVKIT_HOME / "config" / "skills.json").read_text()).get("sources") or []
+    except (OSError, ValueError):
+        sources = []
+    names = [n for s in sources if isinstance(s, dict) and s.get("group") == group for n in s.get("skills") or {}]
+    tools = ", ".join(_label(k) for k in clouds if k in when) or group
+    return f"Add the agent skills for {tools}" + (f" ({', '.join(names)})" if names else "") + "?"
+
+
+def _skill_groups(saved, a):
+    """skills.groups to save: the saved (else devkit's default) groups, each optional group offered for the tools
+    picked set as answered; None when none was offered, so the default groups stay unpinned."""
+    offered = offered_groups(a["clouds"], saved)
+    if not offered:
+        return None
+    groups = list((_setup_cfg(saved).get("skills") or {}).get("groups") or [])
+    on = set(accepted_groups(a, saved))
+    return [g for g in groups if g not in offered or g in on] + [g for g in offered if g in on and g not in groups]
+
+
 def build_config(saved, a, login) -> dict:
-    """The config to save: the saved one with the answers applied (the keys `dev setup` has always written)."""
+    """The config to save: the saved one with the answers applied (the keys `dev setup` has always written, and
+    skills.groups when an optional skill group was offered)."""
+    groups = _skill_groups(saved, a)
     return core.deep_merge(saved or {}, {
         "dev_root": a["root"], "github_user": login, "handoff_repo": a["handoff"],
         "agents": {"claude": a["use_claude"], "codex": a["use_codex"]},
@@ -147,6 +196,7 @@ def build_config(saved, a, login) -> dict:
         "docker": {"cpu": a["cpu"], "memory": a["mem"], "disk": a["disk"], "autostart": a["autostart"]},
         "gc": {"auto": a["gc_auto"]}, "sync": {"interval_minutes": a["interval"]},
         "ai": {"enabled": bool(a.get("ai")), "asked": True},
+        **({"skills": {"groups": groups}} if groups is not None else {}),
     })
 
 
@@ -164,15 +214,17 @@ def ask_ai(p, saved) -> bool:
     return p.yesno(AI_QUESTION, False)
 
 
-def plan_rows(a, skip_packages) -> list:
+def plan_rows(a, skip_packages, saved=None) -> list:
     """The plan as the line prompts print it."""
     cm = a["codex_mode"]
+    skills = accepted_groups(a, saved)
     return [("config", str(core.tilde(CONFIG_FILE))), ("root", a["root"]),
             ("handoff", f"{a['handoff']} → {a['root']}/.handoff"),
             ("Claude Code", f"{a['claude_mode']}" if a["use_claude"] else "skip"),
             ("Codex", f"{cm} ({CODEX_MODES[cm][0]} / {CODEX_MODES[cm][1]})" if a["use_codex"] else "skip"),
             ("stacks", ", ".join(a["stacks"])), ("git hosts", ", ".join(a["hosts"])),
-            ("clouds", ", ".join(a["clouds"]) or "none"),
+            ("clouds", (", ".join(a["clouds"]) or "none") + (f" · agent skills: {', '.join(skills)}" if skills
+                                                             else "")),
             ("packages", "skip" if skip_packages else "Homebrew + npm for the stacks, hosts and clouds"),
             ("Docker VM", f"{a['cpu']} CPU · {a['mem']} GB · {a['disk']} GB" + (" · at login" if a["autostart"] else "")),
             ("automation", f"sync every {a['interval']} min · safe cleanup {'on' if a['gc_auto'] else 'report only'}"
@@ -244,6 +296,9 @@ def _run_lines(assume_yes=False, skip_packages=False) -> int:
     a["clouds"] = p.multi("Clouds and infrastructure tools you use (numbers, or empty for none)",
                           {k: v[0] for k, v in toolchain.CLOUDS.items()},
                           list(dict.fromkeys((cfg.get("clouds") or []) + seen["clouds"])))
+    a["skill_groups"] = saved_group_answers(d["config"])
+    for g in offered_groups(a["clouds"], d["config"]):  # optional skill groups, for the tools just picked
+        a["skill_groups"][g] = p.yesno(skill_question(g, a["clouds"], d["config"]), a["skill_groups"].get(g, True))
 
     p.section("Docker on Colima")
     dk = cfg["docker"]
@@ -264,7 +319,7 @@ def _run_lines(assume_yes=False, skip_packages=False) -> int:
     new = build_config(d["config"], a, login)
 
     p.section("Plan")
-    for k, v in plan_rows(a, skip_packages):
+    for k, v in plan_rows(a, skip_packages, d["config"]):
         print(f"     {ui.dim(k.ljust(12))} {v}")
     if d["config"] and d["config"] != new:
         changed = sorted(k for k in set(new) | set(d["config"]) if new.get(k) != d["config"].get(k))
@@ -533,7 +588,7 @@ def tui_defaults(d, detected=True) -> Answers:
         disk=int(dk.get("disk") or 80), autostart=bool(dk.get("autostart")),
         gc_auto=bool(cfg["gc"].get("auto", True)), interval=int(cfg["sync"].get("interval_minutes") or 60),
         lock=bool(cfg.get("lock")) and bool(agents.get("claude", True)),
-        ai=bool((cfg.get("ai") or {}).get("enabled", False)))
+        ai=bool((cfg.get("ai") or {}).get("enabled", False)), skill_groups=saved_group_answers(saved))
 
 
 # --------------------------------------------------------------------------- interactive wizard: words
@@ -900,11 +955,20 @@ class _Wizard:
                 show=lambda: ", ".join(_label(k) for k in a["hosts"]))]
         if key == "clouds":
             from . import toolchain
+            saved = d.get("config")
+            optional = list((_setup_cfg(saved).get("skills") or {}).get("optional") or {})
             return [_Q("clouds", "Clouds", lambda: tui.MultiSelect(
                 "Clouds and infrastructure tools",
                 [self._tool_option(k, self._cloud_help(k)) for k in toolchain.CLOUDS], a["clouds"],
                 help="devkit installs each CLI and checks the sign-in. Leave them all unselected if you use none."),
-                show=lambda: ", ".join(_label(k) for k in a["clouds"]) or "none")]
+                show=lambda: ", ".join(_label(k) for k in a["clouds"]) or "none")] + [
+                _Q("skill_groups", f"Agent skills · {g}", lambda g=g: tui.Confirm(
+                    skill_question(g, a["clouds"], saved), a["skill_groups"].get(g, True),
+                    help=f"The {g} group of config/skills.json, for the tools you picked; devkit installs it for "
+                         "Claude Code and Codex. Change it later with skills.groups in devkit's config."),
+                   store=lambda v, g=g: a["skill_groups"].update({g: bool(v)}),
+                   show=lambda g=g: "yes" if a["skill_groups"].get(g, True) else "no",
+                   when=lambda g=g: g in offered_groups(a["clouds"], saved)) for g in optional]
         if key == "docker":
             cpus, ram = d["cpus"], d["ram"]
             return [
@@ -1010,6 +1074,7 @@ class _Wizard:
 
     # ---------------------------------------------------------------- review
     def review_rows(self, a) -> list:
+        skills = accepted_groups(a, self.d.get("config"))
         agents = [f"Claude Code ({CLAUDE_UI[a['claude_mode']][0].lower()})"] if a["use_claude"] else []
         agents += [f"Codex ({CODEX_UI[a['codex_mode']][0].lower()})"] if a["use_codex"] else []
         return [
@@ -1017,7 +1082,8 @@ class _Wizard:
             ("Agents", ", ".join(agents) or "none"),
             ("Stacks", ", ".join(_label(k) for k in a["stacks"]) or "none"),
             ("Git hosts and CI/CD", ", ".join(_label(k) for k in a["hosts"])),
-            ("Clouds", ", ".join(_label(k) for k in a["clouds"]) or "none"),
+            ("Clouds", (", ".join(_label(k) for k in a["clouds"]) or "none")
+             + (f" · agent skills: {', '.join(skills)}" if skills else "")),
             ("Docker", f"{a['cpu']} CPUs · {a['mem']} GB memory · {a['disk']} GB disk"
                        + (" · starts at login" if a["autostart"] else "")),
             ("Automation", f"sync every {a['interval']} min · disk cleanup {'on' if a['gc_auto'] else 'report only'}"
