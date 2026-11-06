@@ -813,7 +813,7 @@ def check_bash(cmd: str, cwd: str, agent: str):
     _BYPASSES.clear()
     if not cmd or not cmd.strip():
         return None
-    v = protected_bash(cmd, cwd or os.getcwd())
+    v = protected_bash(cmd, cwd or os.getcwd()) or evidence_forgery(cmd, cwd or os.getcwd())
     if v:
         return v
     if PIPE_GATE.search(cmd):
@@ -1025,19 +1025,48 @@ def _subagent_meta(s: str) -> bool:
         _under_ci(s, real(core.CLAUDE_HOME / "projects"))
 
 
+def _transcript_roots() -> tuple:
+    return (real(core.CLAUDE_HOME / "projects"), real(core.CODEX_HOME / "sessions"),
+            real(core.CODEX_HOME / "archived_sessions"))
+
+
+def _transcript(s: str) -> bool:
+    """A Claude Code transcript (~/.claude/projects/**/*.jsonl, a subagent's too) or a file of a Codex session
+    (~/.codex/sessions, archived_sessions): the record of what the developer typed, which devkit reads as the
+    evidence of an approval (spec C5). A forged line would read as the developer's (Seraph, B1)."""
+    claude, *codex = _transcript_roots()
+    if _under_ci(s, claude):
+        return s.casefold().endswith(".jsonl")
+    return any(_under_ci(s, r) for r in codex)
+
+
+def _holds_transcripts(s: str) -> bool:
+    """A folder whose move or delete takes transcripts along: one that holds ~/.claude/projects or a Codex sessions
+    folder, any folder of a Codex session, or a chat folder of Claude Code but its memory and tool-results folders."""
+    claude, *codex = _transcript_roots()
+    if any(_under_ci(r, s) for r in (claude, *codex)) or any(_under_ci(s, r) for r in codex):
+        return True
+    if not _under_ci(s, claude):
+        return False
+    parts = s[len(claude):].strip(os.sep).casefold().split(os.sep)
+    return not ({"memory", "tool-results"} & set(parts)) and not parts[-1].endswith((".md", ".json", ".txt"))
+
+
 def is_protected(p: Path) -> bool:
-    """True when the resolved path is devkit's state, configuration or install, or a subagent's launch record."""
+    """True when the resolved path is devkit's state, configuration or install, a subagent's launch record, or an
+    agent session's transcript."""
     if p == UNKNOWN:
         return False
     s = str(p)
     return any(_under_ci(s, real(r)) for r in protected_roots()) or \
-        s.casefold() == real(core.CONFIG_FILE).casefold() or _subagent_meta(s)
+        s.casefold() == real(core.CONFIG_FILE).casefold() or _subagent_meta(s) or _transcript(s)
 
 
 def holds_protected(p: Path) -> bool:
-    """True when the folder holds devkit's state, configuration or install (~/.local/state, ~): moving, linking or
-    deleting it takes them along."""
-    return p != UNKNOWN and any(_under_ci(real(r), str(p)) for r in protected_roots())
+    """True when the folder holds devkit's state, configuration or install (~/.local/state, ~), or agent sessions'
+    transcripts: moving, linking or deleting it takes them along."""
+    return p != UNKNOWN and (any(_under_ci(real(r), str(p)) for r in protected_roots()) or
+                             _holds_transcripts(str(p)))
 
 
 _STATE_OWNERS = {
@@ -1054,6 +1083,13 @@ _TAIL = "Only the developer changes safeguards, in a terminal."
 def protected_reason(p: Path, verb: str = "write") -> str:
     s, tail = str(p), " " + _TAIL
     state, config, share = (real(r) for r in protected_roots())
+    if _transcript(s) or (_holds_transcripts(s) and not any(_under_ci(state_, s) or _under_ci(s, state_)
+                                                             for state_ in (state, config, share))):
+        return (f"{tilde(p)} {'is' if _transcript(s) else 'holds'} an agent session's transcript, which Claude Code "
+                f"or Codex writes and devkit reads as the evidence of what the developer typed (spec C5). Agents may "
+                f"not {verb} it: a forged line would read as the developer's approval. Reading is fine (the Read "
+                f"tool, `tail`, `jq`); to work on a copy, copy it to your scratch folder. Old chats are the "
+                f"developer's to remove, in a terminal.")
     if not is_protected(p):
         head = f"{tilde(p)} holds devkit's state, configuration or install"
         use = "the `dev` command that owns the record you mean to change (`dev help` lists them)"
@@ -1079,8 +1115,10 @@ def protected_reason(p: Path, verb: str = "write") -> str:
 def _mark_for(home: str, config_file: str):
     alts = [r"\.local\W{1,8}state\W{1,8}devkit(?![\w-])", r"\.local\W{1,8}share\W{1,8}devkit(?![\w-])",
             r"\.config\W{1,8}devkit(?![\w-])", r"XDG_(?:STATE|CONFIG|DATA)_HOME\W{1,8}devkit(?![\w-])",
-            r"subagents\W{1,8}[^\s'\"]*\.meta\.json", r"\bcore\.(?:STATE|CONFIG_FILE|share_dir)\b"]
+            r"subagents\W{1,8}[^\s'\"]*\.meta\.json", r"\bcore\.(?:STATE|CONFIG_FILE|share_dir)\b",
+            r"\.claude\W{1,8}projects\W{1,8}[^\s'\"]*\.jsonl", r"\.codex\W{1,8}(?:archived_)?sessions(?![\w-])"]
     alts += [re.escape(real(r)) for r in protected_roots()] + [re.escape(real(config_file))]
+    alts += [re.escape(r) for r in _transcript_roots()[1:]]  # a Codex home set by CODEX_HOME
     return re.compile("|".join(alts), re.I)
 
 
@@ -1332,8 +1370,8 @@ _DEV_TEXT = {"progress", "crew", "lesson", "task", "note", "handoff"}
 AUDIT_REASON = ("`dev config set audit.…` changes what devkit records about the agents' actions, and only the developer "
                 "changes audit settings, in a terminal (spec C11). Ask them: name the setting, the value and why. "
                 "`dev config show` prints the current values.")
-_CODE_WRITES = re.compile(
-    r"\bopen\s*\([^)]*['\"][rbtU]*[wax+][rbt+]*['\"]|\bmode\s*=\s*['\"][^'\"]*[wax+]"
+_CODE_WRITES = re.compile(  # open()'s first argument may hold a call: open(os.path.expanduser('…'), 'w')
+    r"\bopen\s*\((?:[^()]|\([^()]*\))*['\"][rbtU]*[wax+][rbt+]*['\"]|\bmode\s*=\s*['\"][^'\"]*[wax+]"
     r"|\.(?:write_text|write_bytes|touch|unlink|rename|rmdir|mkdir|chmod|symlink_to|hardlink_to)\s*\("
     r"|\bos\.(?:remove|unlink|rename|renames|replace|rmdir|removedirs|mkdir|makedirs|chmod|chown|truncate|symlink|"
     r"link|utime|open|write|system|popen|exec\w*|spawn\w*)\b|\bshutil\.(?:copy\w*|move|rmtree)\b|\bsubprocess\b"
@@ -1904,6 +1942,209 @@ def protected_bash(cmd: str, cwd):
     if not cmd or not cmd.strip():
         return None
     return _Shell(cmd, cwd).run()
+
+
+# ---- devkit's evidence functions called from an agent's own program (B1 of Seraph's review batch 3)
+#
+# devkit takes the developer's prompts and answers from the hooks the harness fires, checked against the session's
+# transcript (progress.confirmed; for Codex the hook alone). A program an agent runs can call the same functions
+# with a payload of its own: progress.on_human_prompt with a transcript the agent wrote, then use_grant, opened
+# `release v26.11.4` in Seraph's repro. So a program that loads a devkit module and reaches one of these functions,
+# or devkit's state writers, is a forgery attempt for every agent, the main session included. The guard judges the
+# programs the shell runs, as the irreversible gate does: inline code, its input (a heredoc, a here-string, a pipe from
+# echo, printf or cat), a script outside the workspace or in a temp folder, nested shells, substitutions, and the
+# command lines a program hands to a process. A repository's own script (a test, run by path or by a test runner) is
+# the repository's code and is not judged here; the transcript rule and progress's own checks hold for it.
+
+_EVIDENCE_FNS = frozenset({"on_human_prompt", "on_question", "on_prompt", "confirmed", "use_grant", "take_evidence",
+                           "evidence", "_keep_human", "_consume", "crew_decide", "_action_evidence",
+                           "_decision_evidence", "_live_grants", "_grant_lookup"})
+_EVIDENCE_COMMON = frozenset({"confirmed", "evidence"})  # common words: they count only on a devkit module
+_STATE_WRITERS = frozenset({"update", "replace", "patch", "remove", "_write"})  # devkit.state's, on that module only
+_EVIDENCE_TEXT = re.compile(r"\b(?:" + "|".join(sorted(_EVIDENCE_FNS - _EVIDENCE_COMMON)) + r")\b")
+_DEVKIT_LOAD_TEXT = re.compile(r"\b(?:from|import)\s+devkit\b|(?:__import__|import_module)\s*\(\s*['\"]devkit\b")
+_DEVKIT_MODULE_STR = re.compile(r"^devkit(?:\.\w+)*$|(?:^|/)devkit/\w+\.py$")
+FORGERY_REASON = ("This program loads devkit and reaches `{fn}`, which records or uses the developer's prompts, "
+                  "answers and grants. Called from an agent's program, it would forge the developer's approval (spec "
+                  "C5; Seraph's B1), so no session runs it, the main session included. The hooks call it when the "
+                  "harness fires them. To try it, write or run a test in the repository (tests/test_evidence.py shows "
+                  "how, with its state in a temporary folder); to read records, use `dev status`, `dev crew "
+                  "decisions` or `dev audit`. For a grant, ask the developer to type `grant <action> <target>`.")
+
+
+def _const_str(n):
+    """The text of a string constant, a sum of them or an f-string without fields; None for anything else."""
+    import ast
+    if isinstance(n, ast.Constant) and isinstance(n.value, str):
+        return n.value
+    if isinstance(n, ast.BinOp) and isinstance(n.op, ast.Add):
+        a, b = _const_str(n.left), _const_str(n.right)
+        return a + b if a is not None and b is not None else None
+    if isinstance(n, ast.JoinedStr):
+        parts = [_const_str(v) for v in n.values]
+        return "".join(parts) if all(p is not None for p in parts) else None
+    return None
+
+
+def _devkit_module(name) -> bool:
+    return bool(name) and (name == "devkit" or name.startswith("devkit."))
+
+
+def evidence_reached(code) -> str:
+    """The devkit evidence function (or devkit.state writer) a program reaches, or '': it loads a devkit module (import,
+    from-import, __import__, importlib, a devkit file by path) and names one (an attribute, an imported name, a
+    getattr, a string), or looks a name up on a devkit module at run time. Code that is not Python is judged by its
+    text."""
+    import ast
+    if not code or not str(code).strip():
+        return ""
+    try:
+        tree = ast.parse(code)
+    except (SyntaxError, ValueError):
+        m = _EVIDENCE_TEXT.search(code) if _DEVKIT_LOAD_TEXT.search(code) else None
+        return m.group(0) if m else ""
+    loads, maybe, star, dynamic, hit = False, False, False, False, ""
+    mods = {}  # local name -> the devkit module it is bound to
+    for n in ast.walk(tree):
+        if isinstance(n, ast.Import):
+            for a in n.names:
+                if _devkit_module(a.name):
+                    loads = True
+                    mods[a.asname or a.name.split(".")[0]] = a.name if a.asname else "devkit"
+        elif isinstance(n, ast.ImportFrom) and not n.level and _devkit_module(n.module):
+            loads = True
+            for a in n.names:
+                if a.name == "*":
+                    star = True
+                elif a.name in _EVIDENCE_FNS or (n.module == "devkit.state" and a.name in _STATE_WRITERS):
+                    hit = hit or a.name
+                else:
+                    mods[a.asname or a.name] = f"{n.module}.{a.name}"
+        elif isinstance(n, ast.Constant) and isinstance(n.value, str):
+            if _DEVKIT_MODULE_STR.search(n.value):
+                loads = True
+        elif isinstance(n, ast.Call):
+            f = n.func
+            fname = f.attr if isinstance(f, ast.Attribute) else getattr(f, "id", "")
+            first = _const_str(n.args[0]) if n.args else None
+            if fname in ("__import__", "import_module", "spec_from_file_location", "run_module", "run_path"):
+                arg = first if fname not in ("spec_from_file_location",) else (
+                    _const_str(n.args[1]) if len(n.args) > 1 else None)
+                if arg is None:
+                    maybe = True
+                elif _DEVKIT_MODULE_STR.search(arg):
+                    loads = True
+            elif fname == "getattr" and len(n.args) > 1:
+                name = _const_str(n.args[1])
+                if name is None:
+                    dynamic = True
+                elif name in _EVIDENCE_FNS:
+                    hit = hit or name
+            elif fname in ("eval", "exec", "compile", "vars"):
+                inner = first
+                if inner is None:
+                    dynamic = True
+                else:
+                    sub = evidence_reached(inner)
+                    hit = hit or sub
+                    loads = loads or bool(_DEVKIT_LOAD_TEXT.search(inner))
+    for n in ast.walk(tree):
+        if isinstance(n, ast.Attribute):
+            base = n.value.id if isinstance(n.value, ast.Name) else n.value.attr if isinstance(n.value, ast.Attribute) \
+                else ""
+            on = mods.get(base, "")
+            if n.attr in _EVIDENCE_FNS - _EVIDENCE_COMMON or (on and n.attr in _EVIDENCE_COMMON):
+                hit = hit or n.attr
+            elif n.attr in _STATE_WRITERS and (on == "devkit.state" or (base == "state" and loads)):
+                hit = hit or f"state.{n.attr}"
+            elif n.attr in ("__dict__", "__getattribute__") and on:
+                dynamic = True
+        elif isinstance(n, ast.Name) and star and n.id in _EVIDENCE_FNS:
+            hit = hit or n.id
+        elif isinstance(n, ast.Constant) and isinstance(n.value, str) and n.value in _EVIDENCE_FNS - _EVIDENCE_COMMON:
+            hit = hit or n.value
+    if hit and (loads or maybe):
+        return hit
+    return "a name looked up at run time" if loads and dynamic else ""
+
+
+def _forged_calls(text, cwd, depth=0) -> str:
+    """The first evidence function an agent's program reaches in a command line, level by level, or ''. A line the
+    guard cannot parse is judged by its text."""
+    if depth > 4 or not text or not str(text).strip():
+        return ""
+    segs = split_commands(text, ops=True)
+    if segs is None:
+        return evidence_reached(text) if _DEVKIT_LOAD_TEXT.search(text) else ""
+    bodies = heredoc_bodies(text)
+    for k, (argv0, _, _, here) in enumerate(segs):
+        argv = _unwrap(argv0)
+        if not argv:
+            continue
+        name = os.path.basename(argv[0])
+        if name in ("cd", "pushd"):
+            cwd = str(core.HOME) if len(argv) == 1 else cwd if argv[1] == "-" else str(resolve(argv[1], cwd))
+            continue
+        prev = _unwrap(segs[k - 1][0]) if k and segs[k - 1][2] in ("|", "|&") else []
+        fn = _forged_argv(argv, cwd, bodies, list(here), prev, depth)
+        if fn:
+            return fn
+    for sub in _expansions(text):
+        fn = _forged_calls(sub, cwd, depth + 1)
+        if fn:
+            return fn
+    return ""
+
+
+def _forged_argv(argv, cwd, bodies, here, prev, depth) -> str:
+    name, args = os.path.basename(argv[0]), argv[1:]
+    if _INTERP.match(name) and _dev_args(argv) is None:
+        if _repo_script(argv, cwd):
+            return ""
+        code, _, module, _ = _program(argv, cwd, bodies)
+        if not code and module is None and prev:  # it reads its program from the pipe
+            code = _produced(prev, cwd)
+        fn = evidence_reached(code)
+        for t in ([] if fn else _code_texts(code)):
+            fn = fn or _forged_calls(t, cwd, depth + 1)
+        return fn
+    texts, inners = [], []
+    if name in _SHELLS:
+        texts = _shell_inputs(args, cwd, bodies)
+        if _reads_stdin(args):
+            texts += here + ([_produced(prev, cwd)] if prev else [])
+    elif name in ("source", ".") and args:
+        texts = [_read_small(resolve(args[0], cwd))]
+    elif name == "eval":
+        texts = [" ".join(args)]
+    elif name == "xargs":
+        i, takes = 0, {"-I", "-n", "-P", "-L", "-d", "-E", "-s", "-a", "-J", "-R", "-S"}
+        while i < len(args) and args[i].startswith("-"):
+            i += 2 if args[i] in takes else 1
+        inners = [_unwrap(args[i:])]
+    elif name == "find":
+        for k, a in enumerate(args):
+            if a in ("-exec", "-execdir", "-ok", "-okdir"):
+                sub = args[k + 1:]
+                inners.append(_unwrap(sub[:next((j for j, x in enumerate(sub) if x in (";", "+")), len(sub))]))
+    for t in texts:
+        fn = _forged_calls(t, cwd, depth + 1)
+        if fn:
+            return fn
+    for inner in inners:
+        fn = _forged_argv(inner, cwd, bodies, [], [], depth + 1) if inner and depth < 4 else ""
+        if fn:
+            return fn
+    return ""
+
+
+def evidence_forgery(cmd: str, cwd):
+    """("deny", why) when a program the shell command runs loads devkit and reaches an evidence function or devkit's
+    state writers (B1 of Seraph's review batch 3); None otherwise."""
+    if not cmd or not cmd.strip():
+        return None
+    fn = _forged_calls(cmd, cwd or os.getcwd())
+    return deny(FORGERY_REASON.format(fn=fn)) if fn else None
 
 
 # --------------------------------------------------------------------------- crew members (spec F3/F4, guard side)
