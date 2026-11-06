@@ -20,7 +20,7 @@ from .core import STATE, sh
 SELFTEST_PROMPT = (
     "This is an automated devkit self-test in a scratch repository. Do exactly these steps, then reply briefly:\n"
     "1. Run exactly: git checkout -b {agent}/devkit-selftest   (report whether it was allowed)\n"
-    "2. List the names of the skills or commands you can use whose names start with 'devkit'.\n"
+    "2. List the names of ALL the skills you can use whose names start with 'devkit' (every one, comma-separated).\n"
     "3. Say whether you received any workspace context when the session started.")
 
 
@@ -169,8 +169,10 @@ def selftest(agent: str, model: str = None) -> dict:
         inst = STATE / "instructions" / f"claude-{sid}.jsonl"
         loaded = inst.exists() and str(core.CLAUDE_HOME / "CLAUDE.md") in inst.read_text()
         checks.append(("global instructions loaded", loaded, "~/.claude/CLAUDE.md (InstructionsLoaded)"))
-    sees = [n for n in ("handoff", "workspace", "delivery", "backend") if re.search(rf"devkit[:\-]?\s*{n}|{n}", reply or "", re.I)]
-    checks.append(("devkit plugin skills visible", len(sees) >= 3, ", ".join(sees) or "none mentioned"))
+    want = sorted(d.name for d in (core.DEVKIT_HOME / "plugin" / "skills").iterdir() if (d / "SKILL.md").exists())
+    sees = [n for n in want if re.search(rf"devkit[:\-]?\s*{re.escape(n)}|\b{re.escape(n)}\b", reply or "", re.I)]
+    checks.append(("devkit plugin skills visible", len(sees) >= max(3, len(want) - 2),
+                   f"{len(sees)}/{len(want)}: " + (", ".join(sees) or "none mentioned")))
     shutil.rmtree(scratch, ignore_errors=True)
     for p in (STATE / "sessions").glob(f"{agent}-{sid}*") if sid else []:
         p.unlink()
