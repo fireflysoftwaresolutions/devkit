@@ -93,7 +93,7 @@ COMMANDS = [
         ("plugin validate", "Validate the devkit plugin with Claude Code's validator and Codex's parser"),
         ("desktop pack|status", "Claude Desktop extension: build the .mcpb bundle, check what is installed"),
         ("install [--only step]", "Apply the devkit configuration (idempotent)"),
-        ("update", "Pull the latest devkit and re-apply it"),
+        ("update", "Move devkit to the newest release (or pull its branch) and re-apply it"),
         ("docker up|down|status|prune", "Run Docker on a Colima VM"),
         ("version", "Show the devkit version"),
     ]),
@@ -827,11 +827,55 @@ def cmd_install(a):
     return 0
 
 
+RELEASE_TAG_RE = re.compile(r"^v(\d+)\.(\d+)\.(\d+)$")
+
+
+def newest_release(tags):
+    """The newest release tag (vYY.MM.PATCH) among `tags`, compared as numbers: v26.11.10 is newer than v26.11.2.
+    None when no tag is a release (other tags, such as v26.12.0-rc1 or nightly, are not)."""
+    found = [(tuple(int(x) for x in m.groups()), t) for t in tags if (m := RELEASE_TAG_RE.match(t.strip()))]
+    return max(found)[1] if found else None
+
+
+def update_checkout(home: Path):
+    """Bring the devkit checkout at `home` up to date -> (exit code, message, whether to run `dev install`).
+
+    Detached at a release tag (how the installer leaves it): fetch the tags and check out the newest release when it
+    is newer. On a branch: `git pull --ff-only`. Refused, with nothing changed, when tracked files have local changes
+    or HEAD is detached somewhere that is not a release."""
+    where = tilde(home)
+    rc, dirty, err = core.git(home, "status", "--porcelain", "--untracked-files=no")
+    if rc != 0:
+        return rc, f"{where} is not a git checkout: {err}", False
+    if dirty:
+        return 1, (f"{where} has local changes, so nothing was updated. Commit or discard them first "
+                   f"(git -C {where} status)."), False
+    branch = core.gitout(home, "symbolic-ref", "-q", "--short", "HEAD")
+    if branch:
+        rc, out, err = core.git(home, "pull", "--ff-only", timeout=120)
+        return rc, f"{branch}: {out or err}", rc == 0
+    current = newest_release(core.gitout(home, "tag", "--points-at", "HEAD").split())
+    if not current:
+        at = core.gitout(home, "rev-parse", "--short", "HEAD")
+        return 1, (f"{where} is at commit {at}, which is neither a release nor a branch, so nothing was updated. "
+                   f"Check out a release (git -C {where} checkout <tag>) or a branch, then run dev update."), False
+    rc, out, err = core.git(home, "fetch", "--quiet", "--tags", timeout=120)
+    if rc != 0:
+        return rc, f"git fetch --tags failed: {err or out}", False
+    newest = newest_release(core.gitout(home, "tag", "--list", "v*").split() + [current])
+    if newest == current:
+        return 0, f"already at the newest release, {current}", False
+    rc, out, err = core.git(home, "-c", "advice.detachedHead=false", "checkout", "--quiet", newest, timeout=60)
+    if rc != 0:
+        return rc, f"git checkout {newest} failed: {err or out}", False
+    return 0, f"{current} → {newest}", True
+
+
 def cmd_update(a):
     print(f"{ui.ARROW} updating {tilde(core.DEVKIT_HOME)}")
-    rc, out, err = core.git(core.DEVKIT_HOME, "pull", "--ff-only", timeout=120)
-    print(f"  {ui.OK if rc == 0 else ui.FAIL} {out or err}")
-    if rc != 0:
+    rc, message, install = update_checkout(core.DEVKIT_HOME)
+    print(f"  {ui.OK if rc == 0 else ui.FAIL} {message}")
+    if rc != 0 or not install:
         return rc
     os.execv(sys.executable, [sys.executable, str(core.DEVKIT_HOME / "bin" / "dev"), "install"])
 
@@ -2520,7 +2564,7 @@ def build_parser():
     p = add("setup", cmd_setup, "Installation and configuration wizard")
     p.add_argument("-y", "--yes", action="store_true", help="accept every default (non-interactive)")
     p.add_argument("--skip-packages", action="store_true", help="do not install Homebrew/npm packages")
-    add("update", cmd_update, "Update devkit")
+    add("update", cmd_update, "Update devkit: the newest release, or a pull of its branch")
     add("docker", cmd_docker, "Docker on Colima").add_argument(
         "action", choices=["up", "down", "status", "prune", "autostart-on", "autostart-off"])
     add("version", cmd_version, "Show version")
