@@ -163,6 +163,9 @@ See [Git and GitHub](git-and-github.md).
 | --- | --- | --- |
 | `jobs.<name>` | the built-in jobs | Changes a scheduled job (`every` in minutes, `at`, `weekly`, `timeout`, `notify`, `enabled`, `about`, `run_at_load`), or adds your own with `cmd`. `dev jobs set`, `enable`, and `disable` write these keys for you. See [Scheduled jobs and the audit trail](jobs-and-audit.md#add-your-own-job) |
 | `audit.publish` | `true` | The `audit` job publishes this machine's audit trail to `audit/<user>@<host>/` in the handoff repository; `false` keeps it local |
+| `audit.retention.local_months` | `13` | Months of audit records kept on this machine: a full year plus one month. A value under `floor_months` is raised to it |
+| `audit.retention.team_months` | `13` | Months of this machine's records kept in the handoff copy, which more people can read. Pruning removes files from the working copy only; git history keeps every published month. See [The audit trail › Retention](audit.md#retention) |
+| `audit.retention.floor_months` | `3` | The least any retention may be, and the hard minimum itself: `dev config validate` refuses 1 or 2. For fewer records, set `audit.level` to `security` instead |
 
 ```json
 {
