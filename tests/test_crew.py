@@ -209,7 +209,10 @@ class RenderTests(unittest.TestCase):
         self.assertIn("\n`testing`\n", body)  # the skills on one line
         self.assertIn('dev crew ask "<question>"', body)
         self.assertIn('dev progress step "<what finished>" --check "<evidence>"', body)
-        self.assertIn("You cannot launch other agents", body)
+        # members may launch narrow helpers within their own limits (Tank's F3: nested agents)
+        self.assertIn("Launch a helper agent only for a narrow lookup or a slice of your own files", body)
+        self.assertIn("cannot go deeper than progress.max_depth", body)
+        self.assertNotIn("You cannot launch other agents", body)
         self.assertTrue(body.rstrip().endswith("Write in the developer's language."))
         review = crew.body(member(tools="review"), roster())
         self.assertIn("review-only", review)
@@ -519,6 +522,15 @@ class DispatchCliTests(unittest.TestCase):
                 rc, _, err = run_cli(*argv)
                 self.assertEqual(rc, 2)
                 self.assertIn(needle, err)
+
+    def test_the_slot_total_is_the_parallel_limit_that_drops_to_one_on_a_short_quota(self):
+        from unittest import mock
+        with TempState():
+            run = {"v": 2, "agent": "claude", "session": "s1", "plan": [], "agents": {}}
+            with mock.patch.object(pg, "quota_used", lambda agent, now=None: 95.0):  # the 5-hour usage: external
+                self.assertEqual(crew.ready_view(run)["max_parallel"], 1)
+            with mock.patch.object(pg, "quota_used", lambda agent, now=None: 10.0):
+                self.assertEqual(crew.ready_view(run)["max_parallel"], pg.cfg()["max_parallel"])
 
     def test_route_the_plan_then_apply(self):
         with TempState():

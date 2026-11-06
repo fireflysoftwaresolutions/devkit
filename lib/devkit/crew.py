@@ -395,8 +395,9 @@ def body(m: dict, roster=None, alias=None) -> str:
             "lesson recur <id> --evidence \"…\"` when it is a known one." if shell else
             "- Learn from mistakes: follow the prevention of the known pitfalls your brief lists, and name in your "
             "report any mistake that could repeat, so Morpheus records it as a lesson.",
-            "- You cannot launch other agents. When you need another specialist, say so in your report or ask "
-            "Morpheus.", "",
+            "- Launch a helper agent only for a narrow lookup or a slice of your own files: it gets your tool level "
+            "and scope, never more, takes one of the crew slots, and cannot go deeper than progress.max_depth (2). "
+            "When you need another specialist, say so in your report or ask Morpheus.", "",
             "## Your report", "",
             "Your final message starts with your own status block; nothing comes before it:", ""]
     out += ["```markdown"] + report_block(m) + ["```", "", f"Then deliver: {_sentence(m['returns'])}", "",
@@ -702,11 +703,11 @@ def _who_label(label, roster=None) -> str:
 
 def ready_view(run: dict, roster=None) -> dict:
     """dispatch.ready() as plain data: what Morpheus can launch now, what is queued or waiting and why, who is busy."""
-    from . import dispatch, progress
+    from . import dispatch
     r = dispatch.ready(run)
     step = lambda s: {"step": s["name"], "member": s.get("label") or "", "who": _who_label(s.get("label"), roster),  # noqa: E731
                       "scope": s.get("scope") or [], "requested_by": s.get("requested_by") or ""}
-    return {"free": r["free"], "max_parallel": progress.cfg()["max_parallel"],
+    return {"free": r["free"], "max_parallel": r["limit"],  # 1 while the 5-hour usage is above the quota
             "launch": [dict(step(s), launch=dispatch.launch_line(s)) for s in r["launch"]],
             "queued": [dict(step(s), launch=dispatch.launch_line(s)) for s in r["queued"]],
             "waiting": [dict(step(s), why=why) for s, why in r["waiting"]],
