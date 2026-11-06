@@ -26,8 +26,12 @@ def owned(owner, *items):
 KNOWN = {
     "D1": owned("R2-5 · QA engineer (Mouse): a test that calls the function · Morpheus to assign (M102)",
                 "E-approvals", "E-deps", "E-main-only", "E-forged-env", "E-team-reason"),
-    "D3": owned("R2-1 · Backend engineer (Tank) · step 62 language-neutral hooks",
-                "crew.catalog", "lessons.for_call", "lessons.for_output"),
+    "D3": {**owned("R2-1 · Backend engineer (Tank) · step 62 language-neutral hooks",
+                   "crew.catalog", "lessons.for_call", "lessons.for_output"),
+           # the guard's F7 allowlist (ca3bdad) and F8 escape hatches (165a8b4) await their calls from hooks.py
+           **owned("found by D3 · Backend engineer (Tank) · step F7 F8 hooks wiring",
+                   "guard.scope_base", "guard.scope_owner_across", "guard.worktree_state", "guard.written_paths",
+                   "guard.member_tool_verdict", "guard.record_bypasses", "guard.stubs_accepted")},
     "D4": {**owned("R2-13 · Technical writer (Ghost) · step 17 crew docs",
                    "commands.md: dev progress assign --activity", "commands.md: dev crew brief --activity",
                    "commands.md: dev lesson add --file", "commands.md: dev lesson add --command",
