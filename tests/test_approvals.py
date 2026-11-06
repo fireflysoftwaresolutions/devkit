@@ -92,6 +92,15 @@ class ApprovalTests(unittest.TestCase):
             ap.record(run, "keymaker", ["pipeline"], "approved", T + 60, roster=ROSTER)
         self.assertEqual(run.get("approvals") or [], [])
 
+    def test_a_step_with_no_kind_of_work_takes_no_approval_from_anyone(self):
+        # Seraph, review batch 4: with no kind of work approver() names no one, and record took any member's verdict
+        run = run_of(step("x7", "tank", ""))
+        self.assertIsNone(ap.approver(raci.step_activity(run["plan"][0], ROSTER), "tank"))
+        for who in ("link", "seraph"):
+            with self.subTest(member=who), self.assertRaisesRegex(ap.ApprovalError, "“x7” has no kind of work"):
+                ap.record(run, who, ["x7"], "approved", T + 60, roster=ROSTER)
+        self.assertNotIn("approvals", run)
+
     def test_only_the_steps_approver_may_approve_it(self):
         run = run_of(step("api", "tank", "backend"), step("ui", "trinity", "frontend", state="unverified"))
         with self.assertRaisesRegex(ap.ApprovalError, "Seraph.* approves “api”"):

@@ -239,8 +239,8 @@ def _developer_evidence(run: dict, e, targets) -> dict:
 def record(run: dict, by: str, steps, verdict: str, now: float, via: str = "step", check: str = "", evidence=None,
            doer_of=None, roster=None) -> dict:
     """Record `by`'s verdict ("approved" or "changes") on the named steps, in the run -> the entry. Refused, whole,
-    when a step is not done, when `by` did it (self-approval) or is not its approver, and for the developer without
-    fresh C5 evidence (`evidence`, from progress.take_evidence)."""
+    when a step is not done, has no kind of work (so no approver), when `by` did it (self-approval) or is not its
+    approver, and for the developer without fresh C5 evidence (`evidence`, from progress.take_evidence)."""
     from . import raci
     if verdict not in VERDICTS:
         raise ApprovalError(f"the verdict is one of {', '.join(VERDICTS)}")
@@ -258,7 +258,10 @@ def record(run: dict, by: str, steps, verdict: str, now: float, via: str = "step
             continue
         did = doer_of(s)
         should = approver(raci.step_activity(s, roster), did)
-        if did == by:
+        if should is None:  # no kind of work: devkit cannot tell who approves it, so nobody may (Seraph, batch 4)
+            problems.append(f"“{s['name']}” has no kind of work, so devkit cannot tell who approves it: declare one "
+                            f"(dev progress assign \"{s['name']}\" --to <member> --activity <id>), then approve it")
+        elif did == by:
             problems.append(f"self-approval: {_who(by, roster)} did “{s['name']}”, and {_who(should, roster)} "
                             f"approves it")
         elif should and should != by:
