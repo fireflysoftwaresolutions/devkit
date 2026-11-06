@@ -156,6 +156,8 @@ class ServerTests(unittest.TestCase):
         self.assertEqual(json.loads(body)["status"], 401)
         status, headers, _ = self.srv.request("/", auth=False)
         self.assertEqual((status, headers["content-type"]), (401, "text/html; charset=utf-8"))
+        for rule in ("base-uri 'none'", "form-action 'none'"):  # the error page's policy too
+            self.assertIn(rule, headers["content-security-policy"])
         status, _, _ = self.srv.request("/api/v1/health", auth=False, headers={"Authorization": "Bearer wrong"})
         self.assertEqual(status, 401)
 
@@ -205,6 +207,8 @@ class ServerTests(unittest.TestCase):
                 self.assertEqual(headers[k], v)
             self.assertIn("frame-ancestors 'none'", headers["content-security-policy"])
             self.assertIn("connect-src 'self'", headers["content-security-policy"])
+            for rule in ("base-uri 'none'", "form-action 'none'"):  # default-src does not cover them: injected
+                self.assertIn(rule, headers["content-security-policy"])  # markup could still send data out
             data = json.loads(re.search(r'<script[^>]* id="devkit-data" type="application/json">(.*?)</script>', html, re.S).group(1))
             self.assertEqual((data["live"], data["snapshot"], "files" in data), (True, 1, False))
         self.assertEqual(len(seen), 2)
