@@ -330,5 +330,34 @@ class HookWiringTests(unittest.TestCase):
         self.assertIn("review-only", self.write(Path(core.DEV) / "acme" / "billing" / "src" / "x.py") or "")
 
 
+class TransparentWrapperTests(unittest.TestCase):
+    # Seraph's review batch 2 (M108), decided by Morpheus (M114): a wrapper's flag that takes a value (nice -n 5,
+    # env -u X, sudo -u me, exec -a x) hid the command after it, and an interpreter's own flags hid `python3 -u
+    # bin/dev`; `$((1<<x))` read as a heredoc hid the lines after it. The guard now sees through all of them.
+
+    def test_a_wrapper_with_a_valued_flag_hides_nothing_from_the_main_guard(self):
+        for cmd in ("nice -n 5 rm -rf ~", "env -u X rm -rf ~", "exec -a x rm -rf ~", "sudo -u me rm -rf ~",
+                    "nice --adjustment=5 rm -rf ~", "time -p rm -rf ~", "nohup rm -rf ~", "command rm -rf ~",
+                    "nice -n 5 gh pr merge 12", "env -S 'rm -rf ~'", "env --split-string='gh pr merge 12'"):
+            with self.subTest(cmd=cmd):
+                self.assertEqual(verdict(cmd), "deny")
+        self.assertEqual(verdict("nice -n 5 ls ~"), "allow")
+
+    def test_arithmetic_with_a_shift_is_not_a_heredoc(self):
+        for cmd in ("echo $((1<<x))\nrm -rf ~", "(( y = 1 << 2 ))\nrm -rf ~", "echo \"$((2 << 3))\"\nrm -rf ~"):
+            with self.subTest(cmd=cmd):
+                self.assertEqual(verdict(cmd), "deny")
+        self.assertEqual(verdict("cat <<EOF\nrm -rf ~\nEOF"), "allow")  # a real heredoc is data
+
+    def test_a_lane_call_behind_a_wrapper_or_interpreter_flags_still_runs_as_morpheus(self):
+        for cmd in ("nice -n 5 dev crew decide D1 yes", "env -u X dev crew decide D1 yes",
+                    "sudo -u me dev crew decide D1 yes", "exec -a x dev crew decide D1 yes",
+                    "python3 -u bin/dev crew decide D1 yes", "python3 -I bin/dev crew decide D1 yes",
+                    "cd lib && python3 -B -m devkit.cli crew decide D1 yes", "python3 -W ignore bin/dev progress step x",
+                    "echo $((1<<x))\ndev crew decide D1 yes"):
+            with self.subTest(cmd=cmd):
+                self.assertIn("command of its own", refusal(cmd) or "")
+
+
 if __name__ == "__main__":
     unittest.main()
