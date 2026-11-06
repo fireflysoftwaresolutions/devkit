@@ -68,6 +68,11 @@ def commands():
     return out
 
 
+# a finished member's report: its Check is the evidence its step ends done with (F6, R2-4)
+DONE = ("**[Firefly> DevKit · Crew member]** api · `main` · step\n- **Done:** the step\n- **Check:** ✓ its tests pass\n"
+        "- **Next:** Morpheus")
+
+
 class RosterTests(unittest.TestCase):
     def test_the_shipped_roster_and_raci_are_complete(self):
         r = crew.load(team=False)
@@ -261,16 +266,19 @@ class AssignmentTests(unittest.TestCase):
         self.assertIn("reassigned from Kid to Tank", [c.get("why") for c in run.get("history") or []][-1] or "")
 
     def test_the_run_ends_only_when_the_accountable_member_approved(self):
-        pg.start("API", plan=["build the JSON API server", "review"], now=self.m(0))
+        # each member stops with its report, whose Check is its evidence (F6); the review follows the work it approves
+        pg.start("API", plan=["build the JSON API server", "review after build the JSON API server"], now=self.m(0))
         pg.assign("build the JSON API server", "Tank", now=self.m(0))
         launch("a1", "devkit:tank", "Tank: build the JSON API server", self.m(1))
-        pg.on_subagent("claude", {"session_id": "s1", "agent_id": "a1", "agent_type": "devkit:tank"}, False, now=self.m(20))
+        pg.on_subagent("claude", {"session_id": "s1", "agent_id": "a1", "agent_type": "devkit:tank",
+                                  "last_assistant_message": DONE}, False, now=self.m(20))
         with self.assertRaises(pg.StepError) as e:
             pg.step("API shipped", kind="done", force=True, now=self.m(22))
         self.assertIn("Code reviewer (Seraph) approves “build the JSON API server”", str(e.exception))
         pg.assign("review", "Seraph", now=self.m(22))
         launch("a2", "devkit:seraph", "Seraph: review", self.m(23))
-        pg.on_subagent("claude", {"session_id": "s1", "agent_id": "a2", "agent_type": "devkit:seraph"}, False, now=self.m(30))
+        pg.on_subagent("claude", {"session_id": "s1", "agent_id": "a2", "agent_type": "devkit:seraph",
+                                  "last_assistant_message": DONE}, False, now=self.m(30))
         run = pg.step("API shipped", kind="done", now=self.m(31))
         self.assertEqual(run["state"], "done")
 
@@ -278,7 +286,8 @@ class AssignmentTests(unittest.TestCase):
         pg.start("API", plan=["build the JSON API server"], now=self.m(0))
         pg.assign("build the JSON API server", "Tank", now=self.m(0))
         launch("a1", "devkit:tank", "Tank: build the JSON API server", self.m(1))
-        pg.on_subagent("claude", {"session_id": "s1", "agent_id": "a1", "agent_type": "devkit:tank"}, False, now=self.m(9))
+        pg.on_subagent("claude", {"session_id": "s1", "agent_id": "a1", "agent_type": "devkit:tank",
+                                  "last_assistant_message": DONE}, False, now=self.m(9))
         run = pg.step("API shipped", kind="done", why="a spike, thrown away", now=self.m(10))
         self.assertEqual(run["state"], "done")
         self.assertEqual(run["raci_overrides"][-1]["owed"], [["seraph", ["build the JSON API server"]]])
