@@ -376,10 +376,11 @@ class MemberTests(GateCase):
     def test_a_member_denial_is_recorded_in_the_trail_with_its_class_lane_and_member(self):
         # Seraph's B2 repro: the gate's record raised TypeError (action= twice), so every member denial came back as
         # the gate-error text and left no record of the action
-        self.assertIn("Crew members never run", self.member("gh pr merge 12") or "")
+        self.assertIn("Crew members never run", self.member("gh -R o/r pr merge 12") or "")
         target, outcome, rec = self.gate_records()[-1]
         self.assertEqual((target, outcome, rec["ref"]["irreversible"], rec["crew"]["lane"], rec["crew"]["member"]),
                          ("12", "deny", "merge", "a1", "tank"))
+        self.assertEqual((rec["ref"]["tier"], rec["ref"]["setting"], rec["ref"]["repo"]), (2, "enforce", "o/r"))
         self.assertEqual(self.records("guard.failopen"), [])
 
     def test_member_remote_delete_is_denied(self):
@@ -456,8 +457,8 @@ class MainTests(GateCase):
     def test_main_tier_1_runs_and_is_recorded(self):
         self.assertIsNone(self.main("git push origin feat/x"))
         target, outcome, rec = self.gate_records()[-1]
-        self.assertEqual((target, outcome, rec["ref"]["irreversible"], rec["ref"]["session"]),
-                         ("feat/x", "ok", "push", "s1"))
+        self.assertEqual((target, outcome, rec["ref"]["irreversible"], rec["ref"]["session"], rec["ref"]["tier"],
+                          rec["ref"]["setting"]), ("feat/x", "ok", "push", "s1", 1, "enforce"))
 
     def test_main_release_without_grant_is_denied_in_enforce(self):
         why = self.main("dev release --version 26.11.5", setting="enforce")
@@ -468,12 +469,14 @@ class MainTests(GateCase):
     def test_main_release_without_grant_runs_with_a_record_in_audit(self):
         self.assertIsNone(self.main("dev release --version 26.11.5", setting="audit"))
         target, outcome, rec = self.gate_records()[-1]
-        self.assertEqual((target, outcome, rec["ref"]["irreversible"]), ("v26.11.5", "audit", "release"))
+        self.assertEqual((target, outcome, rec["ref"]["irreversible"], rec["ref"]["tier"], rec["ref"]["setting"]),
+                         ("v26.11.5", "audit", "release", 2, "audit"))
 
     def test_release_grant_opens_one_release(self):
         store = Store({"release v26.11.5": 1})
         self.assertIsNone(self.main("dev release --version 26.11.5", grant=store))
-        self.assertEqual(self.gate_records()[-1][1], "granted")
+        _, outcome, rec = self.gate_records()[-1]
+        self.assertEqual((outcome, rec["ref"]["grant"], rec["ref"]["source"]), ("granted", "G1", "E2"))
         self.assertIn("grant release v26.11.5", self.main("dev release --version 26.11.5", grant=store) or "")
 
     def test_a_command_with_two_actions_uses_no_grant_unless_both_are_granted(self):
