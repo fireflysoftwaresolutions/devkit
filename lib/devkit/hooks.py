@@ -337,10 +337,10 @@ def stop(agent: str):
                 if agent == "claude":
                     out["systemMessage"] = canary.miss_message(agent, sid)
                 if core.CFG.get("canary", {}).get("enforce", True):
-                    reasons.append("Your final message must start with the [Firefly> DevKit] status line (global "
-                                   "instructions, section 0). Reply now with that line: `[Firefly> DevKit] "
-                                   "<project>@<branch> · <what you did "
-                                   "or found> · <verification> · next: <next step>`.")
+                    reasons.append("Your final message must start with the [Firefly> DevKit] status block (global "
+                                   "instructions, section 0): a header `**[Firefly> DevKit]** <project> · `<branch>` · "
+                                   "<task>`, then the bullets **Done:**, **Check:** (✓/⚠/✗ + evidence) and **Next:**. "
+                                   "Reply now, starting with that block.")
         elif data.get("stop_hook_active"):
             text = data.get("last_assistant_message") or canary.last_assistant_text(data.get("transcript_path")) or ""
             if canary.has_marker(text):  # the corrected reply after a reminder: keep it as the latest status

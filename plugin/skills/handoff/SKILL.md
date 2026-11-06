@@ -27,7 +27,7 @@ Every project has one note: `~/Development/.handoff/projects/<owner>/<repo>.md` 
 2. Check reality: `git status`, `git log --oneline -10`, open PRs (`gh pr list --author @me`), failing tests if any.
 3. Edit the sections above in place. Short sentences, concrete file paths and commands, no filler.
 4. Add your one-line summary: `dev handoff --log "<outcome; what is next>" --agent <claude|codex>` (it goes to the
-   append-only session log with your user, machine and agent). devkit adds the branch, commits and status line.
+   append-only session log with your user, machine and agent). devkit adds the branch, commits and your status block.
 5. If plans or specs were written, link them (`~/Development/.handoff/plans/<owner>/<repo>/<file>.md`).
 6. Do not commit or push the handoff repo yourself: `dev sync` (automatic at session end and hourly) does it.
 

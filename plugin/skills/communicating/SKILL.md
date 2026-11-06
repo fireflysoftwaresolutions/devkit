@@ -109,12 +109,17 @@ Use plain words and concrete examples. Never be condescending. Don't use walls o
 
 ## 7. Final report, at the end of the turn
 
-It starts with the `[Firefly> DevKit]` status line (global instructions §0). After that line:
+The message starts with the status block (global instructions §0). It is the summary, so don't repeat it. Below it,
+add only what the developer needs beyond the block:
 
 ```
-<Outcome in one or two sentences.>
-**Changed:** <files / commands / config> · **Evidence:** <tests: 87 passed; command output; PR #>
-**Not done / risks:** <honest list, or "none"> · **Next:** <the next step, who does it>
+**[Firefly> DevKit]** billing · `feat/invoice-export` · Invoice export
+- **Done:** added a CSV export of invoices to the invoice list.
+- **Check:** ✓ 214 tests pass; exported October (1,204 rows) and opened it in Numbers
+- **Next:** open the PR; Finance tries it on Friday.
+
+**Changed:** `InvoiceExportController`, `InvoiceList.tsx`, a new migration for the export index.
+**Not done:** XLSX export (tracked as a follow-up task).
 ```
 
 Then run `dev progress done "<outcome>"`, which notifies the developer and records the actual time against the
@@ -216,7 +221,7 @@ structure, instead of free text.
 | Task | `dev task add "<title>" --type task\|feature\|bug\|spike --why "…" --done "…"` | By type: Context/Why/Symptom/Question · Scope · Steps to reproduce · Done when (testable checkboxes) |
 | Steps of a run | `dev progress start "<goal>" --plan "step 1; step 2; step 3" --estimate 1h` | Checklist ✓ ▸ ○ with elapsed, estimate and ETA |
 | Session activity | `dev handoff --log "<outcome; next>"` | `YYYY-MM-DD HH:MM · user@host · agent · branch · outcome · next` |
-| Status line | final message, first line | `` `[Firefly> DevKit]` `<project> ⎇ <branch>` `<task>` ❯ <what> ❯ ✓/⚠/✗ <verification> ❯ next → <step> `` |
+| Status block | the start of every final message | `` **[Firefly> DevKit]** <project> · `<branch>` · <task> ``, then **Done:** · **Check:** ✓/⚠/✗ evidence · **Progress:** (when a run is active) · **Next:** |
 | Status report | `dev report [--days 7] [-i <initiative>]` | Summary table, then per initiative: health with reason · progress · milestone · done · in progress · next · blockers and risks · team |
 | PR, merge, review, handover | `dev pr create`, `dev task delegate` | Sections 9–12 above |
 

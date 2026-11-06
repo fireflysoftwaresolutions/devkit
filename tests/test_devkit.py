@@ -344,19 +344,30 @@ class CanaryTests(unittest.TestCase):
                          "api@main · fixed · tests ok · next: -")
         self.assertEqual(canary.status_text("**[Firefly> DevKit]** · api@main · fixed"), "api@main · fixed")
 
-    def test_canary_segments_and_format(self):
-        good = ("`[Firefly> DevKit]` `api ⎇ feat/x_y` `T-fwk7a2` ❯ fixed the export ❯ ✓ 12 tests pass ❯ "
-                "▸ 2/3 · 20m ❯ next → open the PR")
-        line = canary.status_text(good)
-        self.assertEqual(line, "api ⎇ feat/x_y ❯ T-fwk7a2 ❯ fixed the export ❯ ✓ 12 tests pass ❯ ▸ 2/3 · 20m ❯ "
-                               "next → open the PR")
-        self.assertEqual(canary.segments(line)[:2], ["api ⎇ feat/x_y", "T-fwk7a2"])
-        self.assertEqual(canary.format_issues(good), [])
-        self.assertEqual(canary.segments("api@main · fixed · tests ok"), ["api@main", "fixed", "tests ok"])
-        bad = canary.format_issues("[Firefly> DevKit] api@main · fixed")
-        self.assertTrue(any("pill" in x for x in bad) and any("verification" in x for x in bad))
-        self.assertEqual(ui.status_pills(line, color=False).split(" ❯ ")[0], "[Firefly> DevKit] api ⎇ feat/x_y")
-        self.assertIn("\033[48;2;255;179;74m", ui.status_pills(line, color=True))
+    def test_canary_status_block(self):
+        block = ("**[Firefly> DevKit]** api · `feat/x_y` · Invoice export\n"
+                 "- **Done:** added the CSV export endpoint.\n"
+                 "- **Check:** ✓ 12 tests pass\n"
+                 "- **Progress:** 2 of 3 steps · 20 min of ~30\n"
+                 "- **Next:** open the PR.\n\nDetails follow.")
+        self.assertTrue(canary.has_marker(block))
+        p = canary.parse_status(block)
+        self.assertEqual((p["project"], p["branch"], p["task"]), ("api", "feat/x_y", "Invoice export"))
+        self.assertEqual((p["check"], p["next"]), ("✓ 12 tests pass", "open the PR."))
+        line = canary.status_text(block)
+        self.assertEqual(line, "api · feat/x_y ❯ Invoice export ❯ added the CSV export endpoint. ❯ ✓ 12 tests pass ❯ "
+                               "▸ 2 of 3 steps · 20 min of ~30 ❯ next → open the PR.")
+        self.assertEqual(canary.format_issues(block), [])
+        self.assertIn("Check    ", ui.status_block(line, color=False))
+        self.assertIn("\033[48;2;255;179;74m", ui.status_block(line, color=True))
+        # older one-line forms are still understood, but scored as not following the format
+        old = "`[Firefly> DevKit]` `api ⎇ main` `T-fwk7a2xyz1` ❯ fixed ❯ ✓ tests ❯ next → push"
+        self.assertTrue(canary.has_marker(old))
+        self.assertEqual(canary.status_text(old), "api ⎇ main ❯ T-fwk7a2xyz1 ❯ fixed ❯ ✓ tests ❯ next → push")
+        self.assertTrue(canary.format_issues(old))
+        self.assertEqual(canary.status_text("DevKit · api@main · fixed"), "api@main · fixed")
+        bad = canary.format_issues("**[Firefly> DevKit]** api · `main` · x\n- **Done:** see T-fwk7a2xyz1\n- **Check:** ok")
+        self.assertTrue(any("Next" in x for x in bad) and any("✓" in x for x in bad) and any("IDs" in x for x in bad))
 
     def test_check_records(self):
         with TempState():

@@ -236,7 +236,7 @@ def _print_status(p, w=None):
     sl = p.get("status_line") or registry.status_line(p["id"])
     if sl and sl.get("line"):
         print(ui.kv("last status", ui.dim(f"{sl.get('agent', '')} · {ago(sl.get('ts'))}")))
-        print("  " + ui.status_pills(sl["line"]))
+        print(ui.status_block(sl["line"]))
 
 
 def cmd_status(a):

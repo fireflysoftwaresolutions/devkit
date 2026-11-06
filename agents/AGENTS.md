@@ -4,33 +4,39 @@ These rules apply to every project and to both Claude Code and Codex. A reposito
 adds to them and wins on project specifics (build commands, style). The user's explicit request in the session
 wins over both.
 
-## 0. Instruction canary and status line — `[Firefly> DevKit]`
+## 0. Instruction canary and status block — `[Firefly> DevKit]`
 
-Start the **final message of every turn** with one status line, built from segments like a shell prompt:
+Start the **final message of every turn** with this status block: a header line, then three short bullets (four
+while a `dev progress` run is active). Leave a blank line after it, then write the rest of the message.
 
-```
-`[Firefly> DevKit]` `<project> ⎇ <branch>` `<task>` ❯ <what you did or found> ❯ <✓|⚠|✗> <verification> ❯ next → <next step>
+```markdown
+**[Firefly> DevKit]** <project> · `<branch>` · <the task, in a few plain words>
+- **Done:** <what you did or found, in one sentence>
+- **Check:** <✓ | ⚠ | ✗> <the evidence: tests run, command output, CI result>
+- **Progress:** <3 of 7 steps · 24 min of ~40> (only while a `dev progress` run is active)
+- **Next:** <the next step, and who takes it>
 ```
 
 For example:
 
-`[Firefly> DevKit]` `kit-consulting ⎇ release/26.11.4` `T-fwk7a2` ❯ integrated PRs 12, 17 and 22 ❯ ✓ local suite
-green, 214 tests ❯ next → push once and open the release PR
+**[Firefly> DevKit]** kit-consulting · `release/26.11.4` · Release 26.11.4
+- **Done:** merged PRs 12, 17 and 22 into the release branch and fixed the two conflicts.
+- **Check:** ✓ local suite green, 214 tests
+- **Next:** push once and open the release PR.
 
-- **Pills.** The first three segments are inline code: the marker exactly as shown (square brackets, `Firefly>`
-  with the chevron, a space, `DevKit`), then the project's repository name with its branch, then the work item you
-  worked on (`T-…`). Use `-` for a pill that does not apply, e.g. `-` for the task when there is none.
-- **Segments.** The pills are followed by the outcome, the verification and the next step, separated by ` ❯ `.
-  When a `dev progress` run is active, add `▸ 3/7 · 24m of ~40m` before the next step.
-- **Verification glyph.** `✓` verified (tests, build or command run in this session), `⚠` partly verified or not
-  verified, `✗` failed, `–` nothing to verify (a question or a plan).
-- Keep it to one line of about 180 characters, in plain American English, and keep it true: if a rule could not be
-  followed or something failed, the line says so.
+- **Header.** The marker is written exactly as shown: bold, square brackets, `Firefly>` with the chevron, a space,
+  `DevKit`. Then come the repository name, the branch in backticks and the task's title in a few words. Use `-` for
+  any part that does not apply.
+- **Check glyphs.** `✓` means verified in this session, `⚠` partly verified or not verified, `✗` failed, and `–` nothing
+  to verify (a question or a plan).
+- **Bullets.** Each bullet is one plain sentence of at most about 100 characters. Use no internal IDs unless they
+  help the reader (a PR number does; a task ID does not).
+- **Truth.** If a rule could not be followed or something failed, the block says so.
 
-It proves to the user that these global instructions are loaded and followed: devkit checks every reply, reports a
-missing marker as a deviation and scores the format. It is also useful: devkit stores the line as the project's
-latest status, adds it to the session log, shows it as colored segments in `dev status` and on the dashboard, and
-gives it to the next session.
+The block proves to the user that these global instructions are loaded and followed: devkit checks every reply,
+reports a missing marker as a deviation and scores the format. It is also useful: devkit stores it as the project's
+latest status, adds it to the session log, shows it in `dev status` and on the dashboard, and gives it to the next
+session.
 
 ## 1. Workspace: where everything lives
 

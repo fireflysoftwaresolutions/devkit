@@ -80,50 +80,87 @@ STATUS_RE = re.compile(r"^[*`_\s]*" + _MARK + r"[*`\s]*[·:—-]?\s*(.*)$", re.I
 
 SEP = " ❯ "
 GLYPHS = "✓⚠✗–"
+BULLET_RE = re.compile(r"^\s*[-*•]\s+\**\s*(done|check|progress|next)\s*\**\s*:\s*\**\s*(.*)$", re.I)
+
+
+def _clean(s: str) -> str:
+    return re.sub(r"\*\*|`", "", s or "").strip(" ·*").strip()
+
+
+def parse_status(text: str):
+    """The status block -> {project, branch, task, done, check, progress, next}, or None without the marker.
+
+    **[Firefly> DevKit]** api · `main` · Invoice export
+    - **Done:** …   - **Check:** ✓ …   - **Progress:** …   - **Next:** …"""
+    lines = [ln for ln in (text or "").splitlines() if ln.strip()]
+    if not lines:
+        return None
+    m = STATUS_RE.match(lines[0].strip())
+    if not m:
+        return None
+    head = m.group(1).strip()
+    out = {"project": "", "branch": "", "task": "", "done": "", "check": "", "progress": "", "next": "",
+           "legacy": False}
+    for ln in lines[1:7]:
+        b = BULLET_RE.match(ln)
+        if not b:
+            break
+        out[b.group(1).lower()] = _clean(b.group(2))
+    if "❯" in head or not any(out[k] for k in ("done", "check", "next")):
+        out["legacy"] = True  # one-line forms used before the status block
+        out["done"] = _clean(re.sub(r"`\s+`", SEP, head))
+        return out
+    parts = [p.strip() for p in _clean(head).split(" · ")]
+    out["project"], out["branch"] = (parts + ["", ""])[:2]
+    out["task"] = " · ".join(parts[2:])
+    return out
 
 
 def status_text(text: str) -> str:
-    """The status line without the marker, segments joined by ` ❯ `.
-
-    `[Firefly> DevKit]` `api ⎇ main` `T-1` ❯ fixed ❯ ✓ tests ❯ next → push
-        -> "api ⎇ main ❯ T-1 ❯ fixed ❯ ✓ tests ❯ next → push"
-    The legacy form (`DevKit · api@main · fixed · …`) is kept as written."""
-    first = next((ln for ln in (text or "").splitlines() if ln.strip()), "")
-    m = STATUS_RE.match(first.strip())
-    if not m:
+    """One line for logs and views: `api · main ❯ Invoice export ❯ <done> ❯ ✓ <check> [❯ <progress>] ❯ next → <next>`.
+    Older one-line forms are returned as written."""
+    p = parse_status(text)
+    if not p:
         return ""
-    line = m.group(1).strip()
-    if line.startswith("`") or "❯" in line:
-        line = re.sub(r"`\s+`", SEP, line)                  # adjacent pills become segments
-        line = re.sub(r"`\s*❯\s*", SEP, line)
-    line = re.sub(r"\*\*|`", "", line)                     # bold / code markers, not underscores inside ids
-    line = re.sub(r"\s*❯\s*", SEP, line)
-    return line.strip(" ·*❯").strip()
+    if p["legacy"]:
+        line = re.sub(r"\s*❯\s*", SEP, p["done"])
+        return line.strip(" ·*❯").strip()
+    parts = [f"{p['project'] or '-'} · {p['branch'] or '-'}", p["task"] or "-", p["done"], p["check"]]
+    if p["progress"]:
+        parts.append("▸ " + p["progress"])
+    if p["next"]:
+        parts.append("next → " + p["next"])
+    return SEP.join(x for x in parts if x)
 
 
 def segments(line: str) -> list:
-    """A saved status line as segments (new format split on ❯, legacy on ·)."""
+    """A saved status line as segments (current and segmented forms split on ❯, the oldest on ·)."""
     sep = "❯" if "❯" in line else "·"
     return [x.strip() for x in (line or "").split(sep) if x.strip()]
 
 
 def format_issues(text: str) -> list:
-    """What the status line misses against the format in the global instructions (empty = well formed)."""
-    first = next((ln for ln in (text or "").splitlines() if ln.strip()), "").strip()
+    """What the status block misses against the format in the global instructions (empty = well formed)."""
+    lines = [ln for ln in (text or "").splitlines() if ln.strip()]
+    first = lines[0].strip() if lines else ""
     issues = []
-    if not re.match(r"^[*_\s]*`\[Firefly> DevKit\]`", first):
-        issues.append("marker not written exactly as the `[Firefly> DevKit]` pill")
-    segs = segments(status_text(first))
-    if len(segs) < 4:
-        issues.append("fewer than the expected segments (location, task, outcome, verification, next)")
-    if segs and not re.search(r"\S\s*⎇\s*\S", segs[0]):
-        issues.append("first pill is not `<project> ⎇ <branch>`")
-    if not any(x[:1] in GLYPHS for x in segs):
-        issues.append("no verification segment starting with ✓, ⚠, ✗ or –")
-    if not any(x.lower().startswith("next") for x in segs):
-        issues.append("no `next → …` segment")
-    if len(first) > 260:
-        issues.append("longer than one line (about 180 characters)")
+    if not re.match(r"^\*\*\[Firefly> DevKit\]\*\*", first):
+        issues.append("marker not written exactly as **[Firefly> DevKit]**")
+    p = parse_status(text) or {}
+    if p.get("legacy") or not p:
+        issues.append("one line instead of the header and Done / Check / Next bullets")
+        return issues
+    if not (p.get("project") and p.get("branch")):
+        issues.append("header lacks `<project> · <branch>`")
+    for k in ("done", "check", "next"):
+        if not p.get(k):
+            issues.append(f"no **{k.capitalize()}:** bullet")
+    if p.get("check") and p["check"][:1] not in GLYPHS:
+        issues.append("Check does not start with ✓, ⚠, ✗ or –")
+    if any(len(p.get(k) or "") > 160 for k in ("done", "check", "next")):
+        issues.append("a bullet is longer than one plain sentence")
+    if re.search(r"\bT-[0-9a-z]{8,}\b", " ".join(p.get(k) or "" for k in ("task", "done", "next"))):
+        issues.append("internal task IDs in the block (use the task's title)")
     return issues
 
 

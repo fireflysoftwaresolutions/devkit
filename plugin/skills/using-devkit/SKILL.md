@@ -1,6 +1,6 @@
 ---
 name: using-devkit
-description: The operating manual for working inside a devkit workspace — the session protocol (start, during, finish), which `dev` command and which skill to use for each job, projects versus initiatives and who may write what in the handoff repository, and the DevKit status line. Use at the start of any development session, whenever you are unsure which devkit tool or skill fits a task, and before you finish a turn that changed code, tasks or plans.
+description: The operating manual for working inside a devkit workspace — the session protocol (start, during, finish), which `dev` command and which skill to use for each job, projects versus initiatives and who may write what in the handoff repository, and the [Firefly> DevKit] status block. Use at the start of any development session, whenever you are unsure which devkit tool or skill fits a task, and before you finish a turn that changed code, tasks or plans.
 ---
 
 # Using devkit
@@ -13,7 +13,7 @@ this skill is the how.
 
 **Start**
 1. Read the injected *devkit · workspace context*: project, branch, git state, commands, initiatives, Now tasks, last
-   status line and the handoff digest. It replaces exploration — do not rediscover it.
+   status and the handoff digest. It replaces exploration — do not rediscover it.
 2. Pick up where the last session stopped: the first Now task, or what the user asked. `dev task` shows the board.
 3. Unsure about the portfolio? `dev overview` (add `--json` to compute with it).
 
@@ -31,10 +31,10 @@ this skill is the how.
 
 **Finish**
 1. Update the project's note with the `handoff` skill (Current state, tasks, decisions); `dev handoff --log "…"` adds
-   your one-line summary. devkit adds branch, commits and your status line automatically.
-2. Start your final message with the status line:
-   `` `[Firefly> DevKit]` `<project> ⎇ <branch>` `<task>` ❯ <what you did or found> ❯ <✓|⚠|✗> <verification> ❯
-   next → <next step> `` (global instructions §0 has the rules for each segment).
+   your one-line summary. devkit adds branch, commits and your status block automatically.
+2. Start your final message with
+   the status block: `` **[Firefly> DevKit]** <project> · `<branch>` · <task> ``, then the bullets **Done:**,
+   **Check:** (✓/⚠/✗ with the evidence) and **Next:** (global instructions §0 has the rules).
 
 ## Which tool for which job
 
@@ -71,7 +71,7 @@ this skill is the how.
   may work across projects when the user asks.
 - Generated files (`PROJECTS.md`, `TASKS.md`, `ACTIVITY.md`, `registry.json`) are never edited by hand.
 
-## The status line
+## The status block
 
 It is how the user sees, reply by reply, that you follow these instructions — and it feeds the project's latest
 status, the session log, the dashboard and the next session. Make it specific and true: name the branch, the outcome,

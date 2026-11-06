@@ -295,8 +295,10 @@ def status_pills(line: str, color: bool = None) -> str:
     amber, charcoal, ink, paper, graphite = (255, 179, 74), (16, 17, 15), (39, 40, 32), (243, 241, 235), (71, 74, 66)
     spec = [("Firefly❯ DevKit", amber, charcoal), (segs[0], ink, paper)]
     rest = segs[1:]
-    if rest and (rest[0].startswith(("T-", "F-", "B-", "S-")) or rest[0] == "-"):
-        spec.append((rest[0], graphite, paper))
+    current = " · " in segs[0] and rest and rest[-1].lower().startswith("next")  # status-block form
+    if rest and (current or rest[0].startswith(("T-", "F-", "B-", "S-")) or rest[0] == "-"):
+        if rest[0] != "-":
+            spec.append((rest[0], graphite, paper))
         rest = rest[1:]
     if (core_cfg().get("ui") or {}).get("powerline"):  # Nerd Font arrows between pills, like powerlevel10k
         pills = []
@@ -313,3 +315,50 @@ def status_pills(line: str, color: bool = None) -> str:
         styled.append(green(s_) if g == "✓" else yellow(s_) if g == "⚠" else red(s_) if g == "✗" else
                       cyan(s_) if s_.lower().startswith("next") else dim(s_) if g in "▸–" else s_)
     return "".join(pills) + ("  " + dim(" ❯ ").join(styled) if styled else "")
+
+
+def status_block(line: str, color: bool = None, indent: str = "  ") -> str:
+    """A saved status drawn as the block agents write: a header pill row, then Done / Check / Progress / Next."""
+    from .canary import segments
+    segs = segments(line or "")
+    if not segs:
+        return ""
+    current = " · " in segs[0] and len(segs) >= 3 and segs[-1].lower().startswith("next")
+    if not current:
+        return indent + status_pills(line, color)
+    color = (sys.stdout.isatty() and not os.environ.get("NO_COLOR")) if color is None else color
+    where, task, rest = segs[0], segs[1], segs[2:]
+    nxt = rest.pop()[len("next →"):].strip() if rest and rest[-1].lower().startswith("next") else ""
+    prog = next((x[1:].strip() for x in rest if x.startswith("▸")), "")
+    rest = [x for x in rest if not x.startswith("▸")]
+    check = next((x for x in rest if x[:1] in "✓⚠✗–"), "")
+    done = " ".join(x for x in rest if x != check)
+    head = brand_pills([where] + ([task] if task != "-" else []), color)
+    rows = [("Done", done), ("Check", check), ("Progress", prog), ("Next", nxt)]
+    out = [indent + head]
+    for k, val in rows:
+        if not val:
+            continue
+        if color and k == "Check":
+            val = green(val) if val[:1] == "✓" else yellow(val) if val[:1] == "⚠" else red(val) if val[:1] == "✗" else val
+        out.append(f"{indent}  {dim(k.ljust(9)) if color else k.ljust(9)} {val}")
+    return "\n".join(out)
+
+
+
+def brand_pills(parts, color: bool = None) -> str:
+    """`Firefly❯ DevKit` followed by one pill per part (project · branch, task), like a shell prompt."""
+    color = (sys.stdout.isatty() and not os.environ.get("NO_COLOR")) if color is None else color
+    if not color:
+        return "[Firefly> DevKit] " + " · ".join(parts)
+    amber, charcoal, ink, paper, graphite = (255, 179, 74), (16, 17, 15), (39, 40, 32), (243, 241, 235), (71, 74, 66)
+    spec = [("Firefly❯ DevKit", amber, charcoal)] + [(p, ink if i == 0 else graphite, paper) for i, p in enumerate(parts)]
+    arrows = (core_cfg().get("ui") or {}).get("powerline")
+    out = []
+    for i, (txt, bg, fg) in enumerate(spec):
+        out.append(f"\033[48;2;{bg[0]};{bg[1]};{bg[2]}m\033[38;2;{fg[0]};{fg[1]};{fg[2]}m {txt} \033[0m")
+        if arrows:
+            nxt = spec[i + 1][1] if i + 1 < len(spec) else None
+            out.append(f"\033[38;2;{bg[0]};{bg[1]};{bg[2]}m" + (f"\033[48;2;{nxt[0]};{nxt[1]};{nxt[2]}m" if nxt else "")
+                       + "\ue0b0\033[0m")
+    return "".join(out)
