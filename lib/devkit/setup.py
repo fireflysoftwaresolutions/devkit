@@ -817,7 +817,7 @@ def setup_docker():
     step("Docker on Colima")
     f = HOME / ".docker" / "config.json"
     cur = read_json(f, {}) or {}
-    dirs = list(dict.fromkeys((cur.get("cliPluginsExtraDirs") or []) + ["/opt/homebrew/lib/docker/cli-plugins"]))
+    dirs = list(dict.fromkeys((cur.get("cliPluginsExtraDirs") or []) + [f"{core.brew_prefix()}/lib/docker/cli-plugins"]))
     new = dict(cur, cliPluginsExtraDirs=dirs)
     if core.have("docker-credential-osxkeychain"):
         new.setdefault("credsStore", "osxkeychain")

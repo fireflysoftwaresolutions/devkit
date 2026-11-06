@@ -23,6 +23,17 @@ VERSION = (DEVKIT_HOME / "VERSION").read_text().strip() if (DEVKIT_HOME / "VERSI
 # Tools are looked up on a predictable PATH even when a hook runs from an app
 # (Claude Desktop, Codex app, launchd) whose PATH is minimal.
 _EXTRA_PATH = ["/opt/homebrew/bin", "/opt/homebrew/sbin", "/usr/local/bin", str(HOME / ".local" / "bin")]
+
+
+def brew_prefix() -> str:
+    """Homebrew's prefix: /opt/homebrew on Apple Silicon, /usr/local on Intel Macs (HOMEBREW_PREFIX wins)."""
+    env = os.environ.get("HOMEBREW_PREFIX")
+    if env and Path(env, "bin", "brew").exists():
+        return env
+    for p in ("/opt/homebrew", "/usr/local"):
+        if Path(p, "bin", "brew").exists():
+            return p
+    return "/opt/homebrew"
 os.environ["PATH"] = ":".join(dict.fromkeys(_EXTRA_PATH + os.environ.get("PATH", "").split(":")))
 
 # --------------------------------------------------------------------------- config

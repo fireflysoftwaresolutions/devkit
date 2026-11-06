@@ -11,9 +11,12 @@ export DOCKER_HOST="unix://$HOME/.colima/default/docker.sock"
 export TESTCONTAINERS_DOCKER_SOCKET_OVERRIDE=/var/run/docker.sock
 
 # Java: Homebrew's openjdk is keg-only; expose it (and JAVA_HOME) unless a JDK is already registered with macOS.
-if ! /usr/libexec/java_home >/dev/null 2>&1 && [[ -d /opt/homebrew/opt/openjdk ]]; then
-  export JAVA_HOME=/opt/homebrew/opt/openjdk/libexec/openjdk.jdk/Contents/Home
-  path=(/opt/homebrew/opt/openjdk/bin $path)
+# Homebrew lives in /opt/homebrew on Apple Silicon and /usr/local on Intel Macs.
+_dk_brew="${HOMEBREW_PREFIX:-/opt/homebrew}"
+[[ -x "$_dk_brew/bin/brew" ]] || _dk_brew=/usr/local
+if ! /usr/libexec/java_home >/dev/null 2>&1 && [[ -d "$_dk_brew/opt/openjdk" ]]; then
+  export JAVA_HOME="$_dk_brew/opt/openjdk/libexec/openjdk.jdk/Contents/Home"
+  path=("$_dk_brew/opt/openjdk/bin" $path)
 elif [[ -z "$JAVA_HOME" ]]; then
   export JAVA_HOME="$(/usr/libexec/java_home 2>/dev/null)"
 fi

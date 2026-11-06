@@ -156,5 +156,30 @@ class CodexSettingsTests(unittest.TestCase):
         self.assertIs(setup.codex_git_attribution(sessions), True)
 
 
+class IntelMacTests(unittest.TestCase):
+    """Homebrew is in /usr/local on Intel Macs: devkit must not assume /opt/homebrew."""
+
+    def test_the_prefix_follows_where_brew_is(self):
+        from devkit import core
+        with tempfile.TemporaryDirectory() as d:
+            (Path(d) / "bin").mkdir()
+            (Path(d) / "bin" / "brew").write_text("")
+            with mock.patch.dict("os.environ", {"HOMEBREW_PREFIX": d}):
+                self.assertEqual(core.brew_prefix(), d)
+
+    def test_docker_plugins_are_found_under_the_intel_prefix(self):
+        from devkit import core
+        with tempfile.TemporaryDirectory() as d, mock.patch.object(setup, "HOME", Path(d)), \
+                mock.patch.object(core, "brew_prefix", lambda: "/usr/local"), \
+                mock.patch.object(setup, "sh", lambda *a, **k: (1, "", "")), \
+                mock.patch.object(setup, "backup", lambda f: None), mock.patch.object(setup, "_QUIET", [True]):
+            try:
+                setup.setup_docker()
+            except Exception:
+                pass  # the Colima part needs a real Mac; the plugin folder is written first
+            cfg = json.loads((Path(d) / ".docker" / "config.json").read_text())
+        self.assertIn("/usr/local/lib/docker/cli-plugins", cfg["cliPluginsExtraDirs"])
+
+
 if __name__ == "__main__":
     unittest.main()
