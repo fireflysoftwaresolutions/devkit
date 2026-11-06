@@ -62,7 +62,12 @@ class TurnActionTests(unittest.TestCase):
         deck = dict(nothing, skills=["firefly-consulting-desktop:firefly-deck"], commands=["ls decks"])
         self.assertTrue(scope.is_dev_turn(nothing, declared=True))  # a question about the code, with the status block
         self.assertFalse(scope.is_dev_turn(nothing))  # a recipe, or "what's the weather?"
-        self.assertFalse(scope.is_dev_turn(nothing, in_repo=True))  # no tools used, nothing declared
+        # no tools and no status block gives no signal ("how is it going?", "continue"): inside a repository that is
+        # development, so the canary scores the missing block; else the previous turn's decision carries over
+        self.assertTrue(scope.is_dev_turn(nothing, in_repo=True))
+        self.assertTrue(scope.is_dev_turn(nothing, previous=True))
+        self.assertFalse(scope.is_dev_turn(nothing, in_repo=True, previous=False))  # "thanks" after a recipe
+        self.assertTrue(scope.is_dev_turn(dict(nothing, tools={"Grep"}), in_repo=True, previous=False))
         self.assertTrue(scope.is_dev_turn(commit))  # it committed code
         self.assertFalse(scope.is_dev_turn(deck, in_repo=True))  # consulting work through the kit's skills
         self.assertTrue(scope.is_dev_turn(dict(deck, commands=["git push"])))  # unless it ships code
@@ -82,6 +87,19 @@ class TurnActionTests(unittest.TestCase):
             self.assertTrue(scope.decide({"transcript_path": p}, {}))
         finally:
             del os.environ["DEVKIT_SCOPE"]
+
+    def test_a_reply_with_no_tools_and_no_block_takes_the_previous_turns_decision(self):
+        bare = self._t([_claude_prompt("¿cómo va?"), {"type": "assistant", "message": {"role": "assistant", "content": [
+            {"type": "text", "text": "Va bien, faltan dos pasos."}]}}])
+        search = self._t([_claude_prompt("dame una receta"), _claude_tool("WebSearch", {"query": "receta"})])
+        grep = self._t([_claude_prompt("arregla el parser"), _claude_tool("Grep", {"pattern": "parse"})])
+        sess = {"top": "/repo"}
+        self.assertTrue(scope.decide({"transcript_path": bare}, sess))  # the first turn in a repository: development
+        self.assertFalse(scope.decide({"transcript_path": search}, sess))
+        self.assertFalse(scope.decide({"transcript_path": bare}, sess))  # "thanks" after the recipe stays out
+        self.assertTrue(scope.decide({"transcript_path": grep}, sess))
+        self.assertTrue(scope.decide({"transcript_path": bare}, sess))  # a status question after repository work
+        self.assertFalse(scope.decide({"transcript_path": bare}, {}))  # outside a repository, with no history
 
 
 if __name__ == "__main__":

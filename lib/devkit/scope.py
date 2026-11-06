@@ -13,6 +13,8 @@ review, C13):
   commands  development commands (commits, pushes, tags, test and build runs, `dev`)
   edits     files changed inside a repository
   tools     repository tools (reading, searching, editing, a shell) in a session inside a repository
+  none      a reply with no tool call and no status block ("how is it going?", "continue") takes the previous turn's
+            decision; the first one inside a repository is development, so the canary scores its missing block
 Consulting work done through the Firefly consulting kit's skills counts only through development commands, so a deck
 built inside a repository stays consulting work.
 """
@@ -114,10 +116,14 @@ def _in_repo(path: str) -> bool:
     return False
 
 
-def is_dev_turn(actions: dict, in_repo: bool = False, declared: bool = False) -> bool:
+def is_dev_turn(actions: dict, in_repo: bool = False, declared: bool = False, previous=None) -> bool:
     """What the turn did -> development work or not. `in_repo`: the session works inside a repository; `declared`:
-    the final message starts with the status block."""
+    the final message starts with the status block; `previous`: the decision for this session's last turn (None: no
+    turn yet). A reply with no tool call and no block gives no signal ("how is it going?", "continue"): it takes the
+    previous turn's decision, and the first one inside a repository counts as development, so the canary scores it."""
     cmds = actions.get("commands") or []
+    if not declared and not actions.get("tools") and not cmds and not actions.get("edits"):
+        return bool(in_repo) if previous is None else bool(previous)
     strong = any(STRONG_CMD_RE.search(c) for c in cmds)
     consulting = any(CONSULTING_SKILL_RE.search(s or "") for s in actions.get("skills") or []) or \
         any("firefly" in t.lower() and t.startswith("mcp__") for t in actions.get("tools") or ())
@@ -133,7 +139,8 @@ def is_dev_turn(actions: dict, in_repo: bool = False, declared: bool = False) ->
 
 
 def decide(data: dict, sess: dict) -> bool:
-    """The Stop hook's question: should devkit's process (status block, skills) apply to the turn that just ended?"""
+    """The Stop hook's question: should devkit's process (status block, skills) apply to the turn that just ended?
+    The answer is kept in the session record (`scope_last`) for the next turn that gives no signal."""
     if os.environ.get("DEVKIT_SCOPE") == "all":
         return True
     path = data.get("transcript_path")
@@ -142,4 +149,7 @@ def decide(data: dict, sess: dict) -> bool:
         declared = canary.has_marker(canary.last_assistant_text(path) or "") if path else False
     except Exception:
         declared = False
-    return is_dev_turn(turn_actions(path), bool(sess.get("top")), declared)
+    last = sess.get("scope_last")
+    dev = is_dev_turn(turn_actions(path), bool(sess.get("top")), declared, None if last is None else last == "dev")
+    sess["scope_last"] = "dev" if dev else "other"
+    return dev
