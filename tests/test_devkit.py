@@ -368,6 +368,34 @@ class CanaryTests(unittest.TestCase):
                          "api@main · fixed · tests ok · next: -")
         self.assertEqual(canary.status_text("**[Firefly> DevKit]** · api@main · fixed"), "api@main · fixed")
 
+    def test_canary_counts_by_surface(self):
+        import time as _t
+        with TempState():
+            canary.LOG.parent.mkdir(parents=True, exist_ok=True)
+            now = int(_t.time())
+            canary.LOG.write_text("".join(
+                '{"ts": %d, "agent": "claude", "ok": %s, "surface": "%s"}\n' % (now, ok, sf)
+                for ok, sf in (("true", "terminal"), ("true", "terminal"), ("false", "Claude Desktop"))))
+            self.assertEqual(canary.by_surface(1), {("claude", "terminal"): (2, 2), ("claude", "Claude Desktop"): (0, 1)})
+            self.assertIn("Claude Desktop 0/1", canary.summary_line(1))
+
+    def test_surface_detection(self):
+        import os as _os
+        saved = _os.environ.get("CLAUDE_CODE_ENTRYPOINT")
+        try:
+            _os.environ["CLAUDE_CODE_ENTRYPOINT"] = "claude-desktop"
+            self.assertEqual(canary.surface("claude"), "Claude Desktop")
+        finally:
+            if saved is None:
+                _os.environ.pop("CLAUDE_CODE_ENTRYPOINT", None)
+            else:
+                _os.environ["CLAUDE_CODE_ENTRYPOINT"] = saved
+        with tempfile.TemporaryDirectory() as d:
+            tp = Path(d) / "t.jsonl"
+            tp.write_text('{"type": "session_meta", "payload": {"originator": "codex_exec"}}\n')
+            self.assertEqual(canary.surface("codex", {"transcript_path": str(tp)}), "codex exec")
+            self.assertEqual(canary.surface("codex", {}), "unknown")
+
     def test_canary_corrections_are_counted_apart(self):
         with TempState():
             canary.LOG.parent.mkdir(parents=True, exist_ok=True)

@@ -223,12 +223,14 @@ def _note_hash(top: str) -> str:
     return hashlib.sha256(json.dumps(sec, sort_keys=True).encode()).hexdigest()
 
 
-def _register_session(agent: str, sid: str, cwd: str) -> Path:
+def _register_session(agent: str, sid: str, cwd: str, data: dict = None) -> Path:
     f = _session_file(agent, sid)
     if not f.exists():
         top = core.gitout(cwd, "rev-parse", "--show-toplevel")
         f.parent.mkdir(parents=True, exist_ok=True)
+        from .canary import surface
         f.write_text(json.dumps({"agent": agent, "session": sid, "cwd": cwd, "top": top, "started": time.time(),
+                                 "surface": surface(agent, data),
                                  "head": core.gitout(top, "rev-parse", "HEAD") if top else "",
                                  "branch": core.gitout(top, "branch", "--show-current") if top else "",
                                  "note_hash": _note_hash(top) if top and not core.is_temp(top) else ""}))
@@ -239,7 +241,7 @@ def session_start(agent: str):
     data = _stdin_json()
     cwd = data.get("cwd") or os.getcwd()
     sid = data.get("session_id") or f"pid{os.getppid()}"
-    f = _register_session(agent, sid, cwd)
+    f = _register_session(agent, sid, cwd, data)
     try:  # the project id (timing, progress) and DEVKIT_SESSION for this session's shell commands (Claude)
         from . import progress
         rec = core.read_json(f, {}) or {}
@@ -539,7 +541,7 @@ def prompt(agent: str):
     extra = ""
     if sid and not _session_file(agent, sid).exists():
         cwd = data.get("cwd") or os.getcwd()
-        _register_session(agent, sid, cwd)
+        _register_session(agent, sid, cwd, data)
         extra = context_for(cwd, agent)
         _log(f"prompt {agent}: session {sid[:12]} had no SessionStart; devkit context injected")
     raw = (data.get("prompt") or "").lstrip()

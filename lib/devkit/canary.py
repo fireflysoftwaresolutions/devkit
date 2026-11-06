@@ -164,6 +164,40 @@ def format_issues(text: str) -> list:
     return issues
 
 
+SURFACES = {"cli": "terminal", "claude-desktop": "Claude Desktop", "claude-vscode": "VS Code", "sdk-ts": "SDK",
+            "sdk-py": "SDK", "codex_cli_rs": "terminal", "codex_exec": "codex exec", "codex_vscode": "VS Code"}
+
+
+def surface(agent: str, data: dict = None) -> str:
+    """Where the session runs: the terminal, Claude Desktop's Code tab, the ChatGPT/Codex app, an IDE.
+    Claude Code says it in CLAUDE_CODE_ENTRYPOINT; Codex in the transcript's session_meta originator."""
+    if agent == "claude":
+        ep = os.environ.get("CLAUDE_CODE_ENTRYPOINT", "")
+        return SURFACES.get(ep, ep or "unknown")
+    tp = (data or {}).get("transcript_path")
+    try:
+        with open(tp) as fh:
+            meta = (json.loads(fh.readline()).get("payload") or {})
+        orig = meta.get("originator") or ""
+    except (OSError, TypeError, ValueError):
+        return "unknown"
+    if orig in SURFACES:
+        return SURFACES[orig]
+    return "ChatGPT app" if "desktop" in orig.lower() or "chatgpt" in orig.lower() else (orig or "unknown")
+
+
+def by_surface(days: int = 7) -> dict:
+    """{(agent, surface): (ok, total)} over the window, first replies only."""
+    out = {}
+    for r in records(days):
+        if r.get("corrected"):
+            continue
+        k = (r.get("agent"), r.get("surface") or "unknown")
+        ok, n = out.get(k, (0, 0))
+        out[k] = (ok + bool(r.get("ok")), n + 1)
+    return out
+
+
 def check(agent: str, data: dict):
     """-> None when not applicable, else (ok, project_id, status_line). Records the result."""
     if data.get("stop_hook_active"):
@@ -185,7 +219,7 @@ def check(agent: str, data: dict):
         pid = core.project_identity(main, core.gitout(main, "config", "--get", "remote.origin.url"))[0]
     line = status_text(text) if ok else ""
     rec = {"ts": round(time.time()), "agent": agent, "session": (data.get("session_id") or "")[:12],
-           "project": pid, "ok": ok}
+           "project": pid, "ok": ok, "surface": surface(agent, data)}
     if ok:
         rec["status"] = line[:500]
         issues = format_issues(text)
@@ -278,7 +312,13 @@ def summary_line(days: int = 7) -> str:
     s = summary(days)
     if not s:
         return "no tracked replies yet"
-    out = " · ".join(f"{a.capitalize()} {ok}/{tot} ({100 * ok // tot}%)" for a, (ok, tot) in sorted(s.items()))
+    surf = by_surface(days)
+
+    def where(a):
+        parts = [(sf, ok, n) for (ag, sf), (ok, n) in sorted(surf.items()) if ag == a and sf != "unknown"]
+        return f" [{', '.join(f'{sf} {ok}/{n}' for sf, ok, n in parts)}]" if len(parts) > 1 or (
+            parts and parts[0][0] != "terminal") else ""
+    out = " · ".join(f"{a.capitalize()} {ok}/{tot} ({100 * ok // tot}%){where(a)}" for a, (ok, tot) in sorted(s.items()))
     good, scored = format_rate(days)
     fixed = corrected(days)
     return out + (f" · format {100 * good // scored}%" if scored else "") + (f" · {fixed} corrected after a reminder"

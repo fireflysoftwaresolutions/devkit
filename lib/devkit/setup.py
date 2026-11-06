@@ -322,6 +322,54 @@ def install_skills(quiet=False):
         _install_skills()
 
 
+CLAUDE_APP = Path("/Applications/Claude.app")
+CHATGPT_APP = Path("/Applications/ChatGPT.app")
+CHATGPT_CODEX = CHATGPT_APP / "Contents/Resources/codex-cli/bin/codex"
+
+
+def _surface_sessions(agent: str, name: str, days: int = 30) -> list:
+    """devkit session records from one surface (Claude Desktop, ChatGPT app) in the last days, newest first."""
+    out, cut = [], time.time() - days * 86400
+    for f in (STATE / "sessions").glob(f"{agent}-*.json"):
+        rec = read_json(f, {}) or {}
+        if rec.get("surface") == name and (rec.get("started") or 0) > cut:
+            out.append(rec)
+    return sorted(out, key=lambda r: -(r.get("started") or 0))
+
+
+def app_checks(codex_plugins=None) -> list:
+    """The desktop apps run their own copies of the agents on the same configuration as the terminal:
+    Claude Desktop's Code tab reads ~/.claude, the ChatGPT app's Codex reads ~/.codex. Proof, not assumption."""
+    res = []
+    if CLAUDE_APP.exists():
+        bundled = sorted((Path.home() / "Library/Application Support/Claude/claude-code").glob("[0-9]*"))
+        ver = bundled[-1].name if bundled else "?"
+        recs = _surface_sessions("claude", "Claude Desktop")
+        res.append(("Claude Desktop", "Code tab", True,
+                    f"Claude Code {ver} with the same settings, hooks, plugin and skills as the terminal" +
+                    (f"; {len(recs)} session(s) with devkit in 30 days" if recs else
+                     "; no Desktop session recorded since devkit started tracking surfaces"), ""))
+        try:
+            from . import desktop
+            st = desktop.status()
+            res.append(("Claude Desktop", "devkit extension", bool(st.get("installed")) and st.get("current", True),
+                        st.get("detail") or "", "dev install --only desktop"))
+        except Exception:
+            pass
+    if CHATGPT_APP.exists() and CHATGPT_CODEX.exists():
+        _, v, _ = sh([str(CHATGPT_CODEX), "--version"], timeout=30)
+        _, listed, _ = sh([str(CHATGPT_CODEX), "plugin", "list"], timeout=120)
+        want = codex_plugins or []
+        bad = [p for p in want if not any(ln.startswith(p + " ") and "installed, enabled" in ln
+                                          for ln in listed.splitlines())]
+        recs = _surface_sessions("codex", "ChatGPT app")
+        res.append(("ChatGPT app", "Codex", not bad,
+                    f"{v.strip() or 'codex'}, same ~/.codex configuration; {len(want) - len(bad)}/{len(want)} plugins "
+                    f"enabled" + (f"; missing {', '.join(bad)}" if bad else "") +
+                    (f"; {len(recs)} session(s) with devkit in 30 days" if recs else ""), "dev install --only codex"))
+    return res
+
+
 def _install_skills():
     step("Skills (shared by Claude Code and Codex)")
     manifest = load_conf("skills.json")
@@ -821,6 +869,8 @@ def doctor() -> int:
         bad = [p for p in wantp if not any(ln.startswith(p + " ") and "installed, enabled" in ln for ln in listed.splitlines())]
         check("Codex", "plugins", not bad, f"{len(wantp) - len(bad)}/{len(wantp)} enabled" +
               (f"; missing: {', '.join(bad)}" if bad else ""), "dev install --only codex")
+        for group, name, ok, detail, fix in app_checks(wantp):
+            check(group, name, ok, detail, fix)
 
     from . import providers
     pst = providers.status(include_account=False)

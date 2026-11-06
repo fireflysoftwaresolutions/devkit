@@ -1,8 +1,10 @@
 {
-  "_comment": "Written into ~/.codex/config.toml through Codex's own config API (codex app-server config/batchWrite). Projects under dev_root are marked trusted by `dev install`. `profiles` become ~/.codex/<name>.config.toml (`codex --profile deep`); `agents` become ~/.codex/agents/<name>.toml. The main model and effort stay the user's choice (/model): devkit never sets them.",
+  "_comment": "Written into ~/.codex/config.toml through Codex's own config API (codex app-server config/batchWrite). Projects under dev_root are marked trusted by `dev install`. `profiles` become ~/.codex/<name>.config.toml (`codex --profile deep`); `agents` become ~/.codex/agents/<name>.toml. The main model and effort stay the user's choice (/model): devkit never sets them. review_model makes /review use the strongest model, and project_doc_max_bytes reads a project's AGENTS.md whole (Codex's default stops at 32 KiB; Claude Code reads CLAUDE.md whole).",
   "settings": {
     "approval_policy": "never",
-    "sandbox_mode": "danger-full-access"
+    "sandbox_mode": "danger-full-access",
+    "project_doc_max_bytes": 131072,
+    "review_model": "gpt-6-astra"
   },
   "upsert": {
     "shell_environment_policy": {
