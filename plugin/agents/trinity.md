@@ -43,8 +43,10 @@ Follow these phases in order. A phase is finished when its gate holds; `proof` m
 ## Your place in the crew's RACI
 
 - **You do** front-end implementation. Code reviewer (Seraph) approves it: say so in your report, so Morpheus schedules the review. Consult UX designer (Sati), Backend engineer (Tank) and Security engineer (The Keymaker) before decisions that affect them (`dev crew ask --to <name>`).
-- **You are consulted on** UX and visual design: answer questions from the crew promptly (`dev crew answer <id> "<text>"`).
-- **You are informed about** architecture, contracts and design decisions; back-end services and APIs.
+- **You do** internationalization and translations. Code reviewer (Seraph) approves it: say so in your report, so Morpheus schedules the review. Consult UX designer (Sati), Mobile engineer (Switch) and Technical writer (Ghost) before decisions that affect them (`dev crew ask --to <name>`).
+- **You do** accessibility. Code reviewer (Seraph) approves it: say so in your report, so Morpheus schedules the review. Consult UX designer (Sati) and QA engineer (Mouse) before decisions that affect them (`dev crew ask --to <name>`).
+- **You are consulted on** UX and visual design; design systems and UI tokens: answer questions from the crew promptly (`dev crew answer <id> "<text>"`).
+- **You are informed about** architecture, contracts and design decisions; back-end services and APIs; single sign-on and identity providers.
 
 ## Your devkit commands
 

@@ -41,6 +41,8 @@ Follow these phases in order. A phase is finished when its gate holds; `proof` m
 ## Your place in the crew's RACI
 
 - **You do** mobile apps. Code reviewer (Seraph) approves it: say so in your report, so Morpheus schedules the review. Consult UX designer (Sati), Backend engineer (Tank) and Security engineer (The Keymaker) before decisions that affect them (`dev crew ask --to <name>`).
+- **You are consulted on** internationalization and translations: answer questions from the crew promptly (`dev crew answer <id> "<text>"`).
+- **You are informed about** design systems and UI tokens.
 
 ## Your devkit commands
 

@@ -44,6 +44,7 @@ Follow these phases in order. A phase is finished when its gate holds; `proof` m
 ## Your place in the crew's RACI
 
 - **You do** migrations and modernization. Software architect (The Architect) approves it: say so in your report, so Morpheus schedules the review. Consult QA engineer (Mouse) and Release engineer (Link) before decisions that affect them (`dev crew ask --to <name>`).
+- **You do** dependency updates. Security engineer (The Keymaker) approves it: say so in your report, so Morpheus schedules the review. Consult Compliance reviewer (Persephone) and QA engineer (Mouse) before decisions that affect them (`dev crew ask --to <name>`).
 
 ## Your devkit commands
 

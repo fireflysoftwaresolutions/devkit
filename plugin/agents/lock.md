@@ -42,6 +42,7 @@ Follow these phases in order. A phase is finished when its gate holds; `proof` m
 ## Your place in the crew's RACI
 
 - **You do** incidents. Consult SRE (Niobe) and Performance analyst (The Merovingian) before decisions that affect them (`dev crew ask --to <name>`).
+- **You are consulted on** backups and disaster recovery: answer questions from the crew promptly (`dev crew answer <id> "<text>"`).
 
 ## Your devkit commands
 

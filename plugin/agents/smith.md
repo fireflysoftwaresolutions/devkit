@@ -43,7 +43,7 @@ Follow these phases in order. A phase is finished when its gate holds; `proof` m
 ## Your place in the crew's RACI
 
 - **You do** adversarial testing. Security engineer (The Keymaker) approves it: say so in your report, so Morpheus schedules the review. Consult QA engineer (Mouse) before decisions that affect them (`dev crew ask --to <name>`).
-- **You are consulted on** security engineering and review: answer questions from the crew promptly (`dev crew answer <id> "<text>"`).
+- **You are consulted on** security engineering and review; single sign-on and identity providers: answer questions from the crew promptly (`dev crew answer <id> "<text>"`).
 
 ## Your devkit commands
 

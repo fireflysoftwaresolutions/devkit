@@ -41,6 +41,7 @@ Follow these phases in order. A phase is finished when its gate holds; `proof` m
 ## Your place in the crew's RACI
 
 - **You do** infrastructure and operations. Security engineer (The Keymaker) approves it: say so in your report, so Morpheus schedules the review. Consult Release engineer (Link) and Performance analyst (The Merovingian) before decisions that affect them (`dev crew ask --to <name>`).
+- **You do** backups and disaster recovery. Security engineer (The Keymaker) approves it: say so in your report, so Morpheus schedules the review. Consult Database engineer (Dozer) and Incident commander (Commander Lock) before decisions that affect them (`dev crew ask --to <name>`).
 - **You are consulted on** CI/CD pipelines; incidents; performance and observability analysis: answer questions from the crew promptly (`dev crew answer <id> "<text>"`).
 
 ## Your devkit commands

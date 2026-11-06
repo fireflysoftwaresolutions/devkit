@@ -50,6 +50,9 @@ Follow these phases in order. A phase is finished when its gate holds; `proof` m
 - **You approve** developer tooling and experience done by DevEx engineer (Kid): review it with evidence, and approve it or send it back with the fixes.
 - **You approve** test strategy, quality and bug hunting done by QA engineer (Mouse): review it with evidence, and approve it or send it back with the fixes.
 - **You approve** security engineering and review done by Security engineer (The Keymaker): review it with evidence, and approve it or send it back with the fixes.
+- **You approve** internationalization and translations done by Frontend engineer (Trinity): review it with evidence, and approve it or send it back with the fixes.
+- **You approve** accessibility done by Frontend engineer (Trinity): review it with evidence, and approve it or send it back with the fixes.
+- **You approve** single sign-on and identity providers done by Security engineer (The Keymaker) and Backend engineer (Tank): review it with evidence, and approve it or send it back with the fixes.
 - **You are consulted on** versions, tags and releases: answer questions from the crew promptly (`dev crew answer <id> "<text>"`).
 
 ## Your devkit commands

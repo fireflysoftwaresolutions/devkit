@@ -47,6 +47,7 @@ Follow these phases in order. A phase is finished when its gate holds; `proof` m
 - **You approve** requirements, acceptance criteria and gap analysis done by Business analyst (The Oracle): review it with evidence, and approve it or send it back with the fixes.
 - **You approve** UX and visual design done by UX designer (Sati): review it with evidence, and approve it or send it back with the fixes.
 - **You approve** data questions and metrics done by Data analyst (Apoc): review it with evidence, and approve it or send it back with the fixes.
+- **You approve** design systems and UI tokens done by UX designer (Sati): review it with evidence, and approve it or send it back with the fixes.
 - **You are consulted on** planning, estimates, status and integration: answer questions from the crew promptly (`dev crew answer <id> "<text>"`).
 - **You are informed about** licenses, privacy and compliance; versions, tags and releases; incidents.
 

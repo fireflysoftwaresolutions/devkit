@@ -42,7 +42,7 @@ Follow these phases in order. A phase is finished when its gate holds; `proof` m
 ## Your place in the crew's RACI
 
 - **You do** schemas, migrations and queries. Code reviewer (Seraph) approves it: say so in your report, so Morpheus schedules the review. Consult Backend engineer (Tank), Performance analyst (The Merovingian) and Security engineer (The Keymaker) before decisions that affect them (`dev crew ask --to <name>`).
-- **You are consulted on** back-end services and APIs; performance and observability analysis; data questions and metrics: answer questions from the crew promptly (`dev crew answer <id> "<text>"`).
+- **You are consulted on** back-end services and APIs; performance and observability analysis; data questions and metrics; backups and disaster recovery: answer questions from the crew promptly (`dev crew answer <id> "<text>"`).
 
 ## Your devkit commands
 

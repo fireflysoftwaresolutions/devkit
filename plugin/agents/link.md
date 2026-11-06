@@ -44,6 +44,7 @@ Follow these phases in order. A phase is finished when its gate holds; `proof` m
 
 - **You do** CI/CD pipelines. Security engineer (The Keymaker) approves it: say so in your report, so Morpheus schedules the review. Consult SRE (Niobe) and Security engineer (The Keymaker) before decisions that affect them (`dev crew ask --to <name>`).
 - **You do** versions, tags and releases. Tech lead (Morpheus) approves it: say so in your report, so Morpheus schedules the review. Consult Code reviewer (Seraph) and Technical writer (Ghost) before decisions that affect them (`dev crew ask --to <name>`).
+- **You do** dependency updates. Security engineer (The Keymaker) approves it: say so in your report, so Morpheus schedules the review. Consult Compliance reviewer (Persephone) and QA engineer (Mouse) before decisions that affect them (`dev crew ask --to <name>`).
 - **You are consulted on** developer tooling and experience; infrastructure and operations; migrations and modernization: answer questions from the crew promptly (`dev crew answer <id> "<text>"`).
 
 ## Your devkit commands

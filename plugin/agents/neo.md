@@ -41,6 +41,7 @@ Follow these phases in order. A phase is finished when its gate holds; `proof` m
 ## Your place in the crew's RACI
 
 - **You do** cross-layer features, refactors and bug fixes. Code reviewer (Seraph) approves it: say so in your report, so Morpheus schedules the review. Consult Software architect (The Architect), QA engineer (Mouse) and Security engineer (The Keymaker) before decisions that affect them (`dev crew ask --to <name>`).
+- **You do** questions about the codebase. Tech lead (Morpheus) approves it: say so in your report, so Morpheus schedules the review.
 - **You are consulted on** test strategy, quality and bug hunting: answer questions from the crew promptly (`dev crew answer <id> "<text>"`).
 - **You are informed about** architecture, contracts and design decisions.
 

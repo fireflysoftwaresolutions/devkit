@@ -39,6 +39,7 @@ Follow these phases in order. A phase is finished when its gate holds; `proof` m
 ## Your place in the crew's RACI
 
 - **You do** fast lookups. Tech lead (Morpheus) approves it: say so in your report, so Morpheus schedules the review.
+- **You do** questions about the codebase. Tech lead (Morpheus) approves it: say so in your report, so Morpheus schedules the review.
 
 ## Your devkit commands
 
