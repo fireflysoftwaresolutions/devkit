@@ -36,6 +36,7 @@ lib/devkit/
   raci.py               the crew's RACI: who does, approves, is consulted on, and is informed about each kind of work
   dispatch.py           routing work to a crew member, delegation between members, dispatch of ready work
   gates.py              what a crew member owes before it stops (SubagentStop)
+  selfcheck.py          the consistency checks: the parts of devkit that describe each other, compared
   state.py              serialized, atomic writes of the session and run records
   scope.py              whether a turn is development work
   stubs.py              dev stubs: unfinished work in delivered code
@@ -103,6 +104,40 @@ and undo, capped output), CI/CD status for every host (against recorded API resp
 hosts and clouds, the diagram engine and the docs diagrams (stale renders and the width budget), and the dashboard's
 decisions and escaping. Tests that need state use a
 temporary state folder. GitHub CI runs the same suite on Python 3.9 and 3.13; run it locally first.
+
+### Consistency checks
+
+Parts of devkit describe each other: the crew's rules and the functions that enforce them, the parser and
+[Commands](commands.md), the registered hooks and [Agents › Hooks](agents.md#hooks), the configuration the code reads
+and [Configuration](configuration.md), and the roster and its RACI. `lib/devkit/selfcheck.py` compares them, from
+file reads and imports only, in about a second:
+
+| Check | Fails when |
+| --- | --- |
+| D1 | An enforced rule of `dev crew rules` names a function that does not import, or that no test names |
+| D2 | A planned rule names no open work item or plan step (this Mac's state) |
+| D3 | A public function of the crew's modules has no caller outside its own definition and the tests |
+| D4 | A command or option is missing from [Commands](commands.md) or a top-level command from the `using-devkit` skill's table, or a `dev …` command in the instructions, skills, docs, or roster does not parse |
+| D5 | The registered hook events differ from the hooks table or the counts on [Surfaces](surfaces.md) |
+| D6 | A configuration key the code reads is missing from [Configuration](configuration.md) |
+| D7 | A kind of work breaks RACI hygiene: its approver also consulted or informed, a member both consulted and informed, an approver of its own work without a recorded reason, a knowledge doc that does not exist, or no knowledge skill |
+| D8 | A skill the crew names is not installed for its agent (this Mac's state) |
+| D9 | A procedure phase's proof, or a command its gate names, is not in the phase's `devkit` list |
+| D10 | A kind of work has no file anchor and does not say why, or an open lesson has no anchors (this Mac's state) |
+| D11 | A row of the guardrail table in [The crew](crew.md#guardrails) cites no rule id, or states a planned rule as fact |
+
+`tests/test_consistency.py` runs the checks that read only the repository, and tests the others on small fixtures.
+Drift that exists today is listed in its `KNOWN` allowlist, each item with its review finding, owner, and the task
+or plan step that removes it. A new finding fails the test, and so does a listed one that is gone: when you fix one,
+take it out of `KNOWN` in the same commit.
+
+```bash
+python3 -m unittest tests.test_consistency
+python3 -I -c "import sys; sys.path.insert(0,'lib'); from devkit import selfcheck; [print(f) for f in selfcheck.run()]"
+```
+
+The second command lists every finding today, including the checks of this Mac's state. Each finding names its
+evidence and the fix.
 
 ## Trying a change in your own sessions
 

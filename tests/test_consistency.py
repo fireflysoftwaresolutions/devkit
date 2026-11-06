@@ -60,13 +60,6 @@ KNOWN = {
     "D7": owned("R2-9 · the developer approves plan and scope once F6 accepts “developer” as an approver · "
                 "step 36 F6 step endings and approvals",
                 "plan: A morpheus in R", "scope: A hamann in R"),
-    "D11": owned("R2-5 · the matrix rows have ids (dev crew rules); Technical writer (Ghost) cites them · "
-                 "step 17 crew docs",
-                 "At most four members at once", "Separate files for parallel members", "A member stays in its scope",
-                 "The main session respects a member's files", "Read-only members never edit", "No nested launches",
-                 "Steps change only with evidence", "Mistakes are fixable and visible",
-                 "A member that never reports back", "Every report is checked", "Decisions that are yours",
-                 "Only Morpheus records your answers"),
 }
 
 
