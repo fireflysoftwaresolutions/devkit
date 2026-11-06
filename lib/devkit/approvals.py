@@ -132,14 +132,15 @@ def ending(lane: dict, report: str = "") -> tuple:
 # --------------------------------------------------------------------------- approvals
 
 def verdict_of(check) -> str:
-    """An approval's verdict from its Check: ✓ approves, ✗ or ⚠ asks for changes; no Check is no verdict."""
-    g = glyph(check)
+    """An approval's verdict from its Check: ✓ approves, ✗ or ⚠ asks for changes. A Check that starts with none of
+    them (no Check, "–", or words alone such as "tests not run") is no verdict: an approval needs the mark itself."""
+    g = str(check or "").strip()[:1]
     if g == "✓":
         return "approved"
     if g in ("✗", "⚠"):
         return "changes"
-    raise ApprovalError("an approval needs a Check: --check \"✓ <what you checked>\" approves, --check "
-                        "\"✗ <what to change>\" asks for changes")
+    raise ApprovalError("an approval needs a Check that starts with its mark: --check \"✓ <what you checked>\" "
+                        "approves, --check \"✗ <what to change>\" asks for changes")
 
 
 def split_steps(text) -> list:
@@ -190,10 +191,13 @@ def verdicts(run: dict) -> list:
 
 
 def _approved(entries: list, s: dict, who: str) -> bool:
+    """Is `who`'s last verdict on this step, given after it finished, an approval? A step with no finish time is
+    never approved: no verdict can be shown to come after its work."""
+    if not s.get("finished"):
+        return False
     last = None
     for a in entries:
-        if a.get("by") == who and s.get("name") in (a.get("steps") or []) and \
-                (a.get("ts") or 0) >= (s.get("finished") or 0):
+        if a.get("by") == who and s.get("name") in (a.get("steps") or []) and (a.get("ts") or 0) >= s["finished"]:
             last = a.get("verdict")
     return last == "approved"
 
@@ -248,6 +252,10 @@ def record(run: dict, by: str, steps, verdict: str, now: float, via: str = "step
             problems.append(f"“{s['name']}” is {s.get('state') or 'pending'}, not done: Morpheus closes it with "
                             f"evidence first (dev progress step --step \"{s['name']}\" --check \"…\")")
             continue
+        if not s.get("finished"):
+            problems.append(f"“{s['name']}” has no finish time, so no approval can be shown to come after its "
+                            f"work: dev progress reopen \"{s['name']}\" --why \"…\", then close it with evidence")
+            continue
         did = doer_of(s)
         should = approver(raci.step_activity(s, roster), did)
         if did == by:
@@ -257,7 +265,8 @@ def record(run: dict, by: str, steps, verdict: str, now: float, via: str = "step
             problems.append(f"{_who(should, roster)} approves “{s['name']}”, not {_who(by, roster)}")
     if problems:
         raise ApprovalError("; ".join(problems))
-    entry = {"ts": round(now, 1), "by": by, "steps": [s["name"] for s in targets], "verdict": verdict, "via": via}
+    # the exact time: rounded, an approval moments after the finish could fall before it
+    entry = {"ts": now, "by": by, "steps": [s["name"] for s in targets], "verdict": verdict, "via": via}
     if check:
         entry["check"] = str(check)[:300]
     if by == DEVELOPER:
@@ -440,7 +449,7 @@ def apply(run: dict, moves: list, now: float) -> list:
                 lane["finished"] = round(m.get("at") or now, 1)
                 _interval(run, m["id"], lane["finished"], False)
                 if m["to"] == "lost":
-                    lane["lost_at"] = round(now, 1)
+                    lane["lost_at"] = now  # exact: rounded up, a hook moments later would not recover it
         elif m["kind"] == "step":
             s = steps.get(m["id"])
             if not s or s.get("state") != m["from"] or (s.get("owner") or "main") != m["owner_from"]:
