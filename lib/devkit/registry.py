@@ -539,7 +539,15 @@ def build(with_prs=True, refresh_prs=False, with_sizes=False, refresh_sizes=Fals
     return {"version": 1, "host": socket.gethostname().split(".")[0], "dev_root": str(DEV),
             "generated": int(time.time()), "projects": projects, "issues": issues,
             "sessions": live_sessions(), "providers": prov, "github_user": core.github_user(),
-            "initiatives": inits}
+            "initiatives": inits, "team": _team()}
+
+
+def _team():
+    try:
+        from . import work
+        return work.team()
+    except Exception:
+        return []
 
 
 def commit_activity(path: str, days: int = 30) -> dict:
@@ -569,10 +577,34 @@ def plans_for(pid: str) -> list:
     return out[:20]
 
 
+def tasks_for(scope: str, legacy: dict = None) -> dict:
+    """Task view for a project or initiative from work items (falls back to legacy note checkboxes)."""
+    from . import work
+    s = work.summary(scope)
+    if not s["counts"]["open"] and not s["counts"]["done"] and legacy:
+        return legacy
+    by = lambda b: [i["title"] for i in s["open"] if i["bucket"] == b]  # noqa: E731
+    today = time.strftime("%Y-%m-%d")
+    return {"now": by("now"), "next": by("next"), "later": by("later"),
+            "done_recent": [i["title"] for i in s["done_recent"]], "open": s["counts"]["open"],
+            "done": s["counts"]["done"], "doing": s["counts"]["doing"], "blocked": s["counts"]["blocked"],
+            "overdue": [i["title"] for i in s["open"] if i.get("due") and i["due"] < today],
+            "items": s["open"] + s["done_recent"]}
+
+
 def enrich(p: dict):
-    """Add handoff-note summary, activity, latest agent status line and plans to a registry entry."""
+    """Add handoff-note summary, tasks (work items), activity, latest status line, sessions and plans."""
+    from . import work
     f = note_path(p["id"])
     p["note_summary"] = notesmod.summarize(f.read_text()) if f.exists() else None
+    if p["note_summary"] is not None:
+        ns = p["note_summary"]
+        ns["tasks"] = tasks_for(p["id"], ns.get("tasks"))
+        if ns["tasks"].get("items") is not None:
+            pct, src = work.progress(p["id"])
+            if src != "none" and ns.get("progress_source") != "manual":
+                ns["progress"], ns["progress_source"] = pct, src
+        ns["sessions"] = (work.recent_sessions(p["id"]) + (ns.get("sessions") or []))[:12]
     if p.get("main") and p.get("git", True) is not False and p.get("path"):
         p["activity"] = commit_activity(p["path"])
     p["status_line"] = status_line(p["id"])
@@ -627,6 +659,12 @@ def initiatives(projects: list) -> list:
         if not f.exists():
             continue
         ns = notesmod.summarize(f.read_text())
+        from . import work
+        scope = f"initiatives/{d.name}"
+        ns["tasks"] = tasks_for(scope, ns.get("tasks"))
+        if ns.get("progress_source") != "manual" and ns["tasks"].get("items") is not None:
+            ns["progress"], ns["progress_source"] = work.progress(scope)
+        ns["sessions"] = (work.recent_sessions(scope) + (ns.get("sessions") or []))[:12]
         members = []
         for pid in ns["projects"]:
             p = by_id.get(pid) or {}
@@ -783,6 +821,46 @@ def render_auto(p: dict) -> str:
     return "\n".join(lines)
 
 
+TASKS_START, TASKS_END = "<!-- dev:tasks:start -->", "<!-- dev:tasks:end -->"
+
+
+def render_tasks_block(scope: str) -> str:
+    from . import work
+    s = work.summary(scope)
+    lines = [TASKS_START, "_Generated from the work items (`dev task`); edit them with `dev task`, not here._"]
+    for b in ("now", "next", "later"):
+        its = [i for i in s["open"] if i["bucket"] == b]
+        lines.append(f"### {b.capitalize()}")
+        for i in its:
+            lock = f" · 🔒 {i['claimed_by'].split(' ')[0]}" if i["claimed_by"] else ""
+            st = "" if i["status"] in ("todo", "doing") else f" · {i['status']}"
+            lines.append(f"- [ ] `{i['id']}` {i['title']}{st}{lock}")
+    lines.append("### Done")
+    lines += [f"- [x] `{i['id']}` {i['title']}" for i in s["done_recent"][:8]]
+    lines.append(TASKS_END)
+    return "\n".join(lines)
+
+
+def migrate_note_tasks(scope: str, f: Path) -> bool:
+    """One-time: checkbox tasks written in a note become work items (with an 'imported' changelog entry)."""
+    from . import work
+    if not f.exists() or work.all_items(scope):
+        return False
+    text = f.read_text()
+    if TASKS_START in text:
+        return False
+    legacy = notesmod.tasks(text)
+    if not legacy:
+        return False
+    a = work.actor("devkit")
+    for t in legacy:
+        it = work.create(scope, t["text"].rsplit(" ✓ ", 1)[0], bucket=t["bucket"].lower() if t["bucket"] != "Done"
+                         else "next", why="imported from the handoff note", a=a)
+        if t["done"]:
+            work.update(it, "done", a=a, status="done")
+    return True
+
+
 def update_note(p: dict, create=True) -> bool:
     f = note_path(p["id"])
     if not f.exists():
@@ -791,6 +869,15 @@ def update_note(p: dict, create=True) -> bool:
         text = notesmod.new_note(p["id"])
     else:
         text = notesmod.ensure_structure(f.read_text(), p["id"])
+    migrate_note_tasks(p["id"], f)
+    block = render_tasks_block(p["id"])
+    if TASKS_START in text and TASKS_END in text:
+        pre, rest = text.split(TASKS_START, 1)
+        text = pre + block + rest.split(TASKS_END, 1)[1]
+    elif "\n## Tasks\n" in text:
+        head, _, tail = text.partition("\n## Tasks\n")
+        nxt = tail.find("\n## ")
+        text = head + "\n## Tasks\n" + block + "\n" + (tail[nxt:] if nxt != -1 else "")
     auto = render_auto(p)
     if AUTO_START in text and AUTO_END in text:
         pre, rest = text.split(AUTO_START, 1)

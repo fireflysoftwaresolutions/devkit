@@ -33,6 +33,8 @@ COMMANDS = [
         ("initiative [new|add|ls|show]", "Cross-project initiatives: member projects, workstreams, progress"),
         ("task [add|start|done|ls]", "Tasks (Now / Next / Later / Done) of a project, or of an initiative with -i"),
         ("note set k=v …", "Project status, priority, milestone, due date, tags"),
+        ("plan new|revise|approve|ls", "Versioned plans and specs; every change records who and why"),
+        ("team", "Who is working on what, on every machine; who holds which task"),
     ]),
     ("Agents", [
         ("claude [query] [-w branch]", "Start Claude Code in a project (optionally in its own worktree)"),
@@ -411,9 +413,11 @@ def cmd_handoff(a):
     f = core.note_path(p["id"])
     registry.update_note(p)
     if a.log:
-        from . import registry as _r
-        _r.add_session_line(p["id"], f"{core.fmt_ts(time.time())} · {a.agent} · {a.log}", f"m{int(time.time())}")
-        print(f"{ui.OK} logged in {tilde(f)}")
+        from . import work
+        ac = work.actor(a.agent if a.agent != "human" else None)
+        sf = work.log_session(p["id"], f"{core.fmt_ts(time.time())} · {ac['user']}@{ac['host']} · {ac['agent']} · {a.log}")
+        work._commit([sf], f"session log: {p['id']} ({work.actor_str(ac)})")
+        print(f"{ui.OK} logged in {tilde(sf)}")
     elif a.path:
         print(f)
     elif a.edit:
@@ -557,6 +561,17 @@ def cmd_sync(a):
                 reg["drift"] = [d.as_dict() for d in policy.diff()]
             except Exception:
                 pass
+        try:
+            from . import work
+            if a.renew:
+                work.renew_locks(work.actor(a.renew))
+            if a.scheduled:
+                work.pull()
+                work.expire_locks()
+            work.write_presence(reg.get("sessions") or [])
+        except Exception as e:
+            if not a.quiet:
+                ui.warn(f"work items: {e}")
         with core.Lock("notes", wait=60):
             changed = registry.write_outputs(reg)
         try:
@@ -837,45 +852,159 @@ def cmd_initiative(a):
     return 0
 
 
+def _scope(a):
+    """-> (scope, label): an initiative (-i) or a project (-p, default: the one you are in)."""
+    if getattr(a, "initiative", None):
+        if not registry.initiative_path(a.initiative).exists():
+            ui.err(f"no initiative “{a.initiative}” — `dev initiative ls`")
+            sys.exit(2)
+        return f"initiatives/{a.initiative}", f"initiative {a.initiative}"
+    p, _ = _note_project(a)
+    return p["id"], p["id"]
+
+
+def _print_items(scope, label, show_all=False):
+    from . import work
+    items = work.all_items(scope)
+    ordered = work.ordered_open(items)
+    print(ui.section(f"{label} · tasks"))
+    if not items:
+        hint = 'no tasks yet — dev task add "…" --now'
+        print(f"  {ui.dim(hint)}")
+        return
+    me = f"{work.actor()['user']}@{work.actor()['host']}"
+    for n, it in enumerate(ordered, 1):
+        m = it["meta"]
+        holder, expired = work.lock_holder(it)
+        lock = ""
+        if holder and not expired:
+            lock = ui.green(" 🔒 you") if holder.startswith(me) else ui.yellow(f" 🔒 {holder.split(' ')[0]}")
+        st = {"doing": ui.cyan("doing"), "blocked": ui.red("blocked")}.get(m.get("status"), ui.dim(m.get("bucket", "")))
+        pr = ui.yellow(" !") if m.get("priority") == "high" else ""
+        print(f"  {ui.cyan(str(n).rjust(2))} {ui.dim(m['id'])} {st:<8} {m['title']}{pr}{lock} {ui.dim('v' + str(m['version']))}")
+    done = sorted([i for i in items if i["meta"].get("status") == "done"], key=lambda i: i["meta"].get("updated", ""),
+                  reverse=True)
+    for it in (done if show_all else done[:5]):
+        print(f"   {ui.green('✓')} {ui.dim(it['meta']['id'])} {ui.dim(it['meta']['title'])}")
+
+
 def cmd_task(a):
-    from . import notes
-    p, f = _note_project(a)
-    text = f.read_text()
+    from . import work
+    scope, label = _scope(a)
+    act = a.task_cmd or "ls"
     try:
-        if a.task_cmd == "add":
-            bucket = "Now" if a.now else "Later" if a.later else "Next"
-            text = notes.add_task(text, " ".join(a.text), bucket)
-            msg = f"added to {bucket}"
-        elif a.task_cmd in ("done", "start", "next", "later"):
-            bucket = {"start": "Now", "next": "Next", "later": "Later"}.get(a.task_cmd, "Done")
-            text = notes.move_task(text, " ".join(a.selector), bucket, done=a.task_cmd == "done")
-            text = notes.prune_done(text)
-            msg = "done" if a.task_cmd == "done" else f"moved to {bucket}"
-        else:
-            msg = None
+        if act == "add":
+            bucket = "now" if a.now else "later" if a.later else "next"
+            it = work.create(scope, " ".join(a.text), kind=a.type, bucket=bucket, priority=a.priority,
+                             body=a.body or "", why=a.why or "", due=a.due or "")
+            print(f"{ui.OK} {it['meta']['id']} added to {bucket} · {label}")
+            if a.claim:
+                work.claim(it, why=a.why or "")
+                print(f"{ui.OK} claimed by you")
+        elif act in ("start", "claim"):
+            it = work.claim(work.find(" ".join(a.selector), scope), why=a.why or "")
+            print(f"{ui.OK} {it['meta']['id']} claimed until {it['meta']['lock_expires']} — others see it as yours")
+        elif act == "release":
+            it = work.release(work.find(" ".join(a.selector), scope), why=a.why or "", status="todo")
+            print(f"{ui.OK} {it['meta']['id']} released")
+        elif act == "done":
+            it = work.find(" ".join(a.selector), scope)
+            it = work.release(it, why=a.why or "", status="done")
+            print(f"{ui.OK} {it['meta']['id']} done")
+        elif act == "block":
+            it = work.update(work.find(" ".join(a.selector), scope), "block", why=a.why or "", status="blocked")
+            print(f"{ui.OK} {it['meta']['id']} blocked")
+        elif act == "cancel":
+            it = work.find(" ".join(a.selector), scope)
+            it = work.update(it, "cancel", why=a.why or "", status="cancelled", claimed_by="", claimed_at="",
+                             lock_expires="")
+            print(f"{ui.OK} {it['meta']['id']} cancelled")
+        elif act == "move":
+            it = work.update(work.find(" ".join(a.selector), scope), "move", why=a.why or "", bucket=a.to)
+            print(f"{ui.OK} {it['meta']['id']} → {a.to}")
+        elif act == "edit":
+            changes = {}
+            if a.title:
+                changes["title"] = a.title
+            if a.body_file:
+                changes["body"] = Path(a.body_file).read_text()
+            if a.priority_set:
+                changes["priority"] = a.priority_set
+            if a.due:
+                changes["due"] = a.due
+            if not changes:
+                ui.err("nothing to change: --title, --body-file, --priority or --due")
+                return 2
+            it = work.update(work.find(" ".join(a.selector), scope), "edit", why=a.why or "", **changes)
+            print(f"{ui.OK} {it['meta']['id']} v{it['meta']['version']}")
+        elif act in ("show", "history"):
+            it = work.find(" ".join(a.selector), scope)
+            m = it["meta"]
+            if act == "show":
+                print(ui.section(f"{m['id']} · {m['title']}"))
+                for k in ("type", "status", "bucket", "priority", "assignee", "claimed_by", "lock_expires", "due",
+                          "version", "created", "created_by", "updated", "updated_by"):
+                    if m.get(k):
+                        print(ui.kv(k, m[k], 12))
+                if it["body"]:
+                    print("\n" + "\n".join("  " + ln for ln in it["body"].splitlines()))
+            print(ui.section("History"))
+            for e in it["changelog"]:
+                print(f"  {ui.dim('•')} {e}")
+            return 0
     except ValueError as e:
         ui.err(str(e))
         return 2
-    if msg:
-        with core.Lock("notes", wait=30):
-            core.write_if_changed(f, text)
-        print(f"{ui.OK} {p['id']}: {msg}")
-    ts = notes.tasks(f.read_text())
-    if a.task_cmd in (None, "ls") or msg:
-        print(ui.section(f"{p['id']} · tasks"))
-        for b in notes.BUCKETS:
-            items = [t for t in ts if t["bucket"] == b]
-            if b == "Done":
-                items = items[:5] if not getattr(a, "all", False) else items
-            if not items:
-                continue
-            print(f"  {ui.bold(b)}")
-            for t in items:
-                mark = ui.green("✓") if t["done"] else ui.cyan(str(t.get("index")).rjust(2))
-                print(f"   {mark} {t['text']}")
-        if not ts:
-            hint = 'no tasks yet — dev task add "…" --now'
-            print(f"  {ui.dim(hint)}")
+    _print_items(scope, label, getattr(a, "all", False))
+    return 0
+
+
+def cmd_plan(a):
+    from . import plans
+    act = a.plan_cmd or "ls"
+    try:
+        if act == "new":
+            scope, _ = _scope(a)
+            path = plans.new(scope, " ".join(a.title))
+            print(f"{ui.OK} plan → {tilde(path)}  (edit it, then `dev plan revise {tilde(path)} --why \"…\"`)")
+            return 0
+        if act in ("revise", "approve", "supersede"):
+            path = Path(os.path.expanduser(a.path)).resolve()
+            status = {"approve": "approved", "supersede": "superseded"}.get(act)
+            meta = plans.revise(path, a.why or ("approved" if act == "approve" else ""), status=status)
+            print(f"{ui.OK} {meta['id']} v{meta['version']} · {meta['status']}")
+            return 0
+    except ValueError as e:
+        ui.err(str(e))
+        return 2
+    scope = None
+    if a.project or a.initiative:
+        scope, _ = _scope(a)
+    rows = []
+    for p_ in plans.list_plans(scope):
+        flag = ui.yellow(" ✎ needs `dev plan revise`") if p_["needs_revision"] else ""
+        rows.append([p_["id"], p_["status"], f"v{p_['version']}", p_["title"][:50] + flag,
+                     tilde(p_["path"].relative_to(HANDOFF))])
+    if not rows:
+        print("  no plans yet — dev plan new \"<title>\"")
+        return 0
+    print(ui.table(rows, ["ID", "STATUS", "VER", "TITLE", "PATH"], max_widths={4: 60}))
+    return 0
+
+
+def cmd_team(a):
+    from . import work
+    t = work.team(max_age_h=a.hours)
+    print(ui.section(f"Team · machines active in the last {a.hours} h"))
+    if not t:
+        print("  no presence yet (each machine publishes it on sync)")
+    for m in t:
+        print(f"\n  {ui.bold(m['user'] + '@' + m['host'])}  {ui.dim('updated ' + m.get('updated', ''))}")
+        for s_ in m.get("sessions", []):
+            print(f"    {ui.ACTIVE} {s_.get('agent')} · {s_.get('project')}@{s_.get('branch')}  {ui.dim((s_.get('status') or '')[:80])}")
+        for l_ in m.get("locks", []):
+            print(f"    🔒 {l_['id']} {l_['title']}  {ui.dim(l_['scope'] + ' · until ' + l_['until'])}")
+    print()
     return 0
 
 
@@ -1321,25 +1450,59 @@ def build_parser():
     p.add_argument("--path", action="store_true")
     p.add_argument("--log", metavar="TEXT", help="append a line to the session log")
     p.add_argument("--agent", default="human", help="who is logging (human, claude, codex)")
-    p = add("task", cmd_task, "Project or initiative tasks in the handoff repo")
+    p = add("task", cmd_task, "Work items of a project (or of an initiative with -i): add, claim, done, history")
     p.add_argument("-p", "--project", help="project (default: the one you are in)")
     p.add_argument("-i", "--initiative", help="an initiative instead of a project")
-    p.add_argument("--all", action="store_true", help="show every Done task")
+    p.add_argument("--all", action="store_true", help="show every done item")
     tsp = p.add_subparsers(dest="task_cmd")
-    t = tsp.add_parser("add", help="add a task")
+    t = tsp.add_parser("add", help="add a task, feature, bug or spike")
     t.add_argument("text", nargs="+")
-    t.add_argument("--now", action="store_true", help="add to Now (in progress)")
-    t.add_argument("--next", action="store_true", help="add to Next (the default)")
+    t.add_argument("--now", action="store_true", help="add to Now")
+    t.add_argument("--next", action="store_true", help="add to Next (default)")
     t.add_argument("--later", action="store_true", help="add to Later")
-    for verb, h in (("start", "move to Now"), ("done", "mark done"), ("next", "move to Next"), ("later", "move to Later")):
+    t.add_argument("--type", default="task", choices=["task", "feature", "bug", "spike"])
+    t.add_argument("--priority", default="normal", choices=["high", "normal", "low"])
+    t.add_argument("--due", help="YYYY-MM-DD")
+    t.add_argument("--body", help="description / acceptance criteria")
+    t.add_argument("--why", help="why this work exists (recorded in the changelog)")
+    t.add_argument("--claim", action="store_true", help="claim it right away")
+    for verb, h in (("start", "claim the lock and move to Now (doing)"), ("claim", "same as start"),
+                    ("release", "give the lock back (back to todo)"), ("done", "mark done and release"),
+                    ("block", "mark blocked (needs --why)"), ("cancel", "cancel (needs --why)"),
+                    ("show", "an item with its history"), ("history", "an item's changelog")):
         t = tsp.add_parser(verb, help=h)
-        t.add_argument("selector", nargs="+", help="task number from `dev task` or a unique part of its text")
-    tsp.add_parser("ls", help="list tasks")
+        t.add_argument("selector", nargs="+", help="id (T-…), number from `dev task`, or a unique part of the title")
+        t.add_argument("--why", help="the reason (recorded in the changelog and the commit)")
+    t = tsp.add_parser("move", help="move between Now / Next / Later (needs --why)")
+    t.add_argument("selector", nargs="+")
+    t.add_argument("--to", required=True, choices=["now", "next", "later"])
+    t.add_argument("--why")
+    t = tsp.add_parser("edit", help="change title, description, priority or due date (needs --why)")
+    t.add_argument("selector", nargs="+")
+    t.add_argument("--title")
+    t.add_argument("--body-file", help="file with the new description")
+    t.add_argument("--priority", dest="priority_set", choices=["high", "normal", "low"])
+    t.add_argument("--due")
+    t.add_argument("--why")
+    tsp.add_parser("ls", help="list open items")
     p = add("note", cmd_note, "Project metadata in the handoff note")
     p.add_argument("set", choices=["set"])
     p.add_argument("pairs", nargs="+", help="status=… priority=… milestone=… due=YYYY-MM-DD tags=a,b progress=0-100")
     p.add_argument("-p", "--project")
     p.add_argument("-i", "--initiative")
+    p = add("plan", cmd_plan, "Versioned plans and specs: new, revise --why, approve, ls")
+    p.add_argument("-p", "--project")
+    p.add_argument("-i", "--initiative")
+    psp = p.add_subparsers(dest="plan_cmd")
+    x = psp.add_parser("new", help="create a plan in plans/<scope>/")
+    x.add_argument("title", nargs="+")
+    for verb in ("revise", "approve", "supersede"):
+        x = psp.add_parser(verb, help=f"{verb} a plan (records version, who and why)")
+        x.add_argument("path")
+        x.add_argument("--why", help="the reason for the change (required for revise)")
+    psp.add_parser("ls", help="list plans")
+    add("team", cmd_team, "Who is working on what, across machines and developers").add_argument(
+        "--hours", type=float, default=24)
     p = add("initiative", cmd_initiative, "Cross-project initiatives (integrations, platforms, programmes)")
     isp = p.add_subparsers(dest="init_cmd")
     x = isp.add_parser("new", help="create an initiative")
@@ -1399,6 +1562,7 @@ def build_parser():
     p.add_argument("--scheduled", action="store_true", help="background mode: refresh PRs and sizes, safe gc")
     p.add_argument("--no-push", action="store_true")
     p.add_argument("--quiet", action="store_true")
+    p.add_argument("--renew", metavar="AGENT", help=argparse.SUPPRESS)
     p = add("gc", cmd_gc, "Reclaim disk safely")
     p.add_argument("--apply", action="store_true")
     p.add_argument("-y", "--yes", action="store_true")

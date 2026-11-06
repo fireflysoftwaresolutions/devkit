@@ -143,6 +143,31 @@ def context_for(cwd: str, agent: str) -> str:
                          f"{', '.join(ins['projects'])}). This project's workstream: {ws or '-'}. "
                          f"Initiative Now: {'; '.join(ins['tasks']['now'][:3]) or '-'}. "
                          f"Note: {tilde(f2)} (update it for cross-project facts; `dev task -i {d.name}`).")
+    try:
+        from . import work
+        me = work.actor(agent)
+        mine, theirs = [], []
+        scopes = [p["id"]] + [f"initiatives/{d.name}" for d in (HANDOFF / "initiatives").glob("*")
+                              if p["id"] in notesmod.summarize((d / "README.md").read_text())["projects"]] \
+            if (HANDOFF / "initiatives").exists() else [p["id"]]
+        for sc in scopes:
+            for it in work.all_items(sc):
+                holder, expired = work.lock_holder(it)
+                if holder and not expired:
+                    entry = f"{it['meta']['id']} “{it['meta']['title']}” ({sc})"
+                    (mine if holder.startswith(f"{me['user']}@{me['host']}") else theirs).append(f"{entry} — {holder}")
+        if mine:
+            lines.append("Your claimed tasks: " + "; ".join(x.rsplit(" — ", 1)[0] for x in mine[:6]))
+        if theirs:
+            lines.append("Claimed by others — do NOT work on these: " + "; ".join(theirs[:6]))
+        others = [t for t in work.team() if not (t["user"] == me["user"] and t["host"] == me["host"])]
+        busy = [f"{t['user']}@{t['host']} ({s_.get('agent')}, {s_.get('branch')})" for t in others
+                for s_ in t.get("sessions", []) if s_.get("project") == p["id"]]
+        if busy:
+            lines.append("Also working on this project right now: " + ", ".join(busy[:5]) +
+                         ". Coordinate through tasks (claim before you start) and pull before you push.")
+    except Exception:
+        pass
     lines.append("devkit manual: the `using-devkit` skill (session protocol, which tool for which job, project and "
                  "initiative rules, the status line).")
     lines.append(f"Handoff note: {tilde(note)} — read it before starting; update it with the devkit `handoff` skill "
@@ -163,8 +188,11 @@ def _note_hash(top: str) -> str:
     if not f.exists():
         return ""
     from . import notes as notesmod
+    from . import work
     sec = notesmod.sections(f.read_text())
     sec.pop("Session log", None)
+    sec.pop("Tasks", None)
+    sec["_items"] = sorted(f"{i['meta']['id']}:{i['meta'].get('version')}" for i in work.all_items(pid))
     return hashlib.sha256(json.dumps(sec, sort_keys=True).encode()).hexdigest()
 
 
@@ -221,7 +249,16 @@ def record_session(spec: str):
     if not core.note_path(pid).exists():
         p = registry.inspect_repo(main, with_prs=False)
         registry.update_note(p)
-    registry.add_session_line(pid, " · ".join(parts), sid[:12])
+    from . import work
+    a = work.actor(agent, sid)
+    key = f"<!-- s:{sid[:12]} -->"
+    line = " · ".join(parts[:1] + [f"{a['user']}@{a['host']}"] + parts[1:]) + f" {key}"
+    f = work.SESSIONS / pid / f"{time.strftime('%Y-%m')}.md"
+    if f.exists() and key in f.read_text():  # replace this session's line (Stop runs repeatedly)
+        txt = "\n".join(ln if key not in ln else f"- {line}" for ln in f.read_text().splitlines()) + "\n"
+        f.write_text(txt)
+    else:
+        work.log_session(pid, line)
 
 
 def _handoff_nudge(agent: str, data: dict, sess: dict):
@@ -239,6 +276,25 @@ def _handoff_nudge(agent: str, data: dict, sess: dict):
     return (f"devkit: this session made {n} commit(s) but the project's handoff note was not updated. Before you "
             f"finish, update it with the devkit handoff skill (/devkit:handoff) — Current state, Tasks (`dev task done <n>` / "
             f"`dev task add \"…\"`), Decisions and gotchas — then end your reply as usual.")
+
+
+def _plans_without_reason(sess: dict) -> list:
+    """Plan/spec files changed in this session whose version was not bumped (no `dev plan revise`)."""
+    started = sess.get("started") or 0
+    pdir = HANDOFF / "plans"
+    if not pdir.exists():
+        return []
+    from . import plans as plansmod
+    out = []
+    for f in pdir.rglob("*.md"):
+        try:
+            if f.stat().st_mtime <= started + 1:
+                continue
+        except OSError:
+            continue
+        if plansmod.needs_revision(f):
+            out.append(str(f.relative_to(HANDOFF)))
+    return out
 
 
 def stop(agent: str):
@@ -275,6 +331,11 @@ def stop(agent: str):
                     m = main_of(Path(top)) or Path(top)
                     canary.save_status(core.project_identity(m, core.gitout(m, "config", "--get", "remote.origin.url"))[0],
                                        agent, line, core.gitout(top, "branch", "--show-current"))
+        plans = _plans_without_reason(sess)
+        if plans and not data.get("stop_hook_active"):
+            reasons.append("devkit: you changed plan(s) without recording why: " + ", ".join(plans[:4]) +
+                           ". Run `dev plan revise <file> --why \"…\"` for each (it versions the plan and logs the "
+                           "reason), then finish.")
         nudge = _handoff_nudge(agent, data, sess)
         if nudge:
             sess["nudged"] = True
@@ -294,7 +355,7 @@ def stop(agent: str):
         mark.touch()
     except OSError:
         return
-    _spawn_sync(["--session", f"{agent}:{sid}", "--offline"])
+    _spawn_sync(["--session", f"{agent}:{sid}", "--offline", "--renew", agent])
 
 
 def config_change(agent: str):

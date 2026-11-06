@@ -183,6 +183,24 @@ def _setup_git():
     done("shared git defaults included; global ignore covers agent artefacts (.claude/worktrees, …)")
 
 
+GITATTRIBUTES = """# devkit: safe merges between machines and developers
+sessions/** merge=union
+presence/*.json merge=ours
+PROJECTS.md merge=ours
+TASKS.md merge=ours
+ACTIVITY.md merge=ours
+registry.json merge=ours
+"""
+
+
+def handoff_merge_rules():
+    """Append-only logs merge as a union; generated views keep the local copy and are regenerated after a pull."""
+    f = HANDOFF / ".gitattributes"
+    if not f.exists() or "devkit: safe merges" not in f.read_text():
+        f.write_text((f.read_text() if f.exists() else "") + GITATTRIBUTES)
+    core.git(HANDOFF, "config", "merge.ours.driver", "true")
+
+
 def setup_handoff():
     step(f"Handoff repository ({core.handoff_repo()} → {tilde(HANDOFF)})")
     repo = core.handoff_repo()
@@ -224,6 +242,9 @@ def setup_handoff():
                 shutil.copy2(f, HANDOFF / f.name)
         remote = core.gitout(HANDOFF, "remote", "get-url", "origin")
         done(f"present · origin {remote or 'none'}")
+    if (HANDOFF / ".git").exists():
+        handoff_merge_rules()
+        done("multi-machine merge rules (sessions union · generated views ours)")
 
 
 def render_instructions() -> str:
