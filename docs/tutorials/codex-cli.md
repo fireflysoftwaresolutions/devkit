@@ -69,9 +69,10 @@ list in the browser, add tests, and write a short README that explains how to op
 
 What happens, and what you see:
 
-1. **devkit routes the request.** Along with your request, devkit tells Codex which kind of work this is and who on the
-   crew does it: front-end work, done by the Frontend engineer (Trinity) and approved by the Code reviewer (Seraph).
-   It also names the skills that kind of work needs.
+1. **devkit suggests a route.** Along with your request, devkit tells Codex which kind of work it looks like and who
+   on the crew does it: front-end work, done by the Frontend engineer (Trinity) and approved by the Code reviewer
+   (Seraph). The suggestion reads English words only; Codex itself understands your request in any language and
+   declares the kind of work when it plans.
 2. **Codex answers as Morpheus, the tech lead.** He posts a plan and an estimate. Work under ten minutes he does
    himself; this request gets steps for the crew.
 3. **The crew starts.** Morpheus launches each member as a Codex agent role that devkit installed in

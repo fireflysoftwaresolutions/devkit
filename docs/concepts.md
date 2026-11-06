@@ -253,23 +253,23 @@ general question, or consulting work done with the Firefly consulting kit (decks
 gets a normal answer, with no status block, no required skills, and no nudges. Developing the consulting kit itself
 is development work.
 
-devkit decides per turn, in two steps:
+devkit decides per turn, at the end of it, from what the turn did, never from your words: you write in any language.
+The Stop hook counts a turn as development work when any of these is true:
 
-1. **The request.** The prompt hook classifies it as development, other, or no signal. A follow-up with no signal
-   (for example _continue_ or _yes_) keeps the previous turn's class. For a request of the other class, the hook adds
-   nothing to the context.
-2. **Where and what the turn did.** Inside a repository, a request with no signal at all (a status question)
-   counts as development. Otherwise the Stop hook looks at the turn's tool calls. A turn with no signal counts as development
-   when it edited files in a repository or ran development commands. An "other" turn counts only when it did
-   something strong: a commit, a push, a tag, or a test or build run. A deck built inside a repository stays
-   consulting work.
+- **The agent declared it:** its final message starts with the status block.
+- **It ran development commands:** a commit, push, or tag, a test or build run, or a `dev` command.
+- **It changed files inside a repository.**
+- **It used repository tools** (reading, searching, editing, a shell) in a session that works inside a repository.
+
+A turn that used the Firefly consulting kit counts only when it also ran a strong development command, such as a
+commit, a push, or a test run, so a deck built inside a repository stays consulting work.
 
 | Request | Turn | devkit |
 | --- | --- | --- |
-| "Dame una receta de tortilla de patatas" | a web search | nothing |
+| "Dame una receta de tortilla de patatas" | a web search, outside a repository | nothing |
 | "Hazme un deck para Example Bank" | the consulting kit's skills | nothing |
 | "Fix the failing test in the parser" | edits, a test run | the status block, required skills, reminders |
-| "continúa" after a development turn | anything | the same as the turn before |
+| "continúa" after a development turn | edits, a test run | the same as any development turn |
 
 `DEVKIT_SCOPE=all` turns the scope off, so every turn is checked as before (useful to test the canary).
 

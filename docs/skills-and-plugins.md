@@ -55,53 +55,50 @@ skills they require, in `config/skill-rules.json`, and enforces the mapping in b
 
 ### The rules
 
-| Rule | Claude Code | Codex | Matches (files, or a request about…) |
+| Rule | Claude Code | Codex | Matches (files; commands; kinds of work) |
 | --- | --- | --- | --- |
-| `ui` | `frontend-design`, `impeccable` | the same | HTML, CSS, Sass, Less, TSX, JSX, Vue, and Svelte files, code in other languages that renders HTML or styles; UI, UX, frontend, CSS, layout, or a design verb with a dashboard, page, screen, component, or form ("improve the dashboard," not "open the dashboard") |
-| `testing` | `testing` | `testing` | Test files of every stack, `conftest.py`, test runner configs; tests, TDD, coverage, flaky tests, test suites |
-| `angular` | `angular-developer` | `angular-developer` | Components, `angular.json`, routes; Angular |
-| `react` | `react-best-practices` | `react-best-practices` | TSX and JSX files; React, Next.js |
-| `spring` | `java-springboot`, `backend` | the same | Java and Kotlin files that use `org.springframework`; Spring, Java |
+| `ui` | `frontend-design`, `impeccable` | the same | HTML, CSS, Sass, Less, TSX, JSX, Vue, and Svelte files, code in other languages that renders HTML or styles; `ux`, `frontend`, `design-system`, `accessibility`, and `i18n` work |
+| `testing` | `testing` | `testing` | Test files of every stack, `conftest.py`, test runner configs; `pytest`, `jest`, `vitest`, `dev test`, `python3 -m unittest`; `testing` work |
+| `angular` | `angular-developer` | `angular-developer` | Components, `angular.json`, routes; `ng build`, `ng generate`, `ng serve`, `ng test`, `ng update` |
+| `react` | `react-best-practices` | `react-best-practices` | TSX and JSX files; `next build`, `next dev` |
+| `spring` | `java-springboot`, `backend` | the same | Java and Kotlin files that use `org.springframework` |
 | `java-tests` | `java-junit`, `spring-boot-testing` | the same | `*Test.java`, `*Tests.java`, `*IT.java` |
-| `api` | `backend` | `backend` | OpenAPI, GraphQL, and protobuf files, controllers; APIs, endpoints, backends |
-| `database` | `supabase-postgres-best-practices`, `backend` | the same | SQL files and migration folders; migrations, schemas, Postgres, indexes |
-| `workflows` | `cicd`, `github-actions-hardening`, `delivery` | the same | GitHub, GitLab, Bitbucket and Azure pipeline files; GitHub Actions, GitLab CI, Bitbucket Pipelines, Azure DevOps, CI/CD, pipelines, workflows |
-| `security` | `devsecops` | `devsecops` | Dockerfiles, security folders, Terraform; security, auth, secrets, vulnerabilities |
-| `docs` | `docs` | `docs` | `README.md`, `docs/**/*.md`, MDX, `CHANGELOG.md`, `CONTRIBUTING.md`; documentation, guides |
-| `diagrams` | `diagrams` | `diagrams` | Diagram specs, SVG, C4, and Mermaid files; diagrams |
-| `delivery` | `delivery`, `release-policy` | the same | `CHANGELOG.md`, `VERSION`, `cliff.toml`, release-please files; a request about releases, deployments, pushes, merges, pull requests, tags, versions, bumps, changelogs, hotfixes, or publishing |
-| `crew` | `crew`, `working-efficiently` | the same | A request about the crew, subagents, parallel agents, orchestration, or delegation |
-| `communicating` | `communicating` | `communicating` | A request about status reports, delegation, or handovers |
-| `learning` | `learning-loop` | `learning-loop` | A request about lessons, postmortems, retrospectives, root causes, or mistakes that repeat |
+| `api` | `backend` | `backend` | OpenAPI, GraphQL, and protobuf files, controllers; `backend` and `sso` work |
+| `database` | `supabase-postgres-best-practices`, `backend` | the same | SQL files and migration folders; `alembic`, `flyway`, `liquibase`, `psql`, `prisma migrate`; `database` work |
+| `workflows` | `cicd`, `github-actions-hardening`, `delivery` | the same | GitHub, GitLab, Bitbucket and Azure pipeline files; `gh workflow`, `gh run`; `cicd` work |
+| `security` | `devsecops` | `devsecops` | Dockerfiles, security folders, Terraform; `dev sec scan`; `security`, `sso`, `redteam`, and `dependencies` work |
+| `docs` | `docs` | `docs` | `README.md`, `docs/**/*.md`, MDX, `CHANGELOG.md`, `CONTRIBUTING.md`; `dev docs check`; `docs` work |
+| `diagrams` | `diagrams` | `diagrams` | Diagram specs, SVG, C4, and Mermaid files; `dev diagram`; `architecture` work |
+| `delivery` | `delivery`, `release-policy` | the same | `CHANGELOG.md`, `VERSION`, `cliff.toml`, release-please files; `git push`, `git tag`, `dev push`, `dev release`, `dev pr`, `gh pr create`, `gh release`; `release` work |
+| `crew` | `crew`, `working-efficiently` | the same | `plan` work |
+| `communicating` | `communicating` | `communicating` | `dev task delegate`, `dev report`; `plan` and `scope` work |
+| `learning` | `learning-loop` | `learning-loop` | `dev lesson`, `git revert`; `incident` work |
 
-Each rule matches on any of three things: globs on the files a turn changed (`files`); a regular expression on the
-content of changed files (`content`, applied to the `files` matches, or to the `content_files` globs, so a Python file
-that renders HTML counts as UI); and a regular expression on your request or on a subagent's brief (`prompt`). The
-prompt patterns also understand common Spanish words.
+A rule matches on what the work does, never on the words of your request, which can be in any language: globs on the
+files a turn changed (`files`); a regular expression on the content of changed files (`content`, applied to the
+`files` matches, or to the `content_files` globs, so a Python file that renders HTML counts as UI); the command words
+an agent runs (`commands`); and the kinds of work a step or brief declares (`activities`, ids from `dev crew raci`).
 
 ### Where devkit enforces them
 
 | When | Hook | What happens |
 | --- | --- | --- |
-| You send a request | UserPromptSubmit | The agent is told which skills the request needs that it has not loaded yet, and why |
-| Claude starts a subagent | PreToolUse on the Agent and Task tools | A "devkit · required skills" section is appended to the subagent's brief, so the subagent loads them too |
+| Claude starts a subagent | PreToolUse on the Agent and Task tools | A "devkit · required skills" section is appended to the subagent's brief, with the skills of its declared kind of work (else its member's Responsible one) and of the files it owns, so the subagent loads them too |
+| A crew member stops | SubagentStop | The crew gates send the member back once if it did not load the skills of its procedure or of the files it changed |
 | The agent finishes a turn | Stop | If the turn changed matching files without loading a required skill, the turn goes back once per skill per session, with the reason and the files, to load the skill, and review the change |
 
 devkit reads which skills a session loaded from its transcript, that is, Claude's Skill tool calls and reads of a `SKILL.md`,
 and Codex's shell commands that read a `SKILL.md`. Only skills that are installed for that agent are required.
 
-The developer's explicit request still wins. Two real Claude sessions show both sides:
-
-- Asked for `a simple, accessible base stylesheet`, the session received the skill reminder, loaded
-  `frontend-design` with the Skill tool before writing, and needed no second pass.
-- Told explicitly "do not load any skills," the session was sent back by the Stop hook with the reason, and the model
-  followed the developer's instruction, which is the intended precedence.
+The developer's explicit request still wins. Told explicitly "do not load any skills," a real Claude session was sent
+back by the Stop hook with the reason, and the model followed the developer's instruction, which is the intended
+precedence.
 
 ### Configure the rules
 
 | Key | Effect |
 | --- | --- |
-| `skills.enforce` | `false` turns all three enforcement points off |
+| `skills.enforce` | `false` turns off the brief and Stop enforcement points; the crew gates follow `crew.gates.enforce` |
 | `skills.rules` | Your rules: one with an existing `id` changes the fields you give, a new `id` adds a rule |
 
 The format and an example are in [Configuration › Skills](configuration.md#skills). `dev doctor` checks, for each

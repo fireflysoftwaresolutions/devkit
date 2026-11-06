@@ -15,7 +15,7 @@ with `dev doctor`: every failed check prints the command that fixes it.
 | `~/.local/state/devkit/ci/` | Local CI evidence per repository and commit (30 days) and, in `logs/`, the step logs of `dev ci --run` |
 | `~/.local/state/devkit/flaky.jsonl` | CI re-runs with `dev run rerun --flaky` and their reasons |
 | `~/.local/state/devkit/handoff-push-failed.json` | Present while the handoff repository cannot be pushed |
-| `~/.local/state/devkit/lessons-usage.json`, `lesson-signals.jsonl` | How each lesson was used on this machine, and the corrections queued for `dev lesson scan` |
+| `~/.local/state/devkit/lessons-usage.json` | How each lesson was used on this machine |
 | `~/.local/state/devkit/logs/config.log` | Settings restored by `dev config repair` and changes refused by ConfigChange |
 | `~/.local/state/devkit/canary.jsonl` | Status block results per reply: marker, format score, excerpt of misses (90 days) |
 | `~/.local/state/devkit/status/` | The latest status block per project, stored as one line |
