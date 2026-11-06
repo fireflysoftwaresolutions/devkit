@@ -243,6 +243,13 @@ def session_start(agent: str):
     cwd = data.get("cwd") or os.getcwd()
     sid = data.get("session_id") or f"pid{os.getppid()}"
     f = _register_session(agent, sid, cwd, data)
+    try:  # the agent's own process: a `dev` command below it finds this session by its parents (spec C4)
+        from . import progress
+        pid = progress.agent_pid()
+        if pid and (state.read(f) or {}).get("pid") != pid:
+            state.update(f, lambda d: d.update(pid=pid), create=False)
+    except Exception:
+        _log(f"session-start pid {agent}: {traceback.format_exc()[-300:]}")
     try:  # the project id (timing, progress) and DEVKIT_SESSION for this session's shell commands (Claude)
         from . import progress
         rec = state.read(f) or {}
@@ -745,6 +752,129 @@ def _unroutable_lane_command(data: dict, agent: str = "claude"):
     return v[1] if v else None
 
 
+def _close_call(data: dict):
+    """The call's entry leaves the ledger: it ran (PostToolUse, PostToolUseFailure) or never will (refused)."""
+    if data.get("tool_name") in SHELL_TOOLS:
+        try:
+            from . import progress
+            progress.call_closed(data)
+        except Exception:
+            _log(f"ledger close: {traceback.format_exc()[-300:]}")
+
+
+def _rewrite(agent: str, updated: dict) -> dict:
+    """A PreToolUse that changes the tool's input and approves nothing: Claude Code applies updatedInput without a
+    permission decision, and its own permission check then runs on the new input (spec S2, C4)."""
+    out = {"hookEventName": "PreToolUse", "updatedInput": updated}
+    if agent == "codex":  # S2 was measured on Claude Code; Codex keeps the explicit allow until it is measured there
+        out["permissionDecision"] = "allow"
+    return out
+
+
+# What a crew member may not do to the variables that say who calls devkit (spec C4, security consultation §1
+# point 5): set, export or unset a DEVKIT_* variable, or run a program with `env -i` or `env -u DEVKIT_*`, anywhere
+# the shell runs it (nested shells, eval, command substitutions) or in a program's own code. The call ledger already
+# names the member whatever the variables say; this refuses the attempt, so it shows. Text that only mentions a
+# variable (a quoted message, a search, a heredoc written to a file) is not a change.
+_IDENTITY_CODE = re.compile(
+    r"environ\s*\[\s*['\"]DEVKIT_\w*['\"]\s*\]\s*=(?!=)|\bdel\s+(?:os\.)?environ\s*\[\s*['\"]DEVKIT_|"
+    r"environ\.(?:pop|setdefault|__delitem__|__setitem__)\s*\(\s*['\"]DEVKIT_|environ\.clear\s*\(|"
+    r"environ\.update\s*\([^)]*DEVKIT_|"
+    r"\b(?:un)?setenv\s*\(\s*['\"]DEVKIT_|\bputenv\s*\(\s*['\"]DEVKIT_|process\.env\.DEVKIT_\w*\s*=(?!=)|"
+    r"\bdelete\s+process\.env\.DEVKIT_|\bENV\s*\[\s*['\"]DEVKIT_\w*['\"]\s*\]\s*=(?!=)|\bENV\.delete\s*\(\s*['\"]"
+    r"DEVKIT_|\$ENV\s*\{\s*['\"]?DEVKIT_")
+_ASSIGN_WORD = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*=")
+_PREFIX_WORDS = ("sudo", "nohup", "command", "exec", "nice", "time", "builtin", "caffeinate", "setsid")
+
+
+def _prefix_identity(argv0) -> list:
+    """The identity changes in the words before a segment's program: VAR=… assignments, and env's -i, -u NAME,
+    --unset=NAME and its own assignments."""
+    found, i, words = [], 0, list(argv0)
+    while i < len(words):
+        w, name = words[i], os.path.basename(words[i])
+        if _ASSIGN_WORD.match(w):
+            found += [w.split("=", 1)[0]] if w.startswith("DEVKIT_") else []
+        elif name == "env":
+            while i + 1 < len(words) and (words[i + 1].startswith("-") or _ASSIGN_WORD.match(words[i + 1])):
+                i += 1
+                o, unset = words[i], ""
+                if _ASSIGN_WORD.match(o):
+                    unset = o.split("=", 1)[0]  # env DEVKIT_X=… sets it: the same change
+                elif o in ("-", "-i", "--ignore-environment"):
+                    found.append("env -i")
+                elif o in ("-u", "--unset"):
+                    i += 1
+                    unset = words[i] if i < len(words) else ""
+                elif o.startswith("--unset="):
+                    unset = o.split("=", 1)[1]
+                elif o[:1] == "-" and o[1:2] != "-":  # short options together: -i, -iu NAME, -uNAME
+                    before, u, after = o[1:].partition("u")
+                    if "i" in before:
+                        found.append("env -i")
+                    if u and not after:
+                        i += 1
+                        after = words[i] if i < len(words) else ""
+                    unset = after if u else ""
+                if unset.startswith("DEVKIT_"):
+                    found.append(unset)
+        elif name not in _PREFIX_WORDS:
+            break
+        i += 1
+    return found
+
+
+def identity_change(cmd: str, cwd=None) -> list:
+    """The DEVKIT_* identity changes a shell command makes, where the shell runs them -> names ([] when none)."""
+    from . import guard as g
+    cwd = cwd or os.getcwd()
+    calls = g.shell_calls(cmd, cwd)
+    if calls is None:  # the shell would read it another way than the tokenizer: judge the words
+        return ["DEVKIT_*"] if re.search(r"\bDEVKIT_\w*\s*=|\bunset\b[^\n;|&]*\bDEVKIT_|\benv\s+-", cmd) else []
+    found, texts = [], [cmd]
+    for argv, code in calls:
+        name = os.path.basename(argv[0]) if argv else ""
+        if code is not None:
+            found += ["DEVKIT_* in a program's environment"] if _IDENTITY_CODE.search(code) else []
+            continue
+        if name == "unset":
+            found += [a for a in argv[1:] if a.startswith("DEVKIT_") or "$" in a]
+        found += [x for x in g._exports(name, argv[1:]) if x.startswith("DEVKIT_") or x == "?"]
+        if name in g._SHELLS:
+            texts += [argv[k + 1] for k in range(1, len(argv) - 1) if re.fullmatch(r"-[A-Za-z]*c[A-Za-z]*", argv[k])]
+        elif name == "eval":
+            texts.append(" ".join(argv[1:]))
+    seen = set()
+    while texts and len(seen) < 32:
+        t = texts.pop()
+        if t in seen:
+            continue
+        seen.add(t)
+        for argv0, _ in g.split_commands(t) or []:
+            found += _prefix_identity(argv0)
+        texts += g._expansions(t)
+    return sorted(set(found))
+
+
+def _identity_verdict(data: dict):
+    """Inside a subagent: ("deny", why) for a shell command that changes who calls devkit; None otherwise."""
+    if not data.get("agent_id") or data.get("tool_name") not in SHELL_TOOLS:
+        return None
+    cmd = (data.get("tool_input") or {}).get("command") or ""
+    cmd = " ".join(shlex.quote(str(c)) for c in cmd) if isinstance(cmd, list) else str(cmd)
+    try:
+        names = identity_change(cmd, data.get("cwd") or os.getcwd())
+    except Exception:
+        _log(f"identity check: {traceback.format_exc()[-300:]}")
+        names = ["DEVKIT_*"] if "DEVKIT_" in cmd else []  # a crew rule fails closed when the command names one
+    if not names:
+        return None
+    return ("deny", f"This changes {', '.join(names[:4])}: devkit's DEVKIT_* variables say who calls devkit, and a "
+                    f"crew member may not set, export or unset them, or run a program with env -i or env -u DEVKIT_* "
+                    f"(spec C4). devkit knows who you are from its call ledger, whatever the variables say. Run the "
+                    f"command without the change; searching for or quoting the names is fine.")
+
+
 def _member_folder(run: dict, aid: str) -> str:
     """The id of the crew member whose scratch folder (scratchpad/<id>/) a lane writes in: its member's, for a helper
     the member that launched it; the agent id when the lane names no member."""
@@ -941,10 +1071,18 @@ def guard(agent: str):
             progress.bind(agent, data)
         except Exception:
             _log(f"guard bind {agent}: {traceback.format_exc()[-300:]}")
+    if data.get("tool_name") in SHELL_TOOLS:  # the call ledger (spec C4): who makes this call, from the payload
+        try:
+            from . import progress
+            progress.call_opened(agent, data)
+        except Exception:
+            _log(f"guard ledger {agent}: {traceback.format_exc()[-300:]}")
     from . import guard as g
     verdict = g.check(data.get("tool_name") or "", data.get("tool_input") or {}, data.get("cwd") or os.getcwd(), agent)
     if not verdict:
-        verdict = _crew_limits(agent, data) or _stub_commit_gate(data)
+        verdict = _identity_verdict(data) or _crew_limits(agent, data) or _stub_commit_gate(data)
+    if verdict and (verdict[0] == "deny" or agent == "codex"):  # Codex turns ask into deny below
+        _close_call(data)  # a refused call never runs: it leaves no open entry
     if not verdict:
         if data.get("tool_name") in ("Agent", "Task", "spawn_agent"):  # a subagent launch: its label for progress
             try:
@@ -955,6 +1093,7 @@ def guard(agent: str):
         why = _scope_violation(agent, data)
         if why:
             _log(f"guard {agent} deny: {why[:160]}")
+            _close_call(data)
             from . import audit
             audit.record("guard.deny", (data.get("tool_input") or {}).get("file_path") or "", why[:400], "deny",
                          tool=data.get("tool_name") or "", rule="crew-scope")
@@ -964,11 +1103,11 @@ def guard(agent: str):
         routed = _route_subagent_progress(data)
         if routed:
             _log(f"progress {agent}: a subagent's dev progress call goes to its lane")
-            print(json.dumps({"hookSpecificOutput": {"hookEventName": "PreToolUse", "permissionDecision": "allow",
-                                                     "updatedInput": routed}}))
+            print(json.dumps({"hookSpecificOutput": _rewrite(agent, routed)}))
             return
         why = _unroutable_lane_command(data, agent)
         if why:
+            _close_call(data)
             from . import audit
             audit.record("guard.deny", (data.get("tool_input") or {}).get("command", "")[:200], why, "deny",
                          tool=data.get("tool_name") or "", rule="crew-lane")
@@ -985,8 +1124,7 @@ def guard(agent: str):
                 updated = None
             if updated:
                 _log(f"skills {agent}: appended required skills and known pitfalls to a subagent brief")
-                print(json.dumps({"hookSpecificOutput": {"hookEventName": "PreToolUse", "permissionDecision": "allow",
-                                                         "updatedInput": updated}}))
+                print(json.dumps({"hookSpecificOutput": _rewrite(agent, updated)}))
         return
     decision, reason = verdict
     if agent == "codex" and decision == "ask":
@@ -1174,6 +1312,7 @@ def post_tool(agent: str):
     ends the turn, show the status block the final message opens with."""
     from . import progress
     data = _stdin_json()
+    _close_call(data)
     try:
         if data.get("tool_name") in ("Agent", "Task"):  # the launch names the agent it started: an exact binding
             progress.launch_result(agent, data)
@@ -1214,9 +1353,11 @@ def post_tool(agent: str):
 
 def post_tool_failure(agent: str):
     """PostToolUseFailure: a subagent launch that failed (an unknown agent type, an interrupt) starts no agent, so its
-    launch record leaves at once: it never labels another agent or holds a crew slot (spec F0, S6)."""
+    launch record leaves at once: it never labels another agent or holds a crew slot (spec F0, S6). A shell call
+    that failed or was interrupted has ended: it leaves the call ledger."""
     from . import progress
     data = _stdin_json()
+    _close_call(data)
     if data.get("tool_name") in ("Agent", "Task", "spawn_agent"):
         progress.launch_failed(agent, data)
 

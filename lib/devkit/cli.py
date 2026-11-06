@@ -1341,8 +1341,13 @@ def cmd_progress(a):
     from_agent = os.environ.get("DEVKIT_FROM_AGENT") or None  # set by the hooks inside a subagent
     if act == "start":
         names = [x.strip() for x in (a.plan or "").split(";") if x.strip()]
-        run = pg.start(" ".join(a.goal), a.steps or len(names), a.estimate or "", plan=names, from_agent=from_agent,
-                       mode=getattr(a, "mode", "") or "")
+        try:
+            run = pg.start(" ".join(a.goal), a.steps or len(names), a.estimate or "", plan=names,
+                           from_agent=from_agent, mode=getattr(a, "mode", "") or "",
+                           replace=getattr(a, "replace", False), why=getattr(a, "why", "") or "")
+        except ValueError as e:
+            ui.err(str(e))
+            return 2
         if from_agent:
             print(f"{ui.OK} lane plan recorded · {' '.join(a.goal)}")
             return 0
@@ -2340,6 +2345,8 @@ def build_parser():
                         "recommended option and records it (default: devkit config work.mode, else guided)")
     x.add_argument("--plan", help="the steps, separated by ';', each with an optional estimate: "
                                   "\"design=30m; build=2h; docs\"")
+    x.add_argument("--replace", action="store_true", help="replace this session's live run (needs --why)")
+    x.add_argument("--why", help="why the live run is replaced (kept in the new run)")
     x = gsp.add_parser("note", help="an update while a step is still running: no step changes state")
     x.add_argument("text", nargs="+")
     x.add_argument("--next", help="what comes next")

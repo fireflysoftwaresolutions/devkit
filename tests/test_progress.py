@@ -16,13 +16,23 @@ from devkit import canary, core  # noqa: E402
 from devkit import progress as pg  # noqa: E402
 
 
-def boundary(root) -> list:
+def boundary(root, real_caller=False) -> list:
     # what every progress test fakes, as patchers to start and stop: devkit's configuration (its defaults, never the
-    # developer's ~/.config/devkit)
-    return [mock.patch.dict(core.CFG, {"progress": {}, "work": {}})]
+    # developer's ~/.config/devkit), this test process's real parents (they never name a session), the call ledger
+    # (in the test's folder) and who calls: Morpheus, from a call of his. real_caller: the tests of caller identity
+    # (tests/test_caller_identity.py) use devkit's own ledger and session lookup instead.
+    out = [mock.patch.dict(core.CFG, {"progress": {}, "work": {}}),
+           mock.patch.object(pg, "_ancestor_pids", lambda: [], create=True),
+           mock.patch.object(pg, "CALLS", Path(root) / "calls", create=True)]
+    if not real_caller:
+        out.append(mock.patch.object(pg, "caller", lambda *a, **k: {"caller": "main", "how": "test"}, create=True))
+    return out
 
 
 class TempState:
+    def __init__(self, real_caller=False):
+        self.real_caller = real_caller
+
     def __enter__(self):
         self.tmp = tempfile.TemporaryDirectory()
         root = Path(self.tmp.name)
@@ -34,7 +44,7 @@ class TempState:
         pg.RUNS, pg.TIMING, pg.SESSIONS = root / "runs", root / "timing", root / "sessions"
         pg.PENDING = pg.TIMING / "pending"
         pg.QUOTA = root / "quota"  # the real 5-hour usage never changes the parallel limit under test
-        self.boundary = boundary(root)
+        self.boundary = boundary(root, self.real_caller)
         for p in self.boundary:
             p.start()
         pg._publish = lambda: None

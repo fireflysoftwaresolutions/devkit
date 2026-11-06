@@ -26,10 +26,15 @@ Calibration: finished runs record estimate vs actual, so the next estimate is co
 """
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import re
+import shlex
 import statistics
+import subprocess
+import sys
+import tempfile
 import time
 from pathlib import Path
 
@@ -41,6 +46,7 @@ TIMING = STATE / "timing"
 PENDING = STATE / "timing" / "pending"
 SESSIONS = STATE / "sessions"
 QUOTA = STATE / "quota"  # the plan's usage windows, recorded by the status line (hooks.statusline)
+CALLS = STATE / "calls"  # the call ledger (spec C4): <session>/<tool_use_id>.json, one per open shell call
 
 
 def cfg() -> dict:
@@ -52,14 +58,33 @@ def cfg() -> dict:
 # --------------------------------------------------------------------------- which session am I?
 
 def current_session(cwd: str | None = None):
-    """-> (agent, session id) of the agent session running this command.
+    """-> (agent, session id) of the agent session running this command; see resolve_session."""
+    return resolve_session(cwd)[:2]
 
-    Claude Code exports DEVKIT_SESSION through CLAUDE_ENV_FILE at session start. Otherwise (Codex, or a shell)
-    the most recently active devkit session in the same repository is used."""
+
+def resolve_session(cwd: str | None = None):
+    """-> (agent, session id, how) of the session running this command (spec C4):
+    ancestry  the nearest parent process whose pid a session record holds (the agent's own process, recorded at
+              SessionStart), so two sessions in one repository each find their own; DEVKIT_SESSION only chooses
+              among the sessions of that process (after /clear)
+    env       DEVKIT_SESSION, which Claude Code exports to the session's shells (no parent matched)
+    recency   the most recently active devkit session in the same repository (Codex without a recorded pid)
+    shell     none of these: a shell of the developer's, with a session of its own"""
     env = os.environ.get("DEVKIT_SESSION", "")
+    pids = _ancestor_pids()
+    held = {}
+    for f in (SESSIONS.glob("*.json") if pids and SESSIONS.exists() else []):
+        s = core.read_json(f, {}) or {}
+        if isinstance(s.get("pid"), int) and s["pid"] in pids and s.get("agent") and s.get("session"):
+            held.setdefault(s["pid"], []).append((s.get("started") or 0, s["agent"], s["session"]))
+    for pid in pids:
+        if pid in held:
+            named = [c for c in held[pid] if f"{c[1]}:{c[2]}" == env]
+            _, agent, sid = named[0] if named else max(held[pid])
+            return agent, sid, "ancestry"
     if ":" in env:
         agent, sid = env.split(":", 1)
-        return agent, sid
+        return agent, sid, "env"
     cwd = cwd or os.getcwd()
     top = core.gitout(cwd, "rev-parse", "--show-toplevel") or cwd
     best = None
@@ -68,8 +93,201 @@ def current_session(cwd: str | None = None):
         if (s.get("top") or s.get("cwd")) == top and (not best or f.stat().st_mtime > best[0]):
             best = (f.stat().st_mtime, s.get("agent"), s.get("session"))
     if best and time.time() - best[0] < 12 * 3600:
-        return best[1], best[2]
-    return os.environ.get("DEVKIT_AGENT") or "human", f"shell-{os.getppid()}"
+        return best[1], best[2], "recency"
+    return os.environ.get("DEVKIT_AGENT") or "human", f"shell-{os.getppid()}", "shell"
+
+
+def _ps() -> dict:
+    """{pid: (parent pid, command line)} of every process, from `ps`; {} when ps gives no answer."""
+    try:
+        out = subprocess.run(["ps", "-axo", "pid=,ppid=,args="], capture_output=True, text=True, timeout=5).stdout
+    except (OSError, subprocess.SubprocessError):
+        return {}
+    procs = {}
+    for ln in out.splitlines():
+        parts = ln.split(None, 2)
+        if len(parts) >= 2 and parts[0].isdigit() and parts[1].isdigit():
+            procs[int(parts[0])] = (int(parts[1]), parts[2] if len(parts) > 2 else "")
+    return procs
+
+
+_ANCESTRY: dict = {}
+
+
+def _ancestor_pids() -> list:
+    """This process's parents, nearest first, up to launchd (one `ps` per process)."""
+    if os.getpid() not in _ANCESTRY:
+        procs, chain, pid = _ps(), [], os.getppid()
+        while pid > 1 and pid not in chain and len(chain) < 64:
+            chain.append(pid)
+            pid = procs.get(pid, (0, ""))[0]
+        _ANCESTRY[os.getpid()] = chain
+    return _ANCESTRY[os.getpid()]
+
+
+def agent_pid(procs: dict | None = None):
+    """The agent process (Claude Code, Codex) this process runs below: its nearest parent whose command line is an
+    agent's. None outside an agent."""
+    procs = _ps() if procs is None else procs
+    pid, seen = os.getpid(), 0
+    while pid in procs and seen < 64:
+        pid, seen = procs[pid][0], seen + 1
+        if pid in procs and core.is_agent_process(procs[pid][1]):
+            return pid
+    return None
+
+
+# The call ledger (decision D3, contract C4, security consultation §1). The PreToolUse hook writes one entry per
+# shell call of an agent session, keyed by the call's tool_use_id, with who made it: the subagent's agent_id from the
+# harness payload, or main. Its PostToolUse or PostToolUseFailure, or the hook's own refusal, removes it. A `dev`
+# command finds its session (resolve_session), then the open calls whose text holds its own arguments, in order:
+# main only when every match is main's, the member when any is a member's, unknown with none. No variable, parent
+# process or recency ever makes a caller main. Hooks never ask who calls: their payload says it.
+
+CALL_TTL = 600  # an open call expires after its tool's timeout, 10 minutes at most; it is audited then
+CALL_TEXT = 4096  # characters of a call's command kept, redacted (its start and its end when it is longer)
+NOT_A_LANE = ("main", "unknown", "unverified", "human")
+
+
+def _safe_name(s) -> str:
+    return re.sub(r"[^A-Za-z0-9_.-]", "", str(s or ""))[:120]
+
+
+def _write_private(path: Path, doc: dict):
+    """An atomic write, 0600 in 0700 folders, without a lock: each entry has one writer."""
+    for d in (path.parent.parent, path.parent):  # the ledger, and the session's folder in it
+        d.mkdir(parents=True, exist_ok=True, mode=0o700)
+        os.chmod(d, 0o700)
+    fd, tmp = tempfile.mkstemp(prefix=f".{path.name}.", suffix=".tmp", dir=str(path.parent))
+    try:
+        with os.fdopen(fd, "w") as fh:
+            fh.write(json.dumps(doc))
+        os.replace(tmp, path)
+    except BaseException:
+        Path(tmp).unlink(missing_ok=True)
+        raise
+
+
+def call_opened(agent: str, data: dict, now: float | None = None):
+    """PreToolUse of a shell call: its ledger entry {tool_use_id, session, agent, caller (agent_id or main), depth,
+    ts, ttl, cmd_sha256, cmd (redacted, at most CALL_TEXT), cut}."""
+    tid, sid = _safe_name(data.get("tool_use_id")), _safe_name(data.get("session_id"))
+    inp = data.get("tool_input") or {}
+    cmd = inp.get("command")
+    if isinstance(cmd, list):
+        cmd = " ".join(shlex.quote(str(c)) for c in cmd)
+    if not tid or not sid or not isinstance(cmd, str) or not cmd.strip():
+        return
+    from . import audit
+    now = now or time.time()
+    aid = str(data.get("agent_id") or "")[:80]
+    depth = 0
+    if aid:
+        lane = ((load_run(agent, data.get("session_id")) or {}).get("agents") or {}).get(aid) or {}
+        depth = int(lane.get("depth") or 1)
+    timeout = inp.get("timeout")
+    ttl = min(CALL_TTL, max(1.0, timeout / 1000)) if isinstance(timeout, (int, float)) and timeout > 0 else CALL_TTL
+    text = audit.redact(cmd)
+    cut = len(text) > CALL_TEXT
+    if cut:
+        text = text[:CALL_TEXT // 2] + " … " + text[-CALL_TEXT // 2:]
+    _write_private(CALLS / sid / f"{tid}.json", {
+        "tool_use_id": tid, "session": sid, "agent": agent, "caller": aid or "main", "depth": depth,
+        "ts": round(now, 3), "ttl": ttl, "cmd_sha256": hashlib.sha256(cmd.encode()).hexdigest(), "cmd": text,
+        "cut": cut})
+
+
+def call_closed(data: dict):
+    """PostToolUse or PostToolUseFailure of a shell call, or the hook refused it: its entry leaves the ledger."""
+    tid, sid = _safe_name(data.get("tool_use_id")), _safe_name(data.get("session_id"))
+    if tid and sid:
+        try:
+            (CALLS / sid / f"{tid}.json").unlink()
+        except OSError:
+            pass
+
+
+def open_calls(sid: str, now: float | None = None) -> list:
+    """The session's open calls, oldest first. An entry past its ttl got no result (the tool was cut off, or another
+    hook refused it): it is removed and audited as calls.unclosed."""
+    now = now or time.time()
+    try:
+        files = [f for f in (CALLS / _safe_name(sid)).iterdir() if f.suffix == ".json" and not f.name.startswith(".")]
+    except OSError:
+        return []
+    out = []
+    for f in files:
+        e = core.read_json(f, None)
+        if not isinstance(e, dict):
+            continue
+        if now - (e.get("ts") or 0) > (e.get("ttl") or CALL_TTL):
+            try:
+                f.unlink()
+            except OSError:
+                continue  # another process removed it first, and audits it
+            _audit("calls.unclosed", e.get("caller") or "?", f"{str(e.get('cmd') or '')[:200]} (no result within "
+                   f"{e.get('ttl') or CALL_TTL:g} s)", "expired", session=str(sid)[:40])
+            continue
+        out.append(e)
+    return sorted(out, key=lambda e: e.get("ts") or 0)
+
+
+def _names_args(entry: dict, args: list) -> bool:
+    """True when a call's text holds these arguments in order (as typed, or once the shell removed the quotes). A cut
+    member's call holds anything: what was cut away may be the command."""
+    if entry.get("cut") and entry.get("caller") != "main":
+        return True
+    args = [a for a in args if a]
+    if not args:
+        return False
+    texts = [str(entry.get("cmd") or "")]
+    try:
+        texts.append(" ".join(shlex.split(texts[0])))
+    except ValueError:
+        pass
+    for text in texts:
+        at = 0
+        for a in args:
+            i = text.find(a, at)
+            if i < 0:
+                break
+            at = i + len(a)
+        else:
+            return True
+    return False
+
+
+def caller(cwd: str | None = None, argv=None, now: float | None = None) -> dict:
+    """Who runs this `dev` command -> {agent, session, how, caller, calls}. caller: main, a member's agent_id (the
+    most restrictive when several match), unknown (no open call holds the command, or the session was only
+    guessed by recency), unverified (Codex, until its spawned agents' hooks carry agent_id: S3), or human (a
+    developer's shell with no agent session). `argv`: the command's arguments, default sys.argv[1:]."""
+    agent, sid, how = resolve_session(cwd)
+    out = {"agent": agent, "session": sid, "how": how, "caller": "unknown", "calls": []}
+    if how == "shell":
+        return dict(out, caller="human")
+    if agent == "codex":
+        return dict(out, caller="unverified")
+    args = [str(a) for a in (sys.argv[1:] if argv is None else argv)]
+    hits = [c for c in open_calls(sid, now) if _names_args(c, args)]
+    out["calls"] = [c.get("tool_use_id") for c in hits]
+    members = sorted({str(c.get("caller")) for c in hits if c.get("caller") != "main"})
+    if members:
+        run = load_run(agent, sid) or {}
+        out["caller"] = max(members, key=lambda m: (TOOL_LEVELS.index(lane_tools(run, m) or "read"),
+                                                    ((run.get("agents") or {}).get(m) or {}).get("depth") or 0))
+    elif hits and how != "recency":
+        out["caller"] = "main"
+    return out
+
+
+def _as_lane(from_agent, cwd: str | None = None):
+    """The lane a command acts as: DEVKIT_FROM_AGENT when the hooks set it, else the member the call ledger names.
+    Variables only narrow (spec C4): an empty or missing one grants nothing. None for Morpheus."""
+    if from_agent:
+        return from_agent
+    who = caller(cwd).get("caller")
+    return who if who and who not in NOT_A_LANE else None
 
 
 def run_path(agent: str, sid: str) -> Path:
@@ -569,19 +787,27 @@ def headline(run: dict, now: float | None = None) -> str:
 
 
 def start(goal: str, steps: int = 0, estimate: str = "", cwd: str | None = None, plan=None, from_agent: str | None = None,
-          now: float | None = None, mode: str = "") -> dict:
+          now: float | None = None, mode: str = "", replace: bool = False, why: str = "") -> dict:
+    """A new run for this session. A live run is replaced only with `replace` and a reason (spec C4). From a crew
+    member: its lane's own plan inside the main run, never a new main run."""
     now = now or time.time()
     agent, sid = current_session(cwd)
+    from_agent = _as_lane(from_agent, cwd)
     if from_agent:  # a subagent planning its own work: a lane of the main run, never a new main run
+        if replace:
+            _main_only(from_agent, "replaces a run")
         with _tx(agent, sid):
             run = normalize(load_run(agent, sid) or {})
-            if run.get("goal"):
-                lane = _lane(run, from_agent, now)
-                lane.update(goal=goal, plan=[x[0] for x in parse_plan(plan)], done=0)
-                run["updates"].append({"ts": round(now), "kind": "agent", "agent": from_agent,
-                                       "text": f"plan: {goal}"})
-                _save(run)
-                return run
+            if not run.get("goal"):
+                raise StepError("no progress run in this session: Morpheus starts one with dev progress start")
+            lane = _lane(run, from_agent, now)
+            lane.update(goal=goal, plan=[x[0] for x in parse_plan(plan)], done=0)
+            run["updates"].append({"ts": round(now), "kind": "agent", "agent": from_agent, "text": f"plan: {goal}"})
+            _save(run)
+            return run
+    _main_only(None, "replaces a run" if replace else "starts a run", cwd)
+    if replace and not (why or "").strip():
+        raise StepError("say why the live run is replaced: --why \"…\" (it is kept in the new run)")
     sf = SESSIONS / f"{agent}-{sid}.json"
     sess = core.read_json(sf, {}) or {}
     project = sess.get("project") or _project(cwd)
@@ -602,7 +828,16 @@ def start(goal: str, steps: int = 0, estimate: str = "", cwd: str | None = None,
     if sess.get("turn_started") and (sess.get("turn_started") or 0) >= (sess.get("turn_ended") or 0):
         _open(run, "turn", "main", now)  # started inside a turn: that turn is active time
     with _tx(agent, sid):
-        load_run(agent, sid)  # a run that does not parse raises StateBusy here: it is never written over
+        live = load_run(agent, sid)  # a run that does not parse raises StateBusy here: it is never written over
+        if live and live.get("goal") and live.get("state") != "done":
+            if not replace:
+                done_ = sum(1 for s in live.get("plan") or [] if s.get("state") in DONE)
+                raise StepError(f"a run is live in this session: “{live['goal']}” ({done_} of "
+                                f"{len(live.get('plan') or [])} steps). Add to it (dev progress add), end it (dev "
+                                f"progress done), or replace it: dev progress start … --replace --why \"<reason>\"")
+            run["replaced"] = {"goal": live["goal"], "started": live.get("started"), "ts": round(now),
+                               "why": why.strip()[:300]}
+            _audit("progress.replace", live["goal"][:120], why.strip()[:300], project=run.get("project") or "")
         _save(run)
     _publish()
     return run
@@ -649,11 +884,28 @@ def _advance_main(run, now):
         nxt.update(state="running", started=now)
 
 
-def _main_only(from_agent, what: str):
-    """Only Morpheus (the main session) changes the main plan; a crew member asks him."""
+def _main_only(from_agent, what: str, cwd: str | None = None):
+    """Only Morpheus (the main session) changes the main plan, sets the mode and records the developer's answers; a
+    crew member asks him. The call ledger must name main (spec C4): a lane variable, a parent process or recency
+    never does."""
     if from_agent:
         raise StepError(f"only Morpheus {what}: ask him with dev crew ask \"…\" (your own steps: dev progress add, "
                         "dev progress step)")
+    who = caller(cwd)
+    c = who.get("caller")
+    if c in ("main", "human"):
+        return
+    if c == "unverified":
+        _audit("caller.unverified", what, f"{who.get('agent')} session {str(who.get('session'))[:40]}: devkit cannot "
+               f"verify who calls yet (spec C4, S3)", "allowed")
+        return
+    _audit("caller.refused", what, f"caller {c}; session found by {who.get('how')}", "deny",
+           session=str(who.get("session"))[:40])
+    if c == "unknown" or not c:
+        raise StepError(f"only Morpheus {what}, and no open call of this session typed this command: type the "
+                        f"command itself, not through a script or another shell, as a command of its own (spec C4)")
+    raise StepError(f"only Morpheus {what}: this command runs inside a crew member's call ({c[:16]}). Ask him with "
+                    f"dev crew ask \"…\"")
 
 
 def _step_text(s: dict, label: str = "") -> str:
@@ -699,7 +951,7 @@ def assign(which, label: str, cwd: str | None = None, now: float | None = None, 
     guard keeps that subagent's edits inside them. The crew's RACI must make the member Responsible for the step's
     kind of work; `why` overrides it, recorded. `activity`: the step's kind of work, an id from dev crew raci, which
     then decides whatever language the step is written in."""
-    _main_only(from_agent, "assigns the plan's steps")
+    _main_only(from_agent, "assigns the plan's steps", cwd)
     activity = _activity_id(activity) if activity else ""
     globs = [x.strip() for x in scope.split(",") if x.strip()] if scope else []
     now = now or time.time()
@@ -864,6 +1116,7 @@ def crew_ask(text: str, to: str | None = None, from_agent: str | None = None, cw
     """A question or request between crew members (default: to Morpheus, the main session). It reaches the recipient
     with its next tool call (PostToolUse) or prompt."""
     now = now or time.time()
+    from_agent = _as_lane(from_agent, cwd)
     agent, sid = current_session(cwd)
     with _tx(agent, sid):
         run = load_run(agent, sid)
@@ -889,6 +1142,7 @@ def _post(run, frm: str, to: str, text: str, now: float, from_name: str = "") ->
 
 
 def crew_answer(msg_id: str, text: str, from_agent: str | None = None, cwd: str | None = None, now: float | None = None) -> dict:
+    from_agent = _as_lane(from_agent, cwd)
     agent, sid = current_session(cwd)
     with _tx(agent, sid):
         run = normalize(load_run(agent, sid) or {})
@@ -909,6 +1163,7 @@ def crew_answer(msg_id: str, text: str, from_agent: str | None = None, cwd: str 
 
 def crew_inbox(from_agent: str | None = None, cwd: str | None = None, mark: bool = True) -> list:
     """Messages for the caller (the main session, or the subagent whose lane this is) not delivered yet."""
+    from_agent = _as_lane(from_agent, cwd)
     agent, sid = current_session(cwd)
     run = load_run(agent, sid)
     return _take_messages(agent, sid, from_agent or "main", mark) if run else []
@@ -952,6 +1207,7 @@ def set_mode(mode: str, approve: str = "", cwd: str | None = None, now: float | 
     now = now or time.time()
     if mode not in ("guided", "auto"):
         raise StepError("mode is guided or auto")
+    _main_only(None, "sets the mode", cwd)
     agent, sid = current_session(cwd)
     with _tx(agent, sid):
         run = normalize(load_run(agent, sid) or {})
@@ -975,6 +1231,7 @@ def crew_decision(question: str, options=None, recommend: str = "", irreversible
     recommendation; in guided mode, or for an irreversible action not pre-approved, it waits for the developer: the
     asking member's lane waits and its step is blocked until Morpheus records the answer (crew_decide)."""
     now = now or time.time()
+    from_agent = _as_lane(from_agent, cwd)
     agent, sid = current_session(cwd)
     with _tx(agent, sid):
         run = load_run(agent, sid)
@@ -1020,6 +1277,7 @@ def crew_decide(decision_id: str, answer: str, cwd: str | None = None, now: floa
     """Record the developer's answer (Morpheus runs it after asking): the waiting member's step runs again, and a
     message with the answer waits for that member (delivered when Morpheus resumes it)."""
     now = now or time.time()
+    _main_only(None, "records the developer's answers", cwd)
     agent, sid = current_session(cwd)
     with _tx(agent, sid):
         run = normalize(load_run(agent, sid) or {})
@@ -1107,7 +1365,7 @@ def messages_context(agent: str, sid: str, me: str) -> str:
 
 def begin(which, cwd: str | None = None, now: float | None = None, from_agent: str | None = None) -> dict:
     """Mark a step as started now (parallel work the main agent does itself)."""
-    _main_only(from_agent, "starts the plan's steps")
+    _main_only(from_agent, "starts the plan's steps", cwd)
     now = now or time.time()
     agent, sid = current_session(cwd)
     with _tx(agent, sid):
@@ -1214,6 +1472,7 @@ def add_step(spec: str, cwd: str | None = None, now: float | None = None, why: s
     """Add a step discovered during the work: "name=30m after other". From a crew member, the step goes to its own
     lane's plan; the main plan is Morpheus's."""
     now = now or time.time()
+    from_agent = _as_lane(from_agent, cwd)
     agent, sid = current_session(cwd)
     with _tx(agent, sid):
         run = normalize(load_run(agent, sid) or {})
@@ -1248,7 +1507,7 @@ def add_step(spec: str, cwd: str | None = None, now: float | None = None, why: s
 def reopen(which, why: str, cwd: str | None = None, now: float | None = None, skip: bool = False,
            from_agent: str | None = None) -> dict:
     """Undo a wrong close (back to running or pending), or skip a step on purpose. Both need a reason."""
-    _main_only(from_agent, "skips the plan's steps" if skip else "reopens the plan's steps")
+    _main_only(from_agent, "skips the plan's steps" if skip else "reopens the plan's steps", cwd)
     now = now or time.time()
     if not (why or "").strip():
         raise StepError("say why: --why \"…\" (it goes into the run's history)")
@@ -1316,6 +1575,7 @@ def note(text: str, nxt: str = "", cwd: str | None = None, from_agent: str | Non
     """An update while a step is still running: recorded and shown (it resets the silence timer), and no step
     changes state. `dev progress step` is for a step that is finished."""
     now = now or time.time()
+    from_agent = _as_lane(from_agent, cwd)
     if not (text or "").strip():
         raise StepError("say what is happening: dev progress note \"<what is happening>\" --next \"<what is next>\"")
     agent, sid = current_session(cwd)
@@ -1360,7 +1620,13 @@ def step(text: str, nxt: str = "", cwd: str | None = None, kind: str = "step", c
          from_agent: str | None = None, now: float | None = None, force: bool = False, why: str = "") -> dict:
     now = now or time.time()
     agent, sid = current_session(cwd)
-    if not load_run(agent, sid):  # no run yet: start one first (start publishes, so never inside the lock)
+    from_agent = _as_lane(from_agent, cwd)
+    if kind == "done" and not from_agent:
+        _main_only(None, "ends the run", cwd)
+    if not load_run(agent, sid):  # no run yet: Morpheus's step starts one (start publishes, so never in the lock)
+        if from_agent:
+            raise StepError("no progress run in this session, so this step has no lane to go to: Morpheus starts "
+                            "the run (dev progress start); until then, report it in your message")
         start(text if kind != "step" else "work in progress", cwd=cwd, now=now)
         from_agent_lane = False
     else:

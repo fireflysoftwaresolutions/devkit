@@ -142,6 +142,7 @@ def delegate(task: str, to: str = "auto", files=None, scope: str = "", after: st
     """Add a step for another crew member. -> {"step", "member", "routed", "lane"} (lane: the working lane it
     joined, or None when Morpheus has to launch the member)."""
     now = now or time.time()
+    from_agent = progress._as_lane(from_agent, cwd)  # a member's call names the member, whatever the variables say
     agent, sid = current_session(cwd)
     with progress._tx(agent, sid):
         run = load_run(agent, sid)
@@ -290,8 +291,11 @@ def ready_context(agent: str, sid: str) -> str:
 
 
 def assign_plan(apply: bool = False, cwd: str | None = None, now: float | None = None) -> list:
-    """Route every plan step nobody owns: -> [(step, member, score, reasons)]; with apply, assign them."""
+    """Route every plan step nobody owns: -> [(step, member, score, reasons)]; with apply, assign them (Morpheus
+    only, like dev progress assign: spec C4)."""
     now = now or time.time()
+    if apply:
+        progress._main_only(None, "assigns the plan's steps", cwd)
     agent, sid = current_session(cwd)
     with progress._tx(agent, sid):
         run = load_run(agent, sid)
