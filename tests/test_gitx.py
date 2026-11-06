@@ -833,7 +833,8 @@ class PrTests(unittest.TestCase):
             self.assertEqual(rc, 0)
             self.assertIn("title: feat(invoice): add csv export", out)
             self.assertIn("- CI local: python3 -m unittest: 42 passed", out)
-            self.assertIn("still empty: What and why", out)
+            self.assertIn("still empty: Qué y por qué", out)  # Spanish PRs use the Spanish template
+        self.assertIn("pull_request.es.md", out)
 
     def test_merge_gate(self):
         with Sandbox() as s:

@@ -113,7 +113,7 @@ def _age(value) -> str:
             ts = dt.datetime.fromisoformat(value.replace("Z", "+00:00")).timestamp()
         except ValueError:
             return "-"
-    return core.ago(ts).replace(" ago", "") if ts else "-"
+    return core.ago(ts) if ts else "-"  # "3 min ago", "just now"
 
 
 # --------------------------------------------------------------------------- repository context
@@ -415,7 +415,7 @@ def no_evidence(c, action: str, rev="HEAD") -> int:
         names = core.gitout(c.top, "diff-tree", "-r", "--name-only", last["tree"], tree).splitlines()
         if names:
             more = f" (+{len(names) - 4} more)" if len(names) > 4 else ""
-            detail = (f"; the last local run ({last.get('how')}, {_age(last.get('ts'))} ago) verified a different tree, "
+            detail = (f"; the last local run ({last.get('how')}, {_age(last.get('ts'))}) verified a different tree, "
                       f"changed since: {', '.join(names[:4])}{more}")
     return refuse(f"no local CI evidence for {sha[:7] or 'HEAD'}{detail}",
                   f"run what CI runs: `dev ci --run` (or run your suite, then `dev ci --mark-passed --note "
@@ -428,7 +428,7 @@ def describe_evidence(ev) -> str:
     how = {"run": "dev ci --run", "attested": "attested", "marked": "dev ci --mark-passed"}.get(ev.get("how"),
                                                                                                 ev.get("how"))
     steps = f", {len(ev.get('steps') or [])} steps" if ev.get("steps") else ""
-    return f"{how}{steps}, {_age(ev.get('ts'))} ago"
+    return f"{how}{steps}, {_age(ev.get('ts'))}"
 
 
 # --------------------------------------------------------------------------- dev branch
@@ -1637,7 +1637,7 @@ def _pr_view(c, a) -> int:
         return emit(p)
     print(_pr_line(p))
     print(f"  +{p.get('additions', 0)} −{p.get('deletions', 0)} in {p.get('changedFiles', 0)} file(s) · by "
-          f"{(p.get('author') or {}).get('login', '?')} · updated {_age(p.get('updatedAt'))} ago · {p.get('url')}")
+          f"{(p.get('author') or {}).get('login', '?')} · updated {_age(p.get('updatedAt'))} · {p.get('url')}")
     if a.body:
         text = re.sub(r"<!--.*?-->", "", p.get("body") or "", flags=re.S)
         text = re.sub(r"\n{3,}", "\n\n", text).strip()
@@ -2462,7 +2462,7 @@ def cmd_issue(a) -> int:
         if len(lines) > 40:
             info(f"… {len(lines) - 40} more line(s) · dev issue view {i['number']} --json")
         for cm in (i.get("comments") or [])[-5:]:
-            print(ui.dim(f"  ── {(cm.get('author') or {}).get('login', '?')}, {_age(cm.get('createdAt'))} ago"))
+            print(ui.dim(f"  ── {(cm.get('author') or {}).get('login', '?')}, {_age(cm.get('createdAt'))}"))
             for ln in (cm.get("body") or "").strip().splitlines()[:12]:
                 print("    " + ln)
         return 0
