@@ -2023,13 +2023,12 @@ def _glob_hit(path: str, g: str) -> bool:
         path.startswith(g.rstrip("*").rstrip("/") + "/") or path == g
 
 
-def scope_holds(path, cwd, globs) -> bool:
-    """True when `path` is in one of `globs`, by the crew scope rules: a glob relative to the repository of `cwd`
-    (`lib/**`, `docs/`, a file) never reaches outside it; an absolute or ~ glob names a folder anywhere, such as the
-    project's plans in the handoff repository."""
+def scope_holds(path, cwd, globs, base=None) -> bool:
+    """True when `path` is in one of `globs`, by the crew scope rules: a glob relative to the lane's repository
+    (`base`, from scope_base; without it the repository of `cwd`) such as `lib/**`, `docs/` or a file never reaches
+    outside it; an absolute or ~ glob names a folder anywhere, such as the project's plans in the handoff repository."""
     ap = os.path.normpath(os.path.join(str(cwd), str(path)))
-    top = core.gitout(cwd, "rev-parse", "--show-toplevel") or str(cwd)
-    rel = os.path.relpath(ap, top)
+    rel = scope_rel(ap, cwd, base)
     for g in globs or []:
         if g.startswith(("/", "~")):
             ga = os.path.expanduser(g)
@@ -2047,6 +2046,35 @@ def _real_glob(g: str) -> str:
     return "/".join([real("/".join(parts[:k]) or "/")] + parts[k:]) if k else g
 
 
+def scope_rel(path, cwd, base=None) -> str:
+    """`path` relative to the folder a lane's scope globs count from (`base`, else the repository of `cwd`); it
+    starts with '..' outside it. Symbolic links are resolved when the plain paths disagree (/var and /private/var)."""
+    ap = os.path.normpath(os.path.join(str(cwd), str(path)))
+    top = str(base) if base else (core.gitout(cwd, "rev-parse", "--show-toplevel") or str(cwd))
+    rel = os.path.relpath(ap, top)
+    return os.path.relpath(real(ap), real(top)) if rel.startswith("..") else rel
+
+
+def _common_dir(path) -> str:
+    c = core.gitout(path, "rev-parse", "--path-format=absolute", "--git-common-dir")
+    return real(c) if c else ""
+
+
+def scope_base(project, cwd) -> str:
+    """The folder a crew lane's scope globs are relative to (spec F7, G13): the checkout of the run's repository
+    (`project`, its id under the workspace) that the session works in, its main checkout or one of its worktrees;
+    else that repository's main checkout, so a session whose folder is ~ (Claude Desktop) or another repository still
+    counts from it; with no run, the checkout of `cwd`, else `cwd`."""
+    cwd = str(cwd or os.getcwd())
+    top = core.gitout(cwd, "rev-parse", "--show-toplevel") if os.path.isdir(cwd) else ""
+    main = Path(DEV) / str(project) if project else None
+    if main is not None and (main / ".git").exists():
+        if top and _common_dir(top) and _common_dir(top) == _common_dir(main):
+            return top
+        return str(main)
+    return top or cwd
+
+
 def _dev_home(argv, cwd) -> Path:
     """The devkit checkout a `dev` call runs: bin/dev's folder (through the symlink on PATH), else devkit's home."""
     a0 = argv[1] if os.path.basename(argv[0]) != "dev" and len(argv) > 1 else argv[0]
@@ -2057,11 +2085,11 @@ def _dev_home(argv, cwd) -> Path:
     return Path(real(core.DEVKIT_HOME))
 
 
-def _sync_verdict(argv, cwd, scope):
+def _sync_verdict(argv, cwd, scope, base=None):
     agents = _dev_home(argv, cwd) / "plugin" / "agents"
     layers = _layers(scope)
     probe = str(agents / "__any_agent__.md")  # sync rewrites and removes every generated file there
-    if layers and all(scope_holds(probe, cwd, layer) for layer in layers):
+    if layers and all(scope_holds(probe, cwd, layer, base=base) for layer in layers):
         return None
     where = "; ".join(", ".join(layer) for layer in layers) or "no step scope"
     return deny(f"`dev crew sync` rewrites and removes the generated files in {tilde(agents)}/, which your step's "
@@ -2111,20 +2139,448 @@ class _ScratchShell(_Shell):
         return deny(why) if why else None
 
 
-def crew_shell_verdict(cmd: str, cwd, scope=None, member=None):
-    """For a crew member's shell command that devkit did not route to its lane: ("deny", why) when it runs a
-    `dev progress` or `dev crew` call that would act as Morpheus or change the team's crew, `dev crew sync` that
-    writes outside the member's step scope, or writes or deletes in the session scratchpad outside the member's own
-    folder; None otherwise. `scope`: the step scope, globs or layers of globs; `member`: the member's id."""
+# --------------------------------------------------------------------------- read-only lanes (spec F7, consultation §4)
+#
+# A review or read-only crew member (crew.json `tools`: review, read; a helper has its member's level, spec F3) runs
+# only what this allowlist names, in every segment of its command once the prefixes are stripped: readers, git and gh
+# reads, devkit's reading commands and the project's checks. A list of writers can never be complete (every
+# interpreter, every tool with an output flag and every nested shell writes), so the allowlist fails closed: anything
+# it does not name is refused, and those refusals are how it grows. Write detection (worktree_state, written_paths)
+# is the backstop for what an allowed check writes when it runs.
+
+TOOL_LEVELS = ("all", "build", "review", "read")  # least to most restrictive, as progress.TOOL_LEVELS
+READONLY_REASON = ("read-only lane: {what}. Report the change with file:line and the fix, or ask Morpheus to run it "
+                   "(`dev crew ask \"…\"`). Readers (cat, grep, rg, sed -n '1,20p', find, git log|diff|show, gh pr "
+                   "view, dev status|grep|diff, …) and the project's checks (pytest, python3 -m unittest, ruff check, "
+                   "tsc --noEmit, …) run; redirects only to /dev/null or a temp folder.")
+_RO_READERS = frozenset({
+    "cat", "head", "tail", "wc", "ls", "tree", "file", "stat", "du", "pwd", "basename", "dirname", "realpath",
+    "readlink", "which", "type", "echo", "printf", "date", "diff", "cmp", "comm", "cut", "tr", "sort", "uniq",
+    "column", "nl", "od", "xxd", "strings", "jq", "grep", "egrep", "fgrep", "rg", "find", "sed", "yq", "shasum",
+    "md5", "sha256sum", "cksum", "uname",
+    # shell builtins that change nothing outside the shell
+    "cd", "pushd", "popd", "true", "false", "test", "[", "[[", "read", "set", "wait", "sleep", "export", "unset",
+    "local", "declare", "typeset", "readonly", "for", "select", "case", "in", "esac"})
+# a reader's own flags that write a file or run a program
+_RO_FLAGS = {"rg": ("--pre",), "sort": ("-o", "--output"), "tree": ("-o",), "file": ("-C", "--compile"),
+             "date": ("-s", "--set"), "yq": ("-i", "--inplace", "-s", "--split-exp")}
+# the project's checks, as (program, the words that must follow it, flags that make it write); a program's path and
+# version suffix do not matter (/usr/bin/python3, ./mvnw). The developer adds more in safeguards.readonly_commands.
+_RO_CHECKS = (
+    ("pytest", (), ()), ("py.test", (), ()), ("python", ("-m", "pytest"), ()), ("python", ("-m", "unittest"), ()),
+    ("python", ("-m", "mypy"), ()), ("python", ("-m", "ruff", "check"), ("--fix", "--unsafe-fixes", "--add-noqa")),
+    ("npm", ("test",), ()), ("npm", ("run", "test"), ()), ("pnpm", ("test",), ()), ("pnpm", ("run", "test"), ()),
+    ("yarn", ("test",), ()), ("yarn", ("run", "test"), ()), ("vitest", ("run",), ("-u", "--update")),
+    ("mvnw", ("test",), ()), ("mvnw", ("verify",), ()), ("gradlew", ("test",), ()), ("go", ("test",), ()),
+    ("cargo", ("test",), ()), ("ruff", ("check",), ("--fix", "--unsafe-fixes", "--add-noqa", "--watch")),
+    ("mypy", (), ()), ("pyright", (), ()), ("tsc", (), ()), ("eslint", (), ("--fix",)), ("prettier", (), ("--write", "-w")),
+    ("shellcheck", (), ()), ("markdownlint", (), ("--fix",)), ("markdownlint-cli2", (), ("--fix",)),
+    ("semgrep", (), ("--autofix", "-o", "--output")), ("gitleaks", (), ("-r", "--report-path")),
+    ("osv-scanner", (), ("--output",)), ("trivy", (), ("-o", "--output")))
+_RO_RUNNERS = frozenset({"npx", "bunx", "uvx", "pnpx", "uv", "poetry", "pipenv", "pdm", "hatch", "rye", "pnpm"})
+_RO_ENV = re.compile(r"^(?:LC_[A-Z]+|LANG|LANGUAGE|TZ|NO_COLOR|FORCE_COLOR|CLICOLOR(?:_FORCE)?|TERM|COLUMNS|LINES|CI|"
+                     r"PYTHONDONTWRITEBYTECODE|PYTHONUNBUFFERED|PYTHONHASHSEED|PYTHONIOENCODING)$")
+_RO_GIT_READ = frozenset({"status", "log", "show", "diff", "blame", "annotate", "grep", "ls-files", "ls-tree",
+                          "rev-parse", "rev-list", "describe", "shortlog", "cat-file", "merge-base", "show-ref",
+                          "for-each-ref", "name-rev", "range-diff", "diff-tree", "diff-files", "diff-index",
+                          "check-ignore", "check-attr", "whatchanged", "version", "help"})
+_RO_GIT_GLOBAL = frozenset({"--no-pager", "-P", "--no-optional-locks", "--literal-pathspecs", "--no-replace-objects"})
+_RO_GH_READ = frozenset({"view", "list", "diff", "checks", "status"})
+_RO_DEV = {"status": None, "grep": None, "find": None, "files": None, "diff": None, "stubs": None, "help": None,
+           "version": None, "sec": ("scan",), "test": ("", "run", "plan", "audit"), "plan": ("show",),
+           "lesson": ("add", "recur"), "task": ("", "ls", "list", "show"), "ci": ("", "status", "ls", "list"),
+           "delivery": ("", "show")}
+_SED_ADDR = r"(?:\d+|\$|/(?:[^/\\\n]|\\.)*/I?)"
+_SED_PRINT = re.compile(rf"^(?:{_SED_ADDR}(?:\s*,\s*{_SED_ADDR})?)?\s*(?:p|q\d*)$")
+
+
+def _readonly_config() -> list:
+    """The developer's extra checks for read-only lanes, `safeguards.readonly_commands` (command prefixes such as
+    "make lint"). Only the developer changes safeguards (spec C11), so this list may grant."""
+    try:
+        v = (core.load_config().get("safeguards") or {}).get("readonly_commands") or []
+    except Exception:
+        return []
+    return [str(x) for x in v if isinstance(x, str) and x.strip()] if isinstance(v, list) else []
+
+
+def _family(name: str) -> str:
+    """A program's name without its folder, version suffix and case: /usr/bin/python3.12 -> python, ./mvnw -> mvnw."""
+    n = os.path.basename(str(name)).casefold()
+    return re.sub(r"[0-9.]+$", "", n) if re.match(r"^(?:python|pypy|perl|ruby|node)", n) else n
+
+
+def _flag_hits(args, flags) -> str:
+    """The first of `flags` among `args` (`--output x`, `--output=x`, a short flag in a cluster: `-wo` has -w), or ''."""
+    for a in args:
+        for f in flags:
+            if a == f or (f.startswith("--") and a.startswith(f + "=")) or \
+                    (len(f) == 2 and f[0] == "-" and a[:1] == "-" and a[1:2] != "-" and f[1] in a[1:]):
+                return f
+    return ""
+
+
+def _check_refusal(argv) -> str | None:
+    """None when `argv` is one of the project's checks; else why not ('' when it is not a check at all)."""
+    fam, rest = _family(argv[0]), argv[1:]
+    for prog, words, writes in _RO_CHECKS:
+        if fam != prog or [_family(w) if k == 0 else w for k, w in enumerate(rest[:len(words)])] != list(words):
+            continue
+        f = _flag_hits(rest[len(words):], writes)
+        if f:
+            return f"`{' '.join([prog, *words, f])}` writes files"
+        if prog == "tsc" and "--noEmit" not in rest:
+            return "`tsc` without --noEmit writes the compiled files"
+        if prog == "prettier" and not {"--check", "-c", "--list-different", "-l"} & set(rest):
+            return "`prettier` without --check writes the formatted files"
+        return None
+    for line in _readonly_config():
+        try:
+            words = shlex.split(line)
+        except ValueError:
+            continue
+        if words and _family(words[0]) == _family(argv[0]) and argv[1:len(words)] == words[1:]:
+            return None
+    return ""
+
+
+def _ro_env(name: str, value: str = "") -> str | None:
+    """Why a read-only lane may not set variable `name` for a command, or None. Pagers, external diff and git
+    configuration variables make a reader run a program."""
+    if _RO_ENV.match(name) or (name in ("PAGER", "GIT_PAGER", "MANPAGER") and value in ("", "cat")):
+        return None
+    return f"setting {name} makes the command run another program or act differently"
+
+
+def _ro_sed(args) -> str | None:
+    scripts, files, quiet, i = [], [], False, 0
+    while i < len(args):
+        a = args[i]
+        if a in ("-n", "--quiet", "--silent"):
+            quiet = True
+        elif a in ("-E", "-r", "--regexp-extended", "-s", "--separate", "-u", "--unbuffered", "-z", "--null-data",
+                   "--posix", "--debug", "--sandbox"):
+            pass
+        elif a in ("-e", "--expression"):
+            scripts.append(args[i + 1] if i + 1 < len(args) else "")
+            i += 1
+        elif a.startswith("--expression="):
+            scripts.append(a.split("=", 1)[1])
+        elif a.startswith("-") and not a.startswith("--") and len(a) > 1:
+            for k, ch in enumerate(a[1:]):
+                if ch == "n":
+                    quiet = True
+                elif ch == "e":
+                    tail = a[k + 2:]
+                    scripts.append(tail or (args[i + 1] if i + 1 < len(args) else ""))
+                    i += 0 if tail else 1
+                    break
+                elif ch not in "Ersuz":
+                    return f"`sed -{ch}` writes files or reads a script file"
+        elif a.startswith("-"):
+            return f"`sed {a}` writes files or reads a script file"
+        else:
+            files.append(a)
+        i += 1
+    if not scripts and files:
+        scripts = files[:1]
+    if not quiet:
+        return "`sed` without -n is for editing; print lines with `sed -n '1,20p' file` or `sed -n '/re/p' file`"
+    for s in scripts:
+        for part in re.split(r"[;\n]", s):
+            if part.strip() and not _SED_PRINT.match(part.strip()):
+                return f"the sed command `{part.strip()}` can write or run (only line ranges and /re/ with p)"
+    return None
+
+
+def _ro_git(args) -> str | None:
+    i = 0
+    while i < len(args) and args[i].startswith("-"):
+        a = args[i]
+        if a == "-C" or a in ("--git-dir", "--work-tree"):
+            i += 2
+            continue
+        if a in _RO_GIT_GLOBAL or a.startswith(("--git-dir=", "--work-tree=")):
+            i += 1
+            continue
+        if a in ("--version", "--help", "-h"):
+            return None
+        return f"`git {a}` can make git run a program or change its configuration"
+    if i >= len(args):
+        return None
+    sub, rest = args[i], args[i + 1:]
+    if any(r == "--output" or r.startswith(("--output=", "--output-directory")) for r in rest):
+        return f"`git {sub} --output` writes a file"
+    pos = [r for r in rest if not r.startswith("-")]
+    if sub in _RO_GIT_READ:
+        if sub == "grep" and any(r.startswith(("-O", "--open-files-in-pager")) for r in rest):
+            return "`git grep -O` runs a program"
+        return None
+    flags = {r.split("=", 1)[0] for r in rest if r.startswith("-")}
+    listing = bool(flags & {"-l", "--list"})
+    if sub == "reflog":
+        return f"`git reflog {pos[0]}` changes the reflog" if pos and pos[0] in ("expire", "delete", "drop") else None
+    if sub == "branch":
+        ok = {"-a", "--all", "-r", "--remotes", "-v", "-vv", "--verbose", "-l", "--list", "--show-current",
+              "--contains", "--no-contains", "--merged", "--no-merged", "--points-at", "--sort", "--format",
+              "--column", "--no-column", "--color", "--no-color", "-i", "--ignore-case", "--abbrev"}
+        vals = _positionals(rest, {"--contains", "--no-contains", "--merged", "--no-merged", "--points-at", "--sort",
+                                   "--format"})
+        return None if flags <= ok and (listing or not vals) else "`git branch` with these arguments changes branches"
+    if sub == "tag":
+        ok = {"-l", "--list", "--contains", "--no-contains", "--merged", "--no-merged", "--points-at", "--sort",
+              "--format", "--column", "--no-column", "-i", "--ignore-case", "--color", "-v", "--verify"}
+        num = {f for f in flags if re.match(r"^-n\d*$", f)}
+        vals = _positionals(rest, {"--contains", "--no-contains", "--merged", "--no-merged", "--points-at", "--sort",
+                                   "--format"})
+        lists = listing or bool(flags & {"-v", "--verify"})
+        return None if flags - num <= ok and (lists or not vals) else "`git tag` with these arguments changes tags"
+    if sub == "remote":
+        return None if not pos or pos[0] in ("show", "get-url") else f"`git remote {pos[0]}` changes the remotes"
+    if sub == "stash":
+        return None if pos[:1] in (["list"], ["show"]) else "`git stash` without list or show changes the work tree"
+    if sub == "worktree":
+        return None if pos[:1] == ["list"] else "`git worktree` without list changes the worktrees"
+    if sub == "config":
+        reads = {"--get", "--get-all", "--get-regexp", "--get-urlmatch", "--list", "-l"}
+        writes = {"--unset", "--unset-all", "--add", "--replace-all", "--rename-section", "--remove-section",
+                  "--edit", "-e"}
+        if flags & writes or not (flags & reads or pos[:1] in (["get"], ["list"])):
+            return "`git config` without --get or --list changes the configuration"
+        return None
+    return f"`git {sub}` is not a read"
+
+
+def _ro_gh(args) -> str | None:
+    pos = [a for a in args if not a.startswith("-")]
+    if not pos or pos[0] in ("help", "version") or args[:1] in (["--version"], ["--help"]):
+        return None
+    if pos[0] in ("pr", "issue", "run", "repo", "release"):
+        act = pos[1] if len(pos) > 1 else ""
+        return None if act in _RO_GH_READ else f"`gh {pos[0]} {act}` is not a read"
+    if pos[0] == "api":
+        attached = next((a[2:] for a in args if a.startswith("-X") and len(a) > 2), "")
+        method = (_opt_value(args, ("-X", "--method")) or attached or "GET").upper()
+        fields = _flag_hits(args, ("-f", "-F", "--field", "--raw-field", "--input"))
+        if method != "GET" or fields:
+            return f"`gh api` with {'-X ' + method if method != 'GET' else fields} writes through the API"
+        return None
+    return f"`gh {pos[0]}` is not a read"
+
+
+def _ro_dev(args) -> str | None:
+    kind = _crew_kind(args)
+    if kind:  # dev progress and dev crew: the lane rules of crew_shell_verdict decide
+        return None
+    pos = [a for a in args if not a.startswith("-")]
+    sub = pos[0] if pos else ""
+    if sub in _RO_DEV and (_RO_DEV[sub] is None or (pos[1] if len(pos) > 1 else "") in _RO_DEV[sub]):
+        if sub == "ci" and {"--run", "--resume"} & set(args):
+            return "`dev ci --run` runs the pipeline's build and package steps"
+        return None
+    return f"`dev {' '.join(pos[:2]) or '…'}` changes devkit's records or the repository"
+
+
+def _own_scratch_script(argv, cwd, member) -> bool:
+    """True when an interpreter runs a script file from crew member `member`'s own scratch folder (a probe it wrote
+    with the Write tool), not inline code or its input."""
+    for a in argv[1:]:
+        if a in ("-", "--", "-c", "-e", "-E", "--eval", "-p", "--print", "-r", "-m") or \
+                (a.startswith("-") and not a.startswith("--") and a[-1:] in ("c", "e", "m")):
+            return False
+        if a.startswith("-"):
+            continue
+        p = resolve(a, cwd)
+        m = _SCRATCHPAD.match(str(p)) if p != UNKNOWN else None
+        return bool(member and m and m.group(2) and not scratch_refusal(p, member))
+    return False
+
+
+def _ro_program(argv0, cwd, member=None) -> str | None:
+    """Why one command of a read-only lane (its words, prefixes included) is refused, or None."""
+    argv = _unwrap(argv0)
+    pre = argv0[:len(argv0) - len(argv)]
+    runner = False
+    for k, a in enumerate(pre):
+        n = os.path.basename(a)
+        if _ASSIGN.match(a):
+            why = _ro_env(*a.split("=", 1))
+            if why:
+                return why
+        elif n == "sudo":
+            return "`sudo` runs the command as another user"
+        elif n == "env" and any(x.startswith("-") for x in pre[k + 1:k + 2]):
+            return "`env` with options changes the command's environment"
+        elif n in _RO_RUNNERS:
+            runner = True
+    if not argv:
+        return None
+    name, args = os.path.basename(argv[0]), argv[1:]
+    if argv[0][:1] in ("$", "`") or name.startswith("#"):
+        return None if name.startswith("#") else "a program named by a variable"
+    dev = _dev_args(argv)
+    if dev is not None:
+        return _ro_dev(dev)
+    why = _check_refusal(argv)
+    if why is not None:
+        if not why and _INTERP.match(name) and not runner and _own_scratch_script(argv, cwd, member):
+            return None
+        return why or (f"`{name}` is not on the read-only allowlist" if runner or _INTERP.match(name) or
+                       name in _SHELLS or name in ("eval", "source", ".") else _ro_reader(name, args, cwd, member))
+    return None
+
+
+def _ro_reader(name, args, cwd, member=None) -> str | None:
+    if name not in _RO_READERS and name not in ("git", "gh", "xargs"):
+        return f"`{name}` is not on the read-only allowlist"
+    f = _flag_hits(args, _RO_FLAGS.get(name, ()))
+    if f:
+        return f"`{name} {f}` writes a file or runs a program"
+    if name in ("export", "local", "declare", "typeset", "readonly"):
+        for a in args:
+            if not a.startswith(("-", "+")):
+                why = _ro_env(*(a.split("=", 1) + [""])[:2])
+                if why:
+                    return why
+    if name == "sed":
+        return _ro_sed(args)
+    if name == "git":
+        return _ro_git(args)
+    if name == "gh":
+        return _ro_gh(args)
+    if name in ("uniq", "xxd") and len([a for a in args if not a.startswith("-")]) > 1:
+        return f"`{name}` writes its second file argument"
+    if name == "find":
+        for k, a in enumerate(args):
+            if a in ("-delete", "-fprint", "-fprint0", "-fprintf", "-fls"):
+                return f"`find {a}` deletes or writes files"
+            if a in ("-exec", "-execdir", "-ok", "-okdir"):
+                inner = args[k + 1:]
+                inner = inner[:next((j for j, x in enumerate(inner) if x in (";", "+")), len(inner))]
+                why = _ro_program(inner, cwd, member) if inner else None
+                if why:
+                    return why
+    if name == "xargs":
+        i, takes = 0, {"-I", "-n", "-P", "-L", "-d", "-E", "-s", "-a", "-J", "-R", "-S"}
+        while i < len(args) and args[i].startswith("-"):
+            i += 2 if args[i] in takes else 1
+        return _ro_program(args[i:], cwd, member) if args[i:] else None
+    return None
+
+
+def _proc_subst(text: str) -> bool:
+    """True when the shell runs a process substitution, `<(…)` or `>(…)`, outside quotes."""
+    q, i = None, 0
+    while i < len(text):
+        c = text[i]
+        if q:
+            q = None if c == q else q
+            i += 2 if c == "\\" and q == '"' else 1
+            continue
+        if c == "\\":
+            i += 2
+            continue
+        if c in "'\"":
+            q = c
+        elif c in "<>" and text[i + 1:i + 2] == "(":
+            return True
+        i += 1
+    return False
+
+
+def _redirect_ok(target, cwd) -> bool:
+    if target in ("/dev/null", "/dev/stdout", "/dev/stderr", "-"):
+        return True
+    p = resolve(target, cwd)
+    return p != UNKNOWN and is_temp(p)
+
+
+def readonly_refusal(cmd: str, cwd, member=None) -> str | None:
+    """Why a review or read-only lane may not run `cmd` (spec F7, consultation §4), or None when every segment is on
+    the read-only allowlist: no command substitution or process substitution, a command that parses, redirects only to
+    /dev/null or a temp folder, and each program a reader, a read of git, gh or dev, one of the project's checks, or a
+    script from crew member `member`'s own scratch folder."""
     if not cmd or not str(cmd).strip():
         return None
+    if _expansions(cmd) or _proc_subst(strip_heredocs(cmd)):
+        return READONLY_REASON.format(what="`$(…)`, backticks, `<(…)` and `>(…)` run commands the guard cannot judge")
+    segs = split_commands(cmd)
+    if segs is None:
+        return READONLY_REASON.format(what="the guard cannot parse this command, so it cannot tell what it writes")
+    here = str(cwd or os.getcwd())
+    for argv0, redirs in segs:
+        argv0, extra = list(argv0), []
+        while any(t in (">|", ">>|") for t in argv0):  # `>|` reaches argv as a token; its target follows it
+            k = next(j for j, t in enumerate(argv0) if t in (">|", ">>|"))
+            extra += argv0[k + 1:k + 2] or [""]
+            del argv0[k:k + 2]
+        bad = next((r for r in list(redirs) + extra if not _redirect_ok(r, here)), None)
+        if bad is not None:
+            return READONLY_REASON.format(what=f"the redirect to `{bad}` writes a file")
+        argv = _unwrap(argv0)
+        if argv and os.path.basename(argv[0]) in ("cd", "pushd") and len(argv) > 1 and argv[1] != "-":
+            here = str(resolve(argv[1], here))
+        why = _ro_program(argv0, here, member)
+        if why:
+            return READONLY_REASON.format(what=why)
+    return None
+
+
+def member_level(member) -> str | None:
+    """The tool level crew member `member` (an id, as hooks._member_folder gives it) works with by the roster:
+    all, build, review or read; None for an agent the roster does not know."""
+    if not member:
+        return None
+    from . import crew
+    m = crew.member(str(member))
+    t = (m or {}).get("tools")
+    return t if t in TOOL_LEVELS else None
+
+
+def _strictest(*levels) -> str | None:
+    known = [lv for lv in levels if lv in TOOL_LEVELS]
+    return max(known, key=TOOL_LEVELS.index) if known else None
+
+
+def _record(action, target="", detail="", outcome="ok", **extra):
+    try:
+        from . import audit
+        audit.record(action, target, detail, outcome, **extra)
+    except Exception:
+        pass
+
+
+def failopen(where: str, exc: BaseException):
+    """A guard rule that failed lets the call run (workspace rules fail open, principle P4); the failure is recorded
+    as guard.failopen, so a rule that never runs is seen (spec G12)."""
+    _record("guard.failopen", where, f"{type(exc).__name__}: {exc}"[:300], "allow", rule=where)
+
+
+def crew_shell_verdict(cmd: str, cwd, scope=None, member=None, level=None, base=None):
+    """For a crew member's shell command that devkit did not route to its lane: ("deny", why) when it runs a
+    `dev progress` or `dev crew` call that would act as Morpheus or change the team's crew, `dev crew sync` that
+    writes outside the member's step scope, writes or deletes in the session scratchpad outside the member's own
+    folder, or, in a review or read-only lane, runs anything the read-only allowlist does not name; None otherwise.
+    `scope`: the step scope, globs or layers of globs; `member`: the member's id; `level`: the lane's tool level
+    (progress.lane_tools), of which the stricter of it and the member's roster level counts; `base`: the folder the
+    scope globs count from (scope_base)."""
+    if not cmd or not str(cmd).strip():
+        return None
+    cwd = cwd or os.getcwd()
     if member:
-        v = _ScratchShell(cmd, cwd or os.getcwd(), member).run()
+        v = _ScratchShell(cmd, cwd, member).run()
         if v:
             return v
-    calls = shell_calls(cmd, cwd or os.getcwd())
+    try:
+        level = _strictest(level, member_level(member))
+    except Exception as e:  # the roster cannot be read: the lane keeps the level it was given
+        failopen("crew-readonly", e)
+        level = _strictest(level)
+    calls = shell_calls(cmd, cwd)
     if calls is None:  # the shell would read it another way than the tokenizer: judge the words, refuse a lane name
-        return deny(LANE_REASON) if _LANE_TEXT.search(cmd) else None
+        if _LANE_TEXT.search(cmd):
+            return deny(LANE_REASON)
+        return deny(readonly_refusal(cmd, cwd, member)) if level in ("review", "read") else None
     for argv, code in calls:
         for kind, args in _dev_calls(argv, code):
             if kind == "lane":
@@ -2134,9 +2590,96 @@ def crew_shell_verdict(cmd: str, cwd, scope=None, member=None):
                 return deny(f"`dev crew {sub}` changes the team's crew or briefs a member: Morpheus runs it. Ask him "
                             f"with `dev crew ask \"…\"` and say what should change and why.")
             if kind == "sync":
-                v = _sync_verdict(argv, cwd or os.getcwd(), scope)
+                v = _sync_verdict(argv, cwd, scope, base)
                 if v:
                     return v
+    if level in ("review", "read"):
+        why = readonly_refusal(cmd, cwd, member)
+        if why:
+            return deny(why)
+    return None
+
+
+# Write detection, the backstop of read-only lanes (spec F7): the hooks take worktree_state of the lane's repository
+# before and after each of its shell calls; written_paths between the two is what the call wrote (scope.write), even
+# when an allowed check (a test run) did it.
+
+def worktree_state(top) -> dict | None:
+    """What `git status` lists in the checkout at `top`, as {path: (status, size, mtime_ns)} for every changed or
+    untracked path (ignored paths left out); None outside a repository or when git fails."""
+    if not top or not os.path.isdir(str(top)):
+        return None
+    rc, out, _ = core.sh(["git", "-C", str(top), "status", "--porcelain=v1", "-z", "--untracked-files=all",
+                          "--no-renames", "--ignore-submodules=dirty"], timeout=10)
+    if rc != 0:
+        return None
+    state = {}
+    for entry in out.split("\0"):
+        if len(entry) < 4:
+            continue
+        path = entry[3:]
+        try:
+            st = os.lstat(os.path.join(str(top), path))
+            state[path] = (entry[:2], st.st_size, st.st_mtime_ns)
+        except OSError:
+            state[path] = (entry[:2], None, None)
+    return state
+
+
+def written_paths(before, after) -> list:
+    """The paths a call wrote, from worktree_state before and after it: new in the list, changed again (status, size
+    or time), or gone from it (restored to the committed version). [] when either state is unknown."""
+    if before is None or after is None:
+        return []
+    return sorted(p for p in set(before) | set(after) if before.get(p) != after.get(p))
+
+
+# A member's scope protects its files from Morpheus in every session of the repository, not only its own (spec F7,
+# G13): hooks._crew_limits asks scope_owner_across before an edit of the main session.
+
+def _run_checkout(run) -> str:
+    """The checkout a run works in: its session's folder (the session record's `top`), else its repository's main
+    checkout under the workspace; '' when neither is known."""
+    try:
+        from . import progress
+        sess = core.read_json(progress.session_path(run.get("agent") or "claude", str(run.get("session") or "-")),
+                              {}) or {}
+        if isinstance(sess, dict) and sess.get("top"):
+            return str(sess["top"])
+    except Exception as e:
+        failopen("crew-ownership", e)
+    main = Path(DEV) / str(run.get("project") or "")
+    return str(main) if run.get("project") and (main / ".git").exists() else ""
+
+
+def scope_owner_across(path, runs=None, me_session="", checkout_of=None):
+    """The crew member of a live run that owns `path` -> (who, globs) or None: a running lane, in a run of another
+    session (any session when `me_session` is ''), working in the checkout that holds `path` (worktrees of one
+    repository hold separate files), whose own scope or the scope of an open step it owns holds the path."""
+    if runs is None:
+        from . import progress
+        runs = progress.active_runs()
+    checkout_of = checkout_of or _run_checkout
+    ap = real(path)
+    for run in runs or []:
+        if not isinstance(run, dict) or run.get("state") == "done" or \
+                (me_session and str(run.get("session") or "") == str(me_session)):
+            continue
+        top = checkout_of(run)
+        if not top or not is_under(Path(ap), Path(real(top))):
+            continue
+        rel = os.path.relpath(ap, real(top))
+        for k, ln in (run.get("agents") or {}).items():
+            if not isinstance(ln, dict) or ln.get("state") != "running":
+                continue
+            globs = set(ln.get("scope") or [])
+            for st in run.get("plan") or []:
+                if isinstance(st, dict) and st.get("owner") == k and st.get("state") not in ("done", "skipped"):
+                    globs.update(st.get("scope") or [])
+            hit = any(_glob_hit(ap, os.path.expanduser(g)) if g.startswith(("/", "~")) else _glob_hit(rel, g)
+                      for g in globs if isinstance(g, str) and g)
+            if hit:
+                return (ln.get("persona") or ln.get("label") or "a crew member", sorted(globs))
     return None
 
 
@@ -2166,24 +2709,25 @@ def _in_checkout(path) -> bool:
     return bool(d and core.gitout(d, "rev-parse", "--show-toplevel"))
 
 
-def member_write_exempt(path, cwd, scope=None, member=None) -> bool:
+def member_write_exempt(path, cwd, scope=None, member=None, base=None) -> bool:
     """True when a crew member may write `path` with a file tool whatever its tool level or step scope: a scratch file
     (a temp folder outside the repository it works in; in the session scratchpad only its own folder when `member` is
     given), or a plan of its own project in the handoff repository (plans/<project>/) that every layer of its step
-    scope names. That is how a review-only member such as The Oracle writes the spec it was asked for."""
+    scope names. That is how a review-only member such as The Oracle writes the spec it was asked for. `base`: the
+    lane's repository (scope_base), which also names its project when the session's folder is ~."""
     if not path:
         return False
     ap = os.path.normpath(os.path.join(str(cwd), str(path)))
     if _SCRATCHPAD.match(real(ap)):  # the session scratchpad: the member's own folder
         return not scratch_refusal(ap, member)
-    top = core.gitout(cwd, "rev-parse", "--show-toplevel") or str(cwd)  # as the hooks' scope check counts it
+    top = str(base) if base else (core.gitout(cwd, "rev-parse", "--show-toplevel") or str(cwd))
     if core.is_temp(ap) and not is_under(Path(real(ap)), Path(real(top))) and not _in_checkout(ap):
         return True
-    pid = current_project(cwd)
+    pid = current_project(base or cwd)
     if not pid or not is_under(Path(real(ap)), Path(real(core.HANDOFF)) / "plans" / pid):
         return False
     layers = _layers(scope)
-    return bool(layers) and all(scope_holds(ap, cwd, layer) for layer in layers)
+    return bool(layers) and all(scope_holds(ap, cwd, layer, base=base) for layer in layers)
 
 
 def check(tool: str, tool_input: dict, cwd: str, agent: str):

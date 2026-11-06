@@ -310,7 +310,8 @@ class HookWiringTests(unittest.TestCase):
                                                       "cwd": CWD, "tool_input": {"file_path": str(path)}})
 
     def test_read_only_crew_commands_and_mentions_pass_in_a_subagent(self):
-        for cmd in ("dev crew graph", "dev crew raci backend", 'git commit -m "explain dev progress step"'):
+        # o1 is The Oracle, review-only: its shell runs only reads (spec F7), so the mention is in a read
+        for cmd in ("dev crew graph", "dev crew raci backend", 'git log --grep "explain dev progress step"'):
             with self.subTest(cmd=cmd):
                 self.assertIsNone(self.lane(cmd))
         self.assertIn("command of its own", self.lane("cd lib && dev progress step x") or "")
