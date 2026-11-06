@@ -256,11 +256,11 @@ Live progress of long agent work, with active time, a critical-path ETA and a pl
 
 | Command | Effect |
 | --- | --- |
-| `dev progress start "<goal>" [--plan "a=30m; b=1h after a; c"] [--estimate 2h] [--steps N] [--mode guided\|auto]` | Starts a run for the current session. Each plan step can carry an estimate and the steps it waits for; steps without an estimate share what `--estimate` leaves. `--mode` sets who takes the developer's decisions ([The crew](crew.md#guided-or-automatic)). Prints how long similar runs took here |
+| `dev progress start "<goal>" [--plan "a=30m; b=1h after a [backend]; c"] [--estimate 2h] [--steps N] [--mode guided\|auto] [--replace --why "…"]` | Starts a run for the current session. While the session's run is live, a second start is refused: finish it with `dev progress done`, or replace it with `--replace --why "…"`, which keeps the reason in the new run. Each plan step can carry an estimate, the steps it waits for, and its kind of work in brackets: an id from `dev crew raci`, which decides the RACI check and the approver ([The crew › Kinds of work](crew.md#kinds-of-work-and-the-raci)); an unknown id is refused. Steps without an estimate share what `--estimate` leaves. `--mode` sets who takes the developer's decisions ([The crew](crew.md#guided-or-automatic)). Prints how long similar runs took here |
 | `dev progress step "<what finished>" --check "<evidence>" [--step <n or name>] [--next "…"] [--force]` | Closes the running step (or the one named) with its evidence, and prints the update, which is the status block with the plan under it, then the exact change made. Refused when the description does not match the step, a crew member still owns it, or its dependencies are open; `--no-check` when there is nothing to verify |
 | `dev progress note "<what is happening>" [--next "…"]` | An update while a step is still running: recorded and printed as the status block (Check `–` the step is still running), and no step changes state. From a crew member, it stays in its lane |
-| `dev progress add "<name>=<estimate> [after …]" [--why "…"]` | Adds a step found during the work; add it when it starts. From a crew member, the step goes to its own lane |
-| `dev progress assign <step> --to <member> [--scope "<globs>"] [--why "…"]` | Hands a step to a crew member; its time is that member's, and the guard keeps its edits inside the scope. Refused when the crew's RACI does not make that member Responsible for the step's kind of work, unless `--why` gives the reason, which is recorded |
+| `dev progress add "<name>=<estimate> [after …] [<id>]" [--why "…"]` | Adds a step found during the work; add it when it starts. `[<id>]` declares its kind of work, as in a plan. From a crew member, the step goes to its own lane |
+| `dev progress assign <step> --to <member> [--scope "<globs>"] [--activity ID] [--why "…"]` | Hands a step to a crew member; its time is that member's, and the guard keeps its edits inside the scope. `--activity` declares the step's kind of work (an id from `dev crew raci`, such as `backend` or `ux`), so the RACI check and the approver do not depend on the language of the step's name. Refused when the crew's RACI does not make that member Responsible for the step's kind of work, unless `--why` gives the reason, which is recorded |
 | `dev progress begin <step>` | Starts a step in parallel with the running one |
 | `dev progress reopen <step> --why "…"` · `dev progress skip <step> --why "…"` | Undoes a wrong close, or skips a step on purpose |
 | `dev progress block "<why>" [--next "<what is needed>"]` | The run is blocked; prints the update and sends a desktop notification |
@@ -271,8 +271,11 @@ Live progress of long agent work, with active time, a critical-path ETA and a pl
 
 Estimates accept `45m`, `1h30m`, `2h`, or a number of minutes. Inside a subagent, `dev progress start`, `step`, and
 `add` write to that subagent's own lane (the hooks pass its id), never to the main plan; `assign`, `begin`, `reopen`,
-and `skip` change the main plan and are refused there. Run them as a command of their own: inside `&&`, a pipe,
-`$(…)`, or a redirect, the guard refuses them.
+`skip`, `done`, and `start --replace` change the main plan and are refused there. Run them as a command of their
+own: inside `&&`, a pipe, `$(…)`, or a redirect, the guard refuses them. devkit records every shell call with the
+agent that made it, and a command is Morpheus's only when such a call holds it as typed. Morpheus types these
+commands himself too: through a script or another shell, they are refused (see [The crew › Who is
+calling](crew.md#who-is-calling)).
 
 ### `dev time [--days N] [-p PROJECT]`
 
@@ -311,7 +314,7 @@ devkit's specialist agents. See [The crew](crew.md).
 | `dev crew set <member> <field> "<value>" --why "…"` | Changes a member's definition for the whole team (`name`, `title`, `role`, `summary`, `goal`, `skills`, `procedure`, `tools`, `tier`, and the other fields), recorded in the handoff repository. List fields take `"a; b; c"`; `procedure` takes JSON. The members get it in their briefs; Codex roles with `dev install --only codex` |
 | `dev crew history` | The team's changes to the crew and the RACI, newest first: what changed, who changed it, and why |
 | `dev crew show <name>` | One member: role, personality, when to use it, skills, tools, model tier, keywords |
-| `dev crew brief <name> "<task>" [--scope "<globs>"] [--step <step>]` | A ready brief for the Agent tool or `spawn_agent`, the exact launch line for Claude Code and Codex, and the `dev progress assign` command that links the lane |
+| `dev crew brief <name> "<task>" [--scope "<globs>"] [--step <step>] [--activity ID]` | A ready brief for the Agent tool or `spawn_agent`, the exact launch line for Claude Code and Codex, and the `dev progress assign` command that links the lane. `--activity` declares the task's kind of work, which picks the brief's skills, knowledge, and known pitfalls in any language; without it, the member's Responsible kind of work decides |
 | `dev crew route "<task>" [--files a,b]` · `dev crew route --plan [--apply]` | The best members for a task, with scores and reasons; or a member for every unowned plan step |
 | `dev crew delegate "<task>" [--to <name>\|auto] [--scope …] [--after <step>] [--estimate 30m] [--files a,b]` | A step for another member, with who asked; joins a working member's lane, or waits for Morpheus to launch it |
 | `dev crew decline "<step>" --why "…"` | Hands a delegated step back to Morpheus |
@@ -326,21 +329,22 @@ devkit's specialist agents. See [The crew](crew.md).
 Learn from mistakes: blameless lessons in the handoff repository, recalled in every session, counted when they repeat,
 and turned into automation. The guide is [Lessons](lessons.md).
 
-### `dev lesson [add | ls | show | recur | prevent | retire | restore | scan | review] [-p PROJECT | -i SLUG | --global]`
+### `dev lesson [add | anchor | ls | show | recur | prevent | retire | restore | scan | review] [-p PROJECT | -i SLUG | --global]`
 
 The scope is the project you are in (or `-p`), an initiative (`-i`), or `--global`. `<lesson>` is an id, a unique
 start of one, or words of a title.
 
 | Command | Effect |
 | --- | --- |
-| `dev lesson add "<title>" --cause "…" --prevent "…" [options]` | Records a lesson; the root cause and the prevention are required. Options: `--kind bug\|mistake\|process\|tooling\|security\|performance\|design`, `--severity low\|medium\|high`, `--happened`, `--fix`, `--detect`, `--evidence` (repeatable), `--tag` (repeatable), `--retire-when`, `--why` |
-| `dev lesson` · `dev lesson ls [--search WORDS] [--all]` | The lessons of this scope plus the global ones, strongest first; `--all` lists every scope and retired lessons |
+| `dev lesson add "<title>" --cause "…" --prevent "…" [options] [anchors]` | Records a lesson; the root cause and the prevention are required. Options: `--kind bug\|mistake\|process\|tooling\|security\|performance\|design`, `--severity low\|medium\|high`, `--happened`, `--fix`, `--detect`, `--evidence` (repeatable), `--tag` (repeatable), `--retire-when`, `--why`. Anchors say where it applies, each repeatable: `--file "<glob>"`, `--command "<command words>"`, `--activity <id>` (a kind of work from `dev crew raci`), `--error "<text the tool output shows>"`, `--stack <stack>`. Without anchors, only the session start can recall it, and the command says so |
+| `dev lesson anchor <lesson> --why "…" [--file …] [--command …] [--activity …] [--error …] [--stack …]` | Adds anchors to a lesson, for example one written before anchors existed; they join the ones it has. An anchor cannot contain a comma, and an unknown kind of work is refused |
+| `dev lesson [--search WORDS] [--all] [ls]` | The lessons of this scope plus the global ones, strongest first. `--search` keeps those with the words in the title or any section, and `--all` lists every scope and retired lessons. Both options belong to `dev lesson` itself: put them before `ls`, or leave `ls` out, because after `ls` they are refused |
 | `dev lesson show <lesson>` | All fields, sections, and the history |
 | `dev lesson recur <lesson> [--evidence "…"] [--why "…"]` | It happened again: counts the repeat, adds the evidence, and reopens a retired lesson |
 | `dev lesson prevent <lesson> --by test\|lint\|type\|guard\|skill\|ci\|rule\|doc --ref "…" --why "…"` | Automation now prevents it; the lesson leaves the session context |
 | `dev lesson retire <lesson> --why "…"` | It no longer applies |
 | `dev lesson restore <lesson> --why "…"` | Brings an archived lesson back as open |
-| `dev lesson scan [--days N]` | Signals worth a lesson that have none yet: reverts, fixes, repeated guard refusals, missed status blocks, corrections, bouncing tasks (default 14 days) |
+| `dev lesson scan [--days N]` | Signals worth a lesson that have none yet: reverts, fixes, repeated guard refusals, missed status blocks, bouncing tasks (default 14 days) |
 | `dev lesson review` | Recurring lessons that are not prevented, and open lessons not seen for four months |
 
 ### `dev sleep [--dry-run] [--quiet]`
@@ -641,7 +645,7 @@ a fresh fetch, that `origin` has nothing you lack, no WIP or fixup commits, a fi
 
 | Command | Effect |
 | --- | --- |
-| `dev pr create [--title T] [--base B] [--draft] [--body-file F \| --edit] [--ci-passed] [--lang L] [--dry-run]` | Opens the PR of the pushed branch with a Conventional title and the body from the PR template, pre-filled with the commits, the local CI result, and the links. Empty "What and why" or "How to verify" sections are refused unless `--draft`. `--dry-run` prints the title, the template used, the evidence, and the body; `--body-file -` reads standard input |
+| `dev pr create [--title T] [--base B] [--draft] [--fill \| --body-file F \| --edit] [--ci-passed] [--lang L] [--dry-run]` | Opens the PR of the pushed branch with a Conventional title and the body from the PR template, pre-filled with the commits, the local CI result, and the links (`--fill`, the default). Empty "What and why" or "How to verify" sections are refused unless `--draft`. `--dry-run` prints the title, the template used, the evidence, and the body; `--body-file -` reads standard input |
 | `dev pr view [n] [--body] [--json]` | One-line state: branches, checks, review, conflicts, size, author, age, address |
 | `dev pr ls [--all] [--all-projects [--offline]] [--json]` | Your open PRs and those waiting for your review; `--all` adds the others; `--all-projects` covers every project |
 | `dev pr checks [n] [--watch [--fail-fast] [--interval S] [--timeout MIN]] [--lines N] [--json]` | Pass, fail, and pending counts; each failing job with its trimmed log (25 lines). Exits with `0` (passed), `1` (failed), or `8` (pending). `--watch` waits and prints only the result |
@@ -649,7 +653,7 @@ a fresh fetch, that `origin` has nothing you lack, no WIP or fixup commits, a fi
 | `dev pr ready [n] [--lang L]` | Marks a draft ready after checking its title and required sections |
 | `dev pr comment [n] -m "…" \| --body-file F` | Comments on a PR |
 | `dev pr review [n] --approve \| --request-changes \| --comment [-m "…"]` | Reviews a PR; `--request-changes` and `--comment` need a message |
-| `dev pr diff [n] [--patch \| --name-only] [--json]` | Files changed with +/−, largest first, or the full patch |
+| `dev pr diff [n] [--stat \| --patch \| --name-only] [--json]` | Files changed with +/−, largest first (`--stat`, the default), the full patch, or the names only |
 
 ### `dev run ls | view | rerun`
 
@@ -927,20 +931,37 @@ devkit's scheduled background work as launchd jobs: `sync`, `sleep`, `gc`, `repa
 | `dev jobs enable <job>` · `dev jobs disable <job> [--why "…"]` | Turns a job on or off |
 | `dev jobs install` | Writes and loads every enabled job from the configuration, unloads the ones turned off, and replaces the old `com.devkit.sync` agent |
 
-### `dev audit [--days N] [--action PREFIX] [--actor TEXT] [--team] [--json] [-n N]`
+### `dev audit [verify | export | show <id> | stats | config] [filters] [--format F] [-o FILE]`
 
 The audit trail: every changing `dev` command, guard refusal, blocked settings change, missed status block, handoff
 write and push, settings repair, cleanup, and job run, with secrets redacted. See
 [Scheduled jobs and the audit trail › The audit trail](jobs-and-audit.md#the-audit-trail).
 
+| Command | Effect |
+| --- | --- |
+| `dev audit [filters]` | The matching records, newest first |
+| `dev audit verify [--team]` | Checks that each record is chained to the one before it and reports the first broken link; `--team` also checks the handoff repository's copies |
+| `dev audit export --format jsonl\|csv\|ocsf\|cef [-o FILE] [filters]` | The matching records in one format; `-o` writes a file only you can read, and the export itself is recorded |
+| `dev audit show <id>` | One record in full, as JSON (a unique start of its id works) |
+| `dev audit stats [filters]` | Record counts by category and by day |
+| `dev audit config` | The audit settings in effect |
+
 | Option | Effect |
 | --- | --- |
-| `--days N` | The window (default 7; fractions work) |
+| `--days N` | The window (default 7, unless `--since` or `--until`; fractions work) |
+| `--since DATE` · `--until DATE` | From or up to a date, `YYYY-MM-DD` or `YYYY-MM-DDTHH:MM` in local time; `--until` is included |
 | `--action PREFIX` | Only actions that start with it: `guard`, `job`, `dev.push`, `handoff` |
 | `--actor TEXT` | Only records whose `user@host agent` contains it |
+| `-p PROJECT` · `--member NAME` | One project (`owner/repo`), or one crew member (`Tank`) |
+| `--category C` | `change`, `decision`, `refusal`, `security`, `lifecycle`, `job`, `release`, `data`, or `config` |
+| `--severity S` | This severity or a higher one: `info`, `notice`, `warning`, `critical` |
+| `--outcome O` | `ok`, `blocked`, `failed`, or `recorded` |
+| `--grep REGEX` | A regular expression over the action, target, detail, and reason |
 | `--team` | Every machine, from `audit/` in the handoff repository, plus this one |
-| `--json` | The records as JSON |
+| `--format F` · `--json` | `table`, `json`, or `csv` (`--json` is `--format json`); for `export`, `jsonl`, `csv`, `ocsf`, or `cef` |
+| `-o FILE`, `--out FILE` | With `export`: write to this file instead of the terminal |
 | `-n N` | The newest N records (default 60) |
+| `--quiet` | With `--publish`, the `audit` job's command (see [Internal commands](#internal-commands)): prints nothing |
 
 ## Environment
 
@@ -985,6 +1006,22 @@ same text.
 recorded evidence: the session ran, the SessionStart hook recorded it, the guard blocked a tool-prefixed branch, the
 reply carried the status block (and its format score), the global instructions were loaded, and the devkit plugin
 skills are visible. `--model` picks the model for that session, and `-v` prints the agent's reply.
+
+### `dev desktop pack | status [--no-validate] [--json]`
+
+The devkit extension for Claude Desktop's chat and Cowork (see [Agents › The devkit
+extension](agents.md#the-devkit-extension)).
+
+| Command | Effect |
+| --- | --- |
+| `dev desktop status [--json]` | The installed version, whether it is enabled, since when, the **devkit folder** setting, and whether its launcher finds your devkit checkout |
+| `dev desktop pack [--no-validate]` | Builds the bundle in `dist/desktop/devkit-<version>.mcpb` and validates it with the `mcpb` CLI; `--no-validate` skips that check (no `npx` download). `dev install --only desktop` packs it and opens it in Claude Desktop |
+
+### `dev mcp`
+
+Serves devkit's tools over MCP (the Model Context Protocol) on standard input and output. The Claude Desktop
+extension's launcher runs it; you do not run it yourself. Each tool runs a `dev` command without a shell and with a
+timeout.
 
 ### `dev config [diff | repair | show | edit | validate | lock | unlock | status] [--quiet]`
 
