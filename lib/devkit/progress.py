@@ -1610,12 +1610,46 @@ def _keep_human(agent: str, sid: str, new: list, extra=None):
                session=f"{agent}:{sid}", answer=e.get("answer") or "")
 
 
+_SESSION_ID = re.compile(r"[A-Za-z0-9_-]{1,80}")
+
+
+def harness_transcript(agent: str, sid: str) -> str:
+    """The session's own transcript, where the harness writes it (spec C5, release blocker B1): Claude Code's
+    ~/.claude/projects/<project folder>/<session id>.jsonl, found from the session id alone, never from a path a
+    hook event or a caller names. '' when there is none or more than one, or the id is not a plain session id."""
+    if agent != "claude" or not _SESSION_ID.fullmatch(str(sid or "")):
+        return ""
+    try:
+        hits = sorted((core.CLAUDE_HOME / "projects").glob(f"*/{sid}.jsonl"))
+    except OSError:
+        return ""
+    return str(hits[0]) if len(hits) == 1 else ""
+
+
+def _foreign_transcript(agent: str, sid: str, named) -> bool:
+    """A hook event that names a transcript other than the session's own (a forged event or path, B1): its
+    evidence is refused and recorded. An event that names none, or the session's own, is fine."""
+    if agent != "claude" or not named:
+        return False
+    named = str(named)
+    own = harness_transcript(agent, sid)
+    if own:
+        return os.path.realpath(named) != os.path.realpath(own)
+    p = Path(named)  # not written yet (the first prompt): it must be where the harness will write it
+    return not (p.name == f"{sid}.jsonl" and p.parent.parent == core.CLAUDE_HOME / "projects")
+
+
 def _entry(agent, channel, covers, excerpt, uuid, transcript, run, now, **more) -> dict:
     e = {"ts": now, "agent": agent, "channel": channel, "covers": covers, "excerpt": str(excerpt)[:200],
          "transcript_uuid": str(uuid or ""), "transcript": str(transcript or ""),
          "run": (run or {}).get("started"), "used": None, "expires": None, "repo": (run or {}).get("project") or ""}
     e.update(more)
     return e
+
+
+def _refuse_forged(agent: str, sid: str, named, what: str):
+    _audit("crew.evidence-refused", what[:200], f"the event names the transcript {core.tilde(str(named))[:200]}, "
+           f"not the session's own: its evidence counts for nothing (B1)", "refused", session=f"{agent}:{sid}"[:60])
 
 
 def on_human_prompt(agent: str, data: dict, now: float | None = None) -> list:
@@ -1628,26 +1662,29 @@ def on_human_prompt(agent: str, data: dict, now: float | None = None) -> list:
     text = str(data.get("prompt") or "")
     if sess is None or headless(sess) or _RELAYED.search(text):
         return []
+    if _foreign_transcript(agent, sid, data.get("transcript_path")):
+        _refuse_forged(agent, sid, data.get("transcript_path"), "a prompt")
+        return []
     run = load_run(agent, sid)
     live = run if run and run.get("goal") and run.get("state") != "done" else None
-    uuid, tp, new = data.get("prompt_id") or "", data.get("transcript_path") or "", []
+    uuid, tp, new = data.get("prompt_id") or "", harness_transcript(agent, sid), []
     repo = sess.get("project") or (live or {}).get("project") or ""  # a grant holds in this repository only
     for ln in _own_lines(text):
         mt = _APPROVE_LINE.match(ln)
         if mt and live:
             new.append(_entry(agent, "E2", mt.group(1).upper(), ln, uuid, tp, live, now,
-                              answer=(mt.group(2) or "").strip()[:300], repo=repo))
+                              answer=(mt.group(2) or "").strip()[:300], repo=repo, session=sid))
             continue
         mt = _GRANT_LINE.match(ln)
         if mt and mt.group(1).lower() in GRANT_CLASSES:
             new.append(_entry(agent, "E2", f"{mt.group(1).lower()} {mt.group(2)}", ln, uuid, tp, live, now,
-                              expires=now + GRANT_TTL, repo=repo))
+                              expires=now + GRANT_TTL, repo=repo, session=sid))
     if not new and live and _PLAIN_YES.match(text):
         ids = (sess.get("last_shown") or {}).get("ids") or []
         d = _decision(live, ids[0]) if len(ids) == 1 else None
         if d and d.get("state") == "pending" and not d.get("irreversible"):
             new.append(_entry(agent, "E2", d["id"], text.strip(), uuid, tp, live, now, answer="", plain=True,
-                              repo=repo))
+                              repo=repo, session=sid))
     if new or (tp and sess.get("transcript") != tp):
         _keep_human(agent, sid, new, {"transcript": tp} if tp else None)
     return new
@@ -1665,6 +1702,9 @@ def on_question(agent: str, data: dict, now: float | None = None) -> list:
     run = load_run(agent, sid)
     if sess is None or headless(sess) or not run or not run.get("decisions"):
         return []
+    if _foreign_transcript(agent, sid, data.get("transcript_path")):
+        _refuse_forged(agent, sid, data.get("transcript_path"), "a question tool answer")
+        return []
     qs = [q for q in (data.get("tool_input") or {}).get("questions") or [] if isinstance(q, dict)]
     resp = data.get("tool_response") if isinstance(data.get("tool_response"), dict) else {}
     answers = resp.get("answers") if isinstance(resp.get("answers"), dict) else {}
@@ -1679,8 +1719,8 @@ def on_question(agent: str, data: dict, now: float | None = None) -> list:
             continue
         opt = option_of(d, label)
         new.append(_entry(agent, "E1", d["id"], f"{qt[:120]} = {label[:70]}", data.get("tool_use_id"),
-                          data.get("transcript_path"), run, now, answer=(opt or label.strip())[:300],
-                          free=opt is None, question=qt[:800], label=label[:300]))
+                          harness_transcript(agent, sid), run, now, answer=(opt or label.strip())[:300],
+                          free=opt is None, question=qt[:800], label=label[:300], session=sid))
     if shown:
         _mark_shown(agent, sid, shown, now)
     if new:
@@ -1743,14 +1783,18 @@ def _text_of(msg) -> str:
     return "\n".join(b.get("text") or "" for b in c or [] if isinstance(b, dict) and b.get("type") == "text")
 
 
-def confirmed(e: dict) -> bool:
-    """Does the transcript show this entry as the developer's own act? E2: a prompt record with its prompt id,
-    origin human, outside any subagent, holding the line. E1: the question tool's result for its tool_use_id with
-    that answer. Codex transcripts are not read yet (spec F0, S3): its entries rest on the hook alone."""
+def confirmed(e: dict, sid: str = "") -> bool:
+    """Does the session's own transcript (harness_transcript, from the session id: `sid` or the entry's) show this
+    entry as the developer's own act? E2: a prompt record with its prompt id, origin human, outside any subagent,
+    holding the line. E1: the question tool's result for its tool_use_id with that answer. An entry that carries
+    another transcript's path is refused (B1). Codex transcripts are not read yet (spec F0, S3): its entries rest on
+    the hook alone."""
     if e.get("agent") == "codex":
         return True
-    uuid, path = str(e.get("transcript_uuid") or ""), e.get("transcript") or ""
+    uuid, path = str(e.get("transcript_uuid") or ""), harness_transcript("claude", sid or e.get("session") or "")
     if not uuid or not path:
+        return False
+    if e.get("transcript") and os.path.realpath(str(e["transcript"])) != os.path.realpath(path):
         return False
     try:
         for ln in _lines_back(path, json.dumps(uuid).encode()):
@@ -1788,7 +1832,7 @@ def evidence(agent: str, sid: str, pick, now: float | None = None, run=None) -> 
     sess = state.read(session_path(agent, sid)) or {}
     if headless(sess):
         return []
-    return [e for e in sess.get("human") or [] if _live(e, now, run) and pick(e) and confirmed(e)]
+    return [e for e in sess.get("human") or [] if _live(e, now, run) and pick(e) and confirmed(e, sid)]
 
 
 def _consume(agent: str, sid: str, e: dict, now: float) -> dict | None:
@@ -1966,14 +2010,13 @@ def evidence_check(rec: dict, path, line):
     if ev.get("channel") not in ("E1", "E2") or agent != "claude":
         return None
     uuid = str(ev.get("transcript_uuid") or "")
-    tp = (state.read(session_path(agent, sid)) or {}).get("transcript") or \
-        next(iter(sorted((core.HOME / ".claude" / "projects").glob(f"*/{sid}.jsonl"))), "")
+    tp = harness_transcript(agent, sid)  # the harness's own file, never a path a record or an event names (B1)
     if not tp or not Path(tp).exists():
         old = time.time() - float(rec.get("ts") or 0) > TRANSCRIPT_DAYS * 86400
         return None if old else (f"evidence {ev['channel']} {uuid or '-'} for {rec.get('target')}: the session's "
                                  f"transcript is gone, so no message of the developer backs it")
     e = {"agent": agent, "channel": ev["channel"], "transcript_uuid": uuid, "transcript": str(tp)}
-    if not confirmed(e):
+    if not confirmed(e, sid):
         return (f"evidence {ev['channel']} {uuid or '-'} for {rec.get('target')}: no message of the developer in "
                 f"{core.tilde(tp)} backs it")
     return None

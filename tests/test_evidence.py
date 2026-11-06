@@ -19,7 +19,7 @@ from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "lib"))
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from devkit import audit, hooks, progress as pg  # noqa: E402
+from devkit import audit, core, hooks, progress as pg  # noqa: E402
 from test_progress import TempState, launch  # noqa: E402
 
 SETTINGS = Path(__file__).resolve().parents[1] / "config" / "claude" / "settings.json"
@@ -35,9 +35,11 @@ class EvidenceCase(unittest.TestCase):
         self.state = TempState().__enter__()
         self.addCleanup(self.state.__exit__, None, None, None)
         self.root = Path(self.state.tmp.name)
-        self.transcript = self.root / "transcript.jsonl"
+        self.transcript = self.root / ".claude" / "projects" / "-repo" / "s1.jsonl"  # the harness's own (B1)
+        self.transcript.parent.mkdir(parents=True)
         self.transcript.write_text("")
-        for p in (mock.patch.object(hooks, "STATE", self.root), mock.patch.object(pg, "_ci", lambda *a: "")):
+        for p in (mock.patch.object(hooks, "STATE", self.root), mock.patch.object(pg, "_ci", lambda *a: ""),
+                  mock.patch.object(core, "CLAUDE_HOME", self.root / ".claude")):
             p.start()
             self.addCleanup(p.stop)
         self.n = 0
