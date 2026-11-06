@@ -12,6 +12,7 @@ errors, logs them to ~/.local/state/devkit/logs/hooks.log and exits 0.
 """
 from __future__ import annotations
 
+import io
 import json
 import re
 import os
@@ -1298,7 +1299,84 @@ HANDLERS = {"session-start": session_start, "stop": stop, "session-end": session
             "statusline": statusline}
 
 
+# --------------------------------------------------------------------------- payload capture (spec C9)
+
+CAPTURES = STATE / "captures"
+CAPTURE_KEEP = 20  # captures kept per event (tool events: per event and tool)
+CAPTURE_CUT = 200  # characters kept of prompts, tool input and output, and the last assistant message
+CAPTURE_CUT_KEYS = ("prompt", "tool_input", "tool_response", "last_assistant_message")
+_CAPTURE_TOKEN = re.compile(r"(?i)\bbearer\s+[a-z0-9._~+/=-]{8,}|\beyJ[a-z0-9_-]{8,}\.[a-z0-9_-]{8,}\.[a-z0-9_-]{4,}")
+_CAPTURE_SECRET_KEY = re.compile(r"(?i)token|secret|passw|api[_-]?key|authorization|cookie|credential")
+
+
+def capture_enabled() -> bool:
+    return os.environ.get("DEVKIT_HOOK_CAPTURE", "").strip() == "1"
+
+
+def _scrub(value, cut: bool, key: str = ""):
+    """A payload value with tokens removed; strings under a secret-looking key dropped whole; strings under the
+    CAPTURE_CUT_KEYS cut to CAPTURE_CUT characters."""
+    if isinstance(value, str):
+        if _CAPTURE_SECRET_KEY.search(key):
+            return "[redacted]"
+        from .audit import SECRET
+        s = _CAPTURE_TOKEN.sub("[redacted]", SECRET.sub("[redacted]", value))
+        return s[:CAPTURE_CUT] + "…" if cut and len(s) > CAPTURE_CUT else s
+    if isinstance(value, dict):
+        return {k: _scrub(v, cut or k in CAPTURE_CUT_KEYS, str(k)) for k, v in value.items()}
+    if isinstance(value, list):
+        return [_scrub(v, cut, key) for v in value]
+    return value
+
+
+def capture(event: str, agent: str, data) -> Path | None:
+    """Keep this hook payload, redacted, in STATE/captures/<agent>/<event>-<n>.json: the last CAPTURE_KEEP per event,
+    and per tool for tool events (`PreToolUse.Agent-3.json`), so a Bash call does not push an Agent launch out.
+    Contract tests and spikes are built from these real payloads. The path, or None; never raises."""
+    try:
+        if not isinstance(data, dict):
+            return None
+        name = str(data.get("hook_event_name") or event) + (f".{data['tool_name']}" if data.get("tool_name") else "")
+        name = re.sub(r"[^A-Za-z0-9_.-]", "_", name)[:120]
+        d = CAPTURES / agent
+        d.mkdir(parents=True, exist_ok=True)
+        body = json.dumps(_scrub(data, False), indent=1, sort_keys=True, ensure_ascii=False)
+        pat = re.compile(re.escape(name) + r"-(\d+)\.json$")
+        for _ in range(5):  # two hooks of one event at once: the second takes the next number
+            nums = sorted(int(m.group(1)) for p in d.iterdir() if (m := pat.match(p.name)))
+            n = nums[-1] + 1 if nums else 1
+            path = d / f"{name}-{n}.json"
+            try:
+                fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+            except FileExistsError:
+                continue
+            with os.fdopen(fd, "w") as fh:
+                fh.write(body)
+            for old in nums[:max(0, len(nums) + 1 - CAPTURE_KEEP)]:
+                (d / f"{name}-{old}.json").unlink(missing_ok=True)
+            return path
+    except Exception:
+        _log(f"capture {event} {agent}: {traceback.format_exc()[-300:]}")
+    return None
+
+
+def _capture_stdin(event: str, agent: str):
+    """Read the payload once to capture it, and give the handler the same text on stdin."""
+    try:
+        raw = sys.stdin.read()
+        sys.stdin = io.StringIO(raw)
+        try:
+            data = json.loads(raw) if raw.strip() else {}
+        except ValueError:
+            data = {"unparsed": raw[:CAPTURE_CUT]}
+        capture(event, agent, data)
+    except Exception:
+        _log(f"capture {event} {agent}: {traceback.format_exc()[-300:]}")
+
+
 def run(event: str, agent: str) -> int:
+    if capture_enabled():  # DEVKIT_HOOK_CAPTURE=1: unknown events are captured too (spikes register them)
+        _capture_stdin(event, agent)
     fn = HANDLERS.get(event)
     if not fn:
         return 0

@@ -1,0 +1,26 @@
+{
+ "agent_id": "ae9628de44b28a1d8",
+ "agent_transcript_path": "/Users/dev/.claude/projects/-Users-dev-Development--tmp-f0-repo/043c3a29-420b-4c79-8e10-aef6ee7d46ac/subagents/agent-ae9628de44b28a1d8.jsonl",
+ "agent_type": "general-purpose",
+ "background_tasks": [
+  {
+   "agent_type": "general-purpose",
+   "description": "F0 bg2 probe",
+   "id": "ae9628de44b28a1d8",
+   "status": "running",
+   "type": "subagent"
+  }
+ ],
+ "cwd": "/Users/dev/Development/.tmp/f0/repo",
+ "effort": {
+  "level": "medium"
+ },
+ "hook_event_name": "SubagentStop",
+ "last_assistant_message": "**[Firefly> DevKit · F0 bg2 probe]** f0/repo · `main` · background probe reply\n\n- **Done:** Replied `ok` with no tools, as the probe asked. No files were read or changed.\n- **Check:** – nothing to ver…",
+ "permission_mode": "default",
+ "prompt_id": "030027ac-b032-4c1a-a3e7-4fe0ffed55bc",
+ "session_crons": [],
+ "session_id": "043c3a29-420b-4c79-8e10-aef6ee7d46ac",
+ "stop_hook_active": true,
+ "transcript_path": "/Users/dev/.claude/projects/-Users-dev-Development--tmp-f0-repo/043c3a29-420b-4c79-8e10-aef6ee7d46ac.jsonl"
+}

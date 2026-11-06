@@ -1,0 +1,25 @@
+{
+ "cwd": "/Users/dev/Development/.tmp/f0/repo",
+ "duration_ms": 106,
+ "effort": {
+  "level": "medium"
+ },
+ "hook_event_name": "PostToolUse",
+ "permission_mode": "bypassPermissions",
+ "prompt_id": "e2e95d7a-40e4-4785-8ebd-942160ad22f4",
+ "session_id": "043c3a29-420b-4c79-8e10-aef6ee7d46ac",
+ "tool_input": {
+  "command": "echo S2_REWRITTEN",
+  "description": "Echo S2_ORIGINAL marker"
+ },
+ "tool_name": "Bash",
+ "tool_response": {
+  "interrupted": false,
+  "isImage": false,
+  "noOutputExpected": false,
+  "stderr": "",
+  "stdout": "S2_REWRITTEN"
+ },
+ "tool_use_id": "toolu_01UUiTLjN1KcFk5SQghATcFH",
+ "transcript_path": "/Users/dev/.claude/projects/-Users-dev-Development--tmp-f0-repo/043c3a29-420b-4c79-8e10-aef6ee7d46ac.jsonl"
+}

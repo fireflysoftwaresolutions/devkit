@@ -1,0 +1,21 @@
+{
+ "cwd": "/Users/dev/Development/.tmp/f0/repo",
+ "duration_ms": 0,
+ "effort": {
+  "level": "medium"
+ },
+ "error": "Agent type 'no-such-agent-type' not found. Available agents: claude, claude-security:claude-security, claude-security:explore, claude-security:patch-generator, claude-security:patch-verifier, claude-security:scan-inventory, claude-security:scan-loader, claude-security:scan-redactor, claude-security:scan-researcher, claude-security:scan-verifier, devkit:apoc, devkit:architect, devkit:dozer, devkit:ghost, devkit:hamann, devkit:keymaker, devkit:kid, devkit:link, devkit:lock, devkit:merovingian, devkit:mouse, devkit:neo, devkit:niobe, devkit:oracle, devkit:persephone, devkit:rama, devkit:roland, devkit:sati, devkit:scout, devkit:seraph, devkit:smith, devkit:sparks, devkit:switch, devkit:tank, devkit:trainman, devkit:trinity, Explore, general-purpose, Plan, statusline-setup, web-fetch",
+ "hook_event_name": "PostToolUseFailure",
+ "is_interrupt": false,
+ "permission_mode": "bypassPermissions",
+ "prompt_id": "e2e95d7a-40e4-4785-8ebd-942160ad22f4",
+ "session_id": "043c3a29-420b-4c79-8e10-aef6ee7d46ac",
+ "tool_input": {
+  "description": "F0 bad type",
+  "prompt": "Reply ok.\n\n## devkit · your report\nStart your final report with your status block: **[Firefly> DevKit · F0 bad type]** <project> · `<branch>` · <task>, then - **Done:**, - **Check:** (✓/⚠/✗ + evidence…",
+  "subagent_type": "no-such-agent-type"
+ },
+ "tool_name": "Agent",
+ "tool_use_id": "toolu_01PuEWUaYm2QQ23oPgzKr2Gf",
+ "transcript_path": "/Users/dev/.claude/projects/-Users-dev-Development--tmp-f0-repo/043c3a29-420b-4c79-8e10-aef6ee7d46ac.jsonl"
+}
