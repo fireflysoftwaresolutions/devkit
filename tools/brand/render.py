@@ -82,6 +82,49 @@ def hero_svg(theme="dark", W=1600, H=520):
 </svg>"""
 
 
+def lockup_svg(theme="dark"):
+    """Transparent lockup for terminal art: the prompt-and-spark mark + the devkıt wordmark with its spark."""
+    ink = PAPER if theme == "dark" else CHARCOAL
+    size, base, m = 200, 236, 300
+    dot_x, dot_y = m + 2.133 * size, base - 0.705 * size
+    return f"""<svg xmlns="http://www.w3.org/2000/svg" width="1100" height="300" viewBox="0 0 1100 300">
+{DEFS}
+<g transform="translate(-6,-14) scale(0.62)">
+<path d="M118 206 L196 268 L118 330" fill="none" stroke="{ink}" stroke-width="38" stroke-linecap="round" stroke-linejoin="round"/>
+<path d="M232 334 H318" stroke="{ink}" stroke-width="38" stroke-linecap="round"/>
+<path d="M300 334 C 352 330, 382 280, 380 204" fill="none" stroke="url(#trail)" stroke-width="16" stroke-linecap="round"/>
+{spark(372, 150, 8.5, glow=False)}
+</g>
+<text x="{m}" y="{base}" font-family="Manrope" font-size="{size}" font-weight="700" letter-spacing="-8" fill="{ink}">devkıt</text>
+{spark(dot_x, dot_y, 2.9, glow=False)}
+</svg>"""
+
+
+def terminal_art():
+    """Pre-render the lockup as terminal art (truecolor, 256-colour, ASCII) into lib/devkit/art/."""
+    import shutil
+    if not shutil.which("chafa"):
+        print("chafa not found (brew install chafa): terminal art skipped")
+        return
+    art = ROOT / "lib" / "devkit" / "art"
+    src = ROOT / "assets" / "src"
+    art.mkdir(parents=True, exist_ok=True)
+    for theme in ("dark", "light"):
+        svg = src / f"lockup-{theme}.svg"
+        svg.write_text(lockup_svg(theme))
+        png = src / f"lockup-{theme}.png"
+        run("rsvg-convert", "-w", 1100, "-h", 300, svg, "-o", png)
+        for colors, suffix in (("full", ""), ("256", "-256")):
+            out = subprocess.run(["chafa", "--size", "60x9", "--format", "symbols", "--symbols", "block+border+space",
+                                  "--colors", colors, "--fg-only", "--polite", "on", str(png)],
+                                 capture_output=True, text=True, check=True).stdout
+            (art / f"lockup-{theme}{suffix}.ans").write_text(out)
+    ascii_ = subprocess.run(["chafa", "--size", "60x9", "--format", "symbols", "--symbols", "ascii",
+                             "--colors", "none", "--polite", "on", str(src / "lockup-dark.png")],
+                            capture_output=True, text=True, check=True).stdout
+    (art / "lockup.txt").write_text(ascii_)
+
+
 def run(*args):
     subprocess.run([str(a) for a in args], check=True)
 
@@ -102,6 +145,7 @@ def main():
         png = src / f"hero-{theme}.png"
         run("rsvg-convert", "-w", 1600, "-h", 520, svg, "-o", png)
         run("cwebp", "-quiet", "-q", "92", png, "-o", imgs / f"hero-{theme}.webp")
+    terminal_art()
     print("rendered:", ", ".join(str(p.relative_to(ROOT)) for p in
                                  [passets / "logo.png", passets / "icon.png", imgs / "hero-dark.webp", imgs / "hero-light.webp"]))
 

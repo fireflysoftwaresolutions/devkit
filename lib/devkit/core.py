@@ -44,6 +44,12 @@ DEFAULTS = {
     "docker": {"cpu": 6, "memory": 12, "disk": 80, "vm_type": "vz", "rosetta": True,
                "mount_type": "virtiofs", "autostart": False},
     "editor": "code",
+    "agents": {"claude": True, "codex": True},
+    "claude": {"default_mode": "bypassPermissions"},
+    "codex": {"mode": "full", "approval_policy": "never", "sandbox_mode": "danger-full-access"},
+    "stacks": ["java", "python", "php", "node"],
+    "lock": False,
+    "handoff": {"enforce": True},
 }
 
 

@@ -1,7 +1,10 @@
-# Global npm packages installed by install.sh (pinned major versions are resolved by npm).
-typescript
+# Global npm packages, grouped like the Brewfile (`# @group`); `dev setup` installs the groups of your stacks.
+# @python
 pyright
+# @node
+typescript
 typescript-language-server
-intelephense
 @angular/cli
 @playwright/cli
+# @php
+intelephense

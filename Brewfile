@@ -1,28 +1,35 @@
-# devkit toolchain — `brew bundle --file=Brewfile` (run by install.sh)
-# Core
+# devkit toolchain. `dev setup` installs the `# @core`, `# @docker` and `# @agents` groups plus the stacks you choose.
+# @core
 brew "git"
 brew "gh"
 brew "jq"
 brew "ripgrep"
 brew "fzf"
 brew "python"
-brew "uv"
 brew "node"
+# @python
+brew "uv"
+# @node
 brew "pnpm"
-# Java
+# @java
 brew "openjdk"
 brew "maven"
 brew "gradle"
 brew "jdtls"
-# PHP
+# @php
 brew "php"
 brew "composer"
-# Containers and VMs
+# @docker
 brew "colima"
 brew "lima"
 brew "docker"
 brew "docker-compose"
 brew "docker-buildx"
 brew "docker-credential-helper"
-# Agents (Claude Code uses its native installer, see install.sh)
+# @agents
 cask "codex"
+# @brand  (maintainers only: tools/brand/render.py)
+brew "librsvg"
+brew "webp"
+brew "chafa"
+cask "font-manrope"

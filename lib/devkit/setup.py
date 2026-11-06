@@ -33,7 +33,16 @@ def render(text: str) -> str:
 
 
 def load_conf(name: str):
-    return json.loads(render((CONF / name).read_text()))
+    """A devkit config file, with the values the user chose in `dev setup` (config.json) applied."""
+    data = json.loads(render((CONF / name).read_text()))
+    if name == "claude/settings.json":
+        data.setdefault("permissions", {})["defaultMode"] = CFG["claude"].get("default_mode", "bypassPermissions")
+        if data["permissions"]["defaultMode"] != "bypassPermissions":
+            data.pop("skipDangerousModePermissionPrompt", None)
+    elif name == "codex/config.json":
+        data["settings"]["approval_policy"] = CFG["codex"].get("approval_policy", "never")
+        data["settings"]["sandbox_mode"] = CFG["codex"].get("sandbox_mode", "danger-full-access")
+    return data
 
 
 def backup(path: Path, keep: int = 10):
@@ -526,6 +535,9 @@ def run_install(only=None):
     for name, fn in steps:
         if only and name not in only:
             continue
+        if name in ("claude", "codex") and not CFG.get("agents", {}).get(name, True):
+            step(f"{'Claude Code' if name == 'claude' else 'Codex'}: skipped (disabled in `dev setup`)")
+            continue
         try:
             fn()
         except Exception as e:  # keep going; doctor reports what is left
@@ -637,6 +649,8 @@ def doctor() -> int:
     from . import providers
     pst = providers.status(include_account=False)
     for key in ("claude", "codex"):
+        if not CFG.get("agents", {}).get(key, True):
+            continue
         p = pst[key]
         check("Agents", f"{p['name']} installed + signed in", bool(p.get("installed") and p.get("logged_in")),
               f"{p.get('version') or 'missing'} · {p.get('auth_method') or '-'} · plan {p.get('plan') or '-'}",

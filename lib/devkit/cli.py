@@ -54,6 +54,7 @@ COMMANDS = [
         ("du", "Disk usage of projects, worktrees, agent data, temp and Docker"),
     ]),
     ("Environment", [
+        ("setup [--yes]", "The installation and configuration wizard (first install, or to change choices)"),
         ("doctor", "Verify the whole setup (git, gh, Claude, Codex, skills, Docker, automation)"),
         ("agents [test [claude|codex]]", "Claude Code and Codex: installed, signed in, plan, quota; live self-tests"),
         ("config diff|repair|lock|…", "Preview and enforce the agent settings devkit manages"),
@@ -350,6 +351,10 @@ def cmd_adopt(a):
     _trust_codex(dest)
     gc._log(f"adopt · {p['id']}: {tilde(old_main)} → {tilde(dest)}")
     print(f"  {ui.WARN} Claude Desktop / Codex app chats opened at the old path should be restarted from {tilde(dest)}")
+    if core.real(old_main) == core.real(core.DEVKIT_HOME):
+        import subprocess  # devkit moved itself: its paths are embedded in hooks, links and launchd — re-apply them
+        print(f"  {ui.ARROW} devkit moved itself; re-applying its configuration from {tilde(dest)}")
+        return subprocess.call([sys.executable, str(dest / "bin" / "dev"), "install"])
     return cmd_sync(argparse.Namespace(session=None, finish=False, offline=True, scheduled=False, no_push=False,
                                        quiet=True))
 
@@ -1130,6 +1135,11 @@ def cmd_agents(a):
     return 0
 
 
+def cmd_setup(a):
+    from . import wizard
+    return wizard.run(assume_yes=a.yes, skip_packages=a.skip_packages)
+
+
 def cmd_version(a):
     print(f"devkit {core.VERSION} · {tilde(core.DEVKIT_HOME)}\n{COPYRIGHT}")
     return 0
@@ -1268,6 +1278,9 @@ def build_parser():
     add("doctor", cmd_doctor, "Verify the setup")
     add("install", cmd_install, "Apply configuration").add_argument(
         "--only", help="comma list: config,cli,git,handoff,instructions,skills,claude,codex,docker,launchd")
+    p = add("setup", cmd_setup, "Installation and configuration wizard")
+    p.add_argument("-y", "--yes", action="store_true", help="accept every default (non-interactive)")
+    p.add_argument("--skip-packages", action="store_true", help="do not install Homebrew/npm packages")
     add("update", cmd_update, "Update devkit")
     add("docker", cmd_docker, "Docker on Colima").add_argument(
         "action", choices=["up", "down", "status", "prune", "autostart-on", "autostart-off"])

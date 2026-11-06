@@ -1,0 +1,20 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1100" height="300" viewBox="0 0 1100 300">
+<defs>
+  <radialGradient id="glow"><stop offset="0" stop-color="#FFB34A" stop-opacity="0.45"/>
+    <stop offset="0.45" stop-color="#FFB34A" stop-opacity="0.12"/><stop offset="1" stop-color="#FFB34A" stop-opacity="0"/></radialGradient>
+  <linearGradient id="trail" x1="0" y1="1" x2="1" y2="0"><stop offset="0" stop-color="#FFB34A" stop-opacity="0.2"/>
+    <stop offset="1" stop-color="#FFB34A" stop-opacity="1"/></linearGradient>
+  <linearGradient id="trailsoft" x1="0" y1="1" x2="1" y2="0"><stop offset="0" stop-color="#FFB34A" stop-opacity="0"/>
+    <stop offset="1" stop-color="#FFB34A" stop-opacity="0.55"/></linearGradient>
+  <filter id="blur6" x="-50%" y="-50%" width="200%" height="200%"><feGaussianBlur stdDeviation="6"/></filter>
+  <filter id="blur14" x="-50%" y="-50%" width="200%" height="200%"><feGaussianBlur stdDeviation="14"/></filter>
+</defs>
+<g transform="translate(-6,-14) scale(0.62)">
+<path d="M118 206 L196 268 L118 330" fill="none" stroke="#F3F1EB" stroke-width="38" stroke-linecap="round" stroke-linejoin="round"/>
+<path d="M232 334 H318" stroke="#F3F1EB" stroke-width="38" stroke-linecap="round"/>
+<path d="M300 334 C 352 330, 382 280, 380 204" fill="none" stroke="url(#trail)" stroke-width="16" stroke-linecap="round"/>
+<g fill="none" stroke="#FFB34A" stroke-width="12.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="372" cy="150" r="21.2"/><path d="M372.0 69.2 L372.0 99.0"/><path d="M372.0 201.0 L372.0 230.8"/><path d="M291.2 150.0 L321.0 150.0"/><path d="M423.0 150.0 L452.8 150.0"/><path d="M342.2 120.2 L342.3 120.2"/><path d="M401.8 120.2 L401.8 120.2"/><path d="M342.2 179.8 L342.3 179.8"/><path d="M401.8 179.8 L401.8 179.8"/></g>
+</g>
+<text x="300" y="236" font-family="Manrope" font-size="200" font-weight="700" letter-spacing="-8" fill="#F3F1EB">devkıt</text>
+<g fill="none" stroke="#FFB34A" stroke-width="4.3" stroke-linecap="round" stroke-linejoin="round"><circle cx="726.6" cy="95.0" r="7.2"/><path d="M726.6 67.5 L726.6 77.6"/><path d="M726.6 112.4 L726.6 122.5"/><path d="M699.1 95.0 L709.2 95.0"/><path d="M744.0 95.0 L754.1 95.0"/><path d="M716.5 84.8 L716.5 84.8"/><path d="M736.8 84.8 L736.8 84.8"/><path d="M716.5 105.2 L716.5 105.2"/><path d="M736.8 105.2 L736.8 105.2"/></g>
+</svg>

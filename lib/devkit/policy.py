@@ -172,8 +172,9 @@ def diff_git():
 
 
 def diff(include_codex=True):
-    out = diff_claude() + diff_instructions() + diff_skills() + diff_git()
-    if include_codex and core.have("codex"):
+    agents = core.CFG.get("agents", {})
+    out = (diff_claude() if agents.get("claude", True) else []) + diff_instructions() + diff_skills() + diff_git()
+    if include_codex and agents.get("codex", True) and core.have("codex"):
         out += diff_codex()
     return out
 

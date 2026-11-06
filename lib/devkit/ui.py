@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import os
 import re
+from pathlib import Path
 import shutil
 import sys
 
@@ -146,6 +147,33 @@ def logo_inline() -> str:
     return bold(cyan(s)) if COLOR else s
 
 
+ART_DIR = Path(__file__).resolve().parent / "art"
+
+
+def terminal_theme() -> str:
+    """dark | light — DEVKIT_THEME wins; else COLORFGBG ("fg;bg", bg 7/15 = light); default dark."""
+    t = os.environ.get("DEVKIT_THEME", "").lower()
+    if t in ("dark", "light"):
+        return t
+    bg = os.environ.get("COLORFGBG", "").split(";")[-1]
+    return "light" if bg in ("7", "15") else "dark"
+
+
+def logo_art() -> list:
+    """The devkit logo (mark + wordmark) as pre-rendered terminal art, matched to the terminal's colour support."""
+    theme = terminal_theme()
+    name = (f"lockup-{theme}.ans" if TRUECOLOR else f"lockup-{theme}-256.ans" if COLOR else "lockup.txt")
+    try:
+        lines = (ART_DIR / name).read_text().rstrip("\n").split("\n")
+    except OSError:
+        return []
+    while lines and not ANSI_RE.sub("", lines[0]).strip():
+        lines.pop(0)
+    while lines and not ANSI_RE.sub("", lines[-1]).strip():
+        lines.pop()
+    return [ln + ("\x1b[0m" if COLOR else "") for ln in lines]
+
+
 def banner(context: str = "", framed: bool = True) -> str:
     """The devkit welcome art: firefly + 3D gradient logo in a double frame, version and copyright footer."""
     from .core import COPYRIGHT, VERSION
@@ -162,8 +190,12 @@ def banner(context: str = "", framed: bool = True) -> str:
     bot = edge("╚" + "═" * W + "╝")
     side_l, side_r = edge("║"), edge("║")
     rows = [" " * (W - len(TRAIL) - 3) + _trail() + "   "]
-    for i in range(6):
-        rows.append("  " + _firefly_row(i) + "   " + _logo_row(i))
+    art = logo_art()
+    if art:
+        rows += ["   " + ln for ln in art]
+    else:  # fallback: drawn firefly + block letters
+        for i in range(6):
+            rows.append("  " + _firefly_row(i) + "   " + _logo_row(i))
     rows.append("")
     rows.append("  " + italic(dim(TAGLINE)) if COLOR else "  " + TAGLINE)
     rows.append("  " + dim("─" * (W - 4)))
