@@ -87,6 +87,42 @@ It refuses while tracked files in the devkit checkout have local changes (`git -
 when the checkout is at a commit that is neither a release tag nor a branch. Commit or discard the changes, or check out
 a release or a branch, then run `dev update` again.
 
+### `dev install` refuses to pin devkit
+
+`dev install` pins a read-only copy of the checkout for the hooks and the guard (see
+[Getting started › The pinned copy](getting-started.md#the-pinned-copy)), and it says why when it refuses:
+
+| The message says | Cause | Fix |
+| --- | --- | --- |
+| `… is not verified: it is not the release v…, and no dev ci --run passed for this tree` | The checkout is on a commit that is neither a release on GitHub nor tested on this Mac | On a release checkout, `dev update`. On a branch, run `bin/dev ci --run` in the checkout, then `dev install`. To pin it anyway, `dev install --unverified --why "<reason>"`; the reason is audited |
+| `… has uncommitted changes to N tracked file(s)` | The copy is made from git, so it would not match what is on disk | Commit the changes (then `bin/dev ci --run`) or discard them. `dev install --version <installed version>` re-applies the installed copy meanwhile |
+| `… does not compile, and the hooks would fail open on it` | A Python file in the commit has a syntax error | Fix it, commit, and run `dev install` again |
+| `devkit is not pinned yet: run dev install (every step) first` | `--only` re-applies steps from the installed copy, and there is none yet | Run `dev install` without `--only` once |
+| `--version and --unverified choose the copy every step runs, so they go without --only` | `--version` or `--unverified` was combined with `--only` | Run them without `--only` |
+
+Every refusal is also written to the audit trail (`dev audit --action install`).
+
+### `dev doctor` says the pinned copy changed or is not used
+
+| Check that fails | Cause | Fix |
+| --- | --- | --- |
+| `pinned copy matches its manifest` | A file in the read-only copy changed after it was pinned, or was added or removed | `dev install` rebuilds the copy from git |
+| `hooks run the pinned copy` | A hook, the status line, or `~/.local/bin/dev` runs another copy or the checkout | `dev install --only cli,claude,codex` |
+| `pinned copy is the installed version` | `install.json` and the copy disagree on the version or commit | `dev install` |
+| `hooks run a pinned copy` | devkit was never pinned on this Mac, or the copy was deleted | `dev install` |
+
+### Go back to an earlier devkit
+
+devkit keeps the newest three pinned copies, and any copy still in use. To switch the hooks back to an earlier one:
+
+```bash
+ls ~/.local/share/devkit/releases     # the copies kept: <version>-<commit>
+dev install --version 26.11.2         # or the full name, 26.11.2-<commit>
+```
+
+It checks the copy against its checksums before it uses it. The checkout stays where it is; `dev update` later moves
+it to the newest release again.
+
 ## Sessions and agents
 
 ### Claude Code or Codex does not show the devkit context
@@ -110,8 +146,10 @@ Or review them in Codex with `/hooks` (CLI) or Settings → Hooks (app). Restart
 ### A devkit skill or a crew agent is missing
 
 Both agents install a snapshot of the devkit plugin. `dev doctor` reports "devkit plugin copy is current" for each;
-when it fails, run `dev install --only claude` or `dev install --only codex`, which reinstalls the plugin from your
-checkout, then restart the agent. Codex reads the crew's roles from `~/.codex/agents/`, which
+when it fails, run `dev install --only claude` or `dev install --only codex`, which reinstalls the plugin from the
+installed [pinned copy](getting-started.md#the-pinned-copy), then restart the agent. `--only` never reads the
+checkout: when the checkout has a newer plugin, run `dev install`, which pins the checkout's commit first (a release,
+or a commit whose `bin/dev ci --run` passed) and reinstalls the plugin from that copy. Codex reads the crew's roles from `~/.codex/agents/`, which
 `dev install --only codex` writes. `dev crew sync --check` reports Claude agents that are out of date with
 `config/crew.json`.
 

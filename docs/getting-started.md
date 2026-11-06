@@ -330,6 +330,9 @@ checkout to the newest release.
 If a new release misbehaves, `dev install --version <previous version>` switches the hooks back to the copy pinned
 before it.
 
+Run `dev update` and `dev install` yourself, in Terminal. They change what every hook and the guard run, so the guard
+refuses them from an agent: ask Claude or Codex for anything else, but not for these.
+
 Restart running Claude Code and Codex sessions afterward; they read instructions and hooks at session start. To change
 the choices you made in the wizard, run `dev setup` again.
 
