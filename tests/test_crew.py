@@ -524,10 +524,14 @@ class CrewSessionTests(unittest.TestCase):
             self.assertIn("no progress run", out)
             self.assertEqual(run_cli("crew", "mode", "auto")[0], 2)  # no run to set it on
             pg.start("Parser", plan=["parse"])
-            rc, out, _ = run_cli("crew", "mode", "auto", "--approve", "push, pr")
+            rc, out, _ = run_cli("crew", "mode", "auto", "--approve", "push feat/*, pr feat/*")
             self.assertEqual(rc, 0)
             self.assertIn("Mode auto", out)
-            self.assertIn("pre-approved irreversible actions: push, pr", run_cli("crew", "mode")[1])
+            self.assertIn("no grant of the developer for push feat/*, pr feat/*: they open nothing", out)  # spec C5
+            self.assertIn("pre-approved irreversible actions: push feat/*, pr feat/*", run_cli("crew", "mode")[1])
+            rc, _, err = run_cli("crew", "mode", "auto", "--approve", "push")
+            self.assertEqual(rc, 2)  # a pre-approval names its target (spec C6)
+            self.assertIn("name one target for each pre-approval", err)
             rc, _, err = run_cli("crew", "mode", "auto", "--approve", "launch-rockets")
             self.assertEqual(rc, 2)
             self.assertIn("unknown action", err)
@@ -550,17 +554,40 @@ class CrewSessionTests(unittest.TestCase):
             self.assertIn("auto · review", out)
             self.assertIn("no pending decisions", run_cli("crew", "decisions", "--pending")[1])
             rc, out, _ = run_cli("crew", "decide", "D1", "B")
+            self.assertEqual(rc, 0)  # no answer of the developer to D1 reached devkit: Morpheus's, unverified
+            self.assertIn("D1 recorded by Morpheus, not verified by the developer: B: patch it (overrides the "
+                          "automatic choice A)", out)
+            listed = run_cli("crew", "decisions")[1]
+            self.assertIn("B: patch it (was A)", listed)
+            self.assertIn("morpheus · unverified", listed)
+
+    def test_decisions_ask_prints_the_exact_question_for_the_question_tool(self):
+        with TempState():
+            pg.start("Parser", plan=["parse"])
+            run_cli("crew", "ask", "--decision", "Rewrite or patch the parser?", "--options",
+                    "A: rewrite it | B: patch it", "--recommend", "A")
+            rc, out, _ = run_cli("crew", "decisions", "--ask", "D1")
             self.assertEqual(rc, 0)
-            self.assertIn("D1 decided by the developer: B: patch it (overrides the automatic choice A)", out)
-            self.assertIn("B: patch it (was A)", run_cli("crew", "decisions")[1])
+            self.assertEqual(pg.load_run("claude", "s1")["decisions"][0]["target"], "")
+            self.assertIn("question: D1 · Rewrite or patch the parser?", out)
+            self.assertIn("options: A: rewrite it | B: patch it", out)
+            self.assertIn("approve D1: <option>", out)
+            self.assertEqual(run_cli("crew", "decisions", "--ask", "D9")[0], 2)
+            rc, _, err = run_cli("crew", "ask", "--decision", "Release 26.11.4 now?", "--options", "yes | no",
+                                 "--recommend", "yes", "--irreversible", "release")
+            rc, _, err = run_cli("crew", "decide", "D2", "yes")
+            self.assertEqual(rc, 2)  # irreversible, and no answer of the developer: it stays pending
+            self.assertIn("D2 · Release 26.11.4 now?", err)
+            self.assertEqual(pg.load_run("claude", "s1")["decisions"][1]["state"], "pending")
 
     def test_irreversible_or_guided_decisions_wait_for_the_developer(self):
         with TempState() as t:
             pg.start("Parser", plan=["parse", "ship"])
-            pg.set_mode("auto", approve="push")
+            pg.set_mode("auto", approve="push feat/*")
             rc, out, _ = run_cli("crew", "ask", "--decision", "Release 26.11.2 now?", "--recommend", "yes",
-                                 "--irreversible", "release")
+                                 "--irreversible", "release", "--target", "v26.11.2")
             self.assertEqual(rc, 0)  # release is not pre-approved: Morpheus asks the developer
+            self.assertEqual(pg.load_run("claude", "s1")["decisions"][0]["target"], "v26.11.2")
             self.assertIn("ask the developer now (AskUserQuestion / request_user_input) with the decision template, "
                           'then: dev crew decide D1 "<answer>"', out)
             pg.set_mode("guided")

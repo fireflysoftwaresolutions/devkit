@@ -119,8 +119,9 @@ class ConsultationTests(CallerCase):
         self.call("dev crew decide D1 yes")
         rc, out = self.dev("crew", "decide", "D1", "yes")
         self.assertEqual(rc, 0, out)
-        self.assertEqual((self.decision()["state"], self.decision()["answer"], self.decision()["by"]),
-                         ("decided", "yes", "developer"))
+        # Morpheus may record it; without the developer's own answer (spec C5) it is his, unverified
+        self.assertEqual((self.decision()["state"], self.decision()["answer"], self.decision()["by"],
+                          self.decision()["verified"]), ("decided", "yes", "morpheus", False))
 
 
 class MorpheusOnlyTests(CallerCase):

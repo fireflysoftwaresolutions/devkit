@@ -815,8 +815,17 @@ def stats(recs: list) -> dict:
 
 # --------------------------------------------------------------------------- verify (R2)
 
+def _load_checks():
+    """The modules that add CHECKS: progress checks developer evidence against the transcripts (spec C5)."""
+    try:
+        from . import progress  # noqa: F401
+    except Exception:
+        pass
+
+
 def verify_file(path: Path) -> dict:
     """The chain of one month file: its first broken link, and what the CHECKS find in the intact records."""
+    _load_checks()
     res = {"path": str(path), "records": 0, "v1": 0, "first": None, "checks": []}
     try:
         data = Path(path).read_bytes()

@@ -107,7 +107,7 @@
     ],
     "PostToolUse": [
       {
-        "matcher": "Bash|Agent|Task|Monitor|Write|Edit|MultiEdit|WebFetch|WebSearch",
+        "matcher": "Bash|Agent|Task|Monitor|Write|Edit|MultiEdit|WebFetch|WebSearch|AskUserQuestion",
         "hooks": [
           {
             "type": "command",

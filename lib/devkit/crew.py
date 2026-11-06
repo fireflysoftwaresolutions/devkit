@@ -1427,7 +1427,7 @@ def _ask_decision(a, me) -> int:
         ui.err("a decision goes to the developer through Morpheus: drop --to")
         return 2
     d = progress.crew_decision(" ".join(a.text), options=a.options or "", recommend=a.recommend or "",
-                               irreversible=a.irreversible or "", from_agent=me)
+                               irreversible=a.irreversible or "", from_agent=me, target=a.target or "")
     if d["state"] == "decided":
         print(f"{ui.OK} auto mode: go ahead with {_option(d, d['answer'])} ({d['id']}, recorded; the developer can "
               "revisit it with dev crew decisions)")
@@ -1453,17 +1453,46 @@ def _decide(a, me) -> int:
                f"\"Needs from Morpheus: {a.id}\"")
         return 2
     d = progress.crew_decide(a.id, " ".join(a.text))
-    print(f"{ui.OK} {d['id']} decided by the {d['by']}: {_option(d, d['answer'])}"
-          + (f" (overrides the automatic choice {d['overrides']})" if d.get("overrides") else ""))
+    tail = f": {_option(d, d['answer'])}" + (f" (overrides the automatic choice {d['overrides']})"
+                                             if d.get("overrides") else "")
+    if d.get("verified"):  # who decided is computed from the developer's evidence (spec C5), never typed
+        how = "the question tool" if (d.get("evidence") or {}).get("channel") == "E1" else "their prompt"
+        print(f"{ui.OK} {d['id']} decided by the developer (through {how}){tail}")
+    else:
+        print(f"{ui.WARN} {d['id']} recorded by Morpheus, not verified by the developer{tail}")
+        print(ui.dim(f"  devkit saw no answer of the developer to {d['id']} after it was shown; for their own "
+                     f"answer: dev crew decisions --ask {d['id']}"))
     if d.get("from") and d["from"] != "main":
         print(f"resume {d.get('from_name') or 'the crew member'} with SendMessage / send_input and the answer "
               "(a message with it is queued for them)")
     return 0
 
 
+def _ask(run, did) -> int:
+    """The decision as the developer must be asked it: only an answer to this question is their evidence (E1)."""
+    from . import progress
+    d = progress._decision(run, did)
+    if not d:
+        ui.err(f"no decision {did} in this session's run: dev crew decisions")
+        return 2
+    print("Ask the developer with the question tool (AskUserQuestion), exactly:")
+    print(f"  question: {progress.ask_text(d)}")
+    if d.get("options"):
+        print(f"  options: {' | '.join(d['options'])}")
+        print(ui.dim("  use these labels as they are; \"(Recommended)\" may follow the one you recommend"))
+    print(f"Or they type a line of its own in their prompt: approve {d['id']}" + (": <option>" if d.get("options")
+                                                                                 else ""))
+    if d.get("irreversible"):
+        print(ui.dim(f"  it leads to an irreversible action ({d['irreversible']}): only one of the options, or the "
+                     "approve line, counts; a free-text answer does not"))
+    return 0
+
+
 def _decisions(a) -> int:
     from . import progress
     run = live_run()
+    if getattr(a, "ask", None):
+        return _ask(run, a.ask)
     decs = [d for d in (run or {}).get("decisions") or [] if not a.pending or d.get("state") == "pending"]
     if not decs:
         print("  no pending decisions" if a.pending else "  no decisions in this session's run")
@@ -1471,7 +1500,8 @@ def _decisions(a) -> int:
     rows = []
     for d in decs:
         answer = _option(d, d.get("answer")) + (f" (was {d['overrides']})" if d.get("overrides") else "")
-        by = "auto · review" if d.get("by") == "auto" else (d.get("by") or "")
+        by = "auto · review" if d.get("by") == "auto" else (d.get("by") or "") + \
+            (" · unverified" if d.get("verified") is False else " ✓" if d.get("verified") else "")
         rows.append([d["id"], d.get("from_name") or "?", d.get("question") or "", d.get("state") or "",
                      answer or "-", by or "-"])
     print(ui.table(rows, ["ID", "FROM", "QUESTION", "STATE", "ANSWER", "BY"], max_widths={2: 56, 4: 36}))
@@ -1489,13 +1519,19 @@ def _mode(a, me) -> int:
         run = live_run()
         view = {"mode": progress.mode_of(run), "approved": list((run or {}).get("approved") or [])}
         print(mode_line(view) + ("" if run else "\n" + ui.dim("  no progress run in this session yet: the default")))
-        print(ui.dim(f"  irreversible actions auto mode can pre-approve: {', '.join(progress.IRREVERSIBLE)}"))
+        print(ui.dim("  irreversible actions auto mode can pre-approve, each with its target (push feat/*): "
+                     + ", ".join(x for x in progress.IRREVERSIBLE if x not in progress.NEVER_PREAPPROVED)))
         return 0
     if me:
         ui.err("only Morpheus sets the mode, on the developer's word: ask him with dev crew ask")
         return 2
     run = progress.set_mode(a.mode, approve=a.approve or "")
     print(f"{ui.OK} " + mode_line({"mode": run.get("mode"), "approved": run.get("approved")}).strip())
+    unbacked = progress.unbacked_approvals(run)
+    if unbacked:  # a pre-approval needs the developer's own grant (spec C5)
+        verb = "it opens" if len(unbacked) == 1 else "they open"
+        print(f"{ui.WARN} no grant of the developer for {', '.join(unbacked)}: {verb} nothing until they type a line "
+              f"of its own, such as “grant {unbacked[0]}”, and you run this again")
     if a.approve and a.mode == "guided":
         print(ui.dim("  approvals apply to auto mode only: none recorded"))
     return 0
@@ -1932,6 +1968,8 @@ def register(add):
     x.add_argument("--options", help="the options, separated by |: \"A: rewrite the parser | B: patch it\"")
     x.add_argument("--recommend", help="the option you recommend, e.g. A")
     x.add_argument("--irreversible", help="the irreversible action it leads to: " + ", ".join(_irreversible()))
+    x.add_argument("--target", help="what that action acts on (a branch, a tag, a PR number): the developer's "
+                                    "answer opens that action on that target once")
     x = sp.add_parser("answer", help="answer a crew message by its id")
     x.add_argument("id", help="the message id, e.g. M3")
     x.add_argument("text", nargs="+")
@@ -1945,6 +1983,8 @@ def register(add):
     x.add_argument("text", nargs="+", help="the answer")
     x = sp.add_parser("decisions", help="this run's decisions; automatic ones are marked for review")
     x.add_argument("--pending", action="store_true", help="only those waiting for the developer")
+    x.add_argument("--ask", metavar="ID", help="the exact question and options to ask the developer with the "
+                                               "question tool for this decision (their evidence, spec C5)")
     x = sp.add_parser("route", help="who should do a task, ranked with the reasons; --plan: a member for each open step")
     x.add_argument("task", nargs="*", help="the task, in a sentence")
     x.add_argument("--files", help="the files it touches, comma-separated (they weigh in the ranking)")

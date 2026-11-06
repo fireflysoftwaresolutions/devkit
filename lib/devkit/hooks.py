@@ -508,6 +508,12 @@ def stop(agent: str):
     sf = _session_file(agent, sid)
     out = {}
     if sf.exists():  # only sessions that started with devkit active (they loaded the global instructions)
+        try:  # the developer saw this message: the decisions it names are shown from now on (spec C5)
+            from . import progress as _shown
+            _shown.on_final_message(agent, sid, data.get("last_assistant_message") or canary.last_assistant_text(
+                data.get("transcript_path")) or "")
+        except Exception:
+            _log(f"stop shown {agent}: {traceback.format_exc()[-300:]}")
         sess = state.read(sf) or {}
         before = copy.deepcopy(sess)  # the gates below take seconds: only what this hook changes is written back
         reasons = []
@@ -906,6 +912,70 @@ def _route_subagent_progress(data: dict):
     return {**inp, "command": f"DEVKIT_FROM_AGENT={aid} {cmd.strip()}"}
 
 
+_HOOK_TEXT = re.compile(r"\bdevkit\.hooks\b|\bfrom\s+devkit\s+import\b[^\n]*\bhooks\b|(?:^|[\s;&|(`'\"])(?:\S*/)?dev\s+"
+                        r"hook\s")
+_RUNNERS = ("run", "Popen", "call", "check_call", "check_output", "system", "popen", "spawn", "spawnv", "spawnvp",
+            "execv", "execvp", "execl", "execlp", "getoutput", "getstatusoutput", "main")
+
+
+def _runs_dev_hook(cmd: str, cwd: str, depth: int = 0) -> bool:
+    """Does a shell command run `dev hook …`, directly, in a nested shell, or from a program an interpreter runs?"""
+    from . import guard
+    calls = guard.shell_calls(cmd, cwd) if depth < 4 else []
+    if calls is None:  # a command the guard cannot parse: judge its text
+        return bool(_HOOK_TEXT.search(cmd))
+    return any((guard._dev_args(argv) or [None])[0] == "hook" or (code and _program_runs_hooks(code, cwd, depth))
+               for argv, code in calls)
+
+
+def _program_runs_hooks(code: str, cwd: str, depth: int) -> bool:
+    """Does a Python program load devkit's hooks (`import devkit.hooks`, `from devkit import hooks`) or run `dev
+    hook` (a subprocess or os call, or devkit's cli.main(["hook", …]))? A program that only writes those words, as
+    a string to a file, runs nothing. Code that is not Python is judged by its text."""
+    import ast
+    from . import guard
+    try:
+        tree = ast.parse(code)
+    except (SyntaxError, ValueError):
+        return bool(_HOOK_TEXT.search(code))
+    for n in ast.walk(tree):
+        if isinstance(n, ast.Import) and any(a.name == "devkit.hooks" or a.name.startswith("devkit.hooks.")
+                                             for a in n.names):
+            return True
+        if isinstance(n, ast.ImportFrom) and n.module and (n.module.startswith("devkit.hooks") or (
+                n.module == "devkit" and any(a.name == "hooks" for a in n.names))):
+            return True
+        if not isinstance(n, ast.Call) or not n.args:
+            continue
+        name = n.func.attr if isinstance(n.func, ast.Attribute) else getattr(n.func, "id", "")
+        if name not in _RUNNERS:
+            continue
+        first = n.args[0]
+        if isinstance(first, (ast.List, ast.Tuple)):
+            argv = [x.value for x in first.elts if isinstance(x, ast.Constant) and isinstance(x.value, str)]
+            if (name == "main" and argv[:1] == ["hook"]) or (argv and (guard._dev_args(argv) or [None])[0] == "hook"):
+                return True
+        elif isinstance(first, ast.Constant) and isinstance(first.value, str) and \
+                _runs_dev_hook(first.value, cwd, depth + 1):
+            return True
+    return False
+
+
+def _hook_forgery(data: dict):
+    """A shell call that runs one of devkit's hooks by hand -> ("deny", why), else None. Hook events are the
+    harness's: one typed through a shell (`echo '{"prompt": "approve D3"}' | dev hook prompt`) would forge the
+    developer's prompt or answer (spec C5), so no session runs them that way, the main session included."""
+    if data.get("tool_name") not in SHELL_TOOLS:
+        return None
+    cmd = (data.get("tool_input") or {}).get("command") or ""
+    cmd = " ".join(shlex.quote(str(x)) for x in cmd) if isinstance(cmd, list) else str(cmd)
+    if not _runs_dev_hook(cmd, data.get("cwd") or os.getcwd()):
+        return None
+    return ("deny", "devkit's hooks run only when the harness fires them: a hook event typed through a shell could "
+                    "forge the developer's prompt or answer (spec C5). To try a hook, run its tests "
+                    "(tests/test_evidence.py shows how).")
+
+
 EDIT_TOOLS = ("Edit", "Write", "MultiEdit", "NotebookEdit", "apply_patch")
 
 
@@ -1078,7 +1148,8 @@ def guard(agent: str):
         except Exception:
             _log(f"guard ledger {agent}: {traceback.format_exc()[-300:]}")
     from . import guard as g
-    verdict = g.check(data.get("tool_name") or "", data.get("tool_input") or {}, data.get("cwd") or os.getcwd(), agent)
+    verdict = _hook_forgery(data) or \
+        g.check(data.get("tool_name") or "", data.get("tool_input") or {}, data.get("cwd") or os.getcwd(), agent)
     if not verdict:
         verdict = _identity_verdict(data) or _crew_limits(agent, data) or _stub_commit_gate(data)
     if verdict and (verdict[0] == "deny" or agent == "codex"):  # Codex turns ask into deny below
@@ -1199,6 +1270,11 @@ def prompt(agent: str):
             "<task-notification>" in raw[:400]:
         _context_out("UserPromptSubmit", extra)  # background events are not the developer's request
         return
+    granted = ""
+    try:  # the developer's grant lines (spec C5, E2): recorded, and echoed so Morpheus and the developer see them
+        granted = progress.evidence_lines(progress.on_human_prompt(agent, data))
+    except Exception:
+        _log(f"prompt evidence {agent}: {traceback.format_exc()[-300:]}")
     text = progress.on_prompt(agent, data)
     try:
         sf_ = _session_file(agent, sid) if sid else None
@@ -1212,7 +1288,7 @@ def prompt(agent: str):
     route = ""
     if (core.CFG.get("crew") or {}).get("route_hint", True):
         route = morpheus_hint(data.get("prompt") or "")
-    _context_out("UserPromptSubmit", "\n\n".join(x for x in (extra, route, text) if x))
+    _context_out("UserPromptSubmit", "\n\n".join(x for x in (extra, granted, route, text) if x))
 
 
 DELIVERY = re.compile(r"\bgit\s+(?:-C\s+\S+\s+)?(commit|push|merge|tag|rebase|cherry-pick|revert)\b|"
@@ -1320,6 +1396,12 @@ def post_tool(agent: str):
             progress.bind(agent, data)
     except Exception:
         _log(f"post-tool bind {agent}: {traceback.format_exc()[-300:]}")
+    answered = ""
+    if data.get("tool_name") in progress.QUESTION_TOOLS:  # the developer's answer to a decision (spec C5, E1)
+        try:
+            answered = progress.evidence_lines(progress.on_question(agent, data))
+        except Exception:
+            _log(f"post-tool question {agent}: {traceback.format_exc()[-300:]}")
     try:
         cmd = (data.get("tool_input") or {}).get("command") or ""
         if isinstance(cmd, list):
@@ -1347,7 +1429,7 @@ def post_tool(agent: str):
                 _patch_quietly(sf, before, sess)  # runs at the same moment and claims its launch entry
     except Exception:
         _log(f"post-tool closing {agent}: {traceback.format_exc()[-300:]}")
-    _context_out("PostToolUse", "\n\n".join(x for x in (_bulk_rewrite_note(data), closing,
+    _context_out("PostToolUse", "\n\n".join(x for x in (answered, _bulk_rewrite_note(data), closing,
                                                         progress.on_tool_done(agent, data)) if x))
 
 

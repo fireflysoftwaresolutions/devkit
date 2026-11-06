@@ -945,14 +945,20 @@ def _raci_assign(run: dict, s: dict, label: str, why: str, now: float, activity:
 
 
 def assign(which, label: str, cwd: str | None = None, now: float | None = None, scope: str = "",
-           from_agent: str | None = None, why: str = "", activity: str = "") -> dict:
+           from_agent: str | None = None, why: str = "", activity: str = "", allow: str = "") -> dict:
     """Hand a plan step to a subagent: the next subagent launched with this description (or a running lane with this
     label) owns it, and its time is that subagent's time. `scope`: the files it owns (comma-separated globs); the
     guard keeps that subagent's edits inside them. The crew's RACI must make the member Responsible for the step's
     kind of work; `why` overrides it, recorded. `activity`: the step's kind of work, an id from dev crew raci, which
-    then decides whatever language the step is written in."""
+    then decides whatever language the step is written in. `allow`: the tier-1 actions (push, pr) the member may
+    take in this step, each only with the developer's evidence for it (their grant, or a verified decision; spec
+    C6); the step's `allow` lists those that had it."""
     _main_only(from_agent, "assigns the plan's steps", cwd)
     activity = _activity_id(activity) if activity else ""
+    wanted = [x.strip().lower() for x in (allow or "").split(",") if x.strip()]
+    if any(x not in TIER1 for x in wanted):
+        raise StepError(f"a member's step may be allowed {' and '.join(TIER1)} only; merge, release, publish, deploy "
+                        f"and every other irreversible action stay the main session's (spec C6)")
     globs = [x.strip() for x in scope.split(",") if x.strip()] if scope else []
     now = now or time.time()
     agent, sid = current_session(cwd)
@@ -969,6 +975,16 @@ def assign(which, label: str, cwd: str | None = None, now: float | None = None, 
             _log_change(run, s, s.get("state"), "pending", "main", f"reassigned from {old} to {label}", now)
             s.update(owner="main", state="pending")  # the other member's lane no longer owns it
         s["label"] = label
+        if wanted:
+            held = dict(s.get("allow_evidence") or {})
+            for act in wanted:
+                held[act] = held.get(act) or _action_evidence(agent, sid, run, act, "", now, any_target=True)
+            s["allow_evidence"] = {k: v for k, v in held.items() if v}
+            s["allow"] = [a for a in wanted if a in s["allow_evidence"]]
+            missing = [a for a in wanted if a not in s["allow"]]
+            _audit("crew.allow", s["name"], f"{label} may {', '.join(s['allow']) or 'take no irreversible action'}"
+                   + (f"; no grant of the developer for {', '.join(missing)}" if missing else ""),
+                   project=run.get("project") or "")
         if globs:
             for k, lane in (run.get("agents") or {}).items():
                 if lane.get("state") == "running" and not _label_matches(label, lane):
@@ -1194,31 +1210,122 @@ def _take_messages(agent, sid, me: str, mark=True) -> list:
 
 
 IRREVERSIBLE = ("push", "pr", "merge", "release", "deploy", "delete-data", "migrate-production", "spend", "publish",
-                "external-message")
+                "external-message", "push-destructive", "pr-write", "api-write")
+TIER1 = ("push", "pr")  # a member's step grant covers these only (spec C6)
+NEVER_PREAPPROVED = ("publish", "deploy")
+PREAPPROVAL_HOURS = 8
+PREAPPROVAL_USES = {"merge": 1, "release": 1}  # every other action: 10
 
 
 def mode_of(run) -> str:
     return (run or {}).get("mode") or ((core.CFG.get("work") or {}).get("mode")) or "guided"
 
 
+def _live_preapprovals(run, now: float) -> list:
+    if mode_of(run) != "auto" or not run or run.get("state") == "done":
+        return []
+    return [p for p in run.get("preapprovals") or [] if p.get("uses_left", 0) > 0 and now <= p.get("expires", 0)
+            and p.get("evidence")]
+
+
+def unbacked_approvals(run, now: float | None = None) -> list:
+    """The pre-approvals auto mode was given that have no grant of the developer behind them: they open nothing."""
+    live = {f"{p['action']} {p['target']}" for p in _live_preapprovals(run, now or time.time())}
+    return [x for x in (run or {}).get("approved") or [] if x not in live]
+
+
+def approved_actions(run, now: float | None = None) -> list:
+    """The irreversible actions auto mode may decide by itself: those with a live pre-approval the developer granted."""
+    return sorted({p["action"] for p in _live_preapprovals(run, now or time.time())})
+
+
+def _action_evidence(agent: str, sid: str, run: dict, action: str, target: str, now: float, any_target=False):
+    """Use the developer's evidence for one action (a pre-approval's or a step grant's): their live grant of that
+    action and target (any target with `any_target`), else a verified, unused decision naming the action. -> the
+    evidence to keep with it, or None."""
+    def granted(x):
+        return x.get("channel") == "E2" and bool(x.get("expires"))
+    got = None
+    if not any_target:
+        got = take_evidence(agent, sid, f"{action} {target}", now, pick=granted)
+    else:
+        for e in evidence(agent, sid, lambda x: granted(x) and str(x.get("covers") or "").partition(" ")[0] == action,
+                          now):
+            got = _consume(agent, sid, e, now)
+            if got:
+                break
+    if got:
+        return {k: got.get(k) for k in ("channel", "ts", "covers", "transcript_uuid", "excerpt")}
+    d = next((x for x in run.get("decisions") or [] if x.get("verified") and x.get("by") == "developer"
+              and x.get("irreversible") == action and not x.get("used")
+              and (any_target or not x.get("target") or _norm(x["target"]) == _norm(target))), None)
+    if d:
+        d["used"] = now  # the caller saves the run
+        return {"channel": "decision", "ts": d.get("decided"), "covers": d["id"],
+                **{k: (d.get("evidence") or {}).get(k) for k in ("transcript_uuid", "excerpt")}}
+    return None
+
+
+def _preapproval_items(approve: str, cwd) -> list:
+    """`push feat/*, release v26.11.4` -> [(action, target)]; refused: an unknown action, an item without its one
+    target, publishing and deploying, and what the guard's target rules refuse (spec C6)."""
+    items = [x.split() for x in (approve or "").split(",") if x.strip()]
+    bad = [" ".join(x) for x in items if x[0].lower() not in IRREVERSIBLE]
+    if bad:
+        raise StepError(f"unknown action(s) {', '.join(bad)}; known: {', '.join(IRREVERSIBLE)}")
+    out = []
+    for x in items:
+        act = x[0].lower()
+        if len(x) != 2:
+            raise StepError(f"name one target for each pre-approval: “{act} <target>”, such as push feat/*, "
+                            f"release v26.11.4 or merge 142 (a pre-approval without one would cover everything)")
+        if act in NEVER_PREAPPROVED:
+            raise StepError(f"{act} is never pre-approved: the developer approves each one (grant {act} <target>)")
+        try:
+            from . import guard
+            check = getattr(guard, "preapproval_problem", None)
+        except Exception:
+            check = None
+        problem = check(act, x[1], cwd or os.getcwd()) if check else None
+        if problem:
+            raise StepError(problem)
+        out.append((act, x[1]))
+    return out
+
+
 def set_mode(mode: str, approve: str = "", cwd: str | None = None, now: float | None = None) -> dict:
     """guided: decisions that are the developer's wait for the developer; auto: the crew goes on with the recommended
-    option and records it. `approve`: irreversible actions pre-approved for auto mode (comma-separated)."""
+    option and records it. `approve`: irreversible actions pre-approved for auto mode, each with its target
+    (`push feat/*, release v26.11.4`). A pre-approval opens something only with the developer's evidence (spec C5):
+    their grant of that action and target, or a verified decision naming it; it has its uses (1 for merge and
+    release, 10 for the others) and ends after 8 hours, with the run, or when the mode goes back to guided."""
     now = now or time.time()
     if mode not in ("guided", "auto"):
         raise StepError("mode is guided or auto")
     _main_only(None, "sets the mode", cwd)
+    items = _preapproval_items(approve, cwd) if mode == "auto" else []
     agent, sid = current_session(cwd)
     with _tx(agent, sid):
         run = normalize(load_run(agent, sid) or {})
         if not run.get("goal"):
             raise StepError("no progress run in this session: dev progress start \"<goal>\" --plan \"…\" --mode " + mode)
-        approved = [x.strip().lower() for x in (approve or "").split(",") if x.strip()]
-        bad = [x for x in approved if x not in IRREVERSIBLE]
-        if bad:
-            raise StepError(f"unknown action(s) {', '.join(bad)}; known: {', '.join(IRREVERSIBLE)}")
-        run["mode"], run["approved"] = mode, approved if mode == "auto" else []
-        _audit("crew.mode", mode, "approved: " + (", ".join(approved) or "nothing"), project=run.get("project") or "")
+        keep = [p for p in _live_preapprovals(dict(run, mode="auto"), now) if (p["action"], p["target"]) in items]
+        for act, target in items:
+            if any(p["action"] == act and p["target"] == target for p in keep):
+                continue
+            ev = _action_evidence(agent, sid, run, act, target, now)
+            if ev:
+                keep.append({"id": f"P{len(run.get('preapprovals') or []) + len(keep) + 1}", "action": act,
+                             "target": target, "repo": run.get("project") or "", "uses_left":
+                             PREAPPROVAL_USES.get(act, 10), "expires": now + PREAPPROVAL_HOURS * 3600, "evidence": ev,
+                             "ts": now})
+        approved = [f"{a} {t}" for a, t in items]
+        run["mode"], run["approved"], run["preapprovals"] = mode, approved, keep
+        run.pop("approved_evidence", None)
+        unbacked = unbacked_approvals(run, now)
+        _audit("crew.mode", mode, "approved: " + (", ".join(approved) or "nothing")
+               + (f"; no grant of the developer for {', '.join(unbacked)}: it opens nothing" if unbacked else ""),
+               project=run.get("project") or "")
         run.setdefault("history", []).append({"ts": round(now), "step": "(mode)", "from": None, "to": mode,
                                               "by": "main", "why": "approved: " + (", ".join(approved) or "nothing")})
         _save(run)
@@ -1226,10 +1333,12 @@ def set_mode(mode: str, approve: str = "", cwd: str | None = None, now: float | 
 
 
 def crew_decision(question: str, options=None, recommend: str = "", irreversible: str = "", from_agent: str | None = None,
-                  cwd: str | None = None, now: float | None = None) -> dict:
+                  cwd: str | None = None, now: float | None = None, target: str = "") -> dict:
     """A decision point. -> the decision record. In auto mode a reversible decision is taken at once with the
     recommendation; in guided mode, or for an irreversible action not pre-approved, it waits for the developer: the
-    asking member's lane waits and its step is blocked until Morpheus records the answer (crew_decide)."""
+    asking member's lane waits and its step is blocked until Morpheus records the answer (crew_decide). `target`:
+    what the irreversible action acts on (a branch, a tag, a PR number): a verified decision opens that action on
+    that target once (spec C6)."""
     now = now or time.time()
     from_agent = _as_lane(from_agent, cwd)
     agent, sid = current_session(cwd)
@@ -1245,11 +1354,14 @@ def crew_decision(question: str, options=None, recommend: str = "", irreversible
         act = (irreversible or "").strip().lower()
         if act and act not in IRREVERSIBLE:
             raise StepError(f"unknown irreversible action “{act}”; known: {', '.join(IRREVERSIBLE)}")
+        target = (target or "").strip()
+        if target and (not act or len(target.split()) != 1):
+            raise StepError("--target goes with --irreversible and names one thing: a branch, a tag, a PR number")
         decs = run.setdefault("decisions", [])
         d = {"id": f"D{len(decs) + 1}", "ts": round(now), "question": question.strip()[:800], "options": opts,
-             "recommend": rec, "irreversible": act, "from": from_agent or "main",
+             "recommend": rec, "irreversible": act, "target": target, "from": from_agent or "main",
              "from_name": _name_of(run, from_agent or "main"), "state": "pending", "answer": "", "by": ""}
-        auto = mode_of(run) == "auto" and (not act or act in (run.get("approved") or []))
+        auto = mode_of(run) == "auto" and (not act or act in approved_actions(run, now))
         if auto and rec:
             d.update(state="decided", answer=rec, by="auto", decided=round(now))
         else:
@@ -1273,21 +1385,50 @@ def crew_decision(question: str, options=None, recommend: str = "", irreversible
     return d
 
 
-def crew_decide(decision_id: str, answer: str, cwd: str | None = None, now: float | None = None, by: str = "developer") -> dict:
+def crew_decide(decision_id: str, answer: str, cwd: str | None = None, now: float | None = None) -> dict:
     """Record the developer's answer (Morpheus runs it after asking): the waiting member's step runs again, and a
-    message with the answer waits for that member (delivered when Morpheus resumes it)."""
+    message with the answer waits for that member (delivered when Morpheus resumes it). Who decided is computed,
+    never typed (spec C5): the developer, verified, when an unused piece of their evidence (E1, E2) given after the
+    decision was shown covers it; otherwise Morpheus, unverified, and an irreversible decision stays pending."""
     now = now or time.time()
     _main_only(None, "records the developer's answers", cwd)
     agent, sid = current_session(cwd)
-    with _tx(agent, sid):
-        run = normalize(load_run(agent, sid) or {})
-        d = next((x for x in run.get("decisions") or [] if x["id"].lower() == str(decision_id).lower()), None)
+    answer = answer.strip()[:800]
+
+    def find(run):
+        d = _decision(run, decision_id)
         if not d:
             raise StepError(f"no decision {decision_id}")
-        if d["state"] == "decided" and d.get("by") != "auto":
+        if d["state"] == "decided" and d.get("by") != "auto" and d.get("verified") is not False:
             raise StepError(f"{d['id']} was already decided by {d['by']}: “{d['answer']}”")
+        return d
+    run0 = normalize(load_run(agent, sid) or {})
+    ev = _decision_evidence(agent, sid, run0, find(run0), answer, now)  # the transcript is read outside the lock
+    with _tx(agent, sid):
+        run = normalize(load_run(agent, sid) or {})
+        d = find(run)
+        if d["state"] == "decided" and d.get("by") != "auto" and not ev:
+            raise StepError(f"{d['id']} was already recorded by Morpheus without the developer's evidence: “"
+                            f"{d['answer']}”. Only their own answer replaces it: ask with the question tool, "
+                            f"exactly “{ask_text(d)}”, or they type: approve {d['id']}: <option>")
+        if not ev and d.get("irreversible"):
+            d.update(proposed=answer, by="morpheus", verified=False, proposed_ts=round(now))
+            _save(run, touch_session=False)
+            _audit("crew.decided", d["id"], answer[:300], "blocked", project=run.get("project") or "",
+                   by="morpheus", verified=False, irreversible=d["irreversible"])
+            raise StepError(f"{d['id']} leads to an irreversible action ({d['irreversible']}), and devkit has no "
+                            f"answer of the developer to it after it was shown: it stays pending. Ask with the "
+                            f"question tool, exactly “{ask_text(d)}”"
+                            + (f" with the options {' | '.join(d['options'])}" if d.get("options") else "")
+                            + f", or they type a line of its own: approve {d['id']}" + (": <option>" if d.get(
+                                "options") else "") + ". Then run this again.")
         prev = d.get("answer")
-        d.update(state="decided", answer=answer.strip()[:800], by=by, decided=round(now))
+        d.update(state="decided", answer=answer, by="developer" if ev else "morpheus", verified=bool(ev),
+                 decided=round(now))
+        d.pop("proposed", None)
+        d.pop("proposed_ts", None)
+        if ev:
+            d["evidence"] = {k: ev.get(k) for k in ("channel", "ts", "covers", "transcript_uuid", "excerpt")}
         if prev and prev != d["answer"]:
             d["overrides"] = prev  # the developer changed an automatic decision
         for s in run.get("plan") or []:
@@ -1300,8 +1441,9 @@ def crew_decide(decision_id: str, answer: str, cwd: str | None = None, now: floa
                 lane.pop("waiting", None)
                 lane["state"] = lane.pop("state_before_wait", None) or "running"
         _save(run, touch_session=False)
-    _audit("crew.decided", d["id"], d["answer"][:300], project=run.get("project") or "", by=by,
-           overrides=d.get("overrides") or "")
+    _audit("crew.decided", d["id"], d["answer"][:300], project=run.get("project") or "", by=d["by"],
+           overrides=d.get("overrides") or "", verified=d["verified"], channel=(ev or {}).get("channel") or "",
+           transcript_uuid=(ev or {}).get("transcript_uuid") or "", session=f"{agent}:{sid}")
     if d["from"] != "main":
         crew_ask(f"Decision {d['id']} — {d['question'][:120]} → {d['answer']}", to=d["from"], cwd=cwd, now=now)
     return d
@@ -1327,25 +1469,32 @@ def _ready(agent, sid) -> str:
         return ""
 
 
+def _told(d: dict) -> bool:
+    return bool(d.get("told") or d.get("surfaced"))  # `surfaced`: runs written before spec C5
+
+
 def decisions_context(agent: str, sid: str) -> str:
     """For the main session: decisions waiting for the developer, newest first, once per decision."""
     run = load_run(agent, sid)
-    if not run or not any(not d.get("surfaced") for d in pending_decisions(run)):
+    if not run or not any(not _told(d) for d in pending_decisions(run)):
         return ""  # the usual case, without the lock
     with _tx(agent, sid):
         run = normalize(load_run(agent, sid) or {})
-        new = [d for d in pending_decisions(run) if not d.get("surfaced")]
+        new = [d for d in pending_decisions(run) if not _told(d)]
         if not new:
             return ""
         for d in new:
-            d["surfaced"] = True
+            d["told"] = round(time.time())  # delivered to Morpheus; `shown` is when the developer saw it
+            d.pop("surfaced", None)
         _save(run, touch_session=False)
     lines = ["devkit · decisions waiting for the developer (" + mode_of(run) + " mode). Ask with your question tool "
-             "(AskUserQuestion / request_user_input) using the decision template, then record the answer with "
-             "`dev crew decide <id> \"<answer>\"` and resume the member who asked (SendMessage / send_input):"]
+             "(AskUserQuestion), its question exactly as quoted below and the options as listed, or show the "
+             "decision in your final message and let the developer type `approve D<n>[: <option>]`. Then record "
+             "the answer with `dev crew decide <id> \"<answer>\"` (devkit records who decided from that evidence) "
+             "and resume the member who asked (SendMessage / send_input):"]
     for d in new:
         opts = (" Options: " + " | ".join(d["options"])) if d["options"] else ""
-        lines.append(f"- {d['id']} from {d['from_name']}: {d['question']}{opts}"
+        lines.append(f"- {d['id']} from {d['from_name']}: “{ask_text(d)}”{opts}"
                      + (f" Recommended: {d['recommend']}." if d.get("recommend") else "")
                      + (f" Irreversible: {d['irreversible']}." if d.get("irreversible") else ""))
     return "\n".join(lines)
@@ -1361,6 +1510,469 @@ def messages_context(agent: str, sid: str, me: str) -> str:
         lines.append(f"- {m['id']} from {m.get('from_name')}: {m['text']}"
                      + (f" (answer to {m['reply_to']})" if m.get("reply_to") else ""))
     return "\n".join(lines)
+
+
+# --------------------------------------------------------------------------- developer evidence (spec D4, C5)
+#
+# A decision, or one irreversible action on one target, is the developer's only through two channels the hooks see:
+# E1, the question tool's answer to the recorded "D<n> · <question>", and E2, a grant line the developer types. Each
+# entry lives in the session record (`human`), covers one decision or one action and target, counts only after the
+# decision was shown, is used once and expires. It is confirmed at use time against the transcript, where Claude
+# Code marks the developer's own prompts (origin human): a hook event typed through a shell, a `-p` prompt, a task
+# notification or a relayed comment never counts. Agents' text, tool results and crew messages never reach it.
+
+GRANT_TTL = 30 * 60  # seconds a `grant <action> <target>` stays usable
+HUMAN_KEEP = 50  # evidence entries kept per session
+QUESTION_TOOLS = ("AskUserQuestion",)  # Codex's request_user_input joins when its payload is known (spec F0, S3)
+GRANT_CLASSES = ("push", "pr", "push-destructive", "pr-write", "merge", "release", "publish", "deploy", "api-write",
+                 "external-message", "delete-data", "migrate-production", "spend")  # C6's classes and IRREVERSIBLE
+HEADLESS_SURFACES = ("SDK", "claude -p", "codex exec")  # nobody at the keyboard: DEVKIT_PREAPPROVE only
+TRANSCRIPT_DAYS = 30  # Claude Code's default cleanupPeriodDays: older evidence may have lost its transcript
+_APPROVE_LINE = re.compile(r"(?i)^approve\s+(D\d+)\s*(?::\s*(\S.*?))?\s*$")
+_GRANT_LINE = re.compile(r"(?i)^grant\s+([a-z][a-z-]*)\s+(\S+)\s*$")
+_PLAIN_YES = re.compile(r"(?i)^\s*yes\s*[.!]?\s*$")
+_RELAYED = re.compile(r"^\s*(?:\[[^\]\n]{0,120}\bsent to (?:Claude|Codex)\b[^\]\n]*\]|\[SYSTEM NOTIFICATION|"
+                      r"<task-notification|<system-reminder|<agent-message|<command-name>|<local-command)",
+                      re.IGNORECASE | re.MULTILINE)
+_DECISION_REF = re.compile(r"\bD(\d+)\b")
+_RECOMMENDED = re.compile(r"\s*\(recommended\)\s*$", re.IGNORECASE)
+
+
+def _norm(text) -> str:
+    return " ".join(str(text or "").split()).casefold()
+
+
+def ask_text(d: dict) -> str:
+    """The question to put to the developer with the question tool, exactly: only an answer to this text is E1."""
+    return f"{d['id']} · {d['question']}"
+
+
+def option_of(d: dict, text):
+    """The decision's option an answer names (the label, with or without the question tool's "(Recommended)", or
+    the option's letter: "B" for "B: reject"), else None."""
+    t = _norm(_RECOMMENDED.sub("", str(text or "")))
+    for o in d.get("options") or []:
+        if t and (t == _norm(o) or (":" in o and t == _norm(o.split(":", 1)[0]))):
+            return o
+    return None
+
+
+def headless(sess: dict) -> bool:
+    """A session with nobody at the keyboard (`claude -p`, the SDK, `codex exec`, devkit's own headless calls)."""
+    return str((sess or {}).get("surface") or "") in HEADLESS_SURFACES or os.environ.get("DEVKIT_HEADLESS") == "1"
+
+
+def preapproved(cls: str, target: str) -> bool:
+    """A headless session's pre-approval: `DEVKIT_PREAPPROVE="release v26.11.4, push feat/*"` in the hook
+    environment, set by whoever launched the session; `dev` commands never read it (spec C5)."""
+    import fnmatch
+    for item in (os.environ.get("DEVKIT_PREAPPROVE") or "").split(","):
+        parts = item.split()
+        if len(parts) == 2 and parts[0].lower() == str(cls).lower() and fnmatch.fnmatchcase(str(target), parts[1]):
+            return True
+    return False
+
+
+def _own_lines(text: str) -> list:
+    """The lines the developer typed as their own: outside fenced code blocks, quotes and indented code."""
+    out, fence = [], False
+    for ln in str(text or "").splitlines():
+        s = ln.strip()
+        if s.startswith(("```", "~~~")):
+            fence = not fence
+            continue
+        if fence or s.startswith(">") or ln.startswith(("    ", "\t")):
+            continue
+        out.append(s)
+    return out
+
+
+def _decision(run, did):
+    return next((x for x in (run or {}).get("decisions") or [] if x["id"].lower() == str(did).lower()), None)
+
+
+def _keep_human(agent: str, sid: str, new: list, extra=None):
+    def fn(s):
+        s["human"] = ((s.get("human") or []) + new)[-HUMAN_KEEP:]
+        s.update(extra or {})
+    state.update(session_path(agent, sid), fn, create=False)
+    for e in new:
+        _audit("crew.evidence", e["covers"], e["excerpt"], channel=e["channel"], transcript_uuid=e["transcript_uuid"],
+               session=f"{agent}:{sid}", answer=e.get("answer") or "")
+
+
+def _entry(agent, channel, covers, excerpt, uuid, transcript, run, now, **more) -> dict:
+    e = {"ts": now, "agent": agent, "channel": channel, "covers": covers, "excerpt": str(excerpt)[:200],
+         "transcript_uuid": str(uuid or ""), "transcript": str(transcript or ""),
+         "run": (run or {}).get("started"), "used": None, "expires": None, "repo": (run or {}).get("project") or ""}
+    e.update(more)
+    return e
+
+
+def on_human_prompt(agent: str, data: dict, now: float | None = None) -> list:
+    """UserPromptSubmit: the E2 lines of the developer's prompt -> the entries recorded. A line of its own, outside
+    code blocks and quotes: `approve D<n>[: <option>]` or `grant <action> <target>`; a plain "yes" covers the one
+    decision the last final message showed. Relayed comments, notifications and headless sessions record nothing."""
+    now = now or time.time()
+    sid = data.get("session_id") or ""
+    sess = state.read(session_path(agent, sid)) if sid else None
+    text = str(data.get("prompt") or "")
+    if sess is None or headless(sess) or _RELAYED.search(text):
+        return []
+    run = load_run(agent, sid)
+    live = run if run and run.get("goal") and run.get("state") != "done" else None
+    uuid, tp, new = data.get("prompt_id") or "", data.get("transcript_path") or "", []
+    repo = sess.get("project") or (live or {}).get("project") or ""  # a grant holds in this repository only
+    for ln in _own_lines(text):
+        mt = _APPROVE_LINE.match(ln)
+        if mt and live:
+            new.append(_entry(agent, "E2", mt.group(1).upper(), ln, uuid, tp, live, now,
+                              answer=(mt.group(2) or "").strip()[:300], repo=repo))
+            continue
+        mt = _GRANT_LINE.match(ln)
+        if mt and mt.group(1).lower() in GRANT_CLASSES:
+            new.append(_entry(agent, "E2", f"{mt.group(1).lower()} {mt.group(2)}", ln, uuid, tp, live, now,
+                              expires=now + GRANT_TTL, repo=repo))
+    if not new and live and _PLAIN_YES.match(text):
+        ids = (sess.get("last_shown") or {}).get("ids") or []
+        d = _decision(live, ids[0]) if len(ids) == 1 else None
+        if d and d.get("state") == "pending" and not d.get("irreversible"):
+            new.append(_entry(agent, "E2", d["id"], text.strip(), uuid, tp, live, now, answer="", plain=True,
+                              repo=repo))
+    if new or (tp and sess.get("transcript") != tp):
+        _keep_human(agent, sid, new, {"transcript": tp} if tp else None)
+    return new
+
+
+def on_question(agent: str, data: dict, now: float | None = None) -> list:
+    """PostToolUse of the question tool in the main session: the decisions it asked are shown, and an answer to the
+    exact `ask_text` of a decision is E1 evidence for it (one of its options; free text counts only when the
+    decision is reversible). -> the entries recorded."""
+    now = now or time.time()
+    sid = data.get("session_id") or ""
+    if data.get("agent_id") or data.get("tool_name") not in QUESTION_TOOLS or not sid:
+        return []
+    sess = state.read(session_path(agent, sid))
+    run = load_run(agent, sid)
+    if sess is None or headless(sess) or not run or not run.get("decisions"):
+        return []
+    qs = [q for q in (data.get("tool_input") or {}).get("questions") or [] if isinstance(q, dict)]
+    resp = data.get("tool_response") if isinstance(data.get("tool_response"), dict) else {}
+    answers = resp.get("answers") if isinstance(resp.get("answers"), dict) else {}
+    pending = {d["id"] for d in pending_decisions(run)}
+    exact = {_norm(ask_text(d)): d for d in run["decisions"]}
+    shown, new = set(), []
+    for q in qs:
+        qt = str(q.get("question") or "")
+        shown.update(f"D{n}" for n in _DECISION_REF.findall(qt) if f"D{n}" in pending)
+        d, label = exact.get(_norm(qt)), answers.get(qt)
+        if not d or not isinstance(label, str) or not label.strip():
+            continue
+        opt = option_of(d, label)
+        new.append(_entry(agent, "E1", d["id"], f"{qt[:120]} = {label[:70]}", data.get("tool_use_id"),
+                          data.get("transcript_path"), run, now, answer=(opt or label.strip())[:300],
+                          free=opt is None, question=qt[:800], label=label[:300]))
+    if shown:
+        _mark_shown(agent, sid, shown, now)
+    if new:
+        _keep_human(agent, sid, new)
+    return new
+
+
+def _mark_shown(agent: str, sid: str, ids, now: float):
+    with _tx(agent, sid):
+        run = load_run(agent, sid)
+        hit = [d for d in (run or {}).get("decisions") or [] if d["id"] in ids and not d.get("shown")]
+        for d in hit:
+            d["shown"] = now
+        if hit:
+            _save(run, touch_session=False)
+
+
+def on_final_message(agent: str, sid: str, text: str, now: float | None = None):
+    """Stop: the developer saw the final message, so each pending decision it names is shown (from now on evidence
+    for it counts), and a plain "yes" next covers it when it was the only one."""
+    now = now or time.time()
+    f = session_path(agent, sid)
+    if not f.exists():
+        return
+    ids = {f"D{n}" for n in _DECISION_REF.findall(str(text or ""))}
+    run = load_run(agent, sid)
+    named = sorted((d["id"] for d in pending_decisions(run) if d["id"] in ids), key=lambda x: int(x[1:]))
+    if named:
+        _mark_shown(agent, sid, set(named), now)
+    elif not ((state.read(f) or {}).get("last_shown") or {}).get("ids"):
+        return  # nothing shown now or before: no write
+    try:
+        state.update(f, lambda s: s.update(last_shown={"ts": now, "ids": named}), create=False)
+    except state.StateBusy:
+        pass  # audited by state: a plain "yes" next covers nothing, which is the safe side
+
+
+def _lines_back(path, key: bytes, block: int = 1 << 20):
+    """The lines of a file that contain `key`, last first, reading backwards in blocks."""
+    with open(path, "rb") as fh:
+        fh.seek(0, 2)
+        pos, rest = fh.tell(), b""
+        while pos > 0:
+            n = min(block, pos)
+            pos -= n
+            fh.seek(pos)
+            parts = (fh.read(n) + rest).split(b"\n")
+            rest = parts[0]
+            for ln in reversed(parts[1:]):
+                if key in ln:
+                    yield ln
+        if key in rest:
+            yield rest
+
+
+def _text_of(msg) -> str:
+    c = (msg or {}).get("content")
+    if isinstance(c, str):
+        return c
+    return "\n".join(b.get("text") or "" for b in c or [] if isinstance(b, dict) and b.get("type") == "text")
+
+
+def confirmed(e: dict) -> bool:
+    """Does the transcript show this entry as the developer's own act? E2: a prompt record with its prompt id,
+    origin human, outside any subagent, holding the line. E1: the question tool's result for its tool_use_id with
+    that answer. Codex transcripts are not read yet (spec F0, S3): its entries rest on the hook alone."""
+    if e.get("agent") == "codex":
+        return True
+    uuid, path = str(e.get("transcript_uuid") or ""), e.get("transcript") or ""
+    if not uuid or not path:
+        return False
+    try:
+        for ln in _lines_back(path, json.dumps(uuid).encode()):
+            try:
+                r = json.loads(ln)
+            except ValueError:
+                continue
+            if not isinstance(r, dict) or r.get("type") != "user" or r.get("isSidechain"):
+                continue
+            if e.get("channel") == "E2":
+                if r.get("promptId") == uuid and (r.get("origin") or {}).get("kind") == "human" and \
+                        (not e.get("excerpt") or _norm(e["excerpt"]) in _norm(_text_of(r.get("message")))):
+                    return True
+            elif e.get("channel") == "E1":
+                blocks = (r.get("message") or {}).get("content")
+                res = r.get("toolUseResult") if isinstance(r.get("toolUseResult"), dict) else {}
+                if any(isinstance(b, dict) and b.get("type") == "tool_result" and b.get("tool_use_id") == uuid
+                       for b in blocks or []) and \
+                        (not e.get("question") or (res.get("answers") or {}).get(e["question"]) == e.get("label")):
+                    return True
+    except OSError:
+        return False
+    return False
+
+
+def _live(e: dict, now: float, run=None) -> bool:
+    if e.get("used") is not None or (e.get("expires") and now > e["expires"]):
+        return False
+    return run is None or (e.get("run") == run.get("started") and run.get("state") != "done")
+
+
+def evidence(agent: str, sid: str, pick, now: float | None = None, run=None) -> list:
+    """The session's live, unused entries that `pick(entry)` accepts and the transcript confirms, oldest first."""
+    now = now or time.time()
+    sess = state.read(session_path(agent, sid)) or {}
+    if headless(sess):
+        return []
+    return [e for e in sess.get("human") or [] if _live(e, now, run) and pick(e) and confirmed(e)]
+
+
+def _consume(agent: str, sid: str, e: dict, now: float) -> dict | None:
+    """Mark one entry used, under the session's lock; None when another process used it first."""
+    out = {}
+
+    def fn(s):
+        for x in s.get("human") or []:
+            if x.get("ts") == e["ts"] and x.get("covers") == e["covers"] and x.get("used") is None:
+                x["used"] = now
+                out.update(x)
+                return None
+        return state.SKIP
+    state.update(session_path(agent, sid), fn, create=False)
+    return out or None
+
+
+def take_evidence(agent: str, sid: str, covers: str, now: float | None = None, run=None, pick=None):
+    """Use one live entry that covers `covers` ("D3" or "release v26.11.4") -> the entry, marked used, or None.
+    Raises state.StateBusy when the session's lock is busy (the gate denies a member and fails open for main)."""
+    now = now or time.time()
+    for e in evidence(agent, sid, lambda x: _norm(x.get("covers")) == _norm(covers) and (pick or bool)(x), now, run):
+        got = _consume(agent, sid, e, now)
+        if got:
+            return got
+    return None
+
+
+def _target_covers(action: str, pattern: str, target: str) -> bool:
+    """Does a grant's target pattern cover this target? The guard's rule (spec C6: push globs never match the
+    default branch, tags match with or without v), else the same text or a glob."""
+    try:
+        from . import guard
+        rule = getattr(guard, "target_matches", None)
+    except Exception:
+        rule = None
+    if rule:
+        return bool(rule(action, pattern, target))
+    import fnmatch
+    p, t = str(pattern or ""), str(target or "")
+    return bool(p) and (p == t or (any(c in p for c in "*?[") and fnmatch.fnmatchcase(t, p)))
+
+
+def _same_repo(have, want) -> bool:
+    return not have or not want or str(have).lower() == str(want).lower()
+
+
+def _opened(id_, source, uses_left, expires) -> dict:
+    return {"id": id_, "source": source, "uses_left": uses_left, "expires": expires}
+
+
+def use_grant(agent: str, sid: str, *, action: str, target: str, repo: str = "", lane: str | None = None,
+              consume: bool = True, now: float | None = None):
+    """What opens one irreversible action (spec C6, The Keymaker's gate) -> {id, source, uses_left, expires}, or
+    None. `lane` None is the main session: a live E2 grant of that action and target, a verified decision naming
+    them, or in auto mode a pre-approval with uses left (never for publish or deploy); a headless session only by
+    DEVKIT_PREAPPROVE in the hook environment. A member's lane: only a grant of the running step it owns, for push
+    and PR create. `consume` False peeks, so the gate checks every action of a command before it uses any; True
+    takes one use under the session's lock. state.StateBusy and every other error reach the caller: the gate
+    denies a member and fails open for the main session."""
+    now = now or time.time()
+    action = str(action or "").lower()
+    sess = state.read(session_path(agent, sid)) or {}
+    run = load_run(agent, sid)
+    live = run if run and run.get("goal") and run.get("state") != "done" else None
+    if lane:
+        if action not in TIER1 or not live:
+            return None
+        s = next((x for x in live.get("plan") or [] if x.get("owner") == lane and x.get("state") == "running"
+                  and action in (x.get("allow") or [])), None)
+        return _opened(f"step:{s['name']}", "step", None, None) if s else None
+    if headless(sess):
+        return _opened("DEVKIT_PREAPPROVE", "preapproval", None, None) if preapproved(action, target) else None
+
+    def grants(e):
+        cls, _, pattern = str(e.get("covers") or "").partition(" ")
+        return e.get("channel") == "E2" and bool(e.get("expires")) and cls == action and \
+            _same_repo(e.get("repo"), repo) and _target_covers(action, pattern, target)
+    for e in evidence(agent, sid, grants, now):
+        eid = f"E2:{e.get('transcript_uuid') or round(e['ts'])}:{e['covers']}"
+        if not consume:
+            return _opened(eid, "E2", 1, e["expires"])
+        got = _consume(agent, sid, e, now)
+        if got:
+            _audit("crew.grant-used", f"{action} {target}", f"E2 grant “{got['covers']}”", channel="E2",
+                   transcript_uuid=got.get("transcript_uuid") or "", session=f"{agent}:{sid}")
+            return _opened(eid, "E2", 0, got["expires"])
+    if not live or not _same_repo(live.get("project"), repo):
+        return None
+
+    def decision(r):
+        return next((d for d in r.get("decisions") or [] if d.get("state") == "decided" and d.get("verified")
+                     and d.get("by") == "developer" and d.get("irreversible") == action and d.get("target")
+                     and not d.get("used") and _target_covers(action, d["target"], target)), None)
+
+    def preapproval(r):
+        if action in NEVER_PREAPPROVED:
+            return None
+        return next((p for p in _live_preapprovals(r, now) if p["action"] == action and _same_repo(p.get("repo"), repo)
+                     and _target_covers(action, p["target"], target)), None)
+    for source, find in (("decision", decision), ("preapproval", preapproval)):
+        hit = find(live)
+        if not hit:
+            continue
+        if not consume:
+            return _opened(hit["id"], source, hit.get("uses_left", 1), hit.get("expires"))
+        with _tx(agent, sid):
+            r = load_run(agent, sid) or {}
+            hit = find(r)
+            if not hit:
+                continue
+            if source == "decision":
+                hit["used"] = now
+            else:
+                hit["uses_left"] -= 1
+            _save(r, touch_session=False)
+        _audit("crew.grant-used", f"{action} {target}", f"{source} {hit['id']}", project=r.get("project") or "",
+               session=f"{agent}:{sid}")
+        return _opened(hit["id"], source, hit.get("uses_left", 0), hit.get("expires"))
+    return None
+
+
+def _when(ts) -> str:
+    return time.strftime("%H:%M", time.localtime(ts))
+
+
+def evidence_lines(entries: list) -> str:
+    """The echo of what the developer just granted or approved, for the next context."""
+    out = []
+    for e in entries:
+        how = "by your prompt" if e["channel"] == "E2" else "by your answer to the question tool"
+        if e.get("expires"):
+            out.append(f"granted: {e['covers']} {how} at {_when(e['ts'])} (one use, until {_when(e['expires'])})")
+        else:
+            out.append(f"approved: {e['covers']}{': ' + e['answer'] if e.get('answer') else ''} {how} at "
+                       f"{_when(e['ts'])} (record it with dev crew decide {e['covers']} \"<the answer>\")")
+    return ("devkit · " + "; ".join(out)) if out else ""
+
+
+def _live_grants(agent: str, sid: str, now: float) -> list:
+    sess = state.read(session_path(agent, sid)) or {}
+    return [e for e in sess.get("human") or [] if e.get("expires") and _live(e, now)]
+
+
+def _decision_evidence(agent: str, sid: str, run: dict, d: dict, answer: str, now: float):
+    """The entry that makes `answer` the developer's decision, used now; None without one. Raises StepError when
+    the developer chose something else, so Morpheus records their answer and not his own."""
+    def fits(e):
+        if d.get("shown") is None or e["ts"] < d["shown"]:
+            return False
+        if (e.get("plain") or e.get("free")) and d.get("irreversible"):
+            return False
+        return True
+    found = evidence(agent, sid, lambda e: _norm(e.get("covers")) == _norm(d["id"]) and fits(e), now, run)
+    if not found:
+        return None
+    e = found[-1]  # the developer's latest word on it
+    said = e.get("answer") or (d.get("recommend") if e["channel"] == "E2" and d.get("options") else "")
+    if said:
+        want = option_of(d, said) or said
+        if not (option_of(d, answer) == want or _norm(answer) == _norm(want)):
+            raise StepError(f"{d['id']}: the developer chose “{want}” ({'question tool' if e['channel'] == 'E1' else 'prompt'}"
+                            f" at {_when(e['ts'])}); record that: dev crew decide {d['id']} \"{want}\"")
+    return _consume(agent, sid, e, now)
+
+
+def evidence_check(rec: dict, path, line):
+    """`dev audit verify` (spec C5, K1): each recorded piece of developer evidence must point to a real message of
+    the developer in the session's transcript. -> the problem, or None."""
+    if rec.get("action") != "crew.evidence":
+        return None
+    ev, ref = rec.get("evidence") or {}, rec.get("ref") or {}
+    agent, _, sid = str(ref.get("session") or "").partition(":")
+    if ev.get("channel") not in ("E1", "E2") or agent != "claude":
+        return None
+    uuid = str(ev.get("transcript_uuid") or "")
+    tp = (state.read(session_path(agent, sid)) or {}).get("transcript") or \
+        next(iter(sorted((core.HOME / ".claude" / "projects").glob(f"*/{sid}.jsonl"))), "")
+    if not tp or not Path(tp).exists():
+        old = time.time() - float(rec.get("ts") or 0) > TRANSCRIPT_DAYS * 86400
+        return None if old else (f"evidence {ev['channel']} {uuid or '-'} for {rec.get('target')}: the session's "
+                                 f"transcript is gone, so no message of the developer backs it")
+    e = {"agent": agent, "channel": ev["channel"], "transcript_uuid": uuid, "transcript": str(tp)}
+    if not confirmed(e):
+        return (f"evidence {ev['channel']} {uuid or '-'} for {rec.get('target')}: no message of the developer in "
+                f"{core.tilde(tp)} backs it")
+    return None
+
+
+def _register_checks():
+    from . import audit
+    if evidence_check not in audit.CHECKS:
+        audit.CHECKS.append(evidence_check)
 
 
 def begin(which, cwd: str | None = None, now: float | None = None, from_agent: str | None = None) -> dict:
@@ -1774,6 +2386,10 @@ def render_update(run: dict, branch: str | None = None, now: float | None = None
         lines.append("- **You:** decide " + "; ".join(f"“{d['question'][:70]}”" for d in waiting[:2])
                      + (f" (+{len(waiting) - 2} more)" if len(waiting) > 2 else ""))
     lines.append(f"- **Next:** {nxt or 'continue the plan'}")
+    grants = _live_grants(run.get("agent") or "", run.get("session") or "", now) if run.get("session") else []
+    if grants:  # what the developer granted, echoed in the status until it is used or expires (spec C5)
+        lines += ["", "Granted: " + "; ".join(f"{e['covers']} by your prompt at {_when(e['ts'])}, until "
+                                              f"{_when(e['expires'])}" for e in grants)]
     if plan:
         lines.append("")
         for i, s in enumerate(plan, 1):
@@ -2568,3 +3184,6 @@ def report(days: int = 7, project: str | None = None) -> str:
     if len(out) == 1:
         out.append("  no timing data yet (devkit records turns, slow commands, subagents and runs as agents work)")
     return "\n".join(out)
+
+
+_register_checks()  # `dev audit verify` checks every piece of developer evidence (spec C5, K1)

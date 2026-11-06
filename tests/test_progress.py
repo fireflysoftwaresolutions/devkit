@@ -659,9 +659,9 @@ class GuidedAndAutoTests(unittest.TestCase):
             self.assertEqual(pg.load_run("claude", "s1")["plan"][0]["state"], "running")  # Neo keeps working
             push = pg.crew_decision("Push the release branch?", recommend="yes", irreversible="push", now=self.m(3))
             self.assertEqual(push["state"], "pending")  # irreversible: the developer decides
-            pg.set_mode("auto", approve="push", now=self.m(4))
+            pg.set_mode("auto", approve="push fix/*", now=self.m(4))
             again = pg.crew_decision("Push the fix branch?", recommend="yes", irreversible="push", now=self.m(5))
-            self.assertEqual(again["state"], "decided")  # pre-approved
+            self.assertEqual(again["state"], "pending")  # a pre-approval without the developer's grant opens nothing
             over = pg.crew_decide("D1", "B: reject", now=self.m(6))  # the developer overrides an automatic choice
             self.assertEqual((over["answer"], over["overrides"]), ("B: reject", "A"))
             with self.assertRaises(pg.StepError):
