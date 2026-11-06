@@ -202,6 +202,8 @@ def _commit(paths, message: str, push: bool = True, wait: bool = False):
     rc, _, _ = core.git(HANDOFF, "diff", "--cached", "--quiet")
     if rc != 0:
         core.git(HANDOFF, "commit", "-q", "-m", message, "--", *rel)
+        from . import audit
+        audit.record("handoff." + (rel[0].split("/")[0] if rel else "write"), ", ".join(rel)[:300], message)
     if not push or not core.gitout(HANDOFF, "remote") or not core.CFG["sync"].get("push", True):
         return True
     if os.environ.get("DEVKIT_NO_AUTOSYNC") and not wait:  # bulk operations push once at the end

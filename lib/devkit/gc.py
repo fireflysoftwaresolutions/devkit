@@ -24,6 +24,8 @@ ARTEFACTS = {"node_modules", ".venv", "venv", "dist", "build", "target", ".next"
 
 
 def _log(msg: str):
+    from . import audit
+    audit.record("ops", msg.split(" · ")[0][:60], msg)
     LOGDIR.mkdir(parents=True, exist_ok=True)
     f = LOGDIR / time.strftime("%Y-%m.md")
     if not f.exists():

@@ -358,6 +358,8 @@ def stop(agent: str):
                 branch = core.gitout(sess.get("top") or data.get("cwd") or ".", "branch", "--show-current")
                 canary.save_status(pid, agent, line, branch or sess.get("branch"))
             elif not ok:
+                from . import audit
+                audit.record("canary.miss", pid or "", "final message without the status block", "miss")
                 if agent == "claude":
                     out["systemMessage"] = canary.miss_message(agent, sid)
                 if core.CFG.get("canary", {}).get("enforce", True):
@@ -448,6 +450,8 @@ def config_change(agent: str):
     ks = sorted({d.key for d in drift})
     keys = ", ".join(ks[:6]) + (f" (+{len(ks) - 6} more)" if len(ks) > 6 else "")
     _log(f"config-change blocked ({agent}): {keys}")
+    from . import audit
+    audit.record("config.blocked", path, keys, "blocked")
     policy._log(f"blocked change to devkit-managed keys: {keys}")
     _spawn(["config", "repair", "--quiet"])
     print(f"devkit manages these settings: {keys}. Change devkit's configuration instead "
@@ -503,6 +507,10 @@ def guard(agent: str):
     if agent == "codex" and decision == "ask":
         decision = "deny"
     _log(f"guard {agent} {decision}: {reason[:160]}")
+    from . import audit
+    tin = data.get("tool_input") or {}
+    audit.record(f"guard.{decision}", tin.get("command") or tin.get("file_path") or data.get("tool_name") or "",
+                 reason[:400], decision, tool=data.get("tool_name") or "")
     print(json.dumps({"hookSpecificOutput": {"hookEventName": "PreToolUse", "permissionDecision": decision,
                                              "permissionDecisionReason": reason}}))
 

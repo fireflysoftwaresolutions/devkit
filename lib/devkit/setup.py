@@ -640,6 +640,15 @@ def setup_docs_tools():
 
 
 def setup_launchd():
+    """Scheduled jobs (sync, sleep, gc, repair, audit, doctor, lessons) as launchd agents, from the devkit config."""
+    step("Scheduled jobs (launchd)")
+    from . import jobs
+    for state, name, detail in jobs.install(quiet=True):
+        (done if state in ("ok", "loaded", "legacy", "disabled") else fail)(f"{name}: {state}" +
+                                                                          (f" · {detail}" if detail else ""))
+
+
+def _legacy_setup_launchd():
     step("Background sync (launchd)")
     interval = int(CFG["sync"].get("interval_minutes", 60)) * 60
     log = STATE / "logs" / "sync.log"
@@ -829,10 +838,15 @@ def doctor() -> int:
     rc, out, _ = sh(["docker", "compose", "version", "--short"], timeout=20)
     check("Docker", "compose plugin", rc == 0, out or "not found", "dev install --only docker")
 
-    loaded = sh(["launchctl", "print", f"gui/{os.getuid()}/{LAUNCHD_LABEL}"])[0] == 0
-    last = read_json(STATE / "last-sync.json", {}) or {}
-    check("Automation", "launchd sync job", loaded, f"last run {core.ago(last.get('ts'))}" if last else "never ran",
-          "dev install --only launchd")
+    from . import jobs as _jobs
+    for jname, jj in _jobs.jobs().items():
+        if not jj.get("enabled"):
+            continue
+        lr = _jobs.last_run(jname) or {}
+        okj = _jobs.loaded(jname) and lr.get("rc") in (0, None)
+        check("Automation", f"job {jname}", okj, f"{_jobs.schedule_text(jj)} · last " +
+              (core.ago(lr["start"]) + (" ok" if lr.get("rc") == 0 else f" exit {lr.get('rc')}") if lr else "never"),
+              f"dev jobs show {jname}")
     from . import canary
     sm = canary.summary(7)
     tot = sum(t for _, t in sm.values())

@@ -44,6 +44,8 @@ COMMANDS = [
         ("time [--days 7]", "How long things take: turns, slow commands, subagents, estimate accuracy"),
         ("handoff-import <dir> --slug s", "Adopt an old handoff repository as an initiative (from a staging folder)"),
         ("lesson add|ls|scan|review", "Learn from mistakes: lessons recalled in every session, repeats automated"),
+        ("jobs [show|run|set|enable|disable|journal]", "Scheduled jobs (sync, sleep, gc, repair, audit, doctor, lessons)"),
+        ("audit [--days 7] [--team]", "The audit trail: every change, decision and job run, per machine and team"),
         ("sleep [--dry-run]", "Consolidate and forget (daily): unused lessons fade, duplicates merge, old records go"),
         ("report [--days 7]", "Status report for initiatives and projects (Markdown, for the team or management)"),
     ]),
@@ -585,8 +587,9 @@ def cmd_sync(a):
                              refresh_sizes=a.scheduled) if not a.offline else \
             registry.build(with_prs=True, refresh_prs=False, with_sizes=False, pr_max_age=10 ** 9)
         results = []
-        if a.scheduled and CFG["gc"].get("auto"):
-            results = gc.apply(gc.plan(reg, with_sizes=True), only_auto=True)
+        if a.scheduled and CFG["gc"].get("auto") and not (core.HOME / "Library" / "LaunchAgents" /
+                                                          "com.devkit.job.gc.plist").exists():
+            results = gc.apply(gc.plan(reg, with_sizes=True), only_auto=True)  # only when the gc job is not installed
             if any(ok_ and m.startswith("removed") for ok_, m in results):
                 core._CWDS = None
                 reg = registry.build(with_prs=True, refresh_prs=False, with_sizes=False)
@@ -603,8 +606,9 @@ def cmd_sync(a):
                 pass
         try:
             from . import sleep as _sleep
-            if a.scheduled and _sleep.due():
-                _sleep.run(quiet=True)
+            if a.scheduled and _sleep.due() and not (core.HOME / "Library" / "LaunchAgents" /
+                                                     "com.devkit.job.sleep.plist").exists():
+                _sleep.run(quiet=True)  # only when the sleep job is not installed
         except Exception as e:
             if not a.quiet:
                 ui.warn(f"sleep: {e}")
@@ -697,10 +701,10 @@ def cmd_gc(a):
         if input(f"\n  Apply {len(pl['actions'])} action(s)? [y/N] ").strip().lower() not in ("y", "yes"):
             return 1
     print(ui.section("Applying"))
-    for ok, msg in gc.apply(pl, only_auto=False):
+    for ok, msg in gc.apply(pl, only_auto=getattr(a, "auto_only", False)):
         print(f"  {ui.OK if ok else ui.WARN} {msg}")
     return cmd_sync(argparse.Namespace(session=None, finish=False, offline=True, scheduled=False, no_push=False,
-                                       quiet=False))
+                                       quiet=False, renew=None))
 
 
 def cmd_du(a):
@@ -1408,6 +1412,98 @@ def cmd_sleep(a):
     return 0
 
 
+def cmd_jobs(a):
+    from . import jobs as J
+    act = a.jobs_cmd or "ls"
+    try:
+        if act == "exec":
+            return J.execute(a.name)
+        if act == "run":
+            print(f"{ui.ARROW} running {a.name} now (log: {tilde(J.LOGS / (a.name + '.log'))})")
+            rc = J.execute(a.name)
+            r = J.last_run(a.name) or {}
+            print(f"{ui.OK if rc == 0 else ui.FAIL} {a.name} · exit {rc} · {r.get('duration', 0):.0f}s · {r.get('summary', '')}")
+            return rc
+        if act in ("enable", "disable"):
+            J.set_schedule(a.name, enabled=(act == "enable"), why=a.why or "")
+            print(f"{ui.OK} {a.name} {act}d")
+            return 0
+        if act == "set":
+            j = J.set_schedule(a.name, every=a.every, at=a.at, weekly=a.weekly, why=a.why or "")
+            print(f"{ui.OK} {a.name}: {J.schedule_text(j)}")
+            return 0
+        if act == "install":
+            for state, name, detail in J.install():
+                print(f"  {ui.OK if state in ('ok', 'loaded', 'legacy', 'disabled') else ui.FAIL} {name:<9} {state:<9} {ui.dim(detail)}")
+            return 0
+        if act == "logs":
+            f = J.LOGS / f"{a.name}.log"
+            lines = f.read_text(errors="ignore").splitlines()[-a.lines:] if f.exists() else ["(no runs yet)"]
+            print("\n".join(lines))
+            return 0
+        if act == "journal":
+            rows = []
+            for r in J.journal(a.days, getattr(a, "name", None))[-a.lines:]:
+                rows.append([core.fmt_ts(r["start"]), r["job"], "skipped" if r.get("rc") is None else
+                             ("ok" if r["rc"] == 0 else f"exit {r['rc']}"), f"{r.get('duration', 0):.0f}s",
+                             (r.get("summary") or "")[:70]])
+            print(ui.table(rows, ["STARTED", "JOB", "RESULT", "TOOK", "LAST LINE"]) if rows else "  no runs yet")
+            return 0
+        if act == "show":
+            j = J.jobs()[a.name]
+            print(ui.section(f"job {a.name}"))
+            for k, v in (("about", j.get("about")), ("command", "dev " + " ".join(j["cmd"])),
+                         ("schedule", J.schedule_text(j)), ("enabled", "yes" if j.get("enabled") else "no"),
+                         ("loaded", "yes" if J.loaded(a.name) else "no"), ("timeout", f"{j.get('timeout')} min"),
+                         ("notify", j.get("notify")), ("log", tilde(J.LOGS / (a.name + ".log")))):
+                print(ui.kv(k, v, 10))
+            for r in J.journal(30, a.name)[-8:]:
+                ok = r.get("rc") == 0
+                print(f"  {ui.OK if ok else ui.FAIL} {core.fmt_ts(r['start'])}  {r.get('duration', 0):>5.0f}s  "
+                      f"{ui.dim((r.get('summary') or '')[:80])}")
+            return 0
+    except (ValueError, KeyError) as e:
+        ui.err(str(e))
+        return 2
+    rows = []
+    for name, j in J.jobs().items():
+        r = J.last_run(name) or {}
+        last = "never" if not r else (core.ago(r["start"]) + " · " + ("ok" if r.get("rc") == 0 else
+                                                                       "skipped" if r.get("rc") is None else f"exit {r['rc']}"))
+        nxt = J.next_run(j)
+        state = ("on" if J.loaded(name) else "not loaded") if j.get("enabled") else "off"
+        rows.append([name, state, J.schedule_text(j), last, core.fmt_ts(nxt)[5:] if nxt else "-", j.get("about", "")[:60]])
+    print(ui.section("Scheduled jobs (launchd)"))
+    print(ui.table(rows, ["JOB", "STATE", "SCHEDULE", "LAST RUN", "NEXT", "WHAT"]))
+    print(ui.dim("\n  dev jobs show|run|logs <job> · dev jobs set <job> --every 30m|--at 03:30|--weekly 'mon 09:00' · "
+                 "dev jobs enable|disable <job> · dev jobs journal"))
+    return 0
+
+
+def cmd_audit(a):
+    from . import audit
+    if a.publish:
+        changed = audit.publish()
+        audit.prune()
+        if changed:
+            from . import work
+            work._commit(changed, f"audit: {len(changed)} file(s) from {audit.actor()['host']}")
+        if not a.quiet:
+            print(f"{ui.OK} audit published ({len(changed)} file(s) changed)")
+        return 0
+    rs = audit.records(a.days, a.action, a.actor, a.team)
+    if a.json:
+        print(json.dumps(rs, indent=1, ensure_ascii=False))
+        return 0
+    print(ui.section(f"Audit · last {a.days} days" + (" · team" if a.team else "") + f" · {len(rs)} record(s)"))
+    for r in rs[-a.lines:]:
+        bad = r.get("outcome") not in ("ok", None)
+        who = f"{r.get('user')}@{r.get('host')} {r.get('agent')}"
+        print(f"  {ui.dim(core.fmt_ts(r['ts']))} {(ui.red if bad else ui.cyan)(r.get('action', ''))[:40]:<28} "
+              f"{r.get('target', '')[:70]}  {ui.dim(who)}" + (f"  {ui.red(r['outcome'])}" if bad else ""))
+    return 0
+
+
 def cmd_team(a):
     from . import work
     t = work.team(max_age_h=a.hours)
@@ -2028,6 +2124,34 @@ def build_parser():
     p = add("sleep", cmd_sleep, "Consolidate and forget: lessons decay unless used, duplicates merge, old records go")
     p.add_argument("--dry-run", action="store_true", help="show what would change")
     p.add_argument("--quiet", action="store_true")
+    p = add("jobs", cmd_jobs, "Scheduled jobs: see, run, change, enable or disable; journal and logs")
+    jsp = p.add_subparsers(dest="jobs_cmd")
+    jsp.add_parser("ls", help="every job with its schedule, last run and next run")
+    jsp.add_parser("install", help="write and load the launchd jobs from the config")
+    for verb, h_ in (("show", "a job with its recent runs"), ("run", "run a job now"), ("exec", argparse.SUPPRESS),
+                     ("enable", "turn a job on"), ("disable", "turn a job off"), ("logs", "a job's log")):
+        x = jsp.add_parser(verb, help=h_)
+        x.add_argument("name")
+        x.add_argument("--why")
+        x.add_argument("-n", "--lines", type=int, default=60)
+    x = jsp.add_parser("set", help="change a schedule: --every 30m | --at 03:30 | --weekly 'mon 09:00'")
+    x.add_argument("name")
+    x.add_argument("--every")
+    x.add_argument("--at")
+    x.add_argument("--weekly")
+    x.add_argument("--why")
+    x = jsp.add_parser("journal", help="past runs of every job: start, result, duration, last line")
+    x.add_argument("--days", type=int, default=7)
+    x.add_argument("-n", "--lines", type=int, default=40)
+    p = add("audit", cmd_audit, "The audit trail: every change, decision and job run devkit made")
+    p.add_argument("--days", type=float, default=7)
+    p.add_argument("--action", help="only actions starting with this, e.g. guard, job, task, rm")
+    p.add_argument("--actor", help="user@host or agent")
+    p.add_argument("--team", action="store_true", help="every machine (from the handoff repository)")
+    p.add_argument("--json", action="store_true")
+    p.add_argument("-n", "--lines", type=int, default=60)
+    p.add_argument("--publish", action="store_true", help=argparse.SUPPRESS)
+    p.add_argument("--quiet", action="store_true")
     p = add("report", cmd_report, "Status report (Markdown): health, progress, done, in progress, next, risks, team")
     p.add_argument("--days", type=int, default=7)
     p.add_argument("-i", "--initiative")
@@ -2099,6 +2223,7 @@ def build_parser():
     p.add_argument("--renew", metavar="AGENT", help=argparse.SUPPRESS)
     p = add("gc", cmd_gc, "Reclaim disk safely")
     p.add_argument("--apply", action="store_true")
+    p.add_argument("--auto-only", action="store_true", help="only what is safe without a person (the gc job)")
     p.add_argument("-y", "--yes", action="store_true")
     p.add_argument("-v", "--verbose", action="store_true")
     add("du", cmd_du, "Disk usage report").add_argument("--refresh", action="store_true")
@@ -2162,7 +2287,17 @@ def main(argv=None) -> int:
         return cmd_home(a) or 0
     if getattr(a, "args", None) and a.args[:1] == ["--"]:
         a.args = a.args[1:]
+    from . import audit
+    track = audit.audited(argv)
+    start = time.time()
+    rc = 1
     try:
-        return a.fn(a) or 0
+        rc = a.fn(a) or 0
+        return rc
     except KeyboardInterrupt:
+        rc = 130
         return 130
+    finally:
+        if track:
+            audit.record("dev." + argv[0], " ".join(argv[1:])[:300], "", "ok" if rc == 0 else f"exit {rc}",
+                         duration=round(time.time() - start, 2), cwd=core.tilde(os.getcwd()))

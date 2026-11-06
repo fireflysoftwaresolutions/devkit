@@ -200,6 +200,8 @@ def diff(include_codex=True):
 # --------------------------------------------------------------------------- repair
 
 def _log(msg: str):
+    from . import audit
+    audit.record("config", msg[:80], msg)
     d = STATE / "logs"
     d.mkdir(parents=True, exist_ok=True)
     with (d / "config.log").open("a") as f:
