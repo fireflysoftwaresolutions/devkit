@@ -2271,7 +2271,9 @@ _RO_GH_READ = frozenset({"view", "list", "diff", "checks", "status"})
 _RO_DEV = {"status": None, "grep": None, "find": None, "files": None, "diff": None, "stubs": None, "help": None,
            "version": None, "sec": ("scan",), "test": ("", "run", "plan", "audit"), "plan": ("show",),
            "lesson": ("add", "recur"), "task": ("", "ls", "list", "show"), "ci": ("", "status", "ls", "list"),
-           "delivery": ("", "show")}
+           "delivery": ("", "show"), "audit": ("", "verify", "show", "stats", "config")}
+_AUDIT_VALUES = {"--days", "--since", "--until", "--action", "--actor", "-p", "--project", "--member", "--category",
+                 "--severity", "--outcome", "--grep", "--format", "-o", "--out", "-n", "--lines"}
 _SED_ADDR = r"(?:\d+|\$|/(?:[^/\\\n]|\\.)*/I?)"
 _SED_PRINT = re.compile(rf"^(?:{_SED_ADDR}(?:\s*,\s*{_SED_ADDR})?)?\s*(?:p|q\d*)$")
 
@@ -2456,9 +2458,13 @@ def _ro_dev(args) -> str | None:
         return None
     pos = [a for a in args if not a.startswith("-")]
     sub = pos[0] if pos else ""
+    if sub == "audit":  # its filters take values (--action guard): the subcommand is the first other word
+        pos = _positionals(args, _AUDIT_VALUES)
     if sub in _RO_DEV and (_RO_DEV[sub] is None or (pos[1] if len(pos) > 1 else "") in _RO_DEV[sub]):
         if sub == "ci" and {"--run", "--resume"} & set(args):
             return "`dev ci --run` runs the pipeline's build and package steps"
+        if sub == "audit" and {"--publish", "-o", "--out"} & {a.split("=", 1)[0] for a in args}:
+            return "`dev audit --publish` commits the audit trail to the handoff repository, and `-o` writes a file"
         return None
     return f"`dev {' '.join(pos[:2]) or '…'}` changes devkit's records or the repository"
 

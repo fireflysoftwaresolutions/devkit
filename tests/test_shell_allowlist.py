@@ -138,6 +138,17 @@ class AllowlistTests(unittest.TestCase):
                 self.assertIsNone(lane(cmd))
         self.assertIsNotNone(lane("ls > listing.txt"))  # a redirect into the repository writes a file
 
+    def test_a_review_lane_reads_the_audit_trail_but_never_publishes_or_exports_it_to_a_file(self):
+        # Persephone's lesson L-fxwm448qq5i (Morpheus, M163): the audit reads are read commands
+        for cmd in ("dev audit", "dev audit verify", "dev audit stats --days 3", "dev audit show 1a2b",
+                    "dev audit config", "bin/dev audit --action guard --json"):
+            with self.subTest(cmd=cmd):
+                self.assertIsNone(lane(cmd))
+        for cmd in ("dev audit --publish", "dev audit export -o out.jsonl", "dev audit export --out=out.jsonl",
+                    "dev audit export"):
+            with self.subTest(cmd=cmd):
+                self.assertIsNotNone(lane(cmd))
+
     def test_git_and_gh_read_but_never_change_anything(self):
         for cmd in ("git branch x", "git branch -d x", "git tag -d v1", "git remote add o url", "git stash pop",
                     "git worktree add ../x", "git config --unset x", "git config core.hooksPath x",
