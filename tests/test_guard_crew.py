@@ -47,6 +47,14 @@ class ProtectedCwdTests(unittest.TestCase):
             with self.subTest(cmd=cmd):
                 self.assertEqual(verdict(cmd), "deny")
 
+    def test_a_program_started_in_a_parent_folder_of_devkit_state_is_refused(self):
+        # Seraph's re-review (M77, a): from ~/.local/state or ~/.local a relative path still reaches devkit's state
+        for cmd in (f"cd {STATE.parent} && python3 -c \"open('devkit/runs/x.json', 'w')\"",
+                    f"cd {STATE.parent.parent} && node -e \"require('fs').writeFileSync('state/devkit/r.json', '')\""):
+            with self.subTest(cmd=cmd):
+                self.assertEqual(verdict(cmd), "deny")
+        self.assertEqual(verdict("cd ~ && python3 -c \"open('notes.md', 'w')\""), "allow")  # HOME holds everything
+
     def test_a_program_that_writes_in_a_folder_the_guard_cannot_see_is_refused_when_the_command_names_state(self):
         cmd = f"D={STATE}/runs; cd $D && python3 -c \"open('x.json', 'w').write('x')\""
         self.assertEqual(verdict(cmd), "deny")

@@ -1609,7 +1609,10 @@ class _Shell:
     def interpreter(self, argv, assigns, cwd):
         code, rest, module, inplace = _program(argv, cwd, self.bodies)
         name = os.path.basename(argv[0])
-        inside = bool(cwd) and str(cwd) != str(UNKNOWN) and is_protected(Path(cwd))
+        # started in devkit's state or configuration, or in a folder that holds them (~/.local/state, ~/.local; not
+        # HOME, which holds everything), its relative paths can land there (Seraph, K1 review)
+        here = Path(cwd) if cwd and str(cwd) != str(UNKNOWN) else None
+        inside = bool(here) and (is_protected(here) or (holds_protected(here) and real(here) != real(HOME)))
         if _repo_script(argv, cwd) and not inside:
             module = name  # a repository's own script (a test) is its code, like `-m`: only its path arguments count
             pos = [a for a in rest if not a.startswith("-")]
@@ -1624,7 +1627,6 @@ class _Shell:
         if not cwd or str(cwd) == str(UNKNOWN):  # its relative paths land in a folder the guard cannot see
             self.unresolved.append(f"a path relative to the folder {name} runs in")
         named = [c for c in _candidates(rest) + assigns if _pathlike(c)]
-        # started inside devkit's state or configuration, its relative paths land there (Seraph, K1 review)
         hit = inside or _mark().search(code) or any(is_protected(resolve(c, cwd)) for c in named) or \
             (self.mentions and _CODE_INPUTS.search(code)) or ("DEVKIT_" in _unescape(code) and _SETTINGS_NAME.search(code)) \
             or _DEV_LINK_TEXT.search(code) or _dev_command_text().search(code)
