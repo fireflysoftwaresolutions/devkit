@@ -618,9 +618,10 @@ def config_change(agent: str):
     if settings is None:
         return
     drift = [d for d in policy.diff_claude(settings) if not d.key.startswith("hooks.") or policy.lock_status() == "off"]
-    if not drift:
+    env_keys = _devkit_env_change(path, settings)
+    if not drift and not env_keys:
         return
-    ks = sorted({d.key for d in drift})
+    ks = sorted({d.key for d in drift} | {f"env.{k}" for k in env_keys})
     keys = ", ".join(ks[:6]) + (f" (+{len(ks) - 6} more)" if len(ks) > 6 else "")
     _log(f"config-change blocked ({agent}): {keys}")
     from . import audit
@@ -631,6 +632,29 @@ def config_change(agent: str):
           f"(config/claude/settings.json in the devkit repo or ~/.config/devkit/config.json) and run `dev install`.",
           file=sys.stderr)
     sys.exit(2)
+
+
+def _devkit_env_change(path: str, settings: dict) -> list:
+    """The DEVKIT_* variables of the settings' env block that differ from what devkit manages (spec C11: set,
+    changed or removed), put back to devkit's values in the file. [] when none differ."""
+    from . import guard, policy
+    flat, _ = policy.claude_desired()
+    want = {p[1]: json.dumps(v) for p, v in flat.items() if len(p) == 2 and p[0] == "env"
+            and str(p[1]).startswith("DEVKIT_")}
+    try:
+        have = guard.devkit_env(Path(path).read_text())
+    except OSError:
+        return []
+    changed = sorted(k for k in set(want) | set(have) if want.get(k) != have.get(k))
+    if changed:
+        env = {k: v for k, v in (settings.get("env") or {}).items() if not str(k).startswith("DEVKIT_")}
+        settings["env"] = {**env, **{k: json.loads(v) for k, v in want.items()}}
+        if not settings["env"]:
+            settings.pop("env")
+        tmp = Path(f"{path}.devkit.tmp")
+        tmp.write_text(json.dumps(settings, indent=2) + "\n")
+        os.replace(tmp, path)
+    return changed
 
 
 def instructions_loaded(agent: str):
