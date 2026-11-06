@@ -342,8 +342,8 @@ class RenderTests(unittest.TestCase):
         self.assertIn("function markerChip", dashboard.JS)
 
     def test_static_export_is_the_page_of_its_data(self):
-        """`render` (dev sync, --export) is `page(collect(...))` with no nonce: no CSP attributes, no live flag."""
-        self.assertEqual(self.html, dashboard.page(dashboard.collect(self.reg, handoff=self.handoff, now=NOW)))
+        """`render` (dev sync, --export) is `page()` of its own data with no nonce: no CSP attributes, no live flag."""
+        self.assertEqual(self.html, dashboard.page(self.data))   # the same data again (a second collect sees a later clock)
         self.assertNotIn("nonce=", self.html)
         self.assertNotIn("live", self.data)
         self.assertIn('<script>(function(){try{var t=JSON.parse(localStorage.getItem("devkit.theme"))', self.html)
