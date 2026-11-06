@@ -158,6 +158,9 @@ def handoff_violation(rel: str, cwd, envs=frozenset()):
                 f"`dev delivery apply --set key=value --why \"…\"`.")
     if rel.startswith("lessons/"):
         return (f"`{rel}` is a lesson, versioned with who and why. Use `dev lesson add|recur|prevent|retire …`.")
+    if rel.startswith("audit/"):
+        return (f"`{rel}` is the audit trail: each machine's records are published by its `audit` job and are never "
+                f"edited. Read it with `dev audit`.")
     if rel.startswith(("items/", "sessions/", "presence/")):
         return (f"`{rel}` is managed by devkit so that versions, locks, history and attribution stay correct. Use "
                 f"`dev task add|start|done|edit|move|cancel --why …` for work items and `dev handoff --log \"…\"` "

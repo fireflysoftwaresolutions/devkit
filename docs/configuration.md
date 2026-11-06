@@ -49,6 +49,7 @@ repositories that are no longer in place.
 | `claude.default_mode` | `bypassPermissions` | Claude Code's permission mode: `bypassPermissions` (no prompts; the guard protects the workspace), `acceptEdits` or `default` |
 | `claude.subagent_model` · `claude.subagent_effort` | empty | Model and effort for every Claude subagent. Empty keeps the session's (recommended). See [Models and tokens](models-and-tokens.md#configuration-keys) |
 | `claude.fast_mode_per_session` | `true` | Keep `fastModePerSessionOptIn` in Claude's settings |
+| `claude.statusline` | `true` | Install devkit's status line when you have none (it records Claude's quota; see [Agents](agents.md#settings-claudesettingsjson)) |
 | `codex.mode` | `full` | The choice in `dev setup`: `full` (no prompts, full access) or `workspace` (sandboxed to the project, asks when it needs more) |
 | `codex.approval_policy` · `codex.sandbox_mode` | `never` · `danger-full-access` | Written to `~/.codex/config.toml`; `workspace` mode sets `on-request` · `workspace-write` |
 | `codex.max_subagent_threads` | `4` | Parallel subagent threads per Codex session |
@@ -186,6 +187,7 @@ Never edit the generated files directly; the next install overwrites them, and `
 | `AZURE_DEVOPS_EXT_PAT` | `dev ci status` for Azure Pipelines and the `az devops` CLI (`AZURE_DEVOPS_PAT` works too for `dev ci status`) |
 | `DEVKIT_NO_NOTIFY=1` | No desktop notifications from that process |
 | `DEVKIT_THEME=dark\|light` | The wordmark's ink: paper on dark, charcoal on light (otherwise taken from `COLORFGBG`, default dark) |
+| `DEVKIT_SCOPE=all` | Check every turn with the status block and required skills, not only development turns |
 | `DEVKIT_NO_AUTOSYNC=1` | No queued background syncs from that process; bulk operations push once at the end |
 | `NO_COLOR` | Plain output without colors |
 | `DEVKIT_SESSION`, `DEVKIT_AGENT` | Set by devkit in Claude Code sessions (and `DEVKIT_AGENT=job` in scheduled jobs) so `dev progress`, the work-item changelog, and the audit trail know the session and agent; do not set them yourself |

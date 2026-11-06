@@ -1690,9 +1690,9 @@ def _pr_create(c, a) -> int:
                               "dev pr create --dry-run > body.md, fill it in, then dev pr create --body-file body.md")
     body, removed = strip_attribution(body)
     missing = body_problems(body, template)
-    if a.dry_run:
+    if a.dry_run:  # the body alone on stdout (`> body.md` works); the summary on stderr
         print(f"title: {title}\ntemplate: {source}\nevidence: {describe_evidence(ev)}" +
-              (f"\nstill empty: {', '.join(missing)}" if missing else "") + "\n---")
+              (f"\nstill empty: {', '.join(missing)}" if missing else "") + "\n---", file=sys.stderr)
         print(body)
         return 0
     if missing and not a.draft:

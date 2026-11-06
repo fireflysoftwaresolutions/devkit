@@ -28,7 +28,8 @@ Each starts with a header such as:
 
 | Section | What it tells the agents |
 | --- | --- |
-| 0. Instruction canary and status block | Start the final message of every turn, without exception and in any language, with the `[Firefly> DevKit]` status block (see [Concepts › The status block](concepts.md#the-status-block)) |
+| Scope | The rules apply to development work only; a recipe or consulting work with the Firefly consulting kit gets a normal answer (see [Concepts › Development work only](concepts.md#development-work-only)) |
+| 0. Instruction canary and status block | Start the final message of every development turn, without exception and in any language, with the `[Firefly> DevKit]` status block (see [Concepts › The status block](concepts.md#the-status-block)) |
 | 1. Workspace | Where repositories, worktrees, the handoff repository, and scratch files live |
 | 2. Start of every task | Read the session context and the handoff note before anything else |
 | 3. How to work | Scale the process to the task, reproduce bugs first, verify in small steps, show evidence; write plainly in American English; keep the developer informed with `dev progress` and the `communicating` templates; learn from mistakes with lessons (see [Lessons](lessons.md)); spend tokens where they buy quality |
@@ -60,6 +61,15 @@ A repository's own AGENTS.md or CLAUDE.md adds to them; an explicit request from
 | `hooks` | see [Hooks](#hooks) | devkit's hook handlers (any other handlers are kept) |
 | `enabledPlugins` | the plugins in `config/claude/plugins.json` set to `true` | Plugins enabled everywhere |
 | `fastModePerSessionOptIn` | `true` | Fast mode is chosen per session (see [Models and tokens](models-and-tokens.md#claude-code-fast-mode)) |
+| `statusLine` | `dev hook statusline --agent claude`, only when you have no status line of your own | Shows `project · branch · model · ctx 42% · 5h 12% · 7d 36%` and records Claude's usage windows |
+
+**Claude's quota.** Claude Code reports the plan's 5-hour and 7-day usage windows only to the status line, so
+devkit's status line saves them in `~/.local/state/devkit/quota/claude.json` each time it refreshes (about 80 ms,
+no git calls). `dev doctor`, the self-test (`dev agents test claude` skips with the reset time when a window is
+full) and the dashboard's Health page read them the same way they read Codex's quota. A reading counts until its
+window resets; after that, the next session in a terminal refreshes it. A usage of 80% shows in amber and 95% in red.
+A status line you set yourself is kept, and then devkit has no Claude quota to show. To turn devkit's off, set
+`claude.statusline` to `false` in `~/.config/devkit/config.json` and run `dev install --only claude`.
 
 `env` sets the Docker and Testcontainers socket, turns off telemetry (Angular CLI, Next.js, Superpowers, Trivy,
 Semgrep, Syft, Grype), turns off the per-turn and per-commit reviews and the scan tip of the security plugins

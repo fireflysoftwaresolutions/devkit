@@ -251,6 +251,18 @@ The first release.
 - **Identity:** the devkit wordmark outlined from Manrope with the amber spark as the dot of its letter, banners in
   the brand's light-trail system, the plugin icon, and the wordmark drawn by hand for the terminal.
 
+- **Development work only.** devkit's process (the status block, required skills, reminders) applies to
+  development turns; a recipe or consulting work with the Firefly consulting kit gets a normal answer. Each turn is
+  judged by its request and by what it did (`lib/devkit/scope.py`); `DEVKIT_SCOPE=all` checks every turn.
+- **Claude's quota.** A devkit status line (installed only when you have none) shows project, branch, model, context
+  and the 5-hour and 7-day usage, and records the windows, so `dev doctor`, the self-test and the dashboard report
+  Claude's quota like Codex's.
+- **Status block first, always.** The communicating templates and `dev progress step` (new `--check`) now produce the
+  block itself; the Stop hook says whether the block is missing or what came before it.
+- `dev canary` shows results per surface and corrected misses; `dev help` lists `dev run`, `dev issue`, `dev git` and
+  `dev gh`; `dev pr create --dry-run` prints the body alone on stdout; the wizard's sync interval sets the sync job.
+- The guard protects the handoff repository's `audit/` folder.
+
 ### Security
 
 - **The guard**, a pre-tool hook for both agents, enforces the workspace layout, managed worktrees, and canonical

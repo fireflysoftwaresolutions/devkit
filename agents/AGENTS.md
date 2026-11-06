@@ -8,8 +8,8 @@ wins over both.
 reviewing, debugging, testing, building, deploying or releasing software; setting up or operating developer tools,
 repositories, CI and devkit; and questions about a codebase. They do not apply to anything else, for example a
 recipe, a general question, or consulting work done with the Firefly consulting kit (decks, documents, research,
-proposals; developing the kit itself is development work). Answer those normally, with no status block and no
-devkit process. In a session that mixes both, apply the rules to the development turns only.
+proposals; developing the kit itself is development work). Answer those normally, without the status block or
+devkit's process. In a session that mixes both, apply the rules to the development turns only.
 
 ## 0. Instruction canary and status block: `[Firefly> DevKit]`
 
@@ -188,8 +188,10 @@ the routing table, briefing templates, and context rules.
   `vYY.MM.PATCH`, release branches `release/YY.MM.PATCH`. `dev calver` prints the current and the next version.
 - Commit only when the user asks or committing is part of the task. Never push to `main`/`master` directly unless the
   user says so; never plain force-push (use `--force-with-lease` on your own branch only).
-- Use `gh` for GitHub work: pull requests (`gh pr create --fill` then edit), reviews, checks (`gh pr checks`), and CI
-  logs.
+- Use devkit's git and GitHub commands, which apply these rules for you: `dev branch new`, `dev commit`,
+  `dev push`, `dev pr create` (the template, pre-filled), `dev pr checks --watch`, `dev run view --failed`,
+  `dev pr merge` and `dev release`. Plain `git` and `gh` work for everything else; the guard refuses a raw
+  `gh pr merge` or `gh release create`.
 
 ## 7. Delivery: integrate and verify locally, push once, one CI run
 
@@ -204,18 +206,19 @@ minutes) and can re-trigger the CI of every other open PR. Follow the devkit `de
    CHANGELOG / docs once, and run the full local suite on the result.
 3. **Push once, open one PR.** Only after the whole local suite is green. The PR closes or supersedes the
    individual PRs. Do not merge PRs one after another to "see what CI says."
-4. **Watch, don't poll:** `gh pr checks --watch` or `gh run watch`.
-5. **If CI fails:** read the failing log (`gh run view <id> --log-failed`), reproduce it locally, fix, re-run the
+4. **Watch, don't poll:** `dev pr checks --watch` (or `dev ci status --watch` on any CI host).
+5. **If CI fails:** read the failing log (`dev run view <id> --failed`), reproduce it locally, fix, re-run the
    local suite, then push once. Never chain speculative "try this" pushes. Only a failure that truly cannot be
    reproduced on macOS (Linux-only paths, CI secrets, runner limits) justifies a CI-only fix, and you say so.
-6. **Do not blindly re-run CI.** `gh run rerun --failed` is only for a failure proven to be flaky; record the flaky
-   test in the handoff note.
+6. **Do not blindly re-run CI.** `dev run rerun <id> --flaky "<reason>"` is only for a failure proven to be flaky;
+   record the flaky test in the handoff note.
 7. **Every project has a recorded delivery policy** (versioning, bump rule, test gate, changelog, release flow,
    publishing). `dev delivery` shows it, or detects and recommends one with its gaps; `dev delivery apply --why "…"`
    records it in the handoff repository (`release-policy` skill). The session context shows it, and the guard refuses
    tags that break it.
-8. **Release from the verified integration branch:** merge with the repository's strategy, tag, publish, then
-   verify the published artefact (download/install it) before calling the release done.
+8. **Release from the verified integration branch:** `dev pr merge` (the repository's strategy), then `dev release`
+   (tag and publish by the policy), then verify the published artifact (download or install it) before calling
+   the release done.
 9. **GitOps:** git is the source of truth for code, configuration, and infrastructure. Changes to environments go
    through PRs and tags; no manual changes to deployed systems, no drift.
 

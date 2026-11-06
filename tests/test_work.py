@@ -228,7 +228,8 @@ class IsolationTests(unittest.TestCase):
             self.assertIsNone(check("initiatives/platform/README.md"))
             self.assertEqual(check("initiatives/other/README.md")[0], "deny")
             for rel in ("items/acme/one/T-x.md", "sessions/acme/one/2026-11.md", "presence/ana@mbp1.json",
-                        "PROJECTS.md", "registry.json"):
+                        "PROJECTS.md", "registry.json", "audit/ana@mbp1/2026-11.jsonl", "lessons/global/L-x.md",
+                        "policies/acme/one.json"):
                 with self.subTest(rel=rel):
                     self.assertEqual(check(rel)[0], "deny")
             portfolio = guard.check("Write", {"file_path": str(h.root / "projects/acme/two.md")}, str(h.root), "claude")

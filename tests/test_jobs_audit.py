@@ -17,7 +17,8 @@ class JobTests(unittest.TestCase):
         self.tmp = tempfile.TemporaryDirectory()
         root = Path(self.tmp.name)
         self.saved = (jobs.JOURNAL, jobs.LOGS, core.CONFIG_FILE, dict(core.CFG.get("jobs") or {}), jobs.install,
-                      audit.AUDIT)
+                      audit.AUDIT, core.CFG.get("sync"))
+        core.CFG["sync"] = {}
         jobs.JOURNAL, jobs.LOGS = root / "journal.jsonl", root / "logs"
         core.CONFIG_FILE = root / "config.json"
         core.CFG["jobs"] = {}
@@ -25,8 +26,9 @@ class JobTests(unittest.TestCase):
         audit.AUDIT = root / "audit"
 
     def tearDown(self):
-        jobs.JOURNAL, jobs.LOGS, core.CONFIG_FILE, j, jobs.install, audit.AUDIT = self.saved
+        jobs.JOURNAL, jobs.LOGS, core.CONFIG_FILE, j, jobs.install, audit.AUDIT, sync = self.saved
         core.CFG["jobs"] = j
+        core.CFG["sync"] = sync
         self.tmp.cleanup()
 
     def test_default_jobs_and_plists(self):
@@ -38,6 +40,12 @@ class JobTests(unittest.TestCase):
         self.assertEqual(p["ProgramArguments"][-3:], ["jobs", "exec", "sleep"])
         self.assertEqual(jobs.plist_for("sync", js["sync"])["StartInterval"], 3600)
         self.assertEqual(jobs.plist_for("doctor", js["doctor"])["StartCalendarInterval"]["Weekday"], 1)
+
+    def test_wizard_sync_interval_sets_the_sync_job(self):
+        core.CFG["sync"] = {"interval_minutes": 30}
+        self.assertEqual(jobs.plist_for("sync", jobs.jobs()["sync"])["StartInterval"], 1800)
+        core.CFG["jobs"] = {"sync": {"every": 15}}  # an explicit job schedule wins
+        self.assertEqual(jobs.jobs()["sync"]["every"], 15)
 
     def test_set_schedule_persists_and_validates(self):
         j = jobs.set_schedule("gc", at="02:15", why="quieter hour")

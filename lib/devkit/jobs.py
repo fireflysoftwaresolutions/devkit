@@ -61,6 +61,8 @@ def jobs() -> dict:
             j.pop("every", None), j.pop("weekly", None)
         if (over.get(name) or {}).get("weekly"):
             j.pop("every", None), j.pop("at", None)
+        if name == "sync" and "every" not in (over.get(name) or {}) and (CFG.get("sync") or {}).get("interval_minutes"):
+            j["every"] = int(CFG["sync"]["interval_minutes"])  # the wizard's "sync interval" answer
         out[name] = j
     for name, j in over.items():  # custom jobs added by the developer
         if name not in out and isinstance(j, dict) and j.get("cmd"):

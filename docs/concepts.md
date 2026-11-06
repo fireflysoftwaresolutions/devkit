@@ -210,9 +210,9 @@ list is in [Guard rules](guard.md).
 
 ## The status block
 
-The global instructions (section 0 of `agents/AGENTS.md`) require the final message of every turn to start with the
-status block: a bold header with the `[Firefly> DevKit]` marker, then three short bullets (four while a
-`dev progress` run is active).
+The global instructions (section 0 of `agents/AGENTS.md`) require the final message of every development turn to
+start with the status block: a bold header with the `[Firefly> DevKit]` marker, then three short bullets (four while
+a `dev progress` run is active).
 
 ```markdown
 **[Firefly> DevKit]** kit-consulting · `release/26.11.4` · Release 26.11.4
@@ -237,6 +237,33 @@ output: those go right below it, and "lead with the point" applies to that text.
 agent writes after its last tool call, so a reply that only says it is waiting for background work starts with the
 block too. The update that `dev progress step` prints already is the block.
 
+### Development work only
+
+devkit's process is for development: writing, reviewing, debugging, testing, building, deploying, or releasing
+software, operating developer tools, repositories, CI and devkit, and questions about a codebase. A recipe, a
+general question, or consulting work done with the Firefly consulting kit (decks, documents, research, proposals)
+gets a normal answer, with no status block, no required skills, and no nudges. Developing the consulting kit itself
+is development work.
+
+devkit decides per turn, in two steps:
+
+1. **The request.** The prompt hook classifies it as development, other, or no signal. A follow-up with no signal
+   (for example _continue_ or _yes_) keeps the previous turn's class. For a request of the other class, the hook adds
+   nothing to the context.
+2. **What the turn did.** The Stop hook looks at the turn's tool calls. A turn with no signal counts as development
+   when it edited files in a repository or ran development commands. An "other" turn counts only when it did
+   something strong: a commit, a push, a tag, or a test or build run. A deck built inside a repository stays
+   consulting work.
+
+| Request | Turn | devkit |
+| --- | --- | --- |
+| "Dame una receta de tortilla de patatas" | a web search | nothing |
+| "Hazme un deck para Example Bank" | the consulting kit's skills | nothing |
+| "Fix the failing test in the parser" | edits, a test run | the status block, required skills, reminders |
+| "continúa" after a development turn | anything | the same as the turn before |
+
+`DEVKIT_SCOPE=all` turns the scope off, so every turn is checked as before (useful to test the canary).
+
 ### What devkit does with it
 
 <picture>
@@ -244,12 +271,12 @@ block too. The update that `dev progress step` prints already is the block.
   <img src="images/diagrams/status-flow-light.svg" alt="Progress and the status block: the agent records long work with dev progress, which shares steps, estimate, and ETA with the team through presence, dev team, and the dashboard; every final message starts with the status block; after each turn the Stop hook reads it, records the marker and the format score in the canary log, and stores the block as one compact line that dev status, dev overview, the dashboard, and the next session show." width="100%">
 </picture>
 
-- **It is a canary.** The rule lives only in the global instruction files, and it applies to every turn without
-  exception: short answers, questions back to you, status updates, replies while background work runs, and replies in
+- **It is a canary.** The rule lives only in the global instruction files, and it applies to every development turn
+  without exception: short answers, questions back to you, status updates, replies while background work runs, and replies in
   any language. The session-start hook deliberately does not repeat it, so the first turn is a clean test: a reply
   without the marker means the global instructions were not loaded or not followed. Only after a session has missed it
   once does every later prompt carry a reminder.
-- **It is checked after every turn.** In sessions that devkit tracks under the dev root, the Stop hook reads the final
+- **It is checked after every development turn.** In sessions that devkit tracks under the dev root, the Stop hook reads the final
   reply (Codex passes it as `last_assistant_message`; for Claude Code devkit reads the session transcript) and records
   whether its first non-empty line starts with the marker. In Claude Code a missing marker also shows you a warning at
   once. With `canary.enforce` on (the default), the hook asks the agent to reply again with the block, and says what

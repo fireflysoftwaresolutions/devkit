@@ -829,12 +829,13 @@ class PrTests(unittest.TestCase):
     def test_dry_run_prints_the_body_in_the_configured_language(self):
         with Sandbox() as s:
             self.pushed(s)
-            rc, out, _ = dev("pr", "create", "--dry-run", "--lang", "es")
+            rc, out, err = dev("pr", "create", "--dry-run", "--lang", "es")
             self.assertEqual(rc, 0)
-            self.assertIn("title: feat(invoice): add csv export", out)
+            self.assertIn("title: feat(invoice): add csv export", err)  # the summary goes to stderr
+            self.assertIn("still empty: Qué y por qué", err)  # Spanish PRs use the Spanish template
+            self.assertIn("pull_request.es.md", err)
+            self.assertTrue(out.startswith("## Qué y por qué"), out[:80])  # stdout is the body alone: `> body.md`
             self.assertIn("- CI local: python3 -m unittest: 42 passed", out)
-            self.assertIn("still empty: Qué y por qué", out)  # Spanish PRs use the Spanish template
-        self.assertIn("pull_request.es.md", out)
 
     def test_merge_gate(self):
         with Sandbox() as s:

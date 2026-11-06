@@ -128,7 +128,7 @@ The groups are marked `# @group` in the [Brewfile](../Brewfile) and in
 | `codex` | Configures Codex through its own app-server API, writes and trusts the hooks, writes the profiles and the `scout` role, installs plugins and MCP servers, reinstalls a stale devkit plugin |
 | `docker` | Adds the Compose and Buildx plugin folder and the keychain credential store to `~/.docker/config.json`; registers Colima at login if you chose that |
 | `docs` | Checks markdownlint, lychee, and Vale, and syncs the Google and write-good Vale styles |
-| `launchd` | Loads the background sync job `com.devkit.sync` (hourly by default) |
+| `launchd` | Loads devkit's seven scheduled jobs, `com.devkit.job.<name>`: sync (hourly by default), sleep, gc, repair, audit, doctor and lessons ([jobs and audit](jobs-and-audit.md)) |
 
 Details are in [Agents](agents.md) and [Configuration](configuration.md).
 
@@ -205,7 +205,7 @@ each).
 | `~/.zshrc` | The block between `# >>> devkit >>>` and `# <<< devkit <<<` | Delete the block |
 | `~/.gitconfig` | `user.name`, `user.email`, `include.path` (shared defaults), `core.excludesFile`, the gh credential helper | `git config --global --unset …` |
 | `~/.docker/config.json` | `cliPluginsExtraDirs`, `credsStore` | Remove the keys |
-| `~/Library/LaunchAgents/com.devkit.sync.plist` | The background sync job | `launchctl bootout gui/$UID/com.devkit.sync` and delete the file |
+| `~/Library/LaunchAgents/com.devkit.job.*.plist` | The scheduled jobs | `dev jobs` lists them; for each, `launchctl bootout gui/$UID/com.devkit.job.<name>` and delete the file |
 | `~/.config/devkit/` | Your configuration and personal rules | Delete it |
 | `~/.local/state/devkit/` | Caches, locks, session records, runs and timing, the latest status per project, logs, the canary log, the dashboard, the `dev rm` manifest (`trash.jsonl`), backups | Delete it |
 | `~/.local/share/devkit/` | Fetched third-party skills (`skills-src/`, `skills/`) and the Vale styles | Delete it |

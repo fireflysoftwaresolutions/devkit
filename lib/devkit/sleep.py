@@ -1,7 +1,7 @@
 # Copyright (c) 2026 Firefly Software Solutions Inc. All rights reserved.
 """`dev sleep`: what a brain does at night — consolidate what matters, forget what does not.
 
-Runs daily from the background sync (or by hand, with --dry-run to preview):
+Runs nightly as the `sleep` job (`dev jobs`), or by hand (--dry-run previews):
   lessons   usage is published for the team; strength decays unless a lesson is used; near-duplicates are merged;
             weak, retired and long-prevented lessons are archived (restorable with `dev lesson restore`); the active
             set per scope is capped; patterns seen in several projects are proposed as global lessons

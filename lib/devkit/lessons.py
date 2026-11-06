@@ -7,14 +7,14 @@ follow) and how to detect it early, with evidence (commits, PRs, CI runs) and a 
 
 The loop:
   capture   `dev lesson add`, prompted by signals: reverts and fix commits, repeated guard refusals, canary misses,
-            reopened tasks, required-skill reminders (`dev lessons scan`), and the Stop hook after a fix commit
+            reopened tasks, required-skill reminders (`dev lesson scan`), and the Stop hook after a fix commit
   recall    the session context lists the open lessons that apply (project, its initiatives, global)
   recur     `dev lesson recur` counts a repeat; a lesson that recurs is a candidate for automation
   prevent   `dev lesson prevent --by test|lint|guard|skill|ci|rule --ref …`: automation beats prose
   review    `dev lesson review` lists recurring, unprevented and stale lessons
   use       every time a lesson is shown in a session, applied (named in a reply), repeated or looked up, its usage is
             counted (per machine: lessons/usage/<user>@<host>.json, summed across the team)
-  sleep     `dev sleep` (daily, from the background sync) consolidates like a brain at night: strength decays unless
+  sleep     `dev sleep` (nightly, the `sleep` job) consolidates like a brain at night: strength decays unless
             a lesson is used; weak, prevented or retired lessons are forgotten into lessons/archive/ (restorable);
             near-duplicates are merged; the active set per scope is capped
 """

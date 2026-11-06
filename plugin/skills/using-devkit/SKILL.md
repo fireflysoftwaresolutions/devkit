@@ -57,7 +57,8 @@ or diagram files without them.
 | Backend | — | `backend`, `java-springboot`, `spring-boot-testing`, `java-junit` |
 | Frontend | Chrome DevTools MCP, `playwright-cli` | `angular-developer`, `react-best-practices`, `composition-patterns`, `frontend-design` / `impeccable` |
 | Security | `dev sec scan` | `devsecops`, `/security-review` |
-| Ship | `dev ci`, `dev ci status`, `dev calver`, `dev delivery`, `/devkit:ship` | `delivery`, `release-policy` |
+| Branch, commit, PR | `dev branch new`, `dev commit`, `dev push`, `dev pr create\|checks --watch\|merge`, `dev run view --failed` | `delivery`, `communicating` (PR template) |
+| Ship | `dev ci --run`, `dev ci status`, `dev calver`, `dev delivery`, `dev release`, `/devkit:ship` | `delivery`, `release-policy` |
 | Document | `dev docs check`, `dev diagram render` | `docs`, `documentation-writer`, `doc-coauthoring`, `diagrams` |
 | Hand off | `dev handoff`, `dev task`, `/devkit:handoff` | `handoff` |
 | Coordinate with others | `dev team`, `dev task start\|release`, `dev task show <n>` (history) | — |
@@ -69,6 +70,8 @@ or diagram files without them.
 | Report status | `dev report [--days 7] [-i <slug>]`, `dev standup` | `communicating` |
 | Where things stand | `dev status`, `dev overview`, `dev standup`, `/devkit:status` | — |
 | Something is off | `dev doctor`, `dev config diff`, `dev guard check "<cmd>"` | — |
+| Background jobs and history | `dev jobs` (ls, run, set, logs), `dev audit` | — |
+| Files, safely | `dev files`, `dev find`, `dev grep`, `dev diff`, `dev rm` (to the Trash, `--undo`), `dev mv`, `dev cp` | — |
 
 ## Projects and initiatives
 
