@@ -37,13 +37,32 @@ class CrewSkillCheckTests(unittest.TestCase):
         return home, sdir
 
     def test_a_crew_skill_missing_for_an_agent_fails_with_its_fix(self):
+        # iac is turned on here, so its skill is owed (Morpheus, M199: a group the developer asked for must install)
         homes = {"claude": self.agent("claude", "testing", "superpowers:brainstorming")}
-        [(group, name, ok, detail, fix)] = setup.crew_skill_checks(["claude"], roster=ROSTER, homes=homes)
+        [(group, name, ok, detail, fix)] = setup.crew_skill_checks(["claude"], roster=ROSTER, homes=homes,
+                                                                   groups=["iac"])
         self.assertEqual((group, name, ok), ("Agents", "crew skills (claude)", False))
         self.assertIn("terraform-style-guide", detail)
         self.assertIn("1 of 3", detail)
         self.assertIn("skills.groups", fix)
         self.assertIn("dev install --only skills", fix)
+
+    def test_a_skill_of_an_opt_in_group_that_is_off_only_informs(self):
+        # Morpheus, M199: the row passes, and says who names the skill and the line that turns its group on
+        homes = {"claude": self.agent("claude", "testing", "superpowers:brainstorming")}
+        [(_, _, ok, detail, fix)] = setup.crew_skill_checks(["claude"], roster=ROSTER, homes=homes, groups=[])
+        self.assertTrue(ok)
+        self.assertIn("terraform-style-guide", detail)
+        self.assertIn("niobe", detail)
+        self.assertIn('add "iac" to skills.groups', detail)
+        self.assertEqual(fix, "")
+
+    def test_a_missing_skill_of_a_default_group_fails_even_when_the_group_is_off(self):
+        roster = {"members": [{"id": "dozer", "skills": ["supabase-postgres-best-practices"]}], "activities": []}
+        homes = {"claude": self.agent("claude")}
+        [(_, _, ok, detail, _)] = setup.crew_skill_checks(["claude"], roster=roster, homes=homes, groups=[])
+        self.assertFalse(ok)
+        self.assertIn("supabase-postgres-best-practices (postgres)", detail)
 
     def test_every_crew_skill_installed_passes_for_each_agent(self):
         everything = ("testing", "terraform-style-guide", "superpowers:brainstorming")

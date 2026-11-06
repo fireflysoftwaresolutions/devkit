@@ -1423,11 +1423,15 @@ def run_install(only=None, unverified_why=None, version=None, as_pinned=False) -
 
 # --------------------------------------------------------------------------- doctor
 
-def crew_skill_checks(agents, roster=None, homes=None) -> list:
+def crew_skill_checks(agents, roster=None, homes=None, groups=None) -> list:
     """selfcheck D8 for `dev doctor`: per agent, the skills the crew names (the team's crew) that it has not
-    installed, with the lines that install them. -> [(group, name, ok, detail, fix)]. `homes`: {agent: (agent home,
-    skills folder)} in place of this Mac's (the tests)."""
+    installed, with the lines that install them. -> [(group, name, ok, detail, fix)]. A skill of an opt-in group
+    (not one of devkit's default `skills.groups`) that the developer has not turned on only informs: the row passes
+    and says who names it and the line that turns the group on (Morpheus, M199); every other missing skill fails.
+    `homes`: {agent: (agent home, skills folder)}; `groups`: the groups turned on (default: the configuration)."""
     from . import selfcheck
+    on = set((CFG.get("skills") or {}).get("groups") or [] if groups is None else groups)
+    defaults = set(core.DEFAULTS["skills"]["groups"])
     rows = []
     for agent in agents:
         home, sdir = (homes or {}).get(agent, (None, None))
@@ -1437,13 +1441,23 @@ def crew_skill_checks(agents, roster=None, homes=None) -> list:
         except Exception as e:  # a broken roster is the crew check's to report
             rows.append(("Agents", f"crew skills ({agent})", False, f"crew: {e}", "dev crew sync"))
             continue
-        names = [f.item.split(": ", 1)[1] for f in missing]
-        groups = [f.evidence.split("(group ", 1)[1].split(")")[0] for f in missing]
-        detail = (f"all {len(named)} skills the crew names are installed" if not missing else
-                  f"{len(missing)} of {len(named)} not installed: " +
-                  ", ".join(f"{n} ({g})" for n, g in zip(names[:5], groups)) + (" …" if len(missing) > 5 else ""))
-        rows.append(("Agents", f"crew skills ({agent})", not missing, detail,
-                     " · ".join(dict.fromkeys(f.fix for f in missing))))
+
+        def group(f):
+            return f.evidence.split("(group ", 1)[1].split(")")[0]
+
+        off = [f for f in missing if group(f) not in defaults | on | {"core", "unknown"}
+               and not group(f).startswith("plugin ")]
+        owed = [f for f in missing if f not in off]
+        parts = []
+        if owed:
+            parts.append(f"{len(owed)} of {len(named)} not installed: " + ", ".join(
+                f"{f.item.split(': ', 1)[1]} ({group(f)})" for f in owed[:5]) + (" …" if len(owed) > 5 else ""))
+        for f in off[:3]:
+            parts.append(f"info: {f.item.split(': ', 1)[1]} ({group(f)}, off) {f.evidence.split('; ', 1)[1]}; "
+                         f"to use it: {f.fix}")
+        rows.append(("Agents", f"crew skills ({agent})", not owed,
+                     " · ".join(parts) or f"all {len(named)} skills the crew names are installed",
+                     " · ".join(dict.fromkeys(f.fix for f in owed))))
     return rows
 
 
