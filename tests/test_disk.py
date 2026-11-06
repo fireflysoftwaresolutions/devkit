@@ -509,6 +509,24 @@ class FreeTests(Sandbox):
         self.assertTrue([a for a in self.audited if a[0] == "ops" and "free" in " ".join(map(str, a))])
         self.assertIn(str(n), disk.load()["freed"])
 
+    # A file git tracks inside ignored build output (added with git add -f after the measurement) is work, changed
+    # or not: dev free keeps that whole folder and says why (Seraph's batch 4, follow-up 1). The check is git
+    # ls-files itself, so it does not rest on how a git version's check-ignore treats such a folder.
+    def test_free_keeps_build_output_that_holds_a_tracked_file(self):
+        r, copy, rep = self.setup_copy()
+        disk.mark_seen(rep)
+        build = item(rep, "build")
+        self.assertEqual(build["targets"][0]["folders"], ["dist"])
+        (copy / "dist" / "keep.js").write_text("v1\n")
+        git(copy, "add", "-f", "dist/keep.js")
+        git(copy, "commit", "-q", "-m", "keep a built file")
+        (copy / "dist" / "keep.js").write_text("v2, not committed\n")
+        rc, out = self.free(build["n"])
+        self.assertEqual(rc, 1, out)
+        self.assertEqual((copy / "dist" / "keep.js").read_text(), "v2, not committed\n")
+        self.assertTrue((copy / "dist" / "big.js").exists())
+        self.assertIn("dist holds files git tracks", " ".join(out.split()))
+
     # dev free asks first: any answer but yes deletes nothing.
     def test_free_asks_first_and_no_deletes_nothing(self):
         r, copy, rep = self.setup_copy()

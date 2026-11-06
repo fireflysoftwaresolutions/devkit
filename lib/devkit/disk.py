@@ -943,10 +943,14 @@ def _free_build(it: dict):
         return False, 0, f"{t['name']} is no longer there. Measure again: dev du --refresh"
     if _busy(t["path"]):
         return False, 0, f"a program is working in {t['name']}. Close it first."
-    freed, gone = 0, []
+    freed, gone, kept = 0, [], []
     for rel in t["folders"]:
         full = os.path.join(t["path"], rel)
         if os.path.islink(full) or not os.path.isdir(full):
+            continue
+        rc, tracked, _ = core.git(t["path"], "ls-files", "--", rel)
+        if rc != 0 or tracked.strip():
+            kept.append(rel)  # git tracks files in it (git add -f), so it is work, whatever check-ignore says
             continue
         if core.git(t["path"], "check-ignore", "-q", rel)[0] != 0:
             continue  # git no longer ignores it, so it may be work
@@ -955,9 +959,12 @@ def _free_build(it: dict):
         if not os.path.exists(full):
             freed += kb
             gone.append(rel)
+    held = (f"{', '.join(kept)} {'holds' if len(kept) == 1 else 'hold'} files git tracks, so "
+            f"{'it stays' if len(kept) == 1 else 'they stay'}") if kept else ""
     if not gone:
-        return False, 0, f"git no longer ignores the build output in {t['name']}, so nothing was deleted."
-    return True, freed, f"deleted {', '.join(gone)} in {ui.tilde_path(t['path'])}"
+        return False, 0, (f"in {t['name']}, {held}; nothing was deleted." if kept else
+                          f"git no longer ignores the build output in {t['name']}, so nothing was deleted.")
+    return True, freed, f"deleted {', '.join(gone)} in {ui.tilde_path(t['path'])}" + (f" ({held})" if held else "")
 
 
 def _free_worktrees(it: dict):
