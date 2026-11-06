@@ -1,0 +1,17 @@
+# The block `dev setup prompt` adds to ~/.config/starship.toml (spec P-fxs316lh3nw R9), between the two marker lines
+# below. It shows devkit's prompt segment, which shell/devkit.zsh sets in DEVKIT_PROMPT and DEVKIT_PROMPT_ASK inside
+# devkit projects. `dev setup` fills {{STYLE}} and {{ASK_STYLE}} from the theme: the background of the module the
+# segment follows (here bg:#FCA17D, Starship's Pastel Powerline git group), or plain colors for a theme without
+# backgrounds. It also puts ${env_var.DEVKIT_PROMPT} and ${env_var.DEVKIT_PROMPT_ASK} into `format`, right after
+# $git_status (or $git_branch, or first). `dev setup prompt --remove` takes both out.
+# >>> devkit prompt (added by dev setup; dev setup prompt --remove takes it out) >>>
+[env_var.DEVKIT_PROMPT]
+variable = "DEVKIT_PROMPT"
+style = "{{STYLE}}"
+format = "[$env_value ]($style)"
+
+[env_var.DEVKIT_PROMPT_ASK]
+variable = "DEVKIT_PROMPT_ASK"
+style = "{{ASK_STYLE}}"
+format = "[ $env_value ]($style)"
+# <<< devkit prompt <<<

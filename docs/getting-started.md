@@ -243,6 +243,7 @@ with `dev install --only <step>`, which re-applies it from the copy that is inst
 | `docker` | Adds the Compose and Buildx plugin folder and the keychain credential store to `~/.docker/config.json`; registers Colima at login if you chose that |
 | `docs` | Checks markdownlint, lychee, and Vale, and syncs the Google and write-good Vale styles |
 | `launchd` | Loads devkit's seven scheduled jobs, `com.devkit.job.<name>`: sync (hourly by default), sleep, gc, repair, audit, doctor and lessons ([jobs and audit](jobs-and-audit.md)) |
+| `prompt` | Keeps the [prompt helper](#the-prompt-helper) as you chose it: refreshes devkit's Starship block, or asks once when you have not answered yet (`dev setup prompt`) |
 
 Details are in [Agents](agents.md) and [Configuration](configuration.md).
 
@@ -279,6 +280,89 @@ The [tutorials](surfaces.md) walk through a first task on each surface.
 - **Docker:** `dev docker up` creates and starts the Colima VM the first time (see [Docker](docker.md)).
 - **A live check:** `dev agents test` runs a short real session with each agent and checks that the hooks, the guard,
   the status block, the global instructions, and the devkit skills all work.
+
+## The prompt helper
+
+Inside a devkit project, your prompt can show a small helper: the project's alias (the name `dev status` takes), the
+crew members working, the checks of your branch, and a question that waits for you. Outside devkit projects it shows
+nothing. This Mac's Starship prompt with the helper:
+
+```text
+ ancongui  …/fireflysoftwaresolutions/devkit   release/26.11.3 ✦ devkit · 6 working  ! 1 question for you   ♥ 12:58
+```
+
+| Part | 100 columns and wider | Narrower | Shown while |
+| --- | --- | --- | --- |
+| The project | `✦ devkit` | `✦ devkit` | You are in one of its checkouts or worktrees; an alias over 16 characters ends in `…` |
+| The crew | `· 6 working` | `▸6` | A member's heartbeat is newer than 15 minutes, in a run that reported in the last 30 minutes (the rule `dev status` uses) |
+| The checks | `· checks ✓`, `✗` or `…` | `✓`, `✗` or `…` | Your branch has a run (passed, failed or running), and you are still on that branch |
+| A question for you | `! 1 question for you` | `!1` | A crew decision waits for your answer; it goes the moment you answer |
+
+When devkit has not refreshed the helper for 24 hours, only the project part stays. Without UTF-8 (`LANG=C`) the
+glyphs become `*`, `>`, `ok`, `x` and `...`.
+
+Add it with `dev setup prompt` (`dev install` also asks once). It says what it changes, asks, and then:
+
+- **Starship:** adds a marked block to `~/.config/starship.toml`, after saving a copy in
+  `~/.local/state/devkit/backups/`. It puts `${env_var.DEVKIT_PROMPT}` and `${env_var.DEVKIT_PROMPT_ASK}` into your
+  `format` right after `$git_status` (or `$git_branch`, or first), and gives the helper the background of the module
+  it follows. A theme without backgrounds gets amber text and a red question.
+- **Plain zsh** (none of the other prompts): turns on devkit's own zsh block in `shell/devkit.zsh`, which puts the
+  helper in front of your `PROMPT`. `~/.zshrc` is not changed. With `NO_COLOR` set, the helper has no colors.
+- **`oh-my-posh`** and **Powerlevel10k**: devkit sets the text; add the snippet for your theme, which follows.
+
+`dev prompt` shows what the helper says in the folder you are in. `dev setup prompt --remove` takes it out again.
+
+The block devkit adds to Starship's file:
+
+```toml
+# >>> devkit prompt (added by dev setup; dev setup prompt --remove takes it out) >>>
+[env_var.DEVKIT_PROMPT]
+variable = "DEVKIT_PROMPT"
+style = "bg:#FCA17D fg:#10110F"
+format = "[$env_value ]($style)"
+
+[env_var.DEVKIT_PROMPT_ASK]
+variable = "DEVKIT_PROMPT_ASK"
+style = "bg:#C0392B fg:#F3F1EB bold"
+format = "[ $env_value ]($style)"
+# <<< devkit prompt <<<
+```
+
+For `oh-my-posh`, add two `text` segments to a block of your theme, right after the `git` segment:
+
+```json
+{
+  "type": "text",
+  "style": "plain",
+  "foreground": "#FFB34A",
+  "template": "{{ if .Env.DEVKIT_PROMPT }} {{ .Env.DEVKIT_PROMPT }} {{ end }}"
+},
+{
+  "type": "text",
+  "style": "plain",
+  "foreground": "#F3F1EB",
+  "background": "#C0392B",
+  "template": "{{ if .Env.DEVKIT_PROMPT_ASK }} {{ .Env.DEVKIT_PROMPT_ASK }} {{ end }}"
+}
+```
+
+For Powerlevel10k, add this function to `~/.p10k.zsh`, then add `devkit` to `POWERLEVEL9K_LEFT_PROMPT_ELEMENTS`
+right after `vcs`:
+
+```zsh
+function prompt_devkit() {
+  [[ -n $DEVKIT_PROMPT ]] && p10k segment -f 215 -t "${DEVKIT_PROMPT//\%/%%}"
+  [[ -n $DEVKIT_PROMPT_ASK ]] && p10k segment -b red -f white -t "${DEVKIT_PROMPT_ASK//\%/%%}"
+}
+```
+
+**What a prompt costs.** Nothing runs when the prompt is drawn: devkit's hooks and commands (`dev status`,
+`dev alias`, `dev ci watch`) write the helper's facts ahead of time to `~/.local/state/devkit/prompt/cache.zsh`, and a
+zsh function reads them with builtins only, never Python, git, or another program. Measured on an Apple Silicon Mac
+with 40 projects of 3 checkouts each: 0.13 ms per prompt, and 1.7 ms for a prompt right after devkit rewrote the
+cache. The budget is 5 ms, and a test holds it. `DEVKIT_PROMPT` and `DEVKIT_PROMPT_ASK` hold plain text, because Starship
+and `oh-my-posh` escape a `%` for zsh themselves; the preceding snippets escape it for zsh and Powerlevel10k.
 
 ## Onboarding another developer
 
@@ -358,6 +442,7 @@ each).
 | `~/.zprofile` | One line, `eval "$(/opt/homebrew/bin/brew shellenv)"`, added by the installer only when Homebrew was not on your `PATH` (Apple Silicon) | Delete the line |
 | `~/.local/bin/dev` | Symlink to `bin/dev` in the pinned copy | Delete it |
 | `~/.zshrc` | The block between `# >>> devkit >>>` and `# <<< devkit <<<` | Delete the block |
+| `~/.config/starship.toml` | Only after you agree in `dev setup prompt`: the block between `# >>> devkit prompt` and `# <<< devkit prompt <<<`, and its two references in `format` | `dev setup prompt --remove` |
 | `~/.gitconfig` | `user.name`, `user.email`, `include.path` (shared defaults), `core.excludesFile`, the gh credential helper | `git config --global --unset …` |
 | `~/.docker/config.json` | `cliPluginsExtraDirs`, `credsStore` | Remove the keys |
 | `~/Library/LaunchAgents/com.devkit.job.*.plist` | The scheduled jobs | `dev jobs` lists them; for each, `launchctl bootout gui/$UID/com.devkit.job.<name>` and delete the file |

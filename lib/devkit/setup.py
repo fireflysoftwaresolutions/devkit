@@ -1380,6 +1380,215 @@ def setup_desktop():
          + (f" (replaces {st.get('installed_version')})" if st.get("installed") else ""))
 
 
+# --------------------------------------------------------------------------- the prompt segment (spec P-fxs316lh3nw R9)
+# shell/devkit.zsh sets DEVKIT_PROMPT and DEVKIT_PROMPT_ASK inside devkit projects (lib/devkit/prompt.py has the
+# rule). `dev setup prompt` asks the developer, then shows them in the prompt they use: a marked block in Starship's
+# config (a backup first), or devkit's own zsh block in shell/devkit.zsh, turned on by the mode file, so ~/.zshrc is
+# never edited for it. oh-my-posh and Powerlevel10k get a snippet in docs/getting-started.md.
+
+PROMPT_START = "# >>> devkit prompt"
+PROMPT_END = "# <<< devkit prompt <<<"
+PROMPT_REFS = ("${env_var.DEVKIT_PROMPT}", "${env_var.DEVKIT_PROMPT_ASK}")
+PROMPT_DOCS = "docs/getting-started.md#the-prompt-helper"
+_FORMAT = re.compile(r'^format\s*=\s*("""(?:.|\n)*?"""|\'\'\'(?:.|\n)*?\'\'\'|"(?:[^"\\\n]|\\.)*"|\'[^\'\n]*\')',
+                     re.M)
+
+
+class PromptSetupError(ValueError):
+    """The Starship config cannot take devkit's block safely; the message says why and what to do."""
+
+
+def starship_toml() -> Path:
+    """The Starship config this shell reads: $STARSHIP_CONFIG, else ~/.config/starship.toml."""
+    return Path(os.environ.get("STARSHIP_CONFIG") or HOME / ".config" / "starship.toml")
+
+
+def prompt_kind(zshrc_text: str, env=None) -> str:
+    """Which prompt this Mac's zsh draws: starship, oh-my-posh, powerlevel10k, or zsh (none of them)."""
+    env = os.environ if env is None else env
+    t = zshrc_text or ""
+    if "starship init" in t or env.get("STARSHIP_SHELL"):
+        return "starship"
+    if "oh-my-posh init" in t or env.get("POSH_THEME"):
+        return "oh-my-posh"
+    if "powerlevel10k" in t or "p10k.zsh" in t or env.get("POWERLEVEL9K_MODE") is not None:
+        return "powerlevel10k"
+    return "zsh"
+
+
+def _top_level(text: str) -> str:
+    """The part of a TOML file before its first table header: where Starship's `format` lives. A line of the format
+    string such as `[](fg:#DA627D)\\` is not a header."""
+    m = re.search(r"^[ \t]*\[\[?[A-Za-z0-9_.\-\"' ]+\]\]?[ \t]*(?:#.*)?$", text, re.M)
+    return text[:m.start()] if m else text
+
+
+def _table_style(text: str, table: str) -> str:
+    m = re.search(rf"^\[{re.escape(table)}\]\s*$((?:\n(?!\[).*)*)", text, re.M)
+    s = re.search(r'^\s*style\s*=\s*["\']([^"\']*)["\']', m.group(1), re.M) if m else None
+    return s.group(1) if s else ""
+
+
+def _without_block(text: str) -> str:
+    return re.sub(r"\n?" + re.escape(PROMPT_START) + r"[^\n]*\n(?:.|\n)*?" + re.escape(PROMPT_END) + r"\n?", "", text)
+
+
+def _without_refs(text: str) -> str:
+    for ref in PROMPT_REFS:
+        text = re.sub(r"^[ \t]*" + re.escape(ref) + r"\\\n", "", text, flags=re.M)
+        text = text.replace(ref, "")
+    return text
+
+
+def _validate_toml(text: str, path: Path):
+    try:
+        import tomllib  # Python 3.11+; on older Pythons the text is checked by the rules above only
+    except ImportError:
+        return
+    try:
+        tomllib.loads(text)
+    except tomllib.TOMLDecodeError as e:
+        raise PromptSetupError(f"{tilde(path)} would not be valid TOML ({e}); nothing changed. Add the block by hand: "
+                               f"{PROMPT_DOCS}") from None
+
+
+def starship_with_prompt(text: str, path: Path = None, template: Path = None) -> str:
+    """Starship's config with devkit's marked block and the two references in `format`, after $git_status (or
+    $git_branch, or first), styled like the module it follows. Applying it twice gives the same text, and references
+    the developer moved elsewhere in `format` stay where they are."""
+    path = path or starship_toml()
+    tpl = (template or CONF / "starship.toml").read_text()
+    block = tpl[tpl.index(PROMPT_START):tpl.index(PROMPT_END) + len(PROMPT_END)] + "\n"
+    _validate_toml(text, path)
+    placed = _without_block(text)
+    keep = all(r in _top_level(placed) for r in PROMPT_REFS)
+    base = placed if keep else _without_refs(placed)
+    if re.search(r"^\s*\[env_var\.DEVKIT_PROMPT(_ASK)?\]", base, re.M):
+        raise PromptSetupError(f"{tilde(path)} already defines [env_var.DEVKIT_PROMPT] outside devkit's block; "
+                               "remove it, then run dev setup prompt again.")
+    top = _top_level(base)
+    fm = _FORMAT.search(top)
+    anchor = next((a for a in ("git_status", "git_branch") if fm and re.search(rf"\$\{{?{a}\b(?![\w.])", fm.group(1))),
+                  "")
+    bg = re.search(r"\bbg:(#[0-9A-Fa-f]{3,8}|\w+)", _table_style(base, anchor)) if anchor else None
+    style, ask = (f"bg:{bg.group(1)} fg:#10110F", "bg:#C0392B fg:#F3F1EB bold") if bg else \
+        ("bold fg:#FFB34A", "bold fg:#C0392B")
+    block = block.replace("{{STYLE}}", style).replace("{{ASK_STYLE}}", ask)
+    out = base
+    if fm and not keep:
+        s = fm.group(1)
+        q = s[:3] if s[:3] in ('"""', "'''") else s[0]
+        body = s[len(q):-len(q)]
+        refs = "".join(PROMPT_REFS)
+        tok = re.search(rf"\$\{{?{anchor}\}}?(?![\w.])", body) if anchor else None
+        if tok and len(q) == 3 and re.search(r"(?m)^[ \t]*" + re.escape(tok.group(0)) + r"\\\n", body):
+            line = re.search(r"(?m)^[ \t]*" + re.escape(tok.group(0)) + r"\\\n", body)
+            body = body[:line.end()] + "".join(f"{r}\\\n" for r in PROMPT_REFS) + body[line.end():]
+        elif tok:
+            body = body[:tok.end()] + refs + body[tok.end():]
+        elif len(q) == 3 and body.startswith("\n"):
+            body = "\n" + "".join(f"{r}\\\n" for r in PROMPT_REFS) + body[1:]
+        else:
+            body = refs + body
+        out = base[:fm.start(1)] + q + body + q + base[fm.end(1):]
+    out = (out if out.endswith("\n") else out + "\n") + "\n" + block if out else block
+    _validate_toml(out, path)
+    return out
+
+
+def starship_without_prompt(text: str) -> str:
+    """Starship's config without devkit's block and references: the text it had before."""
+    return _without_refs(_without_block(text))
+
+
+def _prompt_say(msg: str):
+    print(msg)
+
+
+def setup_prompt(assume_yes: bool = False, remove: bool = False, ask=None, zshrc: Path = None,
+                 starship: Path = None, env=None, say=_prompt_say) -> int:
+    """`dev setup prompt`: ask the developer, then show devkit's segment in the prompt they use. `remove` takes it out
+    again. Every file it rewrites is backed up first. -> exit code."""
+    from . import prompt
+    zshrc = zshrc or ZSHRC
+    starship = starship or starship_toml()
+    kind = prompt_kind(zshrc.read_text() if zshrc.exists() else "", env)
+    if remove:
+        if starship.exists():
+            text = starship.read_text()
+            new = starship_without_prompt(text)
+            if new != text:
+                backup(starship)
+                starship.write_text(new)
+                say(f"  {ui.OK} Took devkit's block out of {tilde(starship)} (a copy is in {tilde(STATE / 'backups')}).")
+        prompt.set_mode("off")
+        say(f"  {ui.OK} The prompt helper is off. Open a new terminal tab to see it. Add it again: dev setup prompt")
+        return 0
+    where = {"starship": f"It adds a marked block to {tilde(starship)} and puts the helper after\n  your git branch. "
+                         "A copy of the file is saved first.",
+             "zsh": "It turns on devkit's own zsh block (shell/devkit.zsh, which your shell\n  already loads), so "
+                    f"{tilde(zshrc)} stays as it is.",
+             "oh-my-posh": "oh-my-posh draws your prompt: devkit sets the text, and you add two\n  segments to your "
+                           f"theme ({PROMPT_DOCS}).",
+             "powerlevel10k": "Powerlevel10k draws your prompt: devkit sets the text, and you add a\n  segment to "
+                              f"~/.p10k.zsh ({PROMPT_DOCS})."}[kind]
+    say(f"\n  {ui.bold('Prompt helper')}\n  devkit can show a small helper in your prompt inside devkit projects:\n"
+        f"    ✦ devkit · 6 working  ! 1 question for you\n  {where}")
+    if not assume_yes:
+        answer = (ask or input)("  Add it? [Y/n] ")
+        if (answer or "").strip().lower() not in ("", "y", "yes"):
+            prompt.set_mode("off")
+            say(f"  {ui.dim('Nothing changed. Add it later: dev setup prompt')}")
+            return 0
+    if kind == "starship":
+        text = starship.read_text() if starship.exists() else ""
+        try:
+            new = starship_with_prompt(text, starship)
+        except PromptSetupError as e:
+            say(f"  {ui.FAIL} {e}")
+            return 1
+        if new != text:
+            backup(starship)
+            starship.parent.mkdir(parents=True, exist_ok=True)
+            starship.write_text(new)
+    prompt.set_mode(kind)
+    prompt.safe_refresh()
+    say(f"  {ui.OK} Added. Open a new terminal tab to see it.\n    Take it out: dev setup prompt --remove")
+    return 0
+
+
+def install_prompt(starship: Path = None):
+    """`dev install`'s step: keep the segment as the developer chose; ask once when no answer is recorded yet. A
+    Starship block the developer took out by hand is not added back: only `dev setup prompt` asks for that."""
+    from . import prompt
+    step("Prompt helper")
+    m = prompt.mode()
+    if m == "starship":
+        path = starship or starship_toml()
+        text = path.read_text() if path.exists() else ""
+        if PROMPT_START not in text:
+            note(f"devkit's block is no longer in {tilde(path)}; add it again: dev setup prompt")
+            return
+        try:
+            new = starship_with_prompt(text, path)
+        except PromptSetupError as e:
+            note(str(e))
+            return
+        if new != text:
+            backup(path)
+            path.write_text(new)
+        done(f"devkit's block in {tilde(path)} is current")
+    elif m in ("zsh", "oh-my-posh", "powerlevel10k"):
+        prompt.safe_refresh()
+        done(f"on ({m}); take it out: dev setup prompt --remove")
+    elif m == "off":
+        done("off; add it: dev setup prompt")
+    elif sys.stdin.isatty() and not _QUIET[0]:
+        setup_prompt()
+    else:
+        note("not set up yet: dev setup prompt adds it to your prompt")
+
+
 def run_install(only=None, unverified_why=None, version=None, as_pinned=False) -> int:
     """`dev install`. From a checkout it pins the checkout (or switches to `version`), then starts itself again from
     that pinned copy (`--as-pinned`), which runs the steps, so every path they write names the copy; `only` re-applies
@@ -1401,7 +1610,7 @@ def run_install(only=None, unverified_why=None, version=None, as_pinned=False) -
     steps = [("config", ensure_config), ("tools", setup_tools), ("cli", install_cli), ("git", setup_git), ("handoff", setup_handoff),
              ("instructions", write_agent_instructions), ("skills", install_skills), ("claude", setup_claude),
              ("codex", setup_codex), ("desktop", setup_desktop), ("docker", setup_docker), ("docs", setup_docs_tools),
-             ("launchd", setup_launchd)]
+             ("launchd", setup_launchd), ("prompt", install_prompt)]
     for name, fn in steps:
         if only and name not in only:
             continue
@@ -1473,6 +1682,12 @@ def crew_raci_checks(base=None, team=None) -> list:
     detail = "no RACI errors" if not found else "; ".join(f.item.split(": ", 1)[1] for f in found[:4]) + \
         (" …" if len(found) > 4 else "")
     return [("Agents", "crew RACI (team changes)", not found, detail, " · ".join(f.fix for f in found[:2]))]
+
+
+def free_disk_check(free_gb: float) -> tuple:
+    """doctor's free-disk row: below 20 GB it names `dev free`, which shows what takes space and frees it by plan
+    item (spec P-fxs316lh3nw, decision (b): the name users see; `dev gc` stays for scripts)."""
+    return "Automation", "free disk", free_gb > 20, f"{free_gb:.0f} GB free", "dev free"
 
 
 def doctor() -> int:
@@ -1688,7 +1903,7 @@ def doctor() -> int:
         by_agent[r.get("agent")] = by_agent.get(r.get("agent"), 0) + 1
     check("Agents", "sessions running with devkit (7d)", True,
           ", ".join(f"{k}: {v}" for k, v in sorted(by_agent.items()) if k) or "none yet", "")
-    check("Automation", "free disk", free_gb > 20, f"{free_gb:.0f} GB free", "dev gc --apply")
+    check(*free_disk_check(free_gb))
 
     group = None
     fails = 0

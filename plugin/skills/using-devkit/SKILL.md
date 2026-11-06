@@ -74,7 +74,7 @@ diagram files without them.
 | Plans and specs | `dev plan new "…" --kind plan\|spec\|spike\|bugfix\|adr`, `dev plan revise --why`, `approve`, `ls` | Superpowers writing-plans, `communicating` (formats) |
 | Hand work to a teammate | `dev task delegate <n> --to <login> --why "…"` | `communicating` |
 | Report status | `dev report [--days 7] [-i <slug>]`, `dev standup` | `communicating` |
-| Where things stand | `dev status`, `dev overview`, `dev standup`, `dev dashboard` (for the developer), `/devkit:status` | — |
+| Where things stand | `dev status`, `dev overview`, `dev standup`, `dev dashboard` (for the developer), `dev prompt` (the prompt helper; `dev setup prompt` adds it), `/devkit:status` | — |
 | Something is off | `dev doctor`, `dev canary` (status block results), `dev agents` (both agents' versions, sign-in, quota), `dev config diff`, `dev guard check "<cmd>"`, `dev plugin validate` | — |
 | Background jobs and history | `dev jobs` (ls, run, set, logs), `dev audit`, `dev sync` (the handoff repository) | — |
 | Files, safely | `dev files`, `dev find`, `dev grep`, `dev diff`, `dev rm` (to the Trash, `--undo`), `dev mv`, `dev cp` | — |

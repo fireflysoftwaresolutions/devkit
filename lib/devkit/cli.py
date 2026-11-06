@@ -477,6 +477,7 @@ def cmd_alias(a):
             ui.err(str(e))
             return 2
         now_ = registry.alias_map(ps).get(pid, pid)
+        _prompt_refresh(reg)
         print(f"{ui.OK} removed {a.project}: {pid} is {ui.bold(now_)} again")
         return 0
     if a.alias:
@@ -487,6 +488,7 @@ def cmd_alias(a):
             ui.err(str(e))
             return 2
         moved = f" (moved from {prev.rsplit('/', 1)[-1]})" if prev else ""
+        _prompt_refresh(reg)
         print(f"{ui.OK} {ui.bold(a.alias.lower())} is now the alias of {p['id']}{moved}. Try it:")
         print(ui.command(f"dev status {a.alias.lower()}", 4))
         return 0
@@ -506,6 +508,38 @@ def cmd_alias(a):
     else:
         print("  No projects on this Mac yet: dev ls --all lists the portfolio.")
     print(f"\n  {ui.dim('Set one: dev alias <alias> [project] · remove it: dev alias rm <alias>')}\n")
+    return 0
+
+
+# --------------------------------------------------------------------------- the prompt segment (R9)
+
+def _prompt_refresh(reg, cwd=None):
+    """Commands that just read the facts give them to the prompt's cache too (never fails the command)."""
+    from . import prompt
+    prompt.safe_refresh(cwd, reg=reg, force=True)
+
+
+def cmd_prompt(a):
+    """dev prompt: what the prompt shows here and how it reaches the prompt · dev prompt refresh: write the cache for
+    every project on this Mac."""
+    from . import prompt
+    if a.action == "refresh":
+        done = prompt.refresh(reg=_reg(prs=False))
+        print(f"{ui.OK} the prompt knows {len(done)} project{'s' if len(done) != 1 else ''} on this Mac")
+        return 0
+    m = prompt.mode()
+    seg, ask = prompt.show(os.getcwd())
+    print()
+    if not m or m == "off":
+        print(f"  {ui.glyph('none')} The prompt helper is off. Add it:")
+        print(ui.command("dev setup prompt", 4))
+    elif seg:
+        print(f"  {seg}" + (f"  {ask}" if ask else ""))
+        print(f"  {ui.dim(f'Shown through {m}. Take it out: dev setup prompt --remove')}")
+    else:
+        print(f"  {ui.glyph('none')} Nothing here: this folder is not in a devkit project, or the prompt has not "
+              "seen it yet (dev prompt refresh).")
+    print()
     return 0
 
 
@@ -845,12 +879,14 @@ def cmd_status(a):
         p, w = registry.project_for_cwd(reg, os.getcwd())
     if not p:
         v = home_view(reg, offline=False)
+        _prompt_refresh(reg)
         if getattr(a, "json", False):
             print(json.dumps(v, indent=2, ensure_ascii=False, default=str))
             return 0
         print("\n".join(render_home(v)))
         return 0
     v = status_view(reg, p, w)
+    _prompt_refresh(reg, (w or {}).get("path") or p.get("path") if a.query else os.getcwd())
     v["show_all"] = bool(getattr(a, "all", False))
     if getattr(a, "json", False):
         print(json.dumps(v, indent=2, ensure_ascii=False, default=str))
@@ -2910,6 +2946,9 @@ def cmd_agents(a):
 
 
 def cmd_setup(a):
+    if getattr(a, "what", None) == "prompt":
+        from . import setup as setup_mod
+        return setup_mod.setup_prompt(assume_yes=a.yes, remove=a.remove)
     from . import wizard
     return wizard.run(assume_yes=a.yes, skip_packages=a.skip_packages)
 
@@ -3374,9 +3413,13 @@ def build_parser():
     p.add_argument("-v", "--verbose", action="store_true")
     p = add("diagram", cmd_diagram, "Branded SVG diagrams from JSON specs (render · check · new)")
     p.add_argument("rest", nargs=argparse.REMAINDER, help="render <spec|dir> [--out DIR] [--png] · check <spec|svg|dir> · new <kind> <name>")
-    p = add("setup", cmd_setup, "Installation and configuration wizard")
+    p = add("setup", cmd_setup, "Installation and configuration wizard; dev setup prompt adds the prompt helper")
+    p.add_argument("what", nargs="?", choices=["prompt"], help="prompt: only the prompt helper")
+    p.add_argument("--remove", action="store_true", help="with prompt: take the prompt helper out again")
     p.add_argument("-y", "--yes", action="store_true", help="accept every default (non-interactive)")
     p.add_argument("--skip-packages", action="store_true", help="do not install Homebrew/npm packages")
+    add("prompt", cmd_prompt, "What devkit's prompt helper shows here; refresh writes it for this Mac").add_argument(
+        "action", nargs="?", choices=["refresh"])
     add("update", cmd_update, "Update devkit: the newest release, or a pull of its branch")
     add("docker", cmd_docker, "Docker on Colima").add_argument(
         "action", choices=["up", "down", "status", "trim", "prune", "autostart-on", "autostart-off"])

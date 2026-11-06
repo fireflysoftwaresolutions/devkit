@@ -180,6 +180,8 @@ def record(top: str, res: dict):
             json.dumps(res, indent=1, ensure_ascii=False))
     except OSError:
         pass
+    from . import prompt
+    prompt.safe_refresh(top, force=True)  # the prompt's checks follow the result at once (spec P-fxs316lh3nw R9)
     from . import audit
     detail = "; ".join(f"{d['run']} #{d['number']}: {d['class']}" for d in res["diagnoses"]) or res["state"]
     audit.record("ci.watch", f"{res.get('repo')}@{res.get('branch')}", detail, res["state"], sha=res.get("sha"))

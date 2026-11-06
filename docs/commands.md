@@ -1051,7 +1051,7 @@ write and push, settings repair, cleanup, and job run, with secrets redacted. Se
 
 ## Environment
 
-### `dev setup [-y] [--skip-packages]`
+### `dev setup [-y] [--skip-packages]` · `dev setup prompt [--remove] [-y]`
 
 The installation and configuration wizard. It detects the Mac, GitHub, and both agents. It asks for the development
 root, the handoff repository, which agents to configure and their permission modes, your stacks, your git hosts and
@@ -1059,10 +1059,19 @@ clouds, the Docker VM, automation, and the settings lock. It shows the plan and 
 the packages for your stacks, hosts, and clouds, then `dev install`, the sign-ins, and `dev doctor`. Run it again to
 change your choices.
 
+`dev setup prompt` sets up only the [prompt helper](getting-started.md#the-prompt-helper): it says what it changes,
+asks once, and then shows the helper in the prompt you use. With Starship it adds a marked block to
+`~/.config/starship.toml` (or `$STARSHIP_CONFIG`) after a backup, and puts the helper after your git branch. Without
+Starship, `oh-my-posh`, or Powerlevel10k it turns on devkit's own zsh block in `shell/devkit.zsh`, so `~/.zshrc` stays as
+it is. For `oh-my-posh` and Powerlevel10k it points you to the snippet for your theme. A no is remembered: `dev install`
+does not ask again.
+
 | Option | Effect |
 | --- | --- |
 | `-y`, `--yes` | Accept every default, without questions |
 | `--skip-packages` | Do not install Homebrew or npm packages |
+| `prompt` | Only the prompt helper |
+| `--remove` | With `prompt`: take the helper out again (the Starship block too, after a backup) |
 
 ### `dev doctor`
 
@@ -1202,6 +1211,17 @@ It also puts `~/.local/bin` on the PATH, sets the Docker and telemetry environme
 for `dev` and `dcd`: the commands, project aliases, worktree branches, the verbs of `dev task`, `dev progress`, `dev crew`,
 and `dev agents` with their main options, the options of `dev dashboard` and `dev install` (its steps and the pinned
 copies for `--version`), and the Docker actions.
+
+Once `dev setup prompt` turned it on, it also draws the [prompt helper](getting-started.md#the-prompt-helper): before
+each prompt, `_devkit_prompt` sets `DEVKIT_PROMPT` and `DEVKIT_PROMPT_ASK` inside devkit projects and unsets them
+elsewhere.
+
+### `dev prompt [refresh]`
+
+What the prompt helper shows in the current folder, for example `✦ devkit · 6 working · checks ✓  ! 1 question for
+you`, and how it reaches your prompt (Starship, zsh, `oh-my-posh`, or Powerlevel10k). The helper reads a cache that
+devkit's hooks and commands keep current (`dev status`, `dev alias`, `dev ci watch`), so a prompt runs no program and
+costs well under 5 ms. `dev prompt refresh` writes that cache for every project on this Mac at once.
 
 ## Internal commands
 
