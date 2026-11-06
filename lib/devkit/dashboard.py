@@ -1135,7 +1135,13 @@ a.fig:hover .fl{text-decoration:underline;text-underline-offset:3px;text-decorat
 .warnline{display:flex;gap:var(--s2);align-items:baseline;font-size:var(--fs-1);color:var(--text);padding:var(--s2) var(--s2);border-bottom:1px solid var(--line-soft);min-width:0}
 .warnline .dot{transform:translateY(-1px)}
 /* initiative rows (Home) */
-.inir{display:grid;grid-template-columns:minmax(0,1.5fr) minmax(120px,1fr) minmax(0,1fr) minmax(0,1fr);gap:var(--s1) var(--s4);align-items:center;padding:var(--s3) var(--s2)}
+.inir{display:grid;grid-template-columns:minmax(0,1.4fr) minmax(140px,.9fr) minmax(0,1.4fr) minmax(110px,.6fr);gap:var(--s1) var(--s5);align-items:center;padding:var(--s3) var(--s2)}
+.inir>*{min-width:0} .inir .nm .rl{min-width:0} .inir .c4{white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+/* the next date: due date first, the milestone as one truncated line (two lines in tables, one line in Home rows) */
+.nd{display:grid;grid-template-columns:minmax(0,1fr);font-size:var(--fs-1);line-height:1.45;min-width:0}
+.nd .due{color:var(--text)} .nd .due.over{color:var(--bad-text)} .nd .due.none{color:var(--text-2)} .nd .ms{color:var(--text-2)} .nd .due.none+.ms{color:var(--text)}
+.inir .nd{display:flex;align-items:baseline;gap:var(--s2)} .inir .nd .due{flex:none} .inir .nd .ms{flex:0 1 auto}
+.since .sl1>.lnk,.since .sl1>.ell:first-child{flex:0 1 auto;min-width:0} .since .sl1>.sc2{flex:0 0 auto;max-width:45%}
 .inir .nm{display:flex;align-items:center;gap:var(--s2);font-weight:600;color:var(--strong);min-width:0}
 .inir .sub{font-size:var(--fs-1);color:var(--text-2)}
 /* ---------- tables: quiet */
@@ -1154,6 +1160,9 @@ table.pt td{white-space:nowrap}
 table.pt td.c-name{max-width:220px} table.pt .pname,table.pt .powner{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 td.c-now{max-width:200px;white-space:normal} td.c-status{max-width:230px;white-space:normal}
 td.c-prog{width:170px} table.pt .prog{min-width:100px}
+table.it{table-layout:fixed} table.it td{overflow:hidden;text-overflow:ellipsis} table.it td.c-name{max-width:none}
+table.it th.c-health{width:28px} table.it th.c-prog{width:150px} table.it th.c-ms{width:190px} table.it th.c-work{width:164px}
+table.it th.c-st{width:140px} table.it th.c-who{width:112px} table.it th.c-act{width:104px} table.it .prog{min-width:0;max-width:none}
 td.c-who{width:100px} td.c-cta{width:120px;text-align:right}
 table.pt .prs{flex-wrap:nowrap}
 .slt{font-size:var(--fs-1);line-height:1.4;color:var(--text)}
@@ -1173,6 +1182,7 @@ table.pt .prs{flex-wrap:nowrap}
 .phead .go{display:flex;flex-wrap:wrap;gap:var(--s2);align-items:center;justify-content:flex-end}
 .pline{font-size:var(--fs-2);color:var(--text-2)}
 .pline .stat{color:var(--text)}
+.pline .msl{display:inline-block;max-width:52ch;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;vertical-align:bottom}
 .lead{margin:0;max-width:70ch;color:var(--text);font-size:var(--fs-2)}
 .lead p{margin:0}
 .pprog{display:flex;align-items:center;gap:var(--s3);max-width:520px;font-size:var(--fs-1);color:var(--text-2)}
@@ -1373,7 +1383,7 @@ table.pt .prs{flex-wrap:nowrap}
 .road-tl.today{color:var(--strong);font-weight:600}
 .road-m{position:absolute;top:50%;width:9px;height:9px;margin:-5px 0 0 -5px;transform:rotate(45deg);background:var(--mark);border-radius:1px;z-index:2}
 .road-m.over{background:var(--bad)} .road-m.done{background:var(--good)}
-.road-t{position:absolute;top:50%;transform:translate(10px,-50%);font-size:var(--fs-1);color:var(--text-2);white-space:nowrap;z-index:2;background:var(--page);padding:0 4px}
+.road-t{position:absolute;top:50%;transform:translate(10px,-50%);font-size:var(--fs-1);color:var(--text-2);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;z-index:2;background:var(--page);padding:0 4px}
 .road-t.r{transform:translate(-10px,-50%)}
 /* ---------- timeline */
 .tl{list-style:none;margin:0;padding:0}
@@ -1447,9 +1457,10 @@ a.rl,a.at,a.itl{color:inherit;text-decoration:none} a.rl:hover,a.at:hover,a.itl:
   main .tw.st:not(.x) table.t th{top:var(--nav-h)} main .tabpanel .tw.st:not(.x) table.t th{top:calc(var(--nav-h) + var(--tabs-h))}}
 /* ---------- responsive */
 @media (max-width:1600px){table.pt:not(.it) .c-act{display:none}}
-@media (max-width:1180px){.board{grid-template-columns:repeat(2,minmax(0,1fr))}.c-size,.c-act{display:none}td.c-who{display:none}
+@media (max-width:1180px){.nav{gap:var(--s4)}.tabs{gap:var(--s3)}.search{flex-basis:170px}#palbtn{display:none}
+  .board{grid-template-columns:repeat(2,minmax(0,1fr))}.c-size,.c-act{display:none}.c-who{display:none}
   .since{grid-template-columns:repeat(2,minmax(0,1fr))}.people{grid-template-columns:minmax(0,1fr)}}
-@media (max-width:1024px){.cols,.cols.even{grid-template-columns:minmax(0,1fr)}.search{flex-basis:200px}.c-last{display:none}
+@media (max-width:1024px){.cols,.cols.even{grid-template-columns:minmax(0,1fr)}.search{flex-basis:150px}.c-last{display:none}
   .inir{grid-template-columns:minmax(0,1fr) minmax(120px,200px)}.inir .c3,.inir .c4{grid-column:1/-1}}
 @media (pointer:coarse){.icopy{width:40px;height:40px}.btn{height:40px}.btn.sm{height:36px}}
 @media (max-width:768px){
@@ -2225,9 +2236,10 @@ function teamNow() {
 function notCloned(x) { return x.members.filter(m => { const p = BYID.get(m.id); return p ? !p.local : !m.local; }).length; }
 function memberCounts(x) { const c = {blocked: 0, risk: 0}; for (const m of x.members) { const p = BYID.get(m.id), st = (p && p.status) || m.status; if (st === "blocked") c.blocked++; if (p && p.health.level === "risk") c.risk++; } return c; }
 function nextDate(x) {
-  const over = x.due && x.status !== "done" && x.due < lkey(new Date());
-  if (!x.due && !x.milestone) return h("span", {class: "t2", text: "No due date"});
-  return h("span", null, x.milestone ? h("span", {text: x.milestone + (x.due ? ", " : "")}) : null, x.due ? h("span", {class: over ? "bad" : "t2", text: over ? "overdue since " + shortDay(x.due) : "due " + shortDay(x.due)}) : null);
+  const over = !!(x.due && x.status !== "done" && x.due < lkey(new Date()));
+  const when = x.due ? (over ? "overdue since " : "due ") + shortDay(x.due) : "No due date";
+  return h("div", {class: "nd", title: [x.milestone ? "Milestone: " + x.milestone : "", x.due ? (over ? "Overdue since " : "Due ") + x.due : ""].filter(Boolean).join(". ") || null},
+    h("span", {class: "due" + (over ? " over" : "") + (x.due ? "" : " none"), text: when}), x.milestone ? h("span", {class: "ms ell", text: x.milestone}) : null);
 }
 function workText(c) { return h("span", null, h("span", {class: "num", text: c.open + " open"}), c.blocked ? h("span", {class: "bad num", text: ", " + c.blocked + " blocked"}) : null); }
 /* Home: one row per initiative (status, progress, next date, open and blocked work) */
@@ -2251,8 +2263,8 @@ function sincePanel() {
   const body = h("div", {class: "since"},
     col("Sessions", s.sessions || [], x => h("li", {title: [x.who, x.agent].filter(Boolean).join(" with ")}, h("div", {class: "sl1"}, h("span", {class: "k num", text: tm(x.ts)}), h("button", {class: "lnk", type: "button", onclick: () => x.project && openScope(x.project), text: scopeName(x.project || "") || "—"})), h("div", {class: "ell", title: plain(stripMarker(x.text))}, logText(x))), "No agent sessions since yesterday."),
     col("Commits", s.commits || [], ([pid, n]) => h("li", {style: "display:flex;gap:8px"}, h("button", {class: "lnk ell", style: "flex:1;text-align:left;font-weight:400", type: "button", onclick: () => openProject(pid), text: scopeName(pid)}), h("span", {class: "num k", text: String(n)})), "No commits since yesterday."),
-    col("Merged PRs", s.merged || [], x => h("li", {class: "ell"}, h("a", {href: x.url, target: "_blank", rel: "noopener noreferrer", text: "#" + x.number}), " ", x.title, h("span", {class: "k", text: " in " + x.repo.split("/").pop()})), "Nothing merged since yesterday."),
-    col("Completed tasks", s.done || [], x => h("li", {class: "ell"}, x.id && ITEMBY.has(x.id) ? h("button", {class: "lnk", style: "font-weight:400", type: "button", onclick: () => openTask(x.id), text: x.text}) : inline(x.text), h("span", {class: "k", text: " in " + scopeName(x.project)})), "No tasks completed since yesterday.", link({view: "tasks", tst: "done"})));
+    col("Merged PRs", s.merged || [], x => h("li", {class: "ell", title: "#" + x.number + " " + x.title}, h("a", {href: x.url, target: "_blank", rel: "noopener noreferrer", text: "#" + x.number}), " ", x.title, h("span", {class: "k", text: " in " + x.repo.split("/").pop()})), "Nothing merged since yesterday."),
+    col("Completed tasks", s.done || [], x => h("li", {class: "sl1", title: x.text + " in " + scopeName(x.project)}, x.id && ITEMBY.has(x.id) ? h("button", {class: "lnk", style: "font-weight:400", type: "button", onclick: () => openTask(x.id), text: x.text}) : h("span", {class: "ell"}, inline(x.text)), h("span", {class: "k ell sc2", text: "in " + scopeName(x.project)})), "No tasks completed since yesterday.", link({view: "tasks", tst: "done"})));
   return panel("Since yesterday", null, h("span", {class: "t2", text: "from " + fmtDay(s.from)}), body);
 }
 function viewHome(main) {
@@ -2290,7 +2302,8 @@ function roadmap(items) {
     rows.push(h("div", {class: "road-row", "data-nav": "", tabindex: "0", role: "link", "aria-label": x.label + ", due " + x.due, onclick: x.open, onkeydown: e => { if (e.key === "Enter") x.open(); }},
       h("span", {class: "road-l ell", title: x.label}, h("span", {class: "dot " + (SDOT[x.status] || "d-info"), "aria-hidden": "true"}), x.label),
       track([h("span", {class: "road-m" + (over ? " over" : x.status === "done" ? " done" : ""), style: "left:" + p.toFixed(2) + "%", title: (over ? "Overdue · " : "Due ") + x.due + (x.milestone ? " · " + x.milestone : "")}),
-        h("span", {class: "road-t" + (right ? " r" : ""), style: (right ? "right:" + (100 - p).toFixed(2) : "left:" + p.toFixed(2)) + "%", text: shortDay(x.due) + (x.milestone ? ": " + x.milestone : "") + (over ? " (overdue)" : "")})])));
+        h("span", {class: "road-t" + (right ? " r" : ""), title: x.label + ", " + shortDay(x.due) + (x.milestone ? ": " + x.milestone : "") + (over ? " (overdue)" : ""),
+          style: (right ? "right:" + (100 - p).toFixed(2) : "left:" + p.toFixed(2)) + "%;max-width:calc(" + (right ? p : 100 - p).toFixed(2) + "% - 14px)", text: shortDay(x.due) + (x.milestone ? ": " + x.milestone : "") + (over ? " (overdue)" : "")})])));
   }
   return h("div", {class: "road", role: "list", "aria-label": "Milestones and due dates"}, rows);
 }
@@ -2341,7 +2354,7 @@ function viewInitiative(main) {
       h("div", {class: "go"}, x.note && FILEMAP.has(x.note) ? h("a", {class: "btn ghost", href: link({view: "explorer", f: x.note, id: ""})}, "README") : null,
         cmdMenu("Commands", [["Show it in the terminal", "dev initiative show " + x.id], ["Add a task", "dev task -i " + x.id + ' add "…" --now'], ["Add a member project", "dev initiative add " + x.id + " <owner/repo>"]]))),
     h("div", {class: "pline"}, meta(statusBadge(x.status), x.priority === "high" ? "High priority" : x.priority === "low" ? "Low priority" : null,
-      x.milestone ? "Milestone: " + x.milestone : null, x.due ? h("span", {class: over ? "bad" : null, text: over ? "overdue since " + shortDay(x.due) : "due " + shortDay(x.due)}) : null,
+      x.milestone ? h("span", {class: "msl", title: "Milestone: " + x.milestone, text: "Milestone: " + x.milestone}) : null, x.due ? h("span", {class: over ? "bad" : null, text: over ? "overdue since " + shortDay(x.due) : "due " + shortDay(x.due)}) : null,
       x.owner ? "owner " + x.owner : null, x.last ? "active " + rel(x.last) : null)),
     state ? h("p", {class: "lead", title: longState ? state : null}, inline(longState ? state.slice(0, 240).replace(/\s+\S*$/, "") + "…" : state)) : null,
     h("div", {class: "pprog"}, progressBar(x, true), h("span", {text: pr.why}))));
@@ -2632,7 +2645,7 @@ function viewProject(main) {
     h("div", {class: "pt1"}, h("div", null, h("h1", null, healthDot(p), p.name || p.id)),
       h("div", {class: "go"}, p.local ? cmdBtn("dev claude " + p.id, true, "Copy dev claude") : cmdBtn("dev clone " + p.id, true, "Copy dev clone"),
         cmdMenu("More commands", p.local ? [["Start Codex", "dev codex " + p.id], ["Go to the checkout", "dcd " + p.id], ["Write the handoff", "dev handoff " + p.id]] : [["Write the handoff", "dev handoff " + p.id]]))),
-    h("div", {class: "pline"}, meta(statusBadge(p.status, true), p.priority === "high" ? "High priority" : null, ns.milestone ? "Milestone: " + ns.milestone : null, ns.due ? dueBadge(ns.due, p.status === "done") : null,
+    h("div", {class: "pline"}, meta(statusBadge(p.status, true), p.priority === "high" ? "High priority" : null, ns.milestone ? h("span", {class: "msl", title: "Milestone: " + ns.milestone, text: "Milestone: " + ns.milestone}) : null, ns.due ? dueBadge(ns.due, p.status === "done") : null,
       p.inits.length ? h("span", null, "in ", p.inits.map((id, i) => [i ? ", " : "", h("a", {href: link({view: "initiatives", id, tab: ""}), text: (BYINIT.get(id) || {}).title || id})])) : null,
       m.branch ? h("span", {class: "meta", title: "Current branch"}, icon("branch"), m.branch) : null, lastSeen ? "active " + rel(lastSeen) : null, p.local ? null : "not cloned on this Mac")),
     lv !== "ok" ? h("div", {class: "hreason"}, h("span", {class: "dot d-" + lv, "aria-hidden": "true"}), h("span", null, h("span", {class: lv === "risk" ? "bad" : "warn-t", text: hl + ": "}), p.health.reasons.join(", "))) : null,

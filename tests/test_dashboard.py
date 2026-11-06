@@ -23,6 +23,8 @@ FUTURE = time.strftime("%Y-%m-%d", time.localtime(NOW + 20 * 86400))
 ISO = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(NOW - 3600))
 MARK = "[Firefly> DevKit]"           # the status-line marker agents write
 FAKE_PAT = "ghp_" + "0123456789abcdefABCDEF0123456789abcd"   # built at runtime: no token-shaped literal in the file
+LONG_MILESTONE = "Business-first journey delivery across the experience, domain and core layers (plan of 2026-10-31, revised after review)"
+LONG_GOAL = "Deliver working banking and insurance operations through Experience, Domain and Core services, with verified artefacts and consumer adoption."
 LEGACY = "DevKit ·"                  # the legacy marker, still accepted
 SAVED = "widget · main ❯ Ship export ❯ export endpoint done ❯ ✓ 31 tests green ❯ ▸ 3/7 ❯ next → contract test"   # what devkit saves
 ME = f"me@{socket.gethostname().split('.')[0].lower()}"
@@ -244,6 +246,20 @@ class RenderTests(unittest.TestCase):
         self.assertIn("--elev-border:0 solid transparent", dashboard.LIGHT)
         self.assertIn("--shadow:none", dashboard.DARK)
 
+    def test_long_texts_do_not_widen_the_page(self):
+        """Real milestones and goals are long: the initiatives table has a fixed layout (the name takes the flexible
+        width), the next date is the due date with the milestone as one truncated line and the full text on hover."""
+        css, js = dashboard.CSS, dashboard.JS
+        self.assertIn("table.it{table-layout:fixed}", css)
+        for col in ("c-health", "c-prog", "c-ms", "c-work", "c-st", "c-who", "c-act"):
+            self.assertRegex(css, r"table\.it th\." + col + r"\{width:\d+px\}", col)    # every column but the name is fixed
+        self.assertNotRegex(css, r"table\.it th\.c-name\{width")
+        self.assertIn('h("span", {class: "ms ell", text: x.milestone})', js)             # one truncated line
+        self.assertIn('"Milestone: " + x.milestone', js)                                 # the full text on hover
+        self.assertIn('"No due date"', js)
+        self.assertIn(".inir .nd{display:flex", css)                                     # Home: one line per initiative
+        self.assertIn(".c-who{display:none}", css)                                       # a hidden column hides its header too
+
     def test_rows_are_links(self):
         """Clickable rows hold a real link (keyboard, screen readers, j/k) instead of being focusable themselves."""
         js = dashboard.JS
@@ -305,12 +321,15 @@ class RenderTests(unittest.TestCase):
                 pid = members[n % 77] if n < 330 else f"acme/p{n % 13}"
                 item(root, pid, f"T-s{n:03d}", f"Task {n}", ["todo", "doing", "blocked", "done"][n % 4], ["now", "next", "later"][n % 3],
                      links=["initiative:jafly"] if n % 5 == 0 and n < 330 else [])
-            ini = {"id": "jafly", "title": "Jafly", "projects": members, "members": [{"id": m, "status": "active", "local": False} for m in members]}
+            ini = {"id": "jafly", "title": "Jafly", "projects": members, "members": [{"id": m, "status": "active", "local": False} for m in members],
+                   "milestone": LONG_MILESTONE, "goal": LONG_GOAL, "due": ""}           # no due date, long texts, nobody on it
             reg = {"projects": projects, "initiatives": [ini] + [{"id": f"i{k}", "title": f"I{k}", "projects": []} for k in range(4)], "github_user": "me"}
             html = dashboard.render(reg, handoff=root, now=NOW)
             d = embedded(html)
         self.assertEqual((len(d["projects"]), len(d["initiatives"]), len(d["items"])), (90, 5, 400))
         self.assertEqual(len(d["initiatives"][0]["linked_items"]), 66)
+        self.assertEqual((d["initiatives"][0]["milestone"], d["initiatives"][0]["goal"], d["initiatives"][0]["due"]), (LONG_MILESTONE, LONG_GOAL, ""))
+        self.assertEqual(d["people"], [])
         self.assertEqual(d["kpis"]["not_cloned"], 77)
         self.assertEqual(d["kpis"]["prs_failing"], 13)
         self.assertLess(len(html), 3_000_000)
