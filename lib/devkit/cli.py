@@ -1933,7 +1933,7 @@ def cmd_progress(a):
                     from . import raci
                     extra["activity"] = raci.resolve_activity(a.activity)["id"]
                 run = pg.assign(a.which, " ".join(a.to), scope=getattr(a, "scope", "") or "", from_agent=from_agent,
-                                why=getattr(a, "why", "") or "", **extra)
+                                why=getattr(a, "why", "") or "", allow=getattr(a, "allow", "") or "", **extra)
             elif act == "begin":
                 run = pg.begin(a.which, from_agent=from_agent)
             elif act == "add":
@@ -3120,6 +3120,8 @@ def build_parser():
     x.add_argument("--why", help="assign a member the crew's RACI does not make Responsible (recorded)")
     x.add_argument("--activity", help="the step's kind of work, an id from dev crew raci (backend, ux, …): it decides "
                                       "the RACI check and the approver, in any language")
+    x.add_argument("--allow", help="the irreversible actions this member may take in the step: push, pr (tier 1 "
+                                   "only), each with the developer's grant (spec C6)")
     x = gsp.add_parser("begin", help="mark a plan step as started (parallel work you do yourself)")
     x.add_argument("which", help="step number or part of its name")
     x = gsp.add_parser("add", help="add a step found during the work: \"name=30m after other\"")
