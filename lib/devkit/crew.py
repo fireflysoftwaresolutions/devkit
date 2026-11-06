@@ -1514,7 +1514,7 @@ def _mode(a, me) -> int:
     from . import progress
     if not a.mode:
         if a.approve:
-            ui.err("--approve goes with auto: dev crew mode auto --approve \"push, pr\"")
+            ui.err("--approve goes with auto: dev crew mode auto --approve \"push feat/*, pr feat/*\"")
             return 2
         run = live_run()
         view = {"mode": progress.mode_of(run), "approved": list((run or {}).get("approved") or [])}
@@ -1977,7 +1977,8 @@ def register(add):
     x = sp.add_parser("mode", help="guided (the developer decides) or auto (the crew goes on and records); "
                                    "no argument: the current mode")
     x.add_argument("mode", nargs="?", choices=["guided", "auto"])
-    x.add_argument("--approve", help="irreversible actions auto mode may take, comma-separated, e.g. \"push, pr\"")
+    x.add_argument("--approve", help="irreversible actions auto mode may take, each with its target, comma-separated, "
+                                     "e.g. \"push feat/*, release v26.11.4\"; each needs the developer's grant")
     x = sp.add_parser("decide", help="record the developer's answer to a decision (Morpheus only)")
     x.add_argument("id", help="the decision id, e.g. D3")
     x.add_argument("text", nargs="+", help="the answer")
