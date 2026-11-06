@@ -3,6 +3,13 @@
 All notable changes to devkit. Versions follow CalVer `YY.MM.PATCH` (PATCH restarts at 0 each month); tags are
 `vYY.MM.PATCH`. Sections follow [Keep a Changelog](https://keepachangelog.com/).
 
+## [Unreleased]
+
+### Fixed
+
+- `dev agents test` reads the hooks log from the byte offset it recorded, so the guard check no longer reports
+  "no guard decision logged" when earlier lines hold multi-byte characters.
+
 ## [26.11.1] - 2026-11-06
 
 devkit is open source under the Apache License 2.0.
