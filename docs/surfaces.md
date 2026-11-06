@@ -23,18 +23,23 @@ the Code tab.
 | | Claude Code in Terminal and IDEs | Claude Desktop's Code tab | Codex CLI | Codex in the ChatGPT app | Claude Desktop chat and Cowork |
 | --- | --- | --- | --- | --- | --- |
 | Reads its setup from | `~/.claude` | `~/.claude` (Local sessions only) | `~/.codex`, `~/.agents/skills` | `~/.codex` | The devkit extension |
-| Hooks | All ten events | All ten events | Eight events, after Codex trusts them | The same eight events | None |
+| Hooks | All eleven events | All eleven events | Eight events, after Codex trusts them | The same eight events | None |
+| Runs devkit from | The pinned copy that `dev install` made | The pinned copy | The pinned copy | The pinned copy | The pinned copy, through the extension's launcher |
 | Guard | Denies, or asks you to confirm | Denies, or asks you to confirm | Denies (Codex has no "ask") | Denies | No guard hook; its two task tools run `dev task`, which checks and audits each change as in a terminal |
+| devkit's own state and configuration | The guard refuses agents' writes to them | The same | The same, for shell commands and `apply_patch` | As in the CLI | Not applicable: its tools write only through `dev task` |
 | Crew | Launches members as `devkit:<id>` agents | Launches members as `devkit:<id>` agents | Launches members as roles (`spawn_agent`) | Launches members as roles | Shows the crew, who works now, and decisions waiting (`devkit_crew`); launches no one |
-| Routing hint (Morpheus's route for each request) | Yes | Yes | Yes | Yes | No; `devkit_rules` returns the routing rules on request |
-| Required skills in crew briefs | Yes, added to every brief | Yes | Not by the hook, because Codex lets a hook change only shell commands; the session context and `dev crew brief` name the skills instead | As in the CLI | Not applicable |
+| Routing hint (Morpheus's route for each request) | Yes, a guess from English words | Yes | Yes | Yes | No; `devkit_rules` returns the routing rules on request |
+| Required skills and known pitfalls in crew briefs | Yes, added to every brief | Yes | Not by the hook, because Codex lets a hook change only shell commands; `dev crew brief` names them instead | As in the CLI | Not applicable |
+| Crew gates when a member stops | Yes: status block, `dev progress step`, then proofs, skills, unfinished work, tests, and lessons | Yes | **Not yet verified:** the checks read the member's reply or transcript, and no recorded Codex payload carries them yet (see below) | As in the CLI | Not applicable |
+| After the context is compacted | SessionStart prints the workspace context again; the run and its lanes stay on disk | The same | The same (`compact` source) | The same | Not applicable |
 | Status block checked and scored | Yes, at the end of every development turn | Yes | Yes | Yes | Asked for, not checked |
 | Writes code | Yes | Yes | Yes | Yes | No |
 | Verified in real sessions | Terminal: yes. IDEs: none recorded yet | Yes | **Not yet** (see below) | **Not yet** (see below) | The tools have tests; `dev desktop status` checks the install |
 
-The ten hook events of Claude Code are SessionStart, UserPromptSubmit, PreToolUse, PostToolUse, SubagentStart,
-SubagentStop, Stop, SessionEnd, ConfigChange, and InstructionsLoaded. Codex has no ConfigChange or InstructionsLoaded
-event. [Agents › Hooks](agents.md#hooks) says what each one does.
+The eleven hook events of Claude Code are SessionStart, UserPromptSubmit, PreToolUse, PostToolUse,
+PostToolUseFailure, SubagentStart, SubagentStop, Stop, SessionEnd, ConfigChange, and InstructionsLoaded. Codex has no
+PostToolUseFailure, ConfigChange, or InstructionsLoaded event. [Agents › Hooks](agents.md#hooks) says what each one
+does.
 
 ### What "not yet" means for Codex
 
@@ -43,6 +48,10 @@ test account to reset on **2026-11-09**. Until then, the Codex columns of the ta
 the configuration that `dev doctor` checks (hook trust, plugins, roles, and the ChatGPT app's bundled Codex). They do
 not come from a recorded Codex session. If Codex behaves differently on your Mac, `dev doctor` and `dev canary` show
 it, and [Troubleshooting](troubleshooting.md#codex-hooks-are-not-running) has the fixes.
+
+The crew's checks at SubagentStop are the one gap the code already shows. Codex registers the event, but the checks
+read the member's final reply or its transcript, and devkit has no recorded Codex payload that carries either. Until
+the live test confirms it, treat a Codex member's report as unchecked: read its status block and its work yourself.
 
 Claude Code was checked in real sessions in the terminal and in Claude Desktop's Code tab: each session's status
 block results are recorded per surface (`dev canary`). The VS Code extension and JetBrains IDEs run the same Claude

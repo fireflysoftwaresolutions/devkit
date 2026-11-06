@@ -37,9 +37,6 @@ KNOWN = {
                        "adopt", "open", "claude", "codex", "handoff-import", "note", "sleep", "stubs", "dashboard",
                        "agents", "plugin", "sync", "gc", "du", "canary", "rebase", "issue", "git", "gh", "mcp",
                        "desktop", "install", "setup", "update", "docker", "version")))},
-    "D5": owned("R2-13 · Technical writer (Ghost) · T-fxrngz6uua0 docs follow-ups (hook events)",
-                "agents.md: PostToolUseFailure (claude)", "surfaces.md: Hooks column 1 (claude)",
-                "surfaces.md: Hooks column 2 (claude)", "surfaces.md: the Claude Code event list"),
     "D7": owned("R2-9 · the developer approves plan and scope once F6 accepts “developer” as an approver · "
                 "step 36 F6 step endings and approvals",
                 "plan: A morpheus in R", "scope: A hamann in R"),
