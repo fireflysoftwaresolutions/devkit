@@ -13,7 +13,19 @@ from devkit import ui, canary, ci, core, guard, registry  # noqa: E402
 
 DEV = core.DEV
 HOME = core.HOME
-OWNER = next(iter(sorted(core.owners())), "someowner")
+# Hermetic: the GitHub accounts that own top-level folders normally come from `gh`; tests use fixed ones so they run
+# the same on a developer's Mac and in CI (no GitHub sign-in there).
+OWNER = "acme-test"
+_REAL = (core.owners, core.github_user)
+
+
+def setUpModule():
+    core.owners = lambda: {OWNER, "otherorg"}
+    core.github_user = lambda: OWNER
+
+
+def tearDownModule():
+    core.owners, core.github_user = _REAL
 
 
 class TempState:
