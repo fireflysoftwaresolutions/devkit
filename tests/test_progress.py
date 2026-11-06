@@ -20,11 +20,13 @@ class TempState:
         self.tmp = tempfile.TemporaryDirectory()
         root = Path(self.tmp.name)
         from devkit import audit
-        self.saved = (pg.RUNS, pg.TIMING, pg.PENDING, pg.SESSIONS, pg._publish, os.environ.get("DEVKIT_SESSION"))
+        self.saved = (pg.RUNS, pg.TIMING, pg.PENDING, pg.SESSIONS, pg.QUOTA, pg._publish,
+                      os.environ.get("DEVKIT_SESSION"))
         self.audit_saved = audit.AUDIT
         audit.AUDIT = root / "audit"  # tests never write to the real audit trail
         pg.RUNS, pg.TIMING, pg.SESSIONS = root / "runs", root / "timing", root / "sessions"
         pg.PENDING = pg.TIMING / "pending"
+        pg.QUOTA = root / "quota"  # the real 5-hour usage never changes the parallel limit under test
         pg._publish = lambda: None
         os.environ["DEVKIT_SESSION"] = "claude:s1"
         os.environ["DEVKIT_NO_NOTIFY"] = "1"
@@ -37,7 +39,7 @@ class TempState:
     def __exit__(self, *exc):
         from devkit import audit
         audit.AUDIT = self.audit_saved
-        pg.RUNS, pg.TIMING, pg.PENDING, pg.SESSIONS, pg._publish, env = self.saved
+        pg.RUNS, pg.TIMING, pg.PENDING, pg.SESSIONS, pg.QUOTA, pg._publish, env = self.saved
         if env is None:
             os.environ.pop("DEVKIT_SESSION", None)
         else:
@@ -477,7 +479,7 @@ class CrewGuardrailTests(unittest.TestCase):
             verdict = hooks._crew_limits("claude", spawn)
             self.assertEqual(verdict[0], "deny")
             self.assertIn("the limit is 4", verdict[1])
-            self.assertIsNone(hooks._crew_limits("claude", dict(spawn, agent_id="a0")))  # not the main's launch
+            self.assertEqual(hooks._crew_limits("claude", dict(spawn, agent_id="a0"))[0], "deny")  # a helper too
 
     def test_overlapping_scopes_are_refused(self):
         with TempState():

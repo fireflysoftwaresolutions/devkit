@@ -40,11 +40,13 @@ RUNS = STATE / "runs"
 TIMING = STATE / "timing"
 PENDING = STATE / "timing" / "pending"
 SESSIONS = STATE / "sessions"
+QUOTA = STATE / "quota"  # the plan's usage windows, recorded by the status line (hooks.statusline)
 
 
 def cfg() -> dict:
     return {"nudge_minutes": 8, "notify": True, "notify_after_minutes": 10, "slow_tool_seconds": 20,
-            "max_parallel": 4, "stale_agent_hours": 6, **(core.CFG.get("progress") or {})}
+            "max_parallel": 4, "stale_agent_hours": 6, "max_depth": 2, "quota_percent": 90,
+            **(core.CFG.get("progress") or {})}
 
 
 # --------------------------------------------------------------------------- which session am I?
@@ -725,15 +727,19 @@ def _globs_overlap(a: str, b: str) -> bool:
 
 def scope_owner(run, rel_path: str, me: str = "main"):
     """The running crew member (other than `me`) whose scope covers this path -> (lane id, lane) or (None, None)."""
-    import fnmatch
     for k, lane in (run.get("agents") or {}).items():
         if k == me or lane.get("state") != "running":
             continue
-        for g in lane.get("scope") or []:
-            if fnmatch.fnmatch(rel_path, g) or fnmatch.fnmatch(rel_path, g.rstrip("/") + "/**") or \
-                    rel_path.startswith(g.rstrip("*").rstrip("/") + "/") or rel_path == g:
-                return k, lane
+        if _in_globs(rel_path, lane.get("scope") or []):
+            return k, lane
     return None, None
+
+
+def _in_globs(rel_path: str, globs) -> bool:
+    """A repo-relative path matches one of a scope's globs ("lib/parser/**", "docs/", "README.md")."""
+    import fnmatch
+    return any(fnmatch.fnmatch(rel_path, g) or fnmatch.fnmatch(rel_path, g.rstrip("/") + "/**") or
+               rel_path.startswith(g.rstrip("*").rstrip("/") + "/") or rel_path == g for g in globs)
 
 
 def running_agents(run) -> list:
@@ -1740,8 +1746,8 @@ def _launches(s: dict, now: float) -> dict:
 
 def _note_agent_launch(agent: str, data: dict, now: float | None = None):
     """PreToolUse of a subagent launch (Claude's Agent/Task, Codex's spawn_agent), after the guard allowed it: a
-    launch record keyed by the call's tool_use_id, with its description, type and caller (the launching subagent's
-    agent_id, or main). The agent it starts binds to exactly this record (see bind); nothing takes it by order. A
+    launch record keyed by the call's tool_use_id, with its description, type, caller (the launching subagent's
+    agent_id, or main) and depth (1 for Morpheus's launches, 2 for a helper a member launches; spec C2). The agent it starts binds to exactly this record (see bind); nothing takes it by order. A
     launch without a tool_use_id (Codex today) holds a crew slot for LAUNCH_TTL and never binds. Runs under
     note_agent_launch's hold."""
     sid = data.get("session_id") or "-"
@@ -1755,9 +1761,10 @@ def _note_agent_launch(agent: str, data: dict, now: float | None = None):
     now = now or time.time()
     tid = str(data.get("tool_use_id") or "")
     ls = _launches(s, now)
+    parent = str(data.get("agent_id") or "main")
     entry = {"tool_use_id": tid or None, "label": str(label)[:80],
-             "type": inp.get("subagent_type") or inp.get("agent_type") or "", "parent": data.get("agent_id") or "main",
-             "ts": round(now, 1), "state": "pending", "agent_id": None}
+             "type": inp.get("subagent_type") or inp.get("agent_type") or "", "parent": parent,
+             "depth": launch_depth(s, None, parent), "ts": round(now, 1), "state": "pending", "agent_id": None}
     if tid:
         if tid in ls:
             return  # the same call recorded twice
@@ -1854,7 +1861,8 @@ def _bind_step(run: dict, aid: str, lane: dict, now: float):
 def _lane_event(run, aid, kind, tid, rec, binding, now, start, waiting, own=True):
     """The run's side of a binding (spec C3): the agent's lane, created provisional at its start when a launch is
     waiting (no step, no scope, until it binds), resumed when the agent works again after it had stopped, and bound
-    to its launch: label, persona and the step the launch names. `own`: the hook is the agent's own start or tool
+    to its launch: label, parent, depth, persona and the step the launch names (none for a member's helper, which
+    works inside its member's step; spec F3). `own`: the hook is the agent's own start or tool
     call, so a finished lane resumes; never for its launch's result or its stop."""
     lane = run["agents"].get(aid)
     if lane is None:
@@ -1872,11 +1880,13 @@ def _lane_event(run, aid, kind, tid, rec, binding, now, start, waiting, own=True
                project=run.get("project") or "", agent_id=aid[:16])
     if binding == "exact" and lane.get("binding") == "pending":
         label = rec.get("label") or lane.get("label") or kind
-        lane.update(binding="exact", launch=tid, label=label, parent=rec.get("parent") or "main",
+        parent = rec.get("parent") or "main"
+        lane.update(binding="exact", launch=tid, label=label, parent=parent,
+                    depth=rec.get("depth") or (1 if parent == "main" else 2),
                     persona=persona(kind or rec.get("type") or "", label))
         _audit("crew.bind", lane["persona"] or label, label, project=run.get("project") or "", agent_id=aid[:16],
                launch=str(tid)[:40])
-        if lane.get("state") == "running":
+        if lane.get("state") == "running" and parent == "main":
             _bind_step(run, aid, lane, now)
     elif binding == "conflict" and lane.get("binding") == "pending":
         lane["binding"] = "conflict"
@@ -2002,6 +2012,129 @@ def slots(run: dict, sess: dict | None = None, now: float | None = None) -> list
     out += [(k, v.get("persona") or v.get("label") or k[:8]) for k, v in agents.items()
             if v.get("state") == "running" and v.get("binding", "exact") == "exact"]
     return out
+
+
+# Nested agents (spec F3, contract C3). A subagent can launch agents of its own; such a helper gets its parent's
+# tool level and scope, never more, and counts against the parallel limit. Permissions are computed from the lanes
+# and steps each time, never stored on the helper. The hooks (_crew_limits, _scope_violation) and the guard's shell
+# rules call these.
+
+TOOL_LEVELS = ("all", "build", "review", "read")  # least to most restrictive (crew.json `tools`)
+
+
+def lane_chain(run: dict, aid: str) -> list:
+    """The lane and the lanes above it, [aid, parent, grandparent, …], up to Morpheus's launch; [] when `aid` has no
+    lane. Stops at a parent with no lane in this run (a helper of an agent devkit never saw) and at a cycle."""
+    agents, out, cur = (run or {}).get("agents") or {}, [], str(aid or "")
+    while cur and cur != "main" and cur in agents and cur not in out:
+        out.append(cur)
+        cur = str(agents[cur].get("parent") or "main")
+    return out
+
+
+def _lane_level(lane: dict) -> str:
+    """One lane's own tool level: read for a lane whose launch another agent is bound to, else its crew member's
+    `tools`, else all (an ad-hoc agent)."""
+    if lane.get("binding") == "conflict":
+        return "read"
+    try:
+        from . import crew
+        m = crew._for_lane(lane)
+    except Exception:
+        m = None
+    return m["tools"] if m and m.get("tools") in TOOL_LEVELS else "all"
+
+
+def lane_tools(run: dict, aid: str):
+    """The tool level a lane works with: the most restrictive along its parent chain, so a general-purpose helper
+    of a review-only member is review-only too. One of TOOL_LEVELS, or None when `aid` has no lane."""
+    chain = lane_chain(run, aid)
+    if not chain:
+        return None
+    return max((_lane_level(run["agents"][k]) for k in chain), key=TOOL_LEVELS.index)
+
+
+def lane_scope(run: dict, aid: str) -> list:
+    """The scope a lane edits in, as layers [[globs], …]: one per lane in its parent chain that has a scope (the
+    lane's own globs and those of the open steps it owns). A path must match every layer, so a helper stays inside
+    its member's files, and a helper with a scope of its own inside both. [] when nothing is scoped."""
+    plan = (run or {}).get("plan") or []
+    layers = []
+    for k in lane_chain(run, aid):
+        globs = set(run["agents"][k].get("scope") or [])
+        for st in plan:
+            if st.get("owner") == k and st.get("state") not in DONE:
+                globs.update(st.get("scope") or [])
+        if globs:
+            layers.append(sorted(globs))
+    return layers
+
+
+def in_scope(rel_path: str, layers: list) -> bool:
+    """A repo-relative path is inside every layer of a lane_scope (the same glob rules as scope_owner)."""
+    return all(_in_globs(rel_path, layer) for layer in layers if layer)
+
+
+def launch_depth(sess: dict, run: dict | None, parent: str) -> int:
+    """How deep a launch by `parent` (an agent_id, or main) sits: 1 for Morpheus's, its parent's depth + 1 for a
+    subagent's. A parent devkit has no record of counts as depth 1."""
+    if not parent or parent == "main":
+        return 1
+    lane = ((run or {}).get("agents") or {}).get(parent) or {}
+    rec = next((v for v in ((sess or {}).get("launches") or {}).values() if isinstance(v, dict)
+                and v.get("agent_id") == parent), None) or {}
+    return int(lane.get("depth") or rec.get("depth") or 1) + 1
+
+
+def quota_used(agent: str, now: float | None = None):
+    """The share of the plan's 5-hour window used, in percent, as the status line last recorded it; None without
+    a reading or when that window has reset since."""
+    now = now or time.time()
+    w = (core.read_json(QUOTA / f"{agent}.json", {}) or {}).get("five_hour") or {}
+    if not isinstance(w, dict) or w.get("used_percentage") is None or (w.get("resets_at") or 0) <= now:
+        return None
+    try:
+        return float(w["used_percentage"])
+    except (TypeError, ValueError):
+        return None
+
+
+def parallel_limit(agent: str, now: float | None = None) -> tuple:
+    """How many crew members may work at once -> (limit, why it is lower, or ""): progress.max_parallel, and 1
+    while the recorded 5-hour usage is above progress.quota_percent (spec G17)."""
+    c = cfg()
+    used = quota_used(agent, now)
+    if used is not None and used > c["quota_percent"]:
+        return 1, (f"the 5-hour usage is at {used:.0f} % (above progress.quota_percent, {c['quota_percent']} %), "
+                   f"so devkit allows one crew member at a time until the window resets")
+    return int(c["max_parallel"]), ""
+
+
+def launch_verdict(agent: str, data: dict, run: dict, now: float | None = None):
+    """Why a subagent launch (Agent, Task, spawn_agent) must not run -> the reason, or None. It applies at every
+    depth: a helper a member launches takes a slot like the member did, and no launch goes deeper than
+    progress.max_depth."""
+    now = now or time.time()
+    sess = core.read_json(session_path(agent, data.get("session_id") or "-"), {}) or {}
+    sess = sess if isinstance(sess, dict) else {}
+    parent = str(data.get("agent_id") or "main")
+    depth, most = launch_depth(sess, run, parent), int(cfg()["max_depth"])
+    if depth > most:
+        return (f"This launch would run {depth} levels below Morpheus; the limit is {most} (progress.max_depth). Do "
+                f"this part yourself, or name it in your report and Morpheus assigns it.")
+    busy = slots(run, sess, now)
+    limit, why = parallel_limit(agent, now)
+    if len(busy) < limit:
+        return None
+    names = ", ".join(name for _, name in busy)
+    head = f"{len(busy)} crew members are working or starting ({names}); the limit is {limit} at once"
+    if why:
+        head += f": {why}"
+    if parent != "main":
+        return (f"{head}. A helper takes a slot like any crew member, so do this part yourself, or name it in your "
+                f"report and Morpheus assigns it.")
+    return (f"{head}. Wait for one to finish (you are notified), or give the work to one of them (SendMessage / "
+            f"send_input). progress.max_parallel in devkit config changes the limit.")
 
 
 def on_subagent(agent: str, data: dict, started: bool, now: float | None = None):

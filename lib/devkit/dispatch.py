@@ -2,8 +2,10 @@
 # SPDX-License-Identifier: Apache-2.0
 """Who does what: routing work to the right crew member, delegation between members, and dispatch of ready work.
 
-Subagents cannot launch subagents in Claude Code (and Codex limits their depth), so the crew coordinates through the
-run's plan, and Morpheus (the main session) is the only dispatcher:
+Subagents can launch agents of their own (Claude Code's meta files carry spawnDepth), but such a helper only extends
+its member: it gets the member's tool level and scope, takes a crew slot, takes no plan step, and stops at
+progress.max_depth (spec F3). So the crew coordinates through the run's plan, and Morpheus (the main session) is the
+only dispatcher:
 
   route      a task description (and the files it touches) -> crew members ranked by fit, with the reasons
   delegate   anyone adds a step for another member; it joins the plan with who asked. If that member is working,
@@ -215,11 +217,13 @@ def decline(which: str, why: str, from_agent: str | None = None, cwd: str | None
 
 
 def ready(run, now: float | None = None) -> dict:
-    """{"launch": [steps ready to launch], "waiting": [(step, why)], "busy": [lanes working], "free": n}."""
+    """{"launch": [steps ready to launch], "waiting": [(step, why)], "busy": [lanes working], "free": n,
+    "limit": n} (the parallel limit, lower while the 5-hour quota is short)."""
     run = normalize(run)
     plan = run.get("plan") or []
     busy = progress.running_agents(run)
-    free = max(0, progress.cfg()["max_parallel"] - len(progress.slots(run)))  # launches count before they start
+    limit = progress.parallel_limit(run.get("agent") or "claude", now)[0]
+    free = max(0, limit - len(progress.slots(run)))  # launches count before they start
     launch, waiting = [], []
     for s in plan:
         if s.get("state") not in ("pending", "blocked") or not s.get("label") or (s.get("owner") or "main") != "main":
@@ -233,7 +237,8 @@ def ready(run, now: float | None = None) -> dict:
             waiting.append((s, f"{s['label']} is busy: send it to them (SendMessage / send_input)"))
         else:
             launch.append(s)
-    return {"launch": launch[:free], "queued": launch[free:], "waiting": waiting, "busy": busy, "free": free}
+    return {"launch": launch[:free], "queued": launch[free:], "waiting": waiting, "busy": busy, "free": free,
+            "limit": limit}
 
 
 def launch_line(s: dict) -> str:
@@ -269,7 +274,7 @@ def ready_context(agent: str, sid: str) -> str:
             s["ready_told"] = True
         progress._save(run, touch_session=False)
     mode = progress.mode_of(run)
-    lines = [f"devkit · ready to launch ({r['free']} of {progress.cfg()['max_parallel']} crew slots free, {mode} "
+    lines = [f"devkit · ready to launch ({r['free']} of {r['limit']} crew slots free, {mode} "
              f"mode{': launch them now, in one message' if mode == 'auto' else ''}):"]
     from . import crew
     lines += [f"- {crew._who_label(s['label'])}: {s['name']} → {launch_line(s)}" for s in new]

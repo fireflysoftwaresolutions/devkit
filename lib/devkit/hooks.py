@@ -777,7 +777,8 @@ def _stub_commit_gate(data: dict):
 
 def _crew_limits(agent: str, data: dict):
     """Coordination guardrails -> ("deny", reason) or None:
-    - at most `progress.max_parallel` crew members at once (default 4);
+    - at most `progress.max_parallel` crew members at once (default 4; 1 while the 5-hour usage is above
+      progress.quota_percent), counting the helpers members launch, and no launch deeper than progress.max_depth;
     - the main session does not edit files a running crew member owns (DEVKIT_SCOPE_OVERRIDE=1 for an emergency)."""
     try:
         from . import progress
@@ -788,15 +789,10 @@ def _crew_limits(agent: str, data: dict):
         run = progress.normalize(run)
         progress.expire_stale(run)
         tool = data.get("tool_name")
-        if tool in ("Agent", "Task", "spawn_agent") and not data.get("agent_id"):
-            busy = progress.slots(run)  # launches waiting for their agent, and bound lanes at work (resumed too)
-            limit = progress.cfg()["max_parallel"]
-            if len(busy) >= limit:
-                names = ", ".join(name for _, name in busy)
-                return ("deny", f"{len(busy)} crew members are working or starting ({names}); the limit is {limit} "
-                                f"at once. Wait "
-                                f"for one to finish (you are notified), or give the work to one of them "
-                                f"(SendMessage / send_input). progress.max_parallel in devkit config changes the limit.")
+        if tool in ("Agent", "Task", "spawn_agent"):  # at every depth (spec F3): a member's helper takes a slot too
+            why = progress.launch_verdict(agent, data, run)
+            if why:
+                return ("deny", why)
         if tool in EDIT_TOOLS and not data.get("agent_id") and not os.environ.get("DEVKIT_SCOPE_OVERRIDE"):
             inp = data.get("tool_input") or {}
             path = inp.get("file_path") or inp.get("notebook_path") or ""
@@ -835,20 +831,20 @@ def _same_repository(a: str, b: str) -> bool:
 
 def _scope_violation(agent: str, data: dict):
     """A crew member assigned a scope (dev progress assign … --scope "globs") edits only those files, so parallel
-    agents never write the same file. -> the refusal, or None."""
+    agents never write the same file, and review-only and read-only members edit nothing. A helper a member
+    launches has the member's tool level and scope, never more (spec F3). -> the refusal, or None."""
     aid = data.get("agent_id")
     if not aid or data.get("tool_name") not in EDIT_TOOLS:
         return None
     try:
         from . import progress
-        import fnmatch
         run, lane = progress.lane_of(agent, data.get("session_id") or "-", aid)
         if not lane:
             return None
         if lane.get("binding") == "conflict":  # a launch binds once: a second agent claiming it edits nothing
             return ("this agent claims a launch that another agent is bound to, so devkit lets it read but not edit. "
                     "Report what you need to change, and Morpheus checks the launch (dev crew graph).")
-        scope = lane.get("scope") or []
+        chain = [run["agents"][k] for k in progress.lane_chain(run, aid)]
         inp = data.get("tool_input") or {}
         paths = [inp.get("file_path") or inp.get("notebook_path") or ""]
         if data.get("tool_name") == "apply_patch" or not paths[0]:
@@ -857,15 +853,16 @@ def _scope_violation(agent: str, data: dict):
         cwd = data.get("cwd") or os.getcwd()
         top = core.gitout(cwd, "rev-parse", "--show-toplevel") or cwd
         name = lane.get("persona") or lane.get("label") or "this crew member"
-        try:
-            from . import crew
-            mem = crew.member(lane.get("persona") or "") if lane.get("persona") else None
-        except Exception:
-            mem = None
-        if mem and mem.get("tools") in ("review", "read"):
-            return (f"{name} is {'review-only' if mem['tools'] == 'review' else 'read-only'}: report the change with "
-                    f"file:line and the fix, and Morpheus assigns it.")
-        if not scope:
+        head = chain[-1].get("persona") or chain[-1].get("label") or "its crew member"
+        if len(chain) > 1:  # a helper: the limits it inherits are its member's
+            name = f"this helper of {head}"
+        level = progress.lane_tools(run, aid)
+        if level in ("review", "read"):
+            return (f"{name} is {'review-only' if level == 'review' else 'read-only'}"
+                    f"{f', like {head}' if len(chain) > 1 else ''}: report the change with file:line and the fix, "
+                    f"and Morpheus assigns it.")
+        layers = progress.lane_scope(run, aid)
+        if not layers:
             return None
         for p_ in [x for x in paths if x]:
             ap = os.path.normpath(p_ if os.path.isabs(p_) else os.path.join(cwd, p_))
@@ -876,9 +873,9 @@ def _scope_violation(agent: str, data: dict):
                     rel = os.path.relpath(os.path.realpath(ap), wt)
             if rel.startswith("..") and core.is_temp(ap):
                 continue  # the member's own scratch files (session scratchpad, temp dirs): no other member owns them
-            if not any(fnmatch.fnmatch(rel, g) or fnmatch.fnmatch(rel, g.rstrip("/") + "/**") or rel.startswith(
-                    g.rstrip("*").rstrip("/") + "/") or rel == g for g in scope):
-                return (f"{rel} is outside {name}'s scope ({', '.join(scope)}): another crew member may own it. "
+            if not progress.in_scope(rel, layers):
+                return (f"{rel} is outside {name}'s scope ({' and '.join(', '.join(g) for g in layers)}): another "
+                        f"crew member may own it. "
                         f"Ask Morpheus to widen it: dev crew ask \"may I change {rel}? why: …\"")
     except Exception:
         return None
