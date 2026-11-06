@@ -1061,6 +1061,26 @@ class ResumeTests(unittest.TestCase):
                              {"Lint": ("kept", first), "Unit": ("kept", first)})
             self.assertIn("unaffected", gitx._verify_line(gitx.evidence(s.ctx()), gitx.STRINGS["en"]))
 
+    def test_steps_that_read_every_file_rerun_after_a_docs_change(self):
+        for cmd, reads in (("gitleaks dir --redact .", True), ("docker run --rm -v \"$PWD:/src\" ghcr.io/x/trivy:1 fs .", True),
+                           ("dev docs check", True), ("npx markdownlint-cli2 '**/*.md'", True), ("vale docs", True),
+                           ("dev sec scan", True), ("test -f calc.py", False), ("npm run build", False),
+                           ("python -m unittest discover -s tests", False)):
+            with self.subTest(cmd=cmd):
+                self.assertEqual(gitx._reads_every_file(cmd), reads)
+        with G.Sandbox() as s:
+            write(s.repo, dict(CALC, **{"calc.py": CALC["calc.py"]}))
+            s.write(".github/workflows/ci.yml", CI_WORKFLOW.replace(
+                "      - name: Unit", "      - name: Secrets\n        run: echo gitleaks dir .\n      - name: Unit"))
+            s.branch("feat/calc")
+            self.commit(s, "feat: calc")
+            self.assertEqual(G.dev("ci", "--run")[0], 0)
+            write(s.repo, {"README.md": "# calc, with a usage section\n"})
+            self.commit(s, "docs: explain calc")
+            self.assertEqual(G.dev("ci", "--run", "--resume")[0], 0)
+            steps = self.steps(gitx.evidence(s.ctx()))
+            self.assertEqual((steps["Lint"]["how"], steps["Secrets"]["how"]), ("kept", "full"))  # a doc can leak too
+
     def test_a_global_change_reruns_the_whole_test_step(self):
         with G.Sandbox() as s:
             self.setup(s, BROKEN_ADD)
