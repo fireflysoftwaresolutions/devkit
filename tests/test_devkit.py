@@ -9,7 +9,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "lib"))
 
-from devkit import canary, ci, core, guard, registry  # noqa: E402
+from devkit import ui, canary, ci, core, guard, registry  # noqa: E402
 
 DEV = core.DEV
 HOME = core.HOME
@@ -328,20 +328,40 @@ jobs:
 
 class CanaryTests(unittest.TestCase):
     def test_marker_detection(self):
-        self.assertTrue(canary.has_marker("DevKit · kit · done"))
-        self.assertTrue(canary.has_marker("\n**DevKit** · x"))
-        self.assertFalse(canary.has_marker("Done. DevKit · later"))
+        self.assertTrue(canary.has_marker("[Firefly> DevKit] kit@main · done"))
+        self.assertTrue(canary.has_marker("\n**[Firefly> DevKit]** kit · x"))
+        self.assertTrue(canary.has_marker("`[firefly> devkit]` kit"))
+        self.assertTrue(canary.has_marker("DevKit · kit · done"))  # legacy marker, still accepted
+        self.assertFalse(canary.has_marker("Done. [Firefly> DevKit] later"))
+        self.assertFalse(canary.has_marker("[Firefly] DevKit kit"))
         self.assertFalse(canary.has_marker("Here is the fix"))
 
     def test_status_text_keeps_ids(self):
         self.assertEqual(canary.status_text("DevKit · _local/x_y@feat/a_b · done · `tests` ok · next: -"),
                          "_local/x_y@feat/a_b · done · tests ok · next: -")
         self.assertEqual(canary.status_text("**DevKit** · api@main · fixed"), "api@main · fixed")
+        self.assertEqual(canary.status_text("[Firefly> DevKit] api@main · fixed · tests ok · next: -"),
+                         "api@main · fixed · tests ok · next: -")
+        self.assertEqual(canary.status_text("**[Firefly> DevKit]** · api@main · fixed"), "api@main · fixed")
+
+    def test_canary_segments_and_format(self):
+        good = ("`[Firefly> DevKit]` `api ⎇ feat/x_y` `T-fwk7a2` ❯ fixed the export ❯ ✓ 12 tests pass ❯ "
+                "▸ 2/3 · 20m ❯ next → open the PR")
+        line = canary.status_text(good)
+        self.assertEqual(line, "api ⎇ feat/x_y ❯ T-fwk7a2 ❯ fixed the export ❯ ✓ 12 tests pass ❯ ▸ 2/3 · 20m ❯ "
+                               "next → open the PR")
+        self.assertEqual(canary.segments(line)[:2], ["api ⎇ feat/x_y", "T-fwk7a2"])
+        self.assertEqual(canary.format_issues(good), [])
+        self.assertEqual(canary.segments("api@main · fixed · tests ok"), ["api@main", "fixed", "tests ok"])
+        bad = canary.format_issues("[Firefly> DevKit] api@main · fixed")
+        self.assertTrue(any("pill" in x for x in bad) and any("verification" in x for x in bad))
+        self.assertEqual(ui.status_pills(line, color=False).split(" ❯ ")[0], "[Firefly> DevKit] api ⎇ feat/x_y")
+        self.assertIn("\033[48;2;255;179;74m", ui.status_pills(line, color=True))
 
     def test_check_records(self):
         with TempState():
             cwd = str(DEV)
-            self.assertEqual(canary.check("codex", {"cwd": cwd, "last_assistant_message": "DevKit · ok"})[0], True)
+            self.assertEqual(canary.check("codex", {"cwd": cwd, "last_assistant_message": "[Firefly> DevKit] x@main · ok"})[0], True)
             self.assertEqual(canary.check("codex", {"cwd": cwd, "last_assistant_message": "no marker"})[0], False)
             self.assertIsNone(canary.check("codex", {"cwd": "/tmp", "last_assistant_message": "x"}))
             self.assertEqual(canary.summary(1), {"codex": (1, 2)})

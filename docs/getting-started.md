@@ -92,7 +92,7 @@ dev docker up                    # if you use containers or Testcontainers
 dcd <repo> && claude             # or codex: the session starts with the project's context
 ```
 
-Ask the agent for a quick task in a repository and check that its final message starts with `DevKit ·`. That
+Ask the agent for a quick task in a repository and check that its final message starts with `[Firefly> DevKit]`. That
 proves the global instructions are loaded (see [Concepts › Instruction canary](concepts.md#instruction-canary)).
 
 ## Updating

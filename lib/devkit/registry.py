@@ -360,7 +360,7 @@ def _checks(rollup: list) -> str:
 
 
 def live_sessions(max_age_s: int = 6 * 3600) -> list:
-    """Agent sessions devkit is tracking now: agent, project, branch, started, latest DevKit status line."""
+    """Agent sessions devkit is tracking now: agent, project, branch, started, latest [Firefly> DevKit] status line."""
     out = []
     d = STATE / "sessions"
     if not d.exists():
@@ -757,7 +757,7 @@ def render_map(reg: dict) -> str:
            f"**{human_kb(total_kb) if total_kb else '-'}** on disk", ""]
     try:
         from . import canary
-        out += [f"**Instruction canary (7 days):** {canary.summary_line(7)} — replies starting with `DevKit ·`", ""]
+        out += [f"**Instruction canary (7 days):** {canary.summary_line(7)} — replies starting with `[Firefly> DevKit]`", ""]
     except Exception:
         pass
     inits = reg.get("initiatives") or []

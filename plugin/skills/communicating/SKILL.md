@@ -109,7 +109,7 @@ Use plain words and concrete examples. Never be condescending. Don't use walls o
 
 ## 7. Final report, at the end of the turn
 
-It starts with the DevKit status line (global instructions §0). After that line:
+It starts with the `[Firefly> DevKit]` status line (global instructions §0). After that line:
 
 ```
 <Outcome in one or two sentences.>
@@ -216,7 +216,7 @@ structure, instead of free text.
 | Task | `dev task add "<title>" --type task\|feature\|bug\|spike --why "…" --done "…"` | By type: Context/Why/Symptom/Question · Scope · Steps to reproduce · Done when (testable checkboxes) |
 | Steps of a run | `dev progress start "<goal>" --plan "step 1; step 2; step 3" --estimate 1h` | Checklist ✓ ▸ ○ with elapsed, estimate and ETA |
 | Session activity | `dev handoff --log "<outcome; next>"` | `YYYY-MM-DD HH:MM · user@host · agent · branch · outcome · next` |
-| Status line | final message, first line | `DevKit · <project>@<branch> · <what> · <verification> · next: <step>` |
+| Status line | final message, first line | `` `[Firefly> DevKit]` `<project> ⎇ <branch>` `<task>` ❯ <what> ❯ ✓/⚠/✗ <verification> ❯ next → <step> `` |
 | Status report | `dev report [--days 7] [-i <initiative>]` | Summary table, then per initiative: health with reason · progress · milestone · done · in progress · next · blockers and risks · team |
 | PR, merge, review, handover | `dev pr create`, `dev task delegate` | Sections 9–12 above |
 

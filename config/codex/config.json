@@ -1,5 +1,5 @@
 {
-  "_comment": "Written into ~/.codex/config.toml through Codex's own config API (codex app-server config/batchWrite). Projects under dev_root are marked trusted by `dev install`.",
+  "_comment": "Written into ~/.codex/config.toml through Codex's own config API (codex app-server config/batchWrite). Projects under dev_root are marked trusted by `dev install`. `profiles` become ~/.codex/<name>.config.toml (`codex --profile deep`); `agents` become ~/.codex/agents/<name>.toml. The main model and effort stay the user's choice (/model): devkit never sets them.",
   "settings": {
     "approval_policy": "never",
     "sandbox_mode": "danger-full-access"
@@ -13,6 +13,36 @@
         "NEXT_TELEMETRY_DISABLED": "1",
         "SUPERPOWERS_DISABLE_TELEMETRY": "1"
       }
+    },
+    "agents": {
+      "max_concurrent_threads_per_session": 4
+    }
+  },
+  "profiles": {
+    "fast": {
+      "model": "gpt-6-luna",
+      "model_reasoning_effort": "low"
+    },
+    "deep": {
+      "model": "gpt-6-astra",
+      "model_reasoning_effort": "high",
+      "plan_mode_reasoning_effort": "xhigh"
+    },
+    "review": {
+      "model": "gpt-6-astra",
+      "model_reasoning_effort": "high",
+      "review_model": "gpt-6-astra",
+      "sandbox_mode": "read-only"
+    }
+  },
+  "agents": {
+    "scout": {
+      "name": "scout",
+      "description": "Read-only lookups that return checkable facts: files, symbols, call sites, config values, log lines.",
+      "developer_instructions": "Answer with path:line references and short excerpts only. Do not edit files. Say 'not found' rather than guess. Mark anything inferred.",
+      "model": "gpt-6-luna",
+      "model_reasoning_effort": "low",
+      "sandbox_mode": "read-only"
     }
   }
 }

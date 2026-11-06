@@ -36,12 +36,28 @@ def load_conf(name: str):
     """A devkit config file, with the values the user chose in `dev setup` (config.json) applied."""
     data = json.loads(render((CONF / name).read_text()))
     if name == "claude/settings.json":
-        data.setdefault("permissions", {})["defaultMode"] = CFG["claude"].get("default_mode", "bypassPermissions")
+        cc = CFG["claude"]
+        data.setdefault("permissions", {})["defaultMode"] = cc.get("default_mode", "bypassPermissions")
         if data["permissions"]["defaultMode"] != "bypassPermissions":
             data.pop("skipDangerousModePermissionPrompt", None)
+        if not cc.get("fast_mode_per_session", True):
+            data.pop("fastModePerSessionOptIn", None)
+        for key, env in (("subagent_model", "CLAUDE_CODE_SUBAGENT_MODEL"), ("subagent_effort", "CLAUDE_CODE_SUBAGENT_EFFORT")):
+            if cc.get(key):  # empty = subagents inherit the session model (the vendor default; recommended)
+                data.setdefault("env", {})[env] = cc[key]
     elif name == "codex/config.json":
-        data["settings"]["approval_policy"] = CFG["codex"].get("approval_policy", "never")
-        data["settings"]["sandbox_mode"] = CFG["codex"].get("sandbox_mode", "danger-full-access")
+        cx = CFG["codex"]
+        data["settings"]["approval_policy"] = cx.get("approval_policy", "never")
+        data["settings"]["sandbox_mode"] = cx.get("sandbox_mode", "danger-full-access")
+        if cx.get("max_subagent_threads") is not None:
+            data["upsert"].setdefault("agents", {})["max_concurrent_threads_per_session"] = cx["max_subagent_threads"]
+        if cx.get("profiles") is False:
+            data["profiles"] = {}
+        elif isinstance(cx.get("profiles"), dict):
+            data["profiles"] = {**data.get("profiles", {}), **cx["profiles"]}
+        for key, field in (("subagent_model", "model"), ("subagent_effort", "model_reasoning_effort")):
+            if cx.get(key):
+                data["upsert"].setdefault("agents", {})[f"default_subagent_{'model' if field == 'model' else 'reasoning_effort'}"] = cx[key]
     return data
 
 
@@ -439,7 +455,7 @@ def write_codex_config(quiet=False):
         if (read_json(hooks_f, {}) or {}) != merged:
             backup(hooks_f)
             hooks_f.write_text(json.dumps(merged, indent=2) + "\n")
-        done(f"{tilde(hooks_f)}: SessionStart / PreToolUse / Stop / SessionEnd")
+        done(f"{tilde(hooks_f)}: " + " / ".join(ours))
         projects = {str(DEV): {"trust_level": "trusted"}}
         from . import registry
         mains, _, _ = registry.discover()
@@ -466,12 +482,49 @@ def write_codex_config(quiet=False):
             fail(f"codex app-server: {e}")
 
 
+def _toml_value(v) -> str:
+    return json.dumps(v) if isinstance(v, str) else ("true" if v is True else "false" if v is False else str(v))
+
+
+def write_codex_profiles(conf: dict):
+    """`codex --profile <name>` layers ~/.codex/<name>.config.toml over the user config. Codex's config API writes
+    only the user config, so devkit writes these small files itself (it owns them)."""
+    profiles = conf.get("profiles") or {}
+    for name, prof in profiles.items():
+        text = "# Managed by devkit (config/codex/config.json → profiles). Use: codex --profile " + name + "\n" + \
+               "".join(f"{k} = {_toml_value(v)}\n" for k, v in prof.items())
+        f = CODEX_HOME / f"{name}.config.toml"
+        if not f.exists() or f.read_text() != text:
+            f.write_text(text)
+    if profiles:
+        done("profiles: " + ", ".join(f"{n} ({p.get('model')}, {p.get('model_reasoning_effort')})"
+                                      for n, p in profiles.items()) + " — `codex --profile <name>`")
+
+
+def write_codex_agents(conf: dict):
+    """Custom agent roles (e.g. the read-only `scout`) as ~/.codex/agents/<name>.toml, auto-discovered by Codex."""
+    roles = conf.get("agents") or {}
+    if not roles:
+        return
+    d = CODEX_HOME / "agents"
+    d.mkdir(parents=True, exist_ok=True)
+    for name, role in roles.items():
+        text = "# Managed by devkit (config/codex/config.json → agents). Edit devkit's config, not this file.\n" + \
+               "".join(f"{k} = {_toml_value(v)}\n" for k, v in role.items())
+        f = d / f"{name}.toml"
+        if not f.exists() or f.read_text() != text:
+            f.write_text(text)
+    done(f"agent roles: {', '.join(roles)} (~/.codex/agents)")
+
+
 def setup_codex():
     step("Codex (CLI + ChatGPT app): settings, hooks, plugins, MCP")
     if not core.have("codex"):
         fail("codex CLI not found — `brew install --cask codex`, then re-run `dev install`")
         return
     write_codex_config()
+    write_codex_profiles(load_conf("codex/config.json"))
+    write_codex_agents(load_conf("codex/config.json"))
     plugins = load_conf("codex/plugins.json")
     _, mk, _ = sh(["codex", "plugin", "marketplace", "list"], timeout=60)
     for name, src in plugins.get("marketplaces", {}).items():
@@ -671,6 +724,15 @@ def doctor() -> int:
                 st = {h["eventName"]: h["trustStatus"] for h in hs}
                 check("Codex", "devkit hooks trusted", hs and all(v == "trusted" for v in st.values()),
                       ", ".join(f"{k}:{v}" for k, v in st.items()) or "none", "dev install --only codex")
+                try:
+                    avail = set(rpc.models())
+                    profs = load_conf("codex/config.json").get("profiles") or {}
+                    miss = sorted({p.get("model") for p in profs.values() if p.get("model")} - avail)
+                    check("Codex", "profile models available", not miss,
+                          ", ".join(f"{n}={p.get('model')}" for n, p in profs.items()) + (f"; not on this account: {miss}" if miss else ""),
+                          "set codex.profiles in ~/.config/devkit/config.json to models from `codex debug models`")
+                except Exception:
+                    pass
                 mcps = set((cfg.get("mcp_servers") or {}).keys())
                 wantm = set(load_conf("codex/plugins.json").get("mcp", {}))
                 check("Codex", "MCP servers", wantm <= mcps, ", ".join(sorted(wantm & mcps)) +

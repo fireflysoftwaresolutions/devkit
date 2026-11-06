@@ -20,7 +20,7 @@
     {"from": "agent", "to": "hooks", "label": "PreToolUse: command or file write"},
     {"from": "hooks", "to": "agent", "label": "allow, or deny with the right way", "style": "return"},
     {"divider": "Every reply"},
-    {"from": "agent", "to": "you", "label": "DevKit · project@branch · outcome · next", "style": "primary"},
+    {"from": "agent", "to": "you", "label": "[Firefly> DevKit] status line", "style": "primary"},
     {"from": "agent", "to": "hooks", "label": "Stop"},
     {"from": "hooks", "to": "handoff", "label": "canary · status line · session line"},
     {"divider": "Session end"},

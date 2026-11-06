@@ -81,6 +81,10 @@ class CodexRPC:
             "edits": [{"keyPath": k, "value": v, "mergeStrategy": m} for k, v, m in edits],
             "reloadUserConfig": reload})
 
+    def models(self) -> list:
+        res = self.call("model/list", {})
+        return [m.get("id") or m.get("model") for m in (res.get("data") or res.get("models") or []) if isinstance(m, dict)]
+
     def read(self, cwd=None):
         return self.call("config/read", {"cwd": cwd} if cwd else {})
 

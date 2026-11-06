@@ -33,7 +33,8 @@ this skill is the how.
 1. Update the project's note with the `handoff` skill (Current state, tasks, decisions); `dev handoff --log "…"` adds
    your one-line summary. devkit adds branch, commits and your status line automatically.
 2. Start your final message with the status line:
-   `DevKit · <project>@<branch> · <what you did or found> · <verification> · next: <next step>`.
+   `` `[Firefly> DevKit]` `<project> ⎇ <branch>` `<task>` ❯ <what you did or found> ❯ <✓|⚠|✗> <verification> ❯
+   next → <next step> `` (global instructions §0 has the rules for each segment).
 
 ## Which tool for which job
 
@@ -50,6 +51,7 @@ this skill is the how.
 | Document | `dev docs check`, `dev diagram render` | `docs`, `documentation-writer`, `doc-coauthoring`, `diagrams` |
 | Hand off | `dev handoff`, `dev task`, `/devkit:handoff` | `handoff` |
 | Coordinate with others | `dev team`, `dev task start|release`, `dev task show <n>` (history) | — |
+| Choose model, effort, subagents | `scout` agent for lookups; `codex --profile fast|deep|review` | `working-efficiently` |
 | Keep the developer informed | `dev progress start|step|block|done`, `dev time` | `communicating` |
 | Plans and specs | `dev plan new "…" --kind plan|spec|spike|bugfix|adr`, `dev plan revise --why`, `approve`, `ls` | Superpowers writing-plans, `communicating` (formats) |
 | Hand work to a teammate | `dev task delegate <n> --to <login> --why "…"` | `communicating` |

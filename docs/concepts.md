@@ -123,10 +123,10 @@ work. Full rules: [Guard rules](guard.md).
 ## Instruction canary
 
 The global instructions (section 0 of `agents/AGENTS.md`) require the final message of every turn to start with
-`DevKit ·` and a one-line status, for example:
+`[Firefly> DevKit]` and a one-line status, for example:
 
 ```text
-DevKit · kit-consulting · integrated PRs 12/17/22 on release/26.11.4 · local suite green, ready to push once
+`[Firefly> DevKit]` `kit-consulting ⎇ release/26.11.4` `T-fwk7a2` ❯ integrated PRs 12, 17 and 22 ❯ ✓ local suite green, 214 tests ❯ next → push once
 ```
 
 The rule lives **only** in the global instruction files. The session-start hook deliberately does not repeat it, so
@@ -137,7 +137,7 @@ Only sessions whose start was recorded by devkit's SessionStart hook are tracked
 running when devkit was installed are not counted. After every turn in such a session under the dev root, the Stop
 hook reads the final reply (Codex passes it as
 `last_assistant_message`; for Claude Code devkit reads the session transcript) and records whether its first
-non-empty line starts with `DevKit`. In Claude Code a missing marker also shows a warning to you immediately. The
+non-empty line starts with `[Firefly> DevKit]`. In Claude Code a missing marker also shows a warning to you immediately. The
 results are in `dev canary`, on the dashboard, in `dev doctor` (fails below 90% over 7 days) and in `PROJECTS.md`.
 
 ## Background sync

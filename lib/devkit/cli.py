@@ -56,7 +56,7 @@ COMMANDS = [
         ("diagram render|check|new", "Branded, validated SVG diagrams (flow, C4, state, sequence, ER, timeline)"),
     ]),
     ("Tracking and disk", [
-        ("canary", "How often Claude/Codex replies carried the “DevKit ·” instruction marker"),
+        ("canary", "How often Claude/Codex replies carried the “[Firefly> DevKit]” instruction marker"),
         ("sync", "Refresh the projects map and handoff notes, commit and push the handoff repo"),
         ("gc [--apply]", "Show (or reclaim) merged worktrees, stale build output and temp files"),
         ("du", "Disk usage of projects, worktrees, agent data, temp and Docker"),
@@ -172,7 +172,7 @@ def cmd_home(a):
     print(ui.kv("projects", f"{len(ps)} · worktrees {n_wt} · live sessions {live}"))
     print(ui.kv("handoff", f"{tilde(HANDOFF)} → {core.handoff_repo()} · last sync {ago(last.get('ts'))}"))
     from . import canary
-    print(ui.kv("canary", canary.summary_line(7) + ui.dim("  (DevKit · marker, 7 days)")))
+    print(ui.kv("canary", canary.summary_line(7) + ui.dim("  ([Firefly> DevKit] marker, 7 days)")))
     recent = sorted(ps, key=lambda x: -(x.get("last_activity") or 0))[:5]
     if recent:
         print(ui.kv("recent", ", ".join(f"{x['id']} {ui.dim(ago(x.get('last_activity')))}" for x in recent)))
@@ -233,6 +233,10 @@ def _print_status(p, w=None):
     if p.get("prs_open"):
         print(ui.kv("open PRs", ", ".join(f"#{x['number']}" for x in p["prs_open"][:10])))
     print(ui.kv("handoff", tilde(core.note_path(p["id"]))))
+    sl = p.get("status_line") or registry.status_line(p["id"])
+    if sl and sl.get("line"):
+        print(ui.kv("last status", ui.dim(f"{sl.get('agent', '')} · {ago(sl.get('ts'))}")))
+        print("  " + ui.status_pills(sl["line"]))
 
 
 def cmd_status(a):
@@ -1207,7 +1211,7 @@ def cmd_overview(a):
         if x["purpose"]:
             print(f"    {ui.dim(x['purpose'])}")
         if x["status_line"]:
-            print(f"    {ui.cyan('◆')} {x['status_line']['line']}  {ui.dim(x['status_line']['agent'] + ' · ' + ago(x['status_line']['ts']))}")
+            print(f"    {ui.status_pills(x['status_line']['line'])}  {ui.dim(x['status_line']['agent'] + ' · ' + ago(x['status_line']['ts']))}")
         for t in x["now"][:3]:
             print(f"    {ui.cyan('▸')} {t}")
         if x["open_tasks"] > len(x["now"][:3]):

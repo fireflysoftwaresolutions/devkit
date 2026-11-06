@@ -2,7 +2,7 @@
 """Instruction canary ("Simon says").
 
 The global instructions (agents/AGENTS.md, section 0) tell every agent to start
-the final message of each turn with `DevKit ·`. That rule exists ONLY in the
+the final message of each turn with `[Firefly> DevKit]`. That rule exists ONLY in the
 global instructions — it is deliberately not repeated by the session-start
 hook — so a reply without the marker means the global instructions were not
 loaded or not followed.
@@ -23,8 +23,11 @@ from pathlib import Path
 from . import core
 from .core import DEV, STATE
 
-MARKER = "DevKit"
-MARKER_RE = re.compile(r"^[\W_]*DevKit\b")
+MARKER = "[Firefly> DevKit]"
+# The marker, optionally wrapped in ** or backticks. The legacy `DevKit ·` (before 26.11.0) is still accepted, so
+# sessions that loaded the older instructions are not reported as misses.
+_MARK = r"(?:\[\s*firefly\s*>\s*devkit\s*\]|devkit\b)"
+MARKER_RE = re.compile(r"^[*`_\s]*" + _MARK, re.I)
 LOG = STATE / "canary.jsonl"
 
 
@@ -72,17 +75,56 @@ def has_marker(text: str) -> bool:
     return bool(MARKER_RE.match(first.strip()))
 
 
-STATUS_RE = re.compile(r"^[\W_]*DevKit\W*·?\s*(.*)$")
+STATUS_RE = re.compile(r"^[*`_\s]*" + _MARK + r"[*`\s]*[·:—-]?\s*(.*)$", re.I)
+
+
+SEP = " ❯ "
+GLYPHS = "✓⚠✗–"
 
 
 def status_text(text: str) -> str:
-    """The useful part of the marker line: `DevKit · <project>@<branch> · <outcome> · <verification> · next: …`."""
+    """The status line without the marker, segments joined by ` ❯ `.
+
+    `[Firefly> DevKit]` `api ⎇ main` `T-1` ❯ fixed ❯ ✓ tests ❯ next → push
+        -> "api ⎇ main ❯ T-1 ❯ fixed ❯ ✓ tests ❯ next → push"
+    The legacy form (`DevKit · api@main · fixed · …`) is kept as written."""
     first = next((ln for ln in (text or "").splitlines() if ln.strip()), "")
     m = STATUS_RE.match(first.strip())
     if not m:
         return ""
-    line = re.sub(r"\*\*|`", "", m.group(1))           # bold / code markers, not underscores inside ids
-    return line.strip(" ·*").strip()
+    line = m.group(1).strip()
+    if line.startswith("`") or "❯" in line:
+        line = re.sub(r"`\s+`", SEP, line)                  # adjacent pills become segments
+        line = re.sub(r"`\s*❯\s*", SEP, line)
+    line = re.sub(r"\*\*|`", "", line)                     # bold / code markers, not underscores inside ids
+    line = re.sub(r"\s*❯\s*", SEP, line)
+    return line.strip(" ·*❯").strip()
+
+
+def segments(line: str) -> list:
+    """A saved status line as segments (new format split on ❯, legacy on ·)."""
+    sep = "❯" if "❯" in line else "·"
+    return [x.strip() for x in (line or "").split(sep) if x.strip()]
+
+
+def format_issues(text: str) -> list:
+    """What the status line misses against the format in the global instructions (empty = well formed)."""
+    first = next((ln for ln in (text or "").splitlines() if ln.strip()), "").strip()
+    issues = []
+    if not re.match(r"^[*_\s]*`\[Firefly> DevKit\]`", first):
+        issues.append("marker not written exactly as the `[Firefly> DevKit]` pill")
+    segs = segments(status_text(first))
+    if len(segs) < 4:
+        issues.append("fewer than the expected segments (location, task, outcome, verification, next)")
+    if segs and not re.search(r"\S\s*⎇\s*\S", segs[0]):
+        issues.append("first pill is not `<project> ⎇ <branch>`")
+    if not any(x[:1] in GLYPHS for x in segs):
+        issues.append("no verification segment starting with ✓, ⚠, ✗ or –")
+    if not any(x.lower().startswith("next") for x in segs):
+        issues.append("no `next → …` segment")
+    if len(first) > 260:
+        issues.append("longer than one line (about 180 characters)")
+    return issues
 
 
 def check(agent: str, data: dict):
@@ -109,6 +151,10 @@ def check(agent: str, data: dict):
            "project": pid, "ok": ok}
     if ok:
         rec["status"] = line[:200]
+        issues = format_issues(text)
+        rec["format_ok"] = not issues
+        if issues:
+            rec["format"] = issues[:3]
     else:
         rec["excerpt"] = re.sub(r"\s+", " ", text.strip())[:120]
         rec["instructions_loaded"] = instructions_loaded(agent, data.get("session_id") or "")
@@ -143,7 +189,7 @@ def miss_message(agent: str, sid: str) -> str:
     loaded = instructions_loaded(agent, sid)
     why = (" ~/.claude/CLAUDE.md was loaded, so the reply ignored the global instructions." if loaded else
            " ~/.claude/CLAUDE.md was NOT loaded in this session — run `dev doctor`." if loaded is False else "")
-    return (f"⚠ DevKit canary: this reply did not start with “{MARKER} ·”.{why} `dev canary` shows the history.")
+    return (f"⚠ {MARKER} canary: this reply did not start with “{MARKER}”.{why} `dev canary` shows the history.")
 
 
 def records(days: int = 7) -> list:
@@ -170,11 +216,19 @@ def summary(days: int = 7) -> dict:
     return out
 
 
+def format_rate(days: int = 7):
+    """(well formed, scored) over replies that carried the marker."""
+    rs = [r for r in records(days) if r.get("ok") and "format_ok" in r]
+    return sum(1 for r in rs if r["format_ok"]), len(rs)
+
+
 def summary_line(days: int = 7) -> str:
     s = summary(days)
     if not s:
         return "no tracked replies yet"
-    return " · ".join(f"{a.capitalize()} {ok}/{tot} ({100 * ok // tot}%)" for a, (ok, tot) in sorted(s.items()))
+    out = " · ".join(f"{a.capitalize()} {ok}/{tot} ({100 * ok // tot}%)" for a, (ok, tot) in sorted(s.items()))
+    good, scored = format_rate(days)
+    return out + (f" · format {100 * good // scored}%" if scored else "")
 
 
 def prune(max_days: int = 90):

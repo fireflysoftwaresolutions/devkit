@@ -71,7 +71,7 @@ TIPS = [
     "Worktrees reuse node_modules copy-on-write when the lockfile matches: no reinstall, ~0 bytes.",
     "Personal agent rules go in ~/.config/devkit/AGENTS.personal.md; `dev install` merges them.",
     "`dev docker up` starts Colima with Rosetta, so amd64 images run on Apple silicon.",
-    "`dev canary` shows whether every Claude/Codex reply started with “DevKit ·”, proof they followed the rules.",
+    "`dev canary` shows whether every Claude/Codex reply started with “[Firefly> DevKit]”, proof they followed the rules.",
     "Branches are `<type>/<ticket>-<topic>`: feat/PROJ-142-invoice-export, fix/login-timeout, release/26.11.4.",
 ]
 
@@ -269,3 +269,47 @@ def err(msg: str):
 
 def warn(msg: str):
     print(f"{WARN} {msg}", file=sys.stderr)
+
+
+def core_cfg() -> dict:
+    try:
+        from . import core
+        return core.CFG
+    except Exception:
+        return {}
+
+
+def status_pills(line: str, color: bool = None) -> str:
+    """A saved [Firefly> DevKit] status line drawn like a shell prompt: colored pills, then the segments."""
+    from .canary import segments
+    segs = segments(line or "")
+    if not segs:
+        return ""
+    color = (sys.stdout.isatty() and not os.environ.get("NO_COLOR")) if color is None else color
+    if not color:
+        return "[Firefly> DevKit] " + " ❯ ".join(segs)
+
+    def pill(text, bg, fg):
+        return f"\033[48;2;{bg[0]};{bg[1]};{bg[2]}m\033[38;2;{fg[0]};{fg[1]};{fg[2]}m {text} \033[0m"
+
+    amber, charcoal, ink, paper, graphite = (255, 179, 74), (16, 17, 15), (39, 40, 32), (243, 241, 235), (71, 74, 66)
+    spec = [("Firefly❯ DevKit", amber, charcoal), (segs[0], ink, paper)]
+    rest = segs[1:]
+    if rest and (rest[0].startswith(("T-", "F-", "B-", "S-")) or rest[0] == "-"):
+        spec.append((rest[0], graphite, paper))
+        rest = rest[1:]
+    if (core_cfg().get("ui") or {}).get("powerline"):  # Nerd Font arrows between pills, like powerlevel10k
+        pills = []
+        for i, (txt, bg, fg) in enumerate(spec):
+            pills.append(pill(txt, bg, fg))
+            nxt = spec[i + 1][1] if i + 1 < len(spec) else None
+            arrow = f"\033[38;2;{bg[0]};{bg[1]};{bg[2]}m" + (f"\033[48;2;{nxt[0]};{nxt[1]};{nxt[2]}m" if nxt else "")
+            pills.append(arrow + "\ue0b0\033[0m")
+    else:
+        pills = [pill(txt, bg, fg) for txt, bg, fg in spec]
+    styled = []
+    for s_ in rest:
+        g = s_[:1]
+        styled.append(green(s_) if g == "✓" else yellow(s_) if g == "⚠" else red(s_) if g == "✗" else
+                      cyan(s_) if s_.lower().startswith("next") else dim(s_) if g in "▸–" else s_)
+    return "".join(pills) + ("  " + dim(" ❯ ").join(styled) if styled else "")

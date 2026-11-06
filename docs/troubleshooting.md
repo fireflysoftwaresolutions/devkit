@@ -40,7 +40,7 @@ Restart the session: instructions and hooks are read at session start. Check tha
 
 ### Canary deviations
 
-`dev canary` lists replies that did not start with `DevKit ·`.
+`dev canary` lists replies that did not start with `[Firefly> DevKit]`.
 
 - Many deviations from one agent: check that its instruction file exists and is generated
   (`~/.claude/CLAUDE.md` or `~/.codex/AGENTS.md`), then `dev install --only instructions` and restart its sessions.

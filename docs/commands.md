@@ -133,7 +133,7 @@ verbatim.
 
 ### `dev canary [--days N] [--limit N]`
 
-Instruction-canary report: per agent, how many tracked replies started with `DevKit ·` in the last `N` days
+Instruction-canary report: per agent, how many tracked replies started with `[Firefly> DevKit]` in the last `N` days
 (default 7), then the most recent deviations (default 20) with an excerpt.
 
 ### `dev sync [--offline] [--scheduled] [--no-push] [--quiet]`

@@ -72,7 +72,7 @@
     {
       "id": "log",
       "label": "Session log",
-      "sub": "branch · commits · DevKit status line",
+      "sub": "branch · commits · [Firefly> DevKit] status line",
       "col": 1,
       "row": 7,
       "family": "slate"

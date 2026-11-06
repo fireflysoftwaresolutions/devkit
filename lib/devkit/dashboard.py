@@ -5,17 +5,18 @@ One self-contained HTML file (inline CSS, JS and SVG; data embedded as JSON)
 rendered from the registry that `dev sync` produces, the PR cache, the canary
 and guard logs, and the handoff repository's Markdown (Explorer).
 
-It is organised around jobs, not counts:
-  Home      what needs me now (one prioritised action list with the command
-            for each item), the tasks in progress, the agents working right
-            now with provider status, and what happened since yesterday
-  Projects  a dense, scannable table (cards optional) with computed health,
-            CI per PR and the latest agent status; the drawer is a working
-            surface (rendered handoff note, PRs, tasks with commands, worktrees)
-  Tasks     kanban and by-project lists with copyable `dev task` commands
-  Activity  timeline first (sessions, ops, merged PRs), chart second
-  Explorer  the handoff repository with a safe Markdown viewer
-  Health    providers, canary, guard decisions by rule, drift, worktrees, disk
+It is organised around jobs, not counts, with drill-down pages:
+  Home         a compact summary of everything: KPIs, the top of the action list,
+               initiative cards, who is working on what, what changed
+  Initiatives  list (cards or table, roadmap) -> #/initiatives/<slug>: overview,
+               member projects (grouped, searchable), tasks, plans, sessions, docs
+  Projects     dense table -> #/projects/<id>: overview, tasks, PRs, worktrees,
+               plans, sessions, the handoff note
+  Team         one card per person (user@host): live sessions, locks, claimed
+               tasks, recent sessions; collisions flagged
+  Tasks        work items across scopes (kanban or list) -> the task drawer with
+               lock state, the full changelog and the `dev task` commands
+  Activity · Explorer · Health   as before
 
 Decisions (action priority, project health, "since yesterday", guard rule
 grouping) are computed here in Python so they are unit-tested; the page only
@@ -32,6 +33,7 @@ import calendar
 import json
 import os
 import re
+import socket
 import subprocess
 import time
 from pathlib import Path
@@ -245,11 +247,19 @@ def project_health(p: dict, now: float = None) -> dict:
     return {"level": level, "reasons": risk + warn}
 
 
-def build_actions(reg: dict, now: float = None) -> list:
+def _task_flag(scope: str) -> str:
+    return f"-i {scope[len('initiatives/'):]}" if scope.startswith("initiatives/") else f"-p {scope}"
+
+
+def build_actions(reg: dict, now: float = None, items: list = None, colls: list = None) -> list:
     """The prioritised 'what needs me now' list. Each item carries the one command that moves it forward."""
     now = now or time.time()
     me = reg.get("github_user") or ""
     acts = []
+    items = items or []
+    by_title = {}
+    for it in items:
+        by_title.setdefault((it["scope"], it["title"]), it)
 
     def add(rank, sev, kind, project, title, detail, cmd, url=None, ts=0):
         acts.append({"rank": rank, "sev": sev, "kind": kind, "project": project, "title": title, "detail": detail,
@@ -288,10 +298,12 @@ def build_actions(reg: dict, now: float = None) -> list:
             add(40, "risk", "blocked", pid, f"{p.get('name') or pid} is blocked", state[0][:160] if state else "",
                 f"dev handoff {pid}", None, p.get("last_activity"))
         for t in (ns.get("tasks") or {}).get("overdue") or []:
+            it = by_title.get((pid, t))
             due = re.search(r"\bdue:(\d{4}-\d{2}-\d{2})", t)
             k = task_index(ns, t)
-            add(50, "risk", "overdue", pid, "Overdue task" + (f" (due {due.group(1)})" if due else ""),
-                re.sub(r"\s*\bdue:\S+", "", t), f"dev task done {k} -p {pid}" if k else f"dev handoff {pid}")
+            cmd = (f"dev task -p {pid} done {it['id']}" if it else f"dev task -p {pid} done {k}" if k else f"dev handoff {pid}")
+            add(50, "risk", "overdue", pid, "Overdue task" + (f" (due {(it or {}).get('due') or due.group(1)})" if (it and it.get("due")) or due else ""),
+                re.sub(r"\s*\bdue:\S+", "", t), cmd)
         m = p.get("main") or {}
         checkouts = [(p.get("path"), m.get("branch"), m)] + [(w.get("path"), w.get("branch"), w)
                                                            for w in p.get("worktrees") or [] if not w.get("missing")]
@@ -346,10 +358,24 @@ def build_actions(reg: dict, now: float = None) -> list:
                 (f"{ini.get('progress')}% done" if ini.get("progress") is not None else "") +
                 (f" · milestone {ini['milestone']}" if ini.get("milestone") else ""), f"dev initiative show {slug}")
         for t in ((ini.get("tasks") or {}).get("overdue") or []):
+            it = by_title.get((f"initiatives/{slug}", t))
             k = task_index({"tasks": ini.get("tasks")}, t)
             due = re.search(r"\bdue:(\d{4}-\d{2}-\d{2})", t)
+            cmd = (f"dev task -i {slug} done {it['id']}" if it else f"dev task -i {slug} done {k}" if k else f"dev initiative show {slug}")
             add(50, "risk", "overdue", None, f"Overdue in {title}" + (f" (due {due.group(1)})" if due else ""),
-                re.sub(r"\s*\bdue:\S+", "", t), f"dev task done {k} -i {slug}" if k else f"dev initiative show {slug}")
+                re.sub(r"\s*\bdue:\S+", "", t), cmd)
+    for c in colls or []:
+        if c["kind"] == "same-branch":
+            add(36, "warn", "collision", c["project"], f"Two sessions on {c['project'].split('/')[-1]}@{c['branch'] or '?'}",
+                ", ".join(c["who"]), "dev team")
+        elif c["kind"] == "expired-lock":
+            add(35, "warn", "expired-lock", c["scope"] if not c["scope"].startswith("initiatives/") else None,
+                f"Expired lock still held on {c['id']}", c["text"],
+                f"dev task {_task_flag(c['scope'])} release {c['id']} --why \"lock expired\"")
+    for it in items:
+        if it.get("status") == "blocked" and me and _who(it.get("claimed_by")).split("@")[0] == me.lower():
+            add(42, "risk", "blocked-task", it["scope"] if not it["scope"].startswith("initiatives/") else None,
+                f"Your task {it['id']} is blocked", it["title"], f"dev task {_task_flag(it['scope'])} show {it['id']}")
     drift = reg.get("drift")
     if drift:
         add(90, "warn", "drift", None, f"Agent configuration drifted ({len(drift)} setting(s))",
@@ -362,8 +388,9 @@ def build_actions(reg: dict, now: float = None) -> list:
     return acts
 
 
-def since_yesterday(reg: dict, cache: dict, now: float = None) -> dict:
+def since_yesterday(reg: dict, cache: dict, now: float = None, items: list = None, slog: list = None) -> dict:
     """What happened since the start of yesterday: sessions, commits, merged PRs, completed tasks."""
+    from . import work
     now = now or time.time()
     y0 = _midnight(now, 1)
     yday = time.strftime("%Y-%m-%d", time.localtime(y0))
@@ -372,9 +399,19 @@ def since_yesterday(reg: dict, cache: dict, now: float = None) -> dict:
         ts = s.get("last_seen") or s.get("started") or 0
         if ts >= y0:
             sessions.append({"ts": ts, "project": s.get("project"), "agent": s.get("agent"),
-                             "branch": s.get("branch"), "text": s.get("status") or "", "live": bool(s.get("active"))})
+                             "branch": s.get("branch"), "text": s.get("status") or "", "live": bool(s.get("active")), "who": ""})
     seen = {(x["project"], x["agent"]) for x in sessions}
+    logged = {ln["scope"] for ln in slog or []}
+    live_ts = {}
+    for x in sessions:
+        live_ts[(x["project"], x["agent"])] = max(live_ts.get((x["project"], x["agent"]), 0), x["ts"])
+    for ln in slog or []:
+        if ln["ts"] >= y0 and not ((ln["scope"], ln["agent"]) in seen and ln["ts"] <= live_ts[(ln["scope"], ln["agent"])]):
+            sessions.append({"ts": ln["ts"], "project": ln["scope"], "agent": ln["agent"], "branch": ln["branch"],
+                             "text": ln["text"], "live": False, "who": ln["who"]})
     for p in reg.get("projects") or []:
+        if p.get("id") in logged:
+            continue
         for line in ((p.get("note_summary") or {}).get("sessions") or []):
             ts = _session_ts(line)
             if ts >= y0:
@@ -383,20 +420,327 @@ def since_yesterday(reg: dict, cache: dict, now: float = None) -> dict:
                 if (p.get("id"), agent) in seen and ts < max([x["ts"] for x in sessions if x["project"] == p.get("id")] or [0]):
                     continue
                 sessions.append({"ts": ts, "project": p.get("id"), "agent": agent, "branch": "",
-                                 "text": body.split(" · ", 1)[1] if " · " in body else body, "live": False})
+                                 "text": body.split(" · ", 1)[1] if " · " in body else body, "live": False, "who": ""})
     commits = []
     for p in reg.get("projects") or []:
         n = sum(v for k, v in (p.get("activity") or {}).items() if k >= yday)
         if n:
             commits.append([p.get("id"), n])
-    done = []
+    done = [{"project": i["scope"], "text": i["title"], "id": i["id"], "who": _who(i.get("updated_by"))}
+            for i in sorted(items or [], key=lambda i: i.get("updated") or "", reverse=True)
+            if i["status"] == "done" and work.parse_iso(i.get("updated") or "") >= y0]
+    scoped = {i["scope"] for i in items or []}
     for p in reg.get("projects") or []:
+        if p.get("id") in scoped:
+            continue
         for t in ((p.get("note_summary") or {}).get("tasks") or {}).get("done_recent") or []:
             m = re.search(r"✓\s*(\d{4}-\d{2}-\d{2})", t)
             if m and m.group(1) >= yday:
                 done.append({"project": p.get("id"), "text": re.sub(r"\s*✓\s*\d{4}-\d{2}-\d{2}", "", t)})
     return {"from": y0, "sessions": sorted(sessions, key=lambda x: -x["ts"])[:40],
             "commits": sorted(commits, key=lambda x: -x[1]), "merged": merged_prs(cache, y0)[:20], "done": done[:30]}
+
+
+# --------------------------------------------------------------------------- work items, presence, sessions, plans
+
+def _who(s: str) -> str:
+    """'user@host (agent:session)' -> 'user@host'."""
+    return (s or "").split(" ")[0].strip()
+
+
+def read_items(handoff: Path, now: float = None) -> list:
+    """Every work item under <handoff>/items (all scopes), with lock state and changelog."""
+    from . import work
+    now = now or time.time()
+    base = Path(handoff) / "items"
+    out = []
+    if not base.is_dir():
+        return out
+    for f in sorted(base.rglob("*.md")):
+        try:
+            it = work.parse(f.read_text(errors="replace"))
+        except (OSError, ValueError):
+            continue
+        m = it.get("meta") or {}
+        scope = m.get("scope") or str(f.parent.relative_to(base))
+        holder = m.get("claimed_by") or ""
+        expired = bool(holder) and work.parse_iso(m.get("lock_expires") or "") < now
+        links = m.get("links") or []
+        if isinstance(links, str):
+            links = [x.strip() for x in links.strip("[]").split(",") if x.strip()]
+        out.append({"id": m.get("id") or f.stem, "type": m.get("type") or "task", "title": m.get("title") or it.get("title") or f.stem,
+                    "scope": scope, "initiative": scope[len("initiatives/"):] if scope.startswith("initiatives/") else "",
+                    "status": m.get("status") or "todo", "bucket": m.get("bucket") or "next", "priority": m.get("priority") or "normal",
+                    "assignee": m.get("assignee") or "", "claimed_by": holder, "claimed_at": m.get("claimed_at") or "",
+                    "lock_expires": m.get("lock_expires") or "", "lock": ("expired" if expired else "held") if holder else "",
+                    "due": m.get("due") or "", "links": links, "version": m.get("version") or 1,
+                    "created": m.get("created") or "", "created_by": m.get("created_by") or "",
+                    "updated": m.get("updated") or "", "updated_by": m.get("updated_by") or "",
+                    "body": (it.get("body") or "")[:4000], "changelog": (it.get("changelog") or [])[:60],
+                    "path": str(f.relative_to(Path(handoff)))})
+    return out
+
+
+def read_presence(handoff: Path, reg: dict, max_age_h: float = 24, now: float = None) -> list:
+    """Team presence (reg["team"] when the registry carries it, else <handoff>/presence/*.json)."""
+    from . import work
+    now = now or time.time()
+    if reg.get("team") is not None:
+        return [t for t in reg.get("team") or [] if isinstance(t, dict)]
+    out = []
+    d = Path(handoff) / "presence"
+    for f in sorted(d.glob("*.json")) if d.is_dir() else []:
+        try:
+            p = json.loads(f.read_text())
+        except (OSError, ValueError):
+            continue
+        if now - work.parse_iso(p.get("updated") or "") < max_age_h * 3600:
+            out.append(p)
+    return out
+
+
+SESSION_RE = re.compile(r"^(\d{4}-\d{2}-\d{2} \d{2}:\d{2})\s*·\s*(.*)$")
+
+
+def read_session_log(handoff: Path, months: int = 2, limit: int = 1500) -> list:
+    """Append-only session logs (<handoff>/sessions/<scope>/<YYYY-MM>.md), newest first."""
+    base = Path(handoff) / "sessions"
+    out = []
+    if not base.is_dir():
+        return out
+    by_scope = {}
+    for f in base.rglob("*.md"):
+        by_scope.setdefault(str(f.parent.relative_to(base)), []).append(f)
+    for scope, files in by_scope.items():
+        for f in sorted(files, reverse=True)[:months]:
+            try:
+                lines = f.read_text(errors="replace").splitlines()
+            except OSError:
+                continue
+            for ln in lines:
+                if not ln.startswith("- "):
+                    continue
+                m = SESSION_RE.match(re.sub(r"\s*<!--.*?-->\s*$", "", ln[2:]).strip())
+                if not m:
+                    continue
+                parts = [x.strip() for x in m.group(2).split(" · ")]
+                who = parts.pop(0) if parts and "@" in parts[0] and " " not in parts[0] else ""
+                agent = parts.pop(0) if parts and parts[0] in ("claude", "codex", "human", "devkit") else ""
+                branch = parts.pop(0).strip("`") if parts and parts[0].startswith("`") else ""
+                out.append({"ts": _session_ts(m.group(1)), "scope": scope, "who": who, "agent": agent, "branch": branch,
+                            "text": " · ".join(parts)})
+    out.sort(key=lambda x: -x["ts"])
+    return out[:limit]
+
+
+def read_plans(handoff: Path) -> list:
+    """Versioned plans and specs (<handoff>/plans/<scope>/*.md)."""
+    from . import plans as plansmod
+    base = Path(handoff) / "plans"
+    out = []
+    for f in sorted(base.rglob("*.md")) if base.is_dir() else []:
+        try:
+            meta, body, log = plansmod._split(f.read_text(errors="replace"))
+        except OSError:
+            continue
+        title = meta.get("title") or next((ln[2:].strip() for ln in body.splitlines() if ln.startswith("# ")), f.stem)
+        out.append({"scope": meta.get("scope") or str(f.parent.relative_to(base)), "id": meta.get("id") or "", "title": title,
+                    "status": meta.get("status") or "unversioned", "version": meta.get("version") or "",
+                    "updated": meta.get("updated") or "", "updated_by": meta.get("updated_by") or "",
+                    "needs_revision": plansmod.needs_revision(f), "changelog": log[:20],
+                    "path": str(f.relative_to(Path(handoff))), "mtime": int(f.stat().st_mtime)})
+    return out
+
+
+SESSION_KEYS = ("agent", "project", "branch", "started", "status", "last_seen", "session", "progress", "subagents",
+                "turn_started")
+
+
+def live_sessions_of(person: dict, now: float, max_idle_s: float = 2 * 3600) -> list:
+    out = []
+    for s in person.get("sessions") or []:
+        if not isinstance(s, dict):
+            continue
+        seen = s.get("last_seen") or s.get("started") or 0
+        if not seen or now - seen <= max_idle_s:
+            out.append(s)
+    return out
+
+
+def collisions(team: list, items: list, now: float = None) -> list:
+    """Two people or sessions on the same project and branch; locks that expired but are still held."""
+    now = now or time.time()
+    by = {}
+    for person in team:
+        who = person.get("who") or f"{person.get('user')}@{person.get('host')}"
+        for s in live_sessions_of(person, now):
+            if s.get("project") and s.get("branch"):
+                by.setdefault((s["project"], s.get("branch") or ""), []).append((who, s.get("agent") or "agent"))
+    out = []
+    for (proj, br), lst in sorted(by.items()):
+        if len(set(lst)) > 1:
+            out.append({"kind": "same-branch", "project": proj, "branch": br, "who": sorted({f"{w} ({a})" for w, a in lst}),
+                        "text": f"{len(set(lst))} sessions on {proj}@{br or '?'}: " + ", ".join(sorted({f'{w} ({a})' for w, a in lst}))})
+    for it in items:
+        if it.get("lock") == "expired" and it.get("status") not in ("done", "cancelled"):
+            out.append({"kind": "expired-lock", "id": it["id"], "scope": it["scope"], "holder": it["claimed_by"],
+                        "until": it["lock_expires"],
+                        "text": f"{it['id']} “{it['title'][:60]}” is still claimed by {_who(it['claimed_by'])}, "
+                                f"lock expired {it['lock_expires'][:16].replace('T', ' ')}"})
+    return out
+
+
+def people(team: list, items: list, slog: list, now: float = None, local: list = None, me: str = "") -> list:
+    """One entry per person (user@host): presence, live sessions, held locks, claimed items, recent sessions.
+
+    This machine's own sessions come from the local registry (fresher than its presence file)."""
+    now = now or time.time()
+    out = {}
+
+    def get(who):
+        user, _, host = who.partition("@")
+        return out.setdefault(who, {"who": who, "user": user, "host": host, "updated": 0, "sessions": [], "locks": [],
+                                    "claimed": [], "recent": []})
+    from . import work
+    for person in team:
+        who = f"{person.get('user')}@{person.get('host')}"
+        e = get(who)
+        e["updated"] = int(work.parse_iso(person.get("updated") or ""))
+        e["sessions"] = live_sessions_of(person, now)
+        e["locks"] = [lk for lk in person.get("locks") or [] if isinstance(lk, dict)]
+    mine = [s for s in local or [] if isinstance(s, dict) and s.get("active")]
+    if me and (mine or me in out):
+        e = get(me)
+        if mine:
+            e["sessions"] = [{k: s.get(k) for k in SESSION_KEYS} for s in mine]
+            e["updated"] = max(e["updated"], max(int(s.get("last_seen") or 0) for s in mine))
+    for it in items:
+        if it.get("claimed_by") and it.get("status") not in ("done", "cancelled"):
+            get(_who(it["claimed_by"]))["claimed"].append(it["id"])
+    for ln in slog:
+        if ln.get("who") and ln["who"] in out and len(out[ln["who"]]["recent"]) < 8:
+            out[ln["who"]]["recent"].append(ln)
+    for ln in slog:
+        if ln.get("who") and ln["who"] not in out:
+            e = get(ln["who"])
+            e["recent"].append(ln)
+    return sorted(out.values(), key=lambda e: (-len(e["sessions"]), -len(e["claimed"]), -e["updated"], e["who"]))
+
+
+def linked_items(items: list, slug: str, members: list) -> list:
+    """An initiative's work: its own items plus member-project items that link to it (links: initiative:<slug>)."""
+    mem, tag = set(members or []), f"initiative:{slug}"
+    return [i for i in items if i["scope"] == f"initiatives/{slug}" or (i["scope"] in mem and tag in i["links"])]
+
+
+SECRET_RE = re.compile(r"(?i)(bearer\s+|--?(?:token|password|secret|api[_-]?key)[\s=]+|(?:token|password|passwd|secret|"
+                       r"authorization|api[_-]?key)[\"']?\s*[=:]\s*(?:bearer\s+)?)[^\s'\"]+"
+                       r"|\b(?=[A-Za-z0-9_]*\d)(?=[A-Za-z0-9_]*[A-Za-z])[A-Za-z0-9_]{32,}\b")
+
+
+def _redact(s: str) -> str:
+    """Command lines in timing records may carry credentials: mask them before they reach the page."""
+    return SECRET_RE.sub(lambda m: (m.group(1) or "") + "***", str(s or ""))
+
+
+def _q(vals: list, q: float):
+    s = sorted(vals)
+    return s[int(q * (len(s) - 1))] if s else None
+
+
+def timing_summary(recs: list, now: float = None) -> dict:
+    """Time predictability from the timing records (progress.records): turn length, estimate accuracy (actual ÷
+    estimate of finished runs), the slowest commands and subagent durations; overall and per project."""
+    import statistics
+    now = now or time.time()
+
+    def st(xs):
+        return {"n": len(xs), "median": round(statistics.median(xs), 1) if xs else None,
+                "p90": round(_q(xs, 0.9), 1) if xs else None}
+
+    def pick(r):
+        out = {k: r.get(k) for k in ("ts", "agent", "project", "secs", "estimate", "steps")}
+        out["what"] = _redact(r.get("what"))[:160]
+        return out
+    month, week = now - 30 * 86400, now - 7 * 86400
+    turn = lambda rs: [r["secs"] / 60 for r in rs if r.get("kind") == "turn" and r.get("ts", 0) >= month]  # noqa: E731
+    runs = lambda rs: [r for r in rs if r.get("kind") == "run" and (r.get("estimate") or 0) > 0]  # noqa: E731
+    ratio = lambda rs: round(statistics.median([r["secs"] / 60 / r["estimate"] for r in runs(rs)]), 2) if runs(rs) else None  # noqa: E731
+    tools = sorted((r for r in recs if r.get("kind") == "tool" and r.get("ts", 0) >= week), key=lambda r: -(r.get("secs") or 0))
+    subs = [r for r in recs if r.get("kind") == "subagent" and r.get("ts", 0) >= week]
+    by = {}
+    for r in recs:
+        if r.get("project"):
+            by.setdefault(r["project"], []).append(r)
+    by_project = {}
+    for pid, rs in by.items():
+        if turn(rs) or runs(rs):
+            by_project[pid] = {"turns": st(turn(rs)), "ratio": ratio(rs), "runs": len(runs(rs)),
+                               "slow_tools": [pick(r) for r in sorted((r for r in rs if r.get("kind") == "tool" and r.get("ts", 0) >= week),
+                                                                       key=lambda r: -(r.get("secs") or 0))[:5]]}
+    return {"turns": st(turn(recs)), "ratio": ratio(recs), "runs": len(runs(recs)),
+            "recent_runs": [pick(r) for r in sorted(runs(recs), key=lambda r: -r.get("ts", 0))[:8]],
+            "slow_tools": [pick(r) for r in tools[:10]], "tools": len(tools),
+            "subagents": dict(st([r["secs"] / 60 for r in subs]), top=[pick(r) for r in sorted(subs, key=lambda r: -(r.get("secs") or 0))[:6]]),
+            "by_project": by_project}
+
+
+def _timing(now: float) -> dict:
+    try:
+        from . import progress
+        return timing_summary(progress.records(60), now)
+    except Exception:  # timing is optional: never break the dashboard
+        return timing_summary([], now)
+
+
+def _runs(now: float) -> list:
+    """Agent runs with live progress on this machine (running, blocked, or finished in the last hour)."""
+    try:
+        from . import progress
+        runs = progress.active_runs()
+    except Exception:
+        return []
+    out = []
+    for r in runs:
+        if not isinstance(r, dict) or (r.get("state") == "done" and now - (r.get("finished") or 0) > 3600):
+            continue
+        try:
+            b = progress.brief(r)
+        except (KeyError, TypeError, ValueError):
+            continue
+        b.update({"agent": r.get("agent"), "session": r.get("session"), "project": r.get("project"),
+                  "estimate_cal": r.get("estimate_cal"), "finished": r.get("finished"),
+                  "updates": [{k: u.get(k) for k in ("ts", "kind", "text", "next")} for u in (r.get("updates") or [])[-8:]]})
+        out.append(b)
+    return out[:20]
+
+
+OPEN = ("todo", "doing", "blocked")
+
+
+def kpis(reg: dict, items: list, ppl: list, actions: list, now: float = None) -> dict:
+    """The Home summary numbers (work items first; legacy note checkboxes for scopes without items)."""
+    now = now or time.time()
+    projects = [p for p in reg.get("projects") or [] if isinstance(p, dict)]
+    inits = [i for i in reg.get("initiatives") or [] if isinstance(i, dict)]
+    scoped = {i["scope"] for i in items}
+    open_ = [i for i in items if i["status"] in OPEN]
+    doing = len([i for i in open_ if i["status"] == "doing"])
+    blocked = len([i for i in open_ if i["status"] == "blocked"])
+    n_open = len(open_)
+    for scope, t in [(p.get("id"), ((p.get("note_summary") or {}).get("tasks") or {})) for p in projects] + \
+            [(f"initiatives/{i.get('id')}", i.get("tasks") or {}) for i in inits]:
+        if scope not in scoped and t and t.get("items") is None:
+            n_open += int(t.get("open") or 0)
+            doing += len(t.get("now") or [])
+    failing = sum(1 for p in projects for r in p.get("prs_open") or [] if r.get("checks") == "failing")
+    live = sum(len(x["sessions"]) for x in ppl) if ppl else len([s for s in reg.get("sessions") or [] if s.get("active")])
+    return {"initiatives": len(inits), "initiatives_active": len([i for i in inits if (i.get("status") or "active") in ("active", "blocked")]),
+            "projects": len(projects), "not_cloned": len([p for p in projects if p.get("local") is False]),
+            "open": n_open, "doing": doing, "blocked": blocked,
+            "people": len(ppl), "people_active": len([x for x in ppl if x["sessions"]]), "live_sessions": live,
+            "locks": len([i for i in items if i.get("lock") == "held" and i["status"] in OPEN]),
+            "prs_failing": failing, "needs_me": len(actions), "urgent": len([a for a in actions if a["sev"] == "risk"])}
 
 
 # --------------------------------------------------------------------------- payload
@@ -436,8 +780,9 @@ def _project(p: dict, now: float) -> dict:
     return out
 
 
-def _initiative(i: dict) -> dict:
+def _initiative(i: dict, items: list = None) -> dict:
     out = dict(i)
+    out["linked_items"] = [x["id"] for x in linked_items(items or [], i.get("id") or "", i.get("projects") or [])]
     out["tasks"] = dict(i.get("tasks") or {})
     out["task_index"] = {t: n + 1 for n, t in enumerate(_open_tasks({"tasks": out["tasks"]}))}
     out["members"] = list(i.get("members") or [])
@@ -450,8 +795,15 @@ def collect(reg: dict, handoff: Path = None, now: float = None) -> dict:
     files, meta = explorer_files(handoff)
     cache = pr_cache()
     events = guard_events()
+    items = read_items(handoff, now)
+    team = read_presence(handoff, reg, now=now)
+    slog = read_session_log(handoff)
+    me = f"{reg.get('github_user') or os.environ.get('USER', '')}@{socket.gethostname().split('.')[0].lower()}"
+    ppl = people(team, items, slog, now, local=reg.get("sessions") or [], me=me)
+    colls = collisions(ppl, items, now)
+    acts = build_actions(reg, now, items, colls)
     return {
-        "v": 2,
+        "v": 3,
         "version": core.VERSION,
         "copyright": core.COPYRIGHT,
         "generated": int(reg.get("generated") or now),
@@ -461,9 +813,19 @@ def collect(reg: dict, handoff: Path = None, now: float = None) -> dict:
         "dev_root": core.tilde(reg.get("dev_root") or core.DEV),
         "handoff": core.tilde(handoff),
         "projects": [_project(p, now) for p in reg.get("projects", [])],
-        "initiatives": [_initiative(i) for i in reg.get("initiatives") or [] if isinstance(i, dict)],
-        "actions": build_actions(reg, now),
-        "since": since_yesterday(reg, cache, now),
+        "initiatives": [_initiative(i, items) for i in reg.get("initiatives") or [] if isinstance(i, dict)],
+        "actions": acts,
+        "kpis": kpis(reg, items, ppl, acts, now),
+        "items": items,
+        "team": team,
+        "people": ppl,
+        "session_log": slog,
+        "plans": read_plans(handoff),
+        "collisions": colls,
+        "since": since_yesterday(reg, cache, now, items, slog),
+        "who": me,
+        "timing": _timing(now),
+        "runs": _runs(now),
         "merged": merged_prs(cache, now - 30 * 86400)[:200],
         "sessions": reg.get("sessions") or [],
         "providers": reg.get("providers") or {},
@@ -477,7 +839,6 @@ def collect(reg: dict, handoff: Path = None, now: float = None) -> dict:
         "files": files,
         "files_meta": meta,
     }
-
 
 # --------------------------------------------------------------------------- page
 
@@ -857,10 +1218,12 @@ JS = r"""
 window.addEventListener("error", e => { const b = document.createElement("div"); b.className = "err"; b.id = "dk-error";
   b.textContent = "Dashboard error: " + (e.message || e.error); document.body.append(b); });
 const D = JSON.parse(document.getElementById("devkit-data").textContent);
-const VIEWS = [["overview", "Home", "o"], ["portfolio", "Portfolio", "i"], ["projects", "Projects", "p"], ["tasks", "Tasks", "t"], ["activity", "Activity", "a"], ["explorer", "Explorer", "e"], ["health", "Health", "h"]];
-const DEFAULT = {view: "overview", q: "", status: [], priority: [], owner: [], stack: [], tag: [], ci: [], health: [],
-  live: false, prs: false, sort: "attention", group: "none", layout: "table", dense: false, p: "", f: "", fq: "",
-  range: 7, types: [], tp: "", tmode: "board", i: "", pgroup: "initiative", psort: "priority", nc: false};
+const VIEWS = [["overview", "Home", "o"], ["initiatives", "Initiatives", "i"], ["projects", "Projects", "p"], ["team", "Team", "m"], ["tasks", "Tasks", "t"], ["activity", "Activity", "a"], ["explorer", "Explorer", "e"], ["health", "Health", "h"]];
+const ROUTES = VIEWS.map(v => v[0]).concat(["search", "actions"]);
+const DEFAULT = {view: "overview", id: "", tab: "", task: "", q: "", status: [], priority: [], owner: [], stack: [], tag: [], ci: [], health: [],
+  live: false, prs: false, nc: false, loose: false, sort: "attention", group: "none", layout: "table", dense: false, f: "", fq: "",
+  range: 7, types: [], tp: "", tmode: "board", who: "", tst: "", ist: "", psort: "priority", ilayout: "cards", mq: "", mg: "", src: "all", kind: ""};
+const PAGEKEYS = {tab: "", task: "", mq: "", mg: "", src: "all", tst: ""};
 const $ = (s, r = document) => r.querySelector(s);
 const $$ = (s, r = document) => Array.from(r.querySelectorAll(s));
 const SVGNS = "http://www.w3.org/2000/svg";
@@ -911,38 +1274,87 @@ function shortDay(k) { return new Date(k + "T12:00:00").toLocaleDateString(undef
 function compact(n) { return n >= 1e6 ? (n / 1e6).toFixed(1) + "M" : n >= 1e4 ? Math.round(n / 1e3) + "K" : n >= 1e3 ? (n / 1e3).toFixed(1) + "K" : String(n); }
 function kb(k) { if (k == null) return "—"; return k >= 1048576 ? (k / 1048576).toFixed(1) + " GB" : k >= 1024 ? Math.round(k / 1024) + " MB" : k + " KB"; }
 function plural(n, w, p) { return n + " " + (n === 1 ? w : (p || w + "s")); }
-function stripMarker(line) { return String(line || "").replace(/^[\W_]*DevKit\s*·?\s*/, ""); }
+function stripMarker(line) { return String(line || "").replace(/^[\W_]*(?:\[\s*firefly\s*>\s*devkit\s*\]|devkit(?=[\s·:—*`]))[\s·:—*`]*/i, ""); }
 function iso(s) { const t = Date.parse(s || ""); return isNaN(t) ? 0 : t / 1000; }
+function fmtMin(m) { m = Math.max(0, Math.round(m || 0)); return m >= 60 ? Math.floor(m / 60) + "h" + String(m % 60).padStart(2, "0") + "m" : m + "m"; }
 
-/* ---------------------------------------------------------------- data model */
+/* ---------------------------------------------------------------- data model: work items, projects, initiatives, people */
+const OPEN = ["todo", "doing", "blocked"];
+const ME = D.who || "";
+const STATUS = {active: ["●", "Active"], paused: ["❚❚", "Paused"], blocked: ["⊘", "Blocked"], done: ["✓", "Done"], archived: ["▢", "Archived"], untracked: ["○", "No note"], unknown: ["○", "No note"]};
+const PRIO = {high: ["▲", "High"], normal: ["", "Normal"], low: ["▼", "Low"]};
+const PRANK = {high: 0, normal: 1, low: 2}, HRANK = {risk: 0, warn: 1, ok: 2};
+const SEVICON = {risk: "!", warn: "!", info: "i"};
+const KIND = {"ci-failing": "CI", "changes-requested": "Review", "conflicts": "Conflicts", "review-waiting": "Review", "review-requested": "Review",
+  "blocked": "Blocked", "blocked-task": "Blocked", "overdue": "Overdue", "idle-work": "Unsaved work", "reclaim": "Reclaim", "layout": "Layout", "stale-note": "Handoff",
+  "drift": "Config", "sign-in": "Sign in", "collision": "Collision", "expired-lock": "Lock"};
+const CHECKS = {passing: "CI passing", failing: "CI failing", pending: "CI running", none: "no CI", unknown: "CI unknown"};
+const ISTATUS = {todo: ["○", "To do"], doing: ["◐", "Doing"], blocked: ["⊘", "Blocked"], done: ["✓", "Done"], cancelled: ["✕", "Cancelled"]};
+const SDOT = {active: "d-ok", paused: "d-warn", blocked: "d-risk", done: "d-info", archived: "d-info", untracked: "d-info", unknown: "d-info"};
+const SORDER = {blocked: 0, active: 1, paused: 2, untracked: 3, unknown: 3, done: 4, archived: 5};
+function whoOf(s) { return String(s || "").split(" ")[0]; }
+function agentOf(s) { const m = /\(([^:)]+)/.exec(String(s || "")); return m ? m[1] : ""; }
+function isMe(w) { return !!w && w === ME; }
+function isInit(scope) { return String(scope).startsWith("initiatives/"); }
+function flagOf(scope) { return isInit(scope) ? "-i " + scope.slice(12) : "-p " + scope; }
+function cnt(items) { const c = {open: 0, todo: 0, doing: 0, blocked: 0, done: 0, cancelled: 0, total: items.length}; for (const x of items) { if (x.open) c.open++; if (c[x.status] != null) c[x.status]++; } return c; }
+
+const ITEMS = (D.items || []).map(x => Object.assign({}, x, {holder: whoOf(x.claimed_by), agent: agentOf(x.claimed_by), open: OPEN.includes(x.status)}));
+const ITEMBY = new Map(ITEMS.map(x => [x.id, x]));
+const BYSCOPE = new Map();
+for (const x of ITEMS) { if (!BYSCOPE.has(x.scope)) BYSCOPE.set(x.scope, []); BYSCOPE.get(x.scope).push(x); }
+/* scopes without work items still show their note checkboxes (legacy) as read-only items */
+function legacy(scope, t, tidx) {
+  const out = []; let k = 0;
+  for (const [bucket, list, status] of [["now", t.now, "doing"], ["next", t.next, "todo"], ["later", t.later, "todo"], ["later", t.done_recent, "done"]]) for (const raw of list || []) {
+    const it = {id: "note:" + scope + "#" + (++k), legacy: true, n: status === "done" ? 0 : (tidx[raw] || 0), type: "task", scope, status, bucket, priority: "normal",
+      due: (/\bdue:(\d{4}-\d{2}-\d{2})\b/.exec(raw) || [])[1] || "", title: String(raw).replace(/\s*\bdue:\S+/, "").replace(/\s*✓\s*\d{4}-\d{2}-\d{2}/, ""),
+      claimed_by: "", lock: "", lock_expires: "", changelog: [], version: 0, holder: "", agent: "", open: status !== "done", links: [], body: ""};
+    out.push(it); ITEMBY.set(it.id, it);
+  }
+  return out;
+}
 const P = (D.projects || []).map((p, i) => {
   const ns = p.note_summary || null;
   const t = (ns && ns.tasks) || {now: [], next: [], later: [], done_recent: [], open: 0, done: 0, overdue: []};
   const id = p.id || p.name || "project-" + i;
   const owner = id.includes("/") ? id.slice(0, id.lastIndexOf("/")) : "(local)";
-  const wts = p.worktrees || [];
-  const prsOpen = p.prs_open || [];
+  const wts = p.worktrees || [], prsOpen = p.prs_open || [];
   const live = (p.main && p.main.active ? 1 : 0) + wts.filter(w => w.active).length;
-  const status = ns ? (ns.status || "active") : "untracked";
-  const health = p.health || {level: "ok", reasons: []};
-  const ci = Array.from(new Set(prsOpen.map(r => r.checks || "unknown")));
-  const o = Object.assign({}, p, {id, ns, t, owner, wts, live, status, priority: (ns && ns.priority) || "normal", tags: (ns && ns.tags) || [],
-    stack: p.stack || [], prsOpen, prs: prsOpen.length, act: p.activity || {}, sessions: (ns && ns.sessions) || [], health, ci,
-    tidx: p.task_index || {}, local: p.local !== false, inits: p.initiatives || []});
-  o.hay = [id, p.name, o.stack.join(" "), (p.main || {}).branch, o.tags.join(" "), ns && ns.purpose, ns && ns.state, t.now.join(" "), t.next.join(" "),
-    t.later.join(" "), p.status_line && p.status_line.line, prsOpen.map(r => "#" + r.number + " " + r.title).join(" ")].filter(Boolean).join(" \n ").toLowerCase();
+  const o = Object.assign({}, p, {id, ns, t, owner, wts, live, status: ns ? (ns.status || "active") : "untracked", priority: (ns && ns.priority) || "normal", tags: (ns && ns.tags) || [],
+    stack: p.stack || [], prsOpen, prs: prsOpen.length, act: p.activity || {}, sessions: (ns && ns.sessions) || [], health: p.health || {level: "ok", reasons: []},
+    ci: Array.from(new Set(prsOpen.map(r => r.checks || "unknown"))), tidx: p.task_index || {}, local: p.local !== false, inits: p.initiatives || []});
+  o.items = BYSCOPE.get(id) || legacy(id, t, o.tidx);
+  o.cnt = cnt(o.items);
+  o.hay = [id, p.name, o.stack.join(" "), (p.main || {}).branch, o.tags.join(" "), ns && ns.purpose, ns && ns.state, o.items.filter(x => x.open).map(x => x.id + " " + x.title).join(" "),
+    p.status_line && p.status_line.line, prsOpen.map(r => "#" + r.number + " " + r.title).join(" ")].filter(Boolean).join(" \n ").toLowerCase();
   return o;
 });
 const BYID = new Map(P.map(p => [p.id, p]));
+const PEOPLE = (D.people || []).map(x => Object.assign({}, x, {sessions: x.sessions || [], locks: x.locks || [], claimed: x.claimed || [], recent: x.recent || []}));
+if (!PEOPLE.length) { const live = (D.sessions || []).filter(s => s.active); if (live.length) PEOPLE.push({who: ME || D.host, user: ME.split("@")[0], host: D.host, updated: D.generated, sessions: live, locks: [], claimed: [], recent: []}); }
+const BYWHO = new Map(PEOPLE.map(x => [x.who, x]));
+const ONPROJ = new Map();
+for (const x of PEOPLE) for (const s of x.sessions) if (s.project) { if (!ONPROJ.has(s.project)) ONPROJ.set(s.project, []); ONPROJ.get(s.project).push(Object.assign({who: x.who, asOf: x.updated}, s)); }
+const RUNS = D.runs || [];
+function runOf(s) { return RUNS.find(r => r.session && r.session === s.session && r.agent === s.agent) || null; }
+function peopleOn(scopes, items) { const out = new Set(); for (const sc of scopes) for (const s of ONPROJ.get(sc) || []) out.add(s.who); for (const it of items) if (it.open && it.holder && it.lock !== "expired") out.add(it.holder); return Array.from(out); }
+for (const p of P) p.people = peopleOn([p.id], p.items);
 const INITS = (D.initiatives || []).map(x => {
   const t = x.tasks || {};
   const tk = {now: t.now || [], next: t.next || [], later: t.later || [], done_recent: t.done_recent || [], open: t.open || 0, done: t.done || 0, overdue: t.overdue || []};
-  return Object.assign({}, x, {t: tk, members: x.members || [], projects: x.projects || [], tidx: x.task_index || {}, status: x.status || "active", priority: x.priority || "normal",
-    title: x.title || x.id, tags: x.tags || [], sessions: x.sessions || [],
-    hay: [x.id, x.title, x.goal, x.scope, x.state, (x.projects || []).join(" "), tk.now.join(" "), tk.next.join(" "), (x.tags || []).join(" ")].filter(Boolean).join(" \n ").toLowerCase()});
+  const scope = "initiatives/" + x.id, linked = (x.linked_items || []).map(id => ITEMBY.get(id)).filter(Boolean);
+  const items = linked.length || BYSCOPE.has(scope) ? linked : legacy(scope, tk, x.task_index || {});
+  const projects = x.projects || [], members = x.members || [];
+  const last = Math.max(x.last_activity || 0, ...projects.map(id => (BYID.get(id) || {}).last_activity || 0));
+  return Object.assign({}, x, {t: tk, scope, items, cnt: cnt(items), members, projects, tidx: x.task_index || {}, status: x.status || "active", priority: x.priority || "normal",
+    title: x.title || x.id, tags: x.tags || [], sessions: x.sessions || [], last, people: peopleOn(projects.concat([scope]), items),
+    hay: [x.id, x.title, x.goal, x.scope, x.state, projects.join(" "), items.filter(i => i.open).map(i => i.id + " " + i.title).join(" "), (x.tags || []).join(" ")].filter(Boolean).join(" \n ").toLowerCase()});
 });
 const BYINIT = new Map(INITS.map(x => [x.id, x]));
-const SDOT = {active: "d-ok", paused: "d-warn", blocked: "d-risk", done: "d-info", archived: "d-info", untracked: "d-info", unknown: "d-info"};
+const MEMBEROF = new Map();
+for (const x of INITS) for (const id of x.projects) { if (!MEMBEROF.has(id)) MEMBEROF.set(id, []); MEMBEROF.get(id).push(x.id); }
+function allItems() { const out = ITEMS.slice(); for (const p of P) if (p.items.length && p.items[0].legacy) out.push(...p.items); for (const x of INITS) if (x.items.length && x.items[0].legacy) out.push(...x.items); return out; }
 function progOf(x) {
   const t = x.t || {}, done = t.done || 0, total = (t.open || 0) + done;
   if (x.progress != null && x.progress !== "" && !isNaN(+x.progress)) {
@@ -961,50 +1373,41 @@ function progressBar(x, wide) {
 }
 function dueBadge(due, done) { if (!due) return null; const over = !done && due < lkey(new Date());
   return h("span", {class: "due" + (over ? " over" : ""), title: over ? "Past its due date (" + due + ")" : "Due " + due, text: (over ? "overdue · " : "due ") + shortDay(due)}); }
-function memberChip(m) {
-  const p = BYID.get(m.id), st = (p && p.status) || m.status || "unknown";
-  const pct = m.progress != null ? m.progress : p ? progOf(p).pct : null, local = m.local !== false && (!p || p.local);
-  return h("button", {class: "mchip", type: "button", title: m.id + " · " + st + (pct != null ? " · " + pct + "%" : "") + (local ? "" : " · not cloned on this Mac"),
-      onclick: e => { e.stopPropagation(); openProject(m.id); }},
-    h("span", {class: "dot " + (SDOT[st] || "d-info"), "aria-hidden": "true"}), (p && p.name) || m.id.split("/").pop(),
-    pct != null ? h("span", {class: "num t2", text: pct + "%"}) : null, local ? null : h("span", {class: "t2", title: "not cloned", text: "☁"}));
-}
 const FILES = D.files || [];
 const FILEMAP = new Map(FILES.map(f => [f.path, f]));
 const ACTIONS = D.actions || [];
-const STATUS = {active: ["●", "Active"], paused: ["❚❚", "Paused"], blocked: ["⊘", "Blocked"], done: ["✓", "Done"], archived: ["▢", "Archived"], untracked: ["○", "No note"]};
-const PRIO = {high: ["▲", "High"], normal: ["", "Normal"], low: ["▼", "Low"]};
-const PRANK = {high: 0, normal: 1, low: 2}, HRANK = {risk: 0, warn: 1, ok: 2};
-const SEVICON = {risk: "!", warn: "!", info: "i"};
-const KIND = {"ci-failing": "CI", "changes-requested": "Review", "conflicts": "Conflicts", "review-waiting": "Review", "review-requested": "Review",
-  "blocked": "Blocked", "overdue": "Overdue", "idle-work": "Unsaved work", "reclaim": "Reclaim", "layout": "Layout", "stale-note": "Handoff", "drift": "Config", "sign-in": "Sign in"};
-const CHECKS = {passing: "CI passing", failing: "CI failing", pending: "CI running", none: "no CI", unknown: "CI unknown"};
 function initFor(path) { const m = /^initiatives\/([^/]+)\//.exec(path); return m ? BYINIT.get(m[1]) : null; }
 function projectFor(path) { let best = null; for (const p of P) if ((path === "projects/" + p.id + ".md" || path.startsWith("plans/" + p.id + "/")) && (!best || p.id.length > best.id.length)) best = p; return best; }
 
-/* ---------------------------------------------------------------- state + URL hash */
+/* ---------------------------------------------------------------- state + URL: #/<view>[/<id>][?k=v]  (ids keep their slashes and dots) */
 let S = Object.assign({}, DEFAULT);
 function encode(st) {
   const parts = [];
   for (const k of Object.keys(DEFAULT)) {
-    if (k === "view") continue; const v = st[k], d = DEFAULT[k];
+    if (k === "view" || k === "id") continue; const v = st[k], d = DEFAULT[k];
     if (JSON.stringify(v) === JSON.stringify(d)) continue;
     parts.push(k + "=" + encodeURIComponent(Array.isArray(v) ? v.join(",") : v === true ? "1" : String(v)));
   }
-  return "#/" + st.view + (parts.length ? "?" + parts.join("&") : "");
+  const path = st.id && (st.view === "initiatives" || st.view === "projects") ? "/" + String(st.id).split("/").map(encodeURIComponent).join("/") : "";
+  return "#/" + st.view + path + (parts.length ? "?" + parts.join("&") : "");
 }
+function dec(s) { try { return decodeURIComponent(s); } catch (e) { return s; } }
 function decode(hash) {
-  const m = /^#\/([a-z]+)(?:\?(.*))?$/.exec(hash || ""); if (!m) return null;
+  const m = /^#\/([a-z]+)(\/[^?]*)?(?:\?(.*))?$/.exec(hash || ""); if (!m) return null;
   const st = Object.assign({}, DEFAULT);
-  st.view = (VIEWS.some(v => v[0] === m[1]) || m[1] === "search") ? m[1] : "overview";
-  for (const kv of (m[2] || "").split("&")) {
-    if (!kv) continue; const i = kv.indexOf("="); const k = i < 0 ? kv : kv.slice(0, i); const v = i < 0 ? "" : decodeURIComponent(kv.slice(i + 1));
-    if (!(k in DEFAULT)) continue; const d = DEFAULT[k];
-    st[k] = Array.isArray(d) ? (v ? v.split(",") : []) : typeof d === "boolean" ? v === "1" : typeof d === "number" ? (+v || d) : v;
+  const v = m[1] === "portfolio" ? "initiatives" : m[1];
+  st.view = ROUTES.includes(v) ? v : "overview";
+  if (m[2] && (st.view === "initiatives" || st.view === "projects")) st.id = m[2].slice(1).split("/").filter(Boolean).map(dec).join("/");
+  for (const kv of (m[3] || "").split("&")) {
+    if (!kv) continue; const i = kv.indexOf("="); const k = i < 0 ? kv : kv.slice(0, i); const val = i < 0 ? "" : dec(kv.slice(i + 1));
+    if (k === "p" && val) { st.view = "projects"; st.id = val; continue; }      /* v2 links: ?p=<project>, ?i=<initiative> */
+    if (k === "i" && val) { st.view = "initiatives"; st.id = val; continue; }
+    if (!(k in DEFAULT) || k === "view" || k === "id") continue; const d = DEFAULT[k];
+    st[k] = Array.isArray(d) ? (val ? val.split(",") : []) : typeof d === "boolean" ? val === "1" : typeof d === "number" ? (+val || d) : val;
   }
   return st;
 }
-function link(patch) { return encode(Object.assign({}, DEFAULT, {view: S.view}, patch)); }
+function link(patch) { const keep = !("view" in patch) || patch.view === S.view; return encode(Object.assign({}, DEFAULT, {view: S.view, id: keep ? S.id : ""}, patch)); }
 function set(patch, push) {
   Object.assign(S, patch);
   const hs = encode(S);
@@ -1012,9 +1415,10 @@ function set(patch, push) {
   if (location.hash !== hs) history.replaceState(null, "", hs);
   store.set("devkit.state", S); render();
 }
+let lastView = "";
 window.addEventListener("hashchange", () => { const st = decode(location.hash); if (st) { S = st; store.set("devkit.state", S); render(); } });
 
-/* ---------------------------------------------------------------- filtering */
+/* ---------------------------------------------------------------- filtering (project facets) */
 function tokens(q) { return String(q || "").toLowerCase().split(/\s+/).filter(Boolean); }
 function matchFacets(p) {
   if (S.status.length && !S.status.includes(p.status)) return false;
@@ -1024,12 +1428,13 @@ function matchFacets(p) {
   if (S.tag.length && !p.tags.some(x => S.tag.includes(x))) return false;
   if (S.ci.length && !p.ci.some(x => S.ci.includes(x))) return false;
   if (S.health.length && !S.health.includes(p.health.level)) return false;
-  if (S.live && !p.live) return false; if (S.prs && !p.prs) return false; if (S.nc && p.local) return false;
+  if (S.live && !p.live && !ONPROJ.has(p.id)) return false; if (S.prs && !p.prs) return false; if (S.nc && p.local) return false;
+  if (S.loose && MEMBEROF.has(p.id)) return false;
   return true;
 }
 function filtered(useQ) { const tk = useQ ? tokens(S.q) : []; return P.filter(p => matchFacets(p) && tk.every(t => p.hay.includes(t))); }
-function facetCount() { return ["status", "priority", "owner", "stack", "tag", "ci", "health"].reduce((a, k) => a + S[k].length, 0) + (S.live ? 1 : 0) + (S.prs ? 1 : 0) + (S.nc ? 1 : 0); }
-const CLEAR = {status: [], priority: [], owner: [], stack: [], tag: [], ci: [], health: [], live: false, prs: false, nc: false};
+function facetCount() { return ["status", "priority", "owner", "stack", "tag", "ci", "health"].reduce((a, k) => a + S[k].length, 0) + (S.live ? 1 : 0) + (S.prs ? 1 : 0) + (S.nc ? 1 : 0) + (S.loose ? 1 : 0); }
+const CLEAR = {status: [], priority: [], owner: [], stack: [], tag: [], ci: [], health: [], live: false, prs: false, nc: false, loose: false};
 
 /* ---------------------------------------------------------------- markdown (safe subset, DOM only) */
 function inline(text) {
@@ -1159,15 +1564,103 @@ function panel(title, count, right, body, opts) {
     h("div", {class: "ph"}, h("h2", {text: title}), count != null ? h("span", {class: "count num", text: String(count)}) : null, right ? h("div", {class: "right"}, right) : null),
     h("div", {class: "pb" + (opts.flush ? " flush" : "")}, body));
 }
-function taskLine(p, t, cls, flag) {
-  const due = (/\bdue:(\d{4}-\d{2}-\d{2})\b/.exec(t) || [])[1], over = due && due < lkey(new Date());
-  const idx = p.tidx[t], fl = (flag || "-p") + " " + p.id;
-  const cmd = idx ? (cls === "doing" ? "dev task done " + idx + " " + fl : cls === "done" ? null : "dev task start " + idx + " " + fl) : null;
-  return h("li", {class: "trow"}, h("span", {class: "box " + (cls || ""), "aria-hidden": "true"}),
-    h("span", {class: "tx"}, inline(String(t).replace(/\s*\bdue:\d{4}-\d{2}-\d{2}\b/, "")), due ? h("span", {class: "due" + (over ? " over" : ""), text: (over ? "overdue " : "due ") + due}) : null),
-    cmd ? icopy(cmd, cls === "doing" ? "Mark done" : "Start") : null);
+function seg(label, key, opts, cur) {
+  const v0 = cur === undefined ? S[key] : cur;
+  return h("div", {class: "seg", role: "group", "aria-label": label}, opts.map(([v, l, n]) => h("button", {type: "button", "aria-pressed": String(v0 === v), onclick: () => set({[key]: v}, true)},
+    l, n != null ? h("span", {class: "sn num", text: String(n)}) : null)));
 }
-
+function selectBox(label, key, opts) { const s = h("select", {"aria-label": label}); for (const [v, l] of opts) s.append(h("option", {value: v, selected: S[key] === v}, l)); s.addEventListener("change", () => set({[key]: s.value}, true)); return s; }
+function crumbs(list) {
+  return h("nav", {class: "crumbs", "aria-label": "Breadcrumb"}, h("ol", null, list.map(([label, href], i) => h("li", null,
+    href && i < list.length - 1 ? h("a", {href, text: label}) : h("span", {"aria-current": i === list.length - 1 ? "page" : null, text: label})))));
+}
+function stats(rows) {
+  return h("div", {class: "stats"}, rows.filter(Boolean).map(([v, l, tone, title, href]) => h(href ? "a" : "div", {class: "st" + (tone ? " " + tone : ""), title: title || null, href: href || null},
+    h("span", {class: "sv num", text: String(v)}), h("span", {class: "sl", text: l}))));
+}
+function callout(tone, title, body, act) {
+  return h("div", {class: "callout " + tone, role: tone === "risk" ? "alert" : null}, h("span", {class: "sev " + tone, "aria-hidden": "true", text: tone === "info" ? "i" : "!"}),
+    h("div", {class: "cbody"}, h("strong", {text: title}), body ? h("div", {class: "t2"}, body) : null), act ? h("div", {class: "cact"}, act) : null);
+}
+function pageTabs(tabs, cur) {
+  const bar = h("div", {class: "ptabs", role: "tablist", "aria-label": "Sections"});
+  for (const [key, label, n] of tabs) bar.append(h("button", {class: "ptab", role: "tab", type: "button", id: "tab-" + key, "aria-selected": String(cur === key), "aria-controls": "tabpanel", tabindex: cur === key ? "0" : "-1",
+    onclick: () => set({tab: key === tabs[0][0] ? "" : key, src: "all", tst: ""}, true)}, label, n != null ? h("span", {class: "n num", text: String(n)}) : null));
+  bar.addEventListener("keydown", e => {
+    if (!["ArrowRight", "ArrowLeft", "Home", "End"].includes(e.key)) return; e.preventDefault();
+    const bs = $$(".ptab", bar), i = bs.indexOf(document.activeElement);
+    const nx = e.key === "Home" ? bs[0] : e.key === "End" ? bs[bs.length - 1] : bs[(i + (e.key === "ArrowRight" ? 1 : -1) + bs.length) % bs.length]; nx.focus(); nx.click();
+  });
+  return bar;
+}
+function avatar(w, lg) {
+  const user = String(w || "?").split("@")[0], ini = (user.replace(/[^a-z0-9]/gi, "").slice(0, 2) || "?").toUpperCase();
+  const live = ((BYWHO.get(w) || {}).sessions || []).length > 0;
+  return h("span", {class: "av" + (lg ? " lg" : "") + (live ? " live" : "") + (isMe(w) ? " me" : ""), role: "img", title: w + (isMe(w) ? " (you)" : "") + (live ? " · live session" : ""), "aria-label": w + (isMe(w) ? " (you)" : "") + (live ? ", live" : "")}, ini);
+}
+function avatars(list, max) {
+  max = max || 4; if (!list.length) return h("span", {class: "muted", text: "—"});
+  return h("span", {class: "avs"}, list.slice(0, max).map(w => avatar(w)), list.length > max ? h("span", {class: "av more", title: list.slice(max).join(", "), text: "+" + (list.length - max)}) : null);
+}
+function lockIcon() { return sv("svg", {class: "lk", width: 10, height: 12, viewBox: "0 0 10 12", "aria-hidden": "true", focusable: "false"}, sv("rect", {x: 1, y: 5, width: 8, height: 6.5, rx: 1.5, fill: "currentColor"}), sv("path", {d: "M3 5V3.6a2 2 0 0 1 4 0V5", fill: "none", stroke: "currentColor", "stroke-width": 1.4})); }
+function untilText(s) { const t = iso(s); if (!t) return ""; const d = t - nowS(); return d <= 0 ? "expired " + rel(t) : "for " + dur(d); }
+function claimChip(it, short) {
+  if (!it.claimed_by) return null;
+  const exp = it.lock === "expired", w = it.holder;
+  return h("span", {class: "claim" + (exp ? " exp" : "") + (isMe(w) ? " mine" : ""), title: "Claimed by " + it.claimed_by + (it.lock_expires ? (exp ? " · lock expired " : " · lock until ") + fmt(iso(it.lock_expires)) : "")},
+    lockIcon(), h("span", {class: "cw ell", text: (isMe(w) ? "you" : w) + (it.agent && !short ? " · " + it.agent : "")}), short && !exp ? null : h("span", {class: "cu", text: exp ? "expired" : untilText(it.lock_expires)}));
+}
+function istatusIcon(st) { const [ic, l] = ISTATUS[st] || ISTATUS.todo; return h("span", {class: "ist i-" + st, role: "img", title: l, "aria-label": l, text: ic}); }
+function istatusBadge(st) { const [ic, l] = ISTATUS[st] || ISTATUS.todo; return h("span", {class: "badge i-" + st}, h("span", {class: "ic", "aria-hidden": "true", text: ic}), l); }
+function typeTag(t) { return t && t !== "task" ? h("span", {class: "tag ty-" + t, text: t}) : null; }
+function scopeName(scope) { if (isInit(scope)) { const x = BYINIT.get(scope.slice(12)); return x ? x.title : scope.slice(12); } const p = BYID.get(scope); return p ? (p.name || p.id) : String(scope || "").split("/").pop(); }
+function scopeChip(scope) {
+  const ini = isInit(scope);
+  return h("button", {class: "mchip sc", type: "button", title: (ini ? "Initiative " : "Project ") + scope, onclick: e => { e.stopPropagation(); ini ? openInitiative(scope.slice(12)) : openProject(scope); }}, ini ? h("span", {class: "t2", "aria-hidden": "true", text: "◆"}) : null, scopeName(scope));
+}
+function taskCmds(it) {
+  if (it.legacy && !it.n) return [];
+  const sel = it.legacy ? String(it.n) : it.id, f = "dev task " + flagOf(it.scope) + " ", c = [];
+  if (it.status === "todo") c.push(["Start: claim the lock", f + "start " + sel]);
+  if (it.status === "doing" || it.status === "blocked") c.push(["Mark done", f + "done " + sel]);
+  if (it.claimed_by && it.open) c.push([it.lock === "expired" ? "Release the expired lock" : "Release the lock", f + "release " + sel + ' --why "…"']);
+  if (it.open) {
+    c.push(["Move to " + (it.bucket === "now" ? "Next" : "Now"), f + "move " + sel + " --to " + (it.bucket === "now" ? "next" : "now") + ' --why "…"']);
+    if (it.status !== "blocked") c.push(["Block", f + "block " + sel + ' --why "…"']);
+    c.push(["Cancel", f + "cancel " + sel + ' --why "…"']);
+  }
+  if (!it.legacy) c.push(["Show the history", f + "history " + sel]);
+  return c;
+}
+function itemRow(it, opts) {
+  opts = opts || {};
+  const first = taskCmds(it)[0];
+  return h("li", {class: "irow" + (it.open ? "" : " closed"), "data-nav": "", tabindex: "0", onclick: () => openTask(it.id), onkeydown: e => { if (e.key === "Enter") openTask(it.id); }},
+    istatusIcon(it.status),
+    h("div", {class: "im"}, h("div", {class: "itl", title: it.title}, it.title),
+      h("div", {class: "imeta"}, h("span", {class: "iid mono", text: it.legacy ? (it.n ? "#" + it.n + " · note" : "note") : it.id}), typeTag(it.type), opts.scope && it.scope !== opts.home ? scopeChip(it.scope) : null,
+        prioIcon(it.priority), it.due ? dueBadge(it.due, !it.open) : null, !it.legacy && it.version > 1 ? h("span", {class: "muted", title: "Version " + it.version + " — open for the history", text: "v" + it.version}) : null)),
+    h("div", {class: "icl"}, claimChip(it)),
+    first && it.open ? icopy(first[1], first[0]) : h("span"));
+}
+function sortItems(items) {
+  const b = {now: 0, next: 1, later: 2}, s = {blocked: 0, doing: 1, todo: 2, done: 3, cancelled: 4};
+  return items.slice().sort((a, c) => (s[a.status] ?? 5) - (s[c.status] ?? 5) || (b[a.bucket] ?? 3) - (b[c.bucket] ?? 3) || (PRANK[a.priority] ?? 1) - (PRANK[c.priority] ?? 1) || String(c.updated || "").localeCompare(String(a.updated || "")));
+}
+function parseLog(line) {
+  const parts = String(line).split(" · ");
+  if (parts.length < 4 || !/^v\d+$/.test(parts[0])) return {v: "", ts: 0, who: "", agent: "", op: String(line), detail: "", why: ""};
+  const rest = parts.slice(3).join(" · "), wi = rest.indexOf(" — why: "), what = wi >= 0 ? rest.slice(0, wi) : rest, ci = what.indexOf(": ");
+  return {v: parts[0], ts: iso(parts[1]), who: whoOf(parts[2]), agent: agentOf(parts[2]), op: ci > 0 ? what.slice(0, ci) : what, detail: ci > 0 ? what.slice(ci + 2) : "", why: wi >= 0 ? rest.slice(wi + 8) : ""};
+}
+function changelog(lines) {
+  if (!lines || !lines.length) return empty("No history yet");
+  return h("ol", {class: "clog"}, lines.map(l => { const e = parseLog(l);
+    return h("li", null, h("span", {class: "cv num", text: e.v || "•"}),
+      h("div", {class: "cb"}, h("div", {class: "ch"}, h("strong", {text: e.op}), e.detail ? h("span", {class: "t2", text: " · " + e.detail}) : null),
+        h("div", {class: "cm"}, e.who.includes("@") ? avatar(e.who) : null, h("span", {text: e.who + (e.agent ? " · " + e.agent : "")}), e.ts ? h("span", {class: "muted", title: fmt(e.ts), text: " · " + fmt(e.ts) + " (" + rel(e.ts) + ")"}) : null),
+        e.why ? h("div", {class: "cwhy"}, h("span", {class: "label", text: "Why"}), " ", inline(e.why)) : null)); }));
+}
 /* ---------------------------------------------------------------- column chart (single series) with tooltip, keyboard, table twin */
 function activityChart(projects, n, title, height) {
   const ks = days(n);
@@ -1221,15 +1714,6 @@ function rankedBars(rows, fmtv, onclick) {
     h("div", {class: "trk", role: "img", "aria-label": label + ": " + fmtv(v)}, h("i", {style: "width:" + Math.max(0.5, (v / max) * 100).toFixed(1) + "%"})),
     h("span", {class: "num t2", text: fmtv(v)})]));
 }
-
-/* ---------------------------------------------------------------- navbar + filters */
-function renderNav() {
-  const tabs = $("#tabs"); clear(tabs);
-  const urgent = ACTIONS.filter(a => a.sev === "risk").length;
-  for (const [v, label, key] of VIEWS) tabs.append(h("button", {class: "tab", role: "tab", "aria-selected": String(S.view === v), type: "button", onclick: () => go(v), title: label + " (g " + key + ")"},
-    label, v === "overview" && urgent ? h("span", {class: "n", "aria-label": urgent + " urgent", text: String(urgent)}) : null));
-  const q = $("#q"); if (document.activeElement !== q) q.value = S.q;
-}
 function facetMenu(key, label, values, fmtv) {
   const sel = S[key];
   const det = h("details", {class: "facet"}, h("summary", null, h("span", {class: "btn sm"}, label + (sel.length ? " · " + sel.length : ""), h("span", {"aria-hidden": "true", text: "▾"}))));
@@ -1243,128 +1727,177 @@ function facetMenu(key, label, values, fmtv) {
   det.append(menu); return det;
 }
 function counts(fn) { const m = new Map(); for (const p of P) for (const v of [].concat(fn(p))) if (v) m.set(v, (m.get(v) || 0) + 1); return Array.from(m.entries()).sort((a, b) => b[1] - a[1] || String(a[0]).localeCompare(b[0])); }
+
+/* ---------------------------------------------------------------- live runs: progress, ETA, subagents, current turn */
+function liveRun(s, asOf) {
+  const p = s.progress || null, run = runOf(s), now = nowS();
+  const tp90 = ((D.timing || {}).turns || {}).p90;
+  const turn = s.turn_started ? now - s.turn_started : 0;
+  const chips = h("div", {class: "rchips"},
+    turn ? h("span", {class: "rc" + (tp90 && turn / 60 > tp90 ? " warn" : ""), title: tp90 ? "90% of turns here finish within " + fmtMin(tp90) : null}, h("span", {class: "dot d-live", "aria-hidden": "true"}), "turn running " + dur(turn), tp90 && turn / 60 > tp90 ? " · longer than 90% of turns" : "") : h("span", {class: "rc muted", text: "idle between turns"}),
+    s.subagents ? h("span", {class: "rc"}, h("span", {class: "sa", "aria-hidden": "true", text: "⧉"}), plural(s.subagents, "subagent") + " running") : null);
+  if (!p) return h("div", {class: "run none"}, chips);
+  const el = p.started ? (now - p.started) / 60 : 0, est = (run && run.estimate_cal) || p.estimate || 0;
+  const left = p.eta_min != null && p.state === "running" ? Math.max(0, p.eta_min - (now - (asOf || D.rendered || now)) / 60) : null;
+  const pct = p.steps ? Math.min(100, 100 * (p.step || 0) / p.steps) : est ? Math.min(100, 100 * el / est) : null;
+  const over = est && el > est && p.state === "running";
+  const head = [p.steps ? (p.step || 0) + "/" + p.steps + " steps" : "step " + (p.step || 0), fmtMin(el) + " elapsed" + (est ? " of ~" + fmtMin(est) : ""), p.state === "running" ? (left != null ? "ETA ~" + fmtMin(left) : "") : p.state].filter(Boolean).join(" · ");
+  return h("div", {class: "run " + (p.state || "running")},
+    h("div", {class: "rh"}, h("strong", {class: "ell", text: p.goal || "Agent run"}), h("span", {class: "badge r-" + (p.state || "running")}, p.state === "blocked" ? "⊘ blocked" : p.state === "done" ? "✓ done" : "● running")),
+    pct != null ? h("div", {class: "rbar" + (over ? " over" : ""), role: "progressbar", "aria-valuenow": Math.round(pct), "aria-valuemin": 0, "aria-valuemax": 100, "aria-label": "Run progress " + head}, h("i", {style: "width:" + pct.toFixed(1) + "%"})) : null,
+    h("div", {class: "rmeta num" + (over ? " warn" : ""), text: head + (over ? " · over the estimate by " + fmtMin(el - est) : "")}),
+    p.last ? h("div", {class: "rl"}, h("span", {class: "label", text: p.state === "blocked" ? "Blocked" : "Latest"}), " ", inline(p.last), p.updated ? h("span", {class: "muted", text: " · " + rel(p.updated)}) : null) : null,
+    p.next ? h("div", {class: "rl"}, h("span", {class: "label", text: "Next"}), " ", inline(p.next)) : null,
+    chips);
+}
+function sessionBlock(s, who, asOf) {
+  return h("div", {class: "sess"},
+    h("div", {class: "sh"}, h("span", {class: "badge"}, h("span", {class: "dot d-live", "aria-hidden": "true"}), s.agent || "agent"),
+      s.project ? h("button", {class: "sp", type: "button", onclick: () => openProject(s.project), text: scopeName(s.project)}) : h("span", {class: "muted", text: "no project"}),
+      s.branch ? h("span", {class: "mono sb", text: "⎇ " + s.branch}) : null, h("span", {class: "t2 num ss", text: s.started ? "for " + dur(nowS() - s.started) : ""}), who ? h("span", {class: "t2 sw", text: who}) : null),
+    liveRun(s, asOf),
+    s.status ? h("div", {class: "statusline"}, h("span", {class: "who", text: "Latest DevKit status"}), inline(stripMarker(s.status))) : null);
+}
+
+/* ---------------------------------------------------------------- navbar + filters */
+function renderNav() {
+  const tabs = $("#tabs"); clear(tabs);
+  const urgent = ACTIONS.filter(a => a.sev === "risk").length, colls = (D.collisions || []).length;
+  for (const [v, label, key] of VIEWS) tabs.append(h("button", {class: "tab", role: "tab", "aria-selected": String(S.view === v || (v === "overview" && S.view === "actions")), type: "button", onclick: () => go(v), title: label + " (g " + key + ")"},
+    label, v === "overview" && urgent ? h("span", {class: "n", "aria-label": urgent + " urgent", text: String(urgent)}) : null, v === "team" && colls ? h("span", {class: "n warn", "aria-label": colls + " collisions", text: String(colls)}) : null));
+  const q = $("#q"); if (document.activeElement !== q) q.value = S.q;
+}
 function renderFilters() {
   const bar = $("#filters"); clear(bar);
-  if (!["portfolio", "projects", "tasks", "activity", "search"].includes(S.view)) { bar.hidden = true; return; } bar.hidden = false;
+  if (!((S.view === "projects" && !S.id) || S.view === "activity" || S.view === "search")) { bar.hidden = true; return; } bar.hidden = false;
   bar.append(h("span", {class: "label", text: "Filter"}),
     facetMenu("health", "Health", counts(p => p.health.level), v => ({ok: "Healthy", warn: "Needs a look", risk: "At risk"})[v] || v),
     facetMenu("ci", "CI", counts(p => p.ci), v => CHECKS[v] || v),
     facetMenu("status", "Status", counts(p => p.status), v => (STATUS[v] || [0, v])[1]), facetMenu("priority", "Priority", counts(p => p.priority)),
     facetMenu("owner", "Owner / host", counts(p => p.owner)), facetMenu("stack", "Stack", counts(p => p.stack)), facetMenu("tag", "Tag", counts(p => p.tags)));
-  for (const [k, l] of [["live", "Live session"], ["prs", "Open PRs"], ["nc", "Not cloned"]]) { const cb = h("input", {type: "checkbox", checked: S[k]}); cb.addEventListener("change", () => set({[k]: cb.checked}, true)); bar.append(h("label", {class: "toggle"}, cb, l)); }
+  for (const [k, l] of [["live", "Live session"], ["prs", "Open PRs"], ["nc", "Not cloned"], ["loose", "Outside initiatives"]]) { const cb = h("input", {type: "checkbox", checked: S[k]}); cb.addEventListener("change", () => set({[k]: cb.checked}, true)); bar.append(h("label", {class: "toggle"}, cb, l)); }
   const chips = [];
   for (const k of ["health", "ci", "status", "priority", "owner", "stack", "tag"]) for (const v of S[k]) chips.push(h("span", {class: "chip"}, k + ": " + v, h("button", {type: "button", "aria-label": "Remove " + v, onclick: () => set({[k]: S[k].filter(x => x !== v)}, true), text: "×"})));
   if (facetCount()) bar.append(...chips, h("button", {class: "btn sm ghost", type: "button", onclick: () => set(CLEAR, true)}, "Clear"));
 }
 
-/* ---------------------------------------------------------------- Home: what needs me now */
+/* ---------------------------------------------------------------- Home: a compact summary of everything */
+function actionTarget(a) {
+  const tid = (/\b([TFBS]-[0-9a-z]{6,})\b/.exec(a.cmd || "") || [])[1];
+  if (tid && ITEMBY.has(tid)) return () => openTask(tid);
+  if (a.project && (BYID.has(a.project) || MEMBEROF.has(a.project))) return () => openProject(a.project);
+  const slug = (/(?:initiative show|-i) ([\w.-]+)/.exec(a.cmd || "") || [])[1];
+  if (slug && BYINIT.has(slug)) return () => openInitiative(slug);
+  if (a.kind === "collision") return () => go("team");
+  return null;
+}
 function actionRow(a, i) {
-  const p = a.project && BYID.get(a.project);
-  return h("li", {class: "act", "data-nav": "", tabindex: "0", onkeydown: e => { if (e.key === "Enter" && p) openProject(p.id); }, onclick: () => { if (p) openProject(p.id); }},
+  const p = a.project && BYID.get(a.project), go_ = actionTarget(a);
+  return h("li", {class: "act", "data-nav": "", tabindex: "0", onkeydown: e => { if (e.key === "Enter" && go_) go_(); }, onclick: () => { if (go_) go_(); }},
     h("span", {class: "sev " + a.sev, "aria-label": a.sev === "risk" ? "urgent" : a.sev === "warn" ? "attention" : "info", text: SEVICON[a.sev]}),
     h("div", {style: "min-width:0"}, h("div", {class: "at"}, h("span", {class: "tag", text: KIND[a.kind] || a.kind}), a.url ? h("a", {href: a.url, target: "_blank", rel: "noopener noreferrer", onclick: e => e.stopPropagation(), text: a.title}) : h("span", {text: a.title})),
       h("div", {class: "ad ell"}, p ? h("span", {class: "proj", text: p.name || p.id}) : null, p && a.detail ? " · " : null, inline(a.detail || ""))),
     h("div", {class: "ar"}, cmdBtn(a.cmd, i === 0)));
 }
-function tiles(ps) {
-  const failing = ps.reduce((a, p) => a + p.prsOpen.filter(r => r.checks === "failing").length, 0);
-  const nowN = ps.reduce((a, p) => a + p.t.now.length, 0);
-  const live = (D.sessions || []).filter(s => s.active).length;
-  const wts = ps.reduce((a, p) => a + p.wts.length, 0), recl = ps.reduce((a, p) => a + p.wts.filter(w => w.pr && /MERGED|CLOSED/.test(w.pr.state) && !w.active).length, 0);
-  const tile = (n, label, sub, href, tone) => h("a", {class: "tile " + (tone || ""), href}, h("span", {class: "tv num", text: String(n)}), h("span", {class: "tl"}, h("b", {text: label}), sub));
-  return h("div", {class: "tiles"},
-    tile(failing, failing === 1 ? "PR failing CI" : "PRs failing CI", failing ? "Fix locally, push once" : "All open PRs green or pending", link({view: "projects", ci: ["failing"]}), failing ? "risk" : "ok"),
-    tile(nowN, nowN === 1 ? "task in progress" : "tasks in progress", plural(ps.reduce((a, p) => a + p.t.open, 0), "open task"), link({view: "tasks"})),
-    tile(live, live === 1 ? "live agent session" : "live agent sessions", live ? "see Agents right now" : "start one with dev claude", "#agents"),
-    tile(wts, wts === 1 ? "worktree" : "worktrees", recl ? recl + " reclaimable · dev gc" : "none reclaimable", link({view: "health"})));
+function kpiStrip() {
+  const k = D.kpis || {}, colls = (D.collisions || []).length;
+  const tile = (n, label, sub, href, tone) => h("a", {class: "kpi" + (tone ? " " + tone : ""), href, role: "listitem"}, h("span", {class: "kv num", text: n == null ? "—" : String(n)}), h("span", {class: "kl", text: label}), h("span", {class: "ks", text: sub || ""}));
+  return h("div", {class: "kpis", role: "list", "aria-label": "Summary"},
+    tile(k.initiatives, k.initiatives === 1 ? "initiative" : "initiatives", (k.initiatives_active || 0) + " active", link({view: "initiatives"})),
+    tile(k.projects, k.projects === 1 ? "project" : "projects", k.not_cloned ? k.not_cloned + " not cloned here" : "all cloned here", link({view: "projects"})),
+    tile(k.open, k.open === 1 ? "open task" : "open tasks", plural(k.locks || 0, "lock") + " held", link({view: "tasks"})),
+    tile(k.doing, "doing", "claimed, in progress", link({view: "tasks", tst: "doing"})),
+    tile(k.blocked, "blocked", k.blocked ? "needs a decision" : "nothing blocked", link({view: "tasks", tst: "blocked"}), k.blocked ? "risk" : ""),
+    tile(k.people_active, k.people_active === 1 ? "person active" : "people active", "of " + plural(k.people || 0, "person", "people"), link({view: "team"})),
+    tile(k.live_sessions, k.live_sessions === 1 ? "live session" : "live sessions", colls ? plural(colls, "collision") : "no collisions", link({view: "team"}), colls ? "warn" : ""),
+    tile(k.prs_failing, k.prs_failing === 1 ? "PR failing CI" : "PRs failing CI", k.prs_failing ? "fix locally, push once" : "green or pending", link({view: "projects", ci: ["failing"]}), k.prs_failing ? "risk" : ""));
 }
-function nowPanel(ps) {
-  const groups = ps.filter(p => p.t.now.length).sort((a, b) => HRANK[a.health.level] - HRANK[b.health.level] || PRANK[a.priority] - PRANK[b.priority] || (b.last_activity || 0) - (a.last_activity || 0));
-  const total = groups.reduce((a, p) => a + p.t.now.length, 0);
-  const cap = 6, extra = groups.length - cap;
-  const body = groups.length ? groups.slice(0, cap).map(p => h("div", {class: "grp"}, h("div", {class: "grp-h"}, healthDot(p), h("button", {type: "button", onclick: () => openProject(p.id, "tasks"), text: p.name || p.id}), prioBadge(p.priority)),
-      h("ul", {class: "tl-rows"}, p.t.now.map(t => taskLine(p, t, "doing"))))).concat(extra > 0 ? [h("a", {class: "more-l", href: link({view: "tasks"}), text: "+" + plural(extra, "more project") + " with work in progress →"})] : [])
-    : empty("Nothing in progress", "Pick the next task: ", h("code", {text: "dev task start <n> -p <project>"}), " — or ask your agent to plan the work.");
-  return panel("Now", total, h("a", {class: "btn sm ghost", href: link({view: "tasks"})}, "All tasks →"), body);
+function needsPanel() {
+  const body = ACTIONS.length ? [h("ul", {class: "acts"}, ACTIONS.slice(0, 5).map(actionRow)), ACTIONS.length > 5 ? h("a", {class: "more-l pad", href: link({view: "actions"}), text: "All " + ACTIONS.length + " items that need you →"}) : null]
+    : empty("All clear", "No failing CI, reviews, blocked work, collisions, overdue tasks or idle work.");
+  return panel("Needs you", ACTIONS.length, ACTIONS.length > 5 ? h("a", {class: "btn sm ghost", href: link({view: "actions"})}, "All " + ACTIONS.length + " →") : null, body, {flush: !!ACTIONS.length});
 }
-function providerChips() {
-  const out = []; const pv = D.providers || {};
-  for (const key of ["claude", "codex"]) {
-    const p = pv[key]; if (!p || !p.installed) continue;
-    const name = p.name || key, q = p.quota || {};
-    let tone = "good", text = name;
-    if (p.logged_in === false) { tone = "warning"; text += " · not signed in"; }
-    else if (q.available === false) { tone = "critical"; text += " · quota exhausted" + (q.resets_at ? " until " + fmtDay(q.resets_at) : ""); }
-    else { text += " · signed in" + (p.plan ? " · " + p.plan.charAt(0).toUpperCase() + p.plan.slice(1) : ""); if (q.used_percent != null) text += " · " + Math.round(q.used_percent) + "% used"; }
-    out.push(h("span", {class: "prov", title: [p.version ? "v" + p.version : "", p.auth_method || "", q.note || ""].filter(Boolean).join(" · ")}, h("span", {class: "dot d-" + tone, "aria-hidden": "true"}), text));
-  }
-  return out;
+function teamNow() {
+  const colls = D.collisions || [], active = PEOPLE.filter(x => x.sessions.length).length;
+  const rows = PEOPLE.slice(0, 6).map(x => {
+    const s = x.sessions[0], p = s && s.progress;
+    return h("li", {class: "prow", "data-nav": "", tabindex: "0", onclick: () => go("team"), onkeydown: e => { if (e.key === "Enter") go("team"); }},
+      avatar(x.who),
+      h("div", {class: "pm"}, h("div", {class: "pw"}, h("strong", {class: "ell", text: x.who}), isMe(x.who) ? h("span", {class: "tag", text: "you"}) : null),
+        h("div", {class: "ps ell t2"}, s ? (s.agent || "agent") + " · " + scopeName(s.project || "") + (s.branch ? " ⎇ " + s.branch : "") + (x.sessions.length > 1 ? " · +" + (x.sessions.length - 1) + " more" : "") : "no live session · seen " + rel(x.updated)),
+        p ? h("div", {class: "pp"}, h("div", {class: "rbar sm" + (p.state === "blocked" ? " blocked" : ""), role: "progressbar", "aria-valuenow": p.steps ? Math.round(100 * (p.step || 0) / p.steps) : 0, "aria-valuemin": 0, "aria-valuemax": 100, "aria-label": "Run progress"}, h("i", {style: "width:" + (p.steps ? Math.min(100, 100 * (p.step || 0) / p.steps) : 0).toFixed(0) + "%"})),
+          h("span", {class: "num t2" + (p.state === "blocked" ? " bad" : ""), text: p.state === "blocked" ? "blocked" : (p.steps ? (p.step || 0) + "/" + p.steps : "step " + (p.step || 0)) + (p.eta_min != null ? " · ETA ~" + fmtMin(p.eta_min) : "")})) : null),
+      h("div", {class: "pr2"}, s && s.subagents ? h("span", {class: "rc", title: plural(s.subagents, "subagent") + " running", text: "⧉ " + s.subagents}) : null,
+        x.locks.length ? h("span", {class: "claim sm", title: plural(x.locks.length, "lock") + " held"}, lockIcon(), String(x.locks.length)) : null));
+  });
+  const body = [colls.length ? h("div", {class: "cbar"}, colls.slice(0, 2).map(c => h("div", {class: "ci"}, h("span", {class: "sev warn", "aria-hidden": "true", text: "!"}), h("span", {class: "ell", title: c.text, text: c.text}))), colls.length > 2 ? h("a", {class: "more-l", href: link({view: "team"}), text: "+" + (colls.length - 2) + " more collisions →"}) : null) : null,
+    rows.length ? h("ul", {class: "prows"}, rows) : empty("Nobody is working right now", "Presence appears when a session starts: ", h("code", {text: "dev claude <project>"})),
+    PEOPLE.length > 6 ? h("a", {class: "more-l pad", href: link({view: "team"}), text: "+" + plural(PEOPLE.length - 6, "more person", "more people") + " →"}) : null];
+  return panel("Team now", PEOPLE.length ? active + " active" : null, h("a", {class: "btn sm ghost", href: link({view: "team"})}, "Team →"), body, {flush: true});
 }
-function agentsPanel() {
-  const live = (D.sessions || []).filter(s => s.active).sort((a, b) => (b.last_seen || 0) - (a.last_seen || 0));
-  const body = live.length ? h("div", {class: "tw"}, h("table", {class: "t"}, h("thead", null, h("tr", null, ["Agent", "Project @ branch", "Running", "Latest status"].map(x => h("th", {text: x})))),
-      h("tbody", null, live.map(s => h("tr", {"data-nav": "", tabindex: "0", onclick: () => s.project && BYID.has(s.project) && openProject(s.project)},
-        h("td", null, h("span", {class: "badge"}, h("span", {class: "dot d-live", "aria-hidden": "true"}), s.agent || "agent")),
-        h("td", {class: "mono", style: "font-size:.8rem"}, (s.project || "—") + (s.branch ? " @ " + s.branch : "")),
-        h("td", {class: "num t2", text: s.started ? dur(nowS() - s.started) : "—"}),
-        h("td", {class: "slt"}, s.status ? inline(stripMarker(s.status)) : h("span", {class: "muted", text: "no status line yet"})))))))
-    : empty("No agent is working right now", "Start one inside a project: ", h("code", {text: "dev claude <project>"}), " or ", h("code", {text: "dev codex <project>"}), ". Sessions appear here with their latest DevKit status line.");
-  return panel("Agents right now", live.length, providerChips(), body, {id: "agents", flush: !!live.length});
+function notCloned(x) { return x.members.filter(m => { const p = BYID.get(m.id); return p ? !p.local : !m.local; }).length; }
+function memberStatusBar(x) {
+  const order = ["active", "blocked", "paused", "done", "unknown"], c = {};
+  for (const m of x.members) { const st = ((BYID.get(m.id) || {}).status) || m.status || "unknown"; const k = order.includes(st) ? st : "unknown"; c[k] = (c[k] || 0) + 1; }
+  const tot = x.members.length || 1, keys = order.filter(k => c[k]);
+  if (!keys.length) return null;
+  return h("div", {class: "sbar-w"}, h("div", {class: "sbar", role: "img", "aria-label": "Member projects by status: " + keys.map(k => c[k] + " " + (STATUS[k] || [0, k])[1].toLowerCase()).join(", ")},
+    keys.map(k => h("i", {class: "sb-" + k, style: "width:" + (100 * c[k] / tot).toFixed(2) + "%", title: c[k] + " " + (STATUS[k] || [0, k])[1].toLowerCase()}))),
+    h("div", {class: "sleg"}, keys.map(k => h("span", null, h("i", {class: "sb-" + k, "aria-hidden": "true"}), c[k] + " " + (STATUS[k] || [0, k])[1].toLowerCase()))));
+}
+function initCard(x, compact) {
+  const nc = notCloned(x), n = x.members.length;
+  return h("article", {class: "icard" + (compact ? " compact" : ""), "data-nav": "", tabindex: "0", "aria-label": "Initiative " + x.title, onclick: () => openInitiative(x.id), onkeydown: e => { if (e.key === "Enter") openInitiative(x.id); }},
+    h("div", {class: "ic-h"}, h("span", {class: "dot " + (SDOT[x.status] || "d-info"), "aria-hidden": "true"}), h("h3", {class: "ell", text: x.title}), prioIcon(x.priority)),
+    h("div", {class: "ic-b"}, statusBadge(x.status), x.milestone ? h("span", {class: "badge", title: "Milestone", text: "◆ " + x.milestone}) : null, dueBadge(x.due, x.status === "done")),
+    !compact && x.goal ? h("p", {class: "ic-g", title: plain(x.goal)}, plain(x.goal)) : null,
+    progressBar(x, true),
+    h("div", {class: "ic-m"},
+      h("span", null, h("strong", {class: "num", text: String(n)}), n === 1 ? " project" : " projects", nc ? h("span", {class: "t2", text: nc === n ? " · none cloned here" : " · " + nc + " not cloned"}) : null),
+      h("span", null, h("strong", {class: "num", text: String(x.cnt.open)}), " open", x.cnt.doing ? h("span", {class: "t2", text: " · " + x.cnt.doing + " doing"}) : null, x.cnt.blocked ? h("span", {class: "bad", text: " · " + x.cnt.blocked + " blocked"}) : null)),
+    compact ? null : memberStatusBar(x),
+    h("div", {class: "ic-f"}, avatars(x.people, 5), h("span", {class: "t2 num", text: x.last ? "active " + rel(x.last) : ""})));
+}
+function initiativesPanel() {
+  const list = INITS.slice().sort((a, b) => (SORDER[a.status] ?? 6) - (SORDER[b.status] ?? 6) || PRANK[a.priority] - PRANK[b.priority] || String(a.due || "9").localeCompare(String(b.due || "9")));
+  const loose = P.filter(p => !MEMBEROF.has(p.id)).length;
+  const body = list.length ? [h("div", {class: "icards"}, list.slice(0, 6).map(x => initCard(x, true))),
+      h("div", {class: "sfoot t2"}, list.length > 6 ? h("a", {href: link({view: "initiatives"}), text: "+" + (list.length - 6) + " more initiatives · "}) : null,
+        loose ? h("a", {href: link({view: "projects", loose: true}), text: plural(loose, "project") + " outside initiatives →"}) : "Every project belongs to an initiative")]
+    : empty("No initiatives yet", "Group related projects into a programme with a goal, milestone and due date: ", h("code", {text: 'dev initiative new <slug> --title "…" --projects owner/a,owner/b'}));
+  return panel("Initiatives", INITS.length || null, h("a", {class: "btn sm ghost", href: link({view: "initiatives"})}, "All initiatives →"), body, {cls: "mb"});
 }
 function sincePanel() {
-  const s = D.since || {}; const col = (title, items, render, emptyText) => h("div", null, h("h3", null, title, h("span", {class: "n num", text: String(items.length)})),
-    items.length ? h("ul", null, items.slice(0, 8).map(render), items.length > 8 ? h("li", {class: "k", text: "+" + (items.length - 8) + " more in Activity"}) : null) : h("p", {class: "k", style: "margin:0", text: emptyText}));
+  const s = D.since || {}, N = 3;
+  const col = (title, items, render, emptyText, href) => h("div", null, h("h3", null, title, h("span", {class: "n num", text: String(items.length)})),
+    items.length ? h("ul", null, items.slice(0, N).map(render), items.length > N ? h("li", null, h("a", {class: "k", href: href || link({view: "activity"}), text: "+" + (items.length - N) + " more →"})) : null) : h("p", {class: "k", style: "margin:0", text: emptyText}));
   const body = h("div", {class: "since"},
-    col("Sessions", s.sessions || [], x => h("li", null, h("span", {class: "k num", text: tm(x.ts) + " · " + (x.agent || "") + " · "}), h("button", {class: "t2", style: "all:unset;cursor:pointer;font-weight:650", onclick: () => x.project && BYID.has(x.project) && openProject(x.project), text: (BYID.get(x.project) || {}).name || x.project || "—"}), h("div", {class: "ell", title: plain(x.text)}, inline(stripMarker(x.text)))), "No agent sessions since yesterday."),
-    col("Commits", s.commits || [], ([pid, n]) => h("li", {style: "display:flex;gap:8px"}, h("span", {class: "ell", style: "flex:1", text: (BYID.get(pid) || {}).name || pid}), h("span", {class: "num t2", text: String(n)})), "No commits since yesterday."),
+    col("Sessions", s.sessions || [], x => h("li", null, h("span", {class: "k num", text: tm(x.ts) + " · " + [x.who, x.agent].filter(Boolean).join(" · ") + " · "}), h("button", {class: "lnk", type: "button", onclick: () => x.project && openScope(x.project), text: scopeName(x.project || "") || "—"}), h("div", {class: "ell t2", title: plain(x.text)}, inline(stripMarker(x.text)))), "No agent sessions since yesterday."),
+    col("Commits", s.commits || [], ([pid, n]) => h("li", {style: "display:flex;gap:8px"}, h("button", {class: "lnk ell", style: "flex:1;text-align:left", type: "button", onclick: () => openProject(pid), text: scopeName(pid)}), h("span", {class: "num t2", text: String(n)})), "No commits since yesterday."),
     col("Merged PRs", s.merged || [], x => h("li", {class: "ell"}, h("a", {href: x.url, target: "_blank", rel: "noopener noreferrer", text: "#" + x.number}), " ", x.title, h("span", {class: "k", text: " · " + x.repo.split("/").pop()})), "Nothing merged since yesterday."),
-    col("Completed tasks", s.done || [], x => h("li", {class: "ell"}, h("span", {class: "k", text: ((BYID.get(x.project) || {}).name || x.project) + " · "}), inline(x.text)), "No tasks completed since yesterday."));
-  return panel("What changed since yesterday", null, h("span", {class: "t2", style: "font-size:.8rem", text: "from " + fmtDay(s.from)}), body, {flush: true});
+    col("Completed tasks", s.done || [], x => h("li", {class: "ell"}, x.id && ITEMBY.has(x.id) ? h("button", {class: "lnk", type: "button", onclick: () => openTask(x.id), text: x.text}) : inline(x.text), h("span", {class: "k", text: " · " + scopeName(x.project) + (x.who ? " · " + x.who : "")})), "No tasks completed since yesterday.", link({view: "tasks", tst: "done"})));
+  return panel("Since yesterday", null, h("span", {class: "t2", style: "font-size:.8rem", text: "from " + fmtDay(s.from)}), body, {flush: true});
 }
-function standsPanel() {
-  const inits = INITS.slice().sort((a, b) => ({blocked: 0, active: 1, paused: 2, done: 3, archived: 4}[a.status] ?? 5) - ({blocked: 0, active: 1, paused: 2, done: 3, archived: 4}[b.status] ?? 5) || PRANK[a.priority] - PRANK[b.priority] || String(a.due || "9").localeCompare(String(b.due || "9")));
-  const inInit = new Set(INITS.flatMap(x => x.projects));
-  const loose = P.filter(p => !inInit.has(p.id));
-  const byStatus = {}; for (const p of loose) byStatus[p.status] = (byStatus[p.status] || 0) + 1;
-  const nc = P.filter(p => !p.local).length;
-  const row = (dot, label, onclick, prog, meta) => h("div", {class: "srow", "data-nav": "", tabindex: "0", onclick, onkeydown: e => { if (e.key === "Enter") onclick(); }},
-    h("span", {class: "dot " + dot, "aria-hidden": "true"}), h("span", {class: "sl ell"}, label), prog, h("span", {class: "sm t2"}, meta));
-  const rows = inits.length ? inits.slice(0, 7).map(x => row(SDOT[x.status] || "d-info", [h("strong", {text: x.title}), h("span", {class: "t2", text: " · " + plural(x.projects.length, "project")})], () => openInitiative(x.id), progressBar(x),
-      [x.milestone ? "◆ " + x.milestone + " " : "", dueBadge(x.due, x.status === "done")]))
-    : P.slice().sort((a, b) => HRANK[a.health.level] - HRANK[b.health.level] || (b.last_activity || 0) - (a.last_activity || 0)).slice(0, 7).map(p => row(SDOT[p.status] || "d-info", h("strong", {text: p.name || p.id}), () => openProject(p.id), progressBar(p), [p.ns && p.ns.milestone ? "◆ " + p.ns.milestone + " " : "", dueBadge(p.ns && p.ns.due, p.status === "done")]));
-  const foot = h("div", {class: "sfoot t2"}, inits.length ? plural(loose.length, "project") + " outside initiatives" + (Object.keys(byStatus).length ? ": " + Object.entries(byStatus).map(([k, v]) => v + " " + ((STATUS[k] || [0, k])[1]).toLowerCase()).join(" · ") : "")
-    : ["No initiatives yet. Group related projects: ", h("code", {text: 'dev initiative new <slug> --title "…" --projects a,b'})], nc ? " · " + nc + " not cloned on this Mac" : "");
-  return panel("Where everything stands", INITS.length ? plural(INITS.length, "initiative") + " · " + plural(P.length, "project") : plural(P.length, "project"), h("a", {class: "btn sm ghost", href: link({view: "portfolio"})}, "Portfolio →"), [h("div", {class: "stands"}, rows), foot]);
-}
-let homeAll = false;
 function viewHome(main) {
-  const ps = P;
-  const risk = ACTIONS.filter(a => a.sev === "risk").length;
-  const liveN = (D.sessions || []).filter(s => s.active).length;
+  const k = D.kpis || {};
   main.append(h("div", {class: "head"}, h("h1", {text: "Today"}),
-    h("span", {class: "sub", text: (ACTIONS.length ? plural(ACTIONS.length, "item") + " need you" + (risk ? " · " + risk + " urgent" : "") : "Nothing is waiting on you") + " · " + plural(liveN, "agent") + " working"}),
-    h("div", {class: "right t2", style: "font-size:.8rem"}, "Synced " + rel(D.generated) + " · " + D.host)));
-  main.append(tiles(ps));
-  const LIMIT = 8, more = ACTIONS.length - LIMIT;
-  const acts = ACTIONS.length ? [h("ul", {class: "acts"}, (homeAll ? ACTIONS : ACTIONS.slice(0, LIMIT)).map(actionRow)),
-      more > 0 ? h("div", {class: "more"}, h("button", {class: "btn sm", type: "button", onclick: () => { homeAll = !homeAll; render(); }}, homeAll ? "Show the top " + LIMIT : "Show all " + ACTIONS.length + " (" + more + " more)")) : null]
-    : empty("All clear", "No failing CI, reviews, blocked projects, overdue tasks or idle work. ", h("a", {href: link({view: "projects"})}, "Browse projects →"));
-  main.append(h("div", {class: "cols", style: "margin-bottom:16px"}, panel("What needs me now", ACTIONS.length, null, acts, {flush: !!ACTIONS.length}), nowPanel(ps)));
-  main.append(h("div", {class: "stack-v"}, standsPanel(), agentsPanel(), sincePanel()));
+    h("span", {class: "sub", text: (ACTIONS.length ? plural(ACTIONS.length, "item") + " need you" + (k.urgent ? " · " + k.urgent + " urgent" : "") : "Nothing is waiting on you") + " · " + plural(k.live_sessions || 0, "live session")}),
+    h("div", {class: "right t2", style: "font-size:.8rem", text: "Synced " + rel(D.generated) + " · " + D.host})));
+  main.append(kpiStrip());
+  main.append(h("div", {class: "cols mb"}, needsPanel(), teamNow()));
+  main.append(initiativesPanel());
+  main.append(sincePanel());
+}
+function viewActions(main) {
+  const kinds = new Map(); for (const a of ACTIONS) { const l = KIND[a.kind] || a.kind; kinds.set(l, (kinds.get(l) || 0) + 1); }
+  const list = ACTIONS.filter(a => !S.kind || (KIND[a.kind] || a.kind) === S.kind);
+  main.append(crumbs([["Home", link({view: "overview", kind: ""})], ["Needs you"]]));
+  main.append(h("div", {class: "head"}, h("h1", {text: "Everything that needs you"}), h("span", {class: "sub", text: plural(ACTIONS.length, "item") + ", most urgent first · each with the command that moves it forward"})));
+  if (kinds.size > 1) main.append(h("div", {class: "toolbar"}, seg("Kind", "kind", [["", "All", ACTIONS.length]].concat(Array.from(kinds.entries()).map(([l, n]) => [l, l, n])))));
+  main.append(panel("Needs you", list.length, null, list.length ? h("ul", {class: "acts"}, list.map(actionRow)) : empty("All clear"), {flush: !!list.length}));
 }
 
-/* ---------------------------------------------------------------- Portfolio: everything we carry */
-function openInitiative(id) { if (!BYINIT.has(id)) { toast("No initiative " + id); return; } set({i: id, p: ""}, true); }
-function initiativeRow(x) {
-  const lastSt = x.members.map(m => m.status_line || (BYID.get(m.id) || {}).status_line).filter(Boolean).sort((a, b) => (b.ts || 0) - (a.ts || 0))[0];
-  return h("article", {class: "ini", "data-nav": "", tabindex: "0", "aria-label": "Initiative " + x.title, onclick: () => openInitiative(x.id), onkeydown: e => { if (e.key === "Enter") openInitiative(x.id); }},
-    h("div", {class: "ini-h"}, h("h3", {class: "ell", text: x.title}), h("span", {class: "ini-b"}, statusBadge(x.status), prioBadge(x.priority), x.milestone ? h("span", {class: "badge", title: "Milestone", text: "◆ " + x.milestone}) : null, dueBadge(x.due, x.status === "done")),
-      h("span", {class: "ini-p"}, progressBar(x, true))),
-    x.goal ? h("div", {class: "ini-goal ell", title: plain(x.goal)}, plain(x.goal)) : null,
-    h("div", {class: "ini-m"}, x.members.length ? x.members.map(memberChip) : h("span", {class: "muted", text: "No member projects yet — dev initiative add " + x.id + " <owner/repo>"})),
-    x.t.now.length ? h("ul", {class: "tl-rows ini-now"}, x.t.now.slice(0, 3).map(t => taskLine(x, t, "doing", "-i")), x.t.now.length > 3 ? h("li", {class: "t2", style: "font-size:.8rem", text: "+" + (x.t.now.length - 3) + " more in progress"}) : null) : null,
-    lastSt ? h("div", {class: "statusline"}, h("span", {class: "who", text: (lastSt.agent || "agent") + " · " + rel(lastSt.ts)}), inline(stripMarker(lastSt.line))) : null);
-}
+/* ---------------------------------------------------------------- Initiatives: list -> #/initiatives/<slug> */
 function roadmap(items) {
   if (!items.length) return null;
   const today = new Date(); today.setHours(12, 0, 0, 0); const t0 = today.getTime() / 1000;
@@ -1387,64 +1920,200 @@ function roadmap(items) {
   }
   return h("div", {class: "road", role: "list", "aria-label": "Milestones and due dates"}, rows);
 }
-function pTable(ps) {
-  return h("div", {class: "tw"}, h("table", {class: "t pt"},
-    h("thead", null, h("tr", null, h("th", {class: "c-health"}), h("th", {text: "Project"}), h("th", {class: "c-st", text: "Status"}), h("th", {text: "Progress"}), h("th", {class: "c-last", text: "Milestone · due"}), h("th", {text: "In progress"}), h("th", {class: "c-size", text: "Initiatives"}), h("th", {class: "c-act", text: "Last activity"}))),
-    h("tbody", null, ps.map(p => h("tr", {"data-nav": "", tabindex: "0", onclick: () => openProject(p.id), onkeydown: e => { if (e.key === "Enter") openProject(p.id); }},
-      h("td", {class: "c-health"}, healthDot(p)),
-      h("td", {class: "c-name"}, h("span", {class: "pname"}, p.name || p.id, p.local ? null : h("span", {class: "tag", style: "margin-left:8px", title: "Has a handoff note but no checkout on this Mac", text: "not cloned"})), h("span", {class: "powner", text: p.owner})),
-      h("td", {class: "c-st"}, statusBadge(p.status), prioIcon(p.priority)),
-      h("td", {class: "c-prog"}, progressBar(p)),
-      h("td", {class: "c-last"}, p.ns && p.ns.milestone ? h("span", {class: "t2", text: "◆ " + p.ns.milestone + " "}) : null, dueBadge(p.ns && p.ns.due, p.status === "done") || (p.ns && p.ns.milestone ? null : h("span", {class: "muted", text: "—"}))),
-      h("td", {class: "c-now"}, nowCell(p)),
-      h("td", {class: "c-size"}, p.inits.length ? p.inits.map(id => h("button", {class: "mchip", type: "button", onclick: e => { e.stopPropagation(); openInitiative(id); }, text: (BYINIT.get(id) || {}).title || id})) : h("span", {class: "muted", text: "—"})),
-      h("td", {class: "c-act num t2", text: rel(p.last_activity)}))))));
-}
 function sortInits(list) {
   const due = x => x.due || "9999";
   const by = {priority: (a, b) => PRANK[a.priority] - PRANK[b.priority] || due(a).localeCompare(due(b)), progress: (a, b) => (progOf(a).pct ?? -1) - (progOf(b).pct ?? -1),
     due: (a, b) => due(a).localeCompare(due(b)), activity: (a, b) => (b.last_activity || 0) - (a.last_activity || 0)};
   return list.slice().sort(by[S.psort] || by.priority);
 }
-function sortLoose(list) {
-  const due = p => (p.ns && p.ns.due) || "9999";
-  const by = {priority: (a, b) => PRANK[a.priority] - PRANK[b.priority] || HRANK[a.health.level] - HRANK[b.health.level], progress: (a, b) => (progOf(a).pct ?? -1) - (progOf(b).pct ?? -1),
-    due: (a, b) => due(a).localeCompare(due(b)), activity: (a, b) => (b.last_activity || 0) - (a.last_activity || 0)};
-  return list.slice().sort(by[S.psort] || by.priority);
+function initTable(list) {
+  return h("div", {class: "panel"}, h("div", {class: "tw st"}, h("table", {class: "t pt it"},
+    h("thead", null, h("tr", null, h("th", {class: "c-health"}), h("th", {text: "Initiative"}), h("th", {class: "c-st", text: "Status"}), h("th", {class: "c-prog", text: "Progress"}), h("th", {class: "c-last", text: "Milestone · due"}), h("th", {text: "Projects"}), h("th", {text: "Tasks"}), h("th", {class: "c-who", text: "People"}), h("th", {class: "c-act", text: "Last activity"}))),
+    h("tbody", null, list.map(x => { const nc = notCloned(x);
+      return h("tr", {"data-nav": "", tabindex: "0", onclick: () => openInitiative(x.id), onkeydown: e => { if (e.key === "Enter") openInitiative(x.id); }},
+        h("td", {class: "c-health"}, h("span", {class: "dot " + (SDOT[x.status] || "d-info"), "aria-hidden": "true"})),
+        h("td", {class: "c-name"}, h("span", {class: "pname", text: x.title}), h("span", {class: "powner", text: x.owner ? "owner " + x.owner : x.id})),
+        h("td", {class: "c-st"}, statusBadge(x.status), prioIcon(x.priority)), h("td", {class: "c-prog"}, progressBar(x)),
+        h("td", {class: "c-last"}, x.milestone ? h("span", {class: "t2", text: "◆ " + x.milestone + " "}) : null, dueBadge(x.due, x.status === "done") || (x.milestone ? null : h("span", {class: "muted", text: "—"}))),
+        h("td", {class: "num"}, String(x.members.length), nc ? h("span", {class: "t2", text: " · " + nc + " not cloned"}) : null),
+        h("td", {class: "num"}, String(x.cnt.open) + " open", x.cnt.blocked ? h("span", {class: "bad", text: " · " + x.cnt.blocked + " blocked"}) : null),
+        h("td", {class: "c-who"}, avatars(x.people, 3)), h("td", {class: "c-act num t2", text: rel(x.last)})); })))));
 }
-function viewPortfolio(main) {
-  const tk = tokens(S.q);
-  const inits = sortInits(INITS.filter(x => (!S.status.length || S.status.includes(x.status)) && (!S.priority.length || S.priority.includes(x.priority)) && tk.every(t => x.hay.includes(t))));
-  const ps = filtered(true), inInit = new Set(INITS.flatMap(x => x.projects));
-  const loose = sortLoose(ps.filter(p => !inInit.has(p.id)));
-  const nc = P.filter(p => !p.local).length;
-  main.append(h("div", {class: "head"}, h("h1", {text: "Portfolio"}), h("span", {class: "sub", text: plural(INITS.length, "initiative") + " · " + plural(P.length, "project") + (nc ? " · " + nc + " not cloned here" : "")})));
-  const sel = h("select", {"aria-label": "Sort"}); for (const [v, l] of [["priority", "Sort: priority"], ["due", "Sort: due date"], ["progress", "Sort: progress"], ["activity", "Sort: activity"]]) sel.append(h("option", {value: v, selected: S.psort === v}, l));
-  sel.addEventListener("change", () => set({psort: sel.value}, true));
-  main.append(h("div", {class: "toolbar"}, h("span", {class: "count", text: ""}), h("div", {class: "seg", role: "group", "aria-label": "Group by"}, [["initiative", "By initiative"], ["owner", "By owner"], ["status", "By status"]].map(([g, l]) => h("button", {type: "button", "aria-pressed": String(S.pgroup === g), onclick: () => set({pgroup: g}, true)}, l))), sel));
-  const dated = inits.filter(x => x.due).map(x => ({label: x.title, due: x.due, milestone: x.milestone, status: x.status, open: () => openInitiative(x.id)}))
-    .concat(loose.filter(p => p.ns && p.ns.due).map(p => ({label: p.name || p.id, due: p.ns.due, milestone: p.ns.milestone, status: p.status, open: () => openProject(p.id)})));
-  if (dated.length) main.append(panel("Milestones and due dates", dated.length, null, roadmap(dated.slice(0, 16)), {cls: "mb"}));
-  if (S.pgroup === "status") {
-    const order = ["blocked", "active", "paused", "untracked", "done", "archived"];
-    for (const st of order) {
-      const gi = inits.filter(x => x.status === st), gp = loose.filter(p => p.status === st);
-      if (!gi.length && !gp.length) continue;
-      main.append(panel((STATUS[st] || [0, st])[1], gi.length + gp.length, null, [gi.length ? h("div", {class: "inis"}, gi.map(initiativeRow)) : null, gp.length ? pTable(gp) : null], {cls: "mb", flush: true}));
-    }
-    return;
+function viewInitiatives(main) {
+  if (S.id) { viewInitiative(main); return; }
+  const tk = tokens(S.q), all = INITS.filter(x => tk.every(t => x.hay.includes(t)));
+  const list = sortInits(all.filter(x => !S.ist || x.status === S.ist));
+  const inInit = new Set(INITS.flatMap(x => x.projects)), loose = P.filter(p => !MEMBEROF.has(p.id)).length;
+  main.append(h("div", {class: "head"}, h("h1", {text: "Initiatives"}), h("span", {class: "sub", text: plural(INITS.length, "initiative") + " · " + plural(inInit.size, "member project") + (loose ? " · " + loose + " outside initiatives" : "")})));
+  const st = {}; for (const x of all) st[x.status] = (st[x.status] || 0) + 1;
+  main.append(h("div", {class: "toolbar"}, seg("Status", "ist", [["", "All", all.length]].concat(Object.keys(st).sort((a, b) => (SORDER[a] ?? 6) - (SORDER[b] ?? 6)).map(k => [k, (STATUS[k] || [0, k])[1], st[k]]))),
+    h("span", {class: "spacer"}), selectBox("Sort", "psort", [["priority", "Sort: priority"], ["due", "Sort: due date"], ["progress", "Sort: progress"], ["activity", "Sort: activity"]]),
+    seg("Layout", "ilayout", [["cards", "Cards"], ["table", "Table"]])));
+  if (!list.length) { main.append(h("div", {class: "panel mb"}, empty(INITS.length ? "No initiative matches" : "No initiatives yet", INITS.length ? "Clear the search or the status filter." : ["Group related projects into a programme with goal, milestone and due date: ", h("code", {text: 'dev initiative new <slug> --title "…" --projects owner/a,owner/b'})]))); }
+  else main.append(S.ilayout === "table" ? initTable(list) : h("div", {class: "icards wide mb"}, list.map(x => initCard(x))));
+  const dated = list.filter(x => x.due).map(x => ({label: x.title, due: x.due, milestone: x.milestone, status: x.status, open: () => openInitiative(x.id)}));
+  if (dated.length) main.append(panel("Milestones and due dates", dated.length, null, roadmap(dated.slice(0, 16)), {cls: "mb mt"}));
+  if (loose) main.append(h("p", {class: "t2 sfoot"}, h("a", {href: link({view: "projects", loose: true}), text: plural(loose, "project") + " are outside initiatives →"}), " Add one with ", h("code", {text: "dev initiative add <slug> <owner/repo>"})));
+}
+const ITABS = [["overview", "Overview"], ["projects", "Projects"], ["tasks", "Tasks"], ["plans", "Plans"], ["sessions", "Sessions"], ["docs", "Docs & source"]];
+function viewInitiative(main) {
+  const x = BYINIT.get(S.id);
+  if (!x) { main.append(crumbs([["Initiatives", link({view: "initiatives", id: ""})], [S.id]]), h("div", {class: "panel"}, empty("No initiative “" + S.id + "”", h("a", {href: link({view: "initiatives", id: ""})}, "All initiatives →")))); return; }
+  const tab = ITABS.some(t => t[0] === S.tab) ? S.tab : "overview";
+  const pr = progOf(x), nc = notCloned(x), plansL = plansFor([x.scope]), sess = sessionsFor([x.scope].concat(x.projects), x.sessions);
+  main.append(crumbs([["Initiatives", link({view: "initiatives", id: "", tab: ""})], [x.title]]));
+  main.append(h("header", {class: "phead"},
+    h("div", {class: "pt1"}, h("div", {class: "pt-t"}, h("h1", {text: x.title}),
+        h("div", {class: "bd"}, statusBadge(x.status), prioBadge(x.priority), x.milestone ? h("span", {class: "badge", title: "Milestone", text: "◆ " + x.milestone}) : null, dueBadge(x.due, x.status === "done"), x.tags.map(t => h("span", {class: "stk", text: "#" + t}))),
+        h("div", {class: "pmeta t2"}, [x.owner ? "Owner " + x.owner : null, plural(x.members.length, "project") + (nc ? " (" + (nc === x.members.length ? "none cloned here" : nc + " not cloned") + ")" : ""), x.last ? "active " + rel(x.last) : null].filter(Boolean).join(" · "))),
+      h("div", {class: "pt-p"}, progressBar(x, true), h("div", {class: "t2 why", text: pr.why}))),
+    h("div", {class: "go"}, cmdBtn("dev initiative show " + x.id, true), cmdBtn('dev task -i ' + x.id + ' add "…" --now'), x.note && FILEMAP.has(x.note) ? h("a", {class: "btn sm", href: link({view: "explorer", f: x.note, id: ""})}, "README in Explorer") : null)));
+  main.append(stats([[x.members.length, x.members.length === 1 ? "project" : "projects", "", nc ? nc + " not cloned on this Mac" : "all cloned", link({tab: "projects"})], [x.cnt.open, "open tasks", "", null, link({tab: "tasks"})],
+    [x.cnt.doing, "doing"], [x.cnt.blocked, "blocked", x.cnt.blocked ? "risk" : ""], [x.people.length, x.people.length === 1 ? "person on it" : "people on it"], [plansL.length, plansL.length === 1 ? "plan" : "plans", "", null, link({tab: "plans"})]]));
+  main.append(pageTabs([["overview", "Overview"], ["projects", "Projects", x.members.length], ["tasks", "Tasks", x.cnt.open], ["plans", "Plans", plansL.length], ["sessions", "Sessions", sess.length], ["docs", "Docs & source"]], tab));
+  const tp = h("div", {class: "tabpanel", id: "tabpanel", role: "tabpanel", "aria-labelledby": "tab-" + tab});
+  main.append(tp);
+  const part = (label, text) => text ? [h("div", {class: "label", style: "margin:12px 0 4px", text: label}), md(text)] : null;
+  if (tab === "overview") {
+    const doing = sortItems(x.items.filter(i => i.status === "doing" || i.status === "blocked"));
+    tp.append(h("div", {class: "cols"},
+      h("div", {class: "stack-v"}, panel("Goal, scope and state", null, null, (x.goal || x.scope || x.state) ? [part("Goal", x.goal), part("Scope", x.scope), part("Current state", x.state)] : empty("No goal written yet", "Edit ", h("code", {text: x.note || "initiatives/" + x.id + "/README.md"}), " or ask an agent for a handoff.")),
+        panel("In progress", doing.length, h("a", {class: "btn sm ghost", href: link({tab: "tasks"})}, "All tasks →"), doing.length ? h("ul", {class: "irows"}, doing.slice(0, 8).map(i => itemRow(i, {scope: true, home: x.scope}))) : empty("Nothing in progress", "Claim the next task: ", h("code", {text: "dev task -i " + x.id + " start <id>"})), {flush: !!doing.length})),
+      h("div", {class: "stack-v"}, whoPanel(x.people, x.projects.concat([x.scope])),
+        panel("Risks and decisions", null, null, (x.risks || x.decisions) ? [part("Risks", x.risks), part("Decisions", x.decisions)] : empty("Nothing recorded yet", "Risks and decisions live in the initiative README.")),
+        x.links ? panel("Links", null, null, md(x.links)) : null)));
+  } else if (tab === "projects") tp.append(membersBlock(x));
+  else if (tab === "tasks") tp.append(itemsBlock(x.items, {scope: x.scope, initiative: true}));
+  else if (tab === "plans") tp.append(plansBlock(plansL, x.scope));
+  else if (tab === "sessions") tp.append(sessionsBlock(sess, true));
+  else {
+    const docs = (x.docs || []).filter(d => FILEMAP.has(d));
+    tp.append(h("div", {class: "cols even"}, panel("Source", null, null, x.source ? md(x.source) : empty("No source archive recorded")),
+      panel("Documents", docs.length, x.note && FILEMAP.has(x.note) ? h("a", {class: "btn sm", href: link({view: "explorer", f: x.note, id: ""})}, "README") : null,
+        docs.length ? h("ul", {class: "tl-rows"}, docs.map(d => h("li", {class: "trow"}, h("a", {href: link({view: "explorer", f: d, id: ""}), text: d.split("/").slice(2).join("/") || d})))) : empty("No documents", "Add Markdown under ", h("code", {text: "initiatives/" + x.id + "/docs/"})))));
   }
-  main.append(panel("Initiatives", inits.length, null, inits.length ? h("div", {class: "inis"}, inits.map(initiativeRow))
-    : empty(INITS.length ? "No initiative matches" : "No initiatives yet", INITS.length ? "Clear the filters to see all initiatives." : ["Group related projects into a programme with goal, milestone and due date: ", h("code", {text: 'dev initiative new <slug> --title "…" --projects owner/a,owner/b'})]), {cls: "mb", flush: !!inits.length}));
-  if (S.pgroup === "owner") {
-    const groups = new Map(); for (const p of sortLoose(ps)) { if (!groups.has(p.owner)) groups.set(p.owner, []); groups.get(p.owner).push(p); }
-    for (const [o, list] of groups) main.append(panel(o, list.length, null, pTable(list), {cls: "mb", flush: true}));
-    return;
+}
+function whoPanel(people, scopes) {
+  const set = new Set(scopes);
+  const rows = people.map(w => { const x = BYWHO.get(w) || {sessions: [], locks: []};
+    const here = x.sessions.filter(s => set.has(s.project)), locks = ITEMS.filter(i => i.holder === w && i.open && i.lock === "held" && (set.has(i.scope) || scopes.includes(i.scope)));
+    return h("li", {class: "prow", "data-nav": "", tabindex: "0", onclick: () => go("team"), onkeydown: e => { if (e.key === "Enter") go("team"); }}, avatar(w),
+      h("div", {class: "pm"}, h("div", {class: "pw"}, h("strong", {class: "ell", text: w}), isMe(w) ? h("span", {class: "tag", text: "you"}) : null),
+        h("div", {class: "ps t2 ell", text: [here.length ? here.map(s => (s.agent || "agent") + " · " + scopeName(s.project) + (s.branch ? " ⎇ " + s.branch : "")).join(", ") : null, locks.length ? plural(locks.length, "claimed task") : null].filter(Boolean).join(" · ") || "—"})),
+      h("div", {class: "pr2"}, locks.length ? h("span", {class: "claim sm", title: plural(locks.length, "lock")}, lockIcon(), String(locks.length)) : null)); });
+  return panel("Who is on it", people.length || null, h("a", {class: "btn sm ghost", href: link({view: "team", id: ""})}, "Team →"), rows.length ? h("ul", {class: "prows"}, rows) : empty("Nobody right now", "People appear here when they hold a task lock or run a session in a member project."), {flush: !!rows.length});
+}
+function family(ids) {
+  const toks = ids.map(id => String(id).split("/").pop().toLowerCase().split(/[-_.]/));
+  let k = 0; while (toks.length > 1 && toks.every(t => t.length > k + 1 && t[k] === toks[0][k])) k++;
+  return id => { const t = String(id).split("/").pop().toLowerCase().split(/[-_.]/); return t.length > k ? t[k] : t[t.length - 1]; };
+}
+function miniStatus(list) {
+  const c = {}; for (const d of list) c[d.st] = (c[d.st] || 0) + 1;
+  return h("span", {class: "mini", "aria-label": Object.entries(c).map(([k, n]) => n + " " + k).join(", ")}, Object.keys(c).sort((a, b) => (SORDER[a] ?? 6) - (SORDER[b] ?? 6)).map(k => h("span", {title: c[k] + " " + (STATUS[k] || [0, k])[1].toLowerCase()}, h("span", {class: "dot " + (SDOT[k] || "d-info"), "aria-hidden": "true"}), String(c[k]))));
+}
+function memberTable(list) {
+  return h("div", {class: "tw st"}, h("table", {class: "t pt mt"},
+    h("thead", null, h("tr", null, h("th", {class: "c-health"}), h("th", {text: "Project"}), h("th", {class: "c-st", text: "Status"}), h("th", {class: "c-prog", text: "Progress"}), h("th", {text: "In progress · latest"}), h("th", {class: "c-who", text: "Who"}), h("th", {class: "c-cta"}))),
+    h("tbody", null, list.map(d => h("tr", {"data-nav": "", tabindex: "0", onclick: () => openProject(d.id), onkeydown: e => { if (e.key === "Enter") openProject(d.id); }},
+      h("td", {class: "c-health"}, d.p ? healthDot(d.p) : h("span", {class: "dot d-info", role: "img", title: "No handoff note on this Mac yet", "aria-label": "no note"})),
+      h("td", {class: "c-name"}, h("span", {class: "pname", text: d.name}), h("span", {class: "powner", title: d.ws || d.id, text: d.ws || d.owner})),
+      h("td", {class: "c-st"}, statusBadge(d.st in STATUS ? d.st : "untracked")),
+      h("td", {class: "c-prog"}, d.pct != null ? progressBar(d.p || {progress: d.pct, t: {}}) : h("span", {class: "muted", text: "—"})),
+      h("td", {class: "c-now"}, d.doing.length ? h("div", {class: "slt"}, h("div", {class: "ell", title: d.doing[0].title}, istatusIcon(d.doing[0].status), " ", d.doing[0].title), d.doing.length > 1 ? h("div", {class: "who", text: "+" + (d.doing.length - 1) + " more in progress"}) : null)
+        : d.sl ? h("div", {class: "slt"}, h("div", {class: "ell", title: plain(stripMarker(d.sl.line))}, inline(stripMarker(d.sl.line))), h("div", {class: "who", text: (d.sl.agent || "agent") + " · " + rel(d.sl.ts)})) : h("span", {class: "muted", text: "—"})),
+      h("td", {class: "c-who"}, avatars(d.people, 3)),
+      h("td", {class: "c-cta"}, d.local ? null : h("span", {class: "nc"}, h("span", {class: "tag", title: "Not cloned on this Mac", text: "not cloned"}), icopy("dev clone " + d.id, "Clone"))))))));
+}
+function membersBlock(x) {
+  const mem = x.members.map(m => { const p = BYID.get(m.id), st = (p && p.status) || m.status || "unknown";
+    return {id: m.id, p, name: (p && p.name) || m.id.split("/").pop(), owner: m.id.includes("/") ? m.id.slice(0, m.id.lastIndexOf("/")) : "(local)", st: st in STATUS ? st : "unknown", local: p ? p.local : !!m.local,
+      pct: p ? progOf(p).pct : (m.progress != null ? m.progress : null), doing: p ? sortItems(p.items.filter(i => i.status === "doing" || i.status === "blocked")) : [],
+      sl: m.status_line || (p && p.status_line), ws: plain(m.workstream || ""), people: p ? p.people : []}; });
+  for (const d of mem) d.hay = [d.id, d.st, d.ws, d.doing.map(i => i.title).join(" "), d.people.join(" "), d.local ? "cloned" : "not cloned"].join(" ").toLowerCase();
+  const fam = family(mem.map(d => d.id)), fc = {};
+  for (const d of mem) { d.fam = fam(d.id); fc[d.fam] = (fc[d.fam] || 0) + 1; }
+  for (const d of mem) if (fc[d.fam] < 2) d.fam = "other";
+  const nFam = new Set(mem.map(d => d.fam)).size, famOk = nFam >= 2 && nFam <= 16, hasWs = mem.some(d => d.ws);
+  const groupings = [["status", "Status"]].concat(famOk ? [["family", "Family"]] : []).concat([["owner", "Owner"]]).concat(hasWs ? [["ws", "Workstream"]] : []).concat([["none", "None"]]);
+  const g = groupings.some(o => o[0] === S.mg) ? S.mg : mem.length > 12 ? (famOk ? "family" : "status") : "none";
+  const input = h("input", {id: "mq", type: "search", class: "fin", placeholder: "Filter " + plural(mem.length, "project") + "…", value: S.mq, "aria-label": "Filter member projects", autocomplete: "off"});
+  const count = h("span", {class: "count t2", role: "status"});
+  const box = h("div", {class: "stack-v"});
+  function draw() {
+    const tk = tokens(input.value), shown = mem.filter(d => tk.every(t => d.hay.includes(t)));
+    count.textContent = shown.length === mem.length ? plural(mem.length, "project") : shown.length + " of " + mem.length;
+    clear(box);
+    if (!mem.length) { box.append(h("div", {class: "panel"}, empty("No member projects", h("code", {text: "dev initiative add " + x.id + " <owner/repo>"})))); return; }
+    if (!shown.length) { box.append(h("div", {class: "panel"}, empty("No project matches “" + input.value + "”", "Search covers names, status, workstreams, tasks in progress and people."))); return; }
+    const key = d => g === "status" ? d.st : g === "owner" ? d.owner : g === "family" ? d.fam : g === "ws" ? (d.ws ? d.ws.split(/[.:;—]/)[0].trim().slice(0, 48) : "No workstream") : "";
+    const groups = new Map(); for (const d of shown.slice().sort((a, b) => (SORDER[a.st] ?? 6) - (SORDER[b.st] ?? 6) || a.name.localeCompare(b.name))) { const k = key(d); if (!groups.has(k)) groups.set(k, []); groups.get(k).push(d); }
+    const order = Array.from(groups.keys()).sort((a, b) => g === "status" ? (SORDER[a] ?? 6) - (SORDER[b] ?? 6) : a === "other" ? 1 : b === "other" ? -1 : groups.get(b).length - groups.get(a).length || a.localeCompare(b));
+    if (groups.size === 1) { box.append(h("div", {class: "panel"}, memberTable(shown))); return; }
+    order.forEach((k, gi) => { const list = groups.get(k), ncl = list.filter(d => !d.local).length;
+      const det = h("details", {class: "mgrp panel", open: tk.length > 0 || gi < 3 || groups.size <= 4},
+        h("summary", null, h("span", {class: "mg-n", text: g === "status" ? (STATUS[k] || [0, k])[1] : k}), h("span", {class: "count num", text: String(list.length)}), miniStatus(list),
+          h("span", {class: "mg-c t2", text: ncl ? (ncl === list.length ? "none cloned" : ncl + " not cloned") : ""})), memberTable(list));
+      box.append(det); });
   }
-  main.append(panel(INITS.length ? "Projects outside initiatives" : "Projects", loose.length, null, loose.length ? pTable(loose) : empty("Every project belongs to an initiative"), {flush: !!loose.length}));
+  input.addEventListener("input", debounce(() => { S.mq = input.value; history.replaceState(null, "", encode(S)); store.set("devkit.state", S); draw(); }, 120));
+  draw();
+  const nc = mem.filter(d => !d.local).length;
+  return h("div", {class: "stack-v"},
+    nc ? callout("info", nc === mem.length ? "None of these projects is cloned on this Mac" : nc + " of " + mem.length + " projects are not cloned on this Mac", "Their handoff notes, tasks and sessions come from the handoff repository. Clone the ones you work on; the copy icon on each row gives the command.", cmdBtn("dev clone <owner/repo>")) : null,
+    h("div", {class: "toolbar"}, input, count, h("span", {class: "spacer"}), seg("Group by", "mg", groupings, g)), box);
+}
+function itemsBlock(items, opts) {
+  opts = opts || {};
+  const src = opts.initiative ? S.src || "all" : "all";
+  const list = !opts.initiative || src === "all" ? items : src === "own" ? items.filter(i => i.scope === opts.scope) : items.filter(i => i.scope !== opts.scope);
+  const st = S.tst || "open", c = cnt(list), closed = c.done + c.cancelled;
+  const shown = sortItems(list.filter(i => st === "all" ? true : st === "open" ? i.open : st === "done" ? !i.open : i.status === st));
+  const legacyOnly = items.length && items.every(i => i.legacy);
+  const tb = h("div", {class: "toolbar"}, seg("Status", "tst", [["open", "Open", c.open], ["doing", "Doing", c.doing], ["blocked", "Blocked", c.blocked], ["todo", "To do", c.todo], ["done", "Closed", closed], ["all", "All", list.length]], st),
+    opts.initiative ? seg("Source", "src", [["all", "All"], ["own", "Initiative"], ["projects", "From projects"]], src) : null, h("span", {class: "spacer"}), cmdBtn("dev task " + flagOf(opts.scope) + ' add "…" --now'));
+  const out = h("div", {class: "stack-v"}, tb);
+  if (legacyOnly) out.append(callout("info", "These tasks are checkboxes in the handoff note", "They have no id, lock or history yet. The next ", h("code", {text: "dev sync"}), " imports them as work items."));
+  if (!shown.length) { out.append(h("div", {class: "panel"}, empty(list.length ? "Nothing " + (st === "open" ? "open" : st) : "No tasks yet", list.length ? "Switch the status filter to see the rest." : ["Plan the work: ", h("code", {text: "dev task " + flagOf(opts.scope) + ' add "…" --now'})]))); return out; }
+  if (st === "open" || st === "all") {
+    for (const [b, label] of [["now", "Now"], ["next", "Next"], ["later", "Later"]]) { const g = shown.filter(i => i.open && i.bucket === b); if (g.length) out.append(panel(label, g.length, null, h("ul", {class: "irows"}, g.map(i => itemRow(i, {scope: true, home: opts.scope}))), {flush: true})); }
+    const done = shown.filter(i => !i.open);
+    if (done.length) out.append(panel("Closed", done.length, null, h("ul", {class: "irows"}, done.slice(0, 50).map(i => itemRow(i, {scope: true, home: opts.scope}))), {flush: true}));
+  } else out.append(panel(st === "done" ? "Closed" : (ISTATUS[st] || [0, st])[1], shown.length, null, h("ul", {class: "irows"}, shown.slice(0, 200).map(i => itemRow(i, {scope: true, home: opts.scope}))), {flush: true}));
+  return out;
+}
+function plansFor(scopes) { const s = new Set(scopes); return (D.plans || []).filter(p => s.has(p.scope)).sort((a, b) => String(b.updated || "").localeCompare(String(a.updated || "")) || (b.mtime || 0) - (a.mtime || 0)); }
+function plansBlock(list, scope, legacyList) {
+  if (!list.length && legacyList && legacyList.length) list = legacyList.map(pl => ({title: pl.title, path: pl.path, status: "unversioned", version: "", updated: "", updated_by: "", mtime: pl.mtime, changelog: []}));
+  if (!list.length) return h("div", {class: "panel"}, empty("No plans yet", "Start one: ", h("code", {text: "dev plan " + flagOf(scope) + ' new "…"'}), " — plans and specs are versioned with who, when and why."));
+  return h("div", {class: "panel"}, h("ul", {class: "plans"}, list.map(pl => h("li", {class: "pl"},
+    h("div", {class: "pl-h"}, h("span", {class: "badge pl-" + pl.status, title: "Plan status", text: pl.status}),
+      FILEMAP.has(pl.path) ? h("a", {class: "pl-t", href: link({view: "explorer", f: pl.path, id: ""}), text: pl.title}) : h("span", {class: "pl-t", text: pl.title}),
+      pl.version ? h("span", {class: "muted num", text: "v" + pl.version}) : null, pl.id && pl.id !== "—" ? h("span", {class: "iid mono", text: pl.id}) : null,
+      pl.needs_revision ? h("span", {class: "badge warn-b", title: "The body changed without dev plan revise --why", text: "edited · needs a revision"}) : null,
+      h("span", {class: "pl-u t2", text: [pl.updated_by, pl.updated ? rel(iso(pl.updated)) : pl.mtime ? rel(pl.mtime) : ""].filter(Boolean).join(" · ")})),
+    pl.needs_revision ? h("div", {class: "pl-c"}, cmdBtn("dev plan revise " + D.handoff + "/" + pl.path + ' --why "…"')) : null,
+    pl.changelog && pl.changelog.length ? h("details", {class: "pl-log"}, h("summary", null, "History · " + plural(pl.changelog.length, "version")), changelog(pl.changelog)) : null))));
+}
+function sessionsFor(scopes, legacyLines) {
+  const s = new Set(scopes), out = (D.session_log || []).filter(x => s.has(x.scope));
+  if (!out.length) for (const l of legacyLines || []) out.push({ts: sessTs(l), scope: scopes[0], who: "", agent: "", branch: "", text: sessText(l)});
+  return out.sort((a, b) => b.ts - a.ts);
+}
+const SHOWN = {};
+function sessionsBlock(list, showScope) {
+  if (!list.length) return h("div", {class: "panel"}, empty("No sessions logged", "devkit adds a line after each agent session that commits or changes files."));
+  const n = SHOWN.sessions || 60, ul = h("ul", {class: "tl"}); let day = "";
+  for (const it of list.slice(0, n)) {
+    const k = lkey(new Date(it.ts * 1000));
+    if (k !== day) { day = k; ul.append(h("li", {class: "day", text: fmtDay(it.ts)})); }
+    ul.append(h("li", {class: "it"}, h("span", {class: "tm", text: tm(it.ts)}), it.who ? avatar(it.who) : h("span", {class: "ki", "aria-hidden": "true", text: "◇"}),
+      h("div", {style: "min-width:0"}, h("div", {class: "slw t2"}, [it.who, it.agent, it.branch ? "⎇ " + it.branch : ""].filter(Boolean).join(" · "), showScope && it.scope ? [" · ", scopeChip(it.scope)] : null), h("div", null, inline(stripMarker(it.text))))));
+  }
+  return h("div", {class: "panel"}, ul, list.length > n ? h("div", {class: "more"}, h("button", {class: "btn sm", type: "button", onclick: () => { SHOWN.sessions = n + 200; render(); }}, "Show " + Math.min(200, list.length - n) + " more")) : null);
 }
 
-/* ---------------------------------------------------------------- Projects */
+/* ---------------------------------------------------------------- Projects: table -> #/projects/<owner>/<repo> */
 function sortProjects(ps) {
   const by = {attention: (a, b) => HRANK[a.health.level] - HRANK[b.health.level] || PRANK[a.priority] - PRANK[b.priority] || (b.last_activity || 0) - (a.last_activity || 0),
     activity: (a, b) => (b.last_activity || 0) - (a.last_activity || 0), priority: (a, b) => PRANK[a.priority] - PRANK[b.priority] || (b.last_activity || 0) - (a.last_activity || 0),
@@ -1453,83 +2122,229 @@ function sortProjects(ps) {
 }
 function latest(p) { const sl = p.status_line; if (!sl) return h("span", {class: "muted", text: "—"});
   return h("div", {class: "slt"}, h("div", {class: "ell", title: plain(stripMarker(sl.line))}, inline(stripMarker(sl.line))), h("div", {class: "who", text: (sl.agent || "agent") + " · " + rel(sl.ts)})); }
-function nowCell(p) { if (!p.t.now.length) return h("span", {class: "muted", text: p.t.open ? plural(p.t.open, "open task") : "—"});
-  return h("div", {class: "slt"}, h("div", {class: "ell", title: plain(p.t.now[0])}, inline(p.t.now[0].replace(/\s*\bdue:\S+/, ""))), p.t.now.length > 1 ? h("div", {class: "who", text: "+" + (p.t.now.length - 1) + " more in progress"}) : null); }
+function nowCell(p) {
+  const d = sortItems(p.items.filter(i => i.status === "doing" || i.status === "blocked"));
+  if (!d.length) return h("span", {class: "muted", text: p.cnt.open ? plural(p.cnt.open, "open task") : "—"});
+  return h("div", {class: "slt"}, h("div", {class: "ell", title: d[0].title}, istatusIcon(d[0].status), " ", d[0].title), h("div", {class: "who"}, d[0].holder ? (isMe(d[0].holder) ? "you" : d[0].holder) : "unclaimed", d.length > 1 ? " · +" + (d.length - 1) + " more" : ""));
+}
 function projectTable(ps) {
   const th = (label, key, cls) => h("th", {scope: "col", class: cls || null, "aria-sort": S.sort === key ? "descending" : null}, key ? h("button", {type: "button", onclick: () => set({sort: key}, true), text: label + (S.sort === key ? " ↓" : "")}) : label);
-  return h("div", {class: "tw"}, h("table", {class: "t pt"},
-    h("thead", null, h("tr", null, th("", "attention", "c-health"), th("Project", "name"), th("Status", "priority", "c-st"), h("th", {class: "c-prog", text: "Progress"}), th("In progress", "tasks"), h("th", {text: "Latest agent status"}), h("th", {text: "PRs"}), h("th", {class: "c-act", text: "7 days"}), th("Last activity", "activity", "c-last"), th("Size", "size", "c-size"))),
+  return h("div", {class: "tw st"}, h("table", {class: "t pt"},
+    h("thead", null, h("tr", null, th("", "attention", "c-health"), th("Project", "name"), th("Status", "priority", "c-st"), h("th", {class: "c-prog", text: "Progress"}), th("In progress", "tasks"), h("th", {text: "Latest agent status"}), h("th", {text: "PRs"}), h("th", {class: "c-act", text: "7 days"}), th("Last activity", "activity", "c-last"), h("th", {class: "c-who", text: "Who"}))),
     h("tbody", null, ps.map(p => h("tr", {"data-nav": "", tabindex: "0", onclick: () => openProject(p.id), onkeydown: e => { if (e.key === "Enter") openProject(p.id); }},
       h("td", {class: "c-health"}, healthDot(p)),
-      h("td", {class: "c-name"}, h("span", {class: "pname"}, p.name || p.id, p.live ? h("span", {class: "dot d-live", style: "margin-left:8px;vertical-align:1px", title: "Live session", "aria-label": "live session"}) : null, p.local ? null : h("span", {class: "tag", style: "margin-left:8px", title: "Handoff note only — clone with dev clone " + p.id, text: "not cloned"})), h("span", {class: "powner", text: p.owner + ((p.main || {}).branch ? " · " + p.main.branch : "")})),
+      h("td", {class: "c-name"}, h("span", {class: "pname"}, p.name || p.id, ONPROJ.has(p.id) || p.live ? h("span", {class: "dot d-live", style: "margin-left:8px;vertical-align:1px", title: "Live session", "aria-label": "live session"}) : null, p.local ? null : h("span", {class: "tag", style: "margin-left:8px", title: "Handoff note only — clone with dev clone " + p.id, text: "not cloned"})), h("span", {class: "powner", text: p.owner + ((p.main || {}).branch ? " · " + p.main.branch : "")})),
       h("td", {class: "c-st"}, statusBadge(p.status), prioIcon(p.priority)),
       h("td", {class: "c-prog"}, progressBar(p)), h("td", {class: "c-now"}, nowCell(p)), h("td", {class: "c-status"}, latest(p)), h("td", {class: "c-prs"}, prPills(p, 2)),
       h("td", {class: "c-act"}, h("div", {style: "display:flex;gap:8px;align-items:center"}, sparkline(p, 30, 64, 16), h("span", {class: "num t2", style: "font-size:.75rem", text: String(sum7(p))}))),
-      h("td", {class: "c-last num t2", text: rel(p.last_activity)}), h("td", {class: "c-size num t2", text: kb(p.size_kb)}))))));
+      h("td", {class: "c-last num t2", text: rel(p.last_activity)}), h("td", {class: "c-who"}, avatars(p.people, 3)))))));
 }
 function projectCard(p) {
+  const d = p.items.filter(i => i.status === "doing" || i.status === "blocked");
   return h("button", {class: "pcard", type: "button", "data-nav": "", onclick: () => openProject(p.id), "aria-label": "Open " + p.id},
-    h("div", {class: "r1"}, healthDot(p), h("span", {class: "nm ell", text: p.name || p.id}), p.live ? h("span", {class: "dot d-live", title: "Live session"}) : null, h("span", {class: "bd"}, statusBadge(p.status), prioBadge(p.priority))),
-    p.t.now.length ? h("div", {class: "slt"}, h("span", {class: "who", text: "In progress · "}), inline(p.t.now[0])) : null,
+    h("div", {class: "r1"}, healthDot(p), h("span", {class: "nm ell", text: p.name || p.id}), ONPROJ.has(p.id) ? h("span", {class: "dot d-live", title: "Live session"}) : null, h("span", {class: "bd"}, statusBadge(p.status), prioBadge(p.priority))),
+    progressBar(p, true),
+    d.length ? h("div", {class: "slt ell"}, istatusIcon(d[0].status), " ", d[0].title) : null,
     p.status_line ? h("div", {class: "statusline"}, h("span", {class: "who", text: (p.status_line.agent || "agent") + " · " + rel(p.status_line.ts)}), inline(stripMarker(p.status_line.line))) : null,
-    h("div", {class: "r3"}, prPills(p), h("span", {style: "margin-left:auto;display:flex;gap:8px;align-items:center"}, sparkline(p, 30, 64, 16), rel(p.last_activity), " · ", kb(p.size_kb))));
+    h("div", {class: "r3"}, prPills(p), avatars(p.people, 3), h("span", {style: "margin-left:auto;display:flex;gap:8px;align-items:center"}, sparkline(p, 30, 64, 16), rel(p.last_activity), p.local ? null : h("span", {class: "tag", text: "not cloned"}))));
 }
 function viewProjects(main) {
+  if (S.id) { viewProject(main); return; }
   const ps = sortProjects(filtered(true));
-  const sel = (key, label, opts) => { const s = h("select", {"aria-label": label}); for (const [v, l] of opts) s.append(h("option", {value: v, selected: S[key] === v}, l)); s.addEventListener("change", () => set({[key]: s.value}, true)); return s; };
-  main.append(h("div", {class: "head"}, h("h1", {text: "Projects"}), h("span", {class: "sub", text: ps.length + " of " + P.length + (S.q ? " matching “" + S.q + "”" : "")})));
+  main.append(h("div", {class: "head"}, h("h1", {text: S.loose ? "Projects outside initiatives" : "Projects"}), h("span", {class: "sub", text: ps.length + " of " + P.length + (S.q ? " matching “" + S.q + "”" : "")})));
   main.append(h("div", {class: "toolbar"}, h("span", {class: "count"}, ["risk", "warn"].map(l => { const n = ps.filter(p => p.health.level === l).length; return n ? h("span", {style: "margin-right:12px"}, h("span", {class: "dot d-" + l, style: "margin-right:6px"}), n + (l === "risk" ? " at risk" : " need a look")) : null; })),
-    sel("group", "Group by", [["none", "No grouping"], ["owner", "Group: owner"], ["status", "Group: status"], ["priority", "Group: priority"]]),
-    sel("sort", "Sort by", [["attention", "Sort: needs attention"], ["activity", "Sort: last activity"], ["priority", "Sort: priority"], ["tasks", "Sort: open tasks"], ["name", "Sort: name"], ["size", "Sort: size"]]),
-    h("div", {class: "seg", role: "group", "aria-label": "Layout"}, [["table", "Table"], ["cards", "Cards"]].map(([l, t]) => h("button", {type: "button", "aria-pressed": String(S.layout === l), onclick: () => set({layout: l}, true)}, t))),
+    selectBox("Group by", "group", [["none", "No grouping"], ["initiative", "Group: initiative"], ["owner", "Group: owner"], ["status", "Group: status"], ["priority", "Group: priority"]]),
+    selectBox("Sort by", "sort", [["attention", "Sort: needs attention"], ["activity", "Sort: last activity"], ["priority", "Sort: priority"], ["tasks", "Sort: open tasks"], ["name", "Sort: name"], ["size", "Sort: size"]]),
+    seg("Layout", "layout", [["table", "Table"], ["cards", "Cards"]]),
     h("button", {class: "btn sm", type: "button", "aria-pressed": String(S.dense), onclick: () => set({dense: !S.dense}, true)}, "Dense")));
   if (!ps.length) { main.append(h("div", {class: "panel"}, empty("No projects match", facetCount() || S.q ? h("button", {class: "btn", type: "button", onclick: () => set(Object.assign({q: ""}, CLEAR), true)}, "Clear search and filters") : ["Clone one with ", h("code", {text: "dev clone owner/repo"})]))); return; }
   const groups = new Map();
-  for (const p of ps) { const g = S.group === "owner" ? p.owner : S.group === "status" ? (STATUS[p.status] || [0, p.status])[1] : S.group === "priority" ? PRIO[p.priority][1] : ""; if (!groups.has(g)) groups.set(g, []); groups.get(g).push(p); }
+  const keyOf = p => S.group === "owner" ? [p.owner] : S.group === "status" ? [(STATUS[p.status] || [0, p.status])[1]] : S.group === "priority" ? [PRIO[p.priority] ? PRIO[p.priority][1] : p.priority] : S.group === "initiative" ? (MEMBEROF.get(p.id) || ["—"]).map(id => id === "—" ? "Outside initiatives" : (BYINIT.get(id) || {}).title || id) : [""];
+  for (const p of ps) for (const g of keyOf(p)) { if (!groups.has(g)) groups.set(g, []); groups.get(g).push(p); }
   for (const [g, list] of groups) {
     const body = S.layout === "cards" ? h("div", {class: "cards"}, list.map(projectCard)) : h("div", {class: "panel"}, projectTable(list));
-    main.append(g ? h("div", {style: "margin-bottom:16px"}, h("div", {class: "label", style: "margin:8px 0", text: g + " · " + list.length}), body) : body);
+    main.append(g ? h("section", {class: "mb"}, h("div", {class: "label", style: "margin:8px 0", text: g + " · " + list.length}), body) : body);
+  }
+}
+const PTABS = [["overview", "Overview"], ["tasks", "Tasks"], ["prs", "Pull requests"], ["worktrees", "Worktrees"], ["plans", "Plans"], ["sessions", "Sessions"], ["note", "Handoff note"]];
+function viewUnknownProject(main) {
+  const id = S.id, inits = INITS.filter(x => x.projects.includes(id));
+  main.append(crumbs([["Projects", link({view: "projects", id: "", tab: ""})], [id]]));
+  main.append(h("header", {class: "phead"}, h("div", {class: "pt1"}, h("div", {class: "pt-t"}, h("h1", {text: id.split("/").pop()}), h("div", {class: "pmeta t2", text: id})))));
+  main.append(callout("info", "Not cloned on this Mac and no handoff note yet", ["This project is a member of ", inits.length ? inits.map((x, i) => [i ? ", " : "", h("a", {href: link({view: "initiatives", id: x.id, tab: ""}), text: x.title})]) : "no initiative", ". Clone it to work on it; devkit creates its handoff note on the next sync."], cmdBtn("dev clone " + id, true)));
+}
+function prTable(p) {
+  if (!p.prsOpen.length) return h("div", {class: "panel"}, empty("No open pull requests", !p.local ? "PRs appear once the project is cloned and synced." : p.github ? ["Open one from your branch: ", h("code", {text: "gh pr create --fill"})] : "PR state is tracked for GitHub repositories."));
+  const repo = p.github || p.id;
+  return h("div", {class: "panel"}, h("div", {class: "tw"}, h("table", {class: "t"}, h("thead", null, h("tr", null, ["CI", "Pull request", "Review", "Merge", "Size", "Updated", ""].map(x => h("th", {text: x})))),
+    h("tbody", null, p.prsOpen.map(r => h("tr", null,
+      h("td", null, h("span", {class: "badge"}, h("span", {class: "dot d-" + (r.checks || "unknown"), "aria-hidden": "true"}), (r.checks || "unknown"))),
+      h("td", null, h("a", {href: r.url || "#", target: "_blank", rel: "noopener noreferrer", text: "#" + r.number}), " ", h("span", {text: r.title || ""}), r.draft ? h("span", {class: "tag", style: "margin-left:6px", text: "draft"}) : null, h("div", {class: "t2 mono", style: "font-size:.72rem", text: r.branch || ""})),
+      h("td", {class: "t2", text: r.review === "CHANGES_REQUESTED" ? "changes requested" : r.review === "APPROVED" ? "approved" : r.review === "REVIEW_REQUIRED" ? "review required" : "—"}),
+      h("td", {class: r.mergeable === "CONFLICTING" ? "bad" : "t2", text: r.mergeable === "CONFLICTING" ? "⚠ conflicts" : r.mergeable === "MERGEABLE" ? "clean" : "—"}),
+      h("td", {class: "num t2", text: r.size != null ? compact(r.size) : "—"}), h("td", {class: "num t2", text: rel(iso(r.updated))}),
+      h("td", null, icopy(r.checks === "failing" ? "gh pr checks " + r.number + " -R " + repo + " --watch" : "gh pr view " + r.number + " -R " + repo, "Copy")))))))));
+}
+function wtTable(p) {
+  if (!p.wts.length) return h("div", {class: "panel"}, empty("No worktrees", p.local ? ["Parallel work on this repository: ", h("code", {text: "dev wt new <type>/<topic>"})] : "Worktrees appear once the project is cloned."));
+  return h("div", {class: "panel"}, h("div", {class: "tw"}, h("table", {class: "t"}, h("thead", null, h("tr", null, ["Branch", "PR", "State", "Session", "Size", ""].map(x => h("th", {text: x})))),
+    h("tbody", null, p.wts.map(w => h("tr", null, h("td", {class: "mono", style: "font-size:.78rem", text: w.branch || "detached"}), h("td", {text: w.pr ? "#" + w.pr.number + " " + String(w.pr.state).toLowerCase() : "—"}),
+      h("td", {text: w.missing ? "missing" : ((w.modified || 0) + (w.untracked || 0)) ? ((w.modified || 0) + (w.untracked || 0)) + " changed" : w.unpushed ? w.unpushed + " unpushed" : "clean"}),
+      h("td", {text: w.active ? "live" : rel(w.last_activity)}), h("td", {class: "num", text: kb(w.size_kb)}), h("td", null, w.branch ? icopy("dev wt rm " + w.branch, "Remove") : null))))))));
+}
+function repoKv(p) {
+  const m = p.main || {};
+  return h("dl", {class: "kv"},
+    h("dt", {text: "Path"}), h("dd", {class: "mono", style: "font-size:.8rem;word-break:break-all", text: p.path || (p.local ? "—" : "not cloned · " + (p.canonical || ""))}),
+    p.remote ? [h("dt", {text: "Remote"}), h("dd", null, p.github ? h("a", {href: "https://github.com/" + p.github, target: "_blank", rel: "noopener noreferrer", text: p.remote}) : p.remote)] : null,
+    p.local ? [h("dt", {text: "Branch"}), h("dd", {text: (m.branch || "—") + (m.modified || m.untracked ? " · " + ((m.modified || 0) + (m.untracked || 0)) + " changed" : " · clean") + (m.ahead ? " · ↑" + m.ahead : "") + (m.behind ? " · ↓" + m.behind : "")})] : null,
+    m.last_commit ? [h("dt", {text: "Last commit"}), h("dd", {text: rel(m.last_commit_ts) + " · " + m.last_commit})] : null,
+    (p.commands || []).length ? [h("dt", {text: "Commands"}), h("dd", null, p.commands.map(c => h("code", {style: "margin-right:8px", text: c})))] : null,
+    p.local && !p.canonical_ok && p.canonical ? [h("dt", {text: "Layout"}), h("dd", null, "Not at its canonical path — ", h("code", {text: "dev adopt " + p.path}))] : null,
+    p.stack.length ? [h("dt", {text: "Stack"}), h("dd", null, p.stack.map(s => h("span", {class: "stk", text: s})))] : null,
+    h("dt", {text: "Activity"}), h("dd", null, sparkline(p, 30, 120, 22)));
+}
+function timeStats(t) {
+  if (!t) return null;
+  const tu = t.turns || {};
+  return stats([[tu.median != null ? fmtMin(tu.median) : "—", "median turn", "", tu.n ? "Over " + plural(tu.n, "turn") + " in 30 days" : "No turns recorded yet"],
+    [tu.p90 != null ? fmtMin(tu.p90) : "—", "p90 turn", "", "90% of turns finish within this"],
+    [t.ratio != null ? "×" + t.ratio : "—", "actual ÷ estimate", t.ratio != null && t.ratio > 1.5 ? "warn" : "", t.runs ? "Median over " + plural(t.runs, "finished run") + " with an estimate (60 days)" : "No finished runs with an estimate yet"]]);
+}
+function slowTable(rows, showProject) {
+  if (!rows || !rows.length) return null;
+  return h("div", {class: "tw"}, h("table", {class: "t"}, h("thead", null, h("tr", null, h("th", {text: "Took"}), h("th", {text: "Command"}), showProject ? h("th", {text: "Project"}) : null, h("th", {text: "When"}))),
+    h("tbody", null, rows.map(r => h("tr", null, h("td", {class: "num", style: "white-space:nowrap", text: dur(r.secs || 0)}), h("td", null, h("code", {class: "ell", style: "display:block;max-width:420px", title: r.what, text: r.what || "—"})),
+      showProject ? h("td", {class: "t2 ell", style: "max-width:160px", text: r.project ? scopeName(r.project) : "—"}) : null, h("td", {class: "num t2", style: "white-space:nowrap", text: rel(r.ts)}))))));
+}
+function timePanel(t, showProject, title) {
+  if (!t) return null;
+  const sub = t.subagents || {}, has = (t.turns || {}).n || t.runs || (t.slow_tools || []).length || sub.n;
+  const body = has ? [timeStats(t),
+      t.ratio != null ? h("p", {class: "t2 tnote", text: t.ratio > 1 ? "Runs here take " + t.ratio + "× their estimate: new estimates are scaled by this ratio before the ETA is shown." : "Runs here finish within their estimate."}) : null,
+      (t.slow_tools || []).length ? [h("div", {class: "label", style: "margin:12px 0 4px", text: "Slowest commands · 7 days"}), slowTable(t.slow_tools.slice(0, 6), showProject)] : null,
+      sub.n ? [h("div", {class: "label", style: "margin:12px 0 4px", text: "Subagents · 7 days"}), h("p", {class: "t2", style: "margin:0 0 6px;font-size:.85rem", text: plural(sub.n, "subagent") + " · median " + fmtMin(sub.median) + " · p90 " + fmtMin(sub.p90)}),
+        slowTable((sub.top || []).slice(0, 4), showProject)] : null,
+      (t.recent_runs || []).length ? [h("div", {class: "label", style: "margin:12px 0 4px", text: "Recent runs: actual vs estimate"}), h("ul", {class: "tl-rows"}, t.recent_runs.slice(0, 5).map(r => h("li", {class: "trow"},
+        h("span", {class: "tx ell", title: r.what, text: r.what || "run"}), h("span", {class: "num t2" + (r.estimate && r.secs / 60 > r.estimate * 1.5 ? " bad" : ""), text: fmtMin(r.secs / 60) + " of ~" + fmtMin(r.estimate)}))))] : null]
+    : empty("No timing data yet", "devkit records turn, command, subagent and run durations as agents work; estimates get calibrated from them.");
+  return panel(title || "Time", null, null, body, {id: "time"});
+}
+function viewProject(main) {
+  const p = BYID.get(S.id);
+  if (!p) { viewUnknownProject(main); return; }
+  const tab = PTABS.some(t => t[0] === S.tab) ? S.tab : "overview", ns = p.ns || {}, m = p.main || {};
+  const plansL = plansFor([p.id]), sess = sessionsFor([p.id], p.sessions), here = ONPROJ.get(p.id) || [];
+  const failing = p.prsOpen.filter(r => r.checks === "failing").length;
+  main.append(crumbs([["Projects", link({view: "projects", id: "", tab: ""})], [p.owner, link({view: "projects", id: "", tab: "", owner: [p.owner]})], [p.name || p.id]]));
+  main.append(h("header", {class: "phead"},
+    h("div", {class: "pt1"}, h("div", {class: "pt-t"}, h("h1", null, healthDot(p), " ", p.name || p.id),
+        h("div", {class: "bd"}, statusBadge(p.status), prioBadge(p.priority), ns.milestone ? h("span", {class: "badge", text: "◆ " + ns.milestone}) : null, dueBadge(ns.due, p.status === "done"),
+          p.tags.map(t => h("span", {class: "stk", text: "#" + t})), here.length ? h("span", {class: "badge"}, h("span", {class: "dot d-live"}), plural(here.length, "live session")) : null, p.local ? null : h("span", {class: "tag", text: "not cloned"})),
+        h("div", {class: "pmeta t2"}, [p.owner, m.branch ? "⎇ " + m.branch : null, p.last_activity ? "active " + rel(p.last_activity) : null].filter(Boolean).join(" · "),
+          p.inits.length ? [" · member of ", p.inits.map((id, i) => [i ? ", " : "", h("a", {href: link({view: "initiatives", id, tab: ""}), text: (BYINIT.get(id) || {}).title || id})])] : null)),
+      h("div", {class: "pt-p"}, progressBar(p, true), h("div", {class: "t2 why", text: progOf(p).why}))),
+    p.health.reasons.length ? h("div", {class: "hreason " + p.health.level}, h("strong", {text: p.health.level === "risk" ? "At risk: " : "Needs a look: "}), p.health.reasons.join(" · ")) : null,
+    h("div", {class: "go"}, p.local ? [cmdBtn("dev claude " + p.id, true), cmdBtn("dev codex " + p.id), cmdBtn("dcd " + p.id)] : null, cmdBtn("dev handoff " + p.id))));
+  if (!p.local) main.append(callout("info", "Not cloned on this Mac", "The handoff note, tasks, plans and sessions come from the handoff repository. Clone it to work on it; PRs, worktrees and git activity appear after the next sync.", cmdBtn("dev clone " + p.id, true)));
+  main.append(stats([[p.cnt.open, "open tasks", "", null, link({tab: "tasks"})], [p.cnt.doing, "doing"], [p.cnt.blocked, "blocked", p.cnt.blocked ? "risk" : ""],
+    [p.prs, p.prs === 1 ? "open PR" : "open PRs", failing ? "risk" : "", failing ? failing + " failing CI" : null, link({tab: "prs"})], [p.wts.length, p.wts.length === 1 ? "worktree" : "worktrees", "", null, link({tab: "worktrees"})], [p.people.length, p.people.length === 1 ? "person here" : "people here"]]));
+  main.append(pageTabs([["overview", "Overview"], ["tasks", "Tasks", p.cnt.open], ["prs", "Pull requests", p.prs], ["worktrees", "Worktrees", p.wts.length], ["plans", "Plans", plansL.length || (p.plans || []).length], ["sessions", "Sessions", sess.length], ["note", "Handoff note"]], tab));
+  const tp = h("div", {class: "tabpanel", id: "tabpanel", role: "tabpanel", "aria-labelledby": "tab-" + tab}); main.append(tp);
+  if (tab === "overview") {
+    const doing = sortItems(p.items.filter(i => i.status === "doing" || i.status === "blocked")), next = sortItems(p.items.filter(i => i.status === "todo")).slice(0, 4);
+    const tt = ((D.timing || {}).by_project || {})[p.id];
+    tp.append(h("div", {class: "cols"},
+      h("div", {class: "stack-v"},
+        here.length ? panel("Live now", here.length, null, h("div", {class: "sessl"}, here.map(s => sessionBlock(s, s.who, s.asOf)))) : null,
+        p.status_line ? panel("Latest status", null, h("span", {class: "t2", style: "font-size:.8rem", text: (p.status_line.agent || "agent") + " · " + rel(p.status_line.ts) + (p.status_line.branch ? " · ⎇ " + p.status_line.branch : "")}), h("div", {class: "statusline", style: "font-size:.92rem"}, inline(stripMarker(p.status_line.line)))) : null,
+        panel("In progress", doing.length, h("a", {class: "btn sm ghost", href: link({tab: "tasks"})}, "All tasks →"),
+          doing.length || next.length ? [doing.length ? h("ul", {class: "irows"}, doing.map(i => itemRow(i))) : null, next.length ? [h("div", {class: "label pad-l", text: "Up next"}), h("ul", {class: "irows"}, next.map(i => itemRow(i)))] : null]
+            : empty("Nothing in progress", "Plan the work: ", h("code", {text: "dev task -p " + p.id + ' add "…" --now'})), {flush: !!(doing.length || next.length)}),
+        ns.purpose || ns.state ? panel("Purpose and current state", null, h("a", {class: "btn sm ghost", href: link({tab: "note"})}, "Full note →"), [ns.purpose ? [h("div", {class: "label", style: "margin:4px 0", text: "Purpose"}), md(ns.purpose)] : null, ns.state ? [h("div", {class: "label", style: "margin:12px 0 4px", text: "Current state"}), md(ns.state)] : null]) : null),
+      h("div", {class: "stack-v"}, whoPanel(p.people, [p.id]), panel("Repository", null, null, repoKv(p)), tt ? timePanel(tt, false, "Time on this project") : null)));
+  } else if (tab === "tasks") tp.append(itemsBlock(p.items, {scope: p.id}));
+  else if (tab === "prs") tp.append(prTable(p));
+  else if (tab === "worktrees") tp.append(wtTable(p));
+  else if (tab === "plans") tp.append(plansBlock(plansL, p.id, p.plans));
+  else if (tab === "sessions") tp.append(sessionsBlock(sess, false));
+  else {
+    const f = p.note && FILEMAP.get(p.note);
+    const part = (label, text) => text ? [h("div", {class: "label", style: "margin:12px 0 4px", text: label}), md(text)] : null;
+    tp.append(panel("Handoff note", null, h("span", {style: "display:flex;gap:8px"}, f ? h("a", {class: "btn sm", href: link({view: "explorer", f: p.note, id: "", tab: ""})}, "Open in Explorer") : null, cmdBtn("dev handoff " + p.id)),
+      f ? md(f.text) : p.ns ? [part("Purpose", ns.purpose), part("Current state", ns.state), part("Decisions and gotchas", ns.decisions), part("Links", ns.links)] : empty("No handoff note yet", h("code", {text: "dev sync"}), " creates it; agents fill it in with the devkit handoff skill.")));
   }
 }
 
-/* ---------------------------------------------------------------- Tasks */
-const SHOWN = {};
-function taskCard(p, t, bucket) {
-  const idx = p.tidx[t], due = (/\bdue:(\d{4}-\d{2}-\d{2})\b/.exec(t) || [])[1], over = due && due < lkey(new Date());
-  const cmd = bucket === "Done" || !idx ? null : bucket === "Now" ? "dev task done " + idx + " -p " + p.id : "dev task start " + idx + " -p " + p.id;
-  return h("div", {class: "tc", "data-nav": "", tabindex: "0", onkeydown: e => { if (e.key === "Enter") openProject(p.id, "tasks"); }},
-    h("div", {class: "tx", onclick: () => openProject(p.id, "tasks")}, inline(String(t).replace(/\s*\bdue:\d{4}-\d{2}-\d{2}\b/, ""))),
-    cmd ? icopy(cmd, bucket === "Now" ? "Mark done" : "Start") : h("span"),
-    h("div", {class: "meta"}, healthDot(p), h("button", {type: "button", onclick: () => openProject(p.id), text: p.name || p.id}), idx ? h("span", {class: "muted", text: "#" + idx}) : null,
-      due ? h("span", {class: "due" + (over ? " over" : ""), text: (over ? "overdue " : "due ") + due}) : null));
+/* ---------------------------------------------------------------- Team: one card per person (user@host) */
+function markerChip() { return h("span", {class: "mk", title: "The status-line marker every agent reply starts with"}, "[Firefly", h("span", {class: "chev", text: ">"}), " DevKit]"); }
+function personCard(x) {
+  const claimed = x.claimed.map(id => ITEMBY.get(id)).filter(Boolean), lockIds = new Set(x.locks.map(l => l.id));
+  const extra = claimed.filter(i => !lockIds.has(i.id));
+  const expired = claimed.filter(i => i.lock === "expired");
+  const lockRow = (id, title, scope, until) => { const it = ITEMBY.get(id), exp = (it && it.lock === "expired") || (iso(until) && iso(until) < nowS());
+    return h("li", {class: "lrow" + (exp ? " exp" : ""), "data-nav": "", tabindex: "0", onclick: () => it ? openTask(id) : openScope(scope), onkeydown: e => { if (e.key === "Enter") it ? openTask(id) : openScope(scope); }},
+      lockIcon(), h("span", {class: "iid mono", text: id}), h("span", {class: "ell lt", title: title, text: title}), h("span", {class: "t2 ell ls", text: scopeName(scope)}), h("span", {class: "num lu" + (exp ? " bad" : ""), text: exp ? "expired " + rel(iso(until)) : untilText(until)})); };
+  return h("article", {class: "pcard2 panel" + (isMe(x.who) ? " me" : ""), "aria-label": x.who},
+    h("div", {class: "pc-h"}, avatar(x.who, true), h("div", {class: "pc-n"}, h("h3", null, h("span", {class: "ell", text: x.who}), isMe(x.who) ? h("span", {class: "tag", text: "you"}) : null),
+      h("div", {class: "t2", text: [x.sessions.length ? plural(x.sessions.length, "live session") : "no live session", plural(x.locks.length, "lock"), x.updated ? "presence " + rel(x.updated) : null].filter(Boolean).join(" · ")}))),
+    expired.length ? callout("warn", plural(expired.length, "expired lock") + " still held", "Anyone can release an expired lock; check with " + x.user + " first.", cmdBtn("dev task " + flagOf(expired[0].scope) + " release " + expired[0].id + ' --why "lock expired"')) : null,
+    x.sessions.length ? h("div", {class: "pc-s"}, h("div", {class: "label", text: "Live sessions"}), x.sessions.map(s => sessionBlock(s, null, x.updated))) : null,
+    x.locks.length || extra.length ? h("div", {class: "pc-s"}, h("div", {class: "label", text: "Locks and claimed tasks"}), h("ul", {class: "lrows"}, x.locks.map(l => lockRow(l.id, l.title, l.scope, l.until)), extra.map(i => lockRow(i.id, i.title, i.scope, i.lock_expires)))) : null,
+    x.recent.length ? h("div", {class: "pc-s"}, h("div", {class: "label", text: "Recent sessions"}), h("ul", {class: "rrows"}, x.recent.slice(0, 4).map(r => h("li", null, h("span", {class: "num t2", text: fmt(r.ts)}), " ", scopeChip(r.scope), " ", h("span", {class: "t2", text: [r.agent, r.branch ? "⎇ " + r.branch : ""].filter(Boolean).join(" · ")}), h("div", {class: "ell", title: plain(r.text)}, inline(stripMarker(r.text))))))) : null,
+    !x.sessions.length && !x.locks.length && !extra.length && !x.recent.length ? h("p", {class: "t2", style: "margin:0", text: "Nothing right now."}) : null);
+}
+function viewTeam(main) {
+  const colls = D.collisions || [], live = PEOPLE.reduce((a, x) => a + x.sessions.length, 0), locks = ITEMS.filter(i => i.open && i.claimed_by).length;
+  main.append(h("div", {class: "head"}, h("h1", {text: "Team"}), h("span", {class: "sub", text: plural(PEOPLE.length, "person", "people") + " · " + plural(live, "live session") + " · " + plural(locks, "claimed task") + " · from presence files in the handoff repo"}),
+    h("div", {class: "right"}, providerChips())));
+  if (colls.length) main.append(panel("Collisions", colls.length, null, h("ul", {class: "acts"}, colls.map(c => h("li", {class: "act", "data-nav": "", tabindex: "0", onclick: () => c.id ? openTask(c.id) : openProject(c.project), onkeydown: e => { if (e.key === "Enter") c.id ? openTask(c.id) : openProject(c.project); }},
+    h("span", {class: "sev warn", "aria-hidden": "true", text: "!"}), h("div", {style: "min-width:0"}, h("div", {class: "at"}, h("span", {class: "tag", text: c.kind === "expired-lock" ? "Expired lock" : "Same branch"}), h("span", {text: c.kind === "expired-lock" ? c.id + " · " + scopeName(c.scope) : scopeName(c.project) + " ⎇ " + c.branch})), h("div", {class: "ad", text: c.text})),
+    h("div", {class: "ar"}, cmdBtn(c.kind === "expired-lock" ? "dev task " + flagOf(c.scope) + " release " + c.id + ' --why "lock expired"' : "dev team"))))), {cls: "mb", flush: true}));
+  if (!PEOPLE.length) { main.append(h("div", {class: "panel"}, empty("No presence yet", "Each machine writes ", h("code", {text: "presence/<user>@<host>.json"}), " to the handoff repo while sessions run; ", h("code", {text: "dev team"}), " shows the same in the terminal."))); return; }
+  main.append(h("div", {class: "people"}, PEOPLE.map(personCard)));
+}
+
+/* ---------------------------------------------------------------- Tasks: every work item, across scopes */
+function taskCard(it) {
+  const first = taskCmds(it)[0];
+  return h("div", {class: "tc" + (it.status === "blocked" ? " blk" : ""), "data-nav": "", tabindex: "0", onclick: () => openTask(it.id), onkeydown: e => { if (e.key === "Enter") openTask(it.id); }},
+    h("div", {class: "tx"}, istatusIcon(it.status), " ", it.title),
+    first && it.open ? icopy(first[1], first[0]) : h("span"),
+    h("div", {class: "meta"}, h("span", {class: "iid mono", text: it.legacy ? "note" : it.id}), scopeChip(it.scope), claimChip(it, true), it.due ? dueBadge(it.due, !it.open) : null, prioIcon(it.priority)));
 }
 function viewTasks(main) {
-  const ps = filtered(false).filter(p => !S.tp || p.id === S.tp), tk = tokens(S.q);
-  const buckets = {Now: [], Next: [], Later: [], Done: []};
-  for (const p of ps) for (const [b, list] of [["Now", p.t.now], ["Next", p.t.next], ["Later", p.t.later], ["Done", p.t.done_recent]])
-    for (const t of list) if (tk.every(x => (t + " " + p.id).toLowerCase().includes(x))) buckets[b].push([p, t]);
-  const projSel = h("select", {"aria-label": "Project"}); projSel.append(h("option", {value: ""}, "All projects"));
-  for (const p of P.filter(matchFacets)) projSel.append(h("option", {value: p.id, selected: S.tp === p.id}, p.id));
-  projSel.addEventListener("change", () => set({tp: projSel.value}, true));
-  const open = buckets.Now.length + buckets.Next.length + buckets.Later.length;
-  main.append(h("div", {class: "head"}, h("h1", {text: "Tasks"}), h("span", {class: "sub", text: buckets.Now.length + " in progress · " + open + " open · from the handoff notes"})));
-  main.append(h("div", {class: "toolbar"}, h("span", {class: "count", text: ""}), projSel,
-    h("div", {class: "seg", role: "group", "aria-label": "Layout"}, [["board", "Board"], ["list", "By project"]].map(([m, l]) => h("button", {type: "button", "aria-pressed": String(S.tmode === m), onclick: () => set({tmode: m}, true)}, l)))));
-  if (!open && !buckets.Done.length) { main.append(h("div", {class: "panel"}, empty("No tasks yet", "Add one from any terminal: ", h("code", {text: 'dev task add "…" --now -p <project>'}), ". Agents keep the board in each handoff note as they plan and finish work."))); return; }
+  const all = allItems(), tk = tokens(S.q), who = S.who === "me" ? ME : S.who;
+  const base = all.filter(it => (!S.tp || it.scope === S.tp) && (!who || it.holder === who) && tk.every(t => (it.id + " " + it.title + " " + it.scope + " " + (it.claimed_by || "")).toLowerCase().includes(t)));
+  const items = base.filter(it => !S.tst || (S.tst === "done" ? !it.open : it.status === S.tst));
+  const c = cnt(base);
+  const scopeSel = h("select", {"aria-label": "Scope"}); scopeSel.append(h("option", {value: ""}, "All projects and initiatives"));
+  for (const x of INITS) scopeSel.append(h("option", {value: x.scope, selected: S.tp === x.scope}, "◆ " + x.title));
+  for (const p of P.filter(p => p.items.length)) scopeSel.append(h("option", {value: p.id, selected: S.tp === p.id}, p.id));
+  scopeSel.addEventListener("change", () => set({tp: scopeSel.value}, true));
+  const whos = Array.from(new Set(all.filter(i => i.holder).map(i => i.holder))).sort();
+  const whoSel = h("select", {"aria-label": "Claimed by"}); whoSel.append(h("option", {value: ""}, "Anyone"), ME ? h("option", {value: "me", selected: S.who === "me"}, "Claimed by me") : null);
+  for (const w of whos) whoSel.append(h("option", {value: w, selected: S.who === w}, w));
+  whoSel.addEventListener("change", () => set({who: whoSel.value}, true));
+  main.append(h("div", {class: "head"}, h("h1", {text: "Tasks"}), h("span", {class: "sub", text: c.doing + " doing · " + c.blocked + " blocked · " + c.open + " open · work items with locks and history"})));
+  main.append(h("div", {class: "toolbar"}, seg("Status", "tst", [["", "All"], ["doing", "Doing", c.doing], ["blocked", "Blocked", c.blocked], ["todo", "To do", c.todo], ["done", "Closed", c.done + c.cancelled]]), h("span", {class: "spacer"}), scopeSel, whoSel,
+    seg("Layout", "tmode", [["board", "Board"], ["list", "By scope"]])));
+  if (!all.length) { main.append(h("div", {class: "panel"}, empty("No tasks yet", "Add one from any terminal: ", h("code", {text: 'dev task -p <project> add "…" --now'}), ". Agents claim, finish and release them as they work."))); return; }
+  if (!items.length) { main.append(h("div", {class: "panel"}, empty("No task matches", h("button", {class: "btn", type: "button", onclick: () => set({tst: "", tp: "", who: "", q: ""}, true)}, "Clear the task filters")))); return; }
   if (S.tmode === "list") {
-    const byP = new Map(); for (const b of ["Now", "Next", "Later"]) for (const [p, t] of buckets[b]) { if (!byP.has(p.id)) byP.set(p.id, {p, Now: [], Next: [], Later: []}); byP.get(p.id)[b].push(t); }
-    const items = Array.from(byP.values()).sort((a, b) => b.Now.length - a.Now.length || HRANK[a.p.health.level] - HRANK[b.p.health.level]);
-    main.append(h("div", {class: "stack-v"}, items.map(({p, Now, Next, Later}) => panel(p.name || p.id, Now.length + Next.length + Later.length, h("span", {style: "display:flex;gap:8px;align-items:center"}, healthDot(p), statusBadge(p.status), h("button", {class: "btn sm", type: "button", onclick: () => openProject(p.id)}, "Open")),
-      [["Now", Now, "doing"], ["Next", Next, ""], ["Later", Later, ""]].filter(x => x[1].length).map(([l, list, cls]) => [h("div", {class: "label", style: "margin:8px 0 4px", text: l + " · " + list.length}), h("ul", {class: "tl-rows"}, list.map(t => taskLine(p, t, cls)))])))));
+    const by = new Map(); for (const it of sortItems(items)) { if (!by.has(it.scope)) by.set(it.scope, []); by.get(it.scope).push(it); }
+    const order = Array.from(by.entries()).sort((a, b) => cnt(b[1]).doing - cnt(a[1]).doing || cnt(b[1]).open - cnt(a[1]).open);
+    main.append(h("div", {class: "stack-v"}, order.map(([sc, list]) => panel(scopeName(sc), list.length, h("button", {class: "btn sm", type: "button", onclick: () => openScope(sc, "tasks")}, "Open"), h("ul", {class: "irows"}, list.slice(0, 60).map(i => itemRow(i, {home: sc})))), {flush: true}))));
     return;
   }
   const board = h("div", {class: "board"});
-  for (const b of ["Now", "Next", "Later", "Done"]) {
-    const list = buckets[b], n = SHOWN[b] || 120;
-    const col = h("section", {class: "col", "aria-label": b}, h("h3", null, h("span", {class: "dot", style: "background:var(--" + (b === "Now" ? "mark" : b === "Done" ? "good" : "deemph") + ")"}), b, h("span", {class: "n num", text: String(list.length)})));
-    if (!list.length) col.append(h("p", {class: "t2", style: "margin:4px 8px;font-size:.8rem", text: b === "Now" ? "Nothing in progress — start one from Next." : "Empty."}));
-    for (const [p, t] of list.slice(0, n)) col.append(taskCard(p, t, b));
-    if (list.length > n) col.append(h("button", {class: "btn sm", type: "button", onclick: () => { SHOWN[b] = n + 300; render(); }, text: "Show " + Math.min(300, list.length - n) + " more"}));
+  const closed = items.filter(i => !i.open).sort((a, b) => String(b.updated || "").localeCompare(String(a.updated || "")));
+  for (const [b, label] of [["now", "Now"], ["next", "Next"], ["later", "Later"], ["done", "Closed"]]) {
+    const list = b === "done" ? closed : sortItems(items.filter(i => i.open && i.bucket === b)), n = SHOWN[b] || 60;
+    const col = h("section", {class: "col", "aria-label": label}, h("h3", null, h("span", {class: "dot", style: "background:var(--" + (b === "now" ? "mark" : b === "done" ? "good" : "deemph") + ")"}), label, h("span", {class: "n num", text: String(list.length)})));
+    if (!list.length) col.append(h("p", {class: "t2", style: "margin:4px 8px;font-size:.8rem", text: b === "now" ? "Nothing in progress — start one from Next." : "Empty."}));
+    for (const it of list.slice(0, n)) col.append(taskCard(it));
+    if (list.length > n) col.append(h("button", {class: "btn sm", type: "button", onclick: () => { SHOWN[b] = n + 200; render(); }, text: "Show " + Math.min(200, list.length - n) + " more"}));
     board.append(col);
   }
   main.append(board);
@@ -1537,10 +2352,12 @@ function viewTasks(main) {
 
 /* ---------------------------------------------------------------- Activity: timeline first */
 function timelineItems(ps, nDays) {
-  const cutoff = nowS() - nDays * 86400, ids = new Set(ps.map(p => p.id)), items = [];
-  for (const s of D.sessions || []) { const ts = s.last_seen || s.started || 0; if (ts >= cutoff && (!s.project || ids.has(s.project))) items.push({ts, k: "◆", p: BYID.get(s.project), text: (s.agent || "agent") + (s.branch ? " · `" + s.branch + "`" : "") + (s.status ? " · " + stripMarker(s.status) : "") + (s.active ? " · live" : "")}); }
-  for (const p of ps) for (const s of p.sessions) { const ts = sessTs(s); if (ts >= cutoff) items.push({ts, k: "◇", p, text: sessText(s)}); }
+  const cutoff = nowS() - nDays * 86400, ids = new Set(ps.map(p => p.id)), items = [], logged = new Set((D.session_log || []).map(s => s.scope));
+  for (const x of PEOPLE) for (const s of x.sessions) { const ts = s.last_seen || s.started || 0; if (ts >= cutoff && (!s.project || ids.has(s.project))) items.push({ts, k: "◆", p: BYID.get(s.project), text: [x.who, s.agent || "agent", s.branch ? "`" + s.branch + "`" : "", s.progress && s.progress.goal ? s.progress.goal : "", s.status ? stripMarker(s.status) : "", "live"].filter(Boolean).join(" · ")}); }
+  for (const s of D.session_log || []) if (s.ts >= cutoff && (isInit(s.scope) || ids.has(s.scope))) items.push({ts: s.ts, k: "◇", p: BYID.get(s.scope), scope: isInit(s.scope) ? s.scope : null, text: [s.who, s.agent, s.branch ? "`" + s.branch + "`" : "", stripMarker(s.text)].filter(Boolean).join(" · ")});
+  for (const p of ps) if (!logged.has(p.id)) for (const s of p.sessions) { const ts = sessTs(s); if (ts >= cutoff) items.push({ts, k: "◇", p, text: sessText(s)}); }
   for (const m of D.merged || []) if (m.ts >= cutoff) items.push({ts: m.ts, k: "⑃", text: "Merged [#" + m.number + "](" + m.url + ") " + m.title + " · " + m.repo});
+  for (const it of ITEMS) { const ts = iso(it.updated); if (ts >= cutoff && (it.status === "done" || it.status === "blocked") && (isInit(it.scope) || ids.has(it.scope))) items.push({ts, k: it.status === "done" ? "✓" : "⊘", p: BYID.get(it.scope), scope: isInit(it.scope) ? it.scope : null, text: (it.status === "done" ? "Done " : "Blocked ") + it.id + " " + it.title + (it.updated_by ? " · " + it.updated_by : "")}); }
   for (const ln of D.ops || []) { const ts = sessTs(ln); if (ts >= cutoff) items.push({ts, k: "⚙", text: ln.slice(19)}); }
   for (const r of (D.canary || {}).records || []) if (!r.ok && r.ts >= cutoff) items.push({ts: r.ts, k: "✕", p: BYID.get(r.project), text: "Canary miss (" + r.agent + "): reply began “" + (r.excerpt || "") + "”"});
   return items.sort((a, b) => b.ts - a.ts);
@@ -1553,7 +2370,7 @@ function timeline(ps, nDays, limit) {
     const k = lkey(new Date(it.ts * 1000));
     if (k !== day) { day = k; ul.append(h("li", {class: "day", text: fmtDay(it.ts)})); }
     ul.append(h("li", {class: "it"}, h("span", {class: "tm", text: tm(it.ts)}), h("span", {class: "ki", "aria-hidden": "true", text: it.k}),
-      h("div", {style: "min-width:0"}, it.p ? h("a", {href: link({view: S.view, p: it.p.id}), class: "who", onclick: e => { e.preventDefault(); openProject(it.p.id); }, text: it.p.name || it.p.id}) : null, inline(it.text))));
+      h("div", {style: "min-width:0"}, it.p ? h("a", {href: link({view: "projects", id: it.p.id}), class: "who", onclick: e => { e.preventDefault(); openProject(it.p.id); }, text: it.p.name || it.p.id}) : null, inline(it.text))));
   }
   return ul;
 }
@@ -1631,6 +2448,19 @@ function viewExplorer(main) {
 }
 
 /* ---------------------------------------------------------------- Health */
+function providerChips() {
+  const out = []; const pv = D.providers || {};
+  for (const key of ["claude", "codex"]) {
+    const p = pv[key]; if (!p || !p.installed) continue;
+    const name = p.name || key, q = p.quota || {};
+    let tone = "good", text = name;
+    if (p.logged_in === false) { tone = "warning"; text += " · not signed in"; }
+    else if (q.available === false) { tone = "critical"; text += " · quota exhausted" + (q.resets_at ? " until " + fmtDay(q.resets_at) : ""); }
+    else { text += " · signed in" + (p.plan ? " · " + p.plan.charAt(0).toUpperCase() + p.plan.slice(1) : ""); if (q.used_percent != null) text += " · " + Math.round(q.used_percent) + "% used"; }
+    out.push(h("span", {class: "prov", title: [p.version ? "v" + p.version : "", p.auth_method || "", q.note || ""].filter(Boolean).join(" · ")}, h("span", {class: "dot d-" + tone, "aria-hidden": "true"}), text));
+  }
+  return out;
+}
 function providerCard(key, p) {
   if (!p || !p.installed) return h("div", {class: "panel"}, h("div", {class: "ph"}, h("h2", {text: key === "claude" ? "Claude Code" : "Codex"})), empty("Not installed", "Run ", h("code", {text: "dev install"}), "."));
   const q = p.quota || {}, exhausted = q.available === false, used = q.used_percent;
@@ -1652,8 +2482,8 @@ function viewHealth(main) {
       return h("div", null, h("div", {style: "display:flex;justify-content:space-between;font-size:.85rem"}, h("strong", {text: a.charAt(0).toUpperCase() + a.slice(1)}), h("span", {class: "num t2", text: pct + "% · " + ok + "/" + tot + " replies"})),
         h("div", {class: "qbar"}, h("i", {style: "width:" + pct + "%;background:var(--" + tone + ")"}))); })),
       misses.length ? h("div", {class: "tw", style: "margin-top:12px"}, h("table", {class: "t"}, h("thead", null, h("tr", null, ["When", "Agent", "Project", "Reply began with"].map(x => h("th", {text: x})))),
-        h("tbody", null, misses.map(r => h("tr", null, h("td", {class: "num", text: fmt(r.ts)}), h("td", {text: r.agent}), h("td", {text: r.project || "—"}), h("td", {class: "t2 ell", style: "max-width:320px", text: r.excerpt || ""})))))) : h("p", {class: "t2", style: "font-size:.85rem", text: "No deviations: every tracked reply carried the marker."})]
-    : empty("No tracked replies yet", "Replies in sessions under ", h("code", {text: D.dev_root}), " are checked after every turn.");
+        h("tbody", null, misses.map(r => h("tr", null, h("td", {class: "num", text: fmt(r.ts)}), h("td", {text: r.agent}), h("td", {text: r.project || "—"}), h("td", {class: "t2 ell", style: "max-width:320px", text: r.excerpt || ""})))))) : h("p", {class: "t2", style: "font-size:.85rem"}, "No deviations: every tracked reply started with the ", markerChip(), " status line.")]
+    : empty("No tracked replies yet", "Replies in sessions under ", h("code", {text: D.dev_root}), " are checked after every turn for the ", markerChip(), " status line.");
   main.append(h("div", {class: "cols even", style: "margin-bottom:16px"}, providerCard("claude", pv.claude), providerCard("codex", pv.codex)));
   const rules = D.guard_rules || [];
   const maxc = Math.max(1, ...rules.map(r => r.count));
@@ -1663,7 +2493,7 @@ function viewHealth(main) {
         h("td", {class: "t2", style: "white-space:nowrap", text: Object.entries(r.agents).map(([a, n]) => a + " " + n).join(" · ")}), h("td", {class: "num t2", style: "white-space:nowrap", text: r.last.slice(5)}),
         h("td", {class: "t2"}, h("div", {class: "ell", style: "max-width:420px", title: r.example}, r.example)))))))
     : empty("The guard has not blocked anything", "Blocked actions are grouped by rule here; a rule that keeps firing means an agent is fighting the workspace rules.");
-  main.append(h("div", {class: "cols", style: "margin-bottom:16px"}, panel("Guard decisions by rule", rules.reduce((a, r) => a + r.count, 0), null, guardBody, {flush: !!rules.length}), panel("Instruction canary · 7 days", null, null, canaryBody)));
+  main.append(h("div", {class: "cols", style: "margin-bottom:16px"}, panel("Guard decisions by rule", rules.reduce((a, r) => a + r.count, 0), null, guardBody, {flush: !!rules.length}), panel("Instruction canary · 7 days", null, markerChip(), canaryBody)));
   const drift = D.drift;
   const driftBody = drift == null ? h("p", {class: "t2", style: "font-size:.85rem;margin:0"}, "No drift report in this registry. ", h("code", {text: "dev config diff"}), " compares the devkit configuration with Claude Code and Codex.")
     : !drift.length ? h("p", {class: "t2", style: "margin:0", text: "✓ Claude Code and Codex match the devkit configuration."})
@@ -1680,6 +2510,12 @@ function viewHealth(main) {
     h("div", {class: "stack-v"}, panel("Configuration drift", drift ? drift.length : null, null, driftBody),
       panel("Disk", null, null, sizes.length ? [rankedBars(sizes, kb, id => openProject(id)), h("p", {class: "t2", style: "font-size:.8rem;margin:10px 0 0"}, "Reclaim safely with ", h("code", {text: "dev gc"}), " (dry run).")] : empty("Not measured yet", "The hourly sync measures sizes.")))));
 }
+function viewHealthV3(main) {
+  viewHealth(main);
+  const tp = timePanel(D.timing, true, "Time · how long things really take");
+  const first = $(".cols.even", main);
+  if (tp) { const w = h("div", {class: "mb"}, tp); if (first && first.nextSibling) main.insertBefore(w, first.nextSibling); else main.append(w); }
+}
 
 /* ---------------------------------------------------------------- global search */
 let IDX = null;
@@ -1687,14 +2523,12 @@ function buildIndex() {
   IDX = [];
   for (const p of P) {
     IDX.push({type: "project", pid: p.id, title: p.id, text: [p.ns && p.ns.purpose, p.ns && p.ns.state, p.stack.join(" "), p.tags.join(" ")].filter(Boolean).join(" · ")});
-    for (const [b, list] of [["Now", p.t.now], ["Next", p.t.next], ["Later", p.t.later], ["Done", p.t.done_recent]]) for (const t of list) IDX.push({type: "task", pid: p.id, title: t, text: b + " · " + p.id});
-    for (const s of p.sessions) IDX.push({type: "session", pid: p.id, title: s, text: p.id});
     for (const r of p.prsOpen) IDX.push({type: "pr", pid: p.id, title: "#" + r.number + " " + (r.title || ""), text: (r.branch || "") + " " + (CHECKS[r.checks] || ""), url: r.url});
   }
-  for (const x of INITS) {
-    IDX.push({type: "initiative", iid: x.id, title: x.title, text: [x.goal, x.scope, x.state, x.projects.join(" ")].filter(Boolean).join(" · ")});
-    for (const [b, list] of [["Now", x.t.now], ["Next", x.t.next], ["Later", x.t.later]]) for (const t of list) IDX.push({type: "task", iid: x.id, title: t, text: b + " · " + x.title});
-  }
+  for (const it of allItems()) IDX.push({type: "task", tid: it.id, pid: isInit(it.scope) ? "" : it.scope, title: (it.legacy ? "" : it.id + " ") + it.title, text: [ISTATUS[it.status] ? ISTATUS[it.status][1] : it.status, scopeName(it.scope), it.claimed_by, it.body].filter(Boolean).join(" · ")});
+  for (const x of INITS) IDX.push({type: "initiative", iid: x.id, title: x.title, text: [x.goal, x.scope, x.state, x.projects.join(" ")].filter(Boolean).join(" · ")});
+  for (const x of PEOPLE) IDX.push({type: "person", who: x.who, title: x.who, text: x.sessions.map(s => [s.agent, s.project, s.branch, s.progress && s.progress.goal].filter(Boolean).join(" ")).join(" · ")});
+  for (const s of (D.session_log || []).slice(0, 600)) IDX.push({type: "session", scope: s.scope, pid: isInit(s.scope) ? "" : s.scope, title: fmt(s.ts) + " · " + scopeName(s.scope), text: [s.who, s.agent, s.branch, s.text].filter(Boolean).join(" · ")});
   for (const f of FILES) { const pr = projectFor(f.path); IDX.push({type: f.path.startsWith("plans/") ? "plan" : f.path.startsWith("projects/") || f.path.startsWith("initiatives/") ? "note" : "file", pid: pr ? pr.id : "", title: f.path, text: f.text, file: f.path}); }
   for (const it of IDX) it.lc = (it.title + "\n" + it.text).toLowerCase();
 }
@@ -1704,153 +2538,85 @@ function search(q) {
   for (const it of IDX) {
     if (it.pid && facetCount() && !allowed.has(it.pid)) continue;
     if (!tk.every(t => it.lc.includes(t))) continue;
-    const tl = it.title.toLowerCase(); out.push([tk.reduce((a, t) => a + (tl.includes(t) ? 3 : 1), 0) + ({initiative: 3.5, project: 3, pr: 2.5, task: 2, note: 1.5, plan: 1.5, session: 1, file: 0.5}[it.type] || 0), it]);
+    const tl = it.title.toLowerCase(); out.push([tk.reduce((a, t) => a + (tl.includes(t) ? 3 : 1), 0) + ({initiative: 3.5, project: 3, person: 3, pr: 2.5, task: 2.2, note: 1.5, plan: 1.5, session: 1, file: 0.5}[it.type] || 0), it]);
   }
   return out.sort((a, b) => b[0] - a[0]).map(x => x[1]);
 }
 function snippet(text, q) { text = plain(text); const tk = tokens(q), lc = text.toLowerCase(); let i = -1; for (const t of tk) { i = lc.indexOf(t); if (i >= 0) break; }
   if (i < 0) return text.slice(0, 160); const s = Math.max(0, i - 70); return (s ? "…" : "") + text.slice(s, s + 180) + (s + 180 < text.length ? "…" : ""); }
 function viewSearch(main) {
-  const res = search(S.q), types = ["initiative", "project", "pr", "task", "note", "plan", "session", "file"], cnt = {}; for (const t of types) cnt[t] = 0; for (const r of res) cnt[r.type]++;
+  const res = search(S.q), types = ["initiative", "project", "person", "task", "pr", "note", "plan", "session", "file"], n = {}; for (const t of types) n[t] = 0; for (const r of res) n[r.type]++;
   const shown = res.filter(r => !S.types.length || S.types.includes(r.type));
   main.append(h("div", {class: "head"}, h("h1", {text: "Search"}), h("span", {class: "sub", text: plural(res.length, "result") + " for “" + S.q + "”"})));
-  main.append(h("div", {class: "toolbar"}, h("div", {class: "seg", role: "group", "aria-label": "Result types"}, types.filter(t => cnt[t]).map(t => h("button", {type: "button", "aria-pressed": String(S.types.includes(t)), onclick: () => set({types: S.types.includes(t) ? S.types.filter(x => x !== t) : S.types.concat([t])}, true)}, (t === "pr" ? "PRs" : t + "s") + " " + cnt[t])))));
-  if (!shown.length) { main.append(h("div", {class: "panel"}, empty("Nothing found", "Try fewer words or clear filters. Search covers projects, PRs, tasks, notes, plans, sessions and every Markdown file in the handoff repo."))); return; }
+  main.append(h("div", {class: "toolbar"}, h("div", {class: "seg", role: "group", "aria-label": "Result types"}, types.filter(t => n[t]).map(t => h("button", {type: "button", "aria-pressed": String(S.types.includes(t)), onclick: () => set({types: S.types.includes(t) ? S.types.filter(x => x !== t) : S.types.concat([t])}, true)}, (t === "pr" ? "PRs" : t === "person" ? "people" : t + "s") + " " + n[t])))));
+  if (!shown.length) { main.append(h("div", {class: "panel"}, empty("Nothing found", "Try fewer words or clear filters. Search covers initiatives, projects, people, tasks, PRs, notes, plans, sessions and every Markdown file in the handoff repo."))); return; }
   const box = h("div", {class: "results panel"});
   for (const r of shown.slice(0, 300)) {
-    const el = h("button", {class: "res", type: "button", "data-nav": "", onclick: () => r.url ? window.open(r.url, "_blank", "noopener") : r.file ? set({view: "explorer", f: r.file, fq: S.q}, true) : r.iid ? openInitiative(r.iid) : openProject(r.pid, r.type === "task" ? "tasks" : null)},
-      h("div", {class: "rt"}, h("span", {class: "tag", text: r.type}), h("span", {class: "ell"}, inline(r.title.slice(0, 200)))), h("div", {class: "rs"}, r.pid && r.type !== "project" ? (BYID.get(r.pid) || {}).name + " · " : "", snippet(r.text, S.q)));
+    const run = () => r.url ? window.open(r.url, "_blank", "noopener") : r.tid ? openTask(r.tid) : r.file ? set({view: "explorer", id: "", f: r.file, fq: S.q}, true) : r.iid ? openInitiative(r.iid) : r.who ? go("team") : r.scope ? openScope(r.scope, "sessions") : openProject(r.pid);
+    const el = h("button", {class: "res", type: "button", "data-nav": "", onclick: run},
+      h("div", {class: "rt"}, h("span", {class: "tag", text: r.type}), h("span", {class: "ell"}, inline(r.title.slice(0, 200)))), h("div", {class: "rs"}, r.pid && r.type !== "project" && BYID.has(r.pid) ? (BYID.get(r.pid).name || r.pid) + " · " : "", snippet(r.text, S.q)));
     highlight(el, S.q); box.append(el);
   }
   main.append(box);
 }
 
-/* ---------------------------------------------------------------- project drawer: a working surface */
-function openProject(id, section) { if (!BYID.has(id)) { toast("No handoff note for " + id + " yet"); return; } set({p: id, i: ""}, true); if (section) setTimeout(() => { const el = $("#sec-" + section); if (el) el.scrollIntoView({block: "start"}); }, 80); }
-function closeDrawer() { set({p: "", i: ""}, true); }
+/* ---------------------------------------------------------------- task drawer: metadata, lock, history, commands */
 let lastFocus = null;
 function renderDrawer() {
-  const dr = $("#drawer"), scrim = $("#scrim"), p = BYID.get(S.p), ini = !p && BYINIT.get(S.i);
-  if (ini) { if (dr.hidden) lastFocus = document.activeElement; clear(dr); dr.hidden = false; scrim.hidden = false; requestAnimationFrame(() => { dr.classList.add("on"); scrim.classList.add("on"); }); initiativeDrawer(dr, ini); return; }
-  if (!p) { if (!dr.hidden) { dr.classList.remove("on"); scrim.classList.remove("on"); setTimeout(() => { if (!S.p && !S.i) { dr.hidden = true; scrim.hidden = true; } }, 200); if (lastFocus && lastFocus.focus) lastFocus.focus(); } return; }
+  const dr = $("#drawer"), scrim = $("#scrim"), it = S.task && ITEMBY.get(S.task);
+  if (!it) { if (!dr.hidden) { dr.classList.remove("on"); scrim.classList.remove("on"); setTimeout(() => { if (!S.task) { dr.hidden = true; if ($("#palette").hidden && $("#sheet").hidden) scrim.hidden = true; } }, 200); if (lastFocus && lastFocus.focus && lastFocus.isConnected) lastFocus.focus({preventScroll: true}); } return; }
   if (dr.hidden) lastFocus = document.activeElement;
   clear(dr); dr.hidden = false; scrim.hidden = false; requestAnimationFrame(() => { dr.classList.add("on"); scrim.classList.add("on"); });
-  const ns = p.ns || {}, m = p.main || {};
-  const sec = (id, title, count, right, body, flush) => { const el = panel(title, count, right, body, {id: "sec-" + id, flush}); return el; };
   const closeBtn = h("button", {class: "btn icon", type: "button", onclick: closeDrawer, "aria-label": "Close (Esc)"}, "✕");
-  const navItems = [["note", "Note"], ["tasks", "Tasks"], ["prs", "Pull requests"], ["worktrees", "Worktrees"], ["plans", "Plans"], ["sessions", "Sessions"], ["repo", "Repository"]];
+  const ini = isInit(it.scope), cmds = taskCmds(it);
+  const scopeHref = ini ? link({view: "initiatives", id: it.scope.slice(12), tab: "tasks", task: ""}) : link({view: "projects", id: it.scope, tab: "tasks", task: ""});
+  const exp = it.lock === "expired";
+  const lock = it.claimed_by ? callout(exp ? "warn" : "info", exp ? "Lock expired — still claimed by " + it.holder : "Claimed by " + (isMe(it.holder) ? "you (" + it.holder + ")" : it.holder),
+      [it.agent ? "Agent " + it.agent + " · " : "", it.claimed_at ? "since " + fmt(iso(it.claimed_at)) + " · " : "", it.lock_expires ? (exp ? "expired " : "lock until ") + fmt(iso(it.lock_expires)) + " (" + (exp ? rel(iso(it.lock_expires)) : untilText(it.lock_expires)) + ")" : "",
+        exp ? ". Anyone can release it; others cannot change the task while a lock is valid." : ". Others cannot change it until the lock is released or expires."].join(""))
+    : it.open ? callout("info", "Unclaimed", it.legacy ? "Checkbox tasks have no lock; the next dev sync imports them as work items." : "Start it to take the lock: other people and agents then see it as yours.", cmds[0] && !it.legacy ? cmdBtn(cmds[0][1], true) : null) : null;
   const head = h("div", {class: "dh"},
-    h("div", {class: "r1"}, h("div", {style: "flex:1;min-width:0"}, h("div", {class: "t2", style: "font-size:.8rem;display:flex;gap:8px;align-items:center"}, healthDot(p), p.owner, (m.branch ? " · ⎇ " + m.branch : "")), h("h2", {id: "drawer-title", text: p.name || p.id})), closeBtn),
-    h("div", {class: "bd"}, statusBadge(p.status), prioBadge(p.priority), ns.milestone ? h("span", {class: "badge", text: "◆ " + ns.milestone}) : null, dueBadge(ns.due, p.status === "done"),
-      p.tags.map(t => h("span", {class: "stk", text: "#" + t})), p.live ? h("span", {class: "badge"}, h("span", {class: "dot d-live"}), "Live session") : null),
-    p.health.reasons.length ? h("div", {class: "t2", style: "font-size:.82rem;margin-top:8px"}, h("strong", {text: p.health.level === "risk" ? "At risk: " : "Needs a look: "}), p.health.reasons.join(" · ")) : null,
-    p.inits.length ? h("div", {class: "bd"}, h("span", {class: "t2", style: "font-size:.8rem", text: "Initiatives:"}), p.inits.map(id => h("button", {class: "mchip", type: "button", onclick: () => openInitiative(id), text: (BYINIT.get(id) || {}).title || id}))) : null,
-    h("div", {style: "margin-top:10px;max-width:420px"}, progressBar(p, true)),
-    h("div", {class: "go"}, p.local ? [cmdBtn("dev claude " + p.id, true), cmdBtn("dev codex " + p.id), cmdBtn("dcd " + p.id)] : [h("span", {class: "tag", text: "not cloned on this Mac"}), cmdBtn("dev clone " + p.id, true)], cmdBtn("dev handoff " + p.id)),
-    h("nav", {class: "dnav", "aria-label": "Sections"}, navItems.map(([id, l]) => h("a", {href: "#sec-" + id, onclick: e => { e.preventDefault(); const el = $("#sec-" + id); if (el) el.scrollIntoView({block: "start", behavior: "smooth"}); }}, l))));
+    h("div", {class: "r1"}, h("div", {style: "flex:1;min-width:0"}, crumbs([[ini ? "Initiatives" : "Projects", link({view: ini ? "initiatives" : "projects", id: "", tab: "", task: ""})], [scopeName(it.scope), scopeHref], [it.legacy ? "Note task" : it.id]]),
+      h("h2", {id: "drawer-title", text: it.title})), closeBtn),
+    h("div", {class: "bd"}, istatusBadge(it.status), h("span", {class: "badge", title: "Bucket", text: (it.bucket || "next").replace(/^./, c => c.toUpperCase())}), typeTag(it.type), prioBadge(it.priority), it.due ? dueBadge(it.due, !it.open) : null, !it.legacy ? h("span", {class: "badge", title: "Version", text: "v" + it.version}) : null, claimChip(it)));
   const body = h("div", {class: "db"});
-  if (p.status_line) body.append(h("div", {class: "statusline", style: "font-size:.9rem"}, h("span", {class: "who", text: "Latest status · " + (p.status_line.agent || "agent") + " · " + rel(p.status_line.ts) + (p.status_line.branch ? " · " + p.status_line.branch : "")}), inline(stripMarker(p.status_line.line))));
-  const noteParts = [];
-  if (!p.ns) noteParts.push(empty("No handoff note yet", h("code", {text: "dev sync"}), " creates it; agents fill it in with the devkit-handoff skill."));
-  else {
-    const part = (label, text) => text ? [h("div", {class: "label", style: "margin:12px 0 4px", text: label}), md(text)] : null;
-    noteParts.push(part("Purpose", ns.purpose), part("Current state", ns.state), part("Decisions and gotchas", ns.decisions), part("Links", ns.links));
-    if (!ns.purpose && !ns.state) noteParts.push(h("p", {class: "t2", text: "The note has no purpose or current state yet — ask the agent for a handoff: dev handoff " + p.id}));
-  }
-  body.append(sec("note", "Handoff note", null, p.note && FILEMAP.has(p.note) ? h("a", {class: "btn sm", href: link({view: "explorer", f: p.note})}, "Open full note") : null, noteParts));
-  const tl = (label, items, cls) => items.length ? [h("div", {class: "label", style: "margin:10px 0 2px", text: label + " · " + items.length}), h("ul", {class: "tl-rows"}, items.map(t => taskLine(p, t, cls)))] : null;
-  body.append(sec("tasks", "Tasks", p.t.open, cmdBtn('dev task add "…" --now -p ' + p.id), p.t.open + p.t.done ? [tl("Now", p.t.now, "doing"), tl("Next", p.t.next, ""), tl("Later", p.t.later, ""), tl("Done recently", p.t.done_recent, "done")]
-    : empty("No tasks", "Plan the work: ", h("code", {text: 'dev task add "…" --now -p ' + p.id}))));
-  const prTable = p.prsOpen.length ? h("div", {class: "tw"}, h("table", {class: "t"}, h("thead", null, h("tr", null, ["CI", "Pull request", "Review", "Merge", "Size", "Updated", ""].map(x => h("th", {text: x})))),
-      h("tbody", null, p.prsOpen.map(r => { const repo = p.github || p.id; return h("tr", null,
-        h("td", null, h("span", {class: "badge"}, h("span", {class: "dot d-" + (r.checks || "unknown"), "aria-hidden": "true"}), (r.checks || "unknown"))),
-        h("td", null, h("a", {href: r.url || "#", target: "_blank", rel: "noopener noreferrer", text: "#" + r.number}), " ", h("span", {text: r.title || ""}), r.draft ? h("span", {class: "tag", style: "margin-left:6px", text: "draft"}) : null, h("div", {class: "t2 mono", style: "font-size:.72rem", text: r.branch || ""})),
-        h("td", {class: "t2", text: r.review === "CHANGES_REQUESTED" ? "changes requested" : r.review === "APPROVED" ? "approved" : r.review === "REVIEW_REQUIRED" ? "review required" : "—"}),
-        h("td", {class: r.mergeable === "CONFLICTING" ? "" : "t2", text: r.mergeable === "CONFLICTING" ? "⚠ conflicts" : r.mergeable === "MERGEABLE" ? "clean" : "—"}),
-        h("td", {class: "num t2", text: r.size != null ? compact(r.size) : "—"}), h("td", {class: "num t2", text: rel(iso(r.updated))}),
-        h("td", null, icopy(r.checks === "failing" ? "gh pr checks " + r.number + " -R " + repo + " --watch" : "gh pr view " + r.number + " -R " + repo, "Copy"))); }))))
-    : empty("No open pull requests", p.github ? ["Open one from your branch: ", h("code", {text: "gh pr create --fill"})] : "PR state is tracked for GitHub repositories.");
-  body.append(sec("prs", "Pull requests", p.prsOpen.length, null, prTable, !!p.prsOpen.length));
-  body.append(sec("worktrees", "Worktrees", p.wts.length, null, p.wts.length ? h("div", {class: "tw"}, h("table", {class: "t"}, h("thead", null, h("tr", null, ["Branch", "PR", "State", "Session", "Size", ""].map(x => h("th", {text: x})))),
-    h("tbody", null, p.wts.map(w => h("tr", null, h("td", {class: "mono", style: "font-size:.78rem", text: w.branch || "detached"}), h("td", {text: w.pr ? "#" + w.pr.number + " " + String(w.pr.state).toLowerCase() : "—"}),
-      h("td", {text: w.missing ? "missing" : ((w.modified || 0) + (w.untracked || 0)) ? ((w.modified || 0) + (w.untracked || 0)) + " changed" : w.unpushed ? w.unpushed + " unpushed" : "clean"}),
-      h("td", {text: w.active ? "live" : rel(w.last_activity)}), h("td", {class: "num", text: kb(w.size_kb)}), h("td", null, w.branch ? icopy("dev wt rm " + w.branch, "Remove") : null))))))
-    : empty("No worktrees", "Parallel work on this repo: ", h("code", {text: "dev wt new <type>/<topic>"})), !!p.wts.length));
-  body.append(sec("plans", "Plans", (p.plans || []).length, null, (p.plans || []).length ? h("ul", {class: "tl-rows"}, p.plans.map(pl => h("li", {class: "trow"}, h("a", {href: link({view: "explorer", f: pl.path}), text: pl.title}), h("span", {class: "t2", style: "margin-left:auto", text: rel(pl.mtime)}))))
-    : empty("No plans", "Specs and plans written by agents land in ", h("code", {text: "plans/" + p.id + "/"}), " of the handoff repo.")));
-  body.append(sec("sessions", "Session log", p.sessions.length, null, p.sessions.length ? h("ul", {class: "tl-rows"}, p.sessions.map(s => h("li", {class: "trow"}, h("span", {class: "t2 num", style: "flex:none;font-size:.78rem", text: s.slice(5, 16)}), h("span", {class: "tx"}, inline(sessText(s))))))
-    : empty("No sessions logged", "devkit adds a line after each agent session that commits or changes files.")));
-  body.append(sec("repo", "Repository", null, null, h("dl", {class: "kv"},
-    h("dt", {text: "Path"}), h("dd", {class: "mono", style: "font-size:.8rem;word-break:break-all", text: p.path || "—"}),
-    p.remote ? [h("dt", {text: "Remote"}), h("dd", null, p.github ? h("a", {href: "https://github.com/" + p.github, target: "_blank", rel: "noopener noreferrer", text: p.remote}) : p.remote)] : null,
-    h("dt", {text: "Branch"}), h("dd", {text: (m.branch || "—") + (m.modified || m.untracked ? " · " + ((m.modified || 0) + (m.untracked || 0)) + " changed" : " · clean") + (m.ahead ? " · ↑" + m.ahead : "") + (m.behind ? " · ↓" + m.behind : "")}),
-    m.last_commit ? [h("dt", {text: "Last commit"}), h("dd", {text: rel(m.last_commit_ts) + " · " + m.last_commit})] : null,
-    (p.commands || []).length ? [h("dt", {text: "Commands"}), h("dd", null, p.commands.map(c => h("code", {style: "margin-right:8px", text: c})))] : null,
-    !p.canonical_ok && p.canonical ? [h("dt", {text: "Layout"}), h("dd", null, "Not at its canonical path — ", h("code", {text: "dev adopt " + p.path}))] : null,
-    h("dt", {text: "Activity"}), h("dd", null, sparkline(p, 30, 120, 22)))));
+  if (lock) body.append(lock);
+  if (it.body) body.append(panel("Description", null, null, md(it.body)));
+  body.append(panel("Commands", null, null, cmds.length ? h("div", {class: "cmds"}, cmds.map(([label, c], i) => h("div", {class: "cmdr"}, h("span", {class: "t2", text: label}), cmdBtn(c, i === 0 && it.open)))).concat(h("p", {class: "t2 tnote"}, "Changes of scope (move, block, cancel, edit) need ", h("code", {text: '--why "…"'}), ": the reason is versioned in the changelog and the commit."))
+    : empty("No commands", it.legacy ? "This checkbox has no number in dev task yet." : "")));
+  if (!it.legacy) body.append(panel("Details", null, null, h("dl", {class: "kv"},
+    h("dt", {text: "Id"}), h("dd", {class: "mono", text: it.id}),
+    h("dt", {text: ini ? "Initiative" : "Project"}), h("dd", null, scopeChip(it.scope)),
+    it.assignee ? [h("dt", {text: "Assignee"}), h("dd", {text: it.assignee})] : null,
+    h("dt", {text: "Created"}), h("dd", {text: [it.created ? fmt(iso(it.created)) : "", it.created_by].filter(Boolean).join(" · ") || "—"}),
+    h("dt", {text: "Updated"}), h("dd", {text: [it.updated ? fmt(iso(it.updated)) + " (" + rel(iso(it.updated)) + ")" : "", it.updated_by].filter(Boolean).join(" · ") || "—"}),
+    (it.links || []).length ? [h("dt", {text: "Links"}), h("dd", null, it.links.map(l => { const m = /^initiative:(.+)$/.exec(l); return m && BYINIT.has(m[1]) ? scopeChip("initiatives/" + m[1]) : h("span", {class: "stk", text: l}); }))] : null,
+    it.path ? [h("dt", {text: "File"}), h("dd", null, h("code", {style: "word-break:break-all", text: it.path}), " ", icopy(D.handoff + "/" + it.path, "Copy path"))] : null)));
+  if (!it.legacy) body.append(panel("History", it.changelog.length, h("span", {class: "t2", style: "font-size:.78rem", text: "every version: who, when, why"}), changelog(it.changelog)));
   dr.append(head, body);
   closeBtn.focus({preventScroll: true});
 }
 
-function initiativeDrawer(dr, x) {
-  const closeBtn = h("button", {class: "btn icon", type: "button", onclick: closeDrawer, "aria-label": "Close (Esc)"}, "✕");
-  const pr = progOf(x);
-  const navItems = [["goal", "Goal"], ["workstreams", "Workstreams"], ["itasks", "Tasks"], ["decisions", "Decisions & risks"], ["source", "Source"], ["isessions", "Sessions"]];
-  const head = h("div", {class: "dh"},
-    h("div", {class: "r1"}, h("div", {style: "flex:1;min-width:0"}, h("div", {class: "t2", style: "font-size:.8rem", text: "Initiative · " + plural(x.projects.length, "project") + (x.owner ? " · owner " + x.owner : "")}), h("h2", {id: "drawer-title", text: x.title})), closeBtn),
-    h("div", {class: "bd"}, statusBadge(x.status), prioBadge(x.priority), x.milestone ? h("span", {class: "badge", text: "◆ " + x.milestone}) : null, dueBadge(x.due, x.status === "done"), x.tags.map(t => h("span", {class: "stk", text: "#" + t}))),
-    h("div", {style: "margin-top:12px;max-width:520px"}, progressBar(x, true), h("div", {class: "t2", style: "font-size:.78rem;margin-top:2px", text: pr.why})),
-    h("div", {class: "go"}, cmdBtn("dev initiative show " + x.id, true), cmdBtn('dev task add "…" --now -i ' + x.id)),
-    h("nav", {class: "dnav", "aria-label": "Sections"}, navItems.map(([id, l]) => h("a", {href: "#sec-" + id, onclick: e => { e.preventDefault(); const el = $("#sec-" + id); if (el) el.scrollIntoView({block: "start", behavior: "smooth"}); }}, l))));
-  const body = h("div", {class: "db"});
-  const part = (label, text) => text ? [h("div", {class: "label", style: "margin:12px 0 4px", text: label}), md(text)] : null;
-  body.append(panel("Goal and scope", null, x.note && FILEMAP.has(x.note) ? h("a", {class: "btn sm", href: link({view: "explorer", f: x.note})}, "Open README") : null,
-    (x.goal || x.scope || x.state) ? [part("Goal", x.goal), part("Scope", x.scope), part("Current state", x.state)] : empty("No goal written yet", "Edit ", h("code", {text: x.note || "initiatives/" + x.id + "/README.md"}), " or ask an agent for a handoff."), {id: "sec-goal"}));
-  const ws = x.members.map(m => { const p = BYID.get(m.id), local = m.local !== false && (!p || p.local), st = (p && p.status) || m.status || "unknown";
-    const nowT = (p ? p.t.now : m.now || []).slice(0, 3), sl = m.status_line || (p && p.status_line);
-    return h("div", {class: "ws"}, h("div", {class: "ws-h"}, h("span", {class: "dot " + (SDOT[st] || "d-info"), "aria-hidden": "true"}),
-        h("button", {class: "ws-n", type: "button", onclick: () => openProject(m.id), text: (p && p.name) || m.id}), h("span", {class: "t2", style: "font-size:.78rem", text: m.id}), statusBadge(st in STATUS ? st : "untracked"),
-        h("span", {style: "margin-left:auto"}, p ? progressBar(p) : (m.progress != null ? h("span", {class: "num t2", text: m.progress + "%"}) : null))),
-      m.workstream ? h("div", {class: "t2", style: "font-size:.85rem;margin:4px 0 0"}, inline(plain(m.workstream))) : null,
-      nowT.length ? h("ul", {class: "tl-rows", style: "margin-top:4px"}, nowT.map(t => p ? taskLine(p, t, "doing") : h("li", {class: "trow"}, h("span", {class: "box doing"}), h("span", {class: "tx"}, inline(t))))) : null,
-      sl ? h("div", {class: "statusline", style: "margin-top:6px"}, h("span", {class: "who", text: (sl.agent || "agent") + " · " + rel(sl.ts)}), inline(stripMarker(sl.line))) : null,
-      local ? null : h("div", {style: "margin-top:6px;display:flex;gap:8px;align-items:center"}, h("span", {class: "tag", text: "not cloned"}), cmdBtn("dev clone " + m.id))); });
-  body.append(panel("Workstreams", x.members.length, null, ws.length ? h("div", {class: "wss"}, ws) : empty("No member projects", h("code", {text: "dev initiative add " + x.id + " <owner/repo>"})), {id: "sec-workstreams"}));
-  const tl = (label, items, cls) => items.length ? [h("div", {class: "label", style: "margin:10px 0 2px", text: label + " · " + items.length}), h("ul", {class: "tl-rows"}, items.map(t => taskLine(x, t, cls, "-i")))] : null;
-  body.append(panel("Tasks", x.t.open, cmdBtn('dev task add "…" --now -i ' + x.id), x.t.open + x.t.done ? [tl("Now", x.t.now, "doing"), tl("Next", x.t.next, ""), tl("Later", x.t.later, ""), tl("Done recently", x.t.done_recent, "done")]
-    : empty("No initiative tasks", "Cross-project tasks live here: ", h("code", {text: 'dev task add "…" --now -i ' + x.id})), {id: "sec-itasks"}));
-  body.append(panel("Decisions, risks and links", null, null, (x.decisions || x.risks || x.links) ? [part("Risks", x.risks), part("Decisions", x.decisions), part("Links", x.links)] : empty("Nothing recorded yet"), {id: "sec-decisions"}));
-  const docs = (x.docs || []).filter(d => FILEMAP.has(d));
-  body.append(panel("Source and documents", null, null, [x.source ? md(x.source) : h("p", {class: "t2", style: "margin:0", text: "No source archive recorded."}),
-    docs.length ? [h("div", {class: "label", style: "margin:12px 0 4px", text: "Documents"}), h("ul", {class: "tl-rows"}, docs.map(d => h("li", {class: "trow"}, h("a", {href: link({view: "explorer", f: d}), text: d.split("/").slice(2).join("/") || d}))))] : null], {id: "sec-source"}));
-  body.append(panel("Session log", x.sessions.length, null, x.sessions.length ? h("ul", {class: "tl-rows"}, x.sessions.map(s => h("li", {class: "trow"}, h("span", {class: "t2 num", style: "flex:none;font-size:.78rem", text: s.slice(5, 16)}), h("span", {class: "tx"}, inline(sessText(s))))))
-    : empty("No sessions logged"), {id: "sec-isessions"}));
-  dr.append(head, body);
-  closeBtn.focus({preventScroll: true});
-}
-
-/* ---------------------------------------------------------------- command palette */
+/* ---------------------------------------------------------------- command palette + sheet */
 function fuzzy(q, s) { const toks = String(q || "").toLowerCase().split(/\s+/).filter(Boolean); if (!toks.length) return 1; let total = 0; s = s.toLowerCase(); for (const t of toks) { const sc = fuzzy1(t, s); if (!sc) return 0; total += sc; } return total; }
 function fuzzy1(q, s) { const i = s.indexOf(q); if (i >= 0) return 100 - Math.min(i, 80) + (i === 0 ? 20 : 0); let qi = 0, score = 0, prev = -2; for (let j = 0; j < s.length && qi < q.length; j++) if (s[j] === q[qi]) { score += prev === j - 1 ? 3 : 1; prev = j; qi++; } return qi === q.length ? score : 0; }
 function paletteItems() {
   const items = [];
   for (const [v, label, key] of VIEWS) items.push({grp: "View", label: "Go to " + label, hint: "g " + key, run: () => go(v)});
+  items.push({grp: "View", label: "Everything that needs you", hint: ACTIONS.length + " items", run: () => go("actions")});
   for (const a of ACTIONS) items.push({grp: "Action", label: "Copy: " + a.cmd, hint: a.title, run: () => copy(a.cmd)});
   items.push({grp: "Setting", label: "Toggle theme (light/dark)", run: toggleTheme}, {grp: "Setting", label: "Theme: follow system", run: () => { try { localStorage.removeItem("devkit.theme"); } catch (e) {} delete document.documentElement.dataset.theme; }},
-    {grp: "Setting", label: "Toggle dense mode", run: () => set({dense: !S.dense}, true)}, {grp: "Setting", label: "Projects as table", run: () => go("projects", {layout: "table"})}, {grp: "Setting", label: "Projects as cards", run: () => go("projects", {layout: "cards"})},
-    {grp: "Setting", label: "Clear search and filters", run: () => set(Object.assign({q: ""}, CLEAR), true)}, {grp: "Help", label: "Keyboard shortcuts", hint: "?", run: openSheet}, {grp: "Help", label: "Print this view", run: () => window.print()});
-  for (const x of INITS) {
-    items.push({grp: "Initiative", label: x.title, hint: (progOf(x).pct != null ? progOf(x).pct + "% · " : "") + x.status, run: () => openInitiative(x.id)});
-    items.push({grp: "Command", label: "Copy: dev initiative show " + x.id, run: () => copy("dev initiative show " + x.id)});
-  }
+    {grp: "Setting", label: "Toggle dense mode", run: () => set({dense: !S.dense}, true)}, {grp: "Setting", label: "Clear search and filters", run: () => set(Object.assign({q: ""}, CLEAR), true)},
+    {grp: "Help", label: "Keyboard shortcuts", hint: "?", run: openSheet}, {grp: "Help", label: "Print this view", run: () => window.print()});
+  for (const x of INITS) { items.push({grp: "Initiative", label: x.title, hint: (progOf(x).pct != null ? progOf(x).pct + "% · " : "") + x.status + " · " + plural(x.members.length, "project"), run: () => openInitiative(x.id)}); items.push({grp: "Command", label: "Copy: dev initiative show " + x.id, run: () => copy("dev initiative show " + x.id)}); }
+  for (const x of PEOPLE) items.push({grp: "Person", label: x.who, hint: x.sessions.length ? plural(x.sessions.length, "live session") : "idle", run: () => go("team")});
   for (const p of P) {
     items.push({grp: "Project", label: p.id, hint: p.health.level === "ok" ? p.status : p.health.reasons[0], run: () => openProject(p.id)});
-    for (const c of ["dcd ", "dev claude ", "dev codex ", "dev handoff "]) items.push({grp: "Command", label: "Copy: " + c + p.id, run: () => copy(c + p.id)});
-    items.push({grp: "Command", label: "Copy: dev task add … -p " + p.id, run: () => copy('dev task add "…" --now -p ' + p.id)});
-    for (const t of p.t.now.concat(p.t.next).slice(0, 40)) items.push({grp: "Task", label: t, hint: p.name, run: () => openProject(p.id, "tasks")});
+    for (const c of p.local ? ["dcd ", "dev claude ", "dev codex ", "dev handoff "] : ["dev clone "]) items.push({grp: "Command", label: "Copy: " + c + p.id, run: () => copy(c + p.id)});
     for (const r of p.prsOpen) items.push({grp: "PR", label: "#" + r.number + " " + (r.title || ""), hint: (CHECKS[r.checks] || "") + " · " + p.name, run: () => window.open(r.url, "_blank", "noopener")});
   }
-  for (const f of FILES) items.push({grp: "File", label: f.path, run: () => set({view: "explorer", f: f.path, fq: "", p: ""}, true)});
+  for (const it of allItems().filter(i => i.open).slice(0, 1500)) items.push({grp: "Task", label: (it.legacy ? "" : it.id + " ") + it.title, hint: scopeName(it.scope) + (it.holder ? " · " + it.holder : ""), run: () => openTask(it.id)});
+  for (const f of FILES) items.push({grp: "File", label: f.path, run: () => set({view: "explorer", id: "", f: f.path, fq: "", task: ""}, true)});
   return items;
 }
 function openPalette() {
@@ -1874,18 +2640,27 @@ function openPalette() {
   input.addEventListener("keydown", e => { if (e.key === "ArrowDown") { e.preventDefault(); sel = Math.min(shown.length - 1, sel + 1); paint(); } else if (e.key === "ArrowUp") { e.preventDefault(); sel = Math.max(0, sel - 1); paint(); } else if (e.key === "Enter") { e.preventDefault(); run(sel); } });
   draw(); input.focus();
 }
-function closePalette() { const pal = $("#palette"); if (pal.hidden) return; pal.hidden = true; if (!S.p) { $("#scrim").classList.remove("on"); $("#scrim").hidden = true; } if (lastFocus && lastFocus.focus) lastFocus.focus(); }
+function closePalette() { const pal = $("#palette"); if (pal.hidden) return; pal.hidden = true; if (!S.task) { $("#scrim").classList.remove("on"); $("#scrim").hidden = true; } if (lastFocus && lastFocus.focus) lastFocus.focus(); }
 function openSheet() {
-  const sh = $("#sheet"); const rows = [["/", "Search everything"], ["⌘K · Ctrl K", "Command palette"], ["g o · i · p · t · a · e · h", "Home · Portfolio · Projects · Tasks · Activity · Explorer · Health"], ["j / k", "Next / previous item"], ["↵", "Open the focused item"], ["Esc", "Close the drawer or palette, clear search"], ["← →", "Read the chart day by day (chart focused)"], ["?", "This sheet"]];
+  const sh = $("#sheet"); const rows = [["/", "Search everything"], ["⌘K · Ctrl K", "Command palette"], ["g o · i · p · m · t", "Home · Initiatives · Projects · Team · Tasks"], ["g a · e · h", "Activity · Explorer · Health"], ["u", "Up: from a page back to its list"],
+    ["← →", "Switch tabs (tab bar focused) · read the chart day by day"], ["j / k", "Next / previous item"], ["↵", "Open the focused item"], ["Esc", "Close the task drawer or palette, clear search"], ["?", "This sheet"]];
   clear(sh).append(h("h2", {text: "Keyboard shortcuts"}), h("dl", null, rows.map(([k, v]) => [h("dt", null, h("kbd", {text: k})), h("dd", {style: "margin:0", text: v})])),
-    h("p", {class: "t2", style: "margin:14px 0 0;font-size:.8rem", text: "The URL keeps the view and filters: bookmark or share it. The page reloads itself every 2 minutes while visible."}),
+    h("p", {class: "t2", style: "margin:14px 0 0;font-size:.8rem", text: "The URL keeps the page, tab, task and filters — #/initiatives/<slug>, #/projects/<owner>/<repo>?tab=tasks&task=<id> — so you can bookmark or share any view. The page reloads itself every 2 minutes while visible."}),
     h("div", {style: "text-align:right;margin-top:10px"}, h("button", {class: "btn", type: "button", onclick: closeSheet}, "Close")));
   sh.hidden = false; $("#scrim").hidden = false; $("#scrim").classList.add("on"); $("button", sh).focus();
 }
-function closeSheet() { $("#sheet").hidden = true; if (!S.p && $("#palette").hidden) { $("#scrim").classList.remove("on"); $("#scrim").hidden = true; } }
+function closeSheet() { $("#sheet").hidden = true; if (!S.task && $("#palette").hidden) { $("#scrim").classList.remove("on"); $("#scrim").hidden = true; } }
 
 /* ---------------------------------------------------------------- navigation, theme, keyboard */
-function go(view, patch) { set(Object.assign({view, p: ""}, patch || {}), true); window.scrollTo(0, 0); }
+function go(view, patch) { set(Object.assign({view, id: "", task: ""}, PAGEKEYS, patch || {}), true); window.scrollTo(0, 0); }
+function openProject(id, tab) {
+  if (!BYID.has(id) && !MEMBEROF.has(id)) { toast("No handoff note for " + id + " yet"); return; }
+  set(Object.assign({}, PAGEKEYS, {view: "projects", id, tab: tab || ""}), true); window.scrollTo(0, 0);
+}
+function openInitiative(id, tab) { if (!BYINIT.has(id)) { toast("No initiative " + id); return; } set(Object.assign({}, PAGEKEYS, {view: "initiatives", id, tab: tab || ""}), true); window.scrollTo(0, 0); }
+function openScope(scope, tab) { if (isInit(scope)) openInitiative(scope.slice(12), tab); else openProject(scope, tab); }
+function openTask(id) { if (!ITEMBY.has(id)) { toast("No task " + id); return; } set({task: id}, true); }
+function closeDrawer() { set({task: ""}, true); }
 function toggleTheme() {
   const cur = document.documentElement.dataset.theme || (matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light");
   const next = cur === "dark" ? "light" : "dark"; document.documentElement.dataset.theme = next; store.set("devkit.theme", next);
@@ -1896,7 +2671,7 @@ document.addEventListener("keydown", e => {
   const tag = (e.target && e.target.tagName) || "", typing = /^(INPUT|TEXTAREA|SELECT)$/.test(tag) || (e.target && e.target.isContentEditable);
   if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === "k") { e.preventDefault(); if ($("#palette").hidden) openPalette(); else closePalette(); return; }
   if (e.key === "Escape") {
-    if (!$("#palette").hidden) { closePalette(); return; } if (!$("#sheet").hidden) { closeSheet(); return; } if (S.p || S.i) { closeDrawer(); return; }
+    if (!$("#palette").hidden) { closePalette(); return; } if (!$("#sheet").hidden) { closeSheet(); return; } if (S.task) { closeDrawer(); return; }
     if (e.target.id === "q" && S.q) { set({q: "", view: S.view === "search" ? store.get("devkit.prevView", "overview") : S.view}, true); return; }
     if (typing) e.target.blur(); return;
   }
@@ -1906,6 +2681,7 @@ document.addEventListener("keydown", e => {
   if (e.key === "?") { e.preventDefault(); openSheet(); return; }
   if (gAt && Date.now() - gAt < 1200) { gAt = 0; const v = VIEWS.find(x => x[2] === e.key.toLowerCase()); if (v) { e.preventDefault(); go(v[0]); } return; }
   if (e.key === "g") { gAt = Date.now(); return; }
+  if (e.key === "u" && !S.task) { if (S.id) { e.preventDefault(); go(S.view); } else if (S.view === "actions") go("overview"); return; }
   if (e.key === "j" || e.key === "k") {
     e.preventDefault(); const scope = !$("#drawer").hidden ? $("#drawer") : $("#view");
     const items = $$("[data-nav]", scope).filter(x => x.offsetParent !== null); if (!items.length) return;
@@ -1915,37 +2691,47 @@ document.addEventListener("keydown", e => {
 });
 
 /* ---------------------------------------------------------------- render + boot */
+const VIEWFN = {overview: viewHome, actions: viewActions, initiatives: viewInitiatives, projects: viewProjects, team: viewTeam, tasks: viewTasks, activity: viewActivity, explorer: viewExplorer, health: viewHealthV3, search: viewSearch};
+function pageTitle() {
+  if (S.view === "initiatives" && S.id) return (BYINIT.get(S.id) || {}).title || S.id;
+  if (S.view === "projects" && S.id) return (BYID.get(S.id) || {}).name || S.id;
+  return (VIEWS.find(v => v[0] === S.view) || [0, S.view === "actions" ? "Needs you" : "Search"])[1];
+}
 function render() {
+  const fid = document.activeElement && document.activeElement.id && $("#view").contains(document.activeElement) ? document.activeElement.id : "";
+  const page = S.view + "/" + S.id;
   document.body.classList.toggle("dense", !!S.dense);
   renderNav(); renderFilters();
   const main = clear($("#view"));
-  ({overview: viewHome, portfolio: viewPortfolio, projects: viewProjects, tasks: viewTasks, activity: viewActivity, explorer: viewExplorer, health: viewHealth, search: viewSearch}[S.view] || viewHome)(main);
+  (VIEWFN[S.view] || viewHome)(main);
   renderDrawer();
+  if (fid) { const el = document.getElementById(fid); if (el && $("#drawer").hidden) el.focus({preventScroll: true}); }
+  if (page !== lastView) { lastView = page; document.title = pageTitle() + " · Firefly devkit"; }
   const t = $("#ticker"); if (t) t.textContent = "Synced " + rel(D.generated);
 }
 (function boot() {
   const nav = $("#nav");
   nav.append(h("nav", {class: "tabs", id: "tabs", role: "tablist", "aria-label": "Views"}), h("span", {class: "spacer"}),
-    h("div", {class: "search", role: "search"}, h("span", {class: "ico", "aria-hidden": "true", text: "⌕"}), h("input", {id: "q", type: "search", placeholder: "Search projects, PRs, tasks, notes…", "aria-label": "Search everything", autocomplete: "off"}), h("kbd", {text: "/"})),
+    h("div", {class: "search", role: "search"}, h("span", {class: "ico", "aria-hidden": "true", text: "⌕"}), h("input", {id: "q", type: "search", placeholder: "Search projects, tasks, people, notes…", "aria-label": "Search everything", autocomplete: "off"}), h("kbd", {text: "/"})),
     h("button", {class: "btn icon", id: "palbtn", type: "button", onclick: openPalette, "aria-label": "Command palette", title: "Command palette (⌘K)"}, "⌘"),
     h("button", {class: "btn icon ghost", id: "theme", type: "button", onclick: toggleTheme, "aria-label": "Toggle theme", title: "Toggle theme"}, "◐"));
   const q = $("#q");
   q.addEventListener("input", debounce(() => {
     const v = q.value.trim();
-    if (v && !["projects", "tasks", "search", "activity"].includes(S.view)) { store.set("devkit.prevView", S.view); set({q: v, view: "search", p: ""}, true); }
+    if (v && !(["projects", "tasks", "search", "activity", "initiatives"].includes(S.view) && !S.id)) { store.set("devkit.prevView", S.view); set({q: v, view: "search", id: "", task: ""}, true); }
     else if (!v && S.view === "search") set({q: "", view: store.get("devkit.prevView", "overview")}, true);
     else set({q: v});
   }, 140));
   q.addEventListener("keydown", e => { if (e.key === "Enter") { const first = $("[data-nav]", $("#view")); if (first) first.focus(); } });
   document.addEventListener("click", e => { $$(".facet[open]").forEach(d => { if (!d.contains(e.target)) d.open = false; }); }, true);
   $("#scrim").addEventListener("click", () => { if (!$("#palette").hidden) closePalette(); else if (!$("#sheet").hidden) closeSheet(); else closeDrawer(); });
-  window.addEventListener("hashchange", () => { if (!S.p && !S.i) { const dr = $("#drawer"); if (!dr.hidden) renderDrawer(); } });
   const st = decode(location.hash) || store.get("devkit.state", null);
-  if (st) S = Object.assign({}, DEFAULT, st); if (!location.hash) history.replaceState(null, "", encode(S));
+  if (st) S = Object.assign({}, DEFAULT, st, {view: ROUTES.includes(st.view) ? st.view : st.view === "portfolio" ? "initiatives" : "overview"});
+  if (!location.hash || location.hash !== encode(S)) history.replaceState(null, "", encode(S));
   render();
   try { const y = sessionStorage.getItem("devkit.scroll"); if (y) { window.scrollTo(0, +y); sessionStorage.removeItem("devkit.scroll"); } } catch (e) {}
   setInterval(() => { const t = $("#ticker"); if (t) t.textContent = "Synced " + rel(D.generated); }, 30000);
-  setInterval(() => { if (document.visibilityState === "visible" && $("#palette").hidden && !/^(INPUT|SELECT|TEXTAREA)$/.test((document.activeElement || {}).tagName || "")) {
+  setInterval(() => { if (document.visibilityState === "visible" && $("#palette").hidden && !S.task && !/^(INPUT|SELECT|TEXTAREA)$/.test((document.activeElement || {}).tagName || "")) {
     try { sessionStorage.setItem("devkit.scroll", String(window.scrollY)); } catch (e) {} location.reload(); } }, 120000);
 })();
 })();
@@ -2002,6 +2788,218 @@ td.c-prog{width:150px} table.pt .prog{min-width:104px}
 @media (max-width:1024px){.ini-h{grid-template-columns:minmax(0,1fr)}.ini-p{justify-self:stretch}.ini-h h3{white-space:normal}}
 @media (max-width:768px){.srow{grid-template-columns:10px minmax(0,1fr) auto}.srow .prog{grid-column:2/-1;max-width:none}.srow .sm{grid-column:2/-1;justify-content:flex-start}
   .road-row{grid-template-columns:96px minmax(0,1fr)}.road-t{display:none}td.c-prog{width:auto}table.pt td.c-prog{grid-column:2/-1}}
+"""
+
+CSS += r"""
+/* ---------- v3 components: breadcrumbs, page header, stats, tabs */
+:root{--nav-h:56px;--tabs-h:46px}
+.mt{margin-top:var(--s4)} .bad{color:var(--bad-text)} .spacer{flex:1}
+.lnk{all:unset;cursor:pointer;font-weight:650;color:var(--text)} .lnk:hover{text-decoration:underline} .lnk:focus-visible{outline:2px solid var(--focus);border-radius:4px}
+.crumbs ol{list-style:none;display:flex;flex-wrap:wrap;gap:2px 0;margin:0 0 var(--s2);padding:0;font-size:var(--fs-sm);color:var(--text-2)}
+.crumbs li{display:flex;align-items:center;min-width:0}
+.crumbs li+li::before{content:"›";margin:0 8px;color:var(--muted)}
+.crumbs a{color:var(--text-2);text-decoration:none} .crumbs a:hover{color:var(--text);text-decoration:underline}
+.crumbs [aria-current]{color:var(--heading);font-weight:650;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;max-width:60vw}
+.phead{display:grid;gap:var(--s3);margin:0 0 var(--s4)}
+.pt1{display:grid;grid-template-columns:minmax(0,1fr) minmax(240px,360px);gap:var(--s4);align-items:end}
+.pt-t{min-width:0}
+.phead h1{margin:0;font-size:var(--fs-title);font-weight:450;letter-spacing:-.035em;line-height:1.15;color:var(--heading);overflow-wrap:anywhere;display:flex;align-items:center;gap:10px}
+.phead h1 .hd{width:12px;height:12px}
+.phead .bd{display:flex;flex-wrap:wrap;gap:6px;margin-top:var(--s2)}
+.pmeta{font-size:var(--fs-sm);margin-top:var(--s2)}
+.pt-p .why{font-size:var(--fs-xs);margin-top:2px}
+.phead .go{display:flex;flex-wrap:wrap;gap:var(--s2)}
+.hreason{font-size:var(--fs-sm);color:var(--text-2);padding:6px 10px;border-radius:var(--rs);background:var(--surface-2);border-left:3px solid var(--warning)}
+.hreason.risk{border-left-color:var(--critical)}
+.stats{display:flex;flex-wrap:wrap;gap:0;margin:0 0 var(--s3);background:var(--surface);border:1px solid var(--line-soft);border-radius:var(--r);overflow:hidden}
+.stats .st{flex:1 1 120px;display:flex;flex-direction:column;gap:2px;padding:var(--s2) var(--s4);border-right:1px solid var(--line-soft);text-decoration:none;min-width:0}
+.stats .st:last-child{border-right:0}
+.stats a.st:hover{background:var(--hover)}
+.stats .sv{font-size:1.25rem;font-weight:650;letter-spacing:-.02em;color:var(--heading);line-height:1.2}
+.stats .sl{font-size:var(--fs-xs);color:var(--text-2)}
+.stats .st.risk .sv{color:var(--bad-text)} .stats .st.warn .sv{color:var(--warn-text)}
+.ptabs{position:sticky;top:var(--nav-h);z-index:20;display:flex;gap:2px;margin:0 0 var(--s4);border-bottom:1px solid var(--line);background:var(--page);overflow-x:auto;scrollbar-width:none;height:var(--tabs-h);align-items:flex-end}
+.ptabs::-webkit-scrollbar{display:none}
+.ptab{border:0;background:none;padding:0 var(--s3);height:calc(var(--tabs-h) - 2px);color:var(--text-2);font-weight:650;font-size:var(--fs-md);cursor:pointer;white-space:nowrap;display:flex;align-items:center;gap:6px;border-bottom:2px solid transparent;margin-bottom:-1px}
+.ptab:hover{color:var(--text);border-bottom-color:var(--line)}
+.ptab[aria-selected="true"]{color:var(--heading);border-bottom-color:var(--heading)}
+.ptab .n{font-size:.7rem;font-weight:700;color:var(--text-2);background:var(--surface-3);border-radius:999px;padding:0 7px;line-height:18px}
+.tabpanel{min-width:0}
+.tab .n.warn{background:var(--warning);color:#10110f}
+.seg .sn{margin-left:6px;font-size:.68rem;color:var(--muted);font-weight:700}
+.seg button[aria-pressed="true"] .sn{color:var(--text-2)}
+/* ---------- Home: KPI strip */
+.kpis{display:grid;grid-template-columns:repeat(8,minmax(0,1fr));gap:var(--s2);margin:0 0 var(--s4)}
+.kpi{display:flex;flex-direction:column;gap:1px;padding:var(--s3);background:var(--surface);border:1px solid var(--line-soft);border-radius:var(--r);text-decoration:none;min-width:0;transition:border-color .15s}
+.kpi:hover{border-color:var(--line)}
+.kpi .kv{font-size:1.55rem;font-weight:600;letter-spacing:-.03em;line-height:1.1;color:var(--heading)}
+.kpi .kl{font-size:var(--fs-sm);font-weight:650;color:var(--text);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.kpi .ks{font-size:var(--fs-xs);color:var(--muted);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.kpi.risk{border-left:3px solid var(--critical)} .kpi.risk .kv{color:var(--bad-text)}
+.kpi.warn{border-left:3px solid var(--warning)} .kpi.warn .kv{color:var(--warn-text)}
+.more-l.pad{padding:var(--s2) var(--s4);border-top:1px solid var(--line-soft)}
+/* ---------- callouts */
+.callout{display:grid;grid-template-columns:22px minmax(0,1fr) auto;gap:var(--s3);align-items:center;padding:var(--s3) var(--s4);border-radius:var(--r);border:1px solid var(--line-soft);background:var(--surface);margin:0 0 var(--s3)}
+.callout.warn{border-color:color-mix(in srgb,var(--warning) 55%,var(--line-soft));background:color-mix(in srgb,var(--warning) 7%,var(--surface))}
+.callout.risk{border-color:color-mix(in srgb,var(--critical) 55%,var(--line-soft))}
+.callout .cbody{min-width:0;font-size:var(--fs-sm)} .callout .cbody strong{display:block;color:var(--heading);font-size:var(--fs-md)}
+.callout .cact{display:flex;gap:var(--s2);flex-wrap:wrap;justify-content:flex-end}
+.db .callout,.pcard2 .callout{margin:0}
+/* ---------- people: avatars, claim chips */
+.av{flex:none;display:inline-grid;place-items:center;width:26px;height:26px;border-radius:50%;background:var(--surface-3);color:var(--heading);font-size:.66rem;font-weight:800;letter-spacing:.02em;border:1px solid var(--line)}
+.av.lg{width:40px;height:40px;font-size:.85rem}
+.av.live{box-shadow:0 0 0 2px var(--page),0 0 0 4px var(--good)}
+.av.me{border-color:var(--heading)}
+.av.more{background:var(--surface-2);color:var(--text-2);font-weight:700}
+.avs{display:inline-flex;align-items:center}
+.avs .av{margin-left:-6px;box-shadow:0 0 0 2px var(--surface)} .avs .av:first-child{margin-left:0}
+.avs .av.live{box-shadow:0 0 0 2px var(--surface),0 0 0 3.5px var(--good)}
+.claim{display:inline-flex;align-items:center;gap:5px;height:22px;max-width:100%;padding:0 8px;border-radius:999px;border:1px solid var(--line);background:var(--surface-2);font-size:var(--fs-xs);font-weight:650;color:var(--text);white-space:nowrap;min-width:0}
+.claim .lk{flex:none;color:var(--text-2)} .claim .cw{min-width:0} .claim .cu{color:var(--muted);font-weight:600}
+.claim.mine{border-color:var(--text-2)} .claim.mine .lk{color:var(--heading)}
+.claim.exp{border-color:var(--warning);color:var(--warn-text);background:color-mix(in srgb,var(--warning) 8%,var(--surface))} .claim.exp .lk,.claim.exp .cu{color:var(--warn-text)}
+.claim.sm{height:20px;padding:0 6px}
+/* ---------- work items */
+.ist{flex:none;display:inline-grid;place-items:center;width:18px;height:18px;font-size:.8rem;line-height:1;color:var(--muted)}
+.ist.i-doing,.badge.i-doing .ic{color:var(--mark)} .ist.i-blocked,.badge.i-blocked .ic{color:var(--bad-text)} .ist.i-done,.badge.i-done .ic{color:var(--good-text)} .ist.i-cancelled{color:var(--muted)}
+.tag.ty-bug{color:var(--bad-text)} .tag.ty-feature,.tag.ty-spike{color:var(--text)}
+.irows{list-style:none;margin:0;padding:0}
+.irow{display:grid;grid-template-columns:20px minmax(0,1fr) minmax(0,auto) 26px;gap:var(--s1) var(--s3);align-items:center;padding:var(--s2) var(--s4);border-bottom:1px solid var(--line-soft);cursor:pointer;min-height:var(--row)}
+.irow:last-child{border-bottom:0} .irow:hover{background:var(--hover)}
+.irow.closed .itl{color:var(--text-2)} .irow.closed .i-done~* .itl{text-decoration:none}
+.irow .im{min-width:0} .irow .itl{font-weight:600;color:var(--heading);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;line-height:1.35}
+.imeta{display:flex;flex-wrap:wrap;gap:4px 8px;align-items:center;font-size:var(--fs-xs);color:var(--text-2);margin-top:1px}
+.imeta .mchip{height:20px;margin:0;padding:0 8px}
+.iid{font-size:.7rem;color:var(--muted)}
+.icl{min-width:0;display:flex;justify-content:flex-end}
+.mchip.sc{max-width:220px;overflow:hidden;text-overflow:ellipsis}
+.label.pad-l{display:block;padding:var(--s3) var(--s4) var(--s1)}
+/* ---------- changelog */
+.clog{list-style:none;margin:0;padding:0;position:relative}
+.clog li{display:grid;grid-template-columns:44px minmax(0,1fr);gap:var(--s3);padding:0 0 var(--s3);position:relative}
+.clog li::before{content:"";position:absolute;left:21px;top:24px;bottom:0;width:1px;background:var(--line-soft)}
+.clog li:last-child::before{display:none}
+.clog .cv{display:grid;place-items:center;height:22px;border-radius:999px;background:var(--surface-3);font-size:.7rem;font-weight:800;color:var(--text-2)}
+.clog li:first-child .cv{background:var(--heading);color:var(--page)}
+.clog .ch{font-size:var(--fs-md);color:var(--heading)}
+.clog .cm{display:flex;align-items:center;gap:6px;flex-wrap:wrap;font-size:var(--fs-xs);color:var(--text-2);margin-top:2px}
+.clog .cm .av{width:20px;height:20px;font-size:.55rem}
+.clog .cwhy{margin-top:4px;font-size:var(--fs-sm);padding:4px 10px;border-left:2px solid var(--line);color:var(--text)}
+/* ---------- initiative cards */
+.icards{display:grid;grid-template-columns:repeat(auto-fill,minmax(280px,1fr));gap:var(--s3)}
+.icards.wide{grid-template-columns:repeat(auto-fill,minmax(360px,1fr))}
+.icard{display:grid;gap:var(--s2);align-content:start;padding:var(--s3) var(--s4) var(--s4);background:var(--surface);border:1px solid var(--line-soft);border-radius:var(--r);cursor:pointer;min-width:0;transition:border-color .15s}
+.panel .icard{background:var(--surface-2)}
+.icard:hover,.icard:focus-visible{border-color:var(--line)}
+.ic-h{display:flex;align-items:center;gap:var(--s2);min-width:0}
+.ic-h h3{margin:0;font-size:var(--fs-lg);font-weight:650;letter-spacing:-.015em;color:var(--heading);min-width:0;flex:1}
+.ic-b{display:flex;flex-wrap:wrap;gap:4px}
+.ic-g{margin:0;color:var(--text-2);font-size:var(--fs-sm);display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden}
+.ic-m{display:flex;flex-wrap:wrap;gap:4px var(--s4);font-size:var(--fs-sm);color:var(--text)}
+.ic-m strong{font-weight:700;color:var(--heading)}
+.ic-f{display:flex;align-items:center;justify-content:space-between;gap:var(--s2);font-size:var(--fs-xs);min-height:26px}
+.sbar{display:flex;height:6px;border-radius:999px;overflow:hidden;background:var(--surface-3);gap:1px}
+.sbar i,.sleg i{display:block;height:100%}
+.sb-active{background:var(--good)} .sb-blocked{background:var(--critical)} .sb-paused{background:var(--warning)} .sb-done{background:var(--deemph)} .sb-unknown{background:var(--surface-3);outline:1px solid var(--line)}
+.sleg{display:flex;flex-wrap:wrap;gap:2px 10px;font-size:.7rem;color:var(--text-2);margin-top:4px}
+.sleg span{display:inline-flex;align-items:center;gap:4px} .sleg i{width:8px;height:8px;border-radius:2px}
+/* ---------- team rows, runs, sessions */
+.prows{list-style:none;margin:0;padding:0}
+.prow{display:grid;grid-template-columns:26px minmax(0,1fr) auto;gap:var(--s3);align-items:center;padding:var(--s2) var(--s4);border-bottom:1px solid var(--line-soft);cursor:pointer}
+.prow:last-child{border-bottom:0} .prow:hover{background:var(--hover)}
+.prow .pm{min-width:0} .prow .pw{display:flex;align-items:center;gap:6px;min-width:0;font-size:var(--fs-md);color:var(--heading)}
+.prow .ps{font-size:var(--fs-xs)} .prow .pp{display:flex;align-items:center;gap:8px;margin-top:4px;font-size:var(--fs-xs)}
+.prow .pp .rbar{flex:1;max-width:160px;margin:0}
+.prow .pr2{display:flex;gap:6px;align-items:center}
+.cbar{display:grid;gap:4px;padding:var(--s2) var(--s4);border-bottom:1px solid var(--line-soft);background:color-mix(in srgb,var(--warning) 6%,var(--surface))}
+.cbar .ci{display:flex;gap:8px;align-items:center;font-size:var(--fs-sm);min-width:0} .cbar .sev{width:18px;height:18px;font-size:.62rem}
+.rbar{height:6px;border-radius:999px;background:var(--mark-soft);overflow:hidden;margin:6px 0 4px}
+.rbar i{display:block;height:100%;border-radius:999px;background:var(--mark)}
+.rbar.over i{background:var(--warning)} .rbar.blocked i,.run.blocked .rbar i{background:var(--critical)} .run.done .rbar i{background:var(--good)}
+.rbar.sm{height:4px}
+.run{display:grid;gap:2px;font-size:var(--fs-sm)}
+.run .rh{display:flex;align-items:center;gap:var(--s2);min-width:0} .run .rh strong{color:var(--heading);min-width:0;flex:1}
+.badge.r-blocked{border-color:var(--critical);color:var(--bad-text)} .badge.r-done{color:var(--good-text)}
+.run.blocked{padding-left:10px;border-left:3px solid var(--critical)}
+.rmeta{font-size:var(--fs-xs);color:var(--text-2)} .rmeta.warn{color:var(--warn-text)}
+.rl{font-size:var(--fs-sm);color:var(--text);line-height:1.4} .rl .label{margin-right:4px}
+.rchips{display:flex;flex-wrap:wrap;gap:6px;margin-top:4px}
+.rc{display:inline-flex;align-items:center;gap:6px;height:22px;padding:0 8px;border-radius:999px;background:var(--surface-3);font-size:var(--fs-xs);font-weight:650;color:var(--text);white-space:nowrap}
+.rc.warn{background:color-mix(in srgb,var(--warning) 16%,var(--surface));color:var(--warn-text)} .rc.muted{background:none;color:var(--muted);padding:0}
+.sessl{display:grid;gap:var(--s3)}
+.sess{display:grid;gap:var(--s2);padding:var(--s3);border:1px solid var(--line-soft);border-radius:10px;background:var(--surface-2);min-width:0}
+.sess .sh{display:flex;align-items:center;gap:var(--s2);flex-wrap:wrap;min-width:0;font-size:var(--fs-sm)}
+.sess .sp{all:unset;cursor:pointer;font-weight:700;color:var(--heading)} .sess .sp:hover{text-decoration:underline} .sess .sp:focus-visible{outline:2px solid var(--focus);border-radius:4px}
+.sess .sb{font-size:.75rem;color:var(--text-2)} .sess .ss{margin-left:auto;font-size:var(--fs-xs)} .sess .sw{font-size:var(--fs-xs)}
+.people{display:grid;grid-template-columns:repeat(auto-fill,minmax(420px,1fr));gap:var(--s4);align-items:start}
+.pcard2{display:grid;gap:var(--s3);padding:var(--s4)}
+.pcard2.me{border-color:var(--line)}
+.pc-h{display:flex;gap:var(--s3);align-items:center;min-width:0}
+.pc-n{min-width:0;flex:1} .pc-n h3{margin:0;display:flex;align-items:center;gap:8px;font-size:var(--fs-lg);font-weight:650;color:var(--heading);min-width:0} .pc-n .t2{font-size:var(--fs-sm)}
+.pc-s{display:grid;gap:var(--s2)}
+.lrows,.rrows{list-style:none;margin:0;padding:0;display:grid}
+.lrow{display:grid;grid-template-columns:12px auto minmax(0,1fr) minmax(0,120px) auto;gap:var(--s2);align-items:center;padding:6px var(--s2);border-radius:8px;font-size:var(--fs-sm);cursor:pointer}
+.lrow:hover{background:var(--hover)} .lrow .lk{color:var(--text-2)} .lrow.exp .lk{color:var(--warn-text)} .lrow .ls,.lrow .lu{font-size:var(--fs-xs)}
+.rrows li{padding:6px 0;border-bottom:1px solid var(--line-soft);font-size:var(--fs-sm);min-width:0} .rrows li:last-child{border-bottom:0}
+.rrows .mchip{height:20px;margin:0}
+.slw{font-size:var(--fs-xs);display:flex;flex-wrap:wrap;align-items:center;gap:4px} .slw .mchip{height:20px;margin:0}
+.tl .it .av{width:22px;height:22px;font-size:.55rem}
+/* ---------- member projects, plans */
+.fin{height:34px;padding:0 12px;border-radius:999px;border:1px solid var(--line);background:var(--surface);min-width:240px;font-size:var(--fs-md);outline:none}
+.fin:focus{border-color:var(--focus);box-shadow:0 0 0 3px var(--mark-soft)}
+.mgrp>summary{display:flex;align-items:center;gap:var(--s3);min-height:48px;padding:var(--s2) var(--s4);cursor:pointer;list-style:none;border-radius:var(--r)}
+.mgrp>summary::-webkit-details-marker{display:none}
+.mgrp>summary::before{content:"▸";color:var(--muted);font-size:.75rem;transition:transform .12s}
+.mgrp[open]>summary::before{transform:rotate(90deg)}
+.mgrp[open]>summary{border-bottom:1px solid var(--line-soft);border-radius:var(--r) var(--r) 0 0}
+.mgrp .mg-n{font-weight:700;color:var(--heading);font-size:var(--fs-lg);text-transform:capitalize}
+.mgrp .count{color:var(--muted);font-weight:600;font-size:var(--fs-sm)}
+.mgrp .mg-c{margin-left:auto;font-size:var(--fs-xs)}
+.mini{display:inline-flex;gap:10px;font-size:var(--fs-xs);color:var(--text-2)} .mini>span{display:inline-flex;align-items:center;gap:4px}
+td.c-who{width:96px} td.c-cta{width:150px;text-align:right} .nc{display:inline-flex;gap:4px;align-items:center}
+table.mt td.c-name{max-width:300px}
+.plans{list-style:none;margin:0;padding:0}
+.pl{padding:var(--s3) var(--s4);border-bottom:1px solid var(--line-soft);display:grid;gap:var(--s2)} .pl:last-child{border-bottom:0}
+.pl-h{display:flex;flex-wrap:wrap;align-items:center;gap:var(--s2)} .pl-t{font-weight:650;color:var(--heading);text-decoration:none} a.pl-t:hover{text-decoration:underline}
+.pl-u{margin-left:auto;font-size:var(--fs-xs)}
+.badge.pl-approved{color:var(--good-text)} .badge.pl-superseded{color:var(--muted);text-decoration:line-through} .badge.pl-draft{color:var(--text)} .badge.pl-unversioned{color:var(--muted);border-style:dashed}
+.badge.warn-b{border-color:var(--warning);color:var(--warn-text)}
+.pl-log>summary{cursor:pointer;font-size:var(--fs-xs);color:var(--text-2);font-weight:650} .pl-log .clog{margin-top:var(--s2)}
+/* ---------- drawer (task), marker chip, commands */
+.drawer{width:min(720px,100vw)}
+.dh .crumbs ol{margin-bottom:4px}
+.cmds{display:grid;gap:6px}
+.cmdr{display:grid;grid-template-columns:minmax(120px,190px) minmax(0,1fr);gap:var(--s3);align-items:center;font-size:var(--fs-sm)}
+.cmdr .cmd{justify-self:start}
+.tnote{font-size:var(--fs-xs);margin:var(--s3) 0 0}
+.mk{display:inline-flex;align-items:center;height:20px;padding:0 7px;border-radius:6px;border:1px solid var(--line);background:var(--surface-2);font-family:ui-monospace,"SF Mono",Menlo,Consolas,monospace;font-size:.72rem;font-weight:700;color:var(--heading);white-space:nowrap;vertical-align:1px}
+.mk .chev{color:var(--accent-text);margin:0 1px}
+.tc.blk{border-left:3px solid var(--critical)}
+.tc .meta .mchip{height:20px;margin:0}
+.tc .tx{display:flex;gap:6px;align-items:flex-start} .tc .tx .ist{margin-top:1px}
+/* sticky table headers on wide screens (tables that fit), under the navbar and the page tabs */
+@media (min-width:1280px){main .tw.st{overflow:visible} main table.t th{top:var(--nav-h)} main .tabpanel table.t th{top:calc(var(--nav-h) + var(--tabs-h))}}
+@media (max-width:1180px){.kpis{grid-template-columns:repeat(4,minmax(0,1fr))}.pt1{grid-template-columns:minmax(0,1fr)}.people{grid-template-columns:minmax(0,1fr)}td.c-who{display:none}}
+@media (max-width:768px){
+  :root{--nav-h:0px}
+  .nav{position:relative}
+  .kpis{grid-template-columns:repeat(2,minmax(0,1fr))}.kpi{padding:var(--s2) var(--s3)}.kpi .kv{font-size:1.3rem}
+  .phead h1{font-size:1.45rem}
+  .stats .st{flex:1 1 33%;border-bottom:1px solid var(--line-soft);padding:var(--s2) var(--s3)}.stats .sv{font-size:1.05rem}
+  .icards,.icards.wide{grid-template-columns:minmax(0,1fr)}
+  .irow{grid-template-columns:20px minmax(0,1fr) 26px;padding:var(--s2) var(--s3)}.irow .icl{grid-column:2;grid-row:2;justify-content:flex-start}.irow .icl:empty{display:none}
+  .irow>.icopy,.irow>span:last-child{grid-column:3;grid-row:1}
+  .callout{grid-template-columns:22px minmax(0,1fr)}.callout .cact{grid-column:1/-1;justify-content:flex-start}
+  .callout .cmd{max-width:100%}
+  .fin{min-width:0;flex:1 1 100%}
+  .lrow{grid-template-columns:12px auto minmax(0,1fr) auto}.lrow .ls{display:none}
+  .people{grid-template-columns:minmax(0,1fr)}.pcard2{padding:var(--s3)}
+  .cmdr{grid-template-columns:minmax(0,1fr)}
+  table.pt td.c-who,table.pt td.c-cta{grid-column:2/-1;text-align:left;width:auto}
+  .mgrp>summary{flex-wrap:wrap;gap:var(--s2)}.mgrp .mg-c{margin-left:0}
+  .db{padding:var(--s3) var(--s4) var(--s6)}.dh{padding:var(--s3) var(--s4) var(--s2)}
+  .ptab{padding:0 10px}
+}
 """
 
 HTML = """<!doctype html>

@@ -241,7 +241,8 @@ def managed_payload() -> dict:
     from .setup import load_conf
     frag = load_conf("claude/settings.json")
     plugins = load_conf("claude/plugins.json")
-    payload = {k: v for k, v in frag.items()}
+    # fastModePerSessionOptIn stays a user setting: once managed, Claude Code refuses `/fast on` outside a terminal.
+    payload = {k: v for k, v in frag.items() if k not in ("fastModePerSessionOptIn",)}
     payload["enabledPlugins"] = {p: True for p in plugins["plugins"]}
     payload["_devkit"] = {"version": core.VERSION, "source": str(core.DEVKIT_HOME),
                           "note": "Managed by devkit. Change devkit's configuration, then `dev config lock` again."}

@@ -29,14 +29,14 @@ First release.
   Codex's own manifest parser.
 - **Global instructions** generated for both agents from one source: method, files and disk, worktrees, trunk-based
   branch naming, Conventional Commits, CalVer, local-first delivery (one integration, one push, one CI run), backend
-  methodology, documentation, handoff and the `DevKit ·` status line.
+  methodology, documentation, handoff and the `[Firefly> DevKit]` status line.
 - **Hooks** for both agents: session context (handoff digest, tasks, git state, commands, last status line), the
   guard, Stop (canary, status capture, one-time handoff reminder after commits), SessionEnd sync; Claude Code also
   ConfigChange (blocks edits to managed settings) and InstructionsLoaded (canary diagnostics).
 - **Guard**: workspace layout, worktree and clone locations, backup copies, destructive commands, `git clean -x`,
   `reset --hard` with changes, force pushes, the CI push budget, blind CI re-runs, branch naming and AI attribution;
   heredoc bodies and file-descriptor redirections are understood; `dev guard check` simulates any decision.
-- **Instruction canary and status line**: every reply starts with `DevKit · project@branch · outcome · verification
+- **Instruction canary and status line**: every reply starts with `[Firefly> DevKit] project@branch · outcome · verification
   · next`; recorded per agent, shown in notes, context, overview and the dashboard.
 - **Configuration policy**: `dev config diff` previews drift, `repair` restores it (automatically at session start
   and hourly), `lock` installs a Claude Code managed-settings drop-in.

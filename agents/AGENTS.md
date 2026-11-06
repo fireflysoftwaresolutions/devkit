@@ -4,19 +4,33 @@ These rules apply to every project and to both Claude Code and Codex. A reposito
 adds to them and wins on project specifics (build commands, style). The user's explicit request in the session
 wins over both.
 
-## 0. Instruction canary and status line — `DevKit ·`
+## 0. Instruction canary and status line — `[Firefly> DevKit]`
 
-Start the **final message of every turn** with one status line:
+Start the **final message of every turn** with one status line, built from segments like a shell prompt:
 
-`DevKit · <project>@<branch> · <what you did or found> · <verification> · next: <next step>`
+```
+`[Firefly> DevKit]` `<project> ⎇ <branch>` `<task>` ❯ <what you did or found> ❯ <✓|⚠|✗> <verification> ❯ next → <next step>
+```
 
-for example `DevKit · kit-consulting@release/26.11.4 · integrated PRs 12/17/22 · local suite green · next: push once,
-open the release PR`. Use `-` for a part that does not apply (`DevKit · - · answered a question · - · next: -`).
+For example:
 
-It proves to the user that these global instructions are loaded and followed (devkit checks every reply and reports a
-missing marker as a deviation), and it is useful: devkit stores the line as the project's latest status, adds it to
-the session log of the handoff note, shows it on the dashboard and gives it to the next session. Keep it truthful: if
-you could not follow a rule or something failed, say so in that line.
+`[Firefly> DevKit]` `kit-consulting ⎇ release/26.11.4` `T-fwk7a2` ❯ integrated PRs 12, 17 and 22 ❯ ✓ local suite
+green, 214 tests ❯ next → push once and open the release PR
+
+- **Pills.** The first three segments are inline code: the marker exactly as shown (square brackets, `Firefly>`
+  with the chevron, a space, `DevKit`), then the project's repository name with its branch, then the work item you
+  worked on (`T-…`). Use `-` for a pill that does not apply, e.g. `-` for the task when there is none.
+- **Segments.** The pills are followed by the outcome, the verification and the next step, separated by ` ❯ `.
+  When a `dev progress` run is active, add `▸ 3/7 · 24m of ~40m` before the next step.
+- **Verification glyph.** `✓` verified (tests, build or command run in this session), `⚠` partly verified or not
+  verified, `✗` failed, `–` nothing to verify (a question or a plan).
+- Keep it to one line of about 180 characters, in plain American English, and keep it true: if a rule could not be
+  followed or something failed, the line says so.
+
+It proves to the user that these global instructions are loaded and followed: devkit checks every reply, reports a
+missing marker as a deviation and scores the format. It is also useful: devkit stores the line as the project's
+latest status, adds it to the session log, shows it as colored segments in `dev status` and on the dashboard, and
+gives it to the next session.
 
 ## 1. Workspace: where everything lives
 
@@ -87,6 +101,18 @@ The developer should never have to ask "how is it going?". Follow the `communica
 - **End.** The final report gives the outcome, what changed, the evidence, what is not done and the next step, after
   the DevKit status line. Then run `dev progress done "<outcome>"`, which notifies the developer and calibrates future
   estimates.
+
+### Spend tokens where they buy quality
+
+The main session runs on the model and effort the developer chose. Don't switch either mid-task (each switch re-reads
+the whole context uncached); say so when a task needs a different tier. Raise effort for bugs in code you didn't
+write, security, migrations and final reviews; keep the default for scoped implementation; send only mechanical,
+checkable lookups to the small read-only `scout` agent. Delegate to subagents only for independent or verbose work
+(broad searches, 2–4 parallel questions, long logs, an independent review, disjoint write sets) — this is the explicit
+instruction Codex needs before it spawns them. Brief them completely (goal, scope, what is known, return format), never
+redo their work, and check what they report before you rely on it. After two failed attempts at the same problem, stop
+and escalate (more effort, a stronger model, or the developer) instead of retrying. The `working-efficiently` skill has
+the routing table, briefing templates and context rules.
 
 ## 4. Files and disk
 
@@ -188,6 +214,8 @@ Follow the devkit `backend` skill for the detailed checklists. Always:
 - **Library and framework docs:** prefer the vendor's version-matched source (Angular CLI MCP, the project's
   installed `node_modules/<pkg>` docs, framework MCPs), then **context7**, then web search. Check the version in the
   lockfile before using an API.
+- **Working efficiently and communicating:** `working-efficiently` (models, effort, subagents, tokens),
+  `communicating` (updates, decisions, PRs, handovers, formats), `using-devkit` (which `dev` command for which job).
 - **Code intelligence:** use the LSP tools (TypeScript, Python, Java, PHP) to find definitions, references and type
   errors rather than grepping when they are available.
 - **Design and architecture:** `grill-with-docs`, `domain-modeling`, `codebase-design`,

@@ -30,7 +30,7 @@ and the ChatGPT app), skills, plugins, Docker and the background automation, and
 | `claude/vigilant-jang-ec71c0` branches and AI attribution | Trunk-based naming (`feat/PROJ-142-invoice-export`) and no attribution, enforced for both agents |
 | Claude and Codex behave differently, and settings drift | One set of rules, skills and hooks for both; drift is blocked and repaired; `dev config diff` previews everything |
 | Nobody knows what is in flight | A private handoff repo with a live projects map, task boards, activity, and a dashboard |
-| "Did the agent even read the rules?" | Every reply starts with a `DevKit ·` status line; devkit checks it, records it and reports deviations |
+| "Did the agent even read the rules?" | Every reply starts with a `[Firefly> DevKit]` status line; devkit checks it, records it and reports deviations |
 
 ## Install
 
@@ -75,7 +75,7 @@ devkit is also a plugin for **Claude Code** and **Codex**, installed automatical
 - **Skills:** `handoff`, `workspace`, `delivery` (local-first GitOps), `backend` (contracts, migrations, testing,
   resilience), plus a curated set for architecture (ADRs, C4, domain modelling), Angular, React, Spring and testing.
 - **Rules:** one set of global instructions for both agents: method, files and disk, worktrees, branches, commits,
-  delivery, backend practice, handoff, and the `DevKit ·` status line.
+  delivery, backend practice, handoff, and the `[Firefly> DevKit]` status line.
 - **Guard:** a pre-tool hook that blocks what wastes time or disk, and explains the right way in one sentence.
 
 ## How it fits together
