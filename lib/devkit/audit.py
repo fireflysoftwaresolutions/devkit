@@ -170,7 +170,7 @@ ACTIONS = {
     "job": ("job", "info"), "jobs": ("config", "notice"), "ci.watch": ("job", "info"), "ops": ("job", "info"),
     "state": ("lifecycle", "warning"), "install": ("lifecycle", "notice"),
     "caller": ("security", "warning"), "caller.unverified": ("security", "notice"),
-    "calls": ("lifecycle", "notice"), "progress": ("decision", "notice"),
+    "calls": ("lifecycle", "notice"), "progress": ("decision", "notice"), "session": ("lifecycle", "info"),
 }
 
 # a caller's keyword -> where it goes in the record; callers pass nothing else (anything else is dropped)
@@ -622,7 +622,8 @@ READ_SUB = {("task", "ls"), ("task", "show"), ("task", "history"), ("task", None
             ("pr", "view"), ("pr", "checks"), ("pr", "diff"), ("run", "ls"), ("run", "view"), ("branch", "ls"),
             ("issue", "ls"), ("issue", "view"), ("sec", "scan"), ("desktop", "status"), ("crew", None),
             ("crew", "show"), ("crew", "brief"), ("crew", "inbox"), ("crew", "decisions"), ("crew", "next"),
-            ("ci", None), ("ci", "status"), ("ci", "audit")}
+            ("ci", None), ("ci", "status"), ("ci", "audit"), ("session", "brief"), ("session", "compactions"),
+            ("session", None)}
 # `ci audit --fix` edits workflow files and `ci init` writes a pipeline (unless --dry-run): both are audited
 # crew sync, ask, answer, decide, delegate, decline, mode <guided|auto> and route --apply change state;
 # `crew mode` alone and `crew route` without --apply only read
