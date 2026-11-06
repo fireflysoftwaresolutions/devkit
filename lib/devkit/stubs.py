@@ -188,7 +188,7 @@ def scan_repo(top: str, paths=None) -> list:
 
 def message(findings: list, limit: int = 8) -> str:
     lines = [f"- {f['file']}:{f['line']} {f['rule']}: {f['text']}" for f in findings[:limit]]
-    more = f"\n- … and {len(findings) - limit} more (dev stubs --changed)" if len(findings) > limit else ""
+    more = f"\n- … and {len(findings) - limit} more (dev stubs)" if len(findings) > limit else ""
     return ("These lines leave unfinished work (stubs, placeholders or TODOs):\n" + "\n".join(lines) + more +
             "\nBuild it for real now. If deferring it is part of the plan, record the task (dev task add \"…\" --why "
             "\"…\") and name it on the line, for example TODO(T-fwk6abc123): …; an issue (#123) works too.")

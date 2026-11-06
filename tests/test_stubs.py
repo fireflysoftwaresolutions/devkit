@@ -104,6 +104,16 @@ class CommitGateHookTests(unittest.TestCase):
 
 
 
+class MessageTests(unittest.TestCase):
+    def test_the_suggested_command_exists(self):
+        import re
+        import shlex
+        from devkit import cli, stubs as S
+        many = [{"file": "a.py", "line": n, "rule": "todo", "text": "x"} for n in range(1, 12)]
+        cmd = re.search(r"\((dev stubs[^)]*)\)", S.message(many)).group(1)
+        a = cli.build_parser().parse_args(shlex.split(cmd)[1:])  # argparse exits on an unknown flag
+        self.assertEqual((a.cmd, a.all, a.staged), ("stubs", False, False))  # the changes since HEAD
+
 class BulkRewriteNoteTests(unittest.TestCase):
     """Lesson L-fwyp0n9vzv6: a regex that rewrites files must be followed by reading every changed line."""
 
