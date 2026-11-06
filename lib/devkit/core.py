@@ -60,7 +60,10 @@ DEFAULTS = {
     "claude": {"default_mode": "bypassPermissions"},
     "codex": {"mode": "full", "approval_policy": "never", "sandbox_mode": "danger-full-access"},
     "stacks": ["java", "python", "php", "node"],
-    "skills": {"groups": ["security-deep", "postgres", "observability"], "enforce": True, "rules": []},
+    # skills.groups: the optional skill groups of config/skills.json this Mac installs. skills.optional: groups never
+    # installed by default, which the setup wizard offers when the developer picks one of these tools.
+    "skills": {"groups": ["security-deep", "postgres", "observability"], "optional": {"iac": ["terraform"]},
+               "enforce": True, "rules": []},
     "language": "en-US",
     "hosts": ["github"],
     "clouds": [],
@@ -178,6 +181,14 @@ def deep_merge(base: dict, extra: dict) -> dict:
         else:
             out[k] = v
     return out
+
+
+def offered_skill_groups(tools, cfg=None) -> list:
+    """The optional skill groups (`skills.optional`) the setup wizard offers for the cloud and infrastructure tools
+    the developer picked (toolchain.CLOUDS keys): ["iac"] for terraform. Offered, never installed by default."""
+    picked = set(tools or [])
+    optional = ((cfg if cfg is not None else CFG).get("skills") or {}).get("optional") or {}
+    return [g for g, when in optional.items() if picked & set(when or [])]
 
 
 def load_config() -> dict:
