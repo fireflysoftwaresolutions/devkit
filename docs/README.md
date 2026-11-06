@@ -41,6 +41,7 @@ block, progress updates, approvals, the crew graph, and the dashboard.
 | [Delivery](delivery.md) | The delivery policy, local-first GitOps (one integration branch, one push, one CI run), following CI with `dev ci status`, releases |
 | [Lessons](lessons.md) | Learning from mistakes: recording, recalling, counting repeats, automating prevention, and `dev sleep` |
 | [Scheduled jobs and the audit trail](jobs-and-audit.md) | `dev jobs`: the background jobs, their schedules, logs, and journal; `dev audit`: everything devkit changed or decided |
+| [The audit trail](audit.md) | What each record holds (schema v2), levels, the hash chain and `dev audit verify`, queries and exports (JSONL, CSV, OCSF, CEF), retention, and the GDPR rights of the people recorded |
 | [Diagrams](diagrams.md) | `dev diagram`: specs, validation, design rules, devkit's own diagrams |
 | [Disk and cleanup](disk-and-cleanup.md) | `dev gc` safety rules, automatic cleanup, `dev du`, agent data retention |
 | [Docker](docker.md) | Colima, Compose, and Buildx, Testcontainers, amd64 images |

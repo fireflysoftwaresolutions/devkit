@@ -18,7 +18,7 @@ reschedule, and turn off. Everything devkit changes or decides, in the backgroun
 | `sleep` | Daily at 03:30 | `dev sleep --quiet` | Merges, forgets, and caps lessons; trims devkit's old records, caches, and logs (see [Lessons › Sleep](lessons.md#sleep)) |
 | `gc` | Daily at 04:00 | `dev gc --apply --yes --auto-only` | Reclaims disk safely: merged worktrees, idle build output, stale temp, Docker build cache (see [Disk and cleanup](disk-and-cleanup.md)) |
 | `repair` | Every 6 hours | `dev config repair --quiet` | Restores devkit-managed agent settings and Codex hook trust if anything drifted |
-| `audit` | Daily at 05:00 | `dev audit --publish --quiet` | Publishes this machine's audit trail to the handoff repository and prunes local files older than two years |
+| `audit` | Daily at 05:00 | `dev audit --publish --quiet` | Publishes this machine's audit trail to the handoff repository and prunes month files past their retention, 13 months by default (see [The audit trail › Retention](audit.md#retention)) |
 | `doctor` | Mondays at 09:00 | `dev doctor` | The full health check; you get a notification when a check fails |
 | `lessons` | Fridays at 16:00 | `dev lesson review` | Lists recurring lessons to automate and stale ones to retire, and always notifies you |
 
@@ -119,28 +119,33 @@ The same keys under a built-in job's name change that job; you write only what y
 
 ## The audit trail
 
-Every record says who (user, machine, and agent: `claude`, `codex`, `job`, or `human`), when, what (the action and its
-target), the details, and the outcome.
+Every record says who acted (user, machine, and agent: `claude`, `codex`, `job`, or `human`, and the crew member when
+one acts), when, what (the action and its target), the details, the outcome, and, for an override, the reason. The
+full record, its categories and levels, the hash chain, and the exports are in [The audit trail](audit.md).
 
 | Action | Recorded when |
 | --- | --- |
-| `dev.<command>` | A `dev` command that changes something runs: its arguments, the result (`ok` or `exit N`), the duration, and the folder. Read-only commands and dry runs are not recorded |
+| `dev.<command>` | A `dev` command that changes something runs: its arguments, the result (`ok` or `exit N`), the duration, and the folder. Read-only commands and dry runs are not recorded, unless `audit.level` is `all` |
 | `guard.deny` · `guard.ask` | The guard refuses a command or a file write, or asks you about one, with the reason |
-| `config.blocked` | ConfigChange refuses an edit to a devkit-managed setting |
+| `config.blocked` | ConfigChange refuses an edit to a devkit-managed setting, or a `DEVKIT_*` variable in a settings file |
 | `config` | `dev config repair` restores a setting |
 | `canary.miss` | A final message lacks the status block |
+| `crew.<event>` | A crew member's lane starts, binds, ends, or is lost; a crew gate sends a member back (`crew.gate`); a crew message is sent (its id, sender, recipient, and length, never its text); a decision is asked or made |
 | `handoff.<folder>` | devkit commits to the handoff repository: `handoff.items`, `handoff.plans`, `handoff.lessons`, `handoff.policies`, and so on |
 | `handoff.push` | The handoff repository is pushed, or the push fails |
 | `ops` | Cleanups, worktree removals, adoptions, and sleep summaries |
 | `job.<name>` · `jobs.set` · `jobs.install` | A job runs, a schedule changes, the jobs are installed |
+| `audit.<event>` | The audit trail itself: a prune, a settings change, a verify, an export, or a publish that was refused |
 
-**Secrets are redacted** before a record is written. Tokens and keys of GitHub, Slack, OpenAI, and AWS, private
-keys, and `password=`, `secret:`, `token=`, or `api_key=` values keep only their first four characters.
+**Secrets never reach a record.** Tokens, keys, passwords, and credentials in URLs are redacted in every text field
+before a record is written, crew message text is never recorded, and `/Users/<name>` becomes `~`. See
+[The audit trail › What a record holds](audit.md#what-a-record-holds-and-what-it-never-holds).
 
-**Where it lives.** Each machine appends to `~/.local/state/devkit/audit/YYYY-MM.jsonl` and keeps two years. Every
-day at 05:00 the `audit` job copies this month's file and the two before into the handoff repository as
-`audit/<user>@<host>/YYYY-MM.jsonl`, in one commit, so the team shares one history and git keeps it. Set
-`audit.publish` to `false` to keep the trail on your Mac.
+**Where it lives.** Each machine appends to `~/.local/state/devkit/audit/YYYY-MM.jsonl` and keeps 13 months by
+default (`audit.retention.local_months`). Every day at 05:00 the `audit` job copies this month's file and the two
+before into the handoff repository as `audit/<user>@<host>/YYYY-MM.jsonl`, in one commit, so the team shares one
+history and git keeps it. Set `audit.publish` to `false` to keep the trail on your Mac. Retention, the legal hold, and
+what git history keeps are in [The audit trail › Retention](audit.md#retention).
 
 ### Read it
 
@@ -164,5 +169,8 @@ dev audit --json -n 500           # for tools and agents
 `--action` matches the start of the action (`guard`, `job`, `dev.pr`, `handoff`), and `--actor` any part of
 `user@host agent`. Refusals, failures, and misses are highlighted.
 
-See also [Commands › Tracking and disk](commands.md#tracking-and-disk), [Configuration](configuration.md#jobs-and-audit),
-and [Troubleshooting](troubleshooting.md#a-scheduled-job-fails-or-does-not-run).
+For one whole record, statistics, the settings, the chain check, and exports, see
+[The audit trail › Query and export](audit.md#query-and-export) and [Verify the chain](audit.md#verify-the-chain).
+
+See also [The audit trail](audit.md), [Commands › Tracking and disk](commands.md#tracking-and-disk),
+[Configuration](configuration.md#jobs-and-audit), and [Troubleshooting](troubleshooting.md#a-scheduled-job-fails-or-does-not-run).
