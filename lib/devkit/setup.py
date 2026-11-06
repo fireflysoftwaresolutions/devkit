@@ -1423,6 +1423,30 @@ def run_install(only=None, unverified_why=None, version=None, as_pinned=False) -
 
 # --------------------------------------------------------------------------- doctor
 
+def crew_skill_checks(agents, roster=None, homes=None) -> list:
+    """selfcheck D8 for `dev doctor`: per agent, the skills the crew names (the team's crew) that it has not
+    installed, with the lines that install them. -> [(group, name, ok, detail, fix)]. `homes`: {agent: (agent home,
+    skills folder)} in place of this Mac's (the tests)."""
+    from . import selfcheck
+    rows = []
+    for agent in agents:
+        home, sdir = (homes or {}).get(agent, (None, None))
+        try:
+            named = selfcheck.crew_skills(selfcheck._roster(roster, team=True))
+            missing = selfcheck.d8_uninstalled_skills(agent, roster=roster, agent_home=home, skills_dir=sdir)
+        except Exception as e:  # a broken roster is the crew check's to report
+            rows.append(("Agents", f"crew skills ({agent})", False, f"crew: {e}", "dev crew sync"))
+            continue
+        names = [f.item.split(": ", 1)[1] for f in missing]
+        groups = [f.evidence.split("(group ", 1)[1].split(")")[0] for f in missing]
+        detail = (f"all {len(named)} skills the crew names are installed" if not missing else
+                  f"{len(missing)} of {len(named)} not installed: " +
+                  ", ".join(f"{n} ({g})" for n, g in zip(names[:5], groups)) + (" …" if len(missing) > 5 else ""))
+        rows.append(("Agents", f"crew skills ({agent})", not missing, detail,
+                     " · ".join(dict.fromkeys(f.fix for f in missing))))
+    return rows
+
+
 def doctor() -> int:
     print(ui.banner("doctor"))
     results = []
@@ -1486,6 +1510,8 @@ def doctor() -> int:
               f"missing or out of date: {', '.join(stale[:5])}", "dev install --only codex")
     except Exception as e:
         check("Agents", "crew agents", False, f"crew: {e}", "dev crew sync")
+    for row in crew_skill_checks([a for a in ("claude", "codex") if CFG.get("agents", {}).get(a, True)]):
+        check(*row)
     managed = read_json(STATE / "skills-managed.json", []) or []
     if not isinstance(managed, dict):  # before 26.11.0: every skill went to both agents
         managed = {n: ["claude", "codex"] for n in managed}
