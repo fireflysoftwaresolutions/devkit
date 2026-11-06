@@ -914,7 +914,7 @@ def cmd_ci(a):
 def cmd_canary(a):
     from . import canary
     rs = canary.records(a.days)
-    print(ui.section(f"Instruction canary “{canary.MARKER} ·” — last {a.days} days"))
+    print(ui.section(f"Instruction canary {canary.MARKER} — last {a.days} days"))
     if not rs:
         print("  no tracked replies yet (replies in sessions under ~/Development are checked after every turn)")
         return 0
