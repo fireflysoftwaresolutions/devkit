@@ -4,9 +4,11 @@
 # The crew gates at SubagentStop: a member ran its proofs, loaded its skills, left no unfinished work or tests that
 # cannot fail, and recorded a lesson after repeated guard refusals. Run: python3 -m unittest tests.test_crew_gates
 import json
+import os
 import subprocess
 import sys
 import tempfile
+import time
 import unittest
 from pathlib import Path
 
@@ -29,6 +31,16 @@ KID = {"id": "kid", "name": "Kid", "title": "DevEx engineer", "tools": "all",
            {"phase": "Hand off", "do": "hand off", "skills": ["communicating"], "devkit": ["dev progress step"],
             "proof": "dev progress step"}]}
 
+# Kid as config/crew.json has it: the Document phase proves itself with `dev docs check`, Verify with `dev test prove`.
+KID_DOCS = {**KID, "procedure": [
+    {"phase": "Build", "do": "build it", "skills": ["superpowers:test-driven-development"], "devkit": ["dev test"],
+     "proof": "dev test"},
+    {"phase": "Document", "do": "document it", "skills": ["docs"], "devkit": ["dev docs check"],
+     "proof": "dev docs check"},
+    {"phase": "Verify", "do": "verify it", "skills": ["testing"], "devkit": ["dev test", "dev test prove"],
+     "proof": "dev test prove"},
+    KID["procedure"][-1]]}
+
 # A read-only member (tools: read) whose procedure still names a proof and a skill.
 SCOUT = {"id": "sparks", "name": "Sparks", "tools": "read", "skills": ["docs"],
          "procedure": [{"phase": "Search", "do": "search", "skills": ["docs"], "devkit": ["dev grep"],
@@ -46,10 +58,14 @@ def git(cwd, *args):
 
 
 class Transcript:
-    # Builds a member's own transcript (JSONL) in the shape Claude Code writes for a subagent.
+    # Builds a member's own transcript (JSONL) in the shape Claude Code writes for a subagent: the brief's record
+    # carries the time the lane started, as Claude Code's `timestamp` (UTC, milliseconds).
     def __init__(self, path):
         self.path = Path(path)
-        self.records = [{"type": "user", "isSidechain": True, "message": {"role": "user", "content": "the brief"}}]
+        self.started = time.time()
+        stamp = time.strftime("%Y-%m-%dT%H:%M:%S", time.gmtime(self.started)) + ".000Z"
+        self.records = [{"type": "user", "isSidechain": True, "timestamp": stamp,
+                         "message": {"role": "user", "content": "the brief"}}]
         self.n = 0
 
     def call(self, name, result="ok", is_error=False, **inp):
@@ -170,6 +186,26 @@ class CrewGateTests(GateCase):
         self.tx.bash("dev docs check")
         self.assertEqual(self.rules(self.gates()), [("skills", "docs")])
 
+    def test_a_docs_proof_is_owed_only_when_the_member_changed_docs(self):
+        self.write("calc.py", "def add(a, b):\n    return a + b\n")
+        self.complete()
+        self.tx.bash("bin/dev test prove")
+        self.assertEqual(self.gates(KID_DOCS), [])  # code only: the Document phase did not apply
+        self.write("docs/usage.md", "# Usage\n\nCall add(2, 3).\n")
+        self.assertEqual(self.rules(self.gates(KID_DOCS)), [("proofs", "dev docs check"), ("skills", "docs")])
+
+    def test_a_docs_page_written_through_the_shell_owes_the_docs_proof(self):
+        self.complete()
+        self.shell_write("README.md", "# repo\n\nInstall it with make.\n")
+        self.assertEqual(self.rules(self.gates(KID_DOCS)), [("proofs", "dev docs check"), ("skills", "docs")])
+
+    def test_test_proofs_are_owed_only_when_the_member_changed_code(self):
+        self.tx.skill("communicating").bash('dev progress step "looked into it" --check "read the parser"')
+        self.assertEqual(self.gates(KID_DOCS), [])  # it changed nothing: only the hand-off proof applies
+        self.write("calc.py", "def add(a, b):\n    return a + b\n")
+        self.assertEqual([f["item"] for f in self.gates(KID_DOCS) if f["rule"] == "proofs"],
+                         ["dev test", "dev test prove"])
+
     def test_unfinished_work_in_a_changed_file_is_found(self):
         (self.repo / "other.py").write_text("x = 1  # TODO not the member's file\n")
         self.write("calc.py", "def add(a, b):\n    return a + b  # TODO handle overflow\n")
@@ -222,6 +258,54 @@ class CrewGateTests(GateCase):
         self.assertEqual([f["rule"] for f in found], ["stubs"])
         self.assertIn("TODO mine", found[0]["evidence"])
         self.assertNotIn("TODO theirs", found[0]["evidence"])
+
+    def shell_write(self, rel, text):
+        # The member writes a file through the shell (a heredoc), so no Write or Edit call names it.
+        p = self.repo / rel
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_text(text)
+        self.tx.bash(f"cat > {rel} <<'EOF'\n{text}EOF")
+        return p
+
+    def test_unfinished_work_written_through_the_shell_is_found(self):
+        self.shell_write("calc.py", "def add(a, b):\n    return a + b  # TODO handle overflow\n")
+        self.complete()
+        found = self.gates()
+        self.assertEqual([f["rule"] for f in found], ["stubs"])
+        self.assertIn("calc.py:2", found[0]["evidence"])
+
+    def test_a_test_that_cannot_fail_written_through_the_shell_is_found(self):
+        self.shell_write("tests/test_calc.py", "import unittest\n\n\nclass AddTests(unittest.TestCase):\n"
+                                               "    def test_adds(self):\n        self.assertTrue(True)\n")
+        self.complete()
+        found = self.gates()
+        self.assertEqual([f["rule"] for f in found], ["tests"])
+        self.assertIn("test_adds", found[0]["evidence"])
+
+    def test_a_shell_append_to_a_shared_file_blames_only_the_lines_its_command_holds(self):
+        (self.repo / "calc.py").write_text("def add(a, b):\n    return a + b\n")
+        git(self.repo, "add", "-A")
+        git(self.repo, "commit", "-q", "-m", "calc")
+        with (self.repo / "calc.py").open("a") as fh:  # another member's uncommitted line in the same file
+            fh.write("# TODO theirs\n")
+        with (self.repo / "calc.py").open("a") as fh:
+            fh.write("# FIXME mine\n")
+        self.tx.bash("cat >> calc.py <<'EOF'\n# FIXME mine\nEOF")
+        self.complete()
+        found = self.gates()
+        self.assertEqual([f["rule"] for f in found], ["stubs"])
+        self.assertIn("FIXME mine", found[0]["evidence"])
+        self.assertNotIn("TODO theirs", found[0]["evidence"])
+
+    def test_files_changed_before_the_lane_started_or_not_written_by_it_are_not_blamed(self):
+        old = self.repo / "old.py"  # another member's uncommitted work from before this lane started
+        old.write_text("x = 1  # TODO theirs, from before\n")
+        before = self.tx.started - 600
+        os.utime(old, (before, before))
+        (self.repo / "now.py").write_text("y = 2  # TODO theirs, written meanwhile\n")  # no command of this member
+        self.tx.bash("cat old.py").bash("python3 -m unittest -q")  # its shell read one and ran, but wrote neither
+        self.complete()
+        self.assertEqual(self.gates(), [])
 
     def test_two_guard_refusals_without_a_lesson_ask_for_one(self):
         self.complete()

@@ -29,9 +29,12 @@ KNOWN = {
     "D3": {**owned("R2-1 · Backend engineer (Tank) · step 62 language-neutral hooks",
                    "crew.catalog", "lessons.for_call", "lessons.for_output"),
            # the guard's F7 allowlist (ca3bdad) and F8 escape hatches (165a8b4) await their calls from hooks.py
+           # (worktree_state has one: the crew gates read the worktree diff since a lane started)
            **owned("found by D3 · Backend engineer (Tank) · step F7 F8 hooks wiring",
-                   "guard.scope_base", "guard.scope_owner_across", "guard.worktree_state", "guard.written_paths",
-                   "guard.member_tool_verdict", "guard.record_bypasses", "guard.stubs_accepted")},
+                   "guard.scope_base", "guard.scope_owner_across", "guard.written_paths",
+                   "guard.member_tool_verdict", "guard.record_bypasses", "guard.stubs_accepted"),
+           **owned("C6 · Security engineer (The Keymaker) · step 74 F5 gate tiers: guard.irreversible_verdict calls it",
+                   "progress.use_grant")},
     "D7": owned("R2-9 · the developer approves plan and scope once F6 accepts “developer” as an approver · "
                 "step 36 F6 step endings and approvals",
                 "plan: A morpheus in R", "scope: A hamann in R"),

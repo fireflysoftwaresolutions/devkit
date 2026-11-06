@@ -6,12 +6,16 @@ The main session's Stop hook checks a turn for unfinished work, tests that canno
 gates hold a crew member to the same standard and to its own procedure (config/crew.json). They read the member's
 own transcript (`agent_transcript_path` in the SubagentStop input), never the main session's:
 
-  proofs   each `proof` of its procedure ran as a shell command, not as text inside quotes or a heredoc
-  skills   it loaded the skills of each procedure phase it worked in (a phase with a proof, or one whose devkit
-           commands it ran) and the skills devkit's skill rules require for the files it changed: a Skill tool call,
-           or a read of the skill's SKILL.md
+  proofs   the `proof` of each procedure phase that applied ran as a shell command, not as text inside quotes or a
+           heredoc. A proof about files applies only when the member changed files of its kind (`FILE_PROOFS`: no
+           `dev docs check` without a docs change, no test proof without a code change); the others always apply
+  skills   it loaded the skills of each procedure phase it worked in (a phase whose proof applied, or one whose
+           devkit commands it ran) and the skills devkit's skill rules require for the files it changed: a Skill
+           tool call, or a read of the skill's SKILL.md
   stubs    the files it changed leave no unfinished work and no untracked deferrals (the `stubs` module)
   tests    the test files it changed hold no test that cannot fail (`testaudit`, high findings)
+The files it changed are those of its Write and Edit calls and, for what it wrote through its shell, the checkout's
+worktree diff since its lane started; only its own lines are blamed on it (`_mine`).
   lessons  two or more guard refusals are answered with `dev lesson add` or `dev lesson recur`
 
 Read-only members (`tools: read`) have no shell, so they skip the proofs and lessons gates. `check` is the hook's
@@ -147,6 +151,46 @@ def _written(path) -> dict:
     return out
 
 
+def _lane_start(path):
+    """When the member's lane started: the `timestamp` of the first record of its transcript (Claude Code writes UTC
+    with milliseconds). None when the transcript has none."""
+    from datetime import datetime
+    for rec in _records(path):
+        ts = rec.get("timestamp")
+        if isinstance(ts, str) and ts:
+            try:
+                return datetime.fromisoformat(ts.replace("Z", "+00:00")).timestamp()
+            except ValueError:
+                return None
+    return None
+
+
+def _shell_written(top, path, commands, known) -> dict:
+    """What the member may have written through its shell: the paths of the checkout's worktree diff
+    (`guard.worktree_state`) changed since its lane started, other than `known` (its Write and Edit files), as
+    {real path: (whole file?, [its shell commands])}. Whole when the file is new (untracked) and a command names its
+    path; otherwise only lines its commands hold are its (a heredoc's body, a sed expression). {} without a start."""
+    start = _lane_start(path) if commands else None
+    if start is None:
+        return {}
+    from . import guard
+    out = {}
+    for rel, (status, _, mtime_ns) in (guard.worktree_state(top) or {}).items():
+        real = os.path.realpath(os.path.join(top, rel))
+        if mtime_ns is None or mtime_ns < (start - 1) * 1e9 or real in known or not os.path.isfile(real):
+            continue
+        out[real] = (status == "??" and _named(top, real, commands), list(commands))
+    return out
+
+
+def _named(top, real, commands) -> bool:
+    """A shell command names this file: its repository path as a word (`> docs/a.md`, `sed -i … ./a.py`), or its
+    full path."""
+    rel = os.path.relpath(real, os.path.realpath(top))
+    word = re.compile(r"(?:^|[\s'\"=>(])(?:\./)?" + re.escape(rel) + r"(?![\w./-])|" + re.escape(real))
+    return any(word.search(c) for c in commands)
+
+
 def _mine(written, top, rel, *needles) -> bool:
     """Did this member write it: the whole file, or a text it wrote holds one of the needles (the finding's line, or
     its test's name)? Another member's uncommitted lines in a shared file are theirs."""
@@ -155,6 +199,36 @@ def _mine(written, top, rel, *needles) -> bool:
         return True
     needles = [n.strip() for n in needles if n and n.strip()]
     return any(n in t for n in needles for t in texts)
+
+
+DOC_SUFFIXES = (".md", ".mdx", ".rst", ".adoc", ".txt")
+
+
+def _is_doc(rel: str) -> bool:
+    p = rel.replace(os.sep, "/").lower()
+    return p.endswith(DOC_SUFFIXES) or p.split("/")[0] in ("docs", "doc")
+
+
+def _is_test(rel: str) -> bool:
+    from . import testaudit
+    return testaudit.is_test_file(rel)
+
+
+# A proof about files is owed only when the member changed files of its kind (crew review 2, R2-6): no docs check
+# for a step that changed no docs, no test proof for a step that changed no code. Other proofs are always owed.
+FILE_PROOFS = {"dev docs check": _is_doc, "dev test": lambda f: not _is_doc(f),
+               "dev test prove": lambda f: not _is_doc(f), "dev test audit": _is_test}
+
+
+def _proof_owed(phase: dict, changed) -> bool:
+    proof = phase.get("proof")
+    kind = FILE_PROOFS.get(" ".join(str(proof or "").split()))
+    return bool(proof) and (kind is None or any(kind(f) for f in changed))
+
+
+def _phase_applied(phase: dict, invocations, changed) -> bool:
+    """The member worked in this phase: its proof is owed, or it ran one of the phase's devkit commands."""
+    return _proof_owed(phase, changed) or any(_ran(c, invocations) for c in phase.get("devkit") or [])
 
 
 def _ran(command: str, invocations) -> bool:
@@ -188,10 +262,12 @@ def _rel(path, top) -> str:
         return str(path)
 
 
-def _skill_findings(m, invocations, loaded, changed, top) -> list:
+def _skill_findings(m, invocations, loaded, changed, top, kinds=()) -> list:
+    """`changed`: the paths the skill rules match; `kinds`: the changed paths as the phases see them (repository
+    paths), which decide the phases the member worked in."""
     need = {}  # short name -> (name as written, [why])
     for x in (m or {}).get("procedure") or []:
-        if not isinstance(x, dict) or not (x.get("proof") or any(_ran(c, invocations) for c in x.get("devkit") or [])):
+        if not isinstance(x, dict) or not _phase_applied(x, invocations, kinds):
             continue
         for s in x.get("skills") or []:
             need.setdefault(skillguard.short(s), (s, []))[1].append(f"the {x.get('phase')} phase of your procedure")
@@ -264,19 +340,24 @@ def crew_gates(member, transcript_path, cwd, roster=None) -> list:
     top = core.gitout(cwd, "rev-parse", "--show-toplevel") if cwd and os.path.isdir(cwd) else ""
     # real paths: git names the top as /private/var/… where the member wrote /var/… (macOS temp folders)
     in_repo = [os.path.realpath(f) for f in paths if top and os.path.isfile(f) and core.is_under(f, top)]
+    shell = _shell_written(top, transcript_path, commands, set(in_repo)) if top and not read_only else {}
+    touched = [r for r in shell if _named(top, r, commands)]  # shell writes it named: the phases count them
+    kinds = [_rel(f, top) for f in dict.fromkeys(in_repo + touched)] + [f for f in paths if f not in in_repo
+                                                                         and not (top and core.is_under(f, top))]
     found = []
     if not read_only:
-        from . import crew
-        for proof in crew.proofs(m or {}):
-            if not _ran(proof, inv):
+        for x in (m or {}).get("procedure") or []:
+            proof = x.get("proof") if isinstance(x, dict) else None
+            if proof and _proof_owed(x, kinds) and not _ran(proof, inv):
                 found.append(_finding("proofs", proof, f"`{proof}` is not among your {len(commands)} shell commands "
                                       "(text inside quotes or a heredoc does not count)",
                                       f"run `{proof}{PROOF_ARGS.get(proof, '')}`"))
-    found += _skill_findings(m, inv, loaded, paths, top)
-    if in_repo:
-        written = _written(transcript_path)
-        found += _stub_findings(top, in_repo, written)
-        found += _test_findings(top, in_repo, written)
+    found += _skill_findings(m, inv, loaded, paths + touched, top, kinds)
+    if in_repo or shell:
+        written = {**_written(transcript_path), **shell}
+        changed = in_repo + sorted(shell)
+        found += _stub_findings(top, changed, written)
+        found += _test_findings(top, changed, written)
     if not read_only and len(refusals) >= 2 and not (_ran("dev lesson add", inv) or _ran("dev lesson recur", inv)):
         first = (re.sub(r"^[:\s]+", "", DENIAL_RE.sub("", refusals[0], 1)).splitlines() or [""])[0][:120]
         found.append(_finding("lessons", "dev lesson add",
