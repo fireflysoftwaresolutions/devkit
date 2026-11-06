@@ -535,9 +535,12 @@ class UnknownProgramTests(GateCase):
         for cmd in ("[ -f x ] && gh pr view 12", "[[ -n x ]]", "git status", "python3 -c \"print(1)\"",
                     "python3 -c \"print('gh pr merge 12')\"", "echo $HOME",
                     # a method named like a dynamic builtin is not one: this refused the fix's own edit script
-                    "python3 -c \"import re; print(re.compile('x'))\"", "python3 -c \"m.eval(); print(1)\""):
+                    "python3 -c \"import re; print(re.compile('x'))\"", "python3 -c \"m.eval(); print(1)\"",
+                    # the elements of a bash array are words, not a command: this refused the fix's test runner
+                    "mods=(\"$x\" b); mods+=(\"${m//\\//.}\")", "local -a a=($HOME/x)"):
             with self.subTest(cmd=cmd):
                 self.assertEqual(self.acts(cmd), [])
+        self.assertEqual(self.acts("a=($(gh pr merge 12))"), [("merge", 2, "12")])  # what it runs still counts
 
     def test_the_main_session_is_told_how_to_clear_it_and_a_grant_of_that_command_opens_it(self):
         target = self.acts("$X pr merge 12")[0][2]

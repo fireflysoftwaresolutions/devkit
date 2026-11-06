@@ -4257,7 +4257,7 @@ def _segment_actions(argv, cwd, bodies, depth) -> list:
     return _found(found, argv, cwd) + more
 
 
-_ASSIGN = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*=")
+_ARRAY_OPEN = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*\+?=$")
 _PAGER_KEY = re.compile(r"^(?:core\.pager|pager\.[^=]+)$", re.I)
 
 
@@ -4349,6 +4349,8 @@ def _text_actions(text, cwd, depth=0):
         return None
     bodies, out, gh_repo, shell_env = heredoc_bodies(text), [], "", {}
     for k, (argv0, _, op, here) in enumerate(segs):
+        if k and segs[k - 1][2] == "(" and segs[k - 1][0] and _ARRAY_OPEN.match(segs[k - 1][0][-1]):
+            continue  # the elements of `arr=( … )` or `arr+=( … )` are words, not a command
         argv = _unwrap(argv0)
         # a program the shell names only when it runs (RT1): `env -S '…'` splits a string into a command, `$(…)` or
         # backticks in the command word print its name, a variable or a glob expands to it
