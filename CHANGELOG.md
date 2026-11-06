@@ -28,6 +28,8 @@ All notable changes to devkit. Versions follow CalVer `YY.MM.PATCH` (PATCH resta
 
 ### Changed
 
+- A first `dev setup` on a Mac with no projects asks which languages to set up, with Python and Node preselected,
+  instead of installing Java, PHP, Node and Python without asking.
 - Claude Code: `attribution.sessionUrl` is `false`, so cloud and Remote Control sessions add no `Claude-Session`
   trailer either; the deprecated `includeCoAuthoredBy` key is removed; and `BASH_DEFAULT_TIMEOUT_MS` is 5 minutes,
   so a test suite or a build in the foreground is not cut off at 2.

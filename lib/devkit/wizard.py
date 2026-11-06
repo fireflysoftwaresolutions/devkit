@@ -32,6 +32,9 @@ from .core import CONFIG_FILE, DEVKIT_HOME, STATE
 STACKS = {"java": "Java / Spring (JDK, Maven, Gradle, jdtls)", "python": "Python (uv, pyright)",
           "php": "PHP (php, Composer, intelephense)", "node": "Node / TypeScript / Angular / React (pnpm, tsc, ng)"}
 BASE_GROUPS = ("core", "docker", "agents", "docs", "security")
+# A first run on a Mac with no repositories preselects these, and the wizard always asks (the developer's choice,
+# 2026-11-06): a light, fast first install; Java and PHP are one answer away.
+FIRST_STACKS = ("python", "node")
 CLAUDE_MODES = {"bypassPermissions": "no prompts; the devkit guard protects the workspace (recommended)",
                 "acceptEdits": "edits without prompts, commands ask", "default": "ask before every tool"}
 CODEX_MODES = {"full": ("never", "danger-full-access", "no prompts, full access; the devkit guard protects (recommended)"),
@@ -208,7 +211,9 @@ def _run_lines(assume_yes=False, skip_packages=False) -> int:
         a["codex_mode"] = p.choose("Codex autonomy", {k: v[2] for k, v in CODEX_MODES.items()}, a["codex_mode"])
 
     p.section("Stacks (toolchains, language servers, skills)")
-    a["stacks"] = p.multi("Stacks you develop in (comma-separated numbers)", STACKS, cfg.get("stacks") or list(STACKS))
+    found = [k for k in STACKS if ((d.get("stacks_found") or {}).get("counts") or {}).get(k)]
+    a["stacks"] = p.multi("Stacks you develop in (comma-separated numbers)", STACKS,
+                          (d["config"] or {}).get("stacks") or found or list(FIRST_STACKS))
 
     from . import toolchain
     seen = toolchain.detect()
@@ -493,7 +498,7 @@ def tui_defaults(d, detected=True) -> Answers:
     if "stacks" in saved or not detected:
         stacks = list(cfg.get("stacks") or [])
     else:
-        stacks = [k for k in STACKS if found.get(k)] or list(STACKS)
+        stacks = [k for k in STACKS if found.get(k)] or list(FIRST_STACKS)
     agents, dk = cfg.get("agents") or {}, cfg["docker"]
     claude_mode = (cfg.get("claude") or {}).get("default_mode", "bypassPermissions")
     codex_mode = (cfg.get("codex") or {}).get("mode", "full")
@@ -701,6 +706,10 @@ class _Wizard:
         mode = "recommended"
         while True:
             mode = self.screen.ask(self.welcome_prompt(mode), self.welcome)
+            if mode == "recommended" and self.first_stacks():
+                if self.section([k for k, _ in SECTIONS].index("stacks")) is tui.BACK:
+                    continue  # Esc on the stacks question: back to the welcome screen
+                break
             if mode == "recommended" or self.walk() is not tui.BACK:
                 break
         while True:
@@ -710,6 +719,11 @@ class _Wizard:
             k = self.screen.ask(self.section_prompt(), lambda: self.frame(STEPS, "Review"))
             if k is not tui.BACK:
                 self.section(k)
+
+    def first_stacks(self) -> bool:
+        """A first run with no repositories to learn from: the recommended setup still asks for the toolchains."""
+        return not (self.d.get("config") or {}).get("stacks") and \
+            not ((self.d.get("stacks_found") or {}).get("counts") or {})
 
     def _survey(self):
         self.d = survey()

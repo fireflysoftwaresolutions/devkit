@@ -37,7 +37,9 @@ command and a few presses of Return. Have your Mac's login password and your Git
    `1A2B-3C4D`, and your browser opens GitHub: sign in, type the code, and choose **Authorize**. Back in Terminal, you
    see `✓ signed in to GitHub as <your name>`.
 7. **The setup wizard.** A full-screen page shows what the wizard found on your Mac, with **Recommended setup**
-   selected: press Return. The next page is the plan, with **Apply** selected: press Return. Each item then shows a
+   selected: press Return. On a Mac with no projects yet, it then asks which languages you work in, with Python and
+   Node (JavaScript and TypeScript) already selected: press Return to keep them, or add Java or PHP with the arrow
+   keys and Space. The next page is the plan, with **Apply** selected: press Return. Each item then shows a
    spinner while it runs and `✓` when it is done. When the wizard offers to sign you in to Claude Code or Codex, press
    Return: your browser opens, and you sign in there with your Claude or ChatGPT account. When it offers to start
    Docker, press Return.
@@ -188,8 +190,8 @@ When the input or output is not a terminal (a pipe or a script), when `TERM` is 
 uses plain line prompts instead: each question shows its default in brackets, and Enter keeps it. `--yes` accepts
 every default without asking and writes the same configuration as earlier versions. When nothing can answer (the input
 is not a terminal), the line prompts say so at the start and take every default, as with `--yes`. To get the line prompts in a
-terminal, run `TERM=dumb dev setup`. Unlike the interactive **Recommended setup**, `--yes` keeps every stack selected
-unless your saved configuration lists fewer.
+terminal, run `TERM=dumb dev setup`. With `--yes`, the stacks are your saved ones, else the ones found in your
+projects, else Python and Node.
 
 | Package group | Installed | Contents |
 | --- | --- | --- |

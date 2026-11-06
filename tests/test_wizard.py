@@ -286,7 +286,7 @@ SNAPSHOT_FIRST = {
     "dev_root": "~/Development", "github_user": "ada", "handoff_repo": "ada/handoff",
     "agents": {"claude": True, "codex": True}, "claude": {"default_mode": "bypassPermissions"},
     "codex": {"mode": "full", "approval_policy": "never", "sandbox_mode": "danger-full-access"},
-    "stacks": ["java", "python", "php", "node"], "lock": False, "hosts": ["github", "gitlab"], "clouds": ["aws"],
+    "stacks": ["python", "node"], "lock": False, "hosts": ["github", "gitlab"], "clouds": ["aws"],
     "docker": {"cpu": 6, "memory": 12, "disk": 80, "autostart": False}, "gc": {"auto": True},
     "sync": {"interval_minutes": 60}}
 SAVED = {"stacks": ["python"], "hosts": ["bitbucket"], "clouds": [], "docker": {"cpu": 4, "memory": 8},
@@ -325,11 +325,11 @@ changes until you confirm.
      Codex autonomy → full
 
    4 Stacks (toolchains, language servers, skills)
-     ■ 1. java — Java / Spring (JDK, Maven, Gradle, jdtls)
+     □ 1. java — Java / Spring (JDK, Maven, Gradle, jdtls)
      ■ 2. python — Python (uv, pyright)
-     ■ 3. php — PHP (php, Composer, intelephense)
+     □ 3. php — PHP (php, Composer, intelephense)
      ■ 4. node — Node / TypeScript / Angular / React (pnpm, tsc, ng)
-     Stacks you develop in (comma-separated numbers) → java, python, php, node
+     Stacks you develop in (comma-separated numbers) → python, node
 
    5 Git hosts and CI/CD (CLIs, sign-in checks, `dev ci status`)
      found on this Mac: gitlab (x); aws (y)
@@ -365,7 +365,7 @@ changes until you confirm.
      handoff      ada/handoff → ~/Development/.handoff
      Claude Code  bypassPermissions
      Codex        full (never / danger-full-access)
-     stacks       java, python, php, node
+     stacks       python, node
      git hosts    github, gitlab
      clouds       aws
      packages     skip
@@ -497,6 +497,12 @@ class InteractiveTests(unittest.TestCase):
         self.assertRegex(text, r"Good (morning|afternoon|evening), Ada\.")
         self.assertNotIn("[31m", text)  # the escape sequence in the GitHub name was removed
 
+    def test_a_first_run_with_no_repositories_asks_the_stacks_with_python_and_node_preselected(self):
+        rc, cfg, text, ran = self.run_wizard(ENTER + ENTER + ENTER, stacks={})
+        self.assertEqual(rc, 0)
+        self.assertIn("Stacks", text)  # asked even on the recommended path
+        self.assertEqual(cfg["stacks"], ["python", "node"])  # Return keeps the light preselection
+
     def test_customize_then_change_a_section_from_the_review(self):
         keys = (DOWN + ENTER                      # Customize
                 + ENTER + b"\x15team/handoff" + ENTER  # workspace
@@ -552,7 +558,7 @@ class InteractiveTests(unittest.TestCase):
 class DefaultsAndDetectionTests(unittest.TestCase):
     def test_stack_defaults(self):
         self.assertEqual(wizard.tui_defaults(fake_survey())["stacks"], ["java", "node"])
-        self.assertEqual(wizard.tui_defaults(fake_survey(stacks={}))["stacks"], list(wizard.STACKS))
+        self.assertEqual(wizard.tui_defaults(fake_survey(stacks={}))["stacks"], ["python", "node"])  # light first run
         self.assertEqual(wizard.tui_defaults(fake_survey({"stacks": ["php"]}))["stacks"], ["php"])
         self.assertEqual(wizard.tui_defaults(fake_survey({"stacks": []}))["stacks"], [])
 
@@ -850,7 +856,7 @@ class PseudoTerminalTests(unittest.TestCase):
         raw = t.out.decode("utf-8", "replace")
         self.assertNotIn("\x1b[?1049h", raw)
         self.assertIn("1 This machine", raw)
-        self.assertEqual(t.config()["stacks"], ["java", "python", "php", "node"])  # unchanged line-mode default
+        self.assertEqual(t.config()["stacks"], ["python", "node"])  # the light first-run default
 
 
 if __name__ == "__main__":
