@@ -884,11 +884,13 @@ def guard(agent: str):
         if data.get("tool_name") in ("Agent", "Task"):  # subagent briefs get the skills their work requires
             try:
                 from . import skillguard
-                updated = skillguard.on_agent_brief(agent, data.get("tool_input") or {})
+                sf_ = _session_file(agent, data.get("session_id") or "-")
+                sess_ = (core.read_json(sf_, {}) or {}) if sf_.exists() else {}
+                updated = skillguard.on_agent_brief(agent, data.get("tool_input") or {}, _session_project(data, sess_))
             except Exception:
                 updated = None
             if updated:
-                _log(f"skills {agent}: appended required skills to a subagent brief")
+                _log(f"skills {agent}: appended required skills and known pitfalls to a subagent brief")
                 print(json.dumps({"hookSpecificOutput": {"hookEventName": "PreToolUse", "permissionDecision": "allow",
                                                          "updatedInput": updated}}))
         return

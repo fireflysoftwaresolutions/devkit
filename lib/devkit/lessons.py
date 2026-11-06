@@ -289,6 +289,45 @@ def context_lines(project: str, initiatives=(), limit: int = 4) -> list:
     return out
 
 
+# words every task and lesson share, which say nothing about the work
+TASK_STOP = {"the", "and", "for", "with", "that", "this", "from", "into", "after", "before", "then", "when", "was", "are",
+             "not", "its", "but", "you", "your", "our", "fix", "make", "add", "use", "run", "new", "all", "any", "one",
+             "now", "can", "has", "have", "had", "will", "must", "should", "would", "could", "about", "there", "their"}
+
+
+def for_task(project: str, text: str, limit: int = 4, initiatives=()) -> list:
+    """The open lessons a crew member should know for one task: the project's, its initiatives' and the global ones,
+    ranked by how much the lesson shares with the task's words, then by strength. A high-severity lesson that
+    shares nothing still counts for its project. -> lessons (each counted as "shown")."""
+    words = {w for w in re.findall(r"[a-z0-9]{3,}", (text or "").lower())} - TASK_STOP
+    pool = [x for x in all_lessons(project) + [y for s in initiatives for y in all_lessons(f"initiatives/{s}")]
+            + all_lessons("global") if x["meta"].get("status") == "open"]
+    _USAGE_CACHE["u"] = usage()
+    try:
+        scored = []
+        for les in pool:
+            shared = len(words & _words(les))
+            own = les["meta"].get("scope") == project
+            if shared == 0 and not (own and les["meta"].get("severity") == "high"):
+                continue
+            scored.append((shared, _score(les), les))
+        picked = [x[2] for x in sorted(scored, key=lambda x: (-x[0], -x[1]))[:limit]]
+    finally:
+        _USAGE_CACHE.clear()
+    track([x["meta"]["id"] for x in picked], "shown")
+    return picked
+
+
+def pitfall_lines(lessons_: list) -> list:
+    """One line per lesson: id, what happened, and its prevention."""
+    out = []
+    for les in lessons_:
+        m = les["meta"]
+        rule = (les["sections"].get("Prevention") or "").splitlines()[0][:160] if les["sections"].get("Prevention") else ""
+        out.append(f"- {m['id']} ({m['severity']}, ×{m['occurrences']}): {m['title']}" + (f" — prevention: {rule}" if rule else ""))
+    return out
+
+
 def search(query: str, scope: str = None) -> list:
     q = query.lower()
     return [x for x in all_lessons(scope) if q in (x["meta"]["title"] + " " + " ".join(x["sections"].values())).lower()]

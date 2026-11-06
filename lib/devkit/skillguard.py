@@ -173,8 +173,9 @@ def on_prompt(agent: str, prompt: str, sess: dict) -> str:
             "follow it; if a subagent does the work, its brief must name them):\n" + "\n".join(dict.fromkeys(lines)))
 
 
-def on_agent_brief(agent: str, tool_input: dict):
-    """Claude Agent/Task: the brief gets the skills its work requires. -> updated tool input, or None."""
+def on_agent_brief(agent: str, tool_input: dict, project: str = ""):
+    """Claude Agent/Task: the brief gets the skills its work requires and the known pitfalls (lessons) for its task.
+    -> updated tool input, or None."""
     if not enabled() or agent != "claude":
         return None
     brief = tool_input.get("prompt") or ""
@@ -193,6 +194,17 @@ def on_agent_brief(agent: str, tool_input: dict):
                 "it (if the Skill tool is not available, read its SKILL.md under ~/.claude):\n" + \
                 "\n".join(f"- `{s}` — {why}" for s, why in seen) + \
                 "\nSay in your report which ones you loaded and how you applied them."
+    if project and "devkit · known pitfalls" not in brief and "## Known pitfalls" not in brief:
+        try:
+            from . import lessons
+            picked = lessons.for_task(project, brief[:4000] + " " + (tool_input.get("description") or ""))
+        except Exception:
+            picked = []
+        if picked:
+            extra += ("\n\n## devkit · known pitfalls\nLessons from earlier mistakes in this work; follow their "
+                      "prevention. If one happens again, run `dev lesson recur <id> --evidence \"…\"`; a new mistake "
+                      "that could repeat gets `dev lesson add \"…\" --cause \"…\" --prevent \"…\"`.\n"
+                      + "\n".join(lessons.pitfall_lines(picked)))
     if "Firefly> DevKit" not in brief:  # every crew member reports the same way (the SubagentStop hook checks it)
         name = (tool_input.get("description") or "").split(":")[0].strip() or "Agent"
         extra += (f"\n\n## devkit · your report\nStart your final report with your status block: **[Firefly> DevKit · "

@@ -389,7 +389,13 @@ def body(m: dict, roster=None, alias=None) -> str:
     elif tools == "read":
         out.append("- You are read-only: you never edit, create or delete files, and you never commit. Cite "
                    '`path:line` for every fact, mark what you inferred, and say `not found` rather than guess.')
-    out += ["- You cannot launch other agents. When you need another specialist, say so in your report or ask "
+    out += ["- Learn from mistakes with devkit's lesson manager: follow the prevention of the known pitfalls your brief "
+            "lists; when you make or find a mistake that could repeat (a refused command you had to redo, a test you "
+            "broke, a wrong assumption), record it: `dev lesson add \"…\" --cause \"…\" --prevent \"…\"`, or `dev "
+            "lesson recur <id> --evidence \"…\"` when it is a known one." if shell else
+            "- Learn from mistakes: follow the prevention of the known pitfalls your brief lists, and name in your "
+            "report any mistake that could repeat, so Morpheus records it as a lesson.",
+            "- You cannot launch other agents. When you need another specialist, say so in your report or ask "
             "Morpheus.", "",
             "## Your report", "",
             "Your final message starts with your own status block; nothing comes before it:", ""]
@@ -774,6 +780,11 @@ def brief_text(m: dict, task: str, scope: str = "", step=None, roster=None, cwd=
     cwd = cwd or os.getcwd()
     top = core.gitout(cwd, "rev-parse", "--show-toplevel")
     project = Path(top).name if top else "<project>"
+    pid = ""
+    if top:
+        from .registry import main_of
+        main_ = main_of(Path(top)) or Path(top)
+        pid = core.project_identity(main_, core.gitout(main_, "config", "--get", "remote.origin.url"))[0] or ""
     branch = (core.gitout(cwd, "rev-parse", "--abbrev-ref", "HEAD") if top else "") or "<branch>"
     globs = [g.strip() for g in (scope or "").split(",") if g.strip()]
     head = [ui.section(f"Brief for {m['name']} ({m['role']})")] + [f"  {ln}" for ln in _spawn_lines(m)]
@@ -799,6 +810,14 @@ def brief_text(m: dict, task: str, scope: str = "", step=None, roster=None, cwd=
     if m.get("procedure"):
         b += ["", "## Procedure", "", "Follow your procedure's phases (your agent instructions); before you report, "
               "devkit checks that you ran: " + (", ".join(f"`{p}`" for p in proofs(m)) or "nothing in particular") + "."]
+    try:
+        from . import lessons
+        picked = lessons.for_task(pid, task) if pid else []
+    except Exception:
+        picked = []
+    if picked:
+        b += ["", "## Known pitfalls", "", "Lessons from earlier mistakes in this work; follow their prevention:"] + \
+            lessons.pitfall_lines(picked)
     b += ["", "## Return", "", _sentence(m["returns"]), "",
           "## Report format", "", "Your final message starts with this block; nothing comes before it:", ""]
     b += report_block(m, project=project, branch=branch, task="<the task, in a few words>")

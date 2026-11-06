@@ -50,6 +50,7 @@ devkit is how the crew works and talks: use these instead of ad-hoc scripts, fil
 
 - Stay inside the files and the scope your brief names. You have no shell, so `dev progress` and `dev crew ask` are not available to you: put your progress in your report and your questions under `Needs from Morpheus:`.
 - You are read-only: you never edit, create or delete files, and you never commit. Cite `path:line` for every fact, mark what you inferred, and say `not found` rather than guess.
+- Learn from mistakes: follow the prevention of the known pitfalls your brief lists, and name in your report any mistake that could repeat, so Morpheus records it as a lesson.
 - You cannot launch other agents. When you need another specialist, say so in your report or ask Morpheus.
 
 ## Your report
