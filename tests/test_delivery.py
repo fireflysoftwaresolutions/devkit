@@ -76,11 +76,13 @@ class RecordTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             delivery.record("acme/api", {"versioning": "calver"}, "", a=A)
         p = delivery.record("acme/api", {"versioning": "calver", "tag_format": "vYY.MM.PATCH",
-                                         "test_gate": ["./mvnw verify"]}, "first policy", a=A)
+                                         "test_gate": ["./mvnw verify"], "changelog": "keep-a-changelog"},
+                            "first policy", a=A)
+        self.assertEqual(p["changelog"], "keep-a-changelog")  # the policy field survives the history
         self.assertEqual(p["version"], 1)
         p = delivery.record("acme/api", {**p, "test_gate": ["./mvnw -B verify"]}, "batch mode", a=A)
         self.assertEqual(p["version"], 2)
-        self.assertIn("test_gate — why: batch mode", p["changelog"][0])
+        self.assertIn("test_gate — why: batch mode", p["history"][0])
         self.assertIsNone(delivery.tag_violation("acme/api", "v26.11.3"))
         self.assertIn("CalVer", delivery.tag_violation("acme/api", "v1.4.0"))
         self.assertIn("CalVer", delivery.tag_violation("acme/api", "v26.13.0"))  # no 13th month

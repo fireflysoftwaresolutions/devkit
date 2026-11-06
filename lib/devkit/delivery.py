@@ -245,12 +245,15 @@ def record(scope: str, policy: dict, why: str, a=None) -> dict:
     a = a or work.actor()
     old = load(scope) or {}
     changed = sorted(k for k in FIELDS if old.get(k) != policy.get(k)) if old else ["created"]
+    if isinstance(old.get("changelog"), list):  # written before the history field existed
+        changed = [c for c in changed if c != "changelog"] or ["history moved"]
     data = {k: policy.get(k) for k in FIELDS}
     data["bump"] = policy.get("bump")
     data["version"] = int(old.get("version") or 0) + 1
     data["updated"], data["updated_by"] = work.now_iso(), f"{a['user']}@{a['host']}"
-    data["changelog"] = [f"v{data['version']} · {data['updated']} · {work.actor_str(a)} · "
-                         f"{', '.join(changed) or 'no change'} — why: {why}"] + (old.get("changelog") or [])[:49]
+    prev = old.get("history") or ([] if isinstance(old.get("changelog"), str) else old.get("changelog") or [])
+    data["history"] = [f"v{data['version']} · {data['updated']} · {work.actor_str(a)} · "
+                       f"{', '.join(changed) or 'no change'} — why: {why}"] + prev[:49]
     f = policy_path(scope)
     f.parent.mkdir(parents=True, exist_ok=True)
     f.write_text(json.dumps(data, indent=2, ensure_ascii=False) + "\n")
