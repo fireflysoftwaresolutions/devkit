@@ -494,6 +494,29 @@ ACTIONLINT_JSON = json.dumps([{"message": "property \"x\" is not defined", "file
                                "line": 9, "column": 3, "kind": "expression"}])
 
 
+class ScanSnippetTests(unittest.TestCase):
+    """Each missing scanner gets the snippet that adds that scanner, with its pinned image, not a generic one."""
+
+    def test_each_scan_finding_carries_its_own_scanner(self):
+        want = {"no-secret-scan": "gitleaks", "no-sast": "semgrep", "no-sca": "osv-scanner"}
+        cases = {"gitlab": {".gitlab-ci.yml": BAD_GITLAB, "package.json": "{}"},
+                 "bitbucket": {"bitbucket-pipelines.yml": BAD_BITBUCKET, "pom.xml": "<project/>"},
+                 "azure": {"azure-pipelines.yml": BAD_AZURE, "package.json": "{}"}}
+        for host, files in cases.items():
+            rep = run_audit(repo(files))
+            got = {f["id"]: f.get("snippet") or "" for f in rep["findings"] if f["id"] in want}
+            self.assertEqual(set(got), set(want), host)
+            for fid, tool in want.items():
+                with self.subTest(host=host, finding=fid):
+                    snip = got[fid]
+                    self.assertIn(tool, snip)
+                    self.assertIn("@sha256:", snip)  # the pinned image devkit's own pipeline uses
+                    for other in set(want.values()) - {tool}:
+                        self.assertNotIn(other, snip)
+                    if host == "gitlab":  # a stage every GitLab pipeline has, not devkit's own lint stage
+                        self.assertIn("stage: test", snip)
+
+
 class ExternalLinterTests(unittest.TestCase):
     def test_zizmor_and_actionlint_are_merged(self):
         r = repo({".github/workflows/bad.yml": BAD_GH})
@@ -648,6 +671,24 @@ class InitTests(unittest.TestCase):
         for name, im in pins["images"].items():
             self.assertRegex(im.get("digest", ""), r"^sha256:[0-9a-f]{64}$", name)
         self.assertRegex(pins["binaries"]["cosign"]["sha256"], r"^[0-9a-f]{64}$")
+
+    def test_the_policy_test_gate_and_timeout_shape_the_generated_pipeline(self):
+        policy = {"tag_format": "vYY.MM.PATCH", "job_timeout_minutes": 45,
+                  "test_gate": ["python3 -m compileall -q lib", "python3 -m unittest discover -s tests",
+                                "/usr/bin/python3 -m unittest discover -s tests"]}
+        r = repo(STACKS["python"])
+        for provider in P.PROVIDERS:
+            with self.subTest(provider=provider):
+                gen, notes = P.generate(r, provider, policy=policy)
+                main = gen[P.TARGETS[provider]]
+                self.assertEqual(main.count("python -m unittest discover -s tests"), 1)  # one interpreter, once
+                self.assertIn("python -m compileall -q lib", main)
+                self.assertNotIn("/usr/bin/python3", main)  # the runner's system Python is not the configured one
+                self.assertIn("45", main)
+                rep = P.audit(r, provider=provider, policy=policy, only=set(gen), overlay=gen, external=False)
+                self.assertNotIn("test-gate-mismatch", ids(rep))
+                self.assertEqual(loud(rep), [])
+                self.assertTrue(any("test gate" in n for n in notes))
 
     def test_every_provider_and_stack_parses_back_and_audits_clean(self):
         policy = {"tag_format": "vYY.MM.PATCH"}

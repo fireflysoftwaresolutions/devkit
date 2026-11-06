@@ -25,6 +25,7 @@ import fnmatch
 import json
 import os
 import re
+import textwrap
 from pathlib import Path
 
 from . import core
@@ -2705,25 +2706,24 @@ def check_repo(pls: list, ctx: Ctx) -> list:
     pr_jobs = [j for j in jobs if j["on_pr"]]
     pr_corpus = "\n".join(_corpus(j, ctx) for j in pr_jobs)
     prov = main["provider"]
-    sec_snip = _SECURITY_SNIPPETS.get(prov)
     # --- scanning
     if not SECRET_SCAN_RE.search(corpus):
         out.append(finding(main, "no-secret-scan", "no secret scanning: a leaked key reaches the shared branch "
                            "unnoticed", "add gitleaks (`gitleaks dir --redact .`) to the pipeline; keep the host's "
-                           "own secret scanning and push protection on too", snippet=sec_snip))
+                           "own secret scanning and push protection on too", snippet=_scan_snippet(prov, "no-secret-scan")))
     if not SAST_RE.search(corpus):
         out.append(finding(main, "no-sast", "no static analysis for security bugs", "add semgrep "
-                           "(`semgrep scan --config p/default --error`) or CodeQL", snippet=sec_snip))
+                           "(`semgrep scan --config p/default --error`) or CodeQL", snippet=_scan_snippet(prov, "no-sast")))
     if f["has_deps"] and not SCA_RE.search(corpus):
         sev = "low" if f["updater"] else None
         out.append(finding(main, "no-sca", "no dependency vulnerability scan" +
                            (f" ({' and '.join(f['updater'])} updates versions, but nothing gates a vulnerable one)"
                             if f["updater"] else ""),
                            "add osv-scanner (`osv-scanner scan source -r .`) or trivy fs", severity=sev,
-                           snippet=sec_snip))
+                           snippet=_scan_snippet(prov, "no-sca")))
     if f["iac"] and not IAC_RE.search(corpus):
         out.append(finding(main, "no-iac-scan", f"infrastructure files ({', '.join(f['iac'][:3])}) are not scanned",
-                           "add `trivy config .` (or checkov)", snippet=sec_snip))
+                           "add `trivy config .` (or checkov)", snippet=_scan_snippet(prov, "no-iac-scan")))
     builds_images = bool(f["dockerfiles"]) or bool(DOCKER_BUILD_RE.search(corpus))
     if builds_images and not IMAGE_SCAN_RE.search(corpus):
         out.append(finding(main, "no-container-scan", "container images are built but not scanned",
@@ -2791,15 +2791,34 @@ def check_repo(pls: list, ctx: Ctx) -> list:
     return out
 
 
-_SECURITY_SNIPPETS = {
-    "gitlab": "security:\n  stage: test\n  needs: []\n  image:\n    name: <pinned trivy or gitleaks image>\n"
-              "    entrypoint: [\"\"]\n  script:\n    - gitleaks dir --redact .\n# or: include: [{template: Jobs/SAST.gitlab-ci.yml}, "
-              "{template: Jobs/Secret-Detection.gitlab-ci.yml}, {template: Jobs/Dependency-Scanning.gitlab-ci.yml}]",
-    "bitbucket": "- step:\n    name: security\n    image: <pinned gitleaks image>\n    script:\n"
-                 "      - gitleaks dir --redact .",
-    "azure": "- job: security\n  steps:\n    - script: docker run --rm -v \"$PWD:/repo\" -w /repo <pinned gitleaks image> "
-             "dir --redact .",
-}
+_SCAN_TOOL = {"no-secret-scan": "gitleaks", "no-sast": "semgrep", "no-sca": "osv-scanner", "no-iac-scan": "trivy"}
+_SCAN_ITEM = {"gitlab": None, "bitbucket": "- step:", "azure": "- script:"}  # how one scanner's block starts
+
+
+def _scan_snippet(prov: str, finding_id: str) -> str | None:
+    """The block of devkit's own security fragment for this host (the one `dev ci init` writes, images pinned by
+    digest) that adds the missing scanner: a GitLab job, a Bitbucket step, an Azure script step."""
+    tool = _SCAN_TOOL.get(finding_id)
+    if prov not in _SCAN_ITEM or not tool:
+        return None
+    text = textwrap.dedent(render(_tpl(f"{prov}/security.yml"), {}, _pins()))
+    if prov == "azure":  # the steps of the one security job
+        text = textwrap.dedent(text.split("steps:\n", 1)[1])
+    start = _SCAN_ITEM[prov]
+    if start is None:
+        blocks = [b for b in text.strip().split("\n\n") if b.strip()]
+    else:
+        blocks, cur = [], []
+        for ln in text.splitlines():
+            if ln.startswith(start) and cur:
+                blocks.append("\n".join(cur)); cur = []
+            cur.append(ln)
+        blocks.append("\n".join(cur))
+    hit = [b.strip("\n") for b in blocks if tool in b]
+    if len(hit) != 1:
+        return None
+    # devkit's pipelines have a lint stage; any other GitLab pipeline has GitLab's default `test` stage
+    return hit[0].replace("\n  stage: lint\n", "\n  stage: test\n") if prov == "gitlab" else hit[0]
 
 
 def _norm_cmd(c: str) -> list:
@@ -3834,6 +3853,33 @@ def _tag_patterns(policy, root: Path) -> dict:
             "tag_bb": f"{v}*.*.*", "tag_az": f"{v}*"}
 
 
+_INTERP = re.compile(r"(^|\s)(?:/usr/bin/|/usr/local/bin/|/opt/homebrew/bin/)?python3?(?:\.\d+)?(?=\s|$)")
+
+
+def _apply_policy(jobs: list, policy, notes: list) -> None:
+    """The delivery policy shapes the generated jobs: its test gate is what the unit-test job runs (the audit checks
+    the same thing), and `job_timeout_minutes` is every generated job's timeout."""
+    p = policy or {}
+    gate = [str(g).strip() for g in (p.get("test_gate") or []) if str(g).strip()]
+    tests = [j for j in jobs if j["stage"] == "test"]
+    if gate and tests:
+        ran = [_norm_cmd(c) for j in jobs if j["stage"] in ("lint", "test") for c in j["commands"]]
+        if [g for g in gate if not any(_gate_match(_norm_cmd(g), c) for c in ran)]:
+            # one interpreter on the runner: the one the setup step installed (a gate may name the Mac's own pythons)
+            run = list(dict.fromkeys(_INTERP.sub(r"\1python", g) for g in gate))
+            j = tests[0]
+            j.update(steps=[("Test gate (delivery policy)", "\n".join(run))], commands=run, junit=None,
+                     name=j["name"].replace("unit tests", "test gate"))
+            notes.append(f"the test job runs the delivery policy's test gate: {'; '.join(run)}")
+    elif gate:
+        notes.append("no test job was generated for the delivery policy's test gate: add "
+                     f"`{'; '.join(gate)}` to the pipeline")
+    mins = p.get("job_timeout_minutes")
+    if isinstance(mins, int) and mins > 0:
+        for j in jobs:
+            j["timeout"] = mins
+
+
 def generate(root, provider: str = "github", stack: str = "auto", policy=None, branch=None) -> dict:
     """The pipeline files for the repository -> ({path: text}, notes)."""
     root = Path(root)
@@ -3849,6 +3895,7 @@ def generate(root, provider: str = "github", stack: str = "auto", policy=None, b
         or "main"
     ctx = {"project": root.name, "date": dt.date.today().isoformat(), "branch": branch, **_tag_patterns(policy, root)}
     jobs = [j for s_ in stacks for j in _jobs_for(s_)]
+    _apply_policy(jobs, policy, notes)
     compose = f["compose_test"]
     if compose and provider in ("github", "azure") and not any(j["stage"] == "integration" for j in jobs):
         svc = _compose_service(root / compose[0])
