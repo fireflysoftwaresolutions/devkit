@@ -351,6 +351,70 @@ def _plans_without_reason(sess: dict) -> list:
     return out
 
 
+TEST_FILE_RE = re.compile(r"(^|/)(tests?|__tests__|spec)/|(^|/)test_[^/]+\.py$|_test\.(py|go)$|\.(spec|test)\.[jt]sx?$|"
+                          r"(Test|Tests|IT)\.(java|kt)$|Test\.php$")
+
+
+def _turn_files(data: dict, sess: dict):
+    """(repo top, [existing files inside it that this turn edited])."""
+    from . import scope
+    cwd = data.get("cwd") or os.getcwd()
+    top = sess.get("top") or core.gitout(cwd, "rev-parse", "--show-toplevel")
+    if not top:
+        return None, []
+    files = []
+    for e in scope.turn_actions(data.get("transcript_path")).get("edits") or []:
+        for f in (e or "").split():
+            fp = Path(f) if os.path.isabs(f) else Path(cwd) / f
+            if fp.exists() and core.is_under(str(fp), top):
+                files.append(str(fp))
+    return top, sorted(set(files))
+
+
+def _stub_gate(data: dict, sess: dict):
+    """Unfinished work the turn left in the files it edited (stubs, placeholders, TODOs without a task) sends the
+    turn back: devkit builds things for real. Fails open."""
+    try:
+        top, files = _turn_files(data, sess)
+        if not files:
+            return None
+        from . import stubs
+        msg = stubs.stop_gate(top, files)
+        if msg:
+            from . import audit
+            audit.record("stubs.gate", top, msg[:300], "blocked")
+        return msg
+    except Exception:
+        _log(f"stop stubs: {traceback.format_exc()[-300:]}")
+        return None
+
+
+def _test_gate(data: dict, sess: dict):
+    """Tests the turn edited that cannot fail (no assertion, trivial or swallowed assertions, empty bodies) send the
+    turn back with the findings (testaudit.stop_gate). Fails open."""
+    try:
+        top, edited = _turn_files(data, sess)
+        if not top:
+            return None
+        try:
+            from .testx import is_test_file
+        except Exception:
+            is_test_file = TEST_FILE_RE.search
+        files = [f for f in edited if is_test_file(f)]
+        if not files:
+            return None
+        from . import testaudit
+        msg = testaudit.stop_gate(top, sorted(set(files)))
+        if msg:
+            _log(f"stop tests: {len(set(files))} test file(s) with tests that cannot fail")
+            from . import audit
+            audit.record("tests.gate", top, msg[:300], "blocked")
+        return msg
+    except Exception:
+        _log(f"stop tests: {traceback.format_exc()[-300:]}")
+        return None
+
+
 def stop(agent: str):
     data = _stdin_json()
     from . import canary
@@ -406,6 +470,11 @@ def stop(agent: str):
                 reasons.append(why)
         except Exception:
             _log(f"stop skills {agent}: {traceback.format_exc()[-300:]}")
+        if dev_turn and not data.get("stop_hook_active"):
+            for gate in (_stub_gate, _test_gate):
+                why = gate(data, sess)
+                if why:
+                    reasons.append(why)
         try:  # lessons the reply names were applied: that use keeps them alive
             from . import lessons as _les
             said = data.get("last_assistant_message") or ""
@@ -501,6 +570,186 @@ def session_end(agent: str):
 
 # --------------------------------------------------------------------------- guard
 
+SHELL_TOOLS = ("Bash", "exec_command", "shell", "local_shell", "unified_exec")
+# what a subagent runs as itself: dev progress …, and dev crew ask, answer, inbox, decide, decisions, mode, delegate,
+# decline and route
+DEV_LANE_CMD = re.compile(r"^\s*(?:\S*/)?dev\s+(?:progress(?:\s|$)|"
+                          r"crew\s+(?:ask|answer|inbox|decide|decisions|mode|delegate|decline|route)(?:\s|$))")
+
+
+ANY_LANE_CMD = re.compile(r"(?:^|[\s;&|(`])(?:\S*/)?dev\s+(?:progress|crew)\b")
+
+
+def _runs_more_than_one_command(cmd: str) -> bool:
+    """True when the shell would do more than run this one program: an operator, redirect or newline outside quotes,
+    a command substitution where the shell expands it (unquoted or inside double quotes), or an unterminated quote.
+    Single quotes are literal; `;` inside any quotes is just text."""
+    i, n, q = 0, len(cmd), None
+    while i < n:
+        c = cmd[i]
+        if q == "'":
+            q = None if c == "'" else q
+        elif q == '"':
+            if c == "\\":
+                i += 1
+            elif c == '"':
+                q = None
+            elif c == "`" or cmd.startswith("$(", i):
+                return True
+        elif c == "\\":
+            i += 1
+        elif c in "'\"":
+            q = c
+        elif c in ";&|<>\n`" or cmd.startswith("$(", i):
+            return True
+        i += 1
+    return q is not None
+
+
+def _unroutable_lane_command(data: dict):
+    """Inside a subagent, a dev progress / dev crew command devkit cannot route to the subagent's lane (it is part of
+    a compound command) would act as the main session: advance the main plan, or record the developer's decision.
+    Refused, with the fix."""
+    if not data.get("agent_id") or data.get("tool_name") not in SHELL_TOOLS:
+        return None
+    cmd = (data.get("tool_input") or {}).get("command") or ""
+    cmd = " ".join(cmd) if isinstance(cmd, list) else str(cmd)
+    if not ANY_LANE_CMD.search(cmd) or _route_subagent_progress(data):
+        return None
+    return ("Run `dev progress …` and `dev crew …` as a command of its own (no `&&`, `;`, pipes or `$(…)`), so devkit "
+            "can route it to your lane. Inside a compound command it would act as Morpheus.")
+
+
+def _route_subagent_progress(data: dict):
+    """Inside a subagent (the hook input carries `agent_id`, in Claude Code and Codex), a single `dev progress …`
+    or `dev crew ask|answer|inbox|decide|decisions|mode|delegate|decline|route` command gets DEVKIT_FROM_AGENT, so it
+    updates that subagent's lane (its messages, decisions and delegations come from it, and `decide` refuses it) and
+    never advances the main plan.
+    Compound commands are left alone: the rewrite must not approve anything but that one command."""
+    aid = data.get("agent_id")
+    inp = data.get("tool_input") or {}
+    cmd = inp.get("command")
+    if not aid or data.get("tool_name") not in SHELL_TOOLS or not isinstance(cmd, str) or not DEV_LANE_CMD.match(cmd):
+        return None
+    if _runs_more_than_one_command(cmd):
+        return None
+    if not re.fullmatch(r"[A-Za-z0-9_.:-]{1,80}", str(aid)):
+        return None
+    return {**inp, "command": f"DEVKIT_FROM_AGENT={aid} {cmd.strip()}"}
+
+
+EDIT_TOOLS = ("Edit", "Write", "MultiEdit", "NotebookEdit", "apply_patch")
+
+
+COMMIT_RE = re.compile(r"\bgit\s+(?:-C\s+(\S+)\s+)?commit\b|\bdev\s+commit\b")
+
+
+def _stub_commit_gate(data: dict):
+    """A commit that would include unfinished work (stubs, placeholders, TODOs without a task) is refused.
+    DEVKIT_ALLOW_STUBS=1 when the developer accepts them."""
+    if data.get("tool_name") not in SHELL_TOOLS or os.environ.get("DEVKIT_ALLOW_STUBS"):
+        return None
+    cmd = (data.get("tool_input") or {}).get("command") or ""
+    cmd = " ".join(cmd) if isinstance(cmd, list) else str(cmd)
+    m = COMMIT_RE.search(command_words(cmd))  # a commit the command runs, not the text it writes
+    if not m or "DEVKIT_ALLOW_STUBS=1" in cmd or "--wip" in cmd:
+        return None
+    try:
+        cwd = data.get("cwd") or os.getcwd()
+        where = m.group(1) or cwd
+        top = core.gitout(where if os.path.isabs(where) else os.path.join(cwd, where), "rev-parse", "--show-toplevel")
+        if not top:
+            return None
+        from . import stubs
+        why = stubs.commit_gate(top, cmd)
+        return ("deny", why) if why else None
+    except Exception:
+        _log(f"stub commit gate: {traceback.format_exc()[-300:]}")
+        return None
+
+
+def _crew_limits(agent: str, data: dict):
+    """Coordination guardrails -> ("deny", reason) or None:
+    - at most `progress.max_parallel` crew members at once (default 4);
+    - the main session does not edit files a running crew member owns (DEVKIT_SCOPE_OVERRIDE=1 for an emergency)."""
+    try:
+        from . import progress
+        sid = data.get("session_id") or "-"
+        run = progress.load_run(agent, sid)
+        if not run or run.get("state") == "done":
+            return None
+        run = progress.normalize(run)
+        progress.expire_stale(run)
+        tool = data.get("tool_name")
+        if tool in ("Agent", "Task", "spawn_agent") and not data.get("agent_id"):
+            busy = progress.running_agents(run)
+            limit = progress.cfg()["max_parallel"]
+            if len(busy) >= limit:
+                names = ", ".join(v.get("persona") or v.get("label") or k[:8] for k, v in busy)
+                return ("deny", f"{len(busy)} crew members are working ({names}); the limit is {limit} at once. Wait "
+                                f"for one to finish (you are notified), or give the work to one of them "
+                                f"(SendMessage / send_input). progress.max_parallel in devkit config changes the limit.")
+        if tool in EDIT_TOOLS and not data.get("agent_id") and not os.environ.get("DEVKIT_SCOPE_OVERRIDE"):
+            inp = data.get("tool_input") or {}
+            path = inp.get("file_path") or inp.get("notebook_path") or ""
+            if path:
+                cwd = data.get("cwd") or os.getcwd()
+                top = core.gitout(cwd, "rev-parse", "--show-toplevel") or cwd
+                rel = os.path.relpath(os.path.normpath(path if os.path.isabs(path) else os.path.join(cwd, path)), top)
+                k, lane = progress.scope_owner(run, rel)
+                if lane:
+                    who = lane.get("persona") or lane.get("label") or "a crew member"
+                    return ("deny", f"{rel} belongs to {who} while they work (scope {', '.join(lane['scope'])}). Ask "
+                                    f"them (dev crew ask --to \"{who}\" \"…\") or wait until they finish; "
+                                    f"DEVKIT_SCOPE_OVERRIDE=1 only for an emergency.")
+    except Exception:
+        _log(f"crew limits {agent}: {traceback.format_exc()[-300:]}")
+    return None
+
+
+def _scope_violation(agent: str, data: dict):
+    """A crew member assigned a scope (dev progress assign … --scope "globs") edits only those files, so parallel
+    agents never write the same file. -> the refusal, or None."""
+    aid = data.get("agent_id")
+    if not aid or data.get("tool_name") not in EDIT_TOOLS:
+        return None
+    try:
+        from . import progress
+        import fnmatch
+        run, lane = progress.lane_of(agent, data.get("session_id") or "-", aid)
+        if not lane:
+            return None
+        scope = lane.get("scope") or []
+        inp = data.get("tool_input") or {}
+        paths = [inp.get("file_path") or inp.get("notebook_path") or ""]
+        if data.get("tool_name") == "apply_patch" or not paths[0]:
+            body = inp.get("input") or inp.get("patch") or inp.get("command") or ""
+            paths = re.findall(r"\*\*\* (?:Add|Update|Delete) File: (\S+)", str(body)) or paths
+        cwd = data.get("cwd") or os.getcwd()
+        top = core.gitout(cwd, "rev-parse", "--show-toplevel") or cwd
+        name = lane.get("persona") or lane.get("label") or "this crew member"
+        try:
+            from . import crew
+            mem = crew.member(lane.get("persona") or "") if lane.get("persona") else None
+        except Exception:
+            mem = None
+        if mem and mem.get("tools") in ("review", "read"):
+            return (f"{name} is {'review-only' if mem['tools'] == 'review' else 'read-only'}: report the change with "
+                    f"file:line and the fix, and Morpheus assigns it.")
+        if not scope:
+            return None
+        for p_ in [x for x in paths if x]:
+            ap = os.path.normpath(p_ if os.path.isabs(p_) else os.path.join(cwd, p_))
+            rel = os.path.relpath(ap, top)
+            if not any(fnmatch.fnmatch(rel, g) or fnmatch.fnmatch(rel, g.rstrip("/") + "/**") or rel.startswith(
+                    g.rstrip("*").rstrip("/") + "/") or rel == g for g in scope):
+                return (f"{rel} is outside {name}'s scope ({', '.join(scope)}): another crew member may own it. "
+                        f"Ask Morpheus to widen it: dev crew ask \"may I change {rel}? why: …\"")
+    except Exception:
+        return None
+    return None
+
+
 def guard(agent: str):
     if os.environ.get("DEVKIT_GUARD", "").lower() == "off":
         return
@@ -513,6 +762,37 @@ def guard(agent: str):
     from . import guard as g
     verdict = g.check(data.get("tool_name") or "", data.get("tool_input") or {}, data.get("cwd") or os.getcwd(), agent)
     if not verdict:
+        verdict = _crew_limits(agent, data) or _stub_commit_gate(data)
+    if not verdict:
+        if data.get("tool_name") in ("Agent", "Task", "spawn_agent"):  # a subagent launch: its label for progress
+            try:
+                from . import progress
+                progress.note_agent_launch(agent, data)
+            except Exception:
+                pass
+        why = _scope_violation(agent, data)
+        if why:
+            _log(f"guard {agent} deny: {why[:160]}")
+            from . import audit
+            audit.record("guard.deny", (data.get("tool_input") or {}).get("file_path") or "", why[:400], "deny",
+                         tool=data.get("tool_name") or "", rule="crew-scope")
+            print(json.dumps({"hookSpecificOutput": {"hookEventName": "PreToolUse", "permissionDecision": "deny",
+                                                     "permissionDecisionReason": why}}))
+            return
+        routed = _route_subagent_progress(data)
+        if routed:
+            _log(f"progress {agent}: a subagent's dev progress call goes to its lane")
+            print(json.dumps({"hookSpecificOutput": {"hookEventName": "PreToolUse", "permissionDecision": "allow",
+                                                     "updatedInput": routed}}))
+            return
+        why = _unroutable_lane_command(data)
+        if why:
+            from . import audit
+            audit.record("guard.deny", (data.get("tool_input") or {}).get("command", "")[:200], why, "deny",
+                         tool=data.get("tool_name") or "", rule="crew-lane")
+            print(json.dumps({"hookSpecificOutput": {"hookEventName": "PreToolUse", "permissionDecision": "deny",
+                                                     "permissionDecisionReason": why}}))
+            return
         if data.get("tool_name") in ("Agent", "Task"):  # subagent briefs get the skills their work requires
             try:
                 from . import skillguard
@@ -606,6 +886,47 @@ DELIVERY = re.compile(r"\bgit\s+(?:-C\s+\S+\s+)?(commit|push|merge|tag|rebase|ch
                       r"\bgh\s+(pr\s+(create|merge)|release\s+create)\b")
 
 
+def command_words(cmd: str) -> str:
+    """A shell command without its heredoc bodies and quoted strings: what it runs, not the text it writes."""
+    out, skip = [], None
+    for ln in (cmd or "").splitlines():
+        if skip is not None:
+            if ln.strip() == skip:
+                skip = None
+            continue
+        m = re.search(r"<<-?\s*['\"]?(\w+)['\"]?", ln)
+        if m:
+            skip = m.group(1)
+        out.append(ln)
+    text = "\n".join(out)
+    text = re.sub(r"'[^']*'", "''", text)
+    return re.sub(r'"(?:\\.|[^"\\])*"', '""', text)
+
+
+CI_TRIGGER = re.compile(r"\bgit\s+(?:-C\s+\S+\s+)?push\b|\bdev\s+push\b|\b(?:gh|dev)\s+pr\s+(?:create|merge)\b|"
+                        r"\bdev\s+release\b")
+
+
+# lesson L-fwyp0n9vzv6: regex rewrites of code and prose changed what they should not, twice
+_AT_CMD = r"(?:^|[;&|(\n]\s*|\bxargs\s+(?:-\S+\s+)*)"
+SED_INPLACE = re.compile(_AT_CMD + r"(?:sed\s+(?:-[a-zA-Z]+\s+)*-i|perl\s+-[a-zA-Z]*i)")
+
+
+def _bulk_rewrite_note(data: dict) -> str:
+    """A shell command that rewrote files with a regex (sed -i, perl -pi, a script with re.sub that writes files):
+    the agent reads every changed line before it tests, syncs or commits."""
+    if data.get("tool_name") not in SHELL_TOOLS:
+        return ""
+    cmd = (data.get("tool_input") or {}).get("command") or ""
+    cmd = " ".join(cmd) if isinstance(cmd, list) else str(cmd)
+    scripted = "re.sub(" in cmd and re.search(r"\.write_text\(|\.write\(|open\([^)]*[\"']w", cmd)
+    if not (scripted or SED_INPLACE.search(cmd)):
+        return ""
+    return ("A regex just rewrote files. Read every changed line (`git diff -U0 -- <files>`; for untracked files, "
+            "compare with what they said before) before you test, sync or commit: a pattern cannot parse nested "
+            "expressions or prose, and it changes text it should not. Prefer exact-string edits that must match once.")
+
+
 def post_tool(agent: str):
     """PostToolUse: time slow calls; remind the agent to update the developer after a long silence; sync the
     handoff repository right after a delivery event (commit, push, merge, tag, PR, release)."""
@@ -615,12 +936,19 @@ def post_tool(agent: str):
         cmd = (data.get("tool_input") or {}).get("command") or ""
         if isinstance(cmd, list):
             cmd = " ".join(cmd)
-        if data.get("tool_name") in ("Bash", "exec_command", "shell") and DELIVERY.search(cmd):
+        words = command_words(cmd)
+        if data.get("tool_name") in ("Bash", "exec_command", "shell") and DELIVERY.search(words):
             from . import work
-            work.request_sync("delivery: " + DELIVERY.search(cmd).group(0))
+            work.request_sync("delivery: " + DELIVERY.search(words).group(0))
+        if data.get("tool_name") in SHELL_TOOLS and CI_TRIGGER.search(words) and not data.get("agent_id"):
+            from . import ciwatch  # a push or PR starts CI: watch it, and tell this session how it ended
+            cwd = data.get("cwd") or os.getcwd()
+            top = core.gitout(cwd, "rev-parse", "--show-toplevel")
+            if top and not core.is_temp(top):
+                ciwatch.start_background(top, session=f"{agent}:{data.get('session_id') or ''}")
     except Exception:
         pass
-    _context_out("PostToolUse", progress.on_tool_done(agent, data))
+    _context_out("PostToolUse", "\n\n".join(x for x in (_bulk_rewrite_note(data), progress.on_tool_done(agent, data)) if x))
 
 
 def subagent_start(agent: str):
@@ -629,8 +957,36 @@ def subagent_start(agent: str):
 
 
 def subagent_stop(agent: str):
+    """SubagentStop: the crew member's report must start with its own status block (the canary covers the crew too);
+    without it the member is sent back once to write it. Then its lane and step are closed."""
     from . import progress
-    progress.on_subagent(agent, _stdin_json(), False)
+    data = _stdin_json()
+    out = None
+    try:
+        sid = data.get("session_id") or "-"
+        sf = _session_file(agent, sid)
+        sess = (core.read_json(sf, {}) or {}) if sf.exists() else None
+        if sess is not None and sess.get("turn_class") != "other" and not data.get("stop_hook_active"):
+            from . import canary
+            run, lane = progress.lane_of(agent, sid, data.get("agent_id") or "")
+            name = (lane or {}).get("persona") or progress.persona(data.get("agent_type") or "",
+                                                                  (lane or {}).get("label") or "") \
+                or ((lane or {}).get("label") or "").split(":")[0].strip() or "Agent"
+            pid = (run or {}).get("project") or sess.get("project")
+            if not canary.check_subagent(agent, data, sess, pid, name):
+                from . import audit
+                audit.record("canary.crew-miss", pid or "", f"{name}'s report had no status block", "miss")
+                out = {"decision": "block", "reason":
+                       f"devkit · end your report with your status block first, exactly: **[Firefly> DevKit · {name}]** "
+                       f"<project> · `<branch>` · <task>, then - **Done:**, - **Check:** (✓/⚠/✗ + evidence) and "
+                       f"- **Next:**; then what you deliver and \"Needs from Morpheus:\" (or nothing). Nothing above "
+                       f"the block."}
+    except Exception:
+        _log(f"subagent-stop {agent}: {traceback.format_exc()[-300:]}")
+    if out:
+        print(json.dumps(out))
+        return
+    progress.on_subagent(agent, data, False)
 
 
 QUOTA = STATE / "quota"

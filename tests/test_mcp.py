@@ -145,7 +145,7 @@ class ServerTests(unittest.TestCase):
     def test_tools_list_matches_the_definitions(self):
         tools = self.s.request("tools/list")["result"]["tools"]
         self.assertEqual([t["name"] for t in tools], [t["name"] for t in mcp.TOOLS])
-        self.assertEqual(len(tools), 14)
+        self.assertEqual(len(tools), 18)
         for t in tools:
             with self.subTest(tool=t["name"]):
                 self.assertTrue(t["name"].startswith("devkit_"))
@@ -162,6 +162,15 @@ class ServerTests(unittest.TestCase):
         self.assertEqual(r["structuredContent"]["total"], 1)
         self.assertEqual(r["structuredContent"]["records"][0]["action"], "guard.deny")
         self.assertEqual(json.loads(r["content"][0]["text"]), r["structuredContent"])
+
+    def test_crew_lists_the_roster_without_a_running_run(self):
+        r = self.s.call("devkit_crew")["result"]
+        self.assertNotIn("isError", r)
+        crew = r["structuredContent"]
+        self.assertEqual(len(crew["members"]), 26)
+        self.assertEqual(crew["members"][0]["id"], "morpheus")
+        self.assertEqual(next(m for m in crew["members"] if m["id"] == "neo")["spawn"]["claude_code"], "devkit:neo")
+        self.assertNotIn("run", crew)  # nothing is running in the throwaway HOME
 
     def test_call_returns_plain_text(self):
         r = self.s.call("devkit_lessons")["result"]

@@ -222,12 +222,47 @@ _tool("devkit_delivery_policy", "Delivery policy",
       {"project": PROJECT, "initiative": INITIATIVE},
       lambda a: ["delivery", "--json"] + _scope(a), READ, json_out=True)
 
+_tool("devkit_stubs", "Unfinished work",
+      "Unfinished work in a project: TODO, FIXME, 'not implemented', placeholders and empty function bodies that "  # devkit: allow-stub describes the markers
+      "name no task, issue or reason. By default the uncommitted changes; with everything=true, every tracked file. "
+      "devkit builds things for real: planned work names its task (TODO(T-…)).",  # devkit: allow-stub describes the markers
+      {"project": PROJECT, "everything": {"type": "boolean", "default": False,
+                                          "description": "Scan every tracked file, not only the uncommitted changes."}},
+      lambda a: ["stubs", "--json"] + (["--all"] if a.get("everything") else [])
+      + ([f"--project={a['project']}"] if a.get("project") else []), READ, json_out=True)
+
+_tool("devkit_test_plan", "Test plan",
+      "Which tests a project's current changes can break, and why: each changed file mapped to the tests that can see "
+      "it (the blast radius), the last failures, and the time estimate. Nothing runs. Agents use it to run only what "
+      "a change can break instead of the whole suite.",
+      {"project": PROJECT},
+      lambda a: ["test"] + ([f"--project={a['project']}"] if a.get("project") else []) + ["plan", "--json"], READ,
+      json_out=True)
+
+_tool("devkit_ci_audit", "CI/CD audit",
+      "Diagnoses a project's CI/CD pipelines (GitHub Actions, GitLab CI, Bitbucket Pipelines, Azure Pipelines): "
+      "findings by severity in five areas (speed, reliability, security and DevSecOps, quality gates, delivery), each "
+      "with the file, line and fix, plus actionlint and zizmor results for GitHub when installed. Read-only: it never "
+      "changes a file.",
+      {"project": PROJECT},
+      lambda a: ["ci", "audit", "--json"] + ([f"--project={a['project']}"] if a.get("project") else []), READ,
+      json_out=True)
+
 _tool("devkit_team", "Team",
       "Who is working on what across the developer's machines and teammates: live agent sessions with project, "
       "branch and status, and the task locks each person holds.",
       {"hours": {"type": "number", "minimum": 1, "maximum": 720, "default": 24,
                  "description": "Machines active in the last N hours."}},
       lambda a: ["team", f"--hours={a['hours']:g}"], READ)
+
+_tool("devkit_crew", "Crew",
+      "devkit's crew of specialist agents (Neo, Trinity, Seraph, The Keymaker and the others) that Claude Code and "
+      "Codex sessions delegate to: each member's role, when to use them, skills, tier and tools. When a session on "
+      "this Mac is running a progress run, also who is working now (lanes with state, minutes and the files they "
+      "own), the plan steps assigned to each member, who is ready to launch, queued or waiting and why, open crew "
+      "messages, the mode (guided: the developer decides; auto: the crew goes on and records) with its approvals, "
+      "and the decisions waiting for the developer.",
+      {}, lambda a: ["crew", "--json", "--latest"], READ, json_out=True)
 
 _tool("devkit_doctor", "Doctor",
       "Checks the whole devkit setup on this Mac (toolchain, GitHub sign-in and git identity, workspace and handoff "

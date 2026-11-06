@@ -60,7 +60,8 @@ COMMANDS = [
         ("wt rm <branch|path>", "Remove a worktree safely (refuses if work would be lost)"),
     ]),
     ("Delivery", [
-        ("ci [--commands]", "Show what GitHub Actions runs, so you run it locally before the one push"),
+        ("ci [--commands] · audit · init",
+         "What CI runs (run it locally first); `ci audit [--fix]` diagnoses pipelines on any host; `ci init` sets one up"),
         ("branch new|rename|ls|clean", "Branches from an up-to-date main, with valid names; tidy merged ones"),
         ("commit · push · rebase", "Conventional commits, push after local CI evidence (dev ci --run), rebase on main"),
         ("pr create|ls|checks|merge", "PRs with the template, checks with failing logs, safe merges"),
@@ -68,6 +69,8 @@ COMMANDS = [
         ("run ls|view --failed|rerun", "CI runs, failing logs trimmed; rerun only with --flaky \"reason\""),
         ("issue ls|view|create", "Issues, compact"),
         ("git … · gh …", "Escape hatches to git and gh, with the same policy checks"),
+        ("stubs [--staged|--all]", "Unfinished work: stubs, placeholders, TODOs without a task (also checked on commit)"),
+        ("crew [show|brief|route|delegate|next|ask|mode|decide]", "The specialist agents: who does what, briefs, routing, delegation, decisions"),
         ("ci status [--watch]", "Live CI/CD runs (GitHub, GitLab, Bitbucket, Azure): jobs, steps, elapsed, ETA"),
         ("calver [--next]", "Current and next CalVer version YY.MM.PATCH from the repository's tags"),
         ("sec scan [--history]", "Security: secrets (gitleaks), dependencies (osv-scanner), SAST (Semgrep), Trivy"),
@@ -916,11 +919,18 @@ def cmd_ci_status(a, top):
 def cmd_ci(a):
     from . import ci
     top = core.gitout(os.getcwd(), "rev-parse", "--show-toplevel")
-    if a.query and a.query != "status":
+    if a.query and a.query not in ("status", "audit", "init", "watch"):
         top = _resolve(_reg(prs=False), a.query)["path"]
+    if getattr(a, "project", None):
+        top = _resolve(_reg(prs=False), a.project)["path"]
     if not top:
         ui.err("not inside a repository")
         return 2
+    if a.query in ("audit", "init"):  # pipelines: diagnose and fix, or set one up
+        from . import pipelines
+        return (pipelines.cmd_audit if a.query == "audit" else pipelines.cmd_init)(a, top)
+    if a.query == "watch":  # follow the runs to the end; diagnose a failure
+        return cmd_ci_watch(a, top)
     from . import gitx
     r = gitx.ci_command(a, top)  # --run, --mark-passed, --evidence: local CI evidence for dev push
     if r is not None:
@@ -935,6 +945,19 @@ def cmd_ci(a):
         print(ui.section("Recent runs"))
         run(["gh", "run", "list", "--limit", "8"])
     return 0
+
+
+def cmd_ci_watch(a, top):
+    from . import ciwatch
+    res = ciwatch.watch(top, branch=a.branch, sha=getattr(a, "sha", None), timeout_min=getattr(a, "timeout", 90) or 90,
+                        quiet=getattr(a, "quiet", False) or a.json)
+    if getattr(a, "session", None) and ":" in a.session:
+        ciwatch.deliver(*a.session.split(":", 1), res)
+    if a.json:
+        print(json.dumps(res, ensure_ascii=False))
+    else:
+        print(ciwatch.message(res).replace("devkit · ", "", 1))
+    return {"passed": 0, "failed": 1, "timeout": 3, "none": 4}[res["state"]]
 
 
 def cmd_canary(a):
@@ -1256,11 +1279,16 @@ def cmd_plan(a):
 def cmd_progress(a):
     from . import progress as pg
     act = a.progress_cmd
+    from_agent = os.environ.get("DEVKIT_FROM_AGENT") or None  # set by the hooks inside a subagent
     if act == "start":
         names = [x.strip() for x in (a.plan or "").split(";") if x.strip()]
-        run = pg.start(" ".join(a.goal), a.steps or len(names), a.estimate or "", plan=names)
+        run = pg.start(" ".join(a.goal), a.steps or len(names), a.estimate or "", plan=names, from_agent=from_agent,
+                       mode=getattr(a, "mode", "") or "")
+        if from_agent:
+            print(f"{ui.OK} lane plan recorded · {' '.join(a.goal)}")
+            return 0
         cal = pg.calibration(run.get("project"))
-        print(f"{ui.OK} run started · {run['goal']}" + (f" · {a.steps} steps" if a.steps else "")
+        print(f"{ui.OK} run started · {run['goal']} · {pg.mode_of(run)} mode" + (f" · {a.steps} steps" if a.steps else "")
               + (f" · estimate {pg.fmt_min(run['estimate'])}" if run["estimate"] else ""))
         hints = []
         if cal["ratio"] and run["estimate"]:
@@ -1273,8 +1301,52 @@ def cmd_progress(a):
         return 0
     if act in ("step", "block", "done"):
         kind = {"step": "step", "block": "blocked", "done": "done"}[act]
-        run = pg.step(" ".join(a.text), a.next or "", kind=kind, check=getattr(a, "check", "") or "")
+        check = getattr(a, "check", "") or ""
+        if act == "step" and not from_agent and not check and not getattr(a, "no_check", False):
+            ui.err("closing a step needs its evidence: --check \"<tests run, output, CI result>\" "
+                   "(or --no-check when there is nothing to verify, which the update shows as ⚠)")
+            return 2
+        before = {s["name"]: s.get("state") for s in (pg.normalize(pg.load_run(*pg.current_session()) or {})
+                                                     .get("plan") or [])} if not from_agent else {}
+        try:
+            run = pg.step(" ".join(a.text), a.next or "", kind=kind, check=check, which=getattr(a, "step", None),
+                          from_agent=from_agent, force=getattr(a, "force", False))
+        except ValueError as e:
+            ui.err(str(e))
+            return 2
+        if from_agent:
+            lane = (run.get("agents") or {}).get(from_agent) or {}
+            print(f"{ui.OK} {lane.get('persona') or lane.get('label') or 'lane'} · {' '.join(a.text)}")
+            return 0
         print(pg.render_update(run))
+        changed = [(i, s) for i, s in enumerate(run.get("plan") or [], 1) if before.get(s["name"]) != s.get("state")]
+        if changed:
+            print(ui.dim("  changed: " + " · ".join(f"{i}. {s['name']} {before.get(s['name']) or 'new'} → "
+                                                    f"{s.get('state')}" for i, s in changed)))
+        return 0
+    if act in ("assign", "begin", "add", "reopen", "skip"):
+        try:
+            if act == "assign":
+                run = pg.assign(a.which, " ".join(a.to), scope=getattr(a, "scope", "") or "", from_agent=from_agent)
+            elif act == "begin":
+                run = pg.begin(a.which, from_agent=from_agent)
+            elif act == "add":
+                run = pg.add_step(" ".join(a.spec), why=getattr(a, "why", "") or "", from_agent=from_agent)
+                if from_agent:
+                    print(f"{ui.OK} added to your lane's plan · {' '.join(a.spec)}")
+                    return 0
+            else:
+                run = pg.reopen(a.which, a.why or "", skip=act == "skip", from_agent=from_agent)
+        except ValueError as e:
+            ui.err(str(e))
+            return 2
+        print(pg.render_update(run))
+        return 0
+    if act == "history":
+        run = pg.normalize(pg.load_run(*pg.current_session()) or {})
+        for h in run.get("history") or []:
+            print(f"  {core.fmt_ts(h['ts'])}  {h['step']:<32} {h.get('from') or '-':>8} → {h['to']:<8} "
+                  f"{ui.dim(h.get('by', ''))}  {h.get('why', '')[:80]}")
         return 0
     if act == "time":
         print(pg.report(a.days, a.project))
@@ -1327,10 +1399,11 @@ def cmd_delivery(a):
         base = (delivery.load(scope) or (delivery.recommend(delivery.detect(repo)) if repo else {}))
         for kv in a.set or []:
             k, _, v = kv.partition("=")
-            if k not in delivery.FIELDS and k != "bump":
-                ui.err(f"unknown field {k}: {', '.join(delivery.FIELDS)}")
+            try:
+                delivery.set_field(base, k, v)
+            except ValueError as e:
+                ui.err(str(e))
                 return 2
-            base[k] = [x.strip() for x in v.split(";") if x.strip()] if k in ("test_gate", "publish", "deploy") else v
         try:
             rec = delivery.record(scope, base, a.why or "")
         except ValueError as e:
@@ -2149,13 +2222,37 @@ def build_parser():
     x.add_argument("goal", nargs="+")
     x.add_argument("--steps", type=int)
     x.add_argument("--estimate", help="e.g. 30m, 1h30m")
-    x.add_argument("--plan", help="the step names, separated by ';' (shown as a checklist)")
+    x.add_argument("--mode", choices=["guided", "auto"],
+                   help="guided: the developer's decisions wait for the developer; auto: the crew goes on with the "
+                        "recommended option and records it (default: devkit config work.mode, else guided)")
+    x.add_argument("--plan", help="the steps, separated by ';', each with an optional estimate: "
+                                  "\"design=30m; build=2h; docs\"")
     for verb, h_ in (("step", "a step finished"), ("block", "blocked: why and what is needed"),
                      ("done", "finished: the outcome")):
         x = gsp.add_parser(verb, help=h_)
         x.add_argument("text", nargs="+")
         x.add_argument("--next", help="what comes next")
         x.add_argument("--check", help="the evidence for this step: tests run, command output, CI result")
+        x.add_argument("--step", help="which plan step (number or part of its name); default: the running one")
+        x.add_argument("--force", action="store_true", help="skip the safety checks (text must describe the step, "
+                                                                "dependencies done, no subagent still on it)")
+        if verb == "step":
+            x.add_argument("--no-check", action="store_true", help="nothing to verify for this step (shown as ⚠)")
+    x = gsp.add_parser("assign", help="hand a plan step to a subagent: the one launched with this description owns it")
+    x.add_argument("which", help="step number or part of its name")
+    x.add_argument("--to", nargs="+", required=True, help="the subagent's description or name, e.g. Neo")
+    x.add_argument("--scope", help="the files it owns, comma-separated globs; the guard keeps its edits inside them")
+    x = gsp.add_parser("begin", help="mark a plan step as started (parallel work you do yourself)")
+    x.add_argument("which", help="step number or part of its name")
+    x = gsp.add_parser("add", help="add a step found during the work: \"name=30m after other\"")
+    x.add_argument("spec", nargs="+")
+    x.add_argument("--why", help="why it was not in the plan")
+    for verb, h_ in (("reopen", "undo a wrong close: the step goes back to running"),
+                     ("skip", "skip a step on purpose")):
+        x = gsp.add_parser(verb, help=h_)
+        x.add_argument("which", help="step number or part of its name")
+        x.add_argument("--why", required=True, help="the reason (kept in the run's history)")
+    gsp.add_parser("history", help="every step change: when, from → to, by whom, why")
     x = gsp.add_parser("time", help="how long things take: turns, slow commands, subagents, estimate accuracy")
     x.add_argument("--days", type=int, default=7)
     x.add_argument("-p", "--project")
@@ -2169,7 +2266,7 @@ def build_parser():
     p.add_argument("--json", action="store_true")
     dsp = p.add_subparsers(dest="delivery_cmd")
     x = dsp.add_parser("apply", help="record the policy (recommended, or with --set changes) in the handoff repo")
-    x.add_argument("--set", action="append", metavar="KEY=VALUE", help="e.g. versioning=semver, test_gate=\"a; b\"")
+    x.add_argument("--set", action="append", metavar="KEY=VALUE", help="e.g. versioning=semver, test_gate=\"a; b\", job_timeout_minutes=45")
     x.add_argument("--why", help="the reason (recorded in the policy changelog and the commit)")
     x.add_argument("--tasks", action="store_true", help="create a work item for every gap")
     x.add_argument("-p", "--project", default=argparse.SUPPRESS)
@@ -2252,6 +2349,8 @@ def build_parser():
     p.add_argument("-o", "--out", help="write to a file instead of stdout")
     from . import fs
     fs.register(add)
+    from . import stubs as _stubs
+    _stubs.register(add)
     add("team", cmd_team, "Who is working on what, across machines and developers").add_argument(
         "--hours", type=float, default=24)
     p = add("initiative", cmd_initiative, "Cross-project initiatives (integrations, platforms, programmes)")
@@ -2324,8 +2423,16 @@ def build_parser():
     p = add("canary", cmd_canary, "Instruction-compliance canary report")
     p.add_argument("--days", type=int, default=7)
     p.add_argument("--limit", type=int, default=20)
-    p = add("ci", cmd_ci, "What CI runs (to run it locally first), and `dev ci status`: live runs on any host")
-    p.add_argument("query", nargs="?", help="a project, or `status`")
+    p = add("ci", cmd_ci, "What CI runs (to run it locally first), `dev ci status`: live runs on any host, "
+                          "`dev ci watch`: follow a run to the end and diagnose a failure, `dev ci audit`: diagnose "
+                          "pipelines, `dev ci init`: set one up")
+    p.add_argument("query", nargs="?", help="a project, or `status`, `audit`, `init` or `watch`")
+    p.add_argument("-p", "--project", help="the project (id or a unique part of its name) for status, audit, init "
+                                           "and watch")
+    p.add_argument("--sha", help="watch: the commit whose runs to follow (default: HEAD)")
+    p.add_argument("--timeout", type=float, default=90, help="watch: minutes before giving up (default 90)")
+    p.add_argument("--session", help=argparse.SUPPRESS)
+    p.add_argument("--quiet", action="store_true", help="watch: no progress lines, only the result")
     p.add_argument("--commands", action="store_true", help="print only the run commands")
     p.add_argument("--runs", action="store_true", help="also list recent CI runs")
     p.add_argument("--status", action="store_true", help="live runs with job and step progress and an ETA")
@@ -2337,10 +2444,16 @@ def build_parser():
     p.add_argument("--json", action="store_true")
     from . import gitx
     gitx.add_ci_arguments(p)
+    from . import pipelines
+    pipelines.add_ci_arguments(p)
     gitx.register(add)
+    from . import testx
+    testx.register(add)
     add("mcp", cmd_mcp, "Serve devkit's tools over MCP on stdio (the Claude Desktop extension runs this)")
     from . import desktop
     desktop.register(add)
+    from . import crew
+    crew.register(add)
     add("doctor", cmd_doctor, "Verify the setup")
     add("install", cmd_install, "Apply configuration").add_argument(
         "--only", help="comma list: config,tools,cli,git,handoff,instructions,skills,claude,codex,desktop,docker,docs,launchd")
