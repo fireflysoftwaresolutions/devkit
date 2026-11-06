@@ -399,7 +399,7 @@ figure.chart figcaption .btn{margin-left:auto}
 .seg button[aria-pressed="true"]{background:var(--surface-3);color:var(--heading)}
 /* explorer */
 .explorer{display:grid;grid-template-columns:320px minmax(0,1fr);gap:16px;align-items:start}
-.tree{position:sticky;top:120px;max-height:calc(100vh - 140px);overflow:auto;background:var(--surface);border:1px solid var(--line-soft);border-radius:16px;padding:10px}
+.tree{position:sticky;top:72px;max-height:calc(100vh - 92px);overflow:auto;background:var(--surface);border:1px solid var(--line-soft);border-radius:16px;padding:10px}
 .tree input{width:100%;padding:7px 10px;border-radius:10px;border:1px solid var(--line);background:var(--surface-2);margin-bottom:8px}
 .tree details{margin-left:4px}
 .tree summary{cursor:pointer;padding:4px 6px;border-radius:8px;font-size:.84rem;font-weight:650;list-style:none;display:flex;gap:6px;align-items:center}
@@ -410,7 +410,7 @@ figure.chart figcaption .btn{margin-left:auto}
 .tree .file:hover{background:var(--surface-2);color:var(--text)}
 .tree .file[aria-current="true"]{background:var(--surface-3);color:var(--heading);font-weight:650}
 .viewer{background:var(--surface);border:1px solid var(--line-soft);border-radius:16px;min-height:60vh}
-.viewer .vh{display:flex;flex-wrap:wrap;gap:8px;align-items:center;padding:12px 16px;border-bottom:1px solid var(--line-soft);position:sticky;top:114px;background:var(--surface);border-radius:16px 16px 0 0;z-index:5}
+.viewer .vh{display:flex;flex-wrap:wrap;gap:8px;align-items:center;padding:12px 16px;border-bottom:1px solid var(--line-soft);position:sticky;top:64px;background:var(--surface);border-radius:16px 16px 0 0;z-index:5}
 .viewer .vh .path{font-weight:650;color:var(--heading);word-break:break-all}
 .viewer .vh input{padding:6px 10px;border-radius:999px;border:1px solid var(--line);background:var(--surface-2);min-width:180px}
 .notice{font-size:.8rem;color:var(--text-2);background:var(--surface-2);border:1px dashed var(--line);border-radius:10px;padding:8px 10px;margin-bottom:10px}
@@ -540,10 +540,12 @@ function rel(ts) {
   return Math.floor(d / 604800) + " w ago";
 }
 function fmt(ts) { if (!ts) return "—"; return new Date(ts * 1000).toLocaleString(undefined, {year:"numeric", month:"short", day:"numeric", hour:"2-digit", minute:"2-digit"}); }
+function tm(ts) { const d = new Date(ts * 1000); return String(d.getHours()).padStart(2, "0") + ":" + String(d.getMinutes()).padStart(2, "0"); }
 function lkey(d) { return d.getFullYear() + "-" + String(d.getMonth() + 1).padStart(2, "0") + "-" + String(d.getDate()).padStart(2, "0"); }
 function days(n) { const out = [], b = new Date(D.generated * 1000); b.setHours(12, 0, 0, 0);
   for (let i = n - 1; i >= 0; i--) { const d = new Date(b); d.setDate(b.getDate() - i); out.push(lkey(d)); } return out; }
 function sessTs(line) { const m = /^(\d{4}-\d{2}-\d{2}) (\d{2}):(\d{2})/.exec(line || ""); return m ? new Date(m[1] + "T" + m[2] + ":" + m[3] + ":00").getTime() / 1000 : 0; }
+function sessText(s) { return String(s || "").slice(16).replace(/^\s*·\s*/, ""); }
 function shortDay(k) { const d = new Date(k + "T12:00:00"); return d.toLocaleDateString(undefined, {month: "short", day: "numeric"}); }
 function compact(n) { return n >= 1e6 ? (n / 1e6).toFixed(1) + "M" : n >= 1e4 ? Math.round(n / 1e3) + "K" : n >= 1e3 ? (n / 1e3).toFixed(1) + "K" : String(n); }
 function kb(k) { if (k == null) return "—"; return k >= 1048576 ? (k / 1048576).toFixed(1) + " GB" : k >= 1024 ? Math.round(k / 1024) + " MB" : k + " KB"; }
@@ -698,8 +700,9 @@ function md(text) {
 }
 function highlight(el, q, cls) {
   const tk = tokens(q).filter(t => t.length > 1); if (!tk.length) return 0;
-  const re = new RegExp("(" + tk.map(t => t.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")).join("|") + ")", "gi");
-  const walker = document.createTreeWalker(el, NodeFilter.SHOW_TEXT, {acceptNode: n => n.parentNode && !/^(SCRIPT|STYLE|MARK)$/.test(n.parentNode.nodeName) && re.test(n.nodeValue) ? NodeFilter.FILTER_ACCEPT : NodeFilter.FILTER_REJECT});
+  const src = "(" + tk.map(t => t.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")).join("|") + ")";
+  const re = new RegExp(src, "gi"), probe = new RegExp(src, "i");
+  const walker = document.createTreeWalker(el, NodeFilter.SHOW_TEXT, {acceptNode: n => n.parentNode && !/^(SCRIPT|STYLE|MARK)$/.test(n.parentNode.nodeName) && probe.test(n.nodeValue) ? NodeFilter.FILTER_ACCEPT : NodeFilter.FILTER_REJECT});
   const nodes = []; let n; while ((n = walker.nextNode())) nodes.push(n);
   let count = 0;
   for (const node of nodes) {
@@ -836,7 +839,6 @@ function renderFilters() {
   const chips = [];
   for (const k of ["status", "priority", "owner", "stack", "tag"]) for (const v of S[k]) chips.push(h("span", {class: "chip"}, v, h("button", {type: "button", "aria-label": "Remove " + v, onclick: () => set({[k]: S[k].filter(x => x !== v)}, true), text: "×"})));
   if (chips.length || facetCount()) bar.append(...chips, h("button", {class: "btn sm ghost", type: "button", onclick: () => set({status: [], priority: [], owner: [], stack: [], tag: [], live: false, prs: false, attn: false}, true)}, "Clear filters"));
-  document.addEventListener("click", e => { $$(".facet[open]").forEach(d => { if (!d.contains(e.target)) d.open = false; }); }, {once: true, capture: true});
 }
 
 /* ---------------------------------------------------------------- views */
@@ -907,7 +909,7 @@ function taskCard(p, t, bucket) {
 }
 function timelineItems(ps, nDays) {
   const cutoff = nowS() - nDays * 86400, items = [];
-  for (const p of ps) for (const s of p.sessions) { const ts = sessTs(s); if (ts >= cutoff) items.push({ts, p, text: s.slice(17)}); }
+  for (const p of ps) for (const s of p.sessions) { const ts = sessTs(s); if (ts >= cutoff) items.push({ts, p, text: sessText(s)}); }
   for (const ln of D.ops || []) { const ts = sessTs(ln); if (ts >= cutoff) items.push({ts, text: ln.slice(19), op: true}); }
   for (const r of (D.canary || {}).records || []) if (!r.ok && r.ts >= cutoff) items.push({ts: r.ts, text: "Canary miss (" + r.agent + "): " + (r.excerpt || ""), canary: true, p: BYID.get(r.project)});
   return items.sort((a, b) => b.ts - a.ts);
@@ -919,7 +921,7 @@ function timeline(ps, nDays, limit) {
   for (const it of items) {
     const k = lkey(new Date(it.ts * 1000));
     if (k !== day) { day = k; ul.append(h("li", {class: "day", text: shortDay(k)})); }
-    ul.append(h("li", {class: "it"}, h("span", {class: "tm", text: new Date(it.ts * 1000).toTimeString().slice(0, 5)}),
+    ul.append(h("li", {class: "it"}, h("span", {class: "tm", text: tm(it.ts)}),
       h("div", null, it.p ? h("a", {href: encode(Object.assign({}, S, {p: it.p.id})), class: "who", text: it.p.id, onclick: e => { e.preventDefault(); openProject(it.p.id); }}) : h("span", {class: "who t2", text: it.op ? "ops" : ""}), inline(it.text))));
   }
   return ul;
@@ -1088,7 +1090,7 @@ function viewHealth(main) {
   const g = D.guard || [];
   main.append(h("h2", {class: "sec"}, "Guard decisions", h("span", {class: "label", text: g.length + " recent"})),
     g.length ? h("div", {class: "tablewrap"}, h("table", {class: "t"}, h("thead", null, h("tr", null, ["When", "Agent", "Decision", "Reason"].map(x => h("th", {text: x})))),
-      h("tbody", null, g.slice().reverse().map(e => h("tr", null, h("td", {class: "num", text: e.ts}), h("td", {text: e.agent}), h("td", null, h("span", {class: "badge"}, h("span", {class: "ic", style: "color:var(--" + (e.decision === "deny" ? "critical" : "warning") + ")", text: e.decision === "deny" ? "⊘" : "?"}), e.decision)), h("td", null, inline(e.reason)))))))) : h("p", {class: "t2", text: "The guard has not blocked anything recently."}));
+      h("tbody", null, g.slice().reverse().map(e => h("tr", null, h("td", {class: "num", text: e.ts}), h("td", {text: e.agent}), h("td", null, h("span", {class: "badge"}, h("span", {class: "ic", style: "color:var(--" + (e.decision === "deny" ? "critical" : "warning") + ")", text: e.decision === "deny" ? "⊘" : "?"}), e.decision)), h("td", null, inline(e.reason))))))) : h("p", {class: "t2", text: "The guard has not blocked anything recently."}));
   const drift = D.drift;
   main.append(h("h2", {class: "sec"}, "Configuration drift"));
   if (drift == null) main.append(h("p", {class: "t2"}, "No drift report in this registry. Run ", h("code", {text: "dev config diff"}), " to compare the devkit configuration with Claude Code and Codex."));
@@ -1189,11 +1191,10 @@ function renderDrawer() {
     h("div", {style: "margin-top:10px"}, sparkline(p, 30))));
   if ((p.prs_open || []).length) body.append(sect("prs", "Open pull requests", h("ul", {class: "tasklist"}, p.prs_open.map(pr => h("li", null, p.github ? h("a", {href: "https://github.com/" + p.github + "/pull/" + pr.number, target: "_blank", rel: "noopener noreferrer", text: "#" + pr.number}) : "#" + pr.number, " ", h("span", {text: pr.title || ""}), pr.draft ? h("span", {class: "badge", text: "draft"}) : null, h("span", {class: "t2 mono", text: " " + (pr.branch || "")}))))));
   if (p.wts.length) body.append(sect("worktrees", "Worktrees", h("div", {class: "tablewrap"}, h("table", {class: "t"}, h("thead", null, h("tr", null, ["Branch", "PR", "State", "Session", "Size"].map(x => h("th", {text: x})))),
-    h("tbody", null, p.wts.map(w => h("tr", null, h("td", {class: "mono", text: w.branch || "detached"}), h("td", {text: w.pr ? "#" + w.pr.number + " " + String(w.pr.state).toLowerCase() : "—"}), h("td", {text: w.missing ? "missing" : ((w.modified || 0) + (w.untracked || 0)) ? ((w.modified || 0) + (w.untracked || 0)) + " changed" : "clean"}), h("td", {text: w.active ? "live" : rel(w.last_activity)}), h("td", {class: "num", text: kb(w.size_kb)})))))))));
-  if (p.sessions.length) body.append(sect("sessions", "Session log", h("ul", {class: "tasklist"}, p.sessions.map(s => h("li", null, h("span", {class: "t2 num", style: "flex:none", text: s.slice(0, 16)}), h("span", null, inline(s.slice(17))))))));
+    h("tbody", null, p.wts.map(w => h("tr", null, h("td", {class: "mono", text: w.branch || "detached"}), h("td", {text: w.pr ? "#" + w.pr.number + " " + String(w.pr.state).toLowerCase() : "—"}), h("td", {text: w.missing ? "missing" : ((w.modified || 0) + (w.untracked || 0)) ? ((w.modified || 0) + (w.untracked || 0)) + " changed" : "clean"}), h("td", {text: w.active ? "live" : rel(w.last_activity)}), h("td", {class: "num", text: kb(w.size_kb)}))))))));
+  if (p.sessions.length) body.append(sect("sessions", "Session log", h("ul", {class: "tasklist"}, p.sessions.map(s => h("li", null, h("span", {class: "t2 num", style: "flex:none", text: s.slice(0, 16)}), h("span", null, inline(sessText(s))))))));
   if (p.note) body.append(h("p", {class: "t2"}, "Source: ", h("a", {href: encode(Object.assign({}, S, {view: "explorer", f: p.note, p: ""})), text: p.note}), " in " + D.handoff));
   dr.append(head, body);
-  $("button", head.lastChild ? head : dr).focus({preventScroll: true});
   head.lastChild.focus({preventScroll: true});
 }
 
@@ -1312,6 +1313,7 @@ function tick() { const t = $("#ticker"); if (t) { t.textContent = "Updated " + 
     else set({q: v});
   }, 140));
   q.addEventListener("keydown", e => { if (e.key === "Enter") { const first = $("[data-nav]", $("#view")); if (first) first.focus(); } });
+  document.addEventListener("click", e => { $$(".facet[open]").forEach(d => { if (!d.contains(e.target)) d.open = false; }); }, true);
   $("#scrim").addEventListener("click", () => { if (!$("#palette").hidden) closePalette(); else if (!$("#sheet").hidden) closeSheet(); else closeDrawer(); });
   const st = decode(location.hash) || store.get("devkit.state", null);
   if (st) S = Object.assign({}, DEFAULT, st); if (!location.hash) history.replaceState(null, "", encode(S));

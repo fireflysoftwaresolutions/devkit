@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
 import shutil
 import sys
 import time
@@ -44,6 +45,7 @@ COMMANDS = [
     ]),
     ("Delivery", [
         ("ci [--commands]", "Show what GitHub Actions runs, so you run it locally before the one push"),
+        ("calver [--next]", "Current and next CalVer version YY.MM.PATCH from the repository's tags"),
     ]),
     ("Tracking and disk", [
         ("canary", "How often Claude/Codex replies carried the “DevKit ·” instruction marker"),
@@ -1029,6 +1031,34 @@ def cmd_plugin(a):
     return 0 if res and all(ok for _, ok, _ in res) else 1
 
 
+CALVER_RE = re.compile(r"^v?(\d{2})\.(\d{1,2})\.(\d+)$")
+
+
+def calver(path: str, today=None):
+    """-> (current CalVer tag or None, next YY.MM.PATCH) from the repository's tags."""
+    import datetime as dt
+    today = today or dt.date.today()
+    yy, mm = today.year % 100, today.month
+    tags = core.gitout(path, "tag", "--list").split()
+    versions = sorted((tuple(int(x) for x in m.groups()), t) for t in tags if (m := CALVER_RE.match(t)))
+    current = versions[-1][1] if versions else None
+    this_month = [v for v, _ in versions if v[0] == yy and v[1] == mm]
+    nxt = f"{yy}.{mm}.{max(v[2] for v in this_month) + 1 if this_month else 0}"
+    return current, nxt
+
+
+def cmd_calver(a):
+    top = core.gitout(os.getcwd(), "rev-parse", "--show-toplevel") or str(core.DEVKIT_HOME)
+    cur, nxt = calver(top)
+    if a.next:
+        print(nxt)
+        return 0
+    print(ui.kv("repository", tilde(top), 12))
+    print(ui.kv("current", cur or "no CalVer tag yet", 12))
+    print(ui.kv("next", f"{nxt}  (tag v{nxt}, branch release/{nxt})", 12))
+    return 0
+
+
 def cmd_version(a):
     print(f"devkit {core.VERSION} · {tilde(core.DEVKIT_HOME)}\n{COPYRIGHT}")
     return 0
@@ -1118,6 +1148,8 @@ def build_parser():
     p.add_argument("config_cmd", nargs="?", choices=["diff", "repair", "show", "edit", "validate", "lock", "unlock",
                                                      "status"])
     p.add_argument("--quiet", action="store_true")
+    add("calver", cmd_calver, "Current and next CalVer version (YY.MM.PATCH)").add_argument(
+        "--next", action="store_true", help="print only the next version")
     p = add("plugin", cmd_plugin, "Validate the devkit plugin for Claude Code and Codex")
     p.add_argument("action", choices=["validate"])
     p = add("guard", cmd_guard, "Simulate the guard")

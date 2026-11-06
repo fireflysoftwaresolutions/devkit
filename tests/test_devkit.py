@@ -190,6 +190,20 @@ class BranchPolicyTests(unittest.TestCase):
                     self.assertEqual(decision("Bash", {"command": cmd}, cwd), "allow")
 
 
+class CalverTests(unittest.TestCase):
+    def test_next_version(self):
+        import datetime as dt
+        from devkit import cli
+        with tempfile.TemporaryDirectory() as d:
+            core.sh(["git", "init", "-q", d])
+            core.sh(["git", "-C", d, "-c", "user.name=t", "-c", "user.email=t@t", "commit", "-q", "--allow-empty", "-m", "x"])
+            self.assertEqual(cli.calver(d, dt.date(2026, 11, 5)), (None, "26.11.0"))
+            for t in ("v26.10.4", "v26.11.0", "v26.11.1", "1.2.3"):
+                core.sh(["git", "-C", d, "tag", t])
+            self.assertEqual(cli.calver(d, dt.date(2026, 11, 20)), ("v26.11.1", "26.11.2"))
+            self.assertEqual(cli.calver(d, dt.date(2026, 12, 1)), ("v26.11.1", "26.12.0"))
+
+
 class PackagingTests(unittest.TestCase):
     ROOT = Path(__file__).resolve().parents[1]
 

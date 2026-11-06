@@ -1,8 +1,8 @@
 # Changelog
 
-All notable changes to devkit. Versions follow [Semantic Versioning](https://semver.org/).
+All notable changes to devkit. Versions follow CalVer `YY.MM.PATCH` (PATCH restarts at 0 each month); tags are `vYY.MM.PATCH`.
 
-## [1.0.0] — 2026-11-05
+## [26.11.0] — 2026-11-05
 
 First release.
 

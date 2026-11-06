@@ -60,8 +60,9 @@ signal to stop and reproduce locally.
 ## 4. Release
 
 1. From the verified, green integration branch: merge with the repository's strategy (squash vs merge commit).
-2. Tag (`git tag -s vX.Y.Z` if the project signs tags) and push the tag; create the GitHub release with notes from the
-   CHANGELOG (`gh release create vX.Y.Z --notes-file …`).
+2. Version: the project's own scheme, otherwise CalVer `YY.MM.PATCH` (`dev calver` prints the next one). Tag
+   `vYY.MM.PATCH` (`git tag -s` if the project signs tags), push the tag, create the GitHub release with notes from the
+   CHANGELOG (`gh release create vYY.MM.PATCH --notes-file …`).
 3. Verify the published artefact: download/install it from the release and smoke-test it.
 4. Update the handoff note: version, what shipped, follow-ups.
 

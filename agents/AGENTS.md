@@ -96,8 +96,10 @@ never move or rename repositories yourself (`dev adopt` does that, with the user
   harness created such a branch for you (Claude Desktop, Codex worktrees, detached HEAD), rename it before the first
   commit: `git branch -m <type>/<topic>`. The guard refuses to create or push non-conforming names.
 - **Commits:** Conventional Commits `type(scope): summary` (imperative, ≤ 72 chars), body explains why; one logical
-  change per commit. **Tags:** `vMAJOR.MINOR.PATCH` (semver), or the project's existing scheme (e.g. calendar
-  versions).
+  change per commit.
+- **Versions:** keep the project's existing scheme. Projects without one use **CalVer `YY.MM.PATCH`** — `26.11.0` is
+  the first release of November 2026, `26.11.1` the next one that month, `26.12.0` the first in December. Tags are
+  `vYY.MM.PATCH`, release branches `release/YY.MM.PATCH`. `dev calver` prints the current and the next version.
 - Commit only when the user asks or the task clearly includes it. Never push to `main`/`master` directly unless the
   user says so; never plain force-push (use `--force-with-lease` on your own branch only).
 - Use `gh` for GitHub: PRs (`gh pr create --fill` then edit), reviews, checks (`gh pr checks`), CI logs.
