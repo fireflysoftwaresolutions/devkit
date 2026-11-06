@@ -146,7 +146,7 @@ every step, who owns it, and anything waiting for you.
 
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="../images/dashboard/background-1440-dark.webp">
-  <img src="../images/dashboard/background-1440-light.webp" alt="The dashboard's Background work view: four figures (one decision waiting for you, one run, one CI failure in 14 days, five scheduled jobs), the waiting decision with its options and an Open the run button, two runs with their steps and owners, and a failed CI result with the first error from its log." width="100%">
+  <img src="../images/dashboard/background-1440-light.webp" alt="The dashboard's Background work view: four figures (one decision waiting for you, one run running and one blocked, one CI failure in 14 days, and five scheduled jobs, with doctor failed on its last run), the waiting decision with its options and an Open the run button, the two run cards with their steps and owners, and a failed CI result with the first error from its log." width="100%">
 </picture>
 
 The [Dashboard](../dashboard.md) guide describes every view.

@@ -37,7 +37,7 @@ The server's log is `~/.local/state/devkit/logs/dashboard.log`.
 
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="images/dashboard/home-1440-dark.webp">
-  <img src="images/dashboard/home-1440-light.webp" alt="The dashboard's Home view: the title says 5 urgent items need you; four stat tiles with a segmented bar each (what needs you by urgency, initiatives on track, projects by off track, at risk, on track, and quiet, open tasks by doing, blocked, and to do); the Needs you list with a decision waiting, a failed CI run, and a PR failing CI; Team now with a progress bar per running session; four Since yesterday counters with sparklines; and one card per initiative with a progress ring, its member projects as colored squares, and a due-date pill." width="100%">
+  <img src="images/dashboard/home-1440-light.webp" alt="The dashboard's Home view: the title says 5 urgent items need you; four stat tiles with a segmented bar each (what needs you by urgency, initiatives on track, projects by off track, at risk, on track, and quiet, open tasks by doing, blocked, and to do); the Needs you list with a decision waiting, a failed CI run, and a PR failing CI; Team now with a progress bar per running session; four Since yesterday counters with sparklines; and three initiative cards, each with a progress ring, its member projects as colored squares, and its due date." width="100%">
 </picture>
 
 ## Views
@@ -67,7 +67,7 @@ figures come first, each a link to its section (**Waiting for you**, **Runs**, *
 
 | Section | What it shows |
 | --- | --- |
-| **Waiting for you** | Only when a decision waits: each question with who asks, the options, the recommendation, and the run it blocks, oldest first. **Open the run** opens the run's drawer at that decision. Answer in the agent's session; the Tech lead (Morpheus) records it |
+| **Waiting for you** | Only when a decision waits: each question with who asks, the options, the recommendation, and the run it blocks, oldest first. **Open the run** opens the run's drawer at that decision. Answer in the agent's session; the Tech lead (Morpheus) records it. Your answer counts only in your own words: the question dialog, or a line you type on its own, such as `approve D1` or `approve D1: B`. A decision tagged _Irreversible_ needs one of those two (a plain _yes_ is not enough), and then opens its action once. For an irreversible action no decision asked about, type `grant <action> <target>`, such as `grant merge 142`: a grant is used once, holds only in the repository of the session you typed it in, and expires after 30 minutes. The dashboard only reads, so it cannot answer or grant |
 | **Runs** | Every `dev progress` run: waiting for you, blocked, stopped reporting, running, then done in the last hour. Each shows its goal, project, branch, agent, and mode, a progress bar, the steps running and next with their owners by role, the time used against the estimate, and the latest update and next step |
 | **CI** | The latest result per branch from `dev ci watch`, failures first. A failed result shows the job and step that failed, its class (test, lint, build, …), the first error from the log, the next action, a link to the log, and `dev run view <id> --failed` to copy |
 | **Scheduled jobs** | devkit's jobs, problems first: failed, timed out, not scheduled, overdue, skipped, OK. Each with its last run, its next run, and its failures in 30 days; the name opens the job's drawer with its recent runs and log |
@@ -86,6 +86,24 @@ lanes, and, in the live page, the evidence, history, and open questions of each 
   <source media="(prefers-color-scheme: dark)" srcset="images/dashboard/run-1440-dark.webp">
   <img src="images/dashboard/run-1440-light.webp" alt="A run's drawer over Background work: the run Invoice export, blocked and waiting for you, guided, with 3 of 6 steps done, 1 h 24 min active of about 2 h (the time so far plus the time left, rounded to 5 minutes), the first estimate of 2 h 30 min under it, 30 to 45 minutes left; the decision D1 waiting for an answer; six steps, each with its owner by role, its state and time, and the step it waits for; and the two crew lanes working." width="100%">
 </picture>
+
+Each step shows its state with a glyph and a word:
+
+| Glyph | State | Meaning |
+| --- | --- | --- |
+| `✓` | Done | Finished with its evidence |
+| `▸` | Running | Someone works on it now |
+| `○` | To do | Not started; it may wait for another step |
+| `■` | Blocked, or waiting for you | Stopped on a problem, or on your answer to a decision |
+| `–` | Skipped | Left out, with a reason |
+| `!` | Stopped reporting | Its crew member stopped without telling devkit, or sent no update for 6 hours (`progress.stale_agent_hours`) |
+| `!` | Unverified, _Tech lead (Morpheus) checks it_ | A crew member's step that ended without evidence |
+
+A step is **unverified** when its member stopped without a Check ✓ in its report and without a
+`dev progress step --check` of its own, or when a review or read-only member's shell call wrote files. It shows in
+amber on the run card, in the run's drawer, and under **Working now** on the Crew tab. Morpheus settles it: he closes
+it with evidence, or reopens it with `dev progress reopen <step> --why "…"`. It never appears under **Needs you**,
+because nothing waits for you.
 
 On a phone the figures sit two by two and the runs stack:
 
@@ -108,12 +126,12 @@ On a phone the figures sit two by two and the runs stack:
 
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="images/dashboard/crew-1440-dark.webp">
-  <img src="images/dashboard/crew-1440-light.webp" alt="The Team view on its Crew tab: Working now lists the Backend engineer (Tank), waiting for your answer to D1, and the Frontend engineer (Trinity), working for 9 minutes; then the crew table with a filter, each member role first with what they do, the work they do and approve, their access, and what they work on now, starting with the Tech lead (Morpheus)." width="100%">
+  <img src="images/dashboard/crew-1440-light.webp" alt="The Team view on its Crew tab, beside the tabs People and Who does what (34 kinds of work): Working now lists the Backend engineer (Tank), waiting for your answer to D1, and the Frontend engineer (Trinity), working for 9 minutes; then the table of all 26 crew members with a filter, each member role first with what they do, the work they do and approve, their access, and what they work on now, starting with the Tech lead (Morpheus)." width="100%">
 </picture>
 
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="images/dashboard/team-1440-dark.webp">
-  <img src="images/dashboard/team-1440-light.webp" alt="The Team view on its People tab: 3 live sessions and 3 claimed tasks; one card per person with a live dot on the avatar, a lock count, and a progress bar for the running session." width="100%">
+  <img src="images/dashboard/team-1440-light.webp" alt="The Team view on its People tab: 3 people and 2 crew members working now, 3 live sessions and 3 claimed tasks; one card each for ana@laptop (you), bob@studio, and carla@mini, with a live dot on the avatar, a lock count, and the project of the running session with its progress bar, 2 of 4 steps for bob." width="100%">
 </picture>
 
 ## Initiative and project pages
@@ -138,7 +156,7 @@ sparkline, and the people on it. The tabs follow.
 
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="images/dashboard/initiative-1440-dark.webp">
-  <img src="images/dashboard/initiative-1440-light.webp" alt="An initiative page: a 55% progress ring and the title LendingOS launch, on track, with its due pill, milestone, and owner; a Commands menu; four stat tiles (2 member projects, one off track and one on track; no open tasks; no tasks done in 14 days; 2 people on it); and the Overview tab with Doing or blocked, the off-track project, Who is on it, Risks and decisions, and the goal." width="100%">
+  <img src="images/dashboard/initiative-1440-light.webp" alt="An initiative page: a 55% progress ring and the title LendingOS launch, on track, due Nov 15, with the milestone Pilot with the first bank and the owner ana; a Commands menu; four stat tiles (2 member projects, one off track and one on track; no open tasks; no tasks done in 14 days; 2 people on it); and the Overview tab with Doing or blocked (nothing in progress, with the command to claim the next task), the off-track project lending-rules, Who is on it (ana and bob), Risks and decisions (nothing recorded yet), and the goal." width="100%">
 </picture>
 
 ### Project page (`#/projects/<owner>/<repo>`)

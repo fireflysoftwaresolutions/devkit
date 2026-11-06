@@ -172,7 +172,7 @@ and anything waiting for you. **Team**, then **Crew** (`g c`), lists the crew me
 
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="../images/dashboard/run-1440-dark.webp">
-  <img src="../images/dashboard/run-1440-light.webp" alt="The dashboard's run drawer over Background work: a run named Invoice export, blocked and waiting for you, with 3 of 6 steps done, the time used against the estimate, the decision D1 waiting for an answer, and every step with its owner, its state, and the step it waits for." width="100%">
+  <img src="../images/dashboard/run-1440-light.webp" alt="The dashboard's run drawer over Background work: a run named Invoice export, blocked and waiting for you, with 3 of 6 steps done, the time used against the estimate and 30 to 45 minutes left, the decision D1 waiting for an answer, every step with its owner, its state, and the step it waits for, and the two crew members working." width="100%">
 </picture>
 
 The [Dashboard](../dashboard.md) guide describes every view.

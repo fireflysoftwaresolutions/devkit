@@ -121,7 +121,7 @@ dev doctor                   verify the whole setup                   dev agents
 
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="docs/images/dashboard/home-1440-dark.webp">
-  <img src="docs/images/dashboard/home-1440-light.webp" alt="The devkit dashboard's Home view: the title says 5 urgent items need you; four stat tiles with a segmented bar each (what needs you, initiatives, projects, and open tasks by state); the Needs you list with a decision waiting, a failed CI run, and a PR failing CI; Team now with a progress bar per running session; four Since yesterday counters with sparklines; and one card per initiative with a progress ring and a due-date pill." width="100%">
+  <img src="docs/images/dashboard/home-1440-light.webp" alt="The devkit dashboard's Home view: the title says 5 urgent items need you; four stat tiles with a segmented bar each (what needs you, initiatives, projects, and open tasks by state); the Needs you list with a decision waiting, a failed CI run, and a PR failing CI; Team now with a progress bar per running session; four Since yesterday counters with sparklines; and three initiative cards, each with a progress ring and its due date." width="100%">
 </picture>
 
 All commands are in [docs/commands.md](docs/commands.md).

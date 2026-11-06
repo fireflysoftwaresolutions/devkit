@@ -137,8 +137,10 @@ full record, its categories and levels, the hash chain, and the exports are in [
 | `job.<name>` · `jobs.set` · `jobs.install` | A job runs, a schedule changes, the jobs are installed |
 | `audit.<event>` | The audit trail itself: a prune, a settings change, a verify, an export, or a publish that was refused |
 
-**Secrets never reach a record.** Tokens, keys, passwords, and credentials in URLs are redacted in every text field
-before a record is written, crew message text is never recorded, and `/Users/<name>` becomes `~`. See
+**Secrets are redacted, as far as the redactor knows their shape.** Tokens, keys, passwords, credentials in URLs,
+and the secrets that common commands take are redacted in every text field before a record is written. A secret in
+a shape the redactor does not know can still reach a record, so keep secrets out of commands. Crew message text and
+decision questions are never recorded, and `/Users/<name>` becomes `~`. See
 [The audit trail › What a record holds](audit.md#what-a-record-holds-and-what-it-never-holds).
 
 **Where it lives.** Each machine appends to `~/.local/state/devkit/audit/YYYY-MM.jsonl` and keeps 13 months by
