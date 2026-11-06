@@ -107,13 +107,15 @@ A repository's own AGENTS.md or CLAUDE.md adds to them; an explicit request from
 | --- | --- | --- |
 | `permissions.defaultMode` | `bypassPermissions` (or your `claude.default_mode`) | No permission prompts; the guard and deny rules still apply |
 | `skipDangerousModePermissionPrompt` | `true` (bypass mode only) | Skips the one-time confirmation of bypass mode |
-| `attribution.commit` · `attribution.pr` | `""` | No Co-Authored-By trailer, no "Generated with Claude Code" line |
+| `attribution.commit` · `attribution.pr` · `attribution.sessionUrl` | `""` · `""` · `false` | No Co-Authored-By trailer, no "Generated with Claude Code" line, and no `Claude-Session` trailer in cloud and Remote Control sessions. devkit also removes the deprecated `includeCoAuthoredBy` |
 | `cleanupPeriodDays` | `14` | Claude Code deletes transcripts and other session data older than 14 days |
-| `env` | see below | Environment for every session |
+| `env` | see below | Environment for every session, including `BASH_DEFAULT_TIMEOUT_MS=300000`: a foreground command gets 5 minutes instead of 2, so a test suite or a build is not cut off (longer jobs run in the background) |
 | `hooks` | see [Hooks](#hooks) | devkit's hook handlers (any other handlers are kept) |
 | `enabledPlugins` | the plugins in `config/claude/plugins.json` set to `true` | Plugins enabled everywhere |
 | `fastModePerSessionOptIn` | `true` | Fast mode is chosen per session (see [Models and tokens](models-and-tokens.md#claude-code-fast-mode)) |
 | `statusLine` | `dev hook statusline --agent claude`, only when you have no status line of your own | Shows `project · branch · model · ctx 42% · 5h 12% · 7d 36%` and records Claude's usage windows |
+
+**Bypass mode in Claude Desktop.** The Code tab reads the same `~/.claude/settings.json`, but Claude Desktop also keeps its own switch per account: **Settings → Code → Allow bypass permissions mode**. Turning it on is your consent in the app, so devkit never writes it; `dev doctor` reads it and says whether bypass mode is allowed, off, or not offered for your account (its plan or its organization's policy).
 
 **Claude's quota.** Claude Code reports the plan's 5-hour and 7-day usage windows only to the status line, so
 devkit's status line saves them in `~/.local/state/devkit/quota/claude.json` each time it refreshes (about 80 ms,
@@ -155,6 +157,7 @@ devkit does not edit `config.toml` as text. It starts `codex app-server` and wri
 | --- | --- | --- |
 | `approval_policy` | `never` (or your `codex.approval_policy`) | No approval prompts, the equivalent of Claude's bypass mode |
 | `sandbox_mode` | `danger-full-access` (or your `codex.sandbox_mode`) | No sandbox; the guard is the safety net |
+| `analytics.enabled` | `false` | Stops OpenAI's usage analytics, like the other telemetry opt-outs devkit sets |
 | `projects."<path>".trust_level` | `trusted` | For the dev root and every repository under it (and new ones from `dev clone`, `dev new`, `dev adopt`) |
 | `shell_environment_policy.set` | Docker, Testcontainers, and telemetry variables | Environment for commands Codex runs |
 | `agents.max_concurrent_threads_per_session` | `4` | At most four subagent threads per session |
@@ -162,6 +165,8 @@ devkit does not edit `config.toml` as text. It starts `codex app-server` and wri
 | `project_doc_max_bytes` | `131072` | Codex reads a project's AGENTS.md whole (its default stops at 32 KiB; Claude Code reads CLAUDE.md whole) |
 | `mcp_servers` | from `config/codex/plugins.json` | context7, Chrome DevTools, Angular CLI |
 | `hooks.state."<key>".trusted_hash` | the hashes Codex reports | Trust for devkit's hooks |
+
+**Attribution in Codex.** Codex can add `Co-authored-by: Codex` to commits and "Generated with Codex" to pull requests, in the terminal and in the ChatGPT app. No `config.toml` key turns it off: it is an account setting on OpenAI's side, which every session records as `git_attribution`. `dev doctor` reads it from your newest session and fails when it is on. Either way, the guard refuses attribution in commits that agents run, and `dev commit` and `dev pr create` remove the lines.
 
 devkit also writes files that it owns:
 

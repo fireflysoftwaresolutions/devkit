@@ -157,6 +157,25 @@ def pack(out_dir: Path = None, validate: bool = True, say=print) -> dict:
     return rep
 
 
+BYPASS_SWITCH = "Settings → Code → Allow bypass permissions mode"
+
+
+def bypass_mode(base: Path = None):
+    """Whether Claude Desktop's Code tab offers bypass mode to the signed-in account: (True | False | None, detail).
+    Desktop keeps its own per-account switch next to ~/.claude/settings.json; devkit reads it and never writes it
+    (turning it on is the developer's consent in the app). Only the account id is read from config.json."""
+    base = Path(base or claude_dir())
+    account = (core.read_json(base / "config.json", {}) or {}).get("lastKnownAccountUuid")
+    if not account:
+        return None, "no signed-in account found"
+    prefs = (core.read_json(base / "claude_desktop_config.json", {}) or {}).get("preferences") or {}
+    if (prefs.get("bypassPermissionsGateByAccount") or {}).get(account) is False:
+        return False, "not offered for the signed-in account (its plan or its organization's policy)"
+    if (prefs.get("bypassPermissionsOptInByAccount") or {}).get(account) is True:
+        return True, "allowed for the signed-in account"
+    return False, f"off: turn on {BYPASS_SWITCH} in Claude Desktop"
+
+
 def status(base: Path = None) -> dict:
     """What Claude Desktop has installed, read from its settings folder (nothing is changed)."""
     base = Path(base or claude_dir())

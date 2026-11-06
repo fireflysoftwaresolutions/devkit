@@ -3,6 +3,25 @@
 All notable changes to devkit. Versions follow CalVer `YY.MM.PATCH` (PATCH restarts at 0 each month); tags are
 `vYY.MM.PATCH`. Sections follow [Keep a Changelog](https://keepachangelog.com/).
 
+## [Unreleased]
+
+### Added
+
+- The PostToolUse hook shows the status block right after a call that usually ends a turn (a subagent launch, a
+  monitor, a background command, or a closing `dev` command), with the project and branch filled in. A note
+  written after the last tool call no longer lands above the block, so the Stop hook does not have to send
+  the turn back.
+- `dev doctor` reads Claude Desktop's own switch for bypass mode in the Code tab (Settings → Code → Allow bypass
+  permissions mode) and says whether it is allowed, off, or not offered for the signed-in account.
+
+### Changed
+
+- Claude Code: `attribution.sessionUrl` is `false`, so cloud and Remote Control sessions add no `Claude-Session`
+  trailer either; the deprecated `includeCoAuthoredBy` key is removed; and `BASH_DEFAULT_TIMEOUT_MS` is 5 minutes,
+  so a test suite or a build in the foreground is not cut off at 2.
+- Codex: `analytics.enabled` is `false`. `dev doctor` also reads whether your Codex account adds commit and PR
+  attribution (an account setting, not a `config.toml` key) from your newest session.
+
 ## [26.11.2] - 2026-11-06
 
 ### Added

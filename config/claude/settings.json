@@ -5,10 +5,12 @@
   "skipDangerousModePermissionPrompt": true,
   "attribution": {
     "commit": "",
-    "pr": ""
+    "pr": "",
+    "sessionUrl": false
   },
   "cleanupPeriodDays": 14,
   "env": {
+    "BASH_DEFAULT_TIMEOUT_MS": "300000",
     "DOCKER_HOST": "unix://{{HOME}}/.colima/default/docker.sock",
     "TESTCONTAINERS_DOCKER_SOCKET_OVERRIDE": "/var/run/docker.sock",
     "NG_CLI_ANALYTICS": "false",

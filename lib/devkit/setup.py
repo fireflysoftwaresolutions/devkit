@@ -382,6 +382,10 @@ def app_checks(codex_plugins=None) -> list:
                 if lc and not lc.get("ok", True):
                     ok_, detail = False, detail + f"; launcher: {lc.get('reason')}"
             res.append(("Claude Desktop", "devkit extension", ok_, detail, "dev install --only desktop"))
+            ok_b, detail_b = desktop.bypass_mode()
+            if ok_b is not None:
+                res.append(("Claude Desktop", "bypass mode in the Code tab", ok_b, detail_b,
+                            "" if ok_b else f"Claude Desktop → {desktop.BYPASS_SWITCH}"))
         except Exception:
             pass
     if CHATGPT_APP.exists() and CHATGPT_CODEX.exists():
@@ -464,6 +468,7 @@ def write_claude_settings(include_hooks=True):
     frag = load_conf("claude/settings.json")
     plugins = load_conf("claude/plugins.json")
     new = core.deep_merge(cur, {k: v for k, v in frag.items() if k != "hooks"})
+    new.pop("includeCoAuthoredBy", None)  # deprecated since Claude Code 2.0.62; `attribution` replaces it
     new["hooks"] = merge_hooks(cur.get("hooks") or {}, frag.get("hooks") or {} if include_hooks else {})
     if not new["hooks"]:
         new.pop("hooks")
@@ -581,6 +586,29 @@ def write_codex_config(quiet=False):
                     fail(f"hook trust status: {status} — open Codex and review them with /hooks")
         except CodexError as e:
             fail(f"codex app-server: {e}")
+
+
+_GIT_ATTRIBUTION = re.compile(rb'"git_attribution"\s*:\s*(true|false)')
+
+
+def codex_git_attribution(sessions: Path = None, scan: int = 30):
+    """Whether Codex adds `Co-authored-by: Codex` to commits and a "Generated with Codex" line to PRs. It is an
+    account setting on OpenAI's side (no config.toml key turns it off); every session records it in its first
+    lines as `git_attribution`. The newest of the last `scan` sessions that records it, or None (unknown)."""
+    sessions = Path(sessions or CODEX_HOME / "sessions")
+    try:
+        files = sorted(sessions.glob("*/*/*/*.jsonl"), key=lambda p: p.stat().st_mtime, reverse=True)[:scan]
+    except OSError:
+        return None
+    for f in files:
+        try:
+            with open(f, "rb") as fh:  # the session's opening context (the flag sits about 150 KB in), not its turns
+                m = _GIT_ATTRIBUTION.search(fh.read(1 << 20))
+        except OSError:
+            continue
+        if m:
+            return m.group(1) == b"true"
+    return None
 
 
 def _toml_value(v) -> str:
@@ -987,7 +1015,8 @@ def doctor() -> int:
     check("Claude", "bypassPermissions default", (s.get("permissions") or {}).get("defaultMode") == "bypassPermissions",
           (s.get("permissions") or {}).get("defaultMode", "unset"), "dev install --only claude")
     att = s.get("attribution") or {}
-    check("Claude", "no attribution", att.get("commit") == "" and att.get("pr") == "", json.dumps(att), "dev install --only claude")
+    check("Claude", "no attribution", att.get("commit") == "" and att.get("pr") == "" and att.get("sessionUrl") is False,
+          json.dumps(att), "dev install --only claude")
     events = {e for e, gs in (s.get("hooks") or {}).items() for g in gs for h in g.get("hooks", []) if is_devkit_hook(h)}
     check("Claude", "devkit hooks", {"SessionStart", "SessionEnd", "PreToolUse", "Stop", "UserPromptSubmit",
                                      "PostToolUse"} <= events, ", ".join(sorted(events)),
@@ -1012,6 +1041,13 @@ def doctor() -> int:
                 bad = {k: cfg.get(k) for k, v in cw["settings"].items() if cfg.get(k) != v}
                 check("Codex", "approval/sandbox", not bad, ", ".join(f"{k}={cfg.get(k)}" for k in cw["settings"]),
                       "dev install --only codex")
+                att_ = codex_git_attribution()
+                if att_ is not None:  # an account setting on OpenAI's side, recorded by every session
+                    check("Codex", "no attribution", att_ is False,
+                          "off for your account (the sessions record git_attribution: false)" if att_ is False else
+                          "on for your account: Codex adds Co-authored-by: Codex to commits and \"Generated with "
+                          "Codex\" to PRs (devkit's guard, dev commit and dev pr create still remove them)",
+                          "turn off commit attribution in your Codex account settings")
                 hs = [h for h in rpc.hooks(HOME) if str(h.get("sourcePath")) == str(CODEX_HOME / "hooks.json")]
                 st = {h["eventName"]: h["trustStatus"] for h in hs}
                 check("Codex", "devkit hooks trusted", hs and all(v == "trusted" for v in st.values()),
