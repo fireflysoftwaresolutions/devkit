@@ -38,10 +38,11 @@ devkit helps you notice the moments that deserve one:
 | `revert` · `fix` | Revert and `fix:` commits in the repository |
 | `guard` | The same guard refusal three or more times |
 | `canary` | Two or more replies without the status block |
-| `correction` | A prompt that corrects the agent, such as one that starts with `no,`, `that's wrong`, `you forgot`, or `otra vez`, queued by the prompt hook |
 | `task` | A work item that was reopened or unblocked more than once |
 
-Corrections are only queued as signals; devkit never writes a lesson by itself.
+devkit never writes a lesson by itself, and it never reads your prompts for corrections: you write in any language,
+and a word list would miss most of them. When you correct the agent, the agent records the lesson, as the global
+instructions require.
 
 ## Write it
 
@@ -53,7 +54,8 @@ dev lesson add "Pushed after a piped test run hid the failure" \
   --fix "ran the suite again without the pipe" \
   --prevent "never gate a commit or push on a pipeline without set -o pipefail" \
   --detect "CI fails right after a push that passed locally" \
-  --evidence "commit d75a9f9"
+  --evidence "commit d75a9f9" \
+  --command "git push" --activity cicd
 ```
 
 ```text
@@ -71,12 +73,38 @@ dev lesson add "Pushed after a piped test run hid the failure" \
 - **Optional:** `--happened`, `--fix`, `--detect`, `--evidence` (repeat it: commits, PRs, CI runs, tasks), `--tag`,
   `--why`, and `--retire-when` for an outside change that makes the lesson obsolete, such as a library version
   or an upstream fix.
+- **Anchor it:** say where it applies with `--file`, `--command`, `--activity`, `--error`, or `--stack` (see
+  [Anchors](#anchors-where-a-lesson-applies)). A lesson with no anchors can be recalled only at session start, and
+  `dev lesson add` says so.
 - **Never put secrets or personal data in a lesson.**
 
 A lesson is a Markdown file in the handoff repository, `lessons/<project id>/`, `lessons/initiatives/<slug>/`, or
 `lessons/global/`, with its fields in a front matter block, the sections What happened, Root cause, Fix, Prevention,
 Detection, and Evidence, and a changelog. Every change bumps its version and makes one commit; the guard refuses
 direct edits of `lessons/`.
+
+## Anchors: where a lesson applies
+
+devkit decides which lessons a piece of work needs from what the work does, never from the words anyone wrote about
+it. Developers and agents write in any language, so a lesson carries **anchors**, which mean the same in every
+language:
+
+| Anchor | Flag (repeat it) | Matches |
+| --- | --- | --- |
+| Files | `--file "db/migrations/**"` | A file or glob, compared with the files a step owns |
+| Commands | `--command "git push --force"` | Command words, in order; quoted text that only mentions them does not count |
+| Kinds of work | `--activity database` | An id from `dev crew raci`; an unknown id is refused |
+| Error signatures | `--error "relation does not exist"` | Text the tool output shows when the mistake happens |
+| Stack | `--stack python` | The stack it applies to |
+
+Give anchors when you record the lesson, or add them later. They join the ones the lesson already has, and the reason
+goes into its history:
+
+```bash
+dev lesson anchor L-fwqyx0ywj1x --command "git push" --activity cicd --why "recall it when a push is gated on tests"
+```
+
+An anchor cannot contain a comma: give each one on its own flag.
 
 ## Recall
 
@@ -88,14 +116,21 @@ Known pitfalls (lessons from earlier mistakes; follow their prevention, and `dev
 - L-fwqyx0ywj1x (acme/billing, high, ×2): Pushed after a piped test run hid the failure — never gate a commit or push on a pipeline without set -o pipefail
 ```
 
-Before you change an area, search what is known about it:
+A crew member's brief adds the lessons of its step: those anchored on the step's kind of work or on the files it owns,
+plus the project's high-severity lessons. `dev crew brief` puts them in the brief it prints, and on Claude Code the
+launch hook adds them to every Agent brief (see [The crew](crew.md)).
+
+Before you change an area, search what is known about it. `--search` and `--all` are options of `dev lesson` itself,
+so they go before `ls`, or you leave `ls` out:
 
 ```bash
-dev lesson ls                     # this project's lessons, its initiatives', and the global ones
-dev lesson ls --search "release"  # by words in the title or any section
-dev lesson ls --all               # every scope, retired lessons included
+dev lesson                        # this project's lessons, its initiatives', and the global ones
+dev lesson --search "release"     # with these words in the title or any section
+dev lesson --all                  # every scope, retired lessons included
 dev lesson show L-fwqyx0ywj1x     # all sections and the history (a unique part of the id or title works too)
 ```
+
+`--search` is for you, looking something up. devkit itself never selects a lesson by its words.
 
 ## Recur and prevent
 
@@ -139,10 +174,10 @@ It consolidates the lessons of every scope:
 
 | Step | What happens |
 | --- | --- |
-| Merge | Two lessons that are at least 60% alike (in the same scope, or a project lesson that repeats a global one) become one. A global lesson wins over a project lesson, and otherwise the stronger one wins; it keeps the evidence of both and the sum of their occurrences |
+| Merge | Two lessons that share at least 60% of their anchors, including an error signature or a command (in the same scope, or a project lesson that repeats a global one), become one. A global lesson wins over a project lesson, and otherwise the stronger one wins; it keeps the evidence and the anchors of both and the sum of their occurrences. With [background AI](configuration.md#background-ai) on, a small model decides the pairs the anchors leave open, in any language |
 | Forget | A lesson retired more than 30 days ago, a prevented lesson idle for 90 days, or an open lesson idle for 180 days, once it has grown weak, moves to `lessons/archive/<scope>/` |
 | Cap | Each scope keeps at most 25 active lessons; the weakest go to the archive first |
-| Promote | The same pattern in two or more projects is proposed as one global lesson (a proposal only) |
+| Promote | The same mistake in two or more projects (half of their anchors in common, including an error signature or a command, or the model's verdict) is proposed as one global lesson (a proposal only) |
 
 Nothing is deleted: git keeps every version, and `dev lesson restore <id> --why "…"` brings an archived lesson back as
 open. `dev sleep --dry-run` shows what the next night would do.

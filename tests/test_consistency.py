@@ -42,10 +42,6 @@ KNOWN = {
                    "commands.md: dev lesson anchor --stack", "commands.md: dev audit --quiet",
                    "commands.md: dev pr create --fill", "commands.md: dev pr diff --stat",
                    "commands.md: dev mcp", "commands.md: dev desktop"),
-           # a real bug: argparse refuses `dev lesson ls --search …`; the option belongs before `ls`
-           **owned("found by D4 · Technical writer (Ghost) · step 17 crew docs",
-                   'docs/lessons.md: dev lesson ls --search "release"', "docs/lessons.md: dev lesson ls --all",
-                   'plugin/skills/learning-loop/SKILL.md: dev lesson ls --search "<area>"'),
            **owned("R2-14 · Technical writer (Ghost), DevEx engineer (Kid) consulted · step 17 crew docs",
                    *("using-devkit: dev " + c for c in (
                        "adopt", "open", "claude", "codex", "handoff-import", "note", "sleep", "stubs", "dashboard",

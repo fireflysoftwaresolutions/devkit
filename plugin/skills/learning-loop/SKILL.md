@@ -1,6 +1,6 @@
 ---
 name: learning-loop
-description: Learn from mistakes so they do not repeat or pile up across projects. Record a blameless lesson (what happened, root cause, fix, prevention, detection) after fixing a bug, a revert, a CI failure, a guard refusal you hit twice, or a correction from the developer; recall the known pitfalls at the start of work; count repeats; and turn recurring lessons into automation (a test, lint rule, guard rule, required skill or CI check). Uses `dev lesson add|ls|recur|prevent|retire|scan|review`.
+description: Learn from mistakes so they do not repeat or pile up across projects. Record a blameless lesson (what happened, root cause, fix, prevention, detection) after fixing a bug, a revert, a CI failure, a guard refusal you hit twice, or a correction from the developer; recall the known pitfalls at the start of work; count repeats; and turn recurring lessons into automation (a test, lint rule, guard rule, required skill or CI check). Anchor each lesson on files, commands, kinds of work, error signatures and stack, so devkit recalls it from what the work does, in any language. Uses `dev lesson add|anchor|ls|recur|prevent|retire|scan|review`.
 ---
 
 # Learning loop
@@ -17,7 +17,8 @@ Record one when any of these happens and could happen again:
 - **A change was reverted, or a task went back to "doing" more than once.**
 - **CI failed for a reason the local run did not catch.**
 - **The guard refused the same kind of command twice.** `dev lesson scan` lists these.
-- **The developer corrected you,** for example "that's not how it's done here" or "you forgot the tests."
+- **The developer corrected you,** for example "that's not how it's done here" or "you forgot the tests," in any
+  language. devkit does not read the developer's prompts for corrections; recording the lesson is your job.
 
 Skip trivial typos and one-off environment hiccups. Apply the durable bar first: if this lesson disappeared, would
 someone reading the final code still repeat the mistake? If not, the code or its test already holds the knowledge,
@@ -33,20 +34,39 @@ dev lesson add "Releases tagged before the CHANGELOG section existed" \
   --fix "wrote the notes and edited the GitHub release" \
   --prevent "release only with dev release, which refuses a tag without a CHANGELOG section" \
   --detect "dev release --dry-run shows the notes before tagging" \
-  --evidence "PR #212" --evidence "release v26.11.2"
+  --evidence "PR #212" --evidence "release v26.11.2" \
+  --command "dev release" --file "CHANGELOG.md" --activity release
 ```
 
 - **Root cause, not symptom.** Ask "why" until the answer is something you can change: a missing test, an unclear
   rule, a tool that allows the wrong thing.
 - **The prevention is a rule someone can follow tomorrow,** stated as an action.
+- **Anchor it.** Say where it applies, in terms that mean the same in any language. Each flag repeats:
+
+  | Anchor | Flag | Example |
+  | --- | --- | --- |
+  | Files | `--file` | `--file "db/migrations/**"` |
+  | Commands | `--command` | `--command "git push --force"` (command words, in order) |
+  | Kind of work | `--activity` | `--activity database` (an id from `dev crew raci`) |
+  | Error signature | `--error` | `--error "relation does not exist"` (text the tool output shows) |
+  | Stack | `--stack` | `--stack python` |
+
+  A lesson without anchors is recalled only at session start. Add anchors to an older lesson with
+  `dev lesson anchor <id> --file … --command … --why "…"`.
 - **Choose the scope.** `-p` (default: the project you are in), `-i <initiative>` for a programme, `--global` for
   mistakes any project can make.
 - **Never put secrets or personal data in a lesson.**
 
 ## Recall before you work
 
+devkit recalls lessons by behavior, never by words: by the kind of work, the files, the commands, and the error
+text, not by what anyone wrote in a prompt or a step name.
+
 - Read the "Known pitfalls" in your session context and follow their prevention.
-- **Search before you change an area:** `dev lesson ls --search "<area>"`.
+- **A crew brief** carries the lessons anchored on its step's kind of work and files, plus the project's
+  high-severity ones. Follow them like the session's pitfalls.
+- **Search before you change an area:** `dev lesson --search "<area>"`. `--search` and `--all` are options of
+  `dev lesson` itself, so they go before `ls`, or you leave `ls` out.
 - **If a known pitfall happens again:** `dev lesson recur <id> --evidence "…"`.
 
 ## Turn lessons into automation
