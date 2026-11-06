@@ -756,8 +756,9 @@ def check_push_budget(cwd, args, envs):
     recent = [t for t in data.get(key, []) if now - t < PUSH_WINDOW_S]
     why = deny(f"This would be push #{len(recent) + 1} of `{branch}` in the last hour, and every push runs CI "
                f"again. Stop the push-and-see loop: read the failing log (`gh run view --log-failed`), run what "
-               f"CI runs locally (`dev ci` shows the exact commands), fix, and push once. If the full local "
-               f"suite has just passed in this session, prefix the push with DEVKIT_LOCAL_CI_PASSED=1.")
+               f"CI runs locally (`dev ci` shows the exact commands), fix, and push once. `dev ci --run` records "
+               f"the run, and its evidence lets `dev push` through; in the main session a plain `git push` "
+               f"prefixed with DEVKIT_LOCAL_CI_PASSED=1 is let through and recorded.")
     if len(recent) >= PUSH_LIMIT and not _hatch(envs, "DEVKIT_LOCAL_CI_PASSED", "push-budget", why):
         return why
     recent.append(now)

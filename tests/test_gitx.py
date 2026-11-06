@@ -15,6 +15,7 @@ import tempfile
 import time
 import unittest
 from pathlib import Path
+from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "lib"))
 
@@ -491,11 +492,12 @@ class PushTests(unittest.TestCase):
             rc, _, err = dev("push", "--ci-passed")
             self.assertEqual(rc, 2)
             self.assertIn("push #3", err)
-            os.environ["DEVKIT_LOCAL_CI_PASSED"] = "1"
-            try:
-                self.assertEqual(dev("push")[0], 0)
-            finally:
-                os.environ.pop("DEVKIT_LOCAL_CI_PASSED")
+            with mock.patch.dict(os.environ, {"DEVKIT_LOCAL_CI_PASSED": "1"}):  # dev's environment lifts nothing (F8)
+                rc, _, err = dev("push")
+            self.assertEqual(rc, 2)
+            self.assertIn("push #3", err)
+            gitx.record_evidence(s.ctx(), "run", gitx._head(s.ctx().top)[1])  # what `dev ci --run` records
+            self.assertEqual(dev("push")[0], 0)
 
     def test_dry_run_pushes_and_records_nothing(self):
         with Sandbox() as s:

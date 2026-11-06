@@ -395,14 +395,11 @@ def evidence(c, rev="HEAD"):
     return next((m for m in _markers(c) if m.get("tree") == tree), None)
 
 
-def _attested() -> bool:
-    return bool(os.environ.get("DEVKIT_LOCAL_CI_PASSED"))
-
-
 def _evidence_or_attest(c, ci_passed: bool, action: str):
-    """-> (marker or None). `--ci-passed` (or DEVKIT_LOCAL_CI_PASSED=1) records an attestation for HEAD."""
+    """-> (marker or None). `--ci-passed` records an attestation for HEAD. dev never takes it from its own
+    environment (spec F8, rule 4): a variable there may have been set by anything that started dev."""
     ev = evidence(c)
-    if ev or not (ci_passed or _attested()):
+    if ev or not ci_passed:
         return ev
     _, tree = _head(c.top)
     return record_evidence(c, "attested", tree, note=f"dev {action} --ci-passed") if tree else None
@@ -925,9 +922,9 @@ def push_branch(c, lease=False, ci_passed=False, dry_run=False, allow_behind=Fal
         return refuse(f"`{b}` is {behind} commit(s) behind {base}: rebase before review",
                       "dev rebase, re-run the local suite, then dev push (or --allow-behind)")
     ev = evidence(c) if dry_run else _evidence_or_attest(c, ci_passed, "push")
-    if not ev and not (dry_run and (ci_passed or _attested())):
+    if not ev and not (dry_run and ci_passed):
         return no_evidence(c, "push")
-    envs = frozenset({"DEVKIT_LOCAL_CI_PASSED"} if (ev and ev.get("how") == "run") or _attested() else ())
+    envs = frozenset({"DEVKIT_LOCAL_CI_PASSED"} if ev and ev.get("how") == "run" else ())  # only a real run lifts it
     args = ["-u", "origin", b] + ([f"--force-with-lease={b}:{remote}"] if diverged else [])
     what = f"{len(log)} commit(s)" + (" · force-with-lease" if diverged else "") + (" · first push" if not remote else "")
     if dry_run:
@@ -2668,7 +2665,11 @@ def cmd_issue(a) -> int:
 
 # --------------------------------------------------------------------------- dev git … · dev gh … (escape hatches)
 
-ACK_VARS = ("DEVKIT_FLAKY", "DEVKIT_LOCAL_CI_PASSED", "DEVKIT_CROSS_PROJECT", "DEVKIT_SKIP_SECRET_SCAN")
+# The hatches `dev git` and `dev gh` pass on from their environment to the guard. Never the push budget's and the secret
+# scan's (spec F8, rule 4): dev's environment is not the command the guard parsed, so those two come only from a
+# command's own prefix at PreToolUse (`DEVKIT_SKIP_SECRET_SCAN=1 git commit`, a recorded use) or, for the budget,
+# from a real local run's evidence.
+ACK_VARS = ("DEVKIT_FLAKY", "DEVKIT_CROSS_PROJECT")
 
 
 def _agent() -> str:
@@ -2699,8 +2700,9 @@ def _git_sub(args):
     return None, []
 
 
-def git_push_policy(args, cwd):
-    """`dev git push …`: the dev push rules for arbitrary push arguments. Exit code to refuse with, or None."""
+def git_push_policy(args, cwd, ci_passed: bool = False):
+    """`dev git push …`: the dev push rules for arbitrary push arguments. Exit code to refuse with, or None.
+    `ci_passed`: the command's own --ci-passed, which stands for local CI evidence but never lifts the push budget."""
     c = ctx(cwd)
     text = "git push " + " ".join(args)
     acks = {k for k in ACK_VARS if os.environ.get(k)}
@@ -2725,7 +2727,7 @@ def git_push_policy(args, cwd):
             return refuse(f"`{dst}` is the default branch: changes go through a branch and a PR",
                           "dev push from your branch (only when the user explicitly asks: plain `git push`)")
         ev = evidence(c, src)
-        if not ev and _attested():
+        if not ev and ci_passed:
             ev = {"how": "attested"}
         if not ev:
             return no_evidence(c, "push", rev=src)
@@ -2795,11 +2797,11 @@ def cmd_git(a) -> int:
     if sub in _INTERACTIVE and any(x in _INTERACTIVE[sub] for x in rest) and not sys.stdin.isatty():
         return refuse(f"`git {sub} {' '.join(x for x in rest if x in _INTERACTIVE[sub])}` needs an interactive terminal")
     if sub == "push":
-        if "--ci-passed" in rest:
+        ci_passed = "--ci-passed" in rest
+        if ci_passed:
             rest = [x for x in rest if x != "--ci-passed"]
             args = [x for x in args if x != "--ci-passed"]
-            os.environ["DEVKIT_LOCAL_CI_PASSED"] = "1"
-        r = git_push_policy(rest, cwd)
+        r = git_push_policy(rest, cwd, ci_passed=ci_passed)
     elif sub == "commit":
         r = git_commit_policy(rest, cwd)
     else:
@@ -2824,7 +2826,7 @@ def cmd_gh(a) -> int:
     head = args[:2]
     if c is not None and c.provider == "github":
         if head == ["pr", "create"]:
-            if not (evidence(c) or ci_passed or _attested()):
+            if not (evidence(c) or ci_passed):
                 return no_evidence(c, "pr create")
             t = guard._opt_value(args[2:], ("--title", "-t"))
             if t and message_violation(t, "PR title"):
@@ -2859,7 +2861,7 @@ def cmd_gh(a) -> int:
         elif head == ["release", "create"]:
             if c.branch != c.default or _dirty(c.top, untracked=False):
                 return refuse(f"release from a clean `{c.default}`", "dev release (checks, tag, notes)")
-            if not (evidence(c) or ci_passed or _attested()):
+            if not (evidence(c) or ci_passed):
                 return no_evidence(c, "release")
     return EXEC(["gh", *args], cwd=cwd)
 

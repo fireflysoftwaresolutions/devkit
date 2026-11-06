@@ -7,6 +7,8 @@
 # environment; MCP tools are judged by their name; WebFetch never carries a secret out; and devkit's MCP server has
 # no tool for progress, crew, push, pr, release or config. The guard reads command text and paths: no command runs.
 # Run: python3 -m unittest tests.test_escape_hatches -v
+import contextlib
+import io
 import os
 import subprocess
 import sys
@@ -18,7 +20,7 @@ from unittest import mock
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "lib"))
 
-from devkit import core, guard  # noqa: E402
+from devkit import core, gitx, guard  # noqa: E402
 
 CWD = str(ROOT)
 BUILDER = "tank"  # a build member: the read-only allowlist does not apply, so only the hatch rules can refuse
@@ -231,6 +233,34 @@ class ParsedHatchTests(unittest.TestCase):
         self.assertIn("gitleaks found", v[1])
         self.assertEqual(main_session("DEVKIT_SKIP_SECRET_SCAN=1 git commit -m x", str(repo)), "allow")
         self.assertEqual([b["flag"] for b in guard.last_bypasses()], ["DEVKIT_SKIP_SECRET_SCAN"])
+
+    # F8 rule 4 on dev's own paths: `dev git commit` and `dev git push` run the guard in their own process, so a hatch
+    # in that process's environment came from wherever the variable was set, never from the command the guard parsed
+
+    def _branch_repo(self, branch):
+        repo = Path(self.tmp.name) / "repo"
+        repo.mkdir()
+        for args in (["init", "-q", "-b", "main"], ["commit", "-q", "--allow-empty", "-m", "init"],
+                     ["checkout", "-q", "-b", branch]):
+            subprocess.run(["git", "-C", str(repo), "-c", "user.name=t", "-c", "user.email=t@example.com", *args],
+                           check=True, capture_output=True)
+        return str(repo)
+
+    def test_dev_git_commit_never_reads_the_secret_scan_hatch_from_its_environment(self):
+        repo, err = self._branch_repo("fix/x"), io.StringIO()
+        with mock.patch.dict(os.environ, {"DEVKIT_SKIP_SECRET_SCAN": "1"}), contextlib.redirect_stderr(err):
+            rc = gitx.git_commit_policy(["-m", "fix: x"], repo)
+        self.assertEqual(rc, 2)
+        self.assertIn("gitleaks found", err.getvalue())
+
+    def test_dev_never_attests_a_local_ci_run_from_its_environment(self):
+        repo, err = self._branch_repo("feat/x"), io.StringIO()
+        with mock.patch.dict(os.environ, {"DEVKIT_LOCAL_CI_PASSED": "1"}), \
+                mock.patch.object(core, "STATE", Path(self.tmp.name) / "state"), contextlib.redirect_stderr(err):
+            rc = gitx.git_push_policy(["origin", "feat/x"], repo)
+        self.assertEqual(rc, 2)
+        self.assertIn("no local CI evidence", err.getvalue())
+        self.assertEqual(gitx.ACK_VARS, ("DEVKIT_FLAKY", "DEVKIT_CROSS_PROJECT"))
 
     def test_the_stub_gate_takes_its_hatch_only_as_a_commit_prefix_or_a_dev_commit_flag(self):
         for cmd in ("DEVKIT_ALLOW_STUBS=1 git commit -m x", "dev commit --wip", "bin/dev commit --wip -m x",
