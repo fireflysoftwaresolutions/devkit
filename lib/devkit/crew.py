@@ -422,7 +422,10 @@ ENFORCEMENT = (
     ("A run ends only after each Accountable member approved", "dev progress done", "devkit.progress.approvals_owed", "enforced"),
     ("An approval is an explicit verdict after the work", "dev progress done", "F6 step endings and approvals", "planned"),
     ("A step closes only with its evidence", "dev progress step and SubagentStop", "F6 step endings and approvals", "planned"),
-    ("No step starts before its dependencies are done", "every step transition", "plan dependency engine", "planned"),
+    ("No step starts before its dependencies are done", "every step transition (start, add, assign, begin, advance, "
+     "subagent start, close, launch readiness)", "devkit.progress.deps_open", "enforced"),
+    ("A reopened dependency's finished dependents are rechecked before the run ends", "dev progress done",
+     "F6 step endings and approvals", "planned"),
     ("At most four members work in parallel", "PreToolUse: Agent launches", "devkit.hooks._crew_limits", "enforced"),
     ("Nested and resumed subagents count too", "launch ledger", "F3 nested agents", "planned"),
     ("Only Morpheus plans, assigns, decides and changes the mode", "dev progress and dev crew from a lane", "devkit.progress._main_only", "enforced"),
