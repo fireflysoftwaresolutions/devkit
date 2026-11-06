@@ -1566,8 +1566,12 @@ class _Shell:
                 return v
         if not code or not _CODE_WRITES.search(code):
             return None
+        if not cwd or str(cwd) == str(UNKNOWN):  # its relative paths land in a folder the guard cannot see
+            self.unresolved.append(f"a path relative to the folder {name} runs in")
         named = [c for c in _candidates(rest) + assigns if _pathlike(c)]
-        hit = _mark().search(code) or any(is_protected(resolve(c, cwd)) for c in named) or \
+        # started inside devkit's state or configuration, its relative paths land there (Seraph, K1 review)
+        inside = bool(cwd) and str(cwd) != str(UNKNOWN) and is_protected(Path(cwd))
+        hit = inside or _mark().search(code) or any(is_protected(resolve(c, cwd)) for c in named) or \
             (self.mentions and _CODE_INPUTS.search(code)) or ("DEVKIT_" in _unescape(code) and _SETTINGS_NAME.search(code)) \
             or _DEV_LINK_TEXT.search(code) or _dev_command_text().search(code)
         if not hit:
