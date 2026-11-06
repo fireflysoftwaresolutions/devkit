@@ -222,3 +222,7 @@ devkit is designed and maintained by **Andrés Contreras Guillén** for **Firefl
 
 Copyright © 2026 Firefly Software Solutions Inc. Licensed under the Apache License 2.0; see [LICENSE](LICENSE).
 Third-party skills and tools installed by devkit keep their own licenses; see [NOTICE](NOTICE).
+
+Contributions are welcome: the [contributing guide](CONTRIBUTING.md) explains how to propose a change and the checks
+a pull request must pass. Report a vulnerability privately, as the [security policy](SECURITY.md) describes, never in
+a public issue.
