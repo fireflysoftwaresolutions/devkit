@@ -423,6 +423,18 @@ Prints the project's handoff note after refreshing its generated blocks.
 | `--log "…"` | Appends a line to the project's session log (`sessions/<project id>/YYYY-MM.md`) with the date, you, your machine and the agent, and commits it |
 | `--agent` | Who logs the line: `human` (default), `claude` or `codex` |
 
+### `dev session brief | carry | compactions | forget`
+
+A session's continuity: what devkit keeps for a session so that its run and its open requests survive compaction,
+`/clear`, and resume.
+
+| Verb | Effect |
+| --- | --- |
+| `brief` | Prints what devkit kept for a session: this session by default, another with `--session <agent>:<session id>`, or the project's newest session with an open run or requests in the last 12 hours with `--latest` (`-p` names the project). `--for-chat` cuts each request to 200 characters for a chat surface; `--provider` names the reader, and the request text is shown only to the session's own provider |
+| `carry` | Moves the run into this session after `/clear`; `--from` names the cleared session when it is not the one `/clear` ended |
+| `compactions <transcript>` | Counts a transcript's compactions with their tokens before and after; `--members` adds the members' transcripts. Reads only |
+| `forget` | Deletes a session's continuity records (`--session`), or every record and `/clear` link here (`--all`); recorded in the audit trail |
+
 ## Worktrees
 
 ### `dev wt new <branch> [--base REF] [--repo QUERY] [--no-deps]`

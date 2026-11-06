@@ -616,6 +616,18 @@ class FreeTests(Sandbox):
         self.assertIn("the same as dev free", gc_help)
 
 
+# --------------------------------------------------------------------------- dev session (Kid's continuity.py)
+
+
+class SessionWiringTests(unittest.TestCase):
+    # `dev session` reaches continuity's commands with their arguments, as agreed with Kid.
+    def test_dev_session_runs_the_continuity_commands(self):
+        from devkit import continuity
+        a = cli.build_parser().parse_args(["session", "brief", "--latest", "-p", "acme/api"])
+        self.assertIs(a.fn, continuity.cmd_session)
+        self.assertEqual((a.session_cmd, a.latest, a.project), ("brief", True, "acme/api"))
+
+
 # --------------------------------------------------------------------------- the audit trail
 
 

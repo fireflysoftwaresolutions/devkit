@@ -65,7 +65,7 @@ diagram files without them.
 | Branch, commit, PR | `dev branch new`, `dev commit`, `dev rebase`, `dev push`, `dev pr create\|checks --watch\|merge`, `dev run view --failed`, `dev issue`; `dev git` and `dev gh` for anything else | `delivery`, `communicating` (PR template) |
 | Ship | `dev ci --run`, `dev ci status`, `dev calver`, `dev delivery`, `dev release`, `/devkit:ship` | `delivery`, `release-policy` |
 | Document | `dev docs check`, `dev diagram render` | `docs`, `documentation-writer`, `doc-coauthoring`, `diagrams` |
-| Hand off | `dev handoff`, `dev note set status=… priority=…`, `dev task`, `/devkit:handoff`; `dev handoff-import` adopts an older handoff repository | `handoff` |
+| Hand off | `dev handoff`, `dev note set status=… priority=…`, `dev task`, `/devkit:handoff`; `dev handoff-import` adopts an older handoff repository; `dev session brief` (what a session kept through compaction or `/clear`) | `handoff` |
 | Coordinate with others | `dev team`, `dev task start\|release`, `dev task reopen <n> --why "…"`, `dev task show <n>` (history) | — |
 | Choose model, effort, subagents | `sparks` agent (alias `scout`) for lookups; `codex --profile fast\|deep\|review` | `working-efficiently` |
 | Lead the crew | `dev crew` (roster), `dev crew raci [<id>]`, `dev progress assign <step> --to <member> --activity <id>`, `dev crew brief <member> "…" --activity <id>`, `dev crew graph` (the session as one graph), `dev crew next`, `dev crew rules` (every rule and its check) | `crew` |
