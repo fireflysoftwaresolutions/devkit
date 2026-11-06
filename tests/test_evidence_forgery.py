@@ -87,6 +87,15 @@ class TranscriptTests(unittest.TestCase):
         self.assertIsNotNone(bash(f"python3 -c \"import os; open(os.path.expanduser('{record}'), 'w').write('x')\""))
         self.assertIsNotNone(bash(f"python3 -c \"import os; open(os.path.expanduser('{TRANSCRIPT}'), 'a')\""))
         self.assertIsNone(bash(f"python3 -c \"import os; print(open(os.path.expanduser('{record}')).read())\""))
+        # the same write from the agent's own module, which the inline code or `python -m` loads
+        with tempfile.TemporaryDirectory() as d:
+            (Path(d) / "w.py").write_text(f"import os\nopen(os.path.expanduser('{TRANSCRIPT}'), 'a').write('x')\n")
+            (Path(d) / "r.py").write_text(f"import os\nprint(open(os.path.expanduser('{TRANSCRIPT}')).read())\n")
+            for cmd in (f"python3 -c \"import sys; sys.path.insert(0, '{d}'); import w\"", f"cd {d} && python3 -m w",
+                        f"python3 -c \"import runpy; runpy.run_path('{d}/w.py')\""):
+                with self.subTest(cmd=cmd.replace(d, "$D")):
+                    self.assertIsNotNone(bash(cmd))
+            self.assertIsNone(bash(f"python3 -c \"import sys; sys.path.insert(0, '{d}'); import r\""))
 
 class EvidenceCallTests(unittest.TestCase):
 

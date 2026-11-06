@@ -1786,6 +1786,12 @@ class _Shell:
             v = self.targets([a for a in rest if not a.startswith("-")], cwd)
             if v:
                 return v
+        seen = cwd if cwd and str(cwd) != str(UNKNOWN) else None
+        if module and seen and not _devkit_module(module):  # python -m <mod>: the agent's module in its folder
+            p = _local_module(module, [seen])
+            code = _read_small(p) if p else code
+        if code:  # what the agent's own modules it loads write counts too (B1: a transcript written from one)
+            code = "\n".join([code] + loaded_texts(code, seen))
         if not code or not _CODE_WRITES.search(code):
             return None
         if not cwd or str(cwd) == str(UNKNOWN):  # its relative paths land in a folder the guard cannot see
@@ -2086,6 +2092,63 @@ def _decodes(n) -> bool:
                for x in ast.walk(n))
 
 
+def _aliases(tree) -> dict:
+    import ast
+    return {a.asname: a.name for n in ast.walk(tree) if isinstance(n, (ast.Import, ast.ImportFrom))
+            for a in n.names if a.asname}  # `SourceFileLoader as L`: a call to L is a call to SourceFileLoader
+
+
+def _loaded_files(code, cwd) -> list:
+    """The agent's own files (_agent_file) a Python program loads: a module by name from its folder or a constant
+    sys.path entry (import, from-import, import_module, run_module), runpy.run_path, exec(open(…).read()),
+    spec_from_file_location and SourceFileLoader. A file the guard does not read is code it cannot judge."""
+    import ast
+    try:
+        tree = ast.parse(code or "")
+    except (SyntaxError, ValueError):
+        return []
+    dirs = [d for d in [cwd] if d] + [_const_str(n.args[-1]) for n in ast.walk(tree) if isinstance(n, ast.Call)
+                                      and getattr(n.func, "attr", "") in ("insert", "append", "addsitedir")
+                                      and n.args and _const_str(n.args[-1])]
+    alias, out = _aliases(tree), []
+
+    def local(name):
+        p = _local_module(name, dirs) if name and not _devkit_module(name) else None
+        out.extend([p] if p else [])
+
+    def path(arg):
+        p = resolve(arg, cwd) if arg else UNKNOWN
+        out.extend([p] if _agent_file(p) else [])
+    for n in ast.walk(tree):
+        if isinstance(n, ast.Import):
+            for a in n.names:
+                local(a.name)
+        elif isinstance(n, ast.ImportFrom) and not n.level:
+            local(n.module)
+        elif isinstance(n, ast.Call) and n.args:
+            f = n.func
+            fname = alias.get(f.attr if isinstance(f, ast.Attribute) else getattr(f, "id", ""), "")
+            fname = (fname or (f.attr if isinstance(f, ast.Attribute) else getattr(f, "id", ""))).rpartition(".")[2]
+            if fname == "run_path":
+                path(_const_str(n.args[0]))
+            elif fname in ("spec_from_file_location", "SourceFileLoader") and len(n.args) > 1:
+                path(_const_str(n.args[1]))
+            elif fname in ("__import__", "import_module", "run_module"):
+                local(_const_str(n.args[0]))
+            elif fname in ("eval", "exec", "compile"):
+                path(_read_call_path(n.args[0]))
+    return list(dict.fromkeys(out))
+
+
+def loaded_texts(code, cwd, depth: int = 0) -> list:
+    """The text of every agent file a program loads, and of the files they load, three levels deep."""
+    out = []
+    for p in (_loaded_files(code, cwd) if depth < 3 else []):
+        text = _read_small(p)
+        out += [text] + loaded_texts(text, str(p.parent), depth + 1)
+    return out
+
+
 def evidence_reached(code, cwd=None, depth: int = 0) -> str:
     """The devkit evidence function (or devkit.state writer) a program reaches, or '': it loads a devkit module (import,
     from-import, __import__, importlib, a devkit file by path) and names one (an attribute, an imported name, a
@@ -2103,27 +2166,13 @@ def evidence_reached(code, cwd=None, depth: int = 0) -> str:
         return m.group(0) if m else ""
     loads, maybe, star, dynamic, hit = False, False, False, False, ""
     mods = {}  # local name -> the devkit module it is bound to
-    dirs = [d for d in [cwd] if d] + [_const_str(n.args[-1]) for n in ast.walk(tree) if isinstance(n, ast.Call)
-                                      and getattr(n.func, "attr", "") in ("insert", "append", "addsitedir")
-                                      and n.args and _const_str(n.args[-1])]
-    files = []  # the agent's own files this program loads
-    alias = {a.asname: a.name for n in ast.walk(tree) if isinstance(n, (ast.Import, ast.ImportFrom))
-             for a in n.names if a.asname}  # `SourceFileLoader as L`: a call to L is a call to SourceFileLoader
-
-    def local(name):
-        p = _local_module(name, dirs) if name and not _devkit_module(name) else None
-        if p:
-            files.append(p)
+    alias = _aliases(tree)
     for n in ast.walk(tree):
         if isinstance(n, ast.Import):
             for a in n.names:
                 if _devkit_module(a.name):
                     loads = True
                     mods[a.asname or a.name.split(".")[0]] = a.name if a.asname else "devkit"
-                else:
-                    local(a.name)
-        elif isinstance(n, ast.ImportFrom) and not n.level and not _devkit_module(n.module):
-            local(n.module)
         elif isinstance(n, ast.ImportFrom) and not n.level and _devkit_module(n.module):
             loads = True
             for a in n.names:
@@ -2149,11 +2198,6 @@ def evidence_reached(code, cwd=None, depth: int = 0) -> str:
                     maybe = True
                 elif _DEVKIT_MODULE_STR.search(arg):
                     loads = True
-                elif fname in ("run_path", "spec_from_file_location", "SourceFileLoader"):
-                    p = resolve(arg, cwd)
-                    files += [p] if _agent_file(p) else []
-                else:
-                    local(arg)
             elif fname == "getattr" and len(n.args) > 1:
                 name = _const_str(n.args[1])
                 if name is None:
@@ -2164,8 +2208,7 @@ def evidence_reached(code, cwd=None, depth: int = 0) -> str:
                 inner = first
                 path = _read_call_path(n.args[0]) if n.args and inner is None else None
                 if path:
-                    p = resolve(path, cwd)
-                    files += [p] if _agent_file(p) else []
+                    continue  # the file it reads is judged below
                 elif inner is None and n.args and fname != "vars" and _decodes(n.args[0]):
                     return DECODED
                 elif inner is None:
@@ -2174,7 +2217,7 @@ def evidence_reached(code, cwd=None, depth: int = 0) -> str:
                     sub = evidence_reached(inner, cwd, depth + 1)
                     hit = hit or sub
                     loads = loads or bool(_DEVKIT_LOAD_TEXT.search(inner))
-    for p in files:
+    for p in _loaded_files(code, cwd):
         sub = evidence_reached(_read_small(p), str(p.parent), depth + 1)
         if sub:
             return sub
