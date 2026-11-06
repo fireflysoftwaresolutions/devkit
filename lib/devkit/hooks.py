@@ -988,9 +988,59 @@ def _bulk_rewrite_note(data: dict) -> str:
             "expressions or prose, and it changes text it should not. Prefer exact-string edits that must match once.")
 
 
+# lesson L-fwrw94p19ce: a note written after the last tool call ("waiting for Ghost", a comment on the output) landed
+# above the status block, and the Stop hook had to send the turn back. These calls usually end a turn.
+LAUNCH_TOOLS = {"Agent": "a subagent launch", "Task": "a subagent launch", "spawn_agent": "a subagent launch",
+                "Monitor": "a monitor"}
+CLOSING_CMD = re.compile(r"\bdev\s+(?:progress\s+done|handoff\s+--log|sync|task\s+done|push|pr\s+(?:create|merge)|"
+                         r"release)\b|\bgit\s+(?:-C\s+\S+\s+)?push\b|\bgh\s+pr\s+(?:create|merge)\b")
+CLOSING_GAP = 120  # seconds: parallel launches, or a closing command right after one, get one reminder
+
+
+def _turn_ending(data: dict) -> str:
+    """What makes this tool call a likely end of the turn, in words; '' when nothing does."""
+    tool = data.get("tool_name") or ""
+    if tool in LAUNCH_TOOLS:
+        return LAUNCH_TOOLS[tool]
+    if tool not in SHELL_TOOLS:
+        return ""
+    tin = data.get("tool_input") or {}
+    if tin.get("run_in_background"):
+        return "a background command"
+    cmd = tin.get("command") or ""
+    m = CLOSING_CMD.search(command_words(" ".join(cmd) if isinstance(cmd, list) else str(cmd)))
+    return f"`{' '.join(m.group(0).split())}`" if m else ""
+
+
+def closing_reminder(data: dict, sess: dict, now: float) -> str:
+    """PostToolUse, main session, development turns: right after a call that usually ends the turn, the status block
+    the final message opens with, with this project and branch filled in. Records when it reminded in `sess`."""
+    what = _turn_ending(data)
+    if not what or data.get("agent_id"):
+        return ""
+    if sess.get("turn_class") == "other" and os.environ.get("DEVKIT_SCOPE") != "all":
+        return ""
+    last = sess.get("closing_nudge") or 0
+    if last >= (sess.get("turn_started") or 0) and now - last < CLOSING_GAP:
+        return ""
+    sess["closing_nudge"] = now
+    # the repository of the command's folder (the session may have started outside one), else the one it started in
+    top = (core.gitout(data["cwd"], "rev-parse", "--show-toplevel") if data.get("cwd") else "") or sess.get("top") or ""
+    if top:
+        from .registry import main_of
+        project = (main_of(Path(top)) or Path(top)).name
+    else:
+        project = (sess.get("project") or "").rstrip("/").rsplit("/", 1)[-1] or "<project>"
+    branch = (core.gitout(top, "branch", "--show-current") if top else "") or "-"
+    return (f"devkit · after {what}: if you end the turn here (to wait, or because the work is done), your final "
+            f"message opens with the status block: **[Firefly> DevKit]** {project} · `{branch}` · <task>, then "
+            f"Done / Check / Next. Nothing above it: a waiting note or a comment on this output goes below the block.")
+
+
 def post_tool(agent: str):
     """PostToolUse: time slow calls; remind the agent to update the developer after a long silence; sync the
-    handoff repository right after a delivery event (commit, push, merge, tag, PR, release)."""
+    handoff repository right after a delivery event (commit, push, merge, tag, PR, release); at a call that usually
+    ends the turn, show the status block the final message opens with."""
     from . import progress
     data = _stdin_json()
     try:
@@ -1009,7 +1059,18 @@ def post_tool(agent: str):
                 ciwatch.start_background(top, session=f"{agent}:{data.get('session_id') or ''}")
     except Exception:
         pass
-    _context_out("PostToolUse", "\n\n".join(x for x in (_bulk_rewrite_note(data), progress.on_tool_done(agent, data)) if x))
+    closing = ""
+    try:
+        sf = _session_file(agent, data.get("session_id") or "-")
+        if sf.exists():  # only sessions that started with devkit active
+            sess = core.read_json(sf, {}) or {}
+            closing = closing_reminder(data, sess, time.time())
+            if closing:
+                sf.write_text(json.dumps(sess))
+    except Exception:
+        _log(f"post-tool closing {agent}: {traceback.format_exc()[-300:]}")
+    _context_out("PostToolUse", "\n\n".join(x for x in (_bulk_rewrite_note(data), closing,
+                                                        progress.on_tool_done(agent, data)) if x))
 
 
 def subagent_start(agent: str):
