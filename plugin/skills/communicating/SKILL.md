@@ -217,7 +217,7 @@ Each kind of record has one shape, so anyone can read anything quickly. Use the 
 structure, instead of free text.
 
 | Record | Command | Structure |
-|---|---|---|
+| --- | --- | --- |
 | Plan | `dev plan new "<title>"` | Summary · Context · Goals · Non-goals · Approach · Steps (owner, estimate, verified by) · Verification · Risks · Rollout and rollback · Open questions |
 | Feature spec | `dev plan new "<title>" --kind spec` | Summary · Problem · Users and scenarios · Requirements (R1…, priority) · Out of scope · UX · API and data · Acceptance criteria · Metrics · Risks |
 | Spike | `--kind spike` | Question · Timebox · Options · Method · Findings · Recommendation (with confidence) |

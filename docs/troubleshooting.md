@@ -15,6 +15,8 @@ with `dev doctor`: every failed check prints the command that fixes it.
 | `~/.local/state/devkit/sessions/` | Session records (expire after 7 days) |
 | `~/.local/state/devkit/runs/` | `dev progress` runs, one file per session |
 | `~/.local/state/devkit/timing/` | Turns, slow commands, subagents, and finished runs, one file per month (`dev time`) |
+| `~/.local/state/devkit/trash.jsonl` | Every `dev rm` (and replaced file of `dev mv` and `dev cp`): what went to the Trash, from where, and why |
+| `~/.local/state/devkit/cache/ci/` | Recent CI/CD runs and typical durations for `dev ci status` |
 | `~/.local/state/devkit/backups/` | Copies of every file devkit rewrote |
 | `~/.local/state/devkit/cache/` | GitHub user and organizations, sizes; `prs/` holds PR lists |
 
@@ -116,14 +118,66 @@ devkit merge rules, run `dev install --only handoff`.
 
 ## Configuration
 
-### `dev config validate` reports `ui`, `progress`, `work`, or `language` as unknown keys
+### `dev doctor` reports a git host or cloud as not signed in
 
-The validator's list of keys is older than these keys. `ui`, `progress`, and `work` take effect anyway; `language` is
-reserved (see [Configuration](configuration.md#workspace)).
+The Hosts and Clouds checks cover the hosts and clouds you chose in `dev setup` (`hosts` and `clouds` in the
+configuration). They are local checks, and each failure prints the sign-in command: `glab auth login`, `az login`,
+`aws configure sso`, `gcloud auth login`, `doctl auth init`, or the token to export for Bitbucket
+(`BITBUCKET_TOKEN`) and Azure DevOps (`AZURE_DEVOPS_EXT_PAT`). A missing CLI is installed by
+`dev install --only tools`.
 
 ### `dev guard check` says "unrecognized arguments"
 
 Quote a command that has its own options: `dev guard check "git switch -c fix/login"`.
+
+## Files
+
+### `dev rm` refused to delete something
+
+The refusal names the reason and the flag that overrides it, for example `tracked by git … → retry with --tracked`,
+and nothing in the batch was deleted. Check that you really mean it, then retry with that flag. When the line says
+`no override; ask the user`, there is no flag: the path is a repository, a worktree, a workspace root, or a system
+folder, and the message says what to use instead (`dev wt rm`, `dev adopt`, or asking the developer). See
+[Commands › dev rm](commands.md#dev-rm-paths-flags--dev-rm---undo-n--dev-rm---list).
+
+### Something was deleted by mistake
+
+```bash
+dev rm --list        # recent deletions, newest first
+dev rm --undo        # restore the last run; --undo 3 restores the last three
+```
+
+A restored file that was tracked by git is unstaged again. A path that exists again is not overwritten; the message
+names the copy in the Trash. Files you emptied from the Trash cannot be restored.
+
+### The guard blocks `rm`, `find -delete`, or an overwriting `cp`
+
+Outside temp folders and build output, these go through `dev rm`, `dev cp`, and `dev mv`, which are recoverable. Use
+them, or prefix the command with `DEVKIT_RAW_FS=1` when a permanent delete is what you want (see
+[Guard rules › Deleting and overwriting files](guard.md#deleting-and-overwriting-files)).
+
+## Delivery
+
+### `git tag` is refused by the delivery policy
+
+The project's recorded policy says how its tags look, and the message gives the tag to use (`dev calver --next` for
+CalVer). Tag with that, change the policy with `dev delivery apply --set versioning=… --why "…"`, or prefix the
+command with `DEVKIT_TAG_ANY=1` for a one-off tag.
+
+### `dev ci status` cannot read the pipelines
+
+It prints the reason instead of the runs:
+
+| Host | Fix |
+| --- | --- |
+| GitHub Actions | `gh auth status`; `dev install --only git` signs `gh` in to git |
+| GitLab CI | Install `glab` and run `glab auth login`, or export `GITLAB_TOKEN` |
+| Bitbucket Pipelines | Export `BITBUCKET_TOKEN` (an access token with `pipeline:read`), or `BITBUCKET_USERNAME` and `BITBUCKET_APP_PASSWORD` |
+| Azure Pipelines | Export `AZURE_DEVOPS_EXT_PAT` (a token with the Build read scope) |
+
+The message `no CI provider for this remote` means the `origin` remote is on a host that `dev ci status` does not read. The
+GitLab, Bitbucket, and Azure readers are tested against recorded API responses; report a host that answers
+differently.
 
 ## Workspace
 

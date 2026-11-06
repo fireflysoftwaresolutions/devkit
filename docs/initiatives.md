@@ -71,7 +71,9 @@ dev initiative                                # every initiative: status, priori
 dev initiative show payments                  # progress and its source, goal, members with status and progress, Now tasks
 dev task -i payments                          # the initiative's work items
 dev task add "Agree on the refund event schema" --type feature --now -i payments
+dev task link 3 --to payments --why "…"      # a project task that counts toward the initiative
 dev plan new "Refund events" --kind spec -i payments
+dev delivery apply -i payments --set release_train="ledger, billing, checkout; monthly" --why "…"
 dev report -i payments                        # a status report for this initiative
 ```
 
@@ -98,8 +100,28 @@ do not count. The items are:
 A manual `progress:` value in the frontmatter (`dev note set progress=40 -i payments`) overrides the computed one;
 `dev initiative show`, `PROJECTS.md`, and the dashboard mark it as manual. Set it back to empty to compute it again.
 
-Project tasks get the `initiative:<slug>` link when `dev handoff-import` creates them from a task tagged with a member
-project (see the next section). New cross-project work goes into the initiative itself with `dev task -i <slug>`.
+To count a project task toward an initiative, link it from the project:
+
+```bash
+dev task link 3 --to payments --why "billing's refund endpoint is part of the payments milestone"
+```
+
+`dev handoff-import` adds the same link to tasks tagged with a member project (see the next section). New
+cross-project work goes into the initiative itself with `dev task -i <slug>`.
+
+## Release trains
+
+When member projects must release together (a platform, a bill of materials, a parent POM and its services), record
+the order and the rhythm as the initiative's delivery policy:
+
+```bash
+dev delivery apply -i payments --set release_train="ledger, billing, checkout; monthly" --why "they share the event schema"
+dev delivery -i payments      # prints the recorded policy
+```
+
+Each member keeps its own version scheme in its own policy (see [Delivery › The delivery
+policy](delivery.md#the-delivery-policy)). Sessions see their project's own policy, so set `release_train` in a
+member's policy too when its sessions should see the train.
 
 ## Adopt an existing handoff repository
 

@@ -93,12 +93,17 @@ def check(root: Path, paths=None, online=False, fix=False, prose=True) -> int:
         own_ini = root / ".vale.ini"
         if core.have("vale") and (own_ini.exists() or ensure_vale()):
             cfg = str(own_ini if own_ini.exists() else VALE_INI)
-            rc, out = _run(["vale", "--config", cfg, "--output", "JSON", "--minAlertLevel", "warning"] + rel, root)
+            p = subprocess.run(["vale", "--config", cfg, "--output", "JSON", "--minAlertLevel", "warning"] + rel,
+                               cwd=root, capture_output=True, text=True)
+            lines, errors = [], []
             try:
-                data = json.loads(out or "{}")
+                data = json.loads(p.stdout or "{}")
             except ValueError:
                 data = {}
-            lines, errors = [], []
+                errors.append("vale output could not be read: " + (p.stdout or p.stderr).strip()[:200])
+            for ln in (p.stderr or "").splitlines():  # e.g. E201 invalid front matter: Vale skipped that file
+                if ln.strip() and ("E1" in ln or "E2" in ln or "Error" in ln):
+                    errors.append("vale: " + ln.strip()[:200])
             for f, alerts in sorted(data.items()) if isinstance(data, dict) else []:
                 for al in alerts:
                     ln = f"{f}:{al.get('Line')}:{al.get('Span', [0])[0]}: {al.get('Severity')} {al.get('Check')}: " \
@@ -106,6 +111,7 @@ def check(root: Path, paths=None, online=False, fix=False, prose=True) -> int:
                     lines.append(ln)
                     if al.get("Severity") == "error":
                         errors.append(ln)
+            lines += [e for e in errors if e.startswith("vale")]
             print(f"  {ui.OK if not lines else (ui.FAIL if errors else ui.WARN)} {len(lines)} finding(s)"
                   f"{f', {len(errors)} error(s)' if errors else ''}")
             for ln in lines[:40]:

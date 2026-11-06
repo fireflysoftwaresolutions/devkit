@@ -1,8 +1,8 @@
 # Concepts
 
-This page explains the ideas behind devkit: where everything lives, how work is organized, what the handoff
-repository holds, how worktrees come and go, what the guard does, what the status block proves, and when devkit
-syncs.
+This page explains the ideas behind devkit: where everything lives, how work is organized, how it covers the
+lifecycle from plan to operate, what the handoff repository holds, how worktrees come and go, what the guard does,
+what the status block proves, and when devkit syncs.
 
 ## Workspace layout
 
@@ -66,6 +66,29 @@ devkit keeps one hierarchy for everyone who shares a handoff repository:
 A scope is a project id or `initiatives/<slug>`. [Initiatives](initiatives.md) and
 [Teams and machines](teams.md) cover the details.
 
+## From plan to operate
+
+devkit covers the whole development lifecycle. Each stage has a command and a skill, and each feeds the next, so
+nothing falls between them.
+
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="images/diagrams/lifecycle-map-dark.svg">
+  <img src="images/diagrams/lifecycle-map-light.svg" alt="From plan to operate: plan with dev plan new and Superpowers; track the task with dev task; build with dev progress and the required skills; pass the local test gate with dev ci and dev sec scan; review with /code-review and the communicating templates; integrate on one branch with the delivery skill; release by the recorded policy with dev delivery and the release-policy skill; follow CI with dev ci status; deploy through a tag and its pipeline; hand off with the handoff skill and dev sync." width="100%">
+</picture>
+
+| Stage | devkit | Skill | Guide |
+| --- | --- | --- | --- |
+| Plan | `dev plan new --kind plan\|spec\|spike\|bugfix\|adr` | Superpowers (brainstorming, writing-plans), `architecture` | [Templates](templates.md) |
+| Task | `dev task add`, `dev task start` | `using-devkit` | [Teams and machines](teams.md) |
+| Build | `dev progress`, `dev files`, `dev grep`, `dev diff` | the required skills for the work | [Skills and plugins](skills-and-plugins.md#required-skills) |
+| Test gate | `dev ci --commands`, `dev sec scan` | `delivery`, `devsecops` | [Delivery](delivery.md) |
+| Review and PR | `/code-review`, the PR template | `communicating` | [Templates](templates.md#pull-request-description) |
+| Integrate | one `release/<version>` or `integration/<topic>` branch | `delivery` | [Delivery](delivery.md) |
+| Release | `dev delivery`, `dev calver` | `release-policy` | [Delivery › The delivery policy](delivery.md#the-delivery-policy) |
+| CI status | `dev ci status --watch` | `communicating` | [Commands](commands.md) |
+| Deploy | a tag and its pipeline (GitOps) | `delivery` | [Delivery](delivery.md) |
+| Handoff | `dev handoff --log`, `dev sync` | `handoff` | [Concepts › Handoff notes](#handoff-notes) |
+
 ## The handoff repository
 
 `~/Development/.handoff` is a private git repository (by default `<your-github-login>/handoff`). It is the memory
@@ -83,10 +106,11 @@ that you, Claude Code and Codex share across sessions, machines, and developers.
 | `plans/<scope>/` | Plans and specs, versioned, kept out of the code repositories | `dev plan`, agents |
 | `sessions/<scope>/YYYY-MM.md` | Append-only session log | the hooks, `dev handoff --log` |
 | `presence/<user>@<host>.json` | What each machine is doing now: live sessions, progress, held locks | `dev sync` on that machine |
+| `policies/<scope>.json` | The delivery policy of a project (or the release train of an initiative), versioned with its history | `dev delivery apply` only |
 | `log/YYYY-MM.md` | Operations: worktree removals, cleanups, adoptions, imports, restored settings | `dev` |
 | `.gitattributes` | Merge rules that keep machines from conflicting | `dev install` |
 
-The guard keeps the generated files, `items/`, `sessions/`, and `presence/` out of reach of direct edits, and keeps a
+The guard keeps the generated files, `items/`, `sessions/`, `presence/`, and `policies/` out of reach of direct edits, and keeps a
 project session from writing another project's note or plans (see [Guard rules](guard.md#the-handoff-repository)).
 
 ### Handoff notes
@@ -175,8 +199,9 @@ are not detected). The rules are in [Disk and cleanup](disk-and-cleanup.md).
 
 A pre-tool hook runs before every shell command and file write of Claude Code and Codex. It enforces the workspace
 rules: layout, managed worktrees, canonical clones, no backup copies, no writes outside the workspace, no destructive
-commands, no plain force pushes, a CI push budget, no blind CI re-runs, branch names, no AI attribution, no secrets
-in commits, isolation in the handoff repository, and no settings that switch devkit off. Each denial explains the
+commands, permanent deletes and overwrites through `dev rm`, `dev mv`, and `dev cp`, no plain force pushes, a CI push
+budget, no blind CI re-runs, branch names, tags that follow the delivery policy, no AI attribution, no secrets in
+commits, isolation in the handoff repository, and no settings that switch devkit off. Each denial explains the
 right way, so the agent corrects itself in one step. It fails open: a bug in the guard never blocks work. The full
 list is in [Guard rules](guard.md).
 

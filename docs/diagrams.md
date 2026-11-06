@@ -101,6 +101,7 @@ system-font fallback never overflows a box.
 | Spec | Shows | Used in |
 | --- | --- | --- |
 | `docs/diagrams/architecture.json` | How devkit fits together | README |
+| `docs/diagrams/lifecycle-map.json` | From plan to operate: the command and skill at each stage | README, [Concepts](concepts.md) |
 | `docs/diagrams/session-lifecycle.json` | A session with devkit, hook by hook | [Concepts](concepts.md) |
 | `docs/diagrams/work-hierarchy.json` | Portfolio, initiatives, projects, and their records | [Concepts](concepts.md), [Initiatives](initiatives.md) |
 | `docs/diagrams/handoff-note.json` | Anatomy of a handoff note | [Concepts](concepts.md), this page |
@@ -108,6 +109,7 @@ system-font fallback never overflows a box.
 | `docs/diagrams/work-item-lifecycle.json` | The states of a work item: claim, release, expire | [Teams and machines](teams.md) |
 | `docs/diagrams/handoff-sync.json` | Locks and sync between two machines | [Teams and machines](teams.md) |
 | `docs/diagrams/delivery.json` | Local-first delivery: one push, one CI run | [Delivery](delivery.md) |
+| `docs/diagrams/delivery-policy.json` | The delivery policy: detect, recommend, record, and where it applies | [Delivery](delivery.md) |
 | `docs/diagrams/worktree-lifecycle.json` | Worktree lifecycle | this page |
 
 After changing a spec, run `dev diagram render docs/diagrams`; `tests/test_diagram.py` fails when a rendered SVG is

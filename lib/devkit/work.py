@@ -239,10 +239,10 @@ def task_body(kind: str, why: str = "", done=None) -> str:
     f = core.DEVKIT_HOME / "templates" / "tasks" / f"{kind}.md"
     text = f.read_text().strip() if f.exists() else "## Done when\n- [ ] _Acceptance criterion, testable._"
     if why:
-        text = re.sub(r"(## (Why|Context|Question|Symptom)\n)_[^\n]*_", lambda m: m.group(1) + why, text, count=1)
+        text = re.sub(r"(## (Why|Context|Question|Symptom)\n\n?)_[^\n]*_", lambda m: m.group(1) + why, text, count=1)
     if done:
         crit = "\n".join(f"- [ ] {d}" for d in done)
-        text = re.sub(r"(## Done when\n)(- \[ \] [^\n]*\n?)+", lambda m: m.group(1) + crit + "\n", text, count=1)
+        text = re.sub(r"(## Done when\n\n?)(- \[ \] [^\n]*\n?)+", lambda m: m.group(1) + crit + "\n", text, count=1)
     return text.strip()
 
 

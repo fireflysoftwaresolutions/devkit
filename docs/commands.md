@@ -41,8 +41,9 @@ cd "$(dev go widget)"      # what `dcd widget` does
 ### `dev status [<query>]`
 
 The current project, or `<query>`: path, remote, stack, detected commands, branch and state, PR, last commit,
-worktrees, open PRs, the handoff note, the latest status block drawn as a block (see
-[Concepts › The status block](concepts.md#the-status-block)) and the items that need attention. Outside a project it
+worktrees, open PRs, the handoff note, the latest CI run of the branch with its jobs (as in `dev ci status`), the latest
+status block drawn as a block (see [Concepts › The status block](concepts.md#the-status-block)), and the items that
+need attention. Outside a project it
 shows the home screen.
 
 ### `dev clone <owner/repo | host/group/repo | url>`
@@ -148,13 +149,15 @@ of the title. See [Teams and machines](teams.md) for locks, versions, and the ch
 | `add <title> [options]` | Creates a work item (see the next table) |
 | `start <selector> [--why]` | Claims the lock (8 hours by default), pushes it at once, and moves a todo item to Now as doing |
 | `claim <selector> [--why]` | Same as `start` |
-| `release <selector> [--why]` | Gives the lock back; the item returns to todo. Also returns a blocked item to todo |
+| `release <selector> [--why]` | Gives the lock back; the item returns to todo |
 | `done <selector> [--why]` | Marks the item done and releases the lock |
 | `block <selector> --why "…"` | Marks the item blocked |
+| `unblock <selector> [--why]` | Back to work: todo, or doing while the item is still claimed |
 | `cancel <selector> --why "…"` | Cancels the item and clears its lock |
 | `move <selector> --to now\|next\|later --why "…"` | Moves the item between buckets |
 | `edit <selector> [--title "…"] [--body-file FILE] [--priority high\|normal\|low] [--due YYYY-MM-DD] --why "…"` | Changes the title, the description, the priority, or the due date |
 | `delegate <selector> --to LOGIN [--why "…"] [--due YYYY-MM-DD] [--no-copy]` | Assigns the item to a teammate, releases your lock, prints the message to send, and copies it to the clipboard |
+| `link <selector> --to SLUG --why "…"` | Counts a project task toward an initiative (adds the link `initiative:<slug>`) |
 | `show <selector>` | The item's fields, its description, and its history |
 | `history <selector>` | The item's changelog only |
 | `ls` | The open items (the default) |
@@ -173,8 +176,8 @@ Options of `dev task add`:
 | `--body "…"` | Your own description instead of the template |
 | `--no-template` | No description at all |
 
-`edit`, `move`, `cancel`, and `--why` on the other verbs record the reason in the item's changelog and in its commit;
-`edit`, `move`, and `cancel` refuse to run without it. Changing an item that someone else holds an unexpired lock on
+`--why` records the reason in the item's changelog and in its commit. `edit`, `move`, `block`, `cancel`, and `link`
+refuse to run without it. Changing an item that someone else holds an unexpired lock on
 is refused; coordinate with them or wait for the lock to expire.
 
 ### `dev note set <key=value> … [-p PROJECT | -i SLUG]`
@@ -314,9 +317,74 @@ written.
 | `--commands` | Only the `run:` commands, in order (steps that use secrets are left out) |
 | `--runs` | Also list the 8 most recent CI runs (`gh run list`) |
 
+### `dev ci status [--watch] [--branch NAME | --all-branches] [--all-jobs] [--limit N] [--json]`
+
+The live state of the CI/CD runs of the repository you are in, on any of four hosts; the provider follows the
+`origin` remote. `dev ci <project> --status` does the same for another project.
+
+```text
+▸ GitHub Actions · acme/billing · feat/invoice-export
+  ▸ ci #142 running · 12m40s elapsed · ETA ~6m20s (usually 19m00s) · push a1b2c3d
+      3/5 jobs done · 2 running
+      ▸ tests (Python 3.13) · step 4/7 “Unit tests” · 6m10s
+      https://github.com/acme/billing/actions/runs/…
+```
+
+Each run shows its state, the elapsed time, and an ETA: the median duration of the last successful runs of the same
+pipeline, minus the elapsed time. Failed jobs come first, then the running ones with their current step. When the
+newest run on GitHub failed, the command prints `gh run view <id> --log-failed` and exits with `1`.
+
+| Option | Effect |
+| --- | --- |
+| `--watch` | Refresh every 15 seconds until no run is in progress |
+| `--branch NAME` | Runs of this branch (default: the current branch) |
+| `--all-branches` | Runs of every branch |
+| `--all-jobs` | List every running job instead of the first six |
+| `--limit N` | Number of runs (default 5) |
+| `--json` | The normalized runs as JSON |
+
+| Host | How devkit reads it | Verified |
+| --- | --- | --- |
+| GitHub Actions | `gh`, signed in by devkit | Live |
+| GitLab CI | `glab api` when installed (`glab auth login`), otherwise the REST API with `GITLAB_TOKEN` | Against recorded API responses |
+| Bitbucket Pipelines | The REST API with `BITBUCKET_TOKEN` (an access token with `pipeline:read`), or `BITBUCKET_USERNAME` and `BITBUCKET_APP_PASSWORD` | Against recorded API responses |
+| Azure Pipelines | The REST API with `AZURE_DEVOPS_EXT_PAT` (a token with the Build read scope), the same variable the `az devops` CLI uses | Against recorded API responses |
+
+Tokens are read from the environment and never printed. A host that cannot be read reports why instead of failing.
+`dev status` shows the latest run of the branch, and when you ask an agent for status, the prompt hook adds the
+branch's pipelines to its context.
+
 ### `dev calver [--next]`
 
 The repository's current CalVer tag, the next version (`YY.MM.PATCH`), and the names of its tag and release branch. `--next` prints only the next version. Outside a repository it reads the devkit repository.
+
+### `dev delivery [-p PROJECT | -i SLUG] [--json]` · `dev delivery apply …`
+
+A project's delivery policy: how it versions, tests, releases, and ships. See
+[Delivery › The delivery policy](delivery.md#the-delivery-policy).
+
+`dev delivery` shows three things: what it detects in the repository (kind, version scheme and latest tag, version
+file, release tools, changelog, CI, the test gate, branch model, what it publishes and deploys), the recorded policy
+or the one it recommends, and the gaps, each with its fix. `--json` prints the same for tools and agents. With `-i`,
+it prints the initiative's recorded policy (a release train).
+
+`dev delivery apply --why "…" [--set KEY=VALUE]… [--tasks] [-p PROJECT | -i SLUG]` records the policy (the recorded
+one, or else the recommendation) in the handoff repository with the changes from `--set`, and makes one commit.
+
+| Option | Effect |
+| --- | --- |
+| `--why "…"` | Required: the reason, recorded in the policy's history and the commit |
+| `--set KEY=VALUE` | Change one field; repeat it. Lists (`test_gate`, `publish`, `deploy`) are separated by `;` |
+| `--tasks` | Open a work item for every gap (high gaps go to Now, with high priority) |
+
+The fields are `versioning`, `tag_format`, `version_source`, `release_flow`, `changelog`, `test_gate`, `ci`,
+`branch_model`, `publish`, `deploy`, `kind`, `release_train`, and `bump`.
+
+```bash
+dev delivery apply --why "first release policy: service, CalVer, Maven verify gate" --tasks
+dev delivery apply --set versioning=semver --set test_gate="./mvnw -B verify" --why "it is a library now"
+dev delivery apply -i platform --set release_train="bom → parent → services, monthly" --why "release together"
+```
 
 ### `dev sec scan [<query>] [--history] [--config RULES] [-v]`
 
@@ -356,7 +424,140 @@ Branded, validated SVG diagrams from JSON specs. See [Diagrams](diagrams.md).
 | `dev diagram render <spec \| dir> [--out DIR] [--png]` | Writes `<name>-dark.svg` and `<name>-light.svg` (specs in `docs/diagrams/` go to `docs/images/diagrams/`); `--png` adds 2x previews |
 | `dev diagram check <spec \| svg \| dir>` | Validates specs or SVG files; exits with `1` on problems |
 
-<!-- TODO(devkit-docs): files-and-git -->
+## Files
+
+Agents and people both use these safe, token-light commands. Their output is compact and capped: every list ends with a
+`+N more — narrow with …` line, and it is plain text when it is not a terminal. A refusal names the reason and the
+flag that overrides it (or says there is none), and a refused batch changes nothing. The guard steers raw deletes and
+overwrites to these commands (see [Guard rules › Deleting and overwriting files](guard.md#deleting-and-overwriting-files)).
+
+### `dev files [<path>] [-d DEPTH] [--all] [--max N] [--json]`
+
+A compact tree that respects `.gitignore`: folders first, file counts, sizes from 100 KB (files) and 1 MB (folders) up,
+git markers (`M`, `??`, …), and noise folded away (build output, `.git`). In folders with more than 20 files,
+extensions with at least 8 files fold into one line.
+
+| Option | Effect |
+| --- | --- |
+| `-d`, `--depth N` | Levels to expand (default 2) |
+| `--all` | Include gitignored files and build output |
+| `--max N` | Line cap (default 80; `0` for none) |
+| `--json` | Machine-readable output |
+
+### `dev find [<pattern>] [<path>] [options]`
+
+Finds files by name, respecting `.gitignore`, with paths relative to where you are. The pattern is a glob when it looks
+like one (`*.py`) and a regular expression otherwise; it ignores case unless it has a capital letter. It uses `fd`
+when installed.
+
+| Option | Effect |
+| --- | --- |
+| `-e`, `--ext EXT` | An extension; repeat it |
+| `-t f` · `-t d` | Files or folders only |
+| `-g`, `--glob` · `--regex` | Force the pattern type |
+| `-p`, `--full-path` | Match the whole path, not only the name |
+| `--changed` | Only paths git reports as changed or untracked |
+| `--since WHEN` | Changed within `30m`, `2h`, `2d`, `1w`, or since `YYYY-MM-DD` |
+| `--size SIZE` | At least (`+1M`) or at most (`-100k`) that size |
+| `--all` | Include gitignored files |
+| `--max N` · `--json` | Result cap (default 60) · JSON |
+
+### `dev grep <pattern> [<paths>…] [options]`
+
+Searches file contents with ripgrep (a Python fallback when it is missing) and prints `file:line: text`, trimmed to
+one line and capped, five matches per file by default. Case is smart unless you say otherwise.
+
+| Option | Effect |
+| --- | --- |
+| `-i` · `-s` | Ignore case · case-sensitive |
+| `-F` · `-w` | A literal string · whole words |
+| `-g GLOB` | Include or exclude files: `-g '*.py' -g '!tests/**'` |
+| `-t TYPE` | A ripgrep file type: `py`, `ts`, `java`, … |
+| `-l` · `--count` | Matching files only · matching lines per file |
+| `-C N` | Context lines |
+| `--max N` · `--max-per-file N` | Line cap (default 60) · matches per file (default 5) |
+| `--all` | Include gitignored files |
+| `--ast [--lang LANG]` | Structural search with ast-grep (`$X` metavariables) |
+| `--json` | JSON |
+
+### `dev diff [REV…] [PATH…] [options]`
+
+A token-light `git diff`: the changed files and their line counts first, then hunks with one line of context. Lock
+files, minified files, snapshots, build output, and generated code fold to one line, and so does any file with more
+than 300 changed lines. Outside git, or with two untracked paths, it compares the two paths directly.
+
+| Option | Effect |
+| --- | --- |
+| `--staged` | Staged changes |
+| `--names` | Changed paths only |
+| `--word` | Word diff |
+| `--syntax` | Structural diff with difftastic (`difft`) |
+| `-U N` | Context lines (default 1) |
+| `--max N` · `--fold N` | Total line cap (default 300) · fold files with more changed lines (default 300) |
+| `--no-index` | Compare two paths directly |
+
+### `dev rm <paths>… [flags]` · `dev rm --undo [N]` · `dev rm --list`
+
+A safe delete. `dev rm` never unlinks: it moves paths to the macOS Trash and records each one in
+`~/.local/state/devkit/trash.jsonl`, so `dev rm --undo` puts them back. The deletion of a tracked file is staged in
+git, like `git rm`, and undoing it unstages it.
+
+```text
+$ dev rm README.md
+✗ dev rm refused 1 of 1 path; nothing was deleted
+  README.md: tracked by git (the deletion is staged, like git rm) → retry with --tracked
+$ dev rm -r lib/devkit/__pycache__
+trashed lib/devkit/__pycache__/ (1.7 MB) · undo: dev rm --undo
+```
+
+It refuses, unless you give the flag that matches the reason:
+
+| Reason | Flag |
+| --- | --- |
+| A folder | `-r` |
+| Tracked by git | `--tracked` (the deletion is staged) |
+| Uncommitted changes, untracked files, gitignored local files that git cannot restore (`.env`, keys, databases), or a folder outside git in the workspace | `--discard` (it stays in the Trash) |
+| A file that a running process has open, or a folder a process works in | `--force-in-use` |
+| Outside `~/Development`, the scratchpad, and the temp folders | `--outside` |
+
+Some paths have no flag, and the refusal says what to do instead: system and home folders (even when they do not
+exist on this Mac), the folder you are in, the workspace root and its owner, host, and `_local` project folders, the
+handoff repository and its managed folders, a repository checkout, a worktree (`dev wt rm`), a submodule, a `.git`
+folder and anything inside it except a stale lock file, a folder that contains a repository, and devkit's own
+folders. Gitignored build output and temp files need no flag.
+
+| Option | Effect |
+| --- | --- |
+| `-f` | Skip paths that do not exist (it never overrides a safety check) |
+| `--dry-run` | Show the plan, change nothing |
+| `--why "…"` | A reason, kept in the manifest |
+| `--undo [N]` | Restore the last `N` `dev rm` runs (default 1); a path that exists again is not overwritten |
+| `--list` | Recent deletions, newest first |
+
+### `dev mv <src>… <dest> [options]` · `dev cp <src>… <dest> [options]`
+
+Move, rename, or copy without overwriting anything silently. With more than one source, the destination must be a
+folder.
+
+| Option | Effect |
+| --- | --- |
+| `-f`, `--force` | Replace what exists; the old version goes to the Trash, and `dev rm --undo` restores it |
+| `--dry-run` | Show the plan, change nothing |
+| `--cross` | `dev mv` only: move to another project or out of the workspace |
+| `-r` | `dev cp` only: copy folders |
+| `--skip-heavy` · `--include-heavy` | `dev cp -r` only: copy without, or with, `.git`, `node_modules`, and `.venv` |
+
+- **Never clobbers.** When the destination exists, the command refuses unless you pass `-f`. A folder copied onto a
+  folder replaces only the files present on both sides.
+- **Keeps git right.** `dev mv` uses `git mv` for tracked files that stay in the same repository.
+- **Keeps the layout.** A destination that breaks the workspace layout, a backup-style name (`*.bak`, `* copy.*`), a
+  copy of a repository, or a sibling copy such as `repo-pr12` is refused; use `dev wt new <branch>` for a parallel
+  checkout.
+- **Protects the workspace.** `dev mv` refuses the paths that `dev rm` protects (use `dev adopt` to move a
+  repository). `dev cp -r` refuses to copy `.git`, `node_modules`, or `.venv` until you choose `--skip-heavy` or
+  `--include-heavy`.
+
+<!-- TODO(devkit-docs): files-and-git — the git and GitHub wrapper (dev branch, commit, push, pr, run, release, issue) goes here once it is merged. -->
 
 ## Tracking and disk
 
@@ -396,10 +597,11 @@ cached sizes.
 
 ### `dev setup [-y] [--skip-packages]`
 
-The installation and configuration wizard. It detects the Mac, GitHub, and both agents, asks for the development root,
-the handoff repository, which agents to configure and their permission modes, your stacks, the Docker VM, automation
-and the settings lock, shows the plan, and applies it only after you confirm: packages for the chosen stacks, then
-`dev install`, the sign-ins, and `dev doctor`. Run it again to change your choices.
+The installation and configuration wizard. It detects the Mac, GitHub, and both agents. It asks for the development
+root, the handoff repository, which agents to configure and their permission modes, your stacks, your git hosts and
+clouds, the Docker VM, automation, and the settings lock. It shows the plan and applies it only after you confirm:
+the packages for your stacks, hosts, and clouds, then `dev install`, the sign-ins, and `dev doctor`. Run it again to
+change your choices.
 
 | Option | Effect |
 | --- | --- |
@@ -411,9 +613,10 @@ and the settings lock, shows the plan, and applies it only after you confirm: pa
 Checks the toolchain, GitHub sign-in and git identity, the workspace (PATH, shell, config, handoff repository with its
 push state, layout), the generated instructions and skills, Claude Code (permission mode, attribution, hooks,
 plugins, MCP servers), Codex (approval and sandbox, hook trust, profile models, MCP servers, plugins), both agents'
-sign-in and quota, the devkit plugin (validators, and whether each agent's installed copy is current), project
-settings that switch devkit off, sessions that ran with devkit in the last 7 days, Docker, the background job, the
-instruction canary (fails below 90% over 7 days) and free disk. Each failure prints its fix. Exits with `1` if any
+sign-in and quota, the devkit plugin (validators, and whether each agent's installed copy is current), whether every
+required skill is installed for both agents, project settings that switch devkit off, sessions that ran with devkit
+in the last 7 days, each git host and cloud you chose (its CLI installed and signed in, checked locally), Docker, the
+background job, the instruction canary (fails below 90% over 7 days), and free disk. Each failure prints its fix. Exits with `1` if any
 check fails.
 
 ### `dev agents [status | test] [claude | codex | all] [--json] [--model MODEL] [-v]`
@@ -458,7 +661,9 @@ logo and skills).
 ### `dev install [--only STEPS]`
 
 Applies the configuration; safe to run again. `STEPS` is a comma-separated list of
-`config,cli,git,handoff,instructions,skills,claude,codex,docker,docs,launchd`. See
+`config,tools,cli,git,handoff,instructions,skills,claude,codex,docker,docs,launchd`. The `tools` step installs only
+the Homebrew and npm packages that are missing for your stacks, git hosts, and clouds (and the Azure DevOps CLI
+extension), unless `packages.auto` is off. See
 [Getting started › What dev install configures](getting-started.md#what-dev-install-configures).
 
 ### `dev update`

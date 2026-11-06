@@ -3,7 +3,7 @@
 Every spec is JSON with these common keys:
 
 | Key | Required | Meaning |
-|---|---|---|
+| --- | --- | --- |
 | `kind` | yes | `flow` · `c4` · `state` · `sequence` · `er` · `timeline` |
 | `name` | yes | file stem: `<name>-dark.svg`, `<name>-light.svg` |
 | `title` | yes | the kicker at the top left (also the SVG `<title>`) |

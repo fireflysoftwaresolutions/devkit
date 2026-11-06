@@ -10,7 +10,7 @@ Documentation is part of the change: update it in the same branch as the code it
 ## 1. Decide what you are writing (Diátaxis)
 
 | Reader needs | Type | Shape |
-|---|---|---|
+| --- | --- | --- |
 | To learn by doing | Tutorial | One path, every step works, no choices, ends in a visible result |
 | To get a task done | How-to guide | Goal in the title, numbered steps, prerequisites, expected result |
 | Exact facts | Reference | Complete, consistent tables and entries; generated where possible |
@@ -43,7 +43,7 @@ Never mix types on one page; link between them. The `documentation-writer` skill
 - American spelling; Oxford comma; em dashes without spaces; sentence-case headings; no "simply", "just", "easy".
 - Code, commands, paths, keys and identifiers in backticks; code blocks always declare a language.
 - Tables for comparisons and options; numbered lists only for sequences.
-- Link text says where it goes ("see [Configuration](configuration.md)"), never "click here".
+- Link text says where it goes (for example "see the Configuration guide"), never "click here".
 - Keep facts in one place and link to them; generated reference (CLI help, config keys) must match the code.
 
 ## 5. CHANGELOG and releases

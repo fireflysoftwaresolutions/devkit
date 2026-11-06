@@ -10,7 +10,7 @@ It applies equally to one developer with a laptop and a desktop, and to a team t
 
 - **Claim before you work.** `dev task start <n>` takes a lock on the item and pushes it at once. Other machines see
   it, and their agents are told not to work on it.
-- **Every change has a reason.** Changes of scope (`edit`, `move`, `cancel`) need `--why "…"`. Each change bumps the
+- **Every change has a reason.** Changes of scope (`edit`, `move`, `block`, `cancel`, `link`) need `--why "…"`. Each change bumps the
   item's version, adds a changelog line (who, machine, agent, when, why), and makes one commit.
 - **Write through `dev`.** Work items, session logs, and presence are written only by `dev`; the guard blocks direct
   edits, so versions, locks, and history stay correct.
@@ -100,14 +100,16 @@ the command (detected from its environment), `human` otherwise.
 | --- | --- | --- | --- |
 | `dev task add "…"` | — | todo, in Next (or `--now`, `--later`) | none (`--claim` takes it at once) |
 | `dev task start <n>` · `claim <n>` | todo | doing, in Now | taken for `work.lock_hours` (8), pushed at once |
-| `dev task release <n>` | doing or blocked | todo | given back, pushed at once |
+| `dev task release <n>` | doing | todo | given back, pushed at once |
 | `dev task done <n>` | any open state | done | given back, pushed at once |
 | `dev task block <n> --why "…"` | todo or doing | blocked | unchanged |
+| `dev task unblock <n>` | blocked | doing while it is claimed, todo otherwise | unchanged |
 | `dev task cancel <n> --why "…"` | any open state | cancelled | cleared |
 | `dev task delegate <n> --to <login>` | any open state | todo when you held the lock | yours is given back; the teammate claims it |
+| `dev task link <n> --to <slug> --why "…"` | any state | unchanged; it now counts toward the initiative | unchanged |
 | Lock not renewed for 8 hours | doing | doing, unlocked | cleared by the hourly sync on any machine |
 
-Claiming a blocked item keeps it blocked; run `dev task release <n>` to return it to todo first.
+Claiming a blocked item keeps it blocked; run `dev task unblock <n>` when the blocker is gone.
 
 ### Locks across machines
 
@@ -132,7 +134,7 @@ The lock length is `work.lock_hours` in [Configuration](configuration.md).
 
 ### Reasons and history
 
-`edit`, `move`, and `cancel` refuse to run without `--why`. Every other verb accepts it too. The reason goes into the
+`edit`, `move`, `block`, `cancel`, and `link` refuse to run without `--why`. Every other verb accepts it too. The reason goes into the
 changelog line and the commit message, so `git log` in the handoff repository reads like a history of decisions:
 
 ```text
@@ -234,6 +236,7 @@ there like any other conflict.
 | --- | --- |
 | Writing a file under `items/`, `sessions/`, or `presence/` | Denied: use `dev task` or `dev handoff --log` |
 | Writing `PROJECTS.md`, `TASKS.md`, `ACTIVITY.md`, `registry.json`, or `log/` | Denied: `dev sync` generates them |
+| Writing a file under `policies/` | Denied: use `dev delivery apply` |
 | Writing another project's note or plans from a project session | Denied |
 | Writing an initiative the session's project is not a member of | Denied |
 | `dev task -p <other project>` or `-i <initiative it is not in>` from a project session | Denied |

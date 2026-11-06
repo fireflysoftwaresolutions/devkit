@@ -175,6 +175,10 @@ def context_for(cwd: str, agent: str) -> str:
                                    "(`release-policy` skill) before the first release.")
     except Exception:
         pass
+    lang = (core.CFG.get("language") or "en-US")
+    if lang.lower() not in ("en-us", "en"):
+        lines.append(f"Language: this developer set devkit's language to {lang}: write replies, commits, PRs and docs "
+                     f"in it unless they ask otherwise.")
     lines.append("Long work: `dev progress start \"<goal>\" --plan \"a; b; c\" --estimate 30m`, then `dev progress step` "
                  "and an update to the developer every few minutes (`communicating` skill: templates for updates, "
                  "decisions, PRs, handovers; plain American English).")

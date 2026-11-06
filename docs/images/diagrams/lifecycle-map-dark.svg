@@ -1,0 +1,68 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1056" height="704" viewBox="0 0 1056 704" role="img" aria-labelledby="dk-title dk-desc">
+<title id="dk-title">From plan to operate</title>
+<desc id="dk-desc">The development lifecycle with devkit, stage by stage, with the command and skill for each: plan with dev plan new and Superpowers; track the task with dev task; build with dev progress and the required skills; pass the local test gate with dev ci and dev sec scan; review with /code-review and the communicating templates; integrate on one branch with the delivery skill; release by the recorded policy with dev delivery and the release-policy skill; follow CI with dev ci status; deploy through a tag and its pipeline; and hand off with the handoff skill and dev sync. Each stage feeds the next, so there is no gap between plan and operate.</desc>
+<rect width="1056" height="704" fill="#10110F"/>
+<g font-family="Manrope, 'Manrope Variable', system-ui, -apple-system, 'Segoe UI', Arial, sans-serif">
+<circle cx="68" cy="74" r="4" fill="#FFB34A"/>
+<text x="80" y="78.5" font-size="12" font-weight="600" fill="#BFB8AB" letter-spacing="0.48">FROM PLAN TO OPERATE</text>
+<g transform="translate(64.0,104.0)">
+<path d="M224.0,40.0 L344.5,40.0" fill="none" stroke="#BFB8AB" stroke-width="1.5" stroke-linejoin="round" stroke-linecap="round"/><polygon points="352.0,40.0 344.0,44.0 344.0,36.0" fill="#BFB8AB"/>
+<rect x="251.6" y="28.0" width="72.7" height="24.0" rx="11.0" fill="#10110F"/>
+<text x="288.0" y="44.0" font-size="13" font-weight="400" fill="#BFB8AB" text-anchor="middle">approved</text>
+<path d="M576.0,40.0 L696.5,40.0" fill="none" stroke="#BFB8AB" stroke-width="1.5" stroke-linejoin="round" stroke-linecap="round"/><polygon points="704.0,40.0 696.0,44.0 696.0,36.0" fill="#BFB8AB"/>
+<rect x="608.6" y="28.0" width="62.8" height="24.0" rx="11.0" fill="#10110F"/>
+<text x="640.0" y="44.0" font-size="13" font-weight="400" fill="#BFB8AB" text-anchor="middle">claimed</text>
+<path d="M816.0,80.0 L816.0,100.0 Q816.0,112.0 804.0,112.0 L124.0,112.0 Q112.0,112.0 112.0,124.0 L112.0,144.5" fill="none" stroke="#BFB8AB" stroke-width="1.5" stroke-linejoin="round" stroke-linecap="round"/><polygon points="112.0,152.0 108.0,144.0 116.0,144.0" fill="#BFB8AB"/>
+<rect x="430.3" y="100.0" width="67.4" height="24.0" rx="11.0" fill="#10110F"/>
+<text x="464.0" y="116.0" font-size="13" font-weight="400" fill="#BFB8AB" text-anchor="middle">changes</text>
+<path d="M224.0,192.0 L344.5,192.0" fill="none" stroke="#BFB8AB" stroke-width="1.5" stroke-linejoin="round" stroke-linecap="round"/><polygon points="352.0,192.0 344.0,196.0 344.0,188.0" fill="#BFB8AB"/>
+<rect x="262.6" y="180.0" width="50.8" height="24.0" rx="11.0" fill="#10110F"/>
+<text x="288.0" y="196.0" font-size="13" font-weight="400" fill="#BFB8AB" text-anchor="middle">green</text>
+<path d="M576.0,192.0 L696.5,192.0" fill="none" stroke="#BFB8AB" stroke-width="1.5" stroke-linejoin="round" stroke-linecap="round"/><polygon points="704.0,192.0 696.0,196.0 696.0,188.0" fill="#BFB8AB"/>
+<rect x="603.6" y="180.0" width="72.7" height="24.0" rx="11.0" fill="#10110F"/>
+<text x="640.0" y="196.0" font-size="13" font-weight="400" fill="#BFB8AB" text-anchor="middle">approved</text>
+<path d="M816.0,232.0 L816.0,260.0 Q816.0,272.0 804.0,272.0 L124.0,272.0 Q112.0,272.0 112.0,284.0 L112.0,296.5" fill="none" stroke="#BFB8AB" stroke-width="1.5" stroke-linejoin="round" stroke-linecap="round"/><polygon points="112.0,304.0 108.0,296.0 116.0,296.0" fill="#BFB8AB"/>
+<rect x="428.0" y="260.0" width="72.0" height="24.0" rx="11.0" fill="#10110F"/>
+<text x="464.0" y="276.0" font-size="13" font-weight="400" fill="#BFB8AB" text-anchor="middle">one push</text>
+<path d="M224.0,344.0 L344.5,344.0" fill="none" stroke="#BFB8AB" stroke-width="1.5" stroke-linejoin="round" stroke-linecap="round"/><polygon points="352.0,344.0 344.0,348.0 344.0,340.0" fill="#BFB8AB"/>
+<rect x="270.5" y="332.0" width="34.9" height="24.0" rx="11.0" fill="#10110F"/>
+<text x="288.0" y="348.0" font-size="13" font-weight="400" fill="#BFB8AB" text-anchor="middle">tag</text>
+<path d="M576.0,344.0 L696.5,344.0" fill="none" stroke="#BFB8AB" stroke-width="1.5" stroke-linejoin="round" stroke-linecap="round"/><polygon points="704.0,344.0 696.0,348.0 696.0,340.0" fill="#BFB8AB"/>
+<rect x="614.6" y="332.0" width="50.8" height="24.0" rx="11.0" fill="#10110F"/>
+<text x="640.0" y="348.0" font-size="13" font-weight="400" fill="#BFB8AB" text-anchor="middle">green</text>
+<path d="M816.0,384.0 L816.0,484.0 Q816.0,496.0 804.0,496.0 L583.5,496.0" fill="none" stroke="#BFB8AB" stroke-width="1.5" stroke-linejoin="round" stroke-linecap="round"/><polygon points="576.0,496.0 584.0,492.0 584.0,500.0" fill="#BFB8AB"/>
+<rect x="664.2" y="484.0" width="63.7" height="24.0" rx="11.0" fill="#10110F"/>
+<text x="696.0" y="500.0" font-size="13" font-weight="400" fill="#BFB8AB" text-anchor="middle">shipped</text>
+<rect x="0.0" y="0.0" width="224.0" height="80.0" rx="6.0" fill="#1F201C" stroke="#4C4E45" stroke-width="1.5"/>
+<text x="112.0" y="34.0" font-size="16" font-weight="600" fill="#F3F1EB" text-anchor="middle">Plan</text>
+<text x="112.0" y="56.0" font-size="13" font-weight="400" fill="#BFB8AB" text-anchor="middle">dev plan new · Superpowers</text>
+<rect x="352.0" y="0.0" width="224.0" height="80.0" rx="6.0" fill="#1F201C" stroke="#4C4E45" stroke-width="1.5"/>
+<text x="464.0" y="34.0" font-size="16" font-weight="600" fill="#F3F1EB" text-anchor="middle">Task</text>
+<text x="464.0" y="56.0" font-size="13" font-weight="400" fill="#BFB8AB" text-anchor="middle">dev task add · start</text>
+<rect x="704.0" y="0.0" width="224.0" height="80.0" rx="6.0" fill="#1F201C" stroke="#4C4E45" stroke-width="1.5"/>
+<text x="816.0" y="34.0" font-size="16" font-weight="600" fill="#F3F1EB" text-anchor="middle">Build</text>
+<text x="816.0" y="56.0" font-size="13" font-weight="400" fill="#BFB8AB" text-anchor="middle">dev progress · required skills</text>
+<rect x="0.0" y="152.0" width="224.0" height="80.0" rx="6.0" fill="#1F201C" stroke="#4C4E45" stroke-width="1.5"/>
+<text x="112.0" y="186.0" font-size="16" font-weight="600" fill="#F3F1EB" text-anchor="middle">Test gate</text>
+<text x="112.0" y="208.0" font-size="13" font-weight="400" fill="#BFB8AB" text-anchor="middle">dev ci · dev sec scan</text>
+<rect x="352.0" y="152.0" width="224.0" height="80.0" rx="6.0" fill="#1F201C" stroke="#4C4E45" stroke-width="1.5"/>
+<text x="464.0" y="186.0" font-size="16" font-weight="600" fill="#F3F1EB" text-anchor="middle">Review · PR</text>
+<text x="464.0" y="208.0" font-size="13" font-weight="400" fill="#BFB8AB" text-anchor="middle">/code-review · communicating</text>
+<rect x="704.0" y="152.0" width="224.0" height="80.0" rx="6.0" fill="#1F201C" stroke="#4C4E45" stroke-width="1.5"/>
+<text x="816.0" y="186.0" font-size="16" font-weight="600" fill="#F3F1EB" text-anchor="middle">Integrate</text>
+<text x="816.0" y="208.0" font-size="13" font-weight="400" fill="#BFB8AB" text-anchor="middle">one branch · delivery</text>
+<rect x="0.0" y="304.0" width="224.0" height="80.0" rx="6.0" fill="#FFB34A" stroke="#FFB34A" stroke-width="2"/>
+<text x="112.0" y="338.0" font-size="16" font-weight="600" fill="#272820" text-anchor="middle">Release</text>
+<text x="112.0" y="360.0" font-size="13" font-weight="400" fill="#272820" text-anchor="middle">dev delivery · release-policy</text>
+<rect x="352.0" y="304.0" width="224.0" height="80.0" rx="6.0" fill="#1F201C" stroke="#4C4E45" stroke-width="1.5"/>
+<text x="464.0" y="338.0" font-size="16" font-weight="600" fill="#F3F1EB" text-anchor="middle">CI status</text>
+<text x="464.0" y="360.0" font-size="13" font-weight="400" fill="#BFB8AB" text-anchor="middle">dev ci status --watch</text>
+<rect x="704.0" y="304.0" width="224.0" height="80.0" rx="6.0" fill="#1F201C" stroke="#4C4E45" stroke-width="1.5"/>
+<text x="816.0" y="338.0" font-size="16" font-weight="600" fill="#F3F1EB" text-anchor="middle">Deploy</text>
+<text x="816.0" y="360.0" font-size="13" font-weight="400" fill="#BFB8AB" text-anchor="middle">tag → pipeline · GitOps</text>
+<rect x="352.0" y="456.0" width="224.0" height="80.0" rx="6.0" fill="#293235" stroke="#8EA3AB" stroke-width="1.5"/>
+<text x="464.0" y="490.0" font-size="16" font-weight="600" fill="#F3F1EB" text-anchor="middle">Handoff</text>
+<text x="464.0" y="512.0" font-size="13" font-weight="400" fill="#A4B4B9" text-anchor="middle">handoff skill · dev sync</text>
+</g>
+</g>
+</svg>

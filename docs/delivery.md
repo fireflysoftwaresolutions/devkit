@@ -10,6 +10,75 @@ again. devkit's method, which the global instructions and the devkit `delivery` 
   <img src="images/diagrams/delivery-light.svg" alt="Local-first delivery: feature branches are merged on one local integration branch and checked with the local equivalent of CI; only a green local run is pushed once as one PR, so CI runs once; a red CI run is reproduced and fixed locally; a green run is merged, tagged with a CalVer version, released, and verified." width="100%">
 </picture>
 
+## The delivery policy
+
+Every project has one recorded way to version, test, release, and ship: its delivery policy. devkit detects what the
+repository does today, recommends a policy that keeps what works, and records the one you choose in the handoff
+repository, where every session sees it and the guard enforces it.
+
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="images/diagrams/delivery-policy-dark.svg">
+  <img src="images/diagrams/delivery-policy-light.svg" alt="Delivery policy: dev delivery detects what the repository does today and recommends a policy that keeps what works, listing the gaps; dev delivery apply records it with a reason in policies/<scope>.json, versioned with its history, and --tasks opens a work item per gap; every session sees the policy, the guard refuses tags that break it, and releases follow it." width="100%">
+</picture>
+
+### Detect and recommend
+
+```bash
+dev delivery            # detected · recorded or recommended policy · gaps, each with its fix
+dev delivery --json     # the same, for tools and agents
+```
+
+devkit reads the repository:
+
+| It looks at | For example |
+| --- | --- |
+| Version tags and version files | `v26.11.0` tags; `package.json`, `pom.xml`, `pyproject.toml`, `composer.json`, `gradle.properties`, `build.gradle.kts`, `Cargo.toml`, `VERSION` |
+| Release tools | `release-please`, `semantic-release`, `goreleaser`, `git-cliff`, `changesets`, `bump-my-version`, `commitizen`, `maven-release-plugin` |
+| Changelog | `CHANGELOG.md` in Keep a Changelog format, or another changelog file |
+| CI and the test gate | GitHub Actions, GitLab CI, Bitbucket Pipelines, Azure Pipelines, Jenkins; the commands CI runs |
+| Branch model | Trunk-based, GitFlow (`develop`), release branches |
+| What it publishes and deploys | Maven, npm, PyPI, Packagist, container images; GitHub Pages, Kubernetes, containers, platform configs |
+
+Then it recommends, keeping what works:
+
+| Situation | Versioning |
+| --- | --- |
+| The repository already has a consistent scheme | Keep it |
+| A library others depend on (it publishes to Maven, npm, PyPI, or Packagist) | SemVer, `vMAJOR.MINOR.PATCH`, bumped from Conventional Commits |
+| An app, service, platform, or internal tool | CalVer, `vYY.MM.PATCH` (`dev calver --next`) |
+| Projects that release together as one set | A release train on their initiative (`-i <slug>`) |
+
+The gaps are what stands between the project and a release you can trust, by severity: no recorded policy, no CI,
+no test gate (high); no version scheme, no changelog, artifacts published without a release workflow (medium); a
+version file out of step with the tags, a long-lived `develop` branch (low).
+
+### Record it
+
+```bash
+dev delivery apply --why "first release policy: service, CalVer, Maven verify gate" --tasks
+dev delivery apply --set versioning=semver --set test_gate="./mvnw -B verify" --why "it is a library now"
+```
+
+`dev delivery apply` writes `policies/<project id>.json` (or `policies/initiatives/<slug>.json`) in the handoff
+repository: the versioning and tag format, the version source, the release flow, the changelog, the test gate, the
+CI, the branch model, what it publishes and deploys, the bump rule, and an optional release train. Each change bumps
+the policy's version, adds a history line (who, when, what changed, why), and makes one commit. `--tasks` opens a
+work item for each gap. The guard refuses direct edits of `policies/`.
+
+### What the policy does
+
+- **Every session sees it.** The session context shows the policy in one line: versioning and tag format, release
+  flow, and test gate. A project without one gets a reminder to run `dev delivery` before its first release.
+- **The guard refuses tags that break it.** In a CalVer project, `git tag v2.0.0` is refused with the next version
+  to use (`dev calver --next`); in a SemVer project, a tag that is not `vMAJOR.MINOR.PATCH` is refused. Prefix the
+  command with `DEVKIT_TAG_ANY=1` to tag anyway, or change the policy.
+- **Release work requires the `release-policy` skill.** Requests about releases, tags, version bumps, changelogs and
+  publishing, and changes to `CHANGELOG.md`, `VERSION`, or release-tool configuration, require the `delivery` and
+  `release-policy` skills (see [Skills and plugins › Required skills](skills-and-plugins.md#required-skills)).
+
+devkit records its own policy this way, with CalVer `vYY.MM.PATCH` from `VERSION`, a Keep a Changelog `CHANGELOG.md`,
+and a test gate that compiles the code and runs the suite with Homebrew's Python and with the macOS system Python 3.9.
+
 ## 1. Know the pipeline
 
 ```bash
@@ -54,9 +123,23 @@ Ask the sessions working on those branches to commit locally and stop pushing. N
 after another to see what CI says; the integration PR supersedes them. `dev calver` prints the next version and the
 release branch name when the project uses CalVer.
 
-## 4. When CI fails
+## 4. Follow CI
 
-1. Read the real error: `gh run view <run-id> --log-failed`.
+Watch the single run instead of polling it:
+
+```bash
+dev ci status            # the branch's runs: state, jobs, current step, elapsed, ETA
+dev ci status --watch    # refresh every 15 seconds until nothing runs
+gh pr checks --watch     # the PR's checks, on GitHub
+```
+
+`dev ci status` works with GitHub Actions, GitLab CI, Bitbucket Pipelines and Azure Pipelines; the ETA comes from
+the last successful runs of the same pipeline. The details and the sign-in each host needs are in
+[Commands › dev ci status](commands.md#dev-ci-status---watch---branch-name----all-branches---all-jobs---limit-n---json).
+
+## 5. When CI fails
+
+1. Read the real error: `gh run view <run-id> --log-failed` (`dev ci status` prints the command for a failed run).
 2. Reproduce it locally with the same command and versions, fix it, run the full local suite.
 3. Push once. One fix per push, never a "try this and see."
 4. If the failure truly cannot be reproduced on macOS (Linux-only paths, case-sensitive file system, a CI-only
@@ -68,18 +151,21 @@ release branch name when the project uses CalVer.
    DEVKIT_FLAKY=1 gh run rerun <run-id> --failed
    ```
 
-## 5. Release
+## 6. Release
+
+Release by the recorded policy (see [The delivery policy](#the-delivery-policy)); `dev delivery` shows it.
 
 1. Run `dev sec scan` on the integration branch and fix or justify every finding.
 2. From the verified, green integration branch, merge with the repository's strategy (squash or merge commit). A
    squash message repeats the PR title and says what changed and why in one or two sentences, with no attribution
    lines.
-3. Tag (signed if the project signs tags), push the tag, and create the release with notes from the CHANGELOG:
-   `gh release create vX.Y.Z --notes-file <notes>`. `dev calver` gives the next CalVer version.
+3. Tag with the policy's format (signed if the project signs tags), push the tag, and create the release with
+   notes from the CHANGELOG: `gh release create vX.Y.Z --notes-file <notes>`. `dev calver` gives the next CalVer
+   version.
 4. Download or install the published artifact and smoke-test it.
 5. Update the handoff note (version, what shipped, follow-ups) and mark the tasks done with `dev task done <n>`.
 
-## 6. GitOps rules
+## 7. GitOps rules
 
 - Git is the source of truth for code, configuration, infrastructure, and deployment manifests.
 - Environments change only through merged PRs and tags that pipelines deploy; no manual changes, no drift. An
@@ -91,13 +177,15 @@ release branch name when the project uses CalVer.
 
 ## How the guard enforces it
 
-| Rule | Behaviour |
+| Rule | Behavior |
 | --- | --- |
 | Push budget | The third push of the same branch within 60 minutes is denied with instructions to reproduce locally. Prefix the push with `DEVKIT_LOCAL_CI_PASSED=1` only when the full local suite has just passed in the session. |
 | Blind re-runs | `gh run rerun` is denied unless prefixed with `DEVKIT_FLAKY=1`. |
 | Force pushes | Plain `--force`, `-f`, and `+refspec` are denied; `--force-with-lease` is allowed on your own branch, never to `main` or `master`. |
 | Branch names | A branch that breaks `<type>/<ticket>-<topic>` cannot be created, renamed to, or pushed. |
 | Secrets | A commit that contains a secret found by gitleaks is denied. |
+| Tags | A tag that breaks the recorded delivery policy is denied unless prefixed with `DEVKIT_TAG_ANY=1`. |
+| Policies | Direct edits of `policies/` in the handoff repository are denied; use `dev delivery apply`. |
 
 The budget counts push attempts per repository and branch on this machine
 (`~/.local/state/devkit/ci-pushes.json`). The full rules are in [Guard rules](guard.md).

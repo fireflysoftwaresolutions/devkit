@@ -23,13 +23,14 @@ gate), the branch model, and what the project publishes or deploys.
 ## 2. Decide (keep what works; change only with a reason)
 
 | Situation | Versioning | Why |
-|---|---|---|
+| --- | --- | --- |
 | The repository already has a consistent scheme | keep it | consumers and automation depend on it |
 | A library, SDK, framework or package others depend on | **SemVer** `vMAJOR.MINOR.PATCH` | the number tells consumers whether an upgrade can break them |
 | An application, service, platform, internal tool or docs site | **CalVer** `vYY.MM.PATCH` (devkit default) | the date tells everyone how current a deployment is; nobody depends on its API through a version range |
 | Several projects released together (platform, BOM, parent POM) | a **release train** on the initiative | one version and one order for the set; each member keeps its own scheme |
 
 Bumps:
+
 - **CalVer:** `dev calver --next`. `PATCH` restarts at 0 each month: 26.11.0, 26.11.1, then 26.12.0.
 - **SemVer** follows Conventional Commits since the last tag. `BREAKING CHANGE` or `!` bumps major; `feat` bumps
   minor; `fix` and `perf` bump patch. Before 1.0.0, breaking changes bump minor.

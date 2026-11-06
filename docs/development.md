@@ -27,6 +27,9 @@ lib/devkit/
   policy.py             managed settings: diff, repair, the Claude Code lock, project overrides
   security.py           dev sec scan and the pre-commit secret check
   ci.py                 GitHub Actions workflow reader for dev ci
+  cistatus.py           dev ci status: CI/CD runs on GitHub, GitLab, Bitbucket, and Azure, with an ETA
+  delivery.py           dev delivery: detect, recommend, and record a delivery policy; the tag check
+  fs.py                 dev files, find, grep, diff, rm, mv, and cp: token-light and recoverable
   gc.py                 safe disk reclamation
   docs.py               dev docs check
   diagram.py            dev diagram: layout, routing, rendering and validation
@@ -34,6 +37,7 @@ lib/devkit/
   providers.py          Claude Code and Codex status, quota and self-tests
   setup.py              dev install and dev doctor
   wizard.py             dev setup
+  toolchain.py          git hosts and clouds: their CLIs, sign-in checks and Homebrew groups
   codexrpc.py           JSON-RPC client for codex app-server
   art/                  terminal art of the logo
 agents/AGENTS.md        global instructions rendered for Claude Code and Codex
@@ -74,8 +78,10 @@ python3 -m py_compile lib/devkit/*.py && /usr/bin/python3 -m py_compile lib/devk
 
 The tests cover guard decisions, remote parsing and project ids for different hosts, `git status` parsing, the CI
 workflow reader, the status block parser and format score, transcript reading, work items (locks, versions, reasons,
-delegation), plans, progress, and timing, status reports, required skills, the diagram engine, and the docs diagrams
-(stale renders and the width budget), and the dashboard's decisions and escaping. Tests that need state use a
+delegation), plans, progress, and timing, status reports, required skills, the file commands (refusals, the Trash
+and undo, capped output), CI/CD status for every host (against recorded API responses), delivery policies, git
+hosts and clouds, the diagram engine and the docs diagrams (stale renders and the width budget), and the dashboard's
+decisions and escaping. Tests that need state use a
 temporary state folder. GitHub CI runs the same suite on Python 3.9 and 3.13; run it locally first.
 
 ## Adding a command
@@ -96,7 +102,8 @@ temporary state folder. GitHub CI runs the same suite on Python 3.9 and 3.13; ru
 
 devkit follows its own delivery method: integrate locally, run the full suite, push once.
 
-1. Update `VERSION` with the next CalVer version (`dev calver --next`) and add a `CHANGELOG.md` entry.
+1. Follow devkit's recorded delivery policy (`dev delivery`): update `VERSION` with the next CalVer version
+   (`dev calver --next`) and add a `CHANGELOG.md` entry.
 2. Run the tests on both Pythons (see [Running the tests](#running-the-tests)), `dev docs check` and
    `dev diagram check docs/diagrams`.
 3. Run `dev install` on your machine, then `dev doctor` and `dev agents test`; every check must pass.

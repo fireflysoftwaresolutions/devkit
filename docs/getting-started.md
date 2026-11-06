@@ -45,6 +45,8 @@ Codex are installed and signed in. Then it asks a few questions, each with a def
 | Workspace | Development root; private handoff repository (`<you>/handoff`, or a shared one) |
 | Agents | Configure Claude Code? Codex? Claude Code's permission mode (`bypassPermissions` recommended, `acceptEdits`, `default`); Codex's autonomy (`full` recommended, or `workspace`, sandboxed) |
 | Stacks | Java and Spring, Python, PHP, Node, and TypeScript (Angular, React) |
+| Git hosts and CI/CD | GitHub (always), GitLab, Bitbucket, Azure DevOps; the ones this Mac already shows are preselected |
+| Cloud and infrastructure | AWS, Microsoft Azure, Google Cloud, DigitalOcean, Kubernetes and Helm, OpenTofu or Terraform; preselected from the config folders and CLIs it finds |
 | Docker on Colima | VM CPUs, memory, disk; start Colima at login? |
 | Automation | Reclaim disk automatically? Background sync interval; lock Claude Code settings with a managed-settings file? |
 
@@ -54,7 +56,7 @@ if you chose to, and runs `dev doctor`.
 
 | Package group | Installed | Contents |
 | --- | --- | --- |
-| core | always | git, gh, jq, ripgrep, git-cliff, fzf, Python, Node |
+| core | always | git, gh, jq, ripgrep, fd, ast-grep, difftastic, git-cliff, fzf, Python, Node |
 | docker | always | Colima, Lima, the Docker CLI, Compose, Buildx, the keychain credential helper |
 | agents | always | Codex; Claude Code through its official installer when it is missing |
 | docs | always | Vale, lychee, markdownlint-cli2, the Manrope font |
@@ -63,6 +65,10 @@ if you chose to, and runs `dev doctor`.
 | node | with the Node stack | pnpm, TypeScript, typescript-language-server, the Angular CLI, the Playwright CLI (with its skills) |
 | java | with the Java stack | OpenJDK, Maven, Gradle, jdtls |
 | php | with the PHP stack | PHP, Composer, Intelephense |
+| gitlab | with GitLab | glab |
+| azure-devops | with Azure DevOps | the Azure CLI and its `azure-devops` extension |
+| aws · azure · gcp · digitalocean | with that cloud | the AWS CLI · the Azure CLI · the Google Cloud CLI · doctl |
+| kubernetes · terraform | with that tool | kubectl and Helm · OpenTofu |
 
 The groups are marked `# @group` in the [Brewfile](../Brewfile) and in
 [`config/npm-globals.txt`](../config/npm-globals.txt).
@@ -74,6 +80,7 @@ The groups are marked `# @group` in the [Brewfile](../Brewfile) and in
 | Step | Effect |
 | --- | --- |
 | `config` | Creates `~/.config/devkit/config.json` if it is missing, and the workspace folders |
+| `tools` | Installs the Homebrew and npm packages that are missing for your stacks, git hosts, and clouds, and the Azure DevOps CLI extension (only reports them when `packages.auto` is off) |
 | `cli` | Links `~/.local/bin/dev` and adds a managed block to `~/.zshrc` that sources `shell/devkit.zsh` |
 | `git` | Sets `user.name` and `user.email` from your GitHub account, makes `gh` git's credential helper, includes the shared git defaults, and the global ignore file |
 | `handoff` | Clones your handoff repository, or creates it as a private GitHub repository and pushes the first commit; writes the multi-machine merge rules |
@@ -122,6 +129,7 @@ dev adopt ~/somewhere/old-repo   # move repositories that are not in the layout 
 dev docker up                    # if you use containers or Testcontainers
 dev overview                     # initiatives and projects at a glance
 dev team                         # who is working on what, if you share a handoff repository
+dev delivery                     # in each project: its release policy and gaps (dev delivery apply records one)
 dcd <repo> && claude             # or codex: the session starts with the project's context
 ```
 
@@ -161,7 +169,7 @@ each).
 | `~/.docker/config.json` | `cliPluginsExtraDirs`, `credsStore` | Remove the keys |
 | `~/Library/LaunchAgents/com.devkit.sync.plist` | The background sync job | `launchctl bootout gui/$UID/com.devkit.sync` and delete the file |
 | `~/.config/devkit/` | Your configuration and personal rules | Delete it |
-| `~/.local/state/devkit/` | Caches, locks, session records, runs and timing, the latest status per project, logs, the canary log, the dashboard, backups | Delete it |
+| `~/.local/state/devkit/` | Caches, locks, session records, runs and timing, the latest status per project, logs, the canary log, the dashboard, the `dev rm` manifest (`trash.jsonl`), backups | Delete it |
 | `~/.local/share/devkit/` | Fetched third-party skills (`skills-src/`, `skills/`) and the Vale styles | Delete it |
 | Claude Code and Codex plugins and MCP servers | Installed and enabled | `claude plugin disable <name>`, `claude mcp remove -s user <name>`, `codex plugin remove <name>` |
 

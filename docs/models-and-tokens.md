@@ -86,6 +86,22 @@ a change.
 devkit owns the profile and role files it writes. Removing a profile from the configuration does not delete its file;
 delete `~/.codex/<name>.config.toml` yourself.
 
+## Token-light commands
+
+Reading a whole tree, a long search result, or a full diff costs context that the next turns pay for again. devkit's
+file commands give agents the same facts in fewer tokens, with every list capped and an explicit `+N more — narrow
+with …` line instead of silent truncation:
+
+| Instead of | Use | What changes |
+| --- | --- | --- |
+| `ls -R`, `tree` | `dev files [path] -d 2` | Folders first, counts and sizes, git markers, build output and `.git` folded |
+| `find` | `dev find <pattern>` | Respects `.gitignore`, smart case, filters by extension, change, age, and size |
+| `grep -r` | `dev grep <regex>` | `file:line: text`, trimmed to one line, five matches per file, structural search with `--ast` |
+| `git diff` | `dev diff` | Changed files first, one line of context, and lock and generated files folded |
+| `rm`, `mv`, `cp` | `dev rm`, `dev mv`, `dev cp` | Safe and recoverable: the Trash, `dev rm --undo`, no silent overwrite |
+
+Every command accepts `--json` where a structured answer helps, and the details are in [Commands › Files](commands.md#files).
+
 ## The rules agents follow
 
 The `working-efficiently` skill, and a short section of the global instructions, tell both agents how to spend

@@ -8,7 +8,7 @@ description: How to work with the ~/Development layout and the `dev` CLI — clo
 ## Layout
 
 | What | Where | Command |
-|---|---|---|
+| --- | --- | --- |
 | GitHub repo | `~/Development/<owner>/<repo>` (lowercase) | `dev clone <owner/repo>` |
 | GitLab, Bitbucket, Azure DevOps, self-hosted | `~/Development/<host>/<group>/<…>/<repo>` | `dev clone <https-or-ssh-url>` |
 | No remote yet | `~/Development/_local/<name>` | `dev new <name>` (`--github` creates it on GitHub) |

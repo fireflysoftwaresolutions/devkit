@@ -51,6 +51,7 @@ exist in the dev root.
 | --- | --- |
 | A file under `items/`, `sessions/`, or `presence/` | deny → `dev task add\|start\|done\|edit\|move\|cancel --why …`, `dev handoff --log "…"` |
 | `PROJECTS.md`, `TASKS.md`, `ACTIVITY.md`, `registry.json`, or anything under `log/` | deny → `dev sync` generates them; edit the note instead |
+| A file under `policies/` | deny → `dev delivery apply --set key=value --why "…"` |
 | `projects/<other project>.md` from a session in another project | deny |
 | `plans/<other project>/…` from a session in another project | deny |
 | `initiatives/<slug>/…` from a project that is not a member of that initiative | deny → `dev initiative add <slug> <project>` from a portfolio session |
@@ -92,6 +93,7 @@ If devkit really should be off somewhere, change devkit's own configuration (see
 | `git clean` with `-x` or `-X` | deny (it deletes `.env`, local config and caches) |
 | `git reset --hard` with uncommitted changes to tracked files | deny |
 | `git commit` when gitleaks finds a secret in what the commit is about to record: the staged changes, plus any `git add` earlier in the same command, or every tracked change with `commit -a` | deny, with the rule, file, and line of each finding |
+| `git tag <name>` that breaks the project's recorded delivery policy (a non-CalVer tag in a CalVer project, a non-SemVer tag in a SemVer project) | deny, with the version to use, unless prefixed `DEVKIT_TAG_ANY=1` |
 | `git commit`, `tag`, `merge`, or `notes` whose message (inline or `-F` file) contains AI attribution | deny |
 | `git init <dir>` that breaks the layout | deny |
 
@@ -140,9 +142,24 @@ apply the same rule. Change the lists with `branches.types` and `branches.forbid
 | `mkdir`, `touch`, and the destination of `cp`, `mv`, `rsync`, or `ditto`, when they break the layout | deny |
 | `cp`, `mv`, and the like to a backup-style filename inside the dev root | deny |
 
-Removing `node_modules`, `dist`, and other folders inside a repository is allowed.
+### Deleting and overwriting files
 
-<!-- TODO(devkit-docs): files-and-git — add the safe file commands (dev rm, mv, cp) once they are merged. -->
+Outside scratch areas, permanent deletes and silent overwrites go through `dev rm`, `dev mv`, and `dev cp`, which
+use the Trash, keep a manifest for `dev rm --undo`, stage tracked deletions like `git rm`, and refuse open files and
+unsaved work (see [Commands › Files](commands.md#files)).
+
+| Command | Decision |
+| --- | --- |
+| `rm <path>` or `unlink <path>` | deny → `dev rm <path>` |
+| `find … -delete`, or `find … -exec rm` | deny → list the matches with `dev find`, then `dev rm` them |
+| `xargs rm` | deny → `dev rm` |
+| `git clean -f` (without `-n`) when it would delete untracked paths | deny → review with `git clean -n`, then `dev rm --discard <paths>` |
+| `cp` or `mv` onto an existing file, without `-n` or `-i` | deny → `dev cp` or `dev mv` (with `--force`, the old version goes to the Trash) |
+
+These stay allowed: build output (`node_modules`, `dist`, `build`, `target`, `.venv`, `__pycache__`, caches and
+coverage folders), anything in a temp folder or the scratchpad, `rm` in a temp folder, and paths built from shell
+variables the guard cannot see (`$VAR`, `$(…)`). Prefix the command with `DEVKIT_RAW_FS=1` to bypass these rules for
+that command; the protected paths in the previous table stay protected.
 
 ## Example messages
 
@@ -157,6 +174,10 @@ change, not who made it: `<type>/<ticket>-<topic>` (…). Rename it: `git branch
 `items/acme/api/T-fwk7a2q1x9m.md` is managed by devkit so that versions, locks, history and attribution stay
 correct. Use `dev task add|start|done|edit|move|cancel --why …` for work items and `dev handoff --log "…"` for the
 session log.
+
+`rm notes.txt` deletes permanently. Use `dev rm <paths>` instead: it moves them to the Trash with a manifest
+(`dev rm --undo` restores them), refuses files that are open or hold unsaved work, stages tracked deletions like
+`git rm`, and tells you the exact flag when you really mean it. To bypass, prefix the command with DEVKIT_RAW_FS=1.
 
 This would be push #3 of `feat/x` in the last hour, and every push runs CI again. Stop the push-and-see loop: read
 the failing log (`gh run view --log-failed`), run what CI runs locally (`dev ci` shows the exact commands), fix,
@@ -180,6 +201,8 @@ The guard sees the command text, not the inner commands of `$( … )` substituti
 | `DEVKIT_LOCAL_CI_PASSED=1 git push …` | one push | The full local suite has just passed in this session |
 | `DEVKIT_FLAKY=1 gh run rerun …` | one re-run | The failure is a proven flaky test, recorded in the handoff note |
 | `DEVKIT_CROSS_PROJECT=1 dev task …` | one command | You asked the session to change another project's records |
+| `DEVKIT_RAW_FS=1 rm …` | one command | A permanent delete or an overwrite is really what you want |
+| `DEVKIT_TAG_ANY=1 git tag …` | one command | A tag outside the delivery policy is intended (or change the policy) |
 | `DEVKIT_SKIP_SECRET_SCAN=1 claude` | the whole session | gitleaks reports false positives you cannot mark |
 | `DEVKIT_GUARD=off claude` (or `codex`) | the whole session | A session genuinely needs the guard off |
 

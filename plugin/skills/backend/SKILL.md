@@ -37,7 +37,7 @@ Apply what fits the change; follow the repository's existing conventions where t
 ## Testing
 
 | Layer | What | Tools |
-|---|---|---|
+| --- | --- | --- |
 | Unit | domain rules, edge cases | JUnit 5 + AssertJ · pytest · PHPUnit/Pest · Vitest/Jest |
 | Integration | repositories, migrations, messaging against real services | Testcontainers (Postgres, MySQL, Kafka, Redis…) |
 | API / contract | request/response shape and status codes | Spring MockMvc/WebTestClient · FastAPI TestClient · Laravel HTTP tests · supertest |

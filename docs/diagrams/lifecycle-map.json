@@ -1,0 +1,30 @@
+{
+  "name": "lifecycle-map",
+  "kind": "flow",
+  "title": "From plan to operate",
+  "desc": "The development lifecycle with devkit, stage by stage, with the command and skill for each: plan with dev plan new and Superpowers; track the task with dev task; build with dev progress and the required skills; pass the local test gate with dev ci and dev sec scan; review with /code-review and the communicating templates; integrate on one branch with the delivery skill; release by the recorded policy with dev delivery and the release-policy skill; follow CI with dev ci status; deploy through a tag and its pipeline; and hand off with the handoff skill and dev sync. Each stage feeds the next, so there is no gap between plan and operate.",
+  "equal_widths": "all",
+  "nodes": [
+    {"id": "plan", "label": "Plan", "sub": "dev plan new · Superpowers", "col": 0, "row": 0},
+    {"id": "task", "label": "Task", "sub": "dev task add · start", "col": 1, "row": 0},
+    {"id": "build", "label": "Build", "sub": "dev progress · required skills", "col": 2, "row": 0},
+    {"id": "gate", "label": "Test gate", "sub": "dev ci · dev sec scan", "col": 0, "row": 1},
+    {"id": "review", "label": "Review · PR", "sub": "/code-review · communicating", "col": 1, "row": 1},
+    {"id": "integrate", "label": "Integrate", "sub": "one branch · delivery", "col": 2, "row": 1},
+    {"id": "release", "label": "Release", "sub": "dev delivery · release-policy", "col": 0, "row": 2, "emphasis": true},
+    {"id": "ci", "label": "CI status", "sub": "dev ci status --watch", "col": 1, "row": 2},
+    {"id": "deploy", "label": "Deploy", "sub": "tag → pipeline · GitOps", "col": 2, "row": 2},
+    {"id": "handoff", "label": "Handoff", "sub": "handoff skill · dev sync", "col": 1, "row": 3, "family": "slate"}
+  ],
+  "edges": [
+    {"from": "plan", "to": "task", "label": "approved"},
+    {"from": "task", "to": "build", "label": "claimed"},
+    {"from": "build", "to": "gate", "label": "changes", "from_side": "bottom", "to_side": "top", "route": "vh"},
+    {"from": "gate", "to": "review", "label": "green"},
+    {"from": "review", "to": "integrate", "label": "approved"},
+    {"from": "integrate", "to": "release", "label": "one push", "from_side": "bottom", "to_side": "top", "route": "vh"},
+    {"from": "release", "to": "ci", "label": "tag"},
+    {"from": "ci", "to": "deploy", "label": "green"},
+    {"from": "deploy", "to": "handoff", "label": "shipped", "from_side": "bottom", "to_side": "right", "route": "vh"}
+  ]
+}

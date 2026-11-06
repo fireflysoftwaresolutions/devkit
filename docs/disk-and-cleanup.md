@@ -76,6 +76,12 @@ Homebrew caches, the Colima VM disk, and `docker system df`.
 | Codex app worktrees | Managed by the app: it keeps the 15 most recent (Settings → Worktrees), never deletes pinned or running chats; devkit never removes them |
 | Codex sessions | No automatic retention; use `codex archive` / `codex delete` |
 
+## Deleting by hand
+
+`dev rm` moves what you delete to the macOS Trash instead of unlinking it, so it can be restored with `dev rm --undo`
+(see [Commands › Files](commands.md#files)). The space comes back only when the Trash is emptied; `dev gc` never
+empties it. Gitignored build output deleted with `dev rm -r` needs no flag.
+
 ## Saving disk up front
 
 - Worktrees reuse `node_modules` copy-on-write when the lockfile matches (APFS clones cost almost nothing).

@@ -1,11 +1,11 @@
 <svg xmlns="http://www.w3.org/2000/svg" width="1032" height="776" viewBox="0 0 1032 776" role="img" aria-labelledby="dk-title dk-desc">
 <title id="dk-title">Life of a work item</title>
-<desc id="dk-desc">A work item starts as todo when dev task add creates it. dev task start (or claim) takes an 8-hour lock and makes it doing; release or delegate gives the lock back and returns it to todo, and done releases the lock and closes the item. A lock that is not renewed for 8 hours expires: the item stays doing, unlocked, and anyone may claim it. block marks an item blocked, and release returns a blocked item to todo. cancel, with a reason, closes any open item.</desc>
+<desc id="dk-desc">A work item starts as todo when dev task add creates it. dev task start (or claim) takes an 8-hour lock and makes it doing; release or delegate gives the lock back and returns it to todo, and done releases the lock and closes the item. A lock that is not renewed for 8 hours expires: the item stays doing, unlocked, and anyone may claim it. block, with a reason, marks an item blocked, and unblock returns it to todo (or to doing while it is still claimed). cancel, with a reason, closes any open item.</desc>
 <rect width="1032" height="776" fill="#F3F1EB"/>
 <g font-family="Manrope, 'Manrope Variable', system-ui, -apple-system, 'Segoe UI', Arial, sans-serif">
 <circle cx="68" cy="74" r="4" fill="#FFB34A"/>
 <text x="80" y="78.5" font-size="12" font-weight="600" fill="#62645B" letter-spacing="0.48">LIFE OF A WORK ITEM</text>
-<g transform="translate(110.3,84.0)">
+<g transform="translate(111.4,84.0)">
 <rect x="-24.0" y="128.0" width="584.0" height="312.0" rx="12" fill="#EAE7DF" stroke="#D8D4CA" stroke-width="1" stroke-dasharray="6 4"/>
 <text x="-8.0" y="152.0" font-size="12" font-weight="600" fill="#62645B" text-anchor="start" letter-spacing="0.48">OPEN</text>
 <path d="M88.0,44.0 L88.0,176.5" fill="none" stroke="#62645B" stroke-width="1.5" stroke-linejoin="round" stroke-linecap="round"/><polygon points="88.0,184.0 84.0,176.0 92.0,176.0" fill="#62645B"/>
@@ -21,11 +21,11 @@
 <rect x="584.9" y="212.0" width="46.3" height="24.0" rx="11.0" fill="#F3F1EB"/>
 <text x="608.0" y="228.0" font-size="13" font-weight="400" fill="#62645B" text-anchor="middle">done</text>
 <path d="M88.0,264.0 L88.0,328.5" fill="none" stroke="#62645B" stroke-width="1.5" stroke-linejoin="round" stroke-linecap="round"/><polygon points="88.0,336.0 84.0,328.0 92.0,328.0" fill="#62645B"/>
-<rect x="64.1" y="288.0" width="47.7" height="24.0" rx="11.0" fill="#EAE7DF"/>
-<text x="88.0" y="304.0" font-size="13" font-weight="400" fill="#62645B" text-anchor="middle">block</text>
+<rect x="45.7" y="288.0" width="84.7" height="24.0" rx="11.0" fill="#EAE7DF"/>
+<text x="88.0" y="304.0" font-size="13" font-weight="400" fill="#62645B" text-anchor="middle">block --why</text>
 <path d="M0.0,376.0 L-8.0,376.0 Q-16.0,376.0 -16.0,368.0 L-16.0,228.2 Q-16.0,224.0 -11.8,224.0 L-7.5,224.0" fill="none" stroke="#62645B" stroke-width="1.5" stroke-linejoin="round" stroke-dasharray="6 5" stroke-linecap="butt"/><polygon points="0.0,224.0 -8.0,228.0 -8.0,220.0" fill="#62645B"/>
-<rect x="-46.3" y="288.0" width="60.6" height="24.0" rx="11.0" fill="#EAE7DF"/>
-<text x="-16.0" y="304.0" font-size="13" font-weight="400" fill="#62645B" text-anchor="middle">release</text>
+<rect x="-47.4" y="288.0" width="62.8" height="24.0" rx="11.0" fill="#EAE7DF"/>
+<text x="-16.0" y="304.0" font-size="13" font-weight="400" fill="#62645B" text-anchor="middle">unblock</text>
 <path d="M448.0,264.0 L448.0,328.5" fill="none" stroke="#62645B" stroke-width="1.5" stroke-linejoin="round" stroke-linecap="round"/><polygon points="448.0,336.0 444.0,328.0 452.0,328.0" fill="#62645B"/>
 <rect x="404.1" y="288.0" width="87.7" height="24.0" rx="11.0" fill="#EAE7DF"/>
 <text x="448.0" y="304.0" font-size="13" font-weight="400" fill="#62645B" text-anchor="middle">lock expires</text>

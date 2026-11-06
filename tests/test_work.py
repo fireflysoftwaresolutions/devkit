@@ -124,7 +124,7 @@ class PlanTests(unittest.TestCase):
 class TemplateTests(unittest.TestCase):
     def test_task_bodies_by_type(self):
         body = work.task_body("bug", "Login times out on Safari", ["Safari login works", "regression test added"])
-        self.assertIn("## Symptom\nLogin times out on Safari", body)
+        self.assertIn("## Symptom\n\nLogin times out on Safari", body)
         self.assertIn("- [ ] Safari login works\n- [ ] regression test added", body)
         self.assertIn("## Steps to reproduce", body)
         for kind, section in (("feature", "## Why"), ("spike", "## Timebox"), ("task", "## Done when")):

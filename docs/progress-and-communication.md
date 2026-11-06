@@ -91,7 +91,7 @@ Turn them off with `progress.notify: false` in [Configuration](configuration.md)
 
 | Hook | What it does |
 | --- | --- |
-| UserPromptSubmit | Starts the turn clock. When your prompt asks for status, devkit adds the real records to the agent's context (the session's runs with their headline, last update, and running subagents) and asks for the overall status template. It understands English and Spanish phrasings such as `how is it going?`, `where are we`, `what's left`, `status?`, `ETA`, `give me an update`, `¿cómo va?`, or `¿qué falta?` |
+| UserPromptSubmit | Starts the turn clock. When your prompt asks for status, devkit adds the real records to the agent's context (the session's runs with their headline, last update, and running subagents, and the CI/CD runs of the branch with their current job, step, elapsed time, and ETA) and asks for the overall status template. It understands English and Spanish phrasings such as `how is it going?`, `where are we`, `what's left`, `status?`, `ETA`, `give me an update`, `¿cómo va?`, or `¿qué falta?`. Background notifications (subagent results, system notices) are not treated as your request |
 | PostToolUse | Times each tool call and records the ones slower than `progress.slow_tool_seconds` (20). After `progress.nudge_minutes` (8) without an update to you, it reminds the agent to send one and to record it with `dev progress step`, at most six times per turn |
 | SubagentStart, SubagentStop | Track running subagents (shown in progress and status answers) and record how long each one took |
 | Stop | Records the turn's duration and sends the long-turn notification |
@@ -99,6 +99,18 @@ Turn them off with `progress.notify: false` in [Configuration](configuration.md)
 The same UserPromptSubmit hook is also a safety net: a session that never ran SessionStart (a hook failure, an
 untrusted Codex hook, an old client) is registered at its first prompt and receives the full devkit context then.
 See [Agents › Hooks](agents.md#hooks).
+
+## Pipelines
+
+When the work has CI/CD pipelines, agents report them in progress updates and status answers, one line per run:
+
+```text
+CI/CD: ci #142 running · job tests (Python 3.13) step 4/7 "Unit tests" · 12m elapsed · ETA ~6m · <link>
+```
+
+`dev ci status` gives them the facts for GitHub Actions, GitLab CI, Bitbucket Pipelines, and Azure Pipelines, with
+an ETA from the last successful runs, and `dev ci status --watch` follows a run to the end instead of polling (see
+[Commands › dev ci status](commands.md#dev-ci-status---watch---branch-name----all-branches---all-jobs---limit-n---json)).
 
 ## Where the time goes: `dev time`
 
@@ -122,7 +134,7 @@ five lines, and honest estimates given as ranges.
 | --- | --- | --- |
 | Kickoff | Before any task longer than a few minutes | Plan with the estimate and steps; checks, risks, what it needs from you |
 | Progress update | After each step, every 8–10 minutes of tool work, when background work finishes | Headline with steps, elapsed, estimate, and ETA; done, now, next, blockers |
-| Status answer | When you ask "how is it going?" or "what's left?" | A one-line verdict, a table per workstream (state, evidence, ETA), what is left, risks, what it needs from you |
+| Status answer | When you ask "how is it going?" or "what's left?" | A one-line verdict, a table per workstream (state, evidence, ETA), the CI/CD pipelines (state, current job and step, elapsed, ETA), what is left, risks, what it needs from you |
 | Background work | When subagents, parallel sessions, or long commands start and end | What runs, what it produces, and when; then the result in one or two lines |
 | Decision request | Only for decisions that are yours: scope, behavior, cost, risk, irreversible, or external effects | Context, options with gains, costs, and effort, a recommendation, and what it does if you do not answer |
 | Explanation | When you need to understand something | The answer in one sentence, how it works, an example from your code, what it means for you, where to read more |

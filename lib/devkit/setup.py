@@ -349,6 +349,9 @@ def _install_skills():
             shutil.copytree(s, out, symlinks=True)
             (out / ".devkit-source").write_text(f"{src['repo']}@{src['ref']} {rel} license={src.get('license')}\n")
             wanted[name] = out
+    pw = SKILLS_SHARE / "playwright-cli"  # installed by the packages step from `playwright-cli install --skills`
+    if (pw / "SKILL.md").exists():
+        wanted["playwright-cli"] = pw
     managed_f = STATE / "skills-managed.json"
     previous = set(read_json(managed_f, []) or [])
     for home in (CLAUDE_HOME / "skills", AGENTS_HOME / "skills"):

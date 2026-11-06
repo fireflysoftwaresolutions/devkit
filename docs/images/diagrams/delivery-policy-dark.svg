@@ -1,0 +1,72 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1024" height="1016" viewBox="0 0 1024 1016" role="img" aria-labelledby="dk-title dk-desc">
+<title id="dk-title">Delivery policy</title>
+<desc id="dk-desc">dev delivery detects what a repository does today (version tags and files, release tools, changelog, CI, the test gate, branches, what it publishes and deploys), recommends a policy that keeps what works, and lists the gaps. dev delivery apply records the policy with a reason in policies/&lt;scope&gt;.json in the handoff repository, versioned with its history, and --tasks opens a work item for each gap. Every session then sees the policy in its context, the guard refuses tags that break it, and releases follow it with dev calver and the release-policy skill.</desc>
+<rect width="1024" height="1016" fill="#10110F"/>
+<g font-family="Manrope, 'Manrope Variable', system-ui, -apple-system, 'Segoe UI', Arial, sans-serif">
+<circle cx="68" cy="74" r="4" fill="#FFB34A"/>
+<text x="80" y="78.5" font-size="12" font-weight="600" fill="#BFB8AB" letter-spacing="0.48">DELIVERY POLICY</text>
+<text x="922.2" y="78.5" font-size="13" font-weight="400" fill="#BFB8AB">stored</text>
+<g transform="translate(890.2,74)"><rect x="0" y="-7" width="24" height="14" rx="3" fill="#293235" stroke="#8EA3AB" stroke-width="1.5"/></g>
+<text x="830.7" y="78.5" font-size="13" font-weight="400" fill="#BFB8AB">devkit</text>
+<g transform="translate(798.7,74)"><rect x="0" y="-7" width="24" height="14" rx="3" fill="#2C2416" stroke="#FFB34A" stroke-width="1.5"/></g>
+<g transform="translate(68.0,104.0)">
+<path d="M424.0,80.0 L424.0,144.5" fill="none" stroke="#BFB8AB" stroke-width="1.5" stroke-linejoin="round" stroke-linecap="round"/><polygon points="424.0,152.0 420.0,144.0 428.0,144.0" fill="#BFB8AB"/>
+<rect x="399.0" y="104.0" width="50.0" height="24.0" rx="11.0" fill="#10110F"/>
+<text x="424.0" y="120.0" font-size="13" font-weight="400" fill="#BFB8AB" text-anchor="middle">reads</text>
+<path d="M424.0,232.0 L424.0,296.5" fill="none" stroke="#BFB8AB" stroke-width="1.5" stroke-linejoin="round" stroke-linecap="round"/><polygon points="424.0,304.0 420.0,296.0 428.0,296.0" fill="#BFB8AB"/>
+<rect x="365.4" y="256.0" width="117.2" height="24.0" rx="11.0" fill="#10110F"/>
+<text x="424.0" y="272.0" font-size="13" font-weight="400" fill="#BFB8AB" text-anchor="middle">keep what works</text>
+<path d="M532.0,192.0 L780.0,192.0 Q792.0,192.0 792.0,204.0 L792.0,296.5" fill="none" stroke="#BFB8AB" stroke-width="1.5" stroke-linejoin="round" stroke-linecap="round"/><polygon points="792.0,304.0 788.0,296.0 796.0,296.0" fill="#BFB8AB"/>
+<rect x="609.5" y="180.0" width="105.1" height="24.0" rx="11.0" fill="#10110F"/>
+<text x="662.0" y="196.0" font-size="13" font-weight="400" fill="#BFB8AB" text-anchor="middle">missing pieces</text>
+<path d="M424.0,384.0 L424.0,448.5" fill="none" stroke="#BFB8AB" stroke-width="1.5" stroke-linejoin="round" stroke-linecap="round"/><polygon points="424.0,456.0 420.0,448.0 428.0,448.0" fill="#BFB8AB"/>
+<rect x="383.1" y="408.0" width="81.8" height="24.0" rx="11.0" fill="#10110F"/>
+<text x="424.0" y="424.0" font-size="13" font-weight="400" fill="#BFB8AB" text-anchor="middle">you decide</text>
+<path d="M792.0,384.0 L792.0,448.5" fill="none" stroke="#BFB8AB" stroke-width="1.5" stroke-linejoin="round" stroke-linecap="round"/><polygon points="792.0,456.0 788.0,448.0 796.0,448.0" fill="#BFB8AB"/>
+<rect x="763.7" y="408.0" width="56.7" height="24.0" rx="11.0" fill="#10110F"/>
+<text x="792.0" y="424.0" font-size="13" font-weight="400" fill="#BFB8AB" text-anchor="middle">--tasks</text>
+<path d="M424.0,536.0 L424.0,604.5" fill="none" stroke="#BFB8AB" stroke-width="1.5" stroke-linejoin="round" stroke-linecap="round"/><polygon points="424.0,612.0 420.0,604.0 428.0,604.0" fill="#BFB8AB"/>
+<rect x="380.9" y="562.0" width="86.2" height="24.0" rx="11.0" fill="#10110F"/>
+<text x="424.0" y="578.0" font-size="13" font-weight="400" fill="#BFB8AB" text-anchor="middle">one commit</text>
+<path d="M316.0,656.0 L92.0,656.0 Q80.0,656.0 80.0,668.0 L80.0,760.5" fill="none" stroke="#BFB8AB" stroke-width="1.5" stroke-linejoin="round" stroke-linecap="round"/><polygon points="80.0,768.0 76.0,760.0 84.0,760.0" fill="#BFB8AB"/>
+<rect x="151.9" y="644.0" width="92.3" height="24.0" rx="11.0" fill="#10110F"/>
+<text x="198.0" y="660.0" font-size="13" font-weight="400" fill="#BFB8AB" text-anchor="middle">session start</text>
+<path d="M424.0,700.0 L424.0,760.5" fill="none" stroke="#BFB8AB" stroke-width="1.5" stroke-linejoin="round" stroke-linecap="round"/><polygon points="424.0,768.0 420.0,760.0 428.0,760.0" fill="#BFB8AB"/>
+<rect x="397.4" y="722.0" width="53.1" height="24.0" rx="11.0" fill="#10110F"/>
+<text x="424.0" y="738.0" font-size="13" font-weight="400" fill="#BFB8AB" text-anchor="middle">git tag</text>
+<path d="M532.0,656.0 L780.0,656.0 Q792.0,656.0 792.0,668.0 L792.0,760.5" fill="none" stroke="#BFB8AB" stroke-width="1.5" stroke-linejoin="round" stroke-linecap="round"/><polygon points="792.0,768.0 788.0,760.0 796.0,760.0" fill="#BFB8AB"/>
+<rect x="617.4" y="644.0" width="89.3" height="24.0" rx="11.0" fill="#10110F"/>
+<text x="662.0" y="660.0" font-size="13" font-weight="400" fill="#BFB8AB" text-anchor="middle">next version</text>
+<rect x="316.0" y="0.0" width="216.0" height="80.0" rx="6.0" fill="#293235" stroke="#8EA3AB" stroke-width="1.5"/>
+<text x="424.0" y="34.0" font-size="16" font-weight="600" fill="#F3F1EB" text-anchor="middle">Repository</text>
+<text x="424.0" y="56.0" font-size="13" font-weight="400" fill="#A4B4B9" text-anchor="middle">tags · version files · CI · tools</text>
+<rect x="316.0" y="152.0" width="216.0" height="80.0" rx="6.0" fill="#2C2416" stroke="#FFB34A" stroke-width="1.5"/>
+<text x="424.0" y="186.0" font-size="16" font-weight="600" fill="#F3F1EB" text-anchor="middle">Detect</text>
+<text x="424.0" y="208.0" font-size="13" font-weight="400" fill="#FFB34A" text-anchor="middle">dev delivery</text>
+<rect x="316.0" y="304.0" width="216.0" height="80.0" rx="6.0" fill="#2C2416" stroke="#FFB34A" stroke-width="1.5"/>
+<text x="424.0" y="338.0" font-size="16" font-weight="600" fill="#F3F1EB" text-anchor="middle">Recommend</text>
+<text x="424.0" y="360.0" font-size="13" font-weight="400" fill="#FFB34A" text-anchor="middle">keep · SemVer · CalVer</text>
+<rect x="692.0" y="304.0" width="200.0" height="80.0" rx="6.0" fill="#1F201C" stroke="#4C4E45" stroke-width="1.5"/>
+<text x="792.0" y="338.0" font-size="16" font-weight="600" fill="#F3F1EB" text-anchor="middle">Gaps</text>
+<text x="792.0" y="360.0" font-size="13" font-weight="400" fill="#BFB8AB" text-anchor="middle">each with its fix</text>
+<rect x="316.0" y="456.0" width="216.0" height="80.0" rx="6.0" fill="#FFB34A" stroke="#FFB34A" stroke-width="2"/>
+<text x="424.0" y="490.0" font-size="16" font-weight="600" fill="#272820" text-anchor="middle">Record</text>
+<text x="424.0" y="512.0" font-size="13" font-weight="400" fill="#272820" text-anchor="middle">dev delivery apply --why</text>
+<rect x="692.0" y="456.0" width="200.0" height="80.0" rx="6.0" fill="#293235" stroke="#8EA3AB" stroke-width="1.5"/>
+<text x="792.0" y="490.0" font-size="16" font-weight="600" fill="#F3F1EB" text-anchor="middle">Work items</text>
+<text x="792.0" y="512.0" font-size="13" font-weight="400" fill="#A4B4B9" text-anchor="middle">one per gap</text>
+<path d="M316.0,620.0 A108.0,8 0 0 1 532.0,620.0 L532.0,692.0 A108.0,8 0 0 1 316.0,692.0 Z" fill="#293235" stroke="#8EA3AB" stroke-width="1.5"/><path d="M316.0,620.0 A108.0,8 0 0 0 532.0,620.0" fill="none" stroke="#8EA3AB" stroke-width="1.5"/>
+<text x="424.0" y="658.0" font-size="16" font-weight="600" fill="#F3F1EB" text-anchor="middle">policies/&lt;scope&gt;.json</text>
+<text x="424.0" y="680.0" font-size="13" font-weight="400" fill="#A4B4B9" text-anchor="middle">versions · history</text>
+<rect x="-4.0" y="768.0" width="168.0" height="80.0" rx="6.0" fill="#1F201C" stroke="#4C4E45" stroke-width="1.5"/>
+<text x="80.0" y="802.0" font-size="16" font-weight="600" fill="#F3F1EB" text-anchor="middle">Session context</text>
+<text x="80.0" y="824.0" font-size="13" font-weight="400" fill="#BFB8AB" text-anchor="middle">every session sees it</text>
+<rect x="316.0" y="768.0" width="216.0" height="80.0" rx="6.0" fill="#1F201C" stroke="#4C4E45" stroke-width="1.5"/>
+<text x="424.0" y="802.0" font-size="16" font-weight="600" fill="#F3F1EB" text-anchor="middle">Guard</text>
+<text x="424.0" y="824.0" font-size="13" font-weight="400" fill="#BFB8AB" text-anchor="middle">refuses tags that break it</text>
+<rect x="692.0" y="768.0" width="200.0" height="80.0" rx="6.0" fill="#1F201C" stroke="#4C4E45" stroke-width="1.5"/>
+<text x="792.0" y="802.0" font-size="16" font-weight="600" fill="#F3F1EB" text-anchor="middle">Release</text>
+<text x="792.0" y="824.0" font-size="13" font-weight="400" fill="#BFB8AB" text-anchor="middle">dev calver · release-policy</text>
+</g>
+</g>
+</svg>

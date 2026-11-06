@@ -17,7 +17,7 @@ the sentence. Show the parts the point depends on — the boundary crossed, the 
 leave the rest out. Comparing options? Draw the difference (the edge one option adds or removes), not two lists.
 
 | You need to show | Kind |
-|---|---|
+| --- | --- |
 | Components and how they connect; an architecture; a pipeline | `flow` |
 | Software at C4 levels (person, system, container, component, external) | `c4` |
 | Who calls whom, in what order, over time | `sequence` |
@@ -49,6 +49,7 @@ Commit the spec and both SVGs together; re-render whenever the spec changes (tes
 ## Quality rules
 
 **Layout**
+
 - Choose one reading direction: left → right for flows and pipelines, top → bottom for layers and hierarchies.
   Arrows go with it; the few that go back (failure loops, responses) are dashed.
 - Use the grid. Same-kind nodes share a row or column; leave the default `equal_widths` on (or `"all"` for a calm,
@@ -58,6 +59,7 @@ Commit the spec and both SVGs together; re-render whenever the spec changes (tes
 - Balance whitespace: no node crammed against another, no empty quadrant. Remove nodes before shrinking anything.
 
 **Edges and arrows**
+
 - Every edge has a verb or a payload as its label (`writes`, `JSON/HTTPS`, `on merge`). An unlabeled arrow means
   "related somehow" — remove it or label it.
 - Orthogonal routing with rounded bends is automatic. Help it: put connected nodes in the same row or column so the
@@ -68,6 +70,7 @@ Commit the spec and both SVGs together; re-render whenever the spec changes (tes
 - Never route through a node, a label or a group title; never let labels collide (the validator enforces this).
 
 **Colour and emphasis**
+
 - Colour means something: `neutral` (default), `firefly` (devkit/Firefly-owned), `steel` (third party, external),
   `slate` (data, generated, storage), `olive` (control, automation, metadata), `note`.
 - **Amber is punctuation, never decoration: one focal element per diagram** — either one `emphasis: true` node or one
@@ -75,12 +78,14 @@ Commit the spec and both SVGs together; re-render whenever the spec changes (tes
 - Add a `legend` only when an encoding (family or edge style) repeats and is not self-explanatory.
 
 **Type and text**
+
 - Labels are nouns (2–4 words); `sub` lines are short qualifiers. Two lines at most each; type never below 12 px —
   boxes grow, type never shrinks. Sentences belong in the caption or the surrounding prose.
 - Name things exactly as the reader knows them (command names, file paths, product names); no customer names or
   invented metrics.
 
 **Accessibility and files**
+
 - `title` and `desc` are required; the `alt` of the `<img>` repeats the claim of `desc`.
 - Text contrast ≥ 4.5:1, meaningful marks ≥ 3:1, in both themes (checked).
 - Files: specs in `docs/diagrams/<name>.json`, output `docs/images/diagrams/<name>-{dark,light}.svg`, kebab-case
@@ -89,7 +94,7 @@ Commit the spec and both SVGs together; re-render whenever the spec changes (tes
 ## Validator codes
 
 | Code | Fix |
-|---|---|
+| --- | --- |
 | `overlap` | Move one node to another row/column, or remove it; do not shrink text |
 | `overflow` | Shorten the label, drop the fixed `width`, or let it wrap |
 | `crossing` | Put endpoints in line, change `from_side`/`to_side`, add a `via`, or move the obstacle |

@@ -15,11 +15,17 @@ The first release.
   `~/Development/<host>/<group>/<repo>`, projects without a remote in `_local/`, managed worktrees in `.worktrees/`,
   and scratch files in `.tmp/`. `dev clone`, `dev new`, and `dev adopt` keep repositories in place.
 - **Setup wizard** (`dev setup`, started by `install.sh`): it detects the Mac and both agents; asks for the workspace,
-  the handoff repository (yours or a shared one), the agents and their permission modes, your stacks, the Docker VM,
-  automation and the settings lock; shows the plan; installs only the packages your stacks need; applies the
-  configuration; offers the sign-ins; and runs `dev doctor`. `--yes` accepts every default.
-- **`dev install`**, safe to run again, in steps: `config`, `cli`, `git`, `handoff`, `instructions`, `skills`,
-  `claude`, `codex`, `docker`, `docs`, and `launchd`. `dev update` pulls devkit and applies it again.
+  the handoff repository (yours or a shared one), the agents and their permission modes, your stacks, your git hosts
+  and clouds (preselected from what the Mac already shows), the Docker VM, automation, and the settings lock; shows
+  the plan; installs only the packages you need; applies the configuration; offers the sign-ins; and runs
+  `dev doctor`. `--yes` accepts every default.
+- **Git hosts and clouds:** the configuration keys `hosts` (GitHub, GitLab, Bitbucket, Azure DevOps) and `clouds`
+  (AWS, Azure, Google Cloud, DigitalOcean, Kubernetes, and OpenTofu or Terraform) choose which CLIs devkit installs, from
+  Brewfile groups of the same names, and `dev doctor` checks that each is installed and signed in, with local checks
+  only.
+- **`dev install`**, safe to run again, in steps: `config`, `tools`, `cli`, `git`, `handoff`, `instructions`,
+  `skills`, `claude`, `codex`, `docker`, `docs`, and `launchd`. The `tools` step installs only the packages that are
+  missing for your stacks, git hosts, and clouds (`packages.auto`). `dev update` pulls devkit and applies it again.
 - **`dev doctor`** checks the toolchain, GitHub sign-in and git identity, the workspace and handoff repository, the
   instructions and skills, Claude Code and Codex (settings, hooks, hook trust, plugins, MCP servers, profile models),
   sign-in and quota, the devkit plugin and whether each agent's copy is current, required skills, project settings
@@ -44,8 +50,8 @@ The first release.
   adopts an older handoff repository from a staging folder; five were adopted this way during the rollout.
 - **Work items** in `items/<scope>/<ID>.md`: one versioned file per task, feature, bug, or spike, with a changelog line
   and a commit for every change. `dev task add` (with `--type`, `--now`, `--later`, `--priority`, `--due`, `--why`,
-  `--done`, `--claim`), `start` or `claim`, `release`, `done`, `block`, `cancel`, `move`, `edit`, `show`, `history`
-  and `delegate --to`. `-p` and `-i` work before or after the verb.
+  `--done`, `--claim`), `start` or `claim`, `release`, `done`, `block --why`, `unblock`, `cancel`, `move`, `edit`,
+  `link --to <initiative>`, `show`, `history`, and `delegate --to`. `-p` and `-i` work before or after the verb.
 - **Locks across machines:** `dev task start` takes an 8-hour lock and pushes it at once; other sessions are told
   not to work on the task; locks renew while a session works and expire when nobody renews them. Changes of scope need
   `--why`.
@@ -66,8 +72,9 @@ The first release.
   run blocks or finishes or a long turn ends.
 - **`dev time`**: turn lengths, estimate accuracy, subagent durations, and the slowest commands.
 - **`dev report`**: a Markdown status report for the team or management, with health rules you can explain.
-- **Hooks that keep you informed.** UserPromptSubmit answers "how is it going?" from real records, PostToolUse times
-  slow commands and reminds a quiet agent after about 8 minutes, and SubagentStart and SubagentStop track subagents.
+- **Hooks that keep you informed.** UserPromptSubmit answers "how is it going?" from real records, CI/CD pipelines
+  included, and ignores background notifications. PostToolUse times slow commands and reminds a quiet agent after
+  about 8 minutes. SubagentStart and SubagentStop track subagents.
 - **The `communicating` skill** with templates for kickoff, progress, status, decisions, explanations, final and
   failure reports, pull request descriptions, squash-merge messages, review comments, delegation, and the structured
   formats of every record. Agents write in plain American English.
@@ -126,6 +133,18 @@ The first release.
 
 - **Delivery:** `dev ci` shows what CI runs so you run it locally and push once; `dev calver` prints the current and
   next CalVer version.
+- **Delivery policy:** `dev delivery` detects how a project versions, tests, releases, and ships (tags, version files,
+  release tools, changelog, CI, the test gate, branch model, what it publishes and deploys), recommends a policy that
+  keeps what works (SemVer for libraries, CalVer for apps and services), and lists the gaps. `dev delivery apply
+  --why` records it in `policies/<scope>.json` in the handoff repository, versioned with its history, and `--tasks`
+  opens a work item per gap. Sessions see the policy, the guard refuses tags that break it, and release work requires
+  the new `release-policy` skill. Initiatives can record a release train. devkit's own policy is recorded.
+- **CI/CD status on any host:** `dev ci status [--watch]` shows the runs of the branch on GitHub Actions, GitLab CI,
+  Bitbucket Pipelines, and Azure Pipelines, with jobs, the current step, elapsed time, and an ETA from recent
+  successful runs. `dev status` shows the latest run, and status answers include the pipelines. GitHub is verified
+  live; the other three are verified against recorded API responses.
+- **devkit's own CI:** a pinned macOS workflow that runs the suite on Python 3.9 and 3.13, the devkit pull request
+  template, and grouped weekly Dependabot updates for the actions.
 - **Templates** for plans, specs, spikes, bug fixes and ADRs (`templates/plans/`), typed tasks (`templates/tasks/`),
   pull requests (`templates/github/pull_request.md`) and the handoff repository README (`templates/handoff/`).
 - **Docs tooling:** `dev docs check` (markdownlint, lychee links and anchors, Vale with Google and write-good, SVG
@@ -133,15 +152,26 @@ The first release.
 - **Diagrams:** `dev diagram render|check|new` renders validated SVG diagrams (flow, architecture, sequence, state,
   C4, ER, timeline) in the Firefly palette, dark and light, and the `diagrams` skill.
 
+#### Files
+
+- **Token-light file commands:** `dev files` (a compact tree), `dev find` (names), `dev grep` (contents, structural
+  search with ast-grep), and `dev diff` (changed files first, short hunks, generated files folded) keep their output
+  compact and capped. Homebrew adds fd, ast-grep, and difftastic.
+- **Safe file operations:** `dev rm` moves paths to the Trash with a manifest and `dev rm --undo`, stages tracked
+  deletions like `git rm`, and refuses open files, unsaved or untracked work, repositories, worktrees, and workspace
+  and system folders unless the exact flag is given. `dev mv` and `dev cp` never overwrite silently, use `git mv` for
+  tracked files, and refuse layout breaks, backup names, and heavy copies.
+
 #### Dashboard and disk
 
-- **Dashboard:** a self-contained, branded HTML command center with Home, Initiatives, Projects, Team, Tasks,
-  Activity, Explorer, and Health views, initiative and project pages, a task drawer with lock state, commands and
+- **Dashboard:** a self-contained, branded HTML command center with a clear information hierarchy: a summary Home
+  (what needs you, team now, initiatives, since yesterday) and Initiatives, Projects, Team, Tasks, Activity, Explorer,
+  and Health views, initiative and project pages, a task drawer with lock state, commands and
   history, live runs and time, search, a command palette and shareable URLs; regenerated on every sync.
 - **Disk:** safe cleanup of merged worktrees, idle build output, stale temp files and the Docker build cache, checked
   again before every removal; copy-on-write `node_modules` for new worktrees; `dev gc` and `dev du`.
-- **Identity:** the devkit wordmark outlined from Manrope with the amber spark as the dot of its letter, banners in the brand's
-  light-trail system, the plugin icon, and the logo as terminal art.
+- **Identity:** the devkit wordmark outlined from Manrope with the amber spark as the dot of its letter, banners in
+  the brand's light-trail system, the plugin icon, and the logo as terminal art.
 
 ### Security
 
@@ -149,7 +179,9 @@ The first release.
   clones; blocks backup copies, writes outside the workspace and destructive commands (`rm -r` of protected paths,
   `git clean -x`, `git reset --hard` with changes); blocks plain force pushes, a third push of the same branch within
   an hour, blind CI re-runs, non-conforming branch names and AI attribution; keeps the handoff repository's work
-  items, logs, presence, and generated files out of direct edits; and keeps each project session to its own records.
+  items, logs, presence, policies, and generated files out of direct edits; keeps each project session to its own
+  records; steers `rm`, `unlink`, `find -delete`, `xargs rm`, `git clean -f`, and overwriting `cp` and `mv` to the
+  recoverable `dev` commands; and refuses tags that break the delivery policy.
   `dev guard check` simulates any decision.
 - **No secrets in commits:** the guard runs gitleaks on what a `git commit` is about to record, including a `git add`
   earlier in the same command, and refuses the commit when it finds a secret.

@@ -16,7 +16,7 @@ re-reads the whole context uncached. If the work needs a different tier, say so 
 or suggest it for the next session.
 
 | Work | Model | Effort | Why |
-|---|---|---|---|
+| --- | --- | --- | --- |
 | Architecture, design trade-offs, ambiguous requirements | session model; suggest the strongest (Fable, Astra) for big calls | high–xhigh | A wrong direction multiplies every later cost |
 | Debugging without a clear repro, flaky tests, concurrency, code you didn't write | session model | high, xhigh if stuck | Correctness depends on edge cases that are easy to miss |
 | Security review, auth, money, personal data, migrations, public API changes | session model or stronger, never smaller | high | Misses are silent and expensive |
@@ -44,7 +44,7 @@ chat (Anthropic). For Codex this section is the explicit instruction its spawn t
 **Delegate** rows, otherwise work locally.
 
 | Situation | Decision |
-|---|---|
+| --- | --- |
 | Broad search across many files or naming conventions, where you need only the conclusion | **Delegate** to one read-only search agent |
 | 2–4 independent questions (separate modules, code vs docs vs logs) | **Delegate** in parallel, all launched in one message |
 | Verbose work: full test suite, long logs, documentation fetches | **Delegate** or run in the background, and get a summary back |
@@ -76,6 +76,7 @@ The brief is the agent's only context. If you can't write a clear one, you don't
 hand it off. Give paths, not pasted file contents.
 
 **Lookup or research**
+
 ```
 Goal: <the decision this answer feeds, one sentence>
 Questions: 1. … 2. …
@@ -86,6 +87,7 @@ Say "not found" rather than guess. Don't edit files or start agents.
 ```
 
 **Worker (code change)**
+
 ```
 Goal and acceptance: <behavior; the test that must pass>
 Write scope: only <files/dirs>; don't touch <…>
@@ -95,6 +97,7 @@ Return: files changed, what changed and why, test output summary, open questions
 ```
 
 **Reviewer**
+
 ```
 Review <diff range or files> against <spec, plan or task>. Report only correctness, security and missed-edge-case
 problems: file:line, severity, and a concrete failing scenario. Skip style. If nothing material, say so.
@@ -129,6 +132,7 @@ pass. A cheap agent's "nothing found" in a risky area proves nothing: redo it at
 ## 5. Escalation and quality gates
 
 **Escalation ladder.** Move up a step as soon as one of the triggers applies; don't retry at the same tier.
+
 1. A small agent fails, hedges or returns something you can't verify → redo it on the session model.
 2. Two failed attempts at the same problem → stop patching. Re-read the evidence, state a new hypothesis, raise
    effort (high or xhigh, or `ultrathink` for the turn).
@@ -141,6 +145,7 @@ money, data or migrations; irreversible or external actions; conflicting evidenc
 failing test pass.
 
 **Gates that hold whatever the tier:**
+
 - Evidence before claims: run the check in this session before you say "done", "fixed" or "passes".
 - The narrowest check after each change, the full local suite before done (`delivery` skill: what CI runs).
 - Risky changes (auth, input handling, secrets, migrations, concurrency, public API) get an independent review in a
@@ -164,6 +169,14 @@ that high reasoning effort can quickly consume Plus plan rate limits.
 
 ## 7. devkit compact commands
 
-`dev files`, `dev find`, `dev grep` and `dev diff` are planned as compact, token-budgeted versions of ls, find, grep
-and git diff (`lib/devkit/fs.py`). They are not in this devkit version yet: check `dev --help` before you use them.
-Until then use `git ls-files`, `rg -n` (installed by devkit), LSP navigation and `git diff --stat`.
+Prefer devkit's token-light commands to raw shell output. They are capped, respect `.gitignore` and fold noise:
+
+| Instead of | Use | What you get |
+| --- | --- | --- |
+| `ls -R`, `tree` | `dev files [path]` | a capped tree with sizes, git status and folded build output |
+| `find` | `dev find <pattern> [-e ext] [--changed]` | gitignore-aware paths relative to the current folder |
+| `grep -r` | `dev grep <regex> [-l] [-C n] [--ast]` | `file:line: text`, capped per file and in total |
+| `git diff` | `dev diff [--staged] [--names]` | the stat first, then `-U1` hunks; lock and generated files folded |
+| `rm`, `mv`, `cp` | `dev rm`, `dev mv`, `dev cp` | to the Trash with undo; refuses unsaved work or open files and names the flag |
+
+For CI, `dev ci status` gives the jobs, the current step and an ETA, in place of reading `gh run view` output.

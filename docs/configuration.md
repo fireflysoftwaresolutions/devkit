@@ -32,8 +32,11 @@ Run `dev config edit` to open it and validate it, `dev config show` to print the
 | `default_host` | `github.com` | Host whose repositories live at `<owner>/<repo>`; all others live at `<host>/<group…>/<repo>` |
 | `host_dirs` | `{}` | Folder aliases for hosts, for example `{"gitlab.com": "gitlab"}` → `~/Development/gitlab/<group>/<repo>` |
 | `editor` | `code` | Editor for `dev open` (and for `dev handoff --edit` and `dev config edit` when `$EDITOR` is unset) |
-| `stacks` | `["java", "python", "php", "node"]` | The stacks whose packages `dev setup` installs |
-| `language` | unset | Reserved: the `communicating` skill tells agents to write in this language instead of American English. devkit does not pass it to sessions yet, so put a language preference in your [personal agent rules](#personal-agent-rules) for now |
+| `stacks` | `["java", "python", "php", "node"]` | The stacks whose packages `dev setup` and `dev install --only tools` install |
+| `hosts` | `["github"]` | Git hosts you use: `github`, `gitlab`, `bitbucket`, `azure-devops`. devkit installs their CLIs, `dev doctor` checks the sign-in, and `dev ci status` reads their pipelines |
+| `clouds` | `[]` | Clouds and infrastructure tools you use: `aws`, `azure`, `gcp`, `digitalocean`, `kubernetes`, `terraform` (OpenTofu). devkit installs their CLIs and `dev doctor` checks the sign-in |
+| `packages.auto` | `true` | `dev install` installs missing packages for your stacks, hosts, and clouds; `false` only reports them |
+| `language` | `en-US` | The language for replies and documents, which the `communicating` skill asks agents to follow. devkit does not put it in the session context, so also state another language in your [personal agent rules](#personal-agent-rules) |
 
 Changing `dev_root`, `default_host`, or `host_dirs` changes every canonical path: run `dev ls` and `dev adopt` the
 repositories that are no longer in place.
@@ -145,6 +148,11 @@ Never edit the generated files directly; the next install overwrites them, and `
 | `DEVKIT_FLAKY=1` | Prefix of `gh run rerun`: says the failure is a proven flaky test |
 | `DEVKIT_CROSS_PROJECT=1` | Prefix of `dev task`, `dev note`, or `dev handoff`, or in the agent's environment: lets a project session change another project's records when you asked for it |
 | `DEVKIT_SKIP_SECRET_SCAN=1` | In the agent's environment: the guard does not run gitleaks before `git commit` |
+| `DEVKIT_RAW_FS=1` | Prefix of `rm`, `find -delete`, `xargs rm`, `git clean -f`, or an overwriting `cp` or `mv`: lets the command delete or overwrite directly instead of through `dev rm`, `dev mv`, or `dev cp` |
+| `DEVKIT_TAG_ANY=1` | Prefix of `git tag`: allows a tag that breaks the recorded delivery policy |
+| `GITLAB_TOKEN` | `dev ci status` for GitLab when `glab` is not installed (`GITLAB_PRIVATE_TOKEN` works too) |
+| `BITBUCKET_TOKEN`, or `BITBUCKET_USERNAME` and `BITBUCKET_APP_PASSWORD` | `dev ci status` for Bitbucket Pipelines, and the Bitbucket sign-in check of `dev doctor` |
+| `AZURE_DEVOPS_EXT_PAT` | `dev ci status` for Azure Pipelines and the `az devops` CLI (`AZURE_DEVOPS_PAT` works too for `dev ci status`) |
 | `DEVKIT_NO_NOTIFY=1` | No desktop notifications from that process |
 | `DEVKIT_THEME=dark\|light` | The banner's color theme (otherwise taken from `COLORFGBG`, default dark) |
 | `NO_COLOR` | Plain output without colors |
@@ -177,7 +185,7 @@ These files apply to everyone who installs devkit. Change them in a branch of th
 | `config/git/` | Shared git defaults and the global ignore file |
 | `plugin/` | The devkit plugin: its skills, slash commands and the `scout` agent |
 | `templates/` | Plan, task, pull request and handoff templates (see [Templates](templates.md)) |
-| `Brewfile`, `config/npm-globals.txt` | Packages, grouped by stack (`# @group`) |
+| `Brewfile`, `config/npm-globals.txt` | Packages in `# @group` sections: the base groups (`core`, `docker`, `agents`, `docs`, `security`), one per stack, and one per git host or cloud (`gitlab`, `azure-devops`, `aws`, `azure`, `gcp`, `digitalocean`, `kubernetes`, `terraform`) |
 
 Placeholders `{{DEVKIT}}`, `{{HOME}}`, `{{DEV}}`, and `{{UID}}` are expanded at install time. After editing:
 

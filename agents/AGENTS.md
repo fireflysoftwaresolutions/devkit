@@ -20,6 +20,7 @@ while a `dev progress` run is active). Leave a blank line after it, then write t
 For example:
 
 **[Firefly> DevKit]** kit-consulting · `release/26.11.4` · Release 26.11.4
+
 - **Done:** merged PRs 12, 17 and 22 into the release branch and fixed the two conflicts.
 - **Check:** ✓ local suite green, 214 tests
 - **Next:** push once and open the release PR.

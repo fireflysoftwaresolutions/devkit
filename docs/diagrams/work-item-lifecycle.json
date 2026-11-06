@@ -2,7 +2,7 @@
   "name": "work-item-lifecycle",
   "kind": "state",
   "title": "Life of a work item",
-  "desc": "A work item starts as todo when dev task add creates it. dev task start (or claim) takes an 8-hour lock and makes it doing; release or delegate gives the lock back and returns it to todo, and done releases the lock and closes the item. A lock that is not renewed for 8 hours expires: the item stays doing, unlocked, and anyone may claim it. block marks an item blocked, and release returns a blocked item to todo. cancel, with a reason, closes any open item.",
+  "desc": "A work item starts as todo when dev task add creates it. dev task start (or claim) takes an 8-hour lock and makes it doing; release or delegate gives the lock back and returns it to todo, and done releases the lock and closes the item. A lock that is not renewed for 8 hours expires: the item stays doing, unlocked, and anyone may claim it. block, with a reason, marks an item blocked, and unblock returns it to todo (or to doing while it is still claimed). cancel, with a reason, closes any open item.",
   "equal_widths": "all",
   "nodes": [
     {
@@ -97,12 +97,12 @@
     {
       "from": "todo",
       "to": "blocked",
-      "label": "block"
+      "label": "block --why"
     },
     {
       "from": "blocked",
       "to": "todo",
-      "label": "release",
+      "label": "unblock",
       "style": "dashed",
       "from_side": "left",
       "to_side": "left"

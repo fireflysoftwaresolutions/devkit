@@ -15,6 +15,7 @@ Docker and the background automation, and keeps them that way.
 [Why](#why-devkit) ·
 [Install](#install) ·
 [A quick tour](#a-quick-tour) ·
+[From plan to operate](#from-plan-to-operate) ·
 [Features](#features) ·
 [For your agents](#for-your-agents) ·
 [How it fits together](#how-it-fits-together) ·
@@ -30,7 +31,9 @@ Docker and the background automation, and keeps them that way.
 | Two people (or two agents) pick up the same task | `dev task start` locks it on every machine at once; every change records who, when, and why |
 | "How is it going?" | Agents report progress with an ETA computed from their real pace, and you get a notification when they finish or get stuck |
 | Worktrees and `repo-pr12` copies pile up; disks fill | One managed worktree location, a guard that blocks stray ones, and safe automatic cleanup once work is merged |
-| Push → CI → fix → push → CI … | `dev ci` shows what CI runs; integrate locally, push once, one CI run; the guard stops CI loops and blind re-runs |
+| Push → CI → fix → push → CI … | `dev ci` shows what CI runs; integrate locally, push once, one CI run; `dev ci status` follows it with an ETA on GitHub, GitLab, Bitbucket, or Azure |
+| Every project releases its own way, or not at all | `dev delivery` detects and records a delivery policy (versioning, test gate, changelog, release flow); the guard refuses tags that break it |
+| An agent's `rm -rf` or `cp` destroys work | `dev rm`, `dev mv`, and `dev cp` use the Trash, refuse open or unsaved files, and `dev rm --undo` restores them; the guard steers raw deletes to them |
 | `claude/vigilant-jang-ec71c0` branches and AI attribution | Trunk-based naming (`feat/PROJ-142-invoice-export`) and no attribution, enforced for both agents |
 | Claude and Codex behave differently, and settings drift | One set of rules, skills, and hooks for both; drift is blocked and repaired; `dev config diff` previews everything |
 | Agents skip the skill that fits the job | Required skills are named at the prompt, added to subagent briefs, and checked before a turn ends |
@@ -69,6 +72,10 @@ dev progress                 live runs with ETA                       dev time  
 dev report --days 7          a status report for the team, in Markdown
 dev claude api -w feat/x     Claude Code in a managed worktree        dev codex api   Codex in the project
 dev ci                       what CI runs; run it locally, then push once
+dev ci status --watch        the branch's pipelines: jobs, current step, ETA (GitHub, GitLab, Bitbucket, Azure)
+dev delivery                 the project's release policy and gaps     dev delivery apply --why "…"   record it
+dev files · find · grep · diff   token-light views of the tree, names, contents and changes
+dev rm build/out.log         to the Trash, refuses unsaved work        dev rm --undo   put it back
 dev sec scan                 secrets, dependencies, code, IaC and workflows
 dev gc                       what can be reclaimed safely (dry run)
 dev doctor                   verify the whole setup                   dev agents test   a live check of both agents
@@ -76,10 +83,20 @@ dev doctor                   verify the whole setup                   dev agents
 
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="docs/images/dashboard/home-1440-dark.webp">
-  <img src="docs/images/dashboard/home-1440-light.webp" alt="The devkit dashboard's Home view: a row of numbers (initiatives, projects, open tasks, doing, blocked, people active, live sessions, PRs failing CI), the Needs you list with a command for each item, Team now with each person's live session and progress, and initiative cards with status, progress, and due dates." width="100%">
+  <img src="docs/images/dashboard/home-1440-light.webp" alt="The devkit dashboard's Home view: the title says how many urgent items need you, four figures follow (PRs failing CI, blocked tasks, doing, live sessions), then the Needs you list with one amber copy button on the first row, Team now with each person's live session, progress, and locks, and one row per initiative with progress, milestone, and open and blocked tasks." width="100%">
 </picture>
 
 All commands are in [docs/commands.md](docs/commands.md).
+
+## From plan to operate
+
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/images/diagrams/lifecycle-map-dark.svg">
+  <img src="docs/images/diagrams/lifecycle-map-light.svg" alt="From plan to operate: plan with dev plan new and Superpowers; track the task with dev task; build with dev progress and the required skills; pass the local test gate with dev ci and dev sec scan; review with /code-review and the communicating templates; integrate on one branch with the delivery skill; release by the recorded policy with dev delivery and the release-policy skill; follow CI with dev ci status; deploy through a tag and its pipeline; hand off with the handoff skill and dev sync." width="100%">
+</picture>
+
+Every stage of the lifecycle has a devkit command and a skill, so nothing falls between them. The table with each
+stage's guide is in [Concepts › From plan to operate](docs/concepts.md#from-plan-to-operate).
 
 ## Features
 
@@ -93,6 +110,10 @@ All commands are in [docs/commands.md](docs/commands.md).
 | Status block | Every reply starts with a `[Firefly> DevKit]` block (done, check, progress, next) that devkit checks, scores, and shows everywhere | [Concepts](docs/concepts.md#the-status-block) |
 | Dashboard | A self-contained HTML command center: home, initiatives, projects, team, tasks, activity, explorer, health | [Dashboard](docs/dashboard.md) |
 | Delivery | `dev ci`, local integration, one push and one CI run, CalVer, a push budget, and no blind re-runs | [Delivery](docs/delivery.md) |
+| Delivery policy | `dev delivery` detects how a project versions, tests, and releases, recommends a policy, and records it; sessions see it and the guard enforces its tags | [Delivery › The delivery policy](docs/delivery.md#the-delivery-policy) |
+| CI/CD status | `dev ci status [--watch]` for GitHub Actions, GitLab CI, Bitbucket Pipelines, and Azure Pipelines: jobs, current step, elapsed time, and an ETA | [Commands › dev ci status](docs/commands.md#dev-ci-status---watch---branch-name----all-branches---all-jobs---limit-n---json) |
+| Files | `dev files`, `find`, `grep`, and `diff` with compact, capped output; `dev rm`, `mv`, and `cp` with the Trash, undo, and refusals instead of lost work | [Commands › Files](docs/commands.md#files) |
+| Git hosts and clouds | The CLIs for GitLab, Bitbucket, Azure DevOps, AWS, Azure, Google Cloud, DigitalOcean, Kubernetes, and OpenTofu, installed and checked for sign-in | [Getting started](docs/getting-started.md#the-setup-wizard) |
 | Security | `dev sec scan` (gitleaks, osv-scanner, Semgrep, Trivy, zizmor), a secret check before every commit, and the DevSecOps skills and plugins | [Skills and plugins](docs/skills-and-plugins.md), [Guard rules](docs/guard.md) |
 | Guard | A pre-tool hook that blocks what wastes time or disk or breaks shared records, and explains the right way | [Guard rules](docs/guard.md) |
 | Skills | A curated, pinned catalog for both agents, optional groups, and required skills enforced per kind of work | [Skills and plugins](docs/skills-and-plugins.md) |
@@ -101,7 +122,7 @@ All commands are in [docs/commands.md](docs/commands.md).
 | Docs and diagrams | `dev docs check`, plus validated, branded SVG diagrams in a dark and a light version | [Diagrams](docs/diagrams.md) |
 | Docker | Colima with Compose, Buildx, and Testcontainers | [Docker](docs/docker.md) |
 
-<!-- TODO(devkit-docs): files-and-git -->
+<!-- TODO(devkit-docs): files-and-git — add the git and GitHub wrapper (dev branch, commit, push, pr, run, release, issue) once it is merged. -->
 
 ## For your agents
 
@@ -114,9 +135,9 @@ devkit is also a plugin for **Claude Code** and **Codex**, installed automatical
   answer "how is it going?" from real records and remind a quiet agent to update you.
 - **Slash commands:** `/devkit:status` · `/devkit:overview` · `/devkit:task` · `/devkit:handoff` · `/devkit:standup` ·
   `/devkit:ship` · `/devkit:ci` · `/devkit:dashboard` · `/devkit:doctor` (skills of the same name in Codex).
-- **Skills:** `using-devkit`, `handoff`, `communicating`, `working-efficiently`, `workspace`, `delivery`, `backend`,
-  `devsecops`, `docs`, and `diagrams`, plus a curated, pinned set for architecture, Angular, React, Spring, testing,
-  security and observability. Required skills are enforced for each kind of work.
+- **Skills:** `using-devkit`, `handoff`, `communicating`, `working-efficiently`, `workspace`, `delivery`,
+  `release-policy`, `backend`, `devsecops`, `docs`, and `diagrams`, plus a curated, pinned set for architecture,
+  Angular, React, Spring, testing, security, and observability. Required skills are enforced for each kind of work.
 - **Rules:** one set of global instructions for both agents: the status block, method, plain American English,
   progress and time, token use, files and disk, worktrees, branches, commits, delivery, backend practice, required
   skills, the team protocol, and handoff.
@@ -155,14 +176,14 @@ The ideas behind it are in [docs/concepts.md](docs/concepts.md).
 | [Teams and machines](docs/teams.md) | Work items and locks, reasons, and history, versioned plans, session logs, presence, merge rules |
 | [Initiatives](docs/initiatives.md) | Cross-project initiatives, progress, adopting an older handoff repository |
 | [Progress and communication](docs/progress-and-communication.md) | `dev progress`, ETA and calibration, notifications, `dev time`, message templates, status reports |
-| [Commands](docs/commands.md) | Every `dev` command and option |
+| [Commands](docs/commands.md) | Every `dev` command and option, including the file commands and `dev ci status` |
 | [Dashboard](docs/dashboard.md) | The HTML command center: views, pages, the task drawer, shortcuts, routes |
 | [Configuration](docs/configuration.md) | Every key of `~/.config/devkit/config.json`, personal rules, environment variables |
 | [Agents](docs/agents.md) | What is configured in Claude Code and Codex, hooks, devkit always on |
 | [Skills and plugins](docs/skills-and-plugins.md) | The devkit plugin, required skills, the curated catalog, what was left out |
 | [Models and tokens](docs/models-and-tokens.md) | Models, effort, subagents, the scout agent, Codex profiles |
 | [Templates](docs/templates.md) | Plans and specs, tasks, the pull request template |
-| [Delivery](docs/delivery.md) | Local-first GitOps: branch model, one integration, one push, one CI run |
+| [Delivery](docs/delivery.md) | Local-first GitOps: the delivery policy, one integration, one push, one CI run, following CI, releases |
 | [Guard rules](docs/guard.md) | Everything the guard blocks, and why |
 | [Diagrams](docs/diagrams.md) | `dev diagram` and the diagram design rules |
 | [Disk and cleanup](docs/disk-and-cleanup.md) | `dev gc` safety rules and automatic cleanup |

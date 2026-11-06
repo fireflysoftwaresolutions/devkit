@@ -24,6 +24,7 @@ checkout.
 | `working-efficiently` | Models, effort, subagents, and token hygiene (see [Models and tokens](models-and-tokens.md)) |
 | `workspace` | Layout, `dev` commands, worktrees, disk, Docker, per-project vendor tooling |
 | `delivery` | Local-first GitOps: integration branch, one push, one CI run, CI failures, releases |
+| `release-policy` | The delivery policy: detect, recommend, and record versioning, bumps, the test gate, the changelog, and the release flow with `dev delivery`; release trains |
 | `backend` | API contracts, layering, migrations, testing, resilience, security, operability |
 | `devsecops` | Threat modeling, secrets, dependencies and supply chain, SAST, CI hardening, containers and infrastructure, and `dev sec scan` |
 | `docs` | Documentation to the devkit standard: Diátaxis, Google style, American English, `dev docs check` |
@@ -56,7 +57,7 @@ skills they require, in `config/skill-rules.json`, and enforces the mapping in b
 | `security` | `devsecops` | `devsecops` | Dockerfiles, security folders, Terraform; security, auth, secrets, vulnerabilities |
 | `docs` | `docs` | `docs` | `README.md`, `docs/**/*.md`, MDX, `CHANGELOG.md`, `CONTRIBUTING.md`; documentation, guides |
 | `diagrams` | `diagrams` | `diagrams` | Diagram specs, SVG, C4, and Mermaid files; diagrams |
-| `delivery` | `delivery` | `delivery` | A request about releases, deployments, pushes, merges, or pull requests |
+| `delivery` | `delivery`, `release-policy` | the same | `CHANGELOG.md`, `VERSION`, `cliff.toml`, release-please files; a request about releases, deployments, pushes, merges, pull requests, tags, versions, bumps, changelogs, hotfixes, or publishing |
 | `communicating` | `communicating` | `communicating` | A request about status reports, delegation, or handovers |
 
 Each rule matches on any of three things: globs on the files a turn changed (`files`); a regular expression on the

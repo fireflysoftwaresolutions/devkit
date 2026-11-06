@@ -12,12 +12,14 @@ this skill is the how.
 ## Session protocol
 
 **Start**
+
 1. Read the injected *devkit · workspace context*: project, branch, git state, commands, initiatives, Now tasks, last
    status and the handoff digest. It replaces exploration — do not rediscover it.
 2. Pick up where the last session stopped: the first Now task, or what the user asked. `dev task` shows the board.
 3. Unsure about the portfolio? `dev overview` (add `--json` to compute with it).
 
 **During**
+
 - Claim before you work: `dev task start <n>` takes the lock and pushes it, so other developers' agents see it.
   Never work on a task the context lists as claimed by someone else — pick another one or tell the user.
 - Record work as it happens: `dev task add "…" --type task|feature|bug|spike --why "…" --done "<criterion>" --now
@@ -30,6 +32,7 @@ this skill is the how.
 - Before pushing: `dev ci` (what CI runs) → run it locally → push once (`delivery` skill, `/devkit:ship`).
 
 **Finish**
+
 1. Update the project's note with the `handoff` skill (Current state, tasks, decisions); `dev handoff --log "…"` adds
    your one-line summary. devkit adds branch, commits and your status block automatically.
 2. Start your final message with
@@ -46,7 +49,7 @@ or diagram files without them.
 ## Which tool for which job
 
 | Job | devkit | Skills |
-|---|---|---|
+| --- | --- | --- |
 | Find, clone, start a project | `dev ls`, `dev go`, `dev clone`, `dev new` | `workspace` |
 | Parallel work | `dev wt new <type>/<topic>` | `workspace` |
 | Plan, build, debug | `dev task`, plans folder | Superpowers (brainstorming, writing-plans, TDD, systematic-debugging) |
@@ -57,10 +60,10 @@ or diagram files without them.
 | Ship | `dev ci`, `dev ci status`, `dev calver`, `dev delivery`, `/devkit:ship` | `delivery`, `release-policy` |
 | Document | `dev docs check`, `dev diagram render` | `docs`, `documentation-writer`, `doc-coauthoring`, `diagrams` |
 | Hand off | `dev handoff`, `dev task`, `/devkit:handoff` | `handoff` |
-| Coordinate with others | `dev team`, `dev task start|release`, `dev task show <n>` (history) | — |
-| Choose model, effort, subagents | `scout` agent for lookups; `codex --profile fast|deep|review` | `working-efficiently` |
-| Keep the developer informed | `dev progress start|step|block|done`, `dev time` | `communicating` |
-| Plans and specs | `dev plan new "…" --kind plan|spec|spike|bugfix|adr`, `dev plan revise --why`, `approve`, `ls` | Superpowers writing-plans, `communicating` (formats) |
+| Coordinate with others | `dev team`, `dev task start | release`,`dev task show <n>` (history) | — |
+| Choose model, effort, subagents | `scout` agent for lookups; `codex --profile fast | deep | review` | `working-efficiently` |
+| Keep the developer informed | `dev progress start | step | block | done`,`dev time` | `communicating` |
+| Plans and specs | `dev plan new "…" --kind plan | spec | spike | bugfix | adr`,`dev plan revise --why`,`approve`,`ls` | Superpowers writing-plans, `communicating` (formats) |
 | Hand work to a teammate | `dev task delegate <n> --to <login> --why "…"` | `communicating` |
 | Report status | `dev report [--days 7] [-i <slug>]`, `dev standup` | `communicating` |
 | Where are we | `dev status`, `dev overview`, `dev standup`, `/devkit:status` | — |

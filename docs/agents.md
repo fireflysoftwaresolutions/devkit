@@ -35,7 +35,7 @@ Each starts with a header such as:
 | 4. Files and disk | No stray files, backups, or reinstalls |
 | 5. Worktrees | Only when needed, through `dev wt new` |
 | 6. Git and GitHub | Branch names, Conventional Commits, CalVer, no AI attribution, no plain force pushes |
-| 7. Delivery | Integrate and verify locally, push once, one CI run |
+| 7. Delivery | Know what CI runs, integrate and verify locally, push once, one CI run; every project has a recorded delivery policy (see [Delivery › The delivery policy](delivery.md#the-delivery-policy)) |
 | 8. Backend methodology | Contracts first, isolated domain logic, migrations, real-dependency tests, resilience, security, operability |
 | 9. Skills and tools | Which skill for which job; required skills are enforced (see [Skills and plugins › Required skills](skills-and-plugins.md#required-skills)) |
 | 10. Stack conventions | Java, Python, PHP, TypeScript, Angular, React, and containers |
@@ -137,7 +137,7 @@ works from the Desktop and ChatGPT apps, whose PATH is minimal.
 | Event | Claude Code | Codex | What it does |
 | --- | --- | --- | --- |
 | SessionStart | every source, 30 s | `startup\|resume\|clear\|compact`, 30 s | Records the session's starting commit and branch, refreshes the project's generated blocks, exports `DEVKIT_SESSION` (Claude), restores managed settings in the background, clones `node_modules` into a fresh worktree, and prints the workspace context |
-| UserPromptSubmit | 10 s | 10 s | Starts the turn clock; adds real progress records when you ask for status; names the skills the request needs; registers a session that missed SessionStart and injects its context |
+| UserPromptSubmit | 10 s | 10 s | Starts the turn clock; adds real progress records and the branch's CI/CD pipelines when you ask for status; names the skills the request needs; registers a session that missed SessionStart and injects its context. Background notifications (subagent results, system notices) are not treated as your request |
 | PreToolUse | `Bash\|Write\|Edit\|MultiEdit\|NotebookEdit\|Agent\|Task`, 15 s | `^(Bash\|apply_patch)$`, 15 s | The [guard](guard.md): allow silently, or `deny` (both) or `ask` (Claude) with the reason. Starts the call's timer. On Claude's Agent and Task tools, appends the required skills to the subagent's brief |
 | PostToolUse | `Bash\|Agent\|Task\|Write\|Edit\|MultiEdit\|WebFetch\|WebSearch`, 10 s | `^(Bash\|apply_patch)$`, 10 s | Records slow calls; reminds the agent to update you after a long silence |
 | SubagentStart · SubagentStop | 5 s | 5 s | Tracks running subagents and records their durations |
@@ -157,7 +157,8 @@ At session start (or at the first prompt) the agent receives:
 - the project, its stack, the checkout (main or worktree) with its state and PR, and the detected commands
   (`npm run …`, `./mvnw verify`, `uv run pytest`, `composer …`, `make …`);
 - other worktrees of the repository and whether they have live sessions, and layout problems;
-- the latest status block, the project's status and priority, and its task counts;
+- the latest status block, the project's status and priority, its task counts, and its delivery policy (or a reminder
+  to record one);
 - each initiative the project belongs to: status, progress, members, this project's workstream, the Now tasks, and the
   README's path;
 - your claimed tasks, the tasks claimed by others ("do NOT work on these"), and who else works on this project now;
