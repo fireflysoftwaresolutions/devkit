@@ -156,6 +156,9 @@ class ServerTests(unittest.TestCase):
                     self.assertIsInstance(t["annotations"][hint], bool)
         writes = {t["name"] for t in tools if not t["annotations"]["readOnlyHint"]}
         self.assertEqual(writes, {"devkit_task_add", "devkit_task_update"})
+        # K5: devkit_task_update can block, finish or release any project's task and its lock
+        destructive = {t["name"] for t in tools if t["annotations"]["destructiveHint"]}
+        self.assertEqual(destructive, {"devkit_task_update"})
 
     def test_call_returns_json_as_text_and_structured_content(self):
         r = self.s.call("devkit_audit", {"days": 1, "action": "guard"})["result"]

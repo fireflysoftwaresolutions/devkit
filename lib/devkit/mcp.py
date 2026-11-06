@@ -5,8 +5,10 @@
 A stdlib MCP server on stdio: JSON-RPC 2.0, one message per line. Every tool runs a `dev` command as a subprocess
 (an argument list, never a shell) with a timeout, NO_COLOR=1 and DEVKIT_AGENT=claude-desktop, and returns its output
 as compact text, plus structuredContent when the command printed JSON. The reads are the commands a developer runs
-in a terminal; the two writes (devkit_task_add, devkit_task_update) run `dev task`, so the guard and the audit trail
-apply exactly as they do there.
+in a terminal. The two writes (devkit_task_add, devkit_task_update) run `dev task` as this server's own subprocess,
+so the audit trail records them but the guard does not see them: the guard is a hook on the agent's own tool calls.
+Text injected through another connector can drive these tools, which is why both say to act only when the developer
+asks. They never count as the developer's evidence, and no tool runs progress, crew, push, pr, release or config.
 
 The Claude Desktop extension (desktop/, built with `dev desktop pack`) starts desktop/server/launcher.py, which finds
 this checkout and execs `dev mcp`. Updating devkit therefore updates the tools without reinstalling the extension.
@@ -65,6 +67,7 @@ _HANDLERS = {}  # name -> (argv builder, timeout, json output?, digest, exit 1 i
 READ = {"readOnlyHint": True, "destructiveHint": False, "idempotentHint": True, "openWorldHint": False}
 READ_REMOTE = dict(READ, openWorldHint=True)
 WRITE = {"readOnlyHint": False, "destructiveHint": False, "idempotentHint": False, "openWorldHint": True}
+CHANGE = dict(WRITE, destructiveHint=True)  # changes or ends what exists: another task's state and its lock
 
 PROJECT = {"type": "string", "minLength": 1, "maxLength": 200,
            "description": "Project id as devkit_overview lists it, for example `acme/billing` (a unique part of the "
@@ -341,7 +344,7 @@ _tool("devkit_task_update", "Update task",
                "description": "The reason, recorded in the item's changelog (required to block)."},
        "project": PROJECT, "initiative": INITIATIVE},
       lambda a: ["task", a["action"]] + _scope(a) + ([f"--why={a['why']}"] if a.get("why") else []) + ["--", a["id"]],
-      WRITE, required=("id", "action"))
+      CHANGE, required=("id", "action"))
 
 
 # --------------------------------------------------------------------------- arguments
