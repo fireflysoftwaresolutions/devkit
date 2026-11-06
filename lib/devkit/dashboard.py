@@ -388,10 +388,13 @@ def build_actions(reg: dict, now: float = None, items: list = None, colls: list 
     return acts
 
 
-def since_yesterday(reg: dict, cache: dict, now: float = None, items: list = None, slog: list = None) -> dict:
-    """What happened since the start of yesterday: sessions, commits, merged PRs, completed tasks."""
+def since_yesterday(reg: dict, cache: dict, now: float = None, items: list = None, slog: list = None, me: str = "") -> dict:
+    """What happened since the start of yesterday: sessions, commits, merged PRs, completed tasks.
+
+    This machine's live sessions (reg["sessions"]) are `me`'s; a logged line of the same session is not repeated."""
     from . import work
     now = now or time.time()
+    me = me or f"{reg.get('github_user') or os.environ.get('USER', '')}@{socket.gethostname().split('.')[0].lower()}"
     y0 = _midnight(now, 1)
     yday = time.strftime("%Y-%m-%d", time.localtime(y0))
     sessions = []
@@ -399,16 +402,19 @@ def since_yesterday(reg: dict, cache: dict, now: float = None, items: list = Non
         ts = s.get("last_seen") or s.get("started") or 0
         if ts >= y0:
             sessions.append({"ts": ts, "project": s.get("project"), "agent": s.get("agent"),
-                             "branch": s.get("branch"), "text": s.get("status") or "", "live": bool(s.get("active")), "who": ""})
+                             "branch": s.get("branch"), "text": s.get("status") or "", "live": bool(s.get("active")), "who": me,
+                             "pre": "", "parts": status_parts(s.get("status"))})
     seen = {(x["project"], x["agent"]) for x in sessions}
     logged = {ln["scope"] for ln in slog or []}
     live_ts = {}
     for x in sessions:
         live_ts[(x["project"], x["agent"])] = max(live_ts.get((x["project"], x["agent"]), 0), x["ts"])
     for ln in slog or []:
-        if ln["ts"] >= y0 and not ((ln["scope"], ln["agent"]) in seen and ln["ts"] <= live_ts[(ln["scope"], ln["agent"])]):
+        dup = ln["who"] in ("", me) and (ln["scope"], ln["agent"]) in seen and ln["ts"] <= live_ts[(ln["scope"], ln["agent"])]
+        if ln["ts"] >= y0 and not dup:
             sessions.append({"ts": ln["ts"], "project": ln["scope"], "agent": ln["agent"], "branch": ln["branch"],
-                             "text": ln["text"], "live": False, "who": ln["who"]})
+                             "text": ln["text"], "live": False, "who": ln["who"],
+                             "pre": ln.get("pre", ""), "parts": ln.get("parts")})
     for p in reg.get("projects") or []:
         if p.get("id") in logged:
             continue
@@ -442,6 +448,54 @@ def since_yesterday(reg: dict, cache: dict, now: float = None, items: list = Non
 
 
 # --------------------------------------------------------------------------- work items, presence, sessions, plans
+
+MARKER_RE = re.compile(r"^[\W_]*(?:\[\s*firefly\s*>\s*devkit\s*\]|devkit(?=[\s·:—*`]))[\s·:—*`]*", re.I)
+CHECK_GLYPHS = "✓⚠✗–"
+
+
+def status_parts(line: str):
+    """A saved status line -> {project, branch, task, done, check, progress, next}; None for the legacy one-line form.
+
+    Current: `<project> · <branch> ❯ <task> ❯ <done> ❯ <✓ check> [❯ ▸ <progress>] ❯ next → <next>`; the older
+    segmented form (`api ⎇ main ❯ T-… ❯ … ❯ next → …`) parses the same way. Split on ❯: the first segment is project
+    and branch, the second the task (hidden when "-"); ✓/⚠/✗/– is Check, ▸ Progress, "next →" Next, the rest Done."""
+    s = MARKER_RE.sub("", str(line or ""), count=1).strip()
+    if "❯" not in s:
+        return None
+    segs = [x.strip() for x in s.split("❯") if x.strip()]
+    if len(segs) < 2:
+        return None
+    out = {"project": segs[0].strip("` "), "branch": "", "task": "" if segs[1] == "-" else segs[1], "done": "", "check": "",
+           "progress": "", "next": ""}
+    m = re.match(r"^(.*?)\s*(?:·|⎇)\s*(.+)$", segs[0])
+    if m:
+        out["project"], out["branch"] = m.group(1).strip("` "), m.group(2).strip("` ")
+    done = []
+    for x in segs[2:]:
+        if x[:1] in CHECK_GLYPHS and not out["check"]:
+            out["check"] = x
+        elif x[:1] == "▸":
+            out["progress"] = x[1:].strip()
+        elif re.match(r"(?i)^next\s*(→|->|:)", x):
+            out["next"] = re.sub(r"(?i)^next\s*(→|->|:)\s*", "", x)
+        else:
+            done.append(x)
+    out["done"] = " · ".join(done)
+    return out
+
+
+def _with_status(s: dict, key: str = "status") -> dict:
+    return dict(s, status_parts=status_parts(s.get(key))) if isinstance(s, dict) else s
+
+
+def _log_status(text: str):
+    """Session-log text '… · status: <saved line>' -> (text before the status, parts) when the status parses."""
+    i = (text or "").rfind("status: ")
+    if i < 0:
+        return "", None
+    parts = status_parts(text[i + len("status: "):])
+    return (text[:i].rstrip(" ·"), parts) if parts else ("", None)
+
 
 def _who(s: str) -> str:
     """'user@host (agent:session)' -> 'user@host'."""
@@ -527,7 +581,8 @@ def read_session_log(handoff: Path, months: int = 2, limit: int = 1500) -> list:
                 who = parts.pop(0) if parts and "@" in parts[0] and " " not in parts[0] else ""
                 agent = parts.pop(0) if parts and parts[0] in ("claude", "codex", "human", "devkit") else ""
                 branch = parts.pop(0).strip("`") if parts and parts[0].startswith("`") else ""
-                out.append({"ts": _session_ts(m.group(1)), "scope": scope, "who": who, "agent": agent, "branch": branch,
+                pre, sparts = _log_status(" · ".join(parts))
+                out.append({"ts": _session_ts(m.group(1)), "scope": scope, "who": who, "agent": agent, "branch": branch, "pre": pre, "parts": sparts,
                             "text": " · ".join(parts)})
     out.sort(key=lambda x: -x["ts"])
     return out[:limit]
@@ -777,6 +832,8 @@ def _project(p: dict, now: float) -> dict:
     out["health"] = project_health(p, now)
     ns = p.get("note_summary") or {}
     out["task_index"] = {t: i + 1 for i, t in enumerate(_open_tasks(ns))}
+    if isinstance(out.get("status_line"), dict):
+        out["status_line"] = dict(out["status_line"], parts=status_parts(out["status_line"].get("line")))
     return out
 
 
@@ -785,7 +842,8 @@ def _initiative(i: dict, items: list = None) -> dict:
     out["linked_items"] = [x["id"] for x in linked_items(items or [], i.get("id") or "", i.get("projects") or [])]
     out["tasks"] = dict(i.get("tasks") or {})
     out["task_index"] = {t: n + 1 for n, t in enumerate(_open_tasks({"tasks": out["tasks"]}))}
-    out["members"] = list(i.get("members") or [])
+    out["members"] = [dict(m, status_line=dict(m["status_line"], parts=status_parts(m["status_line"].get("line"))))
+                      if isinstance(m, dict) and isinstance(m.get("status_line"), dict) else m for m in i.get("members") or []]
     return out
 
 
@@ -802,6 +860,8 @@ def collect(reg: dict, handoff: Path = None, now: float = None) -> dict:
     ppl = people(team, items, slog, now, local=reg.get("sessions") or [], me=me)
     colls = collisions(ppl, items, now)
     acts = build_actions(reg, now, items, colls)
+    for x in ppl:
+        x["sessions"] = [_with_status(s) for s in x["sessions"]]
     return {
         "v": 3,
         "version": core.VERSION,
@@ -822,12 +882,12 @@ def collect(reg: dict, handoff: Path = None, now: float = None) -> dict:
         "session_log": slog,
         "plans": read_plans(handoff),
         "collisions": colls,
-        "since": since_yesterday(reg, cache, now, items, slog),
+        "since": since_yesterday(reg, cache, now, items, slog, me),
         "who": me,
         "timing": _timing(now),
         "runs": _runs(now),
         "merged": merged_prs(cache, now - 30 * 86400)[:200],
-        "sessions": reg.get("sessions") or [],
+        "sessions": [_with_status(s) for s in reg.get("sessions") or []],
         "providers": reg.get("providers") or {},
         "issues": [{"kind": i[0], "text": i[1]} if isinstance(i, (list, tuple)) else {"kind": "info", "text": str(i)}
                    for i in reg.get("issues") or []],
@@ -1274,7 +1334,7 @@ function shortDay(k) { return new Date(k + "T12:00:00").toLocaleDateString(undef
 function compact(n) { return n >= 1e6 ? (n / 1e6).toFixed(1) + "M" : n >= 1e4 ? Math.round(n / 1e3) + "K" : n >= 1e3 ? (n / 1e3).toFixed(1) + "K" : String(n); }
 function kb(k) { if (k == null) return "—"; return k >= 1048576 ? (k / 1048576).toFixed(1) + " GB" : k >= 1024 ? Math.round(k / 1024) + " MB" : k + " KB"; }
 function plural(n, w, p) { return n + " " + (n === 1 ? w : (p || w + "s")); }
-function stripMarker(line) { return String(line || "").replace(/^[\W_]*(?:\[\s*firefly\s*>\s*devkit\s*\]|devkit(?=[\s·:—*`]))[\s·:—*`]*/i, ""); }
+function stripMarker(line) { return String(line || "").replace(/^[\W_]*(?:\[\s*firefly\s*>\s*devkit\s*\]|devkit(?=[\s·:—*`]))[\s·:—*`]*/i, "").replace(/(status:\s*)(?:\*\*|`)?(?:\[\s*firefly\s*>\s*devkit\s*\]|devkit\s*·)(?:\*\*|`)?\s*/gi, "$1"); }
 function iso(s) { const t = Date.parse(s || ""); return isNaN(t) ? 0 : t / 1000; }
 function fmtMin(m) { m = Math.max(0, Math.round(m || 0)); return m >= 60 ? Math.floor(m / 60) + "h" + String(m % 60).padStart(2, "0") + "m" : m + "m"; }
 
@@ -1657,7 +1717,7 @@ function changelog(lines) {
   if (!lines || !lines.length) return empty("No history yet");
   return h("ol", {class: "clog"}, lines.map(l => { const e = parseLog(l);
     return h("li", null, h("span", {class: "cv num", text: e.v || "•"}),
-      h("div", {class: "cb"}, h("div", {class: "ch"}, h("strong", {text: e.op}), e.detail ? h("span", {class: "t2", text: " · " + e.detail}) : null),
+      h("div", {class: "cb"}, h("div", {class: "ch"}, h("strong", {text: e.op}), e.detail ? h("span", {class: "t2", text: " · " + e.detail.replace(/\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z/g, m => fmt(iso(m)))}) : null),
         h("div", {class: "cm"}, e.who.includes("@") ? avatar(e.who) : null, h("span", {text: e.who + (e.agent ? " · " + e.agent : "")}), e.ts ? h("span", {class: "muted", title: fmt(e.ts), text: " · " + fmt(e.ts) + " (" + rel(e.ts) + ")"}) : null),
         e.why ? h("div", {class: "cwhy"}, h("span", {class: "label", text: "Why"}), " ", inline(e.why)) : null)); }));
 }
@@ -1750,13 +1810,31 @@ function liveRun(s, asOf) {
     p.next ? h("div", {class: "rl"}, h("span", {class: "label", text: "Next"}), " ", inline(p.next)) : null,
     chips);
 }
+/* saved status lines: parsed in Python (parts); legacy one-line forms are shown as written */
+function ckClass(c) { const g = String(c || "").charAt(0); return g === "✓" ? "ok" : g === "⚠" ? "warn" : g === "✗" ? "bad" : "na"; }
+function brandChip() { return h("span", {class: "sbrand", title: "Firefly DevKit status"}, "Firefly", h("span", {class: "chev", "aria-hidden": "true", text: "❯"}), "DevKit"); }
+function statusCard(raw, parts, meta) {
+  if (!parts) return h("div", {class: "statusline"}, meta ? h("span", {class: "who", text: meta}) : null, inline(stripMarker(raw)));
+  const row = (k, v, cls) => v ? [h("dt", {text: k}), h("dd", {class: cls || null}, inline(v))] : null;
+  return h("div", {class: "sblock"},
+    h("div", {class: "sb-h"}, brandChip(), h("span", {class: "sb-chip", title: [parts.project, parts.branch].filter(Boolean).join(" · "), text: [parts.project, parts.branch].filter(Boolean).join(" · ")}),
+      parts.task ? h("span", {class: "sb-chip task", title: parts.task, text: parts.task}) : null, meta ? h("span", {class: "sb-meta", text: meta}) : null),
+    h("dl", {class: "sb-rows"}, row("Done", parts.done), row("Check", parts.check, "ck " + ckClass(parts.check)), row("Progress", parts.progress), row("Next", parts.next)));
+}
+function statusLine(raw, parts) {
+  if (!parts) return inline(stripMarker(raw));
+  return frag(parts.task ? h("span", {class: "sl-task", text: parts.task + " · "}) : null, inline(parts.done || ""),
+    parts.check ? [" ", h("span", {class: "ck " + ckClass(parts.check), title: "Check: " + parts.check, text: parts.check.charAt(0)})] : null,
+    parts.next ? h("span", {class: "t2", text: " → " + parts.next}) : null);
+}
+function logText(x) { return x.parts ? frag(x.pre ? inline(stripMarker(x.pre) + " · ") : null, statusLine(x.text, x.parts)) : inline(stripMarker(x.text)); }
 function sessionBlock(s, who, asOf) {
   return h("div", {class: "sess"},
     h("div", {class: "sh"}, h("span", {class: "badge"}, h("span", {class: "dot d-live", "aria-hidden": "true"}), s.agent || "agent"),
       s.project ? h("button", {class: "sp", type: "button", onclick: () => openProject(s.project), text: scopeName(s.project)}) : h("span", {class: "muted", text: "no project"}),
       s.branch ? h("span", {class: "mono sb", text: "⎇ " + s.branch}) : null, h("span", {class: "t2 num ss", text: s.started ? "for " + dur(nowS() - s.started) : ""}), who ? h("span", {class: "t2 sw", text: who}) : null),
     liveRun(s, asOf),
-    s.status ? h("div", {class: "statusline"}, h("span", {class: "who", text: "Latest DevKit status"}), inline(stripMarker(s.status))) : null);
+    s.status ? statusCard(s.status, s.status_parts, "latest status") : null);
 }
 
 /* ---------------------------------------------------------------- navbar + filters */
@@ -1849,14 +1927,14 @@ function initCard(x, compact) {
   const nc = notCloned(x), n = x.members.length;
   return h("article", {class: "icard" + (compact ? " compact" : ""), "data-nav": "", tabindex: "0", "aria-label": "Initiative " + x.title, onclick: () => openInitiative(x.id), onkeydown: e => { if (e.key === "Enter") openInitiative(x.id); }},
     h("div", {class: "ic-h"}, h("span", {class: "dot " + (SDOT[x.status] || "d-info"), "aria-hidden": "true"}), h("h3", {class: "ell", text: x.title}), prioIcon(x.priority)),
-    h("div", {class: "ic-b"}, statusBadge(x.status), x.milestone ? h("span", {class: "badge", title: "Milestone", text: "◆ " + x.milestone}) : null, dueBadge(x.due, x.status === "done")),
+    h("div", {class: "ic-b"}, statusBadge(x.status), x.milestone ? h("span", {class: "badge ms", title: "Milestone: " + x.milestone, text: "◆ " + x.milestone}) : null, dueBadge(x.due, x.status === "done")),
     !compact && x.goal ? h("p", {class: "ic-g", title: plain(x.goal)}, plain(x.goal)) : null,
     progressBar(x, true),
     h("div", {class: "ic-m"},
       h("span", null, h("strong", {class: "num", text: String(n)}), n === 1 ? " project" : " projects", nc ? h("span", {class: "t2", text: nc === n ? " · none cloned here" : " · " + nc + " not cloned"}) : null),
       h("span", null, h("strong", {class: "num", text: String(x.cnt.open)}), " open", x.cnt.doing ? h("span", {class: "t2", text: " · " + x.cnt.doing + " doing"}) : null, x.cnt.blocked ? h("span", {class: "bad", text: " · " + x.cnt.blocked + " blocked"}) : null)),
     compact ? null : memberStatusBar(x),
-    h("div", {class: "ic-f"}, avatars(x.people, 5), h("span", {class: "t2 num", text: x.last ? "active " + rel(x.last) : ""})));
+    h("div", {class: "ic-f"}, x.people.length ? avatars(x.people, 5) : h("span", {class: "muted", text: "nobody on it now"}), h("span", {class: "t2 num", text: x.last ? "active " + rel(x.last) : ""})));
 }
 function initiativesPanel() {
   const list = INITS.slice().sort((a, b) => (SORDER[a.status] ?? 6) - (SORDER[b.status] ?? 6) || PRANK[a.priority] - PRANK[b.priority] || String(a.due || "9").localeCompare(String(b.due || "9")));
@@ -1872,7 +1950,7 @@ function sincePanel() {
   const col = (title, items, render, emptyText, href) => h("div", null, h("h3", null, title, h("span", {class: "n num", text: String(items.length)})),
     items.length ? h("ul", null, items.slice(0, N).map(render), items.length > N ? h("li", null, h("a", {class: "k", href: href || link({view: "activity"}), text: "+" + (items.length - N) + " more →"})) : null) : h("p", {class: "k", style: "margin:0", text: emptyText}));
   const body = h("div", {class: "since"},
-    col("Sessions", s.sessions || [], x => h("li", null, h("span", {class: "k num", text: tm(x.ts) + " · " + [x.who, x.agent].filter(Boolean).join(" · ") + " · "}), h("button", {class: "lnk", type: "button", onclick: () => x.project && openScope(x.project), text: scopeName(x.project || "") || "—"}), h("div", {class: "ell t2", title: plain(x.text)}, inline(stripMarker(x.text)))), "No agent sessions since yesterday."),
+    col("Sessions", s.sessions || [], x => h("li", null, h("span", {class: "k num", text: tm(x.ts) + " · " + [x.who, x.agent].filter(Boolean).join(" · ") + " · "}), h("button", {class: "lnk", type: "button", onclick: () => x.project && openScope(x.project), text: scopeName(x.project || "") || "—"}), h("div", {class: "ell t2", title: plain(stripMarker(x.text))}, logText(x))), "No agent sessions since yesterday."),
     col("Commits", s.commits || [], ([pid, n]) => h("li", {style: "display:flex;gap:8px"}, h("button", {class: "lnk ell", style: "flex:1;text-align:left", type: "button", onclick: () => openProject(pid), text: scopeName(pid)}), h("span", {class: "num t2", text: String(n)})), "No commits since yesterday."),
     col("Merged PRs", s.merged || [], x => h("li", {class: "ell"}, h("a", {href: x.url, target: "_blank", rel: "noopener noreferrer", text: "#" + x.number}), " ", x.title, h("span", {class: "k", text: " · " + x.repo.split("/").pop()})), "Nothing merged since yesterday."),
     col("Completed tasks", s.done || [], x => h("li", {class: "ell"}, x.id && ITEMBY.has(x.id) ? h("button", {class: "lnk", type: "button", onclick: () => openTask(x.id), text: x.text}) : inline(x.text), h("span", {class: "k", text: " · " + scopeName(x.project) + (x.who ? " · " + x.who : "")})), "No tasks completed since yesterday.", link({view: "tasks", tst: "done"})));
@@ -1964,7 +2042,7 @@ function viewInitiative(main) {
   main.append(crumbs([["Initiatives", link({view: "initiatives", id: "", tab: ""})], [x.title]]));
   main.append(h("header", {class: "phead"},
     h("div", {class: "pt1"}, h("div", {class: "pt-t"}, h("h1", {text: x.title}),
-        h("div", {class: "bd"}, statusBadge(x.status), prioBadge(x.priority), x.milestone ? h("span", {class: "badge", title: "Milestone", text: "◆ " + x.milestone}) : null, dueBadge(x.due, x.status === "done"), x.tags.map(t => h("span", {class: "stk", text: "#" + t}))),
+        h("div", {class: "bd"}, statusBadge(x.status), prioBadge(x.priority), x.milestone ? h("span", {class: "badge ms", title: "Milestone: " + x.milestone, text: "◆ " + x.milestone}) : null, dueBadge(x.due, x.status === "done"), x.tags.map(t => h("span", {class: "stk", text: "#" + t}))),
         h("div", {class: "pmeta t2"}, [x.owner ? "Owner " + x.owner : null, plural(x.members.length, "project") + (nc ? " (" + (nc === x.members.length ? "none cloned here" : nc + " not cloned") + ")" : ""), x.last ? "active " + rel(x.last) : null].filter(Boolean).join(" · "))),
       h("div", {class: "pt-p"}, progressBar(x, true), h("div", {class: "t2 why", text: pr.why}))),
     h("div", {class: "go"}, cmdBtn("dev initiative show " + x.id, true), cmdBtn('dev task -i ' + x.id + ' add "…" --now'), x.note && FILEMAP.has(x.note) ? h("a", {class: "btn sm", href: link({view: "explorer", f: x.note, id: ""})}, "README in Explorer") : null)));
@@ -2012,7 +2090,7 @@ function miniStatus(list) {
   const c = {}; for (const d of list) c[d.st] = (c[d.st] || 0) + 1;
   return h("span", {class: "mini", "aria-label": Object.entries(c).map(([k, n]) => n + " " + k).join(", ")}, Object.keys(c).sort((a, b) => (SORDER[a] ?? 6) - (SORDER[b] ?? 6)).map(k => h("span", {title: c[k] + " " + (STATUS[k] || [0, k])[1].toLowerCase()}, h("span", {class: "dot " + (SDOT[k] || "d-info"), "aria-hidden": "true"}), String(c[k]))));
 }
-function memberTable(list) {
+function memberTable(list, allNc) {
   return h("div", {class: "tw st"}, h("table", {class: "t pt mt"},
     h("thead", null, h("tr", null, h("th", {class: "c-health"}), h("th", {text: "Project"}), h("th", {class: "c-st", text: "Status"}), h("th", {class: "c-prog", text: "Progress"}), h("th", {text: "In progress · latest"}), h("th", {class: "c-who", text: "Who"}), h("th", {class: "c-cta"}))),
     h("tbody", null, list.map(d => h("tr", {"data-nav": "", tabindex: "0", onclick: () => openProject(d.id), onkeydown: e => { if (e.key === "Enter") openProject(d.id); }},
@@ -2021,9 +2099,9 @@ function memberTable(list) {
       h("td", {class: "c-st"}, statusBadge(d.st in STATUS ? d.st : "untracked")),
       h("td", {class: "c-prog"}, d.pct != null ? progressBar(d.p || {progress: d.pct, t: {}}) : h("span", {class: "muted", text: "—"})),
       h("td", {class: "c-now"}, d.doing.length ? h("div", {class: "slt"}, h("div", {class: "ell", title: d.doing[0].title}, istatusIcon(d.doing[0].status), " ", d.doing[0].title), d.doing.length > 1 ? h("div", {class: "who", text: "+" + (d.doing.length - 1) + " more in progress"}) : null)
-        : d.sl ? h("div", {class: "slt"}, h("div", {class: "ell", title: plain(stripMarker(d.sl.line))}, inline(stripMarker(d.sl.line))), h("div", {class: "who", text: (d.sl.agent || "agent") + " · " + rel(d.sl.ts)})) : h("span", {class: "muted", text: "—"})),
+        : d.sl ? h("div", {class: "slt"}, h("div", {class: "ell", title: plain(stripMarker(d.sl.line))}, statusLine(d.sl.line, d.sl.parts)), h("div", {class: "who", text: (d.sl.agent || "agent") + " · " + rel(d.sl.ts)})) : h("span", {class: "muted", text: "—"})),
       h("td", {class: "c-who"}, avatars(d.people, 3)),
-      h("td", {class: "c-cta"}, d.local ? null : h("span", {class: "nc"}, h("span", {class: "tag", title: "Not cloned on this Mac", text: "not cloned"}), icopy("dev clone " + d.id, "Clone"))))))));
+      h("td", {class: "c-cta"}, d.local ? null : h("span", {class: "nc"}, allNc ? null : h("span", {class: "tag", title: "Not cloned on this Mac", text: "not cloned"}), icopy("dev clone " + d.id, "Clone"))))))));
 }
 function membersBlock(x) {
   const mem = x.members.map(m => { const p = BYID.get(m.id), st = (p && p.status) || m.status || "unknown";
@@ -2039,7 +2117,7 @@ function membersBlock(x) {
   const g = groupings.some(o => o[0] === S.mg) ? S.mg : mem.length > 12 ? (famOk ? "family" : "status") : "none";
   const input = h("input", {id: "mq", type: "search", class: "fin", placeholder: "Filter " + plural(mem.length, "project") + "…", value: S.mq, "aria-label": "Filter member projects", autocomplete: "off"});
   const count = h("span", {class: "count t2", role: "status"});
-  const box = h("div", {class: "stack-v"});
+  const box = h("div", {class: "stack-v"}), allNc = mem.length > 0 && mem.every(d => !d.local);
   function draw() {
     const tk = tokens(input.value), shown = mem.filter(d => tk.every(t => d.hay.includes(t)));
     count.textContent = shown.length === mem.length ? plural(mem.length, "project") : shown.length + " of " + mem.length;
@@ -2049,11 +2127,11 @@ function membersBlock(x) {
     const key = d => g === "status" ? d.st : g === "owner" ? d.owner : g === "family" ? d.fam : g === "ws" ? (d.ws ? d.ws.split(/[.:;—]/)[0].trim().slice(0, 48) : "No workstream") : "";
     const groups = new Map(); for (const d of shown.slice().sort((a, b) => (SORDER[a.st] ?? 6) - (SORDER[b.st] ?? 6) || a.name.localeCompare(b.name))) { const k = key(d); if (!groups.has(k)) groups.set(k, []); groups.get(k).push(d); }
     const order = Array.from(groups.keys()).sort((a, b) => g === "status" ? (SORDER[a] ?? 6) - (SORDER[b] ?? 6) : a === "other" ? 1 : b === "other" ? -1 : groups.get(b).length - groups.get(a).length || a.localeCompare(b));
-    if (groups.size === 1) { box.append(h("div", {class: "panel"}, memberTable(shown))); return; }
+    if (groups.size === 1) { box.append(h("div", {class: "panel"}, memberTable(shown, allNc))); return; }
     order.forEach((k, gi) => { const list = groups.get(k), ncl = list.filter(d => !d.local).length;
       const det = h("details", {class: "mgrp panel", open: tk.length > 0 || gi < 3 || groups.size <= 4},
         h("summary", null, h("span", {class: "mg-n", text: g === "status" ? (STATUS[k] || [0, k])[1] : k}), h("span", {class: "count num", text: String(list.length)}), miniStatus(list),
-          h("span", {class: "mg-c t2", text: ncl ? (ncl === list.length ? "none cloned" : ncl + " not cloned") : ""})), memberTable(list));
+          h("span", {class: "mg-c t2", text: ncl ? (ncl === list.length ? "none cloned" : ncl + " not cloned") : ""})), memberTable(list, allNc));
       box.append(det); });
   }
   input.addEventListener("input", debounce(() => { S.mq = input.value; history.replaceState(null, "", encode(S)); store.set("devkit.state", S); draw(); }, 120));
@@ -2108,7 +2186,7 @@ function sessionsBlock(list, showScope) {
     const k = lkey(new Date(it.ts * 1000));
     if (k !== day) { day = k; ul.append(h("li", {class: "day", text: fmtDay(it.ts)})); }
     ul.append(h("li", {class: "it"}, h("span", {class: "tm", text: tm(it.ts)}), it.who ? avatar(it.who) : h("span", {class: "ki", "aria-hidden": "true", text: "◇"}),
-      h("div", {style: "min-width:0"}, h("div", {class: "slw t2"}, [it.who, it.agent, it.branch ? "⎇ " + it.branch : ""].filter(Boolean).join(" · "), showScope && it.scope ? [" · ", scopeChip(it.scope)] : null), h("div", null, inline(stripMarker(it.text))))));
+      h("div", {style: "min-width:0"}, h("div", {class: "slw t2"}, [it.who, it.agent, it.branch ? "⎇ " + it.branch : ""].filter(Boolean).join(" · "), showScope && it.scope ? [" · ", scopeChip(it.scope)] : null), h("div", null, logText(it)))));
   }
   return h("div", {class: "panel"}, ul, list.length > n ? h("div", {class: "more"}, h("button", {class: "btn sm", type: "button", onclick: () => { SHOWN.sessions = n + 200; render(); }}, "Show " + Math.min(200, list.length - n) + " more")) : null);
 }
@@ -2121,7 +2199,7 @@ function sortProjects(ps) {
   return ps.slice().sort(by[S.sort] || by.attention);
 }
 function latest(p) { const sl = p.status_line; if (!sl) return h("span", {class: "muted", text: "—"});
-  return h("div", {class: "slt"}, h("div", {class: "ell", title: plain(stripMarker(sl.line))}, inline(stripMarker(sl.line))), h("div", {class: "who", text: (sl.agent || "agent") + " · " + rel(sl.ts)})); }
+  return h("div", {class: "slt"}, h("div", {class: "ell", title: plain(stripMarker(sl.line))}, statusLine(sl.line, sl.parts)), h("div", {class: "who", text: (sl.agent || "agent") + " · " + rel(sl.ts)})); }
 function nowCell(p) {
   const d = sortItems(p.items.filter(i => i.status === "doing" || i.status === "blocked"));
   if (!d.length) return h("span", {class: "muted", text: p.cnt.open ? plural(p.cnt.open, "open task") : "—"});
@@ -2145,7 +2223,7 @@ function projectCard(p) {
     h("div", {class: "r1"}, healthDot(p), h("span", {class: "nm ell", text: p.name || p.id}), ONPROJ.has(p.id) ? h("span", {class: "dot d-live", title: "Live session"}) : null, h("span", {class: "bd"}, statusBadge(p.status), prioBadge(p.priority))),
     progressBar(p, true),
     d.length ? h("div", {class: "slt ell"}, istatusIcon(d[0].status), " ", d[0].title) : null,
-    p.status_line ? h("div", {class: "statusline"}, h("span", {class: "who", text: (p.status_line.agent || "agent") + " · " + rel(p.status_line.ts)}), inline(stripMarker(p.status_line.line))) : null,
+    p.status_line ? h("div", {class: "statusline"}, h("span", {class: "who", text: (p.status_line.agent || "agent") + " · " + rel(p.status_line.ts)}), statusLine(p.status_line.line, p.status_line.parts)) : null,
     h("div", {class: "r3"}, prPills(p), avatars(p.people, 3), h("span", {style: "margin-left:auto;display:flex;gap:8px;align-items:center"}, sparkline(p, 30, 64, 16), rel(p.last_activity), p.local ? null : h("span", {class: "tag", text: "not cloned"}))));
 }
 function viewProjects(main) {
@@ -2183,14 +2261,14 @@ function prTable(p) {
       h("td", {class: "t2", text: r.review === "CHANGES_REQUESTED" ? "changes requested" : r.review === "APPROVED" ? "approved" : r.review === "REVIEW_REQUIRED" ? "review required" : "—"}),
       h("td", {class: r.mergeable === "CONFLICTING" ? "bad" : "t2", text: r.mergeable === "CONFLICTING" ? "⚠ conflicts" : r.mergeable === "MERGEABLE" ? "clean" : "—"}),
       h("td", {class: "num t2", text: r.size != null ? compact(r.size) : "—"}), h("td", {class: "num t2", text: rel(iso(r.updated))}),
-      h("td", null, icopy(r.checks === "failing" ? "gh pr checks " + r.number + " -R " + repo + " --watch" : "gh pr view " + r.number + " -R " + repo, "Copy")))))))));
+      h("td", null, icopy(r.checks === "failing" ? "gh pr checks " + r.number + " -R " + repo + " --watch" : "gh pr view " + r.number + " -R " + repo, "Copy"))))))));
 }
 function wtTable(p) {
   if (!p.wts.length) return h("div", {class: "panel"}, empty("No worktrees", p.local ? ["Parallel work on this repository: ", h("code", {text: "dev wt new <type>/<topic>"})] : "Worktrees appear once the project is cloned."));
   return h("div", {class: "panel"}, h("div", {class: "tw"}, h("table", {class: "t"}, h("thead", null, h("tr", null, ["Branch", "PR", "State", "Session", "Size", ""].map(x => h("th", {text: x})))),
     h("tbody", null, p.wts.map(w => h("tr", null, h("td", {class: "mono", style: "font-size:.78rem", text: w.branch || "detached"}), h("td", {text: w.pr ? "#" + w.pr.number + " " + String(w.pr.state).toLowerCase() : "—"}),
       h("td", {text: w.missing ? "missing" : ((w.modified || 0) + (w.untracked || 0)) ? ((w.modified || 0) + (w.untracked || 0)) + " changed" : w.unpushed ? w.unpushed + " unpushed" : "clean"}),
-      h("td", {text: w.active ? "live" : rel(w.last_activity)}), h("td", {class: "num", text: kb(w.size_kb)}), h("td", null, w.branch ? icopy("dev wt rm " + w.branch, "Remove") : null))))))));
+      h("td", {text: w.active ? "live" : rel(w.last_activity)}), h("td", {class: "num", text: kb(w.size_kb)}), h("td", null, w.branch ? icopy("dev wt rm " + w.branch, "Remove") : null)))))));
 }
 function repoKv(p) {
   const m = p.main || {};
@@ -2209,12 +2287,13 @@ function timeStats(t) {
   const tu = t.turns || {};
   return stats([[tu.median != null ? fmtMin(tu.median) : "—", "median turn", "", tu.n ? "Over " + plural(tu.n, "turn") + " in 30 days" : "No turns recorded yet"],
     [tu.p90 != null ? fmtMin(tu.p90) : "—", "p90 turn", "", "90% of turns finish within this"],
-    [t.ratio != null ? "×" + t.ratio : "—", "actual ÷ estimate", t.ratio != null && t.ratio > 1.5 ? "warn" : "", t.runs ? "Median over " + plural(t.runs, "finished run") + " with an estimate (60 days)" : "No finished runs with an estimate yet"]]);
+    [t.ratio != null ? "×" + t.ratio : "—", "actual / estimate", t.ratio != null && t.ratio > 1.5 ? "warn" : "", t.runs ? "Median over " + plural(t.runs, "finished run") + " with an estimate (60 days)" : "No finished runs with an estimate yet"]]);
 }
+function fmtSecs(s) { s = Math.max(0, s || 0); return s < 90 ? Math.round(s) + " s" : dur(s); }
 function slowTable(rows, showProject) {
   if (!rows || !rows.length) return null;
   return h("div", {class: "tw"}, h("table", {class: "t"}, h("thead", null, h("tr", null, h("th", {text: "Took"}), h("th", {text: "Command"}), showProject ? h("th", {text: "Project"}) : null, h("th", {text: "When"}))),
-    h("tbody", null, rows.map(r => h("tr", null, h("td", {class: "num", style: "white-space:nowrap", text: dur(r.secs || 0)}), h("td", null, h("code", {class: "ell", style: "display:block;max-width:420px", title: r.what, text: r.what || "—"})),
+    h("tbody", null, rows.map(r => h("tr", null, h("td", {class: "num", style: "white-space:nowrap", text: fmtSecs(r.secs)}), h("td", null, h("code", {class: "ell", style: "display:block;max-width:420px", title: r.what, text: r.what || "—"})),
       showProject ? h("td", {class: "t2 ell", style: "max-width:160px", text: r.project ? scopeName(r.project) : "—"}) : null, h("td", {class: "num t2", style: "white-space:nowrap", text: rel(r.ts)}))))));
 }
 function timePanel(t, showProject, title) {
@@ -2257,7 +2336,7 @@ function viewProject(main) {
     tp.append(h("div", {class: "cols"},
       h("div", {class: "stack-v"},
         here.length ? panel("Live now", here.length, null, h("div", {class: "sessl"}, here.map(s => sessionBlock(s, s.who, s.asOf)))) : null,
-        p.status_line ? panel("Latest status", null, h("span", {class: "t2", style: "font-size:.8rem", text: (p.status_line.agent || "agent") + " · " + rel(p.status_line.ts) + (p.status_line.branch ? " · ⎇ " + p.status_line.branch : "")}), h("div", {class: "statusline", style: "font-size:.92rem"}, inline(stripMarker(p.status_line.line)))) : null,
+        p.status_line ? panel("Latest status", null, h("span", {class: "t2", style: "font-size:.8rem", text: (p.status_line.agent || "agent") + " · " + rel(p.status_line.ts) + (p.status_line.branch ? " · ⎇ " + p.status_line.branch : "")}), statusCard(p.status_line.line, p.status_line.parts)) : null,
         panel("In progress", doing.length, h("a", {class: "btn sm ghost", href: link({tab: "tasks"})}, "All tasks →"),
           doing.length || next.length ? [doing.length ? h("ul", {class: "irows"}, doing.map(i => itemRow(i))) : null, next.length ? [h("div", {class: "label pad-l", text: "Up next"}), h("ul", {class: "irows"}, next.map(i => itemRow(i)))] : null]
             : empty("Nothing in progress", "Plan the work: ", h("code", {text: "dev task -p " + p.id + ' add "…" --now'})), {flush: !!(doing.length || next.length)}),
@@ -2284,14 +2363,15 @@ function personCard(x) {
   const expired = claimed.filter(i => i.lock === "expired");
   const lockRow = (id, title, scope, until) => { const it = ITEMBY.get(id), exp = (it && it.lock === "expired") || (iso(until) && iso(until) < nowS());
     return h("li", {class: "lrow" + (exp ? " exp" : ""), "data-nav": "", tabindex: "0", onclick: () => it ? openTask(id) : openScope(scope), onkeydown: e => { if (e.key === "Enter") it ? openTask(id) : openScope(scope); }},
-      lockIcon(), h("span", {class: "iid mono", text: id}), h("span", {class: "ell lt", title: title, text: title}), h("span", {class: "t2 ell ls", text: scopeName(scope)}), h("span", {class: "num lu" + (exp ? " bad" : ""), text: exp ? "expired " + rel(iso(until)) : untilText(until)})); };
+      lockIcon(), h("div", {class: "lm"}, h("div", {class: "lt ell", title: title, text: title}), h("div", {class: "ls t2 ell"}, h("span", {class: "iid mono", text: id}), " · " + scopeName(scope))),
+      h("span", {class: "num lu" + (exp ? " bad" : ""), text: exp ? "expired " + rel(iso(until)) : untilText(until)})); };
   return h("article", {class: "pcard2 panel" + (isMe(x.who) ? " me" : ""), "aria-label": x.who},
     h("div", {class: "pc-h"}, avatar(x.who, true), h("div", {class: "pc-n"}, h("h3", null, h("span", {class: "ell", text: x.who}), isMe(x.who) ? h("span", {class: "tag", text: "you"}) : null),
       h("div", {class: "t2", text: [x.sessions.length ? plural(x.sessions.length, "live session") : "no live session", plural(x.locks.length, "lock"), x.updated ? "presence " + rel(x.updated) : null].filter(Boolean).join(" · ")}))),
     expired.length ? callout("warn", plural(expired.length, "expired lock") + " still held", "Anyone can release an expired lock; check with " + x.user + " first.", cmdBtn("dev task " + flagOf(expired[0].scope) + " release " + expired[0].id + ' --why "lock expired"')) : null,
     x.sessions.length ? h("div", {class: "pc-s"}, h("div", {class: "label", text: "Live sessions"}), x.sessions.map(s => sessionBlock(s, null, x.updated))) : null,
     x.locks.length || extra.length ? h("div", {class: "pc-s"}, h("div", {class: "label", text: "Locks and claimed tasks"}), h("ul", {class: "lrows"}, x.locks.map(l => lockRow(l.id, l.title, l.scope, l.until)), extra.map(i => lockRow(i.id, i.title, i.scope, i.lock_expires)))) : null,
-    x.recent.length ? h("div", {class: "pc-s"}, h("div", {class: "label", text: "Recent sessions"}), h("ul", {class: "rrows"}, x.recent.slice(0, 4).map(r => h("li", null, h("span", {class: "num t2", text: fmt(r.ts)}), " ", scopeChip(r.scope), " ", h("span", {class: "t2", text: [r.agent, r.branch ? "⎇ " + r.branch : ""].filter(Boolean).join(" · ")}), h("div", {class: "ell", title: plain(r.text)}, inline(stripMarker(r.text))))))) : null,
+    x.recent.length ? h("div", {class: "pc-s"}, h("div", {class: "label", text: "Recent sessions"}), h("ul", {class: "rrows"}, x.recent.slice(0, 4).map(r => h("li", null, h("span", {class: "num t2", text: fmt(r.ts)}), " ", scopeChip(r.scope), " ", h("span", {class: "t2", text: [r.agent, r.branch ? "⎇ " + r.branch : ""].filter(Boolean).join(" · ")}), h("div", {class: "ell", title: plain(stripMarker(r.text))}, logText(r)))))) : null,
     !x.sessions.length && !x.locks.length && !extra.length && !x.recent.length ? h("p", {class: "t2", style: "margin:0", text: "Nothing right now."}) : null);
 }
 function viewTeam(main) {
@@ -2334,7 +2414,7 @@ function viewTasks(main) {
   if (S.tmode === "list") {
     const by = new Map(); for (const it of sortItems(items)) { if (!by.has(it.scope)) by.set(it.scope, []); by.get(it.scope).push(it); }
     const order = Array.from(by.entries()).sort((a, b) => cnt(b[1]).doing - cnt(a[1]).doing || cnt(b[1]).open - cnt(a[1]).open);
-    main.append(h("div", {class: "stack-v"}, order.map(([sc, list]) => panel(scopeName(sc), list.length, h("button", {class: "btn sm", type: "button", onclick: () => openScope(sc, "tasks")}, "Open"), h("ul", {class: "irows"}, list.slice(0, 60).map(i => itemRow(i, {home: sc})))), {flush: true}))));
+    main.append(h("div", {class: "stack-v"}, order.map(([sc, list]) => panel(scopeName(sc), list.length, h("button", {class: "btn sm", type: "button", onclick: () => openScope(sc, "tasks")}, "Open"), h("ul", {class: "irows"}, list.slice(0, 60).map(i => itemRow(i, {home: sc}))), {flush: true}))));
     return;
   }
   const board = h("div", {class: "board"});
@@ -2582,7 +2662,7 @@ function renderDrawer() {
   const body = h("div", {class: "db"});
   if (lock) body.append(lock);
   if (it.body) body.append(panel("Description", null, null, md(it.body)));
-  body.append(panel("Commands", null, null, cmds.length ? h("div", {class: "cmds"}, cmds.map(([label, c], i) => h("div", {class: "cmdr"}, h("span", {class: "t2", text: label}), cmdBtn(c, i === 0 && it.open)))).concat(h("p", {class: "t2 tnote"}, "Changes of scope (move, block, cancel, edit) need ", h("code", {text: '--why "…"'}), ": the reason is versioned in the changelog and the commit."))
+  body.append(panel("Commands", null, null, cmds.length ? [h("div", {class: "cmds"}, cmds.map(([label, c], i) => h("div", {class: "cmdr"}, h("span", {class: "t2", text: label}), cmdBtn(c, i === 0 && it.open)))), h("p", {class: "t2 tnote"}, "Changes of scope (move, block, cancel, edit) need ", h("code", {text: '--why "…"'}), ": the reason is versioned in the changelog and the commit.")]
     : empty("No commands", it.legacy ? "This checkbox has no number in dev task yet." : "")));
   if (!it.legacy) body.append(panel("Details", null, null, h("dl", {class: "kv"},
     h("dt", {text: "Id"}), h("dd", {class: "mono", text: it.id}),
@@ -2691,6 +2771,8 @@ document.addEventListener("keydown", e => {
 });
 
 /* ---------------------------------------------------------------- render + boot */
+/* sticky headers need visible overflow; a table that does not fit its panel scrolls inside it instead */
+function fitTables(root) { for (const w of $$(".tw.st", root || document)) { w.classList.remove("x"); if (w.scrollWidth > w.clientWidth + 1) w.classList.add("x"); } }
 const VIEWFN = {overview: viewHome, actions: viewActions, initiatives: viewInitiatives, projects: viewProjects, team: viewTeam, tasks: viewTasks, activity: viewActivity, explorer: viewExplorer, health: viewHealthV3, search: viewSearch};
 function pageTitle() {
   if (S.view === "initiatives" && S.id) return (BYINIT.get(S.id) || {}).title || S.id;
@@ -2704,6 +2786,7 @@ function render() {
   renderNav(); renderFilters();
   const main = clear($("#view"));
   (VIEWFN[S.view] || viewHome)(main);
+  fitTables(main);
   renderDrawer();
   if (fid) { const el = document.getElementById(fid); if (el && $("#drawer").hidden) el.focus({preventScroll: true}); }
   if (page !== lastView) { lastView = page; document.title = pageTitle() + " · Firefly devkit"; }
@@ -2724,6 +2807,8 @@ function render() {
   }, 140));
   q.addEventListener("keydown", e => { if (e.key === "Enter") { const first = $("[data-nav]", $("#view")); if (first) first.focus(); } });
   document.addEventListener("click", e => { $$(".facet[open]").forEach(d => { if (!d.contains(e.target)) d.open = false; }); }, true);
+  window.addEventListener("resize", debounce(() => fitTables($("#view")), 150));
+  document.addEventListener("toggle", e => { if (e.target && e.target.matches && e.target.matches("details")) fitTables(e.target); }, true);
   $("#scrim").addEventListener("click", () => { if (!$("#palette").hidden) closePalette(); else if (!$("#sheet").hidden) closeSheet(); else closeDrawer(); });
   const st = decode(location.hash) || store.get("devkit.state", null);
   if (st) S = Object.assign({}, DEFAULT, st, {view: ROUTES.includes(st.view) ? st.view : st.view === "portfolio" ? "initiatives" : "overview"});
@@ -2793,6 +2878,13 @@ td.c-prog{width:150px} table.pt .prog{min-width:104px}
 CSS += r"""
 /* ---------- v3 components: breadcrumbs, page header, stats, tabs */
 :root{--nav-h:56px;--tabs-h:46px}
+/* grid containers size to min-content unless told otherwise: bound every single-column grid so long commands never widen the page */
+.stack-v,.db,.pcard2,.pc-s,.sess,.run,.pl,.cmds,.sessl{grid-template-columns:minmax(0,1fr)}
+.seg{max-width:100%;overflow-x:auto;scrollbar-width:none} .seg::-webkit-scrollbar{display:none} .seg button{flex:none}
+.toolbar select{max-width:100%;min-width:0}
+.tl .it>div,.rl,.rrows li,.cbody,.sess .statusline{overflow-wrap:anywhere}
+.ph .right{min-width:0;max-width:100%}
+.kv{grid-template-columns:auto minmax(0,1fr)} .kv dd{min-width:0;overflow-wrap:anywhere}
 .mt{margin-top:var(--s4)} .bad{color:var(--bad-text)} .spacer{flex:1}
 .lnk{all:unset;cursor:pointer;font-weight:650;color:var(--text)} .lnk:hover{text-decoration:underline} .lnk:focus-visible{outline:2px solid var(--focus);border-radius:4px}
 .crumbs ol{list-style:none;display:flex;flex-wrap:wrap;gap:2px 0;margin:0 0 var(--s2);padding:0;font-size:var(--fs-sm);color:var(--text-2)}
@@ -2800,7 +2892,8 @@ CSS += r"""
 .crumbs li+li::before{content:"›";margin:0 8px;color:var(--muted)}
 .crumbs a{color:var(--text-2);text-decoration:none} .crumbs a:hover{color:var(--text);text-decoration:underline}
 .crumbs [aria-current]{color:var(--heading);font-weight:650;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;max-width:60vw}
-.phead{display:grid;gap:var(--s3);margin:0 0 var(--s4)}
+.phead{display:grid;grid-template-columns:minmax(0,1fr);gap:var(--s3);margin:0 0 var(--s4)}
+.pt1>*{min-width:0} .phead .go .cmd{max-width:100%}
 .pt1{display:grid;grid-template-columns:minmax(0,1fr) minmax(240px,360px);gap:var(--s4);align-items:end}
 .pt-t{min-width:0}
 .phead h1{margin:0;font-size:var(--fs-title);font-weight:450;letter-spacing:-.035em;line-height:1.15;color:var(--heading);overflow-wrap:anywhere;display:flex;align-items:center;gap:10px}
@@ -2839,11 +2932,11 @@ CSS += r"""
 .kpi.warn{border-left:3px solid var(--warning)} .kpi.warn .kv{color:var(--warn-text)}
 .more-l.pad{padding:var(--s2) var(--s4);border-top:1px solid var(--line-soft)}
 /* ---------- callouts */
-.callout{display:grid;grid-template-columns:22px minmax(0,1fr) auto;gap:var(--s3);align-items:center;padding:var(--s3) var(--s4);border-radius:var(--r);border:1px solid var(--line-soft);background:var(--surface);margin:0 0 var(--s3)}
+.callout{display:flex;flex-wrap:wrap;gap:var(--s2) var(--s3);align-items:center;padding:var(--s3) var(--s4);border-radius:var(--r);border:1px solid var(--line-soft);background:var(--surface);margin:0 0 var(--s3)}
 .callout.warn{border-color:color-mix(in srgb,var(--warning) 55%,var(--line-soft));background:color-mix(in srgb,var(--warning) 7%,var(--surface))}
 .callout.risk{border-color:color-mix(in srgb,var(--critical) 55%,var(--line-soft))}
-.callout .cbody{min-width:0;font-size:var(--fs-sm)} .callout .cbody strong{display:block;color:var(--heading);font-size:var(--fs-md)}
-.callout .cact{display:flex;gap:var(--s2);flex-wrap:wrap;justify-content:flex-end}
+.callout>.sev{flex:none} .callout .cbody{flex:1 1 260px;min-width:0;font-size:var(--fs-sm)} .callout .cbody strong{display:block;color:var(--heading);font-size:var(--fs-md)}
+.callout .cact{display:flex;gap:var(--s2);flex-wrap:wrap;justify-content:flex-end;margin-left:auto;max-width:100%;min-width:0} .callout .cmd{max-width:100%}
 .db .callout,.pcard2 .callout{margin:0}
 /* ---------- people: avatars, claim chips */
 .av{flex:none;display:inline-grid;place-items:center;width:26px;height:26px;border-radius:50%;background:var(--surface-3);color:var(--heading);font-size:.66rem;font-weight:800;letter-spacing:.02em;border:1px solid var(--line)}
@@ -2852,8 +2945,8 @@ CSS += r"""
 .av.me{border-color:var(--heading)}
 .av.more{background:var(--surface-2);color:var(--text-2);font-weight:700}
 .avs{display:inline-flex;align-items:center}
-.avs .av{margin-left:-6px;box-shadow:0 0 0 2px var(--surface)} .avs .av:first-child{margin-left:0}
-.avs .av.live{box-shadow:0 0 0 2px var(--surface),0 0 0 3.5px var(--good)}
+.avs{gap:6px} .avs .av{width:24px;height:24px;font-size:.6rem}
+.avs .av.live{box-shadow:0 0 0 1.5px var(--surface),0 0 0 3px var(--good)}
 .claim{display:inline-flex;align-items:center;gap:5px;height:22px;max-width:100%;padding:0 8px;border-radius:999px;border:1px solid var(--line);background:var(--surface-2);font-size:var(--fs-xs);font-weight:650;color:var(--text);white-space:nowrap;min-width:0}
 .claim .lk{flex:none;color:var(--text-2)} .claim .cw{min-width:0} .claim .cu{color:var(--muted);font-weight:600}
 .claim.mine{border-color:var(--text-2)} .claim.mine .lk{color:var(--heading)}
@@ -2888,19 +2981,21 @@ CSS += r"""
 /* ---------- initiative cards */
 .icards{display:grid;grid-template-columns:repeat(auto-fill,minmax(280px,1fr));gap:var(--s3)}
 .icards.wide{grid-template-columns:repeat(auto-fill,minmax(360px,1fr))}
-.icard{display:grid;gap:var(--s2);align-content:start;padding:var(--s3) var(--s4) var(--s4);background:var(--surface);border:1px solid var(--line-soft);border-radius:var(--r);cursor:pointer;min-width:0;transition:border-color .15s}
+.icard{display:grid;grid-template-columns:minmax(0,1fr);gap:var(--s2);align-content:start;padding:var(--s3) var(--s4) var(--s4);background:var(--surface);border:1px solid var(--line-soft);border-radius:var(--r);cursor:pointer;min-width:0;transition:border-color .15s}
 .panel .icard{background:var(--surface-2)}
 .icard:hover,.icard:focus-visible{border-color:var(--line)}
 .ic-h{display:flex;align-items:center;gap:var(--s2);min-width:0}
 .ic-h h3{margin:0;font-size:var(--fs-lg);font-weight:650;letter-spacing:-.015em;color:var(--heading);min-width:0;flex:1}
-.ic-b{display:flex;flex-wrap:wrap;gap:4px}
+.ic-b{display:flex;flex-wrap:wrap;gap:4px;min-width:0}
+.badge.ms{display:inline-block;line-height:20px;max-width:100%;overflow:hidden;text-overflow:ellipsis}
+.pb .md{padding:0}
 .ic-g{margin:0;color:var(--text-2);font-size:var(--fs-sm);display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden}
 .ic-m{display:flex;flex-wrap:wrap;gap:4px var(--s4);font-size:var(--fs-sm);color:var(--text)}
 .ic-m strong{font-weight:700;color:var(--heading)}
 .ic-f{display:flex;align-items:center;justify-content:space-between;gap:var(--s2);font-size:var(--fs-xs);min-height:26px}
 .sbar{display:flex;height:6px;border-radius:999px;overflow:hidden;background:var(--surface-3);gap:1px}
 .sbar i,.sleg i{display:block;height:100%}
-.sb-active{background:var(--good)} .sb-blocked{background:var(--critical)} .sb-paused{background:var(--warning)} .sb-done{background:var(--deemph)} .sb-unknown{background:var(--surface-3);outline:1px solid var(--line)}
+.sb-active{background:var(--deemph)} .sb-blocked{background:var(--critical)} .sb-paused{background:var(--warning)} .sb-done{background:var(--deemph)} .sb-unknown{background:var(--surface-3);outline:1px solid var(--line)}
 .sleg{display:flex;flex-wrap:wrap;gap:2px 10px;font-size:.7rem;color:var(--text-2);margin-top:4px}
 .sleg span{display:inline-flex;align-items:center;gap:4px} .sleg i{width:8px;height:8px;border-radius:2px}
 /* ---------- team rows, runs, sessions */
@@ -2938,7 +3033,8 @@ CSS += r"""
 .pc-n{min-width:0;flex:1} .pc-n h3{margin:0;display:flex;align-items:center;gap:8px;font-size:var(--fs-lg);font-weight:650;color:var(--heading);min-width:0} .pc-n .t2{font-size:var(--fs-sm)}
 .pc-s{display:grid;gap:var(--s2)}
 .lrows,.rrows{list-style:none;margin:0;padding:0;display:grid}
-.lrow{display:grid;grid-template-columns:12px auto minmax(0,1fr) minmax(0,120px) auto;gap:var(--s2);align-items:center;padding:6px var(--s2);border-radius:8px;font-size:var(--fs-sm);cursor:pointer}
+.lrow{display:grid;grid-template-columns:12px minmax(0,1fr) auto;gap:var(--s2);align-items:center;padding:6px var(--s2);border-radius:8px;font-size:var(--fs-sm);cursor:pointer}
+.lrow .lm{min-width:0} .lrow .lt{font-weight:600;color:var(--heading)}
 .lrow:hover{background:var(--hover)} .lrow .lk{color:var(--text-2)} .lrow.exp .lk{color:var(--warn-text)} .lrow .ls,.lrow .lu{font-size:var(--fs-xs)}
 .rrows li{padding:6px 0;border-bottom:1px solid var(--line-soft);font-size:var(--fs-sm);min-width:0} .rrows li:last-child{border-bottom:0}
 .rrows .mchip{height:20px;margin:0}
@@ -2970,15 +3066,32 @@ table.mt td.c-name{max-width:300px}
 .dh .crumbs ol{margin-bottom:4px}
 .cmds{display:grid;gap:6px}
 .cmdr{display:grid;grid-template-columns:minmax(120px,190px) minmax(0,1fr);gap:var(--s3);align-items:center;font-size:var(--fs-sm)}
-.cmdr .cmd{justify-self:start}
+.cmdr .cmd{justify-self:stretch;height:auto;min-height:30px;padding-top:3px;padding-bottom:3px} .cmdr .cmd code{white-space:normal;overflow-wrap:anywhere}
 .tnote{font-size:var(--fs-xs);margin:var(--s3) 0 0}
-.mk{display:inline-flex;align-items:center;height:20px;padding:0 7px;border-radius:6px;border:1px solid var(--line);background:var(--surface-2);font-family:ui-monospace,"SF Mono",Menlo,Consolas,monospace;font-size:.72rem;font-weight:700;color:var(--heading);white-space:nowrap;vertical-align:1px}
+.mk{display:inline-block;line-height:18px;height:20px;padding:0 7px;border-radius:6px;border:1px solid var(--line);background:var(--surface-2);font-family:ui-monospace,"SF Mono",Menlo,Consolas,monospace;font-size:.72rem;font-weight:700;color:var(--heading);white-space:nowrap;vertical-align:1px}
 .mk .chev{color:var(--accent-text);margin:0 1px}
 .tc.blk{border-left:3px solid var(--critical)}
+/* the status block agents write: brand chip, project · branch and task chips, Done / Check / Progress / Next */
+.sblock{display:grid;grid-template-columns:minmax(0,1fr);gap:var(--s2);padding:var(--s3);border:1px solid var(--line-soft);border-radius:10px;background:var(--surface-2);min-width:0}
+.sess .sblock{background:var(--surface)}
+.sb-h{display:flex;flex-wrap:wrap;align-items:center;gap:6px;min-width:0}
+.sbrand{display:inline-flex;align-items:center;height:22px;padding:0 8px;border-radius:6px;background:var(--accent);color:var(--accent-ink);font-size:.72rem;font-weight:800;letter-spacing:.01em;white-space:nowrap}
+.sbrand .chev{margin:0 3px 0 2px}
+.sb-chip{display:inline-flex;align-items:center;height:22px;max-width:100%;padding:0 8px;border-radius:6px;background:var(--surface-3);color:var(--heading);font-size:.75rem;font-weight:700;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;min-width:0}
+.sb-chip.task{background:none;border:1px solid var(--line);color:var(--text);font-weight:650}
+.sb-meta{margin-left:auto;font-size:var(--fs-xs);color:var(--muted);white-space:nowrap}
+.sb-rows{display:grid;grid-template-columns:72px minmax(0,1fr);gap:3px var(--s3);margin:0;font-size:var(--fs-sm);line-height:1.45}
+.sb-rows dt{color:var(--text-2);font-size:.7rem;font-weight:700;letter-spacing:.05em;text-transform:uppercase;padding-top:2px}
+.sb-rows dd{margin:0;min-width:0;overflow-wrap:anywhere;color:var(--text)}
+.ck.ok{color:var(--good-text)} .ck.warn{color:var(--warn-text)} .ck.bad{color:var(--bad-text)} .ck.na{color:var(--muted)}
+.sb-rows dd.ck{font-weight:650}
+.sl-task{color:var(--text-2);font-weight:650}
+.slt .ck{font-weight:800}
 .tc .meta .mchip{height:20px;margin:0}
 .tc .tx{display:flex;gap:6px;align-items:flex-start} .tc .tx .ist{margin-top:1px}
 /* sticky table headers on wide screens (tables that fit), under the navbar and the page tabs */
-@media (min-width:1280px){main .tw.st{overflow:visible} main table.t th{top:var(--nav-h)} main .tabpanel table.t th{top:calc(var(--nav-h) + var(--tabs-h))}}
+@media (min-width:1280px){main .tw.st{overflow:visible} main .tw.st.x{overflow-x:auto}
+  main .tw.st:not(.x) table.t th{top:var(--nav-h)} main .tabpanel .tw.st:not(.x) table.t th{top:calc(var(--nav-h) + var(--tabs-h))}}
 @media (max-width:1180px){.kpis{grid-template-columns:repeat(4,minmax(0,1fr))}.pt1{grid-template-columns:minmax(0,1fr)}.people{grid-template-columns:minmax(0,1fr)}td.c-who{display:none}}
 @media (max-width:768px){
   :root{--nav-h:0px}
@@ -2989,16 +3102,17 @@ table.mt td.c-name{max-width:300px}
   .icards,.icards.wide{grid-template-columns:minmax(0,1fr)}
   .irow{grid-template-columns:20px minmax(0,1fr) 26px;padding:var(--s2) var(--s3)}.irow .icl{grid-column:2;grid-row:2;justify-content:flex-start}.irow .icl:empty{display:none}
   .irow>.icopy,.irow>span:last-child{grid-column:3;grid-row:1}
-  .callout{grid-template-columns:22px minmax(0,1fr)}.callout .cact{grid-column:1/-1;justify-content:flex-start}
-  .callout .cmd{max-width:100%}
   .fin{min-width:0;flex:1 1 100%}
-  .lrow{grid-template-columns:12px auto minmax(0,1fr) auto}.lrow .ls{display:none}
+  .toolbar select{flex:1 1 140px;width:0}
   .people{grid-template-columns:minmax(0,1fr)}.pcard2{padding:var(--s3)}
   .cmdr{grid-template-columns:minmax(0,1fr)}
   table.pt td.c-who,table.pt td.c-cta{grid-column:2/-1;text-align:left;width:auto}
   .mgrp>summary{flex-wrap:wrap;gap:var(--s2)}.mgrp .mg-c{margin-left:0}
   .db{padding:var(--s3) var(--s4) var(--s6)}.dh{padding:var(--s3) var(--s4) var(--s2)}
   .ptab{padding:0 10px}
+  .ph{flex-wrap:wrap}.ph .right{margin-left:0;justify-content:flex-start}
+  table.pt td.c-who:has(>.muted:only-child),table.pt td.c-now:has(>.muted:only-child),table.pt td.c-prog:has(>.muted:only-child){display:none}
+  table.pt td.c-cta{text-align:left}
 }
 """
 
