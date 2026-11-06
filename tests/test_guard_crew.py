@@ -274,5 +274,52 @@ class ShellParsingTests(unittest.TestCase):
         self.assertIn("Edit or Write tool", v[1])
 
 
+class HookWiringTests(unittest.TestCase):
+    """hooks.py calls the guard's crew rules for a subagent's tool calls (wired by Tank, spec F3/F4)."""
+
+    def setUp(self):
+        from devkit import crew, hooks, progress
+        self.hooks, self.progress, self.crew = hooks, progress, crew
+        self.pad = Path(tempfile.mkdtemp()) / "claude-501" / "-x" / "962d6aba-c6a8-44ab-9e02-1d15272468e1" / "scratchpad"
+        self.plans = Path(core.HANDOFF) / "plans" / "acme" / "billing"
+        run = {"agents": {"o1": {"persona": "The Oracle"}}}
+        for name, value in (("lane_of", lambda *a: (run, run["agents"]["o1"])), ("lane_chain", lambda r, a: [a]),
+                            ("lane_tools", lambda r, a: "review"), ("lane_scope", lambda r, a: [[str(self.plans) + "/**"]])):
+            p = mock.patch.object(progress, name, value)
+            p.start()
+            self.addCleanup(p.stop)
+        p = mock.patch.object(guard, "current_project", return_value="acme/billing")
+        p.start()
+        self.addCleanup(p.stop)
+
+    def lane(self, cmd, tool="Bash"):
+        return self.hooks._unroutable_lane_command({"agent_id": "o1", "tool_name": tool, "session_id": "s",
+                                                    "cwd": CWD, "tool_input": {"command": cmd}})
+
+    def write(self, path):
+        return self.hooks._scope_violation("claude", {"agent_id": "o1", "tool_name": "Write", "session_id": "s",
+                                                      "cwd": CWD, "tool_input": {"file_path": str(path)}})
+
+    def test_read_only_crew_commands_and_mentions_pass_in_a_subagent(self):
+        for cmd in ("dev crew graph", "dev crew raci backend", 'git commit -m "explain dev progress step"'):
+            with self.subTest(cmd=cmd):
+                self.assertIsNone(self.lane(cmd))
+        self.assertIn("command of its own", self.lane("cd lib && dev progress step x") or "")
+        self.assertIn("command of its own", self.lane(["bash", "-lc", "dev crew decide D1 A"], "exec_command") or "")
+        self.assertIn("scratchpad/oracle/", self.lane(f"rm {self.pad}/tank/f3.py") or "")
+
+    def test_the_bulk_rewrite_note_reads_what_the_shell_runs(self):
+        def note(cmd):
+            return self.hooks._bulk_rewrite_note({"tool_name": "Bash", "tool_input": {"command": cmd}, "cwd": CWD})
+        self.assertEqual(note('dev crew ask "re.sub(a, b, t) then p.write_text(t)?"'), "")
+        self.assertIn("git diff -U0", note("bash -c \"sed -i '' s/a/b/ f\""))
+
+    def test_a_review_member_writes_its_plan_and_scratch_folder_but_no_code(self):
+        self.assertIsNone(self.write(self.plans / "2026-11-06-spec.md"))
+        self.assertIsNone(self.write(self.pad / "oracle" / "notes.md"))
+        self.assertIn("scratchpad/oracle/", self.write(self.pad / "notes.md") or "")
+        self.assertIn("review-only", self.write(Path(core.DEV) / "acme" / "billing" / "src" / "x.py") or "")
+
+
 if __name__ == "__main__":
     unittest.main()

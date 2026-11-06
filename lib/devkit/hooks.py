@@ -17,6 +17,7 @@ import io
 import json
 import re
 import os
+import shlex
 import subprocess
 import sys
 import time
@@ -694,9 +695,6 @@ DEV_LANE_CMD = re.compile(r"^\s*(?:\S*/)?dev\s+(?:progress(?:\s|$)|"
                           r"crew\s+(?:ask|answer|inbox|decide|decisions|mode|delegate|decline|route)(?:\s|$))")
 
 
-ANY_LANE_CMD = re.compile(r"(?:^|[\s;&|(`])(?:\S*/)?dev\s+(?:progress|crew)\b")
-
-
 def _runs_more_than_one_command(cmd: str) -> bool:
     """True when the shell would do more than run this one program: an operator, redirect or newline outside quotes,
     a command substitution where the shell expands it (unquoted or inside double quotes), or an unterminated quote.
@@ -723,18 +721,41 @@ def _runs_more_than_one_command(cmd: str) -> bool:
     return q is not None
 
 
-def _unroutable_lane_command(data: dict):
-    """Inside a subagent, a dev progress / dev crew command devkit cannot route to the subagent's lane (it is part of
-    a compound command) would act as the main session: advance the main plan, or record the developer's decision.
-    Refused, with the fix."""
+def _unroutable_lane_command(data: dict, agent: str = "claude"):
+    """Inside a subagent, a shell command that runs a dev progress / dev crew call devkit cannot route to the
+    subagent's lane would act as the main session: advance the main plan, or record the developer's decision. The
+    guard judges what the shell runs (guard.crew_shell_verdict): read-only crew commands and text that only mentions
+    lane commands pass; a team change, or `dev crew sync` outside the step's scope, is refused. -> the refusal, or None."""
     if not data.get("agent_id") or data.get("tool_name") not in SHELL_TOOLS:
         return None
-    cmd = (data.get("tool_input") or {}).get("command") or ""
-    cmd = " ".join(cmd) if isinstance(cmd, list) else str(cmd)
-    if not ANY_LANE_CMD.search(cmd) or _route_subagent_progress(data):
+    if _route_subagent_progress(data):
         return None
-    return ("Run `dev progress …` and `dev crew …` as a command of its own (no `&&`, `;`, pipes or `$(…)`), so devkit "
-            "can route it to your lane. Inside a compound command it would act as Morpheus.")
+    cmd = (data.get("tool_input") or {}).get("command") or ""
+    cmd = " ".join(shlex.quote(str(c)) for c in cmd) if isinstance(cmd, list) else str(cmd)
+    aid, scope, member = data["agent_id"], None, str(data["agent_id"])
+    try:
+        from . import progress
+        run, lane = progress.lane_of(agent, data.get("session_id") or "-", aid)
+        if lane:
+            scope, member = progress.lane_scope(run, aid), _member_folder(run, aid)
+    except Exception:
+        _log(f"lane command {agent}: {traceback.format_exc()[-300:]}")
+    from . import guard
+    v = guard.crew_shell_verdict(cmd, data.get("cwd") or os.getcwd(), scope, member)
+    return v[1] if v else None
+
+
+def _member_folder(run: dict, aid: str) -> str:
+    """The id of the crew member whose scratch folder (scratchpad/<id>/) a lane writes in: its member's, for a helper
+    the member that launched it; the agent id when the lane names no member."""
+    try:
+        from . import crew, progress
+        chain = progress.lane_chain(run, aid) or [aid]
+        head = (run.get("agents") or {}).get(chain[-1]) or {}
+        mem = crew.member(head["persona"]) if head.get("persona") else None
+        return str((mem or {}).get("id") or aid)
+    except Exception:
+        return str(aid)
 
 
 def _route_subagent_progress(data: dict):
@@ -871,22 +892,31 @@ def _scope_violation(agent: str, data: dict):
         if len(chain) > 1:  # a helper: the limits it inherits are its member's
             name = f"this helper of {head}"
         level = progress.lane_tools(run, aid)
+        layers = progress.lane_scope(run, aid)
+        member = _member_folder(run, aid)
+        from . import guard
+        for p_ in [x for x in paths if x]:  # each member keeps to its own folder of the session scratchpad
+            why = guard.scratch_refusal(os.path.normpath(os.path.join(cwd, p_)), member)
+            if why:
+                return why
+        # its scratch folder and temp files, and this project's plans that its step's scope names (guard rules)
+        paths = [p_ for p_ in paths if p_ and not guard.member_write_exempt(p_, cwd, layers, member)]
+        if not paths:
+            return None
         if level in ("review", "read"):
             return (f"{name} is {'review-only' if level == 'review' else 'read-only'}"
                     f"{f', like {head}' if len(chain) > 1 else ''}: report the change with file:line and the fix, "
-                    f"and Morpheus assigns it.")
-        layers = progress.lane_scope(run, aid)
+                    f"and Morpheus assigns it. It may write its scratch folder, and this project's plans in the "
+                    f"handoff repository when its step's scope names them.")
         if not layers:
             return None
-        for p_ in [x for x in paths if x]:
+        for p_ in paths:
             ap = os.path.normpath(p_ if os.path.isabs(p_) else os.path.join(cwd, p_))
             rel = os.path.relpath(ap, top)
             if rel.startswith(".."):  # a worktree of the same repository: the scope's paths are relative to it
                 wt = _repo_top_of(ap)
                 if wt and _same_repository(wt, top):
                     rel = os.path.relpath(os.path.realpath(ap), wt)
-            if rel.startswith("..") and core.is_temp(ap):
-                continue  # the member's own scratch files (session scratchpad, temp dirs): no other member owns them
             if not progress.in_scope(rel, layers):
                 return (f"{rel} is outside {name}'s scope ({' and '.join(', '.join(g) for g in layers)}): another "
                         f"crew member may own it. "
@@ -937,7 +967,7 @@ def guard(agent: str):
             print(json.dumps({"hookSpecificOutput": {"hookEventName": "PreToolUse", "permissionDecision": "allow",
                                                      "updatedInput": routed}}))
             return
-        why = _unroutable_lane_command(data)
+        why = _unroutable_lane_command(data, agent)
         if why:
             from . import audit
             audit.record("guard.deny", (data.get("tool_input") or {}).get("command", "")[:200], why, "deny",
@@ -1104,19 +1134,16 @@ CI_TRIGGER = re.compile(r"\bgit\s+(?:-C\s+\S+\s+)?push\b|\bdev\s+push\b|\b(?:gh|
 
 
 # lesson L-fwyp0n9vzv6: regex rewrites of code and prose changed what they should not, twice
-_AT_CMD = r"(?:^|[;&|(\n]\s*|\bxargs\s+(?:-\S+\s+)*)"
-SED_INPLACE = re.compile(_AT_CMD + r"(?:sed\s+(?:-[a-zA-Z]+\s+)*-i|perl\s+-[a-zA-Z]*i)")
-
-
 def _bulk_rewrite_note(data: dict) -> str:
     """A shell command that rewrote files with a regex (sed -i, perl -pi, a script with re.sub that writes files):
-    the agent reads every changed line before it tests, syncs or commits."""
+    the agent reads every changed line before it tests, syncs or commits. The guard judges what the shell runs, so a
+    message that only mentions a rewrite gets no note (B-fxn17sez8cj)."""
     if data.get("tool_name") not in SHELL_TOOLS:
         return ""
     cmd = (data.get("tool_input") or {}).get("command") or ""
-    cmd = " ".join(cmd) if isinstance(cmd, list) else str(cmd)
-    scripted = "re.sub(" in cmd and re.search(r"\.write_text\(|\.write\(|open\([^)]*[\"']w", cmd)
-    if not (scripted or SED_INPLACE.search(cmd)):
+    cmd = " ".join(shlex.quote(str(c)) for c in cmd) if isinstance(cmd, list) else str(cmd)
+    from . import guard
+    if not guard.bulk_rewrite(cmd, data.get("cwd") or os.getcwd()):
         return ""
     return ("A regex just rewrote files. Read every changed line (`git diff -U0 -- <files>`; for untracked files, "
             "compare with what they said before) before you test, sync or commit: a pattern cannot parse nested "
