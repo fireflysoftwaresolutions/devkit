@@ -1275,6 +1275,12 @@ def cmd_sync(a):
             canary.prune()
             _rotate_log(STATE / "logs" / "sync.log")
             _expire_sessions()
+            try:  # continuity records unchanged for 7 days, and clear links older than 10 minutes (spec C12)
+                from . import continuity
+                continuity.expire()
+            except Exception as e:
+                if not a.quiet:
+                    ui.warn(f"continuity: {e}")
         if not a.quiet:
             print(f"{ui.OK} synced {len(reg['projects'])} projects · {len(changed)} file(s) changed"
                   + (f" · gc: {len(results)} action(s)" if results else "") + f" · {tilde(HANDOFF / 'PROJECTS.md')}")

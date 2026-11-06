@@ -428,6 +428,11 @@ Prints the project's handoff note after refreshing its generated blocks.
 A session's continuity: what devkit keeps for a session so that its run and its open requests survive compaction,
 `/clear`, and resume.
 
+The hooks give the same brief after a compaction or a resume; these commands read it where no hook runs. devkit keeps
+the developer's last 5 requests, redacted and cut to 1,000 characters, only for turns classed as development work, and
+deletes a record 7 days after its last change. The brief is at most 4 KB, and `carry` is refused while a member of
+that run is still running.
+
 | Verb | Effect |
 | --- | --- |
 | `brief` | Prints what devkit kept for a session: this session by default, another with `--session <agent>:<session id>`, or the project's newest session with an open run or requests in the last 12 hours with `--latest` (`-p` names the project). `--for-chat` cuts each request to 200 characters for a chat surface; `--provider` names the reader, and the request text is shown only to the session's own provider |
