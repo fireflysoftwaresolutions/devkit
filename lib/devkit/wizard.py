@@ -37,7 +37,8 @@ CLAUDE_MODES = {"bypassPermissions": "no prompts; the devkit guard protects the 
 CODEX_MODES = {"full": ("never", "danger-full-access", "no prompts, full access; the devkit guard protects (recommended)"),
                "workspace": ("on-request", "workspace-write", "sandboxed to the project; asks when it needs more")}
 CLAUDE_INSTALLER = "curl -fsSL https://claude.ai/install.sh | bash"  # Claude Code's official native installer
-GH_LOGIN = ["gh", "auth", "login", "-h", "github.com", "-s", "repo,read:org,workflow,gist"]
+# HTTPS with the browser: no questions about protocols or tokens, and git signs in through gh.
+GH_LOGIN = ["gh", "auth", "login", "-h", "github.com", "-p", "https", "-w", "-s", "repo,read:org,workflow,gist"]
 
 
 class Answers(dict):
@@ -169,6 +170,9 @@ def _run_lines(assume_yes=False, skip_packages=False) -> int:
           f"[brackets]; nothing changes until you confirm.")
     d = detect()
     p = Prompter(assume_yes)
+    if p.yes and not assume_yes:
+        print(f"  {ui.WARN} No terminal to answer from, so every question takes its default (as with --yes). "
+              f"To choose, run {ui.bold('dev setup')} in a terminal.")
     cfg = core.deep_merge(core.DEFAULTS, d["config"] or {})
 
     p.section("This machine")
@@ -183,7 +187,8 @@ def _run_lines(assume_yes=False, skip_packages=False) -> int:
         print(f"     {('Claude Code' if k == 'claude' else 'Codex'):<12} {state}"
               + (f" · {x.get('version')}" if x.get("version") else "") + (f" · plan {x.get('plan')}" if x.get("plan") else ""))
     if not d["gh"].get("login"):
-        print(f"\n  {ui.FAIL} Sign in to GitHub first: gh auth login -s repo,read:org,workflow,gist")
+        print(f"\n  {ui.FAIL} devkit needs your GitHub account, and you are not signed in. Run "
+              f"{' '.join(GH_LOGIN)}, then dev setup again.")
         return 2
 
     a = Answers()
@@ -674,8 +679,8 @@ class _Wizard:
             self.term.write(f"\n  Nothing changed. Run {tui.bold('dev setup')} again when you are ready.\n\n")
             return 1
         if outcome == "no-github":
-            self.term.write(f"\n  {tui.bad('✗')} Sign in to GitHub first: {tui.bold(' '.join(GH_LOGIN[:3]))} "
-                            f"-s repo,read:org,workflow,gist\n\n")
+            self.term.write(f"\n  {tui.bad('✗')} devkit needs your GitHub account, and you are not signed in. Run "
+                            f"{tui.bold(' '.join(GH_LOGIN))}, then {tui.bold('dev setup')} again.\n\n")
             return 2
         return self.apply()
 
@@ -782,6 +787,10 @@ class _Wizard:
         lines = self.banner() + [""]
         lines.append(f"  {tui.bold(ui.greeting(name))} " + ("Let's set up devkit on this Mac." if first else
                                                              "devkit is already set up here."))
+        if first:
+            lines += ["  devkit sets up Claude Code and Codex with shared rules and a safety guard,",
+                      "  and keeps your project notes, tasks, and plans in a private GitHub",
+                      "  repository: your handoff repository."]
         lines.append("  " + tui.dim("Nothing changes until you apply the plan at the end." if first else
                                     "Your saved choices are the starting point; nothing changes until you apply."))
         lines += ["", "  " + tui.bold("On this Mac")]
