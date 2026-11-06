@@ -601,7 +601,9 @@ def start(goal: str, steps: int = 0, estimate: str = "", cwd: str | None = None,
     _advance_main(run, now)  # the first step that waits for nothing
     if sess.get("turn_started") and (sess.get("turn_started") or 0) >= (sess.get("turn_ended") or 0):
         _open(run, "turn", "main", now)  # started inside a turn: that turn is active time
-    _save(run)
+    with _tx(agent, sid):
+        load_run(agent, sid)  # a run that does not parse raises StateBusy here: it is never written over
+        _save(run)
     _publish()
     return run
 
@@ -728,8 +730,13 @@ def assign(which, label: str, cwd: str | None = None, now: float | None = None, 
                                                        if v.get("state") == "running" and _label_matches(label, v)), None)
         if lane_id:
             s.update(owner=lane_id, state="running", started=s.get("started") or now)
+            lane = run["agents"][lane_id]
             if s.get("scope"):
-                run["agents"][lane_id]["scope"] = s["scope"]
+                lane["scope"] = s["scope"]
+            if lane.get("binding") == "unbound":  # Morpheus confirms a lane devkit had no launch record of
+                lane["binding"] = "confirmed"
+                _audit("crew.confirm", lane.get("persona") or label, f"Morpheus assigned “{s['name']}” to a lane "
+                       f"without a launch record", project=run.get("project") or "", agent_id=lane_id[:16])
         elif s.get("state") == "running" and (s.get("owner") or "main") == "main":
             s["state"] = "pending"  # waits for its subagent
         _advance_main(run, now)
@@ -1751,6 +1758,7 @@ LAUNCH_TTL = 15 * 60  # a launch whose agent has not started by then no longer h
 LAUNCH_KEEP = 24 * 3600  # launch records are kept a day (spec C2), the newest LAUNCH_MAX of them
 LAUNCH_MAX = 100
 AGENT_ID = re.compile(r"[A-Za-z0-9_-]{1,80}")
+BOUND = ("exact", "conflict", "unbound", "confirmed")  # a lane whose binding no later hook changes
 
 
 def _launches(s: dict, now: float) -> dict:
@@ -1814,13 +1822,19 @@ def _claim(s: dict, data: dict, aid: str, now: float):
     """The launch this agent belongs to -> (tool_use_id, record, binding). `exact` when the launch's PostToolUse
     named this agent, or its meta file names a launch no agent has claimed (the record then gets this agent and
     state started); `conflict` when the meta file names a launch bound to another agent (a launch binds once);
+    `unbound` when the meta file names a launch devkit has no record of (the record was lost: the state was busy at
+    the launch, or it was dropped after a day), with a record made from the meta file that is never stored;
     (None, None, None) while nothing names one."""
     ls = _launches(s, now)
     tid = next((k for k, v in ls.items() if v.get("agent_id") == aid), None)
     if tid:
         return tid, ls[tid], "exact"
-    tid = str(_launch_meta(data).get("toolUseId") or "")
+    meta = _launch_meta(data)
+    tid = str(meta.get("toolUseId") or "")
     rec = ls.get(tid) if tid else None
+    if tid and not rec:
+        return tid, {"label": str(meta.get("description") or "")[:80], "type": str(meta.get("agentType") or ""),
+                     "parent": None}, "unbound"
     if not rec:
         return None, None, None
     if rec.get("agent_id"):
@@ -1913,6 +1927,12 @@ def _lane_event(run, aid, kind, tid, rec, binding, now, start, waiting, own=True
         lane["binding"] = "conflict"
         _audit("crew.bind-conflict", lane.get("persona") or kind or aid[:8], f"claims launch {tid}, which another "
                f"agent is bound to", "deny", project=run.get("project") or "", agent_id=aid[:16])
+    elif binding == "unbound" and lane.get("binding") == "pending":  # restricted until Morpheus links a step to it
+        label = rec.get("label") or lane.get("label") or kind
+        lane.update(binding="unbound", launch=tid, label=label, persona=persona(kind or rec.get("type") or "", label))
+        _audit("crew.unbound", lane["persona"] or label or aid[:8], f"launch {str(tid)[:40]} has no record: the "
+               f"agent may read, and takes no step, scope or slot until Morpheus assigns it a step", "restricted",
+               project=run.get("project") or "", agent_id=aid[:16])
 
 
 def _attach(agent: str, sid: str, s: dict, data: dict, aid: str, kind: str, now: float, start: bool,
@@ -1946,7 +1966,7 @@ def bind(agent: str, data: dict, now: float | None = None, resume: bool = True):
         return
     run = load_run(agent, sid)
     lane = ((run.get("agents") or {}).get(aid) or {}) if isinstance(run, dict) and run.get("state") != "done" else {}
-    if lane.get("state") == "running" and lane.get("binding", "exact") in ("exact", "conflict"):
+    if lane.get("state") == "running" and lane.get("binding", "exact") in BOUND:
         return
     f = session_path(agent, sid)
     if not lane and ((state.read(f) or {}).get("subagents") or {}).get(aid, {}).get("launch"):
@@ -2031,7 +2051,7 @@ def slots(run: dict, sess: dict | None = None, now: float | None = None) -> list
         elif rec.get("state") == "started" and aid not in agents and aid in subs:
             out.append((aid, rec.get("label") or str(aid)[:8]))  # working in a session without a run
     out += [(k, v.get("persona") or v.get("label") or k[:8]) for k, v in agents.items()
-            if v.get("state") == "running" and v.get("binding", "exact") == "exact"]
+            if v.get("state") == "running" and v.get("binding", "exact") in ("exact", "confirmed")]
     return out
 
 
@@ -2054,9 +2074,9 @@ def lane_chain(run: dict, aid: str) -> list:
 
 
 def _lane_level(lane: dict) -> str:
-    """One lane's own tool level: read for a lane whose launch another agent is bound to, else its crew member's
-    `tools`, else all (an ad-hoc agent)."""
-    if lane.get("binding") == "conflict":
+    """One lane's own tool level: read for a lane whose launch another agent is bound to or that devkit has no
+    launch record of (until Morpheus assigns it a step), else its crew member's `tools`, else all (an ad-hoc agent)."""
+    if lane.get("binding") in ("conflict", "unbound"):
         return "read"
     try:
         from . import crew

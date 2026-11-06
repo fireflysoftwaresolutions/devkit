@@ -610,15 +610,19 @@ def stop(agent: str):
 
 
 def config_change(agent: str):
-    """Claude ConfigChange (user_settings): refuse changes to devkit-managed keys, then restore the file."""
+    """Claude ConfigChange. The user settings: refuse changes to devkit-managed keys, then restore the file. The
+    project and local settings (spec C11): refuse a DEVKIT_* variable in their env block and remove it; devkit
+    manages nothing else there."""
     data = _stdin_json()
     from . import policy
     path = data.get("file_path") or str(core.CLAUDE_HOME / "settings.json")
     settings = core.read_json(path, None)
     if settings is None:
         return
-    drift = [d for d in policy.diff_claude(settings) if not d.key.startswith("hooks.") or policy.lock_status() == "off"]
-    env_keys = _devkit_env_change(path, settings)
+    project = data.get("source") in ("project_settings", "local_settings")
+    drift = [] if project else [d for d in policy.diff_claude(settings)
+                                if not d.key.startswith("hooks.") or policy.lock_status() == "off"]
+    env_keys = _devkit_env_change(path, settings, managed=not project)
     if not drift and not env_keys:
         return
     ks = sorted({d.key for d in drift} | {f"env.{k}" for k in env_keys})
@@ -626,6 +630,11 @@ def config_change(agent: str):
     _log(f"config-change blocked ({agent}): {keys}")
     from . import audit
     audit.record("config.blocked", path, keys, "blocked")
+    if project:
+        print(f"devkit's DEVKIT_* variables say who calls devkit and how its safeguards behave, so no settings file "
+              f"sets them (spec C11): removed {keys} from {path}. The developer changes safeguards in a terminal "
+              f"(dev config).", file=sys.stderr)
+        sys.exit(2)
     policy._log(f"blocked change to devkit-managed keys: {keys}")
     _spawn(["config", "repair", "--quiet"])
     print(f"devkit manages these settings: {keys}. Change devkit's configuration instead "
@@ -634,11 +643,12 @@ def config_change(agent: str):
     sys.exit(2)
 
 
-def _devkit_env_change(path: str, settings: dict) -> list:
+def _devkit_env_change(path: str, settings: dict, managed: bool = True) -> list:
     """The DEVKIT_* variables of the settings' env block that differ from what devkit manages (spec C11: set,
-    changed or removed), put back to devkit's values in the file. [] when none differ."""
+    changed or removed), put back to devkit's values in the file. [] when none differ. `managed`: the user
+    settings, where devkit manages some; a project's settings get none."""
     from . import guard, policy
-    flat, _ = policy.claude_desired()
+    flat = policy.claude_desired()[0] if managed else {}
     want = {p[1]: json.dumps(v) for p, v in flat.items() if len(p) == 2 and p[0] == "env"
             and str(p[1]).startswith("DEVKIT_")}
     try:
@@ -844,6 +854,10 @@ def _scope_violation(agent: str, data: dict):
         if lane.get("binding") == "conflict":  # a launch binds once: a second agent claiming it edits nothing
             return ("this agent claims a launch that another agent is bound to, so devkit lets it read but not edit. "
                     "Report what you need to change, and Morpheus checks the launch (dev crew graph).")
+        if lane.get("binding") == "unbound":  # its launch record was lost: restricted until Morpheus assigns it
+            return ("devkit has no record of the launch that started this agent, so it may read but not edit. Report "
+                    "what you need to change; Morpheus can assign you your step (dev progress assign \"<step>\" "
+                    "--to \"<you>\"), which lifts this.")
         chain = [run["agents"][k] for k in progress.lane_chain(run, aid)]
         inp = data.get("tool_input") or {}
         paths = [inp.get("file_path") or inp.get("notebook_path") or ""]

@@ -73,7 +73,7 @@
     ],
     "ConfigChange": [
       {
-        "matcher": "user_settings",
+        "matcher": "user_settings|project_settings|local_settings",
         "hooks": [
           {
             "type": "command",

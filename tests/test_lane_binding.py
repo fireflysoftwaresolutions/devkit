@@ -212,6 +212,35 @@ class ProvisionalLaneTests(LaneCase):
         self.assertEqual(self.lane("a_tank")["label"], "Tank: dashboard server")
         self.assertEqual(self.step("curl installer")["owner"], "main")
 
+    def test_an_agent_whose_launch_record_was_lost_gets_a_restricted_lane(self):
+        # Seraph M69 (1): the launch record was dropped (state busy at the Agent call), so the meta file names a
+        # launch devkit has no record of. Such an agent is not a helper: it reads, takes no step, no scope and no
+        # slot, and the loss is audited, never "no lane, no limits"
+        from devkit import audit
+        pg.start("Feature", plan=["parser"], now=self.m(0))
+        pg.assign("parser", "Neo", scope="lib/parser/**", now=self.m(0))
+        self.start("a_neo")
+        self.meta("a_neo", "toolu_lost", "Neo: parser")
+        out = self.first_tool("a_neo", tool="Edit", file_path="lib/parser/core.py")
+        self.assertIn('"permissionDecision": "deny"', out)
+        lane = self.lane("a_neo")
+        self.assertEqual((lane.get("binding"), lane.get("scope") or [], lane.get("persona")), ("unbound", [], "Neo"))
+        self.assertEqual((self.step("parser")["owner"], self.step("parser")["state"]), ("main", "pending"))
+        self.assertEqual(pg.lane_tools(self.run_(), "a_neo"), "read")
+        self.assertNotIn("a_neo", [k for k, _ in pg.slots(self.run_())])
+        self.assertEqual([r["target"] for r in audit.records(1, action="crew.unbound")], ["Neo"])
+
+    def test_morpheus_assigning_a_step_to_an_unbound_lane_lifts_the_restriction(self):
+        pg.start("Feature", plan=["parser"], now=self.m(0))
+        pg.assign("parser", "Neo", scope="lib/parser/**", now=self.m(0))
+        self.start("a_neo")
+        self.meta("a_neo", "toolu_lost", "Neo: parser")
+        self.first_tool("a_neo")
+        pg.assign("parser", "Neo", now=self.m(2))  # Morpheus links the step to the running lane
+        self.assertEqual((self.step("parser")["owner"], self.lane("a_neo")["binding"]), ("a_neo", "confirmed"))
+        self.assertNotIn('"deny"', self.first_tool("a_neo", tool="Edit", file_path="lib/parser/core.py"))
+        self.assertIn("outside Neo's scope", self.first_tool("a_neo", tool="Edit", file_path="lib/ui/app.ts"))
+
     def test_a_launch_records_its_tool_use_id_and_its_parent(self):
         self.launch("toolu_fg", "F0 fg probe")
         self.launch("toolu_nested", "F0 nested probe", parent="aaf06cf734666aa86")  # launched inside a subagent
@@ -322,6 +351,15 @@ class SlotTests(LaneCase):
         self.assertEqual(verdict[0], "deny")
         self.assertIn("the limit is 4", verdict[1])
         self.assertEqual(dispatch.ready(self.run_())["free"], 0)
+
+    def test_a_launch_whose_agent_never_starts_frees_its_slot_after_15_minutes(self):
+        # Seraph M78 (1): a launch refused later by another hook, or whose agent never starts, holds a slot only
+        # for LAUNCH_TTL
+        now = time.time()
+        for i, who in enumerate(("Neo", "Trinity", "Tank", "Dozer")):
+            self.launch(f"toolu_{i}", f"{who}: part {i}", at=now - 14 * 60)
+        self.assertIsNotNone(pg.launch_verdict("claude", self.spawn, self.run_(), now=now))
+        self.assertIsNone(pg.launch_verdict("claude", self.spawn, self.run_(), now=now + 2 * 60))
 
     def test_a_helper_gets_no_lane_and_takes_no_slot(self):
         for i, who in enumerate(("Neo", "Trinity", "Tank")):

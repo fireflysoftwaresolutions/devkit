@@ -191,6 +191,31 @@ class ConcurrentWriterTests(Records):
         self.assertEqual(self.sf.read_text(), half)
         self.assertTrue(self.audited("state.unreadable"))
 
+    def test_a_progress_step_on_a_half_written_run_leaves_it_as_it_is(self):
+        # Seraph M69 (2): `dev progress step` checked for a run with an unlocked read, which reads a half-written run
+        # as missing, and then started a new run over it
+        run = pg.run_path("claude", "s1")
+        run.parent.mkdir(parents=True)
+        half = '{"v": 2, "agent": "claude", "session": "s1", "goal": "Work", "plan": [{"name": "par'
+        run.write_text(half)
+        with self.assertRaises(ValueError):
+            pg.step("parser done", check="12 tests pass")
+        self.assertEqual(run.read_text(), half)
+        self.assertTrue(self.audited("state.unreadable"))
+
+    def test_a_temporary_file_left_where_a_writer_would_put_its_own_is_never_written_through(self):
+        # Seraph M78 (2): each write uses a temporary file of its own, created new; a name planted in the record's
+        # folder (here a link to another file) is neither followed nor reused
+        from devkit import state
+        victim = self.root / "victim.txt"
+        victim.write_text("keep me")
+        for name in (f".{self.sf.name}.tmp", f"{self.sf.name}.tmp", f".{self.sf.name}.{os.getpid()}.tmp",
+                     f"{self.sf.stem}.tmp"):
+            (self.sf.parent / name).symlink_to(victim)
+        state.update(self.sf, lambda d: d.update(x=1))
+        self.assertEqual(victim.read_text(), "keep me")
+        self.assertEqual(self.record()["x"], 1)
+
     def test_a_hook_that_cannot_get_the_lock_drops_its_change_and_says_so(self):
         from devkit import state
         lock = self.root / "locks" / "rec-claude-s1.lock"  # one lock per session, for both of its records
