@@ -35,6 +35,58 @@ tail -50 ~/.local/state/devkit/logs/sync.log
 dev sync                                                  # run a sync in the foreground
 ```
 
+## Installing and updating
+
+### The installer stopped at a step
+
+The installer names the step that failed and the command to run it again; it is safe to repeat, and it skips what is
+done already. The lines before the message are the failing command's own output (Homebrew's, git's, or the GitHub
+CLI's). Fix that cause, then run the same command again.
+
+### The installer says there is no terminal
+
+When the installer runs from CI, a provisioning script, or another program with no terminal, nothing can answer
+questions. It then installs Homebrew with `NONINTERACTIVE=1`, which needs passwordless `sudo`, and gives the setup
+wizard `--yes`. It cannot sign you in to GitHub: unless the GitHub CLI is signed in already, it downloads devkit, skips
+the sign-in and the wizard, and exits with code `2`. To finish, set `GH_TOKEN` to a GitHub token for that script, or
+open a terminal and run:
+
+```bash
+gh auth login -h github.com -p https -w -s repo,read:org,workflow,gist
+~/Development/fireflysoftwaresolutions/devkit/install.sh
+```
+
+In a terminal, `curl … | bash` is interactive: the installer reads the answers from the terminal (`/dev/tty`), not
+from the pipe.
+
+### `brew` is not found in a new terminal (Apple Silicon or Intel)
+
+Homebrew lives in `/opt/homebrew` on Apple Silicon and in `/usr/local` on Intel Macs. The installer finds either one.
+`/usr/local/bin` is on the default `PATH` of macOS, so Intel needs nothing more. On Apple Silicon, the installer adds
+`eval "$(/opt/homebrew/bin/brew shellenv)"` to `~/.zprofile` when Homebrew was not on your `PATH`; if you keep your
+`PATH` in another file, add that line there, then open a new terminal. A terminal that runs under Rosetta reports
+`x86_64` and uses the Intel Homebrew in `/usr/local`: open a native terminal for devkit.
+
+### The installer left an existing checkout as it is
+
+The installer moves an existing checkout only when it is at a release tag. It leaves it as it is when it is on a
+branch, has local changes, or is at another commit, and says which. A branch checkout is updated with `dev update`,
+which pulls the branch. To follow releases instead, check out the newest release, for example:
+
+```bash
+git -C ~/Development/fireflysoftwaresolutions/devkit fetch --tags
+git -C ~/Development/fireflysoftwaresolutions/devkit checkout v26.11.2   # the newest vYY.MM.PATCH tag
+```
+
+When the folder exists but is not a git checkout, the installer stops without touching it: move the folder away, or
+install somewhere else with `DEVKIT_HOME`.
+
+### `dev update` refuses to update
+
+It refuses while tracked files in the devkit checkout have local changes (`git -C <checkout> status` lists them), and
+when the checkout is at a commit that is neither a release tag nor a branch. Commit or discard the changes, or check out
+a release or a branch, then run `dev update` again.
+
 ## Sessions and agents
 
 ### Claude Code or Codex does not show the devkit context

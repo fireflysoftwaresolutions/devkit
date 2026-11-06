@@ -5,36 +5,133 @@ share a handoff repository, and lists every file devkit touches.
 
 ## Requirements
 
-- macOS on Apple silicon. `install.sh` installs Homebrew if it is missing.
+- A Mac with Apple Silicon or Intel. devkit does not run on Linux or Windows. The installer installs Homebrew if it is
+  missing.
 - A GitHub account. devkit's repository, `fireflysoftwaresolutions/devkit`, is public; your handoff repository stays
   private.
 - A Claude account for Claude Code, a ChatGPT account for Codex, or both.
 
+## Your first install, step by step
+
+This walk-through is for a first install on your own Mac, even if you have never used a terminal. It takes one
+command and a few presses of Return. Have your Mac's login password and your GitHub account at hand.
+
+1. **Open Terminal.** Press Command-Space, type `Terminal`, and press Return. A window with a text prompt opens.
+2. **Paste the install command, then press Return:**
+
+   ```bash
+   curl -fsSL https://raw.githubusercontent.com/fireflysoftwaresolutions/devkit/main/install.sh | bash
+   ```
+
+   The first line says `devkit installer · devkit is for macOS (Apple Silicon and Intel)`. Each step after it starts
+   with `✦` and its name, then one sentence that says what the step does and why.
+3. **Homebrew**, only if your Mac does not have it yet. Homebrew is the standard installer for developer tools on a
+   Mac, and devkit uses it for everything else. It asks for your Mac password: type it and press Return. Nothing
+   appears while you type; that is normal. Then press Return to continue. This step takes the longest of all,
+   because it also installs Apple's command line tools.
+4. **git, Python, and the GitHub CLI.** Nothing to do here: each tool shows a line with `✓` when it is ready.
+5. **devkit.** The installer downloads devkit into `~/Development/fireflysoftwaresolutions/devkit` and shows
+   `✓ downloaded v…`.
+6. **GitHub sign-in.** devkit keeps your project notes in a private GitHub repository and saves your work under your
+   name, so it needs your GitHub account. Press Return at each question. The terminal shows a one-time code, such as
+   `1A2B-3C4D`, and your browser opens GitHub: sign in, type the code, and choose **Authorize**. Back in Terminal, you
+   see `✓ signed in to GitHub as <your name>`.
+7. **The setup wizard.** A full-screen page shows what the wizard found on your Mac, with **Recommended setup**
+   selected: press Return. The next page is the plan, with **Apply** selected: press Return. Each item then shows a
+   spinner while it runs and `✓` when it is done. When the wizard offers to sign you in to Claude Code or Codex, press
+   Return: your browser opens, and you sign in there with your Claude or ChatGPT account. When it offers to start
+   Docker, press Return.
+8. **The summary.** The installer ends with **What you have now** and **What to do first**.
+9. **Open a new Terminal window** (Command-N), so that the `dev` command works, and run:
+
+   ```bash
+   dev doctor
+   ```
+
+   Every line should show `✓`. A line with `✗` names the command that fixes it.
+10. **Start your first project:**
+
+    ```bash
+    dev new my-app
+    dcd my-app
+    claude
+    ```
+
+    `dev new` creates the project folder, `dcd` goes into it, and `claude` starts Claude Code there (run `codex` for
+    Codex). Ask it for something small, and check that its reply starts with a bold `[Firefly> DevKit]` line, which
+    shows that devkit is active.
+
+If a step fails, the installer names it and prints the command that runs it again. See
+[Troubleshooting › Installing and updating](troubleshooting.md#installing-and-updating).
+
 ## Install on a new Mac
 
 ```bash
-# 1. The GitHub CLI (install.sh installs it too: brew install gh)
-gh auth login -h github.com -s repo,read:org,workflow,gist
+# 1. The installer: prerequisites, the newest devkit release, GitHub sign-in, and the setup wizard
+curl -fsSL https://raw.githubusercontent.com/fireflysoftwaresolutions/devkit/main/install.sh | bash
 
-# 2. devkit itself, in its canonical place
-gh repo clone fireflysoftwaresolutions/devkit ~/Development/fireflysoftwaresolutions/devkit
-
-# 3. The setup wizard (safe to run again at any time)
-~/Development/fireflysoftwaresolutions/devkit/install.sh
-
-# 4. Load the shell integration and verify
+# 2. Load the shell integration and verify
 exec zsh
 dev doctor
 ```
 
-`install.sh` makes sure Homebrew, Python, and the GitHub CLI are present and signed in, then starts the setup wizard,
-`dev setup`. Pass `--yes` to accept every default without questions, or `--skip-packages` when you only want to change
-the configuration:
+The installer prints each step with one sentence on what it does and why, and ends with a summary: where devkit is,
+its version, what you have now, and what to do first. It is safe to run again. In order, it:
+
+1. Checks that the computer is a Mac, and stops on any other system before it changes anything.
+2. Finds Homebrew in `/opt/homebrew` (Apple Silicon) or `/usr/local` (Intel), or installs it with Homebrew's official
+   installer, which asks for your password. When Homebrew was not on your `PATH`, it adds Homebrew's `shellenv` line to
+   `~/.zprofile`, as Homebrew's installer asks you to do, so new terminals find `brew` and what it installs.
+3. Installs git, Python, and the GitHub CLI with Homebrew when they are missing.
+4. Clones devkit into `~/Development/fireflysoftwaresolutions/devkit` and checks out the newest release, the highest
+   `vYY.MM.PATCH` tag. If devkit is already there at a release, it moves to the newest one; a checkout on a branch, with
+   local changes, or at another commit stays as it is. A folder there that is not a git checkout is never changed.
+5. Signs you in to GitHub with the browser (`gh auth login` over HTTPS, so it asks no technical questions), unless
+   the GitHub CLI is signed in already.
+6. Starts the [setup wizard](#the-setup-wizard), `dev setup`, which asks its questions in the terminal even though
+   the installer arrived through a pipe.
+
+To read the script before you run it, download it first:
 
 ```bash
-~/Development/fireflysoftwaresolutions/devkit/install.sh --yes
-~/Development/fireflysoftwaresolutions/devkit/install.sh --skip-packages
+curl -fsSL https://raw.githubusercontent.com/fireflysoftwaresolutions/devkit/main/install.sh -o install.sh
+less install.sh
+bash install.sh
 ```
+
+### Installer options
+
+Pass options after `bash -s --`, and set variables for `bash`, not for `curl`:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/fireflysoftwaresolutions/devkit/main/install.sh | bash -s -- --yes
+curl -fsSL https://raw.githubusercontent.com/fireflysoftwaresolutions/devkit/main/install.sh | DEVKIT_REF=v26.11.2 bash
+```
+
+| Option or variable | Effect |
+| --- | --- |
+| `-y`, `--yes` | Accept every default in the setup wizard |
+| `--skip-packages` | Configure only; do not install the toolchain packages for your stacks (Homebrew, git, Python, and the GitHub CLI are still checked) |
+| `--no-setup` | Get devkit and its prerequisites, but do not sign in or run the wizard; run `install.sh` from the checkout later to finish |
+| `-h`, `--help` | Print the usage, the options, and the variables |
+| Any other option | Passed to `dev setup` |
+| `DEVKIT_HOME` | Where devkit goes (default `~/Development/fireflysoftwaresolutions/devkit`) |
+| `DEVKIT_REPO` | The repository to clone, for example your fork (default `https://github.com/fireflysoftwaresolutions/devkit.git`) |
+| `DEVKIT_REF` | A tag or branch to check out instead of the newest release |
+| `GH_TOKEN` | A GitHub token, read by the GitHub CLI; signs in an install that has no terminal |
+
+### Without a terminal
+
+In CI or a provisioning script, nothing can answer questions, so the installer runs without them. Homebrew's
+installer runs with `NONINTERACTIVE=1` (it needs passwordless `sudo` then), and the wizard gets `--yes`. The GitHub
+sign-in needs a person, or a `GH_TOKEN`: without either, the installer downloads devkit, skips the sign-in and the
+wizard, says how to finish, and exits with code `2`.
+
+### From a clone
+
+When you run `install.sh` from a clone of devkit (`./install.sh`), it sets up that checkout as it is, on whatever
+branch or commit it is: it does not clone, fetch, or switch anything. This is how you install a branch you are working
+on (see [Developing devkit](development.md)).
 
 ### The setup wizard
 
@@ -89,7 +186,8 @@ The full output of the apply steps is in `~/.local/state/devkit/logs/setup.log`,
 
 When the input or output is not a terminal (a pipe or a script), when `TERM` is `dumb`, or with `--yes`, the wizard
 uses plain line prompts instead: each question shows its default in brackets, and Enter keeps it. `--yes` accepts
-every default without asking and writes the same configuration as earlier versions. To get the line prompts in a
+every default without asking and writes the same configuration as earlier versions. When nothing can answer (the input
+is not a terminal), the line prompts say so at the start and take every default, as with `--yes`. To get the line prompts in a
 terminal, run `TERM=dumb dev setup`. Unlike the interactive **Recommended setup**, `--yes` keeps every stack selected
 unless your saved configuration lists fewer.
 
@@ -179,8 +277,14 @@ Ask the agent for a quick task in a repository and check that its final message 
 ## Updating
 
 ```bash
-dev update          # git pull --ff-only in the devkit repository, then dev install
+dev update          # the newest release (or a pull of the branch), then dev install
 ```
+
+The installer leaves devkit at a release tag, so `dev update` follows releases: it fetches the tags and checks out the
+newest release when it is newer, then runs `dev install`; when devkit is at the newest release already, it says so and
+changes nothing. A checkout on a branch, which is how you work on devkit itself, gets `git pull --ff-only` instead.
+`dev update` refuses to start while tracked files have local changes. Running the installer again also moves a release
+checkout to the newest release.
 
 Restart running Claude Code and Codex sessions afterward; they read instructions and hooks at session start. To change
 the choices you made in the wizard, run `dev setup` again.
@@ -202,6 +306,9 @@ each).
 | `~/.codex/fast.config.toml`, `deep.config.toml`, `review.config.toml` | The Codex profiles | Delete them |
 | `~/.codex/agents/scout.toml` | The `scout` agent role | Delete it |
 | `~/.agents/skills/<name>` | Symlinks (Codex's user skill folder) | Delete the symlinks |
+| `~/Development/fireflysoftwaresolutions/devkit` | The devkit checkout (installer; `DEVKIT_HOME` chooses another folder) | Delete the folder |
+| Homebrew, git, Python, and the GitHub CLI | Installed by the installer when they are missing | `brew uninstall git python gh`; Homebrew's own uninstall script |
+| `~/.zprofile` | One line, `eval "$(/opt/homebrew/bin/brew shellenv)"`, added by the installer only when Homebrew was not on your `PATH` (Apple Silicon) | Delete the line |
 | `~/.local/bin/dev` | Symlink to `bin/dev` | Delete it |
 | `~/.zshrc` | The block between `# >>> devkit >>>` and `# <<< devkit <<<` | Delete the block |
 | `~/.gitconfig` | `user.name`, `user.email`, `include.path` (shared defaults), `core.excludesFile`, the gh credential helper | `git config --global --unset …` |

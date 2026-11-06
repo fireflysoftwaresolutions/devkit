@@ -7,6 +7,18 @@ All notable changes to devkit. Versions follow CalVer `YY.MM.PATCH` (PATCH resta
 
 ### Added
 
+- **A one-line install:** `curl -fsSL https://raw.githubusercontent.com/fireflysoftwaresolutions/devkit/main/install.sh | bash`
+  installs Homebrew, git, Python, and the GitHub CLI when they are missing, clones the newest devkit release into
+  `~/Development/fireflysoftwaresolutions/devkit`, signs you in to GitHub, and starts the setup wizard. Its questions
+  come from the terminal even through the pipe; without a terminal (CI), it runs without questions and says how to
+  finish. It says first that devkit is for macOS (Apple Silicon and Intel) and stops on any other system. New:
+  `--no-setup`, `--help`, and the `DEVKIT_HOME`, `DEVKIT_REPO`, and `DEVKIT_REF` variables. Each step says in one
+  plain sentence what it does and why; a failed step is named, with the command to run again; and the run ends with
+  what you have now and what to do first.
+- **A first install for people who are not developers:** a step-by-step guide in Getting started, with what you
+  see at each step. Pressing Return at every question gives a working setup: the GitHub sign-in uses HTTPS and the
+  browser, so it asks no questions about protocols or tokens, and the wizard's first screen says what devkit and the
+  handoff repository are.
 - The PostToolUse hook shows the status block right after a call that usually ends a turn (a subagent launch, a
   monitor, a background command, or a closing `dev` command), with the project and branch filled in. A note
   written after the last tool call no longer lands above the block, so the Stop hook does not have to send
@@ -21,6 +33,18 @@ All notable changes to devkit. Versions follow CalVer `YY.MM.PATCH` (PATCH resta
   so a test suite or a build in the foreground is not cut off at 2.
 - Codex: `analytics.enabled` is `false`. `dev doctor` also reads whether your Codex account adds commit and PR
   attribution (an account setting, not a `config.toml` key) from your newest session.
+- `dev update` follows releases: a checkout at a release tag moves to the newest `vYY.MM.PATCH` tag (compared as
+  numbers, so 26.11.10 is newer than 26.11.2) and then runs `dev install`; at the newest release already, it says so
+  and changes nothing. A checkout on a branch still gets `git pull --ff-only`. It refuses, with nothing changed, while
+  tracked files have local changes or when the checkout is at a commit that is neither a release nor a branch.
+- The wizard's line prompts say so when no terminal can answer and every question takes its default. Without a
+  GitHub sign-in, the wizard says why it needs one and prints the exact command.
+
+### Fixed
+
+- `install.sh` works on Intel Macs: it finds Homebrew in `/usr/local` as well as `/opt/homebrew`, and runs the wizard
+  with Homebrew's Python from `brew --prefix` instead of a fixed `/opt/homebrew/bin/python3`. On Apple Silicon, it adds
+  Homebrew to `~/.zprofile` when Homebrew was not on the `PATH`, so new terminals find `brew`, `gh`, and the toolchain.
 
 ## [26.11.2] - 2026-11-06
 

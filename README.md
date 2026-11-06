@@ -45,18 +45,42 @@ Docker and the background automation, and keeps them that way.
 
 ## Install
 
+devkit is for macOS only (Apple Silicon and Intel). In Terminal, run:
+
 ```bash
-gh auth login -s repo,read:org,workflow,gist                      # once
-gh repo clone fireflysoftwaresolutions/devkit ~/Development/fireflysoftwaresolutions/devkit
-~/Development/fireflysoftwaresolutions/devkit/install.sh          # the setup wizard; safe to run again
-exec zsh && dev doctor                                             # all green
+curl -fsSL https://raw.githubusercontent.com/fireflysoftwaresolutions/devkit/main/install.sh | bash
+exec zsh && dev doctor                                             # every check passes
 ```
 
-`install.sh` makes sure Homebrew, Python, and the GitHub CLI are ready, then starts the setup wizard. The wizard asks
+The installer makes sure Homebrew, git, Python, and the GitHub CLI are present, downloads the newest devkit release to
+`~/Development/fireflysoftwaresolutions/devkit`, signs you in to GitHub, and starts the setup wizard. The wizard asks
 for your workspace, your handoff repository (yours, or one your team shares), which agents to configure, your stacks
 and the Docker VM, shows the plan, and applies it: the toolchain for your stacks, git signed in with your GitHub
-identity, Claude Code and Codex, the devkit plugin and the curated skills in both, and the scheduled jobs. Details are in
-[Getting started](docs/getting-started.md).
+identity, Claude Code and Codex, the devkit plugin and the curated skills in both, and the scheduled jobs. It is safe to
+run again, and `dev update` later moves devkit to the newest release.
+
+To read the script before you run it:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/fireflysoftwaresolutions/devkit/main/install.sh -o install.sh
+less install.sh
+bash install.sh
+```
+
+Pass options after `bash -s --`, for example `curl -fsSL … | bash -s -- --yes`:
+
+| Option or variable | Effect |
+| --- | --- |
+| `--yes` | Accept every default in the setup wizard |
+| `--skip-packages` | Configure only; do not install the toolchain packages for your stacks |
+| `--no-setup` | Get devkit and its prerequisites, but do not sign in or run the wizard |
+| `DEVKIT_HOME` | Where devkit goes (default `~/Development/fireflysoftwaresolutions/devkit`) |
+| `DEVKIT_REPO` | The repository to clone, for example your fork |
+| `DEVKIT_REF` | A tag or branch to check out instead of the newest release |
+
+Set a variable for `bash`, not for `curl`: `curl -fsSL … | DEVKIT_REF=v26.11.2 bash`. Everything the installer and the
+wizard change on your Mac, and how to undo each change, is listed in
+[Getting started › What devkit touches](docs/getting-started.md#what-devkit-touches-and-how-to-undo-it).
 
 ## A quick tour
 

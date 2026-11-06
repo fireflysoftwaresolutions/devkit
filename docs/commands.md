@@ -1003,7 +1003,14 @@ extension), unless `packages.auto` is off. The `launchd` step installs the [sche
 
 ### `dev update`
 
-Runs `git pull --ff-only` in the devkit repository, then `dev install`.
+Updates the devkit checkout, then runs `dev install`. What it does depends on where the checkout is:
+
+| The checkout is | `dev update` |
+| --- | --- |
+| At a release tag (how the installer leaves it) | Fetches the tags and checks out the newest release, the highest `vYY.MM.PATCH` compared as numbers (`v26.11.10` is newer than `v26.11.2`); at the newest release already, it says so and stops without `dev install` |
+| On a branch | `git pull --ff-only` |
+| At a commit that is neither a release nor a branch | Refuses, and says how to check out a release or a branch |
+| Changed: tracked files have local changes | Refuses, and changes nothing; commit or discard the changes first |
 
 ### `dev docker up | down | status | prune | autostart-on | autostart-off`
 
