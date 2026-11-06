@@ -14,8 +14,10 @@ from pathlib import Path
 from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "lib"))
+sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from devkit import cli, core, crew, dispatch, progress as pg, raci  # noqa: E402
+from test_progress import launch  # noqa: E402
 
 # Real tasks and the member who should do them (the misroutes the developer found are the first rows).
 GOLDEN = [
@@ -170,27 +172,34 @@ class AssignmentTests(unittest.TestCase):
     def test_a_starting_subagent_gets_its_own_launch_label_not_a_stale_one(self):
         pg.start("Work", plan=["installer", "dashboard server"], now=self.m(0))
         pg.assign("dashboard server", "Tank", now=self.m(0))
-        launch = lambda d, at: pg.note_agent_launch("claude", {"session_id": "s1", "tool_input": {  # noqa: E731
-            "description": d, "subagent_type": "general-purpose"}}, now=at)
-        launch("Kid: curl installer", self.m(0))  # its SubagentStart never claimed it
-        launch("Tank: dashboard server", self.m(31))
-        launch("Tank: dashboard server", self.m(31) + 1)  # the same launch recorded twice: one entry
+        launch = lambda tid, d, at: pg.note_agent_launch("claude", {  # noqa: E731
+            "session_id": "s1", "tool_use_id": tid, "tool_input": {"description": d, "subagent_type": "general-purpose"}},
+            now=at)
+        launch("toolu_kid", "Kid: curl installer", self.m(0))  # its SubagentStart never came
+        launch("toolu_tank", "Tank: dashboard server", self.m(31))
+        launch("toolu_tank", "Tank: dashboard server", self.m(31) + 1)  # the same launch recorded twice: one entry
         pg.on_subagent("claude", {"session_id": "s1", "agent_id": "t1", "agent_type": "general-purpose"}, True,
                        now=self.m(31) + 2)
+        pg.launch_result("claude", {"session_id": "s1", "tool_use_id": "toolu_tank", "tool_response": {"agentId": "t1"}},
+                         now=self.m(31) + 2)
         run = pg.load_run("claude", "s1")
         self.assertEqual(run["agents"]["t1"]["label"], "Tank: dashboard server")
         self.assertEqual(run["plan"][1]["owner"], "t1")
         sess = json.loads((pg.SESSIONS / "claude-s1.json").read_text())
-        self.assertEqual(sess.get("pending_agents"), [])  # the stale entry expired, the duplicate was never kept
-        # two launches at once: each subagent claims the entry its own launch record names
-        launch("Sati: screens", self.m(40))
-        launch("Ghost: docs", self.m(40))
+        self.assertEqual({k: (v["state"], v["agent_id"]) for k, v in sess["launches"].items()},
+                         {"toolu_kid": ("pending", None), "toolu_tank": ("started", "t1")})  # the duplicate: not kept
+        self.assertEqual([k for k, _ in pg.slots(run, sess, now=self.m(31) + 3)], ["t1"])  # the stale one holds none
+        # two launches at once: each subagent claims the record its own meta file names
+        launch("toolu_sati", "Sati: screens", self.m(40))
+        launch("toolu_ghost", "Ghost: docs", self.m(40))
         with tempfile.TemporaryDirectory() as d:
-            tr = Path(d) / "agent-g1.jsonl"
-            tr.write_text("")
-            (Path(d) / "agent-g1.meta.json").write_text(json.dumps({"toolUseId": "toolu_9", "description": "Ghost: docs"}))
+            main = Path(d) / "s1.jsonl"
+            main.write_text("")
+            (Path(d) / "s1" / "subagents").mkdir(parents=True)
+            (Path(d) / "s1" / "subagents" / "agent-g1.meta.json").write_text(json.dumps(
+                {"toolUseId": "toolu_ghost", "description": "Ghost: docs"}))
             pg.on_subagent("claude", {"session_id": "s1", "agent_id": "g1", "agent_type": "general-purpose",
-                                      "agent_transcript_path": str(tr)}, True, now=self.m(41))
+                                      "transcript_path": str(main)}, True, now=self.m(41))
         self.assertEqual(pg.load_run("claude", "s1")["agents"]["g1"]["label"], "Ghost: docs")
 
     def test_parallel_launches_each_find_their_own_record_from_the_main_transcript(self):
@@ -198,16 +207,17 @@ class AssignmentTests(unittest.TestCase):
         <session>/subagents/agent-<id>.meta.json next to it, whatever order the subagents start in."""
         pg.start("Work", plan=["dashboard screens", "agent lifecycle design"], now=self.m(0))
         pg.assign("agent lifecycle design", "The Architect", now=self.m(0))
-        for d in ("Sati: dashboard screens", "The Architect: agent lifecycle"):
-            pg.note_agent_launch("claude", {"session_id": "s1", "tool_input": {"description": d,
-                                                                              "subagent_type": "general-purpose"}})
+        for aid, d in (("x1", "Sati: dashboard screens"), ("y2", "The Architect: agent lifecycle")):
+            pg.note_agent_launch("claude", {"session_id": "s1", "tool_use_id": f"toolu_{aid}",
+                                            "tool_input": {"description": d, "subagent_type": "general-purpose"}})
         with tempfile.TemporaryDirectory() as d:
             main = Path(d) / "s1.jsonl"
             main.write_text("")
             sub = Path(d) / "s1" / "subagents"
             sub.mkdir(parents=True)
             for aid, desc in (("x1", "Sati: dashboard screens"), ("y2", "The Architect: agent lifecycle")):
-                (sub / f"agent-{aid}.meta.json").write_text(json.dumps({"toolUseId": "t", "description": desc}))
+                (sub / f"agent-{aid}.meta.json").write_text(json.dumps({"toolUseId": f"toolu_{aid}",
+                                                                        "description": desc}))
             for aid in ("y2", "x1"):  # the Architect starts first
                 pg.on_subagent("claude", {"session_id": "s1", "agent_id": aid, "agent_type": "general-purpose",
                                           "transcript_path": str(main)}, True, now=self.m(1))
@@ -219,9 +229,7 @@ class AssignmentTests(unittest.TestCase):
     def test_a_step_waits_for_its_dependencies_even_when_its_member_is_already_working(self):
         pg.start("Work", plan=["lifecycle design", "journey design=1h after lifecycle design"], now=self.m(0))
         pg.assign("lifecycle design", "The Architect", now=self.m(0))
-        pg.note_agent_launch("claude", {"session_id": "s1", "tool_input": {"description": "The Architect: lifecycle"}})
-        pg.on_subagent("claude", {"session_id": "s1", "agent_id": "a1", "agent_type": "devkit:architect"}, True,
-                       now=self.m(1))
+        launch("a1", "devkit:architect", "The Architect: lifecycle", self.m(1))
         run = pg.assign("journey design", "The Architect", now=self.m(2))
         journey = run["plan"][1]
         self.assertEqual((journey["state"], journey.get("owner") or "main"), ("pending", "main"))  # waits
@@ -229,8 +237,7 @@ class AssignmentTests(unittest.TestCase):
     def test_a_step_reassigned_away_from_a_running_member_leaves_its_lane(self):
         pg.start("Work", plan=["installer", "dashboard server"], now=self.m(0))
         pg.assign("installer", "Kid", now=self.m(0))
-        pg.note_agent_launch("claude", {"session_id": "s1", "tool_input": {"description": "Kid: installer"}})
-        pg.on_subagent("claude", {"session_id": "s1", "agent_id": "a1", "agent_type": "devkit:kid"}, True, now=self.m(1))
+        launch("a1", "devkit:kid", "Kid: installer", self.m(1))
         run = pg.assign("dashboard server", "Kid", now=self.m(2))  # a mistake: Kid's running lane takes it
         self.assertEqual(run["plan"][1]["owner"], "a1")
         run = pg.assign("dashboard server", "Tank", now=self.m(3))
@@ -241,15 +248,13 @@ class AssignmentTests(unittest.TestCase):
     def test_the_run_ends_only_when_the_accountable_member_approved(self):
         pg.start("API", plan=["build the JSON API server", "review"], now=self.m(0))
         pg.assign("build the JSON API server", "Tank", now=self.m(0))
-        pg.note_agent_launch("claude", {"session_id": "s1", "tool_input": {"description": "Tank: build the JSON API server"}})
-        pg.on_subagent("claude", {"session_id": "s1", "agent_id": "a1", "agent_type": "devkit:tank"}, True, now=self.m(1))
+        launch("a1", "devkit:tank", "Tank: build the JSON API server", self.m(1))
         pg.on_subagent("claude", {"session_id": "s1", "agent_id": "a1", "agent_type": "devkit:tank"}, False, now=self.m(20))
         with self.assertRaises(pg.StepError) as e:
             pg.step("API shipped", kind="done", force=True, now=self.m(22))
         self.assertIn("Code reviewer (Seraph) approves “build the JSON API server”", str(e.exception))
         pg.assign("review", "Seraph", now=self.m(22))
-        pg.note_agent_launch("claude", {"session_id": "s1", "tool_input": {"description": "Seraph: review"}})
-        pg.on_subagent("claude", {"session_id": "s1", "agent_id": "a2", "agent_type": "devkit:seraph"}, True, now=self.m(23))
+        launch("a2", "devkit:seraph", "Seraph: review", self.m(23))
         pg.on_subagent("claude", {"session_id": "s1", "agent_id": "a2", "agent_type": "devkit:seraph"}, False, now=self.m(30))
         run = pg.step("API shipped", kind="done", now=self.m(31))
         self.assertEqual(run["state"], "done")
@@ -257,8 +262,7 @@ class AssignmentTests(unittest.TestCase):
     def test_ending_without_the_approval_needs_a_reason(self):
         pg.start("API", plan=["build the JSON API server"], now=self.m(0))
         pg.assign("build the JSON API server", "Tank", now=self.m(0))
-        pg.note_agent_launch("claude", {"session_id": "s1", "tool_input": {"description": "Tank: build the JSON API server"}})
-        pg.on_subagent("claude", {"session_id": "s1", "agent_id": "a1", "agent_type": "devkit:tank"}, True, now=self.m(1))
+        launch("a1", "devkit:tank", "Tank: build the JSON API server", self.m(1))
         pg.on_subagent("claude", {"session_id": "s1", "agent_id": "a1", "agent_type": "devkit:tank"}, False, now=self.m(9))
         run = pg.step("API shipped", kind="done", why="a spike, thrown away", now=self.m(10))
         self.assertEqual(run["state"], "done")

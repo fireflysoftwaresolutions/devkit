@@ -747,7 +747,8 @@ def expire_stale(run, now=None) -> bool:
     limit = cfg()["stale_agent_hours"] * 3600
     changed = False
     for k, lane in (run.get("agents") or {}).items():
-        if lane.get("state") == "running" and now - (lane.get("started") or now) > limit:
+        since = max(lane.get("started") or now, lane.get("resumed_at") or 0)  # a resumed lane: since it resumed
+        if lane.get("state") == "running" and now - since > limit:
             last = max([lane.get("started") or now] + [u.get("ts", 0) for u in lane.get("updates") or []])
             lane.update(state="lost", finished=last)
             _audit("crew.lost", lane.get("persona") or lane.get("label") or k, "no report for "
@@ -804,9 +805,13 @@ def _addr(run, ref: str):
     r = (ref or "").strip()
     if not r or r.lower() in ("main", "lead", "morpheus", "tech lead"):
         return "main"
-    for k, v in (run.get("agents") or {}).items():
-        if k == r or _label_matches(r, v):
-            return k
+    agents = run.get("agents") or {}
+    if r in agents:
+        return r
+    hits = [(k, v) for k, v in agents.items() if _label_matches(r, v)]
+    if hits:  # the member's working lane, bound to its launch, before an older or finished one
+        return max(hits, key=lambda kv: (kv[1].get("state") == "running", kv[1].get("binding", "exact") == "exact",
+                                         kv[1].get("started") or 0))[0]
     return "name:" + r
 
 
@@ -1715,9 +1720,29 @@ def note_agent_launch(agent: str, data: dict, now: float | None = None):
         return _note_agent_launch(agent, data, now)
 
 
+LAUNCH_TTL = 15 * 60  # a launch whose agent has not started by then no longer holds a crew slot
+LAUNCH_KEEP = 24 * 3600  # launch records are kept a day (spec C2), the newest LAUNCH_MAX of them
+LAUNCH_MAX = 100
+AGENT_ID = re.compile(r"[A-Za-z0-9_-]{1,80}")
+
+
+def _launches(s: dict, now: float) -> dict:
+    """The session's launch records (spec C2), {tool_use_id: record}, without day-old ones. The queue of
+    descriptions that came before them (`pending_agents`, taken first in, first out) is dropped."""
+    s.pop("pending_agents", None)
+    ls = {k: v for k, v in (s.get("launches") or {}).items()
+          if isinstance(v, dict) and now - (v.get("ts") or now) < LAUNCH_KEEP}
+    if len(ls) > LAUNCH_MAX:
+        ls = dict(sorted(ls.items(), key=lambda kv: kv[1].get("ts") or 0)[-LAUNCH_MAX:])
+    s["launches"] = ls
+    return ls
+
+
 def _note_agent_launch(agent: str, data: dict, now: float | None = None):
-    """PreToolUse of a subagent launch (Claude's Agent/Task, Codex's spawn_agent): remember its description, so the
-    SubagentStart that follows gets a readable label and the plan step assigned to that label. Runs under
+    """PreToolUse of a subagent launch (Claude's Agent/Task, Codex's spawn_agent), after the guard allowed it: a
+    launch record keyed by the call's tool_use_id, with its description, type and caller (the launching subagent's
+    agent_id, or main). The agent it starts binds to exactly this record (see bind); nothing takes it by order. A
+    launch without a tool_use_id (Codex today) holds a crew slot for LAUNCH_TTL and never binds. Runs under
     note_agent_launch's hold."""
     sid = data.get("session_id") or "-"
     f = session_path(agent, sid)
@@ -1728,38 +1753,255 @@ def _note_agent_launch(agent: str, data: dict, now: float | None = None):
     label = inp.get("description") or inp.get("nickname") or inp.get("name") or \
         str(inp.get("message") or inp.get("prompt") or "").strip().split("\n")[0][:60]
     now = now or time.time()
-    entry = {"label": str(label)[:80], "type": inp.get("subagent_type") or inp.get("agent_type") or "",
-             "ts": round(now, 1)}
-    q = (s.get("pending_agents") or [])[-19:]
-    last = q[-1] if q else {}
-    if last.get("label") == entry["label"] and last.get("type") == entry["type"] and \
-            abs(now - (last.get("ts") or 0)) < 10:
-        return  # the same launch recorded twice
-    q.append(entry)
-    s["pending_agents"] = q
+    tid = str(data.get("tool_use_id") or "")
+    ls = _launches(s, now)
+    entry = {"tool_use_id": tid or None, "label": str(label)[:80],
+             "type": inp.get("subagent_type") or inp.get("agent_type") or "", "parent": data.get("agent_id") or "main",
+             "ts": round(now, 1), "state": "pending", "agent_id": None}
+    if tid:
+        if tid in ls:
+            return  # the same call recorded twice
+        ls[tid] = entry
+    elif any(not v.get("tool_use_id") and (v.get("label"), v.get("type")) == (entry["label"], entry["type"])
+             and abs(now - (v.get("ts") or 0)) < 10 for v in ls.values()):
+        return  # the same untracked launch recorded twice
+    else:
+        ls[f"untracked-{now:.3f}"] = entry
     state.replace(f, s)
 
 
-LAUNCH_TTL = 15 * 60  # a launch whose SubagentStart never came does not label a later subagent
-
-
-def _launch_description(data: dict) -> str:
-    """The description the Agent tool launched this subagent with. Claude Code keeps it in `<transcript>.meta.json`
-    next to the subagent's transcript: `agent_transcript_path` when the event carries it, else
-    `<main transcript>/../<session>/subagents/agent-<agent_id>.meta.json`. '' when there is none (Codex, an older
-    client)."""
-    cands = []
-    p = str(data.get("agent_transcript_path") or "")
-    if p.endswith(".jsonl"):
-        cands.append(Path(p[:-len(".jsonl")] + ".meta.json"))
+def _launch_meta(data: dict) -> dict:
+    """Claude Code's record of the Agent call that started this subagent,
+    `<main transcript>/../<session>/subagents/agent-<agent_id>.meta.json`, with toolUseId and description. It is
+    written after the SubagentStart hooks return (spec F0, S1), so it is there from the agent's first tool call on.
+    {} before that, for the agent's own helpers, and on Codex."""
     main, aid = str(data.get("transcript_path") or ""), str(data.get("agent_id") or "")
-    if main.endswith(".jsonl") and aid and "/" not in aid:
-        cands.append(Path(main[:-len(".jsonl")]) / "subagents" / f"agent-{aid}.meta.json")
-    for c in cands:
-        meta = core.read_json(c, {}) or {}
-        if isinstance(meta, dict) and meta.get("description"):
-            return str(meta["description"])
-    return ""
+    if not main.endswith(".jsonl") or not AGENT_ID.fullmatch(aid):
+        return {}
+    meta = core.read_json(Path(main[:-len(".jsonl")]) / "subagents" / f"agent-{aid}.meta.json", {}) or {}
+    return meta if isinstance(meta, dict) else {}
+
+
+def _claim(s: dict, data: dict, aid: str, now: float):
+    """The launch this agent belongs to -> (tool_use_id, record, binding). `exact` when the launch's PostToolUse
+    named this agent, or its meta file names a launch no agent has claimed (the record then gets this agent and
+    state started); `conflict` when the meta file names a launch bound to another agent (a launch binds once);
+    (None, None, None) while nothing names one."""
+    ls = _launches(s, now)
+    tid = next((k for k, v in ls.items() if v.get("agent_id") == aid), None)
+    if tid:
+        return tid, ls[tid], "exact"
+    tid = str(_launch_meta(data).get("toolUseId") or "")
+    rec = ls.get(tid) if tid else None
+    if not rec:
+        return None, None, None
+    if rec.get("agent_id"):
+        return tid, rec, "conflict"
+    rec.update(agent_id=aid, state="started")
+    return tid, rec, "exact"
+
+
+def _task_text(label: str) -> str:
+    """The task part of a launch description: "Neo: session graph" -> "session graph"."""
+    head, sep, rest = (label or "").partition(":")
+    return rest.strip() if sep and rest.strip() and len(head.split()) <= 3 else (label or "")
+
+
+def _name_score(text: str, name: str) -> tuple:
+    """How well a launch's task text names a step: (the same name, how many of the step's words it names, that
+    share of the step's words). (False, 0, 0.0) when it names none."""
+    sw, tw = _words(name), _words(text)
+    hit = sum(1 for b in sw if any(a == b or _same_stem(a, b) for a in tw))
+    return (text.strip().lower() == name.strip().lower(), hit, hit / len(sw) if sw else 0.0)
+
+
+def _bind_step(run: dict, aid: str, lane: dict, now: float):
+    """Give a newly bound lane the plan step its launch names (spec F2): of the steps assigned to its member that
+    the dependency engine finds ready, the one whose name the launch's task text names best ("Neo: session graph"
+    → "session graph command"). Never the member's first step by default: when the text names none of its steps,
+    or two equally, they stay with Morpheus and he is told how to link one."""
+    plan = run.get("plan") or []
+    if any(st.get("owner") == aid and st.get("state") not in DONE for st in plan):
+        return  # one step at a time
+    mine = [st for st in plan if st.get("label") and st.get("state") not in DONE
+            and (st.get("owner") or "main") == "main" and _label_matches(st["label"], lane)]
+    if not mine:
+        return
+    who, label = lane.get("persona") or lane.get("label") or "a subagent", lane.get("label") or ""
+    scored = [(_name_score(_task_text(label), st["name"]), st) for st in mine]
+    best = max(sc for sc, _ in scored)
+    top = [st for sc, st in scored if sc == best]
+    if not best[1] or len(top) > 1:
+        names = ", ".join(f"“{st['name']}”" for st in (top if best[1] else mine))
+        what = f"names {names} equally" if best[1] else f"names none of {mine[0]['label']}'s steps ({names})"
+        _post(run, "devkit", "main", f"{who} started as “{label}”, which {what}: the steps stay with you. If this "
+              f"launch does one of them, link it: dev progress assign \"<step>\" --to \"{mine[0]['label']}\"", now,
+              from_name="devkit")
+        return
+    st = top[0]
+    if not any(x is st for x in ready(run)):
+        w = ", ".join(deps_open(run, st))
+        if w:  # launched too early: the step keeps waiting for its dependencies
+            _post(run, "devkit", "main", f"{who} started, but “{st['name']}” waits for {w}, not done yet: the step "
+                  f"stays pending and this lane runs without it. When {w} is done, link it: dev progress assign "
+                  f"\"{st['name']}\" --to \"{st['label']}\"", now, from_name="devkit")
+        return
+    st.update(owner=aid, state="running", started=st.get("started") or now)
+    if st.get("scope"):
+        lane["scope"] = st["scope"]
+
+
+def _lane_event(run, aid, kind, tid, rec, binding, now, start, waiting, own=True):
+    """The run's side of a binding (spec C3): the agent's lane, created provisional at its start when a launch is
+    waiting (no step, no scope, until it binds), resumed when the agent works again after it had stopped, and bound
+    to its launch: label, persona and the step the launch names. `own`: the hook is the agent's own start or tool
+    call, so a finished lane resumes; never for its launch's result or its stop."""
+    lane = run["agents"].get(aid)
+    if lane is None:
+        if not binding and not (start and waiting):
+            return  # a helper of the agent (compaction, suggestions), or an agent devkit never saw launched
+        lane = _lane(run, aid, now, kind, kind)
+        lane.update(binding="pending", launch=None, persona=persona(kind, ""))
+        _open(run, "agent", aid, now)
+        _audit("crew.start", lane["persona"] or kind or aid[:8], "waits for its launch" if not binding else
+               (rec or {}).get("label") or "", project=run.get("project") or "", agent_id=aid[:16], type=kind)
+    elif own and lane.get("state") != "running":  # resumed (SendMessage): its own lane, and no other step
+        lane.update(state="running", finished=None, resumed=(lane.get("resumed") or 0) + 1, resumed_at=now)
+        _open(run, "agent", aid, now)
+        _audit("crew.resume", lane.get("persona") or lane.get("label") or aid[:8], lane.get("label") or "",
+               project=run.get("project") or "", agent_id=aid[:16])
+    if binding == "exact" and lane.get("binding") == "pending":
+        label = rec.get("label") or lane.get("label") or kind
+        lane.update(binding="exact", launch=tid, label=label, parent=rec.get("parent") or "main",
+                    persona=persona(kind or rec.get("type") or "", label))
+        _audit("crew.bind", lane["persona"] or label, label, project=run.get("project") or "", agent_id=aid[:16],
+               launch=str(tid)[:40])
+        if lane.get("state") == "running":
+            _bind_step(run, aid, lane, now)
+    elif binding == "conflict" and lane.get("binding") == "pending":
+        lane["binding"] = "conflict"
+        _audit("crew.bind-conflict", lane.get("persona") or kind or aid[:8], f"claims launch {tid}, which another "
+               f"agent is bound to", "deny", project=run.get("project") or "", agent_id=aid[:16])
+
+
+def _attach(agent: str, sid: str, s: dict, data: dict, aid: str, kind: str, now: float, start: bool,
+            resume: bool = True):
+    """Bind this agent to its launch, inside the session's hold: the claim on the session record, then the lane
+    on the run (lock order: session, then run). `resume`: a finished lane of this agent works again."""
+    if not AGENT_ID.fullmatch(aid or ""):
+        return
+    tid, rec, binding = _claim(s, data, aid, now)
+    waiting = any(v.get("state") == "pending" and not v.get("agent_id") and now - (v.get("ts") or now) < LAUNCH_TTL
+                  for v in (s.get("launches") or {}).values())
+    subs = s.setdefault("subagents", {})
+    if start or binding or aid in subs:
+        sub = subs.setdefault(aid, {"type": kind, "label": kind, "started": now})
+        if start:
+            sub["started"] = now
+        if binding == "exact":
+            sub.update(label=rec.get("label") or sub.get("label"), launch=tid)
+    _run_event(agent, sid, lambda run: _lane_event(run, aid, kind, tid, rec, binding, now, start, waiting,
+                                                   own=resume))
+
+
+def bind(agent: str, data: dict, now: float | None = None, resume: bool = True):
+    """Late binding (spec D2), at every hook from inside a subagent (its tool calls, its stop). SubagentStart
+    carries neither the launch's tool_use_id nor a meta file yet, so an agent that starts before its launch's
+    result binds at its first hook, when the meta file exists. A known agent whose lane had stopped resumes it at
+    a tool call (SendMessage); `resume=False` at its stop. The usual case, a bound working lane, costs one read of
+    the run."""
+    aid, sid = str(data.get("agent_id") or ""), data.get("session_id") or "-"
+    if not AGENT_ID.fullmatch(aid):
+        return
+    run = load_run(agent, sid)
+    lane = ((run.get("agents") or {}).get(aid) or {}) if isinstance(run, dict) and run.get("state") != "done" else {}
+    if lane.get("state") == "running" and lane.get("binding", "exact") in ("exact", "conflict"):
+        return
+    f = session_path(agent, sid)
+    if not lane and ((state.read(f) or {}).get("subagents") or {}).get(aid, {}).get("launch"):
+        return  # bound, in a session without a run
+    with state.hold(f):
+        s = state.load(f)
+        if s is None:
+            return
+        before = json.dumps(s, sort_keys=True)
+        kind = data.get("agent_type") or data.get("subagent_type") or lane.get("type") or ""
+        _attach(agent, sid, s, data, aid, kind, now or time.time(), start=False, resume=resume)
+        if json.dumps(s, sort_keys=True) != before:
+            state.replace(f, s)
+
+
+def launch_result(agent: str, data: dict, now: float | None = None):
+    """PostToolUse of a subagent launch: its result names the agent it started (`tool_response.agentId`) next to
+    the launch's tool_use_id, an exact binding without the meta file (spec F0). A background launch's result comes
+    together with its SubagentStart, in either order; a foreground launch's only when the agent has ended."""
+    resp = data.get("tool_response")
+    aid = str(resp.get("agentId") or "") if isinstance(resp, dict) else ""
+    tid, sid = str(data.get("tool_use_id") or ""), data.get("session_id") or "-"
+    if not tid or not AGENT_ID.fullmatch(aid):
+        return
+    f = session_path(agent, sid)
+    with state.hold(f):
+        s = state.load(f)
+        if s is None:
+            return
+        now = now or time.time()
+        rec = _launches(s, now).get(tid)
+        if not rec:
+            return  # not a launch devkit recorded
+        if rec.get("agent_id") and rec["agent_id"] != aid:
+            _audit("crew.bind-conflict", rec.get("label") or tid, f"the launch's result names {aid[:16]}, but "
+                   f"{str(rec['agent_id'])[:16]} is bound to it", "deny", project=s.get("project") or "")
+            return
+        rec.update(agent_id=aid, state="started")
+        sub = (s.get("subagents") or {}).get(aid)
+        kind = (sub or {}).get("type") or rec.get("type") or ""
+        if sub is not None:
+            sub.update(label=rec.get("label") or sub.get("label"), launch=tid)
+        _run_event(agent, sid, lambda run: _lane_event(run, aid, kind, tid, rec, "exact", now, False, False,
+                                                       own=False) if sub is not None or aid in run["agents"] else None)
+        state.replace(f, s)
+
+
+def launch_failed(agent: str, data: dict, now: float | None = None):
+    """PostToolUseFailure of a subagent launch (an unknown agent type, an interrupt; spec F0, S6): its launch
+    record leaves at once, so it never labels another agent or holds a crew slot."""
+    tid, sid = str(data.get("tool_use_id") or ""), data.get("session_id") or "-"
+    if not tid:
+        return
+    (PENDING / f"{re.sub(r'[^A-Za-z0-9_-]', '', tid)[:80]}.json").unlink(missing_ok=True)
+    f = session_path(agent, sid)
+    with state.hold(f):
+        s = state.load(f)
+        if s is None:
+            return
+        rec = _launches(s, now or time.time()).pop(tid, None)
+        if rec is None:
+            return
+        state.replace(f, s)
+    _audit("crew.launch-failed", rec.get("label") or tid, str(data.get("error") or "")[:200], "failed",
+           project=s.get("project") or "")
+
+
+def slots(run: dict, sess: dict | None = None, now: float | None = None) -> list:
+    """The crew slots in use, [(id, name)] (spec D2): launches whose agent has not started yet, and working lanes
+    bound to a launch (a resumed one too). A provisional lane counts through its launch; helpers never count. Lanes
+    bound before launch records existed count while they run."""
+    now = now or time.time()
+    if sess is None:
+        sess = core.read_json(session_path(run.get("agent") or "", run.get("session") or ""), {}) if run else {}
+    sess = sess if isinstance(sess, dict) else {}
+    agents, subs = (run or {}).get("agents") or {}, sess.get("subagents") or {}
+    out = []
+    for tid, rec in (sess.get("launches") or {}).items():
+        aid = rec.get("agent_id")
+        if rec.get("state") == "pending" and now - (rec.get("ts") or now) < LAUNCH_TTL:
+            out.append((tid, rec.get("label") or rec.get("type") or "a launch"))
+        elif rec.get("state") == "started" and aid not in agents and aid in subs:
+            out.append((aid, rec.get("label") or str(aid)[:8]))  # working in a session without a run
+    out += [(k, v.get("persona") or v.get("label") or k[:8]) for k, v in agents.items()
+            if v.get("state") == "running" and v.get("binding", "exact") == "exact"]
+    return out
 
 
 def on_subagent(agent: str, data: dict, started: bool, now: float | None = None):
@@ -1770,6 +2012,10 @@ def on_subagent(agent: str, data: dict, started: bool, now: float | None = None)
 
 
 def _on_subagent(agent: str, data: dict, started: bool, now: float | None = None):
+    """SubagentStart: the agent binds to its launch when something names it already (the launch's result came
+    first), else gets a provisional lane while a launch waits, and no lane as a helper; a known agent resumes its
+    own lane and takes nothing else. SubagentStop: a last binding (an agent that used only tools without hooks),
+    then its lane and its step are closed."""
     sid = data.get("session_id") or "-"
     f = session_path(agent, sid)
     s = state.load(f)  # under on_subagent's hold
@@ -1777,43 +2023,10 @@ def _on_subagent(agent: str, data: dict, started: bool, now: float | None = None
         return
     now = now or time.time()
     subs = s.setdefault("subagents", {})
-    aid = data.get("agent_id") or data.get("subagent_id") or "?"
+    aid = str(data.get("agent_id") or data.get("subagent_id") or "?")
     kind = data.get("agent_type") or data.get("subagent_type") or ""
-    if started:
-        q = [x for x in s.get("pending_agents") or [] if now - (x.get("ts") or now) < LAUNCH_TTL]
-        want = _launch_description(data)
-        i = next((j for j, x in enumerate(q) if want and x.get("label") == want[:80]), None)
-        if i is None:  # no launch record: the oldest recent launch of this type
-            i = next((j for j, x in enumerate(q) if not x.get("type") or not kind or x["type"] == kind), None)
-        label = q.pop(i)["label"] if i is not None else (want or kind)
-        s["pending_agents"] = q
-        subs[aid] = {"type": kind, "label": label, "started": now}
-
-        def link(run):
-            _open(run, "agent", aid, now)
-            lane = _lane(run, aid, now, label, kind)
-            lane["persona"] = persona(kind, label)
-            _audit("crew.start", lane["persona"] or label or kind, label, project=run.get("project") or "",
-                   agent_id=aid[:16], type=kind)
-            held = []
-            for st in run.get("plan") or []:  # the step assigned to this crew member (dev progress assign)
-                if st.get("label") and st.get("state") not in DONE and (st.get("owner") or "main") == "main" \
-                        and _label_matches(st["label"], lane):
-                    if deps_open(run, st):
-                        held.append(st)  # launched too early: the step keeps waiting for its dependencies
-                        continue
-                    st.update(owner=aid, state="running", started=st.get("started") or now)
-                    if st.get("scope"):
-                        lane["scope"] = st["scope"]
-                    break
-            else:
-                for st in held:
-                    w, who = ", ".join(deps_open(run, st)), lane["persona"] or label or "a subagent"
-                    _post(run, "devkit", "main", f"{who} started, but “{st['name']}” waits for {w}, not done yet: "
-                          f"the step stays pending and this lane runs without it. When {w} is done, link it: "
-                          f"dev progress assign \"{st['name']}\" --to \"{st['label']}\"", now, from_name="devkit")
-        _run_event(agent, sid, link)
-    else:
+    _attach(agent, sid, s, data, aid, kind, now, start=started, resume=started)  # a stop never resumes a lane
+    if not started:
         v = subs.pop(aid, None)
         if v:
             record("subagent", agent, sid, v.get("label") or v.get("type") or aid, now - v["started"],
@@ -1822,6 +2035,10 @@ def _on_subagent(agent: str, data: dict, started: bool, now: float | None = None
         def finish(run):
             _close(run, "agent", aid, now)
             lane = (run.get("agents") or {}).get(aid)
+            if lane and lane.get("binding") == "pending" and not lane.get("updates") and \
+                    not any(st.get("owner") == aid for st in run.get("plan") or []):
+                del run["agents"][aid]  # never bound, never reported: a helper that started while a launch waited
+                return
             if lane:
                 lane.update(state="done", finished=now)
                 _audit("crew.finish", lane.get("persona") or lane.get("label") or aid,

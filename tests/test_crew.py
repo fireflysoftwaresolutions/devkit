@@ -89,10 +89,13 @@ class TempState(ProgressState):
 
     @staticmethod
     def launch(agent_id="a1", kind="devkit:neo", description="Neo: build the parser"):
-        """A subagent starts in this session (what the hooks record when the Agent tool runs)."""
-        pg.note_agent_launch("claude", {"session_id": "s1", "tool_input": {"description": description,
-                                                                            "subagent_type": kind}})
+        """A subagent starts in this session (what the hooks record when the Agent tool runs: the call, the agent's
+        start, the call's result naming the agent)."""
+        pg.note_agent_launch("claude", {"session_id": "s1", "tool_use_id": f"toolu_{agent_id}",
+                                        "tool_input": {"description": description, "subagent_type": kind}})
         pg.on_subagent("claude", {"session_id": "s1", "agent_id": agent_id, "agent_type": kind}, True)
+        pg.launch_result("claude", {"session_id": "s1", "tool_use_id": f"toolu_{agent_id}",
+                                    "tool_response": {"agentId": agent_id}})
 
     @staticmethod
     def audit_actions() -> list:

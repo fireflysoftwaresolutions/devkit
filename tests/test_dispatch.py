@@ -19,8 +19,12 @@ def m(minutes):
 
 
 def launch(aid, kind, label, at):
-    pg.note_agent_launch("claude", {"session_id": "s1", "tool_input": {"description": label, "subagent_type": kind}})
+    # Claude Code's sequence: the Agent call (PreToolUse), the agent's start, the call's result naming the agent
+    pg.note_agent_launch("claude", {"session_id": "s1", "tool_use_id": f"toolu_{aid}",
+                                    "tool_input": {"description": label, "subagent_type": kind}}, now=at)
     pg.on_subagent("claude", {"session_id": "s1", "agent_id": aid, "agent_type": kind}, True, now=at)
+    pg.launch_result("claude", {"session_id": "s1", "tool_use_id": f"toolu_{aid}", "tool_response": {"agentId": aid}},
+                     now=at)
 
 
 class RouteTests(unittest.TestCase):

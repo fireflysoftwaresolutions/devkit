@@ -117,6 +117,18 @@
         ]
       }
     ],
+    "PostToolUseFailure": [
+      {
+        "matcher": "Agent|Task",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "'{{DEVKIT}}/bin/dev' hook post-tool-failure --agent claude",
+            "timeout": 10
+          }
+        ]
+      }
+    ],
     "SubagentStart": [
       {
         "hooks": [

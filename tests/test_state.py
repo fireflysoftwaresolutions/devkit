@@ -163,13 +163,20 @@ class ConcurrentWriterTests(Records):
         self.assertEqual(len({m["id"] for m in msgs}), 8)  # and each has its own id
 
     def test_a_subagent_start_between_stops_read_and_write_survives(self):
-        self.set_record(turn_started=self.now - 60, pending_agents=[
-            {"label": "Tank: state helper", "type": "general-purpose", "ts": round(self.now, 1)}])
+        self.set_record(turn_started=self.now - 60, launches={"toolu_a7": {
+            "tool_use_id": "toolu_a7", "label": "Tank: state helper", "type": "general-purpose", "parent": "main",
+            "ts": round(self.now, 1), "state": "pending", "agent_id": None}})
+        main = self.root / "s1.jsonl"  # the agent's meta file names its launch: the start claims it
+        main.write_text("")
+        (self.root / "s1" / "subagents").mkdir(parents=True)
+        (self.root / "s1" / "subagents" / "agent-a7.meta.json").write_text(json.dumps(
+            {"toolUseId": "toolu_a7", "description": "Tank: state helper"}))
         self.stop_hook(lambda: pg.on_subagent("claude", {"session_id": "s1", "agent_id": "a7",
-                                                         "agent_type": "general-purpose"}, True))
+                                                         "agent_type": "general-purpose",
+                                                         "transcript_path": str(main)}, True))
         rec = self.record()
         self.assertEqual((rec.get("subagents") or {}).get("a7", {}).get("label"), "Tank: state helper")
-        self.assertEqual(rec.get("pending_agents"), [])  # the claimed launch does not come back
+        self.assertEqual(rec["launches"]["toolu_a7"]["agent_id"], "a7")  # the claimed launch does not come back
         self.assertIsNone(rec["turn_started"])  # and Stop's own change is there too
 
     def test_a_session_that_ended_while_stop_ran_is_not_created_again(self):

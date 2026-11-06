@@ -765,11 +765,12 @@ def _crew_limits(agent: str, data: dict):
         progress.expire_stale(run)
         tool = data.get("tool_name")
         if tool in ("Agent", "Task", "spawn_agent") and not data.get("agent_id"):
-            busy = progress.running_agents(run)
+            busy = progress.slots(run)  # launches waiting for their agent, and bound lanes at work (resumed too)
             limit = progress.cfg()["max_parallel"]
             if len(busy) >= limit:
-                names = ", ".join(v.get("persona") or v.get("label") or k[:8] for k, v in busy)
-                return ("deny", f"{len(busy)} crew members are working ({names}); the limit is {limit} at once. Wait "
+                names = ", ".join(name for _, name in busy)
+                return ("deny", f"{len(busy)} crew members are working or starting ({names}); the limit is {limit} "
+                                f"at once. Wait "
                                 f"for one to finish (you are notified), or give the work to one of them "
                                 f"(SendMessage / send_input). progress.max_parallel in devkit config changes the limit.")
         if tool in EDIT_TOOLS and not data.get("agent_id") and not os.environ.get("DEVKIT_SCOPE_OVERRIDE"):
@@ -820,6 +821,9 @@ def _scope_violation(agent: str, data: dict):
         run, lane = progress.lane_of(agent, data.get("session_id") or "-", aid)
         if not lane:
             return None
+        if lane.get("binding") == "conflict":  # a launch binds once: a second agent claiming it edits nothing
+            return ("this agent claims a launch that another agent is bound to, so devkit lets it read but not edit. "
+                    "Report what you need to change, and Morpheus checks the launch (dev crew graph).")
         scope = lane.get("scope") or []
         inp = data.get("tool_input") or {}
         paths = [inp.get("file_path") or inp.get("notebook_path") or ""]
@@ -866,6 +870,12 @@ def guard(agent: str):
         progress.tool_started(data)
     except Exception:
         pass
+    if data.get("agent_id"):  # late binding (spec D2): this call already runs with its launch's step and scope
+        try:
+            from . import progress
+            progress.bind(agent, data)
+        except Exception:
+            _log(f"guard bind {agent}: {traceback.format_exc()[-300:]}")
     from . import guard as g
     verdict = g.check(data.get("tool_name") or "", data.get("tool_input") or {}, data.get("cwd") or os.getcwd(), agent)
     if not verdict:
@@ -1134,6 +1144,13 @@ def post_tool(agent: str):
     from . import progress
     data = _stdin_json()
     try:
+        if data.get("tool_name") in ("Agent", "Task"):  # the launch names the agent it started: an exact binding
+            progress.launch_result(agent, data)
+        if data.get("agent_id"):
+            progress.bind(agent, data)
+    except Exception:
+        _log(f"post-tool bind {agent}: {traceback.format_exc()[-300:]}")
+    try:
         cmd = (data.get("tool_input") or {}).get("command") or ""
         if isinstance(cmd, list):
             cmd = " ".join(cmd)
@@ -1162,6 +1179,15 @@ def post_tool(agent: str):
         _log(f"post-tool closing {agent}: {traceback.format_exc()[-300:]}")
     _context_out("PostToolUse", "\n\n".join(x for x in (_bulk_rewrite_note(data), closing,
                                                         progress.on_tool_done(agent, data)) if x))
+
+
+def post_tool_failure(agent: str):
+    """PostToolUseFailure: a subagent launch that failed (an unknown agent type, an interrupt) starts no agent, so its
+    launch record leaves at once: it never labels another agent or holds a crew slot (spec F0, S6)."""
+    from . import progress
+    data = _stdin_json()
+    if data.get("tool_name") in ("Agent", "Task", "spawn_agent"):
+        progress.launch_failed(agent, data)
 
 
 def subagent_start(agent: str):
@@ -1199,13 +1225,20 @@ def subagent_stop(agent: str):
     out = None
     try:
         sid = data.get("session_id") or "-"
+        aid = data.get("agent_id") or ""
+        if aid:  # an agent that used only tools without hooks binds now, before its report is checked
+            try:
+                progress.bind(agent, data, resume=False)  # a stop never resumes a finished lane
+            except Exception:
+                _log(f"subagent-stop bind {agent}: {traceback.format_exc()[-300:]}")
         sf = _session_file(agent, sid)
         sess = (state.read(sf) or {}) if sf.exists() else None
         before = copy.deepcopy(sess)  # the report check reads the transcript: only this hook's changes are written
-        aid = data.get("agent_id") or ""
         if sess is not None and sess.get("turn_class") != "other":
             from . import canary
             run, lane = progress.lane_of(agent, sid, aid)
+            if lane and lane.get("binding") == "pending":
+                lane = None  # never bound to a launch: a helper owes no report
             meta = _launch_meta(data)
             label = (lane or {}).get("label") or meta.get("description") or ""
             name = (lane or {}).get("persona") or progress.persona(data.get("agent_type") or "", label) \
@@ -1308,8 +1341,8 @@ def statusline(agent: str):
 
 HANDLERS = {"session-start": session_start, "stop": stop, "session-end": session_end, "guard": guard,
             "config-change": config_change, "instructions-loaded": instructions_loaded, "prompt": prompt,
-            "post-tool": post_tool, "subagent-start": subagent_start, "subagent-stop": subagent_stop,
-            "statusline": statusline}
+            "post-tool": post_tool, "post-tool-failure": post_tool_failure, "subagent-start": subagent_start,
+            "subagent-stop": subagent_stop, "statusline": statusline}
 
 
 # --------------------------------------------------------------------------- payload capture (spec C9)

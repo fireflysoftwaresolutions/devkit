@@ -219,7 +219,7 @@ def ready(run, now: float | None = None) -> dict:
     run = normalize(run)
     plan = run.get("plan") or []
     busy = progress.running_agents(run)
-    free = max(0, progress.cfg()["max_parallel"] - len(busy))
+    free = max(0, progress.cfg()["max_parallel"] - len(progress.slots(run)))  # launches count before they start
     launch, waiting = [], []
     for s in plan:
         if s.get("state") not in ("pending", "blocked") or not s.get("label") or (s.get("owner") or "main") != "main":

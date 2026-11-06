@@ -132,22 +132,23 @@ CONTRACT = {
                      ("SessionStart.startup", "SessionStart.resume")),
     "PreToolUse": ((hooks.guard, hooks._crew_limits, hooks._stub_commit_gate, hooks._scope_violation,
                     hooks._route_subagent_progress, hooks._unroutable_lane_command, progress.tool_started,
-                    progress._note_agent_launch),
+                    progress._note_agent_launch, progress.bind, progress._launch_meta),
                    ("PreToolUse.Agent", "PreToolUse.Agent.in-subagent", "PreToolUse.Bash")),
     "PostToolUse": ((hooks.post_tool, hooks.closing_reminder, hooks._turn_ending, hooks._bulk_rewrite_note,
-                     progress.on_tool_done),
+                     progress.on_tool_done, progress.launch_result, progress.bind, progress._launch_meta),
                     ("PostToolUse.Agent", "PostToolUse.Agent.background", "PostToolUse.Agent.in-subagent",
                      "PostToolUse.Bash")),
-    "SubagentStart": ((hooks.subagent_start, progress._on_subagent, progress._launch_description), ("SubagentStart",)),
-    "SubagentStop": ((hooks.subagent_stop, hooks._launch_meta, canary.check_subagent, progress._on_subagent),
-                     ("SubagentStop", "SubagentStop.sent-back")),
+    "PostToolUseFailure": ((hooks.post_tool_failure, progress.launch_failed), ("PostToolUseFailure.Agent",)),
+    "SubagentStart": ((hooks.subagent_start, progress._on_subagent, progress._launch_meta), ("SubagentStart",)),
+    "SubagentStop": ((hooks.subagent_stop, hooks._launch_meta, canary.check_subagent, progress._on_subagent,
+                      progress.bind, progress._launch_meta), ("SubagentStop", "SubagentStop.sent-back")),
     "Stop": ((hooks.stop, hooks._stub_gate, hooks._test_gate, hooks._turn_files, hooks._handoff_nudge,
               hooks._session_project, canary.check, scope.decide, skillguard.on_stop), ("Stop",)),
     "SessionEnd": ((hooks.session_end,), ("SessionEnd",)),
 }
 CODEX_NAMES = {"subagent_id", "subagent_type"}  # read only when Claude's agent_id / agent_type are missing
 # Fields devkit reads that Claude Code does not send. Each one is a known bug with the fix that removes the read.
-KNOWN_GAPS = {"SubagentStart": {"agent_transcript_path"}}  # F2: SubagentStart carries no agent_transcript_path
+KNOWN_GAPS = {}  # F2 removed the last one: the read of agent_transcript_path at SubagentStart
 
 
 def fixture(name: str) -> dict:
@@ -177,13 +178,11 @@ class PayloadContractTests(unittest.TestCase):
             with self.subTest(event=event):
                 self.assertEqual(missing(event) - KNOWN_GAPS.get(event, set()), set())
 
-    @unittest.expectedFailure
-    def test_subagent_start_carries_the_agent_transcript_path_devkit_reads(self):
-        """progress._launch_description reads agent_transcript_path at SubagentStart; Claude Code sends only
-        transcript_path and agent_id, and writes <session>/subagents/agent-<id>.meta.json after the SubagentStart
-        hooks return, so the description is never found and the start takes the oldest queued launch. F2 binds the
-        lane at the subagent's first hook (tool_use_id and the meta file) instead: it removes the read, this
-        decorator and the KNOWN_GAPS entry."""
+    def test_subagent_start_reads_only_what_claude_code_sends(self):
+        # SubagentStart carries no agent_transcript_path, and Claude Code writes the meta file only after the
+        # SubagentStart hooks return (F0, S1). Before F2 the start read agent_transcript_path, never found the
+        # description and took the oldest queued launch; now it reads transcript_path and agent_id, and the lane
+        # binds by tool_use_id at the launch's result or the agent's first hook.
         self.assertEqual(missing("SubagentStart"), set())
 
     def test_an_agent_launch_carries_the_tool_input_devkit_reads(self):

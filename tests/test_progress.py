@@ -45,6 +45,16 @@ class TempState:
         self.tmp.cleanup()
 
 
+def launch(aid, kind, label, at=None, sid="s1"):
+    # Claude Code's sequence for one subagent launch: the Agent call (PreToolUse, with its tool_use_id), the agent's
+    # start, and the call's result naming the agent it started (the lane binds to its launch exactly)
+    pg.note_agent_launch("claude", {"session_id": sid, "tool_use_id": f"toolu_{aid}",
+                                    "tool_input": {"description": label, "subagent_type": kind}}, now=at)
+    pg.on_subagent("claude", {"session_id": sid, "agent_id": aid, "agent_type": kind}, True, now=at)
+    pg.launch_result("claude", {"session_id": sid, "tool_use_id": f"toolu_{aid}", "tool_response": {"agentId": aid}},
+                     now=at)
+
+
 class ProgressTests(unittest.TestCase):
     def test_minutes(self):
         self.assertEqual(pg.parse_minutes("45m"), 45)
@@ -155,9 +165,7 @@ class TimeModelTests(unittest.TestCase):
             self.assertEqual([s["est"] for s in run["plan"]], [10, 20, 30])
             run = pg.assign("build", "Neo", now=self.m(0))
             self.assertEqual(run["plan"][1]["state"], "pending")  # waits for its subagent
-            pg.note_agent_launch("claude", {"session_id": "s1", "tool_input": {"description": "Neo: build the parser",
-                                                                                "subagent_type": "devkit:neo"}})
-            pg.on_subagent("claude", {"session_id": "s1", "agent_id": "a1", "agent_type": "devkit:neo"}, True)
+            launch("a1", "devkit:neo", "Neo: build the parser")
             run = pg.load_run("claude", "s1")
             self.assertEqual(run["plan"][1]["owner"], "a1")
             self.assertEqual(run["agents"]["a1"]["label"], "Neo: build the parser")
@@ -228,9 +236,7 @@ class TimeModelTests(unittest.TestCase):
         with TempState():
             pg.start("Feature", plan=["api", "ui"], now=self.m(0))
             pg.assign("ui", "Trinity", now=self.m(0))
-            pg.note_agent_launch("claude", {"session_id": "s1", "tool_input": {"description": "Trinity: ui"}})
-            pg.on_subagent("claude", {"session_id": "s1", "agent_id": "a1", "agent_type": "devkit:trinity"}, True,
-                           now=self.m(1))
+            launch("a1", "devkit:trinity", "Trinity: ui", self.m(1))
             with self.assertRaises(pg.StepError) as e:
                 pg.step("ui done", which="ui", now=self.m(2))
             self.assertIn("still working on it", str(e.exception))
@@ -292,10 +298,7 @@ class CrewCoordinationTests(unittest.TestCase):
     def test_messages_reach_the_right_crew_member(self):
         with TempState():
             pg.start("Feature", plan=["build"], now=self.m(0))
-            pg.note_agent_launch("claude", {"session_id": "s1", "tool_input": {"description": "Neo: build it",
-                                                                                "subagent_type": "devkit:neo"}})
-            pg.on_subagent("claude", {"session_id": "s1", "agent_id": "a1", "agent_type": "devkit:neo"}, True,
-                           now=self.m(1))
+            launch("a1", "devkit:neo", "Neo: build it", self.m(1))
             q = pg.crew_ask("Should the parser accept empty lines?", from_agent="a1", now=self.m(2))
             self.assertEqual((q["to"], q["to_name"]), ("main", "Morpheus"))
             # Morpheus gets it with his next tool call; the subagent does not
@@ -308,8 +311,7 @@ class CrewCoordinationTests(unittest.TestCase):
             self.assertIn("from Morpheus: Yes, skip them (answer to M1)", ctx)
             # a message to a crew member who has not started yet waits for them
             pg.crew_ask("Review the parser when Neo is done", to="Seraph", now=self.m(4))
-            pg.on_subagent("claude", {"session_id": "s1", "agent_id": "a2", "agent_type": "devkit:seraph"}, True,
-                           now=self.m(5))
+            launch("a2", "devkit:seraph", "Seraph: review the parser", self.m(5))
             self.assertIn("Review the parser", pg.on_tool_done("claude", {"session_id": "s1", "agent_id": "a2"}))
 
     def test_scope_follows_the_member_into_a_worktree_of_the_same_repository(self):
@@ -324,9 +326,7 @@ class CrewCoordinationTests(unittest.TestCase):
             subprocess.run(["git", "-C", str(main), "worktree", "add", "-q", "-b", "feat/x", str(wt)], check=True)
             pg.start("Feature", plan=["installer"], now=self.m(0))
             pg.assign("installer", "Kid", scope="install.sh,tests/test_install*.py", now=self.m(0))
-            pg.note_agent_launch("claude", {"session_id": "s1", "tool_input": {"description": "Kid: installer"}})
-            pg.on_subagent("claude", {"session_id": "s1", "agent_id": "a1", "agent_type": "devkit:kid"}, True,
-                           now=self.m(1))
+            launch("a1", "devkit:kid", "Kid: installer", self.m(1))
             edit = lambda p: {"session_id": "s1", "agent_id": "a1", "tool_name": "Edit", "cwd": str(main),  # noqa: E731
                               "tool_input": {"file_path": str(p)}}
             from unittest import mock
@@ -343,9 +343,7 @@ class CrewCoordinationTests(unittest.TestCase):
         with TempState(), tempfile.TemporaryDirectory() as repo:
             pg.start("Feature", plan=["parser", "ui"], now=self.m(0))
             pg.assign("parser", "Neo", scope="lib/parser/**,tests/test_parser.py", now=self.m(0))
-            pg.note_agent_launch("claude", {"session_id": "s1", "tool_input": {"description": "Neo: parser"}})
-            pg.on_subagent("claude", {"session_id": "s1", "agent_id": "a1", "agent_type": "devkit:neo"}, True,
-                           now=self.m(1))
+            launch("a1", "devkit:neo", "Neo: parser", self.m(1))
             edit = lambda p: {"session_id": "s1", "agent_id": "a1", "tool_name": "Edit", "cwd": repo,  # noqa: E731
                               "tool_input": {"file_path": os.path.join(repo, p)}}
             self.assertIsNone(hooks._scope_violation("claude", edit("lib/parser/core.py")))
@@ -428,9 +426,7 @@ class CrewGuardrailTests(unittest.TestCase):
         return self.T0 + minutes * 60
 
     def launch(self, aid, kind, label, at):
-        pg.note_agent_launch("claude", {"session_id": "s1", "tool_input": {"description": label,
-                                                                            "subagent_type": kind}})
-        pg.on_subagent("claude", {"session_id": "s1", "agent_id": aid, "agent_type": kind}, True, now=at)
+        launch(aid, kind, label, at)
 
     def test_at_most_four_members_at_once(self):
         from devkit import hooks
@@ -494,9 +490,7 @@ class GuidedAndAutoTests(unittest.TestCase):
 
     def neo(self):
         pg.assign("parser", "Neo", now=self.m(0))
-        pg.note_agent_launch("claude", {"session_id": "s1", "tool_input": {"description": "Neo: parser"}})
-        pg.on_subagent("claude", {"session_id": "s1", "agent_id": "a1", "agent_type": "devkit:neo"}, True,
-                       now=self.m(1))
+        launch("a1", "devkit:neo", "Neo: parser", self.m(1))
 
     def test_guided_waits_for_the_developer_and_resumes(self):
         with TempState():
@@ -601,8 +595,7 @@ class CrewSafetyTests(unittest.TestCase):
         from devkit import hooks
         with TempState(), tempfile.TemporaryDirectory() as repo:
             pg.start("Review", plan=["review"], now=time.time())
-            pg.note_agent_launch("claude", {"session_id": "s1", "tool_input": {"description": "Seraph: review"}})
-            pg.on_subagent("claude", {"session_id": "s1", "agent_id": "r1", "agent_type": "seraph"}, True)
+            launch("r1", "seraph", "Seraph: review")
             edit = {"session_id": "s1", "agent_id": "r1", "tool_name": "apply_patch", "cwd": repo,
                     "tool_input": {"input": "*** Begin Patch\n*** Update File: src/a.py\n"}}
             self.assertIn("review-only", hooks._scope_violation("codex", dict(edit)) or

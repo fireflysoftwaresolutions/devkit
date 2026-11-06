@@ -50,9 +50,12 @@ class PlanDagTests(unittest.TestCase):
         return {n: (s["state"], s.get("owner") or "main") for n, s in self.steps().items()}
 
     def launch(self, aid, kind, label, at):
-        pg.note_agent_launch("claude", {"session_id": "dag", "tool_input": {"description": label,
-                                                                            "subagent_type": kind}}, now=at)
+        # Claude Code's sequence: the Agent call (PreToolUse), the agent's start, the call's result naming the agent
+        pg.note_agent_launch("claude", {"session_id": "dag", "tool_use_id": f"toolu_{aid}",
+                                        "tool_input": {"description": label, "subagent_type": kind}}, now=at)
         pg.on_subagent("claude", {"session_id": "dag", "agent_id": aid, "agent_type": kind}, True, now=at)
+        pg.launch_result("claude", {"session_id": "dag", "tool_use_id": f"toolu_{aid}",
+                                    "tool_response": {"agentId": aid}}, now=at)
 
     def stop(self, aid, kind, at):
         pg.on_subagent("claude", {"session_id": "dag", "agent_id": aid, "agent_type": kind}, False, now=at)
