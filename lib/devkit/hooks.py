@@ -169,6 +169,18 @@ def context_for(cwd: str, agent: str) -> str:
     except Exception:
         pass
     try:
+        from . import lessons
+        inits = [d.name for d in (HANDOFF / "initiatives").glob("*") if (d / "README.md").exists() and
+                 p["id"] in notesmod.summarize((d / "README.md").read_text())["projects"]] \
+            if (HANDOFF / "initiatives").exists() else []
+        known = lessons.context_lines(p["id"], inits)
+        if known:
+            lines.append("Known pitfalls (lessons from earlier mistakes; follow their prevention, and `dev lesson recur "
+                         "<id> --evidence …` if one happens again):")
+            lines += ["- " + x for x in known]
+    except Exception:
+        pass
+    try:
         from . import delivery
         dl = delivery.summary_line(p["id"])
         lines.append(dl if dl else "Delivery policy: not recorded yet — `dev delivery` detects and recommends one "
@@ -370,6 +382,18 @@ def stop(agent: str):
                 reasons.append(why)
         except Exception:
             _log(f"stop skills {agent}: {traceback.format_exc()[-300:]}")
+        if not data.get("stop_hook_active") and not sess.get("lesson_nudged") and sess.get("top"):
+            try:
+                from . import lessons
+                fixes = lessons.fixed_in_session(sess["top"], sess.get("head"))
+                if fixes:
+                    sess["lesson_nudged"] = True
+                    reasons.append("devkit: this session fixed or reverted something (" + "; ".join(fixes[:3]) +
+                                   "). If it was a mistake that could happen again, record a lesson: `dev lesson add "
+                                   "\"<title>\" --cause \"…\" --prevent \"…\" --evidence \"commit …\"` (or "
+                                   "`dev lesson recur <id>` if a known pitfall repeated). Skip it for a trivial fix.")
+            except Exception:
+                _log(f"stop lessons {agent}: {traceback.format_exc()[-300:]}")
         plans = _plans_without_reason(sess)
         if plans and not data.get("stop_hook_active"):
             reasons.append("devkit: you changed plan(s) without recording why: " + ", ".join(plans[:4]) +

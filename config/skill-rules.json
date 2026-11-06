@@ -269,6 +269,19 @@
           "communicating"
         ]
       }
+    },
+    {
+      "id": "learning",
+      "why": "Blameless lessons, root causes, prevention by automation",
+      "prompt": "\\b(lesson\\w*|postmortem|post-mortem|retro\\w*|root cause|again the same|otra vez|de nuevo el mismo|aprende\\w*|mistake\\w*|error(es)? (que )?(se )?repit\\w*)\\b",
+      "skills": {
+        "claude": [
+          "learning-loop"
+        ],
+        "codex": [
+          "learning-loop"
+        ]
+      }
     }
   ]
 }

@@ -109,6 +109,14 @@ The developer should never have to ask "how is it going?" Follow the `communicat
   the DevKit status line. Then run `dev progress done "<outcome>"`, which notifies the developer and calibrates future
   estimates.
 
+### Learn from mistakes
+
+The session context lists known pitfalls (lessons from earlier mistakes): follow their prevention. After you fix a
+bug, revert a change, hit the same guard refusal twice or are corrected by the developer, record a short, blameless
+lesson: `dev lesson add "…" --cause "…" --prevent "…"`. If a known pitfall repeats, run `dev lesson recur <id>`, and
+turn recurring lessons into automation (a test, lint, guard or skill rule, or CI check) with
+`dev lesson prevent`. The `learning-loop` skill has the details.
+
 ### Spend tokens where they buy quality
 
 The main session runs on the model and effort the developer chose. Don't switch either mid-task (each switch re-reads

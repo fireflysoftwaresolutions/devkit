@@ -156,6 +156,8 @@ def handoff_violation(rel: str, cwd, envs=frozenset()):
     if rel.startswith("policies/"):
         return (f"`{rel}` is a recorded delivery policy, versioned with who and why. Change it with "
                 f"`dev delivery apply --set key=value --why \"…\"`.")
+    if rel.startswith("lessons/"):
+        return (f"`{rel}` is a lesson, versioned with who and why. Use `dev lesson add|recur|prevent|retire …`.")
     if rel.startswith(("items/", "sessions/", "presence/")):
         return (f"`{rel}` is managed by devkit so that versions, locks, history and attribution stay correct. Use "
                 f"`dev task add|start|done|edit|move|cancel --why …` for work items and `dev handoff --log \"…\"` "
@@ -631,9 +633,18 @@ def check_push_budget(cwd, args, envs):
     return None
 
 
+PIPE_GATE = re.compile(r"\|(?!\|)[^|&;\n]*&&\s*(?:[A-Z_]+=\S*\s+)*(?:git\s+(?:-C\s+\S+\s+)?(?:commit|push|tag)\b|"
+                       r"dev\s+(?:commit|push|release)\b|gh\s+(?:pr\s+(?:create|merge)|release\s+create)\b)")
+
+
 def check_bash(cmd: str, cwd: str, agent: str):
     if not cmd or not cmd.strip():
         return None
+    if PIPE_GATE.search(cmd) and "pipefail" not in cmd and "DEVKIT_PIPE_OK" not in cmd:
+        return deny("This commits, pushes or tags after a pipeline (`… | … && git commit`): the `&&` sees the exit "
+                    "code of the pipe's last command, so a failing check before the pipe still lets it run. Run the "
+                    "check without the pipe, use `set -o pipefail;` first, or test its output "
+                    "(`out=$(… | tail -1); [ \"$out\" = OK ] && …`). Lesson: gate on the real result.")
     segs = split_commands(cmd)
     if segs is None:
         return _attribution(cmd) if re.search(r"\b(git|gh)\b", cmd) else None

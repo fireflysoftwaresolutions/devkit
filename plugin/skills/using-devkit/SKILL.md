@@ -62,6 +62,7 @@ or diagram files without them.
 | Hand off | `dev handoff`, `dev task`, `/devkit:handoff` | `handoff` |
 | Coordinate with others | `dev team`, `dev task start\|release`, `dev task show <n>` (history) | — |
 | Choose model, effort, subagents | `scout` agent for lookups; `codex --profile fast\|deep\|review` | `working-efficiently` |
+| Learn from mistakes | `dev lesson add\|ls\|recur\|prevent`, `dev lesson scan\|review` | `learning-loop` |
 | Keep the developer informed | `dev progress start\|step\|block\|done`, `dev time` | `communicating` |
 | Plans and specs | `dev plan new "…" --kind plan\|spec\|spike\|bugfix\|adr`, `dev plan revise --why`, `approve`, `ls` | Superpowers writing-plans, `communicating` (formats) |
 | Hand work to a teammate | `dev task delegate <n> --to <login> --why "…"` | `communicating` |

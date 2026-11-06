@@ -43,6 +43,7 @@ COMMANDS = [
         ("delivery [apply]", "Versioning, release, test and deploy policy of a project: detect, recommend, record, gaps"),
         ("time [--days 7]", "How long things take: turns, slow commands, subagents, estimate accuracy"),
         ("handoff-import <dir> --slug s", "Adopt an old handoff repository as an initiative (from a staging folder)"),
+        ("lesson add|ls|scan|review", "Learn from mistakes: lessons recalled in every session, repeats automated"),
         ("report [--days 7]", "Status report for initiatives and projects (Markdown, for the team or management)"),
     ]),
     ("Agents", [
@@ -1285,6 +1286,108 @@ def cmd_delivery(a):
     return 0
 
 
+def _lesson_scope(a):
+    if getattr(a, "global_", False):
+        return "global"
+    if getattr(a, "initiative", None):
+        return f"initiatives/{a.initiative}"
+    if getattr(a, "project", None):
+        return _resolve(_reg(prs=False), a.project)["id"]
+    top = core.gitout(os.getcwd(), "rev-parse", "--show-toplevel")
+    if not top:
+        return "global"
+    from . import delivery
+    return delivery.scope_for(top)
+
+
+def cmd_lesson(a):
+    from . import lessons
+    act = a.lesson_cmd or "ls"
+    try:
+        if act == "add":
+            scope = _lesson_scope(a)
+            les = lessons.add(scope, " ".join(a.title), kind=a.kind, severity=a.severity, happened=a.happened or "",
+                              cause=a.cause or "", fix=a.fix or "", prevention=a.prevent or "",
+                              detection=a.detect or "", evidence=a.evidence or [], tags=a.tag or [], why=a.why or "")
+            print(f"{ui.OK} {les['meta']['id']} recorded in {scope} → {tilde(les['path'])}")
+            print(ui.dim("  automate it when you can: dev lesson prevent " + les["meta"]["id"] +
+                         " --by test|lint|guard|skill|ci --ref … --why …"))
+            return 0
+        if act in ("show", "recur", "prevent", "retire"):
+            les = lessons.find(" ".join(a.selector))
+            if act == "recur":
+                les = lessons.recur(les, a.evidence or "", a.why or "")
+                print(f"{ui.OK} {les['meta']['id']} happened {les['meta']['occurrences']}× — "
+                      + ("automate the prevention now (dev lesson prevent)" if les["meta"]["occurrences"] >= 2 else "noted"))
+                return 0
+            if act == "prevent":
+                les = lessons.prevent(les, a.by, a.ref, a.why or "")
+                print(f"{ui.OK} {les['meta']['id']} prevented by {a.by}: {a.ref}")
+                return 0
+            if act == "retire":
+                les = lessons.retire(les, a.why or "")
+                print(f"{ui.OK} {les['meta']['id']} retired")
+                return 0
+            m = les["meta"]
+            print(ui.section(f"{m['id']} · {m['title']}"))
+            for k in ("scope", "kind", "severity", "status", "occurrences", "prevention", "prevention_ref",
+                      "first_seen", "last_seen", "version"):
+                if m.get(k) not in (None, "", []):
+                    print(ui.kv(k, m[k], 14))
+            for sec, text in les["sections"].items():
+                if text and text != "_—_":
+                    print(f"\n  {ui.bold(sec)}\n" + "\n".join("    " + ln for ln in text.splitlines()))
+            print(ui.section("History"))
+            for e in les["changelog"]:
+                print(f"  {ui.dim('•')} {e}")
+            return 0
+        if act == "scan":
+            pid, repo = None, core.gitout(os.getcwd(), "rev-parse", "--show-toplevel") or None
+            if repo:
+                from . import delivery
+                pid = delivery.scope_for(repo)
+            sig = lessons.signals(pid, repo, a.days)
+            print(ui.section(f"Signals worth a lesson · last {a.days} days" + (f" · {pid}" if pid else "")))
+            if not sig:
+                print(f"  {ui.OK} nothing new")
+            for kind, detail, cmd in sig:
+                print(f"  {ui.WARN} {kind:<7} {detail}\n          {ui.dim(cmd)}")
+            return 0
+        if act == "review":
+            r = lessons.review()
+            print(ui.section(f"Lessons · {r['total']} · " + ", ".join(f"{v} {k}" for k, v in sorted(r["counts"].items()))))
+            if r["recurring"]:
+                print(ui.section("Recurring and not prevented — automate these"))
+                for x in r["recurring"]:
+                    print(f"  {ui.WARN} {x['meta']['id']} ×{x['meta']['occurrences']} {x['meta']['title']}  "
+                          f"{ui.dim(x['meta']['scope'])}")
+            if r["stale"]:
+                print(ui.section("Not seen for 4 months — retire or confirm"))
+                for x in r["stale"]:
+                    print(f"  {ui.dim('·')} {x['meta']['id']} {x['meta']['title']}  {ui.dim('last ' + x['meta']['last_seen'])}")
+            if not r["recurring"] and not r["stale"]:
+                print(f"  {ui.OK} nothing to review")
+            return 0
+    except ValueError as e:
+        ui.err(str(e))
+        return 2
+    # ls
+    items = lessons.search(a.search) if getattr(a, "search", None) else lessons.all_lessons(
+        None if a.all else _lesson_scope(a))
+    if not a.all and not getattr(a, "search", None) and _lesson_scope(a) != "global":
+        items += lessons.all_lessons("global")
+    items = [x for x in items if a.all or x["meta"].get("status") != "retired"]
+    print(ui.section(f"Lessons · {len(items)}"))
+    if not items:
+        print("  none yet — record one after a fix, a revert or a repeated mistake: dev lesson add \"…\" --cause … --prevent …")
+    for x in sorted(items, key=lessons._score, reverse=True):
+        m = x["meta"]
+        st = {"open": ui.yellow("open"), "prevented": ui.green(f"prevented·{m.get('prevention')}"),
+              "retired": ui.dim("retired")}.get(m.get("status"), m.get("status"))
+        print(f"  {ui.dim(m['id'])} {st:<20} ×{m['occurrences']} {m['title']}  {ui.dim(m['scope'] + ' · ' + m['severity'])}")
+    return 0
+
+
 def cmd_team(a):
     from . import work
     t = work.team(max_age_h=a.hours)
@@ -1862,6 +1965,45 @@ def build_parser():
     x.add_argument("--tasks", action="store_true", help="create a work item for every gap")
     x.add_argument("-p", "--project", default=argparse.SUPPRESS)
     x.add_argument("-i", "--initiative", default=argparse.SUPPRESS)
+    p = add("lesson", cmd_lesson, "Learn from mistakes: record, recall, count repeats, prevent with automation")
+    p.add_argument("-p", "--project")
+    p.add_argument("-i", "--initiative")
+    p.add_argument("--global", dest="global_", action="store_true", help="a lesson for every project")
+    p.add_argument("--all", action="store_true", help="every scope, including retired lessons")
+    p.add_argument("--search")
+    lsp = p.add_subparsers(dest="lesson_cmd")
+    x = lsp.add_parser("add", help="record a lesson: what happened, root cause, fix, prevention, detection")
+    x.add_argument("title", nargs="+")
+    x.add_argument("--kind", default="mistake", choices=["bug", "mistake", "process", "tooling", "security",
+                                                         "performance", "design"])
+    x.add_argument("--severity", default="medium", choices=["low", "medium", "high"])
+    x.add_argument("--happened")
+    x.add_argument("--cause", help="the root cause (required)")
+    x.add_argument("--fix")
+    x.add_argument("--prevent", help="the rule that stops it happening again (required)")
+    x.add_argument("--detect", help="how to notice it early")
+    x.add_argument("--evidence", action="append", help="commit, PR, CI run, task (repeat)")
+    x.add_argument("--tag", action="append")
+    x.add_argument("--why")
+    for verb, h_ in (("show", "a lesson with its history"), ("recur", "it happened again (counts repeats)"),
+                     ("retire", "no longer applies (needs --why)")):
+        x = lsp.add_parser(verb, help=h_)
+        x.add_argument("selector", nargs="+")
+        x.add_argument("--evidence")
+        x.add_argument("--why")
+    x = lsp.add_parser("prevent", help="automation now prevents it (test, lint, guard, skill, ci, rule)")
+    x.add_argument("selector", nargs="+")
+    x.add_argument("--by", required=True, choices=["test", "lint", "type", "guard", "skill", "ci", "rule", "doc"])
+    x.add_argument("--ref", required=True, help="the test, rule or file that prevents it")
+    x.add_argument("--why")
+    x = lsp.add_parser("scan", help="signals worth a lesson: reverts, fixes, repeated guard refusals, canary misses")
+    x.add_argument("--days", type=int, default=14)
+    lsp.add_parser("review", help="recurring lessons to automate, stale ones to retire")
+    lsp.add_parser("ls", help="lessons for this project, its initiatives and global ones")
+    for sub in lsp.choices.values():
+        sub.add_argument("-p", "--project", default=argparse.SUPPRESS)
+        sub.add_argument("-i", "--initiative", default=argparse.SUPPRESS)
+        sub.add_argument("--global", dest="global_", action="store_true", default=argparse.SUPPRESS)
     p = add("report", cmd_report, "Status report (Markdown): health, progress, done, in progress, next, risks, team")
     p.add_argument("--days", type=int, default=7)
     p.add_argument("-i", "--initiative")
