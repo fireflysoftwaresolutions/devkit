@@ -99,6 +99,26 @@ class EvidenceCallTests(unittest.TestCase):
                     self.assertIn("forge", bash(f"python3 {script}", agent) or "")
                     self.assertIsNotNone(bash(f"cd {d} && python3 -u repro_forge.py", agent))
 
+    def test_a_forge_in_an_agents_own_module_is_refused_however_the_program_loads_it(self):
+        # the inline code names no devkit module: it loads the agent's file, which does (The Keymaker's probe after
+        # 3e0817f); code decoded and run at run time cannot be read, so it is refused as it is
+        with tempfile.TemporaryDirectory() as d:
+            (Path(d) / "forge.py").write_text("from devkit import progress\nprogress.on_human_prompt('codex', {})\n")
+            (Path(d) / "helper.py").write_text("import json\nprint(json.dumps({'ok': True}))\n")
+            for cmd in (f"python3 -c \"import sys; sys.path.insert(0, '{d}'); import forge\"",
+                        f"cd {d} && python3 -m forge", f"python3 -c \"import runpy; runpy.run_path('{d}/forge.py')\"",
+                        f"python3 -c \"exec(open('{d}/forge.py').read())\"",
+                        f"python3 -c \"from importlib.machinery import SourceFileLoader as L; L('f', '{d}/forge.py')"
+                        f".load_module()\"",
+                        "python3 -c \"import base64; exec(base64.b64decode('ZnJvbSBkZXZraXQgaW1wb3J0IHByb2dyZXNz'))\""):
+                with self.subTest(cmd=cmd.replace(d, "$D")[:70]):
+                    self.assertIsNotNone(bash(cmd, "codex"))
+            for cmd in (f"python3 -c \"import sys; sys.path.insert(0, '{d}'); import helper\"",
+                        f"cd {d} && python3 -m helper", f"python3 -c \"exec(open('{d}/helper.py').read())\"",
+                        "python3 -c \"import json, os; print(os.getcwd())\""):
+                with self.subTest(allowed=cmd.replace(d, "$D")[:70]):
+                    self.assertIsNone(bash(cmd, "codex"))
+
     def test_every_way_to_import_devkit_and_reach_an_evidence_function_is_refused(self):
         for code in ("from devkit import progress; progress.on_human_prompt('codex', {'prompt': 'grant merge 12'})",
                      "from devkit.progress import use_grant; use_grant('claude', 's1', action='merge', target='12')",

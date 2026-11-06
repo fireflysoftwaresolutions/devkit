@@ -2041,13 +2041,60 @@ def _devkit_module(name) -> bool:
     return bool(name) and (name == "devkit" or name.startswith("devkit."))
 
 
-def evidence_reached(code) -> str:
+DECODED = "code it decodes at run time"
+DECODED_REASON = ("This program runs code it decodes at run time (exec of base64, hex, zlib or marshal data), which the "
+                  "guard cannot read, so it cannot tell whether it forges the developer's approval or writes devkit's "
+                  "records (spec C5, C11). Write the code out in the command or a script file.")
+_DECODERS = frozenset({"b64decode", "b32decode", "b85decode", "a85decode", "urlsafe_b64decode", "decodebytes",
+                       "decodestring", "fromhex", "unhexlify", "a2b_base64", "a2b_hex", "decompress", "loads",
+                       "decode", "rot13", "reversed"})
+
+
+def _agent_file(p) -> bool:
+    """A file an agent may have written for itself: outside the workspace or in a temp folder; not a repository's own
+    code, which `_repo_script` leaves to its tests and review."""
+    return p != UNKNOWN and p.is_file() and (not is_under(p, DEV) or is_temp(p))
+
+
+def _local_module(name, dirs):
+    """The agent's file that `import <name>` loads from one of `dirs` (the program's folder, its constant sys.path
+    entries), or None."""
+    rel = str(name or "").replace(".", "/")
+    for d in dirs:
+        for cand in (f"{rel}.py", f"{rel}/__init__.py", f"{rel}/__main__.py"):
+            p = resolve(os.path.join(str(d), cand), str(d))
+            if _agent_file(p):
+                return p
+    return None
+
+
+def _read_call_path(n):
+    """The constant path of `open(P).read()` or `Path(P).read_text()`, else None."""
+    import ast
+    if isinstance(n, ast.Call) and isinstance(n.func, ast.Attribute) and n.func.attr in ("read", "read_text",
+                                                                                          "read_bytes"):
+        inner = n.func.value
+        if isinstance(inner, ast.Call) and getattr(inner.func, "id", getattr(inner.func, "attr", "")) in (
+                "open", "Path", "PurePath", "io.open") and inner.args:
+            return _const_str(inner.args[0])
+    return None
+
+
+def _decodes(n) -> bool:
+    import ast
+    return any(isinstance(x, ast.Call) and (getattr(x.func, "attr", "") or getattr(x.func, "id", "")) in _DECODERS
+               for x in ast.walk(n))
+
+
+def evidence_reached(code, cwd=None, depth: int = 0) -> str:
     """The devkit evidence function (or devkit.state writer) a program reaches, or '': it loads a devkit module (import,
     from-import, __import__, importlib, a devkit file by path) and names one (an attribute, an imported name, a
-    getattr, a string), or looks a name up on a devkit module at run time. Code that is not Python is judged by its
+    getattr, a string), or looks a name up on a devkit module at run time. The agent's own files it loads (a local
+    module from its folder or a constant sys.path entry, runpy.run_path, exec(open(…).read()), spec_from_file_location)
+    are judged too, three levels deep; code it decodes and runs is DECODED. Code that is not Python is judged by its
     text."""
     import ast
-    if not code or not str(code).strip():
+    if not code or not str(code).strip() or depth > 3:
         return ""
     try:
         tree = ast.parse(code)
@@ -2056,12 +2103,27 @@ def evidence_reached(code) -> str:
         return m.group(0) if m else ""
     loads, maybe, star, dynamic, hit = False, False, False, False, ""
     mods = {}  # local name -> the devkit module it is bound to
+    dirs = [d for d in [cwd] if d] + [_const_str(n.args[-1]) for n in ast.walk(tree) if isinstance(n, ast.Call)
+                                      and getattr(n.func, "attr", "") in ("insert", "append", "addsitedir")
+                                      and n.args and _const_str(n.args[-1])]
+    files = []  # the agent's own files this program loads
+    alias = {a.asname: a.name for n in ast.walk(tree) if isinstance(n, (ast.Import, ast.ImportFrom))
+             for a in n.names if a.asname}  # `SourceFileLoader as L`: a call to L is a call to SourceFileLoader
+
+    def local(name):
+        p = _local_module(name, dirs) if name and not _devkit_module(name) else None
+        if p:
+            files.append(p)
     for n in ast.walk(tree):
         if isinstance(n, ast.Import):
             for a in n.names:
                 if _devkit_module(a.name):
                     loads = True
                     mods[a.asname or a.name.split(".")[0]] = a.name if a.asname else "devkit"
+                else:
+                    local(a.name)
+        elif isinstance(n, ast.ImportFrom) and not n.level and not _devkit_module(n.module):
+            local(n.module)
         elif isinstance(n, ast.ImportFrom) and not n.level and _devkit_module(n.module):
             loads = True
             for a in n.names:
@@ -2077,14 +2139,21 @@ def evidence_reached(code) -> str:
         elif isinstance(n, ast.Call):
             f = n.func
             fname = f.attr if isinstance(f, ast.Attribute) else getattr(f, "id", "")
+            fname = alias.get(fname, fname).rpartition(".")[2]
             first = _const_str(n.args[0]) if n.args else None
-            if fname in ("__import__", "import_module", "spec_from_file_location", "run_module", "run_path"):
-                arg = first if fname not in ("spec_from_file_location",) else (
+            if fname in ("__import__", "import_module", "spec_from_file_location", "run_module", "run_path",
+                         "SourceFileLoader"):
+                arg = first if fname not in ("spec_from_file_location", "SourceFileLoader") else (
                     _const_str(n.args[1]) if len(n.args) > 1 else None)
                 if arg is None:
                     maybe = True
                 elif _DEVKIT_MODULE_STR.search(arg):
                     loads = True
+                elif fname in ("run_path", "spec_from_file_location", "SourceFileLoader"):
+                    p = resolve(arg, cwd)
+                    files += [p] if _agent_file(p) else []
+                else:
+                    local(arg)
             elif fname == "getattr" and len(n.args) > 1:
                 name = _const_str(n.args[1])
                 if name is None:
@@ -2093,12 +2162,22 @@ def evidence_reached(code) -> str:
                     hit = hit or name
             elif fname in ("eval", "exec", "compile", "vars"):
                 inner = first
-                if inner is None:
+                path = _read_call_path(n.args[0]) if n.args and inner is None else None
+                if path:
+                    p = resolve(path, cwd)
+                    files += [p] if _agent_file(p) else []
+                elif inner is None and n.args and fname != "vars" and _decodes(n.args[0]):
+                    return DECODED
+                elif inner is None:
                     dynamic = True
                 else:
-                    sub = evidence_reached(inner)
+                    sub = evidence_reached(inner, cwd, depth + 1)
                     hit = hit or sub
                     loads = loads or bool(_DEVKIT_LOAD_TEXT.search(inner))
+    for p in files:
+        sub = evidence_reached(_read_small(p), str(p.parent), depth + 1)
+        if sub:
+            return sub
     for n in ast.walk(tree):
         if isinstance(n, ast.Attribute):
             base = n.value.id if isinstance(n.value, ast.Name) else n.value.attr if isinstance(n.value, ast.Attribute) \
@@ -2155,7 +2234,14 @@ def _forged_argv(argv, cwd, bodies, here, prev, depth) -> str:
         code, _, module, _ = _program(argv, cwd, bodies)
         if not code and module is None and prev:  # it reads its program from the pipe
             code = _produced(prev, cwd)
-        fn = evidence_reached(code)
+        where = cwd
+        if module and not _devkit_module(module):  # python -m <mod>: an agent's module in the folder it runs in
+            p = _local_module(module, [cwd])
+            code, where = (_read_small(p), str(p.parent)) if p else (code, cwd)
+        script = next((resolve(a, cwd) for a in args if a.endswith(".py") and not a.startswith("-")), None)
+        if script is not None and script != UNKNOWN:  # a script's own folder comes first in its sys.path
+            where = str(script.parent)
+        fn = evidence_reached(code, where)
         for t in ([] if fn else _code_texts(code)):
             fn = fn or _forged_calls(t, cwd, depth + 1)
         return fn
@@ -2195,6 +2281,8 @@ def evidence_forgery(cmd: str, cwd):
     if not cmd or not cmd.strip():
         return None
     fn = _forged_calls(cmd, cwd or os.getcwd())
+    if fn == DECODED:
+        return deny(DECODED_REASON)
     return deny(FORGERY_REASON.format(fn=fn)) if fn else None
 
 
