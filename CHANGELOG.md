@@ -96,6 +96,8 @@ devkit is open source under the Apache License 2.0.
 - The crew canary counts only subagents someone launched. Claude Code's own helpers, such as the compaction
   summary, are no longer counted as crew misses or sent back, and a report corrected after the reminder is
   recorded as corrected.
+- `dev test prove <file>` proves only the file's new or changed tests, so tests that already existed are no
+  longer reported as not testing your change.
 
 ## [26.11.0] - 2026-11-05
 

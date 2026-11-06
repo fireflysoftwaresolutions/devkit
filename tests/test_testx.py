@@ -897,6 +897,15 @@ class ProveTests(unittest.TestCase):
             self.assertEqual([(t["id"], t["with_change"], t["without_change"]) for t in data["tests"]],
                              [("test_calc.CalcTests.test_mul", "5/5", "failed")])
 
+    def test_a_named_file_proves_only_its_new_tests(self):
+        with Env() as e:
+            r = e.repo(PROVE_BASE)
+            (r / "tests" / "test_calc.py").write_text(with_tests(TEST_MUL))
+            (r / "calc.py").write_text(MUL)
+            rc, out, err = dev(r, "prove", "--json", "tests/test_calc.py")
+            self.assertEqual(rc, 0, out + err)  # test_add existed before and passes without the change: not reported
+            self.assertEqual([t["id"] for t in json.loads(out)["tests"]], ["test_calc.CalcTests.test_mul"])
+
     def test_flaky_with_the_change_is_reported(self):
         with Env() as e:
             counter = e.root / "counter"

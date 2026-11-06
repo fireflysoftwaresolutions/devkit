@@ -2108,7 +2108,7 @@ def _prove(a, top, runners) -> int:
         r = owner(runners, f)
         if r is None:
             return _refuse(f"no test runner for {f}", "dev test plan shows the runners found here")
-        units = None if a.tests else _changed_units(top, base, f)
+        units = _changed_units(top, base, f)  # a named file too: its new or changed tests (all, when none changed)
         plan.append((r, f, units, _unit_ids(top, r, f, units) if units else None))
     groups = {}
     for r, f, units, ids in plan:
