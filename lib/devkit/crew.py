@@ -31,10 +31,11 @@ TOOLS = {"all": None, "build": "Read, Write, Edit, Grep, Glob, Bash", "review": 
 CLAUDE_MODEL = {"strong": "inherit", "standard": "inherit", "fast": "haiku"}
 CLAUDE_EFFORT = {"strong": "high", "fast": "low"}  # standard: the session's default effort, like Codex
 REQUIRED = ("id", "name", "title", "role", "summary", "personality", "use_when", "skills", "tools", "tier", "returns",
-            "goal", "method", "devkit", "done_when")
+            "goal", "procedure", "devkit", "done_when")
 OPTIONAL = ("main", "not_for", "aliases", "keywords")  # keywords: routing words (dev crew route)
 TEXT_FIELDS = ("id", "name", "title", "role", "summary", "personality", "returns", "goal")
-LIST_FIELDS = ("use_when", "not_for", "skills", "aliases", "keywords", "method", "devkit", "done_when")
+LIST_FIELDS = ("use_when", "not_for", "skills", "aliases", "keywords", "devkit", "done_when")
+PHASE_KEYS = {"phase", "do", "skills", "devkit", "gate", "proof"}
 LEGACY_ALIASES = {"sparks": ["scout"]}  # agent names older briefs still use; a member's own `aliases` field wins
 ID_RE = re.compile(r"^[a-z][a-z0-9]*(?:-[a-z0-9]+)*$")
 _PREFIXED = re.compile(r"^[a-z0-9][a-z0-9_-]*:(\S+)$")  # devkit:neo -> neo (not "Neo: build the parser")
@@ -87,6 +88,34 @@ def _keys(m: dict) -> set:
     return keys | {_norm(a) for a in aliases(m) if isinstance(a, str)}
 
 
+def _procedure_errors(proc) -> list:
+    """A procedure is a list of phases: {phase, do} and optional skills, devkit (lists), gate and proof (text)."""
+    if proc is None:
+        return []
+    if not isinstance(proc, list) or not proc:
+        return ["`procedure` must be a non-empty list of phases"]
+    out = []
+    for i, x in enumerate(proc, 1):
+        if not isinstance(x, dict) or not str(x.get("phase") or "").strip() or not str(x.get("do") or "").strip():
+            out.append(f"procedure phase {i} needs `phase` and `do`")
+            continue
+        extra = set(x) - PHASE_KEYS
+        if extra:
+            out.append(f"procedure phase {i}: unknown {', '.join(sorted(extra))}")
+        for k in ("skills", "devkit"):
+            if k in x and not (isinstance(x[k], list) and all(isinstance(s, str) and s.strip() for s in x[k])):
+                out.append(f"procedure phase {i}: `{k}` must be a list of text")
+        for k in ("gate", "proof"):
+            if k in x and not isinstance(x[k], str):
+                out.append(f"procedure phase {i}: `{k}` must be text")
+    return out
+
+
+def proofs(m: dict) -> list:
+    """The devkit commands a member must have run before it reports (one per phase that names a proof)."""
+    return [x["proof"] for x in m.get("procedure") or [] if isinstance(x, dict) and x.get("proof")]
+
+
 def check(data, known=None):
     """-> (errors, warnings) for a roster. Unknown skills are warnings: the skill may come from elsewhere."""
     if not isinstance(data, dict) or not isinstance(data.get("members"), list) or not data["members"]:
@@ -103,7 +132,7 @@ def check(data, known=None):
         mid = m.get("id") if isinstance(m.get("id"), str) and m.get("id") else None
         where = f"`{mid}`" if mid else f"member {i}"
         missing = [k for k in REQUIRED if k not in m or m[k] is None or (k in TEXT_FIELDS and m[k] == "")
-                   or (k in ("use_when", "method", "devkit", "done_when") and m[k] == [])]
+                   or (k in ("use_when", "procedure", "devkit", "done_when") and m[k] == [])]
         if missing:
             errors.append(f"{where}: missing {', '.join(missing)}")
         for k in TEXT_FIELDS:
@@ -113,6 +142,7 @@ def check(data, known=None):
             if k in m and m[k] is not None and not (isinstance(m[k], list) and
                                                      all(isinstance(x, str) and x.strip() for x in m[k])):
                 errors.append(f"{where}: `{k}` must be a list of text")
+        errors += [f"{where}: {e}" for e in _procedure_errors(m.get("procedure"))]
         if mid and not ID_RE.match(mid):
             errors.append(f"{where}: the id must be kebab-case (lowercase words joined by -)")
         if mid in ids:
@@ -315,15 +345,30 @@ def body(m: dict, roster=None, alias=None) -> str:
     if m["skills"]:
         out += ["Load each one with the Skill tool (it may list a plugin skill with its prefix, such as "
                 "`devkit:testing`). Without the Skill tool, or when it does not list one, read the skill's SKILL.md.",
-                ""] + [f"- `{s}`" for s in m["skills"]] + [""]
+                "", ", ".join(f"`{s}`" for s in m["skills"]), ""]
     else:
         out += ["None. Load a skill only when your brief names one.", ""]
-    out += ["## Your method", ""] + [f"{i}. {_sentence(x)}" for i, x in enumerate(m["method"], 1)] + [""]
+    out += ["## Your procedure", "",
+            "Follow these phases in order. A phase is finished when its gate holds; `proof` marks the devkit command "
+            "devkit looks for in your session before it accepts your report.", ""]
+    for i, x in enumerate(m["procedure"], 1):
+        line = f"{i}. **{x['phase']}.** {_sentence(x['do'])}"
+        extras = []
+        if x.get("skills"):
+            extras.append("skills: " + ", ".join(f"`{s}`" for s in x["skills"]))
+        if x.get("devkit"):
+            extras.append("devkit: " + ", ".join(f"`{c}`" for c in x["devkit"]))
+        if x.get("gate"):
+            extras.append(f"gate: {x['gate']}")
+        if x.get("proof"):
+            extras.append(f"proof: `{x['proof']}`")
+        out.append(line + (" " + " · ".join(extras) if extras else ""))
+    out.append("")
     out += _raci_section(m, roster)
     out += ["## Your devkit commands", "",
             "devkit is how the crew works and talks: use these instead of ad-hoc scripts, files or messages."
             + ("" if shell else " You have no shell: name the command in your report and Morpheus runs it."), ""]
-    out += [f"- `{c}`" for c in m["devkit"]] + [""]
+    out += [", ".join(f"`{c}`" for c in m["devkit"]), ""]
     out += ["## How you work with the crew", ""]
     if shell:
         out += ["- Stay inside the files and the scope your brief names. Before you go beyond them, ask Morpheus: "
@@ -703,6 +748,24 @@ def _dq(s) -> str:
     return '"' + re.sub(r'(["\\$`])', r"\\\1", str(s)) + '"'
 
 
+def brief_skills(m: dict, task: str = "", globs=None, agent: str = "claude"):
+    """The skills a member loads for one task: its own, plus those devkit's skill rules (config/skill-rules.json)
+    require for the task's words and the files in its scope, so a Spring task brings the Java skills and a Python
+    one does not. -> (skills, [why])."""
+    out, why = list(m.get("skills") or []), []
+    try:
+        from . import skillguard
+        rules = skillguard.rules_for_text(task or "") + skillguard.rules_for_files(list(globs or []))
+        for r in rules:
+            add = [s for s in skillguard.required(r, agent) if s not in out]
+            if add:
+                out += add
+                why.append(f"{', '.join(add)}: {r.get('id') or r.get('name') or 'rule'}")
+    except Exception:
+        pass
+    return out, why
+
+
 def brief_text(m: dict, task: str, scope: str = "", step=None, roster=None, cwd=None) -> str:
     """What `dev crew brief` prints: the spawn lines, the lane link and the brief to paste as the prompt."""
     roster = roster or load()
@@ -729,8 +792,13 @@ def brief_text(m: dict, task: str, scope: str = "", step=None, roster=None, cwd=
         b.append("The files this task needs and nothing beyond them. Ask Morpheus before you widen it: "
                  '`dev crew ask "<question>"`.')
     b += ["", "## Skills to load first", ""]
+    skills, why = brief_skills(m, task, globs)
     b.append(("Load each with the Skill tool, or read its SKILL.md when the Skill tool does not list it: "
-              + ", ".join(f"`{s}`" for s in m["skills"]) + ".") if m["skills"] else "None.")
+              + ", ".join(f"`{s}`" for s in skills) + "." + (f" ({'; '.join(why)})" if why else ""))
+             if skills else "None.")
+    if m.get("procedure"):
+        b += ["", "## Procedure", "", "Follow your procedure's phases (your agent instructions); before you report, "
+              "devkit checks that you ran: " + (", ".join(f"`{p}`" for p in proofs(m)) or "nothing in particular") + "."]
     b += ["", "## Return", "", _sentence(m["returns"]), "",
           "## Report format", "", "Your final message starts with this block; nothing comes before it:", ""]
     b += report_block(m, project=project, branch=branch, task="<the task, in a few words>")
@@ -752,7 +820,7 @@ def as_json(roster=None, view=None) -> dict:
     out = []
     for m in members(roster):
         x = {k: m.get(k) for k in ("id", "name", "title", "role", "main", "summary", "goal", "use_when", "not_for", "keywords",
-                                   "skills", "method", "devkit", "done_when", "tools", "tier", "returns")}
+                                   "skills", "procedure", "devkit", "done_when", "tools", "tier", "returns")}
         x["aliases"] = aliases(m)
         if not m.get("main"):
             x["spawn"] = {"claude_code": f"devkit:{m['id']}", "codex": m["id"]}
@@ -987,7 +1055,7 @@ def _messages(a, act) -> int:
     return 0
 
 
-EDITABLE = ("name", "title", "role", "summary", "personality", "goal", "returns", "use_when", "not_for", "skills", "method",
+EDITABLE = ("name", "title", "role", "summary", "personality", "goal", "returns", "use_when", "not_for", "skills", "procedure",
             "devkit", "done_when", "keywords", "tools", "tier")
 
 
@@ -1033,7 +1101,16 @@ def set_member(name: str, field: str, value: str, why: str, by: str = "") -> dic
         raise ValueError(f"no crew member {name!r}: dev crew lists them")
     if field not in EDITABLE:
         raise ValueError(f"`{field}` cannot be changed; these can: {', '.join(EDITABLE)}")
-    v = [x.strip() for x in value.split(";") if x.strip()] if field in LIST_FIELDS else value.strip()
+    if field == "procedure":  # a JSON list of phases: [{"phase": "…", "do": "…", "devkit": ["dev test"], "proof": "…"}]
+        try:
+            v = json.loads(value)
+        except ValueError as e:
+            raise ValueError(f"procedure takes a JSON list of phases ({e})") from None
+        bad = _procedure_errors(v)
+        if bad:
+            raise ValueError("; ".join(bad))
+    else:
+        v = [x.strip() for x in value.split(";") if x.strip()] if field in LIST_FIELDS else value.strip()
     ov = read_overlay()
     ov["members"].setdefault(m["id"], {})[field] = v
     _team_write(ov, f"{m['name']}: {field}", why, by)
@@ -1222,7 +1299,7 @@ def register(add):
     x = sp.add_parser("set", help="change a member's definition for the whole team (recorded in the handoff repo)")
     x.add_argument("name", help="the member: tank, Oracle")
     x.add_argument("field", help=", ".join(EDITABLE))
-    x.add_argument("value", nargs="+", help='the new value; list fields take "a; b; c"')
+    x.add_argument("value", nargs="+", help='the new value; list fields take "a; b; c"; procedure takes JSON')
     x.add_argument("--why", required=True, help="the reason, kept in the crew's history")
     sp.add_parser("history", help="the team's changes to the crew, with who and why")
     x = sp.add_parser("show", help="everything about one member")

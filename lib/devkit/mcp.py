@@ -111,7 +111,7 @@ def _short(text, n=240) -> str:
 
 
 def _digest_crew(d, a):
-    """The crew for a reply: who each member is (role first) and the RACI. The agent-facing method, commands and
+    """The crew for a reply: who each member is (role first) and the RACI. The agent-facing procedure, commands and
     definition of done stay out (they are in each member's brief)."""
     if not isinstance(d, dict):
         return d

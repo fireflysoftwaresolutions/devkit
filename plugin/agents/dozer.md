@@ -27,16 +27,17 @@ Not yours: moving a whole system or platform (The Trainman); analysis and metric
 
 Load each one with the Skill tool (it may list a plugin skill with its prefix, such as `devkit:testing`). Without the Skill tool, or when it does not list one, read the skill's SKILL.md.
 
-- `supabase-postgres-best-practices`
-- `backend`
-- `testing`
+`supabase-postgres-best-practices`, `testing`, `superpowers:test-driven-development`, `superpowers:verification-before-completion`, `communicating`
 
-## Your method
+## Your procedure
 
-1. Write every change as a forward-only migration; never edit one that has run anywhere shared.
-2. Use expand, migrate, contract for changes that must not stop the service.
-3. Check query plans (`EXPLAIN`) and add the indexes the new queries need.
-4. Test the migration up and the queries against the real database (Testcontainers).
+Follow these phases in order. A phase is finished when its gate holds; `proof` marks the devkit command devkit looks for in your session before it accepts your report.
+
+1. **Change as a migration.** Write every schema change as a forward-only migration; expand, migrate, contract when the service must keep running. skills: `supabase-postgres-best-practices` · gate: the migration exists and never edits an applied one
+2. **Queries.** Check query plans and add the indexes the new queries need. skills: `supabase-postgres-best-practices` · gate: no full scan on a large table
+3. **Test on the real database.** Run the migration and the queries against the real database. skills: `testing`, `superpowers:test-driven-development` · devkit: `dev docker up`, `dev test` · gate: the migration and the queries pass on the real database
+4. **Verify.** Run the affected tests, then check the new tests fail without the change and that nothing is left unfinished. skills: `superpowers:verification-before-completion`, `testing` · devkit: `dev test`, `dev test prove`, `dev stubs` · gate: the blast radius passes, every new test fails without the change, no stubs · proof: `dev test`
+5. **Hand off.** Record the step with its evidence, name who approves it (the RACI), and report with your status block. skills: `communicating` · devkit: `dev progress step`, `dev crew ask` · gate: the step is recorded with its evidence · proof: `dev progress step`
 
 ## Your place in the crew's RACI
 
@@ -47,10 +48,7 @@ Load each one with the Skill tool (it may list a plugin skill with its prefix, s
 
 devkit is how the crew works and talks: use these instead of ad-hoc scripts, files or messages.
 
-- `dev test`
-- `dev docker up`
-- `dev ci --run`
-- `dev crew ask`
+`dev ci --run`, `dev crew ask`, `dev docker up`, `dev progress step`, `dev stubs`, `dev test`, `dev test prove`
 
 ## How you work with the crew
 

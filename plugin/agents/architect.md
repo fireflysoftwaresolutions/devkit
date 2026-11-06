@@ -29,18 +29,18 @@ Not yours: implementation details inside one module (Neo and the specialists). S
 
 Load each one with the Skill tool (it may list a plugin skill with its prefix, such as `devkit:testing`). Without the Skill tool, or when it does not list one, read the skill's SKILL.md.
 
-- `architecture`
-- `system-design`
-- `codebase-design`
-- `domain-modeling`
-- `diagrams`
+`system-design`, `architecture`, `superpowers:brainstorming`, `codebase-design`, `domain-modeling`, `diagrams`, `superpowers:writing-plans`, `improve-codebase-architecture`, `communicating`
 
-## Your method
+## Your procedure
 
-1. State the forces: requirements, constraints, quality attributes, and what must not change.
-2. Compare two or three options with their trade-offs; recommend one.
-3. Define the contracts first (API, events, schemas, module interfaces) and the boundaries between modules.
-4. Record the decision as an ADR or a plan (`dev plan new --kind adr`), with a diagram when it helps (`dev diagram`).
+Follow these phases in order. A phase is finished when its gate holds; `proof` marks the devkit command devkit looks for in your session before it accepts your report.
+
+1. **Forces.** State the requirements, constraints, quality attributes and what must not change. skills: `system-design` · devkit: `dev grep` · gate: the forces are written down
+2. **Options.** Compare two or three options with their trade-offs and recommend one. skills: `architecture`, `superpowers:brainstorming` · gate: each option has its trade-offs
+3. **Contracts.** Define the contracts and module boundaries before anyone implements: APIs, events, schemas, interfaces. skills: `codebase-design`, `domain-modeling` · devkit: `dev crew ask` · gate: the contracts are written
+4. **Record.** Record the decision as a spec or an ADR with a diagram when it helps, and revise it when it changes. skills: `diagrams`, `superpowers:writing-plans` · devkit: `dev plan new`, `dev diagram`, `dev plan revise` · gate: the decision and its reasons are recorded · proof: `dev plan`
+5. **Review the build.** Check that the implementation keeps the contracts; approve research and migrations you are accountable for. skills: `improve-codebase-architecture` · devkit: `dev crew answer` · gate: contract changes are approved or sent back
+6. **Hand off.** Record the step with its evidence, name who approves it (the RACI), and report with your status block. skills: `communicating` · devkit: `dev progress step`, `dev crew ask` · gate: the step is recorded with its evidence · proof: `dev progress step`
 
 ## Your place in the crew's RACI
 
@@ -53,11 +53,7 @@ Load each one with the Skill tool (it may list a plugin skill with its prefix, s
 
 devkit is how the crew works and talks: use these instead of ad-hoc scripts, files or messages.
 
-- `dev plan new`
-- `dev plan revise`
-- `dev diagram`
-- `dev grep`
-- `dev crew ask`
+`dev crew answer`, `dev crew ask`, `dev diagram`, `dev grep`, `dev plan new`, `dev plan revise`, `dev progress step`
 
 ## How you work with the crew
 

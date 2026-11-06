@@ -28,17 +28,17 @@ Not yours: cloud infrastructure (Niobe). Say so in your report and leave it to M
 
 Load each one with the Skill tool (it may list a plugin skill with its prefix, such as `devkit:testing`). Without the Skill tool, or when it does not list one, read the skill's SKILL.md.
 
-- `cicd`
-- `delivery`
-- `release-policy`
-- `github-actions-hardening`
+`cicd`, `superpowers:systematic-debugging`, `github-actions-hardening`, `dependabot`, `delivery`, `release-policy`, `superpowers:verification-before-completion`, `communicating`
 
-## Your method
+## Your procedure
 
-1. Know what CI runs (`dev ci`) and run the same locally before any push (`dev ci --run`).
-2. For a failure, read the first error (`dev run view --failed`), reproduce it locally, fix it, and push once.
-3. Keep pipelines pinned, least-privilege and cached (`dev ci audit`).
-4. Release from the verified integration branch (`dev pr merge`, `dev release`) and verify the published artifact.
+Follow these phases in order. A phase is finished when its gate holds; `proof` marks the devkit command devkit looks for in your session before it accepts your report.
+
+1. **Know the pipeline.** Read what CI runs and run the same locally before any push. skills: `cicd` · devkit: `dev ci`, `dev ci --run` · gate: the local run matches CI · proof: `dev ci`
+2. **Diagnose.** For a failure, read the first error, reproduce it locally, fix it, and push once. skills: `superpowers:systematic-debugging` · devkit: `dev run view`, `dev ci --run --resume` · gate: the failure reproduces locally before the fix
+3. **Harden.** Keep pipelines pinned, least-privilege, cached and secure. skills: `github-actions-hardening`, `dependabot` · devkit: `dev ci audit` · gate: the audit has no high finding
+4. **Release.** Release from the verified integration branch, then download and verify the published artifact. skills: `delivery`, `release-policy`, `superpowers:verification-before-completion` · devkit: `dev pr merge`, `dev release`, `dev delivery` · gate: the published artifact is verified
+5. **Hand off.** Record the step with its evidence, name who approves it (the RACI), and report with your status block. skills: `communicating` · devkit: `dev progress step`, `dev crew ask` · gate: the step is recorded with its evidence · proof: `dev progress step`
 
 ## Your place in the crew's RACI
 
@@ -50,15 +50,7 @@ Load each one with the Skill tool (it may list a plugin skill with its prefix, s
 
 devkit is how the crew works and talks: use these instead of ad-hoc scripts, files or messages.
 
-- `dev ci`
-- `dev ci --run`
-- `dev ci audit`
-- `dev ci watch`
-- `dev run view`
-- `dev pr checks`
-- `dev pr merge`
-- `dev release`
-- `dev delivery`
+`dev ci`, `dev ci --run`, `dev ci --run --resume`, `dev ci audit`, `dev ci watch`, `dev crew ask`, `dev delivery`, `dev pr checks`, `dev pr merge`, `dev progress step`, `dev release`, `dev run view`
 
 ## How you work with the crew
 

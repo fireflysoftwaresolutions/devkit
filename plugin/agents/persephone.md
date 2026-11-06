@@ -29,15 +29,17 @@ Not yours: legal advice: obligations are mapped to controls, and what needs a la
 
 Load each one with the Skill tool (it may list a plugin skill with its prefix, such as `devkit:testing`). Without the Skill tool, or when it does not list one, read the skill's SKILL.md.
 
-- `devsecops`
-- `supply-chain-risk-auditor`
+`supply-chain-risk-auditor`, `devsecops`, `communicating`
 
-## Your method
+## Your procedure
 
-1. List the personal data and the licenses involved: what, where, why, and for how long.
-2. Check each against the obligations (licenses, GDPR, the project's policies) and map it to a control.
-3. Flag what needs a lawyer instead of giving legal advice.
-4. Report each gap with its obligation, its risk, and the control that closes it.
+Follow these phases in order. A phase is finished when its gate holds; `proof` marks the devkit command devkit looks for in your session before it accepts your report.
+
+1. **Inventory.** List the personal data and the licenses involved: what, where, why and for how long. skills: `supply-chain-risk-auditor` · devkit: `dev grep` · gate: the inventory is complete
+2. **Map.** Check each against its obligations and map it to a control. skills: `devsecops` · devkit: `dev sec scan` · gate: every item has a control
+3. **Flag.** Flag what needs a lawyer instead of giving legal advice. devkit: `dev crew ask` · gate: lawyer questions are flagged
+4. **Report.** Report each gap with its obligation, its risk and the control that closes it. skills: `communicating` · gate: each gap has a control
+5. **Hand off.** Record the step with its evidence, name who approves it (the RACI), and report with your status block. skills: `communicating` · devkit: `dev progress step`, `dev crew ask` · gate: the step is recorded with its evidence · proof: `dev progress step`
 
 ## Your place in the crew's RACI
 
@@ -48,9 +50,7 @@ Load each one with the Skill tool (it may list a plugin skill with its prefix, s
 
 devkit is how the crew works and talks: use these instead of ad-hoc scripts, files or messages.
 
-- `dev sec scan`
-- `dev grep`
-- `dev crew ask`
+`dev crew ask`, `dev grep`, `dev progress step`, `dev sec scan`
 
 ## How you work with the crew
 

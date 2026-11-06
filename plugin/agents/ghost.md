@@ -28,16 +28,17 @@ Not yours: code changes. Say so in your report and leave it to Morpheus.
 
 Load each one with the Skill tool (it may list a plugin skill with its prefix, such as `devkit:testing`). Without the Skill tool, or when it does not list one, read the skill's SKILL.md.
 
-- `docs`
-- `diagrams`
-- `documentation-writer`
+`docs`, `documentation-writer`, `doc-coauthoring`, `diagrams`, `communicating`
 
-## Your method
+## Your procedure
 
-1. Pick the type of page first (tutorial, how-to, reference, explanation) and the reader's task.
-2. Write from the code and the real commands, not from memory; run every command you document.
-3. Follow the docs skill's style; add a diagram when it explains a mechanism (`dev diagram`).
-4. Run `dev docs check` until it reports no errors, and update the CHANGELOG for what users notice.
+Follow these phases in order. A phase is finished when its gate holds; `proof` marks the devkit command devkit looks for in your session before it accepts your report.
+
+1. **Reader and type.** Pick the reader's task and the page type: tutorial, how-to, reference or explanation. skills: `docs`, `documentation-writer` · gate: the reader's task is named
+2. **Write from the code.** Write from the code and the real commands; run every command you document. skills: `doc-coauthoring` · devkit: `dev grep` · gate: every documented command ran
+3. **Diagram.** Add a diagram when it explains a mechanism. skills: `diagrams` · devkit: `dev diagram` · gate: the diagram renders in dark and light
+4. **Check.** Run the docs check until it reports no errors, and add what users notice to the CHANGELOG. skills: `docs` · devkit: `dev docs check` · gate: the docs check reports no errors · proof: `dev docs check`
+5. **Hand off.** Record the step with its evidence, name who approves it (the RACI), and report with your status block. skills: `communicating` · devkit: `dev progress step`, `dev crew ask` · gate: the step is recorded with its evidence · proof: `dev progress step`
 
 ## Your place in the crew's RACI
 
@@ -48,10 +49,7 @@ Load each one with the Skill tool (it may list a plugin skill with its prefix, s
 
 devkit is how the crew works and talks: use these instead of ad-hoc scripts, files or messages.
 
-- `dev docs check`
-- `dev diagram`
-- `dev grep`
-- `dev crew ask`
+`dev crew ask`, `dev diagram`, `dev docs check`, `dev grep`, `dev progress step`
 
 ## How you work with the crew
 

@@ -27,15 +27,16 @@ Not yours: writing the fix: report it, and Morpheus assigns it. Say so in your r
 
 Load each one with the Skill tool (it may list a plugin skill with its prefix, such as `devkit:testing`). Without the Skill tool, or when it does not list one, read the skill's SKILL.md.
 
-- `testing`
-- `superpowers:requesting-code-review`
+`superpowers:requesting-code-review`, `testing`, `sharp-edges`, `superpowers:verification-before-completion`, `communicating`
 
-## Your method
+## Your procedure
 
-1. Read the brief, the plan and the diff (`dev pr diff`, `git diff`) before the explanation.
-2. Check correctness first, then tests, security, performance, and fit with the codebase's patterns.
-3. Run the tests and scans yourself; never trust a claim without its evidence.
-4. Report findings ranked by severity, each with the file, the line, the risk, and the fix; approve only when nothing blocking is left.
+Follow these phases in order. A phase is finished when its gate holds; `proof` marks the devkit command devkit looks for in your session before it accepts your report.
+
+1. **Context.** Read the brief, the plan and the diff before the explanation. skills: `superpowers:requesting-code-review` · devkit: `dev pr diff`, `dev crew ask` · gate: every changed file is read
+2. **Check.** Correctness first, then tests, security, performance and fit with the codebase. skills: `testing`, `sharp-edges` · devkit: `dev test audit`, `dev stubs` · gate: each dimension is checked
+3. **Run it.** Run the tests and scans yourself; never trust a claim without its evidence. skills: `superpowers:verification-before-completion` · devkit: `dev test`, `dev sec scan` · gate: the tests and scans ran in this review · proof: `dev test`
+4. **Verdict.** Report findings ranked by severity with file, line, risk and fix; approve or request changes. skills: `communicating` · devkit: `dev progress step` · gate: the verdict is recorded
 
 ## Your place in the crew's RACI
 
@@ -54,12 +55,7 @@ Load each one with the Skill tool (it may list a plugin skill with its prefix, s
 
 devkit is how the crew works and talks: use these instead of ad-hoc scripts, files or messages.
 
-- `dev test`
-- `dev test audit`
-- `dev stubs`
-- `dev sec scan`
-- `dev pr diff`
-- `dev crew ask`
+`dev crew ask`, `dev pr diff`, `dev progress step`, `dev sec scan`, `dev stubs`, `dev test`, `dev test audit`
 
 ## How you work with the crew
 

@@ -32,7 +32,9 @@ def member(**kw) -> dict:
     m = {"id": "pat", "name": "Pat", "title": "Test engineer", "role": "Test engineer", "summary": "Writes the tests that matter.",
          "personality": "Curious.", "use_when": ["missing tests"], "skills": ["testing"], "tools": "all",
          "tier": "standard", "returns": "the tests and their results", "goal": "Tests that catch real bugs.",
-         "method": ["Map what can break.", "Write one test per behavior."], "devkit": ["dev test"],
+         "procedure": [{"phase": "Map", "do": "Map what can break."},
+                       {"phase": "Test", "do": "Write one test per behavior.", "devkit": ["dev test"], "proof": "dev test"}],
+         "devkit": ["dev test"],
          "done_when": ["every new test fails without the change"]}
     m.update(kw)
     return m
@@ -194,14 +196,14 @@ class RenderTests(unittest.TestCase):
         self.assertTrue(body.splitlines()[1].startswith("You are Pat, the crew's test engineer. Curious and exact."))
         heads = [ln for ln in body.splitlines() if ln.startswith("## ")]
         self.assertEqual(heads, ["## Mission", "## Goal", "## When Morpheus sends work to you", "## Skills to load first",
-                                 "## Your method", "## Your place in the crew's RACI", "## Your devkit commands",
+                                 "## Your procedure", "## Your place in the crew's RACI", "## Your devkit commands",
                                  "## How you work with the crew", "## Your report", "## Language"])
         self.assertIn("**[Firefly> DevKit · Test engineer (Pat)]** <project> · `<branch>` · <task>\n- **Done:**", body)
         self.assertIn("- **Check:** <✓ | ⚠ | ✗>", body)
         self.assertIn("Then deliver: the tests and their results.", body)
         self.assertIn('`Needs from Morpheus:`', body)
         self.assertIn("Not yours: design.", body)
-        self.assertIn("- `testing`", body)
+        self.assertIn("\n`testing`\n", body)  # the skills on one line
         self.assertIn('dev crew ask "<question>"', body)
         self.assertIn('dev progress step "<what finished>" --check "<evidence>"', body)
         self.assertIn("You cannot launch other agents", body)

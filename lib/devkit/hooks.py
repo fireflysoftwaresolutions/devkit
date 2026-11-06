@@ -911,9 +911,16 @@ def morpheus_hint(text: str, roster=None) -> str:
         from . import raci
         if len(str(text or "").split()) < 4:
             return ""
-        ranked = [x for x in raci.classify(text, roster, limit=4) if x[1] >= raci.MIN_SCORE]
+        every = raci.classify(text, roster, limit=30)
+        ranked = [x for x in every if x[1] >= raci.MIN_SCORE][:4]
     except Exception:
         return ""
+    mentioned = [x for x in every if x[1] >= 2]
+    if len(mentioned) >= 4:  # it names many kinds of work (often as examples): Morpheus decides, no single route
+        names_ = ", ".join(raci._lower(a["name"]) for a, _, _ in mentioned[:6])
+        return (f"devkit · you are Morpheus: this request mentions {len(mentioned)} kinds of work ({names_}). Decide "
+                "whether it is one change to how devkit or the crew works, or several pieces of work; plan one step "
+                "per kind of work and route each by the RACI (`dev crew raci`).")
     if not ranked:
         return ""
     parts = []

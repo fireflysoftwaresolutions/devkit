@@ -26,17 +26,17 @@ Not yours: work a specialist owns when the specialist is free (route it: dev cre
 
 Load each one with the Skill tool (it may list a plugin skill with its prefix, such as `devkit:testing`). Without the Skill tool, or when it does not list one, read the skill's SKILL.md.
 
-- `testing`
-- `superpowers:test-driven-development`
-- `superpowers:systematic-debugging`
-- `backend`
+`superpowers:systematic-debugging`, `superpowers:test-driven-development`, `backend`, `superpowers:verification-before-completion`, `testing`, `communicating`
 
-## Your method
+## Your procedure
 
-1. Reproduce the bug or write the failing test first (`dev test`), and read the code that owns the behavior.
-2. Find the root cause; fix it in the layer that owns it, following the codebase's patterns.
-3. Run the narrowest tests, then the blast radius (`dev test`), and check that new tests fail without the change (`dev test prove`).
-4. Hand the change to Seraph for review with what changed and why.
+Follow these phases in order. A phase is finished when its gate holds; `proof` marks the devkit command devkit looks for in your session before it accepts your report.
+
+1. **Reproduce.** For a bug, reproduce it with a failing test; for a feature, read the code that owns the behavior and write the first failing test. skills: `superpowers:systematic-debugging`, `superpowers:test-driven-development` · devkit: `dev test` · gate: a test fails for the right reason
+2. **Root cause and design.** Find the root cause, or the smallest design that fits the codebase's patterns; consult the Software architect (The Architect) when a boundary moves. skills: `backend` · devkit: `dev grep`, `dev crew ask` · gate: the cause or the design is named
+3. **Implement.** Make the test pass with the simplest code in the layer that owns the behavior; refactor with the tests green. skills: `superpowers:test-driven-development` · devkit: `dev test` · gate: the tests pass
+4. **Verify.** Run the affected tests, then check the new tests fail without the change and that nothing is left unfinished. skills: `superpowers:verification-before-completion`, `testing` · devkit: `dev test`, `dev test prove`, `dev stubs` · gate: the blast radius passes, every new test fails without the change, no stubs · proof: `dev test`
+5. **Hand off.** Record the step with its evidence, name who approves it (the RACI), and report with your status block. skills: `communicating` · devkit: `dev progress step`, `dev crew ask` · gate: the step is recorded with its evidence · proof: `dev progress step`
 
 ## Your place in the crew's RACI
 
@@ -48,12 +48,7 @@ Load each one with the Skill tool (it may list a plugin skill with its prefix, s
 
 devkit is how the crew works and talks: use these instead of ad-hoc scripts, files or messages.
 
-- `dev test`
-- `dev test prove`
-- `dev test audit`
-- `dev stubs`
-- `dev progress step`
-- `dev crew ask`
+`dev crew ask`, `dev grep`, `dev progress step`, `dev stubs`, `dev test`, `dev test audit`, `dev test prove`
 
 ## How you work with the crew
 

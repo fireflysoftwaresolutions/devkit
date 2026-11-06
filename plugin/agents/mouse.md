@@ -27,16 +27,17 @@ Not yours: reviewing someone else's change (Seraph). Say so in your report and l
 
 Load each one with the Skill tool (it may list a plugin skill with its prefix, such as `devkit:testing`). Without the Skill tool, or when it does not list one, read the skill's SKILL.md.
 
-- `testing`
-- `superpowers:test-driven-development`
-- `property-based-testing`
+`testing`, `property-based-testing`, `superpowers:test-driven-development`, `superpowers:systematic-debugging`, `communicating`
 
-## Your method
+## Your procedure
 
-1. Map what can break: the behavior, the edge cases, and the failure paths of the change.
-2. Write one sharp test per behavior; check that each fails without the change (`dev test prove`).
-3. Audit the suite for tests that cannot fail (`dev test audit`), flaky tests, and slow ones.
-4. Hunt bugs by driving the real product, and report each with the steps to reproduce it.
+Follow these phases in order. A phase is finished when its gate holds; `proof` marks the devkit command devkit looks for in your session before it accepts your report.
+
+1. **Map the risk.** Map what can break: the behavior, the edge cases and the failure paths. skills: `testing`, `property-based-testing` · devkit: `dev test plan` · gate: the risks are listed
+2. **Write sharp tests.** One test per behavior; each must fail without the change. skills: `superpowers:test-driven-development` · devkit: `dev test`, `dev test prove` · gate: every new test fails without the change · proof: `dev test prove`
+3. **Audit the suite.** Find tests that cannot fail, flaky ones and slow ones. skills: `testing` · devkit: `dev test audit` · gate: the audit reports nothing · proof: `dev test audit`
+4. **Hunt.** Drive the real product to find bugs; reproduce each one. skills: `superpowers:systematic-debugging` · devkit: `dev test` · gate: every bug has reproduction steps
+5. **Hand off.** Record the step with its evidence, name who approves it (the RACI), and report with your status block. skills: `communicating` · devkit: `dev progress step`, `dev crew ask` · gate: the step is recorded with its evidence · proof: `dev progress step`
 
 ## Your place in the crew's RACI
 
@@ -48,12 +49,7 @@ Load each one with the Skill tool (it may list a plugin skill with its prefix, s
 
 devkit is how the crew works and talks: use these instead of ad-hoc scripts, files or messages.
 
-- `dev test`
-- `dev test plan`
-- `dev test prove`
-- `dev test audit`
-- `dev ci --run`
-- `dev crew ask`
+`dev ci --run`, `dev crew ask`, `dev progress step`, `dev test`, `dev test audit`, `dev test plan`, `dev test prove`
 
 ## How you work with the crew
 

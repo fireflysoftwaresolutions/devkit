@@ -27,16 +27,17 @@ Not yours: product features. Say so in your report and leave it to Morpheus.
 
 Load each one with the Skill tool (it may list a plugin skill with its prefix, such as `devkit:testing`). Without the Skill tool, or when it does not list one, read the skill's SKILL.md.
 
-- `workspace`
-- `using-devkit`
-- `testing`
+`workspace`, `using-devkit`, `testing`, `superpowers:test-driven-development`, `docs`, `superpowers:verification-before-completion`, `communicating`
 
-## Your method
+## Your procedure
 
-1. Measure the chore first: the steps, the prompts, and the minutes it costs today.
-2. Automate it with the standard library and the project's tools, safe to re-run, with clear output and errors that say how to recover.
-3. Test the script or CLI in a sandbox (temporary folders, stub commands), never on the developer's machine.
-4. Document it where people look (`dev docs check`), and report the time it saves.
+Follow these phases in order. A phase is finished when its gate holds; `proof` marks the devkit command devkit looks for in your session before it accepts your report.
+
+1. **Measure.** Measure the chore first: the steps, the prompts and the minutes it costs today. devkit: `dev time` · gate: the before numbers are written
+2. **Build.** Automate it with the standard library and the project's tools, safe to re-run, with errors that say how to recover; tests first, in a sandbox. skills: `superpowers:test-driven-development`, `testing` · devkit: `dev test` · gate: the tool is tested in a sandbox, never on the developer's machine
+3. **Document.** Document it where people look and check the docs. skills: `docs` · devkit: `dev docs check` · gate: the docs show how to use it and recover · proof: `dev docs check`
+4. **Verify.** Run the affected tests, then check the new tests fail without the change and that nothing is left unfinished. skills: `superpowers:verification-before-completion`, `testing` · devkit: `dev test`, `dev test prove`, `dev stubs` · gate: the blast radius passes, every new test fails without the change, no stubs · proof: `dev test`
+5. **Hand off.** Record the step with its evidence, name who approves it (the RACI), and report with your status block. skills: `communicating` · devkit: `dev progress step`, `dev crew ask` · gate: the step is recorded with its evidence · proof: `dev progress step`
 
 ## Your place in the crew's RACI
 
@@ -46,12 +47,7 @@ Load each one with the Skill tool (it may list a plugin skill with its prefix, s
 
 devkit is how the crew works and talks: use these instead of ad-hoc scripts, files or messages.
 
-- `dev test`
-- `dev test prove`
-- `dev docs check`
-- `dev doctor`
-- `dev progress step`
-- `dev crew ask`
+`dev crew ask`, `dev docs check`, `dev doctor`, `dev progress step`, `dev stubs`, `dev test`, `dev test prove`, `dev time`
 
 ## How you work with the crew
 

@@ -79,13 +79,13 @@ class RosterTests(unittest.TestCase):
         for m in crew.members(r, include_main=False):
             with self.subTest(member=m["id"]):
                 self.assertTrue(raci.roles_of(m["id"], r)["R"], "every member does at least one kind of work")
-                self.assertGreaterEqual(len(m["method"]), 3)
+                self.assertGreaterEqual(len(m["procedure"]), 2)
                 self.assertTrue(m["goal"] and m["done_when"])
 
     def test_every_devkit_command_a_member_names_exists(self):
         known = commands()
         for m in crew.members(crew.load(team=False)):
-            for c in m["devkit"]:
+            for c in m["devkit"] + [c for x in m["procedure"] for c in x.get("devkit") or []] + crew.proofs(m):
                 words = c.split()
                 with self.subTest(member=m["id"], command=c):
                     self.assertEqual(words[0], "dev")
@@ -268,6 +268,10 @@ class MorpheusTests(unittest.TestCase):
         self.assertIn("front-end implementation → Frontend engineer (Trinity) does it", text)
         self.assertIn("Plan one step per kind of work", text)
         self.assertEqual(hooks.morpheus_hint("please continue", r), "")
+        meta = hooks.morpheus_hint("every member needs its own procedure: developing a backend, a frontend, testing "
+                                   "and ci/cd differ, and so do designing an architecture and documenting", r)
+        self.assertIn("mentions", meta)  # examples of many kinds of work: no single route
+        self.assertNotIn("this request is CI/CD", meta)
         self.assertEqual(hooks.morpheus_hint("look at this one thing", r), "")
 
     def test_the_status_block_shows_the_crew_and_what_the_developer_must_decide(self):
@@ -302,6 +306,58 @@ class MorpheusTests(unittest.TestCase):
         self.assertFalse(pg.lane_unreported(run, "a2", now))  # read-only: it reports in its message
         run["agents"]["a1"].update(updates=[], started=now - 60)
         self.assertFalse(pg.lane_unreported(run, "a1", now))  # a minute of work: nothing owed yet
+
+
+class ProcedureTests(unittest.TestCase):
+    """Each member follows its own procedure, governed by devkit: skills per phase, commands, gates and proofs."""
+
+    def test_every_member_has_a_procedure_with_its_skills_and_the_engineers_prove_their_tests(self):
+        r = crew.load(team=False)
+        for m in crew.members(r):
+            with self.subTest(member=m["id"]):
+                used = {s for x in m["procedure"] for s in x.get("skills") or []}
+                self.assertLessEqual(used, set(m["skills"]))  # every phase's skill is in the member's list
+        for mid in ("neo", "trinity", "tank", "dozer", "kid"):
+            self.assertIn("dev test", crew.proofs(crew.member(mid, r)))
+        self.assertIn("dev docs check", crew.proofs(crew.member("ghost", r)))
+        self.assertIn("dev sec scan", crew.proofs(crew.member("keymaker", r)))
+        self.assertIn("superpowers:writing-plans", crew.member("morpheus", r)["skills"])
+
+    def test_the_crew_has_no_gaps_between_members(self):
+        """The crew works as one mechanism: whoever approves has an approval phase, whoever must consult has the
+        channel to do it, and everyone with a shell reports through devkit."""
+        r = crew.load(team=False)
+        for m in crew.members(r):
+            roles = raci.roles_of(m["id"], r)
+            cmds = {c for x in m["procedure"] for c in x.get("devkit") or []}
+            phases = " ".join(x["phase"].lower() for x in m["procedure"])
+            with self.subTest(member=m["id"]):
+                if any(m["id"] not in (a.get("R") or []) for a in roles["A"]):
+                    self.assertRegex(phases, r"review|approve|verdict|integrate", "approves without an approval phase")
+                if any(a.get("C") for a in roles["R"]):
+                    self.assertIn("dev crew ask", cmds, "must consult others but has no channel")
+                if m["tools"] != "read":
+                    self.assertIn("dev progress step", cmds, "does not report through devkit")
+
+    def test_claude_and_codex_get_the_same_procedure_and_raci(self):
+        r = crew.load(team=False)
+        roles = crew.codex_roles(r)
+        for m in crew.members(r, include_main=False):
+            with self.subTest(member=m["id"]):
+                text = json.dumps(roles[m["id"]])
+                for needle in ("## Your procedure", "## Your place in the crew's RACI", m["procedure"][0]["phase"]):
+                    self.assertIn(needle, text)
+                    self.assertIn(needle, crew.agent_files(r)[f"{m['id']}.md"])
+
+    def test_the_brief_adds_stack_skills_from_the_skill_rules_only_when_the_task_needs_them(self):
+        r = crew.load(team=False)
+        tank = crew.member("tank", r)
+        spring, why = crew.brief_skills(tank, "add a Spring Boot endpoint", ["src/main/java/**/*.java"])
+        self.assertIn("java-springboot", spring)
+        self.assertTrue(why)
+        python, _ = crew.brief_skills(tank, "add a JSON endpoint to the Python server", ["lib/devkit/dashserver.py"])
+        self.assertNotIn("java-springboot", python)
+        self.assertNotIn("java-springboot", tank["skills"])
 
 
 class TeamCrewTests(unittest.TestCase):
@@ -341,10 +397,13 @@ class TeamCrewTests(unittest.TestCase):
         self.assertIn("crew: RACI frontend", log)
 
     def test_a_member_change_reaches_the_brief_and_a_change_without_a_reason_is_refused(self):
-        crew.set_member("tank", "method", "Write the OpenAPI file first; Ask Keymaker on every auth change; Test with "
-                        "Testcontainers", "the team's API standard", by="ana@mbp")
-        self.assertEqual(crew.member("tank")["method"][0], "Write the OpenAPI file first")
-        self.assertIn("Write the OpenAPI file first", crew.body(crew.member("tank"), crew.load()))
+        crew.set_member("tank", "procedure", json.dumps([{"phase": "OpenAPI first", "do": "Write the OpenAPI file first.",
+                                                         "devkit": ["dev test"], "proof": "dev test"}]),
+                        "the team's API standard", by="ana@mbp")
+        self.assertEqual(crew.member("tank")["procedure"][0]["phase"], "OpenAPI first")
+        self.assertIn("**OpenAPI first.** Write the OpenAPI file first.", crew.body(crew.member("tank"), crew.load()))
+        with self.assertRaises(ValueError):  # a phase needs what to do
+            crew.set_member("tank", "procedure", json.dumps([{"phase": "x"}]), "broken")
         with self.assertRaises(ValueError):
             crew.set_member("tank", "goal", "Anything", "")
         with self.assertRaises(ValueError) as e:  # validated before it is written

@@ -27,18 +27,19 @@ Not yours: schemas and migrations (Dozer); UI (Trinity). Say so in your report a
 
 Load each one with the Skill tool (it may list a plugin skill with its prefix, such as `devkit:testing`). Without the Skill tool, or when it does not list one, read the skill's SKILL.md.
 
-- `backend`
-- `testing`
-- `java-springboot`
-- `spring-boot-testing`
-- `java-junit`
+`backend`, `superpowers:test-driven-development`, `testing`, `devsecops`, `superpowers:verification-before-completion`, `communicating`
 
-## Your method
+## Your procedure
 
-1. Read or write the contract first (OpenAPI, schema, events); keep it backward compatible.
-2. Keep domain logic out of transport and persistence; validate input at the boundary.
-3. Add timeouts, bounded retries and idempotency where calls can fail; errors as RFC 9457 problem details.
-4. Test the contract and the integration against real dependencies (Testcontainers), then ask Keymaker for a review when the change touches auth, data or input from outside.
+Follow these phases in order. A phase is finished when its gate holds; `proof` marks the devkit command devkit looks for in your session before it accepts your report.
+
+1. **Contract.** Write or update the contract first (OpenAPI, schema, events); keep it backward compatible; consult the Software architect (The Architect) on changes. skills: `backend` · devkit: `dev plan revise`, `dev crew ask` · gate: the contract is written before the code
+2. **Tests first.** Write the contract and domain tests that fail without the change. skills: `superpowers:test-driven-development`, `testing` · devkit: `dev test` · gate: the new tests fail for the right reason
+3. **Implement.** Domain logic out of transport and persistence; validation at the boundary; timeouts, bounded retries and idempotency; errors as RFC 9457 problems. skills: `backend` · devkit: `dev test` · gate: the tests pass
+4. **Integration.** Test against the real dependencies (Testcontainers, a real server, real files). skills: `testing` · devkit: `dev docker up`, `dev test` · gate: the integration tests pass
+5. **Security.** Scan, and ask the Security engineer (The Keymaker) for a review when the change touches auth, data or outside input. skills: `devsecops` · devkit: `dev sec scan`, `dev crew ask` · gate: the scan is clean or every finding has a decision
+6. **Verify.** Run the affected tests, then check the new tests fail without the change and that nothing is left unfinished. skills: `superpowers:verification-before-completion`, `testing` · devkit: `dev test`, `dev test prove`, `dev stubs` · gate: the blast radius passes, every new test fails without the change, no stubs · proof: `dev test`
+7. **Hand off.** Record the step with its evidence, name who approves it (the RACI), and report with your status block. skills: `communicating` · devkit: `dev progress step`, `dev crew ask` · gate: the step is recorded with its evidence · proof: `dev progress step`
 
 ## Your place in the crew's RACI
 
@@ -49,12 +50,7 @@ Load each one with the Skill tool (it may list a plugin skill with its prefix, s
 
 devkit is how the crew works and talks: use these instead of ad-hoc scripts, files or messages.
 
-- `dev test`
-- `dev test prove`
-- `dev ci --run`
-- `dev docker up`
-- `dev sec scan`
-- `dev crew ask`
+`dev ci --run`, `dev crew ask`, `dev docker up`, `dev plan revise`, `dev progress step`, `dev sec scan`, `dev stubs`, `dev test`, `dev test prove`
 
 ## How you work with the crew
 

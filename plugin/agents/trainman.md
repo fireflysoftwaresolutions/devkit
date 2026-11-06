@@ -28,17 +28,18 @@ Not yours: routine schema changes (Dozer). Say so in your report and leave it to
 
 Load each one with the Skill tool (it may list a plugin skill with its prefix, such as `devkit:testing`). Without the Skill tool, or when it does not list one, read the skill's SKILL.md.
 
-- `backend`
-- `testing`
-- `supabase-postgres-best-practices`
-- `improve-codebase-architecture`
+`improve-codebase-architecture`, `superpowers:writing-plans`, `superpowers:executing-plans`, `backend`, `testing`, `superpowers:verification-before-completion`, `communicating`
 
-## Your method
+## Your procedure
 
-1. Inventory what depends on what, and the breaking changes between the versions.
-2. Plan the migration in steps that each keep the build green and can be rolled back.
-3. Use the vendor's migration tools and codemods first; hand-edit only what they cannot do.
-4. Prove each step with the full test suite and a comparison of behavior before and after.
+Follow these phases in order. A phase is finished when its gate holds; `proof` marks the devkit command devkit looks for in your session before it accepts your report.
+
+1. **Inventory.** Inventory the dependencies and the breaking changes between the versions. skills: `improve-codebase-architecture` · devkit: `dev grep` · gate: the breaking changes are listed
+2. **Plan the steps.** Plan steps that each keep the build green and can be rolled back; the Software architect (The Architect) approves. skills: `superpowers:writing-plans` · devkit: `dev plan new` · gate: the plan is approved
+3. **Migrate.** Use the vendor's migration tools and codemods first; hand-edit only what they cannot do. skills: `superpowers:executing-plans`, `backend` · devkit: `dev test` · gate: each step's build is green
+4. **Prove.** Prove each step with the full suite and a comparison of behavior before and after. skills: `testing` · devkit: `dev ci --run` · gate: the behavior is the same · proof: `dev ci`
+5. **Verify.** Run the affected tests, then check the new tests fail without the change and that nothing is left unfinished. skills: `superpowers:verification-before-completion`, `testing` · devkit: `dev test`, `dev test prove`, `dev stubs` · gate: the blast radius passes, every new test fails without the change, no stubs · proof: `dev test`
+6. **Hand off.** Record the step with its evidence, name who approves it (the RACI), and report with your status block. skills: `communicating` · devkit: `dev progress step`, `dev crew ask` · gate: the step is recorded with its evidence · proof: `dev progress step`
 
 ## Your place in the crew's RACI
 
@@ -48,11 +49,7 @@ Load each one with the Skill tool (it may list a plugin skill with its prefix, s
 
 devkit is how the crew works and talks: use these instead of ad-hoc scripts, files or messages.
 
-- `dev test`
-- `dev ci --run`
-- `dev plan new`
-- `dev progress step`
-- `dev crew ask`
+`dev ci --run`, `dev crew ask`, `dev grep`, `dev plan new`, `dev progress step`, `dev stubs`, `dev test`, `dev test prove`
 
 ## How you work with the crew
 
