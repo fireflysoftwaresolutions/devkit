@@ -1,6 +1,6 @@
 # Copyright (c) 2026 Firefly Software Solutions Inc.
 # SPDX-License-Identifier: Apache-2.0
-"""devkit's process applies to development turns only (lib/devkit/scope.py)."""
+"""devkit's process applies to development turns only, decided from what a turn did (lib/devkit/scope.py)."""
 import json
 import os
 import sys
@@ -10,39 +10,6 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "lib"))
 from devkit import scope  # noqa: E402
-
-DEV, OTHER = scope.DEV, scope.OTHER
-
-
-class ClassifyTests(unittest.TestCase):
-    def test_everyday_requests_are_not_development(self):
-        for text in ("Dame una receta de tortilla de patatas", "What's a good recipe for banana bread?",
-                     "¿Qué vino va bien con una paella?", "Plan a 3-day trip to Lisbon"):
-            self.assertEqual(scope.classify(text), OTHER, text)
-
-    def test_consulting_deliverables_are_not_development(self):
-        for text in ("Hazme un deck para Example Bank sobre su estrategia de pagos",
-                     "Prepare a proposal for Example Bank with the consulting kit",
-                     "Revisa la presentación del workshop del jueves",
-                     "a deck about our API strategy for the board"):
-            self.assertEqual(scope.classify(text), OTHER, text)
-
-    def test_development_requests(self):
-        for text in ("Fix the failing test in lib/devkit/scope.py", "arregla el bug del renderer de decks",
-                     "el build falla con un Traceback en main.py", "despliega la versión 26.11.0",
-                     "refactor the payment service", "¿por qué falla el pipeline de CI?",
-                     "add a CSV export endpoint to the invoices API"):
-            self.assertEqual(scope.classify(text), DEV, text)
-
-    def test_follow_ups_inherit_the_previous_class(self):
-        for text in ("continúa y termina todo", "sí", "ok, go ahead", "perfecto"):
-            self.assertIsNone(scope.classify(text), text)
-        self.assertEqual(scope.resolve("continúa", DEV), DEV)
-        self.assertEqual(scope.resolve("continúa", OTHER), OTHER)
-        self.assertEqual(scope.resolve("now fix the bug in the parser", OTHER), DEV)
-
-    def test_spanish_and_or_is_not_a_path(self):
-        self.assertEqual(scope.classify("recetas de cocina y/o postres"), OTHER)
 
 
 def _transcript(records) -> str:
@@ -93,23 +60,26 @@ class TurnActionTests(unittest.TestCase):
         nothing = {"edits": [], "commands": [], "skills": [], "tools": set()}
         commit = dict(nothing, commands=["git commit -m 'fix: x'"])
         deck = dict(nothing, skills=["firefly-consulting-desktop:firefly-deck"], commands=["ls decks"])
-        self.assertTrue(scope.is_dev_turn(DEV, nothing))  # a question about the code, answered without tools
-        self.assertFalse(scope.is_dev_turn(OTHER, nothing))  # a recipe
-        self.assertFalse(scope.is_dev_turn(None, nothing))  # "what's the weather?"
-        self.assertTrue(scope.is_dev_turn(OTHER, commit))  # it said deck, but it committed code
-        self.assertFalse(scope.is_dev_turn(None, deck))  # consulting work through the kit's skills
-        self.assertTrue(scope.is_dev_turn(None, dict(nothing, commands=["git status"])))
+        self.assertTrue(scope.is_dev_turn(nothing, declared=True))  # a question about the code, with the status block
+        self.assertFalse(scope.is_dev_turn(nothing))  # a recipe, or "what's the weather?"
+        self.assertFalse(scope.is_dev_turn(nothing, in_repo=True))  # no tools used, nothing declared
+        self.assertTrue(scope.is_dev_turn(commit))  # it committed code
+        self.assertFalse(scope.is_dev_turn(deck, in_repo=True))  # consulting work through the kit's skills
+        self.assertTrue(scope.is_dev_turn(dict(deck, commands=["git push"])))  # unless it ships code
+        self.assertTrue(scope.is_dev_turn(dict(nothing, commands=["git status"])))
+        self.assertTrue(scope.is_dev_turn(dict(nothing, tools={"Grep"}), in_repo=True))
 
     def test_decide_reads_the_session_and_transcript(self):
         p = self._t([_claude_prompt("dame una receta"), _claude_tool("WebSearch", {"query": "receta"})])
-        self.assertFalse(scope.decide({"transcript_path": p}, {"turn_class": OTHER}))
-        self.assertFalse(scope.decide({"transcript_path": p}, {"turn_class": None}))  # outside a repository
-        self.assertTrue(scope.decide({"transcript_path": p}, {"turn_class": None, "top": "/repo"}))  # "how is it going?"
-        self.assertFalse(scope.decide({"transcript_path": p}, {"turn_class": OTHER, "top": "/repo"}))  # a recipe in a repo
-        self.assertTrue(scope.decide({"transcript_path": p}, {"turn_class": DEV}))
+        self.assertFalse(scope.decide({"transcript_path": p}, {}))
+        self.assertFalse(scope.decide({"transcript_path": p}, {"top": "/repo"}))  # a web search is no repository work
+        q = self._t([_claude_prompt("how is it going?"),
+                     {"type": "assistant", "message": {"role": "assistant", "content": [
+                         {"type": "text", "text": "**[Firefly> DevKit]** api · `main` · Status\n- **Done:** x"}]}}])
+        self.assertTrue(scope.decide({"transcript_path": q}, {"top": "/repo"}))  # the block declares it
         os.environ["DEVKIT_SCOPE"] = "all"
         try:
-            self.assertTrue(scope.decide({"transcript_path": p}, {"turn_class": OTHER}))
+            self.assertTrue(scope.decide({"transcript_path": p}, {}))
         finally:
             del os.environ["DEVKIT_SCOPE"]
 

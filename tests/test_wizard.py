@@ -288,8 +288,8 @@ SNAPSHOT_FIRST = {
     "codex": {"mode": "full", "approval_policy": "never", "sandbox_mode": "danger-full-access"},
     "stacks": ["python", "node"], "lock": False, "hosts": ["github", "gitlab"], "clouds": ["aws"],
     "docker": {"cpu": 6, "memory": 12, "disk": 80, "autostart": False}, "gc": {"auto": True},
-    "sync": {"interval_minutes": 60}}
-SAVED = {"stacks": ["python"], "hosts": ["bitbucket"], "clouds": [], "docker": {"cpu": 4, "memory": 8},
+    "sync": {"interval_minutes": 60}, "ai": {"enabled": False, "asked": True}}
+SAVED ={"stacks": ["python"], "hosts": ["bitbucket"], "clouds": [], "docker": {"cpu": 4, "memory": 8},
          "editor": "zed", "agents": {"claude": True, "codex": False}, "lock": True}
 SNAPSHOT_RERUN = {
     "stacks": ["python"], "hosts": ["github", "bitbucket", "gitlab"], "clouds": ["aws"],
@@ -297,7 +297,7 @@ SNAPSHOT_RERUN = {
     "agents": {"claude": True, "codex": True}, "lock": True, "dev_root": "~/Development", "github_user": "ada",
     "handoff_repo": "ada/handoff", "claude": {"default_mode": "bypassPermissions"},
     "codex": {"mode": "full", "approval_policy": "never", "sandbox_mode": "danger-full-access"},
-    "gc": {"auto": True}, "sync": {"interval_minutes": 60}}
+    "gc": {"auto": True}, "sync": {"interval_minutes": 60}, "ai": {"enabled": False, "asked": True}}
 # The line prompts' output with --yes, as `dev setup` printed it before the interactive wizard existed.
 GOLDEN_YES = """\
 Good <time>, Ada. This wizard sets up devkit on this Mac. Press Enter to keep the value in [brackets]; nothing \
@@ -357,6 +357,7 @@ changes until you confirm.
    8 Automation
      Reclaim disk automatically (merged worktrees, idle build output, stale temp)? → yes
      Background sync interval (minutes) → 60
+     Let background jobs ask a small model (Claude Haiku or Codex's gpt-6-luna, at most 20 calls a day), for example to merge duplicate lessons written in different languages? → no
      Lock Claude Code settings with a managed-settings file (needs your admin password)? → no
 
    9 Plan
@@ -370,7 +371,7 @@ changes until you confirm.
      clouds       aws
      packages     skip
      Docker VM    6 CPU · 12 GB · 80 GB
-     automation   sync every 60 min · safe cleanup on
+     automation   sync every 60 min · safe cleanup on · background AI off
      lock         off (drift is still blocked and repaired)
      Apply this plan? → yes
 
@@ -425,7 +426,7 @@ class LineModeTests(unittest.TestCase):
         self.assertEqual(line_mode()[2], GOLDEN_YES)
 
     def test_typed_answers_in_the_line_prompts(self):
-        typed = ["~/Code", "", "n", "y", "2", "1,3", "", "", "8", "", "", "y", "n", "30", "", "y"]
+        typed = ["~/Code", "", "n", "y", "2", "1,3", "", "", "8", "", "", "y", "n", "30", "y", "", "y"]
         rc, cfg, out, _ = line_mode(yes=False, typed=typed)
         self.assertEqual(rc, 0)
         self.assertEqual(cfg["dev_root"], "~/Code")
@@ -435,6 +436,7 @@ class LineModeTests(unittest.TestCase):
         self.assertEqual(cfg["stacks"], ["java", "php"])
         self.assertEqual(cfg["docker"], {"cpu": 8, "memory": 12, "disk": 80, "autostart": True})
         self.assertEqual((cfg["gc"], cfg["sync"], cfg["lock"]), ({"auto": False}, {"interval_minutes": 30}, False))
+        self.assertEqual(cfg["ai"], {"enabled": True, "asked": True})  # asked once, and answered yes
         self.assertIn("[Y/n]", out)
 
     def test_falls_back_to_line_prompts_without_a_terminal_or_with_yes(self):
@@ -510,7 +512,7 @@ class InteractiveTests(unittest.TestCase):
                 + b"a" + ENTER                    # stacks: all
                 + ENTER + ENTER                   # hosts, clouds
                 + b"99" + ENTER + BS + BS + b"4" + ENTER + ENTER + ENTER + b"n"  # docker, with a fixed typo
-                + b"n" + b"30" + ENTER + ENTER    # automation
+                + b"n" + b"30" + ENTER + ENTER + ENTER  # automation: background AI stays off
                 + DOWN + ENTER + b"6" + ENTER     # review → change a section → Docker
                 + ENTER + ENTER + ENTER + b"y"    # … start at login after all
                 + ENTER)                          # apply
@@ -814,6 +816,8 @@ class PseudoTerminalTests(unittest.TestCase):
         t.send(b"n")
         t.expect("Background sync interval (minutes)")
         t.send(b"30" + ENTER)
+        t.expect("Let background jobs ask a small model")
+        t.send(ENTER)
         t.expect("Lock Claude Code settings?")
         t.send(ENTER)
         t.expect("Apply this plan?")
@@ -826,7 +830,7 @@ class PseudoTerminalTests(unittest.TestCase):
             "codex": {"mode": "full", "approval_policy": "never", "sandbox_mode": "danger-full-access"},
             "stacks": ["java", "python", "php", "node"], "lock": False, "hosts": ["github"], "clouds": [],
             "docker": {"cpu": 4, "memory": 6, "disk": 80, "autostart": True}, "gc": {"auto": False},
-            "sync": {"interval_minutes": 30}})
+            "sync": {"interval_minutes": 30}, "ai": {"enabled": False, "asked": True}})
         ran = [c["argv"][0] if c["argv"][0] in ("brew", "npm") else c["argv"][-1] for c in t.calls()]
         self.assertEqual(ran, ["brew", "npm", "install", "doctor"])
         log = self.home / ".local" / "state" / "devkit" / "logs" / "setup.log"

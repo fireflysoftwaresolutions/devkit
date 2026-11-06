@@ -8,6 +8,7 @@ import tempfile
 import time
 import unittest
 from pathlib import Path
+from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "lib"))
 
@@ -21,17 +22,17 @@ class SleepTests(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
         root = Path(self.tmp.name)
-        self.saved = (lessons.LESSONS, work.HANDOFF, lessons.USAGE_LOCAL, lessons.SIGNALS_FILE, sleep.STATE,
-                      sleep.LAST, core.HANDOFF)
+        self.saved = (lessons.LESSONS, work.HANDOFF, lessons.USAGE_LOCAL, sleep.STATE, sleep.LAST, core.HANDOFF)
         lessons.LESSONS, work.HANDOFF, core.HANDOFF = root / "handoff" / "lessons", root / "handoff", root / "handoff"
         lessons.USAGE_LOCAL = root / "state" / "lessons-usage.json"
-        lessons.SIGNALS_FILE = root / "state" / "lesson-signals.jsonl"
         sleep.STATE, sleep.LAST = root / "state", root / "state" / "sleep.json"
         self.root = root
+        self.ai_off = mock.patch.dict(core.CFG, {"ai": {"enabled": False}})  # never a real model call in tests
+        self.ai_off.start()
+        self.addCleanup(self.ai_off.stop)
 
     def tearDown(self):
-        (lessons.LESSONS, work.HANDOFF, lessons.USAGE_LOCAL, lessons.SIGNALS_FILE, sleep.STATE, sleep.LAST,
-         core.HANDOFF) = self.saved
+        (lessons.LESSONS, work.HANDOFF, lessons.USAGE_LOCAL, sleep.STATE, sleep.LAST, core.HANDOFF) = self.saved
         self.tmp.cleanup()
 
     def add(self, title, scope="acme/api", **kw):
@@ -52,14 +53,16 @@ class SleepTests(unittest.TestCase):
         self.assertLess(lessons.strength(les, u), lessons.strength(les, {}))
 
     def test_merge_duplicates_and_keep_the_global_one(self):
+        where = {"commands": ["git commit"], "errors": ["FAILED"], "activities": ["testing"]}
         g = self.add("Commit chained after a pipe hides failing tests", scope="global",
-                     cause="tail exit code hides failing tests", prevention="use pipefail before commit")
-        p = self.add("Commit after a pipe hides failing tests", cause="tail exit code hides failing tests",
-                     prevention="use pipefail before commit")
+                     cause="tail exit code hides failing tests", prevention="use pipefail before commit", **where)
+        p = self.add("Un commit tras un pipe oculta tests rotos", cause="tail oculta el código de salida",
+                     prevention="usa pipefail antes del commit", stack=["python"], **where)
         acts = lessons.consolidate()
         self.assertIn(("merge", p["meta"]["id"]), [(k, i) for k, i, _ in acts])
         kept = lessons.find(g["meta"]["id"])
         self.assertEqual(kept["meta"]["occurrences"], 2)
+        self.assertEqual(lessons.anchors(kept)["stack"], ["python"])  # the merged lesson keeps both anchors
         self.assertTrue((lessons.LESSONS / "archive" / "acme/api" / p["path"].name).exists())
 
     def test_forget_and_restore(self):
@@ -92,12 +95,6 @@ class SleepTests(unittest.TestCase):
         ids = [x["meta"]["id"] for x in lessons.relevant("acme/api")]
         self.assertEqual(ids, [a_["meta"]["id"]])
         self.assertEqual(len(lessons.search("Prevented")), 1)  # still searchable
-
-    def test_corrections_become_signals(self):
-        self.assertTrue(lessons.note_correction("no, you forgot the migration again", "acme/api"))
-        self.assertFalse(lessons.note_correction("add a CSV export", "acme/api"))
-        kinds = [k for k, _, _ in lessons.signals("acme/api", None, 14)]
-        self.assertIn("correction", kinds)
 
     def test_hygiene_trims_only_devkit_records(self):
         st = self.root / "state"

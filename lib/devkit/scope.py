@@ -7,13 +7,14 @@ writing, reviewing, debugging, testing, building, deploying or releasing softwar
 repositories, CI and devkit, and questions about a codebase. Anything else (a recipe, a general question,
 consulting work done with the Firefly consulting kit) gets a normal answer and devkit stays out of the way.
 
-Decided per turn, in two steps:
-  prompt   classify(prompt) -> "dev" | "other" | None. A follow-up with no signal ("continue", "yes") inherits
-           the previous turn's class.
-  repo     with no signal at all, a session inside a repository counts as development ("how is it going?").
-  actions  at Stop, what the turn did. A turn of unknown class becomes development when it edited files in a
-           repository or ran development commands; an "other" turn only through strong actions (commits, pushes,
-           tags, test or build runs), so a deck built inside a repository stays consulting work.
+Decided at Stop from what the turn did, never from the developer's words, which can be in any language (crew gap
+review, C13):
+  declared  the final message starts with the status block: the model declared development work
+  commands  development commands (commits, pushes, tags, test and build runs, `dev`)
+  edits     files changed inside a repository
+  tools     repository tools (reading, searching, editing, a shell) in a session inside a repository
+Consulting work done through the Firefly consulting kit's skills counts only through development commands, so a deck
+built inside a repository stays consulting work.
 """
 from __future__ import annotations
 
@@ -21,51 +22,9 @@ import json
 import os
 import re
 
-DEV, OTHER = "dev", "other"
-
-_STRONG = (
-    # English
-    r"code|codebase|coding|bugs?|bugfix|debug\w*|stack ?traces?|tracebacks?|exceptions?|deploy\w*|pull requests?|"
-    r"PRs?|commits?|branch(es)?|rebase|merge conflicts?|refactor\w*|unit tests?|test suites?|tests? (fail|pass)\w*|"
-    r"failing tests?|compil\w*|lint\w*|type ?check\w*|CI|CD|pipelines?|endpoints?|APIs?|migrations?|schemas?|SQL|"
-    r"docker\w*|kubernetes|k8s|helm|terraform|git|github|gitlab|bitbucket|repos?|repository|repositories|devkit|"
-    r"npm|pnpm|yarn|maven|mvn|gradle|pip|uv|python|java|kotlin|typescript|javascript|node(\.?js)?|angular|react|"
-    r"next\.?js|vue|spring( boot)?|php|laravel|symfony|golang|rust|swift|backend|frontend|front-end|back-end|"
-    r"scripts?|CLI|worktrees?|handoff|canary|hooks?|plugins?|MCP|runners?|workflows?|github actions|releases?|"
-    r"changelog|semver|calver|regex|json|yaml|toml|html|css|tailwind|dashboard|components?|functions?|methods?|"
-    r"classes|modules?|refactoring|dependenc(y|ies)|packages?|build(s|ing)? (fails?|breaks?|errors?)|"
-    r"implement\w*|install\w*|configur\w*|set ?up|setup|server|servers|database|db|query|queries|"
-    r"claude code|codex|subagents?|skills?|AGENTS\.md|CLAUDE\.md|README|"
-    # Spanish
-    r"c[oó]digo|programa(r|ción|cion)|depura\w*|despleg\w*|despliegue\w*|ramas?|compila\w*|implementa\w*|"
-    r"arregla\w*|fallos?|errores?|pruebas?|instala\w*|configura\w*|servidor(es)?|base de datos|migraci[oó]n\w*|"
-    r"refactoriza\w*|versi[oó]n(es)?|lanzamiento|integraci[oó]n continua|extensi[oó]n(es)?|componentes?|"
-    r"funci[oó]n(es)?|m[oó]dulos?|tareas de desarrollo|desarroll\w*")
-
-_OTHER = (
-    # cooking, home, leisure
-    r"recetas?|recipes?|cocina\w*|cook\w*|ingredientes?|ingredients?|horno|oven|postres?|desserts?|guisos?|"
-    r"tortilla|paella|pasta|pizza|comidas?|meals?|cenas?|dinner|desayunos?|breakfast|restaurantes?|restaurants?|"
-    r"vino|wine|viajes?|trips?|travel\w*|vacaciones|holidays?|hotel(es|s)?|vuelos?|flights?|pel[ií]culas?|movies?|"
-    r"series de tv|novelas?|poemas?|poems?|chistes?|jokes?|regalos?|gifts?|deportes?|f[uú]tbol|gimnasio|workout|"
-    # consulting deliverables (the Firefly consulting kit)
-    r"decks?|slides?|diapositivas?|presentaci[oó]n(es)?|presentations?|powerpoint|pptx|docx|one-?pagers?|"
-    r"propuestas? (comercial(es)?|para|de colaboraci[oó]n)|proposals? for|statements? of work|SOW|co-?brand\w*|"
-    r"workshops?|talleres?|engagements?|consultor[ií]a|consulting (work|project|deliverable)s?|"
-    r"informes? para (el )?cliente|business case|plan de negocio|estrategia (comercial|de negocio)|"
-    r"pitch|due diligence|go-to-market|modelo operativo|operating model")
-
-STRONG_RE = re.compile(r"(?<![\w-])(" + _STRONG + r")(?![\w-])", re.I)
-OTHER_RE = re.compile(r"(?<![\w-])(" + _OTHER + r")(?![\w-])", re.I)
-FOLLOW_UP_RE = re.compile(r"^\W*(s[ií]|yes|ok(ay)?|vale|go|dale|adelante|contin[uú]a\w*|continue|sigue|seguimos|"
-                          r"perfecto|perfect|gracias|thanks?|thank you|de acuerdo|hazlo|do it|please continue)\b", re.I)
 CONSULTING_SKILL_RE = re.compile(r"\bfirefly-(consult|deck|document|pitch|cobrand|review|event|storytelling|proposal|"
                                  r"research|problem-solving|business-design|transformation|architecture|"
                                  r"tech-documentation|house-style)\b")
-# a path, a file name with a code extension or a stack-trace line is a development signal by itself
-CODE_HINT_RE = re.compile(r"((~|\.{1,2})/[\w.-]+|\b[\w.-]+/[\w.-]+/[\w.-]+|\b\w+\.(py|ts|tsx|js|jsx|java|kt|go|rs|rb|"
-                          r"php|cs|swift|sql|sh|ya?ml|toml|json|gradle|xml|vue|svelte|css|scss)\b|Traceback|"
-                          r"\bat \w+\.\w+\()")
 
 STRONG_CMD_RE = re.compile(
     r"\bgit\s+(-C\s+\S+\s+)?(commit|push|merge|tag|rebase|cherry-pick|revert|checkout\s+-b|switch\s+-c|worktree)\b|"
@@ -78,30 +37,8 @@ STRONG_CMD_RE = re.compile(
 WEAK_CMD_RE = re.compile(r"\bgit\b|\bdev\b|\bgh\b|\bnode\b|\bnpm\b|\bpython3?\b|\brg\b|\bgrep\b")
 EDIT_TOOLS = {"Edit", "Write", "MultiEdit", "NotebookEdit", "apply_patch"}
 SHELL_TOOLS = {"Bash", "exec_command", "shell", "local_shell", "unified_exec"}
-
-
-def classify(prompt: str) -> str | None:
-    """The request's class from its words: DEV, OTHER, or None when it gives no signal."""
-    text = (prompt or "").strip()
-    if not text:
-        return None
-    strong = STRONG_RE.search(text) or CODE_HINT_RE.search(text)
-    other = OTHER_RE.search(text) or CONSULTING_SKILL_RE.search(text)
-    if other and not strong:
-        return OTHER
-    if strong and other:  # "fix the deck renderer bug" is development; "a deck about our API strategy" is not
-        bug_words = re.search(r"(?<![\w-])(bugs?|fix\w*|arregla\w*|debug\w*|depura\w*|errores?|fallos?|tests?|"
-                              r"pruebas?|commit\w*|deploy\w*|despleg\w*|refactor\w*|c[oó]digo|code|"
-                              r"implement\w*)(?![\w-])", text, re.I) or CODE_HINT_RE.search(text)
-        return DEV if bug_words else OTHER
-    if strong:
-        return DEV
-    return None  # no signal: a follow-up ("continue", "yes") or a general question
-
-
-def resolve(prompt: str, previous: str | None) -> str | None:
-    """The turn's class: the prompt's own, or the previous turn's for a follow-up with no signal."""
-    return classify(prompt) or previous
+REPO_TOOLS = EDIT_TOOLS | SHELL_TOOLS | {"Read", "Grep", "Glob", "LSP", "NotebookRead", "read_file", "list_dir",
+                                       "grep", "view_image"}
 
 
 def _tail_lines(path: str, max_bytes: int = 3_000_000) -> list:
@@ -177,25 +114,32 @@ def _in_repo(path: str) -> bool:
     return False
 
 
-def is_dev_turn(cls: str | None, actions: dict) -> bool:
-    """Combine the prompt's class with what the turn did."""
+def is_dev_turn(actions: dict, in_repo: bool = False, declared: bool = False) -> bool:
+    """What the turn did -> development work or not. `in_repo`: the session works inside a repository; `declared`:
+    the final message starts with the status block."""
     cmds = actions.get("commands") or []
     strong = any(STRONG_CMD_RE.search(c) for c in cmds)
     consulting = any(CONSULTING_SKILL_RE.search(s or "") for s in actions.get("skills") or []) or \
         any("firefly" in t.lower() and t.startswith("mcp__") for t in actions.get("tools") or ())
-    if cls == DEV:
-        return True
-    if cls == OTHER or consulting:
+    if consulting:
         return strong
-    edits = [e for e in actions.get("edits") or [] if e and _in_repo(e)]
-    return strong or bool(edits) or any(WEAK_CMD_RE.search(c) for c in cmds)
+    if declared or strong:
+        return True
+    if any(e and _in_repo(e) for e in actions.get("edits") or []):
+        return True
+    if any(WEAK_CMD_RE.search(c) for c in cmds):
+        return True
+    return in_repo and bool(set(actions.get("tools") or ()) & REPO_TOOLS)
 
 
 def decide(data: dict, sess: dict) -> bool:
     """The Stop hook's question: should devkit's process (status block, skills) apply to the turn that just ended?"""
     if os.environ.get("DEVKIT_SCOPE") == "all":
         return True
-    cls = sess.get("turn_class")
-    if cls is None and sess.get("top"):  # no signal inside a repository ("how is it going?"): development
-        cls = DEV
-    return is_dev_turn(cls, turn_actions(data.get("transcript_path")))
+    path = data.get("transcript_path")
+    try:
+        from . import canary
+        declared = canary.has_marker(canary.last_assistant_text(path) or "") if path else False
+    except Exception:
+        declared = False
+    return is_dev_turn(turn_actions(path), bool(sess.get("top")), declared)

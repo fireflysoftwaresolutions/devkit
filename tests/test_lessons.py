@@ -24,7 +24,8 @@ class CrewPitfallTests(unittest.TestCase):
         self.saved = (lessons.LESSONS, work.HANDOFF, lessons.USAGE_LOCAL)
         lessons.LESSONS, work.HANDOFF, lessons.USAGE_LOCAL = root / "lessons", root, root / "usage.json"
         self.regex = lessons.add("acme/api", "A regex rewrite broke the parser", cause="sed -i on nested code",
-                                 prevention="exact-string edits that must match once", a=A)
+                                 prevention="exact-string edits that must match once", a=A,
+                                 activities=["feature"], files=["src/parser/**"], commands=["sed -i"])
         self.push = lessons.add("acme/api", "A third push in an hour was refused", severity="high",
                                 cause="speculative CI fixes", prevention="reproduce locally, push once", a=A)
         self.other = lessons.add("global", "The status block came after text", cause="a note before the block",
@@ -34,30 +35,31 @@ class CrewPitfallTests(unittest.TestCase):
         lessons.LESSONS, work.HANDOFF, lessons.USAGE_LOCAL = self.saved
         self.tmp.cleanup()
 
-    def test_a_task_gets_the_lessons_it_shares_words_with_and_its_projects_high_ones(self):
-        picked = [x["meta"]["id"] for x in lessons.for_task("acme/api", "fix the parser after a regex rewrite")]
-        self.assertEqual(picked[0], self.regex["meta"]["id"])  # shares the most words
+    def test_a_step_gets_the_lessons_of_its_kind_of_work_and_files_and_its_projects_high_ones(self):
+        picked = [x["meta"]["id"] for x in lessons.for_task("acme/api", activity="feature",
+                                                             files=["src/parser/lexer.py"])]
+        self.assertEqual(picked[0], self.regex["meta"]["id"])  # its kind of work and files
         self.assertIn(self.push["meta"]["id"], picked)  # the project's high-severity lesson, always
-        self.assertNotIn(self.other["meta"]["id"], picked)  # a global lesson that shares nothing
+        self.assertNotIn(self.other["meta"]["id"], picked)  # a global lesson with no anchor in common
         lessons.prevent(lessons.find(self.regex["meta"]["id"]), by="test", ref="tests/test_parser.py",
                         why="a lint now refuses sed -i", a=A)
         self.assertNotIn(self.regex["meta"]["id"],
-                         [x["meta"]["id"] for x in lessons.for_task("acme/api", "fix the parser after a regex rewrite")])
+                         [x["meta"]["id"] for x in lessons.for_task("acme/api", activity="feature")])
 
     def test_a_claude_launch_brief_gets_the_pitfalls_and_how_to_record_a_new_one(self):
         from devkit import skillguard
-        out = skillguard.on_agent_brief("claude", {"description": "Neo: parser fix",
-                                                   "prompt": "Fix the parser after the regex rewrite."}, "acme/api")
+        out = skillguard.on_agent_brief("claude", {"description": "Neo: arreglo del parser",
+                                                   "prompt": "Arregla el parser tras la reescritura."}, "acme/api")
         self.assertIn("## devkit · known pitfalls", out["prompt"])
-        self.assertIn(self.regex["meta"]["id"], out["prompt"])
+        self.assertIn(self.regex["meta"]["id"], out["prompt"])  # Neo does feature work: its lessons, any language
         self.assertIn("dev lesson recur", out["prompt"])
 
     def test_a_launch_gets_the_skills_of_its_kind_of_work(self):
         from devkit import skillguard
         with mock.patch.object(skillguard, "installed", lambda agent: {"testing", "test-driven-development",
                                                                        "property-based-testing"}):
-            out = skillguard.on_agent_brief("claude", {"description": "QA: tests",
-                                                       "prompt": "The tests are flaky and the coverage is low; fix it."})
+            out = skillguard.on_agent_brief("claude", {"description": "Mouse: tests",
+                                                       "prompt": "Los tests fallan a veces; arréglalo."})
         self.assertIn("- `testing`", out["prompt"])
         self.assertIn("what devkit knows about test strategy", out["prompt"])
 

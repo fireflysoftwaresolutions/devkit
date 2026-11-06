@@ -1,9 +1,16 @@
 {
-  "_comment": "Which skills a kind of work requires. devkit enforces them: (1) the prompt hook tells the agent which skills to load for the request, (2) briefs for Claude subagents get the skills appended, (3) the Stop hook refuses to finish a turn that changed matching files without loading the skills, once per skill per session. `files` are globs on changed paths; `content` is a regex checked in changed files that match `files`; `prompt` is a regex on the developer's request or a subagent brief. Extend or override with `skills.rules` in ~/.config/devkit/config.json; turn enforcement off with `skills.enforce: false`.",
+  "_comment": "Which skills a kind of work requires. devkit enforces them: (1) the session catalog lists them by kind of work, (2) briefs for Claude subagents get the skills appended, (3) the Stop hook refuses to finish a turn that changed matching files without loading the skills, once per skill per session. `files` are globs on changed paths; `content` is a regex checked in changed files that match `files`; `activities` are the kinds of work (ids from the crew's RACI) the model declares for a step or a brief; `commands` are command words the agent runs. Nothing matches the developer's words: they can be in any language (crew gap review, C13), and the model picks skills from the catalog it gets at session start. Extend or override with `skills.rules` in ~/.config/devkit/config.json; turn enforcement off with `skills.enforce: false`.",
   "rules": [
     {
       "id": "ui",
       "why": "UI quality: frontend-design for the direction, impeccable for hierarchy, layout, typography, color and the audit",
+      "activities": [
+        "ux",
+        "frontend",
+        "design-system",
+        "accessibility",
+        "i18n"
+      ],
       "files": [
         "*.html",
         "*.css",
@@ -27,7 +34,6 @@
         "*.php"
       ],
       "content": "<style[\\s>]|<!doctype html|className=|styled\\.|@Component\\(",
-      "prompt": "\\b(ui|ux|frontend|front-end|landing( page)?|css|tailwind|layout|interfaz|diseño visual)\\b|\\b(design|redesign|build|create|improve|polish|restyle|style|diseñ\\w*|rediseñ\\w*|mejor\\w*|maquet\\w*|crea\\w*|constru\\w*)\\W+(\\w+\\W+){0,4}(dashboard|page|p[aá]gina|screen|pantalla|component|componente|form|formulario|modal|view|vista)s?\\b",
       "skills": {
         "claude": [
           "frontend-design",
@@ -42,13 +48,19 @@
     {
       "id": "angular",
       "why": "Angular conventions: standalone components, signals, control flow, OnPush",
+      "commands": [
+        "ng build",
+        "ng generate",
+        "ng serve",
+        "ng test",
+        "ng update"
+      ],
       "files": [
         "*.component.ts",
         "*.component.html",
         "angular.json",
         "*.routes.ts"
       ],
-      "prompt": "\\bangular\\b",
       "skills": {
         "claude": [
           "angular-developer"
@@ -61,11 +73,14 @@
     {
       "id": "react",
       "why": "React and Next.js performance and composition patterns",
+      "commands": [
+        "next build",
+        "next dev"
+      ],
       "files": [
         "*.tsx",
         "*.jsx"
       ],
-      "prompt": "\\b(react|next\\.?js)\\b",
       "skills": {
         "claude": [
           "react-best-practices"
@@ -83,7 +98,6 @@
         "*.kt"
       ],
       "content": "org\\.springframework",
-      "prompt": "\\b(spring( boot)?|java)\\b",
       "skills": {
         "claude": [
           "java-springboot",
@@ -98,6 +112,17 @@
     {
       "id": "testing",
       "why": "Tests that can fail for a real bug, TDD done right, and re-running only what a change can break",
+      "activities": [
+        "testing"
+      ],
+      "commands": [
+        "pytest",
+        "jest",
+        "vitest",
+        "dev test",
+        "python3 -m unittest",
+        "python -m unittest"
+      ],
       "files": [
         "test_*.py",
         "*_test.py",
@@ -122,7 +147,6 @@
         "vitest.config.*",
         "phpunit.xml*"
       ],
-      "prompt": "\\b(tests?|testing|tdd|unit tests?|pruebas?|test suite|bater[ií]a de (tests|pruebas)|coverage|cobertura|flaky)\\b",
       "skills": {
         "claude": [
           "testing"
@@ -154,6 +178,10 @@
     {
       "id": "api",
       "why": "Contract first, RFC 9457 errors, compatibility, pagination, idempotency",
+      "activities": [
+        "backend",
+        "sso"
+      ],
       "files": [
         "openapi*.yaml",
         "openapi*.yml",
@@ -163,7 +191,6 @@
         "*controller.ts",
         "*.proto"
       ],
-      "prompt": "\\b(api|endpoint|rest|graphql|grpc|backend|microservice)\\b",
       "skills": {
         "claude": [
           "backend"
@@ -176,6 +203,16 @@
     {
       "id": "database",
       "why": "Postgres schema, migrations, indexes and locking",
+      "activities": [
+        "database"
+      ],
+      "commands": [
+        "alembic",
+        "flyway",
+        "liquibase",
+        "psql",
+        "prisma migrate"
+      ],
       "files": [
         "*.sql",
         "**/db/migration/**",
@@ -183,7 +220,6 @@
         "**/alembic/**",
         "*.changelog.xml"
       ],
-      "prompt": "\\b(migration|schema|postgres|sql|index|database|base de datos)\\b",
       "skills": {
         "claude": [
           "supabase-postgres-best-practices",
@@ -198,6 +234,13 @@
     {
       "id": "workflows",
       "why": "Pipelines on any host: speed, reliability and DevSecOps (cicd), GitHub Actions security, one-push delivery",
+      "activities": [
+        "cicd"
+      ],
+      "commands": [
+        "gh workflow",
+        "gh run"
+      ],
       "files": [
         ".github/workflows/*.yml",
         ".github/workflows/*.yaml",
@@ -209,7 +252,6 @@
         "*.azure-pipelines.yml",
         ".azure-pipelines/**"
       ],
-      "prompt": "\\b(github actions|gitlab ci|bitbucket pipelines?|azure (devops|pipelines?)|workflows?|ci ?/ ?cd|ci pipeline|pipelines? de ci|pipelines?)\\b",
       "skills": {
         "claude": [
           "cicd",
@@ -226,13 +268,21 @@
     {
       "id": "security",
       "why": "Threat modelling, secure defaults and devkit's security scans",
+      "activities": [
+        "security",
+        "sso",
+        "redteam",
+        "dependencies"
+      ],
+      "commands": [
+        "dev sec scan"
+      ],
       "files": [
         "Dockerfile",
         "*.Dockerfile",
         "**/security/**",
         "*.tf"
       ],
-      "prompt": "\\b(security|seguridad|auth\\w*|login|oauth|oidc|jwt|secret|vulnerab\\w*|threat|permission|encrypt\\w*)\\b",
       "skills": {
         "claude": [
           "devsecops"
@@ -245,6 +295,12 @@
     {
       "id": "docs",
       "why": "Documentation structure (Diátaxis), Google style, American English, dev docs check",
+      "activities": [
+        "docs"
+      ],
+      "commands": [
+        "dev docs check"
+      ],
       "files": [
         "README.md",
         "docs/**/*.md",
@@ -252,7 +308,6 @@
         "CHANGELOG.md",
         "CONTRIBUTING.md"
       ],
-      "prompt": "\\b(docs?|document\\w*|readme|guide|gu[ií]a|tutorial)\\b",
       "skills": {
         "claude": [
           "docs"
@@ -265,6 +320,12 @@
     {
       "id": "diagrams",
       "why": "Validated, branded SVG diagrams in dark and light",
+      "activities": [
+        "architecture"
+      ],
+      "commands": [
+        "dev diagram"
+      ],
       "files": [
         "docs/diagrams/*.json",
         "*.svg",
@@ -272,7 +333,6 @@
         "*.likec4",
         "*.mmd"
       ],
-      "prompt": "\\b(diagram\\w*|diagrama\\w*|c4|architecture picture)\\b",
       "skills": {
         "claude": [
           "diagrams"
@@ -285,7 +345,18 @@
     {
       "id": "delivery",
       "why": "Delivery policy (versioning, bumps, test gate, changelog), one push, one CI run, releases",
-      "prompt": "\\b(release|deploy\\w*|push|merge|pull request|publish|versi[oó]n\\w*|tag|bump\\w*|changelog|hotfix)\\b",
+      "activities": [
+        "release"
+      ],
+      "commands": [
+        "git push",
+        "git tag",
+        "dev push",
+        "dev release",
+        "dev pr",
+        "gh pr create",
+        "gh release"
+      ],
       "skills": {
         "claude": [
           "delivery",
@@ -307,7 +378,9 @@
     {
       "id": "crew",
       "why": "Leading the crew: who to send, parallel or in sequence, briefs, lanes, scopes and reports",
-      "prompt": "\\b(crew|subagents?|sub-agents?|agentes? en paralelo|parallel (agents?|work)|spawn\\w*|orchestrat\\w*|orquest\\w*|equipo de agentes|multi-?agent\\w*|delegat\\w*|deleg[ae]\\w*)\\b",
+      "activities": [
+        "plan"
+      ],
       "skills": {
         "claude": [
           "crew",
@@ -322,7 +395,14 @@
     {
       "id": "communicating",
       "why": "Templates for status, decisions, PRs, handovers and reports in plain American English",
-      "prompt": "\\b(status report|report|reporte|informe|delegate|handover|hand off|teammate|compa[nñ]ero|message for|mensaje)\\b",
+      "activities": [
+        "plan",
+        "scope"
+      ],
+      "commands": [
+        "dev task delegate",
+        "dev report"
+      ],
       "skills": {
         "claude": [
           "communicating"
@@ -335,7 +415,13 @@
     {
       "id": "learning",
       "why": "Blameless lessons, root causes, prevention by automation",
-      "prompt": "\\b(lesson\\w*|postmortem|post-mortem|retro\\w*|root cause|again the same|otra vez|de nuevo el mismo|aprende\\w*|mistake\\w*|error(es)? (que )?(se )?repit\\w*)\\b",
+      "activities": [
+        "incident"
+      ],
+      "commands": [
+        "dev lesson",
+        "git revert"
+      ],
       "skills": {
         "claude": [
           "learning-loop"

@@ -455,6 +455,38 @@ ENFORCEMENT = (
 )
 
 
+def catalog(roster=None, agent: str = "claude") -> str:
+    """The ids the model declares, for the session's context (SessionStart and the brief after a compaction): every
+    kind of work with its Responsible and Accountable members and skills, the skill rules, and the lesson anchors.
+    devkit never guesses them from the developer's words, which can be in any language (crew gap review, C13)."""
+    from . import raci, skillguard
+    roster = roster or load()
+
+    def short_names(ids):
+        return ", ".join((member(i, roster) or {}).get("name") or i for i in ids or [])
+    lines = ["devkit catalog · declare these ids, whatever language the developer writes in; devkit enforces on them "
+             "and never on words.",
+             "Kinds of work: one per step (`[id]` in a plan spec, as in `api=1h after design [backend]`, or "
+             "`--activity <id>` when you assign it) and per brief (`--activity <id>`). Without one, a step takes its "
+             "member's Responsible kind of work, then its files'."]
+    for a in raci.activities(roster):
+        sk = ", ".join((a.get("knowledge") or {}).get("skills") or [])
+        lines.append(f"- `{a['id']}` {a['name']} · R {short_names(a.get('R'))} · A {short_names([a.get('A')])}"
+                     + (f" · skills {sk}" if sk else ""))
+    lines.append("Skills the files you change and the commands you run require (briefs get them; Stop checks them):")
+    for r in skillguard.rules():
+        need = skillguard.required(r, agent)
+        if need:
+            when = [f"for {', '.join(r['activities'])}"] if r.get("activities") else []
+            when += [f"running {', '.join(r['commands'][:3])}"] if r.get("commands") else []
+            when += ["by its files"] if r.get("files") else []
+            lines.append(f"- {r['id']}: {', '.join(need)} ({'; '.join(when)})")
+    lines.append('Lesson anchors: record where a lesson applies, never its words: dev lesson add "…" --cause "…" '
+                 '--prevent "…" --file <glob> --command "<command words>" --activity <id> --error "<text the output '
+                 'shows>" --stack <name>. An older lesson gets them with dev lesson anchor <id> … --why "…".')
+    return "\n".join(lines)
+
+
 def enforcement(plan_steps=None) -> list:
     """The matrix as rows, with a check that every enforced rule's function exists and every planned rule names
     a step of `plan_steps` (when given). -> [(rule, where, ref, state, ok)]."""
@@ -822,10 +854,12 @@ def _dq(s) -> str:
     return '"' + re.sub(r'(["\\$`])', r"\\\1", str(s)) + '"'
 
 
-def _brief_activity(m: dict, task: str, step=None, roster=None):
-    """The kind of work a brief is for: the plan step's recorded activity, else the task's (the RACI), else the
-    member's own first Responsible activity. Language-neutral when the step carries its activity."""
+def _brief_activity(m: dict, task: str, step=None, roster=None, activity=None, globs=None):
+    """The kind of work a brief is for, from language-neutral anchors (`raci.anchor`): the declared one (--activity),
+    else the plan step's, else the member's Responsible one and the files in its scope."""
     from . import raci
+    if activity:
+        return raci.resolve_activity(activity, roster)  # a wrong id is refused, not guessed
     try:
         if step is not None and str(step).strip():
             from . import progress
@@ -835,23 +869,19 @@ def _brief_activity(m: dict, task: str, step=None, roster=None):
                 a = raci.step_activity(s, roster)
                 if a:
                     return a
-        top = raci.best(task, roster)
-        if top:  # the knowledge follows the work, whoever does it
-            return top[0]
-        own = raci.roles_of(m["id"], roster)["R"]
-        return own[0] if own else None
+        return raci.anchor(task, member=m["id"], files=globs, roster=roster)[0]
     except Exception:
         return None
 
 
-def brief_skills(m: dict, task: str = "", globs=None, agent: str = "claude"):
+def brief_skills(m: dict, task: str = "", globs=None, agent: str = "claude", activity: str = ""):
     """The skills a member loads for one task: its own, plus those devkit's skill rules (config/skill-rules.json)
-    require for the task's words and the files in its scope, so a Spring task brings the Java skills and a Python
-    one does not. -> (skills, [why])."""
+    require for its kind of work and the files in its scope, so a Spring task brings the Java skills and a Python
+    one does not. Never from the task's words. -> (skills, [why])."""
     out, why = list(m.get("skills") or []), []
     try:
         from . import skillguard
-        rules = skillguard.rules_for_text(task or "") + skillguard.rules_for_files(list(globs or []))
+        rules = skillguard.rules_for_activity(activity) + [r for r, _ in skillguard.rules_for_files(list(globs or []))]
         for r in rules:
             add = [s for s in skillguard.required(r, agent) if s not in out]
             if add:
@@ -862,7 +892,7 @@ def brief_skills(m: dict, task: str = "", globs=None, agent: str = "claude"):
     return out, why
 
 
-def brief_text(m: dict, task: str, scope: str = "", step=None, roster=None, cwd=None) -> str:
+def brief_text(m: dict, task: str, scope: str = "", step=None, roster=None, cwd=None, activity=None) -> str:
     """What `dev crew brief` prints: the spawn lines, the lane link and the brief to paste as the prompt."""
     roster = roster or load()
     if m.get("main"):
@@ -892,10 +922,12 @@ def brief_text(m: dict, task: str, scope: str = "", step=None, roster=None, cwd=
     else:
         b.append("The files this task needs and nothing beyond them. Ask Morpheus before you widen it: "
                  '`dev crew ask "<question>"`.')
-    b += ["", "## Skills to load first", ""]
-    skills, why = brief_skills(m, task, globs)
     from . import raci
-    act = _brief_activity(m, task, step, roster)
+    act = _brief_activity(m, task, step, roster, activity=activity, globs=globs)
+    if act:  # the declaration the launch hook and the crew gates read, whatever language the task is written in
+        b += ["", f"Kind of work: {act['name']} (`{act['id']}`)"]
+    b += ["", "## Skills to load first", ""]
+    skills, why = brief_skills(m, task, globs, activity=(act or {}).get("id") or "")
     know = (act or {}).get("knowledge") or {}
     for s in know.get("skills") or []:
         if s not in skills:
@@ -914,7 +946,7 @@ def brief_text(m: dict, task: str, scope: str = "", step=None, roster=None, cwd=
               "devkit checks that you ran: " + (", ".join(f"`{p}`" for p in proofs(m)) or "nothing in particular") + "."]
     try:
         from . import lessons
-        picked = lessons.for_task(pid, task) if pid else []
+        picked = lessons.for_task(pid, activity=(act or {}).get("id"), files=globs) if pid else []
     except Exception:
         picked = []
     if picked:
@@ -1758,7 +1790,7 @@ def cmd_crew(a) -> int:
             print(show_text(m, roster))
             return 0
         try:
-            print(brief_text(m, " ".join(a.task), a.scope or "", a.step, roster))
+            print(brief_text(m, " ".join(a.task), a.scope or "", a.step, roster, activity=a.activity))
         except ValueError as e:
             ui.err(str(e))
             return 2
@@ -1815,6 +1847,8 @@ def register(add):
     x.add_argument("task", nargs="+", help="what to do")
     x.add_argument("--scope", help="the files the member owns, comma-separated globs")
     x.add_argument("--step", help="the plan step it does (number or part of its name): prints the assign command")
+    x.add_argument("--activity", help="the kind of work, an id from the crew's RACI: it picks the brief's skills, "
+                                      "knowledge and pitfalls, in any language")
     x = sp.add_parser("sync", help="write plugin/agents/<id>.md from config/crew.json")
     x.add_argument("--check", action="store_true", help="only report the files that differ (exit 1 if any)")
     x = sp.add_parser("ask", help="a question to Morpheus (default) or a crew member; --decision: one for the developer")

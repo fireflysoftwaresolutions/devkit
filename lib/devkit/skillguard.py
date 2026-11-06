@@ -2,10 +2,13 @@
 # SPDX-License-Identifier: Apache-2.0
 """Skill enforcement: the right skills are loaded for the work being done (config/skill-rules.json).
 
-1. Prompt   UserPromptSubmit names the skills a request needs (rules matching the prompt) that are not loaded yet.
-2. Brief    PreToolUse on Claude's Agent/Task tool appends the required skills to a subagent's brief (updatedInput).
+1. Catalog  the session's catalog (`crew.catalog`) lists the skills by kind of work; the model picks them, whatever
+            language the developer writes in. Rules never match the developer's words (crew gap review, C13).
+2. Brief    PreToolUse on Claude's Agent/Task tool appends the required skills to a subagent's brief (updatedInput):
+            those of the brief's declared kind of work, else of its member's Responsible one.
 3. Finish   Stop refuses to end a turn that changed files matching a rule while the rule's skills were never
             loaded in the session (once per skill per session), with the reason and the files.
+Rules also answer for a kind of work (`rules_for_activity`) and for a command the agent runs (`rules_for_command`).
 
 Loaded skills are read from the session transcript: Claude's Skill tool calls and reads of SKILL.md files; Codex
 shell commands that read a skill's SKILL.md. Everything fails open.
@@ -111,12 +114,39 @@ def _read_matches(p, rx) -> bool:
         return True  # deleted or unreadable: judge by the path
 
 
-def rules_for_text(text: str) -> list:
-    out = []
-    for r in rules():
-        if r.get("prompt") and re.search(r["prompt"], text or "", re.I):
-            out.append(r)
-    return out
+def rules_for_activity(activity_id: str) -> list:
+    """The rules for a declared kind of work (an id from the crew's RACI)."""
+    return [r for r in rules() if activity_id and activity_id in (r.get("activities") or [])]
+
+
+def rules_for_command(command: str) -> list:
+    """The rules whose command words a shell command runs ("gh workflow run ci.yml" → workflows); text inside quotes
+    is not a command."""
+    from .lessons import runs
+    return [r for r in rules() if any(runs(command, c) for c in r.get("commands") or [])]
+
+
+DECLARED = re.compile(r"^Kind of work: .*\(`([a-z0-9-]+)`\)\s*$", re.M)  # the line `dev crew brief` writes
+OWNED = re.compile(r"^You own only these files: (.+?)\.(?: |$)", re.M)  # up to the sentence end
+
+
+def brief_activity(brief: str, description: str = ""):
+    """The kind of work a subagent's brief is for: the one it declares, else the Responsible one of the crew member
+    its description names ("Tank: the API"). None for a helper that is no crew member."""
+    from . import crew, raci
+    m = DECLARED.search(brief or "")
+    if m and raci.activity(m.group(1)):
+        return raci.activity(m.group(1))
+    who = crew._for_label((description or "").split(":")[0].strip()) if description else None
+    if not who or who.get("main"):
+        return None
+    return raci.anchor("", member=who["id"], files=owned_files(brief))[0]
+
+
+def owned_files(brief: str) -> list:
+    """The file scope a brief gives its member (the line `dev crew brief` writes)."""
+    m = OWNED.search(brief or "")
+    return re.findall(r"`([^`]+)`", m.group(1)) if m else []
 
 
 def required(rule: dict, agent: str) -> list:
@@ -176,22 +206,6 @@ def scan(agent: str, transcript: str, offset: int = 0):
 
 # --------------------------------------------------------------------------- hook entry points
 
-def on_prompt(agent: str, prompt: str, sess: dict) -> str:
-    if not enabled():
-        return ""
-    have = installed(agent)
-    loaded = set(sess.get("skills_loaded") or [])
-    lines = []
-    for r in rules_for_text(prompt):
-        need = [s for s in required(r, agent) if s not in loaded and s in have]
-        if need:
-            lines.append(f"- {', '.join(need)} — {r['why']}")
-    if not lines:
-        return ""
-    return ("devkit · skills this request needs (load each " + how_to_load(agent) + " before you start, and "
-            "follow it; if a subagent does the work, its brief must name them):\n" + "\n".join(dict.fromkeys(lines)))
-
-
 def on_agent_brief(agent: str, tool_input: dict, project: str = ""):
     """Claude Agent/Task: the brief gets the skills its work requires and the known pitfalls (lessons) for its task.
     -> updated tool input, or None."""
@@ -202,19 +216,18 @@ def on_agent_brief(agent: str, tool_input: dict, project: str = ""):
         return None
     have = installed("claude")
     need = []
-    for r in rules_for_text(brief + " " + (tool_input.get("description") or "")):
-        for s in required(r, "claude"):
-            if s in have and not re.search(rf"\b{re.escape(s)}\b", brief, re.I):
-                need.append((s, r["why"]))
-    try:  # the knowledge of the brief's kind of work (the crew's RACI), whoever does it
+    try:  # the brief's kind of work: declared, or its member's (the crew's RACI), never its words
         from . import raci
-        top = raci.best(brief[:4000] + " " + (tool_input.get("description") or ""))
-        for sk in ((top[0].get("knowledge") or {}).get("skills") or []) if top else []:
-            if short(sk) in have and not re.search(rf"\b{re.escape(short(sk))}\b", brief, re.I) and \
-                    short(sk) not in [x for x, _ in need]:
-                need.append((short(sk), f"what devkit knows about {raci._lower(top[0]['name'])}"))
+        act = brief_activity(brief, tool_input.get("description") or "")
     except Exception:
-        pass
+        act = None
+    if act:
+        cands = [(short(sk), f"what devkit knows about {raci._lower(act['name'])}")
+                 for sk in (act.get("knowledge") or {}).get("skills") or []]
+        cands += [(s, r["why"]) for r in rules_for_activity(act["id"]) for s in required(r, "claude")]
+        for s, why in cands:
+            if s in have and not re.search(rf"\b{re.escape(s)}\b", brief, re.I) and s not in [x for x, _ in need]:
+                need.append((s, why))
     extra = ""
     if need:
         seen = dict.fromkeys(need)
@@ -225,7 +238,7 @@ def on_agent_brief(agent: str, tool_input: dict, project: str = ""):
     if project and "devkit · known pitfalls" not in brief and "## Known pitfalls" not in brief:
         try:
             from . import lessons
-            picked = lessons.for_task(project, brief[:4000] + " " + (tool_input.get("description") or ""))
+            picked = lessons.for_task(project, activity=(act or {}).get("id"), files=owned_files(brief))
         except Exception:
             picked = []
         if picked:

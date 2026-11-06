@@ -1547,6 +1547,21 @@ def _lesson_scope(a):
     return delivery.scope_for(top)
 
 
+def _lesson_anchors(a) -> dict:
+    """The anchors given on the command line: where a lesson applies, in terms that mean the same in any language."""
+    return {"files": getattr(a, "file", None) or [], "commands": getattr(a, "command", None) or [],
+            "activities": getattr(a, "activity", None) or [], "errors": getattr(a, "error", None) or [],
+            "stack": getattr(a, "stack", None) or []}
+
+
+def _anchor_flags(x):
+    x.add_argument("--file", action="append", help="a file or glob it applies to (repeat)")
+    x.add_argument("--command", action="append", help="the command words it applies to, e.g. \"git push --force\"")
+    x.add_argument("--activity", action="append", help="the kind of work it applies to: an id from the crew's RACI")
+    x.add_argument("--error", action="append", help="an error signature: text the tool output shows when it happens")
+    x.add_argument("--stack", action="append", help="the stack it applies to: python, java, angular, …")
+
+
 def cmd_lesson(a):
     from . import lessons
     act = a.lesson_cmd or "ls"
@@ -1556,10 +1571,18 @@ def cmd_lesson(a):
             les = lessons.add(scope, " ".join(a.title), kind=a.kind, severity=a.severity, happened=a.happened or "",
                               cause=a.cause or "", fix=a.fix or "", prevention=a.prevent or "",
                               detection=a.detect or "", evidence=a.evidence or [], tags=a.tag or [], why=a.why or "",
-                              retire_when=a.retire_when or "")
+                              retire_when=a.retire_when or "", **_lesson_anchors(a))
             print(f"{ui.OK} {les['meta']['id']} recorded in {scope} → {tilde(les['path'])}")
+            if not any(_lesson_anchors(a).values()):
+                print(ui.dim("  no anchors: only the session start recalls it. Add where it applies: dev lesson anchor "
+                             + les["meta"]["id"] + " --file … --command … --activity … --error … --why …"))
             print(ui.dim("  automate it when you can: dev lesson prevent " + les["meta"]["id"] +
                          " --by test|lint|guard|skill|ci --ref … --why …"))
+            return 0
+        if act == "anchor":
+            les = lessons.set_anchors(lessons.find(" ".join(a.selector)), a.why or "", **_lesson_anchors(a))
+            print(f"{ui.OK} {les['meta']['id']} anchored · " + " · ".join(
+                f"{k} {', '.join(v)}" for k, v in lessons.anchors(les).items() if v))
             return 0
         if act == "restore":
             les = lessons.restore(" ".join(a.selector), a.why or "")
@@ -2390,6 +2413,11 @@ def build_parser():
     x.add_argument("--tag", action="append")
     x.add_argument("--retire-when", help="the outside condition that makes it obsolete (a tool version, an issue)")
     x.add_argument("--why")
+    _anchor_flags(x)
+    x = lsp.add_parser("anchor", help="add where a lesson applies (files, commands, kinds of work, errors, stack)")
+    x.add_argument("selector", nargs="+")
+    x.add_argument("--why", required=True, help="why (kept in the lesson's history)")
+    _anchor_flags(x)
     for verb, h_ in (("show", "a lesson with its history"), ("recur", "it happened again (counts repeats)"),
                      ("retire", "no longer applies (needs --why)"), ("restore", "bring back a forgotten lesson")):
         x = lsp.add_parser(verb, help=h_)

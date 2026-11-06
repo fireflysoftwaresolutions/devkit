@@ -146,7 +146,22 @@ def build_config(saved, a, login) -> dict:
         "stacks": a["stacks"], "lock": a["lock"], "hosts": a["hosts"], "clouds": a["clouds"],
         "docker": {"cpu": a["cpu"], "memory": a["mem"], "disk": a["disk"], "autostart": a["autostart"]},
         "gc": {"auto": a["gc_auto"]}, "sync": {"interval_minutes": a["interval"]},
+        "ai": {"enabled": bool(a.get("ai")), "asked": True},
     })
+
+
+AI_QUESTION = ("Let background jobs ask a small model (Claude Haiku or Codex's gpt-6-luna, at most 20 calls a day), "
+               "for example to merge duplicate lessons written in different languages?")
+AI_HELP = ("Off by default. Without it, devkit compares where lessons apply (files, commands, kinds of work, errors) "
+           "instead. Change it later with ai.enabled in devkit's config.")
+
+
+def ask_ai(p, saved) -> bool:
+    """Background AI is opt-in, and the wizard asks about it once: a saved answer is kept, not asked again."""
+    prev = (saved or {}).get("ai") or {}
+    if prev.get("asked"):
+        return bool(prev.get("enabled"))
+    return p.yesno(AI_QUESTION, False)
 
 
 def plan_rows(a, skip_packages) -> list:
@@ -160,7 +175,8 @@ def plan_rows(a, skip_packages) -> list:
             ("clouds", ", ".join(a["clouds"]) or "none"),
             ("packages", "skip" if skip_packages else "Homebrew + npm for the stacks, hosts and clouds"),
             ("Docker VM", f"{a['cpu']} CPU · {a['mem']} GB · {a['disk']} GB" + (" · at login" if a["autostart"] else "")),
-            ("automation", f"sync every {a['interval']} min · safe cleanup {'on' if a['gc_auto'] else 'report only'}"),
+            ("automation", f"sync every {a['interval']} min · safe cleanup {'on' if a['gc_auto'] else 'report only'}"
+                           f" · background AI {'on' if a.get('ai') else 'off'}"),
             ("lock", "managed settings (sudo)" if a["lock"] else "off (drift is still blocked and repaired)")]
 
 
@@ -239,6 +255,7 @@ def _run_lines(assume_yes=False, skip_packages=False) -> int:
     p.section("Automation")
     a["gc_auto"] = p.yesno("Reclaim disk automatically (merged worktrees, idle build output, stale temp)?", cfg["gc"]["auto"])
     a["interval"] = int(p.ask("Background sync interval (minutes)", str(cfg["sync"]["interval_minutes"])))
+    a["ai"] = ask_ai(p, d["config"] or {})
     a["lock"] = False
     if a["use_claude"]:
         a["lock"] = p.yesno("Lock Claude Code settings with a managed-settings file (needs your admin password)?",
@@ -515,7 +532,8 @@ def tui_defaults(d, detected=True) -> Answers:
         mem=min(int(dk.get("memory") or max(4, min(16, ram // 5))), ram),
         disk=int(dk.get("disk") or 80), autostart=bool(dk.get("autostart")),
         gc_auto=bool(cfg["gc"].get("auto", True)), interval=int(cfg["sync"].get("interval_minutes") or 60),
-        lock=bool(cfg.get("lock")) and bool(agents.get("claude", True)))
+        lock=bool(cfg.get("lock")) and bool(agents.get("claude", True)),
+        ai=bool((cfg.get("ai") or {}).get("enabled", False)))
 
 
 # --------------------------------------------------------------------------- interactive wizard: words
@@ -918,6 +936,8 @@ class _Wizard:
                     help="How often devkit refreshes the project map and pull requests and pushes the handoff "
                          "repository."), store=lambda v: a.update(interval=int(v)),
                    show=lambda: f"every {a['interval']} min"),
+                _Q("ai", "Background AI", lambda: tui.Confirm(AI_QUESTION, a["ai"], help=AI_HELP),
+                   show=yes_no("ai"), when=lambda: not ((d.get("config") or {}).get("ai") or {}).get("asked")),
                 _Q("lock", "Lock Claude Code settings", lambda: tui.Confirm(
                     "Lock Claude Code settings?", a["lock"],
                     help="Writes a managed-settings file that other tools cannot change; needs your admin password. "
@@ -1001,6 +1021,7 @@ class _Wizard:
             ("Docker", f"{a['cpu']} CPUs · {a['mem']} GB memory · {a['disk']} GB disk"
                        + (" · starts at login" if a["autostart"] else "")),
             ("Automation", f"sync every {a['interval']} min · disk cleanup {'on' if a['gc_auto'] else 'report only'}"
+                           f" · background AI {'on' if a.get('ai') else 'off'}"
                            + (f" · settings lock {'on' if a['lock'] else 'off'}" if a["use_claude"] else "")),
         ]
 

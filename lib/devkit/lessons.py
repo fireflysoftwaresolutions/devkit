@@ -9,7 +9,12 @@ follow) and how to detect it early, with evidence (commits, PRs, CI runs) and a 
 The loop:
   capture   `dev lesson add`, prompted by signals: reverts and fix commits, repeated guard refusals, canary misses,
             reopened tasks, required-skill reminders (`dev lesson scan`), and the Stop hook after a fix commit
-  recall    the session context lists the open lessons that apply (project, its initiatives, global)
+  anchors   each lesson names where it applies, in terms that mean the same in any language: files (globs),
+            commands (command words), kinds of work (activity ids), error signatures (tool output) and stack.
+            The developer's words never select a lesson (crew gap review, C13)
+  recall    the session context lists the project's open lessons; a step gets the lessons of its kind of work and
+            files (`for_task`), a tool call those of its command and files (`for_call`), tool output those whose
+            error signature it shows (`for_output`)
   recur     `dev lesson recur` counts a repeat; a lesson that recurs is a candidate for automation
   prevent   `dev lesson prevent --by test|lint|guard|skill|ci|rule --ref …`: automation beats prose
   review    `dev lesson review` lists recurring, unprevented and stale lessons
@@ -21,8 +26,10 @@ The loop:
 """
 from __future__ import annotations
 
+import fnmatch
 import json
 import re
+import shlex
 import time
 from pathlib import Path
 
@@ -33,8 +40,11 @@ LESSONS = HANDOFF / "lessons"
 KINDS = ("bug", "mistake", "process", "tooling", "security", "performance", "design")
 SEVERITIES = ("low", "medium", "high")
 PREVENTIONS = ("test", "lint", "type", "guard", "skill", "ci", "rule", "doc")
+ANCHORS = ("files", "commands", "activities", "errors", "stack")
+LISTS = ("tags",) + ANCHORS
 FIELDS = ("id", "title", "scope", "kind", "severity", "status", "occurrences", "prevention", "prevention_ref",
-          "retire_when", "tags", "first_seen", "last_seen", "version", "created_by", "updated", "updated_by")
+          "retire_when", "tags") + ANCHORS + ("first_seen", "last_seen", "version", "created_by", "updated",
+                                              "updated_by")
 SECTIONS = ("What happened", "Root cause", "Fix", "Prevention", "Detection", "Evidence")
 
 
@@ -71,7 +81,7 @@ def parse(text: str) -> dict:
 
 def render(lesson: dict) -> str:
     m = lesson["meta"]
-    head = "".join(f"{k}: {'[' + ', '.join(m.get(k) or []) + ']' if k == 'tags' else m.get(k, '')}".rstrip() + "\n"
+    head = "".join(f"{k}: {'[' + ', '.join(m.get(k) or []) + ']' if k in LISTS else m.get(k, '')}".rstrip() + "\n"
                    for k in FIELDS)
     body = f"# {m['title']}\n\n" + "".join(f"## {s}\n\n{lesson['sections'].get(s) or '_—_'}\n\n" for s in SECTIONS)
     return "---\n" + head + "---\n" + body + "## Changelog\n\n" + "".join(f"- {c}\n" for c in lesson["changelog"])
@@ -114,9 +124,37 @@ def _log(les: dict, a: dict, op: str, why: str = ""):
                             (f" — why: {why}" if why else ""))
 
 
+def anchors(les: dict) -> dict:
+    """{files, commands, activities, errors, stack: [str]} of a lesson; a lesson written before anchors has none."""
+    m = les.get("meta") or {}
+    return {k: [str(x) for x in m.get(k)] if isinstance(m.get(k), list) else [] for k in ANCHORS}
+
+
+def _clean_anchors(**given) -> dict:
+    """The anchors given, validated: one line each, no commas (the front matter's list separator), and activity ids
+    the crew's RACI knows."""
+    out = {}
+    for k in ANCHORS:
+        items = []
+        for x in given.get(k) or []:
+            x = " ".join(str(x).split())
+            if not x:
+                continue
+            if "," in x:
+                raise ValueError(f"an anchor cannot contain a comma: {x!r} (give each one on its own flag)")
+            if k == "activities":
+                from . import raci
+                x = raci.resolve_activity(x)["id"]
+            if x not in items:
+                items.append(x)
+        out[k] = items
+    return out
+
+
 def add(scope: str, title: str, kind: str = "mistake", severity: str = "medium", happened: str = "", cause: str = "",
         fix: str = "", prevention: str = "", detection: str = "", evidence=None, tags=None, why: str = "",
-        a=None, retire_when: str = "") -> dict:
+        a=None, retire_when: str = "", files=None, commands=None, activities=None, errors=None, stack=None) -> dict:
+    anchored = _clean_anchors(files=files, commands=commands, activities=activities, errors=errors, stack=stack)
     if kind not in KINDS:
         raise ValueError(f"kind must be one of {', '.join(KINDS)}")
     if severity not in SEVERITIES:
@@ -130,7 +168,7 @@ def add(scope: str, title: str, kind: str = "mistake", severity: str = "medium",
     les = {"meta": {"id": lid, "title": title.strip(), "scope": scope, "kind": kind, "severity": severity,
                     "status": "open", "occurrences": 1, "prevention": "rule", "prevention_ref": "",
                     "retire_when": retire_when.strip(),
-                    "tags": list(tags or []), "first_seen": now[:10], "last_seen": now[:10], "version": 1,
+                    "tags": list(tags or []), **anchored, "first_seen": now[:10], "last_seen": now[:10], "version": 1,
                     "created_by": f"{a['user']}@{a['host']}", "updated": now, "updated_by": f"{a['user']}@{a['host']}"},
            "sections": {"What happened": happened, "Root cause": cause, "Fix": fix, "Prevention": prevention,
                         "Detection": detection, "Evidence": "\n".join(f"- {e}" for e in evidence or [])},
@@ -174,6 +212,18 @@ def prevent(les: dict, by: str, ref: str, why: str, a=None) -> dict:
     if not why.strip():
         raise ValueError("say why this prevents it: --why \"…\"")
     return update(les, f"prevented by {by}: {ref}", why, a, status="prevented", prevention=by, prevention_ref=ref)
+
+
+def set_anchors(les: dict, why: str, a=None, **given) -> dict:
+    """Add anchors to a lesson (the backfill of lessons written before anchors existed)."""
+    if not (why or "").strip():
+        raise ValueError("say why: --why \"…\"")
+    new = _clean_anchors(**given)
+    if not any(new.values()):
+        raise ValueError("name at least one anchor: --file, --command, --activity, --error or --stack")
+    have = anchors(les)
+    merged = {k: have[k] + [x for x in new[k] if x not in have[k]] for k in ANCHORS}
+    return update(les, "anchored: " + "; ".join(f"{k} {', '.join(v)}" for k, v in new.items() if v), why, a, **merged)
 
 
 def retire(les: dict, why: str, a=None) -> dict:
@@ -289,33 +339,85 @@ def context_lines(project: str, initiatives=(), limit: int = 4) -> list:
     return out
 
 
-# words every task and lesson share, which say nothing about the work
-TASK_STOP = {"the", "and", "for", "with", "that", "this", "from", "into", "after", "before", "then", "when", "was", "are",
-             "not", "its", "but", "you", "your", "our", "fix", "make", "add", "use", "run", "new", "all", "any", "one",
-             "now", "can", "has", "have", "had", "will", "must", "should", "would", "could", "about", "there", "their"}
+def _meet(a: str, b: str) -> bool:
+    """Could two paths or globs name the same file? ("db/migrations/**" and "/repo/db/migrations/V3.sql": yes)"""
+    a, b = str(a or "").strip(), str(b or "").strip()
+    if not a or not b:
+        return False
+    for x, y in ((a, b), (b, a)):
+        if fnmatch.fnmatch(x, y) or fnmatch.fnmatch(x, "*/" + y.lstrip("/")):
+            return True
+    pa, pb = re.split(r"[*?\[]", a, maxsplit=1)[0], re.split(r"[*?\[]", b, maxsplit=1)[0]
+    if pb != b and pb and (a.startswith(pb) or ("/" + pb) in a):
+        return True
+    return pa != a and bool(pa) and (b.startswith(pa) or ("/" + pa) in b)
 
 
-def for_task(project: str, text: str, limit: int = 4, initiatives=()) -> list:
-    """The open lessons a crew member should know for one task: the project's, its initiatives' and the global ones,
-    ranked by how much the lesson shares with the task's words, then by strength. A high-severity lesson that
-    shares nothing still counts for its project. -> lessons (each counted as "shown")."""
-    words = {w for w in re.findall(r"[a-z0-9]{3,}", (text or "").lower())} - TASK_STOP
-    pool = [x for x in all_lessons(project) + [y for s in initiatives for y in all_lessons(f"initiatives/{s}")]
+def _words_of(command: str) -> list:
+    """A command's words; quoted text stays one word, so a message that mentions a command is not that command."""
+    try:
+        return shlex.split(command or "")
+    except ValueError:
+        return (command or "").split()
+
+
+def runs(command: str, anchor: str) -> bool:
+    """Does the command run the anchor's command words, in order and together ("git push --force")?"""
+    have, want = _words_of(command), _words_of(anchor)
+    return bool(want) and any(have[i:i + len(want)] == want for i in range(len(have) - len(want) + 1))
+
+
+def _pool(project: str, initiatives=()) -> list:
+    return [x for x in all_lessons(project) + [y for s in initiatives for y in all_lessons(f"initiatives/{s}")]
             + all_lessons("global") if x["meta"].get("status") == "open"]
+
+
+def _pick(project: str, scored: list, limit: int) -> list:
+    """The best of [(score, lesson)], each counted as shown."""
     _USAGE_CACHE["u"] = usage()
     try:
-        scored = []
-        for les in pool:
-            shared = len(words & _words(les))
-            own = les["meta"].get("scope") == project
-            if shared == 0 and not (own and les["meta"].get("severity") == "high"):
-                continue
-            scored.append((shared, _score(les), les))
-        picked = [x[2] for x in sorted(scored, key=lambda x: (-x[0], -x[1]))[:limit]]
+        ranked = sorted(((sc, _score(les), les) for sc, les in scored), key=lambda x: (-x[0], -x[1]))
     finally:
         _USAGE_CACHE.clear()
+    picked = [x[2] for x in ranked[:limit]]
     track([x["meta"]["id"] for x in picked], "shown")
     return picked
+
+
+def for_task(project: str, activity=None, files=None, limit: int = 4, initiatives=()) -> list:
+    """The open lessons a step should know: those of its kind of work and of the files in its scope (the project's,
+    its initiatives' and the global ones), and the project's high-severity lessons whatever the step. Never by the
+    step's words. -> lessons (each counted as "shown")."""
+    files = [f for f in files or [] if str(f).strip()]
+    scored = []
+    for les in _pool(project, initiatives):
+        an = anchors(les)
+        sc = (3 if activity and activity in an["activities"] else 0) + \
+            (2 if any(_meet(f, g) for f in files for g in an["files"]) else 0)
+        if sc or (les["meta"].get("scope") == project and les["meta"].get("severity") == "high"):
+            scored.append((sc, les))
+    return _pick(project, scored, limit)
+
+
+def for_call(project: str, files=(), command: str = "", limit: int = 3, initiatives=()) -> list:
+    """The open lessons a tool call should know just in time: those whose command anchor it runs, or whose files it
+    touches."""
+    scored = []
+    for les in _pool(project, initiatives):
+        an = anchors(les)
+        sc = (3 if command and any(runs(command, c) for c in an["commands"]) else 0) + \
+            (2 if any(_meet(f, g) for f in files or () for g in an["files"]) else 0)
+        if sc:
+            scored.append((sc, les))
+    return _pick(project, scored, limit)
+
+
+def for_output(project: str, output: str, limit: int = 3, initiatives=()) -> list:
+    """The open lessons whose error signature a tool's output shows (case does not matter)."""
+    text = (output or "").casefold()
+    scored = [(3, les) for les in _pool(project, initiatives)
+              if text and any(e.casefold() in text for e in anchors(les)["errors"])]
+    return _pick(project, scored, limit)
 
 
 def pitfall_lines(lessons_: list) -> list:
@@ -374,16 +476,7 @@ def signals(project: str = None, repo=None, days: int = 14) -> list:
                         "dev doctor; check the instructions load (dev canary)"))
     except Exception:
         pass
-    # 4. corrections from the developer (queued by the prompt hook)
-    if SIGNALS_FILE.exists():
-        for ln in SIGNALS_FILE.read_text().splitlines()[-200:]:
-            try:
-                r = json.loads(ln)
-            except ValueError:
-                continue
-            if r.get("ts", 0) >= since and (not project or r.get("project") in ("", project)):
-                out.append(("correction", r.get("text", "")[:120], 'dev lesson add "<what the agent got wrong>" …'))
-    # 5. reopened or repeatedly blocked tasks
+    # 4. reopened or repeatedly blocked tasks (the developer's corrections are recorded by the model itself)
     if project:
         for it in work.all_items(project):
             reopen = [c for c in it.get("changelog") or [] if " reopen" in c or "unblock" in c]
@@ -391,24 +484,6 @@ def signals(project: str = None, repo=None, days: int = 14) -> list:
                 out.append(("task", f"{it['meta']['id']} “{it['meta']['title']}” went back {len(reopen)} times",
                             "dev lesson add … --evidence \"task " + it["meta"]["id"] + "\""))
     return out
-
-
-CORRECTION = re.compile(r"(?i)^\s*(no[,.!]|that'?s (wrong|not)|you forgot|te (olvidaste|dije)|otra vez|de nuevo|"
-                        r"eso (no|est[aá] mal)|not like that|así no|asi no|wrong\b|incorrect)")
-SIGNALS_FILE = STATE / "lesson-signals.jsonl"
-
-
-def note_correction(prompt: str, project: str = ""):
-    """The developer corrected the agent: queue it for `dev lesson scan` (never written as a lesson automatically)."""
-    if not prompt or not CORRECTION.search(prompt[:200]):
-        return False
-    try:
-        SIGNALS_FILE.parent.mkdir(parents=True, exist_ok=True)
-        with SIGNALS_FILE.open("a") as fh:
-            fh.write(json.dumps({"ts": int(time.time()), "project": project, "text": prompt.strip()[:200]}) + "\n")
-    except OSError:
-        return False
-    return True
 
 
 def review(scope: str = None) -> dict:
@@ -442,16 +517,35 @@ ARCHIVE = "archive"
 MAX_ACTIVE_PER_SCOPE = 25
 
 
-def _words(les: dict) -> set:
-    text = " ".join([les["meta"]["title"], les["sections"].get("Root cause", ""), les["sections"].get("Prevention", "")])
-    stop = {"the", "a", "an", "and", "or", "of", "to", "in", "on", "for", "with", "is", "it", "be", "not", "that",
-            "this", "by", "at", "as", "was", "are", "when", "from", "its", "into", "so"}
-    return {w for w in re.findall(r"[a-z0-9]{3,}", text.lower()) if w not in stop}
+def _anchor_set(les: dict) -> set:
+    return {f"{k}:{x}" for k, v in anchors(les).items() for x in v}
 
 
 def similarity(a: dict, b: dict) -> float:
-    wa, wb = _words(a), _words(b)
+    """How alike two lessons' anchors are (0 when either has none): never their words."""
+    wa, wb = _anchor_set(a), _anchor_set(b)
     return len(wa & wb) / len(wa | wb) if wa and wb else 0.0
+
+
+def _text(les: dict) -> str:
+    return "\n".join(x for x in (les["meta"]["title"], les["sections"].get("Root cause", ""),
+                                 les["sections"].get("Prevention", "")) if x and x != "_—_")
+
+
+def same_mistake(x: dict, y: dict, threshold: float = 0.6):
+    """-> (same?, why). By the anchors: alike, and the same error signature or command, so a shared file or kind of
+    work alone never makes two lessons one. When background AI is on (`ai`), the model decides the pairs the anchors
+    leave open, in any language, within its daily budget."""
+    sim = similarity(x, y)
+    sig = {i for i in _anchor_set(x) & _anchor_set(y) if i.startswith(("errors:", "commands:"))}
+    if sim >= threshold and sig:
+        return True, f"{sim:.0%} same anchors"
+    if sim > 0 or not (_anchor_set(x) and _anchor_set(y)):
+        from . import ai
+        verdict = ai.same_mistake(_text(x), _text(y))
+        if verdict is not None:
+            return verdict, "the same mistake, says the model" if verdict else "different, says the model"
+    return False, f"{sim:.0%} same anchors"
 
 
 def archive(les: dict, why: str, a=None) -> dict:
@@ -501,15 +595,20 @@ def consolidate(dry_run: bool = False, now: float = None, a=None) -> list:
             if x["meta"]["id"] in gone or y["meta"]["id"] in gone:
                 continue
             same = x["meta"]["scope"] == y["meta"]["scope"] or "global" in (x["meta"]["scope"], y["meta"]["scope"])
-            if same and similarity(x, y) >= 0.6:
+            dup, why = same_mistake(x, y) if same else (False, "")
+            if dup:
                 keep, drop = sorted((x, y), key=lambda z: (z["meta"]["scope"] != "global", -strength(z, use, now)))
-                acts.append(("merge", drop["meta"]["id"], f"into {keep['meta']['id']} ({similarity(x, y):.0%} alike)"))
+                acts.append(("merge", drop["meta"]["id"], f"into {keep['meta']['id']} ({why})"))
                 gone.add(drop["meta"]["id"])
                 if not dry_run:
                     ev = "\n".join(v for v in (keep["sections"].get("Evidence"), drop["sections"].get("Evidence"),
                                                 f"- merged {drop['meta']['id']}") if v and v != "_—_")
+                    both = anchors(keep)
+                    for k, v in anchors(drop).items():
+                        both[k] += [i for i in v if i not in both[k]]
                     keep_ = update(keep, f"merged {drop['meta']['id']}", "near-duplicate", a,
-                                   occurrences=keep["meta"]["occurrences"] + drop["meta"]["occurrences"], Evidence=ev)
+                                   occurrences=keep["meta"]["occurrences"] + drop["meta"]["occurrences"], Evidence=ev,
+                                   **both)
                     keep["meta"] = keep_["meta"]
                     archive(drop, f"merged into {keep['meta']['id']}", a)
     items = [x for x in items if x["meta"]["id"] not in gone]
@@ -544,7 +643,7 @@ def consolidate(dry_run: bool = False, now: float = None, a=None) -> list:
             and x["meta"]["id"] not in {i for _, i, _ in acts}]
     for i, x in enumerate(proj):
         for y in proj[i + 1:]:
-            if x["meta"]["scope"] != y["meta"]["scope"] and similarity(x, y) >= 0.5:
+            if x["meta"]["scope"] != y["meta"]["scope"] and same_mistake(x, y, 0.5)[0]:
                 acts.append(("promote", x["meta"]["id"], f"also seen in {y['meta']['scope']} ({y['meta']['id']}): "
                              f"consider one global lesson"))
     return acts
