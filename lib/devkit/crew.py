@@ -440,7 +440,8 @@ ENFORCEMENT = (
     ("Members get the knowledge of their kind of work", "dev crew brief and the Claude launch hook", "devkit.crew.brief_skills", "enforced"),
     ("Agents cannot write devkit's state or configuration", "PreToolUse: protected paths", "K1 protect devkit state and config", "planned"),
     ("Escape hatches are refused to members and audited", "PreToolUse: flags and variables", "F8 escape hatches and tool coverage", "planned"),
-    ("The guard runs from a verified copy, not the checkout", "dev install", "pinned install first", "planned"),
+    ("The guard runs from a verified copy, not the checkout", "dev install (pins a read-only, checksummed release)",
+     "devkit.setup.pin", "enforced"),
     ("Team changes to the crew carry a reason", "dev crew set and dev crew raci --set", "devkit.crew._team_write", "enforced"),
     ("Questions and decisions go through dev crew ask", "a member's report and messages", "a report may also name its questions", "guidance"),
 )
