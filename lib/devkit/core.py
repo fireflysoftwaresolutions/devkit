@@ -77,10 +77,12 @@ DEFAULTS = {
     "dashboard": {"idle_minutes": 30},  # the live dashboard server stops after this long with no page open
     # the audit trail (docs/audit.md). The team policy (<handoff>/policy/audit.json) sets a floor: a machine may
     # record more and keep longer, never less. Only the developer changes these, in a terminal (spec C11).
+    # Retention (compliance review): the team copy is read more widely, so it keeps no longer than this machine by
+    # default; floor_months is never under AUDIT_FLOOR_MIN. Pruning the handoff copy leaves the months in git history.
     "audit": {
         "publish": True,            # the daily job copies this machine's records to the handoff repository
         "level": "changes",         # security | changes | all (all: also read-only commands)
-        "retention": {"local_months": 13, "team_months": 24, "floor_months": 3},
+        "retention": {"local_months": 13, "team_months": 13, "floor_months": 3},
         "hold": False,              # a legal hold: nothing is pruned, here or in the handoff copy
         "forward": "",              # "" | a file (JSONL lines) | "syslog" | "syslog://host:port" (CEF lines)
         "redact": {"extra": []},    # more regular expressions for the redactor
@@ -88,10 +90,17 @@ DEFAULTS = {
 }
 
 AUDIT_LEVELS = ("security", "changes", "all")  # from the fewest records to the most
+# the least floor_months may be: 3 months covers the time it takes to notice an incident and investigate it. Less
+# data comes from audit.level security, not from a shorter floor (compliance review, GDPR art. 5(1)(e) and 32)
+AUDIT_FLOOR_MIN = 3
 
 
 def _months_ok(v) -> bool:
     return isinstance(v, int) and not isinstance(v, bool) and 1 <= v <= 1200
+
+
+def _floor_ok(v) -> bool:
+    return _months_ok(v) and v >= AUDIT_FLOOR_MIN
 
 
 def _patterns_ok(v) -> bool:
@@ -126,7 +135,8 @@ AUDIT_RULES = {
     ("forward",): (_forward_ok, '"" (off), an absolute file path, "syslog" or "syslog://host:port"'),
     ("retention", "local_months"): (_months_ok, "a whole number of months from 1 to 1200"),
     ("retention", "team_months"): (_months_ok, "a whole number of months from 1 to 1200"),
-    ("retention", "floor_months"): (_months_ok, "a whole number of months from 1 to 1200"),
+    ("retention", "floor_months"): (_floor_ok, f"a whole number of months from {AUDIT_FLOOR_MIN} to 1200 "
+                                               f"({AUDIT_FLOOR_MIN} is the hard minimum)"),
     ("redact", "extra"): (_patterns_ok, "a list of regular expressions"),
 }
 

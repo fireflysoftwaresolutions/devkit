@@ -344,9 +344,27 @@ class RetentionTests(AuditCase):
             (audit.AUDIT / f"{st}.jsonl").write_text(json.dumps({"ts": 1, "action": "dev.task"}) + "\n")
 
     def test_the_defaults(self):
+        # the team copy is the more widely read store, so it keeps no longer than this machine (compliance review)
         s = audit.settings()
         self.assertEqual((s["retention"]["local_months"], s["retention"]["team_months"],
-                          s["retention"]["floor_months"], s["hold"], s["level"]), (13, 24, 3, False, "changes"))
+                          s["retention"]["floor_months"], s["hold"], s["level"]), (13, 13, 3, False, "changes"))
+
+    def test_a_floor_under_three_months_is_refused(self):
+        # 3 months is a hard minimum: it covers noticing an incident and investigating it; less data comes from
+        # audit.level security, not from a shorter floor. local and team months still take 1 (raised to the floor)
+        for v in (1, 2):
+            with self.subTest(floor=v):
+                errors = core.config_errors({"audit": {"retention": {"floor_months": v}}})
+                self.assertEqual(len(errors), 1, errors)
+                self.assertIn("audit.retention.floor_months", errors[0])
+        self.assertEqual(core.config_errors({"audit": {"retention": {"floor_months": 3, "local_months": 1,
+                                                                     "team_months": 1}}}), [])
+        core.CFG["audit"]["retention"]["floor_months"] = 2
+        self.assertEqual(audit.settings()["retention"]["floor_months"], 3)
+        self.policy({"retention": {"floor_months": 1}})
+        s = audit.settings()
+        self.assertEqual(s["retention"]["floor_months"], 3)
+        self.assertTrue(any("policy" in e and "floor_months" in e for e in s["errors"]), s["errors"])
 
     def test_one_month_keeps_the_floor_and_records_the_prune(self):
         core.CFG["audit"]["retention"]["local_months"] = 1
@@ -388,7 +406,7 @@ class RetentionTests(AuditCase):
         s = audit.settings()
         self.assertEqual((s["retention"]["local_months"], s["retention"]["team_months"],
                           s["retention"]["floor_months"], s["hold"], s["level"], s["publish"]),
-                         (13, 24, 3, True, "changes", True))
+                         (13, 13, 3, True, "changes", True))
 
     def test_the_team_policy_raises_the_machine(self):
         self.policy({"level": "all", "hold": True, "retention": {"floor_months": 18}})
@@ -402,7 +420,7 @@ class RetentionTests(AuditCase):
         self.assertEqual(len(errors), 4, errors)
         s = audit.settings()
         self.assertEqual((s["level"], s["hold"], s["retention"]["local_months"], s["retention"]["team_months"]),
-                         ("changes", False, 13, 24))
+                         ("changes", False, 13, 13))
         self.assertEqual(len(s["errors"]), 4)
 
 
@@ -603,6 +621,15 @@ class CommandTests(AuditCase):
         rc, text = self.run_cmd("config")
         self.assertEqual(rc, 0)
         self.assertIn("13 months here", text)
+
+    def test_config_says_git_history_keeps_pruned_months(self):
+        # pruning removes files from the handoff working copy only, so team_months is not yet a real limit: the
+        # settings must say so rather than promise a deletion that does not happen (compliance review, section 1)
+        rc, text = self.run_cmd("config")
+        self.assertEqual(rc, 0)
+        self.assertIn("git history keeps every published month", text)
+        rc, text = self.run_cmd("config", "--json")
+        self.assertIn("git history keeps every published month", json.loads(text)["team"]["history"])
 
 
 class CliWiringTests(unittest.TestCase):

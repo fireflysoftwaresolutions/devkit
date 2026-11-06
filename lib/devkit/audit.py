@@ -958,6 +958,7 @@ def _plan_prune(now: float, cfg: dict) -> dict:
 def prune(now: float = None) -> dict:
     """Remove local month files older than audit.retention.local_months and this machine's handoff copies older than
     team_months (never under floor_months; nothing under audit.hold), and record what was removed (audit.prune).
+    The handoff copies leave the working copy only: git history keeps them (GIT_HISTORY).
     -> {removed: [months], team: [paths, for the handoff commit], records, held}"""
     now = now or time.time()
     cfg = settings()
@@ -1003,6 +1004,11 @@ def _size(files) -> int:
     return total
 
 
+# what team_months really removes, said wherever retention is shown (compliance review, section 1)
+GIT_HISTORY = ("git history keeps every published month until the handoff repository's history is rewritten: "
+               "pruning removes month files from its working copy only")
+
+
 def config_report(now: float = None) -> dict:
     """`dev audit config`: the effective settings, where records live, their sizes and the next prune."""
     now = now or time.time()
@@ -1021,7 +1027,7 @@ def config_report(now: float = None) -> dict:
     return {"settings": {k: v for k, v in cfg.items() if k not in ("errors", "policy")},
             "errors": cfg["errors"], "policy": cfg["policy"] or f"{policy_file()} (none)",
             "local": {"path": str(AUDIT), "files": len(local), "bytes": _size(local)},
-            "team": {"path": str(mine), "files": len(team), "bytes": _size(team)},
+            "team": {"path": str(mine), "files": len(team), "bytes": _size(team), "history": GIT_HISTORY},
             "next_prune": {"at": at, "held": cfg["hold"], "keeps_from": plan["keeps_from"],
                            "team_keeps_from": plan["team_keeps_from"],
                            "would_remove": [f.stem for f in plan["local"]],
@@ -1313,6 +1319,7 @@ def _cmd_config(a, ui) -> int:
                            f"{core.human_kb(c['local']['bytes'] / 1024)}", 16))
     print(ui.kv("handoff copy", f"{core.tilde(c['team']['path'])} · {c['team']['files']} file(s) · "
                                 f"{core.human_kb(c['team']['bytes'] / 1024)}", 16))
+    print(ui.kv("git history", c["team"]["history"], 16))
     n = c["next_prune"]
     when_ = core.fmt_ts(n["at"]) if n["at"] else "with the next audit job"
     print(ui.kv("next prune", "held" if n["held"] else f"{when_}: keeps {n['keeps_from']} on here, "
