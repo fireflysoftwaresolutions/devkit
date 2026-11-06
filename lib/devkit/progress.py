@@ -197,6 +197,21 @@ def call_opened(agent: str, data: dict, now: float | None = None):
         "cut": cut})
 
 
+def call_entry(data: dict) -> dict:
+    """The open ledger entry of this call; {} when it has none."""
+    tid, sid = _safe_name(data.get("tool_use_id")), _safe_name(data.get("session_id"))
+    e = core.read_json(CALLS / sid / f"{tid}.json", None) if tid and sid else None
+    return e if isinstance(e, dict) else {}
+
+
+def call_note(data: dict, **fields):
+    """Add fields to this call's open ledger entry (the hooks keep a read-only lane's worktree state there)."""
+    e = call_entry(data)
+    if e:
+        _write_private(CALLS / _safe_name(data.get("session_id")) / f"{_safe_name(data.get('tool_use_id'))}.json",
+                       {**e, **fields})
+
+
 def call_closed(data: dict):
     """PostToolUse or PostToolUseFailure of a shell call, or the hook refused it: its entry leaves the ledger."""
     tid, sid = _safe_name(data.get("tool_use_id")), _safe_name(data.get("session_id"))
@@ -1290,12 +1305,8 @@ def _preapproval_items(approve: str, cwd) -> list:
                             f"release v26.11.4 or merge 142 (a pre-approval without one would cover everything)")
         if act in NEVER_PREAPPROVED:
             raise StepError(f"{act} is never pre-approved: the developer approves each one (grant {act} <target>)")
-        try:
-            from . import guard
-            check = getattr(guard, "preapproval_problem", None)
-        except Exception:
-            check = None
-        problem = check(act, x[1], cwd or os.getcwd()) if check else None
+        from .guard import preapproval_problem
+        problem = preapproval_problem(act, x[1], cwd or os.getcwd())
         if problem:
             raise StepError(problem)
         out.append((act, x[1]))
@@ -1863,17 +1874,9 @@ def take_evidence(agent: str, sid: str, covers: str, now: float | None = None, r
 
 def _target_covers(action: str, pattern: str, target: str) -> bool:
     """Does a grant's target pattern cover this target? The guard's rule (spec C6: push globs never match the
-    default branch, tags match with or without v), else the same text or a glob."""
-    try:
-        from . import guard
-        rule = getattr(guard, "target_matches", None)
-    except Exception:
-        rule = None
-    if rule:
-        return bool(rule(action, pattern, target))
-    import fnmatch
-    p, t = str(pattern or ""), str(target or "")
-    return bool(p) and (p == t or (any(c in p for c in "*?[") and fnmatch.fnmatchcase(t, p)))
+    default branch, tags match with or without v)."""
+    from .guard import target_matches
+    return bool(target_matches(action, pattern, target))
 
 
 def _same_repo(have, want) -> bool:
@@ -3164,6 +3167,44 @@ def _on_subagent(agent: str, data: dict, started: bool, now: float | None = None
             _advance_main(run, now)
         _run_event(agent, sid, finish)
     state.replace(f, s)
+
+
+def scope_written(agent: str, sid: str, aid: str, paths: list, now: float | None = None) -> dict | None:
+    """A review or read-only lane's shell call wrote these files (spec F7, write detection): the lane keeps them in
+    `scope_writes`, so its report is unverified and its step cannot end done on its word; Morpheus gets a crew
+    message; and the audit trail a scope.write record. "possible" when another lane that may write works in the run
+    at the time (the file may be its), else "certain". -> the lane's scope_writes, or None without a lane."""
+    now = now or time.time()
+    paths = sorted({str(p) for p in paths or [] if p})
+    if not paths:
+        return None
+    with _tx(agent, sid):
+        run = load_run(agent, sid)
+        lane = ((run or {}).get("agents") or {}).get(aid)
+        if not lane:
+            return None
+        chain = set(lane_chain(run, aid))
+        others = [k for k, v in run["agents"].items() if k not in chain and v.get("state") == "running"
+                  and lane_tools(run, k) in ("build", "all")]
+        certainty = "possible" if others else "certain"
+        level = lane_tools(run, aid)
+        had = lane.get("scope_writes") or {}
+        lane["scope_writes"] = {"ts": round(now), "paths": sorted(set(had.get("paths") or []) | set(paths))[:20],
+                                "certainty": "certain" if "certain" in (had.get("certainty"), certainty) else
+                                certainty}
+        who = lane.get("persona") or lane.get("label") or aid
+        shown = ", ".join(paths[:5]) + (f" and {len(paths) - 5} more" if len(paths) > 5 else "")
+        maybe = f" (possibly another member's: {', '.join(_name_of(run, k) for k in others[:3])} works too)" \
+            if others else ""
+        _post(run, aid, "main", f"devkit: {who} works {'review-only' if level == 'review' else 'read-only'}, and "
+              f"its shell call wrote {shown}{maybe}. Its report counts as unverified: check the change (git diff), "
+              f"keep or revert it, then close its step with evidence.", now, from_name="devkit")
+        _save(run)
+        writes = dict(lane["scope_writes"])
+    _audit("scope.write", who, f"{certainty}: {', '.join(paths[:20])}"[:600], "detected", lane=aid[:16],
+           paths=paths[:20], certainty=certainty, count=len(paths), project=run.get("project") or "",
+           **({"severity": "warning"} if certainty == "certain" else {}))
+    return writes
 
 
 def crew_working(run: dict) -> list:

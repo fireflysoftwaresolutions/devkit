@@ -272,6 +272,11 @@ def session_start(agent: str):
     except Exception:
         pass
     text = _with_catalog(context_for(cwd, agent), agent)
+    if os.environ.get("DEVKIT_GUARD", "").lower() == "off":  # spec F8, rule 5: never silent
+        text = ("devkit · the guard is off in this session (DEVKIT_GUARD=off): it judges no tool call, so the "
+                "workspace rules, the crew's limits and the irreversible-action gate do not hold. That is recorded "
+                "once as guard.off in the audit trail. Start the session without it to turn the guard back on.\n\n"
+                + text)
     if agent == "codex":
         print(json.dumps({"hookSpecificOutput": {"hookEventName": "SessionStart", "additionalContext": text}}))
     else:
@@ -563,8 +568,10 @@ def stop(agent: str):
             ok, pid, line = res
             if ok and line:
                 sess["status"] = line
-                branch = core.gitout(sess.get("top") or data.get("cwd") or ".", "branch", "--show-current")
-                canary.save_status(pid, agent, line, branch or sess.get("branch"))
+                where = sess.get("top") or data.get("cwd") or "."
+                branch = core.gitout(where, "branch", "--show-current")
+                top_ = sess.get("top") or core.gitout(where, "rev-parse", "--show-toplevel")  # the session's checkout
+                canary.save_status(pid, agent, line, branch or sess.get("branch"), path=top_ or None)
             elif not ok:
                 from . import audit
                 audit.record("canary.miss", pid or "", "final message without the status block", "miss")
@@ -587,7 +594,7 @@ def stop(agent: str):
                     from .registry import main_of
                     m = main_of(Path(top)) or Path(top)
                     pid_ = core.project_identity(m, core.gitout(m, "config", "--get", "remote.origin.url"))[0]
-                    canary.save_status(pid_, agent, line, core.gitout(top, "branch", "--show-current"))
+                    canary.save_status(pid_, agent, line, core.gitout(top, "branch", "--show-current"), path=top)
                     if sess.get("canary_missed"):
                         canary.record_corrected(agent, sid, pid_, line)
         try:
@@ -779,17 +786,71 @@ def _unroutable_lane_command(data: dict, agent: str = "claude"):
         return None
     cmd = (data.get("tool_input") or {}).get("command") or ""
     cmd = " ".join(shlex.quote(str(c)) for c in cmd) if isinstance(cmd, list) else str(cmd)
-    aid, scope, member = data["agent_id"], None, str(data["agent_id"])
+    from . import guard
+    aid, sid, cwd = data["agent_id"], data.get("session_id") or "-", data.get("cwd") or os.getcwd()
+    scope = member = level = base = None  # no lane names no member, so no member folder applies (M124)
     try:
         from . import progress
-        run, lane = progress.lane_of(agent, data.get("session_id") or "-", aid)
-        if lane:
+        run, lane = progress.lane_of(agent, sid, aid)
+        if lane:  # the lane's own tool level and the run's repository (spec F7, G13)
             scope, member = progress.lane_scope(run, aid), _member_folder(run, aid)
-    except Exception:
-        _log(f"lane command {agent}: {traceback.format_exc()[-300:]}")
-    from . import guard
-    v = guard.crew_shell_verdict(cmd, data.get("cwd") or os.getcwd(), scope, member)
+            level = progress.lane_tools(run, aid)
+            base = guard.scope_base((run or {}).get("project"), cwd)
+    except Exception as e:
+        guard.failopen("crew-lane", e)
+    try:  # the lane's id finds its step grant for a tier-1 push or PR (spec C6, M180)
+        v = guard.crew_shell_verdict(cmd, cwd, scope, member, level=level, base=base, lane=aid, session=sid,
+                                     agent=agent)
+    except Exception as e:
+        guard.failopen("crew-lane", e)
+        return None
     return v[1] if v else None
+
+
+def _lane_rule(why: str) -> str:
+    """The rule a lane command's refusal is recorded under: readonly (the records the read-only allowlist grows
+    from), hatch (an escape hatch a member used), else crew-lane."""
+    if why.startswith("read-only lane"):
+        return "readonly"
+    if why.startswith("Crew members do not use devkit's escape hatches"):
+        return "hatch"
+    return "crew-lane"
+
+
+def _watch_writes(agent: str, data: dict):
+    """Write detection, the backstop of review and read-only lanes (spec F7): before such a lane's shell call, what
+    `git status` lists in the run's repository goes into the call's ledger entry; PostToolUse compares
+    (_check_writes), so a write an allowed check made (a test run) is seen too."""
+    aid = data.get("agent_id")
+    if not aid or data.get("tool_name") not in SHELL_TOOLS or _headless():
+        return
+    from . import guard as g, progress
+    run, lane = progress.lane_of(agent, data.get("session_id") or "-", aid)
+    if not lane or progress.lane_tools(run, aid) not in ("review", "read"):
+        return
+    base = g.scope_base((run or {}).get("project"), data.get("cwd") or os.getcwd())
+    before = g.worktree_state(base)
+    if before is not None:
+        progress.call_note(data, wt_base=base, wt_before=before)
+
+
+def _check_writes(agent: str, data: dict):
+    """PostToolUse of a review or read-only lane's shell call: the paths it wrote (guard.written_paths between the
+    states before and after it) go to progress.scope_written. Before the call leaves the ledger."""
+    if not data.get("agent_id") or data.get("tool_name") not in SHELL_TOOLS:
+        return
+    from . import guard as g
+    try:
+        from . import progress
+        e = progress.call_entry(data)
+        if not isinstance(e.get("wt_before"), dict) or not e.get("wt_base"):
+            return
+        before = {k: tuple(v) if isinstance(v, list) else v for k, v in e["wt_before"].items()}  # JSON keeps lists
+        paths = g.written_paths(before, g.worktree_state(e["wt_base"]))
+        if paths:
+            progress.scope_written(agent, data.get("session_id") or "-", data["agent_id"], paths)
+    except Exception as ex:
+        g.failopen("scope-write", ex)
 
 
 def _close_call(data: dict):
@@ -1095,15 +1156,19 @@ COMMIT_RE = re.compile(r"\bgit\s+(?:-C\s+(\S+)\s+)?commit\b|\bdev\s+commit\b")
 
 def _stub_commit_gate(data: dict):
     """A commit that would include unfinished work (stubs, placeholders, TODOs without a task) is refused.
-    DEVKIT_ALLOW_STUBS=1 when the developer accepts them."""
-    if data.get("tool_name") not in SHELL_TOOLS or os.environ.get("DEVKIT_ALLOW_STUBS"):
+    DEVKIT_ALLOW_STUBS=1 as the commit's own prefix, or `dev commit --wip`, when the developer accepts them (spec F8,
+    rule 3: parsed, never searched; the hook's own environment opens nothing)."""
+    if data.get("tool_name") not in SHELL_TOOLS:
         return None
     cmd = (data.get("tool_input") or {}).get("command") or ""
     cmd = " ".join(cmd) if isinstance(cmd, list) else str(cmd)
     m = COMMIT_RE.search(command_words(cmd))  # a commit the command runs, not the text it writes
-    if not m or "DEVKIT_ALLOW_STUBS=1" in cmd or "--wip" in cmd:
+    if not m:
         return None
+    from . import guard
     try:
+        if guard.stubs_accepted(cmd):
+            return None
         cwd = data.get("cwd") or os.getcwd()
         where = m.group(1) or cwd
         top = core.gitout(where if os.path.isabs(where) else os.path.join(cwd, where), "rev-parse", "--show-toplevel")
@@ -1112,8 +1177,8 @@ def _stub_commit_gate(data: dict):
         from . import stubs
         why = stubs.commit_gate(top, cmd)
         return ("deny", why) if why else None
-    except Exception:
-        _log(f"stub commit gate: {traceback.format_exc()[-300:]}")
+    except Exception as e:
+        guard.failopen("stub-gate", e)
         return None
 
 
@@ -1121,35 +1186,43 @@ def _crew_limits(agent: str, data: dict):
     """Coordination guardrails -> ("deny", reason) or None:
     - at most `progress.max_parallel` crew members at once (default 4; 1 while the 5-hour usage is above
       progress.quota_percent), counting the helpers members launch, and no launch deeper than progress.max_depth;
-    - the main session does not edit files a running crew member owns (DEVKIT_SCOPE_OVERRIDE=1 for an emergency)."""
+    - the main session does not edit files a running crew member owns, in this session's run or in another live run
+      of the repository (spec F7, G13; DEVKIT_SCOPE_OVERRIDE=1 for an emergency)."""
+    from . import guard
     try:
         from . import progress
         sid = data.get("session_id") or "-"
+        tool = data.get("tool_name")
+        main_edit = tool in EDIT_TOOLS and not data.get("agent_id") and not os.environ.get("DEVKIT_SCOPE_OVERRIDE")
+        inp = data.get("tool_input") or {}
+        path = (inp.get("file_path") or inp.get("notebook_path") or "") if main_edit else ""
+        cwd = data.get("cwd") or os.getcwd()
+        if path:  # other sessions' members first: a session with no run respects them too
+            own = guard.scope_owner_across(os.path.normpath(os.path.join(cwd, path)), me_session=sid)
+            if own:
+                return ("deny", f"{path} belongs to {own[0]} while they work (scope {', '.join(own[1])}), in another "
+                                f"session of this repository. Ask them (dev crew ask --to \"{own[0]}\" \"…\") or wait "
+                                f"until they finish; DEVKIT_SCOPE_OVERRIDE=1 only for an emergency.")
         run = progress.load_run(agent, sid)
         if not run or run.get("state") == "done":
             return None
         run = progress.normalize(run)
         progress.expire_stale(run)
-        tool = data.get("tool_name")
         if tool in ("Agent", "Task", "spawn_agent"):  # at every depth (spec F3): a member's helper takes a slot too
             why = progress.launch_verdict(agent, data, run)
             if why:
                 return ("deny", why)
-        if tool in EDIT_TOOLS and not data.get("agent_id") and not os.environ.get("DEVKIT_SCOPE_OVERRIDE"):
-            inp = data.get("tool_input") or {}
-            path = inp.get("file_path") or inp.get("notebook_path") or ""
-            if path:
-                cwd = data.get("cwd") or os.getcwd()
-                top = core.gitout(cwd, "rev-parse", "--show-toplevel") or cwd
-                rel = os.path.relpath(os.path.normpath(path if os.path.isabs(path) else os.path.join(cwd, path)), top)
-                k, lane = progress.scope_owner(run, rel)
-                if lane:
-                    who = lane.get("persona") or lane.get("label") or "a crew member"
-                    return ("deny", f"{rel} belongs to {who} while they work (scope {', '.join(lane['scope'])}). Ask "
-                                    f"them (dev crew ask --to \"{who}\" \"…\") or wait until they finish; "
-                                    f"DEVKIT_SCOPE_OVERRIDE=1 only for an emergency.")
-    except Exception:
-        _log(f"crew limits {agent}: {traceback.format_exc()[-300:]}")
+        if path:
+            top = guard.scope_base(run.get("project"), cwd)
+            rel = guard.scope_rel(path, cwd, top)
+            k, lane = progress.scope_owner(run, rel)
+            if lane:
+                who = lane.get("persona") or lane.get("label") or "a crew member"
+                return ("deny", f"{rel} belongs to {who} while they work (scope {', '.join(lane['scope'])}). Ask "
+                                f"them (dev crew ask --to \"{who}\" \"…\") or wait until they finish; "
+                                f"DEVKIT_SCOPE_OVERRIDE=1 only for an emergency.")
+    except Exception as e:
+        guard.failopen("crew-limits", e)
     return None
 
 
@@ -1174,14 +1247,29 @@ def _same_repository(a: str, b: str) -> bool:
 def _scope_violation(agent: str, data: dict):
     """A crew member assigned a scope (dev progress assign … --scope "globs") edits only those files, so parallel
     agents never write the same file, and review-only and read-only members edit nothing. A helper a member
-    launches has the member's tool level and scope, never more (spec F3). -> the refusal, or None."""
-    aid = data.get("agent_id")
-    if not aid or data.get("tool_name") not in EDIT_TOOLS:
+    launches has the member's tool level and scope, never more (spec F3). Every subagent's file and MCP tools are
+    judged by guard.member_tool_verdict (spec F8): no sending or publishing, no MCP writes from a review or read-only
+    lane or outside the step's scope, no edit of the secret scan's ignore list. Scopes count from the run's
+    repository (spec F7, G13). -> the refusal, or None."""
+    aid, tool = data.get("agent_id"), str(data.get("tool_name") or "")
+    if not aid or not (tool in EDIT_TOOLS or tool.startswith("mcp__")):
         return None
+    from . import guard
     try:
         from . import progress
         run, lane = progress.lane_of(agent, data.get("session_id") or "-", aid)
-        if not lane:
+        cwd = data.get("cwd") or os.getcwd()
+        inp = data.get("tool_input") or {}
+        top = guard.scope_base((run or {}).get("project"), cwd)
+        level = layers = member = None
+        if lane:
+            level, layers, member = progress.lane_tools(run, aid), progress.lane_scope(run, aid), \
+                _member_folder(run, aid)
+        if tool != "apply_patch":
+            v = guard.member_tool_verdict(tool, inp, cwd, level=level, member=member, scope=layers, base=top)
+            if v:
+                return v[1]
+        if not lane or tool not in EDIT_TOOLS:
             return None
         if lane.get("binding") == "conflict":  # a launch binds once: a second agent claiming it edits nothing
             return ("this agent claims a launch that another agent is bound to, so devkit lets it read but not edit. "
@@ -1195,27 +1283,20 @@ def _scope_violation(agent: str, data: dict):
                     "what you need to change; Morpheus can assign you your step (dev progress assign \"<step>\" "
                     "--to \"<you>\"), which lifts this.")
         chain = [run["agents"][k] for k in progress.lane_chain(run, aid)]
-        inp = data.get("tool_input") or {}
         paths = [inp.get("file_path") or inp.get("notebook_path") or ""]
-        if data.get("tool_name") == "apply_patch" or not paths[0]:
+        if tool == "apply_patch" or not paths[0]:
             body = inp.get("input") or inp.get("patch") or inp.get("command") or ""
             paths = re.findall(r"\*\*\* (?:Add|Update|Delete) File: (\S+)", str(body)) or paths
-        cwd = data.get("cwd") or os.getcwd()
-        top = core.gitout(cwd, "rev-parse", "--show-toplevel") or cwd
         name = lane.get("persona") or lane.get("label") or "this crew member"
         head = chain[-1].get("persona") or chain[-1].get("label") or "its crew member"
         if len(chain) > 1:  # a helper: the limits it inherits are its member's
             name = f"this helper of {head}"
-        level = progress.lane_tools(run, aid)
-        layers = progress.lane_scope(run, aid)
-        member = _member_folder(run, aid)
-        from . import guard
         for p_ in [x for x in paths if x]:  # each member keeps to its own folder of the session scratchpad
             why = guard.scratch_refusal(os.path.normpath(os.path.join(cwd, p_)), member)
             if why:
                 return why
         # its scratch folder and temp files, and this project's plans that its step's scope names (guard rules)
-        paths = [p_ for p_ in paths if p_ and not guard.member_write_exempt(p_, cwd, layers, member)]
+        paths = [p_ for p_ in paths if p_ and not guard.member_write_exempt(p_, cwd, layers, member, base=top)]
         if not paths:
             return None
         if level in ("review", "read"):
@@ -1227,7 +1308,7 @@ def _scope_violation(agent: str, data: dict):
             return None
         for p_ in paths:
             ap = os.path.normpath(p_ if os.path.isabs(p_) else os.path.join(cwd, p_))
-            rel = os.path.relpath(ap, top)
+            rel = guard.scope_rel(ap, cwd, top)
             if rel.startswith(".."):  # a worktree of the same repository: the scope's paths are relative to it
                 wt = _repo_top_of(ap)
                 if wt and _same_repository(wt, top):
@@ -1236,13 +1317,121 @@ def _scope_violation(agent: str, data: dict):
                 return (f"{rel} is outside {name}'s scope ({' and '.join(', '.join(g) for g in layers)}): another "
                         f"crew member may own it. "
                         f"Ask Morpheus to widen it: dev crew ask \"may I change {rel}? why: …\"")
-    except Exception:
+    except Exception as e:
+        guard.failopen("crew-scope", e)
         return None
     return None
 
 
+def _guard_off(agent: str, data: dict):
+    """DEVKIT_GUARD=off (spec F8, rule 5): the guard judges nothing, and that is recorded once per session as
+    guard.off (the session record's `guard_off`), so the session's next context and the audit trail show it."""
+    sid = data.get("session_id") or "-"
+    sf = _session_file(agent, sid)
+    first = []
+
+    def mark(d):
+        if (d or {}).get("guard_off"):
+            return state.SKIP
+        first.append(True)
+        return {**(d or {}), "guard_off": round(time.time())}
+    try:
+        if sf.exists():
+            state.update(sf, mark)
+        else:
+            first.append(True)  # no session record to remember it in: every call is recorded
+    except Exception as e:
+        from . import guard as g
+        g.failopen("guard-off", e)
+    if first:
+        from . import audit
+        audit.record("guard.off", data.get("tool_name") or "", "DEVKIT_GUARD=off: the guard judges nothing in this "
+                     "session", "allow", rule="guard-off", session=sid, tool=data.get("tool_name") or "")
+
+
+def _irreversible_main(agent: str, data: dict):
+    """The main session's irreversible-action gate (spec C6, F5 tiers): a shell command's tier-2 actions, and an MCP
+    tool that sends or publishes outside this machine, need the developer's live grant while
+    safeguards.irreversible_main enforces. Crew members are judged in their lane (crew_shell_verdict,
+    member_tool_verdict). -> ("deny", why) or None; the gate records each action and fails open itself."""
+    if data.get("agent_id"):
+        return None
+    from . import guard as g
+    tool, inp = str(data.get("tool_name") or ""), data.get("tool_input") or {}
+    cwd, sid = data.get("cwd") or os.getcwd(), data.get("session_id") or ""
+    if tool in SHELL_TOOLS:
+        cmd = inp.get("command") or ""
+        cmd = " ".join(shlex.quote(str(c)) for c in cmd) if isinstance(cmd, list) else str(cmd)
+        return g.irreversible_verdict(cmd, cwd, agent=agent, session=sid)
+    if tool.startswith("mcp__"):
+        return g.irreversible_tool_verdict(tool, inp, cwd, agent=agent, session=sid)
+    return None
+
+
+def _record_bypasses(agent: str, data: dict):
+    """An allowed call of the main session that used an escape hatch (spec F8, rule 2): one guard.bypass record per
+    use, and the use kept in the session record (`bypasses`), so the next prompt names it."""
+    from . import guard as g
+    uses = g.last_bypasses()
+    if data.get("agent_id") or data.get("tool_name") not in SHELL_TOOLS or not uses:
+        return
+    sid = data.get("session_id") or "-"
+    cmd = (data.get("tool_input") or {}).get("command") or ""
+    cmd = " ".join(shlex.quote(str(c)) for c in cmd) if isinstance(cmd, list) else str(cmd)
+    try:
+        from . import progress
+        mode = progress.mode_of(progress.load_run(agent, sid) or {})
+    except Exception:
+        mode = ""
+    g.record_bypasses(cmd, session=sid, lane="main", mode=mode)
+    sf = _session_file(agent, sid)
+    if not sf.exists():
+        return
+    now = round(time.time(), 3)  # ms: two uses in one second are two uses
+
+    def keep(d):
+        d = d or {}
+        d["bypasses"] = (d.get("bypasses") or [])[-19:] + [{"ts": now, "flag": b["flag"], "rule": b["rule"]}
+                                                           for b in uses]
+        return d
+    state.update(sf, keep)
+
+
+def bypass_context(agent: str, sid: str) -> str:
+    """The escape hatches this session used since its last prompt, and DEVKIT_GUARD=off once (spec F8): what the next
+    context names, so a use is never silent. Marks them shown."""
+    sf = _session_file(agent, sid)
+    if not sid or not sf.exists():
+        return ""
+    lines = []
+
+    def show(d):
+        d = d or {}
+        seen = d.get("bypasses_shown") or 0
+        new = [b for b in d.get("bypasses") or [] if (b.get("ts") or 0) > seen]
+        if d.get("guard_off") and not d.get("guard_off_shown"):
+            lines.append(f"DEVKIT_GUARD=off at {time.strftime('%H:%M', time.localtime(d['guard_off']))}: the guard "
+                         f"judged nothing")
+            d["guard_off_shown"] = True
+        lines.extend(f"{b['flag']} at {time.strftime('%H:%M', time.localtime(b['ts']))} (it skipped the "
+                     f"{b['rule']} rule)" for b in new)
+        if not lines:
+            return state.SKIP
+        d["bypasses_shown"] = max([seen] + [b.get("ts") or 0 for b in new])
+        return d
+    state.update(sf, show)
+    if not lines:
+        return ""
+    return ("devkit · escape hatches used in this session, each recorded as guard.bypass in the audit trail: you "
+            "used " + "; ".join(lines) + ". Say so in your report when it mattered.")
+
+
 def guard(agent: str):
     if os.environ.get("DEVKIT_GUARD", "").lower() == "off":
+        try:
+            _guard_off(agent, _stdin_json())
+        except Exception:
+            _log(f"guard off {agent}: {traceback.format_exc()[-300:]}")
         return
     data = _stdin_json()
     headless = _headless()  # devkit's own headless call: judged, never recorded
@@ -1268,7 +1457,8 @@ def guard(agent: str):
     verdict = _hook_forgery(data) or \
         g.check(data.get("tool_name") or "", data.get("tool_input") or {}, data.get("cwd") or os.getcwd(), agent)
     if not verdict:
-        verdict = _identity_verdict(data) or _crew_limits(agent, data) or _stub_commit_gate(data)
+        verdict = _identity_verdict(data) or _crew_limits(agent, data) or _stub_commit_gate(data) or \
+            _irreversible_main(agent, data)
     if verdict and (verdict[0] == "deny" or agent == "codex"):  # Codex turns ask into deny below
         _close_call(data)  # a refused call never runs: it leaves no open entry
     if not verdict:
@@ -1283,8 +1473,9 @@ def guard(agent: str):
             _log(f"guard {agent} deny: {why[:160]}")
             _close_call(data)
             from . import audit
-            audit.record("guard.deny", (data.get("tool_input") or {}).get("file_path") or "", why[:400], "deny",
-                         tool=data.get("tool_name") or "", rule="crew-scope", agent_id=data.get("agent_id") or "")
+            audit.record("guard.deny", (data.get("tool_input") or {}).get("file_path") or data.get("tool_name") or "",
+                         why[:400], "deny", tool=data.get("tool_name") or "", rule="crew-scope",
+                         agent_id=data.get("agent_id") or "")
             print(json.dumps({"hookSpecificOutput": {"hookEventName": "PreToolUse", "permissionDecision": "deny",
                                                      "permissionDecisionReason": _with_pitfalls(agent, data, why)}}))
             return
@@ -1298,7 +1489,7 @@ def guard(agent: str):
             _close_call(data)
             from . import audit
             audit.record("guard.deny", (data.get("tool_input") or {}).get("command", "")[:200], why, "deny",
-                         tool=data.get("tool_name") or "", rule="crew-lane", agent_id=data.get("agent_id") or "")
+                         tool=data.get("tool_name") or "", rule=_lane_rule(why), agent_id=data.get("agent_id") or "")
             print(json.dumps({"hookSpecificOutput": {"hookEventName": "PreToolUse", "permissionDecision": "deny",
                                                      "permissionDecisionReason": _with_pitfalls(agent, data, why)}}))
             return
@@ -1314,6 +1505,11 @@ def guard(agent: str):
                 _log(f"skills {agent}: appended required skills and known pitfalls to a subagent brief")
                 print(json.dumps({"hookSpecificOutput": _rewrite(agent, updated)}))
                 return
+        try:
+            _record_bypasses(agent, data)
+            _watch_writes(agent, data)
+        except Exception as e:
+            g.failopen("guard-allow", e)
         out = _with_context(agent, {"hookEventName": "PreToolUse"}, data)
         if out.get("additionalContext"):
             print(json.dumps({"hookSpecificOutput": out}))
@@ -1427,7 +1623,12 @@ def prompt(agent: str):
         if route:  # words never decide (C13): the catalog's ids do; this ranks a suggestion, in English only
             route = route.replace("devkit · ", "devkit · a guess from the request's words (English only; declare "
                                   "the kinds of work from the catalog) · ", 1)
-    _context_out("UserPromptSubmit", "\n\n".join(x for x in (extra, granted, route, text) if x))
+    hatches = ""
+    try:
+        hatches = bypass_context(agent, sid)
+    except Exception:
+        _log(f"prompt hatches {agent}: {traceback.format_exc()[-300:]}")
+    _context_out("UserPromptSubmit", "\n\n".join(x for x in (extra, granted, hatches, route, text) if x))
 
 
 DELIVERY = re.compile(r"\bgit\s+(?:-C\s+\S+\s+)?(commit|push|merge|tag|rebase|cherry-pick|revert)\b|"
@@ -1527,6 +1728,7 @@ def post_tool(agent: str):
     ends the turn, show the status block the final message opens with."""
     from . import progress
     data = _stdin_json()
+    _check_writes(agent, data)
     _close_call(data)
     try:
         if data.get("tool_name") in ("Agent", "Task"):  # the launch names the agent it started: an exact binding
@@ -1579,6 +1781,7 @@ def post_tool_failure(agent: str):
     that failed or was interrupted has ended: it leaves the call ledger."""
     from . import progress
     data = _stdin_json()
+    _check_writes(agent, data)  # a call that failed may have written too
     _close_call(data)
     if data.get("tool_name") in ("Agent", "Task", "spawn_agent"):
         progress.launch_failed(agent, data)
@@ -1835,6 +2038,9 @@ def run(event: str, agent: str) -> int:
         fn(agent)
     except SystemExit:
         raise
-    except Exception:  # fail open: never break the agent session
+    except Exception as e:  # fail open: never break the agent session
         _log(f"{event} {agent} error:\n{traceback.format_exc()}")
+        if event == "guard":  # the guard failed open: recorded, so a rule that never runs is seen (spec G12)
+            from . import guard as g
+            g.failopen("guard-hook", e)
     return 0

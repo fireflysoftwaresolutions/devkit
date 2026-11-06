@@ -24,14 +24,6 @@ def owned(owner, *items):
 # Drift that exists today, each with the review finding, its owner and the task or plan step that removes it.
 # Plan steps are those of the 26.11.3 run ("step 17 crew docs" is `dev progress` step 17).
 KNOWN = {
-    "D3": {# the guard's F7 allowlist (ca3bdad), F8 escape hatches (165a8b4) and F5 gate (d9b2ef2) await their calls
-           # from hooks.py (worktree_state has one: the crew gates read the worktree diff since a lane started);
-           # progress.py calls target_matches and preapproval_problem through getattr until Tank imports them
-           **owned("found by D3 · Backend engineer (Tank) · step F7 F8 hooks wiring",
-                   "guard.scope_base", "guard.scope_owner_across", "guard.written_paths",
-                   "guard.member_tool_verdict", "guard.record_bypasses", "guard.stubs_accepted",
-                   "guard.irreversible_verdict", "guard.irreversible_tool_verdict", "guard.target_matches",
-                   "guard.preapproval_problem")},
     "D7": owned("R2-9 · the developer approves plan and scope once F6 accepts “developer” as an approver · "
                 "step 36 F6 step endings and approvals",
                 "plan: A morpheus in R", "scope: A hamann in R"),
