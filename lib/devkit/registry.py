@@ -374,18 +374,20 @@ def live_sessions(max_age_s: int = 6 * 3600) -> list:
             s = json.loads(f.read_text())
         except (OSError, ValueError):
             continue
-        top = s.get("top") or ""
-        if not top or core.is_temp(top):
-            continue
-        main = main_of(Path(top)) or Path(top)
-        pid = core.project_identity(main, gitout(main, "config", "--get", "remote.origin.url"))[0]
-        run = None
+        run, r_ = None, None
         try:
             from . import progress
             r_ = progress.load_run(s.get("agent") or "", s.get("session") or "")
             run = progress.brief(r_) if r_ else None
         except Exception:
             pass
+        top = s.get("top") or ""
+        if not top and r_ and r_.get("project"):  # a session started outside a repo that works in one
+            top = str(core.DEV / r_["project"]) if (core.DEV / r_["project"]).exists() else ""
+        if not top or core.is_temp(top):
+            continue
+        main = main_of(Path(top)) or Path(top)
+        pid = core.project_identity(main, gitout(main, "config", "--get", "remote.origin.url"))[0]
         out.append({"agent": s.get("agent"), "project": pid, "branch": gitout(top, "branch", "--show-current")
                     or s.get("branch"), "started": int(s.get("started") or 0), "last_seen": int(f.stat().st_mtime),
                     "status": s.get("status", ""), "path": top, "active": is_active(top),
