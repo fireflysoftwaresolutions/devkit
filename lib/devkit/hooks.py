@@ -12,6 +12,7 @@ errors, logs them to ~/.local/state/devkit/logs/hooks.log and exits 0.
 """
 from __future__ import annotations
 
+import copy
 import io
 import json
 import re
@@ -22,7 +23,7 @@ import time
 import traceback
 from pathlib import Path
 
-from . import core
+from . import core, state
 from .core import DEV, HANDOFF, STATE, tilde
 
 STOP_DEBOUNCE_S = 120  # session line, lock renewal and presence at most every 2 min
@@ -47,12 +48,17 @@ def _stdin_json() -> dict:
 
 
 def _session_file(agent: str, sid: str) -> Path:
+    """The session's record. It is written only through state (update, or patch for a copy read earlier)."""
     return STATE / "sessions" / f"{agent}-{sid}.json"
 
 
-def _session_lock(agent: str, sid: str) -> core.Lock:
-    """The lock progress.note_agent_launch and on_subagent hold while they change this session's record."""
-    return core.Lock(f"session-{agent}-{re.sub(r'[^A-Za-z0-9_-]', '', sid or '-')[:80]}", wait=2)
+def _patch_quietly(path: Path, before: dict, after: dict):
+    """state.patch for a hook that goes on whatever happens: a busy or unreadable record drops this hook's change
+    whole (state audits it), and the hook still answers."""
+    try:
+        state.patch(path, before, after)
+    except state.StateBusy:
+        pass
 
 
 def _spawn(args, logname="sync.log"):
@@ -218,13 +224,16 @@ def context_for(cwd: str, agent: str) -> str:
 def _register_session(agent: str, sid: str, cwd: str, data: dict = None) -> Path:
     f = _session_file(agent, sid)
     if not f.exists():
-        top = core.gitout(cwd, "rev-parse", "--show-toplevel")
-        f.parent.mkdir(parents=True, exist_ok=True)
+        top = core.gitout(cwd, "rev-parse", "--show-toplevel")  # git before the lock
         from .canary import surface
-        f.write_text(json.dumps({"agent": agent, "session": sid, "cwd": cwd, "top": top, "started": time.time(),
-                                 "surface": surface(agent, data),
-                                 "head": core.gitout(top, "rev-parse", "HEAD") if top else "",
-                                 "branch": core.gitout(top, "branch", "--show-current") if top else ""}))
+        rec = {"agent": agent, "session": sid, "cwd": cwd, "top": top, "started": time.time(),
+               "surface": surface(agent, data),
+               "head": core.gitout(top, "rev-parse", "HEAD") if top else "",
+               "branch": core.gitout(top, "branch", "--show-current") if top else ""}
+        try:  # the one writer that creates a session record; one another hook created meanwhile stays
+            state.update(f, lambda d: state.SKIP if d else rec)
+        except state.StateBusy:
+            pass
     return f
 
 
@@ -235,10 +244,13 @@ def session_start(agent: str):
     f = _register_session(agent, sid, cwd, data)
     try:  # the project id (timing, progress) and DEVKIT_SESSION for this session's shell commands (Claude)
         from . import progress
-        rec = core.read_json(f, {}) or {}
+        rec = state.read(f) or {}
         if not rec.get("project") and rec.get("top") and not core.is_temp(rec["top"]):
-            rec["project"] = progress._project(cwd)
-            f.write_text(json.dumps(rec))
+            project = progress._project(cwd)  # git, before the lock
+            try:
+                state.update(f, lambda d: d.update(project=project), create=False)
+            except state.StateBusy:
+                pass  # audited by state; DEVKIT_SESSION below matters more
         env_file = os.environ.get("CLAUDE_ENV_FILE")
         if env_file:
             with open(env_file, "a") as fh:
@@ -488,7 +500,8 @@ def stop(agent: str):
     sf = _session_file(agent, sid)
     out = {}
     if sf.exists():  # only sessions that started with devkit active (they loaded the global instructions)
-        sess = core.read_json(sf, {}) or {}
+        sess = state.read(sf) or {}
+        before = copy.deepcopy(sess)  # the gates below take seconds: only what this hook changes is written back
         reasons = []
         try:  # devkit's process is for development turns only (a recipe or a consulting deck gets nothing)
             from . import scope
@@ -580,7 +593,7 @@ def stop(agent: str):
             from . import progress
             progress.on_turn_end(agent, sid, sess)
             sess["turn_started"] = None
-        sf.write_text(json.dumps(sess))
+        _patch_quietly(sf, before, sess)  # a subagent that started meanwhile stays; an ended session stays ended
     if out:
         print(json.dumps(out))
     if sid == "-":
@@ -976,11 +989,13 @@ def prompt(agent: str):
     try:  # development or not? A follow-up with no signal keeps the previous turn's class
         from . import scope
         sf0 = _session_file(agent, sid) if sid else None
-        s0 = (core.read_json(sf0, {}) or {}) if sf0 and sf0.exists() else {}
+        s0 = (state.read(sf0) or {}) if sf0 and sf0.exists() else {}
         cls = scope.resolve(raw, s0.get("turn_class"))
         if sf0 and sf0.exists():
-            s0["turn_class"] = cls
-            sf0.write_text(json.dumps(s0))
+            try:
+                state.update(sf0, lambda d: d.update(turn_class=cls), create=False)
+            except state.StateBusy:
+                pass  # audited by state; this turn is still classified
     except Exception:
         cls = None
     if cls == "other":  # a recipe, a general question, consulting work: no devkit context, reminders or skills
@@ -1138,14 +1153,11 @@ def post_tool(agent: str):
     try:
         sf = _session_file(agent, data.get("session_id") or "-")
         if sf.exists():  # only sessions that started with devkit active
-            sess = core.read_json(sf, {}) or {}
+            sess = state.read(sf) or {}
+            before = copy.deepcopy(sess)
             closing = closing_reminder(data, sess, time.time())
-            if closing:  # only the reminder's field, on a fresh copy: a background launch's SubagentStart runs at the
-                with _session_lock(agent, data.get("session_id") or "-"):  # same moment and claims its launch entry
-                    fresh = core.read_json(sf, None)
-                    if isinstance(fresh, dict):
-                        fresh["closing_nudge"] = sess.get("closing_nudge")
-                        sf.write_text(json.dumps(fresh))
+            if closing:  # only what the reminder changed, on the fresh record: a background launch's SubagentStart
+                _patch_quietly(sf, before, sess)  # runs at the same moment and claims its launch entry
     except Exception:
         _log(f"post-tool closing {agent}: {traceback.format_exc()[-300:]}")
     _context_out("PostToolUse", "\n\n".join(x for x in (_bulk_rewrite_note(data), closing,
@@ -1188,7 +1200,8 @@ def subagent_stop(agent: str):
     try:
         sid = data.get("session_id") or "-"
         sf = _session_file(agent, sid)
-        sess = (core.read_json(sf, {}) or {}) if sf.exists() else None
+        sess = (state.read(sf) or {}) if sf.exists() else None
+        before = copy.deepcopy(sess)  # the report check reads the transcript: only this hook's changes are written
         aid = data.get("agent_id") or ""
         if sess is not None and sess.get("turn_class") != "other":
             from . import canary
@@ -1206,13 +1219,13 @@ def subagent_stop(agent: str):
                               if ln.strip()), "")
                 if aid in pending and canary.MARKER_RE.match(first):
                     canary.record_corrected(agent, sid, pid, f"crew {pending.pop(aid)}")
-                    sf.write_text(json.dumps(sess))
+                    _patch_quietly(sf, before, sess)
             elif not canary.check_subagent(agent, data, sess, pid, name) and \
                     core.CFG.get("canary", {}).get("enforce", True):  # off: measured, not sent back
                 from . import audit
                 audit.record("canary.crew-miss", pid or "", f"{name}'s report had no status block", "miss")
                 pending[aid] = name
-                sf.write_text(json.dumps(sess))
+                _patch_quietly(sf, before, sess)
                 out = {"decision": "block", "reason":
                        f"devkit · end your report with your status block first, exactly: **[Firefly> DevKit · {_who(name)}]** "
                        f"<project> · `<branch>` · <task>, then - **Done:**, - **Check:** (✓/⚠/✗ + evidence) and "
@@ -1223,7 +1236,7 @@ def subagent_stop(agent: str):
                 from . import audit  # the crew talks through devkit: the step's evidence goes in the run, live
                 audit.record("crew.unreported", pid or "", f"{name} stopped without dev progress step", "miss")
                 sess["crew_comms"][aid] = name
-                sf.write_text(json.dumps(sess))
+                _patch_quietly(sf, before, sess)
                 out = {"decision": "block", "reason":
                        f"devkit · {_who(name)}, record your work through devkit before you stop: `dev progress step "
                        f"\"<what finished>\" --check \"<evidence>\"` (it goes to your lane, and Morpheus and the "
@@ -1380,6 +1393,7 @@ def run(event: str, agent: str) -> int:
     fn = HANDLERS.get(event)
     if not fn:
         return 0
+    state.WAIT, state.SAY_BUSY = state.HOOK_WAIT, False  # a hook waits at most 2 s for a record, silently
     try:
         (STATE / "logs").mkdir(parents=True, exist_ok=True)
         fn(agent)

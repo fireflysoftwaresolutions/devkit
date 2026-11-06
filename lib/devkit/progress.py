@@ -33,7 +33,7 @@ import statistics
 import time
 from pathlib import Path
 
-from . import core, ui
+from . import core, state, ui
 from .core import STATE
 
 RUNS = STATE / "runs"
@@ -74,21 +74,34 @@ def run_path(agent: str, sid: str) -> Path:
     return RUNS / f"{agent}-{sid}.json"
 
 
+def session_path(agent: str, sid: str) -> Path:
+    return SESSIONS / f"{agent}-{sid}.json"
+
+
 def load_run(agent: str, sid: str):
-    return core.read_json(run_path(agent, sid), None)
+    """The session's run, or None. Inside the record's lock (a writer that will save it), a run that does not parse
+    raises state.StateBusy instead of reading as missing, so it is never written over."""
+    p = run_path(agent, sid)
+    return state.load(p) if state.held(p) else core.read_json(p, None)
+
+
+def _tx(agent: str, sid: str):
+    """The session's lock around `load_run → change → _save` (state.hold): the run is read and written inside one
+    hold, so no other hook or command changes it in between. No git, subprocess or network call inside it."""
+    return state.hold(run_path(agent, sid))
 
 
 def _save(run: dict, touch_session: bool = True):
+    """Write the run atomically through state. The caller loaded it inside the same _tx."""
     p = run_path(run["agent"], run["session"])
-    p.parent.mkdir(parents=True, exist_ok=True)
-    tmp = p.with_suffix(".tmp")
-    tmp.write_text(json.dumps(run, indent=1))
-    os.replace(tmp, p)  # hooks and dev progress write the same run: never leave half a file
-    sf = SESSIONS / f"{run['agent']}-{run['session']}.json"
-    if touch_session and sf.exists():  # the session's last update to the developer
-        s = core.read_json(sf, {}) or {}
-        s["last_update"] = time.time()
-        sf.write_text(json.dumps(s))
+    with state.hold(p):
+        state.replace(p, run, indent=1)
+        if touch_session:  # the session's last update to the developer
+            try:
+                state.update(session_path(run["agent"], run["session"]),
+                             lambda s: s.update(last_update=time.time()), create=False)
+            except state.StateBusy:
+                pass  # audited by state; the run itself is saved
 
 
 # --------------------------------------------------------------------------- estimates and history
@@ -1538,8 +1551,10 @@ def on_prompt(agent: str, data: dict):
     f, s = _sess(agent, sid)
     now = time.time()
     if f.exists():
-        s.update({"turn_started": now, "last_update": now, "nudges": 0})
-        f.write_text(json.dumps(s))
+        try:
+            state.update(f, lambda d: d.update({"turn_started": now, "last_update": now, "nudges": 0}), create=False)
+        except state.StateBusy:
+            pass  # audited by state: this prompt's clock is dropped, the hook still answers
     _run_event(agent, sid, lambda run: (_close(run, "turn", None, now), _open(run, "turn", "main", now)))
     prompt = (data.get("prompt") or "")[:400]
     mail = "\n\n".join(x for x in (messages_context(agent, sid, "main"), decisions_context(agent, sid),
@@ -1640,8 +1655,10 @@ def on_tool_done(agent: str, data: dict):
     quiet = (now - last) / 60
     if quiet < cfg()["nudge_minutes"] or (s.get("nudges") or 0) >= 6:
         return mail or None
-    s["last_nudge"], s["nudges"] = now, (s.get("nudges") or 0) + 1
-    f.write_text(json.dumps(s))
+    try:
+        state.update(f, lambda d: d.update(last_nudge=now, nudges=(d.get("nudges") or 0) + 1), create=False)
+    except state.StateBusy:
+        pass  # audited by state; the nudge still goes out
     run = load_run(agent, sid)
     where = f" ({headline(run)})" if run else ""
     nudge = (f"devkit · {fmt_min(quiet)} since your last update to the developer{where}. Send an update (it prints "
@@ -1653,32 +1670,36 @@ def on_tool_done(agent: str, data: dict):
 
 
 def _run_event(agent, sid, fn):
-    """Apply fn to this session's live run (running or blocked) and save it. Never raises."""
+    """Apply fn to this session's live run (running or blocked) and save it, under the session's lock. Never raises:
+    a run that is busy or does not parse drops the event (state audits it)."""
     try:
-        run = load_run(agent, sid)
-        if not run or run.get("state") == "done":
-            return
-        run = normalize(run)
-        expire_stale(run)
-        fn(run)
-        _save(run, touch_session=False)
+        with _tx(agent, sid):
+            run = load_run(agent, sid)
+            if not run or run.get("state") == "done":
+                return
+            run = normalize(run)
+            expire_stale(run)
+            fn(run)
+            _save(run, touch_session=False)
     except Exception:
         pass
 
 
 def note_agent_launch(agent: str, data: dict, now: float | None = None):
-    """PreToolUse of a subagent launch; see _note_agent_launch. Serialized per session: parallel launches and
-    starts run in separate hook processes that update the same session file."""
-    with core.Lock(f"session-{agent}-{re.sub(r'[^A-Za-z0-9_-]', '', data.get('session_id') or '-')[:80]}", wait=5):
+    """PreToolUse of a subagent launch; see _note_agent_launch. Serialized per session (state.hold): parallel
+    launches and starts run in separate hook processes that update the same session record."""
+    with state.hold(session_path(agent, data.get("session_id") or "-")):
         return _note_agent_launch(agent, data, now)
 
 
 def _note_agent_launch(agent: str, data: dict, now: float | None = None):
     """PreToolUse of a subagent launch (Claude's Agent/Task, Codex's spawn_agent): remember its description, so the
-    SubagentStart that follows gets a readable label and the plan step assigned to that label."""
+    SubagentStart that follows gets a readable label and the plan step assigned to that label. Runs under
+    note_agent_launch's hold."""
     sid = data.get("session_id") or "-"
-    f, s = _sess(agent, sid)
-    if not f.exists():
+    f = session_path(agent, sid)
+    s = state.load(f)
+    if s is None:
         return
     inp = data.get("tool_input") or {}
     label = inp.get("description") or inp.get("nickname") or inp.get("name") or \
@@ -1693,7 +1714,7 @@ def _note_agent_launch(agent: str, data: dict, now: float | None = None):
         return  # the same launch recorded twice
     q.append(entry)
     s["pending_agents"] = q
-    f.write_text(json.dumps(s))
+    state.replace(f, s)
 
 
 LAUNCH_TTL = 15 * 60  # a launch whose SubagentStart never came does not label a later subagent
@@ -1719,15 +1740,17 @@ def _launch_description(data: dict) -> str:
 
 
 def on_subagent(agent: str, data: dict, started: bool, now: float | None = None):
-    """SubagentStart / SubagentStop; see _on_subagent. Serialized per session like note_agent_launch."""
-    with core.Lock(f"session-{agent}-{re.sub(r'[^A-Za-z0-9_-]', '', data.get('session_id') or '-')[:80]}", wait=5):
+    """SubagentStart / SubagentStop; see _on_subagent. Serialized per session like note_agent_launch: one hold covers
+    the session record and the run (the run's save inside re-enters it)."""
+    with state.hold(session_path(agent, data.get("session_id") or "-")):
         return _on_subagent(agent, data, started, now)
 
 
 def _on_subagent(agent: str, data: dict, started: bool, now: float | None = None):
     sid = data.get("session_id") or "-"
-    f, s = _sess(agent, sid)
-    if not f.exists():
+    f = session_path(agent, sid)
+    s = state.load(f)  # under on_subagent's hold
+    if s is None:
         return
     now = now or time.time()
     subs = s.setdefault("subagents", {})
@@ -1790,7 +1813,7 @@ def _on_subagent(agent: str, data: dict, started: bool, now: float | None = None
             run["step"] = sum(1 for x in run.get("plan") or [] if x.get("state") in ("done", "skipped"))
             _advance_main(run, now)
         _run_event(agent, sid, finish)
-    f.write_text(json.dumps(s))
+    state.replace(f, s)
 
 
 def crew_working(run: dict) -> list:

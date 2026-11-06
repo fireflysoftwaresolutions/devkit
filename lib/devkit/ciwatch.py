@@ -30,7 +30,7 @@ import subprocess
 import time
 from pathlib import Path
 
-from . import core
+from . import core, state
 from .core import STATE
 
 WATCH = STATE / "ci" / "watch"
@@ -226,12 +226,9 @@ def deliver(agent: str, sid: str, res: dict):
             os.environ["DEVKIT_SESSION"] = f"{agent}:{sid}"
             progress.crew_ask(text, to="main", from_agent="ci")
             return
-        f = progress.SESSIONS / f"{agent}-{sid}.json"
-        if f.exists():
-            s = core.read_json(f, {}) or {}
-            s.setdefault("ci_events", []).append({"ts": res["ts"], "text": text, "seen": False})
-            s["ci_events"] = s["ci_events"][-10:]
-            f.write_text(json.dumps(s))
+        ev = {"ts": res["ts"], "text": text, "seen": False}
+        state.update(progress.SESSIONS / f"{agent}-{sid}.json",  # the append on the fresh record
+                     lambda s: s.update(ci_events=((s.get("ci_events") or []) + [ev])[-10:]), create=False)
     except Exception:
         pass
 
@@ -241,13 +238,17 @@ def pending_events(agent: str, sid: str) -> str:
     try:
         from . import progress
         f = progress.SESSIONS / f"{agent}-{sid}.json"
-        s = core.read_json(f, {}) or {} if f.exists() else {}
-        new = [e for e in s.get("ci_events") or [] if not e.get("seen")]
-        if not new:
-            return ""
-        for e in new:
-            e["seen"] = True
-        f.write_text(json.dumps(s))
+        if not any(not e.get("seen") for e in (state.read(f) or {}).get("ci_events") or []):
+            return ""  # the usual case, without the lock
+        new = []
+
+        def take(s):
+            new.extend(e for e in s.get("ci_events") or [] if not e.get("seen"))
+            if not new:
+                return state.SKIP
+            for e in new:
+                e["seen"] = True
+        state.update(f, take, create=False)
         return "\n\n".join(e["text"] for e in new)
     except Exception:
         return ""
