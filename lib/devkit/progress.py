@@ -543,8 +543,10 @@ def assign(which, label: str, cwd: str | None = None, now: float | None = None, 
                                     f"owns while working ({', '.join(lane.get('scope'))}). Give each member "
                                     f"different files, or wait until they finish.")
         s["scope"] = globs
-    lane_id = next((k for k, v in (run.get("agents") or {}).items() if v.get("state") == "running" and
-                    _label_matches(label, v)), None)
+    deps_open = [a for a in s.get("after") or [] if any(x["name"] == a and x.get("state") not in ("done", "skipped")
+                                                         for x in run.get("plan") or [])]
+    lane_id = None if deps_open else next((k for k, v in (run.get("agents") or {}).items()
+                                           if v.get("state") == "running" and _label_matches(label, v)), None)
     if lane_id:
         s.update(owner=lane_id, state="running", started=s.get("started") or now)
         if s.get("scope"):

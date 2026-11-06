@@ -216,6 +216,16 @@ class AssignmentTests(unittest.TestCase):
         self.assertEqual(run["agents"]["x1"]["label"], "Sati: dashboard screens")
         self.assertEqual(next(s for s in run["plan"] if s["name"] == "agent lifecycle design")["owner"], "y2")
 
+    def test_a_step_waits_for_its_dependencies_even_when_its_member_is_already_working(self):
+        pg.start("Work", plan=["lifecycle design", "journey design=1h after lifecycle design"], now=self.m(0))
+        pg.assign("lifecycle design", "The Architect", now=self.m(0))
+        pg.note_agent_launch("claude", {"session_id": "s1", "tool_input": {"description": "The Architect: lifecycle"}})
+        pg.on_subagent("claude", {"session_id": "s1", "agent_id": "a1", "agent_type": "devkit:architect"}, True,
+                       now=self.m(1))
+        run = pg.assign("journey design", "The Architect", now=self.m(2))
+        journey = run["plan"][1]
+        self.assertEqual((journey["state"], journey.get("owner") or "main"), ("pending", "main"))  # waits
+
     def test_a_step_reassigned_away_from_a_running_member_leaves_its_lane(self):
         pg.start("Work", plan=["installer", "dashboard server"], now=self.m(0))
         pg.assign("installer", "Kid", now=self.m(0))
