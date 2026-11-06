@@ -367,6 +367,9 @@ class CrewCoordinationTests(unittest.TestCase):
                 self.assertEqual(stop(fixed), "")
                 self.assertEqual(canary.by_member(1), {"Neo": (0, 1)})  # the first report missed; it stays a miss
                 self.assertEqual(canary.corrected(1), 1)  # and the correction is on record
+                with mock.patch.dict(hooks.core.CFG, {"canary": {"enforce": False}}):
+                    self.assertEqual(stop(dict(launched, agent_id="a2")), "")  # measured, not sent back
+                self.assertEqual(canary.by_member(1), {"Neo": (0, 2)})
             finally:
                 canary.LOG, hooks._session_file = saved, saved_sf
 

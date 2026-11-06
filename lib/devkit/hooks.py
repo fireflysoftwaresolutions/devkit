@@ -1046,7 +1046,8 @@ def subagent_stop(agent: str):
                 if aid in pending and canary.MARKER_RE.match(first):
                     canary.record_corrected(agent, sid, pid, f"crew {pending.pop(aid)}")
                     sf.write_text(json.dumps(sess))
-            elif not canary.check_subagent(agent, data, sess, pid, name):
+            elif not canary.check_subagent(agent, data, sess, pid, name) and \
+                    core.CFG.get("canary", {}).get("enforce", True):  # off: measured, not sent back
                 from . import audit
                 audit.record("canary.crew-miss", pid or "", f"{name}'s report had no status block", "miss")
                 pending[aid] = name
