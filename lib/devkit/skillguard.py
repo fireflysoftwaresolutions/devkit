@@ -185,13 +185,21 @@ def on_agent_brief(agent: str, tool_input: dict):
         for s in required(r, "claude"):
             if s in have and not re.search(rf"\b{re.escape(s)}\b", brief, re.I):
                 need.append((s, r["why"]))
-    if not need:
+    extra = ""
+    if need:
+        seen = dict.fromkeys(need)
+        extra = "\n\n## devkit · required skills\nBefore you start, load each of these with the Skill tool and follow " \
+                "it (if the Skill tool is not available, read its SKILL.md under ~/.claude):\n" + \
+                "\n".join(f"- `{s}` — {why}" for s, why in seen) + \
+                "\nSay in your report which ones you loaded and how you applied them."
+    if "Firefly> DevKit" not in brief:  # every crew member reports the same way (the SubagentStop hook checks it)
+        name = (tool_input.get("description") or "").split(":")[0].strip() or "Agent"
+        extra += (f"\n\n## devkit · your report\nStart your final report with your status block: **[Firefly> DevKit · "
+                  f"{name[:30]}]** <project> · `<branch>` · <task>, then - **Done:**, - **Check:** (✓/⚠/✗ + "
+                  f"evidence) and - **Next:**. Record progress with `dev progress step \"…\"` (it goes to your own "
+                  f"lane) and ask Morpheus with `dev crew ask \"…\"` when you need a decision.")
+    if not extra:
         return None
-    seen = dict.fromkeys(need)
-    extra = "\n\n## devkit · required skills\nBefore you start, load each of these with the Skill tool and follow it " \
-            "(if the Skill tool is not available, read its SKILL.md under ~/.claude):\n" + \
-            "\n".join(f"- `{s}` — {why}" for s, why in seen) + \
-            "\nSay in your report which ones you loaded and how you applied them."
     return {**tool_input, "prompt": brief + extra}
 
 

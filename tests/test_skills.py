@@ -26,6 +26,23 @@ class SkillRuleTests(unittest.TestCase):
     def tearDown(self):
         sg.installed = self._installed
 
+    def test_ui_skills_need_design_intent_not_just_the_word_dashboard(self):
+        for text in ("podriamos abrir el dashboard y asi veo como avanzamos?", "open the dashboard",
+                     "y como ha quedado al final el dashboard!"):
+            self.assertNotIn("frontend-design", sg.on_prompt("claude", text, {}), text)
+        for text in ("Mejora el dashboard, es demasiado cargante", "redesign the settings page",
+                     "fix the css of the header"):
+            self.assertIn("frontend-design", sg.on_prompt("claude", text, {}), text)
+
+    def test_tests_and_pipelines_need_their_skills(self):
+        saved = sg.installed
+        sg.installed = lambda agent: {"testing", "cicd", "github-actions-hardening", "delivery"}
+        try:
+            self.assertIn("testing", sg.on_prompt("codex", "add unit tests for the parser", {}))
+            self.assertIn("cicd", sg.on_prompt("claude", "set up a GitLab CI pipeline", {}))
+        finally:
+            sg.installed = saved
+
     def test_prompt_names_missing_skills(self):
         text = sg.on_prompt("claude", "Redesign the dashboard UI and update the docs", {})
         self.assertIn("frontend-design", text)
@@ -42,7 +59,12 @@ class SkillRuleTests(unittest.TestCase):
         self.assertIn("## devkit · required skills", upd["prompt"])
         self.assertIn("`frontend-design`", upd["prompt"])
         self.assertIsNone(sg.on_agent_brief("claude", upd))  # not appended twice
-        self.assertIsNone(sg.on_agent_brief("claude", {"prompt": "Use frontend-design and impeccable to rework the layout"}))
+        named = sg.on_agent_brief("claude", {"prompt": "Use frontend-design and impeccable to rework the layout",
+                                             "description": "Trinity: rework the layout"})
+        self.assertNotIn("required skills", named["prompt"])  # the skills are named already
+        self.assertIn("**[Firefly> DevKit · Trinity]**", named["prompt"])  # every crew member reports the same way
+        self.assertIsNone(sg.on_agent_brief("claude", {"prompt": "Use frontend-design and impeccable to rework the "
+                                                                 "layout. End with **[Firefly> DevKit · Trinity]**"}))
         self.assertIsNone(sg.on_agent_brief("codex", {"prompt": "Rework the dashboard layout"}))
 
     def test_rules_for_files_by_path_and_content(self):
