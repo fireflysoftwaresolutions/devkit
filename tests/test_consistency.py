@@ -25,15 +25,9 @@ def owned(owner, *items):
 # Plan steps are those of the 26.11.3 run ("step 17 crew docs" is `dev progress` step 17).
 KNOWN = {
     "D1": owned("R2-5 · QA engineer (Mouse): a test that calls the function · Morpheus to assign (M102)",
-                "A run ends only after each Accountable member approved",
-                "No step starts before its dependencies are done",
-                "Only Morpheus plans, assigns, decides and changes the mode",
-                "A forged HOME, DEVKIT_CONFIG or dev link cannot point devkit at fake state",
-                "Team changes to the crew carry a reason"),
-    "D3": {**owned("R2-1 · Backend engineer (Tank) · step 62 language-neutral hooks",
-                   "crew.catalog", "lessons.for_call", "lessons.for_output"),
-           **owned("found by D3, not in review 2 · wire or remove · Morpheus to assign (M102)",
-                   "lessons.stats_json")},
+                "E-approvals", "E-deps", "E-main-only", "E-forged-env", "E-team-reason"),
+    "D3": owned("R2-1 · Backend engineer (Tank) · step 62 language-neutral hooks",
+                "crew.catalog", "lessons.for_call", "lessons.for_output"),
     "D4": {**owned("R2-13 · Technical writer (Ghost) · step 17 crew docs",
                    "commands.md: dev progress assign --activity", "commands.md: dev crew brief --activity",
                    "commands.md: dev lesson add --file", "commands.md: dev lesson add --command",
@@ -59,22 +53,10 @@ KNOWN = {
     "D6": owned("R2-13 · Technical writer (Ghost) · step 17 crew docs",
                 "ai", "crew.gates.enforce", "crew.route_hint", "dashboard.idle_minutes", "progress.max_depth",
                 "progress.quota_percent"),
-    "D7": {**owned("R2-9 · Tech lead (Morpheus) with dev crew raci --set; Kid makes raci.check refuse them",
-                   "cicd: A keymaker in C", "performance: A morpheus in I", "tooling: ghost in C and I",
-                   "release: ghost in C and I", "plan: A morpheus in R", "scope: A hamann in R",
-                   "incident: A lock in R"),
-           **owned("R2-9 · a second approver for compliance is the developer's decision",
-                   "compliance: A persephone in R"),
-           **owned("R2-8 · Tech lead (Morpheus) with dev crew raci --set", "lookup: no skill")},
-    "D9": owned("R2-6 · Tech lead (Morpheus) for the roster, DevEx engineer (Kid) for gates.py",
-                "architect Record: proof dev plan", "trainman Prove: proof dev ci"),
-    "D10": owned("R2-10 · DevEx engineer (Kid): FILE_HINTS globs, or `no_files` with its reason",
-                 *(a + ": no file anchor" for a in (
-                     "accessibility", "ai", "architecture", "backup", "codebase", "compliance", "data-analysis",
-                     "dependencies", "design-system", "feature", "i18n", "incident", "lookup", "migration",
-                     "performance", "plan", "redteam", "release", "requirements", "research", "review", "scope",
-                     "security", "sso", "ux"))),
-    "D11": owned("R2-5 · Tech lead (Morpheus) gives the matrix rows ids; Technical writer (Ghost) cites them · "
+    "D7": owned("R2-9 · the developer approves plan and scope once F6 accepts “developer” as an approver · "
+                "step 36 F6 step endings and approvals",
+                "plan: A morpheus in R", "scope: A hamann in R"),
+    "D11": owned("R2-5 · the matrix rows have ids (dev crew rules); Technical writer (Ghost) cites them · "
                  "step 17 crew docs",
                  "At most four members at once", "Separate files for parallel members", "A member stays in its scope",
                  "The main session respects a member's files", "Read-only members never edit", "No nested launches",
@@ -125,6 +107,15 @@ class RepositoryDrift(unittest.TestCase):
     # D10: every kind of work can be reached from files, or says it has none
     def test_d10_kinds_of_work_have_file_anchors(self):
         self.assert_known("D10", selfcheck.d10_file_anchors())
+
+    # D10: a kind of work's own `files` globs reach it as FILE_HINTS do; only one with neither and no reason is drift
+    def test_d10_an_activitys_own_files_reach_it(self):
+        roster = {"members": [{"id": "kid"}], "activities": [
+            {"id": "i18n", "R": ["kid"], "A": "kid", "files": ["**/locales/**"]},
+            {"id": "plan", "R": ["kid"], "A": "kid", "no_files": "plans live in the handoff repository"},
+            {"id": "lookup", "R": ["kid"], "A": "kid", "files": []}]}
+        found = selfcheck.d10_file_anchors(roster=roster, hints=[])
+        self.assertEqual([f.item for f in found], ["lookup: no file anchor"])
 
     # D11: each guardrail row of docs/crew.md cites the matrix row it describes
     def test_d11_guardrails_cite_the_matrix(self):

@@ -116,8 +116,10 @@ def proofs(m: dict) -> list:
     return [x["proof"] for x in m.get("procedure") or [] if isinstance(x, dict) and x.get("proof")]
 
 
-def check(data, known=None):
-    """-> (errors, warnings) for a roster. Unknown skills are warnings: the skill may come from elsewhere."""
+def check(data, known=None, agents=()):
+    """-> (errors, warnings) for a roster. Unknown skills are warnings: the skill may come from elsewhere. `agents`
+    ("claude", "codex"): also warn about each skill the crew names that is not installed for that agent, with its
+    install group and command (selfcheck D8). It reads this Mac's skill folders, so load() leaves it out."""
     if not isinstance(data, dict) or not isinstance(data.get("members"), list) or not data["members"]:
         return ["the roster needs a non-empty `members` list"], []
     errors, warnings = [], []
@@ -171,7 +173,26 @@ def check(data, known=None):
         errors.append("only one member can be `main`, not " + ", ".join(mains))
     from . import raci
     e2, w2 = raci.check(data)
+    if agents and not errors + e2:
+        from . import selfcheck
+        for agent in agents:
+            w2 += [f"{agent}: {f.evidence} · fix: {f.fix}"
+                   for f in selfcheck.d8_uninstalled_skills(agent, roster=data)]
     return errors + e2, warnings + w2
+
+
+def installed_agents() -> tuple:
+    """The agents devkit set up on this Mac (their home folder exists), whose installed skills `check` can verify."""
+    from . import selfcheck
+    return tuple(a for a, (home, _) in selfcheck.AGENT_HOMES.items() if Path(home).is_dir())
+
+
+def shown_warnings(roster) -> list:
+    """What `dev crew` and `dev crew sync` warn about: the roster's warnings, and the skills it names that this Mac
+    has not installed for an agent devkit set up."""
+    known = list(roster.get("warnings") or [])
+    extra = check(roster, agents=installed_agents())[1]
+    return known + [w for w in extra if w not in known]
 
 
 _CACHE = {}
@@ -391,10 +412,13 @@ def body(m: dict, roster=None, alias=None) -> str:
                    '`path:line` for every fact, mark what you inferred, and say `not found` rather than guess.')
     out += ["- Learn from mistakes with devkit's lesson manager: follow the prevention of the known pitfalls your brief "
             "lists; when you make or find a mistake that could repeat (a refused command you had to redo, a test you "
-            "broke, a wrong assumption), record it: `dev lesson add \"…\" --cause \"…\" --prevent \"…\"`, or `dev "
-            "lesson recur <id> --evidence \"…\"` when it is a known one." if shell else
+            "broke, a wrong assumption), record it with where it applies, so devkit recalls it in any language: "
+            "`dev lesson add \"…\" --cause \"…\" --prevent \"…\" --file <glob> --command \"<command words>\" "
+            "--error \"<text the output shows>\"`. A known one: `dev lesson recur <id> --evidence \"…\"`; one "
+            "without anchors: `dev lesson anchor <id> --file … --why \"…\"`." if shell else
             "- Learn from mistakes: follow the prevention of the known pitfalls your brief lists, and name in your "
-            "report any mistake that could repeat, so Morpheus records it as a lesson.",
+            "report any mistake that could repeat, with the files, commands or error text it applies to, so Morpheus "
+            "records it as a lesson with its anchors.",
             "- Launch a helper agent only for a narrow lookup or a slice of your own files: it gets your tool level "
             "and scope, never more, takes one of the crew slots, and cannot go deeper than progress.max_depth (2). "
             "When you need another specialist, say so in your report or ask Morpheus.", "",
@@ -409,50 +433,96 @@ def body(m: dict, roster=None, alias=None) -> str:
 
 # --------------------------------------------------------------------------- the enforcement matrix
 
-# Every rule a crew member or Morpheus is given, the devkit check that enforces it, and its state. "enforced" names
-# the function that does it (tests check it exists); "planned" names the plan step that adds it; "guidance" says why
-# it cannot be checked mechanically. `dev crew rules` prints it.
+# Every rule a crew member or Morpheus is given, the devkit check that enforces it, and its state: (id, rule, where,
+# check, state). The id (`E-…`) is stable, so docs cite it (selfcheck D11) and a reworded rule keeps it. "enforced"
+# names the function that does it (selfcheck D1: it imports and a test names it); "planned" names the plan step or
+# task that adds it (D2); "guidance" says why it cannot be checked mechanically. `dev crew rules` prints it.
 ENFORCEMENT = (
-    ("A member's report starts with its own status block", "SubagentStop: the crew canary", "devkit.hooks.subagent_stop", "enforced"),
-    ("Session and run records never lose a concurrent write", "every hook and dev command (one lock per session)",
-     "devkit.state.update", "enforced"),
-    ("A member records its work with dev progress step", "SubagentStop: lane without updates", "devkit.progress.lane_unreported", "enforced"),
-    ("A member edits only the files of its scope", "PreToolUse: Edit, Write, MultiEdit, apply_patch", "devkit.hooks._scope_violation", "enforced"),
-    ("A member's file scope also holds for shell writes", "PreToolUse: read-only shell allowlist", "F7 read-only shell allowlist", "planned"),
-    ("Review-only and read-only members never edit", "PreToolUse: the edit tools", "devkit.hooks._scope_violation", "enforced"),
-    ("A step goes to the member the RACI makes Responsible", "dev progress assign", "devkit.raci.check_assignment", "enforced"),
-    ("The RACI holds in any language", "kind-of-work tags, files and commands", "multilingual routing", "planned"),
-    ("A run ends only after each Accountable member approved", "dev progress done", "devkit.progress.approvals_owed", "enforced"),
-    ("An approval is an explicit verdict after the work", "dev progress done", "F6 step endings and approvals", "planned"),
-    ("A step closes only with its evidence", "dev progress step and SubagentStop", "F6 step endings and approvals", "planned"),
-    ("No step starts before its dependencies are done", "every step transition (start, add, assign, begin, advance, "
-     "subagent start, close, launch readiness)", "devkit.progress.deps_open", "enforced"),
-    ("A reopened dependency's finished dependents are rechecked before the run ends", "dev progress done",
+    ("E-status-block", "A member's report starts with its own status block", "SubagentStop: the crew canary",
+     "devkit.hooks.subagent_stop", "enforced"),
+    ("E-state-lock", "Session and run records never lose a concurrent write",
+     "every hook and dev command (one lock per session)", "devkit.state.update", "enforced"),
+    ("E-step-records", "A member records its work with dev progress step", "SubagentStop: lane without updates",
+     "devkit.progress.lane_unreported", "enforced"),
+    ("E-scope", "A member edits only the files of its scope", "PreToolUse: Edit, Write, MultiEdit, apply_patch",
+     "devkit.hooks._scope_violation", "enforced"),
+    ("E-shell-scope", "A member's file scope also holds for shell writes", "PreToolUse: read-only shell allowlist",
+     "F7 read-only shell allowlist", "planned"),
+    ("E-read-only", "Review-only and read-only members never edit", "PreToolUse: the edit tools",
+     "devkit.hooks._scope_violation", "enforced"),
+    ("E-separate-files", "Members working in parallel own separate files",
+     "dev progress assign (a scope that overlaps a working member's)", "devkit.progress.assign", "enforced"),
+    ("E-main-scope", "The main session does not edit a working member's files",
+     "PreToolUse: the edit tools (DEVKIT_SCOPE_OVERRIDE=1 for an emergency)", "devkit.hooks._crew_limits",
+     "enforced"),
+    ("E-responsible", "A step goes to the member the RACI makes Responsible", "dev progress assign",
+     "devkit.raci.check_assignment", "enforced"),
+    ("E-any-language", "The RACI holds in any language",
+     "a declared kind of work, the member's own kind, then the files (C13)", "devkit.raci.anchor", "enforced"),
+    ("E-words-never-refuse", "Words never refuse work: with no declared kind of work and no files, the member's "
+     "own kind decides (R2-2)", "dev progress assign", "language-neutral hooks", "planned"),
+    ("E-catalog", "Sessions get the catalog of ids, and lessons at the tool call they apply to (R2-1)",
+     "SessionStart, PreToolUse and PostToolUse", "language-neutral hooks", "planned"),
+    ("E-approvals", "A run ends only after each Accountable member approved", "dev progress done",
+     "devkit.progress.approvals_owed", "enforced"),
+    ("E-no-self-approval", "Nobody approves their own kind of work: Seraph approves code and configuration, "
+     "Morpheus the rest (R2-3)", "dev progress assign and dev progress done", "F6 step endings and approvals",
+     "planned"),
+    ("E-verdict", "An approval is an explicit verdict after the work", "dev progress done",
      "F6 step endings and approvals", "planned"),
-    ("At most four members work in parallel", "PreToolUse: Agent launches", "devkit.hooks._crew_limits", "enforced"),
-    ("A resumed subagent counts against the parallel limit", "launch records keyed by tool_use_id",
+    ("E-evidence", "A step closes only with its evidence", "dev progress step and SubagentStop",
+     "F6 step endings and approvals", "planned"),
+    ("E-gate-findings", "A member the crew gates sent back cannot close its step with the findings open (CR1-F1)",
+     "SubagentStop: the crew gates, at the second stop", "F6 step endings and approvals", "planned"),
+    ("E-deps", "No step starts before its dependencies are done", "every step transition (start, add, assign, begin, "
+     "advance, subagent start, close, launch readiness)", "devkit.progress.deps_open", "enforced"),
+    ("E-recheck", "A reopened dependency's finished dependents are rechecked before the run ends", "dev progress done",
+     "F6 step endings and approvals", "planned"),
+    ("E-fixable", "A step is reopened or skipped only with a reason, kept in the run's history",
+     "dev progress reopen and dev progress skip", "devkit.progress.reopen", "enforced"),
+    ("E-parallel", "At most progress.max_parallel members work in parallel (4 by default)",
+     "PreToolUse: Agent launches", "devkit.hooks._crew_limits", "enforced"),
+    ("E-resumed", "A resumed subagent counts against the parallel limit", "launch records keyed by tool_use_id",
      "devkit.progress.slots", "enforced"),
-    ("Nested subagents count too", "launch ledger", "F3 nested agents", "planned"),
-    ("Only Morpheus plans, assigns, decides and changes the mode", "dev progress and dev crew from a lane", "devkit.progress._main_only", "enforced"),
-    ("Morpheus-only commands cannot be reached through bash -c or scripts", "the call ledger", "F4 caller identity", "planned"),
-    ("Irreversible actions wait for the developer's word", "PreToolUse: the irreversible-action gate", "F5 evidence and irreversible gate", "planned"),
-    ("A member runs the proofs its procedure names", "SubagentStop: the crew gates", "devkit.gates.crew_gates", "enforced"),
-    ("A member loads the skills its brief names", "SubagentStop: the crew gates", "devkit.gates.crew_gates", "enforced"),
-    ("No stubs or untracked TODOs in a member's changes", "SubagentStop: the crew gates", "devkit.gates.crew_gates", "enforced"),
-    ("A member's new tests can fail", "SubagentStop: the crew gates", "devkit.gates.crew_gates", "enforced"),
-    ("A member records a lesson after a repeated refusal", "SubagentStop: the crew gates", "devkit.gates.crew_gates", "enforced"),
-    ("Members get the known pitfalls for their task", "dev crew brief and the Claude launch hook", "devkit.lessons.for_task", "enforced"),
-    ("Members get the knowledge of their kind of work", "dev crew brief and the Claude launch hook", "devkit.crew.brief_skills", "enforced"),
-    ("Agents cannot write devkit's state or configuration", "PreToolUse: protected paths, redirects, writers, nested shells",
-     "devkit.guard.check", "enforced"),
-    ("A forged HOME, DEVKIT_CONFIG or dev link cannot point devkit at fake state",
+    ("E-nested", "A member's helpers take a crew slot and stop at progress.max_depth", "PreToolUse: Agent launches, "
+     "at every depth", "devkit.progress.launch_verdict", "enforced"),
+    ("E-lost-lane", "A member that never reports back loses its step after progress.stale_agent_hours",
+     "every hook event on the run and every launch check", "devkit.progress.expire_stale", "enforced"),
+    ("E-main-only", "Only Morpheus plans, assigns, decides and changes the mode",
+     "dev progress and dev crew from a lane", "devkit.progress._main_only", "enforced"),
+    ("E-caller", "Morpheus-only commands cannot be reached through bash -c or scripts",
+     "the call ledger (Claude Code; Codex calls are audited until S3)", "devkit.progress.caller", "enforced"),
+    ("E-decisions", "A decision that is the developer's waits for the developer in guided mode",
+     "dev crew ask --decision", "devkit.progress.crew_decision", "enforced"),
+    ("E-irreversible", "Irreversible actions wait for the developer's word", "PreToolUse: the irreversible-action gate",
+     "F5 evidence and irreversible gate", "planned"),
+    ("E-proofs", "A member runs the proofs its procedure names", "SubagentStop: the crew gates",
+     "devkit.gates.crew_gates", "enforced"),
+    ("E-skills", "A member loads the skills its brief names", "SubagentStop: the crew gates",
+     "devkit.gates.crew_gates", "enforced"),
+    ("E-stubs", "No stubs or untracked TODOs in a member's changes", "SubagentStop: the crew gates",
+     "devkit.gates.crew_gates", "enforced"),
+    ("E-tests-fail", "A member's new tests can fail", "SubagentStop: the crew gates", "devkit.gates.crew_gates",
+     "enforced"),
+    ("E-lessons", "A member records a lesson after a repeated refusal", "SubagentStop: the crew gates",
+     "devkit.gates.crew_gates", "enforced"),
+    ("E-pitfalls", "Members get the known pitfalls for their task", "dev crew brief and the Claude launch hook",
+     "devkit.lessons.for_task", "enforced"),
+    ("E-knowledge", "Members get the knowledge of their kind of work", "dev crew brief and the Claude launch hook",
+     "devkit.crew.brief_skills", "enforced"),
+    ("E-protected", "Agents cannot write devkit's state or configuration",
+     "PreToolUse: protected paths, redirects, writers, nested shells", "devkit.guard.check", "enforced"),
+    ("E-forged-env", "A forged HOME, DEVKIT_CONFIG or dev link cannot point devkit at fake state",
      "the guard (forged variables, every dev on PATH) and dev at start (devkit.core.ensure_roots)",
      "devkit.guard.forged_env_reason", "enforced"),
-    ("Escape hatches are refused to members and audited", "PreToolUse: flags and variables", "F8 escape hatches and tool coverage", "planned"),
-    ("The guard runs from a verified copy, not the checkout", "dev install (pins a read-only, checksummed release)",
-     "devkit.setup.pin", "enforced"),
-    ("Team changes to the crew carry a reason", "dev crew set and dev crew raci --set", "devkit.crew._team_write", "enforced"),
-    ("Questions and decisions go through dev crew ask", "a member's report and messages", "a report may also name its questions", "guidance"),
+    ("E-escape", "Escape hatches are refused to members and audited", "PreToolUse: flags and variables",
+     "F8 escape hatches and tool coverage", "planned"),
+    ("E-pinned", "The guard runs from a verified copy, not the checkout",
+     "dev install (pins a read-only, checksummed release)", "devkit.setup.pin", "enforced"),
+    ("E-team-reason", "Team changes to the crew carry a reason", "dev crew set and dev crew raci --set",
+     "devkit.crew._team_write", "enforced"),
+    ("E-ask", "Questions and decisions go through dev crew ask", "a member's report and messages",
+     "a report may also name its questions", "guidance"),
 )
 
 
@@ -490,10 +560,11 @@ def catalog(roster=None, agent: str = "claude") -> str:
 
 def enforcement(plan_steps=None) -> list:
     """The matrix as rows, with a check that every enforced rule's function exists and every planned rule names
-    a step of `plan_steps` (when given). -> [(rule, where, ref, state, ok)]."""
+    a step of `plan_steps` (when given). -> [(rule, where, ref, state, ok)], in the order of ENFORCEMENT (whose
+    first field is each row's id)."""
     import importlib
     out = []
-    for rule, where, ref, state in ENFORCEMENT:
+    for _, rule, where, ref, state in ENFORCEMENT:
         ok = True
         if state == "enforced":
             mod, _, fn = ref.rpartition(".")
@@ -1750,9 +1821,9 @@ def cmd_crew(a) -> int:
             steps = None
         rows = enforcement(steps)
         mark = {"enforced": ui.OK, "planned": ui.WARN, "guidance": "·"}
-        print(ui.table([[mark[st] + " " + st, rule, where, ref + ("" if ok else "  ✗ missing")]
-                        for rule, where, ref, st, ok in rows],
-                       ["STATE", "RULE", "WHERE", "CHECK OR PLAN STEP"], max_widths={1: 52, 2: 36, 3: 40}))
+        print(ui.table([[row[0], mark[st] + " " + st, rule, where, ref + ("" if ok else "  ✗ missing")]
+                        for row, (rule, where, ref, st, ok) in zip(ENFORCEMENT, rows)],
+                       ["ID", "STATE", "RULE", "WHERE", "CHECK OR PLAN STEP"], max_widths={2: 52, 3: 36, 4: 40}))
         n = {s: sum(1 for r in rows if r[3] == s) for s in ("enforced", "planned", "guidance")}
         print(ui.dim(f"  {n['enforced']} enforced · {n['planned']} planned · {n['guidance']} guidance"))
         return 0 if all(r[4] for r in rows) else 1
@@ -1765,7 +1836,7 @@ def cmd_crew(a) -> int:
         return 0
     if act == "sync":
         changes = sync(check=a.check, roster=load(team=False))
-        for w in roster["warnings"]:
+        for w in shown_warnings(roster):
             ui.warn(w)
         n = len(agent_files(roster))
         if a.check:
@@ -1807,7 +1878,7 @@ def cmd_crew(a) -> int:
         text = run_text(view)
         if text:
             print(text)
-    for w in roster["warnings"]:
+    for w in shown_warnings(roster):
         ui.warn(w)
     print(ui.dim('\n  dev crew route "<task>" · dev crew next · dev crew show <name> · dev crew brief <name> "<task>" '
                  "--scope \"<globs>\" --step <n>\n  spawn as devkit:<id> (Claude Code) or agent type <id> (Codex)"))

@@ -39,6 +39,7 @@
         "dev crew ask",
         "dev crew brief",
         "dev crew decide",
+        "dev crew graph",
         "dev crew next",
         "dev crew raci",
         "dev crew route",
@@ -48,7 +49,8 @@
         "dev progress note",
         "dev progress start",
         "dev progress step",
-        "dev status"
+        "dev status",
+        "dev task reopen"
       ],
       "done_when": [
         "every step is closed with its evidence or skipped with a reason",
@@ -84,7 +86,7 @@
         },
         {
           "phase": "Plan",
-          "do": "Plan one step per kind of work with dependencies and estimates, tag each step with its kind of work, assign each to its Responsible member with the files it owns, add a docs step for the Technical writer (Ghost) when users will notice the change, and post the plan with the ETA.",
+          "do": "Plan one step per kind of work with dependencies and estimates, tag each step with its kind of work (`[backend]` at the end of its spec, or `--activity backend` on assign), assign each to its Responsible member with the files it owns, add a docs step for the Technical writer (Ghost) when users will notice the change, and post the plan with the ETA.",
           "skills": [
             "superpowers:writing-plans",
             "working-efficiently",
@@ -92,13 +94,13 @@
           ],
           "devkit": [
             "dev progress start",
-            "dev progress assign"
+            "dev progress assign --activity"
           ],
           "gate": "the plan is started and posted"
         },
         {
           "phase": "Run the crew",
-          "do": "Brief members with dev crew brief, at most four in parallel on independent steps; answer their questions; take the developer's decisions to the developer.",
+          "do": "Brief members with dev crew brief, within the parallel limit (progress.max_parallel) on independent steps; follow the session with dev crew graph; answer their questions; take the developer's decisions to the developer.",
           "skills": [
             "superpowers:dispatching-parallel-agents",
             "superpowers:executing-plans",
@@ -106,6 +108,7 @@
           ],
           "devkit": [
             "dev crew brief",
+            "dev crew graph",
             "dev crew next",
             "dev crew answer",
             "dev crew decide"
@@ -126,7 +129,7 @@
         },
         {
           "phase": "Integrate and close",
-          "do": "Integrate the results, run the full suite once, get each approver's review, finish the branch, update the handoff note, and report.",
+          "do": "Integrate the results, run the full suite once, get each approver's review, reopen a work item that comes back with dev task reopen and its reason, finish the branch, update the handoff note, and report.",
           "skills": [
             "superpowers:verification-before-completion",
             "superpowers:finishing-a-development-branch",
@@ -135,6 +138,7 @@
           ],
           "devkit": [
             "dev ci --run",
+            "dev task reopen",
             "dev progress done",
             "dev handoff"
           ],
@@ -505,7 +509,7 @@
             "dev plan revise"
           ],
           "gate": "the decision and its reasons are recorded",
-          "proof": "dev plan"
+          "proof": "dev plan revise"
         },
         {
           "phase": "Review the build",
@@ -721,7 +725,8 @@
           "devkit": [
             "dev test"
           ],
-          "gate": "the tests pass"
+          "gate": "the tests pass",
+          "proof": "dev test"
         },
         {
           "phase": "Verify",
@@ -736,7 +741,7 @@
             "dev stubs"
           ],
           "gate": "the blast radius passes, every new test fails without the change, no stubs",
-          "proof": "dev test"
+          "proof": "dev test prove"
         },
         {
           "phase": "Hand off",
@@ -841,7 +846,8 @@
           "devkit": [
             "dev test"
           ],
-          "gate": "component tests cover the behavior"
+          "gate": "component tests cover the behavior",
+          "proof": "dev test"
         },
         {
           "phase": "Browser check",
@@ -864,7 +870,7 @@
             "dev stubs"
           ],
           "gate": "the blast radius passes, every new test fails without the change, no stubs",
-          "proof": "dev test"
+          "proof": "dev test prove"
         },
         {
           "phase": "Hand off",
@@ -972,7 +978,8 @@
           "devkit": [
             "dev test"
           ],
-          "gate": "the tests pass"
+          "gate": "the tests pass",
+          "proof": "dev test"
         },
         {
           "phase": "Integration",
@@ -1011,7 +1018,7 @@
             "dev stubs"
           ],
           "gate": "the blast radius passes, every new test fails without the change, no stubs",
-          "proof": "dev test"
+          "proof": "dev test prove"
         },
         {
           "phase": "Hand off",
@@ -1114,7 +1121,8 @@
             "dev docker up",
             "dev test"
           ],
-          "gate": "the migration and the queries pass on the real database"
+          "gate": "the migration and the queries pass on the real database",
+          "proof": "dev test"
         },
         {
           "phase": "Verify",
@@ -1129,7 +1137,7 @@
             "dev stubs"
           ],
           "gate": "the blast radius passes, every new test fails without the change, no stubs",
-          "proof": "dev test"
+          "proof": "dev test prove"
         },
         {
           "phase": "Hand off",
@@ -1218,7 +1226,8 @@
           "devkit": [
             "dev test"
           ],
-          "gate": "the tests cover the changed flows"
+          "gate": "the tests cover the changed flows",
+          "proof": "dev test"
         },
         {
           "phase": "Devices",
@@ -1244,7 +1253,7 @@
             "dev stubs"
           ],
           "gate": "the blast radius passes, every new test fails without the change, no stubs",
-          "proof": "dev test"
+          "proof": "dev test prove"
         },
         {
           "phase": "Hand off",
@@ -1348,7 +1357,8 @@
           "devkit": [
             "dev test"
           ],
-          "gate": "the scores meet the targets"
+          "gate": "the scores meet the targets",
+          "proof": "dev test"
         },
         {
           "phase": "Guard",
@@ -1375,7 +1385,7 @@
             "dev stubs"
           ],
           "gate": "the blast radius passes, every new test fails without the change, no stubs",
-          "proof": "dev test"
+          "proof": "dev test prove"
         },
         {
           "phase": "Hand off",
@@ -1466,7 +1476,8 @@
           "devkit": [
             "dev test"
           ],
-          "gate": "the tool is tested in a sandbox, never on the developer's machine"
+          "gate": "the tool is tested in a sandbox, never on the developer's machine",
+          "proof": "dev test"
         },
         {
           "phase": "Document",
@@ -1493,7 +1504,7 @@
             "dev stubs"
           ],
           "gate": "the blast radius passes, every new test fails without the change, no stubs",
-          "proof": "dev test"
+          "proof": "dev test prove"
         },
         {
           "phase": "Hand off",
@@ -1767,6 +1778,7 @@
       "goal": "Nothing merges that the team would regret: correctness, security, tests, and fit with the codebase are checked by someone who did not write it.",
       "devkit": [
         "dev crew ask",
+        "dev crew graph",
         "dev pr diff",
         "dev progress step",
         "dev sec scan",
@@ -1782,11 +1794,12 @@
       "procedure": [
         {
           "phase": "Context",
-          "do": "Read the brief, the plan and the diff before the explanation.",
+          "do": "Read the brief, the plan and the diff before the explanation; dev crew graph shows who did each step and what it waits for.",
           "skills": [
             "superpowers:requesting-code-review"
           ],
           "devkit": [
+            "dev crew graph",
             "dev pr diff",
             "dev crew ask"
           ],
@@ -1827,7 +1840,8 @@
           "devkit": [
             "dev progress step"
           ],
-          "gate": "the verdict is recorded"
+          "gate": "the verdict is recorded",
+          "proof": "dev progress step"
         }
       ]
     },
@@ -2235,7 +2249,7 @@
             "dev ci --run"
           ],
           "gate": "the local run matches CI",
-          "proof": "dev ci"
+          "proof": "dev ci --run"
         },
         {
           "phase": "Diagnose",
@@ -2696,7 +2710,8 @@
           "devkit": [
             "dev test"
           ],
-          "gate": "each step's build is green"
+          "gate": "each step's build is green",
+          "proof": "dev test"
         },
         {
           "phase": "Prove",
@@ -2708,7 +2723,7 @@
             "dev ci --run"
           ],
           "gate": "the behavior is the same",
-          "proof": "dev ci"
+          "proof": "dev ci --run"
         },
         {
           "phase": "Verify",
@@ -2723,7 +2738,7 @@
             "dev stubs"
           ],
           "gate": "the blast radius passes, every new test fails without the change, no stubs",
-          "proof": "dev test"
+          "proof": "dev test prove"
         },
         {
           "phase": "Hand off",
@@ -3027,7 +3042,8 @@
           "docs/crew.md",
           "docs/progress-and-communication.md"
         ]
-      }
+      },
+      "no_files": "plans, estimates and status live in the handoff repository (dev progress, dev plan), not in the project's files"
     },
     {
       "id": "scope",
@@ -3061,7 +3077,8 @@
         "docs": [
           "docs/initiatives.md"
         ]
-      }
+      },
+      "no_files": "priorities and scope live in the handoff repository (dev task), not in the project's files"
     },
     {
       "id": "requirements",
@@ -3101,7 +3118,13 @@
         "docs": [
           "docs/templates.md"
         ]
-      }
+      },
+      "files": [
+        "*.feature",
+        "PRD*",
+        "docs/specs/**",
+        "docs/requirements/**"
+      ]
     },
     {
       "id": "research",
@@ -3136,7 +3159,8 @@
           "working-efficiently"
         ],
         "docs": []
-      }
+      },
+      "no_files": "a spike's code stays outside the repository; its findings go to a plan in the handoff repository"
     },
     {
       "id": "architecture",
@@ -3180,7 +3204,15 @@
         "docs": [
           "docs/diagrams.md"
         ]
-      }
+      },
+      "files": [
+        "docs/adr/**",
+        "**/adr/**",
+        "ARCHITECTURE.md",
+        "docs/architecture/**",
+        "*.c4",
+        "*.likec4"
+      ]
     },
     {
       "id": "ux",
@@ -3225,7 +3257,13 @@
         "docs": [
           "docs/dashboard.md"
         ]
-      }
+      },
+      "files": [
+        "DESIGN.md",
+        "docs/ux/**",
+        "**/wireframes/**",
+        "*.fig"
+      ]
     },
     {
       "id": "frontend",
@@ -3412,7 +3450,8 @@
         "docs": [
           "docs/testing.md"
         ]
-      }
+      },
+      "no_files": "a feature crosses layers: each file names its own kind of work, and the step's member decides"
     },
     {
       "id": "mobile",
@@ -3492,7 +3531,15 @@
         "docs": [
           "docs/models-and-tokens.md"
         ]
-      }
+      },
+      "files": [
+        "prompts/**",
+        "**/prompts/**",
+        "*.prompt",
+        "*.prompt.*",
+        "evals/**",
+        "**/evals/**"
+      ]
     },
     {
       "id": "tooling",
@@ -3507,8 +3554,7 @@
         "keymaker"
       ],
       "I": [
-        "morpheus",
-        "ghost"
+        "morpheus"
       ],
       "signals": [
         "cli",
@@ -3542,7 +3588,11 @@
           "docs/development.md",
           "docs/testing.md"
         ]
-      }
+      },
+      "files": [
+        "config/crew.json",
+        "plugin/agents/**"
+      ]
     },
     {
       "id": "testing",
@@ -3634,7 +3684,16 @@
         "docs": [
           "docs/guard.md"
         ]
-      }
+      },
+      "files": [
+        "SECURITY.md",
+        "security/**",
+        "**/security/**",
+        ".gitleaks*",
+        ".semgrep*",
+        "*.rego",
+        "*threat-model*"
+      ]
     },
     {
       "id": "redteam",
@@ -3669,7 +3728,8 @@
         "docs": [
           "docs/guard.md"
         ]
-      }
+      },
+      "no_files": "an attack changes no files; its findings go to the report"
     },
     {
       "id": "review",
@@ -3701,7 +3761,8 @@
           "docs/testing.md",
           "docs/git-and-github.md"
         ]
-      }
+      },
+      "no_files": "a review reads every kind of file and changes none"
     },
     {
       "id": "compliance",
@@ -3709,10 +3770,8 @@
       "R": [
         "persephone"
       ],
-      "A": "persephone",
-      "C": [
-        "keymaker"
-      ],
+      "A": "keymaker",
+      "C": [],
       "I": [
         "hamann",
         "morpheus"
@@ -3739,7 +3798,16 @@
           "supply-chain-risk-auditor"
         ],
         "docs": []
-      }
+      },
+      "files": [
+        "LICENSE*",
+        "NOTICE*",
+        "COPYING*",
+        "THIRD_PARTY*",
+        "*.spdx*",
+        "*sbom*",
+        "PRIVACY*"
+      ]
     },
     {
       "id": "cicd",
@@ -3749,8 +3817,7 @@
       ],
       "A": "keymaker",
       "C": [
-        "niobe",
-        "keymaker"
+        "niobe"
       ],
       "I": [
         "morpheus",
@@ -3796,8 +3863,7 @@
         "ghost"
       ],
       "I": [
-        "hamann",
-        "ghost"
+        "hamann"
       ],
       "signals": [
         "release",
@@ -3819,7 +3885,16 @@
           "docs/delivery.md",
           "docs/git-and-github.md"
         ]
-      }
+      },
+      "files": [
+        "CHANGELOG*",
+        "VERSION",
+        "RELEASE*",
+        ".release-please*",
+        "release-please-config.json",
+        ".goreleaser*",
+        ".changeset/**"
+      ]
     },
     {
       "id": "infrastructure",
@@ -3875,14 +3950,13 @@
       "R": [
         "lock"
       ],
-      "A": "lock",
+      "A": "morpheus",
       "C": [
         "niobe",
         "merovingian"
       ],
       "I": [
-        "hamann",
-        "morpheus"
+        "hamann"
       ],
       "signals": [
         "incident",
@@ -3906,7 +3980,12 @@
         "docs": [
           "docs/lessons.md"
         ]
-      }
+      },
+      "files": [
+        "*postmortem*",
+        "incidents/**",
+        "**/incidents/**"
+      ]
     },
     {
       "id": "performance",
@@ -3920,9 +3999,7 @@
         "dozer",
         "niobe"
       ],
-      "I": [
-        "morpheus"
-      ],
+      "I": [],
       "signals": [
         "performance",
         "slow",
@@ -3941,7 +4018,20 @@
           "superpowers:systematic-debugging"
         ],
         "docs": []
-      }
+      },
+      "files": [
+        "benchmarks/**",
+        "**/benchmarks/**",
+        "*benchmark*",
+        "*.bench.*",
+        "*_bench.*",
+        "k6/**",
+        "**/load-tests/**",
+        "locustfile*",
+        "*.jmx",
+        "lighthouserc*",
+        ".lighthouserc*"
+      ]
     },
     {
       "id": "migration",
@@ -3978,7 +4068,18 @@
         "docs": [
           "docs/testing.md"
         ]
-      }
+      },
+      "files": [
+        ".nvmrc",
+        ".node-version",
+        ".python-version",
+        ".ruby-version",
+        ".java-version",
+        ".tool-versions",
+        ".sdkmanrc",
+        "UPGRADING*",
+        "MIGRATING*"
+      ]
     },
     {
       "id": "data-analysis",
@@ -4012,7 +4113,15 @@
           "supabase-postgres-best-practices"
         ],
         "docs": []
-      }
+      },
+      "files": [
+        "*.ipynb",
+        "notebooks/**",
+        "**/notebooks/**",
+        "analytics/**",
+        "**/analytics/**",
+        "dbt_project.yml"
+      ]
     },
     {
       "id": "docs",
@@ -4071,9 +4180,12 @@
         "who calls"
       ],
       "knowledge": {
-        "skills": [],
+        "skills": [
+          "working-efficiently"
+        ],
         "docs": []
-      }
+      },
+      "no_files": "a read-only lookup changes no files"
     },
     {
       "id": "i18n",
@@ -4113,7 +4225,22 @@
         "docs": [
           "docs/testing.md"
         ]
-      }
+      },
+      "files": [
+        "locales/**",
+        "**/locales/**",
+        "locale/**",
+        "**/locale/**",
+        "i18n/**",
+        "**/i18n/**",
+        "*.po",
+        "*.pot",
+        "*.xliff",
+        "*.xlf",
+        "*.arb",
+        "*.strings",
+        "**/values*/strings.xml"
+      ]
     },
     {
       "id": "dependencies",
@@ -4153,7 +4280,25 @@
         "docs": [
           "docs/ci-cd.md"
         ]
-      }
+      },
+      "files": [
+        "package-lock.json",
+        "pnpm-lock.yaml",
+        "yarn.lock",
+        "bun.lockb",
+        "poetry.lock",
+        "uv.lock",
+        "Pipfile.lock",
+        "requirements*.txt",
+        "go.sum",
+        "Cargo.lock",
+        "composer.lock",
+        "Gemfile.lock",
+        "gradle.lockfile",
+        ".github/dependabot.yml",
+        "renovate.json*",
+        ".renovaterc*"
+      ]
     },
     {
       "id": "accessibility",
@@ -4192,7 +4337,14 @@
         "docs": [
           "docs/testing.md"
         ]
-      }
+      },
+      "files": [
+        ".pa11yci*",
+        "a11y/**",
+        "**/a11y/**",
+        "*.a11y.*",
+        "axe.config.*"
+      ]
     },
     {
       "id": "sso",
@@ -4231,7 +4383,15 @@
           "backend"
         ],
         "docs": []
-      }
+      },
+      "files": [
+        "auth/**",
+        "**/auth/**",
+        "**/oauth/**",
+        "**/oidc/**",
+        "**/saml/**",
+        "**/sso/**"
+      ]
     },
     {
       "id": "design-system",
@@ -4263,7 +4423,15 @@
           "frontend-design"
         ],
         "docs": []
-      }
+      },
+      "files": [
+        "tokens/**",
+        "**/tokens/**",
+        "*.tokens.json",
+        "design-tokens*",
+        "design-system/**",
+        "**/design-system/**"
+      ]
     },
     {
       "id": "codebase",
@@ -4290,7 +4458,8 @@
           "codebase-design"
         ],
         "docs": []
-      }
+      },
+      "no_files": "explaining or finding code reads any file and changes none"
     },
     {
       "id": "backup",
@@ -4326,7 +4495,13 @@
           "devsecops"
         ],
         "docs": []
-      }
+      },
+      "files": [
+        "*backup*",
+        "*.dump",
+        "velero/**",
+        "pgbackrest*"
+      ]
     }
   ]
 }

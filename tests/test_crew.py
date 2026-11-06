@@ -13,12 +13,13 @@ import tempfile
 import time
 import unittest
 from pathlib import Path
+from unittest import mock
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "lib"))
 sys.path.insert(0, str(ROOT / "tests"))
 
-from devkit import audit, canary, cli, core, crew, hooks, mcp, ui  # noqa: E402
+from devkit import audit, canary, cli, core, crew, hooks, mcp, selfcheck, ui  # noqa: E402
 from devkit import progress as pg  # noqa: E402
 from test_progress import TempState as ProgressState  # noqa: E402
 
@@ -153,6 +154,37 @@ class RosterTests(unittest.TestCase):
                          ["nope", "devkit:nope", "other-plugin:x"])
         self.assertIn("unknown field `extra`", " ".join(warnings))
 
+    # an activity's `files` are globs that anchor its steps (raci.anchor), and `no_files` says why it has none;
+    # anything else is refused, so a typo cannot widen or silence a kind of work's anchor
+    def test_an_activitys_files_are_a_list_of_globs_and_no_files_is_its_reason(self):
+        r = roster()
+        act = r["activities"][0]
+        for field, bad, needle in (("files", "*.po", "`files` must be a list of globs"),
+                                   ("files", ["*.po", " "], "`files` must be a list of globs"),
+                                   ("no_files", ["none"], "`no_files` must be the reason, as text")):
+            with self.subTest(field=field, bad=bad):
+                errors, _ = crew.check(dict(r, activities=[dict(act, **{field: bad})]))
+                self.assertIn(needle, " ".join(errors))
+        good = dict(act, files=["**/locales/**", "*.po"])
+        self.assertEqual(crew.check(dict(r, activities=[good]))[0], [])
+
+    # a skill the crew names that this Mac has not installed for an agent is a warning with its install group and
+    # command (selfcheck D8); without agents, check() reads no machine state, so load() stays the same everywhere
+    def test_a_named_skill_that_is_not_installed_is_a_warning_naming_its_group(self):
+        r = roster(member(skills=["testing", "terraform-style-guide"]))
+        with tempfile.TemporaryDirectory() as d:
+            home, skills = Path(d) / "agent", Path(d) / "skills"
+            (skills / "testing").mkdir(parents=True)
+            (skills / "testing" / "SKILL.md").write_text("x")
+            with mock.patch.dict(selfcheck.AGENT_HOMES, {"claude": (home, skills)}):
+                _, warnings = crew.check(r, agents=("claude",))
+                _, plain = crew.check(r)
+        missing = [w for w in warnings if "not installed" in w]
+        self.assertEqual(len(missing), 1, warnings)
+        self.assertIn("claude: named by the crew but not installed: terraform-style-guide (group iac)", missing[0])
+        self.assertIn("dev install --only skills", missing[0])
+        self.assertFalse([w for w in plain if "not installed" in w])
+
     def test_member_lookup(self):
         for q, want in (("neo", "neo"), ("NEO", "neo"), ("devkit:neo", "neo"), ("The Oracle", "oracle"),
                         ("oracle", "oracle"), ("Oracle", "oracle"), ("the  oracle", "oracle"), ("Agent Smith", "smith"),
@@ -223,6 +255,16 @@ class RenderTests(unittest.TestCase):
         self.assertIn("None. Load a skill only when your brief names one.", read)
         self.assertNotIn("review-only", crew.body(member(tools="build"), roster()))
 
+    # members record where a lesson applies (its anchors), so it is recalled by behavior in any language; a member
+    # without a shell names them for Morpheus
+    def test_the_learn_text_asks_for_the_lessons_anchors(self):
+        shell = crew.body(member(), roster())
+        for needle in ('dev lesson add "…" --cause "…" --prevent "…" --file', "--command", "--error",
+                       'dev lesson anchor <id>'):
+            self.assertIn(needle, shell)
+        read = crew.body(member(tools="read", skills=[]), roster())
+        self.assertIn("the files, commands or error text it applies to", read)
+
     def test_every_shipped_agent_is_short_and_its_report_passes_the_crew_canary(self):
         r = crew.load()
         for m in crew.members(r, include_main=False):
@@ -285,6 +327,52 @@ class CodexTests(unittest.TestCase):
 
 
 # --------------------------------------------------------------------------- sync
+
+class ShippedProcedureTests(unittest.TestCase):
+    # Morpheus tags each step's kind of work, follows the session graph and reopens a work item that comes back;
+    # Seraph reads the graph before the diff (R2-11)
+    def test_morpheus_and_seraph_name_todays_crew_commands(self):
+        r = crew.load(team=False)
+
+        def commands(mid):
+            m = crew.member(mid, r)
+            return set(m["devkit"]) | {c for x in m["procedure"] for c in x.get("devkit") or []}
+        self.assertLessEqual({"dev crew graph", "dev task reopen", "dev progress assign --activity"},
+                             commands("morpheus"))
+        plan = next(x for x in crew.member("morpheus", r)["procedure"] if x["phase"] == "Plan")
+        self.assertIn("`[backend]`", plan["do"])
+        self.assertIn("dev crew graph", commands("seraph"))
+
+    # the proofs devkit looks for are the commands the gates name: new tests that can fail, the local CI run, the
+    # revised plan, and a recorded verdict (R2-6)
+    def test_the_proofs_are_the_commands_the_gates_name(self):
+        r = crew.load(team=False)
+        for mid in ("neo", "trinity", "tank", "dozer", "switch", "rama", "kid", "trainman"):
+            with self.subTest(member=mid):
+                self.assertIn("dev test prove", crew.proofs(crew.member(mid, r)))
+        self.assertIn("dev ci --run", crew.proofs(crew.member("link", r)))
+        self.assertIn("dev ci --run", crew.proofs(crew.member("trainman", r)))
+        self.assertIn("dev plan revise", crew.proofs(crew.member("architect", r)))
+        self.assertIn("dev progress step", crew.proofs(crew.member("seraph", r)))
+
+
+class EnforcementMatrixTests(unittest.TestCase):
+    # every rule has a stable id (E-…) that docs cite (D11) and that survives a reworded rule
+    def test_every_rule_has_a_unique_stable_id(self):
+        ids = [row[0] for row in crew.ENFORCEMENT]
+        self.assertTrue(all(len(row) == 5 for row in crew.ENFORCEMENT))
+        self.assertEqual([i for i in ids if not selfcheck.MATRIX_ID.fullmatch(f"`{i}`")], [])
+        self.assertEqual(len(ids), len(set(ids)))
+
+    # dev crew rules prints each rule with its id
+    def test_rules_prints_each_rules_id(self):
+        with TempState():
+            rc, out, _ = run_cli("crew", "rules")
+        self.assertEqual(rc, 0)
+        for rid, rule, *_ in crew.ENFORCEMENT:
+            with self.subTest(rule=rid):
+                self.assertIn(rid, out)
+
 
 class SyncTests(unittest.TestCase):
     def setUp(self):

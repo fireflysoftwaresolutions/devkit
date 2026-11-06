@@ -507,10 +507,6 @@ def fixed_in_session(top: str, start_head: str) -> list:
     return [ln for ln in log.splitlines() if re.match(r"^\w+\t(fix(\(.+\))?!?:|revert)", ln, re.I)]
 
 
-def stats_json() -> str:
-    return json.dumps(review()["counts"])
-
-
 # --------------------------------------------------------------------------- sleep: consolidate and forget
 
 ARCHIVE = "archive"

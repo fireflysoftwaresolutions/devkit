@@ -10,7 +10,8 @@ member has approved the work they own (`approvals_missing`).
 
 Developers write in any language, so a step's kind of work rests on anchors that do not depend on words (`anchor`):
 an explicit activity id (`--activity`, `[id]` in a plan spec), then the assigned member's Responsible activity, then
-the files in the step's scope (`dispatch.FILE_HINTS`). The English `signals` are only the last, fallback guess."""
+the files in the step's scope (each kind of work's own `files` globs, and `dispatch.FILE_HINTS`). The English
+`signals` are only the last, fallback guess."""
 from __future__ import annotations
 
 import fnmatch
@@ -77,6 +78,11 @@ def check(data: dict):
         sig = a.get("signals")
         if not isinstance(sig, list) or not sig or not all(isinstance(s, str) and s.strip() for s in sig):
             errors.append(f"activity `{aid}`: `signals` must be a non-empty list of words or phrases")
+        if "files" in a and not (isinstance(a["files"], list) and all(isinstance(g, str) and g.strip()
+                                                                       for g in a["files"])):
+            errors.append(f"activity `{aid}`: `files` must be a list of globs (repository paths)")
+        if "no_files" in a and not isinstance(a["no_files"], str):
+            errors.append(f"activity `{aid}`: `no_files` must be the reason, as text")
     for mid in sorted(ids - responsible - {main}):
         errors.append(f"`{mid}` is Responsible for no activity: give it one in `activities`, or remove it")
     return errors, warnings
@@ -207,22 +213,30 @@ def member_activity(member_id: str, text: str = "", roster=None):
     return next((a for a, _, _ in classify(text, roster, limit=len(activities(roster))) if a["id"] in ids), own[0])
 
 
+def _glob_hit(path: str, globs) -> bool:
+    return any(fnmatch.fnmatch(path, g) or fnmatch.fnmatch(path.split("/")[-1], g) for g in globs)
+
+
 def file_activities(files, roster=None, text: str = "") -> list:
-    """[(activity, number of files)] the files in a step's scope say, most files first (`dispatch.FILE_HINTS`: the
-    member whose files they are, then that member's kind of work)."""
+    """[(activity, number of files)] the files in a step's scope say, most files first. A file counts for the kind
+    of work whose own `files` globs name it (config/crew.json, first match), and for the kind of work of the member
+    whose files they are (`dispatch.FILE_HINTS`); an ADR is architecture work and a document. On a tie, a kind of
+    work's own globs come first."""
     from .dispatch import FILE_HINTS
+    acts = activities(roster)
     counts, order = {}, []
     for f in files or []:
         f = str(f or "").strip()
         if not f:
             continue
-        who = next((w for globs, w in FILE_HINTS if any(fnmatch.fnmatch(f, g) or fnmatch.fnmatch(f.split("/")[-1], g)
-                                                         for g in globs)), None)
-        a = member_activity(who, text, roster) if who else None
-        if a:
-            if a["id"] not in counts:
-                order.append(a)
-            counts[a["id"]] = counts.get(a["id"], 0) + 1
+        own = next((a for a in acts if _glob_hit(f, a.get("files") or [])), None)
+        who = next((w for globs, w in FILE_HINTS if _glob_hit(f, globs)), None)
+        hinted = member_activity(who, text, roster) if who else None
+        for a in (own, hinted):
+            if a and not (a is hinted and own and own["id"] == a["id"]):
+                if a["id"] not in counts:
+                    order.append(a)
+                counts[a["id"]] = counts.get(a["id"], 0) + 1
     return sorted(((a, counts[a["id"]]) for a in order), key=lambda x: -x[1])
 
 

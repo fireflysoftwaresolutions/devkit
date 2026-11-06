@@ -14,8 +14,8 @@ as devkit grows (D1-D11 of the crew gap review 2).
       (`self_approval`), knowledge docs that exist and at least one knowledge skill
   D8  every skill the crew names is installed for the agent (machine state, for `dev doctor`)
   D9  every procedure phase's proof and every command its gate names are in that phase's `devkit` list
-  D10 every kind of work can be reached from files (`dispatch.FILE_HINTS`) or says it has none (`no_files`); every
-      open lesson has anchors (machine state)
+  D10 every kind of work can be reached from files (its own `files` globs or `dispatch.FILE_HINTS`) or says it has
+      none (`no_files`); every open lesson has anchors (machine state)
   D11 every row of the guardrail table in docs/crew.md cites a matrix id (`E-…`), and never a `planned` row as fact
 
 Each check returns findings: (check, item, evidence, fix). `item` is stable across runs (no line numbers), so a known
@@ -723,8 +723,9 @@ def d9_phase_proofs(roster=None) -> list:
 
 
 def d10_file_anchors(roster=None, hints=None) -> list:
-    """D10: a kind of work that no `dispatch.FILE_HINTS` glob reaches (directly by its id, or through the member
-    whose first Responsible kind of work it is) and that does not say it has no files (`no_files`)."""
+    """D10: a kind of work that neither its own `files` globs nor a `dispatch.FILE_HINTS` glob reaches (directly by
+    its id, or through the member whose first Responsible kind of work it is) and that does not say it has no files
+    (`no_files`)."""
     from . import raci
     roster = _roster(roster)
     if hints is None:
@@ -737,11 +738,14 @@ def d10_file_anchors(roster=None, hints=None) -> list:
             a = raci.member_activity(target, "", roster)
             if a:
                 reached.add(a["id"])
+    reached |= {a.get("id") for a in raci.activities(roster) if a.get("files")}
     out = []
     for a in raci.activities(roster):
         if a.get("id") not in reached and not str(a.get("no_files") or "").strip():
-            out.append(Finding("D10", f"{a.get('id')}: no file anchor", "no FILE_HINTS glob leads to it",
-                               "add globs for it to dispatch.FILE_HINTS, or record why it has none with `no_files`"))
+            out.append(Finding("D10", f"{a.get('id')}: no file anchor",
+                               "no `files` glob of its own and no FILE_HINTS glob lead to it",
+                               "add its globs as `files` in config/crew.json, or record why it has none with "
+                               "`no_files`"))
     return out
 
 

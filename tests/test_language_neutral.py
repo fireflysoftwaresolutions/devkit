@@ -17,7 +17,7 @@ from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "lib"))
 
-from devkit import ai, cli, core, crew, lessons, scope, skillguard, wizard, work  # noqa: E402
+from devkit import ai, cli, core, crew, lessons, raci, scope, skillguard, wizard, work  # noqa: E402
 
 A = {"user": "ana", "host": "mbp1", "agent": "claude", "session": "s1"}
 DAY = 86400
@@ -302,6 +302,27 @@ class CatalogTests(unittest.TestCase):
         self.assertIn("github-actions-hardening", brief)
         a = cli.build_parser().parse_args(["crew", "brief", "neo", "arregla", "--activity", "cicd"])
         self.assertEqual(a.activity, "cicd")
+
+
+class ActivityFileTests(unittest.TestCase):
+    # A kind of work's own `files` globs (config/crew.json) anchor a step before its words, so a step about the
+    # translations is i18n work whatever language it is written in (R2-10)
+    def test_a_kind_of_works_own_files_anchor_the_step_in_any_language(self):
+        r = crew.load(team=False)
+        for text in ("translate the checkout screen", "traduce la pantalla de pago",
+                     "チェックアウト画面を翻訳する"):
+            with self.subTest(text=text):
+                a, source = raci.anchor(text, files=["src/locales/es.json"], roster=r)
+                self.assertEqual(((a or {}).get("id"), source), ("i18n", "files"))
+
+    # A file of two kinds of work (an ADR is architecture and docs) anchors to the kind whose own globs name it, and
+    # the member whose file kind it also is may still take it
+    def test_a_file_of_two_kinds_anchors_to_its_own_kind_and_either_member_may_take_it(self):
+        r = crew.load(team=False)
+        adr = ["docs/adr/0007-queue.md"]
+        self.assertEqual(raci.anchor("escribe el ADR", files=adr, roster=r)[0]["id"], "architecture")
+        self.assertIsNone(raci.check_assignment("ghost", "escribe el ADR", roster=r, files=adr))
+        self.assertIsNone(raci.check_assignment("architect", "escribe el ADR", roster=r, files=adr))
 
 
 class WizardTests(unittest.TestCase):
