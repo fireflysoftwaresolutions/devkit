@@ -1061,29 +1061,6 @@ def prompt(agent: str):
             "<task-notification>" in raw[:400]:
         _context_out("UserPromptSubmit", extra)  # background events are not the developer's request
         return
-    try:  # development or not? A follow-up with no signal keeps the previous turn's class
-        from . import scope
-        sf0 = _session_file(agent, sid) if sid else None
-        s0 = (state.read(sf0) or {}) if sf0 and sf0.exists() else {}
-        cls = scope.resolve(raw, s0.get("turn_class"))
-        if sf0 and sf0.exists():
-            try:
-                state.update(sf0, lambda d: d.update(turn_class=cls), create=False)
-            except state.StateBusy:
-                pass  # audited by state; this turn is still classified
-    except Exception:
-        cls = None
-    if cls == "other":  # a recipe, a general question, consulting work: no devkit context, reminders or skills
-        _log(f"prompt {agent}: not development work; devkit stays out of this turn")
-        _context_out("UserPromptSubmit", "")
-        return
-    try:
-        from . import lessons as _les
-        sfile = _session_file(agent, sid) if sid else None
-        _proj = ((core.read_json(sfile, {}) or {}).get("project") or "") if sfile and sfile.exists() else ""
-        _les.note_correction(data.get("prompt") or "", _proj)
-    except Exception:
-        pass
     text = progress.on_prompt(agent, data)
     try:
         sf_ = _session_file(agent, sid) if sid else None
@@ -1094,18 +1071,10 @@ def prompt(agent: str):
                     "a comment on the last command below the block.") + ("\n\n" + text if text else "")
     except Exception:
         pass
-    skills = ""
-    try:
-        from . import skillguard
-        sf = _session_file(agent, sid) if sid else None
-        sess = (core.read_json(sf, {}) or {}) if sf and sf.exists() else {}
-        skills = skillguard.on_prompt(agent, data.get("prompt") or "", sess)
-    except Exception:
-        _log(f"prompt skills {agent}: {traceback.format_exc()[-300:]}")
     route = ""
     if (core.CFG.get("crew") or {}).get("route_hint", True):
         route = morpheus_hint(data.get("prompt") or "")
-    _context_out("UserPromptSubmit", "\n\n".join(x for x in (extra, skills, route, text) if x))
+    _context_out("UserPromptSubmit", "\n\n".join(x for x in (extra, route, text) if x))
 
 
 DELIVERY = re.compile(r"\bgit\s+(?:-C\s+\S+\s+)?(commit|push|merge|tag|rebase|cherry-pick|revert)\b|"

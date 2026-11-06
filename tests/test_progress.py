@@ -733,5 +733,34 @@ class CrewSafetyTests(unittest.TestCase):
         self.assertIn("'add \"export\" for $USER; rm -rf /'", line)
 
 
+class HookCallsTests(unittest.TestCase):
+    def test_the_hooks_call_only_devkit_functions_that_exist(self):
+        # Seraph M111 (4): the prompt hook called scope.resolve, lessons.note_correction and skillguard.on_prompt after
+        # they were removed; each call failed inside a try, so every prompt lost its turn class and skills silently
+        import ast
+        import importlib
+        from devkit import hooks
+        tree = ast.parse(Path(hooks.__file__).read_text())
+
+        def imports(body):  # `from . import x as y` written directly in this body (not in nested functions)
+            out, todo = {}, list(body)
+            while todo:
+                n = todo.pop()
+                if isinstance(n, ast.ImportFrom) and n.level == 1 and not n.module:
+                    out.update({a.asname or a.name: a.name for a in n.names})
+                elif not isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef, ast.Lambda)):
+                    todo += list(ast.iter_child_nodes(n))
+            return out
+        top, missing = imports(tree.body), set()
+        for fn in [n for n in ast.walk(tree) if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))]:
+            local = {n.id for n in ast.walk(fn) if isinstance(n, ast.Name) and isinstance(n.ctx, ast.Store)}
+            local |= {a.arg for a in fn.args.args + fn.args.kwonlyargs}
+            mods = {**{k: v for k, v in top.items() if k not in local}, **imports(fn.body)}
+            missing |= {f"{n.value.id}.{n.attr} (line {n.lineno})" for n in ast.walk(fn)
+                        if isinstance(n, ast.Attribute) and isinstance(n.value, ast.Name) and n.value.id in mods
+                        and not hasattr(importlib.import_module(f"devkit.{mods[n.value.id]}"), n.attr)}
+        self.assertEqual(sorted(missing), [])
+
+
 if __name__ == "__main__":
     unittest.main()
