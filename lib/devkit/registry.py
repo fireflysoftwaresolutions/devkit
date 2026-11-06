@@ -379,9 +379,18 @@ def live_sessions(max_age_s: int = 6 * 3600) -> list:
             continue
         main = main_of(Path(top)) or Path(top)
         pid = core.project_identity(main, gitout(main, "config", "--get", "remote.origin.url"))[0]
+        run = None
+        try:
+            from . import progress
+            r_ = progress.load_run(s.get("agent") or "", s.get("session") or "")
+            run = progress.brief(r_) if r_ else None
+        except Exception:
+            pass
         out.append({"agent": s.get("agent"), "project": pid, "branch": gitout(top, "branch", "--show-current")
                     or s.get("branch"), "started": int(s.get("started") or 0), "last_seen": int(f.stat().st_mtime),
-                    "status": s.get("status", ""), "path": top, "active": is_active(top)})
+                    "status": s.get("status", ""), "path": top, "active": is_active(top),
+                    "session": s.get("session"), "progress": run, "subagents": len(s.get("subagents") or {}),
+                    "turn_started": int(s.get("turn_started") or 0)})
     return sorted(out, key=lambda x: -x["last_seen"])
 
 
@@ -577,10 +586,10 @@ def plans_for(pid: str) -> list:
     return out[:20]
 
 
-def tasks_for(scope: str, legacy: dict = None) -> dict:
+def tasks_for(scope: str, legacy: dict = None, items: list = None) -> dict:
     """Task view for a project or initiative from work items (falls back to legacy note checkboxes)."""
     from . import work
-    s = work.summary(scope)
+    s = work.summary(scope, items)
     if not s["counts"]["open"] and not s["counts"]["done"] and legacy:
         return legacy
     by = lambda b: [i["title"] for i in s["open"] if i["bucket"] == b]  # noqa: E731
@@ -661,9 +670,10 @@ def initiatives(projects: list) -> list:
         ns = notesmod.summarize(f.read_text())
         from . import work
         scope = f"initiatives/{d.name}"
-        ns["tasks"] = tasks_for(scope, ns.get("tasks"))
+        items = work.initiative_items(d.name, ns["projects"])
+        ns["tasks"] = tasks_for(scope, ns.get("tasks"), items)
         if ns.get("progress_source") != "manual" and ns["tasks"].get("items") is not None:
-            ns["progress"], ns["progress_source"] = work.progress(scope)
+            ns["progress"], ns["progress_source"] = work.progress(scope, items)
         ns["sessions"] = (work.recent_sessions(scope) + (ns.get("sessions") or []))[:12]
         members = []
         for pid in ns["projects"]:
@@ -1017,6 +1027,24 @@ def write_outputs(reg: dict) -> list:
             changed.append(p["note"])
     write_if_changed(HANDOFF / "TASKS.md", render_tasks(reg) + "\n") and changed.append("TASKS.md")
     write_if_changed(HANDOFF / "ACTIVITY.md", render_activity(reg) + "\n") and changed.append("ACTIVITY.md")
+    for i in reg.get("initiatives") or []:  # initiatives get the same generated task block as projects
+        f = HANDOFF / i["note"]
+        try:
+            txt = f.read_text()
+        except OSError:
+            continue
+        block = render_tasks_block(f"initiatives/{i['id']}")
+        if TASKS_START in txt and TASKS_END in txt:
+            pre, rest = txt.split(TASKS_START, 1)
+            new_txt = pre + block + rest.split(TASKS_END, 1)[1]
+        elif "\n## Tasks\n" in txt:
+            head, _, tail = txt.partition("\n## Tasks\n")
+            nxt = tail.find("\n## ")
+            new_txt = head + "\n## Tasks\n" + block + "\n" + (tail[nxt:] if nxt != -1 else "")
+        else:
+            continue
+        if write_if_changed(f, new_txt):
+            changed.append(i["note"])
     old = read_json(HANDOFF / "registry.json", {}) or {}
     strip = lambda r: {k: v for k, v in r.items() if k != "generated"}  # noqa: E731
     if strip(old) != strip(json.loads(json.dumps(reg))):

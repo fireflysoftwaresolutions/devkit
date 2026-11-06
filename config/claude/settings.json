@@ -31,7 +31,7 @@
     ],
     "PreToolUse": [
       {
-        "matcher": "Bash|Write|Edit|MultiEdit|NotebookEdit",
+        "matcher": "Bash|Write|Edit|MultiEdit|NotebookEdit|Agent|Task",
         "hooks": [
           {
             "type": "command",
@@ -82,6 +82,51 @@
             "type": "command",
             "command": "'{{DEVKIT}}/bin/dev' hook instructions-loaded --agent claude",
             "timeout": 10
+          }
+        ]
+      }
+    ],
+    "UserPromptSubmit": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "'{{DEVKIT}}/bin/dev' hook prompt --agent claude",
+            "timeout": 10
+          }
+        ]
+      }
+    ],
+    "PostToolUse": [
+      {
+        "matcher": "Bash|Agent|Task|Write|Edit|MultiEdit|WebFetch|WebSearch",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "'{{DEVKIT}}/bin/dev' hook post-tool --agent claude",
+            "timeout": 10
+          }
+        ]
+      }
+    ],
+    "SubagentStart": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "'{{DEVKIT}}/bin/dev' hook subagent-start --agent claude",
+            "timeout": 5
+          }
+        ]
+      }
+    ],
+    "SubagentStop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "'{{DEVKIT}}/bin/dev' hook subagent-stop --agent claude",
+            "timeout": 5
           }
         ]
       }

@@ -58,6 +58,28 @@ never move or rename repositories yourself (`dev adopt` does that, with the user
 - **Stay in scope.** Do what was asked. Note unrelated problems in your reply or the handoff note; do not fix them
   silently.
 
+### Keep the developer informed, and keep time predictable
+
+The developer should never have to ask "how is it going?". Follow the `communicating` skill (it has the templates):
+
+- **Kickoff.** For work longer than a few minutes: `dev progress start "<goal>" --steps N --estimate 30m`, then post
+  a short plan with the estimate. The command shows how long similar work really took here; use that number.
+- **During the work.** After each step, every ~8–10 minutes of tool work and whenever background work finishes:
+  `dev progress step "<done, with evidence>" --next "<next>"`, then post the update it prints (≤ 5 lines: done · now ·
+  next · ETA). The hooks remind you after a long silence.
+- **Background work.** When you launch subagents, parallel sessions or long commands, say what runs, what it will
+  produce and when you expect it. Relay each result when it lands. Never sleep or poll.
+- **Decisions.** Ask only when the decision is the developer's (scope, behaviour, cost, risk, irreversible or external
+  effects). Use the decision template: context, options with trade-offs, your recommendation, and what you will do if
+  they don't answer. Explanations lead with the answer, then how it works, an example from their code, and what it
+  means for them.
+- **Time.** At 1.5× the estimate, re-plan and say so. Be fast without cutting corners: run independent tool calls in
+  parallel, run long jobs in the background, run the narrowest check first and the full suite once. Use compact
+  output and targeted reads, and never re-read what you have. `dev time` shows where time goes.
+- **End.** The final report gives the outcome, what changed, the evidence, what is not done and the next step, after
+  the DevKit status line. Then run `dev progress done "<outcome>"`, which notifies the developer and calibrates future
+  estimates.
+
 ## 4. Files and disk
 
 - Prefer editing existing files. Create a new file only when the change needs it.

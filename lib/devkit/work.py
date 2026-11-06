@@ -202,6 +202,8 @@ def _commit(paths, message: str, push: bool = True, wait: bool = False):
         core.git(HANDOFF, "commit", "-q", "-m", message, "--", *rel)
     if not push or not core.gitout(HANDOFF, "remote") or not core.CFG["sync"].get("push", True):
         return True
+    if os.environ.get("DEVKIT_NO_AUTOSYNC") and not wait:  # bulk operations push once at the end
+        return True
     if wait:
         core.git(HANDOFF, "pull", "-q", "--rebase", "--autostash", timeout=60)
         rc, _, _ = core.git(HANDOFF, "push", "-q", timeout=60)
@@ -399,7 +401,8 @@ def write_presence(sessions: list, a=None):
              "until": i["meta"]["lock_expires"]} for i in all_items()
             if (i["meta"].get("claimed_by") or "").startswith(me) and not lock_holder(i)[1]]
     data = {"user": a["user"], "host": a["host"], "updated": now_iso(),
-            "sessions": [{k: s.get(k) for k in ("agent", "project", "branch", "started", "status", "last_seen")}
+            "sessions": [{k: s.get(k) for k in ("agent", "project", "branch", "started", "status", "last_seen",
+                                                "progress", "subagents", "turn_started")}
                          for s in sessions], "locks": held}
     f = PRESENCE / f"{me}.json"
     f.parent.mkdir(parents=True, exist_ok=True)
@@ -421,14 +424,23 @@ def team(max_age_h: float = 24) -> list:
 
 # --------------------------------------------------------------------------- summaries
 
-def summary(scope: str) -> dict:
-    items = all_items(scope)
+def initiative_items(slug: str, members: list) -> list:
+    """Initiative-scope items plus member-project items linked to the initiative (links: initiative:<slug>)."""
+    tag = f"initiative:{slug}"
+    items = all_items(f"initiatives/{slug}")
+    for m in members or []:
+        items += [i for i in all_items(m) if tag in (i["meta"].get("links") or [])]
+    return items
+
+
+def summary(scope: str, items: list = None) -> dict:
+    items = all_items(scope) if items is None else items
     open_ = ordered_open(items)
     done = [i for i in items if i["meta"].get("status") == "done"]
 
     def brief(i):
         holder, expired = lock_holder(i)
-        return {"id": i["meta"]["id"], "title": i["meta"]["title"], "type": i["meta"].get("type"),
+        return {"id": i["meta"]["id"], "title": i["meta"]["title"], "type": i["meta"].get("type"), "scope": i["scope"],
                 "status": i["meta"].get("status"), "bucket": i["meta"].get("bucket"),
                 "priority": i["meta"].get("priority"), "claimed_by": holder if holder and not expired else "",
                 "version": i["meta"].get("version"), "updated": i["meta"].get("updated"), "due": i["meta"].get("due")}
@@ -441,7 +453,7 @@ def summary(scope: str) -> dict:
                        "blocked": len([i for i in open_ if i["meta"].get("status") == "blocked"])}}
 
 
-def progress(scope: str):
-    s = summary(scope)["counts"]
+def progress(scope: str, items: list = None):
+    s = summary(scope, items)["counts"]
     total = s["open"] + s["done"]
     return (round(100 * s["done"] / total), "tasks") if total else (None, "none")

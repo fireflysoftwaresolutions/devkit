@@ -35,6 +35,7 @@ COMMANDS = [
         ("note set k=v …", "Project status, priority, milestone, due date, tags"),
         ("plan new|revise|approve|ls", "Versioned plans and specs; every change records who and why"),
         ("team", "Who is working on what, on every machine; who holds which task"),
+        ("progress [start|step|done]", "Live progress of agent work with ETA; `dev time` for how long things take"),
     ]),
     ("Agents", [
         ("claude [query] [-w branch]", "Start Claude Code in a project (optionally in its own worktree)"),
@@ -405,6 +406,11 @@ def cmd_claude(a):
 
 def cmd_codex(a):
     return _launch("codex", a)
+
+
+def cmd_handoff_import(a):
+    from . import migrate
+    return migrate.run(Path(a.staging), a.slug, dry_run=a.dry_run)
 
 
 def cmd_handoff(a):
@@ -992,6 +998,52 @@ def cmd_plan(a):
     return 0
 
 
+def cmd_progress(a):
+    from . import progress as pg
+    act = a.progress_cmd
+    if act == "start":
+        run = pg.start(" ".join(a.goal), a.steps or 0, a.estimate or "")
+        cal = pg.calibration(run.get("project"))
+        print(f"{ui.OK} run started · {run['goal']}" + (f" · {a.steps} steps" if a.steps else "")
+              + (f" · estimate {pg.fmt_min(run['estimate'])}" if run["estimate"] else ""))
+        hints = []
+        if cal["ratio"] and run["estimate"]:
+            hints.append(f"runs here take {cal['ratio']}× their estimate → plan for ~{pg.fmt_min(run['estimate_cal'])}")
+        if cal["turn_median"]:
+            hints.append(f"median turn {pg.fmt_min(cal['turn_median'])}, p90 {pg.fmt_min(cal['turn_p90'])}")
+        if hints:
+            print("  " + ui.dim(" · ".join(hints)))
+        print(ui.dim("  update with: dev progress step \"<what finished>\" --next \"<what is next>\""))
+        return 0
+    if act in ("step", "block", "done"):
+        kind = {"step": "step", "block": "blocked", "done": "done"}[act]
+        run = pg.step(" ".join(a.text), a.next or "", kind=kind)
+        print(pg.render_update(run))
+        return 0
+    if act == "time":
+        print(pg.report(a.days, a.project))
+        return 0
+    runs = pg.active_runs()
+    from . import work
+    others = [(t["user"] + "@" + t["host"], s_) for t in work.team() for s_ in t.get("sessions", [])
+              if s_.get("progress") and not (t["user"] == work.actor()["user"] and t["host"] == work.actor()["host"])]
+    print(ui.section("Progress"))
+    if not runs and not others:
+        print("  no runs — agents start one with dev progress start \"<goal>\" --steps N --estimate 30m")
+    for r in runs:
+        mark = {"running": ui.cyan("▸"), "blocked": ui.red("■"), "done": ui.green("✓")}.get(r.get("state"), "·")
+        last = (r.get("updates") or [{}])[-1]
+        print(f"  {mark} {ui.bold(r.get('goal', ''))}  {ui.dim(r.get('agent', '') + ' · ' + (r.get('project') or '-'))}")
+        print(f"    {pg.headline(r)}" + (f" · last: {last.get('text')}" if last.get("text") else "")
+              + (f" · next: {last.get('next')}" if last.get("next") else ""))
+    for who, s_ in others:
+        p_ = s_["progress"]
+        print(f"  {ui.ACTIVE} {who} · {s_.get('agent')} · {s_.get('project')} · {p_.get('goal')} — "
+              f"{p_.get('step')}/{p_.get('steps') or '?'}" + (f" · ETA ~{p_['eta_min']}m" if p_.get("eta_min") else ""))
+    print()
+    return 0
+
+
 def cmd_team(a):
     from . import work
     t = work.team(max_age_h=a.hours)
@@ -1075,11 +1127,23 @@ def cmd_overview(a):
         print(f"\n  {ui.bold('◆ ' + i['title'])}  {i['status']} · {i['priority']}  {bar} {pct}"
               + (f"  {ui.dim('milestone ' + i['milestone'])}" if i["milestone"] else "")
               + (f"  {ui.dim('due ' + i['due'])}" if i["due"] else ""))
-        print("    " + ui.dim(" · ".join(m["id"] + ("" if m.get("local") else " (not cloned)") for m in i["members"])))
-        for t in i["tasks"]["now"][:3]:
+        mem = i["members"]
+        local = [m for m in mem if m.get("local")]
+        names = [m["id"].split("/")[-1] for m in (local + [m for m in mem if not m.get("local")])][:6]
+        more = f" +{len(mem) - len(names)} more" if len(mem) > len(names) else ""
+        print("    " + ui.dim(f"{len(mem)} project(s), {len(local)} cloned here: " + ", ".join(names) + more))
+        t_ = i["tasks"]
+        print("    " + ui.dim(f"tasks: {t_.get('doing', 0)} doing · {t_.get('blocked', 0)} blocked · {t_.get('open', 0)} open "
+                              f"· {t_.get('done', 0)} done — dev initiative show {i['id']}"))
+        for t in t_["now"][:3]:
             print(f"    {ui.cyan('▸')} {t}")
+    in_init = {m["id"] for i in data.get("initiatives", []) for m in i["members"]}
+    hidden = 0
     for x in data["projects"]:
         if x["status"] in ("archived",) and not a.all:
+            continue
+        if x["id"] in in_init and not a.all and not x["live_sessions"] and not x.get("local"):
+            hidden += 1
             continue
         badge = {"active": ui.green, "blocked": ui.red, "paused": ui.yellow}.get(x["status"], ui.dim)(x["status"])
         pr = ui.yellow(" !high") if x["priority"] == "high" else ""
@@ -1095,6 +1159,8 @@ def cmd_overview(a):
             print(f"    {ui.dim(str(x['open_tasks']) + ' open task(s) — dev task -p ' + x['id'])}")
         if x["last_session"]:
             print(f"    {ui.dim('last: ' + x['last_session'][:140])}")
+    if hidden:
+        print(f"\n  {ui.dim(f'{hidden} initiative member project(s) not cloned here are summarised above — dev overview --all')}")
     if data["issues"]:
         print(ui.section(f"Needs attention ({len(data['issues'])})"))
         for _, m in data["issues"][:8]:
@@ -1444,6 +1510,10 @@ def build_parser():
         p.add_argument("query", nargs="?")
         p.add_argument("-w", "--worktree", metavar="BRANCH", help="run in a managed worktree for BRANCH")
         p.add_argument("args", nargs=argparse.REMAINDER, help=f"arguments passed to {tool} (after --)")
+    p = add("handoff-import", cmd_handoff_import, "Adopt an old handoff repository (from a staging folder) as an initiative")
+    p.add_argument("staging")
+    p.add_argument("--slug", required=True)
+    p.add_argument("--dry-run", action="store_true")
     p = add("handoff", cmd_handoff, "Show or edit a handoff note")
     p.add_argument("query", nargs="?")
     p.add_argument("--edit", action="store_true")
@@ -1501,6 +1571,24 @@ def build_parser():
         x.add_argument("path")
         x.add_argument("--why", help="the reason for the change (required for revise)")
     psp.add_parser("ls", help="list plans")
+    p = add("progress", cmd_progress, "Live progress of agent work: start, step, block, done; ETA from real pace")
+    gsp = p.add_subparsers(dest="progress_cmd")
+    x = gsp.add_parser("start", help="start a run: goal, steps, estimate")
+    x.add_argument("goal", nargs="+")
+    x.add_argument("--steps", type=int)
+    x.add_argument("--estimate", help="e.g. 30m, 1h30m")
+    for verb, h_ in (("step", "a step finished"), ("block", "blocked: why and what is needed"),
+                     ("done", "finished: the outcome")):
+        x = gsp.add_parser(verb, help=h_)
+        x.add_argument("text", nargs="+")
+        x.add_argument("--next", help="what comes next")
+    x = gsp.add_parser("time", help="how long things take: turns, slow commands, subagents, estimate accuracy")
+    x.add_argument("--days", type=int, default=7)
+    x.add_argument("-p", "--project")
+    p = add("time", lambda a: (print(__import__("devkit.progress", fromlist=["x"]).report(a.days, a.project)), 0)[1],
+            "How long things take: turns, slow commands, subagents, estimate accuracy")
+    p.add_argument("--days", type=int, default=7)
+    p.add_argument("-p", "--project")
     add("team", cmd_team, "Who is working on what, across machines and developers").add_argument(
         "--hours", type=float, default=24)
     p = add("initiative", cmd_initiative, "Cross-project initiatives (integrations, platforms, programmes)")

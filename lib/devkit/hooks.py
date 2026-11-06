@@ -208,6 +208,18 @@ def session_start(agent: str):
                                  "head": core.gitout(top, "rev-parse", "HEAD") if top else "",
                                  "branch": core.gitout(top, "branch", "--show-current") if top else "",
                                  "note_hash": _note_hash(top) if top and not core.is_temp(top) else ""}))
+    try:  # the project id (timing, progress) and DEVKIT_SESSION for this session's shell commands (Claude)
+        from . import progress
+        rec = core.read_json(f, {}) or {}
+        if not rec.get("project") and rec.get("top") and not core.is_temp(rec["top"]):
+            rec["project"] = progress._project(cwd)
+            f.write_text(json.dumps(rec))
+        env_file = os.environ.get("CLAUDE_ENV_FILE")
+        if env_file:
+            with open(env_file, "a") as fh:
+                fh.write(f"export DEVKIT_SESSION={agent}:{sid}\nexport DEVKIT_AGENT={agent}\n")
+    except Exception:
+        _log(f"session-start env {agent}: {traceback.format_exc()[-300:]}")
     _spawn(["config", "repair", "--quiet"])  # restore any devkit-managed setting changed outside devkit
     text = context_for(cwd, agent)
     if agent == "codex":
@@ -342,6 +354,10 @@ def stop(agent: str):
             reasons.append(nudge)
         if reasons:
             out.update({"decision": "block", "reason": " ".join(reasons)})
+        else:
+            from . import progress
+            progress.on_turn_end(agent, sid, sess)
+            sess["turn_started"] = None
         sf.write_text(json.dumps(sess))
     if out:
         print(json.dumps(out))
@@ -404,6 +420,11 @@ def guard(agent: str):
     if os.environ.get("DEVKIT_GUARD", "").lower() == "off":
         return
     data = _stdin_json()
+    try:
+        from . import progress
+        progress.tool_started(data)
+    except Exception:
+        pass
     from . import guard as g
     verdict = g.check(data.get("tool_name") or "", data.get("tool_input") or {}, data.get("cwd") or os.getcwd(), agent)
     if not verdict:
@@ -416,8 +437,36 @@ def guard(agent: str):
                                              "permissionDecisionReason": reason}}))
 
 
+def _context_out(event: str, text: str):
+    if text:
+        print(json.dumps({"hookSpecificOutput": {"hookEventName": event, "additionalContext": text}}))
+
+
+def prompt(agent: str):
+    """UserPromptSubmit: start the turn clock; answer "how is it going?" from real progress records."""
+    from . import progress
+    _context_out("UserPromptSubmit", progress.on_prompt(agent, _stdin_json()))
+
+
+def post_tool(agent: str):
+    """PostToolUse: time slow calls; remind the agent to update the developer after a long silence."""
+    from . import progress
+    _context_out("PostToolUse", progress.on_tool_done(agent, _stdin_json()))
+
+
+def subagent_start(agent: str):
+    from . import progress
+    progress.on_subagent(agent, _stdin_json(), True)
+
+
+def subagent_stop(agent: str):
+    from . import progress
+    progress.on_subagent(agent, _stdin_json(), False)
+
+
 HANDLERS = {"session-start": session_start, "stop": stop, "session-end": session_end, "guard": guard,
-            "config-change": config_change, "instructions-loaded": instructions_loaded}
+            "config-change": config_change, "instructions-loaded": instructions_loaded, "prompt": prompt,
+            "post-tool": post_tool, "subagent-start": subagent_start, "subagent-stop": subagent_stop}
 
 
 def run(event: str, agent: str) -> int:

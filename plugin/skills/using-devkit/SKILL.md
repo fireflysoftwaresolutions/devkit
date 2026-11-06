@@ -49,6 +49,7 @@ this skill is the how.
 | Document | `dev docs check`, `dev diagram render` | `docs`, `documentation-writer`, `doc-coauthoring`, `diagrams` |
 | Hand off | `dev handoff`, `dev task`, `/devkit:handoff` | `handoff` |
 | Coordinate with others | `dev team`, `dev task start|release`, `dev task show <n>` (history) | — |
+| Keep the developer informed | `dev progress start|step|block|done`, `dev time` | `communicating` |
 | Plans and specs | `dev plan new|revise --why|approve|ls` | Superpowers writing-plans |
 | Where are we | `dev status`, `dev overview`, `dev standup`, `/devkit:status` | — |
 | Something is off | `dev doctor`, `dev config diff`, `dev guard check "<cmd>"` | — |

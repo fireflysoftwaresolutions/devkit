@@ -248,6 +248,9 @@ def tasks(text: str) -> list:
             bucket = b if b in BUCKETS else bucket
             continue
         m = TASK_RE.match(ln)
+        if not m and out and ln.startswith("  ") and ln.strip() and not ln.lstrip().startswith(("- ", "* ", "#")):
+            out[-1]["text"] += " " + ln.strip()  # a task wrapped over several lines
+            continue
         if m:
             mark = m.group(2).lower()
             done = mark == "x"
