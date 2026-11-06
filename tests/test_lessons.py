@@ -4,6 +4,7 @@
 import sys
 import tempfile
 import unittest
+from unittest import mock
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "lib"))
@@ -50,6 +51,15 @@ class CrewPitfallTests(unittest.TestCase):
         self.assertIn("## devkit · known pitfalls", out["prompt"])
         self.assertIn(self.regex["meta"]["id"], out["prompt"])
         self.assertIn("dev lesson recur", out["prompt"])
+
+    def test_a_launch_gets_the_skills_of_its_kind_of_work(self):
+        from devkit import skillguard
+        with mock.patch.object(skillguard, "installed", lambda agent: {"testing", "test-driven-development",
+                                                                       "property-based-testing"}):
+            out = skillguard.on_agent_brief("claude", {"description": "QA: tests",
+                                                       "prompt": "The tests are flaky and the coverage is low; fix it."})
+        self.assertIn("- `testing`", out["prompt"])
+        self.assertIn("what devkit knows about test strategy", out["prompt"])
 
     def test_every_member_with_a_shell_is_told_to_record_lessons(self):
         from devkit import crew

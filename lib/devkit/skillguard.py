@@ -206,6 +206,15 @@ def on_agent_brief(agent: str, tool_input: dict, project: str = ""):
         for s in required(r, "claude"):
             if s in have and not re.search(rf"\b{re.escape(s)}\b", brief, re.I):
                 need.append((s, r["why"]))
+    try:  # the knowledge of the brief's kind of work (the crew's RACI), whoever does it
+        from . import raci
+        top = raci.best(brief[:4000] + " " + (tool_input.get("description") or ""))
+        for sk in ((top[0].get("knowledge") or {}).get("skills") or []) if top else []:
+            if short(sk) in have and not re.search(rf"\b{re.escape(short(sk))}\b", brief, re.I) and \
+                    short(sk) not in [x for x, _ in need]:
+                need.append((short(sk), f"what devkit knows about {raci._lower(top[0]['name'])}"))
+    except Exception:
+        pass
     extra = ""
     if need:
         seen = dict.fromkeys(need)
