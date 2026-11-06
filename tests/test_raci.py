@@ -17,7 +17,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "lib"))
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from devkit import cli, core, crew, dispatch, progress as pg, raci  # noqa: E402
-from test_progress import boundary, launch  # noqa: E402
+from test_progress import TempState, boundary, launch  # noqa: E402
 
 # Real tasks and the member who should do them (the misroutes the developer found are the first rows).
 GOLDEN = [
@@ -351,12 +351,13 @@ class MorpheusTests(unittest.TestCase):
                           "h1": {"label": "compaction", "state": "done", "started": 1}},
                "decisions": [{"id": "D1", "question": "Read-only or with actions?", "state": "open", "mode": "guided"}],
                "updates": [{"kind": "step", "text": "contract written", "check": "✓ 4 tests", "next": "the API"}]}
-        with mock.patch.object(pg, "pending_decisions", lambda r: r["decisions"]):
+        with TempState(), mock.patch.object(pg, "pending_decisions", lambda r: r["decisions"]):  # devkit's defaults
             block = pg.render_update(run, branch="main", now=100)
-        self.assertIn("- **Crew:** Backend engineer (Tank) ▸ the API · UX designer (Sati) ✓ the screens", block)
+        crew_line = "Backend engineer (Tank) ▸ the API · UX designer (Sati) ✓ the screens · 1 of 4 slots in use"
+        self.assertIn(f"- **Crew:** {crew_line}", block)  # the slots in use end the line (crew slots R7)
         self.assertIn("- **You:** decide “Read-only or with actions?”", block)
         parsed = canary.parse_status(block)
-        self.assertEqual(parsed["crew"], "Backend engineer (Tank) ▸ the API · UX designer (Sati) ✓ the screens")
+        self.assertEqual(parsed["crew"], crew_line)
         self.assertEqual(parsed["next"], "the API")  # Next still parses after the new bullets
         self.assertEqual(canary.format_issues(block), [])
         self.assertIn("you → decide", canary.status_text(block))

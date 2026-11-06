@@ -774,11 +774,15 @@ def _who_label(label, roster=None) -> str:
 
 def ready_view(run: dict, roster=None) -> dict:
     """dispatch.ready() as plain data: what Morpheus can launch now, what is queued or waiting and why, who is busy."""
-    from . import dispatch
+    from . import dispatch, progress
     r = dispatch.ready(run)
     step = lambda s: {"step": s["name"], "member": s.get("label") or "", "who": _who_label(s.get("label"), roster),  # noqa: E731
-                      "scope": s.get("scope") or [], "requested_by": s.get("requested_by") or ""}
-    return {"free": r["free"], "max_parallel": r["limit"],  # 1 while the 5-hour usage is above the quota
+                      "scope": s.get("scope") or [], "requested_by": s.get("requested_by") or "",
+                      "order": r["why"].get(s["name"], "")}
+    b = r["slots"]
+    return {"free": r["free"], "max_parallel": r["limit"],  # the effective limit: lower while the quota is short
+            "slots": {"used": b["used"], "limit": b["limit"], "max": b["max"], "reserve": b["reserve"],
+                      "why": b["why"], "text": progress.slots_text(b)},
             "launch": [dict(step(s), launch=dispatch.launch_line(s)) for s in r["launch"]],
             "queued": [dict(step(s), launch=dispatch.launch_line(s)) for s in r["queued"]],
             "waiting": [dict(step(s), why=why) for s, why in r["waiting"]],
@@ -851,10 +855,18 @@ def mode_line(view: dict) -> str:
     return "  Mode guided · decisions that are the developer's wait for the developer"
 
 
+def slots_line(sl: dict) -> str:
+    """'Slots: 1 of 3 slots in use (lowered from 6: 5-hour usage at 87 %) · 1 kept for the developer's own request'"""
+    keep = f" · {sl['reserve']} kept for the developer's own request" if sl.get("reserve") else ""
+    return f"Slots: {sl['text']}{keep}"
+
+
 def run_text(view: dict) -> str:
     """The mode, assigned steps, open messages and pending decisions of a run_view."""
     out = [mode_line(view)]
     ready = view.get("ready") or {}
+    if ready.get("slots"):
+        out.append(f"  {slots_line(ready['slots'])}")
     if ready.get("launch"):
         out.append(f"  Ready to launch: {', '.join((s.get('who') or s['member']) + ': ' + s['step'] for s in ready['launch'])}"
                    " · dev crew next")
@@ -1602,24 +1614,36 @@ def _decline(a, me) -> int:
     return 0
 
 
-def _next() -> int:
-    from . import progress
+def _next(a=None, me=None) -> int:
+    from . import dispatch, progress
+    first, why = (getattr(a, "first", None) or "", getattr(a, "why", None) or "") if a is not None else ("", "")
+    if first or why:
+        if not (first and why):
+            ui.err('launch a step ahead of the order with both: dev crew next --first "<step>" --why "…"')
+            return 2
+        s = dispatch.order_why(first, why, from_agent=me)
+        print(f"{ui.OK} “{s['name']}” may go ahead of the order: {why} (recorded and audited)")
+        return 0
     run = live_run()
     if not run:
         print('  no progress run in this session: dev progress start "<goal>" --plan "<step>; <step>"')
         return 0
+    if not me:
+        dispatch.record_order(run)  # the order Morpheus launches in, kept on the run (spec R5)
     v, mode = ready_view(run), progress.mode_of(run)
     print(ui.section("Next" + (f" · {run.get('goal')}" if run.get("goal") else "")))
     approved = ", ".join(run.get("approved") or [])
-    print(f"  {v['free']} of {v['max_parallel']} crew slots free · mode {mode}"
+    print(f"  {slots_line(v['slots'])} · mode {mode}"
           + (f" · pre-approved: {approved}" if mode == "auto" and approved else ""))
     if v["launch"]:
-        print(ui.section("Ready to launch"))
+        print(ui.section("Ready to launch, in this order"))
         for s in v["launch"]:
-            print(f"  {s.get('who') or s['member']}: {s['step']}\n    {s['launch']}")
+            print(f"  {s.get('who') or s['member']}: {s['step']} · {s['order']}\n    {s['launch']}")
     if v["queued"]:
-        print(ui.section("Queued until a slot frees"))
-        print("\n".join(f"  {s.get('who') or s['member']}: {s['step']}" for s in v["queued"]))
+        print(ui.section("Queued until a slot frees, in this order"))
+        print("\n".join(f"  {s.get('who') or s['member']}: {s['step']} · {s['order']}" for s in v["queued"]))
+    if v["launch"] or v["queued"]:
+        print(ui.dim('  launch in this order; to launch a step ahead of it: dev crew next --first "<step>" --why "…"'))
     if v["waiting"]:
         print(ui.section("Waiting"))
         print("\n".join(f"  {s.get('who') or s['member']}: {s['step']} · {s['why']}" for s in v["waiting"]))
@@ -1645,7 +1669,7 @@ def _messages(a, act) -> int:
         if act == "decline":
             return _decline(a, me)
         if act == "next":
-            return _next()
+            return _next(a, me)
         if act == "mode":
             return _mode(a, me)
         if act == "decide":
@@ -2001,7 +2025,10 @@ def register(add):
     x = sp.add_parser("decline", help="hand a delegated step back to Morpheus, with the reason")
     x.add_argument("step", nargs="+", help="the step (number or part of its name)")
     x.add_argument("--why", help="why you cannot take it")
-    sp.add_parser("next", help="the dispatcher: who to launch now, what is queued or waiting and why, who is busy")
+    x = sp.add_parser("next", help="the dispatcher: who to launch now and in what order, what is queued or waiting "
+                                   "and why, who is busy, and the crew's slots")
+    x.add_argument("--first", help="Morpheus: launch this step ahead of the order (with --why, recorded)")
+    x.add_argument("--why", help="why that step goes ahead of the order")
 
 
 def _irreversible() -> tuple:

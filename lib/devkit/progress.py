@@ -49,10 +49,13 @@ QUOTA = STATE / "quota"  # the plan's usage windows, recorded by the status line
 CALLS = STATE / "calls"  # the call ledger (spec C4): <session>/<tool_use_id>.json, one per open shell call
 
 
+TEAM_POLICY = core.HANDOFF / "policy" / "progress.json"  # the team's ceiling on max_parallel (spec P-fxtwig4hqvx R1)
+
+
 def cfg() -> dict:
-    return {"nudge_minutes": 8, "notify": True, "notify_after_minutes": 10, "slow_tool_seconds": 20,
-            "max_parallel": 4, "stale_agent_hours": 6, "max_depth": 2, "quota_percent": 90,
-            **(core.CFG.get("progress") or {})}
+    """The progress section: devkit's defaults (core.DEFAULTS), with each valid value of the configuration; a wrong
+    value keeps its default (`dev config validate` names it)."""
+    return core.progress_config(core.CFG.get("progress") or {})[0]
 
 
 # --------------------------------------------------------------------------- which session am I?
@@ -357,6 +360,15 @@ def parse_minutes(s) -> float:
 def fmt_min(m: float) -> str:
     m = max(0, round(m))
     return f"{m // 60}h{m % 60:02d}m" if m >= 60 else f"{m}m"
+
+
+def fmt_about(m: float) -> str:
+    """An estimate or a time left, as the dashboard shows it (fmtAbout): to 5 minutes, and to the minute under 10,
+    halves up as Math.round does, so "~" claims no more precision than an estimate has. Measured times keep
+    fmt_min."""
+    m = max(0.0, float(m or 0))
+    r = int(m + 0.5)
+    return fmt_min(r if r < 10 else int(m / 5 + 0.5) * 5)
 
 
 def records(days: int = 30, kind: str | None = None, project: str | None = None) -> list:
@@ -2203,6 +2215,7 @@ def add_step(spec: str, cwd: str | None = None, now: float | None = None, why: s
             if _find_step(run, name) and _find_step(run, name)["name"].lower() == name.lower():
                 raise StepError(f"step “{name}” is already in the plan")
         for s in _build_steps(items, run["plan"]):  # an unknown dependency or a cycle is refused: the plan stays as it is
+            s["added"] = round(now, 1)  # its age, and whether it is the developer's latest request (dispatch.order)
             run["plan"].append(s)
             _log_change(run, s, None, "pending", "main", why or "added during the work", now)
         _allocate(run)
@@ -2447,9 +2460,10 @@ def step(text: str, nxt: str = "", cwd: str | None = None, kind: str = "step", c
     return run
 
 
-def crew_summary(run: dict, limit: int = 4) -> str:
-    """Who in the crew works on what in this run, running first: "Tank ▸ the API · Kid ✓ installer". '' without
-    crew members (the agent's own helpers are not the crew)."""
+def crew_summary(run: dict, limit: int = 4, now: float | None = None) -> str:
+    """Who in the crew works on what in this run, running first, then the slots in use and why the limit is lower
+    (spec R7): "Tank ▸ the API · Kid ✓ installer · 1 of 4 slots in use". '' without crew members (the agent's own
+    helpers are not the crew)."""
     from . import crew
     lanes = []
     for aid, lane in (run.get("agents") or {}).items():
@@ -2458,11 +2472,17 @@ def crew_summary(run: dict, limit: int = 4) -> str:
             continue
         step_ = next((s["name"] for s in run.get("plan") or [] if s.get("owner") == aid), "")
         what = step_ or (lane.get("label") or "").split(":", 1)[-1].strip()
-        mark = {"running": "▸", "done": "✓", "lost": "✗"}.get(lane.get("state"), "·")
+        mark = {"running": "▸", "done": "✓", "lost": "✗", "stopped": "✗"}.get(lane.get("state"), "·")
         lanes.append((lane.get("state") != "running", f"{crew.who(m)} {mark} {what}".strip()))
+    if not lanes:
+        return ""
     lanes.sort(key=lambda x: x[0])
-    parts = [x for _, x in lanes[:limit]]
-    return " · ".join(parts) + (f" · +{len(lanes) - limit}" if len(lanes) > limit else "")
+    parts = [x for _, x in lanes[:limit]] + ([f"+{len(lanes) - limit}"] if len(lanes) > limit else [])
+    try:
+        parts.append(slots_text(slot_budget(run.get("agent") or "claude", run, None, now)))
+    except Exception:
+        pass  # the line still names the crew
+    return " · ".join(parts)
 
 
 def render_update(run: dict, branch: str | None = None, now: float | None = None) -> str:
@@ -2655,9 +2675,10 @@ def reconcile_hook(agent: str, data: dict, now: float | None = None) -> list:
     from . import approvals
     sid = data.get("session_id") or "-"
     now = now or time.time()
+    stopped = agent_stopped(agent, data, now)
     run = load_run(agent, sid)
     if not isinstance(run, dict) or run.get("state") not in approvals.LIVE:
-        return []
+        return stopped
     sess = state.read(session_path(agent, sid))
     aid = str(data.get("agent_id") or "")
     lane = (run.get("agents") or {}).get(aid) if aid else None
@@ -2692,6 +2713,57 @@ def reconcile_hook(agent: str, data: dict, now: float | None = None) -> list:
                     made += done
     if made:
         approvals.audit_moves(doc, made)
+    return stopped + made
+
+
+STOP_TOOLS = ("TaskStop", "KillShell")  # Claude Code's tool that stops a background task (KillShell: older name)
+
+
+def agent_stopped(agent: str, data: dict, now: float | None = None) -> list:
+    """PostToolUse of TaskStop on a subagent's task (spec R6, B-fxsvxz9n78p): Claude Code fires no SubagentStop
+    for a stopped agent, so its slot is freed here, at the stop call's result. Its launch record stops holding a
+    slot; its working lane becomes stopped and the steps it owns unverified (no report, so no evidence), for
+    Morpheus to close with evidence or reopen. A stopped agent that works again (SendMessage) resumes its lane and
+    takes its slot back. -> the transitions made"""
+    resp = data.get("tool_response")
+    if data.get("tool_name") not in STOP_TOOLS or not isinstance(resp, dict):
+        return []  # PreToolUse has no result yet: the stop may still fail
+    inp = data.get("tool_input") or {}
+    tid = str(resp.get("task_id") or inp.get("task_id") or inp.get("shell_id") or "")
+    if resp.get("task_type") not in (None, "local_agent") or not AGENT_ID.fullmatch(tid):
+        return []
+    from . import approvals
+    sid, now = data.get("session_id") or "-", now or time.time()
+    f, aid = session_path(agent, sid), tid
+    with state.hold(f):
+        s = state.load(f)
+        if isinstance(s, dict):
+            ls = _launches(s, now)
+            key = next((k for k, v in ls.items() if v.get("agent_id") == tid), None) or (tid if tid in ls else None)
+            if key:
+                aid = ls[key].get("agent_id") or aid
+                if ls[key].get("state") in ("pending", "started"):
+                    ls[key].update(state="stopped", stopped=round(now, 1))
+            sub = (s.get("subagents") or {}).pop(aid, None)
+            if sub and sub.get("started"):
+                record("subagent", agent, sid, sub.get("label") or sub.get("type") or aid, now - sub["started"],
+                       s.get("project") or "")
+            state.replace(f, s)
+    made = []
+    with _tx(agent, sid):
+        run = load_run(agent, sid)
+        lane = ((run or {}).get("agents") or {}).get(aid) if isinstance(run, dict) else None
+        if lane and lane.get("state") == "running":
+            why = f"stopped by TaskStop at {time.strftime('%H:%M', time.localtime(now))}, before its report: no evidence"
+            moves = [{"kind": "lane", "id": aid, "from": "running", "to": "stopped", "why": why, "at": now}]
+            moves += [{"kind": "step", "id": st["name"], "from": "running", "to": "unverified", "owner_from": aid,
+                       "owner": aid, "why": why} for st in run.get("plan") or []
+                      if st.get("owner") == aid and st.get("state") == "running"]
+            made = approvals.apply(run, moves, now)
+            if made:
+                _save(run, touch_session=False)
+    if made:
+        approvals.audit_moves(run, made)
     return made
 
 
@@ -3098,10 +3170,49 @@ def launch_failed(agent: str, data: dict, now: float | None = None):
            project=s.get("project") or "")
 
 
-def slots(run: dict, sess: dict | None = None, now: float | None = None) -> list:
-    """The crew slots in use, [(id, name)] (spec D2): launches whose agent has not started yet, and working lanes
-    bound to a launch (a resumed one too). A provisional lane counts through its launch; helpers never count. Lanes
-    bound before launch records existed count while they run."""
+SCOUTS = ("sparks", "scout")  # the crew's lookup scout: its launches cost progress.slot_weights.scout
+
+
+def _member_named(kind: str = "", label: str = ""):
+    """The crew member a launch's type or description names (devkit:seraph, "Seraph: review"), or None."""
+    try:
+        from . import crew
+        name = persona(kind, label)
+        return (crew.member(name) if name else None) or crew.member((kind or "").split(":")[-1]) or None
+    except Exception:
+        return None
+
+
+def _cost(member, level: str | None) -> float:
+    """What one launch costs (spec R3, progress.slot_weights): a scout lookup, a review-only or read-only member (the
+    most restrictive tool level along its parent chain), or a builder (everything else)."""
+    w = cfg()["slot_weights"]
+    if member and member.get("id") in SCOUTS:
+        return float(w["scout"])
+    return float(w[level]) if level in ("review", "read") else float(w["builder"])
+
+
+def launch_cost(run, kind: str = "", label: str = "", parent: str = "main") -> float:
+    """The slots a launch takes before its agent works: by its member's tool level and, for a member's helper, the
+    level of its parent's chain (a helper of a reviewer reviews too)."""
+    m = _member_named(kind, label)
+    level = m["tools"] if m and m.get("tools") in TOOL_LEVELS else "all"
+    if parent and parent != "main":
+        up = lane_tools(run or {}, parent)
+        if up:
+            level = max((level, up), key=TOOL_LEVELS.index)
+    return _cost(m, level)
+
+
+def step_cost(run, s: dict) -> float:
+    """The slots a plan step's member takes when launched for it."""
+    return launch_cost(run, "", f"{s.get('label') or ''}: {s.get('name') or ''}")
+
+
+def slot_use(run: dict, sess: dict | None = None, now: float | None = None) -> list:
+    """The crew slots in use, [(id, name, cost)] (spec D2, R3): launches whose agent has not started yet, and working
+    lanes bound to a launch (a resumed one too), each at its cost. A provisional lane counts through its launch.
+    Lanes bound before launch records existed count while they run."""
     now = now or time.time()
     if sess is None:
         sess = core.read_json(session_path(run.get("agent") or "", run.get("session") or ""), {}) if run else {}
@@ -3110,13 +3221,72 @@ def slots(run: dict, sess: dict | None = None, now: float | None = None) -> list
     out = []
     for tid, rec in (sess.get("launches") or {}).items():
         aid = rec.get("agent_id")
+        cost = launch_cost(run, rec.get("type") or "", rec.get("label") or "", rec.get("parent") or "main")
         if rec.get("state") == "pending" and now - (rec.get("ts") or now) < LAUNCH_TTL:
-            out.append((tid, rec.get("label") or rec.get("type") or "a launch"))
+            out.append((tid, rec.get("label") or rec.get("type") or "a launch", cost))
         elif rec.get("state") == "started" and aid not in agents and aid in subs:
-            out.append((aid, rec.get("label") or str(aid)[:8]))  # working in a session without a run
-    out += [(k, v.get("persona") or v.get("label") or k[:8]) for k, v in agents.items()
-            if v.get("state") == "running" and v.get("binding", "exact") in ("exact", "confirmed")]
+            out.append((aid, rec.get("label") or str(aid)[:8], cost))  # working in a session without a run
+    try:
+        from . import crew
+    except Exception:
+        crew = None
+    for k, v in agents.items():
+        if v.get("state") == "running" and v.get("binding", "exact") in ("exact", "confirmed"):
+            m = crew._for_lane(v) if crew else None
+            out.append((k, v.get("persona") or v.get("label") or k[:8], _cost(m, lane_tools(run, k))))
     return out
+
+
+def slots(run: dict, sess: dict | None = None, now: float | None = None) -> list:
+    """The crew slots in use, [(id, name)]; see slot_use for what each costs."""
+    return [(k, name) for k, name, _ in slot_use(run, sess, now)]
+
+
+def slot_budget(agent: str, run: dict | None = None, sess: dict | None = None, now: float | None = None) -> dict:
+    """The crew's slots now (spec R3, R4, R7) -> {used (the costs summed), limit, max (progress.max_parallel), reserve
+    (the slots kept for the developer's own request: progress.reserve, never the last slot of a limit of one), why
+    (the limit is lower), busy [(id, name, cost)]}."""
+    limit, why = parallel_limit(agent, now)
+    busy = slot_use(run, sess, now) if run else []
+    c = cfg()
+    return {"used": round(sum(x for *_, x in busy), 2), "limit": limit, "max": int(c["max_parallel"]),
+            "reserve": min(int(c["reserve"]), max(0, limit - 1)), "why": why, "busy": busy}
+
+
+def _n(x) -> str:
+    return f"{float(x):g}"
+
+
+def slots_text(b: dict) -> str:
+    """'1 of 3 slots in use (lowered from 6: 5-hour usage at 87 %)' (spec R7)."""
+    out = f"{_n(b['used'])} of {b['limit']} slots in use"
+    return out + (f" (lowered from {b['max']}: {b['why']})" if b["limit"] < b["max"] and b.get("why") else "")
+
+
+def _step_added(run: dict, s: dict) -> float:
+    """When a plan step joined the plan: its own time, or the run's start for the steps it started with."""
+    return float(s.get("added") or (run or {}).get("started") or 0)
+
+
+def named_step(run: dict, kind: str = "", label: str = ""):
+    """The open plan step a launch of Morpheus's names, as _bind_step would bind it (of the steps assigned to its
+    member, the one its task text names best, and only one), or None."""
+    pseudo = {"label": label, "type": kind, "persona": persona(kind, label)}
+    mine = [st for st in (run or {}).get("plan") or [] if st.get("label") and st.get("state") not in DONE
+            and (st.get("owner") or "main") == "main" and _label_matches(st["label"], pseudo)]
+    if not mine:
+        return None
+    scored = [(_name_score(_task_text(label), st["name"]), st) for st in mine]
+    best = max(sc for sc, _ in scored)
+    top = [st for sc, st in scored if sc == best]
+    return top[0] if best[1] and len(top) == 1 else None
+
+
+def is_latest_request(run: dict, sess: dict, s: dict) -> bool:
+    """A step the developer asked for in the current turn: added since its prompt, by Morpheus (not delegated by a
+    member). True for every step when the turn is unknown (no prompt recorded)."""
+    turn = (sess or {}).get("turn_started")
+    return not turn or (_step_added(run, s) >= float(turn) and (s.get("requested_by") or "main") == "main")
 
 
 # Nested agents (spec F3, contract C3). A subagent can launch agents of its own; such a helper gets its parent's
@@ -3192,11 +3362,8 @@ def launch_depth(sess: dict, run: dict | None, parent: str) -> int:
     return int(lane.get("depth") or rec.get("depth") or 1) + 1
 
 
-def quota_used(agent: str, now: float | None = None):
-    """The share of the plan's 5-hour window used, in percent, as the status line last recorded it; None without
-    a reading or when that window has reset since."""
-    now = now or time.time()
-    w = (core.read_json(QUOTA / f"{agent}.json", {}) or {}).get("five_hour") or {}
+def _window_used(agent: str, now: float, key: str):
+    w = (core.read_json(QUOTA / f"{agent}.json", {}) or {}).get(key) or {}
     if not isinstance(w, dict) or w.get("used_percentage") is None or (w.get("resets_at") or 0) <= now:
         return None
     try:
@@ -3205,15 +3372,76 @@ def quota_used(agent: str, now: float | None = None):
         return None
 
 
+def quota_used(agent: str, now: float | None = None):
+    """The share of the plan's 5-hour window used, in percent, as the status line last recorded it; None without
+    a reading or when that window has reset since."""
+    return _window_used(agent, now or time.time(), "five_hour")
+
+
+def weekly_used(agent: str, now: float | None = None):
+    """The share of the plan's weekly window used, in percent; None without a reading or once it has reset."""
+    return _window_used(agent, now or time.time(), "seven_day")
+
+
+def quota_share(used: float, c: dict | None = None) -> float:
+    """The share of max_parallel the crew may use at this usage (spec R2): the factor of the highest
+    progress.quota_steps step at or below it (1 below every step), and 0 (one member) from progress.quota_percent."""
+    c = c or cfg()
+    steps = {float(k): float(v) for k, v in (c.get("quota_steps") or {}).items()}
+    steps[float(c["quota_percent"])] = 0.0
+    hit = [pct for pct in steps if used >= pct]
+    return steps[max(hit)] if hit else 1.0
+
+
+def team_ceiling():
+    """The team's ceiling on progress.max_parallel (`max_parallel` in policy/progress.json of the handoff
+    repository), or None."""
+    v = (core.read_json(TEAM_POLICY, {}) or {}).get("max_parallel") if TEAM_POLICY.exists() else None
+    return v if core.PROGRESS_RULES["max_parallel"][0](v) else None
+
+
 def parallel_limit(agent: str, now: float | None = None) -> tuple:
-    """How many crew members may work at once -> (limit, why it is lower, or ""): progress.max_parallel, and 1
-    while the recorded 5-hour usage is above progress.quota_percent (spec G17)."""
+    """How many crew members may work at once -> (limit, why it is lower than progress.max_parallel, or ""): the
+    configured max_parallel, under the team's ceiling, scaled by the plan's recorded usage (progress.quota_steps,
+    5-hour and weekly windows; an expired reading counts for nothing), never below 1. Each change is audited."""
     c = cfg()
-    used = quota_used(agent, now)
-    if used is not None and used > c["quota_percent"]:
-        return 1, (f"the 5-hour usage is at {used:.0f} % (above progress.quota_percent, {c['quota_percent']} %), "
-                   f"so devkit allows one crew member at a time until the window resets")
-    return int(c["max_parallel"]), ""
+    top, why = int(c["max_parallel"]), ""
+    team = team_ceiling()
+    if team is not None and team < top:
+        top, why = team, f"the team's ceiling is {team} ({core.tilde(TEAM_POLICY)})"
+    limit = top
+    for label, used in (("5-hour", quota_used(agent, now)), ("weekly", weekly_used(agent, now))):
+        if used is None:
+            continue
+        n = max(1, int(top * quota_share(used, c) + 1e-9))
+        if n < limit:
+            limit, why = n, f"{label} usage at {used:.0f} %"
+    _note_limit(agent, limit, why, int(c["max_parallel"]), now)
+    return limit, why
+
+
+def _note_limit(agent: str, limit: int, why: str, configured: int, now: float | None):
+    """Audit each change of the effective limit once (spec R7): the last one is kept beside the quota reading."""
+    f = QUOTA / f"{agent}.limit.json"
+    if (core.read_json(f, {}) or {}).get("limit", configured) == limit and (f.exists() or limit == configured):
+        return
+    was = {}
+
+    def fn(d):
+        was.update(d)
+        if d.get("limit", configured) == limit and d:
+            return state.SKIP
+        d.update(limit=limit, why=why, ts=round(now or time.time()))
+        return None
+    try:
+        f.parent.mkdir(parents=True, exist_ok=True)
+        state.update(f, fn)
+    except Exception:
+        return
+    old = was.get("limit", configured)
+    if old != limit:
+        _audit("crew.limit", f"{limit} crew slots", f"{old} → {limit}: {why or 'progress.max_parallel'}",
+               project="")
 
 
 def launch_verdict(agent: str, data: dict, run: dict, now: float | None = None):
@@ -3228,19 +3456,59 @@ def launch_verdict(agent: str, data: dict, run: dict, now: float | None = None):
     if depth > most:
         return (f"This launch would run {depth} levels below Morpheus; the limit is {most} (progress.max_depth). Do "
                 f"this part yourself, or name it in your report and Morpheus assigns it.")
-    busy = slots(run, sess, now)
-    limit, why = parallel_limit(agent, now)
-    if len(busy) < limit:
+    inp = data.get("tool_input") or {}
+    kind = str(inp.get("subagent_type") or inp.get("agent_type") or "")
+    label = str(inp.get("description") or inp.get("nickname") or inp.get("name") or "")
+    cost = launch_cost(run, kind, label, parent)
+    if cost <= 0:
+        return None  # a scout lookup costs no slot (progress.slot_weights)
+    b = slot_budget(agent, run, sess, now)
+    used, limit, reserve = b["used"], b["limit"], b["reserve"]
+    if used + cost > limit + 1e-9:
+        names = ", ".join(name for _, name, _ in b["busy"])
+        head = f"{_n(used)} of {limit} crew slots are in use ({names}): the limit is {limit} at once"
+        head += (f", lowered from {b['max']}: {b['why']}" if b["why"] else "") + \
+            (f", and this launch takes {_n(cost)}" if cost != 1 else "")
+        if parent != "main":
+            return (f"{head}. A helper takes a slot like any crew member, so do this part yourself, or name it in "
+                    f"your report and Morpheus assigns it.")
+        return (f"{head}. Wait for one to finish (you are notified), or give the work to one of them (SendMessage / "
+                f"send_input). progress.max_parallel in devkit config changes the limit.")
+    if used + cost > limit - reserve + 1e-9:  # it would take the slot kept for the developer (spec R4)
+        if parent == "main" and _for_the_developer(run, sess, kind, label):
+            _audit("crew.reserve", label or kind or "a launch", f"{_n(used + cost)} of {limit} slots: the slot "
+                   f"progress.reserve keeps for the developer's own request", project=(run or {}).get("project") or "")
+            return None
+        return (f"{_n(used)} of {limit} crew slots are in use, and the last {reserve} is kept for the developer's own "
+                f"request (progress.reserve): queued plan work waits for a free slot. Launch it when a member "
+                f"finishes (dev crew next), or give it to a working member (SendMessage / send_input).")
+    return _order_verdict(run, sess, kind, label, b, cost, now) if parent == "main" else None
+
+
+def _for_the_developer(run, sess, kind: str, label: str) -> bool:
+    """A launch for what the developer asked in the current turn (spec R4): it names no open plan step (ad-hoc work
+    for their request), or one added in this turn."""
+    st = named_step(run, kind, label)
+    return st is None or is_latest_request(run, sess, st)
+
+
+def _order_verdict(run, sess, kind: str, label: str, b: dict, cost: float, now: float):
+    """Morpheus launches the ready steps in their recorded order (spec R5, dispatch.order): a launch for a lower
+    step is refused when it would leave no room for a higher one, unless he recorded why (dev crew next --first)."""
+    st = named_step(run, kind, label)
+    if not st or st["name"] in ((run or {}).get("order_why") or {}):
         return None
-    names = ", ".join(name for _, name in busy)
-    head = f"{len(busy)} crew members are working or starting ({names}); the limit is {limit} at once"
-    if why:
-        head += f": {why}"
-    if parent != "main":
-        return (f"{head}. A helper takes a slot like any crew member, so do this part yourself, or name it in your "
-                f"report and Morpheus assigns it.")
-    return (f"{head}. Wait for one to finish (you are notified), or give the work to one of them (SendMessage / "
-            f"send_input). progress.max_parallel in devkit config changes the limit.")
+    from . import dispatch
+    ranked = dispatch.order(run, now, sess)
+    names = [s["name"] for s, _ in ranked]
+    if st["name"] not in names or names.index(st["name"]) == 0:
+        return None
+    first, why = ranked[0]
+    if b["limit"] - b["reserve"] - b["used"] - cost + 1e-9 >= step_cost(run, first):
+        return None  # both fit
+    return (f"“{first['name']}” comes first ({why}), and launching {label or kind} for “{st['name']}” would leave no "
+            f"slot for it. Launch {first.get('label') or 'its member'} for “{first['name']}” first (dev crew next), "
+            f"or record why this one goes ahead: dev crew next --first {shlex.quote(st['name'])} --why \"…\"")
 
 
 def on_subagent(agent: str, data: dict, started: bool, now: float | None = None):

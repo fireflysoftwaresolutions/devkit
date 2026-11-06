@@ -94,11 +94,21 @@ matching files must also contain; with `content_files`, files of those globs mat
 | `progress.notify` | `true` | Desktop notifications when a run blocks or finishes, and when a long turn ends |
 | `progress.notify_after_minutes` | `10` | A turn at least this long sends a notification when it ends |
 | `progress.slow_tool_seconds` | `20` | Tool calls at least this slow are recorded for `dev time` |
-| `progress.max_parallel` | `4` | Crew members that may work at once, counting the helpers they launch; the guard refuses a further launch ([The crew](crew.md#guardrails)) |
-| `progress.quota_percent` | `90` | While the plan's recorded 5-hour usage is over this share, only one crew member may work at a time, until the window resets |
-| `progress.max_depth` | `2` | How many levels of agents may run below the main session: crew members, and the helpers they launch. A deeper launch is refused |
+| `progress.max_parallel` | `4` | The crew's slots: how many crew members may work at once (1 to 10), counting the helpers they launch; the guard refuses a launch that does not fit ([The crew](crew.md#guardrails)). The team's `policy/progress.json` in the handoff repository may set a lower ceiling, such as `{"max_parallel": 3}` |
+| `progress.quota_steps` | `{"50": 1.0, "70": 0.75, "85": 0.5}` | How the plan's recorded usage lowers the slots: from each usage percent, this share of `max_parallel`, rounded down (never below one). The 5-hour and the weekly windows both count, and the lower result wins; an expired reading counts for nothing. Setting a step adds it or changes its share; a share of `1` turns a step off. With 6 slots at 87 %, 3 members work at once |
+| `progress.quota_percent` | `90` | From this usage of the 5-hour or the weekly window, one crew member works at a time, until the window resets |
+| `progress.slot_weights` | `{"builder": 1.0, "review": 0.5, "read": 0.5, "scout": 0.0}` | What one launch costs, by kind (0 to 1): a review-only or read-only member (its tool level, or its parent's for a helper), the lookup scout (Sparks), or a builder (every other agent). The costs in use must fit the slots, so two reviewers fit in one builder's slot and a scout lookup always runs |
+| `progress.reserve` | `1` | Slots kept for the developer's own request while the crew works: queued plan steps from an earlier turn do not take them; a launch for what the developer asked in the current turn does (audited as `crew.reserve`). Never the last slot of a limit of one |
+| `progress.max_depth` | `2` | How many levels of agents may run below the main session (1 to 5): crew members, and the helpers they launch. A deeper launch is refused |
 | `progress.stale_agent_hours` | `6` | A crew member with no report for this long is closed as lost, and its step goes back to the main session |
-| `progress.stale_agent_minutes` | `90` | The reconciler's limit: a working crew member silent this long (no hook, no update) is lost and frees its slot, and its step waits for a new owner. It works again, with its step, at its next hook |
+| `progress.stale_agent_minutes` | `90` | The reconciler's limit: a working crew member silent this long (no hook, no update) is lost and frees its slot, and its step waits for a new owner. It works again, with its step, at its next hook. A member stopped with TaskStop frees its slot at once, and its step waits unverified |
+
+`dev crew` and `dev crew next` show the slots in use and why the limit is lower ("1 of 3 slots in use (lowered from 6:
+5-hour usage at 87 %)"), the status block's Crew line ends with the same, and each change of the effective limit is
+audited (`crew.limit`). `dev crew next` lists the ready steps in the order Morpheus launches them: the longest critical
+path first, then your latest request, then the oldest; a launch out of that order needs `dev crew next --first
+"<step>" --why "…"`. You set any of these keys in a terminal with `dev config set progress.max_parallel 6`, validated
+and audited; agents are refused.
 | `work.mode` | `guided` | `guided`: decisions that are the developer's wait for the developer; `auto`: the crew goes on with the recommended option and records it. A run can set its own (`--mode`) |
 | `crew.gates.enforce` | `true` | At SubagentStop, the crew gates send a member back once for each proof, skill, unfinished line, test that cannot fail, or lesson it still owes; `false` only records them in the audit trail (see [The crew › Every report is checked](crew.md#every-report-is-checked)) |
 | `crew.route_hint` | `true` | The prompt hook adds Morpheus's route for each request, a guess from the request's words (English only); `false` leaves it out |
@@ -198,7 +208,7 @@ Only you change these, in a terminal (`dev config edit`): the guard refuses `dev
 | --- | --- | --- |
 | `safeguards.readonly_commands` | `[]` | More command prefixes that review and read-only crew members may run, such as `"make lint"`, on top of devkit's read-only allowlist (readers, git and gh reads, devkit's reading commands, and the common checks such as `pytest`, `ruff check`, and `tsc --noEmit`) |
 | `safeguards.irreversible_member` | `enforce` | `audit` only records the irreversible actions crew members try instead of refusing them; any other value enforces |
-| `safeguards.irreversible_main` | audits for the gate's first week on this Mac, then `enforce` | The same for the main session's gate, which is coming in 26.11.3 (see the [CHANGELOG](../CHANGELOG.md)) |
+| `safeguards.irreversible_main` | audits for the gate's first week on this Mac, then `enforce` | The same for the main session's gate: its tier-2 actions, and the MCP tools that send or publish outside this machine, need your grant or a verified decision; during the first week they are only recorded (see [Guard rules](guard.md)) |
 
 ### For another developer
 

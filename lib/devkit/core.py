@@ -14,6 +14,7 @@ import re
 import stat
 import subprocess
 import sys
+import tempfile
 import time
 from pathlib import Path
 
@@ -69,7 +70,14 @@ DEFAULTS = {
     "clouds": [],
     "packages": {"auto": True},
     "ui": {"powerline": False},
-    "progress": {"nudge_minutes": 8, "notify": True, "notify_after_minutes": 10, "slow_tool_seconds": 20},
+    # progress: updates, timing, and the crew's slots (spec P-fxtwig4hqvx). quota_steps scales max_parallel by the
+    # plan's usage (5-hour and weekly windows), and from quota_percent one member works at a time; slot_weights is
+    # what one launch costs by kind; reserve keeps slots for the developer's own request (docs/configuration.md).
+    "progress": {"nudge_minutes": 8, "notify": True, "notify_after_minutes": 10, "slow_tool_seconds": 20,
+                 "max_parallel": 4, "max_depth": 2, "quota_percent": 90,
+                 "quota_steps": {"50": 1.0, "70": 0.75, "85": 0.5},
+                 "slot_weights": {"builder": 1.0, "review": 0.5, "read": 0.5, "scout": 0.0},
+                 "reserve": 1, "stale_agent_hours": 6, "stale_agent_minutes": 90},
     "work": {"lock_hours": 8},
     "lock": False,
     "handoff": {"enforce": True},
@@ -178,9 +186,162 @@ def audit_config(raw, fill: bool = True):
     return values, errors
 
 
+def _number_in(lo, hi, whole=False):
+    def ok(v):
+        if isinstance(v, bool) or not isinstance(v, int if whole else (int, float)):
+            return False
+        return lo <= v <= hi
+    return ok
+
+
+def _steps_ok(v) -> bool:
+    """quota_steps: {"<usage percent>": <share of max_parallel, 0 to 1>}, such as {"70": 0.75}."""
+    if not isinstance(v, dict):
+        return False
+    for k, f in v.items():
+        try:
+            pct = float(k)
+        except (TypeError, ValueError):
+            return False
+        if not 0 <= pct <= 100 or not _number_in(0, 1)(f):
+            return False
+    return True
+
+
+SLOT_KINDS = ("builder", "review", "read", "scout")
+
+
+def _weights_ok(v) -> bool:
+    return isinstance(v, dict) and all(k in SLOT_KINDS and _number_in(0, 1)(w) for k, w in v.items())
+
+
+# the progress section's keys -> (the check, what the value must be)
+PROGRESS_RULES = {
+    "nudge_minutes": (_number_in(1, 240), "a number of minutes from 1 to 240"),
+    "notify": (lambda v: isinstance(v, bool), "true or false"),
+    "notify_after_minutes": (_number_in(0, 1440), "a number of minutes from 0 to 1440"),
+    "slow_tool_seconds": (_number_in(1, 3600), "a number of seconds from 1 to 3600"),
+    "max_parallel": (_number_in(1, 10, whole=True), "a whole number from 1 to 10"),
+    "max_depth": (_number_in(1, 5, whole=True), "a whole number from 1 to 5"),
+    "quota_percent": (_number_in(1, 100), "a usage share in percent from 1 to 100"),
+    "quota_steps": (_steps_ok, 'an object of usage percent to the share of max_parallel from 0 to 1, such as '
+                               '{"70": 0.75}'),
+    "slot_weights": (_weights_ok, "an object of builder, review, read or scout to a cost from 0 to 1"),
+    "reserve": (_number_in(0, 9, whole=True), "a whole number of slots from 0 to 9"),
+    "stale_agent_hours": (_number_in(1, 168), "a number of hours from 1 to 168"),
+    "stale_agent_minutes": (_number_in(5, 1440), "a number of minutes from 5 to 1440"),
+}
+
+
+def progress_config(raw):
+    """A progress section checked against PROGRESS_RULES -> (values, errors): every key, with its default where the
+    value is missing or wrong. quota_steps and slot_weights add to their defaults, key by key."""
+    values = json.loads(json.dumps(DEFAULTS["progress"]))
+    if raw is None:
+        return values, []
+    if not isinstance(raw, dict):
+        return values, ["progress must be an object"]
+    errors = []
+    for key, v in raw.items():
+        rule = PROGRESS_RULES.get(key)
+        if not rule:
+            errors.append(f"unknown key progress.{key}")
+        elif not rule[0](v):
+            errors.append(f"progress.{key} must be {rule[1]} (got {json.dumps(v, ensure_ascii=False)[:40]})")
+        elif isinstance(values.get(key), dict):
+            values[key] = {**values[key], **v}
+        else:
+            values[key] = v
+    return values, errors
+
+
 def config_errors(cfg: dict) -> list:
-    """What is wrong in the checked sections of a devkit configuration (today: audit). -> [message]"""
-    return audit_config((cfg or {}).get("audit"))[1] if "audit" in (cfg or {}) else []
+    """What is wrong in the checked sections of a devkit configuration (audit, progress). -> [message]"""
+    cfg = cfg or {}
+    out = audit_config(cfg.get("audit"))[1] if "audit" in cfg else []
+    return out + (progress_config(cfg.get("progress"))[1] if "progress" in cfg else [])
+
+
+class ConfigError(ValueError):
+    """Why `dev config set` changed nothing, and what to do instead."""
+
+
+def _parse_value(text: str):
+    """A value as the developer types it: JSON when it parses (6, true, {"70": 0.5}), else the text itself."""
+    try:
+        return json.loads(text)
+    except (TypeError, ValueError):
+        return text
+
+
+def config_set(key: str, value: str, path=None, developer=None) -> tuple:
+    """`dev config set <key> <value>`: one key of devkit's configuration file, validated, written atomically and
+    audited -> (old value, new value). Only the developer sets it, in a terminal (set_by_developer, spec C11, K1):
+    an agent's command, a hook and a job are refused, whatever the key. The old value comes from that file and
+    devkit's defaults, never from the effective configuration."""
+    path = Path(path or CONFIG_FILE)
+    try:
+        who = set_by_developer() if developer is None else bool(developer)
+    except Exception:
+        who = False  # a check that cannot decide refuses (fail closed)
+    if not who:
+        _config_audit(key, "", "refused", why="not the developer's terminal")
+        raise ConfigError("dev config set changes devkit's configuration, which only the developer does, in a "
+                          "terminal (spec C11, K1). Ask them, with the key, the value and why.")
+    parts = [p for p in str(key or "").split(".") if p]
+    if not parts or parts[0] not in DEFAULTS or len(parts) > 2 or (len(parts) == 2 and
+                                                                     not isinstance(DEFAULTS[parts[0]], dict)):
+        raise ConfigError(f"unknown key {key!r}: dev config show lists the keys, docs/configuration.md explains them")
+    new = _parse_value(value)
+    section, name = parts[0], parts[1] if len(parts) == 2 else None
+    if name is not None and name not in DEFAULTS[section] and section in ("progress", "audit"):
+        raise ConfigError(f"unknown key {key}: docs/configuration.md lists the {section} keys")
+    try:
+        doc = json.loads(path.read_text()) if path.exists() else {}
+    except (OSError, ValueError) as e:
+        raise ConfigError(f"{tilde(path)} is not valid JSON ({e}): fix it with dev config edit first") from None
+    if not isinstance(doc, dict):
+        raise ConfigError(f"{tilde(path)} must hold a JSON object: fix it with dev config edit first")
+    own = doc.get(section) if isinstance(doc.get(section), dict) else {}
+    if name is None:
+        old = doc.get(section, DEFAULTS[section])
+        trial = dict(doc, **{section: new})
+    else:
+        old = own.get(name, DEFAULTS[section].get(name))
+        trial = dict(doc, **{section: dict(own, **{name: new})})
+    try:
+        problems = [e for e in config_errors({section: trial[section]} if section in ("audit", "progress") else {})
+                    if key in e or "must be an object" in e]
+    except Exception as e:  # a value the checks cannot judge is refused (fail closed)
+        problems = [f"{key}: the value could not be checked ({type(e).__name__})"]
+    default = DEFAULTS[section].get(name) if name is not None else DEFAULTS[section]
+    if not problems and section not in ("audit", "progress") and default is not None and \
+            type(new) is not type(default) and not (isinstance(default, float) and isinstance(new, int)):
+        problems = [f"{key} must be {type(default).__name__} like its default ({json.dumps(default)})"]
+    if problems:
+        raise ConfigError("; ".join(problems))
+    path = Path(os.path.realpath(path))  # a linked file (dotfiles) stays linked: the write goes to its target
+    path.parent.mkdir(parents=True, exist_ok=True)
+    mode = stat.S_IMODE(path.stat().st_mode) if path.exists() else 0o600
+    fd, tmp = tempfile.mkstemp(prefix=f".{path.name}.", suffix=".tmp", dir=str(path.parent))
+    try:
+        with os.fdopen(fd, "w") as fh:
+            fh.write(json.dumps(trial, indent=2, ensure_ascii=False) + "\n")
+        os.chmod(tmp, mode)  # the file keeps its own permissions
+        os.replace(tmp, path)
+    except OSError as e:
+        Path(tmp).unlink(missing_ok=True)
+        raise ConfigError(f"could not write {tilde(path)}: {e}") from None
+    _config_audit(key, f"{json.dumps(old, ensure_ascii=False)} → {json.dumps(new, ensure_ascii=False)}", "ok")
+    return old, new
+
+
+def _config_audit(key: str, detail: str, outcome: str, **extra):
+    try:
+        from . import audit
+        audit.record("dev.config.set", str(key)[:120], detail[:300], outcome, **extra)
+    except Exception:
+        pass
 
 
 def deep_merge(base: dict, extra: dict) -> dict:

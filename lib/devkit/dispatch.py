@@ -166,7 +166,7 @@ def delegate(task: str, to: str = "auto", files=None, scope: str = "", after: st
         while any(s["name"].lower() == name.lower() for s in run["plan"]):
             name, i = f"{base} ({i})", i + 1
         s = _new_step(name, progress.parse_minutes(est) or None)
-        s.update(label=m["name"], requested_by=from_agent or "main", task=task.strip()[:1500])
+        s.update(label=m["name"], requested_by=from_agent or "main", task=task.strip()[:1500], added=round(now, 1))
         if scope:
             s["scope"] = [x.strip() for x in scope.split(",") if x.strip()]
         if after:
@@ -223,16 +223,11 @@ def decline(which: str, why: str, from_agent: str | None = None, cwd: str | None
     return s
 
 
-def ready(run, now: float | None = None) -> dict:
-    """{"launch": [steps ready to launch], "waiting": [(step, why)], "busy": [lanes working], "free": n,
-    "limit": n} (the parallel limit, lower while the 5-hour quota is short)."""
-    run = normalize(run)
-    plan = run.get("plan") or []
+def _sorted(run):
+    """The plan's steps for the crew, sorted: (launchable [steps], waiting [(step, why)])."""
     busy = progress.running_agents(run)
-    limit = progress.parallel_limit(run.get("agent") or "claude", now)[0]
-    free = max(0, limit - len(progress.slots(run)))  # launches count before they start
     launch, waiting = [], []
-    for s in plan:
+    for s in run.get("plan") or []:
         if s.get("state") not in ("pending", "blocked") or not s.get("label") or (s.get("owner") or "main") != "main":
             continue
         deps = progress.deps_open(run, s)  # the plan's one dependency rule: done or skipped satisfies a step
@@ -244,8 +239,122 @@ def ready(run, now: float | None = None) -> dict:
             waiting.append((s, f"{s['label']} is busy: send it to them (SendMessage / send_input)"))
         else:
             launch.append(s)
-    return {"launch": launch[:free], "queued": launch[free:], "waiting": waiting, "busy": busy, "free": free,
-            "limit": limit}
+    return launch, waiting
+
+
+def critical_path(run) -> dict:
+    """{step name: (minutes, steps)}: the longest chain of open work from each step through the steps that wait for
+    it, by their estimates (the step itself included)."""
+    plan = (run or {}).get("plan") or []
+    by = {s["name"]: s for s in plan}
+    waits = {n: [] for n in by}
+    for s in plan:
+        for d in s.get("after") or []:
+            if d in waits:
+                waits[d].append(s["name"])
+    memo = {}
+
+    def walk(n):
+        if n not in memo:
+            memo[n] = (0.0, 0)  # a cycle stops here (the plan is validated acyclic)
+            rest = max((walk(t) for t in waits[n] if by[t].get("state") not in progress.DONE), default=(0.0, 0))
+            memo[n] = (float(by[n].get("est") or 0) + rest[0], 1 + rest[1])
+        return memo[n]
+    return {n: walk(n) for n in by}
+
+
+def order(run, now: float | None = None, sess: dict | None = None) -> list:
+    """The steps Morpheus can launch now, in the order he launches them (spec R5) -> [(step, why)]: the longest
+    critical path first (the step and what waits for it), then the developer's latest request (a step added in the
+    current turn), then the oldest (no step starves), then the plan's order."""
+    run = normalize(run)
+    cands, _ = _sorted(run)
+    if not cands:
+        return []
+    if sess is None:
+        sess = core.read_json(progress.session_path(run.get("agent") or "", run.get("session") or ""), {}) or {}
+    turn = (sess or {}).get("turn_started")
+    chain, index = critical_path(run), {s["name"]: i for i, s in enumerate(run.get("plan") or [])}
+    latest = {s["name"]: bool(turn) and progress.is_latest_request(run, sess, s) for s in cands}
+    cands.sort(key=lambda s: (-round(chain[s["name"]][0]), not latest[s["name"]], progress._step_added(run, s),
+                              index[s["name"]]))
+    out = []
+    for s in cands:
+        mins, n = chain[s["name"]]
+        why = [f"critical path: {n} steps, ~{progress.fmt_about(mins)}" if n > 1 else
+               f"~{progress.fmt_about(mins)}, no step waits for it"]
+        if latest[s["name"]]:
+            why.append("the developer's latest request")
+        added = progress._step_added(run, s)
+        if added:
+            why.append(f"waiting since {time.strftime('%H:%M', time.localtime(added))}")
+        out.append((s, " · ".join(why)))
+    return out
+
+
+def ready(run, now: float | None = None) -> dict:
+    """{"launch": [steps ready to launch, in order], "queued": [steps that wait for a slot], "waiting": [(step,
+    why)], "busy": [lanes working], "free": slots, "limit": n, "slots": progress.slot_budget, "why": {step: its
+    place in the order}}: the ready steps in dispatch order, launched while their cost fits the limit less the
+    developer's reserve (spec R3-R5)."""
+    run = normalize(run)
+    busy = progress.running_agents(run)
+    b = progress.slot_budget(run.get("agent") or "claude", run, None, now)  # launches count before they start
+    free = max(0.0, b["limit"] - b["reserve"] - b["used"])
+    _, waiting = _sorted(run)
+    launch, queued, room, reasons = [], [], free, {}
+    for s, why in order(run, now):
+        reasons[s["name"]] = why
+        cost = progress.step_cost(run, s)
+        if not queued and cost <= room + 1e-9:
+            launch.append(s)
+            room -= cost
+        else:
+            queued.append(s)  # in order: a later, smaller step does not pass a queued one
+    return {"launch": launch, "queued": queued, "waiting": waiting, "busy": busy,
+            "free": int(free) if float(free).is_integer() else round(free, 2), "limit": b["limit"], "slots": b,
+            "why": reasons}
+
+
+def order_why(which: str, why: str, from_agent: str | None = None, cwd: str | None = None,
+              now: float | None = None) -> dict:
+    """Morpheus launches a step ahead of the recorded order (dev crew next --first <step> --why "…"): the reason is
+    kept on the run and audited, and the launch for that step is no longer held back (spec R5). -> the step"""
+    now = now or time.time()
+    progress._main_only(from_agent, "changes the dispatch order", cwd)
+    if not (why or "").strip():
+        raise StepError("say why this step goes first: --why \"…\"")
+    agent, sid = current_session(cwd)
+    with progress._tx(agent, sid):
+        run = normalize(load_run(agent, sid) or {})
+        s = _find_step(run, which)
+        if not s:
+            raise StepError(f"no step “{which}” in the plan")
+        ahead = [x["name"] for x, _ in order(run, now)]
+        run.setdefault("order_why", {})[s["name"]] = {"why": why.strip()[:300], "ts": round(now),
+                                                       "order": ahead[:8]}
+        progress._save(run, touch_session=False)
+    progress._audit("crew.order-override", s["name"], why.strip()[:300], project=run.get("project") or "",
+                    step=s["name"])
+    return s
+
+
+def record_order(run, now: float | None = None, cwd: str | None = None) -> list:
+    """`dev crew next` records the order it shows (spec R5): kept on the run and audited when it changed. -> order"""
+    ranked = order(run, now)
+    names = [s["name"] for s, _ in ranked]
+    if names and names != ((run or {}).get("order") or {}).get("steps"):
+        agent, sid = run.get("agent") or "", run.get("session") or ""
+        try:
+            with progress._tx(agent, sid):
+                doc = load_run(agent, sid)
+                if isinstance(doc, dict) and doc.get("state") != "done":
+                    doc["order"] = {"steps": names, "ts": round(now or time.time())}
+                    progress._save(doc, touch_session=False)
+        except Exception:
+            return ranked
+        progress._audit("crew.order", names[0], " → ".join(names)[:600], project=run.get("project") or "")
+    return ranked
 
 
 def launch_line(s: dict) -> str:
@@ -281,7 +390,7 @@ def ready_context(agent: str, sid: str) -> str:
             s["ready_told"] = True
         progress._save(run, touch_session=False)
     mode = progress.mode_of(run)
-    lines = [f"devkit · ready to launch ({r['free']} of {r['limit']} crew slots free, {mode} "
+    lines = [f"devkit · ready to launch, in this order ({progress.slots_text(r['slots'])}, {mode} "
              f"mode{': launch them now, in one message' if mode == 'auto' else ''}):"]
     from . import crew
     lines += [f"- {crew._who_label(s['label'])}: {s['name']} → {launch_line(s)}" for s in new]
