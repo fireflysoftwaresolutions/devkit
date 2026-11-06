@@ -67,7 +67,7 @@ figures come first, each a link to its section (**Waiting for you**, **Runs**, *
 
 | Section | What it shows |
 | --- | --- |
-| **Waiting for you** | Only when a decision waits: each question with who asks, the options, the recommendation, and the run it blocks, oldest first. **Open the run** opens the run's drawer at that decision. Answer in the agent's session; Morpheus records it |
+| **Waiting for you** | Only when a decision waits: each question with who asks, the options, the recommendation, and the run it blocks, oldest first. **Open the run** opens the run's drawer at that decision. Answer in the agent's session; the Tech lead (Morpheus) records it |
 | **Runs** | Every `dev progress` run: waiting for you, blocked, stopped reporting, running, then done in the last hour. Each shows its goal, project, branch, agent, and mode, a progress bar, the steps running and next with their owners by role, the time used against the estimate, and the latest update and next step |
 | **CI** | The latest result per branch from `dev ci watch`, failures first. A failed result shows the job and step that failed, its class (test, lint, build, …), the first error from the log, the next action, a link to the log, and `dev run view <id> --failed` to copy |
 | **Scheduled jobs** | devkit's jobs, problems first: failed, timed out, not scheduled, overdue, skipped, OK. Each with its last run, its next run, and its failures in 30 days; the name opens the job's drawer with its recent runs and log |
@@ -77,13 +77,14 @@ figures come first, each a link to its section (**Waiting for you**, **Runs**, *
   <img src="images/dashboard/background-1440-light.webp" alt="The Background work view: four figures (1 decision waiting for you, the oldest for 9 minutes; 1 run running and 1 blocked; 1 CI failure in 14 days; 5 scheduled jobs, with doctor failed on its last run), the decision Include cancelled invoices in the export? with who asks, the options, and an Open the run button, two run cards with their steps and owners by role, and a failed CI result with the first error from its log." width="100%">
 </picture>
 
-A run's drawer (`modal=run:<id>`) holds the whole run: progress, active and wall time against the estimate, the time
-left, the decisions waiting for you, every step with its owner, state, time, and the steps it waits for, the crew
+A run's drawer (`modal=run:<id>`) holds the whole run: progress, active and wall time against the plan's current
+total (the time so far plus the time left, with the first estimate under it when the two differ), the time left, the
+decisions waiting for you, every step with its owner, state, time, and the steps it waits for, the crew
 lanes, and, in the live page, the evidence, history, and open questions of each step.
 
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="images/dashboard/run-1440-dark.webp">
-  <img src="images/dashboard/run-1440-light.webp" alt="A run's drawer over Background work: the run Invoice export, blocked and waiting for you, guided, with 3 of 6 steps done, 1 h 24 min active of about 2 h 30 min, 30 to 45 minutes left; the decision D1 waiting for an answer; six steps, each with its owner by role, its state and time, and the step it waits for; and the two crew lanes working." width="100%">
+  <img src="images/dashboard/run-1440-light.webp" alt="A run's drawer over Background work: the run Invoice export, blocked and waiting for you, guided, with 3 of 6 steps done, 1 h 24 min active of about 1 h 59 min (the time so far plus the time left), the first estimate of 2 h 30 min under it, 30 to 45 minutes left; the decision D1 waiting for an answer; six steps, each with its owner by role, its state and time, and the step it waits for; and the two crew lanes working." width="100%">
 </picture>
 
 On a phone the figures sit two by two and the runs stack:
@@ -202,8 +203,9 @@ a drawer shows what the copy holds and says what needs the live dashboard.
 Agents report progress on long runs (`dev progress start|step|block|done`). Summary views draw each running session
 as a thin bar (steps done of the total; red when blocked). The run's drawer and the project page show:
 
-- the run's goal, a thin progress bar, steps done of the total, elapsed time against the estimate (the calibrated one
-  when known), and the time left;
+- the run's goal, a thin progress bar, steps done of the total, elapsed time against the plan's current total (the
+  time so far plus the time left, so the two agree; a run without a plan uses its estimate, the calibrated one when
+  known), and the time left;
 - **Latest**, **Check**, and **Next**, each once: from the run, and from the saved status block when the run does not
   say. **Blocked** runs say so in red, with the blocking reason, and a run that waits for your decision says so;
 - _N subagents running_, and how long the current turn has been running. That is flagged when it is longer than 90%
