@@ -75,6 +75,30 @@ class RepositoryDrift(unittest.TestCase):
     def test_d7_raci_hygiene(self):
         self.assert_known("D7", selfcheck.d7_raci_hygiene())
 
+    # D7, the RACI rules (R2-9): the approver is not consulted or informed, nobody is both, and an approver of its
+    # own work records why; each rule on a small roster of its own
+    def test_d7_each_raci_rule(self):
+        def act(aid, **f):
+            return {"id": aid, "R": ["tank"], "A": "seraph", "C": [], "I": [], **f}
+        roster = {"activities": [act("ok"), act("ac", C=["seraph"]), act("ai", I=["seraph"]),
+                                 act("ci", C=["kid", "neo"], I=["neo"]), act("self", R=["seraph"]),
+                                 act("reason", R=["seraph"], self_approval="the reviewer reviews its own review")]}
+        self.assertEqual(sorted(f.item for f in selfcheck.raci_errors(roster)),
+                         ["ac: A seraph in C", "ai: A seraph in I", "ci: neo in C and I", "self: A seraph in R"])
+
+    # D7, the team's changes (crew/crew.json in the handoff repository): only the RACI errors they add to devkit's
+    # roster are named, as team findings; the roster's own known ones are D7's on the repository
+    def test_d7_team_changes_name_only_the_raci_errors_they_add(self):
+        base = {"activities": [{"id": "plan", "R": ["morpheus"], "A": "morpheus", "C": [], "I": []},
+                               {"id": "api", "R": ["tank"], "A": "seraph", "C": [], "I": []}]}
+        team = {"activities": [base["activities"][0],
+                               {"id": "api", "R": ["tank"], "A": "seraph", "C": ["kid"], "I": ["kid"]},
+                               {"id": "docs", "R": ["ghost"], "A": "ghost", "C": [], "I": [], "self_approval": "x"}]}
+        found = selfcheck.d7_team_raci(base=base, team=team)
+        self.assertEqual([f.item for f in found], ["team: api: kid in C and I"])
+        self.assertIn("dev crew raci api --set", found[0].fix)
+        self.assertEqual(selfcheck.d7_team_raci(base=base, team=base), [])
+
     # D9: each phase's proof and the commands its gate names are in the phase's devkit list
     def test_d9_phase_proofs_are_listed(self):
         self.assert_known("D9", selfcheck.d9_phase_proofs())

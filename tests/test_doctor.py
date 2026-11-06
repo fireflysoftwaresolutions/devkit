@@ -61,5 +61,20 @@ class CrewSkillCheckTests(unittest.TestCase):
         self.assertEqual(fix, "dev install --only codex")
 
 
+class CrewRaciCheckTests(unittest.TestCase):
+    BASE = {"activities": [{"id": "api", "R": ["tank"], "A": "seraph", "C": [], "I": []}]}
+
+    def test_a_raci_error_the_team_added_fails_with_the_command_that_changes_it(self):
+        team = {"activities": [{"id": "api", "R": ["tank"], "A": "seraph", "C": ["seraph"], "I": []}]}
+        [(group, name, ok, detail, fix)] = setup.crew_raci_checks(base=self.BASE, team=team)
+        self.assertEqual((group, name, ok), ("Agents", "crew RACI (team changes)", False))
+        self.assertIn("api: A seraph in C", detail)
+        self.assertIn("dev crew raci api --set", fix)
+
+    def test_team_changes_without_raci_errors_pass(self):
+        [(_, _, ok, _, _)] = setup.crew_raci_checks(base=self.BASE, team=self.BASE)
+        self.assertTrue(ok)
+
+
 if __name__ == "__main__":
     unittest.main()

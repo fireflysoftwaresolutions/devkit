@@ -11,7 +11,8 @@ as devkit grows (D1-D11 of the crew gap review 2).
   D5  the hook events the agents register match the hooks table of docs/agents.md and the counts of docs/surfaces.md
   D6  every configuration key the code reads is in docs/configuration.md
   D7  RACI hygiene per kind of work: A not in C or I, nobody in both C and I, A in R only with a recorded reason
-      (`self_approval`), knowledge docs that exist and at least one knowledge skill
+      (`self_approval`), knowledge docs that exist and at least one knowledge skill; the same RACI rules on the
+      team's changes (machine state: what they add to devkit's roster)
   D8  every skill the crew names is installed for the agent (machine state, for `dev doctor`)
   D9  every procedure phase's proof and every command its gate names are in that phase's `devkit` list
   D10 every kind of work can be reached from files (its own `files` globs or `dispatch.FILE_HINTS`) or says it has
@@ -601,10 +602,11 @@ def d6_config_keys(home=None) -> list:
 
 # --------------------------------------------------------------------------- the roster and the RACI
 
-def d7_raci_hygiene(roster=None, home=None) -> list:
-    """D7: per kind of work, A in C, A in I, a member in both C and I, A in R without a recorded reason
-    (`self_approval`), a knowledge doc that does not exist, or no knowledge skill."""
-    home = _home(home)
+def raci_errors(roster=None) -> list:
+    """The RACI rules of crew review 2 (R2-9), per kind of work: the Accountable member is not also Consulted or
+    Informed, nobody is both Consulted and Informed, and an Accountable member that is also Responsible approves its
+    own work only with a recorded reason (`self_approval`). D7 applies them to devkit's roster, `d7_team_raci` to the
+    team's changes; `raci.check` can turn them into errors."""
     out = []
     for a in _roster(roster).get("activities") or []:
         if not isinstance(a, dict):
@@ -623,6 +625,28 @@ def d7_raci_hygiene(roster=None, home=None) -> list:
         if acc in r and not str(a.get("self_approval") or "").strip():
             out.append(Finding("D7", f"{aid}: A {acc} in R", f"{acc} approves its own `{aid}` work, with no reason",
                                "name another approver, or record why with `self_approval`"))
+    return out
+
+
+def d7_team_raci(base=None, team=None) -> list:
+    """D7 on the team's changes (machine state: crew/crew.json in the handoff repository): the RACI errors the
+    merged roster has and devkit's own roster does not, as `team: …` findings with the command that changes it."""
+    known = {f.item for f in raci_errors(_roster(base))}
+    team = team if team is not None else _roster(None, team=True)
+    return [Finding("D7", f"team: {f.item}", f"the team's crew changes: {f.evidence}",
+                    f"{f.fix}: dev crew raci {f.item.split(':', 1)[0]} --set \"…\" --why \"…\"")
+            for f in raci_errors(team) if f.item not in known]
+
+
+def d7_raci_hygiene(roster=None, home=None) -> list:
+    """D7: per kind of work, the RACI rules (`raci_errors`), a knowledge doc that does not exist, or no knowledge
+    skill."""
+    home = _home(home)
+    out = raci_errors(roster)
+    for a in _roster(roster).get("activities") or []:
+        if not isinstance(a, dict):
+            continue
+        aid = a.get("id") or "?"
         know = a.get("knowledge") or {}
         for doc in know.get("docs") or []:
             if not (home / doc).exists():
@@ -793,8 +817,9 @@ def d11_guardrails(home=None, rows=None) -> list:
 REPO_CHECKS = (("D1", d1_enforced_rows), ("D3", d3_unwired), ("D4", d4_commands), ("D5", d5_hook_events),
                ("D6", d6_config_keys), ("D7", d7_raci_hygiene), ("D9", d9_phase_proofs), ("D10", d10_file_anchors),
                ("D11", d11_guardrails))
-MACHINE_CHECKS = (("D2", d2_planned_rows), ("D8", lambda: d8_uninstalled_skills("claude") +
-                                            d8_uninstalled_skills("codex")), ("D10", d10_lesson_anchors))
+MACHINE_CHECKS = (("D2", d2_planned_rows), ("D7", d7_team_raci),
+                  ("D8", lambda: d8_uninstalled_skills("claude") + d8_uninstalled_skills("codex")),
+                  ("D10", d10_lesson_anchors))
 
 
 def run(machine: bool = True) -> list:

@@ -1447,6 +1447,20 @@ def crew_skill_checks(agents, roster=None, homes=None) -> list:
     return rows
 
 
+def crew_raci_checks(base=None, team=None) -> list:
+    """selfcheck D7 on the team's crew changes for `dev doctor`: the RACI errors they add to devkit's roster (the
+    approver also consulted or informed, a member in both, self-approval without a reason). -> [(group, name, ok,
+    detail, fix)]; `base` and `team` in place of the rosters (the tests)."""
+    from . import selfcheck
+    try:
+        found = selfcheck.d7_team_raci(base=base, team=team)
+    except Exception as e:  # a broken roster is the crew check's to report
+        return [("Agents", "crew RACI (team changes)", False, f"crew: {e}", "dev crew sync")]
+    detail = "no RACI errors" if not found else "; ".join(f.item.split(": ", 1)[1] for f in found[:4]) + \
+        (" …" if len(found) > 4 else "")
+    return [("Agents", "crew RACI (team changes)", not found, detail, " · ".join(f.fix for f in found[:2]))]
+
+
 def doctor() -> int:
     print(ui.banner("doctor"))
     results = []
@@ -1510,7 +1524,8 @@ def doctor() -> int:
               f"missing or out of date: {', '.join(stale[:5])}", "dev install --only codex")
     except Exception as e:
         check("Agents", "crew agents", False, f"crew: {e}", "dev crew sync")
-    for row in crew_skill_checks([a for a in ("claude", "codex") if CFG.get("agents", {}).get(a, True)]):
+    for row in crew_skill_checks([a for a in ("claude", "codex") if CFG.get("agents", {}).get(a, True)]) + \
+            crew_raci_checks():
         check(*row)
     managed = read_json(STATE / "skills-managed.json", []) or []
     if not isinstance(managed, dict):  # before 26.11.0: every skill went to both agents
