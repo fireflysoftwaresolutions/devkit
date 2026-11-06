@@ -65,24 +65,30 @@ def route(task: str, files=None, limit: int = 3) -> list:
     """-> [(member, score, [reasons])], best first. The crew's RACI decides first: when the task is clearly one kind
     of work, its Responsible members lead. Then the member scores: keywords (x5), words shared with its role and
     use_when (x3), summary and skills (x1), and the files the task touches (x4 per matching file kind)."""
-    from . import raci
+    from . import crew, raci
     lead = []
     top = raci.best(task)
     if top:
         act, score, hits = top
+        everyone = crew.members(include_main=True)  # planning is Morpheus's own kind of work
         for mid in act.get("R") or []:
-            m = next((x for x in _roster() if x["id"] == mid), None)
+            m = next((x for x in everyone if x["id"] == mid), None)
             if m:
                 lead.append((m, float(10 + score), [f"RACI R: {act['name']}",
                                                     f"approves: {raci.names([act.get('A')])}",
                                                     "signals: " + ", ".join(hits[:4])]))
-    words = _terms(task)
+    words, said = _terms(task), raci.norm(task)
     scored = []
     for m in _roster():
         score, why = 0.0, []
-        keys = _terms(" ".join(k.replace("-", " ") for k in m.get("keywords") or [])) | \
-            {k.lower() for k in m.get("keywords") or []}
-        hit_k = sorted(words & keys)
+        kws = [str(k) for k in m.get("keywords") or []]
+        single = [k for k in kws if not re.search(r"[\s-]", k.strip())]
+        keys = _terms(" ".join(single)) | {k.lower() for k in single}
+        # a hyphenated or multi-word keyword hits only as the whole phrase ("app-store" or "app store"), never
+        # through its parts: "upgrade the app" is not app-store work
+        phrases = sorted({k.lower() for k in kws if k not in single and any(
+            raci._pattern(v).search(said) for v in (k, k.replace("-", " ")))})
+        hit_k = sorted(words & keys) + phrases
         if hit_k:
             score += 5 * len(hit_k)
             why.append("keywords: " + ", ".join(hit_k[:4]))

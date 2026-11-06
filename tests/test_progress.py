@@ -460,6 +460,77 @@ class CrewCoordinationTests(unittest.TestCase):
                 canary.LOG = saved
 
 
+class DeclaredActivityTests(unittest.TestCase):
+    # A step's kind of work rests on language-neutral anchors (spec C13, Kid's M41 and M45): an explicit activity id
+    # (--activity on assign, [id] in a plan spec), the assigned member's Responsible activity, the files in its scope.
+    T0 = 1_800_000_000.0
+
+    def step(self, name):
+        return next(s for s in pg.load_run("claude", "s1")["plan"] if s["name"] == name)
+
+    def test_assign_stores_an_explicit_activity_and_checks_the_member_against_it(self):
+        with TempState():
+            pg.start("Feature", plan=["paso 2", "paso 3"], now=self.T0)
+            pg.assign("paso 2", "Tank", activity="backend", now=self.T0)
+            s = self.step("paso 2")
+            self.assertEqual((s["activity"], s["activity_from"]), ("backend", "explicit"))
+            with self.assertRaises(pg.StepError) as e:
+                pg.assign("paso 3", "Tank", activity="ux", now=self.T0)
+            self.assertIn("--to Sati", str(e.exception))
+            with self.assertRaises(pg.StepError) as e:
+                pg.assign("paso 3", "Tank", activity="nope", now=self.T0)
+            self.assertIn("backend", str(e.exception))  # the refusal names the ids
+            self.assertEqual(self.step("paso 3")["label"], "")
+
+    def test_an_explicit_activity_stays_when_the_step_is_assigned_again(self):
+        with TempState():
+            pg.start("Feature", plan=["paso 2"], now=self.T0)
+            pg.assign("paso 2", "Tank", activity="backend", now=self.T0)
+            with self.assertRaises(pg.StepError):
+                pg.assign("paso 2", "Sati", now=self.T0)  # still back-end work: Sati is not on it
+            self.assertEqual(self.step("paso 2")["activity"], "backend")
+
+    def test_files_in_scope_of_the_members_own_kind_confirm_an_assignment_the_words_would_refuse(self):
+        with TempState():
+            pg.start("Feature", plan=["build the JSON API server"], now=self.T0)
+            pg.assign("build the JSON API server", "Kid", scope="bin/**", now=self.T0)
+            s = self.step("build the JSON API server")
+            self.assertEqual((s["label"], s["activity"], s["activity_from"]), ("Kid", "tooling", "member"))
+
+    def test_a_plan_spec_declares_its_kind_of_work_after_its_dependencies(self):
+        with TempState():
+            pg.start("Feature", plan="design=30m; api=1h after design [backend]", now=self.T0)
+            s = self.step("api")
+            self.assertEqual((s["after"], s["est"], s["activity"], s["activity_from"]),
+                             (["design"], 60, "backend", "explicit"))
+            pg.add_step("docs=30m [docs]", now=self.T0)
+            self.assertEqual(self.step("docs")["activity"], "docs")
+            with self.assertRaises(pg.StepError) as e:
+                pg.add_step("more=10m [nope]", now=self.T0)
+            self.assertIn("no kind of work", str(e.exception))
+            self.assertEqual([x["name"] for x in pg.load_run("claude", "s1")["plan"]], ["design", "api", "docs"])
+
+
+class RouteTests(unittest.TestCase):
+    def ids(self, task):
+        from devkit import dispatch
+        return [(m["id"], why) for m, _, why in dispatch.route(task)]
+
+    def test_hyphenated_keywords_hit_only_as_whole_phrases(self):
+        # live misroutes: "app-store" gave Switch the word "app", "write-up" gave Ghost the word "up"
+        for task, member, word in (("upgrade the app from Spring Boot 2.7 to 3.3", "switch", "app"),
+                                   ("set up Dependabot for the repo", "ghost", "up")):
+            with self.subTest(task=task):
+                hits = [why for mid, why in self.ids(task) if mid == member]
+                self.assertFalse(any(f"keywords: {word}" in w for why in hits for w in why))
+        switch = dict(self.ids("publish the release to the App Store"))
+        self.assertTrue(any("app store" in w or "app-store" in w for w in switch.get("switch") or []))
+
+    def test_a_planning_request_routes_to_morpheus_first(self):
+        # planning is Morpheus's kind of work (the RACI's R); the route used to look only at the crew without him
+        self.assertEqual(self.ids("resolve the merge conflicts and integrate the branches")[0][0], "morpheus")
+
+
 class CrewGuardrailTests(unittest.TestCase):
     T0 = 1_800_000_000.0
 

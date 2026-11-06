@@ -162,11 +162,13 @@ PACE_MIN, PACE_MAX = 0.5, 2.5
 
 
 def parse_plan(plan) -> list:
-    """"design=30m; build=2h after design; docs" -> [(name, minutes or None, [steps it waits for])]."""
+    """"design=30m; build=2h after design [backend]; docs" -> [(name, minutes or None, [steps it waits for],
+    activity id or "")]. The [id] tag declares the step's kind of work (an id from dev crew raci)."""
+    from . import raci
     items = plan if isinstance(plan, (list, tuple)) else str(plan or "").split(";")
     out = []
     for raw in items:
-        raw = str(raw or "").strip()
+        raw, act = raci.split_activity(str(raw or "").strip())  # before the `after` split, or the tag lands in it
         if not raw:
             continue
         after = []
@@ -175,9 +177,9 @@ def parse_plan(plan) -> list:
             raw, after = m.group(1).strip(), [x.strip() for x in re.split(r"[,&]|\band\b", m.group(2)) if x.strip()]
         m = re.match(r"^(.*?)\s*[=@]\s*(\d[\dhm.\s]*)$", raw)
         if m and parse_minutes(m.group(2)):
-            out.append((m.group(1).strip(), parse_minutes(m.group(2)), after))
+            out.append((m.group(1).strip(), parse_minutes(m.group(2)), after, act))
         else:
-            out.append((raw, None, after))
+            out.append((raw, None, after, act))
     return out
 
 
@@ -317,16 +319,29 @@ def _resolve_after(plan, s, refs) -> list:
 
 def _build_steps(items, plan) -> list:
     """parse_plan items -> their new steps, with `after` resolved against `plan` plus the new steps. The plan they make
-    together is validated (validate_plan) before anything changes: on error, `plan` is untouched."""
-    new = [_new_step(n, e) for n, e, _ in items]
+    together is validated (validate_plan) before anything changes: on error, `plan` is untouched. A declared kind of
+    work ([id] in the spec) is stored on its step as explicit; an unknown id is refused."""
+    new = [_new_step(it[0], it[1]) for it in items]
     full = list(plan or []) + new
     dup = _duplicate_name(full)
     if dup:
         raise StepError(f"two steps are named “{dup}”: give each step its own name, so `after` can name it")
-    for s, (_, _, after) in zip(new, items):
-        s["after"] = _resolve_after(full, s, after)
+    for s, it in zip(new, items):
+        s["after"] = _resolve_after(full, s, it[2])
+        if len(it) > 3 and it[3]:
+            s["activity"], s["activity_from"] = _activity_id(it[3]), "explicit"
     validate_plan(full)
     return new
+
+
+def _activity_id(ref: str) -> str:
+    """A declared kind of work -> its RACI id ("backend", "Back-end services and APIs" -> "backend"), or StepError
+    naming the ids."""
+    from . import raci
+    try:
+        return raci.resolve_activity(ref)["id"]
+    except ValueError as e:
+        raise StepError(str(e)) from None
 
 
 def normalize(run: dict) -> dict:
@@ -574,7 +589,7 @@ def start(goal: str, steps: int = 0, estimate: str = "", cwd: str | None = None,
     cal = calibration(project)
     items = parse_plan(plan)
     if not items and steps:
-        items = [(f"step {i + 1}", None, []) for i in range(steps)]
+        items = [(f"step {i + 1}", None, [], "") for i in range(steps)]
     new = _build_steps(items, [])  # an unknown dependency or a cycle is refused before anything is saved
     run = {"v": 2, "agent": agent, "session": sid, "project": project, "goal": goal, "estimate": est,
            "estimate_cal": round(est * cal["ratio"], 1) if est and cal["ratio"] else est, "cal_ratio": cal["ratio"],
@@ -645,19 +660,23 @@ def _step_text(s: dict, label: str = "") -> str:
     return " ".join(x for x in (s.get("name") or "", s.get("desc") or "", task) if x)
 
 
-def _raci_assign(run: dict, s: dict, label: str, why: str, now: float):
-    """The crew's RACI decides who does a step: refuse a member who is not Responsible for it (unless `why`, which
-    is recorded), and remember the step's kind of work for the approval at the end of the run."""
+def _raci_assign(run: dict, s: dict, label: str, why: str, now: float, activity: str = "", files=None):
+    """The crew's RACI decides who does a step: refuse a member who may not take its kind of work (unless `why`,
+    which is recorded), and remember that kind of work for the approval at the end of the run. The kind of work
+    rests on language-neutral anchors (raci.anchor): `activity` or the one declared on the step earlier, then the
+    member's Responsible activity, then the files in scope (`files`, else the step's), then the words."""
     try:
         from . import crew, raci
         mem = crew._for_label(label)
         text = _step_text(s, label)
-        top = raci.best(text)
-        if top:
-            s["activity"] = top[0]["id"]
+        explicit = activity or (s.get("activity") if s.get("activity_from") == "explicit" else "")
+        files = files or s.get("scope")
+        act, src = raci.anchor(text, member=mem["id"] if mem else None, files=files, activity=explicit or None)
+        if act:
+            s["activity"], s["activity_from"] = act["id"], src
         if not mem:
             return
-        reason = raci.check_assignment(mem["id"], text)
+        reason = raci.check_assignment(mem["id"], text, activity=explicit or None, files=files)
     except StepError:
         raise
     except Exception:
@@ -672,12 +691,15 @@ def _raci_assign(run: dict, s: dict, label: str, why: str, now: float):
 
 
 def assign(which, label: str, cwd: str | None = None, now: float | None = None, scope: str = "",
-           from_agent: str | None = None, why: str = "") -> dict:
+           from_agent: str | None = None, why: str = "", activity: str = "") -> dict:
     """Hand a plan step to a subagent: the next subagent launched with this description (or a running lane with this
     label) owns it, and its time is that subagent's time. `scope`: the files it owns (comma-separated globs); the
     guard keeps that subagent's edits inside them. The crew's RACI must make the member Responsible for the step's
-    kind of work; `why` overrides it, recorded."""
+    kind of work; `why` overrides it, recorded. `activity`: the step's kind of work, an id from dev crew raci, which
+    then decides whatever language the step is written in."""
     _main_only(from_agent, "assigns the plan's steps")
+    activity = _activity_id(activity) if activity else ""
+    globs = [x.strip() for x in scope.split(",") if x.strip()] if scope else []
     now = now or time.time()
     agent, sid = current_session(cwd)
     with _tx(agent, sid):
@@ -685,7 +707,7 @@ def assign(which, label: str, cwd: str | None = None, now: float | None = None, 
         s = _find_step(run, which)
         if not s:
             raise ValueError(f"no step “{which}” in the plan")
-        _raci_assign(run, s, label, why, now)
+        _raci_assign(run, s, label, why, now, activity=activity, files=globs or None)
         owner = s.get("owner") or "main"
         if owner != "main" and s.get("state") != "done" and not _label_matches(label, (run.get("agents") or {}).get(owner)
                                                                                 or {}):
@@ -693,8 +715,7 @@ def assign(which, label: str, cwd: str | None = None, now: float | None = None, 
             _log_change(run, s, s.get("state"), "pending", "main", f"reassigned from {old} to {label}", now)
             s.update(owner="main", state="pending")  # the other member's lane no longer owns it
         s["label"] = label
-        if scope:
-            globs = [x.strip() for x in scope.split(",") if x.strip()]
+        if globs:
             for k, lane in (run.get("agents") or {}).items():
                 if lane.get("state") == "running" and not _label_matches(label, lane):
                     clash = [g for g in globs for h in lane.get("scope") or [] if _globs_overlap(g, h)]
@@ -1197,14 +1218,14 @@ def add_step(spec: str, cwd: str | None = None, now: float | None = None, why: s
         if from_agent:
             lane = _lane(run, from_agent, now)
             plan = lane.setdefault("plan", [])
-            for name, _, _ in items:
+            for name, *_ in items:
                 if name.lower() in (x.lower() for x in plan):
                     raise StepError(f"step “{name}” is already in your lane's plan")
                 plan.append(name)
                 run["updates"].append({"ts": round(now), "kind": "agent", "agent": from_agent, "text": f"added: {name}"})
             _save(run)
             return run
-        for name, _, _ in items:
+        for name, *_ in items:
             if _find_step(run, name) and _find_step(run, name)["name"].lower() == name.lower():
                 raise StepError(f"step “{name}” is already in the plan")
         for s in _build_steps(items, run["plan"]):  # an unknown dependency or a cycle is refused: the plan stays as it is
