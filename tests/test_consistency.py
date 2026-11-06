@@ -32,11 +32,6 @@ KNOWN = {
            **owned("found by D3 · Backend engineer (Tank) · step F7 F8 hooks wiring",
                    "guard.scope_base", "guard.scope_owner_across", "guard.worktree_state", "guard.written_paths",
                    "guard.member_tool_verdict", "guard.record_bypasses", "guard.stubs_accepted")},
-    "D4": {**owned("R2-14 · Technical writer (Ghost), DevEx engineer (Kid) consulted · step 17 crew docs",
-                   *("using-devkit: dev " + c for c in (
-                       "adopt", "open", "claude", "codex", "handoff-import", "note", "sleep", "stubs", "dashboard",
-                       "agents", "plugin", "sync", "gc", "du", "canary", "rebase", "issue", "git", "gh", "mcp",
-                       "desktop", "install", "setup", "update", "docker", "version")))},
     "D7": owned("R2-9 · the developer approves plan and scope once F6 accepts “developer” as an approver · "
                 "step 36 F6 step endings and approvals",
                 "plan: A morpheus in R", "scope: A hamann in R"),

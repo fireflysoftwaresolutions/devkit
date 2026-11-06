@@ -25,7 +25,8 @@ this skill is the how.
 - Record work as it happens: `dev task add "…" --type task|feature|bug|spike --why "…" --done "<criterion>" --now
   --claim` for new work (it gets a structured description), `dev task done <n>` only after verifying
   it, `dev task release <n>` if you stop without finishing, `dev task add "…" --later` for follow-ups you discover.
-  Changes of scope need a reason: `dev task edit|move|cancel|block <n> --why "…"`. Initiative-level work uses `-i`.
+  Changes of scope need a reason: `dev task edit|move|cancel|block|reopen <n> --why "…"`. Initiative-level work uses
+  `-i`.
 - Plans and specs go to `~/Development/.handoff/plans/<project id>/` (`dev plan new "…"`; Superpowers writes there
   too). After you change one, `dev plan revise <file> --why "…"`—the Stop hook insists.
 - Work items, session logs and presence are written through `dev` only (versions, locks, history, attribution).
@@ -42,38 +43,44 @@ this skill is the how.
 ## Required skills
 
 devkit knows which skills each kind of work needs (`config/skill-rules.json` in the devkit repo, extended by
-`skills.rules` in the developer's config). Load the skills the prompt hook names before you start, put them in every
-subagent brief, and expect the Stop hook to send you back once if you changed UI, Spring, migration, workflow, docs,
-or diagram files without them.
+`skills.rules` in the developer's config). Its rules follow what the work does, never the words of a prompt: the files
+you change, the commands you run, and the kind of work a step or brief declares. devkit names the skills for the files
+you change, and a crew brief carries those of its kind of work. Load them before you start, put them in every brief
+you write, and expect the Stop hook to send you back once if you changed UI, Spring, migration, workflow, docs, or
+diagram files without them.
 
 ## Which tool for which job
 
 | Job | devkit | Skills |
 | --- | --- | --- |
-| Find, clone, start a project | `dev ls`, `dev go`, `dev clone`, `dev new` | `workspace` |
+| Find, clone, start a project | `dev ls`, `dev go`, `dev clone`, `dev new`, `dev adopt` (move a repository into the layout, with the developer), `dev open`; `dev claude` and `dev codex` start an agent in it | `workspace` |
 | Parallel work | `dev wt new <type>/<topic>` | `workspace` |
 | Plan, build, debug | `dev task`, plans folder | Superpowers (brainstorming, writing-plans, TDD, systematic-debugging) |
-| Test | `dev test` (failed first, then the blast radius), `dev test plan`, `dev test audit`, `dev test prove` | `testing`, Superpowers TDD |
+| Test | `dev test` (failed first, then the blast radius), `dev test plan`, `dev test audit`, `dev test prove`; `dev stubs` for unfinished work | `testing`, Superpowers TDD |
 | CI/CD pipelines | `dev ci audit [--fix]`, `dev ci init`, `dev ci status` | `cicd`, `github-actions-hardening`, `devsecops` |
 | Architecture and design | `dev initiative` for cross-project work | `architecture`, `system-design`, `domain-modeling`, `codebase-design`, `likec4-dsl`, `diagrams` |
 | Backend | — | `backend`, `java-springboot`, `spring-boot-testing`, `java-junit` |
 | Frontend | Chrome DevTools MCP, `playwright-cli` | `angular-developer`, `react-best-practices`, `composition-patterns`, `frontend-design` / `impeccable` |
 | Security | `dev sec scan` | `devsecops`, `/security-review` |
-| Branch, commit, PR | `dev branch new`, `dev commit`, `dev push`, `dev pr create\|checks --watch\|merge`, `dev run view --failed` | `delivery`, `communicating` (PR template) |
+| Branch, commit, PR | `dev branch new`, `dev commit`, `dev rebase`, `dev push`, `dev pr create\|checks --watch\|merge`, `dev run view --failed`, `dev issue`; `dev git` and `dev gh` for anything else | `delivery`, `communicating` (PR template) |
 | Ship | `dev ci --run`, `dev ci status`, `dev calver`, `dev delivery`, `dev release`, `/devkit:ship` | `delivery`, `release-policy` |
 | Document | `dev docs check`, `dev diagram render` | `docs`, `documentation-writer`, `doc-coauthoring`, `diagrams` |
-| Hand off | `dev handoff`, `dev task`, `/devkit:handoff` | `handoff` |
-| Coordinate with others | `dev team`, `dev task start\|release`, `dev task show <n>` (history) | — |
-| Choose model, effort, subagents | `sparks` agent (alias `scout`) for lookups; `dev crew` for the specialists; `codex --profile fast\|deep\|review` | `working-efficiently` |
-| Learn from mistakes | `dev lesson add\|ls\|recur\|prevent`, `dev lesson scan\|review` | `learning-loop` |
-| Keep the developer informed | `dev progress start\|step\|block\|done`, `dev time` | `communicating` |
+| Hand off | `dev handoff`, `dev note set status=… priority=…`, `dev task`, `/devkit:handoff`; `dev handoff-import` adopts an older handoff repository | `handoff` |
+| Coordinate with others | `dev team`, `dev task start\|release`, `dev task reopen <n> --why "…"`, `dev task show <n>` (history) | — |
+| Choose model, effort, subagents | `sparks` agent (alias `scout`) for lookups; `codex --profile fast\|deep\|review` | `working-efficiently` |
+| Lead the crew | `dev crew` (roster), `dev crew raci [<id>]`, `dev progress assign <step> --to <member> --activity <id>`, `dev crew brief <member> "…" --activity <id>`, `dev crew graph` (the session as one graph), `dev crew next`, `dev crew rules` (every rule and its check) | `crew` |
+| Learn from mistakes | `dev lesson add\|anchor\|recur\|prevent`, `dev lesson --search "…"`, `dev lesson scan\|review`; `dev sleep` consolidates them nightly | `learning-loop` |
+| Keep the developer informed | `dev progress start\|step\|note\|block\|done`, `dev time` | `communicating` |
 | Plans and specs | `dev plan new "…" --kind plan\|spec\|spike\|bugfix\|adr`, `dev plan revise --why`, `approve`, `ls` | Superpowers writing-plans, `communicating` (formats) |
 | Hand work to a teammate | `dev task delegate <n> --to <login> --why "…"` | `communicating` |
 | Report status | `dev report [--days 7] [-i <slug>]`, `dev standup` | `communicating` |
-| Where things stand | `dev status`, `dev overview`, `dev standup`, `/devkit:status` | — |
-| Something is off | `dev doctor`, `dev config diff`, `dev guard check "<cmd>"` | — |
-| Background jobs and history | `dev jobs` (ls, run, set, logs), `dev audit` | — |
+| Where things stand | `dev status`, `dev overview`, `dev standup`, `dev dashboard` (for the developer), `/devkit:status` | — |
+| Something is off | `dev doctor`, `dev canary` (status block results), `dev agents` (both agents' versions, sign-in, quota), `dev config diff`, `dev guard check "<cmd>"`, `dev plugin validate` | — |
+| Background jobs and history | `dev jobs` (ls, run, set, logs), `dev audit`, `dev sync` (the handoff repository) | — |
 | Files, safely | `dev files`, `dev find`, `dev grep`, `dev diff`, `dev rm` (to the Trash, `--undo`), `dev mv`, `dev cp` | — |
+| Disk and Docker | `dev du`, `dev gc` (merged worktrees, build output, temp), `dev docker up\|status` | `workspace` |
+| Install, update, or roll back devkit (the developer, in a terminal: the guard refuses them to agents) | `dev setup`, `dev install [--only <steps>]`, `dev install --version <previous>` (rollback), `dev update`, `dev version` | — |
+| Claude Desktop chat and Cowork | `dev desktop status\|pack`; the extension runs `dev mcp` | — |
 
 ## Projects and initiatives
 
