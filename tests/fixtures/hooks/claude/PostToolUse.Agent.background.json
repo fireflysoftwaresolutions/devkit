@@ -21,7 +21,7 @@
   "canReadOutputFile": true,
   "description": "F0 bg probe",
   "isAsync": true,
-  "outputFile": "/private/tmp/claude-501/-Users-dev-Development--tmp-f0-repo/043c3a29-420b-4c79-8e10-aef6ee7d46ac/tasks/a4e6fec8dd944e821.output",
+  "outputFile": "/tmp/claude-dev/-Users-dev-Development--tmp-f0-repo/043c3a29-420b-4c79-8e10-aef6ee7d46ac/tasks/a4e6fec8dd944e821.output",
   "prompt": "Run this one Bash command exactly: python3 -c 'import time; time.sleep(40)' && date +%s > bg-done.txt  Then reply with: bg done.\n\n## devkit · your report\nStart your final report with your status block…",
   "resolvedModel": "claude-haiku-5-5",
   "status": "async_launched"
