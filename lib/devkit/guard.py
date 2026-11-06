@@ -1828,8 +1828,59 @@ def _unwrap(argv):
             argv = argv[1:]
             while argv and argv[0].startswith("-"):
                 argv = argv[1:]
+        elif n in _WRAPPERS:
+            argv = _wrapped(n, argv[1:])
+        elif n == "yarn" and argv[1:3] == ["workspaces", "foreach"]:  # runs `yarn <command>` in each workspace
+            rest, i = argv[3:], 0
+            while i < len(rest) and rest[i].startswith("-"):
+                i += 2 if rest[i] in ("-j", "--jobs", "--include", "--exclude", "--from") else 1
+            return [argv[0], *rest[i:]]
+        elif n == "yarn" and argv[1:2] == ["workspace"] and len(argv) > 2:  # `yarn workspace <name> <command>`
+            return [argv[0], *argv[3:]]
         else:
             return argv
+
+
+# programs that run the command they are given (Seraph, M243): `script -q /dev/null cmd`, `watch -n 600 cmd`, GNU
+# `parallel cmd ::: args` and `sem`, `arch -arm64 cmd`, `flock file cmd`, `unbuffer cmd`, `chronic cmd`
+_WRAPPERS = frozenset({"script", "watch", "parallel", "sem", "arch", "flock", "unbuffer", "chronic"})
+_PARALLEL_VALUES = frozenset(
+    "-j --jobs -P --max-procs -S --sshlogin --sshloginfile --slf --joblog -a --arg-file --delay --timeout -N -n "
+    "--max-args -L --max-lines --colsep -C -d --delimiter -E -I --results --res --tmpdir --workdir --wd --halt "
+    "--memfree --load -l --retries --transferfile --tf --return --basefile --bf --env --tagstring --rpl "
+    "--shebang-wrap --sqlmaster --sqlworker --id --semaphorename --fg-timeout -s --max-chars".split())
+_WRAP_VALUES = {"script": {"-t", "-F", "-T", "-E", "--echo", "-o", "--output-limit", "-I", "--log-in", "-O",
+                           "--log-out", "-B", "--log-io", "-m", "--logging-format", "--log-timing"},
+                "watch": {"-n", "--interval", "-q", "--equexit"}, "parallel": _PARALLEL_VALUES, "sem": _PARALLEL_VALUES,
+                "arch": {"-e", "-d"}, "flock": {"-w", "--timeout", "-E", "--conflict-exit-code"}}
+
+
+def _wrapped(n, args):
+    """The command a wrapper runs, as argv: a command line it hands to a shell comes back as `sh -c <line>`, and one
+    GNU parallel appends its inputs to ends with `{}` (known only when it runs). [] when it runs none."""
+    takes, i, direct = _WRAP_VALUES.get(n, set()), 0, False
+    while i < len(args) and args[i].startswith("-") and args[i] != "-":
+        a = args[i]
+        if a == "--":
+            i += 1
+            break
+        if n in ("script", "flock") and (a in ("-c", "--command") or a.startswith("--command=")):
+            line = a.split("=", 1)[1] if "=" in a else (args[i + 1] if i + 1 < len(args) else "")
+            return ["sh", "-c", line] if line else []
+        direct = direct or (n == "watch" and a in ("-x", "--exec"))
+        i += 2 if a in takes else 1
+    rest = args[i:]
+    if n in ("script", "flock"):  # script [file [command …]] (BSD), flock <file> <command …>
+        return rest[1:]
+    if n == "watch":  # without -x, watch hands the words to `sh -c`
+        return rest if direct or not rest else ["sh", "-c", " ".join(rest)]
+    if n in ("parallel", "sem"):
+        cut = next((k for k, x in enumerate(rest) if x in (":::", "::::", ":::+", "::::+")), len(rest))
+        cmd, inputs = rest[:cut], rest[cut + 1:]
+        if not cmd:  # each input is a command line; with none here, parallel reads them from its input
+            return ["sh", "-c", "; ".join(inputs)] if inputs else ["sh", "-s"]
+        return cmd if any("{" in x for x in cmd) else cmd + ["{}"]
+    return rest
 
 
 _PY_FLAGS = frozenset("uIBEsSOqbdvxRP")  # python's own flags without a value; -W and -X take one
@@ -3542,7 +3593,20 @@ def _pr_sel(sel: str) -> str:
 
 
 def _gh_actions(args, cwd) -> list:
-    """What a gh command (its arguments after `gh`) does: [(action, target, repo)]."""
+    """What a gh command (its arguments after `gh`) does: [(action, target, repo)]. gh takes -R/--repo before the
+    command too (`gh -R o/r pr merge 12`, Seraph M243), and that repository is the one acted on."""
+    lead = ""
+    while args and args[0].startswith("-"):
+        if args[0] in ("-R", "--repo") and len(args) > 1:
+            lead, args = args[1], args[2:]
+        elif args[0].startswith("--repo="):
+            lead, args = args[0].split("=", 1)[1], args[1:]
+        elif args[0] in ("-h", "--help", "--version"):
+            return []
+        else:
+            args = args[1:]
+    if lead:
+        args = [*args[:2], "-R", lead, *args[2:]] if args[:1] != ["api"] else [args[0], "-R", lead, *args[1:]]
     if not args:
         return []
     group = args[0]
@@ -3701,9 +3765,14 @@ def _python_package(cwd) -> str:
     return _toml_package(Path(cwd) / "pyproject.toml", ("project", "tool.poetry"))
 
 
+_PKG_VALUES = frozenset({"-w", "--workspace", "--prefix", "-C", "--dir", "--filter", "-F", "--registry", "--tag",
+                         "--otp", "--access", "--workspace-dir", "--userconfig", "--cache"})
+
+
 def _publish_actions(name, argv, cwd) -> list:
     args = argv[1:]
-    pos = [a for a in args if not a.startswith("-")]
+    pos = _positionals(args, _PKG_VALUES) if name in ("npm", "pnpm", "yarn", "bun") else \
+        [a for a in args if not a.startswith("-")]
     if "--dry-run" in args or "-n" in args and name in ("twine", "cargo"):
         return []
     if name in ("npm", "pnpm", "yarn", "bun"):
@@ -3820,18 +3889,46 @@ def _url_host(u: str) -> str:
     return (m.group(1) if m else "").strip("[]").lower()
 
 
+def _curl_opts(args):
+    """curl's options as [(flag, value)] and its other words: a cluster of short flags is split (`-sSfX POST`,
+    `-sXPOST`, `-sd@f`, Seraph M243), and a flag that takes a value takes the rest of its cluster or the next word."""
+    shorts = {f for f in _CURL_VALUES if not f.startswith("--")}
+    opts, pos, i = [], [], 0
+    while i < len(args):
+        a = args[i]
+        if a == "--":
+            pos += args[i + 1:]
+            break
+        if a.startswith("--"):
+            k, eq, v = a.partition("=")
+            if not eq and k in _CURL_VALUES:
+                v, i = (args[i + 1] if i + 1 < len(args) else ""), i + 1
+            opts.append((k, v))
+        elif a.startswith("-") and len(a) > 1:
+            for j in range(1, len(a)):
+                f = "-" + a[j]
+                if f in shorts:
+                    v = a[j + 1:]
+                    if not v:
+                        v, i = (args[i + 1] if i + 1 < len(args) else ""), i + 1
+                    opts.append((f, v))
+                    break
+                opts.append((f, ""))
+        else:
+            pos.append(a)
+        i += 1
+    return opts, pos
+
+
 def _http_actions(name, argv) -> list:
     args = argv[1:]
     if name == "curl":
-        method = _opt_value(args, ("-X", "--request")) or \
-            next((a[2:] for a in args if a.startswith("-X") and len(a) > 2), "")
-        data = any(a.split("=", 1)[0] in _CURL_DATA or (a[:2] in ("-d", "-F", "-T") and len(a) > 2 and
-                                                         not a.startswith("--")) for a in args)
-        if any(a in ("-G", "--get") for a in args):
-            data = False
+        opts, pos = _curl_opts(args)
+        method = next((v for f, v in reversed(opts) if f in ("-X", "--request")), "")
+        data = any(f in _CURL_DATA for f, _ in opts) and not any(f in ("-G", "--get") for f, _ in opts)
         writes = (bool(method) and method.upper() not in ("GET", "HEAD", "OPTIONS")) or data
         urls = [a for a in args if re.match(r"^[a-z][a-z0-9+.-]*://", a, re.I)] or \
-            [_opt_value(args, ("--url",)) or ""] + _positionals(args, _CURL_VALUES)
+            [next((v for f, v in opts if f == "--url"), "")] + pos
         hosts = [h for h in (_url_host(u) for u in urls if u) if h]
         if any(u.lower().startswith(("smtp://", "smtps://")) for u in urls):
             return [("external-message", hosts[0] if hosts else "smtp")]
@@ -4004,7 +4101,9 @@ def _argv_actions(argv, cwd, bodies, depth):
         i, takes = 0, {"-I", "-n", "-P", "-L", "-d", "-E", "-s", "-a", "-J", "-R", "-S"}
         while i < len(args) and args[i].startswith("-"):
             i += 2 if args[i] in takes else 1
-        inners = [_unwrap(args[i:])]
+        inner = _unwrap(args[i:])
+        placed = any(a.startswith(("-I", "-J", "--replace")) or a == "-i" for a in args[:i])
+        inners = [inner + ["{}"] if inner and not placed else inner]  # it appends what it reads (Seraph, M243)
     elif name == "find":
         for k, a in enumerate(args):
             if a in ("-exec", "-execdir", "-ok", "-okdir"):
@@ -4034,15 +4133,22 @@ def _text_actions(text, cwd, depth=0):
     segs = split_commands(text, ops=True)
     if segs is None:
         return None
-    bodies, out = heredoc_bodies(text), []
+    bodies, out, gh_repo = heredoc_bodies(text), [], ""
     for k, (argv0, _, _, here) in enumerate(segs):
         argv = _unwrap(argv0)
-        if not argv:
+        sets = [a[8:] for a in (argv0[:argv0.index(argv[0])] if argv and argv[0] in argv0 else argv0)
+                if a.startswith("GH_REPO=")]
+        if argv[:1] in (["export"], ["declare"], ["typeset"]):
+            sets += [a[8:] for a in argv[1:] if a.startswith("GH_REPO=")]
+        if not argv or argv[:1] in (["export"], ["declare"], ["typeset"]):
+            gh_repo = sets[-1] if sets else gh_repo  # the shell keeps it for the gh calls that follow
             continue
         name = os.path.basename(argv[0])
         if name in ("cd", "pushd"):
             cwd = str(core.HOME) if len(argv) == 1 else cwd if argv[1] == "-" else str(resolve(argv[1], cwd))
             continue
+        if name == "gh" and (sets or gh_repo):  # GH_REPO names the repository gh acts on
+            argv = [argv[0], "-R", (sets or [gh_repo])[-1], *argv[1:]]
         more = _argv_actions(argv, cwd, bodies, depth)
         if more is None:
             return None

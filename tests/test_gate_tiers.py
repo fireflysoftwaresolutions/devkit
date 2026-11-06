@@ -320,6 +320,50 @@ class ClassifyTests(GateCase):
             with self.subTest(cmd=cmd):
                 self.assertEqual(self.acts(cmd), [])
 
+    def test_a_program_that_runs_the_command_it_is_given_runs_its_actions(self):
+        # Seraph's M243 probe: these wrappers passed the member gate with no action found
+        for cmd in ("script -q /dev/null gh pr merge 12", "script -c 'gh pr merge 12' /dev/null",
+                    "watch -n 600 gh pr merge 12", "watch -x gh pr merge 12", "watch 'gh pr merge 12'",
+                    "parallel ::: 'gh pr merge 12'", "echo 'gh pr merge 12' | parallel", "arch -arm64 gh pr merge 12",
+                    "flock /tmp/k1.lock gh pr merge 12", "unbuffer gh pr merge 12", "nice -n 5 script -q /dev/null "
+                    "gh pr merge 12"):
+            with self.subTest(cmd=cmd):
+                self.assertEqual(self.acts(cmd), [("merge", 2, "12")])
+
+    def test_a_publish_through_a_workspace_runner_or_after_a_value_flag_is_a_publish(self):
+        # Seraph's probe: `yarn workspaces foreach npm publish` passed; a value flag before `publish` hid it too
+        for cmd in ("yarn workspaces foreach -A npm publish", "yarn workspace @acme/widget npm publish",
+                    "npm -w pkg publish", "pnpm --filter @acme/widget publish"):
+            with self.subTest(cmd=cmd):
+                self.assertEqual(self.acts(cmd), [("publish", 2, "@acme/widget@1.4.0")])
+
+    def test_arguments_appended_when_the_command_runs_make_its_target_unknowable(self):
+        # xargs and parallel append what they read: the target is not the current branch (Seraph, M243)
+        for cmd in ("echo 12 | xargs gh pr merge", "xargs -n1 gh pr merge < prs.txt", "parallel gh pr merge ::: 12"):
+            with self.subTest(cmd=cmd):
+                self.assertEqual(self.acts(cmd), [("merge", 2, "{}")])
+        self.assertEqual(self.acts("echo feat/y | xargs git push origin"), [("push", 1, "{}")])
+        self.assertEqual(self.acts("echo 12 | xargs -I{} gh pr merge {}"), [("merge", 2, "{}")])
+
+    def test_a_repository_named_before_the_command_or_in_gh_repo_is_the_one_acted_on(self):
+        for cmd in ("gh -R o/r pr merge 12", "gh --repo o/r pr merge 12", "gh --repo=o/r pr merge 12",
+                    "GH_REPO=o/r gh pr merge 12", "export GH_REPO=o/r; gh pr merge 12", "env GH_REPO=o/r gh pr merge 12",
+                    "gh -R o/r api -X PUT repos/o/r/pulls/12/merge"):
+            with self.subTest(cmd=cmd):
+                found = guard.irreversible_actions(cmd, self.repo)
+                self.assertEqual([(a["action"], a["tier"], a["repo"]) for a in found][:1],
+                                 [("api-write" if " api " in cmd else "merge", 2, "o/r")])
+
+    def test_curl_reads_its_method_and_data_inside_a_cluster_of_short_flags(self):
+        for cmd in ("curl -sSfX POST https://api.github.com/x", "curl -sXPOST https://api.github.com/x",
+                    "curl -sd@body.json https://api.github.com/x", "curl -fsSL -XDELETE https://api.github.com/x"):
+            with self.subTest(cmd=cmd):
+                self.assertEqual(self.acts(cmd), [("api-write", 2, "api.github.com")])
+        for cmd in ("curl -sSfL https://api.github.com/x", "curl -sSfG -d q=1 https://api.github.com/x",
+                    "curl -sSfX POST http://localhost:8080/x"):
+            with self.subTest(cmd=cmd):
+                self.assertEqual(self.acts(cmd), [])
+
 
 class MemberTests(GateCase):
 
@@ -440,6 +484,7 @@ class MainTests(GateCase):
 
     def test_a_target_known_only_when_the_command_runs_is_never_granted(self):
         for cmd, target in (("ls | xargs -I{} gh pr merge {}", "{}"), ("gh pr merge $PR", "$PR"),
+                            ("echo 12 | xargs gh pr merge", "{}"),
                             ("gh release create \"$(cat VERSION)\"", "$(cat VERSION)")):
             with self.subTest(cmd=cmd):
                 store = Store({f"merge {target}": 5, f"release {target}": 5})
