@@ -60,7 +60,8 @@ chat (Anthropic). For Codex this section is the explicit instruction its spawn t
 - **How many:** one for a search, 2–4 for independent questions, rarely more than 5. Each one costs a full context.
 - **Model and effort:** subagents inherit the session model by design in both tools. Don't set a model on the
   Agent/spawn call unless the user asked. For mechanical lookups use an agent whose definition pins a small model
-  (a read-only `scout`-style agent, when the session lists one) and low effort. This skill asks for `effort: low` on
+  (the crew's read-only Sparks: `devkit:sparks` in Claude Code, agent type `sparks` in Codex; `scout` still works
+  as its alias) and low effort. This skill asks for `effort: low` on
   mechanical, self-checking briefs and `effort: high` on reviews of risky changes (Claude Agent tool: `"lower"` or
   `"higher"` also work).
 - **No duplicate work:** while an agent runs, do non-overlapping work; never redo its task. Give each agent a distinct

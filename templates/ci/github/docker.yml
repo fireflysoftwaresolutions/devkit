@@ -1,0 +1,17 @@
+  image:
+    name: Container image (build and scan)
+@{#needs}
+    needs: [@{needs}]
+@{/needs}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: @{uses:actions/checkout}
+        with:
+          persist-credentials: false
+      - name: Build the image
+        run: docker build -t "ci-image:$GITHUB_SHA" .
+      - name: Scan the image (trivy)
+        run: >-
+          docker run --rm -v /var/run/docker.sock:/var/run/docker.sock @{image:trivy}
+          image --severity HIGH,CRITICAL --exit-code 1 --ignore-unfixed "ci-image:$GITHUB_SHA"

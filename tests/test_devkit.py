@@ -1,4 +1,5 @@
-# Copyright (c) 2026 Firefly Software Solutions Inc. All rights reserved.
+# Copyright (c) 2026 Firefly Software Solutions Inc.
+# SPDX-License-Identifier: Apache-2.0
 """Unit tests for devkit. Run: python3 -m unittest discover -s tests -v"""
 import json
 import os

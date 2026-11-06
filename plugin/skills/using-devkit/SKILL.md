@@ -53,6 +53,8 @@ or diagram files without them.
 | Find, clone, start a project | `dev ls`, `dev go`, `dev clone`, `dev new` | `workspace` |
 | Parallel work | `dev wt new <type>/<topic>` | `workspace` |
 | Plan, build, debug | `dev task`, plans folder | Superpowers (brainstorming, writing-plans, TDD, systematic-debugging) |
+| Test | `dev test` (failed first, then the blast radius), `dev test plan`, `dev test audit`, `dev test prove` | `testing`, Superpowers TDD |
+| CI/CD pipelines | `dev ci audit [--fix]`, `dev ci init`, `dev ci status` | `cicd`, `github-actions-hardening`, `devsecops` |
 | Architecture and design | `dev initiative` for cross-project work | `architecture`, `system-design`, `domain-modeling`, `codebase-design`, `likec4-dsl`, `diagrams` |
 | Backend | — | `backend`, `java-springboot`, `spring-boot-testing`, `java-junit` |
 | Frontend | Chrome DevTools MCP, `playwright-cli` | `angular-developer`, `react-best-practices`, `composition-patterns`, `frontend-design` / `impeccable` |
@@ -62,7 +64,7 @@ or diagram files without them.
 | Document | `dev docs check`, `dev diagram render` | `docs`, `documentation-writer`, `doc-coauthoring`, `diagrams` |
 | Hand off | `dev handoff`, `dev task`, `/devkit:handoff` | `handoff` |
 | Coordinate with others | `dev team`, `dev task start\|release`, `dev task show <n>` (history) | — |
-| Choose model, effort, subagents | `scout` agent for lookups; `codex --profile fast\|deep\|review` | `working-efficiently` |
+| Choose model, effort, subagents | `sparks` agent (alias `scout`) for lookups; `dev crew` for the specialists; `codex --profile fast\|deep\|review` | `working-efficiently` |
 | Learn from mistakes | `dev lesson add\|ls\|recur\|prevent`, `dev lesson scan\|review` | `learning-loop` |
 | Keep the developer informed | `dev progress start\|step\|block\|done`, `dev time` | `communicating` |
 | Plans and specs | `dev plan new "…" --kind plan\|spec\|spike\|bugfix\|adr`, `dev plan revise --why`, `approve`, `ls` | Superpowers writing-plans, `communicating` (formats) |

@@ -1,0 +1,30 @@
+      - uses: @{uses:actions/checkout}
+        with:
+          persist-credentials: false
+@{#pnpm}
+      - uses: @{uses:pnpm/action-setup}
+@{#pnpm_version}
+        with:
+          version: @{pnpm_version}
+@{/pnpm_version}
+@{/pnpm}
+      - uses: @{uses:actions/setup-node}
+        with:
+@{#node_file}
+          node-version-file: @{node_file}
+@{/node_file}
+@{^node_file}
+          node-version: "@{node}"
+@{/node_file}
+@{#cache}
+          cache: @{pm}
+@{/cache}
+@{^cache}
+          package-manager-cache: false
+@{/cache}
+@{#corepack}
+      - name: Corepack
+        run: corepack enable
+@{/corepack}
+      - name: Install
+        run: @{install}

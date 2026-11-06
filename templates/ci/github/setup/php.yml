@@ -1,0 +1,17 @@
+      - uses: @{uses:actions/checkout}
+        with:
+          persist-credentials: false
+      - uses: @{uses:shivammathur/setup-php}
+        with:
+          php-version: "@{php}"
+          tools: composer:v2
+          coverage: none
+@{#cache}
+      - uses: @{uses:actions/cache}
+        with:
+          path: ~/.cache/composer/files
+          key: composer-${{ runner.os }}-${{ hashFiles('composer.lock') }}
+          restore-keys: composer-${{ runner.os }}-
+@{/cache}
+      - name: Install
+        run: @{install}

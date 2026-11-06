@@ -1,0 +1,29 @@
+  @{id}:
+    name: @{name}
+@{#needs}
+    needs: [@{needs}]
+@{/needs}
+    runs-on: ubuntu-24.04
+    timeout-minutes: @{timeout}
+    steps:
+@{setup}
+@{steps}
+@{#junit}
+      - name: Upload the JUnit report
+        if: ${{ !cancelled() }}
+        uses: @{uses:actions/upload-artifact}
+        with:
+          name: @{id}-junit
+          path: @{junit}
+          if-no-files-found: ignore
+          retention-days: 14
+@{/junit}
+@{#artifact}
+      - name: Upload the build
+        uses: @{uses:actions/upload-artifact}
+        with:
+          name: @{artifact}
+          path: dist/
+          if-no-files-found: error
+          retention-days: 7
+@{/artifact}

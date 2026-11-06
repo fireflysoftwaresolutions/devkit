@@ -1,0 +1,25 @@
+      - job: @{id}
+        displayName: @{name}
+@{#needs}
+        dependsOn: [@{needs}]
+@{/needs}
+        timeoutInMinutes: @{timeout}
+        steps:
+@{setup}
+@{steps}
+@{#junit}
+          - task: PublishTestResults@2
+            displayName: JUnit report
+            condition: succeededOrFailed()
+            inputs:
+              testResultsFormat: JUnit
+              testResultsFiles: "@{junit}"
+              failTaskOnFailedTests: true
+@{/junit}
+@{#artifact}
+          - task: PublishPipelineArtifact@1
+            displayName: Keep the build
+            inputs:
+              targetPath: dist
+              artifact: @{artifact}
+@{/artifact}

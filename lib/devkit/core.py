@@ -1,4 +1,5 @@
-# Copyright (c) 2026 Firefly Software Solutions Inc. All rights reserved.
+# Copyright (c) 2026 Firefly Software Solutions Inc.
+# SPDX-License-Identifier: Apache-2.0
 """Paths, configuration and process helpers shared by every devkit module.
 
 Stdlib only and Python 3.9 compatible, so `dev` runs on any Mac without a
@@ -16,7 +17,7 @@ from pathlib import Path
 
 DEVKIT_HOME = Path(__file__).resolve().parents[2]
 HOME = Path.home()
-COPYRIGHT = "© 2026 Firefly Software Solutions Inc. All rights reserved."
+COPYRIGHT = "© 2026 Firefly Software Solutions Inc. · Apache License 2.0"
 VERSION = (DEVKIT_HOME / "VERSION").read_text().strip() if (DEVKIT_HOME / "VERSION").exists() else "0.0.0"
 
 # Tools are looked up on a predictable PATH even when a hook runs from an app

@@ -1,4 +1,5 @@
-# Copyright (c) 2026 Firefly Software Solutions Inc. All rights reserved.
+# Copyright (c) 2026 Firefly Software Solutions Inc.
+# SPDX-License-Identifier: Apache-2.0
 """`dev install` (idempotent configuration of git, Claude Code, Codex, skills, Docker, launchd)
 and `dev doctor` (verification)."""
 from __future__ import annotations
@@ -590,27 +591,89 @@ def write_codex_profiles(conf: dict):
                                       for n, p in profiles.items()) + " — `codex --profile <name>`")
 
 
+CODEX_ROLE_MARK = "# Managed by devkit"
+
+
 def write_codex_agents(conf: dict):
-    """Custom agent roles (e.g. the read-only `scout`) as ~/.codex/agents/<name>.toml, auto-discovered by Codex."""
-    roles = conf.get("agents") or {}
+    """Agent roles as ~/.codex/agents/<name>.toml, auto-discovered by Codex: the crew (config/crew.json, Sparks and
+    its scout alias included), plus any extra roles in config/codex/config.json "agents". Roles devkit wrote earlier
+    and no longer has are removed."""
+    roles = dict(conf.get("agents") or {})
+    crew_n = 0
+    try:
+        from . import crew
+        crew_roles = crew.codex_roles()
+        crew_n = len(crew_roles)
+        roles.update(crew_roles)
+    except Exception as e:
+        fail(f"crew roles: {e}")
     if not roles:
         return
     d = CODEX_HOME / "agents"
     d.mkdir(parents=True, exist_ok=True)
     for name, role in roles.items():
-        text = "# Managed by devkit (config/codex/config.json → agents). Edit devkit's config, not this file.\n" + \
+        text = f"{CODEX_ROLE_MARK} (config/crew.json, config/codex/config.json). Edit devkit's config, not this file.\n" + \
                "".join(f"{k} = {_toml_value(v)}\n" for k, v in role.items())
         f = d / f"{name}.toml"
         if not f.exists() or f.read_text() != text:
             f.write_text(text)
-    done(f"agent roles: {', '.join(roles)} (~/.codex/agents)")
+    for f in d.glob("*.toml"):  # roles devkit wrote that are gone from the config
+        if f.stem not in roles and f.read_text()[:len(CODEX_ROLE_MARK)] == CODEX_ROLE_MARK:
+            f.unlink()
+    done(f"agent roles: {crew_n} crew members + {len(roles) - crew_n} more (~/.codex/agents)")
 
 
-def plugin_copy_stale(cache_root: Path) -> bool:
-    """True when the agent's installed copy of the devkit plugin differs from this checkout's plugin/ folder.
-    Both Claude Code and Codex install a snapshot, and devkit's version does not change between commits."""
-    import filecmp
+CODEX_MARKET = Path.home() / ".local" / "share" / "devkit" / "codex-marketplace"
+
+
+def build_codex_plugin() -> Path:
+    """Codex plugins have no slash commands (their manifest takes skills, hooks, apps, MCP servers and scheduled
+    tasks), so devkit builds Codex's own copy of the plugin: the shared skills plus one skill per command of
+    plugin/commands, with the same name and content. -> the marketplace root to register."""
+    import shutil as _sh
     src = DEVKIT_HOME / "plugin"
+    root = CODEX_MARKET
+    dst = root / "plugin"
+    tmp = root / "plugin.tmp"
+    if tmp.exists():
+        _sh.rmtree(tmp)
+    tmp.mkdir(parents=True)
+    for name in (".codex-plugin", "assets", "skills"):
+        if (src / name).exists():
+            _sh.copytree(src / name, tmp / name)
+    for cmd in sorted((src / "commands").glob("*.md")):
+        text = cmd.read_text()
+        m = re.match(r"---\s*\n(.*?)\n---\s*\n(.*)$", text, re.S)
+        desc = ""
+        body = text
+        if m:
+            desc = next((ln.split(":", 1)[1].strip().strip('"') for ln in m.group(1).splitlines()
+                         if ln.startswith("description:")), "")
+            body = m.group(2)
+        name = cmd.stem
+        if (tmp / "skills" / name).exists():
+            name = f"{name}-command"
+        body = body.replace("$ARGUMENTS", "(the developer's request, if any)").strip()
+        d = tmp / "skills" / name
+        d.mkdir(parents=True)
+        (d / "SKILL.md").write_text(
+            f"---\nname: {name}\ndescription: {json.dumps(desc + ' (the /devkit:' + cmd.stem + ' command of Claude Code, as a skill)')}\n---\n\n"
+            f"<!-- generated from plugin/commands/{cmd.name} by dev install -->\n\n{body}\n")
+    if dst.exists():
+        _sh.rmtree(dst)
+    tmp.rename(dst)
+    mk = root / ".agents" / "plugins"
+    mk.mkdir(parents=True, exist_ok=True)
+    (mk / "marketplace.json").write_text((DEVKIT_HOME / ".agents" / "plugins" / "marketplace.json").read_text())
+    return root
+
+
+def plugin_copy_stale(cache_root: Path, src: Path = None) -> bool:
+    """True when the agent's installed copy of the devkit plugin differs from its source: this checkout's plugin/
+    folder for Claude Code, the generated Codex copy (build_codex_plugin) for Codex. Both agents install a
+    snapshot, and devkit's version does not change between commits."""
+    import filecmp
+    src = src or DEVKIT_HOME / "plugin"
     copies = sorted(cache_root.glob("*")) if cache_root.exists() else []
     if not copies:
         return True
@@ -635,6 +698,9 @@ def setup_codex():
     write_codex_profiles(load_conf("codex/config.json"))
     write_codex_agents(load_conf("codex/config.json"))
     plugins = load_conf("codex/plugins.json")
+    codex_root = build_codex_plugin()
+    if "firefly-devkit" in plugins.get("marketplaces", {}):
+        plugins["marketplaces"]["firefly-devkit"] = str(codex_root)
     _, mk, _ = sh(["codex", "plugin", "marketplace", "list"], timeout=60)
     for name, src in plugins.get("marketplaces", {}).items():
         row = next((ln for ln in mk.splitlines() if ln.split()[:1] == [name]), "")
@@ -653,14 +719,15 @@ def setup_codex():
         rc, out, err = sh(["codex", "plugin", "add", p], timeout=300)
         done(f"installed {p}") if rc == 0 else fail(f"{p}: {(err or out)[-200:]}")
     cache = CODEX_HOME / "plugins" / "cache" / "firefly-devkit" / "devkit"
-    if "devkit@firefly-devkit" in plugins["plugins"] and plugin_copy_stale(cache):
+    if "devkit@firefly-devkit" in plugins["plugins"] and plugin_copy_stale(cache, codex_root / "plugin"):
         sh(["codex", "plugin", "marketplace", "upgrade", "firefly-devkit"], timeout=180)
         sh(["codex", "plugin", "remove", "devkit@firefly-devkit"], timeout=120)
         rc, out, err = sh(["codex", "plugin", "add", "devkit@firefly-devkit"], timeout=300)
-        if rc != 0 or plugin_copy_stale(cache):
+        if rc != 0 or plugin_copy_stale(cache, codex_root / "plugin"):
             fail(f"devkit plugin copy is out of date in Codex: {(err or out)[-160:]}")
         else:
-            done("devkit plugin reinstalled from this checkout (skills, commands)")
+            n = len(list((DEVKIT_HOME / "plugin" / "commands").glob("*.md")))
+            done(f"devkit plugin reinstalled from this checkout (skills, and {n} commands as skills)")
     done(f"{len(plugins['plugins'])} plugins installed and enabled")
 
 
@@ -862,6 +929,17 @@ def doctor() -> int:
         ok = target.exists() and GENERATED_MARK in target.read_text()[:200]
         check("Agents", f"{tilde(target)}", ok, "generated from devkit" if ok else "missing or hand-written",
               "dev install --only instructions")
+    try:
+        from . import crew
+        stale = crew.sync(check=True)
+        check("Agents", "crew agents", not stale, f"{len(crew.load()['members']) - 1} members generated from "
+              f"config/crew.json" if not stale else f"out of date: {', '.join(map(str, stale[:4]))}", "dev crew sync")
+        roles_dir = CODEX_HOME / "agents"
+        missing = [i for i in crew.codex_roles() if not (roles_dir / f"{i}.toml").exists()]
+        check("Codex", "crew roles", not missing, "all crew roles in ~/.codex/agents" if not missing else
+              f"missing: {', '.join(missing[:5])}", "dev install --only codex")
+    except Exception as e:
+        check("Agents", "crew agents", False, f"crew: {e}", "dev crew sync")
     managed = read_json(STATE / "skills-managed.json", []) or []
     if not isinstance(managed, dict):  # before 26.11.0: every skill went to both agents
         managed = {n: ["claude", "codex"] for n in managed}
@@ -967,7 +1045,8 @@ def doctor() -> int:
     st = os.statvfs(str(HOME))
     free_gb = st.f_bavail * st.f_frsize / 1024 ** 3
     for agent_name, home in (("Claude", CLAUDE_HOME), ("Codex", CODEX_HOME)):
-        stale = plugin_copy_stale(home / "plugins" / "cache" / "firefly-devkit" / "devkit")
+        src_ = (build_codex_plugin() / "plugin") if agent_name == "Codex" else None
+        stale = plugin_copy_stale(home / "plugins" / "cache" / "firefly-devkit" / "devkit", src_)
         check(agent_name, "devkit plugin copy is current", not stale,
               "matches plugin/ in this checkout" if not stale else "older than this checkout (skills or agents missing)",
               f"dev install --only {agent_name.lower()}")

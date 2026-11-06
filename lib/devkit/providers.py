@@ -1,4 +1,5 @@
-# Copyright (c) 2026 Firefly Software Solutions Inc. All rights reserved.
+# Copyright (c) 2026 Firefly Software Solutions Inc.
+# SPDX-License-Identifier: Apache-2.0
 """Agent providers (Claude Code, Codex): installation, sign-in, plan, quota — and live self-tests.
 
 `status()` is cheap enough for `dev doctor`, the dashboard and agents (`dev agents --json`).

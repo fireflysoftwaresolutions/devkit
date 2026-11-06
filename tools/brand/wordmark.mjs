@@ -1,4 +1,5 @@
-// Copyright (c) 2026 Firefly Software Solutions Inc. All rights reserved.
+// Copyright (c) 2026 Firefly Software Solutions Inc.
+// SPDX-License-Identifier: Apache-2.0
 // Outlines the "devkit" wordmark from Manrope's real glyph contours (fontkit) and records the exact centre of
 // the i's dot, where the amber spark goes. Output: assets/src/wordmark.json (font units, y down), committed, so
 // render.py needs no Node dependencies. Run from a brand-kit checkout (it has fontkit and @fontsource/manrope):

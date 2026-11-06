@@ -1,4 +1,5 @@
-# Copyright (c) 2026 Firefly Software Solutions Inc. All rights reserved.
+# Copyright (c) 2026 Firefly Software Solutions Inc.
+# SPDX-License-Identifier: Apache-2.0
 """dev docs check never reports success when it cannot read a checker's output (lesson: hidden failures)."""
 import io
 import subprocess

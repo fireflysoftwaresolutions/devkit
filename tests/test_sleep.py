@@ -1,4 +1,5 @@
-# Copyright (c) 2026 Firefly Software Solutions Inc. All rights reserved.
+# Copyright (c) 2026 Firefly Software Solutions Inc.
+# SPDX-License-Identifier: Apache-2.0
 """Sleep: usage, strength decay, merging, forgetting, restoring and hygiene (simulated time)."""
 import json
 import os

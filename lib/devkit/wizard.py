@@ -1,4 +1,5 @@
-# Copyright (c) 2026 Firefly Software Solutions Inc. All rights reserved.
+# Copyright (c) 2026 Firefly Software Solutions Inc.
+# SPDX-License-Identifier: Apache-2.0
 """`dev setup`: the installation and configuration wizard.
 
 Detects the machine and the agents, asks only what matters (with good defaults), shows the plan, then installs

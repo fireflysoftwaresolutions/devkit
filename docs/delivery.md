@@ -67,6 +67,15 @@ CI, the branch model, what it publishes and deploys, the bump rule, and an optio
 the policy's version, adds a history line (who, when, what changed, why), and makes one commit. `--tasks` opens a
 work item for each gap. The guard refuses direct edits of `policies/`.
 
+The optional field `job_timeout_minutes` (default 30, from 5 to 360) is the CI job limit that `dev ci audit` suggests,
+`dev ci audit --fix` writes, and `dev ci init` gives every job it generates (see
+[CI/CD pipelines › Job timeouts](ci-cd.md#job-timeouts-and-the-delivery-policy)). The policy's test gate is also what
+the test job of a generated pipeline runs.
+
+```bash
+dev delivery apply --set job_timeout_minutes=45 --why "integration tests take 35 minutes"
+```
+
 ### What the policy does
 
 - **Every session sees it.** The session context shows the policy in one line: versioning and tag format, release
@@ -88,9 +97,11 @@ dev ci                 # workflows, triggers, jobs, runners, matrices, setup act
 dev ci --commands      # only the commands, in order
 dev ci --runs          # plus the recent runs
 dev ci --run --dry-run # which of those steps run on your Mac, and why the others do not
+dev ci audit           # what makes the pipeline slow, unreliable, or unsafe, with the fixes
 ```
 
-Use the same tool versions as the setup steps (`setup-node`, `setup-java`, `setup-python`).
+Use the same tool versions as the setup steps (`setup-node`, `setup-java`, `setup-python`). To diagnose, fix, or set up
+the pipeline itself, see [CI/CD pipelines](ci-cd.md).
 
 ## 2. A single change
 
@@ -143,6 +154,9 @@ the last successful runs of the same pipeline. The details and the sign-in each 
 [Commands › dev ci status](commands.md#dev-ci-status---watch---branch-name----all-branches---all-jobs---limit-n---json).
 
 ## 5. When CI fails
+
+After every push, `dev ci watch` follows the run and, when it fails, reports the first error, its class, and one next
+action (see [CI/CD pipelines › Watch every run](ci-cd.md#watch-every-run)).
 
 1. Read the real error: `dev run view --failed` (or `dev pr checks`) shows the failing step and the relevant lines of
    its log.

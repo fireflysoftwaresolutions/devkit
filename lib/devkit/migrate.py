@@ -1,4 +1,5 @@
-# Copyright (c) 2026 Firefly Software Solutions Inc. All rights reserved.
+# Copyright (c) 2026 Firefly Software Solutions Inc.
+# SPDX-License-Identifier: Apache-2.0
 """`dev handoff-import <staging dir> --slug <slug>`: adopt an existing handoff/programme repository into the handoff standard.
 
 A staging folder (produced by an analysis of the old repository) contains:

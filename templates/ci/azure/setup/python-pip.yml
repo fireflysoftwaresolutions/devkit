@@ -1,0 +1,12 @@
+          - task: UsePythonVersion@0
+            inputs:
+              versionSpec: "@{python}"
+          - task: Cache@2
+            inputs:
+              key: 'pip | "$(Agent.OS)" | @{pip_key}'
+              path: $(PIP_CACHE_DIR)
+@{#install}
+          - script: |
+              @{install}
+            displayName: Install
+@{/install}

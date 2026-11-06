@@ -1,0 +1,13 @@
+          - task: UseNode@1
+            inputs:
+              version: "@{node}.x"
+          - task: Cache@2
+            inputs:
+              key: '@{pm} | "$(Agent.OS)" | @{lockfile}'
+              path: $(NODE_CACHE_DIR)
+          - script: |
+@{#corepack}
+              corepack enable
+@{/corepack}
+              @{install_ci}
+            displayName: Install

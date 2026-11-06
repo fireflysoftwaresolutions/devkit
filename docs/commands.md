@@ -238,20 +238,30 @@ Who is working on what: one entry per developer and machine (`user@host`) that p
 hours (default 24), with its live sessions (agent, project, branch, latest status) and the locks it holds. Each
 machine publishes its own presence file when it syncs.
 
-### `dev progress [start | step | block | done | time]`
+### `dev progress [start | step | add | assign | begin | reopen | skip | block | done | history | time]`
 
-Live progress of long agent work. See [Progress and communication](progress-and-communication.md).
+Live progress of long agent work, with active time, a critical-path ETA and a plan that stays true. See
+[Progress and communication](progress-and-communication.md).
 
 | Command | Effect |
 | --- | --- |
-| `dev progress start "<goal>" [--steps N] [--plan "a; b; c"] [--estimate 30m]` | Starts a run for the current session. `--plan` names the steps (shown as a checklist) and sets `--steps` to their number. Prints how long similar runs took here |
-| `dev progress step "<what finished>" [--check "<evidence>"] [--next "…"]` | One step finished; prints the update to send, which is the status block with the Progress bullet and the checklist. Without `--check`, Check reads `⚠ not verified at this step` |
+| `dev progress start "<goal>" [--plan "a=30m; b=1h after a; c"] [--estimate 2h] [--steps N] [--mode guided\|auto]` | Starts a run for the current session. Each plan step can carry an estimate and the steps it waits for; steps without an estimate share what `--estimate` leaves. `--mode` sets who takes the developer's decisions ([The crew](crew.md#guided-or-automatic)). Prints how long similar runs took here |
+| `dev progress step "<what finished>" --check "<evidence>" [--step <n or name>] [--next "…"] [--force]` | Closes the running step (or the one named) with its evidence, and prints the update, which is the status block with the plan under it, then the exact change made. Refused when the description does not match the step, a crew member still owns it, or its dependencies are open; `--no-check` when there is nothing to verify |
+| `dev progress note "<what is happening>" [--next "…"]` | An update while a step is still running: recorded and printed as the status block (Check `–` the step is still running), and no step changes state. From a crew member, it stays in its lane |
+| `dev progress add "<name>=<estimate> [after …]" [--why "…"]` | Adds a step found during the work; add it when it starts. From a crew member, the step goes to its own lane |
+| `dev progress assign <step> --to <member> [--scope "<globs>"]` | Hands a step to a crew member; its time is that member's, and the guard keeps its edits inside the scope |
+| `dev progress begin <step>` | Starts a step in parallel with the running one |
+| `dev progress reopen <step> --why "…"` · `dev progress skip <step> --why "…"` | Undoes a wrong close, or skips a step on purpose |
 | `dev progress block "<why>" [--next "<what is needed>"]` | The run is blocked; prints the update and sends a desktop notification |
-| `dev progress done "<outcome>"` | The run is finished; records the time against the estimate and sends a desktop notification |
+| `dev progress done "<outcome>"` | The run is finished; refused while steps are pending or decisions wait; records the active time against the estimate and sends a desktop notification |
+| `dev progress history` | Every step change: when, from → to, by whom (Morpheus, a crew member, devkit), why |
 | `dev progress` | Every run of the last 12 hours on this Mac, and the runs of other machines from their presence |
 | `dev progress time [--days N] [-p PROJECT]` | Same as `dev time` |
 
-Estimates accept `45m`, `1h30m`, `2h`, or a number of minutes.
+Estimates accept `45m`, `1h30m`, `2h`, or a number of minutes. Inside a subagent, `dev progress start`, `step`, and
+`add` write to that subagent's own lane (the hooks pass its id), never to the main plan; `assign`, `begin`, `reopen`,
+and `skip` change the main plan and are refused there. Run them as a command of their own: inside `&&`, a pipe,
+`$(…)`, or a redirect, the guard refuses them.
 
 ### `dev time [--days N] [-p PROJECT]`
 
@@ -273,6 +283,26 @@ outside initiatives. `--days` sets the period (default 7), `-i` or `-p` limits i
 Adopts an older handoff or program repository as an initiative, from a prepared staging folder. `--dry-run` prints
 what it would import. The staging format is in [Initiatives › Adopt an existing handoff
 repository](initiatives.md#adopt-an-existing-handoff-repository).
+
+## The crew
+
+devkit's specialist agents. See [The crew](crew.md).
+
+### `dev crew [show | brief | route | delegate | decline | next | ask | answer | inbox | mode | decide | decisions | sync]`
+
+| Command | Effect |
+| --- | --- |
+| `dev crew [--json] [--latest]` | The roster, and in a session with a run: who is working now, the steps assigned to each member, open messages and decisions, and the mode. `--latest` reads the most recent running run on this Mac instead of this session's; `--json` prints the roster and the live state |
+| `dev crew show <name>` | One member: role, personality, when to use it, skills, tools, model tier, keywords |
+| `dev crew brief <name> "<task>" [--scope "<globs>"] [--step <step>]` | A ready brief for the Agent tool or `spawn_agent`, the exact launch line for Claude Code and Codex, and the `dev progress assign` command that links the lane |
+| `dev crew route "<task>" [--files a,b]` · `dev crew route --plan [--apply]` | The best members for a task, with scores and reasons; or a member for every unowned plan step |
+| `dev crew delegate "<task>" [--to <name>\|auto] [--scope …] [--after <step>] [--estimate 30m] [--files a,b]` | A step for another member, with who asked; joins a working member's lane, or waits for Morpheus to launch it |
+| `dev crew decline "<step>" --why "…"` | Hands a delegated step back to Morpheus |
+| `dev crew next` | Ready to launch (with the commands), queued until a slot frees, waiting and why, and who is busy |
+| `dev crew ask "<text>" [--to <name>]` · `dev crew answer <id> "<text>"` · `dev crew inbox` | Messages between members; delivered with the recipient's next action |
+| `dev crew ask --decision "<question>" [--options "A \| B"] [--recommend A] [--irreversible push]` | A decision point: decided at once in auto mode, waits for the developer in guided mode or for irreversible actions |
+| `dev crew mode [guided\|auto] [--approve "push, pr"]` · `dev crew decide <id> "<answer>"` · `dev crew decisions [--pending]` | The mode, the developer's answers (recorded by Morpheus only), and every decision with who took it |
+| `dev crew sync [--check]` | Regenerates the Claude Code agents from `config/crew.json` |
 
 ## Lessons
 
@@ -356,9 +386,9 @@ with `1` when removal was refused.
 
 ### `dev ci [<query>] [--commands] [--runs]`
 
-Reads `.github/workflows/*.yml` and prints each workflow's triggers, jobs, runners, matrices, setup actions and every
+Reads `.github/workflows/*.yml` and prints each workflow's triggers, jobs, runners, matrices, setup actions, and every
 `run:` command, so you can run exactly what CI runs before the single push. Expressions (`${{ … }}`) are shown as
-written.
+written. The query can also be `status`, `watch`, `audit`, or `init`; each has its own entry below.
 
 | Option | Effect |
 | --- | --- |
@@ -376,6 +406,7 @@ Local CI evidence: proof that what CI runs passed on your Mac, on exactly the fi
 | `--dry-run` | With `--run`: the plan, without running anything |
 | `--keep-going` | With `--run`: do not stop at the first failure |
 | `--step-timeout MIN` | With `--run`: minutes per step (default 30) |
+| `--resume` | With `--run`, after a fix: re-runs the failed steps, the steps that never ran, and the passed steps that the changes since can affect; a test step re-runs only its failed and affected tests (the whole step when the change is global). The evidence is recorded as "resumed" (see [Testing › After a CI step fails](testing.md#after-a-ci-step-fails)) |
 | `--mark-passed [--note "…"]` | Records that you ran the full suite yourself on the current files; the note goes into the PR body |
 | `--evidence [--json]` | Whether HEAD has evidence, and how it was recorded; exits with `2` when it has none |
 
@@ -415,6 +446,57 @@ newest run on GitHub failed, the command prints `gh run view <id> --log-failed` 
 Tokens are read from the environment and never printed. A host that cannot be read reports why instead of failing.
 `dev status` shows the latest run of the branch, and when you ask an agent for status, the prompt hook adds the
 branch's pipelines to its context.
+
+### `dev ci watch [-p PROJECT] [--branch B] [--sha S] [--timeout 90] [--json] [--quiet]`
+
+Follows the CI/CD runs of a branch for one commit (default: the current branch at HEAD) until they finish, on GitHub
+Actions, GitLab CI, Bitbucket Pipelines, or Azure Pipelines. A failure comes with the failed jobs and steps, the first
+error of the failed log (GitHub through `gh run view --log-failed`, GitLab through `glab ci trace`; Bitbucket and
+Azure give the job, step and link), its class (`test`, `lint`, `build`, `dependencies`, `pipeline`,
+`infrastructure`, `unknown`) and the one next action. The log excerpt is marked as untrusted output and has secrets
+redacted. Exit codes: 0 passed, 1 failed, 3 still running at the timeout, 4 no run appeared within five minutes.
+
+devkit starts it in the background after every `git push`, `dev push`, `gh pr create`, `dev pr create`,
+`gh pr merge`, `dev pr merge`, and `dev release` that a main session runs (one watcher per repository, branch, and
+commit), and the result reaches that session with its next action: a crew message to the main agent when it has a
+progress run, otherwise a note on its next tool call or prompt. Each result is in `~/.local/state/devkit/ci/watch/`,
+the audit trail (`ci.watch`), and a desktop notification. `DEVKIT_NO_CI_WATCH=1` turns the automatic start off. See
+[CI/CD pipelines › Watch every run](ci-cd.md#watch-every-run).
+
+### `dev ci audit [--fix] [--strict] [--provider HOST] [--json] [-p PROJECT]`
+
+Diagnoses every pipeline in the repository (GitHub Actions, GitLab CI, Bitbucket Pipelines, Azure Pipelines) for
+speed, reliability, security, quality gates, and delivery. Each finding has an id, a severity, the file and line, and
+the exact fix. On GitHub it adds `actionlint` and `zizmor` findings, on GitLab `glab ci lint`, when those tools are
+installed. The findings catalog is in [CI/CD pipelines](ci-cd.md#findings-catalog).
+
+| Option | Effect |
+| --- | --- |
+| `--fix` | Applies the safe GitHub Actions fixes in the working tree (least-privilege `permissions`, `concurrency`, job timeouts, actions pinned by SHA) and never commits; for the other hosts, prints the snippet under each finding |
+| `--strict` | Exit `1` on medium findings too (default: high and critical) |
+| `--provider github\|gitlab\|bitbucket\|azure` | Only one host |
+| `--json` | The report as JSON |
+
+Exit codes: `1` when a high or critical finding remains (with `--strict`, a medium one too), `0` otherwise.
+
+### `dev ci init [--provider HOST] [--stack STACK] [--dry-run] [--force] [-p PROJECT]`
+
+Writes a pipeline for the detected stack and host: the host from the `origin` remote (GitHub when there is none), the
+stack from the lockfiles (`--stack auto|python|node|java-maven|java-gradle|go|php|docker`). On GitHub it writes
+`.github/workflows/ci.yml`, `.github/workflows/release.yml` and, without Dependabot or Renovate, `.github/dependabot.yml`;
+on the other hosts, their single pipeline file. Every action is pinned by SHA and every image by digest; the pipeline
+has lint, tests with a JUnit report, a security job, and on release tags an SBOM, signing or attestation, and a check
+of what was published. It audits the result, and on GitHub runs `actionlint` on it.
+
+| Option | Effect |
+| --- | --- |
+| `--dry-run` | Prints the files and their audit; writes nothing |
+| `--force` | Replaces an existing pipeline file (refused without it) |
+| `--provider github\|gitlab\|bitbucket\|azure` | Another host than the remote's |
+| `--stack STACK` | Another stack than the detected one |
+
+Exit codes: `1` when the file exists without `--force`, or the result has a medium or higher finding, or `actionlint`
+rejects it; `0` otherwise. See [CI/CD pipelines › Set up a pipeline](ci-cd.md#set-up-a-pipeline).
 
 ### `dev calver [--next]`
 
@@ -582,6 +664,60 @@ Run any git or gh command with the same rules: `dev git push` and `dev git commi
 checks, `dev git stash` is refused in favor of `dev commit --wip`, and `dev gh pr create`, `dev gh pr merge`, and
 `dev gh release create` get the evidence, gate, and policy checks (`--admin` is refused). Everything else passes the
 guard. Put git options before the subcommand after `--`, or use `dev git -C DIR`.
+
+## Quality
+
+Tests and unfinished work. See [Testing](testing.md).
+
+### `dev test [run | plan | prove | audit] [-p PROJECT]`
+
+Runs only what a change can break: the tests that failed last time first, and when they pass, the tests that the
+changed files can affect (the blast radius). It finds the project's runner (pytest, unittest, Jest, Vitest, Maven,
+Gradle, Go, PHPUnit, or Pest) and prints a compact result: each failure with `file:line` and its first error line, and
+the path to the full log.
+
+| Command | Effect |
+| --- | --- |
+| `dev test` | Last failures first; if they pass, the affected tests |
+| `dev test run [<paths>…] [--failed \| --affected \| --all]` | These test files, directories, or runner ids; or only the last failures, only the affected tests, or the full suite |
+| `dev test plan [--all]` | What would run and why (changed file → tests), with the time estimate; runs nothing. `--all`: the whole suite, its full-run time, and the slowest files |
+| `dev test prove [<tests>…] [--runs N]` | For each new or changed test, in a temporary copy: it passes `N` times with your change (default 5) and fails with the production files restored from the base. Verdicts: proves the change, does not test the change, flaky, fails with the change, did not run without the change |
+| `dev test audit [<paths>…] [--changed] [--min-severity low\|medium\|high] [--rule RULE]` | Tests that cannot fail: no or trivial assertions, empty bodies, swallowed failures, skips without a reason, sleeps, and more. `--changed`: only test files changed on this branch, staged, unstaged, or untracked. Default severity shown: medium and up. `--rule` repeats |
+
+| Option | Effect |
+| --- | --- |
+| `--since REF` | Compare with `REF` instead of the merge-base with `origin/<default>` (`run`, `plan`, `prove`, `audit`) |
+| `--runner NAME` | Only this runner: `pytest`, `unittest`, `jest`, `vitest`, `maven`, `gradle`, `go`, `phpunit`, `pest` |
+| `-v`, `--verbose` | Stream the runner's full output (it streams to a terminal anyway) |
+| `--json` | The result as JSON |
+| `-p PROJECT` | Another project; put it before the subcommand: `dev test -p acme/billing plan` |
+
+```text
+  Test plan · fireflysoftwaresolutions/devkit · 135 changed file(s) against origin/main ───
+  last failures: none
+  .github/workflows/ci.yml  → -  CI file: every test can depend on it
+  CHANGELOG.md (+43 more like it)  → -  docs: no tests
+  lib/devkit/audit.py (+16 more like it)  → tests/test_ciwatch.py, tests/test_codex_plugin.py, tests/test_crew.py +20  23 test file(s) depend on it
+  …
+  would run: unittest · 25 file(s) · ~53.8s
+```
+
+Exit codes: `0` when the tests pass or nothing needs to run, `1` when a test fails, and `2` when a selection ran no
+test at all (a mistyped path, a filter that matches nothing) or no runner fits. `dev test prove` exits `1` unless every
+test proves the change; `dev test audit` exits `1` on a high finding.
+
+### `dev stubs [<paths>…] [--staged | --since REF | --all] [--json] [-p PROJECT]`
+
+Unfinished work: `TODO`, `FIXME`, `XXX`, `HACK`; "not implemented" in any language; placeholders (`TBD`,
+`coming soon`, `lorem ipsum`, `placeholder` or `stub` stated in a comment); and Python functions whose body is only
+`...` (abstract methods,
+Protocols, `@overload` and `.pyi` files are fine). A line that names its task (`TODO(T-fwk6abc123)`), its issue
+(`#123`), or a reason (`devkit: allow-stub <reason>`) is planned work and passes. By default it checks the uncommitted
+changes against HEAD (untracked files wholly); `--staged` checks what the next commit takes; `--all` checks every
+tracked file. Exit 1 when it finds something.
+
+The same check runs in the Stop hook (the files a development turn edited) and in the guard before `git commit` and
+`dev commit` (what the commit takes). `DEVKIT_ALLOW_STUBS=1` lets a commit through when the developer accepts it.
 
 ## Files
 

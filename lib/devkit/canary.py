@@ -1,4 +1,5 @@
-# Copyright (c) 2026 Firefly Software Solutions Inc. All rights reserved.
+# Copyright (c) 2026 Firefly Software Solutions Inc.
+# SPDX-License-Identifier: Apache-2.0
 """Instruction canary ("Simon says").
 
 The global instructions (agents/AGENTS.md, section 0) tell every agent to start
@@ -26,7 +27,8 @@ from .core import DEV, STATE
 MARKER = "[Firefly> DevKit]"
 # The marker, optionally wrapped in ** or backticks. The legacy `DevKit ·` (before 26.11.0) is still accepted, so
 # sessions that loaded the older instructions are not reported as misses.
-_MARK = r"(?:\[\s*firefly\s*>\s*devkit\s*\]|devkit\b)"
+_MARK = r"(?:\[\s*firefly\s*>\s*devkit(?:\s*·\s*[^\]\n]{1,40})?\s*\]|devkit\b)"  # crew: [Firefly> DevKit · Neo]
+CREW_RE = re.compile(r"^[*`_\s]*\[\s*firefly\s*>\s*devkit\s*·\s*([^\]\n]{1,40}?)\s*\]", re.I)
 MARKER_RE = re.compile(r"^[*`_\s]*" + _MARK, re.I)
 LOG = STATE / "canary.jsonl"
 
@@ -202,7 +204,7 @@ def by_surface(days: int = 7) -> dict:
     """{(agent, surface): (ok, total)} over the window, first replies only."""
     out = {}
     for r in records(days):
-        if r.get("corrected"):
+        if r.get("corrected") or r.get("kind") == "crew":
             continue
         k = (r.get("agent"), r.get("surface") or "unknown")
         ok, n = out.get(k, (0, 0))
@@ -305,10 +307,42 @@ def corrected(days: int = 7) -> int:
     return sum(1 for r in records(days) if r.get("corrected"))
 
 
-def summary(days: int = 7) -> dict:
-    """{agent: (ok, total)} over the window, first replies only (corrections are counted apart)."""
+def check_subagent(agent: str, data: dict, sess: dict, pid=None, member: str = "") -> bool:
+    """SubagentStop: does the crew member's report start with its own status block (**[Firefly> DevKit · Neo]**)?
+    Records the result next to the main sessions' results (kind "crew"). -> ok"""
+    text = data.get("last_assistant_message") or last_assistant_text(data.get("agent_transcript_path")) or ""
+    lines = [ln for ln in text.splitlines() if ln.strip()]
+    ok = bool(lines) and bool(MARKER_RE.match(lines[0].strip()))
+    rec = {"ts": round(time.time()), "agent": agent, "kind": "crew", "session": (data.get("session_id") or "")[:12],
+           "project": pid, "ok": ok, "surface": sess.get("surface") or surface(agent, data),
+           "member": member or (data.get("agent_type") or "subagent"), "subagent": (data.get("agent_id") or "")[:16]}
+    if ok:
+        rec["status"] = status_text(text)[:300]
+    else:
+        rec["excerpt"] = re.sub(r"\s+", " ", text.strip())[:120]
+    try:
+        LOG.parent.mkdir(parents=True, exist_ok=True)
+        with LOG.open("a") as f:
+            f.write(json.dumps(rec) + "\n")
+    except OSError:
+        pass
+    return ok
+
+
+def by_member(days: int = 7) -> dict:
+    """{crew member: (ok, total)}: the reports subagents ended with."""
     out = {}
-    for r in [r for r in records(days) if not r.get("corrected")]:
+    for r in records(days):
+        if r.get("kind") == "crew" and not r.get("corrected") and not r.get("internal"):
+            ok, n = out.get(r.get("member") or "subagent", (0, 0))
+            out[r.get("member") or "subagent"] = (ok + bool(r.get("ok")), n + 1)
+    return out
+
+
+def summary(days: int = 7) -> dict:
+    """{agent: (ok, total)} over the window: main sessions' first replies (corrections and crew reports apart)."""
+    out = {}
+    for r in [r for r in records(days) if not r.get("corrected") and r.get("kind") != "crew"]:
         ok, tot = out.get(r["agent"], (0, 0))
         out[r["agent"]] = (ok + (1 if r["ok"] else 0), tot + 1)
     return out
@@ -322,7 +356,7 @@ def format_rate(days: int = 7):
 
 def summary_line(days: int = 7) -> str:
     s = summary(days)
-    if not s:
+    if not s and not by_member(days):
         return "no tracked replies yet"
     surf = by_surface(days)
 
@@ -333,6 +367,10 @@ def summary_line(days: int = 7) -> str:
     out = " · ".join(f"{a.capitalize()} {ok}/{tot} ({100 * ok // tot}%){where(a)}" for a, (ok, tot) in sorted(s.items()))
     good, scored = format_rate(days)
     fixed = corrected(days)
+    crew = by_member(days)
+    if crew:
+        cok, cn = sum(v[0] for v in crew.values()), sum(v[1] for v in crew.values())
+        out += f" · crew {cok}/{cn}"
     return out + (f" · format {100 * good // scored}%" if scored else "") + (f" · {fixed} corrected after a reminder"
                                                                             if fixed else "")
 

@@ -1,0 +1,11 @@
+.@{key}:
+  image: @{rt_image}
+  cache:
+    key:
+      files: [@{lockfile}]
+    paths: [@{cache_dir}]
+  before_script:
+@{#corepack}
+    - corepack enable
+@{/corepack}
+    - @{install_ci}

@@ -1,0 +1,12 @@
+      - uses: @{uses:actions/checkout}
+        with:
+          persist-credentials: false
+      - uses: @{uses:actions/setup-java}
+        with:
+          distribution: temurin
+          java-version: "@{java}"
+      - uses: @{uses:gradle/actions/setup-gradle}
+@{^cache}
+        with:
+          cache-disabled: true
+@{/cache}

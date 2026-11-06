@@ -1,4 +1,5 @@
-# Copyright (c) 2026 Firefly Software Solutions Inc. All rights reserved.
+# Copyright (c) 2026 Firefly Software Solutions Inc.
+# SPDX-License-Identifier: Apache-2.0
 """Lessons: record, recall, recur, prevent, review, signals; the pipe-gate guard rule."""
 import sys
 import tempfile

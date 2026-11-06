@@ -1,4 +1,5 @@
-# Copyright (c) 2026 Firefly Software Solutions Inc. All rights reserved.
+# Copyright (c) 2026 Firefly Software Solutions Inc.
+# SPDX-License-Identifier: Apache-2.0
 """`dev report`: a structured status report (Markdown) for initiatives and projects over a period.
 
 For each initiative: health (on track / at risk / off track), progress, milestone and due date, what was done in

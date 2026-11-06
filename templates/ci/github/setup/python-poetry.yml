@@ -1,0 +1,18 @@
+      - uses: @{uses:actions/checkout}
+        with:
+          persist-credentials: false
+      - name: Poetry
+        run: pipx install poetry==@{tool:poetry}
+      - uses: @{uses:actions/setup-python}
+        with:
+@{#python_file}
+          python-version-file: .python-version
+@{/python_file}
+@{^python_file}
+          python-version: "@{python}"
+@{/python_file}
+@{#cache}
+          cache: poetry
+@{/cache}
+      - name: Install
+        run: @{install}

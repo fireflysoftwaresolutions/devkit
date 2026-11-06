@@ -1,0 +1,9 @@
+      - uses: @{uses:actions/checkout}
+        with:
+          persist-credentials: false
+      - uses: @{uses:actions/setup-go}
+        with:
+          go-version-file: go.mod
+@{^cache}
+          cache: false
+@{/cache}

@@ -3,6 +3,104 @@
 All notable changes to devkit. Versions follow CalVer `YY.MM.PATCH` (PATCH restarts at 0 each month); tags are
 `vYY.MM.PATCH`. Sections follow [Keep a Changelog](https://keepachangelog.com/).
 
+## [26.11.1] - 2026-11-06
+
+devkit is open source under the Apache License 2.0.
+
+### Added
+
+#### Testing
+
+- **`dev test`** runs the tests that failed last time first, then only the tests your changes can affect (the blast
+  radius), with pytest, unittest, Jest, Vitest, Maven, Gradle, Go, PHPUnit, or Pest. `dev test run` takes paths,
+  `--failed`, `--affected`, or `--all`; `dev test plan` shows what would run and why; `-p <project>` works from
+  anywhere. A selection that runs no test exits with `2` instead of passing.
+- **Tests that can fail.** `dev test audit` finds tests that cannot fail for a real bug (no or trivial assertions,
+  empty bodies, swallowed failures, skips without a reason, sleeps, mock-only and smoke-only tests) in Python,
+  JavaScript and TypeScript, Java and Kotlin, Go, and PHP. `dev test prove` checks that each new test fails without
+  your change and passes five times with it. The Stop hook sends back a development turn whose new or changed tests
+  cannot fail.
+- **`dev ci --run --resume`** repeats only the failed steps, the steps that never ran, and what the fix affects. Its
+  evidence combines the full run with the affected tests, and the pull request says so.
+- The `testing` skill: a test strategy per kind of code, TDD, flaky tests, mutation testing and diff coverage, and
+  diagnosing an existing suite. Required whenever a turn writes or runs tests.
+
+#### CI/CD
+
+- **`dev ci audit`** diagnoses the pipelines of GitHub Actions, GitLab CI, Bitbucket Pipelines, and Azure Pipelines:
+  security, reliability, speed, quality gates, and delivery, each finding with a severity and its fix, merged with
+  actionlint, zizmor, and `glab ci lint`. `--fix` applies the safe GitHub fixes (permissions, auto-cancel, job
+  timeouts, actions pinned by SHA) and prints the snippets for the other hosts; `--strict` fails on medium findings.
+- **`dev ci init`** writes a pinned pipeline for the detected stack and host: lint, tests with a JUnit report,
+  security scans, and on release tags an SBOM, signing or attestation, and a check of what was published. On GitHub
+  it writes `ci.yml`, a cache-free `release.yml`, and `dependabot.yml`; GitLab signs keyless, Bitbucket and Azure with
+  a cosign key.
+- **`dev ci watch`** starts after every push and pull request, follows the runs to the end, reads the first error of
+  a failure, sorts it into a class, and gives one next action. The main session gets it as a crew message and hands
+  fixes that are not trivial to Link.
+- The delivery-policy field `job_timeout_minutes` (default 30) sets the job timeout that `dev ci audit` suggests,
+  `--fix` writes, and `dev ci init` generates; a generated test job runs the policy's test gate.
+- The `cicd` skill: fast, reliable, DevSecOps pipelines on any host. Required whenever a turn changes a pipeline.
+- devkit's own CI runs a security job (gitleaks, semgrep, osv-scanner, trivy, zizmor), and `actionlint` joins the
+  security tools.
+
+#### The crew
+
+- **25 specialist agents** named after The Matrix and led by the main session as Morpheus, from one roster
+  (`config/crew.json`) for Claude Code, Claude Desktop, Codex (as roles), and the ChatGPT app. Each member has its own
+  lane and time, the files it is assigned (the guard keeps its edits inside them), and a status block it must end its
+  report with, which the SubagentStop hook checks (the crew canary). At most four members work at once.
+- **`dev crew`**: the roster and who works now (`show`), briefs with the launch line (`brief`), routing (`route`),
+  delegation (`delegate`, `decline`), the dispatcher (`next`), messages (`ask`, `answer`, `inbox`), decisions (`mode`,
+  `decide`, `decisions`), and `sync` for the generated agents.
+- **Guided or automatic.** In guided mode, decisions that are yours wait for you; in auto mode, the crew takes the
+  recommended option and records it for review. Irreversible actions wait in both unless you pre-approved them.
+- The `crew` skill: who to send for each kind of work, parallel or in sequence, briefs, and reports.
+
+#### Progress
+
+- **Time you can trust.** Active time (turns and subagents, never the wait for the developer), per-step estimates,
+  dependencies (`after`), a critical-path ETA shown as a range, and a pace that one odd step cannot swing.
+- **A plan that stays true.** Closing a step needs its evidence (`--check`) and a description that matches it;
+  `dev progress add`, `reopen`, `skip`, `history`, and `assign --scope`; every change is recorded and audited.
+
+#### Unfinished work
+
+- **Build it for real.** `dev stubs` finds unfinished work in a change or a repository: `TODO` and `FIXME` markers,
+  "not implemented" code, placeholders, and empty Python bodies. The Stop hook sends back a development turn that leaves
+  untracked ones, and the guard refuses a commit that would include them. Planned work names its task (`TODO(T-…)`) or
+  issue.
+- The global rules: every test must be able to fail for a real bug; after a failure, re-run only the failed tests and
+  what the fix affects; the full suite once, before the push; no stubs or placeholders in delivered work.
+
+#### Surfaces
+
+- Codex gets the plugin's slash commands as skills of the same name.
+- New slash commands: `/devkit:progress`, `/devkit:crew-status`, `/devkit:test`, and `/devkit:stubs`.
+- The Claude Desktop extension has 18 tools, among them `devkit_crew`, `devkit_stubs`, `devkit_test_plan`, and
+  `devkit_ci_audit`.
+- The dashboard's run card shows active time, the ETA range, the steps, and the crew's lanes.
+
+### Changed
+
+- **The handoff note stays current.** After every development turn with new commits, the Stop hook asks for a note
+  and task update when your commits are newer than the note's last real change (task and session lines written by
+  devkit do not count). It also works for sessions that started outside the repository, such as Claude Desktop's.
+- The scout is now Sparks, a member of the crew; `scout` remains an alias in Claude Code and Codex.
+- The UI skills are required for design work only: "open the dashboard" no longer asks for them.
+
+### Fixed
+
+- `dev sec scan` kept the leading dot of hidden paths in zizmor results: `./.github/workflows/ci.yml` no longer
+  becomes `github/workflows/ci.yml`.
+- The crew canary counts only subagents someone launched. Claude Code's own helpers, such as the compaction
+  summary, are no longer counted as crew misses or sent back, and a report corrected after the reminder is
+  recorded as corrected.
+- `dev progress note` sends an update while a step is still running, so no update has to close a step; the
+  silence reminder and the global rules now ask for a note, not a step, until the step is finished.
+- `dev test prove <file>` proves only the file's new or changed tests, so tests that already existed are no
+  longer reported as not testing your change.
+
 ## [26.11.0] - 2026-11-05
 
 The first release.

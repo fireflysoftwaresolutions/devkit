@@ -1,4 +1,5 @@
-# Copyright (c) 2026 Firefly Software Solutions Inc. All rights reserved.
+# Copyright (c) 2026 Firefly Software Solutions Inc.
+# SPDX-License-Identifier: Apache-2.0
 """`dev dashboard`: the project command centre.
 
 One self-contained HTML file (inline CSS, JS and SVG; data embedded as JSON)
@@ -1248,6 +1249,12 @@ table.pt .prs{flex-wrap:nowrap}
 .run .rs{font-size:var(--fs-1);color:var(--text-2);white-space:nowrap}
 .run.blocked .rs{color:var(--bad-text)}
 .rmeta{font-size:var(--fs-1);color:var(--text-2)} .rmeta.warn{color:var(--warn-text)}
+.rsteps{list-style:none;margin:2px 0 0;padding:0;display:grid;gap:1px;font-size:var(--fs-1)}
+.rsteps li{display:grid;grid-template-columns:1.1em minmax(0,1fr) auto;gap:var(--s2);align-items:baseline;color:var(--text-2)}
+.rsteps .g{color:var(--text-2)} .rsteps li.running{color:var(--text)} .rsteps li.running .g{color:var(--mark-strong,var(--text))}
+.rsteps li.blocked,.rsteps li.blocked .g{color:var(--bad-text)} .rsteps .who{color:var(--text-2)} .rsteps .m{font-variant-numeric:tabular-nums}
+.lanes{display:flex;flex-wrap:wrap;gap:4px var(--s2);margin-top:2px;font-size:var(--fs-1);color:var(--text-2)}
+.lanes span{white-space:nowrap} .lanes .on{color:var(--text)} .lanes .lost{color:var(--warn-text)}
 .srows{display:grid;grid-template-columns:52px minmax(0,1fr);gap:2px var(--s3);margin:2px 0 0;font-size:var(--fs-1);line-height:1.45}
 .srows dt{color:var(--text-2)} .srows dd{margin:0;min-width:0;overflow-wrap:anywhere;color:var(--text)}
 .srows dd.bad{color:var(--bad-text)}
@@ -2292,13 +2299,34 @@ function liveRun(s, asOf) {
   const el = p.started ? (now - p.started) / 60 : 0, est = (run && run.estimate_cal) || p.estimate || 0;
   const left = p.eta_min != null && p.state === "running" ? Math.max(0, p.eta_min - (now - (asOf || D.rendered || now)) / 60) : null;
   const pct = p.steps ? Math.min(100, 100 * (p.step || 0) / p.steps) : est ? Math.min(100, 100 * el / est) : null;
-  const over = est && el > est && p.state === "running";
+  const over = est && (p.active_min != null ? p.active_min : el) > est && p.state === "running";
   const state = p.state === "blocked" ? "blocked" : p.state === "done" ? "done" : left != null ? "about " + fmtMin(left) + " left" : "running";
   const steps = p.steps ? (p.step || 0) + " of " + p.steps + " steps" : "step " + (p.step || 0);
+  // active time (turns and subagents), with wall-clock time beside it only when they differ
+  const act = p.active_min != null ? p.active_min : el, wall = p.wall_min != null ? p.wall_min : el;
+  const timeText = fmtMin(act) + " active" + (wall - act >= 5 ? " (" + fmtMin(wall) + " wall)" : "") + (est ? " of about " + fmtMin(est) : "");
+  const range = p.eta_lo != null && p.eta_hi != null && p.state === "running"
+    ? (fmtMin(p.eta_lo) === fmtMin(p.eta_hi) ? "about " + fmtMin(p.eta_hi) : fmtMin(p.eta_lo) + "–" + fmtMin(p.eta_hi)) + " left" : null;
+  const state2 = p.state === "blocked" ? "blocked" : p.state === "done" ? "done" : range || state;
+  const plan = p.plan || [], glyph = {done: "✓", running: "▸", blocked: "■", skipped: "–", pending: "○"};
+  const shown = plan.filter(x => x.state === "running" || x.state === "blocked")
+    .concat(plan.filter(x => x.state === "pending").slice(0, 2));
+  const doneN = plan.filter(x => x.state === "done" || x.state === "skipped").length;
+  const stepList = shown.length ? h("ul", {class: "rsteps", "aria-label": "Plan steps"},
+    shown.map(x => h("li", {class: x.state},
+      h("span", {class: "g", "aria-hidden": "true", text: glyph[x.state] || "○"}),
+      h("span", {class: "ell", title: x.name}, x.name, x.owner && x.owner !== "main" ? h("span", {class: "who", text: " · " + x.owner}) : null),
+      h("span", {class: "m num", text: x.state === "running" ? fmtMin(x.min || 0) + " of ~" + fmtMin(x.est || 0) : "~" + fmtMin(x.est || 0)}))),
+    doneN ? h("li", {class: "more"}, h("span", {class: "g", text: "✓"}), h("span", {text: doneN + " done"}), h("span")) : null) : null;
+  const lanes = (p.agents || []).length ? h("div", {class: "lanes", "aria-label": "Crew"},
+    p.agents.map(a => h("span", {class: a.state === "running" ? "on" : a.state === "lost" ? "lost" : "",
+      title: a.state === "lost" ? "stopped reporting" : a.state},
+      (a.state === "running" ? "▸ " : a.state === "lost" ? "! " : "✓ ") + a.label.split(":")[0] + " " + fmtMin(a.min || 0)))) : null;
   return h("div", {class: "run " + (p.state || "running")},
-    h("div", {class: "rh"}, h("strong", {class: "ell", title: p.goal || "", text: p.goal || "Agent run"}), h("span", {class: "rs num", text: state})),
+    h("div", {class: "rh"}, h("strong", {class: "ell", title: p.goal || "", text: p.goal || "Agent run"}), h("span", {class: "rs num", text: state2})),
     pct != null ? h("div", {class: "rbar" + (over ? " over" : ""), role: "progressbar", "aria-valuenow": Math.round(pct), "aria-valuemin": 0, "aria-valuemax": 100, "aria-label": "Run progress: " + steps + ", " + state}, h("i", {style: "width:" + pct.toFixed(1) + "%"})) : null,
-    h("div", {class: "rmeta num" + (over ? " warn" : "")}, meta(steps, fmtMin(el) + " elapsed" + (est ? " of about " + fmtMin(est) : ""), over ? "over the estimate by " + fmtMin(el - est) : null)));
+    h("div", {class: "rmeta num" + (over ? " warn" : "")}, meta(steps, timeText, over ? "over the estimate by " + fmtMin(act - est) : null)),
+    stepList, lanes);
 }
 /* saved status lines: parsed in Python (parts); legacy one-line forms are shown as written */
 function ckClass(c) { const g = String(c || "").charAt(0); return g === "✓" ? "ok" : g === "⚠" ? "warn" : g === "✗" ? "bad" : "na"; }

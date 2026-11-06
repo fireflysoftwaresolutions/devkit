@@ -1,4 +1,5 @@
-# Copyright (c) 2026 Firefly Software Solutions Inc. All rights reserved.
+# Copyright (c) 2026 Firefly Software Solutions Inc.
+# SPDX-License-Identifier: Apache-2.0
 """Delivery policy: detection, recommendation, gaps, recording and the tag rule. Run: python3 -m unittest -v"""
 import json
 import sys
@@ -88,6 +89,20 @@ class RecordTests(unittest.TestCase):
         self.assertIn("CalVer", delivery.tag_violation("acme/api", "v26.13.0"))  # no 13th month
         self.assertIn("test gate: ./mvnw -B verify", delivery.summary_line("acme/api"))
         self.assertIsNone(delivery.tag_violation("acme/other", "anything"))  # no policy, no rule
+
+    def test_job_timeout_is_a_policy_field(self):
+        p = delivery.set_field({}, "job_timeout_minutes", "45")
+        self.assertEqual(p["job_timeout_minutes"], 45)
+        for bad in ("0", "abc", "999", "4"):
+            with self.assertRaises(ValueError):
+                delivery.set_field({}, "job_timeout_minutes", bad)
+        with self.assertRaises(ValueError):
+            delivery.set_field({}, "timeout", "45")  # unknown field
+        rec = delivery.record("acme/ci", {"versioning": "calver", **p}, "slow integration tests", a=A)
+        self.assertEqual(rec["job_timeout_minutes"], 45)  # recorded, not dropped
+        from devkit import pipelines
+        self.assertEqual(pipelines._default_timeout(rec), 45)
+        self.assertEqual(delivery.set_field({}, "test_gate", "a; b")["test_gate"], ["a", "b"])
 
     def test_guard_refuses_off_policy_tags(self):
         delivery.record("acme/one", {"versioning": "semver", "tag_format": "vMAJOR.MINOR.PATCH"}, "library", a=A)

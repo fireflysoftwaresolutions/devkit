@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
-# Copyright (c) 2026 Firefly Software Solutions Inc. All rights reserved.
+# Copyright (c) 2026 Firefly Software Solutions Inc.
+# SPDX-License-Identifier: Apache-2.0
 """devkit launcher: the entry point of devkit's Claude Desktop extension (an MCPB bundle).
 
 It finds the devkit checkout on this Mac and replaces itself with `<devkit>/bin/dev mcp`, the MCP server that lives

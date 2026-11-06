@@ -1,4 +1,5 @@
-# Copyright (c) 2026 Firefly Software Solutions Inc. All rights reserved.
+# Copyright (c) 2026 Firefly Software Solutions Inc.
+# SPDX-License-Identifier: Apache-2.0
 """Terminal output: colours, the banner, tables. Plain text when not a TTY or NO_COLOR is set."""
 from __future__ import annotations
 

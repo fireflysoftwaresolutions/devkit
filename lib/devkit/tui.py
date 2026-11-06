@@ -1,4 +1,5 @@
-# Copyright (c) 2026 Firefly Software Solutions Inc. All rights reserved.
+# Copyright (c) 2026 Firefly Software Solutions Inc.
+# SPDX-License-Identifier: Apache-2.0
 """A small terminal UI toolkit for `dev setup`: select, multiselect, confirm, text, a step header and a spinner.
 
 Stdlib only (termios, select and ANSI escapes), Python 3.9 compatible, no curses. Each prompt is a small state

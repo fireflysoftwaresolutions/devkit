@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # devkit bootstrap: makes sure Homebrew, Python and the GitHub CLI are present and signed in,
 # then hands over to the setup wizard (`dev setup`). Safe to re-run.
-# Copyright (c) 2026 Firefly Software Solutions Inc. All rights reserved.
+# Copyright (c) 2026 Firefly Software Solutions Inc.
+# SPDX-License-Identifier: Apache-2.0
 #
 #   gh repo clone fireflysoftwaresolutions/devkit ~/Development/fireflysoftwaresolutions/devkit
 #   ~/Development/fireflysoftwaresolutions/devkit/install.sh            # interactive wizard

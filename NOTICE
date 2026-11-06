@@ -1,5 +1,7 @@
 devkit
-Copyright (c) 2026 Firefly Software Solutions Inc. All rights reserved.
+Copyright (c) 2026 Firefly Software Solutions Inc.
+
+This product is licensed under the Apache License, Version 2.0 (see LICENSE).
 
 devkit does not bundle third-party code. At install time it downloads, from their upstream repositories at the
 pinned commits listed in config/skills.json, the following agent skills, which remain under their own licences:

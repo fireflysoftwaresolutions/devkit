@@ -1,0 +1,10 @@
+.@{key}:
+  image: @{rt_image}
+  variables:
+    COMPOSER_CACHE_DIR: .cache/composer
+  cache:
+    key:
+      files: [composer.lock]
+    paths: [.cache/composer]
+  before_script:
+    - @{install}

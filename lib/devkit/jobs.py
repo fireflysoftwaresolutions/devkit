@@ -1,4 +1,5 @@
-# Copyright (c) 2026 Firefly Software Solutions Inc. All rights reserved.
+# Copyright (c) 2026 Firefly Software Solutions Inc.
+# SPDX-License-Identifier: Apache-2.0
 """Scheduled jobs: devkit's background work as named launchd jobs you can see, run, change and audit.
 
 Each job is a `dev …` command on a schedule (every N minutes, daily at HH:MM, or weekly), installed as

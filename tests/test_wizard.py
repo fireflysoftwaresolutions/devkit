@@ -1,4 +1,5 @@
-# Copyright (c) 2026 Firefly Software Solutions Inc. All rights reserved.
+# Copyright (c) 2026 Firefly Software Solutions Inc.
+# SPDX-License-Identifier: Apache-2.0
 """`dev setup`: the terminal UI toolkit (keys, prompts, drivers), the interactive wizard, the line-prompt fallback,
 `--yes` and the Playwright skill install. Nothing here installs packages or touches the real ~/.config, ~/.claude or
 ~/.codex: configs go to temporary folders, commands are stubbed, and the pseudo-terminal runs use a temporary HOME.

@@ -1,5 +1,6 @@
 # devkit shell integration — sourced from ~/.zshrc (managed by `dev install`).
-# Copyright (c) 2026 Firefly Software Solutions Inc. All rights reserved.
+# Copyright (c) 2026 Firefly Software Solutions Inc.
+# SPDX-License-Identifier: Apache-2.0
 
 export DEVKIT_HOME="${${(%):-%x}:A:h:h}"
 typeset -U path

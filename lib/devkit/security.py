@@ -1,4 +1,5 @@
-# Copyright (c) 2026 Firefly Software Solutions Inc. All rights reserved.
+# Copyright (c) 2026 Firefly Software Solutions Inc.
+# SPDX-License-Identifier: Apache-2.0
 """`dev sec scan`: secrets, vulnerable dependencies, code patterns, and filesystem/IaC misconfiguration.
 
   gitleaks     secrets in the working tree and (with --history) the git history
@@ -13,6 +14,7 @@ Also used by the guard: `staged_secrets()` blocks a commit that contains a secre
 from __future__ import annotations
 
 import json
+import re
 import subprocess
 from pathlib import Path
 
@@ -177,7 +179,7 @@ def scan(root: Path, history=False, verbose=False, sast_config="p/default") -> i
                 for f in json.loads(out or "[]"):
                     l0 = (f.get("locations") or [{}])[0]
                     key = ((l0.get("symbolic") or {}).get("key") or {}).get("Local") or {}
-                    path = (key.get("verbatim_path") or key.get("given_path") or "").lstrip("./")
+                    path = re.sub(r"^(?:\./)+", "", key.get("verbatim_path") or key.get("given_path") or "")
                     row = (((l0.get("concrete") or {}).get("location") or {}).get("start_point") or {}).get("row")
                     where = f"{path}:{row + 1}" if path and row is not None else path
                     items.append(f"{(f.get('determinations') or {}).get('severity', '?')}  {where}  "

@@ -1,0 +1,8 @@
+.@{key}:
+  image: @{rt_image}
+  variables:
+    MAVEN_OPTS: -Dmaven.repo.local=.m2/repository
+  cache:
+    key:
+      files: [pom.xml]
+    paths: [.m2/repository]

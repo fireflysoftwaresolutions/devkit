@@ -1,0 +1,21 @@
+    - step: &secret-scan
+        name: Secrets (gitleaks)
+        image: @{image:gitleaks}
+        script:
+          - gitleaks dir --redact --no-banner .
+    - step: &sast
+        name: Code (semgrep)
+        image: @{image:semgrep}
+        script:
+          - semgrep scan --config p/default --error --metrics off --disable-version-check
+    - step: &dependency-scan
+        name: Dependencies (osv-scanner)
+        image: @{image:osv-scanner}
+        script:
+          - /osv-scanner scan source -r --allow-no-lockfiles .
+    - step: &filesystem-scan
+        name: Filesystem and IaC (trivy)
+        image: @{image:trivy}
+        caches: [trivy]
+        script:
+          - trivy fs --scanners vuln,secret,misconfig --severity HIGH,CRITICAL --exit-code 1 --skip-dirs node_modules --skip-dirs .venv .

@@ -1,9 +1,25 @@
-# Copyright (c) 2026 Firefly Software Solutions Inc. All rights reserved.
+# Copyright (c) 2026 Firefly Software Solutions Inc.
+# SPDX-License-Identifier: Apache-2.0
 """Progress, timing and predictability for agent sessions.
 
-Runs     STATE/runs/<agent>-<session>.json — the piece of work a session is doing: goal, steps (k of n), estimate,
-         updates, state (running | blocked | done), ETA. Written by `dev progress`, read by hooks, `dev progress`,
-         presence (other machines) and the dashboard.
+Runs     STATE/runs/<agent>-<session>.json — the piece of work a session is doing: goal, plan steps (each with an
+         estimate, a state, an owner lane and its measured time), the activity intervals, subagent lanes, updates and
+         state (running | blocked | done). Written by `dev progress` and the hooks, read by `dev progress`, presence
+         (other machines) and the dashboard.
+
+Time model (deterministic: every function takes `now`, and the tests use a fixed clock)
+  active time  the union of the intervals in which someone works on the run: the main agent's turns (UserPromptSubmit
+               to Stop) and each subagent (SubagentStart to SubagentStop). Waiting for the developer is not counted,
+               and parallel agents are not counted twice. Wall-clock time is shown next to it.
+  steps        a step's actual time is the active time between its start and its end; for a subagent's step, that
+               subagent's own time.
+  pace         actual ÷ estimate over the steps done in this run, clamped to 0.5–2.5; before any step is done, the
+               project's history (`dev time`); otherwise 1.
+  ETA          per lane (the main agent, each subagent): the estimates of its open steps × pace, minus the time
+               already spent on a running step; the ETA is the longest lane, since lanes run in parallel. Shown as a
+               range.
+  subagents    the hooks see who calls (Claude Code and Codex pass `agent_id` to every hook fired inside a
+               subagent): a subagent's own `dev progress` calls go to its lane and never advance the main plan.
 Timing   STATE/timing/<YYYY-MM>.jsonl — one record per slow tool call, turn and subagent:
          {ts, kind: tool|turn|subagent|run, agent, session, project, what, secs[, estimate]}.
 Calibration: finished runs record estimate vs actual, so the next estimate is corrected (`dev time`).
@@ -28,12 +44,12 @@ SESSIONS = STATE / "sessions"
 
 def cfg() -> dict:
     return {"nudge_minutes": 8, "notify": True, "notify_after_minutes": 10, "slow_tool_seconds": 20,
-            **(core.CFG.get("progress") or {})}
+            "max_parallel": 4, "stale_agent_hours": 6, **(core.CFG.get("progress") or {})}
 
 
 # --------------------------------------------------------------------------- which session am I?
 
-def current_session(cwd: str = None):
+def current_session(cwd: str | None = None):
     """-> (agent, session id) of the agent session running this command.
 
     Claude Code exports DEVKIT_SESSION through CLAUDE_ENV_FILE at session start. Otherwise (Codex, or a shell)
@@ -62,12 +78,14 @@ def load_run(agent: str, sid: str):
     return core.read_json(run_path(agent, sid), None)
 
 
-def _save(run: dict):
+def _save(run: dict, touch_session: bool = True):
     p = run_path(run["agent"], run["session"])
     p.parent.mkdir(parents=True, exist_ok=True)
-    p.write_text(json.dumps(run, indent=1))
+    tmp = p.with_suffix(".tmp")
+    tmp.write_text(json.dumps(run, indent=1))
+    os.replace(tmp, p)  # hooks and dev progress write the same run: never leave half a file
     sf = SESSIONS / f"{run['agent']}-{run['session']}.json"
-    if sf.exists():  # the session's last update to the developer
+    if touch_session and sf.exists():  # the session's last update to the developer
         s = core.read_json(sf, {}) or {}
         s["last_update"] = time.time()
         sf.write_text(json.dumps(s))
@@ -93,7 +111,7 @@ def fmt_min(m: float) -> str:
     return f"{m // 60}h{m % 60:02d}m" if m >= 60 else f"{m}m"
 
 
-def records(days: int = 30, kind: str = None, project: str = None) -> list:
+def records(days: int = 30, kind: str | None = None, project: str | None = None) -> list:
     out, since = [], time.time() - days * 86400
     for f in sorted(TIMING.glob("*.jsonl")) if TIMING.exists() else []:
         for ln in f.read_text().splitlines():
@@ -115,7 +133,7 @@ def record(kind: str, agent: str, sid: str, what: str, secs: float, project: str
         fh.write(json.dumps(r) + "\n")
 
 
-def calibration(project: str = None) -> dict:
+def calibration(project: str | None = None) -> dict:
     """How long things really take here: estimate accuracy, turn length, slow commands."""
     runs = [r for r in records(60, "run", project) if r.get("estimate")]
     ratios = [r["secs"] / 60 / r["estimate"] for r in runs if r["estimate"] > 0]
@@ -125,18 +143,218 @@ def calibration(project: str = None) -> dict:
             "turn_p90": round(sorted(turns)[int(0.9 * (len(turns) - 1))], 1) if turns else None}
 
 
-def eta(run: dict, now: float = None) -> float:
-    """Minutes left: the observed pace per step, blended with the (calibrated) estimate."""
+PACE_MIN, PACE_MAX = 0.5, 2.5
+
+
+def parse_plan(plan) -> list:
+    """"design=30m; build=2h after design; docs" -> [(name, minutes or None, [steps it waits for])]."""
+    items = plan if isinstance(plan, (list, tuple)) else str(plan or "").split(";")
+    out = []
+    for raw in items:
+        raw = str(raw or "").strip()
+        if not raw:
+            continue
+        after = []
+        m = re.match(r"^(.*?)\s+after\s+(.+)$", raw, re.I)
+        if m:
+            raw, after = m.group(1).strip(), [x.strip() for x in re.split(r"[,&]|\band\b", m.group(2)) if x.strip()]
+        m = re.match(r"^(.*?)\s*[=@]\s*(\d[\dhm.\s]*)$", raw)
+        if m and parse_minutes(m.group(2)):
+            out.append((m.group(1).strip(), parse_minutes(m.group(2)), after))
+        else:
+            out.append((raw, None, after))
+    return out
+
+
+def _new_step(name, est=None):
+    return {"name": name, "est": est, "est_auto": est is None, "state": "pending", "owner": "main", "label": "",
+            "started": None, "finished": None}
+
+
+def normalize(run: dict) -> dict:
+    """Bring a run to the current shape (runs written before 26.11.1 had a step counter and a list of names)."""
+    if not run:
+        return run
+    if run.get("v") == 2:
+        if "tracked_since" not in run and "messages" not in run and run.get("intervals"):
+            run["tracked_since"] = min(iv[0] for iv in run["intervals"])  # converted before activity was recorded
+        return run
+    names = [x for x in (run.get("plan") or []) if isinstance(x, str)]
+    n = max(run.get("steps") or 0, len(names))
+    plan = [_new_step(x) for x in names] + [_new_step(f"step {i + 1}") for i in range(len(names), n)]
+    for i, s in enumerate(plan):
+        if i < (run.get("step") or 0):
+            s.update(state="done", untimed=True)
+    # activity was not recorded before the upgrade: until now the run's time is wall-clock time
+    run.update(v=2, plan=plan, intervals=run.get("intervals") or [], agents=run.get("agents") or {},
+               tracked_since=time.time())
+    _allocate(run)
+    return run
+
+
+def _default_step_minutes(project) -> float:
+    steps = [r["secs"] / 60 for r in records(60, "step", project) if r.get("secs")]
+    return round(statistics.median(steps), 1) if len(steps) >= 3 else 10.0
+
+
+def _allocate(run):
+    """Steps without an estimate share what the total estimate leaves; with no total, the median step here."""
+    plan = run.get("plan") or []
+    total = run.get("estimate") or 0
+    known = sum(s["est"] for s in plan if s.get("est") and not s.get("est_auto"))
+    auto = [s for s in plan if s.get("est_auto") or not s.get("est")]
+    if auto:
+        share = (total - known) / len(auto) if total and total > known else _default_step_minutes(run.get("project"))
+        for s in auto:
+            s["est"], s["est_auto"] = round(max(1.0, share), 1), True
+    if not total and plan:
+        run["estimate"] = round(sum(s["est"] for s in plan), 1)
+
+
+def _open(run, kind, ident, now):
+    if not any(iv[1] is None and iv[2] == kind and iv[3] == ident for iv in run["intervals"]):
+        run["intervals"].append([round(now, 1), None, kind, ident])
+
+
+def _close(run, kind, ident, now):
+    for iv in run["intervals"]:
+        if iv[1] is None and iv[2] == kind and (ident is None or iv[3] == ident):
+            iv[1] = round(max(now, iv[0]), 1)
+
+
+def _union_seconds(ivs, t0, t1, now) -> float:
+    segs = sorted((max(a, t0), min(now if b is None else b, t1)) for a, b, *_ in ivs)
+    total, cur = 0.0, None
+    for s, e in segs:
+        if e <= s:
+            continue
+        if cur is None or s > cur[1]:
+            total += (cur[1] - cur[0]) if cur else 0
+            cur = [s, e]
+        else:
+            cur[1] = max(cur[1], e)
+    return total + ((cur[1] - cur[0]) if cur else 0)
+
+
+def active_minutes(run, t0=None, t1=None, now=None, lane=None) -> float:
+    """Active minutes in [t0, t1]: all lanes, or one lane ("main" = the main agent's turns, else a subagent id).
+    A run with no recorded activity (no hooks) falls back to wall-clock time."""
     now = now or time.time()
-    elapsed = (now - run["started"]) / 60
-    n, k = run.get("steps") or 0, run.get("step") or 0
-    est = run.get("estimate_cal") or run.get("estimate") or 0
-    by_est = max(0.0, est - elapsed) if est else None
-    by_pace = (n - k) * elapsed / k if n and k else None
-    if by_pace is not None and by_est is not None:
-        w = min(1.0, k / max(1, n) * 1.5)  # trust the pace more as steps complete
-        return w * by_pace + (1 - w) * by_est
-    return by_pace if by_pace is not None else (by_est if by_est is not None else 0.0)
+    t0, t1 = t0 or run.get("started") or now, min(t1 or now, now)
+    ivs = run.get("intervals") or []
+    if lane == "main":
+        ivs = [iv for iv in ivs if iv[2] == "turn"]
+    elif lane:
+        ivs = [iv for iv in ivs if iv[3] == lane]
+    if not run.get("intervals"):
+        return max(0.0, (t1 - t0) / 60)
+    since = run.get("tracked_since") or 0  # an upgraded run: wall-clock time until activity was recorded
+    if since and t0 < since and not lane:
+        return max(0.0, (min(t1, since) - t0) / 60) + (_union_seconds(ivs, since, t1, now) / 60 if t1 > since else 0)
+    return _union_seconds(ivs, t0, t1, now) / 60
+
+
+def wall_minutes(run, now=None) -> float:
+    now = now or time.time()
+    return max(0.0, ((run.get("finished") or now) - run.get("started", now)) / 60)
+
+
+def step_minutes(run, s, now=None) -> float:
+    if not s.get("started"):
+        return 0.0
+    lane = None if (s.get("owner") or "main") == "main" else s["owner"]
+    return active_minutes(run, s["started"], s.get("finished") or now, now, lane)
+
+
+def pace(run, now=None):
+    """-> (pace, basis). Actual ÷ estimate over this run's finished steps, shrunk toward the prior (the project's
+    history, else 1) in proportion to the evidence: (actual + W·prior) ÷ (estimate + W), W = a quarter of the total
+    estimate (at least 30 minutes). A step closed in under 10% of its estimate is bookkeeping (the work happened
+    elsewhere) and does not count. Clamped to 0.5–2.5."""
+    prior = min(PACE_MAX, max(PACE_MIN, run.get("cal_ratio") or 1.0))
+    est = act = 0.0
+    for s in run.get("plan") or []:
+        if s.get("state") != "done" or not s.get("est") or not s.get("started") or not s.get("finished") \
+                or s.get("untimed"):
+            continue
+        a = step_minutes(run, s, now)
+        if a < 0.1 * s["est"]:
+            continue
+        est, act = est + s["est"], act + a
+    if est < 1:
+        return prior, "history" if run.get("cal_ratio") else "estimate"
+    w = max(30.0, 0.25 * sum((s.get("est") or 0) for s in run.get("plan") or []))
+    return round(min(PACE_MAX, max(PACE_MIN, (act + w * prior) / (est + w))), 3), "this run"
+
+
+def lanes(run, now=None) -> dict:
+    """Minutes left per lane (the main agent and each subagent with open steps)."""
+    now = now or time.time()
+    p, _ = pace(run, now)
+    out = {}
+    if not run.get("plan"):  # no plan: the total estimate minus the active time so far
+        est = run.get("estimate") or 0
+        return {"main": max(0.0, est * p - active_minutes(run, now=now))} if est else {}
+    for s in run.get("plan") or []:
+        if s.get("state") in ("done", "skipped"):
+            continue
+        need = (s.get("est") or 0) * p
+        if s.get("state") == "running":
+            need = max(need - step_minutes(run, s, now), 0.15 * need)
+        lane = s.get("owner") or "main"
+        out[lane] = out.get(lane, 0.0) + need
+    return out
+
+
+def schedule(run, now=None) -> list:
+    """Minutes from now at which each plan step finishes: a step starts when the steps it waits for (`after`) are done
+    and its lane is free (one lane works on one step at a time; subagent lanes run in parallel with the main one).
+    -> [(step, finish)] in plan order; done steps finish at 0."""
+    now = now or time.time()
+    p, _ = pace(run, now)
+    plan = run.get("plan") or []
+    by_name = {s["name"]: s for s in plan}
+    finish, lane_free, out = {}, {}, []
+    for s in plan:
+        if s.get("state") in ("done", "skipped"):
+            finish[s["name"]] = 0.0
+            out.append((s, 0.0))
+            continue
+        dur = (s.get("est") or 0) * p
+        if s.get("state") == "running":
+            dur = max(dur - step_minutes(run, s, now), 0.15 * dur)
+        lane = s.get("owner") or "main"
+        if lane == "main" and s.get("label"):
+            lane = "label:" + s["label"]  # waits for its own subagent, in parallel
+        ready = max((finish.get(a, sum((x.get("est") or 0) * p for x in plan)) for a in s.get("after") or []
+                     if a in by_name), default=0.0)
+        start = 0.0 if s.get("state") == "running" else max(ready, lane_free.get(lane, 0.0))
+        end = start + dur
+        lane_free[lane] = max(lane_free.get(lane, 0.0), end)
+        finish[s["name"]] = end
+        out.append((s, end))
+    return out
+
+
+def eta(run: dict, now: float | None = None) -> float:
+    """Minutes left: the critical path through the plan (dependencies and lanes)."""
+    if (run or {}).get("v") != 2:
+        run = normalize(dict(run or {}))
+    if not run.get("plan"):
+        return round(max(lanes(run, now).values(), default=0.0), 1)
+    return round(max((f for _, f in schedule(run, now)), default=0.0), 1)
+
+
+def eta_range(run, now=None):
+    """(low, high) minutes: ±25% once measured steps set the pace, wider before."""
+    e = eta(run, now)
+    spread = 0.25 if pace(run, now)[1] == "this run" else 0.4  # narrower only once real steps measured the pace
+    return round(e * (1 - spread * 0.8), 1), round(e * (1 + spread), 1)
+
+
+def fmt_range(lo, hi) -> str:
+    a, b = fmt_min(lo), fmt_min(hi)
+    return f"~{a}" if a == b else f"~{a}–{b}"
 
 
 # --------------------------------------------------------------------------- the commands agents run
@@ -153,52 +371,758 @@ def _project(cwd=None) -> str:
         return ""
 
 
-def headline(run: dict, now: float = None) -> str:
+def headline(run: dict, now: float | None = None) -> str:
+    """'2/6 · 42m active (1h05m wall) of ~3h00m · ETA ~24m–37m · 2 agents working'"""
     now = now or time.time()
-    elapsed = (now - run["started"]) / 60
-    n, k = run.get("steps") or 0, run.get("step") or 0
-    parts = [f"{k}/{n}" if n else f"step {k}", f"{fmt_min(elapsed)} elapsed"]
+    run = normalize(run)
+    plan = run.get("plan") or []
+    done = sum(1 for s in plan if s.get("state") in ("done", "skipped"))
+    act, wall = active_minutes(run, now=run.get("finished") or now), wall_minutes(run, now)
+    parts = [f"{done}/{len(plan)}" if plan else "no plan",
+             f"{fmt_min(act)} active" + (f" ({fmt_min(wall)} wall)" if wall - act >= 5 else "")]
     if run.get("estimate"):
         parts[-1] += f" of ~{fmt_min(run.get('estimate_cal') or run['estimate'])}"
     if run.get("state") == "running":
-        parts.append(f"ETA ~{fmt_min(eta(run, now))}")
+        lo, hi = eta_range(run, now)
+        parts.append(f"ETA {fmt_range(lo, hi)}")
     else:
         parts.append(run.get("state", ""))
+    working = sum(1 for a in (run.get("agents") or {}).values() if a.get("state") == "running")
+    if working:
+        parts.append(f"{working} agent{'s' if working > 1 else ''} working")
     return " · ".join(parts)
 
 
-def start(goal: str, steps: int = 0, estimate: str = "", cwd: str = None, plan=None) -> dict:
+def start(goal: str, steps: int = 0, estimate: str = "", cwd: str | None = None, plan=None, from_agent: str | None = None,
+          now: float | None = None, mode: str = "") -> dict:
+    now = now or time.time()
     agent, sid = current_session(cwd)
-    project = (core.read_json(SESSIONS / f"{agent}-{sid}.json", {}) or {}).get("project") or _project(cwd)
+    if from_agent:  # a subagent planning its own work: a lane of the main run, never a new main run
+        run = normalize(load_run(agent, sid) or {})
+        if run.get("goal"):
+            lane = _lane(run, from_agent, now)
+            lane.update(goal=goal, plan=[x[0] for x in parse_plan(plan)], done=0)
+            run["updates"].append({"ts": round(now), "kind": "agent", "agent": from_agent, "text": f"plan: {goal}"})
+            _save(run)
+            return run
+    sf = SESSIONS / f"{agent}-{sid}.json"
+    sess = core.read_json(sf, {}) or {}
+    project = sess.get("project") or _project(cwd)
     est = parse_minutes(estimate)
     cal = calibration(project)
-    run = {"agent": agent, "session": sid, "project": project, "goal": goal, "steps": steps, "step": 0,
-           "estimate": est, "estimate_cal": round(est * cal["ratio"], 1) if est and cal["ratio"] else est,
-           "started": time.time(), "state": "running", "updates": [], "plan": list(plan or [])}
+    items = parse_plan(plan)
+    if not items and steps:
+        items = [(f"step {i + 1}", None, []) for i in range(steps)]
+    run = {"v": 2, "agent": agent, "session": sid, "project": project, "goal": goal, "estimate": est,
+           "estimate_cal": round(est * cal["ratio"], 1) if est and cal["ratio"] else est, "cal_ratio": cal["ratio"],
+           "started": now, "state": "running", "updates": [], "intervals": [], "agents": {},
+           "plan": [_new_step(n, e) for n, e, _ in items], "messages": [], "decisions": [],
+           "mode": mode if mode in ("guided", "auto") else ((core.CFG.get("work") or {}).get("mode") or "guided")}
+    for s, (_, _, after) in zip(run["plan"], items):
+        s["after"] = [x["name"] for x in (_find_step(run, a) for a in after) if x and x is not s]
+    _allocate(run)
+    run["steps"], run["step"] = len(run["plan"]), 0
+    if run["plan"]:
+        run["plan"][0].update(state="running", started=now)
+    if sess.get("turn_started") and (sess.get("turn_started") or 0) >= (sess.get("turn_ended") or 0):
+        _open(run, "turn", "main", now)  # started inside a turn: that turn is active time
     _save(run)
     _publish()
     return run
 
 
-def step(text: str, nxt: str = "", cwd: str = None, kind: str = "step", check: str = "") -> dict:
+def _lane(run, agent_id, now, label="", kind=""):
+    lane = run["agents"].setdefault(agent_id, {"label": label, "type": kind, "started": now, "finished": None,
+                                               "state": "running", "updates": [], "done": 0})
+    if label and not lane.get("label"):
+        lane["label"] = label
+    return lane
+
+
+def _find_step(run, which):
+    """A plan step by 1-based number or by (part of) its name."""
+    plan = run.get("plan") or []
+    if which is None or which == "":
+        return None
+    w = str(which).strip()
+    if w.isdigit() and 1 <= int(w) <= len(plan):
+        return plan[int(w) - 1]
+    lw = w.lower()
+    return next((s for s in plan if s["name"].lower() == lw), None) or \
+        next((s for s in plan if lw in s["name"].lower()), None)
+
+
+def _finish_step(run, s, now, agent, sid):
+    if s.get("state") == "done":
+        return
+    s.update(state="done", finished=now)
+    s["started"] = s.get("started") or now
+    record("step", agent, sid, s["name"], step_minutes(run, s, now) * 60, run.get("project", ""),
+           estimate=s.get("est") or 0, est_auto=bool(s.get("est_auto")), owner="main" if s.get("owner") == "main"
+           else "agent")
+
+
+def _advance_main(run, now):
+    """Keep one main step running: the first pending one not handed to a subagent."""
+    plan = run.get("plan") or []
+    if any(s.get("state") == "running" and (s.get("owner") or "main") == "main" for s in plan):
+        return
+    nxt = next((s for s in plan if s.get("state") == "pending" and (s.get("owner") or "main") == "main"
+                and not s.get("label")), None)
+    if nxt:
+        nxt.update(state="running", started=now)
+
+
+def _main_only(from_agent, what: str):
+    """Only Morpheus (the main session) changes the main plan; a crew member asks him."""
+    if from_agent:
+        raise StepError(f"only Morpheus {what}: ask him with dev crew ask \"…\" (your own steps: dev progress add, "
+                        "dev progress step)")
+
+
+def assign(which, label: str, cwd: str | None = None, now: float | None = None, scope: str = "",
+           from_agent: str | None = None) -> dict:
+    """Hand a plan step to a subagent: the next subagent launched with this description (or a running lane with this
+    label) owns it, and its time is that subagent's time. `scope`: the files it owns (comma-separated globs); the
+    guard keeps that subagent's edits inside them."""
+    _main_only(from_agent, "assigns the plan's steps")
+    now = now or time.time()
+    agent, sid = current_session(cwd)
+    run = normalize(load_run(agent, sid) or {})
+    s = _find_step(run, which)
+    if not s:
+        raise ValueError(f"no step “{which}” in the plan")
+    s["label"] = label
+    if scope:
+        globs = [x.strip() for x in scope.split(",") if x.strip()]
+        for k, lane in (run.get("agents") or {}).items():
+            if lane.get("state") == "running" and not _label_matches(label, lane):
+                clash = [g for g in globs for h in lane.get("scope") or [] if _globs_overlap(g, h)]
+                if clash:
+                    raise StepError(f"{', '.join(clash)} overlaps the files {lane.get('persona') or lane.get('label')} "
+                                    f"owns while working ({', '.join(lane.get('scope'))}). Give each member "
+                                    f"different files, or wait until they finish.")
+        s["scope"] = globs
+    lane_id = next((k for k, v in (run.get("agents") or {}).items() if v.get("state") == "running" and
+                    _label_matches(label, v)), None)
+    if lane_id:
+        s.update(owner=lane_id, state="running", started=s.get("started") or now)
+        if s.get("scope"):
+            run["agents"][lane_id]["scope"] = s["scope"]
+    elif s.get("state") == "running" and (s.get("owner") or "main") == "main":
+        s["state"] = "pending"  # waits for its subagent
+    _advance_main(run, now)
+    _save(run)
+    return run
+
+
+def _globs_overlap(a: str, b: str) -> bool:
+    """Could two path globs match the same file? (conservative: compares the fixed prefixes)"""
+    import fnmatch
+    pa, pb = re.split(r"[*?\[]", a, maxsplit=1)[0], re.split(r"[*?\[]", b, maxsplit=1)[0]
+    if fnmatch.fnmatch(a, b) or fnmatch.fnmatch(b, a):
+        return True
+    return pa.startswith(pb) or pb.startswith(pa)
+
+
+def scope_owner(run, rel_path: str, me: str = "main"):
+    """The running crew member (other than `me`) whose scope covers this path -> (lane id, lane) or (None, None)."""
+    import fnmatch
+    for k, lane in (run.get("agents") or {}).items():
+        if k == me or lane.get("state") != "running":
+            continue
+        for g in lane.get("scope") or []:
+            if fnmatch.fnmatch(rel_path, g) or fnmatch.fnmatch(rel_path, g.rstrip("/") + "/**") or \
+                    rel_path.startswith(g.rstrip("*").rstrip("/") + "/") or rel_path == g:
+                return k, lane
+    return None, None
+
+
+def running_agents(run) -> list:
+    return [(k, v) for k, v in (run.get("agents") or {}).items() if v.get("state") == "running"]
+
+
+def expire_stale(run, now=None) -> bool:
+    """Close lanes and intervals left open by a subagent that never reported back (crashed, or the session was
+    resumed without it), so they neither inflate the time nor block new launches. -> changed"""
+    now = now or time.time()
+    limit = cfg()["stale_agent_hours"] * 3600
+    changed = False
+    for k, lane in (run.get("agents") or {}).items():
+        if lane.get("state") == "running" and now - (lane.get("started") or now) > limit:
+            last = max([lane.get("started") or now] + [u.get("ts", 0) for u in lane.get("updates") or []])
+            lane.update(state="lost", finished=last)
+            _audit("crew.lost", lane.get("persona") or lane.get("label") or k, "no report for "
+                   f"{cfg()['stale_agent_hours']}h", "lost", project=run.get("project") or "")
+            _close(run, "agent", k, last)
+            for s in run.get("plan") or []:
+                if s.get("owner") == k and s.get("state") == "running":
+                    _log_change(run, s, "running", "pending", "devkit", f"{lane.get('persona') or 'subagent'} "
+                                f"stopped reporting; the step waits for a new owner", now)
+                    s.update(state="pending", owner="main")
+            changed = True
+    return changed
+
+
+def _label_matches(label: str, lane: dict) -> bool:
+    """A step assigned to "Neo" belongs to the lane launched as "Neo: build the parser", or as devkit:neo."""
+    lab = (label or "").strip().lower()
+    if not lab:
+        return False
+    names = [(lane.get("label") or "").lower(), (lane.get("persona") or "").lower(), (lane.get("type") or "").lower()]
+    return any(n and (n == lab or n.startswith(lab + ":") or n.startswith(lab + " ") or n.endswith(":" + lab)
+                      or lab in n.split(":")[0]) for n in names)
+
+
+def persona(agent_type: str = "", label: str = "") -> str:
+    """The crew member behind a subagent: from its type (devkit:neo, neo) or its description ("Neo: …")."""
+    cands = [(agent_type or "").split(":")[-1].strip(), (label or "").split(":")[0].strip()]
+    try:
+        from . import crew
+        for cand in cands:
+            m = crew.member(cand) if cand else None
+            if m and not m.get("main"):
+                return m["name"]
+    except Exception:
+        pass
+    if ":" in (agent_type or "") and cands[0]:  # devkit:neo without the roster at hand
+        return cands[0].replace("-", " ").title()
+    if ":" in (label or "") and cands[1] and len(cands[1].split()) <= 3:  # "Neo: build the parser"
+        return cands[1]
+    return ""
+
+
+def lane_of(agent: str, sid: str, agent_id: str):
+    """(run, lane) for a subagent of this session, or (run, None)."""
+    run = load_run(agent, sid)
+    if not run:
+        return None, None
+    run = normalize(run)
+    return run, (run.get("agents") or {}).get(agent_id)
+
+
+def _addr(run, ref: str):
+    """'Morpheus'/'lead'/'main'/'' -> 'main'; a crew name or label -> that lane's id (or the name, for later)."""
+    r = (ref or "").strip()
+    if not r or r.lower() in ("main", "lead", "morpheus", "tech lead"):
+        return "main"
+    for k, v in (run.get("agents") or {}).items():
+        if k == r or _label_matches(r, v):
+            return k
+    return "name:" + r
+
+
+def _name_of(run, addr: str) -> str:
+    if addr == "main":
+        return "Morpheus"
+    if addr == "ci":
+        return "CI watch"
+    if addr.startswith("name:"):
+        return addr[5:]
+    lane = (run.get("agents") or {}).get(addr) or {}
+    return lane.get("persona") or lane.get("label") or "subagent"
+
+
+def crew_ask(text: str, to: str | None = None, from_agent: str | None = None, cwd: str | None = None, now: float | None = None) -> dict:
+    """A question or request between crew members (default: to Morpheus, the main session). It reaches the recipient
+    with its next tool call (PostToolUse) or prompt."""
+    now = now or time.time()
     agent, sid = current_session(cwd)
     run = load_run(agent, sid)
     if not run:
-        run = start(text if kind != "step" else "work in progress", cwd=cwd)
+        raise ValueError("no progress run in this session: Morpheus starts one with dev progress start")
+    run = normalize(run)
+    msgs = run.setdefault("messages", [])
+    m = {"id": f"M{len(msgs) + 1}", "ts": round(now), "from": from_agent or "main", "to": _addr(run, to or ""),
+         "text": text.strip()[:1500], "delivered": False}
+    m["from_name"], m["to_name"] = _name_of(run, m["from"]), _name_of(run, m["to"])
+    msgs.append(m)
+    run["messages"] = msgs[-200:]
+    _save(run, touch_session=False)
+    _audit("crew.message", f"{m['from_name']} → {m['to_name']}", m["text"][:300], project=run.get("project") or "",
+           id=m["id"])
+    return m
+
+
+def crew_answer(msg_id: str, text: str, from_agent: str | None = None, cwd: str | None = None, now: float | None = None) -> dict:
+    agent, sid = current_session(cwd)
+    run = normalize(load_run(agent, sid) or {})
+    q = next((m for m in run.get("messages") or [] if m["id"].lower() == str(msg_id).lower()), None)
+    if not q:
+        raise ValueError(f"no message {msg_id}")
+    q["answered"] = True
+    _save(run, touch_session=False)
+    a = crew_ask(text, to=q["from"] if q["from"] != "main" else "main", from_agent=from_agent, cwd=cwd, now=now)
+    run = normalize(load_run(agent, sid))
+    for m in run["messages"]:
+        if m["id"] == a["id"]:
+            m["reply_to"], m["to"], m["to_name"] = q["id"], q["from"], q["from_name"]
+    _save(run, touch_session=False)
+    return a
+
+
+def crew_inbox(from_agent: str | None = None, cwd: str | None = None, mark: bool = True) -> list:
+    """Messages for the caller (the main session, or the subagent whose lane this is) not delivered yet."""
+    agent, sid = current_session(cwd)
+    run = load_run(agent, sid)
+    return _take_messages(agent, sid, from_agent or "main", mark) if run else []
+
+
+def _take_messages(agent, sid, me: str, mark=True) -> list:
+    run = load_run(agent, sid)
+    if not run:
+        return []
+    run = normalize(run)
+    lane = (run.get("agents") or {}).get(me) or {}
+    out = []
+    for m in run.get("messages") or []:
+        to = m.get("to")
+        mine = to == me or (to.startswith("name:") and me != "main" and _label_matches(to[5:], lane))
+        if mine and not m.get("delivered"):
+            out.append(dict(m))
+            if mark:
+                m["delivered"] = True
+    if out and mark:
+        _save(run, touch_session=False)
+    return out
+
+
+IRREVERSIBLE = ("push", "pr", "merge", "release", "deploy", "delete-data", "migrate-production", "spend", "publish",
+                "external-message")
+
+
+def mode_of(run) -> str:
+    return (run or {}).get("mode") or ((core.CFG.get("work") or {}).get("mode")) or "guided"
+
+
+def set_mode(mode: str, approve: str = "", cwd: str | None = None, now: float | None = None) -> dict:
+    """guided: decisions that are the developer's wait for the developer; auto: the crew goes on with the recommended
+    option and records it. `approve`: irreversible actions pre-approved for auto mode (comma-separated)."""
+    now = now or time.time()
+    if mode not in ("guided", "auto"):
+        raise StepError("mode is guided or auto")
+    agent, sid = current_session(cwd)
+    run = normalize(load_run(agent, sid) or {})
+    if not run.get("goal"):
+        raise StepError("no progress run in this session: dev progress start \"<goal>\" --plan \"…\" --mode " + mode)
+    approved = [x.strip().lower() for x in (approve or "").split(",") if x.strip()]
+    bad = [x for x in approved if x not in IRREVERSIBLE]
+    if bad:
+        raise StepError(f"unknown action(s) {', '.join(bad)}; known: {', '.join(IRREVERSIBLE)}")
+    run["mode"], run["approved"] = mode, approved if mode == "auto" else []
+    _audit("crew.mode", mode, "approved: " + (", ".join(approved) or "nothing"), project=run.get("project") or "")
+    run.setdefault("history", []).append({"ts": round(now), "step": "(mode)", "from": None, "to": mode,
+                                          "by": "main", "why": "approved: " + (", ".join(approved) or "nothing")})
+    _save(run)
+    return run
+
+
+def crew_decision(question: str, options=None, recommend: str = "", irreversible: str = "", from_agent: str | None = None,
+                  cwd: str | None = None, now: float | None = None) -> dict:
+    """A decision point. -> the decision record. In auto mode a reversible decision is taken at once with the
+    recommendation; in guided mode, or for an irreversible action not pre-approved, it waits for the developer: the
+    asking member's lane waits and its step is blocked until Morpheus records the answer (crew_decide)."""
+    now = now or time.time()
+    agent, sid = current_session(cwd)
+    run = load_run(agent, sid)
+    if not run:
+        raise StepError("no progress run in this session: Morpheus starts one with dev progress start")
+    run = normalize(run)
+    opts = [o.strip() for o in (options if isinstance(options, list) else str(options or "").split("|")) if o.strip()]
+    rec = (recommend or "").strip()
+    if rec and opts and not any(o.lower().startswith(rec.lower()) for o in opts):
+        raise StepError(f"the recommendation “{rec}” is not one of the options: {' | '.join(opts)}")
+    act = (irreversible or "").strip().lower()
+    if act and act not in IRREVERSIBLE:
+        raise StepError(f"unknown irreversible action “{act}”; known: {', '.join(IRREVERSIBLE)}")
+    decs = run.setdefault("decisions", [])
+    d = {"id": f"D{len(decs) + 1}", "ts": round(now), "question": question.strip()[:800], "options": opts,
+         "recommend": rec, "irreversible": act, "from": from_agent or "main",
+         "from_name": _name_of(run, from_agent or "main"), "state": "pending", "answer": "", "by": ""}
+    auto = mode_of(run) == "auto" and (not act or act in (run.get("approved") or []))
+    if auto and rec:
+        d.update(state="decided", answer=rec, by="auto", decided=round(now))
+    else:
+        if from_agent:
+            lane = (run.get("agents") or {}).get(from_agent)
+            if lane:
+                lane["state_before_wait"] = lane.get("state")
+                lane["waiting"] = d["id"]
+            for s in run.get("plan") or []:
+                if s.get("owner") == from_agent and s.get("state") == "running":
+                    _log_change(run, s, "running", "blocked", from_agent, f"waiting for the developer: {d['id']}", now)
+                    s["state"], s["waiting"] = "blocked", d["id"]
+        if not auto and not rec and mode_of(run) == "auto":
+            d["note"] = "auto mode, but no recommendation was given: the developer decides"
+    decs.append(d)
+    run["decisions"] = decs[-200:]
+    _save(run, touch_session=False)
+    _audit("crew.decision", d["id"], d["question"][:300], d["state"], project=run.get("project") or "",
+           by=d.get("by") or "", answer=d.get("answer") or "", irreversible=d.get("irreversible") or "",
+           mode=mode_of(run), asked_by=d["from_name"])
+    return d
+
+
+def crew_decide(decision_id: str, answer: str, cwd: str | None = None, now: float | None = None, by: str = "developer") -> dict:
+    """Record the developer's answer (Morpheus runs it after asking): the waiting member's step runs again, and a
+    message with the answer waits for that member (delivered when Morpheus resumes it)."""
+    now = now or time.time()
+    agent, sid = current_session(cwd)
+    run = normalize(load_run(agent, sid) or {})
+    d = next((x for x in run.get("decisions") or [] if x["id"].lower() == str(decision_id).lower()), None)
+    if not d:
+        raise StepError(f"no decision {decision_id}")
+    if d["state"] == "decided" and d.get("by") != "auto":
+        raise StepError(f"{d['id']} was already decided by {d['by']}: “{d['answer']}”")
+    prev = d.get("answer")
+    d.update(state="decided", answer=answer.strip()[:800], by=by, decided=round(now))
+    if prev and prev != d["answer"]:
+        d["overrides"] = prev  # the developer changed an automatic decision
+    for s in run.get("plan") or []:
+        if s.get("waiting") == d["id"]:
+            _log_change(run, s, s.get("state"), "running", "main", f"{d['id']} decided: {d['answer'][:80]}", now)
+            s["state"] = "running"
+            s.pop("waiting", None)
+    for lane in (run.get("agents") or {}).values():
+        if lane.get("waiting") == d["id"]:
+            lane.pop("waiting", None)
+            lane["state"] = lane.pop("state_before_wait", None) or "running"
+    _save(run, touch_session=False)
+    _audit("crew.decided", d["id"], d["answer"][:300], project=run.get("project") or "", by=by,
+           overrides=d.get("overrides") or "")
+    if d["from"] != "main":
+        crew_ask(f"Decision {d['id']} — {d['question'][:120]} → {d['answer']}", to=d["from"], cwd=cwd, now=now)
+    return d
+
+
+def pending_decisions(run) -> list:
+    return [d for d in (run or {}).get("decisions") or [] if d.get("state") == "pending"]
+
+
+def _ci(agent, sid) -> str:
+    try:
+        from . import ciwatch
+        return ciwatch.pending_events(agent, sid)
+    except Exception:
+        return ""
+
+
+def _ready(agent, sid) -> str:
+    try:
+        from . import dispatch
+        return dispatch.ready_context(agent, sid)
+    except Exception:
+        return ""
+
+
+def decisions_context(agent: str, sid: str) -> str:
+    """For the main session: decisions waiting for the developer, newest first, once per decision."""
+    run = load_run(agent, sid)
+    if not run:
+        return ""
+    run = normalize(run)
+    new = [d for d in pending_decisions(run) if not d.get("surfaced")]
+    if not new:
+        return ""
+    for d in new:
+        d["surfaced"] = True
+    _save(run, touch_session=False)
+    lines = ["devkit · decisions waiting for the developer (" + mode_of(run) + " mode). Ask with your question tool "
+             "(AskUserQuestion / request_user_input) using the decision template, then record the answer with "
+             "`dev crew decide <id> \"<answer>\"` and resume the member who asked (SendMessage / send_input):"]
+    for d in new:
+        opts = (" Options: " + " | ".join(d["options"])) if d["options"] else ""
+        lines.append(f"- {d['id']} from {d['from_name']}: {d['question']}{opts}"
+                     + (f" Recommended: {d['recommend']}." if d.get("recommend") else "")
+                     + (f" Irreversible: {d['irreversible']}." if d.get("irreversible") else ""))
+    return "\n".join(lines)
+
+
+def messages_context(agent: str, sid: str, me: str) -> str:
+    """The hook text that delivers a crew member's pending messages."""
+    msgs = _take_messages(agent, sid, me)
+    if not msgs:
+        return ""
+    lines = ["devkit · crew messages for you (answer with `dev crew answer <id> \"…\"`):"]
+    for m in msgs:
+        lines.append(f"- {m['id']} from {m.get('from_name')}: {m['text']}"
+                     + (f" (answer to {m['reply_to']})" if m.get("reply_to") else ""))
+    return "\n".join(lines)
+
+
+def begin(which, cwd: str | None = None, now: float | None = None, from_agent: str | None = None) -> dict:
+    """Mark a step as started now (parallel work the main agent does itself)."""
+    _main_only(from_agent, "starts the plan's steps")
+    now = now or time.time()
+    agent, sid = current_session(cwd)
+    run = normalize(load_run(agent, sid) or {})
+    s = _find_step(run, which)
+    if not s:
+        raise ValueError(f"no step “{which}” in the plan")
+    if s.get("state") != "done":
+        s.update(state="running", started=s.get("started") or now)
+    _save(run)
+    return run
+
+
+class StepError(ValueError):
+    """A step change devkit refuses, with what to do instead."""
+
+
+STOP_WORDS = set("a an the and or of to in on for with by from at as is are was were be been it its this that these "
+                 "those into than then done finished complete completed step steps work working all now x y de la el "
+                 "los las y o en con por para del un una".split())
+
+
+def _words(text: str) -> set:
+    out = set()
+    for w in re.findall(r"[a-z0-9áéíóúñü]{2,}", (text or "").lower()):
+        if w in STOP_WORDS:
+            continue
+        out.add(w[:-1] if len(w) > 3 and w.endswith("s") and not w.endswith("ss") else w)  # tests -> test
+    return out
+
+
+def _same_stem(a: str, b: str) -> bool:
+    short, long_ = sorted((a, b), key=len)
+    if len(short) >= 3 and long_.startswith(short):  # tag / tagged, doc / documentation
+        return True
+    n = 0
+    while n < len(short) and short[n] == long_[n]:
+        n += 1
+    return n >= 5 or (n >= 4 and len(short) <= 6)  # integrate / integration, build / building
+
+
+def _matches(text: str, step: dict) -> bool:
+    """Does the text describe this step? (shares a word stem with its name; unnamed steps always match)"""
+    name = step.get("name", "")
+    if re.fullmatch(r"step \d+", name):
+        return True
+    tw, sw = _words(text), _words(name)
+    return any(_same_stem(a, b) for a in tw for b in sw)
+
+
+def _audit(action: str, target: str, detail: str = "", outcome: str = "ok", **extra):
+    """Every coordination event goes to the audit trail too (dev audit; published to the handoff repository)."""
+    try:
+        from . import audit
+        audit.record(action, target, detail, outcome, **extra)
+    except Exception:
+        pass
+
+
+def _log_change(run, s, old, new, who, why, now):
+    run.setdefault("history", []).append({"ts": round(now), "step": s["name"], "from": old, "to": new,
+                                          "by": who or "main", "why": (why or "")[:300]})
+    run["history"] = run["history"][-200:]
+    _audit(f"plan.{new}", s["name"], why or "", project=run.get("project") or "", run=run.get("goal", "")[:80],
+           by=_name_of(run, who or "main") if who != "devkit" else "devkit", was=old or "")
+
+
+def check_close(run, target, text, explicit, force=False):
+    """The safety checks before a step is closed. Raises StepError with what to do instead."""
+    plan = run.get("plan") or []
+    if target is None:
+        raise StepError("no open step to close. Add the work as a step first: dev progress add \"<step>=<estimate>\"")
+    if target.get("state") in ("done", "skipped"):
+        raise StepError(f"step “{target['name']}” is already {target['state']}; to change it: "
+                        f"dev progress reopen \"{target['name']}\" --why \"…\"")
+    if force:
+        return
+    owner = target.get("owner") or "main"
+    if owner != "main" and target.get("state") == "running":
+        who = (run.get("agents") or {}).get(owner, {})
+        raise StepError(f"step “{target['name']}” belongs to {who.get('persona') or who.get('label') or 'a subagent'}, "
+                        f"still working on it; it closes when that agent finishes. Use --force only if it is "
+                        f"really done.")
+    waiting = [a for a in target.get("after") or [] if any(x["name"] == a and x.get("state") not in ("done", "skipped")
+                                                            for x in plan)]
+    if waiting:
+        raise StepError(f"step “{target['name']}” waits for {', '.join(waiting)}, not done yet. Close those first, "
+                        f"or use --force if the order changed.")
+    if not _matches(text, target):
+        better = [x for x in plan if x is not target and x.get("state") not in ("done", "skipped") and _matches(text, x)]
+        hint = (f" It sounds like step {plan.index(better[0]) + 1}, “{better[0]['name']}”: --step \"{better[0]['name']}\"."
+                if better else " If this is new work, add it: dev progress add \"<step>=<estimate>\", then close it.")
+        raise StepError(f"“{text[:80]}” does not describe step “{target['name']}”"
+                        f"{' (you named it)' if explicit else ' (the running step)'}.{hint} Use --force if it really "
+                        f"is that step.")
+
+
+def add_step(spec: str, cwd: str | None = None, now: float | None = None, why: str = "",
+             from_agent: str | None = None) -> dict:
+    """Add a step discovered during the work: "name=30m after other". From a crew member, the step goes to its own
+    lane's plan; the main plan is Morpheus's."""
+    now = now or time.time()
+    agent, sid = current_session(cwd)
+    run = normalize(load_run(agent, sid) or {})
+    if not run.get("goal"):
+        raise StepError("no progress run in this session: dev progress start \"<goal>\" --plan \"…\"")
+    items = parse_plan(spec)
+    if not items:
+        raise StepError("give the step: dev progress add \"<name>=<estimate>\"")
+    if from_agent:
+        lane = _lane(run, from_agent, now)
+        plan = lane.setdefault("plan", [])
+        for name, _, _ in items:
+            if name.lower() in (x.lower() for x in plan):
+                raise StepError(f"step “{name}” is already in your lane's plan")
+            plan.append(name)
+            run["updates"].append({"ts": round(now), "kind": "agent", "agent": from_agent, "text": f"added: {name}"})
+        _save(run)
+        return run
+    for name, est, after in items:
+        if _find_step(run, name) and _find_step(run, name)["name"].lower() == name.lower():
+            raise StepError(f"step “{name}” is already in the plan")
+        s = _new_step(name, est)
+        s["after"] = [x["name"] for x in (_find_step(run, a) for a in after) if x]
+        run["plan"].append(s)
+        _log_change(run, s, None, "pending", "main", why or "added during the work", now)
+    _allocate(run)
+    run["steps"] = len(run["plan"])
+    _advance_main(run, now)
+    _save(run)
+    return run
+
+
+def reopen(which, why: str, cwd: str | None = None, now: float | None = None, skip: bool = False,
+           from_agent: str | None = None) -> dict:
+    """Undo a wrong close (back to running or pending), or skip a step on purpose. Both need a reason."""
+    _main_only(from_agent, "skips the plan's steps" if skip else "reopens the plan's steps")
+    now = now or time.time()
+    if not (why or "").strip():
+        raise StepError("say why: --why \"…\" (it goes into the run's history)")
+    agent, sid = current_session(cwd)
+    run = normalize(load_run(agent, sid) or {})
+    s = _find_step(run, which)
+    if not s:
+        raise StepError(f"no step “{which}” in the plan")
+    old = s.get("state")
+    if skip:
+        if old in ("done", "skipped"):
+            raise StepError(f"step “{s['name']}” is already {old}")
+        s.update(state="skipped", finished=now)
+    else:
+        if old not in ("done", "skipped", "blocked"):
+            raise StepError(f"step “{s['name']}” is {old}, not closed")
+        s.update(state="pending", finished=None)
+        if (s.get("owner") or "main") == "main":
+            for x in run["plan"]:  # the reopened step becomes the main lane's current one
+                if x is not s and x.get("state") == "running" and (x.get("owner") or "main") == "main":
+                    x["state"] = "pending"
+            s["state"] = "running"
+            s["started"] = s.get("started") or now
+        s.pop("untimed", None)
+        s["reopened"] = (s.get("reopened") or 0) + 1
+    _log_change(run, s, old, s["state"], "main", why, now)
+    run["step"] = sum(1 for x in run["plan"] if x.get("state") in ("done", "skipped"))
+    run["updates"].append({"ts": round(now), "kind": "reopen" if not skip else "skip", "text": why,
+                           "step": s["name"]})
+    _advance_main(run, now)
+    _save(run)
+    return run
+
+
+def note(text: str, nxt: str = "", cwd: str | None = None, from_agent: str | None = None,
+         now: float | None = None) -> dict:
+    """An update while a step is still running: recorded and shown (it resets the silence timer), and no step
+    changes state. `dev progress step` is for a step that is finished."""
+    now = now or time.time()
+    if not (text or "").strip():
+        raise StepError("say what is happening: dev progress note \"<what is happening>\" --next \"<what is next>\"")
+    agent, sid = current_session(cwd)
+    run = normalize(load_run(agent, sid) or {})
+    if not run.get("goal"):
+        raise StepError("no progress run in this session: dev progress start \"<goal>\" --plan \"…\"")
+    u = {"ts": round(now), "kind": "note", "text": text.strip(), "next": nxt, "check": ""}
+    if from_agent:  # a member's note stays in its lane
+        lane = _lane(run, from_agent, now)
+        lane["updates"] = (lane.get("updates") or [])[-19:] + [u]
+        run["updates"].append({**u, "kind": "agent", "agent": from_agent})
+    else:
+        run["updates"].append(u)
+    run["updates"] = run["updates"][-40:]
+    _save(run)
+    return run
+
+
+def step(text: str, nxt: str = "", cwd: str | None = None, kind: str = "step", check: str = "", which=None,
+         from_agent: str | None = None, now: float | None = None, force: bool = False) -> dict:
+    now = now or time.time()
+    agent, sid = current_session(cwd)
+    run = load_run(agent, sid)
+    if from_agent and run:  # a subagent's update: its lane only
+        run = normalize(run)
+        lane = _lane(run, from_agent, now)
+        lane["updates"] = (lane.get("updates") or [])[-19:] + [{"ts": round(now), "kind": kind, "text": text,
+                                                                "check": check}]
+        if kind == "step":
+            lane["done"] = (lane.get("done") or 0) + 1
+        run["updates"].append({"ts": round(now), "kind": "agent", "agent": from_agent, "text": text, "check": check})
+        run["updates"] = run["updates"][-40:]
+        _save(run)
+        return run
+    if not run:
+        run = start(text if kind != "step" else "work in progress", cwd=cwd, now=now)
+    run = normalize(run)
+    plan = run["plan"]
+    target = _find_step(run, which) if which else None
+    if which and not target:
+        raise StepError(f"no step “{which}” in the plan: " + "; ".join(f"{i}. {s['name']}" for i, s in
+                                                                      enumerate(plan, 1)))
     if kind == "step":
-        run["step"] = (run.get("step") or 0) + 1
-        if run.get("steps") and run["step"] > run["steps"]:
-            run["steps"] = run["step"]
+        explicit = target is not None
+        if not target:
+            running = [s for s in plan if s.get("state") == "running" and (s.get("owner") or "main") == "main"]
+            if len(running) > 1:
+                raise StepError("several steps are running (" + ", ".join(s["name"] for s in running) +
+                                "): say which with --step")
+            target = (running or [None])[0] or next((s for s in plan if s.get("state") in ("pending", "blocked")
+                                                     and (s.get("owner") or "main") == "main"
+                                                     and not s.get("label")), None)
+        if not plan:  # a run without a plan: each step is recorded as it comes
+            target = _new_step(text[:60], est=None)
+            plan.append(target)
+            _allocate(run)
+        else:
+            check_close(run, target, text, explicit, force)
+        old_state = target.get("state")
+        _finish_step(run, target, now, agent, sid)
+        _log_change(run, target, old_state, "done", "main", check or text, now)
+        _advance_main(run, now)
         run["state"] = "running"
-    elif kind in ("blocked", "done"):
-        run["state"] = kind
-        if kind == "done":
-            run["finished"] = time.time()
-            if run.get("steps"):
-                run["step"] = run["steps"]
-            record("run", agent, sid, run.get("goal", ""), time.time() - run["started"], run.get("project", ""),
-                   estimate=run.get("estimate") or 0, steps=run.get("steps") or 0)
-    run["updates"].append({"ts": round(time.time()), "kind": kind, "text": text, "next": nxt, "check": check})
+    elif kind == "blocked":
+        run["state"] = "blocked"
+        cur = target or next((s for s in plan if s.get("state") == "running"), None)
+        if cur:
+            _log_change(run, cur, cur.get("state"), "blocked", "main", text, now)
+            cur["state"] = "blocked"
+    elif kind == "done":
+        waiting = pending_decisions(run)
+        if waiting and not force:
+            raise StepError("decisions still waiting for the developer: " + ", ".join(
+                f"{d['id']} ({d['question'][:60]})" for d in waiting) + ". Ask, then dev crew decide <id> \"…\".")
+        open_ = [s for s in plan if s.get("state") not in ("done", "skipped") and s.get("state") != "running"]
+        if open_ and not force:
+            raise StepError("not finished: " + ", ".join(f"“{s['name']}” ({s.get('state')})" for s in open_) +
+                            ". Close or skip each one (dev progress skip \"<step>\" --why \"…\"), or use --force.")
+        for s in plan:
+            if s.get("state") != "done":
+                old_state = s.get("state")
+                if s.get("state") == "running" or s is target:
+                    _finish_step(run, s, now, agent, sid)
+                else:
+                    s["state"] = "skipped"
+                _log_change(run, s, old_state, s["state"], "main", text, now)
+        run.update(state="done", finished=now)
+        _close(run, "turn", None, now)
+        record("run", agent, sid, run.get("goal", ""), active_minutes(run, now=now) * 60, run.get("project", ""),
+               estimate=run.get("estimate") or 0, steps=len(plan), wall=round(wall_minutes(run, now) * 60, 1),
+               basis="active")
+    run["steps"] = len(plan)
+    run["step"] = sum(1 for s in plan if s.get("state") in ("done", "skipped"))
+    run["updates"].append({"ts": round(now), "kind": kind, "text": text, "next": nxt, "check": check,
+                           "step": target["name"] if target else ""})
     run["updates"] = run["updates"][-40:]
     _save(run)
     _publish()
@@ -207,35 +1131,55 @@ def step(text: str, nxt: str = "", cwd: str = None, kind: str = "step", check: s
     return run
 
 
-def render_update(run: dict, branch: str = None) -> str:
-    """The progress update as the devkit status block (global instructions §0), ready to send. It is the block,
-    not a separate format, so an update that ends a turn always starts the way the canary expects."""
+def render_update(run: dict, branch: str | None = None, now: float | None = None) -> str:
+    """The progress update as the devkit status block (global instructions §0), ready to send: the block, then the
+    plan with each step's state, owner and time, then the subagents."""
     from .canary import MARKER
-    last = run["updates"][-1] if run.get("updates") else {}
+    now = now or time.time()
+    run = normalize(run)
+    last = next((u for u in reversed(run.get("updates") or []) if u.get("kind") != "agent"), {})
     if branch is None:
         branch = core.gitout(run.get("cwd") or os.getcwd(), "branch", "--show-current") or "-"
     project = (run.get("project") or "-").split("/")[-1]
     state = run.get("state")
-    done = last.get("text") if last.get("kind") in ("step", "done", "blocked") else ""
+    done = last.get("text") if last.get("kind") in ("step", "done", "blocked", "note") else ""
     check = (last.get("check") or "").strip()
     if check and check[0] not in "✓⚠✗–":
         check = "✓ " + check
     if not check:
-        check = "✗ blocked" if state == "blocked" else "⚠ not verified at this step"
+        check = "✗ blocked" if state == "blocked" else "– the step is still running" if last.get("kind") == "note" \
+            else "⚠ not verified at this step"
     nxt = last.get("next") or ("—" if state == "done" else "")
     if state == "blocked":
         nxt = f"unblock: {nxt or done}"
     lines = [f"**{MARKER}** {project} · `{branch}` · {run.get('goal', '')}",
              f"- **Done:** {done or 'started'}",
              f"- **Check:** {check}",
-             f"- **Progress:** {headline(run)}",
+             f"- **Progress:** {headline(run, now)}",
              f"- **Next:** {nxt or 'continue the plan'}"]
-    if run.get("plan"):  # named steps: a checklist under the block
+    plan = run.get("plan") or []
+    agents = run.get("agents") or {}
+    if plan:
         lines.append("")
-        k = run.get("step") or 0
-        for i, name in enumerate(run["plan"], 1):
-            mark = "✓" if i <= k else ("▸" if i == k + 1 and state == "running" else "○")
-            lines.append(f"{mark} {i}. {name}")
+        for i, s in enumerate(plan, 1):
+            mark = {"done": "✓", "running": "▸", "blocked": "■", "skipped": "–"}.get(s.get("state"), "○")
+            who = ""
+            if (s.get("owner") or "main") != "main":
+                who = f" · {agents.get(s['owner'], {}).get('label') or 'subagent'}"
+            elif s.get("label"):
+                who = f" · waiting for {s['label']}"
+            if s.get("state") in ("done", "running"):
+                tm = f" · {fmt_min(step_minutes(run, s, now))} of ~{fmt_min(s.get('est') or 0)}"
+            else:
+                tm = f" · ~{fmt_min(s.get('est') or 0)}"
+            lines.append(f"{mark} {i}. {s['name']}{who}{tm}")
+    if agents:
+        parts = []
+        for aid, a in agents.items():
+            mins = active_minutes(run, a.get("started"), a.get("finished") or now, now, aid)
+            parts.append(f"{'▸' if a.get('state') == 'running' else '✓'} {a.get('label') or a.get('type') or aid[:8]}"
+                         f" {fmt_min(mins)}")
+        lines.append("Agents: " + " · ".join(parts))
     return "\n".join(lines)
 
 
@@ -273,13 +1217,27 @@ def active_runs(max_age_h: float = 12) -> list:
     return sorted(out, key=lambda r: -r.get("started", 0))
 
 
-def brief(run: dict) -> dict:
-    """Compact form for presence/dashboard."""
-    last = run["updates"][-1] if run.get("updates") else {}
+def brief(run: dict, now: float | None = None) -> dict:
+    """Compact form for presence and the dashboard."""
+    now = now or time.time()
+    run = normalize(run)
+    last = next((u for u in reversed(run.get("updates") or []) if u.get("kind") != "agent"), {})
+    lo, hi = eta_range(run, now) if run.get("state") == "running" else (None, None)
     return {"goal": run.get("goal"), "state": run.get("state"), "step": run.get("step"), "steps": run.get("steps"),
             "estimate": run.get("estimate"), "started": round(run.get("started", 0)),
-            "eta_min": round(eta(run)) if run.get("state") == "running" else None, "last": last.get("text", ""),
-            "next": last.get("next", ""), "updated": last.get("ts")}
+            "eta_min": round(eta(run, now)) if run.get("state") == "running" else None, "eta_lo": lo, "eta_hi": hi,
+            "active_min": round(active_minutes(run, now=run.get("finished") or now), 1),
+            "wall_min": round(wall_minutes(run, now), 1), "pace": round(pace(run, now)[0], 2),
+            "plan": [{"name": s["name"], "state": s.get("state"), "est": s.get("est"),
+                      "min": round(step_minutes(run, s, now), 1),
+                      "owner": "main" if (s.get("owner") or "main") == "main"
+                      else ((run.get("agents") or {}).get(s["owner"], {}).get("label") or "subagent")}
+                     for s in run.get("plan") or []],
+            "agents": [{"label": a.get("label") or a.get("type") or k[:8], "state": a.get("state"),
+                        "min": round(active_minutes(run, a.get("started"), a.get("finished") or now, now, k), 1)}
+                       for k, a in (run.get("agents") or {}).items()],
+            "headline": headline(run, now), "last": last.get("text", ""), "next": last.get("next", ""),
+            "updated": last.get("ts")}
 
 
 # --------------------------------------------------------------------------- hooks
@@ -302,9 +1260,12 @@ def on_prompt(agent: str, data: dict):
     if f.exists():
         s.update({"turn_started": now, "last_update": now, "nudges": 0})
         f.write_text(json.dumps(s))
+    _run_event(agent, sid, lambda run: (_close(run, "turn", None, now), _open(run, "turn", "main", now)))
     prompt = (data.get("prompt") or "")[:400]
+    mail = "\n\n".join(x for x in (messages_context(agent, sid, "main"), decisions_context(agent, sid),
+                                    _ready(agent, sid), _ci(agent, sid)) if x) if f.exists() else ""
     if not STATUS_Q.search(prompt):
-        return None
+        return mail or None
     runs = [r for r in active_runs() if r.get("session") == sid] or active_runs()[:3]
     ctx = ["devkit · the developer is asking for status. Answer with the Overall status template of the "
            "`communicating` skill: one-line verdict, then per workstream: state, evidence, ETA; CI/CD pipelines with "
@@ -387,45 +1348,126 @@ def on_tool_done(agent: str, data: dict):
             record("tool", agent, sid, f"{p.get('tool')}: {p.get('what')}", secs, project)
     if not f.exists():
         return None
+    me = data.get("agent_id") or "main"
+    mail = messages_context(agent, sid, me)
+    if me != "main":  # inside a subagent: deliver its messages; updates to the developer are the main session's job
+        return mail or None
+    mail = "\n\n".join(x for x in (mail, decisions_context(agent, sid), _ready(agent, sid), _ci(agent, sid)) if x)
     now = time.time()
     said = _last_assistant_text_ts(data.get("transcript_path")) if agent == "claude" else None
     last = max(x for x in (s.get("turn_started") or s.get("started") or now, s.get("last_update") or 0,
                            s.get("last_nudge") or 0, said or 0))
     quiet = (now - last) / 60
     if quiet < cfg()["nudge_minutes"] or (s.get("nudges") or 0) >= 6:
-        return None
+        return mail or None
     s["last_nudge"], s["nudges"] = now, (s.get("nudges") or 0) + 1
     f.write_text(json.dumps(s))
     run = load_run(agent, sid)
     where = f" ({headline(run)})" if run else ""
-    return (f"devkit · {fmt_min(quiet)} since your last update to the developer{where}. Send a short progress update "
-            f"now with the Progress template of the `communicating` skill (done · now · next · ETA, ≤ 5 lines), and "
-            f"record it: `dev progress step \"<what finished>\" --next \"<what is next>\"`. If you are over your "
-            f"estimate, say so and give a new one.")
+    nudge = (f"devkit · {fmt_min(quiet)} since your last update to the developer{where}. Send an update (it prints "
+             f"the status block): while the step is still running, `dev progress note \"<what is happening>\" --next "
+             f"\"<what is next>\"`, which changes no step; when it is finished, `dev progress step \"<what finished>\" "
+             f"--check \"<evidence>\"`. Never close a step that is not finished. If you are over your estimate, say so "
+             f"and give a new one.")
+    return "\n\n".join(x for x in (mail, nudge) if x)
 
 
-def on_subagent(agent: str, data: dict, started: bool):
+def _run_event(agent, sid, fn):
+    """Apply fn to this session's live run (running or blocked) and save it. Never raises."""
+    try:
+        run = load_run(agent, sid)
+        if not run or run.get("state") == "done":
+            return
+        run = normalize(run)
+        expire_stale(run)
+        fn(run)
+        _save(run, touch_session=False)
+    except Exception:
+        pass
+
+
+def note_agent_launch(agent: str, data: dict, now: float | None = None):
+    """PreToolUse of a subagent launch (Claude's Agent/Task, Codex's spawn_agent): remember its description, so the
+    SubagentStart that follows gets a readable label and the plan step assigned to that label."""
     sid = data.get("session_id") or "-"
     f, s = _sess(agent, sid)
     if not f.exists():
         return
+    inp = data.get("tool_input") or {}
+    label = inp.get("description") or inp.get("nickname") or inp.get("name") or \
+        str(inp.get("message") or inp.get("prompt") or "").strip().split("\n")[0][:60]
+    q = (s.get("pending_agents") or [])[-19:]
+    q.append({"label": str(label)[:80], "type": inp.get("subagent_type") or inp.get("agent_type") or "",
+              "ts": round(now or time.time(), 1)})
+    s["pending_agents"] = q
+    f.write_text(json.dumps(s))
+
+
+def on_subagent(agent: str, data: dict, started: bool, now: float | None = None):
+    sid = data.get("session_id") or "-"
+    f, s = _sess(agent, sid)
+    if not f.exists():
+        return
+    now = now or time.time()
     subs = s.setdefault("subagents", {})
     aid = data.get("agent_id") or data.get("subagent_id") or "?"
+    kind = data.get("agent_type") or data.get("subagent_type") or ""
     if started:
-        subs[aid] = {"type": data.get("agent_type") or data.get("subagent_type") or "", "started": time.time()}
+        q = s.get("pending_agents") or []
+        i = next((j for j, x in enumerate(q) if not x.get("type") or not kind or x["type"] == kind), None)
+        label = q.pop(i)["label"] if i is not None else kind
+        s["pending_agents"] = q
+        subs[aid] = {"type": kind, "label": label, "started": now}
+
+        def link(run):
+            _open(run, "agent", aid, now)
+            lane = _lane(run, aid, now, label, kind)
+            lane["persona"] = persona(kind, label)
+            _audit("crew.start", lane["persona"] or label or kind, label, project=run.get("project") or "",
+                   agent_id=aid[:16], type=kind)
+            for st in run.get("plan") or []:  # the step assigned to this crew member (dev progress assign)
+                if st.get("label") and st.get("state") != "done" and (st.get("owner") or "main") == "main" \
+                        and _label_matches(st["label"], lane):
+                    st.update(owner=aid, state="running", started=st.get("started") or now)
+                    if st.get("scope"):
+                        lane["scope"] = st["scope"]
+                    break
+        _run_event(agent, sid, link)
     else:
         v = subs.pop(aid, None)
         if v:
-            record("subagent", agent, sid, v.get("type") or aid, time.time() - v["started"], s.get("project") or "")
+            record("subagent", agent, sid, v.get("label") or v.get("type") or aid, now - v["started"],
+                   s.get("project") or "")
+
+        def finish(run):
+            _close(run, "agent", aid, now)
+            lane = (run.get("agents") or {}).get(aid)
+            if lane:
+                lane.update(state="done", finished=now)
+                _audit("crew.finish", lane.get("persona") or lane.get("label") or aid,
+                       f"{active_minutes(run, lane.get('started'), now, now, aid):.1f} active minutes",
+                       project=run.get("project") or "", agent_id=aid[:16])
+            for st in run.get("plan") or []:
+                if st.get("owner") == aid and st.get("state") != "done":
+                    old_state = st.get("state")
+                    _finish_step(run, st, now, agent, sid)
+                    _log_change(run, st, old_state, "done", aid, f"{(lane or {}).get('persona') or 'subagent'} "
+                                                                 f"finished", now)
+            run["step"] = sum(1 for x in run.get("plan") or [] if x.get("state") in ("done", "skipped"))
+            _advance_main(run, now)
+        _run_event(agent, sid, finish)
     f.write_text(json.dumps(s))
 
 
 def on_turn_end(agent: str, sid: str, sess: dict):
-    """Stop: record the turn's duration; notify the developer when a long turn finishes."""
+    """Stop: close the turn's activity interval; record the turn; notify when a long turn finishes."""
+    now = time.time()
+    _run_event(agent, sid, lambda run: _close(run, "turn", None, now))
+    sess["turn_ended"] = now
     t0 = sess.get("turn_started")
     if not t0:
         return
-    secs = time.time() - t0
+    secs = now - t0
     record("turn", agent, sid, sess.get("status", "")[:120], secs, sess.get("project") or "")
     if secs / 60 >= cfg()["notify_after_minutes"]:
         notify(f"{agent} finished · {fmt_min(secs / 60)}", (sess.get("status") or "turn finished")[:180])
@@ -433,7 +1475,7 @@ def on_turn_end(agent: str, sid: str, sess: dict):
 
 # --------------------------------------------------------------------------- reports
 
-def report(days: int = 7, project: str = None) -> str:
+def report(days: int = 7, project: str | None = None) -> str:
     out = [ui.section(f"Time · last {days} days" + (f" · {project}" if project else ""))]
     turns = records(days, "turn", project)
     if turns:

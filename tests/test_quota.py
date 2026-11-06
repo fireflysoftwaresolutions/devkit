@@ -1,4 +1,5 @@
-# Copyright (c) 2026 Firefly Software Solutions Inc. All rights reserved.
+# Copyright (c) 2026 Firefly Software Solutions Inc.
+# SPDX-License-Identifier: Apache-2.0
 """Claude's usage windows, recorded by devkit's status line (hooks.statusline → providers.claude_quota)."""
 import io
 import json

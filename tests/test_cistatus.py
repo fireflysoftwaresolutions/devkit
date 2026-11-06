@@ -1,4 +1,5 @@
-# Copyright (c) 2026 Firefly Software Solutions Inc. All rights reserved.
+# Copyright (c) 2026 Firefly Software Solutions Inc.
+# SPDX-License-Identifier: Apache-2.0
 """CI/CD run status across providers, from canned API payloads. Run: python3 -m unittest -v"""
 import sys
 import unittest

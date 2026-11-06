@@ -1,0 +1,31 @@
+@{id}:
+  stage: @{stage}
+  extends: .@{key}
+@{#needs}
+  needs: [@{needs}]
+@{/needs}
+@{^needs}
+  needs: []
+@{/needs}
+@{#docker}
+  services:
+    - name: @{image:docker-dind}
+      alias: docker
+  variables:
+    DOCKER_HOST: tcp://docker:2375 # Testcontainers talks to the Docker service
+    DOCKER_TLS_CERTDIR: ""
+    TESTCONTAINERS_HOST_OVERRIDE: docker
+@{/docker}
+  script:
+    @{script}
+@{#junit}
+  artifacts:
+    when: always
+    reports:
+      junit: @{junit}
+@{/junit}
+@{#artifact}
+  artifacts:
+    paths: [dist/]
+    expire_in: 1 week
+@{/artifact}

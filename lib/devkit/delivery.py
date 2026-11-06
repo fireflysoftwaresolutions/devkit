@@ -1,4 +1,5 @@
-# Copyright (c) 2026 Firefly Software Solutions Inc. All rights reserved.
+# Copyright (c) 2026 Firefly Software Solutions Inc.
+# SPDX-License-Identifier: Apache-2.0
 """Delivery policy: how a project versions, tests, releases and ships — detected, recommended, recorded, enforced.
 
 detect(repo)        what the repository does today: version scheme and source, release tooling, changelog, CI,
@@ -24,7 +25,25 @@ POLICIES = HANDOFF / "policies"
 CALVER_RE = re.compile(r"^v?(\d{2})\.(\d{1,2})\.(\d+)$")
 SEMVER_RE = re.compile(r"^v?(\d+)\.(\d+)\.(\d+)(?:[-+][0-9A-Za-z.-]+)?$")
 FIELDS = ("versioning", "tag_format", "version_source", "release_flow", "changelog", "test_gate", "ci", "branch_model",
-          "publish", "deploy", "kind", "release_train")
+          "publish", "deploy", "kind", "release_train", "job_timeout_minutes")
+LIST_FIELDS = ("test_gate", "publish", "deploy")
+TIMEOUT_RANGE = (5, 360)  # GitHub's hard limit is 6 hours
+
+
+def set_field(policy: dict, key: str, value: str) -> dict:
+    """One `--set key=value`, validated: lists split on ';', the job timeout an integer of minutes."""
+    if key not in FIELDS and key != "bump":
+        raise ValueError(f"unknown field {key}: {', '.join(FIELDS)}")
+    if key in LIST_FIELDS:
+        policy[key] = [x.strip() for x in value.split(";") if x.strip()]
+    elif key == "job_timeout_minutes":
+        lo, hi = TIMEOUT_RANGE
+        if not value.strip().isdigit() or not lo <= int(value) <= hi:
+            raise ValueError(f"job_timeout_minutes is a whole number of minutes from {lo} to {hi}, not {value!r}")
+        policy[key] = int(value)
+    else:
+        policy[key] = value
+    return policy
 
 
 def _read(p: Path, limit=300_000) -> str:

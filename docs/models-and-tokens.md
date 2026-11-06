@@ -18,28 +18,33 @@ devkit never sets the main model or its effort, in either agent. You choose them
   when a task needs a different tier.
 - **Subagents inherit the session model.** This is the vendor default in both tools and devkit keeps it, so
   delegated work is as good as the main session unless a smaller model is chosen on purpose for checkable lookups.
+  Crew members add only effort: `strong` members run at high effort (in Codex, on the `deep` profile's model).
 
 ## What devkit configures
 
 | Setting | Claude Code | Codex |
 | --- | --- | --- |
-| A small read-only agent for lookups | The `scout` agent of the devkit plugin (`plugin/agents/scout.md`) | The `scout` role, `~/.codex/agents/scout.toml` |
+| A small read-only agent for lookups | Sparks, the crew's scout (`devkit:sparks`, alias `devkit:scout`) | The `sparks` role and its `scout` alias in `~/.codex/agents/` |
 | Profiles for other tiers | Not needed: `/model` and `/effort` | `fast`, `deep`, and `review` in `~/.codex/<name>.config.toml` |
 | Subagent model and effort | Inherit the session (optional override) | Inherit the session (optional override) |
 | Parallel subagents | — | At most 4 threads per session |
 | Fast mode | Opt in per session (`fastModePerSessionOptIn`) | — |
 
-### The scout agent
+### Sparks, the scout agent
 
 A lookup whose answer you can check cheaply (where a symbol is used, which file sets a value, which log line failed)
-does not need the session's model. The scout answers with `path:line` references and short excerpts, says "not
-found" rather than guess, marks what it inferred, and never edits.
+does not need the session's model. Sparks, the crew's scout, answers with `path:line` references and short excerpts,
+says "not found" rather than guess, marks what it inferred, and never edits. `scout` is an alias for Sparks in both
+agents, so briefs that name the scout still work.
 
 | | Claude Code | Codex |
 | --- | --- | --- |
-| Defined in | `plugin/agents/scout.md` (installed with the plugin) | `config/codex/config.json` → `agents.scout`, written to `~/.codex/agents/scout.toml` |
-| Model and effort | Haiku, low effort | `gpt-6-luna`, low reasoning effort |
+| Defined in | `config/crew.json`, generated into `plugin/agents/sparks.md` and `scout.md` (installed with the plugin) | `config/crew.json`, written to `~/.codex/agents/sparks.toml` and `scout.toml` by `dev install --only codex` |
+| Model and effort | Haiku, low effort | The `fast` profile's model and effort (`gpt-6-luna`, low) |
 | Tools or sandbox | `Read`, `Grep`, `Glob`; it does not load `CLAUDE.md` | Read-only sandbox |
+
+Sparks is the only `fast` member of the crew; the others use the session's model (see
+[The crew › Who is on the crew](crew.md#who-is-on-the-crew)).
 
 ### Codex profiles
 
@@ -114,7 +119,7 @@ tokens. In short:
 | Security, auth, money, personal data, migrations, public API changes | The session model or stronger, never smaller; high effort |
 | Final review before "done" or a PR | A fresh context at the session model, high effort |
 | Routine implementation with a clear scope | The session model at its default effort |
-| Searches and lookups, log triage | The scout, low effort, only when the result can be checked |
+| Searches and lookups, log triage | Sparks (the scout), low effort, only when the result can be checked |
 | Mechanical edits from a pattern | A tool first (formatter, LSP rename, codemod); otherwise a small agent |
 
 - **Downgrade only what you can verify cheaply.** A judgment, an unverifiable summary or "no issues found" from a

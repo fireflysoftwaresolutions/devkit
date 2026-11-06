@@ -1,4 +1,5 @@
-# Copyright (c) 2026 Firefly Software Solutions Inc. All rights reserved.
+# Copyright (c) 2026 Firefly Software Solutions Inc.
+# SPDX-License-Identifier: Apache-2.0
 """Lessons: learn from mistakes so they are not repeated, in one project or across all of them.
 
 A lesson is a short, blameless record in the handoff repository: lessons/<scope>/<ID>.md, where scope is a project

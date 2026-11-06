@@ -1,4 +1,5 @@
-# Copyright (c) 2026 Firefly Software Solutions Inc. All rights reserved.
+# Copyright (c) 2026 Firefly Software Solutions Inc.
+# SPDX-License-Identifier: Apache-2.0
 """`dev sleep`: what a brain does at night — consolidate what matters, forget what does not.
 
 Runs nightly as the `sleep` job (`dev jobs`), or by hand (--dry-run previews):

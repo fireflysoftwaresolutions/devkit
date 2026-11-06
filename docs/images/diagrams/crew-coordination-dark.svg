@@ -1,0 +1,51 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1152" height="824" viewBox="0 0 1152 824" role="img" aria-labelledby="dk-title dk-desc">
+<title id="dk-title">How Morpheus leads the crew</title>
+<desc id="dk-desc">The developer gives Morpheus, the main session, a goal. Morpheus plans the steps with their dependencies and briefs crew members, each in its own lane with its own files, up to four at once. Members send questions and decisions back to Morpheus, who asks the developer the decisions that are theirs. At SubagentStop, the crew canary checks that each report starts with the member's status block before it reaches Morpheus. After the push, CI watch follows the run and sends a failure's diagnosis to Morpheus, who hands the fix to Link.</desc>
+<rect width="1152" height="824" fill="#10110F"/>
+<g font-family="Manrope, 'Manrope Variable', system-ui, -apple-system, 'Segoe UI', Arial, sans-serif">
+<circle cx="68" cy="74" r="4" fill="#FFB34A"/>
+<text x="80" y="78.5" font-size="12" font-weight="600" fill="#BFB8AB" letter-spacing="0.48">HOW MORPHEUS LEADS THE CREW</text>
+<g transform="translate(215.0,100.0)">
+<rect x="-16.0" y="320.0" width="888.0" height="160.0" rx="12" fill="#1A1B17" stroke="#2E302A" stroke-width="1"/>
+<text x="0.0" y="344.0" font-size="12" font-weight="600" fill="#BFB8AB" text-anchor="start" letter-spacing="0.48">LANES · OWN TIME AND FILES · UP TO FOUR</text>
+<path d="M384.0,99.5 L384.0,152.5" fill="none" stroke="#BFB8AB" stroke-width="1.5" stroke-linejoin="round" stroke-linecap="round"/><polygon points="384.0,160.0 380.0,152.0 388.0,152.0" fill="#BFB8AB"/><polygon points="384.0,92.0 388.0,100.0 380.0,100.0" fill="#BFB8AB"/>
+<rect x="329.1" y="114.0" width="109.8" height="24.0" rx="11.0" fill="#10110F"/>
+<text x="384.0" y="130.0" font-size="13" font-weight="400" fill="#BFB8AB" text-anchor="middle">goal · decisions</text>
+<path d="M384.0,247.5 L384.0,312.5" fill="none" stroke="#BFB8AB" stroke-width="1.5" stroke-linejoin="round" stroke-linecap="round"/><polygon points="384.0,320.0 380.0,312.0 388.0,312.0" fill="#BFB8AB"/><polygon points="384.0,240.0 388.0,248.0 380.0,248.0" fill="#BFB8AB"/>
+<rect x="328.0" y="268.0" width="112.1" height="24.0" rx="11.0" fill="#10110F"/>
+<text x="384.0" y="284.0" font-size="13" font-weight="400" fill="#BFB8AB" text-anchor="middle">brief · questions</text>
+<path d="M384.0,480.0 L384.0,568.5" fill="none" stroke="#BFB8AB" stroke-width="1.5" stroke-linejoin="round" stroke-linecap="round"/><polygon points="384.0,576.0 380.0,568.0 388.0,568.0" fill="#BFB8AB"/>
+<rect x="358.2" y="516.0" width="51.6" height="24.0" rx="11.0" fill="#10110F"/>
+<text x="384.0" y="532.0" font-size="13" font-weight="400" fill="#BFB8AB" text-anchor="middle">report</text>
+<path d="M276.0,616.0 L-86.0,616.0 Q-98.0,616.0 -98.0,604.0 L-98.0,212.0 Q-98.0,200.0 -86.0,200.0 L268.5,200.0" fill="none" stroke="#BFB8AB" stroke-width="1.5" stroke-linejoin="round" stroke-dasharray="6 5" stroke-linecap="butt"/><polygon points="276.0,200.0 268.0,204.0 268.0,196.0" fill="#BFB8AB"/>
+<rect x="-151.0" y="396.0" width="105.9" height="24.0" rx="11.0" fill="#10110F"/>
+<text x="-98.0" y="412.0" font-size="13" font-weight="400" fill="#BFB8AB" text-anchor="middle">checked report</text>
+<path d="M492.0,200.0 L620.5,200.0" fill="none" stroke="#BFB8AB" stroke-width="1.5" stroke-linejoin="round" stroke-linecap="round"/><polygon points="628.0,200.0 620.0,204.0 620.0,196.0" fill="#BFB8AB"/>
+<rect x="520.6" y="188.0" width="78.7" height="24.0" rx="11.0" fill="#10110F"/>
+<text x="560.0" y="204.0" font-size="13" font-weight="400" fill="#BFB8AB" text-anchor="middle">push once</text>
+<path d="M736.0,240.0 L736.0,360.5" fill="none" stroke="#BFB8AB" stroke-width="1.5" stroke-linejoin="round" stroke-dasharray="6 5" stroke-linecap="butt"/><polygon points="736.0,368.0 732.0,360.0 740.0,360.0" fill="#BFB8AB"/>
+<rect x="664.9" y="292.0" width="142.3" height="24.0" rx="11.0" fill="#10110F"/>
+<text x="736.0" y="308.0" font-size="13" font-weight="400" fill="#BFB8AB" text-anchor="middle">failure, via Morpheus</text>
+<circle cx="384.0" cy="16.0" r="9" fill="#1F201C" stroke="#BFB8AB" stroke-width="1.5"/><path d="M367.0,44.0 Q367.0,28.0 384.0,28.0 Q401.0,28.0 401.0,44.0 Z" fill="#1F201C" stroke="#BFB8AB" stroke-width="1.5"/>
+<text x="384.0" y="70.0" font-size="16" font-weight="600" fill="#F3F1EB" text-anchor="middle">Developer</text>
+<rect x="276.0" y="160.0" width="216.0" height="80.0" rx="6.0" fill="#FFB34A" stroke="#FFB34A" stroke-width="2"/>
+<text x="384.0" y="194.0" font-size="16" font-weight="600" fill="#272820" text-anchor="middle">Morpheus</text>
+<text x="384.0" y="216.0" font-size="13" font-weight="400" fill="#272820" text-anchor="middle">plan with dependencies</text>
+<rect x="628.0" y="160.0" width="216.0" height="80.0" rx="6.0" fill="#2E3126" stroke="#959C7F" stroke-width="1.5"/>
+<text x="736.0" y="194.0" font-size="16" font-weight="600" fill="#F3F1EB" text-anchor="middle">CI watch</text>
+<text x="736.0" y="216.0" font-size="13" font-weight="400" fill="#B9BF9F" text-anchor="middle">first error · class · action</text>
+<rect x="4.0" y="368.0" width="216.0" height="80.0" rx="6.0" fill="#1F201C" stroke="#4C4E45" stroke-width="1.5"/>
+<text x="112.0" y="402.0" font-size="16" font-weight="600" fill="#F3F1EB" text-anchor="middle">Tank</text>
+<text x="112.0" y="424.0" font-size="13" font-weight="400" fill="#BFB8AB" text-anchor="middle">services/**</text>
+<rect x="276.0" y="368.0" width="216.0" height="80.0" rx="6.0" fill="#1F201C" stroke="#4C4E45" stroke-width="1.5"/>
+<text x="384.0" y="402.0" font-size="16" font-weight="600" fill="#F3F1EB" text-anchor="middle">Trinity</text>
+<text x="384.0" y="424.0" font-size="13" font-weight="400" fill="#BFB8AB" text-anchor="middle">web/**</text>
+<rect x="628.0" y="368.0" width="216.0" height="80.0" rx="6.0" fill="#1F201C" stroke="#4C4E45" stroke-width="1.5"/>
+<text x="736.0" y="402.0" font-size="16" font-weight="600" fill="#F3F1EB" text-anchor="middle">Link</text>
+<text x="736.0" y="424.0" font-size="13" font-weight="400" fill="#BFB8AB" text-anchor="middle">.github/workflows/**</text>
+<rect x="276.0" y="576.0" width="216.0" height="80.0" rx="6.0" fill="#2E3126" stroke="#959C7F" stroke-width="1.5"/>
+<text x="384.0" y="610.0" font-size="16" font-weight="600" fill="#F3F1EB" text-anchor="middle">Crew canary</text>
+<text x="384.0" y="632.0" font-size="13" font-weight="400" fill="#B9BF9F" text-anchor="middle">SubagentStop · status block</text>
+</g>
+</g>
+</svg>

@@ -1,4 +1,5 @@
-# Copyright (c) 2026 Firefly Software Solutions Inc. All rights reserved.
+# Copyright (c) 2026 Firefly Software Solutions Inc.
+# SPDX-License-Identifier: Apache-2.0
 """Versioned plans and specs: plans/<scope>/<slug>.md with frontmatter, a body hash and a Changelog.
 
 Any edit to a plan's body without `dev plan revise --why` is detected (`needs_revision`), and the Stop hook

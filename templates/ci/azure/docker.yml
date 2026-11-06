@@ -1,0 +1,13 @@
+      - job: image
+        displayName: Container image (build and scan)
+@{#needs}
+        dependsOn: [@{needs}]
+@{/needs}
+        timeoutInMinutes: 20
+        steps:
+          - script: docker build -t "ci-image:$(Build.SourceVersion)" .
+            displayName: Build the image
+          - script: >-
+              docker run --rm -v /var/run/docker.sock:/var/run/docker.sock @{image:trivy}
+              image --severity HIGH,CRITICAL --exit-code 1 --ignore-unfixed "ci-image:$(Build.SourceVersion)"
+            displayName: Scan the image (trivy)

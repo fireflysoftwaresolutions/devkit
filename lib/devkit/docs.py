@@ -1,4 +1,5 @@
-# Copyright (c) 2026 Firefly Software Solutions Inc. All rights reserved.
+# Copyright (c) 2026 Firefly Software Solutions Inc.
+# SPDX-License-Identifier: Apache-2.0
 """`dev docs check`: Markdown structure, links and anchors, prose, and diagrams — in one pass.
 
 Uses the repository's own configuration when it has one (.markdownlint*, .vale.ini, lychee.toml),

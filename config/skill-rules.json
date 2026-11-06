@@ -27,7 +27,7 @@
         "*.php"
       ],
       "content": "<style[\\s>]|<!doctype html|className=|styled\\.|@Component\\(",
-      "prompt": "\\b(ui|ux|frontend|front-end|dashboard|landing( page)?|css|layout|web page|screen|interfaz|pantalla|diseño visual)\\b",
+      "prompt": "\\b(ui|ux|frontend|front-end|landing( page)?|css|tailwind|layout|interfaz|diseño visual)\\b|\\b(design|redesign|build|create|improve|polish|restyle|style|diseñ\\w*|rediseñ\\w*|mejor\\w*|maquet\\w*|crea\\w*|constru\\w*)\\W+(\\w+\\W+){0,4}(dashboard|page|p[aá]gina|screen|pantalla|component|componente|form|formulario|modal|view|vista)s?\\b",
       "skills": {
         "claude": [
           "frontend-design",
@@ -96,6 +96,43 @@
       }
     },
     {
+      "id": "testing",
+      "why": "Tests that can fail for a real bug, TDD done right, and re-running only what a change can break",
+      "files": [
+        "test_*.py",
+        "*_test.py",
+        "tests/**",
+        "test/**",
+        "__tests__/**",
+        "*.spec.ts",
+        "*.spec.tsx",
+        "*.spec.js",
+        "*.test.ts",
+        "*.test.tsx",
+        "*.test.js",
+        "*.test.jsx",
+        "*Test.java",
+        "*Tests.java",
+        "*IT.java",
+        "*Test.kt",
+        "*_test.go",
+        "*Test.php",
+        "conftest.py",
+        "jest.config.*",
+        "vitest.config.*",
+        "phpunit.xml*"
+      ],
+      "prompt": "\\b(tests?|testing|tdd|unit tests?|pruebas?|test suite|bater[ií]a de (tests|pruebas)|coverage|cobertura|flaky)\\b",
+      "skills": {
+        "claude": [
+          "testing"
+        ],
+        "codex": [
+          "testing"
+        ]
+      }
+    },
+    {
       "id": "java-tests",
       "why": "JUnit 5, AssertJ, Testcontainers and Spring Boot test slices",
       "files": [
@@ -160,19 +197,27 @@
     },
     {
       "id": "workflows",
-      "why": "GitHub Actions security (injection, triggers, pinning, permissions) and the one-push delivery flow",
+      "why": "Pipelines on any host: speed, reliability and DevSecOps (cicd), GitHub Actions security, one-push delivery",
       "files": [
         ".github/workflows/*.yml",
         ".github/workflows/*.yaml",
-        ".github/actions/**"
+        ".github/actions/**",
+        ".gitlab-ci.yml",
+        ".gitlab/ci/**",
+        "bitbucket-pipelines.yml",
+        "azure-pipelines.yml",
+        "*.azure-pipelines.yml",
+        ".azure-pipelines/**"
       ],
-      "prompt": "\\b(github actions|workflow|ci pipeline|pipeline de ci)\\b",
+      "prompt": "\\b(github actions|gitlab ci|bitbucket pipelines?|azure (devops|pipelines?)|workflows?|ci ?/ ?cd|ci pipeline|pipelines? de ci|pipelines?)\\b",
       "skills": {
         "claude": [
+          "cicd",
           "github-actions-hardening",
           "delivery"
         ],
         "codex": [
+          "cicd",
           "github-actions-hardening",
           "delivery"
         ]
@@ -258,6 +303,21 @@
         ".release-please-manifest.json",
         "release-please-config.json"
       ]
+    },
+    {
+      "id": "crew",
+      "why": "Leading the crew: who to send, parallel or in sequence, briefs, lanes, scopes and reports",
+      "prompt": "\\b(crew|subagents?|sub-agents?|agentes? en paralelo|parallel (agents?|work)|spawn\\w*|orchestrat\\w*|orquest\\w*|equipo de agentes|multi-?agent\\w*|delegat\\w*|deleg[ae]\\w*)\\b",
+      "skills": {
+        "claude": [
+          "crew",
+          "working-efficiently"
+        ],
+        "codex": [
+          "crew",
+          "working-efficiently"
+        ]
+      }
     },
     {
       "id": "communicating",

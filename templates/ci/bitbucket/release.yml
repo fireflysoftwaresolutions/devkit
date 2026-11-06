@@ -1,0 +1,29 @@
+    - step: &release-sbom
+        name: Release SBOM (syft)
+        image: @{image:syft-debug}
+        script:
+          - mkdir -p dist
+          - /syft scan dir:. -o spdx-json=dist/sbom.spdx.json
+          - cd dist && sha256sum -- * > SHA256SUMS
+        artifacts:
+          - dist/**
+    - step: &release
+        name: Release (sign, publish to Downloads, verify)
+        image: @{image:alpine}
+        script:
+          # BITBUCKET_ACCESS_TOKEN: a secured repository variable (a repository access token with write access);
+          # COSIGN_PRIVATE_KEY, COSIGN_PASSWORD and COSIGN_PUBLIC_KEY: secured variables from `cosign generate-key-pair`.
+          - apk add --no-cache curl
+          - curl -fsSLo /usr/local/bin/cosign @{bin_url:cosign}
+          - echo "@{bin_sha:cosign}  /usr/local/bin/cosign" | sha256sum -c - && chmod +x /usr/local/bin/cosign
+          - cd dist && for f in *; do cosign sign-blob --yes --key env://COSIGN_PRIVATE_KEY --bundle "$f.sigstore.json" "$f"; done && cd ..
+          - API="https://api.bitbucket.org/2.0/repositories/$BITBUCKET_REPO_FULL_NAME/downloads"
+          - |
+            for f in dist/*; do cp "$f" "$BITBUCKET_TAG-$(basename "$f")"; curl -fsS -H "Authorization: Bearer $BITBUCKET_ACCESS_TOKEN" -X POST "$API" -F files=@"$BITBUCKET_TAG-$(basename "$f")"; done
+          # verify what was published: download it again, check the checksums and the signatures
+          - mkdir -p verify && cd verify
+          - |
+            for f in ../dist/*; do n=$(basename "$f"); curl -fsSL -H "Authorization: Bearer $BITBUCKET_ACCESS_TOKEN" -o "$n" "$API/$BITBUCKET_TAG-$n"; done
+          - sha256sum -c SHA256SUMS
+          - printf '%s' "$COSIGN_PUBLIC_KEY" > /tmp/cosign.pub
+          - for f in $(ls | grep -v '\.sigstore\.json$'); do cosign verify-blob --key /tmp/cosign.pub --bundle "$f.sigstore.json" "$f"; done

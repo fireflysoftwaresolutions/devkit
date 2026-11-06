@@ -1,4 +1,5 @@
-# Copyright (c) 2026 Firefly Software Solutions Inc. All rights reserved.
+# Copyright (c) 2026 Firefly Software Solutions Inc.
+# SPDX-License-Identifier: Apache-2.0
 """Disk reclamation: worktrees whose work is merged, regenerable build output, stale temp.
 
 Safety rules (checked when planning AND again right before acting):

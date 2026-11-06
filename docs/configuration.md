@@ -90,6 +90,9 @@ Apply group changes with `dev install --only skills`. Rule changes apply at the 
 | `progress.notify` | `true` | Desktop notifications when a run blocks or finishes, and when a long turn ends |
 | `progress.notify_after_minutes` | `10` | A turn at least this long sends a notification when it ends |
 | `progress.slow_tool_seconds` | `20` | Tool calls at least this slow are recorded for `dev time` |
+| `progress.max_parallel` | `4` | Crew members that may work at once; the guard refuses a further launch ([The crew](crew.md#guardrails)) |
+| `progress.stale_agent_hours` | `6` | A crew member with no report for this long is closed as lost, and its step goes back to the main session |
+| `work.mode` | `guided` | `guided`: decisions that are the developer's wait for the developer; `auto`: the crew goes on with the recommended option and records it. A run can set its own (`--mode`) |
 | `ui.powerline` | `false` | Draw Nerd Font arrows between the status pills in `dev status` and `dev overview` (needs a Nerd Font in your terminal) |
 | `handoff.enforce` | `true` | When a session made commits without updating the handoff note, the Stop hook asks the agent once to update it |
 | `canary.enforce` | `true` | When a final message lacks the status block, the Stop hook asks the agent to reply again with it |
@@ -187,6 +190,10 @@ Never edit the generated files directly; the next install overwrites them, and `
 | `AZURE_DEVOPS_EXT_PAT` | `dev ci status` for Azure Pipelines and the `az devops` CLI (`AZURE_DEVOPS_PAT` works too for `dev ci status`) |
 | `DEVKIT_NO_NOTIFY=1` | No desktop notifications from that process |
 | `DEVKIT_THEME=dark\|light` | The wordmark's ink: paper on dark, charcoal on light (otherwise taken from `COLORFGBG`, default dark) |
+| `DEVKIT_ALLOW_STUBS=1` | One commit may take unfinished work the developer accepted |
+| `DEVKIT_SCOPE_OVERRIDE=1` | In the agent's environment: the main session may edit files a working crew member owns (emergencies) |
+| `DEVKIT_FROM_AGENT=<id>` | Set by the hooks on a subagent's `dev progress` and `dev crew` commands, so they write to its lane; never set it yourself |
+| `DEVKIT_NO_CI_WATCH=1` | No automatic `dev ci watch` after a push or PR from that process |
 | `DEVKIT_SCOPE=all` | Check every turn with the status block and required skills, not only development turns |
 | `DEVKIT_NO_AUTOSYNC=1` | No queued background syncs from that process; bulk operations push once at the end |
 | `NO_COLOR` | Plain output without colors |

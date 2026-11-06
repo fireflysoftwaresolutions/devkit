@@ -1,0 +1,12 @@
+# Copyright (c) 2026 Firefly Software Solutions Inc.
+# SPDX-License-Identifier: Apache-2.0
+# gitleaks configuration: the default rules, minus compiled Python caches. A .pyc file is built locally from the
+# sources (which are scanned) and is never committed; Python folds test fixtures such as "ghp" + "_" + "…" into one
+# constant there, so the cache looks like a token while the source does not.
+
+[extend]
+useDefault = true
+
+[allowlist]
+description = "compiled Python caches, never committed"
+paths = ['''(^|/)__pycache__/''', '''\.pyc$''']
