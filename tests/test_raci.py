@@ -193,6 +193,29 @@ class AssignmentTests(unittest.TestCase):
                                       "agent_transcript_path": str(tr)}, True, now=self.m(41))
         self.assertEqual(pg.load_run("claude", "s1")["agents"]["g1"]["label"], "Ghost: docs")
 
+    def test_parallel_launches_each_find_their_own_record_from_the_main_transcript(self):
+        """Claude Code's SubagentStart may carry only the main transcript: the launch record sits in
+        <session>/subagents/agent-<id>.meta.json next to it, whatever order the subagents start in."""
+        pg.start("Work", plan=["dashboard screens", "agent lifecycle design"], now=self.m(0))
+        pg.assign("agent lifecycle design", "The Architect", now=self.m(0))
+        for d in ("Sati: dashboard screens", "The Architect: agent lifecycle"):
+            pg.note_agent_launch("claude", {"session_id": "s1", "tool_input": {"description": d,
+                                                                              "subagent_type": "general-purpose"}})
+        with tempfile.TemporaryDirectory() as d:
+            main = Path(d) / "s1.jsonl"
+            main.write_text("")
+            sub = Path(d) / "s1" / "subagents"
+            sub.mkdir(parents=True)
+            for aid, desc in (("x1", "Sati: dashboard screens"), ("y2", "The Architect: agent lifecycle")):
+                (sub / f"agent-{aid}.meta.json").write_text(json.dumps({"toolUseId": "t", "description": desc}))
+            for aid in ("y2", "x1"):  # the Architect starts first
+                pg.on_subagent("claude", {"session_id": "s1", "agent_id": aid, "agent_type": "general-purpose",
+                                          "transcript_path": str(main)}, True, now=self.m(1))
+        run = pg.load_run("claude", "s1")
+        self.assertEqual(run["agents"]["y2"]["label"], "The Architect: agent lifecycle")
+        self.assertEqual(run["agents"]["x1"]["label"], "Sati: dashboard screens")
+        self.assertEqual(next(s for s in run["plan"] if s["name"] == "agent lifecycle design")["owner"], "y2")
+
     def test_a_step_reassigned_away_from_a_running_member_leaves_its_lane(self):
         pg.start("Work", plan=["installer", "dashboard server"], now=self.m(0))
         pg.assign("installer", "Kid", now=self.m(0))

@@ -1483,6 +1483,13 @@ def _run_event(agent, sid, fn):
 
 
 def note_agent_launch(agent: str, data: dict, now: float | None = None):
+    """PreToolUse of a subagent launch; see _note_agent_launch. Serialized per session: parallel launches and
+    starts run in separate hook processes that update the same session file."""
+    with core.Lock(f"session-{agent}-{re.sub(r'[^A-Za-z0-9_-]', '', data.get('session_id') or '-')[:80]}", wait=5):
+        return _note_agent_launch(agent, data, now)
+
+
+def _note_agent_launch(agent: str, data: dict, now: float | None = None):
     """PreToolUse of a subagent launch (Claude's Agent/Task, Codex's spawn_agent): remember its description, so the
     SubagentStart that follows gets a readable label and the plan step assigned to that label."""
     sid = data.get("session_id") or "-"
@@ -1509,16 +1516,31 @@ LAUNCH_TTL = 15 * 60  # a launch whose SubagentStart never came does not label a
 
 
 def _launch_description(data: dict) -> str:
-    """The description the Agent tool launched this subagent with: Claude Code keeps it in `<transcript>.meta.json`
-    next to the subagent's transcript. '' when there is none (Codex, an older client)."""
+    """The description the Agent tool launched this subagent with. Claude Code keeps it in `<transcript>.meta.json`
+    next to the subagent's transcript: `agent_transcript_path` when the event carries it, else
+    `<main transcript>/../<session>/subagents/agent-<agent_id>.meta.json`. '' when there is none (Codex, an older
+    client)."""
+    cands = []
     p = str(data.get("agent_transcript_path") or "")
-    if not p.endswith(".jsonl"):
-        return ""
-    meta = core.read_json(Path(p[:-len(".jsonl")] + ".meta.json"), {}) or {}
-    return str(meta.get("description") or "") if isinstance(meta, dict) else ""
+    if p.endswith(".jsonl"):
+        cands.append(Path(p[:-len(".jsonl")] + ".meta.json"))
+    main, aid = str(data.get("transcript_path") or ""), str(data.get("agent_id") or "")
+    if main.endswith(".jsonl") and aid and "/" not in aid:
+        cands.append(Path(main[:-len(".jsonl")]) / "subagents" / f"agent-{aid}.meta.json")
+    for c in cands:
+        meta = core.read_json(c, {}) or {}
+        if isinstance(meta, dict) and meta.get("description"):
+            return str(meta["description"])
+    return ""
 
 
 def on_subagent(agent: str, data: dict, started: bool, now: float | None = None):
+    """SubagentStart / SubagentStop; see _on_subagent. Serialized per session like note_agent_launch."""
+    with core.Lock(f"session-{agent}-{re.sub(r'[^A-Za-z0-9_-]', '', data.get('session_id') or '-')[:80]}", wait=5):
+        return _on_subagent(agent, data, started, now)
+
+
+def _on_subagent(agent: str, data: dict, started: bool, now: float | None = None):
     sid = data.get("session_id") or "-"
     f, s = _sess(agent, sid)
     if not f.exists():
