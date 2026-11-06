@@ -1,11 +1,11 @@
 ---
 name: release-policy
-description: Understand, recommend and put in place a project's or initiative's delivery policy — versioning (CalVer or SemVer), version bumps, test gate, changelog, release flow, publishing and deployment — using `dev delivery` (detect, recommend, gaps) and `dev delivery apply` (record it in the handoff repository, open tasks for the gaps). Use before a project's first release, when a release, tag, version bump or publish is requested, when a repository has no clear release procedure, and when several projects must release together (release trains).
+description: Understand, recommend and put in place a project's or initiative's delivery policy—versioning (CalVer or SemVer), version bumps, test gate, changelog, release flow, publishing and deployment—using `dev delivery` (detect, recommend, gaps) and `dev delivery apply` (record it in the handoff repository, open tasks for the gaps). Use before a project's first release, when a release, tag, version bump or publish is requested, when a repository has no clear release procedure, and when projects must release together (release trains).
 ---
 
 # Release policy
 
-Every project has one recorded way to version, test, release and ship. It lives in the handoff repository
+Every project has one recorded way to version, test, release, and ship. It lives in the handoff repository
 (`policies/<project id>.json`, or `policies/initiatives/<slug>.json` for a release train), sessions see it in their
 context, the guard refuses tags that break it, and `dev release` follows it.
 
@@ -25,9 +25,9 @@ gate), the branch model, and what the project publishes or deploys.
 | Situation | Versioning | Why |
 | --- | --- | --- |
 | The repository already has a consistent scheme | keep it | consumers and automation depend on it |
-| A library, SDK, framework or package others depend on | **SemVer** `vMAJOR.MINOR.PATCH` | the number tells consumers whether an upgrade can break them |
-| An application, service, platform, internal tool or docs site | **CalVer** `vYY.MM.PATCH` (devkit default) | the date tells everyone how current a deployment is; nobody depends on its API through a version range |
-| Several projects released together (platform, BOM, parent POM) | a **release train** on the initiative | one version and one order for the set; each member keeps its own scheme |
+| A library, SDK, framework, or package others depend on | **SemVer** `vMAJOR.MINOR.PATCH` | the number tells consumers whether an upgrade can break them |
+| An app, service, platform, internal tool, or docs site | **CalVer** `vYY.MM.PATCH` (devkit default) | the date tells everyone how current a deployment is; nobody depends on its API through a version range |
+| Projects released together (platform, BOM, parent POM) | a **release train** on the initiative | one version and one order for the set; each member keeps its own scheme |
 
 Bumps:
 
@@ -47,7 +47,7 @@ dev delivery apply -i <initiative> --set release_train="bom → parent → servi
 ```
 
 Every change bumps the policy's version and records who changed it, when and why. `--tasks` opens a work item for
-each gap, such as no CI, no test gate, no changelog or no release workflow.
+each gap, such as no CI, no test gate, no changelog, or no release workflow.
 
 ## 4. Release by the policy (delivery skill, global rules §7)
 
@@ -63,7 +63,7 @@ each gap, such as no CI, no test gate, no changelog or no release workflow.
 ## 5. Release trains (initiatives)
 
 - Record the order and the compatibility rule in the initiative's policy, for example: "consumers adopt exactly one
-  published framework version through the parent POM and BOM; published versions are never overwritten".
+  published framework version through the parent POM and BOM; published versions are never overwritten."
 - Release the members in dependency order, and record each released version in the initiative note's Decisions.
 - A member project's own policy still governs its tags.
 

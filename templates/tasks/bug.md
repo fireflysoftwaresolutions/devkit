@@ -13,7 +13,7 @@ _What happens, where, since when._
 
 ## Environment
 
-_Version, browser/OS, data set, logs or trace id._
+_Version, browser/OS, data set, logs, or trace id._
 
 ## Done when
 

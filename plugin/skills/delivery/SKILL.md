@@ -1,6 +1,6 @@
 ---
 name: delivery
-description: Local-first GitOps delivery — integrate related branches or PRs on one local integration/release branch, run exactly what CI runs locally, push once and get a single CI run, fix CI failures by reproducing them locally, then release and verify. Use whenever you are about to push, open or merge PRs, combine several branches, cut a release, or when CI is failing.
+description: Local-first GitOps delivery—integrate related branches or PRs on one local integration/release branch, run exactly what CI runs locally, push once and get a single CI run, fix CI failures by reproducing them locally, then release and verify. Use whenever you are about to push, open or merge PRs, combine branches, cut a release, or when CI is failing.
 ---
 
 # Delivery: one integration, one push, one CI run
@@ -25,7 +25,7 @@ Match tool versions to the setup steps (`actions/setup-node` → Node major, `se
 3. Before the first push, run the full local equivalent of CI (lint, types, unit, integration, build, package).
 4. `git push` once; `gh pr create --fill`; `gh pr checks --watch`.
 
-## 2. Several branches or PRs that must land together
+## 2. Branches or PRs that must land together
 
 ```bash
 git fetch origin
@@ -41,20 +41,20 @@ gh pr checks --watch
 
 - Ask other sessions working on those branches to commit locally and stop pushing; worktrees share the
   repository, so you can merge their local branches directly.
-- Never merge the individual PRs one by one to "see what CI says". The integration PR supersedes them: when it is
+- Never merge the individual PRs one by one to "see what CI says." The integration PR supersedes them: when it is
   merged, GitHub marks them merged (their commits are included) or close them with a link.
 
 ## 3. When CI fails
 
-1. `gh run view <run-id> --log-failed` — read the actual error.
+1. `gh run view <run-id> --log-failed`—read the actual error.
 2. Reproduce it locally with the same command (and same versions). Fix it. Re-run the full local suite.
-3. Push once. One fix per push, never "try and see".
+3. Push once. One fix per push, never "try and see."
 4. Not reproducible on macOS (Linux-only path, case-sensitive FS, missing CI secret, runner resources)? Say so,
    make the smallest targeted fix, push once, and explain the reasoning in the PR.
 5. Flaky? Prove it (passes locally repeatedly, unrelated to the change, history of flakiness), record it in the
    handoff note, then `DEVKIT_FLAKY=1 gh run rerun <id> --failed`.
 
-The devkit guard blocks a third push to the same branch within an hour and blind `gh run rerun` — that is the
+The devkit guard blocks a third push to the same branch within an hour and blind `gh run rerun`—that is the
 signal to stop and reproduce locally.
 
 ## 4. Release
@@ -68,7 +68,7 @@ signal to stop and reproduce locally.
 
 ## 5. GitOps rules
 
-- Git is the source of truth for code, configuration, infrastructure and deployment manifests.
+- Git is the source of truth for code, configuration, infrastructure, and deployment manifests.
 - Environments change only through merged PRs and tags (pipelines deploy them); no manual changes, no drift. If an
   emergency manual change happened, capture it in git immediately.
 - Secrets live in the secret manager / CI secrets, referenced by name; never in the repository.

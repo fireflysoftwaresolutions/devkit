@@ -1,10 +1,10 @@
 ## Question
 
-_What we need to learn, and the decision it unblocks._
+_What the team needs to learn, and the decision it unblocks._
 
 ## Timebox
 
-_e.g. 4h._
+_For example, 4 hours._
 
 ## Done when
 

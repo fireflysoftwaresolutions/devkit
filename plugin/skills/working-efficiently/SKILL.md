@@ -1,6 +1,6 @@
 ---
 name: working-efficiently
-description: How to spend tokens, models, reasoning effort and parallelism without losing quality — which work deserves the strongest model and high effort and which can go to a small, fast one; when a subagent or a parallel session pays off and when it is waste; briefing templates; context and tool-output hygiene; escalation rules and quality gates. Covers Claude Code and Codex. Use when you choose a model or effort level, before you launch a subagent or parallel session, when a session grows long or its output floods the context, and when a cheaper attempt fails.
+description: How to spend tokens, models, reasoning effort and parallelism without losing quality—which work deserves the strongest model and high effort and which can go to a small, fast one; when a subagent or a parallel session pays off and when it is waste; briefing templates; context and tool-output hygiene; escalation rules and quality gates. Covers Claude Code and Codex. Use when you choose a model or effort level, before you launch a subagent or parallel session, when a session grows long or its output floods the context, and when a cheaper attempt fails.
 ---
 
 # Working efficiently without losing quality
@@ -22,7 +22,7 @@ or suggest it for the next session.
 | Security review, auth, money, personal data, migrations, public API changes | session model or stronger, never smaller | high | Misses are silent and expensive |
 | Final review before "done" or a PR | fresh context, session model | high | Independence matters more than tier |
 | Routine implementation with a clear scope, and its tests | session model | default (medium on Claude 5.5 models) | The default is tuned for this |
-| Search, file and symbol lookups, "where is X used", config values | small read-only agent | low | The result is cheap to check |
+| Search, file and symbol lookups, "where is X used," config values | small read-only agent | low | The result is cheap to check |
 | Log triage, summarizing long output | small agent | low–medium | Only if it returns quotes and line references you can check |
 | Mechanical edits from a pattern you specified, formatting, lint | a tool (formatter, LSP rename, codemod, sed); else a small agent | low | Deterministic beats any model |
 
@@ -32,13 +32,13 @@ or suggest it for the next session.
   (a summary you can't verify, "no issues found"); the brief leaves room for interpretation; the work is tightly
   coupled to what you are doing; or a cheaper attempt already failed. **Rule: downgrade only work whose result you can
   verify cheaply.**
-- Price per million tokens in/out: Fable 5.1 $10/$50 (usage credits on subscriptions), Opus 5.5 $4/$20, Sonnet 5.5
-  $2/$10, Haiku 5.5 $0.10/$0.50 for prompts up to 100k tokens ($0.50/$2.50 above). On Codex, GPT-6.1 Sol is the
+- Prices per million tokens in/out are Fable 5.1 $10/$50 (usage credits on subscriptions), Opus 5.5 $4/$20, Sonnet 5.5
+  $2/$10, and Haiku 5.5 $0.10/$0.50 for prompts up to 100k tokens ($0.50/$2.50 for longer prompts). On Codex, GPT-6.1 Sol is the
   workhorse, GPT-6 Astra the frontier model and GPT-6 Luna the fast, affordable one.
 
 ## 2. Subagents and parallel sessions
 
-A subagent has its own context, starts cold, sends its own requests and returns a summary. It buys parallelism, a
+A subagent has its own context, starts cold, sends its own requests, and returns a summary. It buys parallelism, a
 clean main context or an unbiased reviewer, never a smarter answer. Multi-agent runs use about 15x the tokens of a
 chat (Anthropic). For Codex this section is the explicit instruction its spawn tool asks for: delegate in the
 **Delegate** rows, otherwise work locally.
@@ -52,8 +52,8 @@ chat (Anthropic). For Codex this section is the explicit instruction its spawn t
 | Implementation split into disjoint write sets that land independently | **Delegate** one worker per slice, each owning its files |
 | Separate tasks lasting hours, or the user wants parallel streams | Parallel sessions in worktrees (`dev wt new <type>/<topic>`), not subagents |
 | A lookup you can do in 1–3 searches or one LSP call | Do it yourself |
-| Your very next step is blocked on the result | Do it yourself |
-| Edits that touch the same files or depend on each other | Do it yourself, in sequence |
+| Your next step is blocked on the result | Do it yourself |
+| Edits that change the same files or depend on each other | Do it yourself, in sequence |
 | A side task that needs what you already know | Claude: a fork (inherits context and cache). Codex: `fork_turns`. Otherwise do it yourself |
 | "A second attempt might do better" | Don't delegate; escalate (section 5) |
 
@@ -75,9 +75,9 @@ chat (Anthropic). For Codex this section is the explicit instruction its spawn t
 The brief is the agent's only context. If you can't write a clear one, you don't understand the task well enough to
 hand it off. Give paths, not pasted file contents.
 
-**Lookup or research**
+### Lookup or research
 
-```
+```text
 Goal: <the decision this answer feeds, one sentence>
 Questions: 1. … 2. …
 Scope: <dirs, files, docs>. Out of scope: <…>
@@ -86,9 +86,9 @@ Return: <format, e.g. path:line + one-line finding per item, under 300 words>. M
 Say "not found" rather than guess. Don't edit files or start agents.
 ```
 
-**Worker (code change)**
+### Worker (code change)
 
-```
+```text
 Goal and acceptance: <behavior; the test that must pass>
 Write scope: only <files/dirs>; don't touch <…>
 Context: <interfaces, conventions, decisions already made and why>
@@ -96,9 +96,9 @@ Verify: run <narrow test command>; report the command and its result.
 Return: files changed, what changed and why, test output summary, open questions.
 ```
 
-**Reviewer**
+### Reviewer
 
-```
+```text
 Review <diff range or files> against <spec, plan or task>. Report only correctness, security and missed-edge-case
 problems: file:line, severity, and a concrete failing scenario. Skip style. If nothing material, say so.
 ```
@@ -146,7 +146,7 @@ failing test pass.
 
 **Gates that hold whatever the tier:**
 
-- Evidence before claims: run the check in this session before you say "done", "fixed" or "passes".
+- Evidence before claims: run the check in this session before you say "done," "fixed," or "passes."
 - The narrowest check after each change, the full local suite before done (`delivery` skill: what CI runs).
 - Risky changes (auth, input handling, secrets, migrations, concurrency, public API) get an independent review in a
   fresh context at high effort: `/code-review`, Codex `/review`, `/security-review`; see the `devsecops` skill.
@@ -173,9 +173,9 @@ Prefer devkit's token-light commands to raw shell output. They are capped, respe
 
 | Instead of | Use | What you get |
 | --- | --- | --- |
-| `ls -R`, `tree` | `dev files [path]` | a capped tree with sizes, git status and folded build output |
+| `ls -R`, `tree` | `dev files [path]` | a capped tree with sizes, git status, and folded build output |
 | `find` | `dev find <pattern> [-e ext] [--changed]` | gitignore-aware paths relative to the current folder |
-| `grep -r` | `dev grep <regex> [-l] [-C n] [--ast]` | `file:line: text`, capped per file and in total |
+| `grep -r` | `dev grep <regex> [-l] [-C n] [--ast]` | `file:line: text` with a cap per file and a total cap |
 | `git diff` | `dev diff [--staged] [--names]` | the stat first, then `-U1` hunks; lock and generated files folded |
 | `rm`, `mv`, `cp` | `dev rm`, `dev mv`, `dev cp` | to the Trash with undo; refuses unsaved work or open files and names the flag |
 

@@ -18,7 +18,7 @@ Families: `neutral` (default) · `firefly` · `steel` · `slate` · `olive` · `
 
 Nodes: `id`, `label`, `sub`, `col`, `row` (fractions allowed: `0.5` centres between two), `span` (`[cols, rows]`),
 `shape` (`box` · `pill` · `store` · `actor` · `note` · `decision`), `family`, `emphasis` (the one focal node),
-`width` (fixed; usually leave it out), `dashed`.
+`width` (fixed; leave it out in most cases), `dashed`.
 Groups: `id`, `title`, `nodes` (member ids), `dashed` (a boundary). Edges may start or end on a group id.
 Edges: `from`, `to`, `label`, `style`, `both` (arrowheads at both ends), `from_side`/`to_side`
 (`left` · `right` · `top` · `bottom`), `route` (`hv` · `vh` · `straight`), `via` (`[[col, row], …]` waypoints),
@@ -91,7 +91,7 @@ self-calls (`from` = `to`), `{"note": "…", "over": ["a", "b"]}`, and `{"divide
 
 ## timeline
 
-`items`: `date`, `label`, `sub`, `emphasis` (the one milestone that matters). Cards alternate above and below the axis.
+`items`: `date`, `label`, `sub`, `emphasis` (the one milestone that matters). Cards alternate on either side of the axis.
 
 ```json
 {"kind": "timeline", "name": "roadmap", "title": "Roadmap", "desc": "…",

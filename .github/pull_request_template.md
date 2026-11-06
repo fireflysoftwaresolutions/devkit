@@ -11,7 +11,7 @@
 ## How to verify
 
 <!-- The exact commands you ran and their results, then how a reviewer can check it. -->
-- Local CI: `<command>` → <result, e.g. "214 tests passed">
+- Local CI: `<command>` → <result, for example "214 tests passed">
 - Manual check: <steps, or "not needed">
 
 ## Risk and rollback

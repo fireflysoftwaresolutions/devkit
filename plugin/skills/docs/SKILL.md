@@ -1,6 +1,6 @@
 ---
 name: docs
-description: Write and maintain project documentation to the devkit standard — README anatomy with a branded hero, Diátaxis structure (tutorials, how-to guides, reference, explanation), Google developer documentation style, SVG diagrams, CHANGELOG with CalVer, and `dev docs check` (markdownlint, link and anchor checks, Vale) until clean. Use when creating or updating a README, a docs/ folder, a guide, a reference page, a runbook, a CHANGELOG or release notes, or when the user asks to document something or to make docs look professional.
+description: Write and maintain project documentation to the devkit standard—README anatomy with a branded hero, Diátaxis structure (tutorials, how-to guides, reference, explanation), Google developer documentation style, SVG diagrams, CHANGELOG with CalVer, and `dev docs check` (markdownlint, link and anchor checks, Vale) until clean. Use when creating or updating a README, a docs/ folder, a guide, a reference page, a runbook, a CHANGELOG or release notes, or when the user asks to document something or to make docs look professional.
 ---
 
 # Documentation to the devkit standard
@@ -17,7 +17,7 @@ Documentation is part of the change: update it in the same branch as the code it
 | To understand why | Explanation | Concepts, trade-offs, diagrams; no step lists |
 
 Never mix types on one page; link between them. The `documentation-writer` skill applies Diátaxis in depth;
-`doc-coauthoring` runs a structured workflow for specs, decision documents and proposals.
+`doc-coauthoring` runs a structured workflow for specs, decision documents, and proposals.
 
 ## 2. README anatomy
 
@@ -40,10 +40,10 @@ Never mix types on one page; link between them. The `documentation-writer` skill
 ## 4. Style (Google developer documentation style)
 
 - Second person, present tense, active voice, imperative for steps ("Run `dev doctor`").
-- American spelling; Oxford comma; em dashes without spaces; sentence-case headings; no "simply", "just", "easy".
+- American spelling; Oxford comma; em dashes without spaces; sentence-case headings; no `simply`, `just`, or `easy`.
 - Code, commands, paths, keys and identifiers in backticks; code blocks always declare a language.
 - Tables for comparisons and options; numbered lists only for sequences.
-- Link text says where it goes (for example "see the Configuration guide"), never "click here".
+- Link text says where it goes (for example "see the Configuration guide"), never "click here."
 - Keep facts in one place and link to them; generated reference (CLI help, config keys) must match the code.
 
 ## 5. CHANGELOG and releases

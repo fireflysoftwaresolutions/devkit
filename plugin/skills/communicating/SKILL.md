@@ -1,24 +1,24 @@
 ---
 name: communicating
-description: How to write to people — the developer and their teammates — plainly and on time. Templates for kickoff plans with estimates, progress updates during long runs and subagents, status answers ("how is it going?"), decision requests, explanations, final and failure reports, pull request descriptions, merge messages, review comments and messages that hand work to a teammate; plus `dev progress` (live progress, ETA, team updates) and `dev task delegate`. Use at the start of non-trivial work, every few minutes of silent work, when background work starts or ends, when you need a decision, when you open or merge a PR, when work moves to someone else, and at the end.
+description: How to write to people—the developer and their teammates—plainly and on time. Templates for kickoff plans with estimates, progress updates during long runs and subagents, status answers ("how is it going?"), decision requests, explanations, final and failure reports, pull request descriptions, merge messages, review comments and messages that hand work to a teammate; plus `dev progress` (live progress, ETA, team updates) and `dev task delegate`. Use at the start of non-trivial work, every few minutes of silent work, when background work starts or ends, when you need a decision, when you open or merge a PR, when work moves to someone else, and at the end.
 ---
 
 # Communicating with the developer
 
-The developer should never have to ask "how is it going?". Tell them before they wonder. Everything you write, to
+The developer should never have to ask "how is it going?" Tell them before they wonder. Everything you write, to
 them or for their team, follows the same rules:
 
-- **American English by default.** Use US spelling and conventions in replies, PRs, commits, docs and messages. Write
+- **American English by default.** Use American spelling and conventions in replies, PRs, commits, docs, and messages. Write
   in another language only when the developer asks for it (or devkit config `language` says so), and then only for
   the content they asked for.
-- **Lead with the answer.** The first line is the outcome, the verdict or the question. Details come after.
-- **Write plainly.** Use short sentences, everyday words and concrete nouns ("the login page times out after 30 s",
+- **Lead with the answer.** The first line is the outcome, the verdict, or the question. Details come after.
+- **Write plainly.** Use short sentences, everyday words, and concrete nouns ("the login page times out after 30 s,"
   not "authentication flow latency issues"). Use active voice. Explain each acronym the first time you use it.
 - **Cut whatever says nothing.** No buzzwords: robust, seamless, leverage, comprehensive, cutting-edge, game-changing.
-  No filler ("It's worth noting that…", "In order to…"). No restating the question, and no list of technologies when
+  No filler (`It's worth noting that…`, `In order to…`). No restating the question, and no list of technologies when
   one sentence explains the point. If a sentence would not change what the reader does or understands, delete it.
-- **Use real evidence, not claims.** Quote the command and its result, the test count, the PR or the run id. Never
-  say "done", "fixed" or "passing" without having run it in this session.
+- **Use real evidence, not claims.** Quote the command and its result, the test count, the PR, or the run id. Never
+  say "done," "fixed," or "passing" without having run it in this session.
 - **Keep it short.** Progress updates are at most 5 lines. Put long material in a file or the handoff note and link it.
 - **Be honest about time.** Give estimates as ranges. When you are past an estimate, say so and give a new one.
 
@@ -37,7 +37,7 @@ dev progress start "<goal>" --steps <n> --estimate <30m|2h>
 
 The command prints how long similar work took here. Use that to set the estimate.
 
-```
+```markdown
 **Plan · <goal>** — ~<estimate> (<n> steps)
 1. <step> 2. <step> 3. <step> …
 Checks: <how you will verify it> · Risks: <the one or two that matter> · I need from you: <nothing | a decision on X>
@@ -52,7 +52,7 @@ before a long wait. Record it and send the text that the command prints:
 dev progress step "<what finished, with evidence>" --next "<what is next>"
 ```
 
-```
+```markdown
 **Progress · <goal>** — 3/7 · 24m of ~40m · ETA ~15m
 - Done: <evidence-backed result>; <result>
 - Now: <what is running> (subagent X for 6m, expected ~10m)
@@ -63,7 +63,7 @@ dev progress step "<what finished, with evidence>" --next "<what is next>"
 
 The prompt hook adds your real progress records to the context. Use them:
 
-```
+```markdown
 **Status:** <one-line verdict: on track | behind by ~X | blocked on Y>
 | Workstream | State | Evidence | ETA |
 |---|---|---|---|
@@ -73,25 +73,25 @@ Left: <remaining steps> · Risks: <top risk> · From you: <decision or nothing>
 ```
 
 When the work has pipelines (GitHub Actions, GitLab CI, Bitbucket Pipelines, Azure Pipelines), always report them:
-`dev ci status` shows every run of the branch with its jobs, current step, elapsed time and an ETA from recent
+`dev ci status` shows every run of the branch with its jobs, current step, elapsed time, and an ETA from recent
 successful runs. Use `dev ci status --watch` to follow a run to the end instead of polling.
 
 ## 4. Background work: subagents, parallel sessions, long commands
 
-- **On launch, say what runs in the background.** Name it, say what it will produce and when you expect it:
-  "3 agents running: A, B, C; I'll integrate as each finishes (~20m)". Then keep working on independent things.
-- **On completion, relay the result in one or two lines.** Say what it found or built, how you verified it and what
-  you will do with it. The developer cannot see subagent output.
+- **On launch, say what runs in the background.** Name it, say what it produces and when you expect it, for example:
+  "3 agents running: A, B, C; I'll integrate as each finishes (~20m)." Then keep working on independent things.
+- **On completion, relay the result briefly (one or two lines).** Say what it found or built, how you verified it,
+  and what you plan to do with it. The developer cannot see subagent output.
 - **Never poll or sleep while waiting.** Use notifications (`run_in_background`, `gh pr checks --watch`). If a job
   runs past its expected time, say so.
 
 ## 5. Decision request, for questions of consequence
 
-Ask only when the decision is truly the developer's: product behaviour, scope, cost, risk, irreversible actions or
-external effects. Everything else, decide yourself and say what you decided. Use the harness's question tool when it
+Ask only when the decision is truly the developer's: product behavior, scope, cost, risk, and actions that are
+irreversible or have external effects. Decide everything else yourself and say what you decided. Use the harness's question tool when it
 has one; otherwise:
 
-```
+```markdown
 **Decision needed · <topic>** — <the question in one line>
 Context: <2–3 lines: what we know and why it matters now>
 | Option | Gains | Costs / risks | Effort |
@@ -108,7 +108,7 @@ If you don't answer: I'll <safe default> / I'll wait on <the blocked part> and c
 2. **Explain how it works**: 3–6 numbered steps, or a small diagram when there is a flow (see the `diagrams` skill).
 3. **Show an example from their code or data**, with the file and line (`path:line`).
 4. **Say what it means for them**: what to do, what to avoid, what changes.
-5. **Point them further**: a doc, a command or a file.
+5. **Point them further**: a doc, a command, or a file.
 
 Use plain words and concrete examples. Never be condescending. Don't use walls of text or unrequested tutorials.
 
@@ -117,7 +117,7 @@ Use plain words and concrete examples. Never be condescending. Don't use walls o
 The message starts with the status block (global instructions §0). It is the summary, so don't repeat it. Below it,
 add only what the developer needs beyond the block:
 
-```
+```markdown
 **[Firefly> DevKit]** billing · `feat/invoice-export` · Invoice export
 - **Done:** added a CSV export of invoices to the invoice list.
 - **Check:** ✓ 214 tests pass; exported October (1,204 rows) and opened it in Numbers
@@ -132,7 +132,7 @@ estimate.
 
 ## 8. Failure or incident
 
-```
+```markdown
 **Problem · <what failed>** — impact: <what is affected>
 Cause: <known | suspected: …> · Evidence: <error line, log, run id>
 Done so far: <what you tried and what it showed> · Next: <the fix or the question>
@@ -143,10 +143,10 @@ Record it with `dev progress block "<reason>" --next "<what is needed>"`.
 ## 9. Pull request description
 
 `dev pr create` fills the template (the repository's own `.github/pull_request_template.md`, otherwise devkit's) from
-your commits, tasks and local CI result. You write the two parts only you can write: **What and why**, and **Risk and
+your commits, tasks, and local CI result. You write only the two parts that need you: the **What and why** and the **Risk and
 rollback**.
 
-```
+```markdown
 Title: feat(invoices): export invoices as CSV           ← Conventional Commit, ≤ 72 chars, imperative
 
 ## What and why
@@ -166,7 +166,7 @@ Low. Read-only endpoint behind the existing `invoices:read` permission. Roll bac
 
 ## 10. Merge message (squash)
 
-```
+```text
 feat(invoices): export invoices as CSV (#151)
 
 Finance can download a month of invoices as CSV from the invoice list instead of copying them by hand.
@@ -181,7 +181,7 @@ attribution lines.
 
 Say what is wrong, why it matters and what to do, in that order. Mark how much it matters:
 
-```
+```text
 blocking: `amount` is parsed as a float, so 0.1 + 0.2 rounds wrong on totals. Use BigDecimal here, as InvoiceTotal does.
 suggestion: this loop calls the repository once per line (N+1). `findAllById(ids)` would make it one query.
 nit: "recieve" → "receive".
@@ -192,10 +192,10 @@ question: should cancelled invoices be exported too? The ticket doesn't say.
 
 When the developer wants someone else to take a task, run `dev task delegate <n> --to <github-login> --why "<why it
 matters>"`. It assigns the work item, records the reason, writes the message below and copies it to the clipboard,
-so the developer can paste it into Slack, Teams or email. Review the text before it goes out; it should read like a
+so the developer can paste it into Slack, Teams, or email. Review the text before it goes out; it should read like a
 person wrote it.
 
-```
+```text
 Hi @maria, could you take this task: "Export invoices as CSV"?
 
 Why it matters: Finance spends a day each month copying invoices by hand.
@@ -223,12 +223,12 @@ structure, instead of free text.
 | Spike | `--kind spike` | Question · Timebox · Options · Method · Findings · Recommendation (with confidence) |
 | Bug fix | `--kind bugfix` | Symptom · Reproduction · Expected vs. actual · Root cause (`file:line`) · Fix · Verification · Prevention |
 | Decision (ADR) | `--kind adr` | Status · Deciders · Date · Context · Decision · Options considered · Consequences |
-| Task | `dev task add "<title>" --type task\|feature\|bug\|spike --why "…" --done "…"` | By type: Context/Why/Symptom/Question · Scope · Steps to reproduce · Done when (testable checkboxes) |
-| Steps of a run | `dev progress start "<goal>" --plan "step 1; step 2; step 3" --estimate 1h` | Checklist ✓ ▸ ○ with elapsed, estimate and ETA |
+| Task | `dev task add "<title>" --type task\|feature\|bug\|spike --why "…" --done "…"` | Depends on the type: a Context, Why, Symptom, or Question section · Scope · Steps to reproduce · Done when (testable checkboxes) |
+| Steps of a run | `dev progress start "<goal>" --plan "step 1; step 2; step 3" --estimate 1h` | Checklist ✓ ▸ ○ with elapsed, estimate, and ETA |
 | Session activity | `dev handoff --log "<outcome; next>"` | `YYYY-MM-DD HH:MM · user@host · agent · branch · outcome · next` |
 | Status block | the start of every final message | `` **[Firefly> DevKit]** <project> · `<branch>` · <task> ``, then **Done:** · **Check:** ✓/⚠/✗ evidence · **Progress:** (when a run is active) · **Next:** |
 | Status report | `dev report [--days 7] [-i <initiative>]` | Summary table, then per initiative: health with reason · progress · milestone · done · in progress · next · blockers and risks · team |
-| PR, merge, review, handover | `dev pr create`, `dev task delegate` | Sections 9–12 above |
+| PR, merge, review, handover | `dev pr create`, `dev task delegate` | Sections 9–12 of this skill |
 
 Fill every placeholder (`_…_`) or delete the section if it does not apply. Never leave template text in a finished
 record. Plans are versioned: after you change one, run `dev plan revise <file> --why "…"`.

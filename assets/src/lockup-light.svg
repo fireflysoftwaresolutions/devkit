@@ -1,4 +1,6 @@
 <svg xmlns="http://www.w3.org/2000/svg" width="1100" height="300" viewBox="0 0 1100 300">
+<title>devkit</title>
+<desc>The devkit lockup: the prompt-and-spark mark next to the devkit wordmark.</desc>
 <defs>
   <radialGradient id="glow"><stop offset="0" stop-color="#FFB34A" stop-opacity="0.45"/>
     <stop offset="0.45" stop-color="#FFB34A" stop-opacity="0.12"/><stop offset="1" stop-color="#FFB34A" stop-opacity="0"/></radialGradient>

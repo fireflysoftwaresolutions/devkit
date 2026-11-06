@@ -6,11 +6,11 @@ _The single question this spike answers, and the decision it unblocks._
 
 ## Timebox
 
-_e.g. 4h. Stop when the time runs out and report what you have._
+_For example, 4 hours. Stop when the time runs out and report what you have._
 
 ## Options to evaluate
 
-- _Option A — what to try, what would make it a winner._
+- _Option A: what to try, and what would make it a winner._
 
 ## Method
 

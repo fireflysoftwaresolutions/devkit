@@ -1451,6 +1451,18 @@ def main(argv=None) -> int:
     target = Path(a.target)
     files = sorted(target.glob("*.json" if a.cmd == "render" else "*")) if target.is_dir() else [target]
     files = [f for f in files if f.suffix in (".json", ".svg")]
+    if target.is_dir():  # a folder may hold other JSON (brand font data, configs): only diagram specs count
+        def is_spec(f):
+            if f.suffix != ".json":
+                return True
+            try:
+                data = json.loads(f.read_text())
+            except (OSError, ValueError):
+                return False
+            return isinstance(data, dict) and "kind" in data and any(k in data for k in ("nodes", "lanes", "steps",
+                                                                                        "states", "entities", "items",
+                                                                                        "actors", "messages", "events"))
+        files = [f for f in files if is_spec(f)]
     rc = 0
     for f in files:
         if a.cmd == "render":

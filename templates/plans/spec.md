@@ -10,12 +10,12 @@ _What users cannot do today, and what it costs them. Evidence first._
 
 ## Users and scenarios
 
-- _As a <role>, I want <capability>, so that <outcome>._
+- _`As a <role>, I want <capability>, so that <outcome>.`_
 
 ## Requirements
 
 | ID | Requirement | Priority |
-|----|-------------|----------|
+| --- | --- | --- |
 | R1 | _The system shall …_ | _must / should / could_ |
 
 ## Out of scope
@@ -36,7 +36,7 @@ _Contract changes (OpenAPI, events, schema), migrations, compatibility, versioni
 
 ## Metrics
 
-_How we will know it works after release._
+_How the team can tell that it works after release._
 
 ## Risks and open questions
 

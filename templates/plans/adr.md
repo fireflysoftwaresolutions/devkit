@@ -10,15 +10,15 @@ _The forces at play: requirements, constraints, what makes this decision necessa
 
 ## Decision
 
-_The choice, stated in one or two sentences._
+_The choice (one or two sentences)._
 
 ## Options considered
 
 | Option | Pros | Cons |
-|--------|------|------|
+| --- | --- | --- |
 | _A (chosen)_ | _…_ | _…_ |
 | _B_ | _…_ | _…_ |
 
 ## Consequences
 
-_What becomes easier, what becomes harder, what we must now do._
+_What becomes easier, what becomes harder, and what the team must now do._

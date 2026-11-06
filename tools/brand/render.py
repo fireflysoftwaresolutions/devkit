@@ -54,9 +54,16 @@ def wordmark(x, baseline, size, ink, glow=True, spark_factor=0.125):
     return svg, wm["width"] * k
 
 
+def a11y(title, desc):
+    """<title> and <desc> for an SVG: screen readers announce them and `dev docs check` requires them."""
+    esc = lambda s: s.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")  # noqa: E731
+    return f"<title>{esc(title)}</title>\n<desc>{esc(desc)}</desc>"
+
+
 def icon_svg(size=512):
     """App icon: a terminal prompt in paper on charcoal; the cursor's light trail ends in the amber spark."""
     return f"""<svg xmlns="http://www.w3.org/2000/svg" width="{size}" height="{size}" viewBox="0 0 512 512">
+{a11y("devkit", "The devkit icon: a terminal prompt in paper on charcoal, with the cursor's light trail ending in the amber spark.")}
 {DEFS}
 <rect width="512" height="512" rx="116" fill="{CHARCOAL}"/>
 <rect x="1.5" y="1.5" width="509" height="509" rx="115" fill="none" stroke="{GRAPHITE}" stroke-width="3"/>
@@ -82,6 +89,7 @@ def hero_svg(theme="dark", W=1600, H=520):
                     for x, y, r, o, b in ((1240, 108, 16, 0.35, 6), (1452, 300, 26, 0.18, 14), (1090, 210, 9, 0.30, 6),
                                           (1520, 120, 10, 0.25, 6), (1330, 400, 20, 0.12, 14)))
     return f"""<svg xmlns="http://www.w3.org/2000/svg" width="{W}" height="{H}" viewBox="0 0 {W} {H}">
+{a11y("devkit", "devkit: one workspace for developers, Claude Code and Codex. By Firefly Software Solutions Inc.")}
 {DEFS}
 <rect width="{W}" height="{H}" fill="{bg}"/>
 {bokeh}
@@ -99,6 +107,7 @@ def lockup_svg(theme="dark"):
     ink = PAPER if theme == "dark" else CHARCOAL
     size, base, m = 200, 236, 300
     return f"""<svg xmlns="http://www.w3.org/2000/svg" width="1100" height="300" viewBox="0 0 1100 300">
+{a11y("devkit", "The devkit lockup: the prompt-and-spark mark next to the devkit wordmark.")}
 {DEFS}
 <g transform="translate(-6,-14) scale(0.62)">
 <path d="M118 206 L196 268 L118 330" fill="none" stroke="{ink}" stroke-width="38" stroke-linecap="round" stroke-linejoin="round"/>

@@ -1,6 +1,6 @@
 ---
 name: backend
-description: Backend engineering checklists for Java/Spring, Python, PHP and Node services — API contract design, domain layering, database migrations, testing strategy with Testcontainers, resilience, security and operability. Use when designing or changing an API, a database schema, a service's domain logic, integration with external systems, or when reviewing backend code.
+description: Backend engineering checklists for Java/Spring, Python, PHP and Node services—API contract design, domain layering, database migrations, testing strategy with Testcontainers, resilience, security and operability. Use when designing or changing an API, a database schema, a service's domain logic, integration with external systems, or when reviewing backend code.
 ---
 
 # Backend methodology
@@ -14,12 +14,12 @@ Apply what fits the change; follow the repository's existing conventions where t
 - Backward compatible by default: add fields, never repurpose; removing or renaming = new version or a deprecation
   period. Consumers of messages must tolerate unknown fields.
 - Resource naming and HTTP semantics: nouns, correct verbs and status codes, idempotency keys for unsafe retries,
-  pagination (cursor for large or live collections), filtering and sorting explicit.
+  pagination (cursor for large or live collections), filtering, and sorting explicit.
 - Errors: one shape (RFC 9457 problem details unless the project has its own); never leak stack traces or SQL.
 
 ## Domain and layering
 
-- Business rules live in the domain/service layer, free of HTTP, ORM and framework types.
+- Business rules live in the domain/service layer, free of HTTP, ORM, and framework types.
 - Controllers/handlers: parse, validate, call one use case, map the result. Persistence behind repositories.
 - DTOs at the edges; never expose ORM entities over the API.
 - Transactions at the use-case boundary; no remote calls inside a database transaction.
@@ -61,7 +61,7 @@ Apply what fits the change; follow the repository's existing conventions where t
 - Validate and normalise input at the boundary (bean validation / pydantic / form requests / zod).
 - Parameterised queries only; no string-built SQL. Escape output for its context.
 - AuthN at the edge, AuthZ per operation and per resource (check ownership, not just roles).
-- Secrets from environment or the secret manager; never in code, logs, tests or the handoff note.
+- Secrets from environment or the secret manager; never in code, logs, tests, or the handoff note.
 - Dependencies: pinned via lockfile; check advisories (`npm audit`, `pip-audit`, `composer audit`,
   OWASP dependency-check / `mvn versions`) when you add or bump one.
 

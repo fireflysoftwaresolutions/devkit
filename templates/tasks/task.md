@@ -1,6 +1,6 @@
 ## Context
 
-_Why this task exists, in one or two sentences._
+_Why this task exists (one or two sentences)._
 
 ## Done when
 

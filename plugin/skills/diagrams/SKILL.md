@@ -5,7 +5,7 @@ description: Draw architecture, flow, sequence, state, C4, ER and timeline diagr
 
 # Diagrams
 
-devkit draws diagrams from a JSON spec with `dev diagram`: Firefly brand (charcoal/paper, amber as the one
+devkit draws diagrams from a JSON spec with `dev diagram`, in the Firefly brand (charcoal/paper, amber as the one
 highlight, Manrope), a light and a dark SVG every time, and a validator that refuses what a careful designer would
 refuse. The full spec format per kind is in `reference/kinds.md`.
 
@@ -13,7 +13,7 @@ refuse. The full spec format per kind is in `reference/kinds.md`.
 
 Draw only when a picture shows a **mechanism** faster than prose: where data flows, which parts talk, what changes
 between two options, what states something moves through, what happens in what order. If one sentence says it, write
-the sentence. Show the parts the point depends on — the boundary crossed, the hop added, the data that moves — and
+the sentence. Show the parts the point depends on—the boundary crossed, the hop added, the data that moves—and
 leave the rest out. Comparing options? Draw the difference (the edge one option adds or removes), not two lists.
 
 | You need to show | Kind |
@@ -22,17 +22,17 @@ leave the rest out. Comparing options? Draw the difference (the edge one option 
 | Software at C4 levels (person, system, container, component, external) | `c4` |
 | Who calls whom, in what order, over time | `sequence` |
 | The life of one thing (states and the events that move it) | `state` |
-| Tables, keys and cardinalities | `er` |
+| Tables, keys, and cardinalities | `er` |
 | Dated milestones | `timeline` |
 
 ## Workflow
 
-1. `dev diagram new <kind> <name> --dir docs/diagrams` — scaffold a spec (or copy one from `reference/kinds.md`).
+1. `dev diagram new <kind> <name> --dir docs/diagrams`—scaffold a spec (or copy one from `reference/kinds.md`).
 2. Write the spec: nodes on a grid (`col`, `row`, fractions allowed), edges with **labels**, groups for boundaries,
-   `title` (the kicker) and `desc` (one or two sentences for people who cannot see it — required).
-3. `dev diagram render docs/diagrams/<name>.json --png` — writes `docs/images/diagrams/<name>-dark.svg` and
+   `title` (the kicker) and `desc` (one or two sentences for people who cannot see it—required).
+3. `dev diagram render docs/diagrams/<name>.json --png`—writes `docs/images/diagrams/<name>-dark.svg` and
    `-light.svg` (+ PNG previews next to them; do not commit PNGs).
-4. `dev diagram check docs/diagrams/<name>.json` — must print nothing but `ok`. Fix the layout, never silence it.
+4. `dev diagram check docs/diagrams/<name>.json`—must print nothing but `ok`. Fix the layout, never silence it.
 5. **Look at the PNG preview** (light and dark). Fix anything that reads awkwardly even if the validator is happy:
    uneven gaps, a label far from its edge, a long detour, an arrow pointing against the reading direction.
 6. Embed with both themes:
@@ -48,7 +48,7 @@ Commit the spec and both SVGs together; re-render whenever the spec changes (tes
 
 ## Quality rules
 
-**Layout**
+### Layout
 
 - Choose one reading direction: left → right for flows and pipelines, top → bottom for layers and hierarchies.
   Arrows go with it; the few that go back (failure loops, responses) are dashed.
@@ -58,10 +58,10 @@ Commit the spec and both SVGs together; re-render whenever the spec changes (tes
   (layered) before going wide. Slides may be wider.
 - Balance whitespace: no node crammed against another, no empty quadrant. Remove nodes before shrinking anything.
 
-**Edges and arrows**
+### Edges and arrows
 
 - Every edge has a verb or a payload as its label (`writes`, `JSON/HTTPS`, `on merge`). An unlabeled arrow means
-  "related somehow" — remove it or label it.
+  "related somehow"—remove it or label it.
 - Orthogonal routing with rounded bends is automatic. Help it: put connected nodes in the same row or column so the
   edge is straight; use `from_side`/`to_side`, `route` (`hv`, `vh`, `straight`) or `via` only to remove a detour.
 - Styles carry meaning, consistently: `data` (default) · `api` · `dashed` (async, optional, failure/fix loops) ·
@@ -69,22 +69,22 @@ Commit the spec and both SVGs together; re-render whenever the spec changes (tes
 - Connect to a whole `group` (use its id) instead of fanning arrows out from each member when the group acts as one.
 - Never route through a node, a label or a group title; never let labels collide (the validator enforces this).
 
-**Colour and emphasis**
+### Color and emphasis
 
-- Colour means something: `neutral` (default), `firefly` (devkit/Firefly-owned), `steel` (third party, external),
+- Color means something: `neutral` (default), `firefly` (owned by devkit or Firefly), `steel` (third party, external),
   `slate` (data, generated, storage), `olive` (control, automation, metadata), `note`.
-- **Amber is punctuation, never decoration: one focal element per diagram** — either one `emphasis: true` node or one
+- **Amber is punctuation, never decoration: one focal element per diagram**—either one `emphasis: true` node or one
   `primary` path. The validator counts them.
 - Add a `legend` only when an encoding (family or edge style) repeats and is not self-explanatory.
 
-**Type and text**
+### Type and text
 
-- Labels are nouns (2–4 words); `sub` lines are short qualifiers. Two lines at most each; type never below 12 px —
+- Labels are nouns (2–4 words); `sub` lines are short qualifiers. Two lines at most each; type never below 12 px:
   boxes grow, type never shrinks. Sentences belong in the caption or the surrounding prose.
 - Name things exactly as the reader knows them (command names, file paths, product names); no customer names or
   invented metrics.
 
-**Accessibility and files**
+### Accessibility and files
 
 - `title` and `desc` are required; the `alt` of the `<img>` repeats the claim of `desc`.
 - Text contrast ≥ 4.5:1, meaningful marks ≥ 3:1, in both themes (checked).
