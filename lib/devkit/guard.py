@@ -151,6 +151,9 @@ def initiative_members(slug: str) -> list:
 
 def handoff_violation(rel: str, cwd, envs=frozenset()):
     """Isolation in the handoff repo: a project session writes only its own note, plans and initiatives."""
+    if rel.startswith("policies/"):
+        return (f"`{rel}` is a recorded delivery policy, versioned with who and why. Change it with "
+                f"`dev delivery apply --set key=value --why \"…\"`.")
     if rel.startswith(("items/", "sessions/", "presence/")):
         return (f"`{rel}` is managed by devkit so that versions, locks, history and attribution stay correct. Use "
                 f"`dev task add|start|done|edit|move|cancel --why …` for work items and `dev handoff --log \"…\"` "
@@ -542,6 +545,17 @@ def check_git(argv, cwd, full_segment, envs=frozenset(), pending=None):
         if n:
             return deny(f"`git reset --hard` would discard {n} uncommitted change(s) in {tilde(gcwd)}. Commit them "
                         f"to a WIP branch first, or ask the user.")
+    if sub == "tag" and gcwd and "DEVKIT_TAG_ANY" not in envs and \
+            not any(a in ("-d", "--delete", "-l", "--list", "-v", "--verify", "-n") or a.startswith("--contains")
+                    for a in args):
+        names = [a for a in args if not a.startswith("-")]
+        if names:
+            pid = current_project(gcwd)
+            if pid:
+                from .delivery import tag_violation
+                v = tag_violation(pid, names[0])
+                if v:
+                    return deny(v + " (DEVKIT_TAG_ANY=1 bypasses.)")
     if sub in ("commit", "tag", "merge", "notes"):
         a = _attribution(full_segment)
         if a:

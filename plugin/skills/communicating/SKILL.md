@@ -68,8 +68,13 @@ The prompt hook adds your real progress records to the context. Use them:
 | Workstream | State | Evidence | ETA |
 |---|---|---|---|
 | <item> | done / in progress / waiting / blocked | <test run, PR #, file> | <~time> |
+CI/CD: <pipeline> #<n> <running|queued|✓|✗> · job <name> step <k>/<n> "<step>" · <elapsed> · ETA ~<min> · <link>
 Left: <remaining steps> · Risks: <top risk> · From you: <decision or nothing>
 ```
+
+When the work has pipelines (GitHub Actions, GitLab CI, Bitbucket Pipelines, Azure Pipelines), always report them:
+`dev ci status` shows every run of the branch with its jobs, current step, elapsed time and an ETA from recent
+successful runs. Use `dev ci status --watch` to follow a run to the end instead of polling.
 
 ## 4. Background work: subagents, parallel sessions, long commands
 

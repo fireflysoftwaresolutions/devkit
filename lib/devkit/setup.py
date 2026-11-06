@@ -403,8 +403,8 @@ def setup_claude():
     locked = policy.lock_status() != "off"
     write_claude_settings(include_hooks=not locked)
     plugins = load_conf("claude/plugins.json")
-    done("settings.json: bypassPermissions by default, no attribution, hooks (SessionStart/Stop/SessionEnd/"
-         "PreToolUse/ConfigChange/InstructionsLoaded)" + (" — hooks served by the managed lock" if locked else ""))
+    done(f"settings.json: {frag['permissions']['defaultMode']} by default, no attribution, hooks: "
+         + ", ".join(sorted((frag.get('hooks') or {}).keys())))
     if locked and policy.lock_status() == "stale":
         note("the managed-settings lock is older than this configuration — run `dev config lock` to refresh it")
     if not core.have("claude"):

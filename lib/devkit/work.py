@@ -32,7 +32,7 @@ TYPES = ("task", "feature", "bug", "spike")
 STATUSES = ("todo", "doing", "blocked", "done", "cancelled")
 BUCKETS = ("now", "next", "later")
 PRIORITIES = ("high", "normal", "low")
-NEEDS_WHY = {"edit", "cancel", "priority", "move", "reopen", "scope"}
+NEEDS_WHY = {"edit", "cancel", "priority", "move", "reopen", "scope", "block", "link"}
 FIELDS = ("id", "type", "title", "scope", "status", "bucket", "priority", "assignee", "claimed_by", "claimed_at",
           "lock_expires", "due", "links", "version", "created", "created_by", "updated", "updated_by")
 
@@ -45,7 +45,9 @@ def actor(agent: str = None, session: str = None) -> dict:
     agent = agent or os.environ.get("DEVKIT_AGENT") or ("claude" if os.environ.get("CLAUDECODE") else
                                                         "codex" if os.environ.get("CODEX_SANDBOX") or
                                                         os.environ.get("CODEX_THREAD_ID") else "human")
-    return {"user": user, "host": host, "agent": agent, "session": (session or os.environ.get("DEVKIT_SESSION", ""))[:12]}
+    sid = session or os.environ.get("DEVKIT_SESSION", "")
+    sid = sid.split(":", 1)[1] if ":" in sid else sid  # DEVKIT_SESSION is "<agent>:<session id>"
+    return {"user": user, "host": host, "agent": agent, "session": sid[:12]}
 
 
 def actor_str(a: dict) -> str:

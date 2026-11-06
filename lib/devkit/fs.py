@@ -521,6 +521,10 @@ def _plan_rm(raw, a):
     t = _target(raw)
     it = {"raw": raw, "path": t, "show": _rel(t), "is_dir": False, "refuse": None, "fix": "", "detail": [],
           "label": "", "kind": "", "top": None, "git_rm": False, "missing": False, "bytes": 0}
+    r = _never_reason(t)  # protected folders are refused whether or not they exist on this machine
+    if r:
+        it.update(refuse=r, fix=ASK)
+        return it
     if not os.path.lexists(t):
         it["missing"] = True
         if not a.missing_ok:
@@ -530,10 +534,6 @@ def _plan_rm(raw, a):
     it["is_dir"] = is_dir
     if is_dir:
         it["show"] = it["show"].rstrip("/") + "/"
-    r = _never_reason(t)
-    if r:
-        it.update(refuse=r, fix=ASK)
-        return it
     where = _where(t)
     r = _structure_reason(t, is_dir, where == "temp")
     if r:

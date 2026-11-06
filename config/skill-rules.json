@@ -237,16 +237,25 @@
     },
     {
       "id": "delivery",
-      "why": "Local integration, one push, one CI run, CalVer releases",
-      "prompt": "\\b(release|deploy\\w*|push|merge|pull request|\\bpr\\b|publish|versi[oó]n|tag)\\b",
+      "why": "Delivery policy (versioning, bumps, test gate, changelog), one push, one CI run, releases",
+      "prompt": "\\b(release|deploy\\w*|push|merge|pull request|publish|versi[oó]n\\w*|tag|bump\\w*|changelog|hotfix)\\b",
       "skills": {
         "claude": [
-          "delivery"
+          "delivery",
+          "release-policy"
         ],
         "codex": [
-          "delivery"
+          "delivery",
+          "release-policy"
         ]
-      }
+      },
+      "files": [
+        "CHANGELOG.md",
+        "VERSION",
+        "cliff.toml",
+        ".release-please-manifest.json",
+        "release-please-config.json"
+      ]
     },
     {
       "id": "communicating",

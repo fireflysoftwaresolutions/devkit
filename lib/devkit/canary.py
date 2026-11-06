@@ -187,7 +187,7 @@ def check(agent: str, data: dict):
     rec = {"ts": round(time.time()), "agent": agent, "session": (data.get("session_id") or "")[:12],
            "project": pid, "ok": ok}
     if ok:
-        rec["status"] = line[:200]
+        rec["status"] = line[:500]
         issues = format_issues(text)
         rec["format_ok"] = not issues
         if issues:
@@ -219,7 +219,7 @@ def save_status(pid, agent: str, line: str, branch=None):
     d = STATE / "status"
     d.mkdir(parents=True, exist_ok=True)
     (d / (pid.replace("/", "__") + ".json")).write_text(json.dumps(
-        {"ts": round(time.time()), "agent": agent, "line": line[:300], "branch": branch}))
+        {"ts": round(time.time()), "agent": agent, "line": line[:700], "branch": branch}))
 
 
 def miss_message(agent: str, sid: str) -> str:

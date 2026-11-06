@@ -40,6 +40,9 @@ COMMANDS = [
         ("find <pattern> · grep <regex>", "Find files and search code with capped, compact output"),
         ("diff [args]", "Token-light git diff: stat first, short hunks, lock and generated files folded"),
         ("rm · mv · cp", "Safe file operations: Trash with undo, git-aware, refuse in-use or unsaved work"),
+        ("delivery [apply]", "Versioning, release, test and deploy policy of a project: detect, recommend, record, gaps"),
+        ("time [--days 7]", "How long things take: turns, slow commands, subagents, estimate accuracy"),
+        ("handoff-import <dir> --slug s", "Adopt an old handoff repository as an initiative (from a staging folder)"),
         ("report [--days 7]", "Status report for initiatives and projects (Markdown, for the team or management)"),
     ]),
     ("Agents", [
@@ -238,6 +241,21 @@ def _print_status(p, w=None):
     if p.get("prs_open"):
         print(ui.kv("open PRs", ", ".join(f"#{x['number']}" for x in p["prs_open"][:10])))
     print(ui.kv("handoff", tilde(core.note_path(p["id"]))))
+    try:
+        from . import cistatus
+        res = cistatus.runs_for(w["path"] if w else p["path"], co.get("branch"), limit=1, detail=True, max_age=60)
+        if res.get("runs"):
+            r0 = res["runs"][0]
+            print(ui.kv("CI", cistatus.describe(r0)))
+            if r0.get("jobs"):
+                print(" " * 17 + cistatus.job_summary(r0["jobs"]))
+                shown, more = cistatus.jobs_to_show(r0["jobs"], 3)
+                for j in shown:
+                    print(" " * 17 + cistatus.describe_job(j))
+        elif res.get("error") and res.get("provider"):
+            print(ui.kv("CI", ui.dim(res["error"][:100])))
+    except Exception:
+        pass
     sl = p.get("status_line") or registry.status_line(p["id"])
     if sl and sl.get("line"):
         print(ui.kv("last status", ui.dim(f"{sl.get('agent', '')} · {ago(sl.get('ts'))}")))
@@ -751,7 +769,7 @@ def cmd_docker(a):
     return 2
 
 
-def _print_ci_runs(res, now=None):
+def _print_ci_runs(res, now=None, a_=None):
     from . import cistatus
     name = {"github": "GitHub Actions", "gitlab": "GitLab CI", "bitbucket": "Bitbucket Pipelines",
             "azure": "Azure Pipelines"}.get(res.get("provider"), "CI")
@@ -766,8 +784,13 @@ def _print_ci_runs(res, now=None):
     for r in res["runs"]:
         print("  " + color.get(r["status"], ui.dim)(cistatus.describe(r, now)) +
               (ui.dim(f"  {r['branch']}") if not res.get("branch") and r.get("branch") else ""))
-        for j in r.get("jobs") or []:
-            print("      " + color.get(j["status"], ui.dim)(cistatus.describe_job(j)))
+        if r.get("jobs"):
+            print("      " + ui.dim(cistatus.job_summary(r["jobs"])))
+            shown, more = cistatus.jobs_to_show(r["jobs"], 99 if getattr(a_, "all_jobs", False) else 6)
+            for j in shown:
+                print("      " + color.get(j["status"], ui.dim)(cistatus.describe_job(j)))
+            if more:
+                print("      " + ui.dim(f"… +{more} more running (dev ci status --all-jobs)"))
         if r["status"] in cistatus.RUNNING and r.get("url"):
             print("      " + ui.dim(r["url"]))
 
@@ -782,7 +805,7 @@ def cmd_ci_status(a, top):
             return 0
         if a.watch and sys.stdout.isatty():
             print("\033[2J\033[H", end="")
-        _print_ci_runs(res)
+        _print_ci_runs(res, a_=a)
         running = [r for r in res["runs"] if r["status"] in cistatus.RUNNING]
         if not a.watch or not running:
             failed = [r for r in res["runs"][:1] if r["status"] == "failed"]
@@ -950,10 +973,23 @@ def _print_items(scope, label, show_all=False):
 def delegate_message(it: dict, who: str, why: str, label: str) -> str:
     """A short, plain message the developer sends to the teammate who takes over a task."""
     m, body = it["meta"], (it.get("body") or "").strip()
-    done_when = next((ln.split(":", 1)[1].strip() for ln in body.splitlines()
-                      if ln.lower().startswith(("done when:", "done means:", "acceptance:"))), "")
-    context = next((p.strip() for p in body.split("\n\n") if p.strip() and not p.lower().startswith(
-        ("done when:", "done means:", "acceptance:"))), "")
+    sections, cur = {"": []}, ""
+    for ln in body.splitlines():
+        if ln.startswith("## "):
+            cur = ln[3:].strip().lower()
+            sections[cur] = []
+        else:
+            sections.setdefault(cur, []).append(ln)
+    filled = lambda lines: [x for x in lines if x.strip() and not re.match(r"^\s*(-\s+(\[ \]\s+)?|\d+\.\s+)?_.*_\s*$", x)]  # noqa: E731
+    criteria = [re.sub(r"^\s*- \[[ x]\]\s*", "", x).strip() for x in filled(sections.get("done when", []))]
+    inline = next((ln.split(":", 1)[1].strip() for ln in body.splitlines()
+                   if ln.lower().startswith(("done when:", "done means:", "acceptance:"))), "")
+    done_when = "; ".join(criteria) or inline
+    ctx_lines = []
+    for key in ("", "why", "context", "symptom", "question", "scope"):
+        ctx_lines += [x.strip() for x in filled(sections.get(key, []))
+                      if not x.lower().startswith(("done when:", "done means:", "acceptance:"))]
+    context = " ".join(ctx_lines)[:400]
     links = [x for x in (m.get("links") or []) if x]
     scope = it.get("scope") or m.get("scope")
     flag = f"-i {scope.split('/', 1)[1]}" if scope.startswith("initiatives/") else f"-p {scope}"
@@ -1000,6 +1036,20 @@ def cmd_task(a):
         elif act == "block":
             it = work.update(work.find(" ".join(a.selector), scope), "block", why=a.why or "", status="blocked")
             print(f"{ui.OK} {it['meta']['id']} blocked")
+        elif act == "unblock":
+            it = work.find(" ".join(a.selector), scope)
+            holder, expired = work.lock_holder(it)
+            it = work.update(it, "unblock", why=a.why or "", status="doing" if holder and not expired else "todo")
+            print(f"{ui.OK} {it['meta']['id']} unblocked ({it['meta']['status']})")
+        elif act == "link":
+            it = work.find(" ".join(a.selector), scope)
+            tag = f"initiative:{a.to}"
+            if not registry.initiative_path(a.to).exists():
+                ui.err(f"no initiative “{a.to}” — `dev initiative ls`")
+                return 2
+            links = list(dict.fromkeys((it["meta"].get("links") or []) + [tag]))
+            it = work.update(it, "link", why=a.why or "", links=links)
+            print(f"{ui.OK} {it['meta']['id']} counts toward initiative {a.to}")
         elif act == "cancel":
             it = work.find(" ".join(a.selector), scope)
             it = work.update(it, "cancel", why=a.why or "", status="cancelled", claimed_by="", claimed_at="",
@@ -1148,6 +1198,80 @@ def cmd_report(a):
         print(f"{ui.OK} {tilde(Path(a.out).expanduser())}")
     else:
         print(text)
+    return 0
+
+
+def cmd_delivery(a):
+    from . import delivery
+    if a.initiative:
+        scope, repo = f"initiatives/{a.initiative}", None
+    else:
+        repo = core.gitout(os.getcwd(), "rev-parse", "--show-toplevel")
+        if a.project:
+            repo = _resolve(_reg(prs=False), a.project).get("path")
+        if not repo:
+            ui.err("not inside a repository (or pass -p <project> / -i <initiative>)")
+            return 2
+        scope = delivery.scope_for(repo)
+    if a.delivery_cmd == "apply":
+        base = (delivery.load(scope) or (delivery.recommend(delivery.detect(repo)) if repo else {}))
+        for kv in a.set or []:
+            k, _, v = kv.partition("=")
+            if k not in delivery.FIELDS and k != "bump":
+                ui.err(f"unknown field {k}: {', '.join(delivery.FIELDS)}")
+                return 2
+            base[k] = [x.strip() for x in v.split(";") if x.strip()] if k in ("test_gate", "publish", "deploy") else v
+        try:
+            rec = delivery.record(scope, base, a.why or "")
+        except ValueError as e:
+            ui.err(str(e))
+            return 2
+        print(f"{ui.OK} delivery policy for {scope} recorded (v{rec['version']}) → "
+              f"{tilde(delivery.policy_path(scope))}")
+        if a.tasks and repo:
+            for sev, gap, fix in delivery.gaps(delivery.detect(repo), rec, True):
+                from . import work
+                it = work.create(scope, gap[:1].upper() + gap[1:], kind="task", bucket="next" if sev != "high" else "now",
+                                 priority="high" if sev == "high" else "normal",
+                                 body=work.task_body("task", f"Delivery policy gap ({sev}). Fix: {fix}"),
+                                 why="gap found by dev delivery")
+                print(f"  {ui.OK} {it['meta']['id']} {gap}")
+        return 0
+    if not repo:
+        p = delivery.load(scope)
+        print(json.dumps(p, indent=1) if p else f"no policy recorded for {scope} — dev delivery apply -i … --set "
+                                                 f"release_train=\"…\" --why \"…\"")
+        return 0
+    rep = delivery.report(repo, scope)
+    if a.json:
+        print(json.dumps(rep, indent=1, ensure_ascii=False))
+        return 0
+    d, rec, recm = rep["detected"], rep["recorded"], rep["recommended"]
+    print(ui.section(f"Delivery · {scope}"))
+    rows = [("kind", d["kind"]), ("versioning", f"{d['versioning'] or 'none'}" + (f" (latest {d['latest_tag']})" if d.get("latest_tag") else "")),
+            ("version file", f"{d['version_source']} = {d['version']}" if d.get("version_source") else "none"),
+            ("release tools", ", ".join(d["release_tools"]) or "none"), ("changelog", d["changelog"] or "none"),
+            ("CI", ", ".join(d["ci"]) or "none"), ("test gate", "; ".join(d["test_gate"]) or "none"),
+            ("branches", d["branch_model"]), ("publishes", ", ".join(d["publish"]) or "nothing"),
+            ("deploys", ", ".join(d["deploy"]) or "nothing")]
+    print(ui.dim("  detected in the repository"))
+    for k, v in rows:
+        print(ui.kv(k, v))
+    pol = rec or recm
+    print(ui.dim("\n  " + (f"recorded policy v{rec['version']} ({rec.get('updated_by')})" if rec else
+                            "recommended policy (not recorded yet)")))
+    for k in ("versioning", "tag_format", "release_flow", "bump", "changelog", "test_gate"):
+        v = pol.get(k)
+        print(ui.kv(k, "; ".join(v) if isinstance(v, list) else (v or "-")))
+    if rep["gaps"]:
+        print(ui.section(f"Gaps ({len(rep['gaps'])})"))
+        color = {"high": ui.red, "medium": ui.yellow, "low": ui.dim}
+        for sev, gap, fix in rep["gaps"]:
+            print(f"  {color[sev](sev.ljust(6))} {gap}\n         {ui.dim('fix: ' + fix)}")
+    else:
+        print(f"\n  {ui.OK} no gaps")
+    if not rec:
+        print(ui.dim("\n  record it: dev delivery apply --why \"…\" [--set versioning=semver] [--tasks]"))
     return 0
 
 
@@ -1647,11 +1771,16 @@ def build_parser():
     t.add_argument("--no-template", action="store_true", help="no structured description")
     for verb, h in (("start", "claim the lock and move to Now (doing)"), ("claim", "same as start"),
                     ("release", "give the lock back (back to todo)"), ("done", "mark done and release"),
-                    ("block", "mark blocked (needs --why)"), ("cancel", "cancel (needs --why)"),
+                    ("block", "mark blocked (needs --why)"), ("unblock", "back to work (todo, or doing if claimed)"),
+                    ("cancel", "cancel (needs --why)"),
                     ("show", "an item with its history"), ("history", "an item's changelog")):
         t = tsp.add_parser(verb, help=h)
         t.add_argument("selector", nargs="+", help="id (T-…), number from `dev task`, or a unique part of the title")
         t.add_argument("--why", help="the reason (recorded in the changelog and the commit)")
+    t = tsp.add_parser("link", help="count a project task toward an initiative (needs --why)")
+    t.add_argument("selector", nargs="+")
+    t.add_argument("--to", required=True, metavar="INITIATIVE")
+    t.add_argument("--why")
     t = tsp.add_parser("delegate", help="hand a task to a teammate: assign it and write the message to send")
     t.add_argument("selector", nargs="+")
     t.add_argument("--to", required=True, help="the teammate's GitHub login")
@@ -1712,6 +1841,17 @@ def build_parser():
             "How long things take: turns, slow commands, subagents, estimate accuracy")
     p.add_argument("--days", type=int, default=7)
     p.add_argument("-p", "--project")
+    p = add("delivery", cmd_delivery, "Versioning, release, test and deploy policy: detect, recommend, record, gaps")
+    p.add_argument("-p", "--project")
+    p.add_argument("-i", "--initiative")
+    p.add_argument("--json", action="store_true")
+    dsp = p.add_subparsers(dest="delivery_cmd")
+    x = dsp.add_parser("apply", help="record the policy (recommended, or with --set changes) in the handoff repo")
+    x.add_argument("--set", action="append", metavar="KEY=VALUE", help="e.g. versioning=semver, test_gate=\"a; b\"")
+    x.add_argument("--why", help="the reason (recorded in the policy changelog and the commit)")
+    x.add_argument("--tasks", action="store_true", help="create a work item for every gap")
+    x.add_argument("-p", "--project", default=argparse.SUPPRESS)
+    x.add_argument("-i", "--initiative", default=argparse.SUPPRESS)
     p = add("report", cmd_report, "Status report (Markdown): health, progress, done, in progress, next, risks, team")
     p.add_argument("--days", type=int, default=7)
     p.add_argument("-i", "--initiative")
@@ -1798,10 +1938,11 @@ def build_parser():
     p.add_argument("--all-branches", action="store_true")
     p.add_argument("--watch", action="store_true", help="refresh every 15 s until no run is in progress")
     p.add_argument("--limit", type=int, default=5)
+    p.add_argument("--all-jobs", action="store_true", help="list every running job")
     p.add_argument("--json", action="store_true")
     add("doctor", cmd_doctor, "Verify the setup")
     add("install", cmd_install, "Apply configuration").add_argument(
-        "--only", help="comma list: config,cli,git,handoff,instructions,skills,claude,codex,docker,launchd")
+        "--only", help="comma list: config,cli,git,handoff,instructions,skills,claude,codex,docker,docs,launchd")
     p = add("docs", cmd_docs, "Check documentation: Markdown, links and anchors, prose, diagrams")
     p.add_argument("check", choices=["check"])
     p.add_argument("paths", nargs="*", help="files or folders (default: the whole repository)")

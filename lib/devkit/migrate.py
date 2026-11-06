@@ -1,5 +1,5 @@
 # Copyright (c) 2026 Firefly Software Solutions Inc. All rights reserved.
-"""`dev handoff import <staging dir>`: adopt an existing handoff/programme repository into the handoff standard.
+"""`dev handoff-import <staging dir> --slug <slug>`: adopt an existing handoff/programme repository into the handoff standard.
 
 A staging folder (produced by an analysis of the old repository) contains:
   README.md      the initiative note in devkit's format (frontmatter with projects/source, sections, Tasks)

@@ -168,6 +168,13 @@ def context_for(cwd: str, agent: str) -> str:
                          ". Coordinate through tasks (claim before you start) and pull before you push.")
     except Exception:
         pass
+    try:
+        from . import delivery
+        dl = delivery.summary_line(p["id"])
+        lines.append(dl if dl else "Delivery policy: not recorded yet — `dev delivery` detects and recommends one "
+                                   "(`release-policy` skill) before the first release.")
+    except Exception:
+        pass
     lines.append("Long work: `dev progress start \"<goal>\" --plan \"a; b; c\" --estimate 30m`, then `dev progress step` "
                  "and an update to the developer every few minutes (`communicating` skill: templates for updates, "
                  "decisions, PRs, handovers; plain American English).")
@@ -482,6 +489,11 @@ def prompt(agent: str):
         _register_session(agent, sid, cwd)
         extra = context_for(cwd, agent)
         _log(f"prompt {agent}: session {sid[:12]} had no SessionStart; devkit context injected")
+    raw = (data.get("prompt") or "").lstrip()
+    if raw.startswith(("<task-notification", "[SYSTEM NOTIFICATION", "<system-reminder", "<agent-message")) or \
+            "<task-notification>" in raw[:400]:
+        _context_out("UserPromptSubmit", extra)  # background events are not the developer's request
+        return
     text = progress.on_prompt(agent, data)
     skills = ""
     try:

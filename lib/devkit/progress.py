@@ -295,11 +295,21 @@ def on_prompt(agent: str, data: dict):
         return None
     runs = [r for r in active_runs() if r.get("session") == sid] or active_runs()[:3]
     ctx = ["devkit · the developer is asking for status. Answer with the Overall status template of the "
-           "`communicating` skill: one-line verdict, then per workstream: state, evidence, ETA; what is left; risks; "
-           "what you need from them. Use these real records:"]
+           "`communicating` skill: one-line verdict, then per workstream: state, evidence, ETA; CI/CD pipelines with "
+           "their state, current job and step, elapsed and ETA; what is left; risks; what you need from them. Use "
+           "these real records:"]
     for r in runs:
         ctx.append(f"- run “{r.get('goal')}” ({r.get('agent')}): {headline(r)}; last: "
                    f"{(r.get('updates') or [{}])[-1].get('text', '-')}")
+    top = s.get("top") or ""
+    if top and not core.is_temp(top):  # CI/CD runs of this branch: jobs, current step, elapsed, ETA
+        try:
+            from . import cistatus
+            branch = core.gitout(top, "branch", "--show-current") or None
+            ctx += ["- " + ln for ln in cistatus.context_lines(top, branch, limit=2)]
+            ctx.append("  (report each pipeline's state, step and ETA; `dev ci status --watch` follows a run)")
+        except Exception:
+            pass
     subs = s.get("subagents") or {}
     for k, v in subs.items():
         ctx.append(f"- subagent {v.get('type', '')} {k[:8]} running for {fmt_min((now - v.get('started', now)) / 60)}")

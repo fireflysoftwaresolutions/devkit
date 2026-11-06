@@ -185,9 +185,13 @@ minutes) and can re-trigger the CI of every other open PR. Follow the devkit `de
    reproduced on macOS (Linux-only paths, CI secrets, runner limits) justifies a CI-only fix, and you say so.
 6. **Do not blindly re-run CI.** `gh run rerun --failed` is only for a failure proven to be flaky; record the flaky
    test in the handoff note.
-7. **Release from the verified integration branch:** merge with the repository's strategy, tag, publish, then
+7. **Every project has a recorded delivery policy** (versioning, bump rule, test gate, changelog, release flow,
+   publishing). `dev delivery` shows it, or detects and recommends one with its gaps; `dev delivery apply --why "…"`
+   records it in the handoff repository (`release-policy` skill). The session context shows it, and the guard refuses
+   tags that break it.
+8. **Release from the verified integration branch:** merge with the repository's strategy, tag, publish, then
    verify the published artefact (download/install it) before calling the release done.
-8. **GitOps:** git is the source of truth for code, configuration and infrastructure. Changes to environments go
+9. **GitOps:** git is the source of truth for code, configuration and infrastructure. Changes to environments go
    through PRs and tags; no manual changes to deployed systems, no drift.
 
 ## 8. Backend methodology
