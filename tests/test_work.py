@@ -34,6 +34,18 @@ class TempHandoff:
 
 
 class ItemTests(unittest.TestCase):
+    def test_a_finished_item_reopens_only_with_a_reason(self):
+        with TempHandoff():
+            it = work.create("acme/api", "Export invoices", why="customer request", a=A)
+            it = work.release(work.load(it["path"]), why="shipped", status="done", a=A)
+            with self.assertRaises(ValueError):
+                work.reopen(work.load(it["path"]), "", a=A)  # a reason is required
+            it = work.reopen(work.load(it["path"]), "closed too early: the review is still open", a=A)
+            self.assertEqual(it["meta"]["status"], "todo")
+            self.assertIn("why: closed too early: the review is still open", it["changelog"][0])
+            with self.assertRaises(ValueError):
+                work.reopen(work.load(it["path"]), "again", a=A)  # an open item has nothing to reopen
+
     def test_create_versions_and_reasons(self):
         with TempHandoff():
             it = work.create("acme/api", "Export invoices", why="customer request", a=A)

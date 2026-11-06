@@ -360,6 +360,16 @@ def claim(it: dict, a=None, hours: float = None, why: str = "") -> dict:
     return it
 
 
+def reopen(it: dict, why: str, a=None) -> dict:
+    """A finished or cancelled item goes back to work (todo), with its reason in the changelog and the commit."""
+    if not (why or "").strip():
+        raise ValueError("reopening a finished item needs its reason: --why \"…\"")
+    status = (it.get("meta") or {}).get("status")
+    if status not in ("done", "cancelled"):
+        raise ValueError(f"{it['meta'].get('id')} is {status}, not finished: there is nothing to reopen")
+    return update(it, "reopen", why=why, a=a, status="todo")
+
+
 def release(it: dict, a=None, why: str = "", status: str = None) -> dict:
     a = a or actor()
     if not _owned_by(it, a):

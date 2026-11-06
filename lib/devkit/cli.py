@@ -1220,6 +1220,9 @@ def cmd_task(a):
             it = work.find(" ".join(a.selector), scope)
             it = work.release(it, why=a.why or "", status="done")
             print(f"{ui.OK} {it['meta']['id']} done")
+        elif act == "reopen":
+            it = work.reopen(work.find(" ".join(a.selector), scope), why=a.why or "")
+            print(f"{ui.OK} {it['meta']['id']} reopened (todo) · why: {a.why}")
         elif act == "block":
             it = work.update(work.find(" ".join(a.selector), scope), "block", why=a.why or "", status="blocked")
             print(f"{ui.OK} {it['meta']['id']} blocked")
@@ -2247,7 +2250,7 @@ def build_parser():
     for verb, h in (("start", "claim the lock and move to Now (doing)"), ("claim", "same as start"),
                     ("release", "give the lock back (back to todo)"), ("done", "mark done and release"),
                     ("block", "mark blocked (needs --why)"), ("unblock", "back to work (todo, or doing if claimed)"),
-                    ("cancel", "cancel (needs --why)"),
+                    ("cancel", "cancel (needs --why)"), ("reopen", "back to todo after done or cancel (needs --why)"),
                     ("show", "an item with its history"), ("history", "an item's changelog")):
         t = tsp.add_parser(verb, help=h)
         t.add_argument("selector", nargs="+", help="id (T-…), number from `dev task`, or a unique part of the title")
