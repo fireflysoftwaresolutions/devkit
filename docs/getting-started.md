@@ -37,22 +37,60 @@ the configuration:
 
 ### The setup wizard
 
-The wizard detects the Mac (macOS version, CPU, memory, Homebrew), your GitHub sign-in, and whether Claude Code and
-Codex are installed and signed in. Then it asks a few questions, each with a default in brackets:
+In a terminal, `dev setup` is a full-screen wizard that you drive with the arrow keys. Nothing on the Mac changes until
+you choose **Apply** on the review screen.
 
-| Section | Questions |
+1. **Welcome.** The wizard looks at the Mac and lists what it found: macOS, CPU, memory, and Homebrew; your GitHub
+   sign-in; whether Claude Code and Codex are installed and signed in; the stacks used by the repositories in
+   `~/Development`; the git hosts and clouds this Mac already shows; and Docker (Colima). Then choose **Recommended
+   setup**, which uses what was found and goes straight to the review, or **Customize**, which walks through the
+   sections. If GitHub is not signed in, the wizard offers to run `gh auth login` first.
+2. **Sections.** Each section is one step, with a progress bar (`Step 3 of 8 · Stacks`). Every answer starts at the
+   recommended or detected value, and the focused option shows a one-line explanation under it.
+3. **Review.** The plan, section by section, and the packages it installs: how many per group, with the groups that
+   are already installed marked `✓`. Choose **Apply**, **Change a section** (edit one section, then come back to the
+   review), or **Quit without changes**.
+4. **Apply.** Each step shows a spinner while it runs and `✓`, `✗`, or `!` when it ends: save
+   `~/.config/devkit/config.json`, install the Homebrew and npm packages, install Claude Code if it is missing, run
+   `dev install`, check the agents' sign-in (and offer to sign you in), start Docker, lock the settings if you chose
+   to, and run `dev doctor`. A failed step shows the last lines of its output and the command that fixes it, and the
+   wizard goes on with the next step. It ends with the checks that need attention and three next steps.
+
+| Section | What you choose |
 | --- | --- |
-| Workspace | Development root; private handoff repository (`<you>/handoff`, or a shared one) |
-| Agents | Configure Claude Code? Codex? Claude Code's permission mode (`bypassPermissions` recommended, `acceptEdits`, `default`); Codex's autonomy (`full` recommended, or `workspace`, sandboxed) |
-| Stacks | Java and Spring, Python, PHP, Node, and TypeScript (Angular, React) |
+| Workspace | The development folder; the private handoff repository (`<you>/handoff`, or a shared one) |
+| Agents | Claude Code, Codex, or both; Claude Code's permissions (no prompts, the recommended `bypassPermissions`; `acceptEdits`; `default`); Codex's autonomy (`full`, recommended, or `workspace`, sandboxed) |
+| Stacks | Java and Spring, Python, PHP, Node and TypeScript (Angular, React); on a first run, the stacks found in your repositories are preselected |
 | Git hosts and CI/CD | GitHub (always), GitLab, Bitbucket, Azure DevOps; the ones this Mac already shows are preselected |
-| Cloud and infrastructure | AWS, Microsoft Azure, Google Cloud, DigitalOcean, Kubernetes and Helm, OpenTofu or Terraform; preselected from the config folders and CLIs it finds |
-| Docker on Colima | VM CPUs, memory, disk; start Colima at login? |
-| Automation | Reclaim disk automatically? Background sync interval; lock Claude Code settings with a managed-settings file? |
+| Clouds | AWS, Microsoft Azure, Google Cloud, DigitalOcean, Kubernetes and Helm, OpenTofu or Terraform; preselected from the config folders and CLIs it finds |
+| Docker | VM CPUs, memory, and disk (checked against this Mac); start Colima at login? |
+| Automation | Reclaim disk space automatically? Background sync interval; lock Claude Code settings with a managed-settings file? |
 
-It shows the plan and changes nothing until you confirm. Then it saves `~/.config/devkit/config.json`, installs the
-packages, runs `dev install`, offers to sign you in to Claude Code and Codex and to start Docker, locks the settings
-if you chose to, and runs `dev doctor`.
+| Key | Action |
+| --- | --- |
+| `↑` `↓` (or `j` `k`, `Tab`) | Move between options |
+| `1`–`9` | Jump to an option |
+| `Enter` | Choose, confirm, or keep the value shown |
+| `Space` | Select or clear an option in a list with checkboxes |
+| `a` | Select all options, or none, in a list with checkboxes |
+| `y` / `n` | Answer a yes-or-no question at once; `←` `→` switch the highlighted answer |
+| Typing | Replaces the value shown in a text field; `←` `→`, `Backspace`, and `Ctrl-U` edit it |
+| `Esc` | Go back one question; on a section's first question, go to the previous section (or the review) |
+| `Ctrl-C` | Quit; before you apply, nothing has changed |
+
+Run `dev setup` again at any time. On a configured Mac it starts from your saved choices (adding the hosts and clouds
+it newly finds) and offers **Keep current setup**; the review marks each section that would change and shows its old
+value. Applying an unchanged plan runs `dev install` again, which repairs anything that drifted.
+
+The full output of the apply steps is in `~/.local/state/devkit/logs/setup.log`, readable only by you.
+
+#### Line prompts and `--yes`
+
+When the input or output is not a terminal (a pipe or a script), when `TERM` is `dumb`, or with `--yes`, the wizard
+uses plain line prompts instead: each question shows its default in brackets, and Enter keeps it. `--yes` accepts
+every default without asking and writes the same configuration as earlier versions. To get the line prompts in a
+terminal, run `TERM=dumb dev setup`. Unlike the interactive **Recommended setup**, `--yes` keeps every stack selected
+unless your saved configuration lists fewer.
 
 | Package group | Installed | Contents |
 | --- | --- | --- |
