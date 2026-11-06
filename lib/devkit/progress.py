@@ -1419,7 +1419,7 @@ def crew_decision(question: str, options=None, recommend: str = "", irreversible
         _save(run, touch_session=False)
     _audit("crew.decision", d["id"], d["question"][:300], d["state"], project=run.get("project") or "",
            by=d.get("by") or "", answer=d.get("answer") or "", irreversible=d.get("irreversible") or "",
-           mode=mode_of(run), asked_by=d["from_name"])
+           mode=mode_of(run), asked_by=d["from_name"], options=d.get("options") or [])
     return d
 
 
@@ -1453,7 +1453,7 @@ def crew_decide(decision_id: str, answer: str, cwd: str | None = None, now: floa
             d.update(proposed=answer, by="morpheus", verified=False, proposed_ts=round(now))
             _save(run, touch_session=False)
             _audit("crew.decided", d["id"], answer[:300], "blocked", project=run.get("project") or "",
-                   by="morpheus", verified=False, irreversible=d["irreversible"])
+                   by="morpheus", verified=False, irreversible=d["irreversible"], options=d.get("options") or [])
             raise StepError(f"{d['id']} leads to an irreversible action ({d['irreversible']}), and devkit has no "
                             f"answer of the developer to it after it was shown: it stays pending. Ask with the "
                             f"question tool, exactly “{ask_text(d)}”"
@@ -1481,7 +1481,8 @@ def crew_decide(decision_id: str, answer: str, cwd: str | None = None, now: floa
         _save(run, touch_session=False)
     _audit("crew.decided", d["id"], d["answer"][:300], project=run.get("project") or "", by=d["by"],
            overrides=d.get("overrides") or "", verified=d["verified"], channel=(ev or {}).get("channel") or "",
-           transcript_uuid=(ev or {}).get("transcript_uuid") or "", session=f"{agent}:{sid}")
+           transcript_uuid=(ev or {}).get("transcript_uuid") or "", session=f"{agent}:{sid}",
+           options=d.get("options") or [])
     if d["from"] != "main":
         crew_ask(f"Decision {d['id']} — {d['question'][:120]} → {d['answer']}", to=d["from"], cwd=cwd, now=now)
     return d
@@ -1661,9 +1662,12 @@ def _keep_human(agent: str, sid: str, new: list, extra=None) -> list:
     state.update(session_path(agent, sid), fn, create=False)
     for e in replayed:
         _refuse_replay(agent, sid, str(e.get("transcript_uuid")), f"{e.get('channel')} {e.get('covers')}")
+    run = load_run(agent, sid) if any(e.get("answer") for e in kept) else None  # an answer names an option or none
     for e in kept:
+        d = _decision(run, e["covers"]) or {}
+        said = e.get("answer") or ""
         _audit("crew.evidence", e["covers"], e["excerpt"], channel=e["channel"], transcript_uuid=e["transcript_uuid"],
-               session=f"{agent}:{sid}", answer=e.get("answer") or "")
+               session=f"{agent}:{sid}", answer=option_of(d, said) or said, options=d.get("options") or [])
     return kept
 
 

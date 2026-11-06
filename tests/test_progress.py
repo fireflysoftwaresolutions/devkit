@@ -830,6 +830,30 @@ class EvidenceReplayTests(unittest.TestCase):
         human = json.loads(self.state.sess.read_text()).get("human") or []
         self.assertEqual([h["transcript_uuid"] for h in human], ["toolu_q1"])
 
+    def test_the_evidence_record_keeps_an_answer_that_names_an_option(self):
+        # M265 (Persephone's compliance review 2): crew.evidence keeps the answer only as one of the decision's options,
+        # so progress passes them; through the real audit.record
+        d = pg.crew_decision("Skip empty lines or reject the file?", options="A: skip | B: reject", recommend="A")
+        q = pg.ask_text(d)
+        result = {"questions": [{"question": q, "options": [{"label": "A: skip"}, {"label": "B: reject"}]}],
+                  "answers": {q: "b: reject (Recommended)"}}
+        self.write({"type": "user", "uuid": "u-3", "isSidechain": False, "toolUseResult": result,
+                    "message": {"role": "user", "content": [{"type": "tool_result", "tool_use_id": "toolu_q2",
+                                                             "content": "answered"}]}})
+        pg.on_question("claude", {"session_id": "s1", "tool_name": "AskUserQuestion", "tool_use_id": "toolu_q2",
+                                  "tool_input": {"questions": result["questions"]}, "tool_response": result,
+                                  "transcript_path": str(self.transcript)})
+        from devkit import audit
+        self.assertEqual([r["ref"]["answer"] for r in audit.records(1, "crew.evidence")], ["B: reject"])
+
+    def test_the_decision_records_keep_the_option_labels_and_an_answer_that_names_one(self):
+        # M327: crew.decision keeps the labels (ref.options) and crew.decided an answer that is one of them
+        from devkit import audit
+        pg.crew_decision("Skip empty lines or reject the file?", options="A: skip | B: reject", recommend="A")
+        pg.crew_decide("D1", "B: reject")
+        self.assertEqual([r["ref"].get("options") for r in audit.records(1, "crew.decision")], ["A: skip | B: reject"])
+        self.assertEqual([r["detail"] for r in audit.records(1, "crew.decided")], ["B: reject"])
+
     def test_a_codex_entry_is_never_confirmed_by_the_hook_alone(self):
         # The Keymaker: devkit reads no Codex transcript yet, so a Codex entry has nothing behind it but the hook event
         self.assertFalse(pg.confirmed({"agent": "codex", "channel": "E2", "transcript_uuid": "p-1", "covers": "D1"}))
