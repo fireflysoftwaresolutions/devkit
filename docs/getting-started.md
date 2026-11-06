@@ -1,7 +1,8 @@
 # Getting started
 
 This guide takes a Mac from zero to a verified devkit setup, explains how to onboard another developer and how to
-share a handoff repository, and lists every file devkit touches.
+share a handoff repository, and lists every file devkit touches. When devkit is installed, the
+[tutorials](surfaces.md) show your first task on the app or terminal you use.
 
 ## Requirements
 
@@ -37,13 +38,16 @@ command and a few presses of Return. Have your Mac's login password and your Git
    `1A2B-3C4D`, and your browser opens GitHub: sign in, type the code, and choose **Authorize**. Back in Terminal, you
    see `✓ signed in to GitHub as <your name>`.
 7. **The setup wizard.** A full-screen page shows what the wizard found on your Mac, with **Recommended setup**
-   selected: press Return. On a Mac with no projects yet, it then asks which languages you work in, with Python and
-   Node (JavaScript and TypeScript) already selected: press Return to keep them, or add Java or PHP with the arrow
-   keys and Space. The next page is the plan, with **Apply** selected: press Return. Each item then shows a
-   spinner while it runs and `✓` when it is done. When the wizard offers to sign you in to Claude Code or Codex, press
-   Return: your browser opens, and you sign in there with your Claude or ChatGPT account. When it offers to start
-   Docker, press Return.
-8. **The summary.** The installer ends with **What you have now** and **What to do first**.
+   selected: press Return. On a Mac with no projects yet, it then asks **Stacks you work in**, the programming
+   languages you plan to use, with Python and Node / TypeScript (JavaScript) already selected. Press Return to keep
+   them, or add Java or PHP with the arrow keys and Space. The next page is the plan, with **Apply** selected: press
+   Return. Each item then shows a spinner while it runs and `✓` when it is done. When the wizard offers to sign you
+   in to Claude Code or Codex, press Return: your browser opens, and you sign in there with your Claude or ChatGPT
+   account. When it offers to start Docker, press Return.
+8. **The summary.** The installer ends with **What you have now** and **What to do first**. One line of **What you
+   have now** says that the hooks and the guard run a read-only copy of devkit, for example
+   `devkit 26.11.3 (4f2c1ab) in ~/.local/share/devkit/releases/26.11.3-4f2c1ab`. That copy is what keeps your agents
+   safe, and nothing can change it by accident ([The pinned copy](#the-pinned-copy) explains it).
 9. **Open a new Terminal window** (Command-N), so that the `dev` command works, and run:
 
    ```bash
@@ -62,6 +66,10 @@ command and a few presses of Return. Have your Mac's login password and your Git
     `dev new` creates the project folder, `dcd` goes into it, and `claude` starts Claude Code there (run `codex` for
     Codex). Ask it for something small, and check that its reply starts with a bold `[Firefly> DevKit]` line, which
     shows that devkit is active.
+11. **Follow the tutorial for where you work.** Each one walks through a first task with devkit's crew and explains
+    what you see. Pick [Claude Code](tutorials/claude-code.md) in Terminal or an IDE,
+    [Claude Desktop's Code tab](tutorials/claude-desktop.md), [Codex CLI](tutorials/codex-cli.md), or
+    [Codex in the ChatGPT app](tutorials/chatgpt-codex.md).
 
 If a step fails, the installer names it and prints the command that runs it again. See
 [Troubleshooting › Installing and updating](troubleshooting.md#installing-and-updating).
@@ -91,7 +99,8 @@ its version, what you have now, and what to do first. It is safe to run again. I
 5. Signs you in to GitHub with the browser (`gh auth login` over HTTPS, so it asks no technical questions), unless
    the GitHub CLI is signed in already.
 6. Starts the [setup wizard](#the-setup-wizard), `dev setup`, which asks its questions in the terminal even though
-   the installer arrived through a pipe.
+   the installer arrived through a pipe. Its `dev install` makes the [pinned copy](#the-pinned-copy) that the hooks
+   and the guard run.
 
 To read the script before you run it, download it first:
 
@@ -133,7 +142,8 @@ wizard, says how to finish, and exits with code `2`.
 
 When you run `install.sh` from a clone of devkit (`./install.sh`), it sets up that checkout as it is, on whatever
 branch or commit it is: it does not clone, fetch, or switch anything. This is how you install a branch you are working
-on (see [Developing devkit](development.md)).
+on (see [Developing devkit](development.md)). A commit that is not a release is pinned only after its tests passed on
+this Mac, so run `bin/dev ci --run` in the clone first; the installer says so when the checkout is not at a release.
 
 ### The setup wizard
 
@@ -152,8 +162,8 @@ you choose **Apply** on the review screen.
    review), or **Quit without changes**.
 4. **Apply.** Each step shows a spinner while it runs and `✓`, `✗`, or `!` when it ends: save
    `~/.config/devkit/config.json`, install the Homebrew and npm packages, install Claude Code if it is missing, run
-   `dev install`, check the agents' sign-in (and offer to sign you in), start Docker, lock the settings if you chose
-   to, and run `dev doctor`. A failed step shows the last lines of its output and the command that fixes it, and the
+   `dev install` (which pins devkit first), check the agents' sign-in (and offer to sign you in), start Docker, lock
+   the settings if you chose to, and run `dev doctor`. A failed step shows the last lines of its output and the command that fixes it, and the
    wizard goes on with the next step. It ends with the checks that need attention and three next steps.
 
 | Section | What you choose |
@@ -191,7 +201,7 @@ uses plain line prompts instead: each question shows its default in brackets, an
 every default without asking and writes the same configuration as earlier versions. When nothing can answer (the input
 is not a terminal), the line prompts say so at the start and take every default, as with `--yes`. To get the line prompts in a
 terminal, run `TERM=dumb dev setup`. With `--yes`, the stacks are your saved ones, else the ones found in your
-projects, else Python and Node.
+projects, and otherwise Python and Node.
 
 | Package group | Installed | Contents |
 | --- | --- | --- |
@@ -214,30 +224,58 @@ The groups are marked `# @group` in the [Brewfile](../Brewfile) and in
 
 ### What `dev install` configures
 
-`dev install` is idempotent: it changes only what differs. Each step can run alone with `dev install --only <step>`.
+`dev install` is idempotent: it changes only what differs. It first pins devkit (next section), then runs every step
+below from that pinned copy, so every path the steps write names the copy, never the checkout. Each step can run alone
+with `dev install --only <step>`, which re-applies it from the copy that is installed already, without pinning.
 
 | Step | Effect |
 | --- | --- |
 | `config` | Creates `~/.config/devkit/config.json` if it is missing, and the workspace folders |
 | `tools` | Installs the Homebrew and npm packages that are missing for your stacks, git hosts, and clouds, and the Azure DevOps CLI extension (only reports them when `packages.auto` is off) |
-| `cli` | Links `~/.local/bin/dev` and adds a managed block to `~/.zshrc` that sources `shell/devkit.zsh` |
+| `cli` | Links `~/.local/bin/dev` to the pinned copy and adds a managed block to `~/.zshrc` that sources its `shell/devkit.zsh` |
 | `git` | Sets `user.name` and `user.email` from your GitHub account, makes `gh` git's credential helper, includes the shared git defaults, and the global ignore file |
 | `handoff` | Clones your handoff repository, or creates it as a private GitHub repository and pushes the first commit; writes the multi-machine merge rules |
 | `instructions` | Generates `~/.claude/CLAUDE.md` and `~/.codex/AGENTS.md` from `agents/AGENTS.md` (plus your personal rules) |
 | `skills` | Fetches third-party skills at pinned commits (your optional groups included) and links them into both agents |
 | `claude` | Merges settings, hooks, plugins, and MCP servers into Claude Code; reinstalls the devkit plugin when the installed copy is stale |
 | `codex` | Configures Codex through its own app-server API, writes and trusts the hooks, writes the profiles and the `scout` role, installs plugins and MCP servers, reinstalls a stale devkit plugin |
+| `desktop` | When Claude Desktop is installed: builds the devkit extension for chat and Cowork and opens its installer when it is missing or out of date (choose **Install**); see [Claude Desktop chat and Cowork](tutorials/desktop-chat-and-cowork.md) |
 | `docker` | Adds the Compose and Buildx plugin folder and the keychain credential store to `~/.docker/config.json`; registers Colima at login if you chose that |
 | `docs` | Checks markdownlint, lychee, and Vale, and syncs the Google and write-good Vale styles |
 | `launchd` | Loads devkit's seven scheduled jobs, `com.devkit.job.<name>`: sync (hourly by default), sleep, gc, repair, audit, doctor and lessons ([jobs and audit](jobs-and-audit.md)) |
 
 Details are in [Agents](agents.md) and [Configuration](configuration.md).
 
+### The pinned copy
+
+Your agents' hooks and the guard run devkit's code before every command an agent runs. If they ran the checkout in
+`~/Development/fireflysoftwaresolutions/devkit`, one broken or careless edit there would switch the guard off for every
+session at once. That is why `dev install` first makes a **pinned copy**: a read-only copy of the checkout's current commit in
+`~/.local/share/devkit/releases/<version>-<commit>/`, with a list of the SHA-256 checksum of every file.
+
+- **What runs it.** The hooks of Claude Code and Codex, devkit's status line, the `dev` command in your shell
+  (`~/.local/bin/dev`), the scheduled jobs, and the Claude Desktop extension. `~/.local/share/devkit/install.json`
+  records which copy is installed and which checkout it came from.
+- **What it pins.** Only a commit that has earned it: a **release**, a `vYY.MM.PATCH` tag that GitHub has on the same
+  commit (what the installer and `dev update` check out), or a commit whose **tests passed on this Mac**
+  (`bin/dev ci --run` in the checkout). Anything else is refused with the reason and the way forward.
+- **What it refuses.** Tracked files with changes that are not committed, because the copy is made from git and would
+  not match what is on disk, and code that does not compile, because the hooks would then fail open.
+- **Installing anyway.** `dev install --unverified --why "<reason>"` pins a commit that is neither a release nor
+  tested. The reason goes to the audit trail (`dev audit`).
+- **Checked.** `dev doctor` fails when a file in the copy changed after it was pinned, or when a hook runs something
+  other than the pinned copy, and names the fix. `dev install` rebuilds a changed copy from git.
+- **Rollback.** devkit keeps the newest three copies, and any copy still in use. To go back to an earlier one, run
+  `dev install --version 26.11.2` (the version, or `<version>-<commit>`); it checks the copy against its checksums
+  first.
+
 ### First run of each agent
+
+The [tutorials](surfaces.md) walk through a first task on each surface.
 
 - **Claude Code:** run `claude` once to sign in (the wizard offers it). Claude Desktop's Code tab reads the same
   `~/.claude` settings, so it is configured too.
-- **Codex:** run `codex` once to sign in. The Codex app inside ChatGPT reads the same `~/.codex` files.
+- **Codex:** run `codex` once to sign in. The ChatGPT app's Codex reads the same `~/.codex` files.
 - **Docker:** `dev docker up` creates and starts the Colima VM the first time (see [Docker](docker.md)).
 - **A live check:** `dev agents test` runs a short real session with each agent and checks that the hooks, the guard,
   the status block, the global instructions, and the devkit skills all work.
@@ -279,14 +317,18 @@ Ask the agent for a quick task in a repository and check that its final message 
 ## Updating
 
 ```bash
-dev update          # the newest release (or a pull of the branch), then dev install
+dev update          # the newest release (or a pull of the branch), then dev install, which pins it
 ```
 
 The installer leaves devkit at a release tag, so `dev update` follows releases: it fetches the tags and checks out the
-newest release when it is newer, then runs `dev install`; when devkit is at the newest release already, it says so and
-changes nothing. A checkout on a branch, which is how you work on devkit itself, gets `git pull --ff-only` instead.
+newest release when it is newer, then runs `dev install`, which pins that release; when devkit is at the newest
+release already, it says so and changes nothing. A checkout on a branch, which is how you work on devkit itself, gets
+`git pull --ff-only` instead, and `dev install` pins the new commit only after `bin/dev ci --run` passes for it.
 `dev update` refuses to start while tracked files have local changes. Running the installer again also moves a release
 checkout to the newest release.
+
+If a new release misbehaves, `dev install --version <previous version>` switches the hooks back to the copy pinned
+before it.
 
 Restart running Claude Code and Codex sessions afterward; they read instructions and hooks at session start. To change
 the choices you made in the wizard, run `dev setup` again.
@@ -311,14 +353,15 @@ each).
 | `~/Development/fireflysoftwaresolutions/devkit` | The devkit checkout (installer; `DEVKIT_HOME` chooses another folder) | Delete the folder |
 | Homebrew, git, Python, and the GitHub CLI | Installed by the installer when they are missing | `brew uninstall git python gh`; Homebrew's own uninstall script |
 | `~/.zprofile` | One line, `eval "$(/opt/homebrew/bin/brew shellenv)"`, added by the installer only when Homebrew was not on your `PATH` (Apple Silicon) | Delete the line |
-| `~/.local/bin/dev` | Symlink to `bin/dev` | Delete it |
+| `~/.local/bin/dev` | Symlink to `bin/dev` in the pinned copy | Delete it |
 | `~/.zshrc` | The block between `# >>> devkit >>>` and `# <<< devkit <<<` | Delete the block |
 | `~/.gitconfig` | `user.name`, `user.email`, `include.path` (shared defaults), `core.excludesFile`, the gh credential helper | `git config --global --unset …` |
 | `~/.docker/config.json` | `cliPluginsExtraDirs`, `credsStore` | Remove the keys |
 | `~/Library/LaunchAgents/com.devkit.job.*.plist` | The scheduled jobs | `dev jobs` lists them; for each, `launchctl bootout gui/$UID/com.devkit.job.<name>` and delete the file |
 | `~/.config/devkit/` | Your configuration and personal rules | Delete it |
 | `~/.local/state/devkit/` | Caches, locks, session records, runs and timing, the latest status per project, logs, the canary log, the dashboard, the `dev rm` manifest (`trash.jsonl`), backups | Delete it |
-| `~/.local/share/devkit/` | Fetched third-party skills (`skills-src/`, `skills/`) and the Vale styles | Delete it |
+| `~/.local/share/devkit/` | Fetched third-party skills (`skills-src/`, `skills/`), the Vale styles, the [pinned copies](#the-pinned-copy) (`releases/`, read-only) with the record of the installed one (`install.json`), and the Claude Desktop extension bundle (`desktop/`) | Run `chmod -R u+w ~/.local/share/devkit`, because the pinned copies are read-only, then delete it |
+| The devkit extension in Claude Desktop | Installed when you choose **Install** | Remove it in **Settings › Extensions** |
 | Claude Code and Codex plugins and MCP servers | Installed and enabled | `claude plugin disable <name>`, `claude mcp remove -s user <name>`, `codex plugin remove <name>` |
 
 Uninstalling never deletes your repositories, the handoff repository or the workspace folders under `~/Development`.
