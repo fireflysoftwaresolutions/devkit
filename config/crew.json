@@ -1777,7 +1777,9 @@
         "flyway",
         "alembic",
         "liquibase",
-        "table"
+        "table",
+        "database migration",
+        "add a migration"
       ]
     },
     {

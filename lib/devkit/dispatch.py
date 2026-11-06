@@ -178,7 +178,8 @@ def delegate(task: str, to: str = "auto", files=None, scope: str = "", after: st
     progress._save(run, touch_session=False)
     progress._audit("crew.delegate", f"{by} → {m['name']}", task.strip()[:300], project=run.get("project") or "",
                     step=name, routed="yes" if routed else "no")
-    text = f"{by} delegates “{task.strip()[:200]}” to {m['name']} (step “{name}”)"
+    from . import crew
+    text = f"{by} delegates “{task.strip()[:200]}” to {crew.who(m)} (step “{name}”)"
     if lane_id and s.get("owner") == lane_id:
         progress.crew_ask(text + ". It is in your lane now; if you cannot take it: dev crew decline "
                           f"\"{name}\" --why \"…\"", to=lane_id, from_agent=from_agent, cwd=cwd, now=now)
@@ -268,7 +269,8 @@ def ready_context(agent: str, sid: str) -> str:
     mode = progress.mode_of(run)
     lines = [f"devkit · ready to launch ({r['free']} of {progress.cfg()['max_parallel']} crew slots free, {mode} "
              f"mode{': launch them now, in one message' if mode == 'auto' else ''}):"]
-    lines += [f"- {s['label']}: {s['name']} → {launch_line(s)}" for s in new]
+    from . import crew
+    lines += [f"- {crew._who_label(s['label'])}: {s['name']} → {launch_line(s)}" for s in new]
     if r["queued"]:
         lines.append(f"- queued until a slot frees: {', '.join(s['name'] for s in r['queued'])}")
     return "\n".join(lines)

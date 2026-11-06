@@ -522,6 +522,7 @@ def run_view(run: dict, roster=None, now=None):
     for (aid, lane), a in zip(raw, b.get("agents") or []):
         m = _for_lane(lane, roster)
         lanes.append({"member": m["name"] if m else (lane.get("persona") or ""), "id": m["id"] if m else "",
+                      "who": who(m) if m else (lane.get("persona") or lane.get("label") or ""),
                       "label": a.get("label"), "state": a.get("state"), "min": a.get("min"),
                       "scope": lane.get("scope") or []})
     names = {aid: lane.get("persona") or lane.get("label") or "subagent" for aid, lane in raw}
@@ -532,6 +533,7 @@ def run_view(run: dict, roster=None, now=None):
         m = _for_label(s["label"], roster)
         owner = s.get("owner") or "main"
         assigned.append({"step": i, "name": s.get("name"), "to": s["label"], "member": m["name"] if m else s["label"],
+                         "who": who(m) if m else s["label"],
                          "scope": s.get("scope") or [], "state": s.get("state"),
                          "lane": names.get(owner, "") if owner != "main" else ""})
     return {"goal": b.get("goal"), "project": run.get("project"), "state": b.get("state"),
@@ -541,17 +543,24 @@ def run_view(run: dict, roster=None, now=None):
             "decisions": [_decision(d) for d in progress.pending_decisions(run)], "ready": ready_view(run, roster)}
 
 
+def _who_label(label, roster=None) -> str:
+    """A step or lane label as developers read it: "Tank" → "Backend engineer (Tank)"."""
+    m = _for_label(label or "", roster)
+    return who(m) if m else (label or "")
+
+
 def ready_view(run: dict, roster=None) -> dict:
     """dispatch.ready() as plain data: what Morpheus can launch now, what is queued or waiting and why, who is busy."""
     from . import dispatch, progress
     r = dispatch.ready(run)
-    step = lambda s: {"step": s["name"], "member": s.get("label") or "",  # noqa: E731
+    step = lambda s: {"step": s["name"], "member": s.get("label") or "", "who": _who_label(s.get("label"), roster),  # noqa: E731
                       "scope": s.get("scope") or [], "requested_by": s.get("requested_by") or ""}
     return {"free": r["free"], "max_parallel": progress.cfg()["max_parallel"],
             "launch": [dict(step(s), launch=dispatch.launch_line(s)) for s in r["launch"]],
             "queued": [dict(step(s), launch=dispatch.launch_line(s)) for s in r["queued"]],
             "waiting": [dict(step(s), why=why) for s, why in r["waiting"]],
             "busy": [{"member": (_for_lane(lane, roster) or {}).get("name") or lane.get("persona") or "",
+                      "who": _who_label(lane.get("persona") or lane.get("label"), roster),
                       "label": lane.get("label") or "", "scope": lane.get("scope") or []} for _, lane in r["busy"]]}
 
 
@@ -624,7 +633,7 @@ def run_text(view: dict) -> str:
     out = [mode_line(view)]
     ready = view.get("ready") or {}
     if ready.get("launch"):
-        out.append(f"  Ready to launch: {', '.join(s['member'] + ' (' + s['step'] + ')' for s in ready['launch'])}"
+        out.append(f"  Ready to launch: {', '.join((s.get('who') or s['member']) + ': ' + s['step'] for s in ready['launch'])}"
                    " · dev crew next")
     if view.get("decisions"):
         out.append(ui.section("Decisions waiting for the developer"))
@@ -858,7 +867,7 @@ def _route(a) -> int:
             print("  every open plan step already has a member")
             return 0
         for s, m, score, why in rows:
-            print(f"  {s['name']} → {m['name']} ({score:g}) · {'; '.join(why)}")
+            print(f"  {s['name']} → {who(m)} ({score:g}) · {'; '.join(why)}")
         if a.apply:
             print(f"{ui.OK} assigned {len(rows)} step(s); who to launch now: dev crew next")
         else:
@@ -918,16 +927,16 @@ def _next() -> int:
     if v["launch"]:
         print(ui.section("Ready to launch"))
         for s in v["launch"]:
-            print(f"  {s['member']}: {s['step']}\n    {s['launch']}")
+            print(f"  {s.get('who') or s['member']}: {s['step']}\n    {s['launch']}")
     if v["queued"]:
         print(ui.section("Queued until a slot frees"))
-        print("\n".join(f"  {s['member']}: {s['step']}" for s in v["queued"]))
+        print("\n".join(f"  {s.get('who') or s['member']}: {s['step']}" for s in v["queued"]))
     if v["waiting"]:
         print(ui.section("Waiting"))
-        print("\n".join(f"  {s['member']}: {s['step']} · {s['why']}" for s in v["waiting"]))
+        print("\n".join(f"  {s.get('who') or s['member']}: {s['step']} · {s['why']}" for s in v["waiting"]))
     if v["busy"]:
         print(ui.section("Busy"))
-        print("\n".join(f"  {ui.ACTIVE} {b['member'] or 'subagent'} · {b['label']}"
+        print("\n".join(f"  {ui.ACTIVE} {b.get('who') or b['member'] or 'subagent'} · {b['label']}"
                         + (f" · scope {', '.join(b['scope'])}" if b["scope"] else "") for b in v["busy"]))
     if not (v["launch"] or v["queued"] or v["waiting"] or v["busy"]):
         print("  nothing assigned to the crew: dev crew route --plan, or dev crew delegate \"<task>\"")
