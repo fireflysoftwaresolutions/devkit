@@ -29,7 +29,7 @@ export SUPERPOWERS_DISABLE_TELEMETRY=1
 export TRIVY_DISABLE_TELEMETRY=true TRIVY_SKIP_VERSION_CHECK=true SEMGREP_SEND_METRICS=off
 export SYFT_CHECK_FOR_APP_UPDATE=false GRYPE_CHECK_FOR_APP_UPDATE=false CLAUDE_SECURITY_SCAN_TIP=off
 
-# dcd <query>: cd into a project (fzf picker when several match).
+# dcd <name>: cd into a project by its alias, id or part of its name (several matches: dev lists them).
 dcd() {
   local p
   p="$(dev go "$@")" || return
@@ -52,4 +52,4 @@ else
   autoload -Uz compinit && compinit -C
   autoload -Uz _dev && compdef _dev dev
 fi
-_dev_projects() { local -a p; p=(${(f)"$(dev __complete projects 2>/dev/null)"}); _describe 'project' p; }
+_dev_projects() { local -a p; p=(${(f)"$(dev __complete aliases 2>/dev/null)"}); _describe 'project' p; }

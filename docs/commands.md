@@ -39,38 +39,83 @@ In a narrow terminal the wordmark becomes one line.
 
 ## Projects
 
-### `dev ls [--offline] [--names]`
+### `dev ls [--all] [--offline] [--names] [--json]`
 
-A table of every project: id, stack, branch, state (modified and untracked files, ahead ↑ and behind ↓), number of
-worktrees, open PRs, last activity (● when a session is live) and size. Ids marked `*` are not at their canonical path.
+The projects on this Mac: those with a checkout or a worktree here. One row per project, newest activity first: the
+alias you type, the branch, your changes in words ("78 to push, 1 new file"), the checks of the branch (`✓`, `✗`, `…`,
+or `–` when there are none), the number of worktrees, and the last activity. At 100 columns and wider the row also
+shows the size and, when the alias differs, the repository name. `●` marks a project a session is working in now, and
+`!` one outside devkit's folder layout (`dev adopt` fixes it). A footer counts the portfolio projects that are not on
+this Mac.
 
 | Option | Effect |
 | --- | --- |
-| `--offline` | Do not query GitHub; use cached PR data |
-| `--names` | Print only the project ids, one per line |
+| `--all` | Also list the portfolio projects that are not on this Mac, grouped by owner, with the `dev clone` command |
+| `--offline` | Do not query GitHub; use cached PR data and skip the checks |
+| `--names` | Print only the project ids, one per line (with `--all`, every project) |
+| `--json` | The rows as JSON, with the portfolio projects that are not on this Mac |
 
-### `dev go <query>`
+### `dev go <name>`
 
-Prints a project's path. The `dcd` shell function uses it.
+Prints a project's path. `<name>` is an id, an alias, or part of a name (see `dev alias` for how names match). When
+the match is not exact, a dim line on standard error names the project it picked (`kit → kit-consulting`). The `dcd`
+shell function uses it.
 
 ```bash
 cd "$(dev go widget)"      # what `dcd widget` does
 ```
 
-### `dev status [<query>]`
+### `dev alias [<alias> [<project>] [--move] | rm <alias>]`
 
-The current project, or `<query>`: path, remote, stack, detected commands, branch and state, PR, last commit,
-worktrees, open PRs, the handoff note, the latest CI run of the branch with its jobs (as in `dev ci status`), the latest
-status block drawn as a block (see [Concepts › The status block](concepts.md#the-status-block)), and the items that
-need attention. Outside a project it
-shows the home screen.
+Short names for projects, kept in the handoff repository (`aliases.json`) so every Mac and teammate shares them. Every
+project has an alias: the repository name when no other project has it, or the one you set. `dev status`, `dev go`,
+`dev open`, `dev wt new --repo`, `dev claude`, `dev codex` and `dev clone` accept an alias, and completion offers them.
 
-### `dev clone <owner/repo | host/group/repo | url>`
+| Command | Effect |
+| --- | --- |
+| `dev alias` | The aliases of the projects on this Mac and every alias the team set: `ALIAS`, `PROJECT`, `SET BY` |
+| `dev alias <alias> [<project>]` | Give the project (default: the one you are in) this alias; it replaces the one it had |
+| `dev alias <alias> <project> --move` | Take an alias that another project has |
+| `dev alias rm <alias>` | Remove an alias you set; the project gets its repository name back |
+
+An alias uses lowercase letters, digits, `.`, `-` and `_`, starts with a letter or a digit, and has at most 40
+characters. It cannot be another project's alias (unless you pass `--move`) or another repository's name.
+
+A name matches projects in this order, ignoring case: an exact id, alias or path; an exact repository name; a name or
+alias that starts with it; one that contains it. The first level with a match decides. Within it, one match wins, or
+the only match on this Mac. Otherwise devkit lists the matches, each with its command, and exits with `2`: it never
+guesses.
+
+### `dev status [<name>] [--all] [--json]`
+
+The project you are in, or `<name>`, in the order of its questions:
+
+1. **Needs you:** what only you can do, or `✓ Nothing needs you right now.` A crew decision waiting for you, the last
+   update's You bullet, a project outside devkit's folder layout (with its `dev adopt` command), and work at risk.
+2. **Right now:** the checks of the branch or its open PR, the crew members working now (role, name, and what their
+   step does, never its code), and the plan's steps done and time left while a run works. A run works while it or one
+   of its crew reported in the last 30 minutes.
+3. **Last update:** the latest status block, whole: who and when, its title, Done, Check, and Next. It names the
+   worktree or copy it came from when that is not the one shown.
+4. **Details:** the branch in words, the last commit, worktrees, the folder, the handoff note and the project's
+   commands.
+
+Text wraps at the terminal width, or at 100 columns in a wider one, under its column; nothing is cut. Outside a
+project it shows what needs you across this Mac's projects, then the projects (the `dev ls` table).
+
+| Option | Effect |
+| --- | --- |
+| `--all` | Also the project's tasks (Now, Next, Later) and plans |
+| `--json` | The same data as JSON, for tools |
+
+### `dev clone <owner/repo | host/group/repo | url | name>`
 
 Clones into the canonical path and prints it. GitHub shorthands go through `gh repo clone`; everything else goes
-through `git clone`. The new repository is marked trusted in Codex and gets a handoff note.
+through `git clone`. The new repository is marked trusted in Codex and gets a handoff note. A bare name or alias of a
+portfolio project (`dev ls --all` lists them) clones that project.
 
 ```bash
+dev clone flyquery                             # a portfolio project, by its name
 dev clone acme/widget                          # → ~/Development/acme/widget
 dev clone git@gitlab.com:group/sub/svc.git     # → ~/Development/gitlab.com/group/sub/svc
 dev clone gitlab.acme.io/team/api              # → ~/Development/gitlab.acme.io/team/api (https)
@@ -911,7 +956,8 @@ nightly `gc` job runs. It then syncs. The rules are in [Disk and cleanup](disk-a
 
 ### `dev du [--refresh]`
 
-Sizes of every project's main checkout and worktrees, Claude Code transcripts and temp, the Codex home, devkit temp,
+Sizes of the main checkout and worktrees of each project on this Mac (a footer counts the portfolio projects that are
+not), Claude Code transcripts and temp, the Codex home, devkit temp,
 the npm and Homebrew caches, the Colima VM disk, and `docker system df` when Docker is running. `--refresh` recomputes
 cached sizes.
 
@@ -1023,13 +1069,14 @@ Serves devkit's tools over MCP (the Model Context Protocol) on standard input an
 extension's launcher runs it; you do not run it yourself. Each tool runs a `dev` command without a shell and with a
 timeout.
 
-### `dev config [diff | repair | show | edit | validate | lock | unlock | status] [--quiet]`
+### `dev config [diff | repair | show | edit | validate | lock | unlock | status] [--check] [--quiet]`
 
 Previews and enforces the agent settings that devkit manages. See [Agents](agents.md).
 
 | Command | Effect |
 | --- | --- |
-| `dev config` · `dev config diff` | Every difference between devkit's configuration and what is installed (Claude Code, Codex, instructions, skills, git). Exits with `1` when there are differences |
+| `dev config` · `dev config diff` | A report of every difference between devkit's configuration and what is installed (Claude Code, Codex, instructions, skills, git). Each one says what it is (`+` new in this devkit version, not installed yet; `~` changed outside devkit; `−` removed outside devkit), shows its value in readable fields (a hook: what it does, its event, matcher, command and time limit), and names the fix. Exits with `0`; a broken config file exits with `2` |
+| `dev config --check` | One line and exit `1` when a setting differs, nothing and exit `0` otherwise: for scripts and `dev doctor` |
 | `dev config repair [--quiet]` | Restores the managed keys and logs what changed. Session start runs it in the background |
 | `dev config show` | The location of the config file and of devkit, and the effective configuration as JSON |
 | `dev config edit` | Opens `~/.config/devkit/config.json` in your editor, then validates it |
@@ -1107,18 +1154,18 @@ Version, install path, and copyright.
 
 | Function | Effect |
 | --- | --- |
-| `dcd <query>` | `cd` into a project (fzf picker when more than one matches) |
+| `dcd <name>` | `cd` into a project by its alias, id, or part of its name (when two or more match, `dev` lists them) |
 | `dwt <branch> [--base REF]` | Create or reuse a managed worktree and `cd` into it |
 
 It also puts `~/.local/bin` on the PATH, sets the Docker and telemetry environment variables, and loads zsh completion
-for `dev` and `dcd`: the commands, project ids, worktree branches, the verbs of `dev task`, `dev progress`, `dev crew`,
+for `dev` and `dcd`: the commands, project aliases, worktree branches, the verbs of `dev task`, `dev progress`, `dev crew`,
 and `dev agents` with their main options, the options of `dev dashboard` and `dev install` (its steps and the pinned
 copies for `--version`), and the Docker actions.
 
 ## Internal commands
 
 `dev hook <event> --agent claude|codex` is the hook entry point that Claude Code and Codex call (see
-[Agents › Hooks](agents.md#hooks)). `dev __complete <projects|branches|commands>` feeds shell completion.
+[Agents › Hooks](agents.md#hooks)). `dev __complete <projects|aliases|branches|commands>` feeds shell completion.
 `dev jobs exec <job>` is what launchd runs for a scheduled job, `dev audit --publish` is the `audit` job's command,
 and `dev sync --delay N` is the queued near-real-time sync.
 

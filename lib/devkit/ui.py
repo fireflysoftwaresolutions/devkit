@@ -217,6 +217,164 @@ def kv(key: str, value, key_width=14) -> str:
     return f"  {dim(key.ljust(key_width))} {value}"
 
 
+# --------------------------------------------------------------------------- the readable terminal (Sati's rules)
+# Every screen: text wraps at the terminal width, or at 100 columns when it is wider; no line runs past the edge;
+# wrapped text continues under its value column; glyphs carry the meaning and color repeats it, so a screen reads the
+# same with NO_COLOR=1; commands sit on their own line, in cyan, so they can be copied whole.
+
+UTF8 = "utf" in (getattr(sys.stdout, "encoding", "") or "utf-8").lower()
+_GLYPHS = {"needs": ("!", "!"), "ok": ("✓", "ok"), "fail": ("✗", "x"), "working": ("▸", ">"), "running": ("…", "..."),
+           "session": ("●", "*"), "none": ("–", "-"), "devkit": ("✦", "*"), "new": ("+", "+"), "changed": ("~", "~"),
+           "removed": ("−", "-"), "leftover": ("×", "x"), "ellipsis": ("…", "...")}
+LABEL_W = 10  # the label column of a screen's rows: "Worktrees" and one space
+
+
+def amber(s) -> str:
+    """Needs you: amber #FFB34A, bold (256 colors: 215)."""
+    if not COLOR:
+        return str(s)
+    return f"\x1b[1;38;2;255;179;74m{s}\x1b[0m" if TRUECOLOR else f"\x1b[1;38;5;215m{s}\x1b[0m"
+
+
+def glyph(name: str) -> str:
+    g = _GLYPHS[name]
+    return g[0] if UTF8 else g[1]
+
+
+def text_width(cols: int = None) -> int:
+    return min(cols or width(), 100)
+
+
+def wrap(text: str, room: int) -> list:
+    """Lines of at most `room` characters, cut only between words."""
+    import textwrap
+    return textwrap.wrap(str(text or ""), max(20, room), break_long_words=False, break_on_hyphens=False) or [""]
+
+
+def row(label: str, value: str, cols: int = None, lw: int = LABEL_W, indent: int = 2, style=None) -> list:
+    """`  Label     value…` with the value wrapped under its own column."""
+    lead = " " * (indent + lw)
+    pieces = wrap(value, text_width(cols) - len(lead) - 1)
+    style = style or (lambda s: s)
+    out = [" " * indent + dim(label.ljust(lw)) + style(pieces[0])]
+    return out + [lead + style(x) for x in pieces[1:]]
+
+
+def para(text: str, cols: int = None, indent: int = 2, first: str = "") -> list:
+    """A paragraph wrapped at the text width; `first` replaces the indent of the first line (a glyph)."""
+    lead = " " * indent
+    pieces = wrap(text, text_width(cols) - indent - 1)
+    return [(first or lead) + pieces[0]] + [lead + x for x in pieces[1:]]
+
+
+def command(cmd: str, indent: int = 5) -> str:
+    return " " * indent + cyan(cmd)
+
+
+def rule_title(title: str, cols: int = None) -> str:
+    """`  Title ──────` with the rule ending one column before the text width."""
+    n = max(3, text_width(cols) - 4 - visible_len(title))
+    return "  " + bold(title) + " " + dim("─" * n)
+
+
+def title_line(name: str, sub: str, right: str, cols: int = None) -> list:
+    """The screen's title: the name in bold, a dim subtitle, `right` aligned to the edge; then a dim rule."""
+    w = text_width(cols) - 1
+    left = 2 + len(name) + 2 + len(sub)
+    gap = w - left - len(right)
+    if gap < 2:  # too narrow for both: the subtitle goes
+        sub, gap = "", max(2, w - 2 - len(name) - len(right))
+    return ["", "  " + bold(name) + ("  " + dim(sub) if sub else "") + " " * gap + right, "  " + dim("─" * (w - 2))]
+
+
+def short_path(path, n: int) -> str:
+    """A path that fits in n characters, cut in the middle at a folder boundary: ~/Development/…/devkit.md."""
+    s = tilde_path(path)
+    if len(s) <= n:
+        return s
+    parts = s.split("/")
+    for k in range(len(parts) - 2, 0, -1):
+        cand = "/".join(parts[:k]) + "/" + glyph("ellipsis") + "/" + parts[-1]
+        if len(cand) <= n:
+            return cand
+    return glyph("ellipsis") + "/" + parts[-1]
+
+
+def tilde_path(p) -> str:
+    s, h = str(p), os.path.expanduser("~")
+    return "~" + s[len(h):] if s == h or s.startswith(h + "/") else s
+
+
+def size_text(kb) -> str:
+    """12.0 GB from 1 GB up, whole numbers below (915 MB)."""
+    if kb is None:
+        return glyph("none")
+    mb = kb / 1024
+    if mb >= 1024:
+        return f"{mb / 1024:.1f} GB"
+    if mb >= 1:
+        return f"{int(round(mb))} MB"
+    return f"{int(kb)} KB"
+
+
+def rel_time(ts, now: float = None, short: bool = False) -> str:
+    """now, 5 min ago, 2 h ago, yesterday, Nov 4 (short: without "ago")."""
+    import datetime as _dt
+    import time as _t
+    if not ts:
+        return glyph("none")
+    now = now or _t.time()
+    s = max(0, now - ts)
+    tail = "" if short else " ago"
+    if s < 60:
+        return "now"
+    if s < 3600:
+        return f"{int(s // 60)} min{tail}"
+    d, today = _dt.datetime.fromtimestamp(ts), _dt.datetime.fromtimestamp(now)
+    if s < 86400 and d.date() == today.date():
+        return f"{int(s // 3600)} h{tail}"
+    if (today.date() - d.date()).days == 1:
+        return "yesterday"
+    if s < 86400:
+        return f"{int(s // 3600)} h{tail}"
+    return f"{d:%b} {d.day}" + (f", {d.year}" if d.year != today.year else "")
+
+
+def clock_time(ts, now: float = None) -> str:
+    """today 12:47, yesterday 18:03, Nov 4."""
+    import datetime as _dt
+    import time as _t
+    if not ts:
+        return glyph("none")
+    d, today = _dt.datetime.fromtimestamp(ts), _dt.datetime.fromtimestamp(now or _t.time())
+    days = (today.date() - d.date()).days
+    if days == 0:
+        return f"today {d:%H:%M}"
+    if days == 1:
+        return f"yesterday {d:%H:%M}"
+    return f"{d:%b} {d.day}" + (f", {d.year}" if d.year != today.year else "")
+
+
+def duration(secs) -> str:
+    """45 s, 56 min, 2 h 5 min."""
+    secs = int(max(0, secs or 0))
+    if secs < 60:
+        return f"{secs} s"
+    if secs < 3600:
+        return f"{secs // 60} min"
+    h, m = divmod(secs // 60, 60)
+    return f"{h} h" + (f" {m} min" if m else "")
+
+
+def fit_cell(s: str, n: int) -> str:
+    """A table cell of at most n characters, cut at the end with …"""
+    s = str(s)
+    if visible_len(s) <= n:
+        return s
+    e = glyph("ellipsis")
+    return ANSI_RE.sub("", s)[: max(1, n - len(e))] + e
+
+
 def err(msg: str):
     print(f"{FAIL} {msg}", file=sys.stderr)
 

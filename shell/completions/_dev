@@ -4,9 +4,10 @@
 _dev() {
   local -a cmds projects sub
   cmds=(
-    'ls:List projects'
+    'ls:The projects on this Mac'
     'go:Print a project path'
     'status:Project status'
+    'alias:Short project names shared by the team'
     'clone:Clone into ~/Development/<owner>/<repo>'
     'new:Start a new project'
     'adopt:Move a repo into the canonical layout'
@@ -76,16 +77,35 @@ _dev() {
     return
   fi
   case "${words[2]}" in
-    go|status|open|handoff|claude|codex|ci)
-      projects=(${(f)"$(dev __complete projects 2>/dev/null)"})
+    go|status|open|handoff|claude|codex|ci|clone)
+      projects=(${(f)"$(dev __complete aliases 2>/dev/null)"})
       _describe 'project' projects ;;
+    alias)
+      if (( CURRENT == 3 )); then
+        sub=('rm:Remove an alias'); _describe 'alias command' sub
+      else
+        projects=(${(f)"$(dev __complete aliases 2>/dev/null)"}); _describe 'project' projects
+        _arguments '--move[take the alias from the project that has it]'
+      fi ;;
+    ls)
+      _arguments '--all[also the portfolio projects not on this Mac]' '--offline[cached data only]' '--json[the rows as JSON]' ;;
     wt)
       if (( CURRENT == 3 )); then
         sub=('new:Create a managed worktree' 'ls:List worktrees' 'rm:Remove a worktree safely')
         _describe 'worktree command' sub
       elif [[ "${words[3]}" == rm ]]; then
         local -a br; br=(${(f)"$(dev __complete branches 2>/dev/null)"}); _describe 'branch' br
+      elif [[ "${words[CURRENT-1]}" == --repo ]]; then
+        projects=(${(f)"$(dev __complete aliases 2>/dev/null)"}); _describe 'project' projects
       fi ;;
+    config)
+      if (( CURRENT == 3 )); then
+        sub=('repair:Put devkit'"'"'s settings back' 'show:The effective configuration' 'edit:Edit your devkit config'
+             'validate:Check your devkit config' 'lock:Lock the settings (asks for your password)' 'unlock:Remove the lock'
+             'status:The lock and recent events')
+        _describe 'config command' sub
+      fi
+      _arguments '--check[one line and exit 1 when a setting differs]' ;;
     task)
       if (( CURRENT == 3 )); then
         sub=('add:Create a work item' 'start:Claim and start' 'claim:Claim and start' 'release:Give the lock back'

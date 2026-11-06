@@ -266,13 +266,59 @@ def instructions_loaded(agent: str, sid: str):
     return any(want in ln for ln in f.read_text().splitlines())
 
 
-def save_status(pid, agent: str, line: str, branch=None):
+STATUS_MAX = 8000  # characters of a saved status block: a real block is far shorter; this only bounds a runaway one
+
+
+def bounded(line: str, limit: int = STATUS_MAX) -> str:
+    """The whole line when it fits; else cut at the last word that fits, with "…" (never inside a word)."""
+    line = line or ""
+    if len(line) <= limit:
+        return line
+    cut = line[:limit - 2]
+    cut = cut[:cut.rfind(" ")] if " " in cut else cut
+    return cut.rstrip() + " …"
+
+
+def save_status(pid, agent: str, line: str, branch=None, path=None):
+    """The latest status block of a project, whole (dev status shows every bullet). `path` is the checkout the
+    session worked in, so dev status can say when an update came from a worktree or a copy."""
     if not pid or not line:
         return
     d = STATE / "status"
     d.mkdir(parents=True, exist_ok=True)
-    (d / (pid.replace("/", "__") + ".json")).write_text(json.dumps(
-        {"ts": round(time.time()), "agent": agent, "line": line[:700], "branch": branch}))
+    rec = {"ts": round(time.time()), "agent": agent, "line": bounded(line), "branch": branch}
+    if path:
+        rec["path"] = str(path)
+    (d / (pid.replace("/", "__") + ".json")).write_text(json.dumps(rec))
+
+
+def parse_line(line: str) -> dict:
+    """A saved status line -> {project, branch, task, done, check, progress, crew, you, next}; {} when it is not in
+    the status-block form (the older one-line forms)."""
+    segs = segments(line or "")
+    if not (segs and " · " in segs[0] and len(segs) >= 3):
+        return {}
+    where, task, rest = segs[0], segs[1], segs[2:]
+    project, _, branch = where.partition(" · ")
+    out = {"project": project.strip(), "branch": branch.strip(), "task": "" if task == "-" else task, "done": "",
+           "check": "", "progress": "", "crew": "", "you": "", "next": ""}
+    done = []
+    for x in rest:
+        low = x.lower()
+        if low.startswith("next →"):
+            out["next"] = x[len("next →"):].strip()
+        elif low.startswith("you →"):
+            out["you"] = x.split("→", 1)[1].strip()
+        elif low.startswith("crew:"):
+            out["crew"] = x[len("crew:"):].strip()
+        elif x.startswith("▸") and not out["progress"]:
+            out["progress"] = x[1:].strip()
+        elif x[:1] in GLYPHS and not out["check"]:
+            out["check"] = x
+        else:
+            done.append(x)
+    out["done"] = " ".join(done)
+    return out
 
 
 def miss_message(agent: str, sid: str) -> str:

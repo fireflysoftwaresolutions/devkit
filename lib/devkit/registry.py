@@ -391,10 +391,71 @@ def live_sessions(max_age_s: int = 6 * 3600) -> list:
         pid = core.project_identity(main, gitout(main, "config", "--get", "remote.origin.url"))[0]
         out.append({"agent": s.get("agent"), "project": pid, "branch": gitout(top, "branch", "--show-current")
                     or s.get("branch"), "started": int(s.get("started") or 0), "last_seen": int(f.stat().st_mtime),
-                    "status": s.get("status", ""), "path": top, "active": is_active(top),
+                    "status": s.get("status", ""), "path": top, "active": _session_live(s, top),
                     "session": s.get("session"), "progress": run, "subagents": len(s.get("subagents") or {}),
                     "turn_started": int(s.get("turn_started") or 0)})
     return sorted(out, key=lambda x: -x["last_seen"])
+
+
+def _pid_runs(pid) -> bool:
+    try:
+        pid = int(pid)
+        if pid <= 0:
+            return False
+        os.kill(pid, 0)
+    except (TypeError, ValueError, ProcessLookupError):
+        return False
+    except PermissionError:
+        return True
+    except OSError:
+        return False
+    return True
+
+
+def _session_live(s: dict, top: str) -> bool:
+    """A session is live while the agent process SessionStart recorded for it runs, wherever its working folder is
+    (the main session often runs from the home folder); without a recorded process, while a process works inside the
+    repository."""
+    if s.get("pid"):
+        return _pid_runs(s["pid"])
+    return is_active(top)
+
+
+# --------------------------------------------------------------------------- who is working (one rule everywhere)
+
+WORKING_S = 30 * 60  # a run is working while the run or one of its lanes reported in the last 30 minutes
+
+
+def last_report(run: dict) -> float:
+    """The newest sign of life of a run: an update, a lane's update, start or end, a step's start or end."""
+    ts = [run.get("started") or 0]
+    ts += [u.get("ts") or 0 for u in run.get("updates") or []]
+    for lane in (run.get("agents") or {}).values():
+        ts += [lane.get("started") or 0, lane.get("finished") or 0]
+        ts += [u.get("ts") or 0 for u in lane.get("updates") or []]
+    for st in run.get("plan") or []:
+        if isinstance(st, dict):
+            ts += [st.get("started") or 0, st.get("finished") or 0]
+    return float(max(ts))
+
+
+def run_working(run: dict, now: float = None) -> bool:
+    """The rule `dev status`, the prompt and the dashboard share (Hamann's change 1)."""
+    now = now or time.time()
+    return bool(run) and run.get("state") == "running" and now - last_report(run) < WORKING_S
+
+
+_CODE = re.compile(r"(?<![\w-])(?:[A-Z]{1,3}-)?[A-Z]{1,3}\d+[a-z]?(?:-\d+)?(?![\w-])")
+
+
+def plain_step(text: str) -> str:
+    """What a step does, without the codes the crew uses (F4, R2-3, LC-F6, K1): "F5 evidence and C13 hooks" →
+    "evidence and hooks". Empty when the step is only a code (decision (c))."""
+    t = _CODE.sub("", text or "")
+    t = re.sub(r"\s+", " ", t).strip(" ,;:·-")
+    t = re.sub(r"^(?:and|or|&)\s+|\s+(?:and|or|&)$", "", t).strip()
+    t = re.sub(r"\b(and|or)\s+(and|or)\b", r"\1", t)
+    return "" if t.lower() in ("and", "or", "&") else t
 
 
 def pr_for_branch(pr_list, branch: str):
@@ -701,17 +762,164 @@ def initiatives(projects: list) -> list:
     return out
 
 
-def find(reg: dict, query: str):
-    """Resolve a project by id, name, path or substring. -> list of matches."""
-    q = (query or "").lower().strip().rstrip("/")
-    ps = reg["projects"]
+# --------------------------------------------------------------------------- this Mac, aliases and matching (R1, R2)
+
+
+def is_local(p: dict) -> bool:
+    """On this Mac: the project has a checkout or a worktree here. The one rule `dev ls`, `dev du` and `dev status`
+    use (spec P-fxs316lh3nw R1); a project the handoff repository knows but that is not checked out is in the
+    portfolio only."""
+    if p.get("local") is False:
+        return False
+    if p.get("path") and os.path.isdir(p["path"]):
+        return True
+    return any(w.get("path") and not w.get("missing") and os.path.isdir(w["path"]) for w in p.get("worktrees") or [])
+
+
+def split_local(projects) -> tuple:
+    """-> (projects on this Mac, projects only in the portfolio)."""
+    here = [p for p in projects if is_local(p)]
+    ids = {id(p) for p in here}
+    return here, [p for p in projects if id(p) not in ids]
+
+
+ALIAS_RE = re.compile(r"^[a-z0-9][a-z0-9._-]{0,39}$")
+
+
+class AliasError(ValueError):
+    """An alias that cannot be set or removed; the message says why and what to do."""
+
+
+def aliases_file() -> Path:
+    """The team's aliases, in the handoff repository so every Mac and teammate shares them."""
+    return core.HANDOFF / "aliases.json"
+
+
+def load_aliases() -> dict:
+    """{alias: {"project", "by", "at"}} as the team set them (one alias per project, the newest wins)."""
+    data = read_json(aliases_file(), {}) or {}
+    raw = data.get("aliases") if isinstance(data, dict) else None
+    out, seen = {}, {}
+    for a, rec in sorted((raw or {}).items(), key=lambda kv: str((kv[1] or {}).get("at", ""))):
+        if isinstance(rec, dict) and rec.get("project") and ALIAS_RE.match(str(a)):
+            if rec["project"] in seen:
+                out.pop(seen[rec["project"]], None)
+            out[a], seen[rec["project"]] = rec, a
+    return out
+
+
+def alias_map(projects, explicit: dict = None) -> dict:
+    """{project id: alias}: the alias the team set, else the repository name when no other project has it (as a name
+    or as a set alias), else the project id."""
+    explicit = load_aliases() if explicit is None else explicit
+    by_project = {rec["project"]: a for a, rec in explicit.items()}
+    names = {}
+    for p in projects:
+        names[(p.get("name") or "").lower()] = names.get((p.get("name") or "").lower(), 0) + 1
+    out = {}
+    for p in projects:
+        name = (p.get("name") or "").lower()
+        if p["id"] in by_project:
+            out[p["id"]] = by_project[p["id"]]
+        elif name and names[name] == 1 and name not in explicit and ALIAS_RE.match(name):
+            out[p["id"]] = name
+        else:
+            out[p["id"]] = p["id"]
+    return out
+
+
+def _short(pid: str) -> str:
+    return pid.rsplit("/", 1)[-1]
+
+
+def _save_aliases(aliases: dict, message: str):
+    f = aliases_file()
+    f.parent.mkdir(parents=True, exist_ok=True)
+    f.write_text(json.dumps({"version": 1, "aliases": dict(sorted(aliases.items()))}, indent=2,
+                            ensure_ascii=False) + "\n")
+    from . import work
+    work._commit([f], message)
+
+
+def set_alias(alias: str, pid: str, projects, move: bool = False, by: str = None) -> str:
+    """Give project `pid` the alias (it replaces the one it had). -> the project that had the alias before, or "".
+    Raises AliasError when the alias is not valid, belongs to another project (unless `move`) or is another
+    repository's name."""
+    a = (alias or "").strip()
+    if not ALIAS_RE.match(a):
+        raise AliasError(f"“{a}” can't be an alias: use lowercase letters, digits, “.”, “-” or “_”, start with a "
+                         "letter or a digit, at most 40 characters.")
+    known = {p["id"]: p for p in projects}
+    if pid not in known:
+        raise AliasError(f"no project “{pid}”: dev ls --all lists them.")
+    explicit = load_aliases()
+    amap = alias_map(projects, explicit)
+    owner = next((q for q, x in amap.items() if x == a and q != pid), "")
+    if owner and a not in explicit:
+        raise AliasError(f"“{a}” is the repository name of {owner}. Pick another alias.")
+    if owner and not move:
+        raise AliasError(f"“{a}” is already the alias of {_short(owner)}. Pick another, or move it: "
+                         f"dev alias {a} {amap.get(pid, pid)} --move.")
+    clash = next((q for q in known.values() if q["id"] != pid and (q.get("name") or "").lower() == a), None)
+    if clash and (known[pid].get("name") or "").lower() != a:
+        raise AliasError(f"“{a}” is the repository name of {clash['id']}. Pick another alias.")
+    for old, rec in list(explicit.items()):
+        if rec["project"] == pid or old == a:
+            explicit.pop(old)
+    from . import work
+    explicit[a] = {"project": pid, "by": by or core.github_user() or os.environ.get("USER", ""),
+                   "at": time.strftime("%Y-%m-%d")}
+    _save_aliases(explicit, f"alias: {a} → {pid} ({work.actor_str(work.actor())})")
+    return owner
+
+
+def remove_alias(alias: str) -> str:
+    """Remove an alias the team set: the project gets its repository name back. -> its project id."""
+    a = (alias or "").strip().lower()
+    explicit = load_aliases()
+    if a not in explicit:
+        raise AliasError(f"“{a}” is not an alias anyone set (dev alias lists them); a repository name stays.")
+    pid = explicit.pop(a)["project"]
+    from . import work
+    _save_aliases(explicit, f"alias: remove {a} from {pid} ({work.actor_str(work.actor())})")
+    return pid
+
+
+def match(reg: dict, query: str) -> dict:
+    """Find projects by a query, ignoring case (decision (a) of spec P-fxs316lh3nw): 1 an exact id, alias or path;
+    2 an exact repository name; 3 a name or alias that starts with the query; 4 one that contains it. The first level
+    with a match decides; within it one match wins, or else the only one on this Mac. -> {"projects": the winner,
+    or every match of the deciding level when it is a tie, "level", "exact", "matches"}."""
+    q = (query or "").strip().rstrip("/")
+    ps = reg.get("projects") or []
+    out = {"query": q, "projects": [], "matches": [], "level": None, "exact": False}
     if not q:
-        return []
-    exact = [p for p in ps if q in (p["id"], p["name"].lower(), core.real(q) if q.startswith(("/", "~")) else "")
-             or core.real(p["path"]) == core.real(os.path.expanduser(q))]
-    if exact:
-        return exact
-    return [p for p in ps if q in p["id"]]
+        return out
+    amap = alias_map(ps)
+    ql = q.lower()
+    path = core.real(os.path.expanduser(q)) if q.startswith(("/", "~", ".")) else None
+    names = lambda p: [(p.get("name") or "").lower(), amap.get(p["id"], "").lower()]  # noqa: E731
+    levels = [
+        lambda p: ql in (p["id"].lower(), amap.get(p["id"], "").lower()) or (
+            path is not None and p.get("path") and core.real(p["path"]) == path),
+        lambda p: (p.get("name") or "").lower() == ql,
+        lambda p: any(n.startswith(ql) for n in names(p)),
+        lambda p: any(ql in n for n in names(p)),
+    ]
+    for level, test in enumerate(levels, 1):
+        hits = [p for p in ps if test(p)]
+        if not hits:
+            continue
+        here = [p for p in hits if is_local(p)]
+        win = hits if len(hits) == 1 else here if len(here) == 1 else hits
+        out.update(projects=win, matches=hits, level=level, exact=level <= 2)
+        return out
+    return out
+
+
+def find(reg: dict, query: str):
+    """Resolve a project by id, alias, path or name (see match). -> the winner, or every tied match."""
+    return match(reg, query)["projects"]
 
 
 def project_for_cwd(reg: dict, cwd: str):
