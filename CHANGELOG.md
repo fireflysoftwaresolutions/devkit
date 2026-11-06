@@ -22,6 +22,9 @@ All notable changes to devkit. Versions follow CalVer `YY.MM.PATCH` (PATCH resta
   docs-only change: a document can leak a key too. Builds and code linters still keep the docs shortcut.
 - The Stop hook asks for `dev plan revise` only for the plans of the project the session works in. With two sessions
   open, it no longer sends one back over a plan the other changed in another project.
+- `dev doctor` compares the installed instructions (`~/.claude/CLAUDE.md`, `~/.codex/AGENTS.md`) and the Codex crew
+  roles with what this devkit writes, so an outdated install shows as out of date instead of passing because the
+  files exist.
 
 ## [26.11.1] - 2026-11-06
 
