@@ -1,11 +1,13 @@
 # Copyright (c) 2026 Firefly Software Solutions Inc.
 # SPDX-License-Identifier: Apache-2.0
 """Work items, locks, history, plans and handoff isolation. Run: python3 -m unittest discover -s tests -v"""
+import re
 import sys
 import tempfile
 import time
 import unittest
 from pathlib import Path
+from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "lib"))
 
@@ -98,9 +100,25 @@ class ItemTests(unittest.TestCase):
             self.assertEqual((s["counts"]["open"], s["counts"]["done"]), (1, 1))
             self.assertEqual(work.progress("acme/api"), (50, "tasks"))
 
-    def test_unique_ids(self):
-        ids = {work.new_id() for _ in range(2000)}
-        self.assertEqual(len(ids), 2000)
+    # An id is the time in seconds since 2026 and 6 random base36 characters. Ids drawn in the same second differ
+    # only by those 6 (36**6 values), so 2000 of them collide in about 1 run of 1,100 (the birthday bound): the old
+    # test_unique_ids failed that way once on Python 3.9 (1999 of 2000). What new_id guarantees is the scope check.
+    SECOND = work.EPOCH + 36 ** 4  # 2026-01-20T10:33:36Z: the time part is "10000"
+
+    def test_ids_drawn_in_one_second_share_the_time_and_differ_in_their_six_random_characters(self):
+        with mock.patch.object(work.time, "time", lambda: self.SECOND):
+            ids = [work.new_id() for _ in range(2000)]
+        self.assertEqual([i for i in ids if not re.fullmatch(r"T-10000[0-9a-z]{6}", i)], [])
+        self.assertGreaterEqual(len(set(ids)), 1998)  # three collisions or more: about 1 run in 10**10
+
+    def test_a_new_id_never_takes_one_already_used_in_its_scope(self):
+        draws = iter("aaaaaa" "bbbbbb")
+        with TempHandoff(), mock.patch.object(work.time, "time", lambda: self.SECOND), \
+                mock.patch("secrets.choice", lambda alphabet: next(draws)):
+            taken = work.item_path("acme/api", "T-10000aaaaaa")
+            taken.parent.mkdir(parents=True)
+            taken.write_text("---\nid: T-10000aaaaaa\n---\n")
+            self.assertEqual(work.new_id("task", "acme/api"), "T-10000bbbbbb")
 
     def test_session_log_is_append_only(self):
         with TempHandoff():
