@@ -58,6 +58,14 @@ never move or rename repositories yourself (`dev adopt` does that, with the user
 - **Stay in scope.** Do what was asked. Note unrelated problems in your reply or the handoff note; do not fix them
   silently.
 
+### Write plainly, in American English
+
+Everything you write (replies, plans, commits, PRs, docs, messages for the team) is in **American English** unless the
+developer asks for another language. It is direct and simple: lead with the point, use short sentences and everyday
+words, explain each acronym once, and give concrete facts and numbers. Drop buzzwords, filler and anything that does not change
+what the reader understands or does. Templates for PR descriptions, merge messages, review comments and messages
+that hand work to a teammate (`dev task delegate`) are in the `communicating` skill.
+
 ### Keep the developer informed, and keep time predictable
 
 The developer should never have to ask "how is it going?". Follow the `communicating` skill (it has the templates):

@@ -121,6 +121,50 @@ class PlanTests(unittest.TestCase):
             self.assertFalse(plans.needs_revision(raw))
 
 
+class TemplateTests(unittest.TestCase):
+    def test_task_bodies_by_type(self):
+        body = work.task_body("bug", "Login times out on Safari", ["Safari login works", "regression test added"])
+        self.assertIn("## Symptom\nLogin times out on Safari", body)
+        self.assertIn("- [ ] Safari login works\n- [ ] regression test added", body)
+        self.assertIn("## Steps to reproduce", body)
+        for kind, section in (("feature", "## Why"), ("spike", "## Timebox"), ("task", "## Done when")):
+            with self.subTest(kind=kind):
+                self.assertIn(section, work.task_body(kind))
+
+    def test_plan_kinds(self):
+        for kind, section in (("plan", "## Non-goals"), ("spec", "## Acceptance criteria"),
+                              ("spike", "## Recommendation"), ("bugfix", "## Root cause"), ("adr", "## Consequences")):
+            with self.subTest(kind=kind):
+                text = plans.template(kind, "Invoice export")
+                self.assertTrue(text.startswith("# Invoice export"))
+                self.assertIn(section, text)
+        with self.assertRaises(ValueError):
+            plans.template("novel", "x")
+        with TempHandoff():
+            path = plans.new("acme/api", "Event store", a=A, kind="adr")
+            self.assertIn("kind: adr", path.read_text())
+            self.assertFalse(plans.needs_revision(path))
+
+    def test_delegate_message(self):
+        from devkit import cli
+        with TempHandoff():
+            it = work.create("acme/api", "Export invoices as CSV", a=A, due="2026-11-20",
+                             body="Finance copies invoices by hand.\n\nDone when: Finance exported October")
+            msg = cli.delegate_message(it, "maria", "", "acme/api")
+            self.assertTrue(msg.startswith("Hi @maria, could you take this task"))
+            self.assertIn("Done means: Finance exported October", msg)
+            self.assertIn("Deadline: 2026-11-20", msg)
+            self.assertIn(f"dev task start {it['meta']['id']} -p acme/api", msg)
+
+    def test_report_health_rules(self):
+        from devkit import report
+        self.assertEqual(report.health("blocked", "", 50, {}, 0)[0], "red")
+        self.assertEqual(report.health("active", "2000-01-01", 50, {}, 0)[0], "red")
+        self.assertEqual(report.health("active", "", 50, {"blocked": 2}, 0)[0], "amber")
+        self.assertEqual(report.health("active", "", 50, {}, time.time())[0], "green")
+        self.assertEqual(report.health("done", "", 100, {}, 0)[0], "done")
+
+
 class IsolationTests(unittest.TestCase):
     def setUp(self):  # the fixture repos live in a system temp dir; treat them as real projects here
         self._is_temp = guard.is_temp

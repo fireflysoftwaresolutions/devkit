@@ -232,6 +232,18 @@ def _touch(it: dict, a: dict, op: str, why: str = "", detail: str = ""):
     it["changelog"].insert(0, entry)
 
 
+def task_body(kind: str, why: str = "", done=None) -> str:
+    """A structured body for a new work item: the type's template with the reason and acceptance criteria filled in."""
+    f = core.DEVKIT_HOME / "templates" / "tasks" / f"{kind}.md"
+    text = f.read_text().strip() if f.exists() else "## Done when\n- [ ] _Acceptance criterion, testable._"
+    if why:
+        text = re.sub(r"(## (Why|Context|Question|Symptom)\n)_[^\n]*_", lambda m: m.group(1) + why, text, count=1)
+    if done:
+        crit = "\n".join(f"- [ ] {d}" for d in done)
+        text = re.sub(r"(## Done when\n)(- \[ \] [^\n]*\n?)+", lambda m: m.group(1) + crit + "\n", text, count=1)
+    return text.strip()
+
+
 def create(scope: str, title: str, kind="task", bucket="next", priority="normal", body="", why="", a=None,
            links=None, due="") -> dict:
     a = a or actor()

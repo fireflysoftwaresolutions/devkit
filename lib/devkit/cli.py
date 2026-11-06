@@ -36,6 +36,7 @@ COMMANDS = [
         ("plan new|revise|approve|ls", "Versioned plans and specs; every change records who and why"),
         ("team", "Who is working on what, on every machine; who holds which task"),
         ("progress [start|step|done]", "Live progress of agent work with ETA; `dev time` for how long things take"),
+        ("report [--days 7]", "Status report for initiatives and projects (Markdown, for the team or management)"),
     ]),
     ("Agents", [
         ("claude [query] [-w branch]", "Start Claude Code in a project (optionally in its own worktree)"),
@@ -894,6 +895,30 @@ def _print_items(scope, label, show_all=False):
         print(f"   {ui.green('✓')} {ui.dim(it['meta']['id'])} {ui.dim(it['meta']['title'])}")
 
 
+def delegate_message(it: dict, who: str, why: str, label: str) -> str:
+    """A short, plain message the developer sends to the teammate who takes over a task."""
+    m, body = it["meta"], (it.get("body") or "").strip()
+    done_when = next((ln.split(":", 1)[1].strip() for ln in body.splitlines()
+                      if ln.lower().startswith(("done when:", "done means:", "acceptance:"))), "")
+    context = next((p.strip() for p in body.split("\n\n") if p.strip() and not p.lower().startswith(
+        ("done when:", "done means:", "acceptance:"))), "")
+    links = [x for x in (m.get("links") or []) if x]
+    scope = it.get("scope") or m.get("scope")
+    flag = f"-i {scope.split('/', 1)[1]}" if scope.startswith("initiatives/") else f"-p {scope}"
+    lines = [f"Hi @{who}, could you take this task: “{m['title']}”?", ""]
+    if why or context:
+        lines.append(f"Why it matters: {why or context}")
+    if context and why:
+        lines.append(f"Context: {context}")
+    lines.append(f"Done means: {done_when or 'the change is merged with tests, and the task is marked done.'}")
+    lines.append(f"Deadline: {m.get('due') or 'none set, so tell me if it will take more than a few days.'}")
+    ref = f"Task {m['id']} in {label}" + (f" · links: {', '.join(links)}" if links else "")
+    lines += [ref, "",
+              f"To pick it up, run `dev task start {m['id']} {flag}`. It locks the task so nobody else starts it, "
+              f"and `dev task show {m['id']} {flag}` shows its full history. Ask me anything here."]
+    return "\n".join(lines)
+
+
 def cmd_task(a):
     from . import work
     scope, label = _scope(a)
@@ -901,9 +926,12 @@ def cmd_task(a):
     try:
         if act == "add":
             bucket = "now" if a.now else "later" if a.later else "next"
+            body = a.body or ("" if a.no_template else work.task_body(a.type, a.why or "", a.done))
             it = work.create(scope, " ".join(a.text), kind=a.type, bucket=bucket, priority=a.priority,
-                             body=a.body or "", why=a.why or "", due=a.due or "")
+                             body=body, why=a.why or "", due=a.due or "")
             print(f"{ui.OK} {it['meta']['id']} added to {bucket} · {label}")
+            if "_" in body and not a.body:
+                print(ui.dim(f"  fill in the description: dev task edit {it['meta']['id']} --body-file <file> --why \"…\""))
             if a.claim:
                 work.claim(it, why=a.why or "")
                 print(f"{ui.OK} claimed by you")
@@ -943,6 +971,21 @@ def cmd_task(a):
                 return 2
             it = work.update(work.find(" ".join(a.selector), scope), "edit", why=a.why or "", **changes)
             print(f"{ui.OK} {it['meta']['id']} v{it['meta']['version']}")
+        elif act == "delegate":
+            it = work.find(" ".join(a.selector), scope)
+            who = a.to.lstrip("@")
+            if (it["meta"].get("claimed_by") or "").startswith(work.actor()["user"] + "@"):
+                it = work.release(it, why=f"handed to {who}", status="todo")
+            changes = {"assignee": who}
+            if a.due:
+                changes["due"] = a.due
+            it = work.update(it, "assign", why=a.why or f"delegated to {who}", **changes)
+            msg = delegate_message(it, who, a.why or "", label)
+            print(msg)
+            if not a.no_copy and core.have("pbcopy"):
+                core.sh(["pbcopy"], input=msg)
+                print(ui.dim("\n(copied to the clipboard — paste it to your teammate)"))
+            return 0
         elif act in ("show", "history"):
             it = work.find(" ".join(a.selector), scope)
             m = it["meta"]
@@ -971,7 +1014,7 @@ def cmd_plan(a):
     try:
         if act == "new":
             scope, _ = _scope(a)
-            path = plans.new(scope, " ".join(a.title))
+            path = plans.new(scope, " ".join(a.title), kind=a.kind)
             print(f"{ui.OK} plan → {tilde(path)}  (edit it, then `dev plan revise {tilde(path)} --why \"…\"`)")
             return 0
         if act in ("revise", "approve", "supersede"):
@@ -1002,7 +1045,8 @@ def cmd_progress(a):
     from . import progress as pg
     act = a.progress_cmd
     if act == "start":
-        run = pg.start(" ".join(a.goal), a.steps or 0, a.estimate or "")
+        names = [x.strip() for x in (a.plan or "").split(";") if x.strip()]
+        run = pg.start(" ".join(a.goal), a.steps or len(names), a.estimate or "", plan=names)
         cal = pg.calibration(run.get("project"))
         print(f"{ui.OK} run started · {run['goal']}" + (f" · {a.steps} steps" if a.steps else "")
               + (f" · estimate {pg.fmt_min(run['estimate'])}" if run["estimate"] else ""))
@@ -1041,6 +1085,17 @@ def cmd_progress(a):
         print(f"  {ui.ACTIVE} {who} · {s_.get('agent')} · {s_.get('project')} · {p_.get('goal')} — "
               f"{p_.get('step')}/{p_.get('steps') or '?'}" + (f" · ETA ~{p_['eta_min']}m" if p_.get("eta_min") else ""))
     print()
+    return 0
+
+
+def cmd_report(a):
+    from . import report
+    text = report.build(a.days, a.initiative, a.project)
+    if a.out:
+        Path(a.out).expanduser().write_text(text)
+        print(f"{ui.OK} {tilde(Path(a.out).expanduser())}")
+    else:
+        print(text)
     return 0
 
 
@@ -1536,6 +1591,8 @@ def build_parser():
     t.add_argument("--body", help="description / acceptance criteria")
     t.add_argument("--why", help="why this work exists (recorded in the changelog)")
     t.add_argument("--claim", action="store_true", help="claim it right away")
+    t.add_argument("--done", action="append", metavar="CRITERION", help="acceptance criterion (repeat for several)")
+    t.add_argument("--no-template", action="store_true", help="no structured description")
     for verb, h in (("start", "claim the lock and move to Now (doing)"), ("claim", "same as start"),
                     ("release", "give the lock back (back to todo)"), ("done", "mark done and release"),
                     ("block", "mark blocked (needs --why)"), ("cancel", "cancel (needs --why)"),
@@ -1543,6 +1600,12 @@ def build_parser():
         t = tsp.add_parser(verb, help=h)
         t.add_argument("selector", nargs="+", help="id (T-…), number from `dev task`, or a unique part of the title")
         t.add_argument("--why", help="the reason (recorded in the changelog and the commit)")
+    t = tsp.add_parser("delegate", help="hand a task to a teammate: assign it and write the message to send")
+    t.add_argument("selector", nargs="+")
+    t.add_argument("--to", required=True, help="the teammate's GitHub login")
+    t.add_argument("--why", help="why it matters (goes in the message and the changelog)")
+    t.add_argument("--due", help="YYYY-MM-DD")
+    t.add_argument("--no-copy", action="store_true", help="do not copy the message to the clipboard")
     t = tsp.add_parser("move", help="move between Now / Next / Later (needs --why)")
     t.add_argument("selector", nargs="+")
     t.add_argument("--to", required=True, choices=["now", "next", "later"])
@@ -1564,8 +1627,9 @@ def build_parser():
     p.add_argument("-p", "--project")
     p.add_argument("-i", "--initiative")
     psp = p.add_subparsers(dest="plan_cmd")
-    x = psp.add_parser("new", help="create a plan in plans/<scope>/")
+    x = psp.add_parser("new", help="create a plan, spec, spike, bugfix or ADR from its template")
     x.add_argument("title", nargs="+")
+    x.add_argument("--kind", default="plan", choices=["plan", "spec", "spike", "bugfix", "adr"])
     for verb in ("revise", "approve", "supersede"):
         x = psp.add_parser(verb, help=f"{verb} a plan (records version, who and why)")
         x.add_argument("path")
@@ -1577,6 +1641,7 @@ def build_parser():
     x.add_argument("goal", nargs="+")
     x.add_argument("--steps", type=int)
     x.add_argument("--estimate", help="e.g. 30m, 1h30m")
+    x.add_argument("--plan", help="the step names, separated by ';' (shown as a checklist)")
     for verb, h_ in (("step", "a step finished"), ("block", "blocked: why and what is needed"),
                      ("done", "finished: the outcome")):
         x = gsp.add_parser(verb, help=h_)
@@ -1589,6 +1654,11 @@ def build_parser():
             "How long things take: turns, slow commands, subagents, estimate accuracy")
     p.add_argument("--days", type=int, default=7)
     p.add_argument("-p", "--project")
+    p = add("report", cmd_report, "Status report (Markdown): health, progress, done, in progress, next, risks, team")
+    p.add_argument("--days", type=int, default=7)
+    p.add_argument("-i", "--initiative")
+    p.add_argument("-p", "--project")
+    p.add_argument("-o", "--out", help="write to a file instead of stdout")
     add("team", cmd_team, "Who is working on what, across machines and developers").add_argument(
         "--hours", type=float, default=24)
     p = add("initiative", cmd_initiative, "Cross-project initiatives (integrations, platforms, programmes)")

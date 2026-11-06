@@ -276,7 +276,11 @@ def write_agent_instructions(quiet=False):
 def _fetch_source(src: dict) -> Path:
     repo, ref = src["repo"], src["ref"]
     dest = SKILLS_SRC / f"{repo.replace('/', '__')}@{ref[:12]}"
+    wanted = [p.rstrip("/") + "/" for p in src["skills"].values()]
     if (dest / ".devkit-complete").exists():
+        missing = [p for p in wanted if not (dest / p).exists()]
+        if missing:  # the same repo@ref is shared by several sources (e.g. optional groups): widen the checkout
+            core.git(dest, "sparse-checkout", "add", *missing, timeout=300)
         return dest
     if dest.exists():
         shutil.rmtree(dest)
@@ -286,8 +290,7 @@ def _fetch_source(src: dict) -> Path:
                     timeout=300)
     if rc != 0:
         raise RuntimeError(f"clone {repo}: {err}")
-    paths = list(src["skills"].values())
-    core.git(dest, "sparse-checkout", "set", "--no-cone", *[p.rstrip("/") + "/" for p in paths], timeout=120)
+    core.git(dest, "sparse-checkout", "set", "--no-cone", *wanted, timeout=120)
     rc, _, err = core.git(dest, "checkout", "-q", ref, timeout=300)
     if rc != 0:
         core.git(dest, "fetch", "-q", "origin", ref, timeout=300)

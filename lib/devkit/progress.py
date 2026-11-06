@@ -167,14 +167,14 @@ def headline(run: dict, now: float = None) -> str:
     return " · ".join(parts)
 
 
-def start(goal: str, steps: int = 0, estimate: str = "", cwd: str = None) -> dict:
+def start(goal: str, steps: int = 0, estimate: str = "", cwd: str = None, plan=None) -> dict:
     agent, sid = current_session(cwd)
     project = (core.read_json(SESSIONS / f"{agent}-{sid}.json", {}) or {}).get("project") or _project(cwd)
     est = parse_minutes(estimate)
     cal = calibration(project)
     run = {"agent": agent, "session": sid, "project": project, "goal": goal, "steps": steps, "step": 0,
            "estimate": est, "estimate_cal": round(est * cal["ratio"], 1) if est and cal["ratio"] else est,
-           "started": time.time(), "state": "running", "updates": []}
+           "started": time.time(), "state": "running", "updates": [], "plan": list(plan or [])}
     _save(run)
     _publish()
     return run
@@ -212,6 +212,11 @@ def render_update(run: dict) -> str:
     last = run["updates"][-1] if run.get("updates") else {}
     head = {"done": "Done", "blocked": "Blocked"}.get(run.get("state"), "Progress")
     lines = [f"**{head} · {run.get('goal', '')}** — {headline(run)}"]
+    if run.get("plan"):  # named steps: a checklist
+        k = run.get("step") or 0
+        for i, name in enumerate(run["plan"], 1):
+            mark = "✓" if i <= k else ("▸" if i == k + 1 and run.get("state") == "running" else "○")
+            lines.append(f"  {mark} {i}. {name}")
     done = [u["text"] for u in run.get("updates", []) if u["kind"] == "step"][-3:]
     if done:
         lines.append("- Done: " + "; ".join(done))

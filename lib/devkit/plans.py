@@ -16,7 +16,7 @@ from .core import HANDOFF
 
 PLANS = HANDOFF / "plans"
 STATUSES = ("draft", "approved", "superseded")
-FIELDS = ("id", "title", "scope", "status", "version", "body_sha", "created", "created_by", "updated", "updated_by",
+FIELDS = ("id", "title", "kind", "scope", "status", "version", "body_sha", "created", "created_by", "updated", "updated_by",
           "supersedes")
 
 
@@ -58,18 +58,28 @@ def scope_of(path: Path) -> str:
     return str(rel.parent)
 
 
-def new(scope: str, title: str, a=None) -> Path:
+KINDS = ("plan", "spec", "spike", "bugfix", "adr")
+
+
+def template(kind: str, title: str) -> str:
+    f = core.DEVKIT_HOME / "templates" / "plans" / f"{kind}.md"
+    if not f.exists():
+        raise ValueError(f"unknown plan kind “{kind}”: {', '.join(KINDS)}")
+    return f.read_text().replace("{{title}}", title).replace("{{date}}", __import__("time").strftime("%Y-%m-%d")).strip()
+
+
+def new(scope: str, title: str, a=None, kind: str = "plan") -> Path:
     a = a or work.actor()
     slug = re.sub(r"[^a-z0-9]+", "-", title.lower()).strip("-")[:60]
-    path = PLANS / scope / f"{work.now_iso()[:10]}-{slug}.md"
+    path = PLANS / scope / f"{__import__('time').strftime('%Y-%m-%d')}-{slug}.md"
+    if path.exists():
+        raise ValueError(f"{path.name} already exists — `dev plan revise` it, or choose another title")
     path.parent.mkdir(parents=True, exist_ok=True)
-    body = (f"# {title}\n\n## Context\n_Why this plan exists; link the task or initiative._\n\n## Goal\n_What is true "
-            f"when it is done._\n\n## Approach\n_Steps, files, interfaces, data._\n\n## Verification\n_How we will "
-            f"know it works: tests, checks, evidence._\n\n## Risks\n_What could go wrong; how we limit it._")
-    meta = {"id": "P-" + work.new_id("task")[2:], "title": title, "scope": scope, "status": "draft", "version": 1,
+    body = template(kind, title)
+    meta = {"id": "P-" + work.new_id("task")[2:], "title": title, "kind": kind, "scope": scope, "status": "draft", "version": 1,
             "body_sha": _sha(body), "created": work.now_iso(), "created_by": f"{a['user']}@{a['host']}",
             "updated": work.now_iso(), "updated_by": f"{a['user']}@{a['host']}"}
-    log = [f"v1 · {work.now_iso()} · {work.actor_str(a)} · created"]
+    log = [f"v1 · {work.now_iso()} · {work.actor_str(a)} · created from the {kind} template"]
     path.write_text(_render(meta, body, log))
     work._commit([path], f"{meta['id']}: plan “{title[:60]}” created ({work.actor_str(a)})")
     return path
