@@ -233,14 +233,15 @@ class ScratchFolderTests(unittest.TestCase):
 
     def test_a_member_works_in_its_own_folder(self):
         for cmd in ("rm keymaker/a.py", "echo x > keymaker/n.md", "mkdir -p keymaker/dk", "rm -rf keymaker/dk",
-                    f"cp {CWD}/lib/devkit/guard.py keymaker/", "dev rm keymaker/old.json", "cat notes.py tank/f3.py"):
+                    f"cp {CWD}/lib/devkit/guard.py keymaker/", "dev rm keymaker/old.json", "cat notes.py tank/f3.py",
+                    "mkdir keymaker-f7 && echo x > keymaker-f7/n.md"):  # scratchpad/<member>-<task>/ is its own too
             with self.subTest(cmd=cmd):
                 self.assertIsNone(self.refused(cmd))
 
     def test_another_members_files_and_the_top_level_are_refused(self):
         for cmd in ("rm *.py", "rm notes.py", "rm -rf tank", "mv tank/f3.py keymaker/", "echo x > tank/f3.py",
                     "dev rm notes.py", f"rm -rf {self.pad}", "find . -name '*.json' -delete", "touch shared.md",
-                    "cd tank && rm f3.py", "bash -c 'rm tank/f3.py'"):
+                    "cd tank && rm f3.py", "bash -c 'rm tank/f3.py'", "rm -rf tank-f3", "rm keymakerx/a.py"):
             with self.subTest(cmd=cmd):
                 self.assertIn("scratchpad/keymaker/", self.refused(cmd) or "")
 

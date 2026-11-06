@@ -2025,13 +2025,14 @@ _SCRATCH_TREE = re.compile(r"/claude-\d+(?:/[^/]+(?:/[0-9A-Fa-f-]{36})?)?/?$")
 
 
 def scratch_refusal(path, member, holds=False):
-    """Why crew member `member` may not write or delete `path`, which is in the session scratchpad outside
-    scratchpad/<member>/ (holds: the command also changes what is inside `path`, as rm -r does); None otherwise."""
+    """Why crew member `member` may not write or delete `path`, which is in the session scratchpad outside its
+    folders, scratchpad/<member>/ and scratchpad/<member>-<task>/ (holds: the command also changes what is inside
+    `path`, as rm -r does); None otherwise."""
     if not member or not path:
         return None
     p = real(str(path))
     m = _SCRATCHPAD.match(p)
-    if m and m.group(2) == member:
+    if m and m.group(2) and (m.group(2) == member or m.group(2).startswith(member + "-")):  # <member>/, <member>-<task>/
         return None
     if not m and not (holds and _SCRATCH_TREE.search(p)):
         return None
