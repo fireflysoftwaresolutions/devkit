@@ -89,6 +89,14 @@ devkit is open source under the Apache License 2.0.
 - The scout is now Sparks, a member of the crew; `scout` remains an alias in Claude Code and Codex.
 - The UI skills are required for design work only: "open the dashboard" no longer asks for them.
 
+### Fixed
+
+- `dev sec scan` kept the leading dot of hidden paths in zizmor results: `./.github/workflows/ci.yml` no longer
+  becomes `github/workflows/ci.yml`.
+- The crew canary counts only subagents someone launched. Claude Code's own helpers, such as the compaction
+  summary, are no longer counted as crew misses or sent back, and a report corrected after the reminder is
+  recorded as corrected.
+
 ## [26.11.0] - 2026-11-05
 
 The first release.
