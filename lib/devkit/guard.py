@@ -2285,7 +2285,7 @@ def _forged_argv(argv, cwd, bodies, here, prev, depth) -> str:
         if script is not None and script != UNKNOWN:  # a script's own folder comes first in its sys.path
             where = str(script.parent)
         fn = evidence_reached(code, where)
-        for t in ([] if fn else _code_texts(code)):
+        for t in ([] if fn else _code_texts(code, name)):
             fn = fn or _forged_calls(t, cwd, depth + 1)
         return fn
     texts, inners = [], []
@@ -3518,12 +3518,18 @@ _WHAT = {"push": "pushes {t}", "pr": "opens a PR from {t}", "push-destructive": 
 # a brace list; `[` and `[[` are the test builtins
 _DYNAMIC_NAME = re.compile(r"[$`*?\[{]")
 # interpreter code that can call a function it names with a string it builds (getattr, __import__, eval, a variable
-# call), so a spawn the _SPAWNS table cannot see may hide in it (RT2)
-_DYNAMIC_CODE = re.compile(
-    r"\b(?:getattr|__import__|importlib|eval|compile|__builtins__|__dict__|__getattribute__|globals|vars|locals)\b|"
-    r"\b(?:Function|Reflect)\s*[.(]|\bglobalThis\s*\[|\brequire\s*\(\s*[^'\"\s)]|\bimport\s*\(\s*[^'\"\s)]|"
-    r"\bprocess\s*\.\s*(?:binding|dlopen)\b|\b(?:public_send|__send__|instance_eval|class_eval)\b|\.send\s*\(|"
-    r"\bcall_user_func\w*|\$\w+\s*\(|&\s*\{|\bdo\s+[\"'$]")
+# call), so a spawn the _SPAWNS table cannot see may hide in it (RT2). Per language, and only the builtins: a method
+# of the same name (re.compile, model.eval) is not one.
+_DYNAMIC_CODE = {
+    "python": re.compile(r"(?<![.\w])(?:getattr|eval|compile|vars|globals|locals)\s*\(|\b(?:__import__|importlib|"
+                         r"__builtins__|__getattribute__|__dict__)\b"),
+    "js": re.compile(r"(?<![.\w])(?:Function|eval)\s*\(|\bReflect\s*\.|\bglobalThis\s*\[|\brequire\s*\(\s*[^'\"\s)]|"
+                     r"\bimport\s*\(\s*[^'\"\s)]|\bprocess\s*\.\s*(?:binding|dlopen)\b"),
+    "ruby": re.compile(r"\b(?:public_send|__send__|instance_eval|class_eval|eval)\b|\.send\s*\("),
+    "perl": re.compile(r"\beval\b|&\s*\{|&\$\w+|\bdo\s+[\"'$]"),
+    "php": re.compile(r"\bcall_user_func\w*|\$\w+\s*\(|(?<![.\w>])eval\s*\("),
+    "": re.compile(r"\beval\b|\bload(?:string)?\s*\(|\bdo\.call\b|\brun script\b"),
+}
 # perl's and ruby's exec and system with a list and no parentheses: exec "gh","pr","merge","12"
 _BARE_LIST = re.compile(r"\b(?:exec|system)\s+((?:'[^'\n]*'|\"[^\"\n]*\")(?:\s*,\s*(?:'[^'\n]*'|\"[^\"\n]*\"))*)")
 
@@ -3533,6 +3539,13 @@ def _unknown(text) -> tuple:
     covers it and no other."""
     import hashlib
     return ("unknown", "cmd-" + hashlib.sha256(str(text).encode()).hexdigest()[:10])
+
+
+def _dynamic_code(name, code) -> bool:
+    """True when an interpreter's program can call a function whose name it builds at run time (RT2)."""
+    fam = re.sub(r"[0-9.]+$", "", os.path.basename(str(name or "")).casefold())
+    fam = {"pypy": "python", "node": "js", "nodejs": "js", "deno": "js", "bun": "js"}.get(fam, fam)
+    return bool(code) and bool(_DYNAMIC_CODE.get(fam, _DYNAMIC_CODE[""]).search(code))
 
 
 def _dynamic_name(word) -> bool:
@@ -4146,10 +4159,10 @@ def _opaque_actions(name, argv, cwd) -> list:
     return out
 
 
-def _code_texts(code) -> list:
+def _code_texts(code, name="") -> list:
     """The command lines an interpreter's program may hand to a shell or a process: its string literals and its lists
     of string literals, when the program can start a process at all (or call a function it names at run time)."""
-    if not code or not (_SPAWNS.search(code) or _SPAWNS_QUOTED.search(code) or _DYNAMIC_CODE.search(code)
+    if not code or not (_SPAWNS.search(code) or _SPAWNS_QUOTED.search(code) or _dynamic_code(name, code)
                         or _BARE_LIST.search(code)):
         return []
     texts = [next((g for g in m.groups() if g is not None), "") for m in _STR_LIT.finditer(code)]
@@ -4232,9 +4245,9 @@ def _segment_actions(argv, cwd, bodies, depth) -> list:
         found = _publish_actions(name, argv, cwd) or _deploy_actions(name, argv, cwd) or _http_actions(name, argv)
         if not found and _INTERP.match(name) and not _repo_script(argv, cwd):
             code = _program(argv, cwd, bodies)[0]
-            for text in _code_texts(code):
+            for text in _code_texts(code, name):
                 more += _text_actions(text, cwd, depth + 1) or []
-            if code and _DYNAMIC_CODE.search(code):  # it may build the name of what it runs (RT2)
+            if _dynamic_code(name, code):  # it may build the name of what it runs (RT2)
                 found = [_unknown(" ".join(argv))]
         if not found and "/" in argv[0] and name not in _SHELLS and not _INTERP.match(name):
             script = _read_small(resolve(argv[0], cwd), 1 << 18)  # a shell script run by its path: what it runs

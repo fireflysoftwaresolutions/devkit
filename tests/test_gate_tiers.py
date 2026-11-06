@@ -533,7 +533,9 @@ class UnknownProgramTests(GateCase):
 
     def test_literal_names_test_builtins_and_programs_that_only_print_stay_known(self):
         for cmd in ("[ -f x ] && gh pr view 12", "[[ -n x ]]", "git status", "python3 -c \"print(1)\"",
-                    "python3 -c \"print('gh pr merge 12')\"", "echo $HOME"):
+                    "python3 -c \"print('gh pr merge 12')\"", "echo $HOME",
+                    # a method named like a dynamic builtin is not one: this refused the fix's own edit script
+                    "python3 -c \"import re; print(re.compile('x'))\"", "python3 -c \"m.eval(); print(1)\""):
             with self.subTest(cmd=cmd):
                 self.assertEqual(self.acts(cmd), [])
 
