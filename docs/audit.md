@@ -73,6 +73,11 @@ devkit keeps these out of every record it writes:
   the length: a hash of a short answer could be guessed, and `dev audit verify` finds the developer's message by its
   id. It keeps the answer only when that answer is one of the decision's options; free text becomes
   `[free text: N characters]`.
+- **Decision questions.** A member's question for the developer (`crew.decision`) keeps the decision id, the member
+  who asked, the option labels (redacted as usual), and the length of the question, which often quotes the developer.
+- **Free-text answers.** The developer's answer (`crew.decided`, and the `dev crew decide` command that records it)
+  keeps the decision id, who answered, and the answer only when it names one of the decision's options, by its
+  label or its letter; any other answer becomes `[free text: N characters]`.
 - **The user name in a home folder.** `/Users/<name>/…` and `/home/<name>/…` become `~/…`.
 
 Secrets are redacted, as far as the redactor knows their shape. Tokens, keys, passwords, passphrases, credentials,

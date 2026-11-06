@@ -21,9 +21,10 @@ daily by the `audit` job to the handoff repository as audit/<user>@<host>/YYYY-M
 audit.retention.local_months here and team_months there, never under floor_months (at least 3), and not pruned at all
 under audit.hold; the team policy (<handoff>/policy/audit.json) raises any of them. Pruning the handoff copy removes
 files from its working copy only: git history keeps every published month. Crew message text, the developer's
-approval lines and home folders never reach a record written now, and secrets are redacted as far as the redactor
-knows their shape; records sealed before these rules are cleaned whenever they are read (docs/audit.md, Personal
-data). Query with `dev audit`; export with `dev audit export` (JSONL, CSV, OCSF, CEF).
+approval lines, decision questions, free-text answers and home folders never reach a record written now, and secrets
+are redacted as far as the redactor knows their shape; records sealed before these rules are cleaned whenever they
+are read (docs/audit.md, Personal data). Query with `dev audit`; export with `dev audit export` (JSONL, CSV, OCSF,
+CEF).
 """
 from __future__ import annotations
 
@@ -99,12 +100,12 @@ _RULES = [
     (r"(?P<dl>\b(?:(?:docker|podman|buildah|nerdctl|oras|skopeo)\s+login|helm\s+registry\s+login)\b" + _ARGS +
      r"\s-p(?:\s+|=)?)" + _ARG, r"\g<dl>" + MARK),
     (r"(?P<gs>\bgh\s+secret\s+set\b" + _ARGS + r"\s(?:--body|-b)(?:\s+|=)?)" + _ARG, r"\g<gs>" + MARK),
-    # GitHub's `Authorization: token X`: X has a digit, or is long, so "token required" stays
     # a value echoed into a command that reads its secret from standard input: echo -n x | docker login
     # --password-stdin, printf '%s' x | gh auth login --with-token (review batch 4). The pipe is a single |
     (r"(?P<ec>\b(?:echo(?:\s+-[neE]{1,3}){0,3}|printf(?:\s+(?:'%s[^'\n]{0,8}'|\"%s[^\"\n]{0,8}\"))?)\s+)" +
      _NOT_DONE + r"(?:\"[^\"\n]{1,256}\"|'[^'\n]{1,256}'|[^\s\"'|;&]{1,256})" +
      r"(?=[ \t]{0,16}\|[^\n|;&]{0,200}?\s--(?:password-stdin|with-token)\b)", r"\g<ec>" + MARK),
+    # GitHub's `Authorization: token X`: X has a digit, or is long, so "token required" stays
     (r"(?i:\b(?P<at>authorization\s*[:=]\s*[\"']?token)\s+" + _NOT_DONE +
      r"(?:(?=[a-z._~+/=-]{0,255}[0-9])[a-z0-9._~+/=-]{8,}|[a-z0-9._~+/=-]{20,}))", r"\g<at> " + MARK),
     # key = "value", "key": "value", key: 'value': a quoted value loses everything up to its closing quote
@@ -168,12 +169,22 @@ MESSAGE_ACTIONS = {"crew.message"}
 # guessable: The Keymaker, M287); `answer` stays only when it is one of the decision's options. `covers`, the
 # channel, the transcript uuid (which verify checks) and the chain say the rest
 EVIDENCE_ACTIONS = {"crew.evidence"}
+# the decision records, by the same rule (M285): crew.decision keeps the decision id, who asked, the option labels
+# (ref.options, redacted as usual) and the question's length; crew.decided keeps the answer, and the answer it
+# overrides, only when it names one of those options. Both keep the labels, so a record read again checks its
+# answers against its own labels and reads back as it was written
+DECISION_ACTIONS = {"crew.decision", "crew.decided"}
+_ANSWERS = ("answer", "overrides")
 # `dev crew ask|answer` arguments that name someone or something; every other argument is message text
 _CREW_NAMES = ("--to", "--recommend", "--irreversible", "--target")
 # what replaces a text: a record read again keeps it as it is, so cleaning on read never counts a marker's length
 _UNTEXT = re.compile(r"\[message text not recorded: \d+\+? characters\]")
+_UNASKED = re.compile(r"\[question not recorded: \d+\+? characters\]")
+_FREE = re.compile(r"\[free text: \d+\+? characters\]")
 # 6677b15 also wrote the line's SHA-256: such a marker reads back with its length only
 _UNLINE = re.compile(r"\[approval line not recorded: (\d+) characters(?:, sha256 [0-9a-f]{64})?\]")
+# the question tool adds this to the recommended option's label (progress._RECOMMENDED)
+_RECOMMENDED = re.compile(r"\s*\(recommended\)\s*$", re.IGNORECASE)
 
 
 def _home(s: str) -> str:
@@ -197,23 +208,57 @@ def _unline(s: str) -> str:
     return f"[approval line not recorded: {m.group(1) if m else len(s)} characters]"
 
 
+def _norm(text) -> str:
+    return " ".join(str(text).split()).casefold()
+
+
 def _option(answer, options) -> str:
-    """A crew.evidence answer as it may be stored: the decision's option it names (same words, any case or spacing),
-    else its length only."""
-    said = " ".join(str(answer).split()).casefold()
+    """An answer as a record may keep it: the decision's option it names, read as progress.option_of reads it (the
+    label in any case or spacing, with the question tool's "(Recommended)", or its letter: "B" for "B: reject"),
+    else its length only. A length marker stays as it is."""
+    s = str(answer)
+    if _FREE.fullmatch(s):
+        return s
+    said = _norm(_RECOMMENDED.sub("", s))
     for o in options if isinstance(options, (list, tuple)) else []:
-        if said and said == " ".join(str(o).split()).casefold():
-            return str(o)
-    return f"[free text: {len(str(answer))} characters]"
+        o = str(o)
+        if said and (said == _norm(o) or (":" in o and said == _norm(o.split(":", 1)[0]))):
+            return o
+    return f"[free text: {len(s)} characters]"
+
+
+def _labels(options, rx) -> str:
+    """A decision's option labels as its records keep them: redacted as usual, joined by " | ", at most 300
+    characters. Its answers are checked against the same text split again, when written and when read."""
+    opts = options.split("|") if isinstance(options, str) else options if isinstance(options, (list, tuple)) else []
+    return _clean(" | ".join(t for t in (str(o).strip() for o in opts) if t), rx)[:300]
+
+
+def _decided(rec: dict) -> dict:
+    """A decision record's answers (crew.decided's detail, ref.answer, ref.overrides), each the option it names
+    among the labels the record keeps, else its length only."""
+    ref = rec.get("ref") if isinstance(rec.get("ref"), dict) else {}
+    labels = [p for p in str(ref.get("options") or "").split(" | ") if p]
+    if rec.get("action") == "crew.decided" and isinstance(rec.get("detail"), str) and rec["detail"]:
+        rec["detail"] = _option(rec["detail"], labels)
+    for k in _ANSWERS:
+        if isinstance(ref.get(k), str) and ref[k]:
+            ref[k] = _option(ref[k], labels)
+    return rec
 
 
 def _crew_args(target: str) -> str:
-    """`dev crew ask|answer …` as cli.py records it (arguments joined by spaces) without the message: the
-    subcommand, the message id, the naming arguments, and the length of the rest."""
+    """`dev crew ask|answer|decide …` as cli.py records it (arguments joined by spaces) without the message or the
+    answer: the subcommand, the message or decision id, the naming arguments, and the length of the rest."""
     toks = target.split(" ")
     i = next((n for n, t in enumerate(toks) if t and not t.startswith("-")), None)
-    if i is None or toks[i] not in ("ask", "answer"):
+    if i is None or toks[i] not in ("ask", "answer", "decide"):
         return target
+    if toks[i] == "decide":  # its options are unknown here; crew.decided keeps the answer, checked against them
+        keep, answer = toks[:i + 2], " ".join(toks[i + 2:])
+        if not answer or _FREE.fullmatch(answer):
+            return target  # nothing to hide, or already recorded this way
+        return " ".join(keep + [f"[free text: {len(answer)}{'+' if len(target) >= 300 else ''} characters]"])
     keep, text, n = toks[:i + 1], [], i + 1
     if toks[i] == "answer" and n < len(toks) and toks[n] and not toks[n].startswith("-"):
         keep.append(toks[n])  # the id of the message it answers
@@ -245,6 +290,10 @@ def _field(action: str, name: str, text, rx) -> str:
         return _untext(len(s), len(s) >= 300) if s else ""  # progress cuts a message at 300 before it gets here
     if name == "detail" and action in EVIDENCE_ACTIONS:
         return _unline(s) if s else ""
+    if name == "detail" and action == "crew.decision":
+        if not s or _UNASKED.fullmatch(s):
+            return s
+        return f"[question not recorded: {len(s)}{'+' if len(s) >= 300 else ''} characters]"  # progress cuts at 300
     if name == "target" and action == "dev.crew":
         s = _crew_args(s)
     return _clean(s, rx)
@@ -340,7 +389,9 @@ EXTRAS = {
     # the irreversible-action gate (guard._gate_record): tier 1 or 2, setting audit or enforce, the grant's id, its
     # source (E1, E2, step or preapproval) and the owner/repo acted on (gh -R can name another)
     "tier": "ref.tier", "setting": "ref.setting", "grant": "ref.grant", "source": "ref.source", "repo": "ref.repo",
-    "options": "",  # crew.evidence: the decision's options, read by build to keep an answer that is one; never stored
+    # the decision's options, read by build to keep an answer that names one; crew.decision and crew.decided keep
+    # them as ref.options, crew.evidence never stores them
+    "options": "",
 }
 RAISE = {"tampered": "critical"}  # a caller's outcome word that makes the record more severe
 EVIDENCE_KEYS = {p.split(".", 1)[1] for p in EXTRAS.values() if p.startswith("evidence.")}
@@ -558,6 +609,11 @@ def build(action: str, target="", detail="", outcome="ok", extra: dict = None, c
            "detail": _field(str(action), "detail", detail or "", rx)[:600], "outcome": out}
     for k, v in extra.items():
         _place(rec, k, v, rx)
+    if str(action) in DECISION_ACTIONS:
+        labels = _labels(options, rx)
+        if labels:
+            rec.setdefault("ref", {})["options"] = labels
+        _decided(rec)
     if code is not None:
         rec.setdefault("evidence", {}).setdefault("exit", code)
     if raw:
@@ -847,6 +903,8 @@ def _reclean(r: dict, rx) -> dict:
     if action in EVIDENCE_ACTIONS and not _UNLINE.fullmatch(str(r.get("detail") or "")) and \
             (out.get("ref") or {}).get("answer"):
         out["ref"] = {**out["ref"], "answer": _option(out["ref"]["answer"], None)}  # never checked against options
+    if action in DECISION_ACTIONS:
+        _decided(out)  # out's ref is its own copy; a record sealed without labels keeps no answer as said
     if out != r:
         out["cleaned"] = True
     return out
@@ -872,6 +930,8 @@ def lift(r: dict, line: bytes = b"", extra=None) -> dict:
     for k, v in r.items():
         if k not in _V1_CORE:
             _place(rec, k, v, rx)
+    if action in DECISION_ACTIONS:
+        _decided(rec)  # v1 kept no labels
     if code is not None:
         rec.setdefault("evidence", {}).setdefault("exit", code)
     if raw:

@@ -435,10 +435,22 @@ class PersonalDataTests(AuditCase):
                 self.assertTrue(got.startswith(kept + " "), got)
                 self.assertNotIn("roadmap", got)
                 self.assertIn("characters", got)
-        for target in ("decide D3 B", "mode auto --approve push", "delegate api --to Tank"):
+        for target in ("mode auto --approve push", "delegate api --to Tank"):
             with self.subTest(target=target):
                 audit.record("dev.crew", target, "", "ok")
                 self.assertEqual(audit.query(action="dev.crew")[-1]["target"], target)
+
+    def test_dev_crew_decide_keeps_the_decision_id_but_not_the_answer(self):
+        # the options are unknown here: crew.decided keeps the answer, checked against them (M304)
+        cases = {"decide D3 after the Acme call, ping Ana": "decide D3 [free text: 29 characters]",
+                 "--json decide D3 B: reject": "--json decide D3 [free text: 9 characters]",
+                 "decide D3 " + "x" * 290: "decide D3 [free text: 290+ characters]",  # cli.py cuts at 300
+                 "decide D3": "decide D3"}
+        for target, kept in cases.items():
+            with self.subTest(target=target[:24]):
+                audit.record("dev.crew", target, "", "ok")
+                self.assertEqual(audit.query(action="dev.crew")[-1]["target"], kept)
+        self.assertNotIn("Acme", (audit.AUDIT / time.strftime("%Y-%m.jsonl")).read_text())
 
     def test_developer_evidence_keeps_the_lines_length_and_an_answer_only_when_it_is_an_option(self):
         # compliance review 2, section 3: accountability needs who approved what, when and how; not the words
@@ -467,6 +479,54 @@ class PersonalDataTests(AuditCase):
         # without the decision's options, no answer is kept as said
         audit.record("crew.evidence", "D6", "approve D6: A: ship", answer="A: ship")
         self.assertEqual(audit.query(action="crew.evidence")[-1]["ref"]["answer"], "[free text: 7 characters]")
+
+    def test_a_decision_keeps_its_id_who_asked_its_options_and_the_questions_length(self):
+        # progress records a member's question this way; the question quotes the developer's request, the option
+        # labels are the member's own and are redacted as usual
+        question = "Ana wants the Acme roadmap by Friday: ship or wait?"
+        opts = ["A: ship", "B: wait for Acme", f"C: ship with token={VALUE}"]
+        audit.record("crew.decision", "D3", question, "pending", project="acme/app", by="", answer="",
+                     irreversible="push", mode="guided", asked_by="Tank", options=opts)
+        r = audit.query(action="crew.decision")[-1]
+        self.assertEqual((r["target"], r["detail"]), ("D3", "[question not recorded: 51 characters]"))
+        self.assertEqual(r["ref"], {"asked_by": "Tank", "irreversible": "push", "mode": "guided", "result": "pending",
+                                    "options": "A: ship | B: wait for Acme | C: ship with token=" + audit.MARK})
+        # an automatic decision keeps the recommendation when it names an option, as `--recommend A` does
+        audit.record("crew.decision", "D4", "y" * 300, "decided", by="auto", answer="A", asked_by="Tank", options=opts)
+        r = audit.query(action="crew.decision")[-1]
+        self.assertEqual((r["detail"], r["ref"]["answer"], r["ref"]["by"]),
+                         ("[question not recorded: 300+ characters]", "A: ship", "auto"))
+        audit.record("crew.decision", "D5", "ship?", "decided", by="auto", answer="when Ana is back", asked_by="Tank")
+        self.assertEqual(audit.query(action="crew.decision")[-1]["ref"]["answer"], "[free text: 16 characters]")
+        raw = (audit.AUDIT / time.strftime("%Y-%m.jsonl")).read_text()
+        for words in ("roadmap", "Friday", "Ana", VALUE):
+            self.assertNotIn(words, raw)
+
+    def test_the_developers_answer_stays_only_when_it_names_one_of_the_options(self):
+        # progress records the answer this way. An option is named as progress.option_of reads it: its label in any
+        # case or spacing, with the question tool's "(Recommended)", or its letter
+        opts = ["A: ship", "B: wait for Acme"]
+        cases = [("b:  WAIT for acme", "B: wait for Acme"), ("A: ship (Recommended)", "A: ship"),
+                 ("B", "B: wait for Acme"), ("after the Acme call, ping Ana", "[free text: 29 characters]")]
+        for answer, kept in cases:
+            with self.subTest(answer=answer):
+                audit.record("crew.decided", "D3", answer, project="acme/app", by="developer", overrides="a",
+                             verified=True, channel="E1", transcript_uuid="tool-4", session="claude:s1", options=opts)
+                r = audit.query(action="crew.decided")[-1]
+                self.assertEqual((r["target"], r["detail"], r["ref"]["by"]), ("D3", kept, "developer"))
+                self.assertEqual((r["ref"]["overrides"], r["ref"]["options"]),
+                                 ("A: ship", "A: ship | B: wait for Acme"))
+        # Morpheus's answer to an irreversible decision, refused; an override of free text; no options at all
+        audit.record("crew.decided", "D5", "push it, Ana said so on the Acme call", "blocked", by="morpheus",
+                     verified=False, irreversible="push", options=opts)
+        self.assertEqual(audit.query(action="crew.decided")[-1]["detail"], "[free text: 37 characters]")
+        audit.record("crew.decided", "D6", "B", by="developer", overrides="when Ana is back", options=opts)
+        self.assertEqual(audit.query(action="crew.decided")[-1]["ref"]["overrides"], "[free text: 16 characters]")
+        audit.record("crew.decided", "D7", "A: ship", by="morpheus")
+        self.assertEqual(audit.query(action="crew.decided")[-1]["detail"], "[free text: 7 characters]")
+        raw = (audit.AUDIT / time.strftime("%Y-%m.jsonl")).read_text()
+        for words in ("Ana", "Acme call"):
+            self.assertNotIn(words, raw)
 
     def test_records_sealed_under_older_rules_are_cleaned_on_read_and_still_verify(self):
         # compliance review 2, section 3: 285 v2 records sealed before f5c49a6 hold message text or a home path, and
@@ -508,6 +568,52 @@ class PersonalDataTests(AuditCase):
         stored_new = [json.loads(ln) for ln in stored.splitlines()][-2:]
         self.assertEqual(new, stored_new)  # a record the current rules wrote reads back as stored, unmarked
         self.assertEqual((audit.AUDIT / time.strftime("%Y-%m.jsonl")).read_bytes(), stored)
+        self.assertTrue(audit.verify(team=False)["ok"])  # the chain still covers the stored bytes
+
+    def test_decision_records_sealed_before_the_rule_are_cleaned_on_read_and_still_verify(self):
+        # until now crew.decision held the question and crew.decided the answer as typed, in v1 and in v2 records
+        month = audit.AUDIT / time.strftime("%Y-%m.jsonl")
+        audit.AUDIT.mkdir(parents=True)
+        month.write_text(json.dumps({"ts": time.time() - 60, "user": "fixture-user", "host": "mac", "agent": "claude",
+                                     "session": "", "action": "crew.decided", "target": "D1",
+                                     "detail": "after the Acme roadmap call", "outcome": "ok", "by": "developer",
+                                     "overrides": "ship it, Ana"}) + "\n")
+        old = [("crew.decision", "D2", "Ana wants the Acme roadmap: ship or wait?",
+                {"ref": {"asked_by": "Tank", "by": "auto", "answer": "wait for the Acme call"}}),
+               ("crew.decided", "D2", "after the Acme roadmap call", {"ref": {"by": "developer", "overrides": "A"}}),
+               ("dev.crew", "decide D2 after the Acme roadmap call", "", {})]
+        for action, target, detail, more in old:
+            ts = round(time.time(), 3)
+            audit._append({"v": 2, "id": audit.new_id(ts), "ts": ts, "time": audit.iso(ts),
+                           "actor": {"user": "fixture-user", "host": "fixture-host", "agent": "claude", "session": ""},
+                           "action": action, "category": "decision", "severity": "notice", "target": target,
+                           "detail": detail, "outcome": "ok", **more})
+        opts = ["A: ship", "B"]
+        audit.record("crew.decision", "D8", "the Acme roadmap again", "pending", asked_by="Tank", options=opts)
+        audit.record("crew.decided", "D8", "a", by="developer", overrides="the Acme roadmap", options=opts)
+        audit.record("dev.crew", "decide D8 the Acme roadmap", "", "ok")
+        stored = month.read_bytes()
+        recs = [r for r in audit.query(days=1) if r["action"] != "audit.config"]
+        for fmt in audit.FORMATS:
+            with self.subTest(format=fmt):
+                self.assertFalse("roadmap" in audit.render(fmt, recs), f"the {fmt} export shows a question or answer")
+        v1, decision, decided, decide = recs[:4]
+        self.assertEqual((v1["v"], v1["detail"], v1["ref"]),
+                         (1, "[free text: 27 characters]", {"by": "developer", "overrides": "[free text: 12 characters]"}))
+        self.assertEqual((decision["detail"], decision["ref"]), ("[question not recorded: 41 characters]", {
+            "asked_by": "Tank", "by": "auto", "answer": "[free text: 22 characters]"}))
+        # sealed without its options, the answer is never checked against them
+        self.assertEqual((decided["detail"], decided["ref"]["overrides"]), ("[free text: 27 characters]",
+                                                                            "[free text: 1 characters]"))
+        self.assertEqual(decide["target"], "decide D2 [free text: 27 characters]")
+        self.assertEqual([r.get("cleaned") for r in recs[1:4]], [True] * 3)
+        again = {k: v for k, v in decision.items() if k != "cleaned"}
+        self.assertEqual(audit.lift(again), again)  # a marker read again stays as it is
+        new = recs[4:]
+        self.assertEqual(new, [json.loads(ln) for ln in stored.splitlines()][-3:])  # read back as stored, unmarked
+        self.assertEqual((new[0]["detail"], new[1]["detail"], new[1]["ref"]["overrides"]),
+                         ("[question not recorded: 22 characters]", "A: ship", "[free text: 16 characters]"))
+        self.assertEqual(month.read_bytes(), stored)
         self.assertTrue(audit.verify(team=False)["ok"])  # the chain still covers the stored bytes
 
     def test_run_step_and_branch_from_the_session_are_redacted(self):
