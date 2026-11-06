@@ -58,8 +58,11 @@ Send one after each finished step, every ~8–10 minutes of tool work, when a su
 before a long wait. Record it and send the text that the command prints:
 
 ```bash
-dev progress step "<what finished>" --check "<evidence>" --next "<what is next>"
+dev progress step "<what finished>" --check "<evidence>" --next "<what is next>"   # the step is finished
+dev progress note "<what is happening>" --next "<what is next>"                     # it is still running
 ```
+
+A note changes no step; `step` closes one. Never close a step to send an update.
 
 The update it prints is the status block, with the Progress bullet and the plan's checklist under it:
 

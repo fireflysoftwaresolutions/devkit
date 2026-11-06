@@ -121,9 +121,11 @@ The developer should never have to ask "how is it going?" Follow the `communicat
 
 - **Kickoff.** For work longer than a few minutes: `dev progress start "<goal>" --steps N --estimate 30m`, then post
   a short plan with the estimate. The command shows how long similar work really took here; use that number.
-- **During the work.** After each step, every ~8–10 minutes of tool work and whenever background work finishes:
-  `dev progress step "<done, with evidence>" --next "<next>"`, then post the update it prints (≤ 5 lines: done · now ·
-  next · ETA). The hooks remind you after a long silence.
+- **During the work.** When a step is finished: `dev progress step "<done>" --check "<evidence>" --next "<next>"`.
+  Every ~8–10 minutes of tool work and whenever background work finishes, while the step is still running:
+  `dev progress note "<what is happening>" --next "<next>"`, which changes no step. Post the update either one prints
+  (≤ 5 lines: done · now · next · ETA). Never close a step that is not finished. The hooks remind you after a long
+  silence.
 - **Background work.** When you launch subagents, parallel sessions, or long commands, say what runs, what it
   produces, and when you expect it. Relay each result when it lands. Never sleep or poll.
 - **Decisions.** Ask only when the decision is the developer's (scope, behavior, cost, risk, and actions that are

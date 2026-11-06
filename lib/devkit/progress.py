@@ -1023,6 +1023,29 @@ def reopen(which, why: str, cwd: str | None = None, now: float | None = None, sk
     return run
 
 
+def note(text: str, nxt: str = "", cwd: str | None = None, from_agent: str | None = None,
+         now: float | None = None) -> dict:
+    """An update while a step is still running: recorded and shown (it resets the silence timer), and no step
+    changes state. `dev progress step` is for a step that is finished."""
+    now = now or time.time()
+    if not (text or "").strip():
+        raise StepError("say what is happening: dev progress note \"<what is happening>\" --next \"<what is next>\"")
+    agent, sid = current_session(cwd)
+    run = normalize(load_run(agent, sid) or {})
+    if not run.get("goal"):
+        raise StepError("no progress run in this session: dev progress start \"<goal>\" --plan \"…\"")
+    u = {"ts": round(now), "kind": "note", "text": text.strip(), "next": nxt, "check": ""}
+    if from_agent:  # a member's note stays in its lane
+        lane = _lane(run, from_agent, now)
+        lane["updates"] = (lane.get("updates") or [])[-19:] + [u]
+        run["updates"].append({**u, "kind": "agent", "agent": from_agent})
+    else:
+        run["updates"].append(u)
+    run["updates"] = run["updates"][-40:]
+    _save(run)
+    return run
+
+
 def step(text: str, nxt: str = "", cwd: str | None = None, kind: str = "step", check: str = "", which=None,
          from_agent: str | None = None, now: float | None = None, force: bool = False) -> dict:
     now = now or time.time()
@@ -1119,12 +1142,13 @@ def render_update(run: dict, branch: str | None = None, now: float | None = None
         branch = core.gitout(run.get("cwd") or os.getcwd(), "branch", "--show-current") or "-"
     project = (run.get("project") or "-").split("/")[-1]
     state = run.get("state")
-    done = last.get("text") if last.get("kind") in ("step", "done", "blocked") else ""
+    done = last.get("text") if last.get("kind") in ("step", "done", "blocked", "note") else ""
     check = (last.get("check") or "").strip()
     if check and check[0] not in "✓⚠✗–":
         check = "✓ " + check
     if not check:
-        check = "✗ blocked" if state == "blocked" else "⚠ not verified at this step"
+        check = "✗ blocked" if state == "blocked" else "– the step is still running" if last.get("kind") == "note" \
+            else "⚠ not verified at this step"
     nxt = last.get("next") or ("—" if state == "done" else "")
     if state == "blocked":
         nxt = f"unblock: {nxt or done}"
@@ -1340,9 +1364,11 @@ def on_tool_done(agent: str, data: dict):
     f.write_text(json.dumps(s))
     run = load_run(agent, sid)
     where = f" ({headline(run)})" if run else ""
-    nudge = (f"devkit · {fmt_min(quiet)} since your last update to the developer{where}. Record the step and send the "
-             f"update it prints (it is the status block): `dev progress step \"<what finished>\" --check \"<evidence>\" "
-             f"--next \"<what is next>\"`. If you are over your estimate, say so and give a new one.")
+    nudge = (f"devkit · {fmt_min(quiet)} since your last update to the developer{where}. Send an update (it prints "
+             f"the status block): while the step is still running, `dev progress note \"<what is happening>\" --next "
+             f"\"<what is next>\"`, which changes no step; when it is finished, `dev progress step \"<what finished>\" "
+             f"--check \"<evidence>\"`. Never close a step that is not finished. If you are over your estimate, say so "
+             f"and give a new one.")
     return "\n\n".join(x for x in (mail, nudge) if x)
 
 

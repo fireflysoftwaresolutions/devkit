@@ -141,7 +141,7 @@ Turn them off with `progress.notify: false` in [Configuration](configuration.md)
 | Hook | What it does |
 | --- | --- |
 | UserPromptSubmit | Starts the turn clock. When your prompt asks for status, devkit adds the real records to the agent's context (the session's runs with their headline, last update, and running subagents, and the CI/CD runs of the branch with their current job, step, elapsed time, and ETA) and asks for the overall status template. It understands English and Spanish phrasings such as `how is it going?`, `where are we`, `what's left`, `status?`, `ETA`, `give me an update`, `¿cómo va?`, or `¿qué falta?`. Background notifications (subagent results, system notices) are not treated as your request |
-| PostToolUse | Times each tool call and records the ones slower than `progress.slow_tool_seconds` (20). After `progress.nudge_minutes` (8) without an update to you, it reminds the agent to send one and to record it with `dev progress step`, at most six times per turn |
+| PostToolUse | Times each tool call and records the ones slower than `progress.slow_tool_seconds` (20). After `progress.nudge_minutes` (8) without an update to you, it reminds the agent to send one: `dev progress note` while the step runs, `dev progress step` when it is finished; at most six times per turn |
 | SubagentStart, SubagentStop | Track running subagents (shown in progress and status answers) and record how long each one took |
 | Stop | Records the turn's duration and sends the long-turn notification |
 
@@ -188,7 +188,7 @@ runs in Next.
 | Template | When the agent uses it | Shape |
 | --- | --- | --- |
 | Kickoff | Before any task longer than a few minutes | The status block (Progress `0 of N steps`), then the plan with the estimate and steps; checks, risks, what it needs from you |
-| Progress update | After each step, every 8–10 minutes of tool work, when background work finishes | The status block that `dev progress step` prints: done, check, progress with ETA, next, and the checklist |
+| Progress update | After each step, every 8–10 minutes of tool work, when background work finishes | The status block that `dev progress step` (a finished step) or `dev progress note` (a step still running) prints: done, check, progress with ETA, next, and the checklist |
 | Status answer | When you ask "how is it going?" or "what's left?" | The status block, then a one-line verdict, a table per workstream (state, evidence, ETA), the CI/CD pipelines (state, current job and step, elapsed, ETA), what is left, risks, what it needs from you |
 | Background work | When subagents, parallel sessions, or long commands start and end | What runs, what it produces, and when; then the result in one or two lines |
 | Decision request | Only for decisions that are yours: scope, behavior, cost, risk, irreversible, or external effects | The status block (Check `– a question`), then context, options with gains, costs, and effort, a recommendation, and what it does if you do not answer |

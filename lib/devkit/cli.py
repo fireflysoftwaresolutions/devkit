@@ -1300,6 +1300,17 @@ def cmd_progress(a):
             print("  " + ui.dim(" · ".join(hints)))
         print(ui.dim("  update with: dev progress step \"<what finished>\" --check \"<evidence>\" --next \"<what is next>\""))
         return 0
+    if act == "note":
+        try:
+            run = pg.note(" ".join(a.text), a.next or "", from_agent=from_agent)
+        except ValueError as e:
+            ui.err(str(e))
+            return 2
+        if from_agent:
+            print(f"{ui.OK} noted in your lane · {' '.join(a.text)}")
+            return 0
+        print(pg.render_update(run))
+        return 0
     if act in ("step", "block", "done"):
         kind = {"step": "step", "block": "blocked", "done": "done"}[act]
         check = getattr(a, "check", "") or ""
@@ -2228,6 +2239,9 @@ def build_parser():
                         "recommended option and records it (default: devkit config work.mode, else guided)")
     x.add_argument("--plan", help="the steps, separated by ';', each with an optional estimate: "
                                   "\"design=30m; build=2h; docs\"")
+    x = gsp.add_parser("note", help="an update while a step is still running: no step changes state")
+    x.add_argument("text", nargs="+")
+    x.add_argument("--next", help="what comes next")
     for verb, h_ in (("step", "a step finished"), ("block", "blocked: why and what is needed"),
                      ("done", "finished: the outcome")):
         x = gsp.add_parser(verb, help=h_)

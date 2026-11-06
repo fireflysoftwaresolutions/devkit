@@ -529,6 +529,20 @@ class CrewSafetyTests(unittest.TestCase):
             "command": "cd lib && dev progress step x"}}))  # the main session may chain commands
         self.assertIsNone(hooks._unroutable_lane_command(dict(sub, tool_input={"command": "git status && ls"})))
 
+    def test_a_note_reports_progress_without_closing_any_step(self):
+        with TempState() as st:
+            pg.start("Release", plan=["build", "ship"], now=time.time())
+            before = [(s["name"], s["state"]) for s in pg.normalize(pg.load_run(*pg.current_session()))["plan"]]
+            run = pg.note("PR open, its CI is running", nxt="merge when green")
+            self.assertEqual([(s["name"], s["state"]) for s in run["plan"]], before)  # no step moved
+            self.assertEqual((run["updates"][-1]["kind"], run["updates"][-1]["next"]), ("note", "merge when green"))
+            self.assertIn("PR open, its CI is running", pg.render_update(run))
+            self.assertGreater(json.loads(st.sess.read_text()).get("last_update") or 0, 0)  # the silence timer
+            with self.assertRaises(pg.StepError):
+                pg.note("   ")
+            lane = pg.note("guide half written", from_agent="g1")["agents"]["g1"]
+            self.assertEqual(lane["updates"][-1]["kind"], "note")  # a member's note stays in its lane
+
     def test_quoted_operators_and_bare_commands_are_routed(self):
         from devkit import hooks
         sub = {"agent_id": "a1", "tool_name": "Bash"}
