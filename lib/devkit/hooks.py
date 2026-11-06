@@ -1006,9 +1006,21 @@ def subagent_start(agent: str):
     progress.on_subagent(agent, _stdin_json(), True)
 
 
+def _launch_meta(data: dict) -> dict:
+    """What launched this subagent: Claude Code keeps `<transcript>.meta.json` (toolUseId, description) next to the
+    transcript of every subagent the Agent tool started. {} for the agent's own helpers (compaction, suggestions)."""
+    p = str(data.get("agent_transcript_path") or "")
+    if not p.endswith(".jsonl"):
+        return {}
+    meta = core.read_json(Path(p[:-len(".jsonl")] + ".meta.json"), {}) or {}
+    return meta if isinstance(meta, dict) and (meta.get("toolUseId") or meta.get("description")) else {}
+
+
 def subagent_stop(agent: str):
-    """SubagentStop: the crew member's report must start with its own status block (the canary covers the crew too);
-    without it the member is sent back once to write it. Then its lane and step are closed."""
+    """SubagentStop: a crew member's report must start with its own status block (the canary covers the crew too);
+    without it the member is sent back once to write it, and the correction is recorded like the main canary's. Only
+    subagents someone launched owe a report (a lane, or the Agent tool's launch record); the agent's own helpers do
+    not. Then its lane and step are closed."""
     from . import progress
     data = _stdin_json()
     out = None
@@ -1016,16 +1028,29 @@ def subagent_stop(agent: str):
         sid = data.get("session_id") or "-"
         sf = _session_file(agent, sid)
         sess = (core.read_json(sf, {}) or {}) if sf.exists() else None
-        if sess is not None and sess.get("turn_class") != "other" and not data.get("stop_hook_active"):
+        aid = data.get("agent_id") or ""
+        if sess is not None and sess.get("turn_class") != "other":
             from . import canary
-            run, lane = progress.lane_of(agent, sid, data.get("agent_id") or "")
-            name = (lane or {}).get("persona") or progress.persona(data.get("agent_type") or "",
-                                                                  (lane or {}).get("label") or "") \
-                or ((lane or {}).get("label") or "").split(":")[0].strip() or "Agent"
+            run, lane = progress.lane_of(agent, sid, aid)
+            meta = _launch_meta(data)
+            label = (lane or {}).get("label") or meta.get("description") or ""
+            name = (lane or {}).get("persona") or progress.persona(data.get("agent_type") or "", label) \
+                or label.split(":")[0].strip() or "Agent"
             pid = (run or {}).get("project") or sess.get("project")
-            if not canary.check_subagent(agent, data, sess, pid, name):
+            pending = sess.setdefault("crew_pending", {})
+            if not (lane or meta):
+                pass  # not launched by anyone: no brief, so no report is owed
+            elif data.get("stop_hook_active"):
+                first = next((ln.strip() for ln in (data.get("last_assistant_message") or "").splitlines()
+                              if ln.strip()), "")
+                if aid in pending and canary.MARKER_RE.match(first):
+                    canary.record_corrected(agent, sid, pid, f"crew {pending.pop(aid)}")
+                    sf.write_text(json.dumps(sess))
+            elif not canary.check_subagent(agent, data, sess, pid, name):
                 from . import audit
                 audit.record("canary.crew-miss", pid or "", f"{name}'s report had no status block", "miss")
+                pending[aid] = name
+                sf.write_text(json.dumps(sess))
                 out = {"decision": "block", "reason":
                        f"devkit · end your report with your status block first, exactly: **[Firefly> DevKit · {name}]** "
                        f"<project> · `<branch>` · <task>, then - **Done:**, - **Check:** (✓/⚠/✗ + evidence) and "

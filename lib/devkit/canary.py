@@ -333,7 +333,7 @@ def by_member(days: int = 7) -> dict:
     """{crew member: (ok, total)}: the reports subagents ended with."""
     out = {}
     for r in records(days):
-        if r.get("kind") == "crew" and not r.get("corrected"):
+        if r.get("kind") == "crew" and not r.get("corrected") and not r.get("internal"):
             ok, n = out.get(r.get("member") or "subagent", (0, 0))
             out[r.get("member") or "subagent"] = (ok + bool(r.get("ok")), n + 1)
     return out

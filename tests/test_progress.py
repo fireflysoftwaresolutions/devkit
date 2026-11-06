@@ -333,6 +333,43 @@ class CrewCoordinationTests(unittest.TestCase):
             other = os.path.expanduser("~/Development/acme/billing/src/app.py")  # another repository is not scratch
             self.assertIn("outside Neo's scope", hooks._scope_violation("claude", edit(other)))
 
+    def test_only_launched_subagents_owe_a_report_and_corrections_are_recorded(self):
+        import contextlib
+        import io
+        from unittest import mock
+        from devkit import hooks
+        with TempState(), tempfile.TemporaryDirectory() as d:
+            saved, saved_sf = canary.LOG, hooks._session_file
+            canary.LOG = Path(d) / "canary.jsonl"
+            hooks._session_file = lambda agent, sid: pg.SESSIONS / f"{agent}-{sid}.json"  # noqa: E731
+
+            def stop(payload):
+                out = io.StringIO()
+                with mock.patch("sys.stdin", io.StringIO(json.dumps(payload))), contextlib.redirect_stdout(out):
+                    hooks.subagent_stop("claude")
+                return out.getvalue()
+            try:
+                internal = {"session_id": "s1", "agent_id": "c1", "last_assistant_message": "<analysis> The summary"}
+                self.assertEqual(stop(internal), "")  # the agent's own helper (compaction): no brief, no report owed
+                self.assertEqual(canary.records(1), [])
+                tr = Path(d) / "agent-a1.jsonl"
+                tr.write_text("")
+                (Path(d) / "agent-a1.meta.json").write_text(json.dumps({"toolUseId": "toolu_1",
+                                                                        "description": "Neo: parser"}))
+                launched = {"session_id": "s1", "agent_id": "a1", "agent_type": "general-purpose",
+                            "agent_transcript_path": str(tr), "last_assistant_message": "Done. The parser works."}
+                sent_back = json.loads(stop(launched))  # launched with the Agent tool: sent back once
+                self.assertEqual(sent_back["decision"], "block")
+                self.assertIn("DevKit · Neo]", sent_back["reason"])  # by the name its launch gave it
+                fixed = dict(launched, stop_hook_active=True, last_assistant_message=(
+                    "**[Firefly> DevKit · Neo]** api · `main` · parser\n- **Done:** x\n- **Check:** \u2713 3 tests\n"
+                    "- **Next:** review"))
+                self.assertEqual(stop(fixed), "")
+                self.assertEqual(canary.by_member(1), {"Neo": (0, 1)})  # the first report missed; it stays a miss
+                self.assertEqual(canary.corrected(1), 1)  # and the correction is on record
+            finally:
+                canary.LOG, hooks._session_file = saved, saved_sf
+
     def test_crew_reports_are_checked_like_the_main_canary(self):
         with TempState(), tempfile.TemporaryDirectory() as d:
             saved = canary.LOG
@@ -344,6 +381,10 @@ class CrewCoordinationTests(unittest.TestCase):
                 self.assertTrue(canary.check_subagent("claude", good, {}, "acme/api", "Neo"))
                 bad = dict(good, last_assistant_message="Done. The parser works.")
                 self.assertFalse(canary.check_subagent("claude", bad, {}, "acme/api", "Neo"))
+                self.assertEqual(canary.by_member(1), {"Neo": (1, 2)})
+                with canary.LOG.open("a") as fh:  # an agent's own helper recorded by an older devkit, marked internal
+                    fh.write(json.dumps({"ts": time.time(), "kind": "crew", "member": "Agent", "ok": False,
+                                         "internal": True}) + "\n")
                 self.assertEqual(canary.by_member(1), {"Neo": (1, 2)})
                 self.assertEqual(canary.summary(1), {})  # crew reports are counted apart from the main replies
                 self.assertIn("crew 1/2", canary.summary_line(1))
