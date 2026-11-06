@@ -7,8 +7,9 @@ All notable changes to devkit. Versions follow CalVer `YY.MM.PATCH` (PATCH resta
 
 Not released yet: the date is set when the release is tagged. This release installs devkit with one command, runs its
 hooks from a pinned copy, gives you a live dashboard, puts the crew under one enforced RACI (who is Responsible,
-Accountable, Consulted, and Informed for each kind of work), protects devkit's own state from agents, and makes the
-audit trail verifiable and exportable.
+Accountable, Consulted, and Informed for each kind of work), holds irreversible actions until you grant them, protects
+devkit's own state from agents, explains what fills your disk and frees it item by item, and makes the audit trail
+verifiable and exportable.
 
 ### What changes for you
 
@@ -25,10 +26,21 @@ devkit refuses more in this release. Each refusal says why and names the command
 - **devkit cannot be pointed elsewhere by an agent.** The guard refuses `HOME`, `DEVKIT_CONFIG`, `DEV_ROOT`, or
   `DEVKIT_SESSION` set for `dev`, and a swapped `dev` link or another `dev` earlier on the `PATH`. devkit reads a
   non-standard `DEVKIT_CONFIG` or `DEV_ROOT` only from a command you run in a terminal with no agent among its parent processes.
-- **Two escape hatches moved.** `dev commit`, `dev push`, `dev pr create`, and `dev release` no longer read
+- **Four escape hatches moved.** `dev commit`, `dev push`, `dev pr create`, and `dev release` no longer read
   `DEVKIT_SKIP_SECRET_SCAN` or `DEVKIT_LOCAL_CI_PASSED` from their environment. Pass `--ci-passed` (recorded as
-  attested), or let a real `dev ci --run` lift the push budget. In the main session, a plain `git commit` or
-  `git push` prefixed with the variable still works.
+  attested), or let a real `dev ci --run` lift the push budget. `dev git` and `dev gh` no longer read
+  `DEVKIT_FLAKY` or `DEVKIT_CROSS_PROJECT` from theirs; rerun a flaky CI run with
+  `dev run rerun <id> --flaky "<reason>"`. In the main session, a hatch still works as a prefix of the command
+  itself, such as `DEVKIT_SKIP_SECRET_SCAN=1 git commit`, where the guard sees it and records it as `guard.bypass`;
+  the next prompt names it, and `DEVKIT_GUARD=off` is recorded once per session and shown when a session starts.
+- **Irreversible actions wait for your grant.** In the main session, these need a line you type on its own,
+  `grant <action> <target>`: merging a pull request (`grant merge 142`), releasing a version, also by pushing its tag
+  (`grant release v26.11.3`), a force push or a push to the default branch, a comment, review, or edit on a pull
+  request or an issue, publishing a package, a deploy, a write through an API, and an MCP tool that sends, creates,
+  or deletes something outside this Mac. The refusal names the exact line. A grant is used once, holds only in the
+  repository of the session you typed it in, and expires after 30 minutes. A push of another branch and a new pull
+  request are recorded, not held. For its first week on a Mac the gate only records what it would refuse, then it enforces;
+  `safeguards.irreversible_main` sets it.
 - **A decision is yours only in your own words.** It counts when you answer the question dialog, or type a line of
   your own: `approve D3`, `approve D3: B`, or `grant push feat/invoice-export`. Without that, an answer Morpheus
   records is marked unverified, and an irreversible decision stays pending. `dev crew mode auto --approve` takes one
@@ -43,16 +55,27 @@ devkit refuses more in this release. Each refusal says why and names the command
 - **Crew members are held tighter.** They are refused every escape hatch (`DEVKIT_*` variables, `env -i`,
   `--ci-passed`, `--no-verify`, `dev config set`, new secret-scan exceptions). A review or read-only member's shell
   runs only a read-only allowlist; add your project's own checks with `safeguards.readonly_commands`. Members never
-  merge, release, tag, publish, deploy, write through an API, or force-push. A push or a pull request needs a step
-  grant (`dev progress assign --allow push,pr`); until the hooks pass that grant on (see Coming in 26.11.3), members
-  do not push or open pull requests at all. In the session scratchpad, each member writes only in its own
+  merge, release, tag, publish, deploy, write through an API, or force-push. A member pushes a branch or opens a pull
+  request only in a step allowed it (`dev progress assign --allow push,pr`), and only with your grant for that action
+  or a decision of yours that names it. When a review or read-only member's shell call writes files, Morpheus gets a
+  message and the member's step ends unverified. In the session scratchpad, each member writes only in its own
   `scratchpad/<member>/` folder.
+- **A member's step ends done only on evidence.** That is a Check ✓ in its report, or its own
+  `dev progress step --check`. Otherwise the step shows as unverified, for Morpheus to close with evidence or reopen
+  (`dev progress reopen <step> --why "…"`).
+- **Approvals are explicit.** Each finished step owes a verdict from the Accountable member of its kind of work,
+  given after the work, for example by the Check ✓ of a review step that follows it. Nobody approves their own work:
+  when the approver did it, the Code reviewer (Seraph) approves code and configuration, and Morpheus the rest. An approval needs
+  the ✓ itself, so "tests not run" approves nothing, and a step with no approver cannot be approved until its kind of
+  work is declared (`dev progress assign … --activity <id>`).
 - **Running a devkit hook by hand is refused** in every session, because a hook event typed through a shell could
   forge your prompt or answer.
 - **Audit records are kept 13 months**, on this Mac and in the handoff copy; this Mac used to keep two years.
   `dev config validate` refuses an `audit.retention.floor_months` under 3.
 - **`dev ls`, `dev du`, and `dev status` show what is on this Mac.** A footer counts the other projects of the
   portfolio, and `dev ls --all` lists them with the `dev clone` command for each.
+- **`dev gc` is the old name of `dev free`.** Without arguments it prints the plan to free space instead of a
+  cleanup dry run, and `dev gc 3` frees item 3 of that plan. `dev gc --apply` still runs the unattended cleanup.
 - **`dev dashboard` starts a local server** and opens a one-time sign-in link instead of writing a file.
   `dev dashboard --export <file>` writes the static page.
 
@@ -134,16 +157,44 @@ devkit refuses more in this release. Each refusal says why and names the command
 - **Project aliases:** `dev alias <alias> [project]`, `dev alias rm <alias>`, and `dev alias` to list them, shared
   with the team through the handoff repository. Names match by exact id or alias, then repository name, then start,
   then any part; a tie lists every match with its command instead of guessing. `dev status`, `go`, `open`,
-  `wt new --repo`, `claude`, and `codex` accept them.
+  `wt new --repo`, `claude`, and `codex` accept them, so `dev status devkit` works from any folder.
 - **A new `dev status`:** it shows Needs you first, then Right now, the last update in full, details, and the footer. It wraps
   at 100 columns, fits 80, and reads the same with `NO_COLOR`; `--json` returns the same data.
 - **`dev config` is a report:** each difference says whether it is new in this devkit version, changed outside
   devkit, or removed outside devkit, and names the fix. `dev config --check` prints one line and exits 1 on a
   difference.
+- **A devkit helper in your shell prompt,** if you want it: `dev setup prompt` asks first, and `dev install` asks
+  once. Inside a devkit project it shows the project's alias, how many crew members are working, your branch's
+  checks, and a question that waits for you; outside, nothing. Nothing runs when the prompt is drawn: `dev status`,
+  `dev alias`, `dev prompt refresh`, and CI watch results write its facts to a cache, which a zsh function reads
+  (0.13 ms per prompt, measured). Members count while their heartbeat is under 15 minutes old, the checks hide when
+  you leave their branch, and after 24 hours without a refresh only the alias stays. Starship gets a marked block in
+  `starship.toml`, saved first; plain zsh gets devkit's own block, so `~/.zshrc` is not edited; oh-my-posh and
+  Powerlevel10k get snippets. `dev setup prompt --remove` takes it out, and `dev prompt` shows what it shows here.
+  See [The prompt helper](docs/getting-started.md#the-prompt-helper).
 - devkit keeps the whole status block of a final message (up to 8,000 characters), not its first 700.
 - Shell completion covers every command and the verbs of `dev task`, `progress`, `crew`, and `agents`.
 - `dev doctor` checks that the skills the crew names are installed for each agent. The setup wizard offers optional
   skill groups for the tools you pick, such as `iac` for Terraform.
+- **`dev session`** shows and manages what devkit keeps of a session through compaction, `/clear`, and resume:
+  `brief` prints it (`--latest` for the project's newest session with an open run), `carry` moves the run into this
+  session after `/clear`, `compactions <transcript>` counts a Claude Code transcript's compactions, and `forget`
+  deletes the records. `brief`, `carry`, and `forget` are Morpheus's. See Coming in 26.11.3 for the hooks that fill
+  these records.
+
+#### Disk
+
+- **`dev du` explains what fills your disk.** For each project on this Mac: the main checkout, managed worktrees,
+  Claude Code and Codex worktrees, and copies outside the layout, each with its largest ignored folders. Then
+  Colima's disk and the space macOS has not got back, agent data and caches with whether each is safe to clear, and a
+  plan to free space, ranked by size, with each item's safety, risk, and command. It deletes nothing, and answers in
+  under 2 seconds from its cache (`--refresh`, `--plan`, `--json`, or one project by name). See
+  [Disk use](docs/disk.md).
+- **`dev free <n>`** frees items of that plan by number, or every safe one with `--safe`. It lists what it deletes,
+  asks once, checks again at that moment for changed files, unpushed commits, and programs working in the folder,
+  and deletes nothing when a newer measurement changed the plan you saw. It keeps a build folder that holds files git
+  tracks, never prunes Docker volumes, and records every deletion in the audit trail.
+- **`dev docker trim`** gives Colima's free space back to macOS without deleting anything.
 
 #### The audit trail
 
@@ -193,6 +244,11 @@ devkit refuses more in this release. Each refusal says why and names the command
   "of about" is the plan's current total (active time plus the time left), lists show a step's title without codes
   such as F4, and a member's step that stopped without evidence shows as unverified, for Morpheus to check, never
   under Needs you.
+- Estimates are rounded to 5 minutes, and to the minute under 10 minutes, on the dashboard and in `dev progress`:
+  _of about 2h00m_, not _1h59m_. Measured times stay exact.
+- Each hook reconciles its session's own run: a member that stopped without saying so, a lost launch, or a run whose
+  session ended is marked as such, so the run, its slots, and the dashboard stay true.
+- `dev doctor`'s fix for a full disk names `dev free`.
 
 ### Fixed
 
@@ -216,6 +272,13 @@ devkit refuses more in this release. Each refusal says why and names the command
 - The `devkit_audit` tool shows who acted again, and `devkit_task_update` says that it changes tasks and that only
   the audit trail, not the guard, covers it.
 - `dev status` shows a saved status block's Crew and You lines on their own rows and wraps long values.
+- The irreversible-action gate's audit record failed on every write, so a crew member got the gate's error text
+  instead of its refusal. Records are written now, and a record that fails cannot change the gate's decision.
+- Review and read-only members can run `dev test prove`, which works in a temporary copy of the checkout.
+- The Accountable or a Consulted member of a kind of work could take it without `--why` and then approve it. Only
+  the Responsible member takes it now; the others need `--why`, which is recorded.
+- `dev gc <n>` is recorded in the audit trail as a deletion, while listing aliases and printing the plan to free
+  space are not recorded, because they only read.
 
 ### Security
 
@@ -226,13 +289,35 @@ devkit refuses more in this release. Each refusal says why and names the command
 - Writes with a relative path from devkit's state or configuration folder, or from a folder that holds them, are
   refused.
 - A `WebFetch` URL that carries a secret is refused.
+- **Your approvals cannot be forged.** devkit reads your answers and grants only from the session's own transcript,
+  where Claude Code writes it; an event that names another file records nothing and is audited as
+  `crew.evidence-refused`, and a prompt or answer replayed through a hook counts once. Agents cannot write, move,
+  or delete Claude Code transcripts or Codex sessions. A program an agent runs that loads devkit's code to reach these
+  functions or devkit's state is refused, also when it loads them through the agent's own files (three levels deep)
+  or through code decoded at run time. On Codex, devkit reads no transcript yet, so a grant or an answer you type
+  there opens nothing: run irreversible actions on Codex yourself, in a terminal.
+- The irreversible-action gate sees more: the repository that `gh -R`, `--repo`, or `GH_REPO` names (so a grant for
+  one repository never covers another), commands run through `script`, `watch`, GNU `parallel`, `sem`, `arch`,
+  `flock`, `unbuffer`, `chronic`, or `yarn workspace`, targets that `xargs` appends, `curl` methods inside short-flag
+  clusters (`-sXPOST`), and `npm -w <pkg> publish`.
+- A forged hook event can no longer end a working member's lane and free its slot.
 - The audit redactor closes the 14 gaps a probe of 32 fake secrets found (among them names like
   `AWS_SECRET_ACCESS_KEY`, quoted values, `--password` flags, PGP private keys, and Stripe, GitLab, Hugging Face,
   Google OAuth, Docker, Slack, and Azure tokens), and also knows Bearer tokens, JWTs, npm and PyPI tokens, Google API
-  keys, and URL credentials. Crew message text and
-  the user name in home folders never reach a record, and older records are cleaned the same way when read.
+  keys, and URL credentials. It also redacts `curl -u`, `sshpass -p`, `mysql -p`, `docker login -p`,
+  `gh secret set --body`, `Authorization: token`, `passphrase=`, `credentials:`, and a value piped by `echo` or
+  `printf` into `--password-stdin` or `--with-token`. The redactor knows these shapes and no others: a secret in a
+  shape it does not know can still reach a record, so keep secrets out of commands.
+- Records hold less about people. Crew message text, decision questions, and the user name in home folders are left
+  out; a decision's answer is kept only when it names one of the options (otherwise its length), and your approval
+  lines only by their length. Records written before are cleaned the same way when read, and `dev audit verify` still
+  checks them as stored.
 - The dashboard server checks the `Host` header, sends `base-uri` and `form-action` rules in its content security
-  policy, keeps its token out of process arguments, and reads files only inside the handoff repository.
+  policy, keeps its token out of process arguments, and reads files only inside the handoff repository. Search
+  results and the command palette open a link only after the page's URL check, so a `javascript:` or `data:` link in
+  the data cannot run, in the static export either.
+- A red team found seven ways around the guard. Each one is a test that is expected to fail until its fix lands, so
+  the suite shows every open gap by name.
 
 ### Removed
 
@@ -242,18 +327,12 @@ devkit refuses more in this release. Each refusal says why and names the command
 
 ### Coming in 26.11.3
 
-These parts are committed as code but not switched on yet; they land before the release is tagged.
+This part is committed as code but the hooks do not call it yet; it lands before the release is tagged.
 
-- **Continuity through compaction and resume:** a checkpoint of the run, the crew working now, the decisions
-  waiting, and your latest requests, given back to the session after a compaction, `claude --resume`, or `/clear`,
-  with `dev session brief`, `carry`, `compactions`, and `forget`.
-- **The main session's gate for irreversible actions:** a push of a feature branch or a new pull request is recorded,
-  and a merge, release, tag push, publish, deploy, force push, or push to the default branch needs your grant (`grant <action> <target>`). It audits only for its first
-  week on a Mac, then enforces (`safeguards.irreversible_main`).
-- **Explicit approvals per step:** each finished step owes a verdict from its approver, recorded after the work,
-  nobody approves their own step, and a member's step ends done only with its evidence.
-- **More crew limits:** a member's file scope for shell writes, the rules for the MCP tools members use, step grants
-  for a member's push or pull request, and a `guard.bypass` audit record for each escape hatch the main session uses.
+- **Continuity through compaction and resume,** for Claude Code and Codex: a checkpoint of the run, the crew working
+  now, the decisions waiting, and your latest requests, given back to the session after a compaction,
+  `claude --resume`, or `/clear`. Your requests stay only in the checkpoint, for 7 days at most, and only the
+  session's own provider sees their text. `dev session` (see The terminal) reads and manages these records.
 
 ## [26.11.2] - 2026-11-06
 
