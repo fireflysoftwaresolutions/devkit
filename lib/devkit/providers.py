@@ -36,10 +36,33 @@ def _claude_status() -> dict:
         a = {}
     out.update(logged_in=bool(a.get("loggedIn")), auth_method=a.get("authMethod"), plan=a.get("subscriptionType"),
                api_provider=a.get("apiProvider"), login_expires=a.get("loginExpiresAt"), account=a.get("email"),
-               quota={"available": None, "note": "Claude Code does not expose quota numbers on the CLI; use /usage "
-                                                 "in a session. Self-tests report rate-limit errors when they occur."})
+               quota=claude_quota())
     out["desktop"] = Path("/Applications/Claude.app").exists()
     return out
+
+
+def claude_quota(now: float = None) -> dict:
+    """Claude's usage windows as recorded by devkit's status line (Claude Code reports them nowhere else)."""
+    import time as _t
+    now = now or _t.time()
+    rec = core.read_json(STATE / "quota" / "claude.json", {}) or {}
+    win = {k: rec.get(k) or {} for k in ("seven_day", "five_hour")}
+    live = {k: w for k, w in win.items() if w.get("used_percentage") is not None and (w.get("resets_at") or 0) > now}
+    if not live:
+        note = ("No usage reading yet: devkit records it from Claude Code's status line, so it appears after the "
+                "next Claude Code session in a terminal." if not rec else
+                f"The last reading ({core.ago(rec.get('ts'))}) has expired; it refreshes in the next Claude Code session.")
+        return {"available": None, "note": note}
+    main = live.get("seven_day") or live.get("five_hour")
+    worst = max(w["used_percentage"] for w in live.values())
+    full = next((k for k, w in live.items() if w["used_percentage"] >= 100), None)
+    return {"available": worst < 100, "used_percent": main["used_percentage"],
+            "window_minutes": 10080 if "seven_day" in live else 300,
+            "resets_at": (live[full] if full else main).get("resets_at"),
+            "secondary_used_percent": (live.get("five_hour") or {}).get("used_percentage") if "seven_day" in live else None,
+            "secondary_resets_at": (live.get("five_hour") or {}).get("resets_at") if "seven_day" in live else None,
+            "reached": {"seven_day": "weekly", "five_hour": "5-hour"}.get(full), "as_of": rec.get("ts"),
+            "source": "status line"}
 
 
 def _codex_status() -> dict:

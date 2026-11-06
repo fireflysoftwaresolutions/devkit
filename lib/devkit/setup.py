@@ -404,7 +404,7 @@ def _install_skills():
     if (pw / "SKILL.md").exists():
         wanted["playwright-cli"] = pw
     managed_f = STATE / "skills-managed.json"
-    previous = set(read_json(managed_f, []) or [])
+    previous = set(read_json(managed_f, []) or [])  # a list, or {name: [agents]} since 26.11.0
     for agent, home in (("claude", CLAUDE_HOME / "skills"), ("codex", AGENTS_HOME / "skills")):
         home.mkdir(parents=True, exist_ok=True)
         mine = {n: tg for n, tg in wanted.items() if agent in only.get(n, {"claude", "codex"})}
@@ -422,7 +422,7 @@ def _install_skills():
                 note(f"{tilde(link)} exists and is not managed by devkit — left untouched")
                 continue
             link.symlink_to(target)
-    managed_f.write_text(json.dumps(sorted(wanted)))
+    managed_f.write_text(json.dumps({n: sorted(only.get(n, {"claude", "codex"})) for n in sorted(wanted)}))
     both = [n for n in wanted if n not in only]
     extra = "; " + ", ".join(f"{n} → {'/'.join(sorted(a))} only" for n, a in sorted(only.items())) if only else ""
     done(f"{len(both)} skills linked into {tilde(CLAUDE_HOME / 'skills')} and {tilde(AGENTS_HOME / 'skills')}{extra}")
@@ -445,6 +445,14 @@ def write_claude_settings(include_hooks=True):
     for p in plugins.get("disabled", []):
         ep[p] = False
     new["enabledPlugins"] = ep
+    sl = cur.get("statusLine") or {}
+    mine = "hook statusline" in str(sl.get("command") or "")
+    if (core.CFG.get("claude") or {}).get("statusline", True) and (not sl or mine):
+        # devkit's status line records Claude's usage windows (doctor, dashboard); a status line of yours is kept
+        new["statusLine"] = {"type": "command", "command": f"'{DEVKIT_HOME}/bin/dev' hook statusline --agent claude",
+                             "padding": 0}
+    elif mine and not (core.CFG.get("claude") or {}).get("statusline", True):
+        new.pop("statusLine", None)
     if new != cur:
         backup(f)
         f.parent.mkdir(parents=True, exist_ok=True)

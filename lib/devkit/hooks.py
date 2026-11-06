@@ -79,7 +79,10 @@ def _clone_node_modules(wt: Path, main: Path):
 def context_for(cwd: str, agent: str) -> str:
     from . import registry
     top = core.gitout(cwd, "rev-parse", "--show-toplevel")
-    lines = ["## devkit · workspace context", ""]
+    lines = ["## devkit · workspace context", "",
+             "For development work only (code, debugging, tests, builds, deploys, releases, developer tools). If a "
+             "request is something else (a recipe, a general question, consulting work with the Firefly consulting "
+             "kit), answer it normally: no status block and no devkit process.", ""]
     if top and core.is_temp(top):
         lines.append(f"Scratch repository in a temp dir ({tilde(top)}): not tracked in the handoff repo. "
                      f"Real projects live under {tilde(DEV)}/<owner>/<repo>.")
@@ -357,7 +360,14 @@ def stop(agent: str):
     if sf.exists():  # only sessions that started with devkit active (they loaded the global instructions)
         sess = core.read_json(sf, {}) or {}
         reasons = []
-        res = canary.check(agent, data)
+        try:  # devkit's process is for development turns only (a recipe or a consulting deck gets nothing)
+            from . import scope
+            dev_turn = scope.decide(data, sess)
+        except Exception:
+            dev_turn = True
+        if not dev_turn:
+            _log(f"stop {agent}: not development work ({sess.get('turn_class') or 'no signal'}); devkit stays out")
+        res = canary.check(agent, data) if dev_turn else None
         if res:
             ok, pid, line = res
             if ok and line:
@@ -391,7 +401,7 @@ def stop(agent: str):
                         canary.record_corrected(agent, sid, pid_, line)
         try:
             from . import skillguard
-            why = skillguard.on_stop(agent, data, sess)
+            why = skillguard.on_stop(agent, data, sess) if dev_turn else None
             if why:
                 reasons.append(why)
         except Exception:
@@ -404,7 +414,7 @@ def stop(agent: str):
                 _les.track(ids, "applied")
         except Exception:
             pass
-        if not data.get("stop_hook_active") and not sess.get("lesson_nudged") and sess.get("top"):
+        if dev_turn and not data.get("stop_hook_active") and not sess.get("lesson_nudged") and sess.get("top"):
             try:
                 from . import lessons
                 fixes = lessons.fixed_in_session(sess["top"], sess.get("head"))
@@ -416,12 +426,12 @@ def stop(agent: str):
                                    "`dev lesson recur <id>` if a known pitfall repeated). Skip it for a trivial fix.")
             except Exception:
                 _log(f"stop lessons {agent}: {traceback.format_exc()[-300:]}")
-        plans = _plans_without_reason(sess)
+        plans = _plans_without_reason(sess) if dev_turn else []
         if plans and not data.get("stop_hook_active"):
             reasons.append("devkit: you changed plan(s) without recording why: " + ", ".join(plans[:4]) +
                            ". Run `dev plan revise <file> --why \"…\"` for each (it versions the plan and logs the "
                            "reason), then finish.")
-        nudge = _handoff_nudge(agent, data, sess)
+        nudge = _handoff_nudge(agent, data, sess) if dev_turn else None
         if nudge:
             sess["nudged"] = True
             reasons.append(nudge)
@@ -550,6 +560,20 @@ def prompt(agent: str):
             "<task-notification>" in raw[:400]:
         _context_out("UserPromptSubmit", extra)  # background events are not the developer's request
         return
+    try:  # development or not? A follow-up with no signal keeps the previous turn's class
+        from . import scope
+        sf0 = _session_file(agent, sid) if sid else None
+        s0 = (core.read_json(sf0, {}) or {}) if sf0 and sf0.exists() else {}
+        cls = scope.resolve(raw, s0.get("turn_class"))
+        if sf0 and sf0.exists():
+            s0["turn_class"] = cls
+            sf0.write_text(json.dumps(s0))
+    except Exception:
+        cls = None
+    if cls == "other":  # a recipe, a general question, consulting work: no devkit context, reminders or skills
+        _log(f"prompt {agent}: not development work; devkit stays out of this turn")
+        _context_out("UserPromptSubmit", "")
+        return
     try:
         from . import lessons as _les
         sfile = _session_file(agent, sid) if sid else None
@@ -609,9 +633,66 @@ def subagent_stop(agent: str):
     progress.on_subagent(agent, _stdin_json(), False)
 
 
+QUOTA = STATE / "quota"
+
+
+def _branch_of(path: str):
+    """(repository name, branch) by reading .git directly: the status line must not spawn git."""
+    d = Path(path or ".").resolve()
+    for p in [d, *d.parents]:
+        g = p / ".git"
+        if g.exists():
+            try:
+                if g.is_file():  # a worktree: "gitdir: <main>/.git/worktrees/<name>"
+                    g = Path(g.read_text().split(":", 1)[1].strip())
+                head = (g / "HEAD").read_text().strip()
+            except OSError:
+                return p.name, ""
+            return p.name, head.rsplit("/", 1)[-1] if head.startswith("ref:") else head[:7]
+    return d.name, ""
+
+
+def statusline(agent: str):
+    """Claude Code's status line. Records the plan's usage windows (rate_limits: 5-hour and 7-day, the only place
+    Claude Code reports them) for doctor, the dashboard and the self-test, then draws one short line:
+    project · branch · model · context used · 5h and 7d usage."""
+    data = _stdin_json()
+    rl = data.get("rate_limits") or {}
+    if rl.get("five_hour") or rl.get("seven_day"):
+        try:
+            f = QUOTA / f"{agent}.json"
+            old = core.read_json(f, {}) or {}
+            rec = {"ts": int(time.time()), "five_hour": rl.get("five_hour"), "seven_day": rl.get("seven_day")}
+            if any(old.get(k) != rec[k] for k in ("five_hour", "seven_day")) or rec["ts"] - (old.get("ts") or 0) > 300:
+                QUOTA.mkdir(parents=True, exist_ok=True)
+                tmp = f.with_suffix(".tmp")
+                tmp.write_text(json.dumps(rec))
+                os.replace(tmp, f)
+        except Exception:
+            pass
+    ws = data.get("workspace") or {}
+    repo, branch = _branch_of(ws.get("current_dir") or data.get("cwd") or os.getcwd())
+    model = ((data.get("model") or {}).get("display_name") or "").replace("Claude ", "")
+    ctx = (data.get("context_window") or {}).get("used_percentage")
+    plain = os.environ.get("NO_COLOR")  # Claude Code renders ANSI colors in the status line
+    dim, amber, red, off = ("",) * 4 if plain else ("\033[2m", "\033[38;2;255;179;74m", "\033[31m", "\033[0m")
+
+    def pct(label, v):
+        if v is None:
+            return None
+        v = round(float(v))
+        tone = red if v >= 95 else amber if v >= 80 else ""
+        return f"{dim}{label}{off} {tone}{v}%{off if tone else ''}"
+    parts = [repo + (f" {dim}·{off} {branch}" if branch else ""), model or None, pct("ctx", ctx),
+             pct("5h", (rl.get("five_hour") or {}).get("used_percentage")),
+             pct("7d", (rl.get("seven_day") or {}).get("used_percentage"))]
+    print(f" {dim}·{off} ".join(p for p in parts if p))
+
+
 HANDLERS = {"session-start": session_start, "stop": stop, "session-end": session_end, "guard": guard,
             "config-change": config_change, "instructions-loaded": instructions_loaded, "prompt": prompt,
-            "post-tool": post_tool, "subagent-start": subagent_start, "subagent-stop": subagent_stop}
+            "post-tool": post_tool, "subagent-start": subagent_start, "subagent-stop": subagent_stop,
+            "statusline": statusline}
 
 
 def run(event: str, agent: str) -> int:

@@ -148,10 +148,12 @@ def diff_instructions():
 
 def diff_skills():
     managed = read_json(STATE / "skills-managed.json", []) or []
+    if not isinstance(managed, dict):  # before 26.11.0: every skill went to both agents
+        managed = {n: ["claude", "codex"] for n in managed}
     out = []
-    for home in (CLAUDE_HOME / "skills", AGENTS_HOME / "skills"):
-        for n in managed:
-            if not (home / n / "SKILL.md").exists():
+    for agent, home in (("claude", CLAUDE_HOME / "skills"), ("codex", AGENTS_HOME / "skills")):
+        for n, agents in managed.items():
+            if agent in agents and not (home / n / "SKILL.md").exists():
                 out.append(Drift("skills", f"{tilde(home)}/{n}", MISSING, "linked"))
     return out
 

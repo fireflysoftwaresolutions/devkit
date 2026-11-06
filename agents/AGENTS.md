@@ -4,9 +4,16 @@ These rules apply to every project and to both Claude Code and Codex. A reposito
 adds to them and wins on project specifics (build commands, style). The user's explicit request in the session
 wins over both.
 
+**Scope: development work only.** These rules, the status block included, apply to development work: writing,
+reviewing, debugging, testing, building, deploying or releasing software; setting up or operating developer tools,
+repositories, CI and devkit; and questions about a codebase. They do not apply to anything else, for example a
+recipe, a general question, or consulting work done with the Firefly consulting kit (decks, documents, research,
+proposals; developing the kit itself is development work). Answer those normally, with no status block and no
+devkit process. In a session that mixes both, apply the rules to the development turns only.
+
 ## 0. Instruction canary and status block: `[Firefly> DevKit]`
 
-Start the **final message of every turn, without exception**, with this status block. That includes short answers,
+Start the **final message of every development turn, without exception**, with this status block. That includes short answers,
 questions back to the developer, status updates, replies while background work runs, and replies in any language: a
 header line, then three short bullets (four while a `dev progress` run is active). Leave a blank line after it, then
 write the rest of the message.
