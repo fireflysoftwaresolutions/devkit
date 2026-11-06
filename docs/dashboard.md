@@ -84,7 +84,7 @@ lanes, and, in the live page, the evidence, history, and open questions of each 
 
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="images/dashboard/run-1440-dark.webp">
-  <img src="images/dashboard/run-1440-light.webp" alt="A run's drawer over Background work: the run Invoice export, blocked and waiting for you, guided, with 3 of 6 steps done, 1 h 24 min active of about 1 h 59 min (the time so far plus the time left), the first estimate of 2 h 30 min under it, 30 to 45 minutes left; the decision D1 waiting for an answer; six steps, each with its owner by role, its state and time, and the step it waits for; and the two crew lanes working." width="100%">
+  <img src="images/dashboard/run-1440-light.webp" alt="A run's drawer over Background work: the run Invoice export, blocked and waiting for you, guided, with 3 of 6 steps done, 1 h 24 min active of about 2 h (the time so far plus the time left, rounded to 5 minutes), the first estimate of 2 h 30 min under it, 30 to 45 minutes left; the decision D1 waiting for an answer; six steps, each with its owner by role, its state and time, and the step it waits for; and the two crew lanes working." width="100%">
 </picture>
 
 On a phone the figures sit two by two and the runs stack:
