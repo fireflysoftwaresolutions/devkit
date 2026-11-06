@@ -54,8 +54,13 @@ work in progress.
 
 ## Automatic cleanup
 
-The launchd job `com.devkit.sync` runs `dev sync --scheduled` every hour. With `gc.auto` on (the default) it applies
-the same plan as `dev gc --apply`. Set `"gc": {"auto": false}` in `~/.config/devkit/config.json` to only report.
+The scheduled `gc` job runs `dev gc --apply --yes --auto-only` every night at 04:00: it applies the actions of the
+`dev gc` plan that are safe without a person. Set `"gc": {"auto": false}` in `~/.config/devkit/config.json` (the
+wizard's "report only") to keep the job off, or move it with `dev jobs set gc --at 02:00`. `dev jobs show gc` lists
+its recent runs, and every action is in the audit trail (see [Scheduled jobs and the audit trail](jobs-and-audit.md)).
+
+The `sleep` job (03:30) trims devkit's own records as well: old timing records, finished runs, session records,
+caches, the hooks log, and old `dev rm` manifest entries (see [Lessons › Sleep](lessons.md#sleep)).
 
 ## `dev du`
 

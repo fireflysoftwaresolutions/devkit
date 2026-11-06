@@ -1,18 +1,18 @@
-<svg xmlns="http://www.w3.org/2000/svg" width="1168" height="816" viewBox="0 0 1168 816" role="img" aria-labelledby="dk-title dk-desc">
+<svg xmlns="http://www.w3.org/2000/svg" width="1184" height="816" viewBox="0 0 1184 816" role="img" aria-labelledby="dk-title dk-desc">
 <title id="dk-title">How devkit fits together</title>
-<desc id="dk-desc">The devkit repository installs rules, the devkit plugin and hooks into the agents: Claude Code (CLI and Desktop) and Codex (CLI and the ChatGPT app). The agents work in your repositories under ~/Development and, through the hooks, read context from and record sessions in the private handoff repository, which an hourly sync keeps current. Repositories and the handoff repository are pushed to GitHub; the dashboard and the overview read the handoff repository.</desc>
-<rect width="1168" height="816" fill="#F3F1EB"/>
+<desc id="dk-desc">The devkit repository installs rules, the devkit plugin and hooks into the agents: Claude Code (CLI and Desktop) and Codex (CLI and the ChatGPT app). The agents work in your repositories under ~/Development and, through the hooks, read context from and record sessions, tasks, and lessons in the private handoff repository, which a sync after every delivery event and the scheduled launchd jobs keep current. Repositories and the handoff repository are pushed to GitHub; the dashboard and the overview read the handoff repository.</desc>
+<rect width="1184" height="816" fill="#F3F1EB"/>
 <g font-family="Manrope, 'Manrope Variable', system-ui, -apple-system, 'Segoe UI', Arial, sans-serif">
 <circle cx="68" cy="74" r="4" fill="#FFB34A"/>
 <text x="80" y="78.5" font-size="12" font-weight="600" fill="#62645B" letter-spacing="0.48">HOW DEVKIT FITS TOGETHER</text>
-<text x="1043.5" y="78.5" font-size="13" font-weight="400" fill="#62645B">third party</text>
-<g transform="translate(1011.5,74)"><rect x="0" y="-7" width="24" height="14" rx="3" fill="#E6E8E6" stroke="#596060" stroke-width="1.5"/></g>
-<text x="920.2" y="78.5" font-size="13" font-weight="400" fill="#62645B">automation</text>
-<g transform="translate(888.2,74)"><rect x="0" y="-7" width="24" height="14" rx="3" fill="#DBDBCF" stroke="#7A8460" stroke-width="1.5"/></g>
-<text x="807.5" y="78.5" font-size="13" font-weight="400" fill="#62645B">your data</text>
-<g transform="translate(775.5,74)"><rect x="0" y="-7" width="24" height="14" rx="3" fill="#D8DCDA" stroke="#6B8795" stroke-width="1.5"/></g>
-<text x="716.0" y="78.5" font-size="13" font-weight="400" fill="#62645B">devkit</text>
-<g transform="translate(684.0,74)"><rect x="0" y="-7" width="24" height="14" rx="3" fill="#FFB34A" stroke="#272820" stroke-width="1.5"/></g>
+<text x="1059.5" y="78.5" font-size="13" font-weight="400" fill="#62645B">third party</text>
+<g transform="translate(1027.5,74)"><rect x="0" y="-7" width="24" height="14" rx="3" fill="#E6E8E6" stroke="#596060" stroke-width="1.5"/></g>
+<text x="936.2" y="78.5" font-size="13" font-weight="400" fill="#62645B">automation</text>
+<g transform="translate(904.2,74)"><rect x="0" y="-7" width="24" height="14" rx="3" fill="#DBDBCF" stroke="#7A8460" stroke-width="1.5"/></g>
+<text x="823.5" y="78.5" font-size="13" font-weight="400" fill="#62645B">your data</text>
+<g transform="translate(791.5,74)"><rect x="0" y="-7" width="24" height="14" rx="3" fill="#D8DCDA" stroke="#6B8795" stroke-width="1.5"/></g>
+<text x="732.0" y="78.5" font-size="13" font-weight="400" fill="#62645B">devkit</text>
+<g transform="translate(700.0,74)"><rect x="0" y="-7" width="24" height="14" rx="3" fill="#FFB34A" stroke="#272820" stroke-width="1.5"/></g>
 <g transform="translate(88.0,104.0)">
 <rect x="-24.0" y="160.0" width="656.0" height="160.0" rx="12" fill="#EAE7DF" stroke="#D8D4CA" stroke-width="1"/>
 <text x="-8.0" y="184.0" font-size="12" font-weight="600" fill="#62645B" text-anchor="start" letter-spacing="0.48">AGENTS · RULES, PLUGIN, HOOKS</text>
@@ -25,18 +25,18 @@
 <path d="M488.0,327.5 L488.0,408.5" fill="none" stroke="#62645B" stroke-width="1.5" stroke-linejoin="round" stroke-linecap="round"/><polygon points="488.0,416.0 484.0,408.0 492.0,408.0" fill="#62645B"/><polygon points="488.0,320.0 492.0,328.0 484.0,328.0" fill="#62645B"/>
 <rect x="426.0" y="356.0" width="124.0" height="24.0" rx="11.0" fill="#F3F1EB"/>
 <text x="488.0" y="372.0" font-size="13" font-weight="400" fill="#62645B" text-anchor="middle">context · sessions</text>
-<path d="M776.0,456.0 L615.5,456.0" fill="none" stroke="#62645B" stroke-width="1.5" stroke-linejoin="round" stroke-linecap="round"/><polygon points="608.0,456.0 616.0,452.0 616.0,460.0" fill="#62645B"/>
-<rect x="636.4" y="444.0" width="111.1" height="24.0" rx="11.0" fill="#F3F1EB"/>
-<text x="692.0" y="460.0" font-size="13" font-weight="400" fill="#62645B" text-anchor="middle">map · tasks · gc</text>
+<path d="M792.0,456.0 L615.5,456.0" fill="none" stroke="#62645B" stroke-width="1.5" stroke-linejoin="round" stroke-linecap="round"/><polygon points="608.0,456.0 616.0,452.0 616.0,460.0" fill="#62645B"/>
+<rect x="637.2" y="444.0" width="125.6" height="24.0" rx="11.0" fill="#F3F1EB"/>
+<text x="700.0" y="460.0" font-size="13" font-weight="400" fill="#62645B" text-anchor="middle">map · locks · audit</text>
 <path d="M120.0,496.0 L120.0,516.0 Q120.0,528.0 132.0,528.0 L280.0,528.0 Q292.0,528.0 292.0,540.0 L292.0,560.5" fill="none" stroke="#62645B" stroke-width="1.5" stroke-linejoin="round" stroke-linecap="round"/><polygon points="292.0,568.0 288.0,560.0 296.0,560.0" fill="#62645B"/>
 <rect x="170.0" y="516.0" width="72.0" height="24.0" rx="11.0" fill="#F3F1EB"/>
 <text x="206.0" y="532.0" font-size="13" font-weight="400" fill="#62645B" text-anchor="middle">one push</text>
 <path d="M476.0,496.0 L476.0,516.0 Q476.0,528.0 464.0,528.0 L328.0,528.0 Q316.0,528.0 316.0,540.0 L316.0,560.5" fill="none" stroke="#62645B" stroke-width="1.5" stroke-linejoin="round" stroke-linecap="round"/><polygon points="316.0,568.0 312.0,560.0 320.0,560.0" fill="#62645B"/>
 <rect x="373.3" y="516.0" width="45.5" height="24.0" rx="11.0" fill="#F3F1EB"/>
 <text x="396.0" y="532.0" font-size="13" font-weight="400" fill="#62645B" text-anchor="middle">push</text>
-<path d="M500.0,496.0 L500.0,516.0 Q500.0,528.0 512.0,528.0 L676.0,528.0 Q688.0,528.0 688.0,540.0 L688.0,560.5" fill="none" stroke="#62645B" stroke-width="1.5" stroke-linejoin="round" stroke-linecap="round"/><polygon points="688.0,568.0 684.0,560.0 692.0,560.0" fill="#62645B"/>
-<rect x="569.0" y="516.0" width="50.0" height="24.0" rx="11.0" fill="#F3F1EB"/>
-<text x="594.0" y="532.0" font-size="13" font-weight="400" fill="#62645B" text-anchor="middle">reads</text>
+<path d="M500.0,496.0 L500.0,516.0 Q500.0,528.0 512.0,528.0 L684.0,528.0 Q696.0,528.0 696.0,540.0 L696.0,560.5" fill="none" stroke="#62645B" stroke-width="1.5" stroke-linejoin="round" stroke-linecap="round"/><polygon points="696.0,568.0 692.0,560.0 700.0,560.0" fill="#62645B"/>
+<rect x="573.0" y="516.0" width="50.0" height="24.0" rx="11.0" fill="#F3F1EB"/>
+<text x="598.0" y="532.0" font-size="13" font-weight="400" fill="#62645B" text-anchor="middle">reads</text>
 <rect x="184.0" y="0.0" width="240.0" height="80.0" rx="6.0" fill="#FFB34A" stroke="#F0A33C" stroke-width="2"/>
 <text x="304.0" y="34.0" font-size="16" font-weight="600" fill="#272820" text-anchor="middle">devkit repo</text>
 <text x="304.0" y="56.0" font-size="13" font-weight="400" fill="#272820" text-anchor="middle">dev CLI · rules · plugin · config</text>
@@ -51,16 +51,16 @@
 <text x="120.0" y="472.0" font-size="13" font-weight="400" fill="#62645B" text-anchor="middle">~/Development/&lt;owner&gt;/&lt;repo&gt;</text>
 <rect x="368.0" y="416.0" width="240.0" height="80.0" rx="6.0" fill="#D8DCDA" stroke="#6B8795" stroke-width="1.5"/>
 <text x="488.0" y="450.0" font-size="16" font-weight="600" fill="#272820" text-anchor="middle">Handoff repo</text>
-<text x="488.0" y="472.0" font-size="13" font-weight="400" fill="#39464B" text-anchor="middle">notes · tasks · map · log</text>
-<rect x="776.0" y="416.0" width="240.0" height="80.0" rx="6.0" fill="#DBDBCF" stroke="#7A8460" stroke-width="1.5"/>
-<text x="896.0" y="450.0" font-size="16" font-weight="600" fill="#272820" text-anchor="middle">Hourly sync</text>
-<text x="896.0" y="472.0" font-size="13" font-weight="400" fill="#4A5040" text-anchor="middle">launchd · dev sync</text>
+<text x="488.0" y="472.0" font-size="13" font-weight="400" fill="#39464B" text-anchor="middle">notes · tasks · lessons · audit</text>
+<rect x="792.0" y="416.0" width="240.0" height="80.0" rx="6.0" fill="#DBDBCF" stroke="#7A8460" stroke-width="1.5"/>
+<text x="912.0" y="450.0" font-size="16" font-weight="600" fill="#272820" text-anchor="middle">Sync and jobs</text>
+<text x="912.0" y="472.0" font-size="13" font-weight="400" fill="#4A5040" text-anchor="middle">launchd · dev jobs</text>
 <rect x="184.0" y="568.0" width="240.0" height="80.0" rx="6.0" fill="#E6E8E6" stroke="#8D9391" stroke-width="1.5"/>
 <text x="304.0" y="602.0" font-size="16" font-weight="600" fill="#272820" text-anchor="middle">GitHub</text>
 <text x="304.0" y="624.0" font-size="13" font-weight="400" fill="#596060" text-anchor="middle">code · private handoff</text>
-<rect x="568.0" y="568.0" width="240.0" height="80.0" rx="6.0" fill="#FFFFFF" stroke="#BFB8AB" stroke-width="1.5"/>
-<text x="688.0" y="602.0" font-size="16" font-weight="600" fill="#272820" text-anchor="middle">Dashboard · overview</text>
-<text x="688.0" y="624.0" font-size="13" font-weight="400" fill="#62645B" text-anchor="middle">dev dashboard · dev overview</text>
+<rect x="576.0" y="568.0" width="240.0" height="80.0" rx="6.0" fill="#FFFFFF" stroke="#BFB8AB" stroke-width="1.5"/>
+<text x="696.0" y="602.0" font-size="16" font-weight="600" fill="#272820" text-anchor="middle">Dashboard · overview</text>
+<text x="696.0" y="624.0" font-size="13" font-weight="400" fill="#62645B" text-anchor="middle">dev dashboard · dev overview</text>
 </g>
 </g>
 </svg>

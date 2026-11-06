@@ -1,6 +1,6 @@
 <svg xmlns="http://www.w3.org/2000/svg" width="1056" height="704" viewBox="0 0 1056 704" role="img" aria-labelledby="dk-title dk-desc">
 <title id="dk-title">From plan to operate</title>
-<desc id="dk-desc">The development lifecycle with devkit, stage by stage, with the command and skill for each: plan with dev plan new and Superpowers; track the task with dev task; build with dev progress and the required skills; pass the local test gate with dev ci and dev sec scan; review with /code-review and the communicating templates; integrate on one branch with the delivery skill; release by the recorded policy with dev delivery and the release-policy skill; follow CI with dev ci status; deploy through a tag and its pipeline; and hand off with the handoff skill and dev sync. Each stage feeds the next, so there is no gap between plan and operate.</desc>
+<desc id="dk-desc">The development lifecycle with devkit, stage by stage, with the command and skill for each: plan with dev plan new and Superpowers; track the task with dev task; build with dev progress and the required skills; pass the local test gate with dev ci --run and dev sec scan; open the PR with dev pr create and the communicating templates; integrate on one branch and push once with dev push; release by the recorded policy with dev release and the release-policy skill; follow CI with dev ci status; deploy through a tag and its pipeline; and hand off with the handoff skill and dev lesson. Each stage feeds the next, so there is no gap between plan and operate.</desc>
 <rect width="1056" height="704" fill="#10110F"/>
 <g font-family="Manrope, 'Manrope Variable', system-ui, -apple-system, 'Segoe UI', Arial, sans-serif">
 <circle cx="68" cy="74" r="4" fill="#FFB34A"/>
@@ -44,16 +44,16 @@
 <text x="816.0" y="56.0" font-size="13" font-weight="400" fill="#BFB8AB" text-anchor="middle">dev progress · required skills</text>
 <rect x="0.0" y="152.0" width="224.0" height="80.0" rx="6.0" fill="#1F201C" stroke="#4C4E45" stroke-width="1.5"/>
 <text x="112.0" y="186.0" font-size="16" font-weight="600" fill="#F3F1EB" text-anchor="middle">Test gate</text>
-<text x="112.0" y="208.0" font-size="13" font-weight="400" fill="#BFB8AB" text-anchor="middle">dev ci · dev sec scan</text>
+<text x="112.0" y="208.0" font-size="13" font-weight="400" fill="#BFB8AB" text-anchor="middle">dev ci --run · dev sec scan</text>
 <rect x="352.0" y="152.0" width="224.0" height="80.0" rx="6.0" fill="#1F201C" stroke="#4C4E45" stroke-width="1.5"/>
 <text x="464.0" y="186.0" font-size="16" font-weight="600" fill="#F3F1EB" text-anchor="middle">Review · PR</text>
-<text x="464.0" y="208.0" font-size="13" font-weight="400" fill="#BFB8AB" text-anchor="middle">/code-review · communicating</text>
+<text x="464.0" y="208.0" font-size="13" font-weight="400" fill="#BFB8AB" text-anchor="middle">dev pr create · communicating</text>
 <rect x="704.0" y="152.0" width="224.0" height="80.0" rx="6.0" fill="#1F201C" stroke="#4C4E45" stroke-width="1.5"/>
 <text x="816.0" y="186.0" font-size="16" font-weight="600" fill="#F3F1EB" text-anchor="middle">Integrate</text>
-<text x="816.0" y="208.0" font-size="13" font-weight="400" fill="#BFB8AB" text-anchor="middle">one branch · delivery</text>
+<text x="816.0" y="208.0" font-size="13" font-weight="400" fill="#BFB8AB" text-anchor="middle">one branch · dev push</text>
 <rect x="0.0" y="304.0" width="224.0" height="80.0" rx="6.0" fill="#FFB34A" stroke="#FFB34A" stroke-width="2"/>
 <text x="112.0" y="338.0" font-size="16" font-weight="600" fill="#272820" text-anchor="middle">Release</text>
-<text x="112.0" y="360.0" font-size="13" font-weight="400" fill="#272820" text-anchor="middle">dev delivery · release-policy</text>
+<text x="112.0" y="360.0" font-size="13" font-weight="400" fill="#272820" text-anchor="middle">dev release · release-policy</text>
 <rect x="352.0" y="304.0" width="224.0" height="80.0" rx="6.0" fill="#1F201C" stroke="#4C4E45" stroke-width="1.5"/>
 <text x="464.0" y="338.0" font-size="16" font-weight="600" fill="#F3F1EB" text-anchor="middle">CI status</text>
 <text x="464.0" y="360.0" font-size="13" font-weight="400" fill="#BFB8AB" text-anchor="middle">dev ci status --watch</text>
@@ -62,7 +62,7 @@
 <text x="816.0" y="360.0" font-size="13" font-weight="400" fill="#BFB8AB" text-anchor="middle">tag → pipeline · GitOps</text>
 <rect x="352.0" y="456.0" width="224.0" height="80.0" rx="6.0" fill="#293235" stroke="#8EA3AB" stroke-width="1.5"/>
 <text x="464.0" y="490.0" font-size="16" font-weight="600" fill="#F3F1EB" text-anchor="middle">Handoff</text>
-<text x="464.0" y="512.0" font-size="13" font-weight="400" fill="#A4B4B9" text-anchor="middle">handoff skill · dev sync</text>
+<text x="464.0" y="512.0" font-size="13" font-weight="400" fill="#A4B4B9" text-anchor="middle">handoff skill · dev lesson</text>
 </g>
 </g>
 </svg>

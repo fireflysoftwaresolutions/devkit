@@ -2,7 +2,7 @@
   "name": "session-lifecycle",
   "kind": "sequence",
   "title": "A session with devkit",
-  "desc": "Sequence of one agent session. At session start the devkit hooks read the project's handoff note, tasks, locks and last status from the handoff repository and give the agent its workspace context. On each prompt the hooks start the turn clock and, when you ask how it is going, add the real progress records. On every tool call the guard allows the action or denies it with the right way to do it, and after slow work the hooks remind the agent to update you. Every final message starts with the status block; the Stop hook checks it and records the status, the session line and the lock renewal. At session end devkit syncs the map and notes and pushes the private handoff repository to GitHub.",
+  "desc": "Sequence of one agent session. At session start the devkit hooks pull the handoff repository, read the project's handoff note, tasks, locks, and the lessons that apply, and give the agent its workspace context. On each prompt the hooks start the turn clock and, when you ask how it is going, add the real progress records. On every tool call the guard allows the action or denies it with the right way to do it; after a commit, push, merge, tag, PR, or release the hooks sync the handoff repository within seconds, and after slow work they remind the agent to update you. Every final message starts with the status block; the Stop hook checks it, records the status, the session line and the lock renewal, and after a fix or revert asks once for a lesson. At session end devkit syncs the map and notes and pushes the private handoff repository to GitHub.",
   "participants": [
     {
       "id": "you",
@@ -42,7 +42,7 @@
     {
       "from": "hooks",
       "to": "handoff",
-      "label": "read note · tasks · locks · status"
+      "label": "read note · tasks · locks · lessons"
     },
     {
       "from": "hooks",
@@ -83,7 +83,7 @@
     {
       "from": "agent",
       "to": "hooks",
-      "label": "PostToolUse: time the call"
+      "label": "PostToolUse: time it · sync deliveries"
     },
     {
       "from": "hooks",
@@ -109,6 +109,12 @@
       "from": "hooks",
       "to": "handoff",
       "label": "status · session line · locks"
+    },
+    {
+      "from": "hooks",
+      "to": "agent",
+      "label": "record a lesson? (after a fix)",
+      "style": "return"
     },
     {
       "divider": "Session end"

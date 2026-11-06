@@ -12,9 +12,11 @@ uncontrolled telemetry or unpinned downloads, and no behavior that conflicts wit
 
 ## The devkit plugin
 
-devkit ships its own plugin, `devkit@firefly-devkit`, for both agents. `dev plugin validate` checks it with Claude
-Code's validator and Codex's own parser, and `dev install` reinstalls an agent's copy when it differs from the
-checkout.
+devkit ships its own plugin, `devkit@firefly-devkit`, for both agents. Its description is the tagline, "Every repo in
+its place, every agent on the same page." It carries the devkit icon in both agents. Claude Code's manifest names the
+icon and the display name, and Codex's adds the logo and the Firefly amber `#FFB34A` as its brand color.
+`dev plugin validate` checks it with Claude Code's validator and Codex's own parser, and `dev install` reinstalls an
+agent's copy when it differs from the checkout.
 
 | Skill | Use |
 | --- | --- |
@@ -25,6 +27,7 @@ checkout.
 | `workspace` | Layout, `dev` commands, worktrees, disk, Docker, per-project vendor tooling |
 | `delivery` | Local-first GitOps: integration branch, one push, one CI run, CI failures, releases |
 | `release-policy` | The delivery policy: detect, recommend, and record versioning, bumps, the test gate, the changelog, and the release flow with `dev delivery`; release trains |
+| `learning-loop` | Learn from mistakes: record a blameless lesson after a fix, a revert, a repeated refusal, or a correction; recall the known pitfalls; count repeats; turn recurring lessons into automation (see [Lessons](lessons.md)) |
 | `backend` | API contracts, layering, migrations, testing, resilience, security, operability |
 | `devsecops` | Threat modeling, secrets, dependencies and supply chain, SAST, CI hardening, containers and infrastructure, and `dev sec scan` |
 | `docs` | Documentation to the devkit standard: Diátaxis, Google style, American English, `dev docs check` |
@@ -46,7 +49,7 @@ skills they require, in `config/skill-rules.json`, and enforces the mapping in b
 
 | Rule | Claude Code | Codex | Matches (files, or a request about…) |
 | --- | --- | --- | --- |
-| `ui` | `frontend-design` | `impeccable` | HTML, CSS, Sass, Less, TSX, JSX, Vue, and Svelte files, code in other languages that renders HTML or styles; UI, UX, frontend, dashboards, layout, screens |
+| `ui` | `frontend-design`, `impeccable` | the same | HTML, CSS, Sass, Less, TSX, JSX, Vue, and Svelte files, code in other languages that renders HTML or styles; UI, UX, frontend, dashboards, layout, screens |
 | `angular` | `angular-developer` | `angular-developer` | Components, `angular.json`, routes; Angular |
 | `react` | `react-best-practices` | `react-best-practices` | TSX and JSX files; React, Next.js |
 | `spring` | `java-springboot`, `backend` | the same | Java and Kotlin files that use `org.springframework`; Spring, Java |
@@ -59,6 +62,7 @@ skills they require, in `config/skill-rules.json`, and enforces the mapping in b
 | `diagrams` | `diagrams` | `diagrams` | Diagram specs, SVG, C4, and Mermaid files; diagrams |
 | `delivery` | `delivery`, `release-policy` | the same | `CHANGELOG.md`, `VERSION`, `cliff.toml`, release-please files; a request about releases, deployments, pushes, merges, pull requests, tags, versions, bumps, changelogs, hotfixes, or publishing |
 | `communicating` | `communicating` | `communicating` | A request about status reports, delegation, or handovers |
+| `learning` | `learning-loop` | `learning-loop` | A request about lessons, postmortems, retrospectives, root causes, or mistakes that repeat |
 
 Each rule matches on any of three things: globs on the files a turn changed (`files`); a regular expression on the
 content of changed files (`content`, applied to the `files` matches, or to the `content_files` globs, so a Python file
@@ -102,7 +106,7 @@ From the `claude-plugins-official` marketplace, enabled for every project.
 | --- | --- | --- | --- |
 | `superpowers` | obra/superpowers · MIT | Brainstorming, plans, subagent-driven development, TDD, systematic debugging, verification before completion, review requests | One process backbone, used in both agents |
 | `context7` | Upstash · MIT | Up-to-date library documentation (remote MCP) | Version-specific docs when no vendor source exists |
-| `frontend-design` | Anthropic · Apache-2.0 | Distinctive, production-grade UI | UI quality in Claude Code (Codex uses impeccable) |
+| `frontend-design` | Anthropic · Apache-2.0 | Distinctive, production-grade UI | The design direction; Codex gets the same skill from devkit (see [Shared skills](#shared-skills-both-agents)) |
 | `commit-commands` | Anthropic · Apache-2.0 | `/commit`, `/commit-push-pr`, `/clean_gone` | Low cost; a consistent commit flow |
 | `security-guidance` | Anthropic · Apache-2.0 | Pattern-based security warnings on edits | Cheap, useful warnings; its costly reviews are off (see the following sections) |
 | `claude-security` | Anthropic | Deep vulnerability scans of the repository, a branch, a PR or a commit, with every finding challenged before it is reported, and verified patch files you apply when you choose | On-demand security review for auth, input handling, and secrets |
@@ -121,7 +125,7 @@ and `typescript`, `pyright`, `jdtls`, and `intelephense`.
 | --- | --- | --- |
 | `devkit@firefly-devkit` | this repository | The devkit skills and commands |
 | `superpowers@openai-curated-remote` | obra/superpowers · MIT | The same process skills as in Claude Code |
-| `impeccable@openai-curated-remote` | pbakaus/impeccable · Apache-2.0 | UI design quality: critique, audit, polish, live iteration |
+| `impeccable@openai-curated-remote` | pbakaus/impeccable · Apache-2.0 | UI design quality: critique, audit, polish, live iteration; Claude Code gets the same skill from devkit |
 | `codex-security@openai-curated-remote` | OpenAI | Security scans, analysis, validation, and investigation of code and diffs |
 
 Codex has no LSP plugin mechanism; its global instructions tell it to run the project's type checker and tests.
@@ -141,6 +145,11 @@ project when needed.
 
 Fetched at install time from upstream at the pinned commits in `config/skills.json`, and linked into
 `~/.claude/skills` and `~/.agents/skills`.
+
+Both design skills reach both agents. Each agent's plugin brings one of them, so devkit links the other one only where
+the plugin does not: `impeccable` (pbakaus/impeccable, tag `skill-v4.8.0`, Apache-2.0) for Claude Code, and
+`frontend-design` (anthropics/claude-plugins-official, Apache-2.0) for Codex. The `ui` rule requires both: frontend-design
+for the direction, impeccable for hierarchy, layout, typography, color, and the audit.
 
 | Skill | Source · license | Use |
 | --- | --- | --- |

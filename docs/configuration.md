@@ -36,7 +36,7 @@ Run `dev config edit` to open it and validate it, `dev config show` to print the
 | `hosts` | `["github"]` | Git hosts you use: `github`, `gitlab`, `bitbucket`, `azure-devops`. devkit installs their CLIs, `dev doctor` checks the sign-in, and `dev ci status` reads their pipelines |
 | `clouds` | `[]` | Clouds and infrastructure tools you use: `aws`, `azure`, `gcp`, `digitalocean`, `kubernetes`, `terraform` (OpenTofu). devkit installs their CLIs and `dev doctor` checks the sign-in |
 | `packages.auto` | `true` | `dev install` installs missing packages for your stacks, hosts, and clouds; `false` only reports them |
-| `language` | `en-US` | The language for replies and documents, which the `communicating` skill asks agents to follow. devkit does not put it in the session context, so also state another language in your [personal agent rules](#personal-agent-rules) |
+| `language` | `en-US` | The language for replies and documents, which the `communicating` skill asks agents to follow, and the language of the pull request template that `dev pr create` fills (`es-ES` uses the Spanish one). devkit does not put it in the session context, so also state another language in your [personal agent rules](#personal-agent-rules) |
 
 Changing `dev_root`, `default_host`, or `host_dirs` changes every canonical path: run `dev ls` and `dev adopt` the
 repositories that are no longer in place.
@@ -100,13 +100,22 @@ Apply group changes with `dev install --only skills`. Rule changes apply at the 
 | `branches.types` | `feat`, `fix`, `refactor`, `perf`, `docs`, `test`, `build`, `ci`, `chore`, `deps`, `style`, `revert`, `hotfix`, `release`, `integration` | Allowed branch types; your list replaces the default |
 | `branches.forbidden_words` | `claude`, `codex`, `copilot`, `cursor`, `chatgpt`, `gpt`, `openai`, `anthropic`, `gemini`, `agent`, `ai`, `bot`, `worktree`, `tmp`, `temp`, `wip` | Words a branch name may not start with; your list replaces the default |
 
+### Git and GitHub
+
+| Key | Default | Meaning |
+| --- | --- | --- |
+| `commits.types` | `feat`, `fix`, `docs`, `style`, `refactor`, `perf`, `test`, `build`, `ci`, `chore`, `revert`, `deps` | The Conventional Commit types that `dev commit` and PR titles accept; your list replaces the default |
+| `gitx.github_hosts` | `[]` | GitHub Enterprise hosts, for example `["github.acme.com"]`, whose repositories `dev pr`, `dev run`, `dev release`, and `dev issue` treat as GitHub |
+
+See [Git and GitHub](git-and-github.md).
+
 ### Sync, cleanup, and Docker
 
 | Key | Default | Meaning |
 | --- | --- | --- |
 | `sync.push` | `true` | Push the handoff repository after each sync and each work-item change |
-| `sync.interval_minutes` | `60` | Interval of the launchd background job (run `dev install --only launchd` after changing it) |
-| `gc.auto` | `true` | The background job applies the safe cleanup automatically |
+| `sync.interval_minutes` | `60` | The sync interval that `dev setup` asks for. The `sync` job's schedule is `jobs.sync`; change it with `dev jobs set sync --every 30m` |
+| `gc.auto` | `true` | The nightly `gc` job applies the safe cleanup; `false` (the wizard's "report only") keeps the job off |
 | `gc.grace_hours` | `24` | Idle time before a merged or fully contained worktree is removed |
 | `gc.idle_artefact_days` | `7` | Idle time before regenerable build output is pruned in a worktree |
 | `gc.temp_days` | `7` | Age after which temp entries are purged |
@@ -118,6 +127,26 @@ Apply group changes with `dev install --only skills`. Rule changes apply at the 
 | `docker.rosetta` | `true` | Rosetta for amd64 images (with `vz`) |
 | `docker.mount_type` | `virtiofs` | Host folder sharing |
 | `docker.autostart` | `false` | `true` registers Colima with `brew services` so it starts at login (same as `dev docker autostart-on`) |
+
+### Jobs and audit
+
+| Key | Default | Meaning |
+| --- | --- | --- |
+| `jobs.<name>` | the built-in jobs | Changes a scheduled job (`every` in minutes, `at`, `weekly`, `timeout`, `notify`, `enabled`, `about`, `run_at_load`), or adds your own with `cmd`. `dev jobs set`, `enable`, and `disable` write these keys for you. See [Scheduled jobs and the audit trail](jobs-and-audit.md#add-your-own-job) |
+| `audit.publish` | `true` | The `audit` job publishes this machine's audit trail to `audit/<user>@<host>/` in the handoff repository; `false` keeps it local |
+
+```json
+{
+  "jobs": {
+    "sync": { "every": 30 },
+    "doctor": { "weekly": "fri 08:30" },
+    "lessons": { "enabled": false }
+  },
+  "audit": { "publish": true }
+}
+```
+
+Run `dev jobs install` after editing these keys by hand.
 
 ### For another developer
 
@@ -144,8 +173,10 @@ Never edit the generated files directly; the next install overwrites them, and `
 | `DEV_ROOT` | Overrides `dev_root` |
 | `DEVKIT_CONFIG` | Path of the config file (default `~/.config/devkit/config.json`) |
 | `DEVKIT_GUARD=off` | In the environment of the agent process (`DEVKIT_GUARD=off claude`), turns the guard off for that whole session (see [Guard rules](guard.md#escape-hatches)) |
-| `DEVKIT_LOCAL_CI_PASSED=1` | Prefix of a `git push`: says the full local suite just passed, lifting the push budget for that push |
-| `DEVKIT_FLAKY=1` | Prefix of `gh run rerun`: says the failure is a proven flaky test |
+| `DEVKIT_LOCAL_CI_PASSED=1` | Prefix of a `git push`: says the full local suite just passed, lifting the push budget for that push. `dev push`, `dev pr create`, and `dev release` accept it like `--ci-passed` |
+| `DEVKIT_FLAKY=1` | Prefix of `gh run rerun`: says the failure is a proven flaky test (prefer `dev run rerun <id> --flaky "…"`) |
+| `DEVKIT_RAW_GH=1` | Prefix of `gh pr merge` or `gh release create`: runs gh's own command instead of `dev pr merge` or `dev release`; `--admin` stays refused |
+| `DEVKIT_PIPE_OK=1` | In a command that commits, pushes, or tags after a pipe: says the pipe's last command is the real check (prefer `set -o pipefail`) |
 | `DEVKIT_CROSS_PROJECT=1` | Prefix of `dev task`, `dev note`, or `dev handoff`, or in the agent's environment: lets a project session change another project's records when you asked for it |
 | `DEVKIT_SKIP_SECRET_SCAN=1` | In the agent's environment: the guard does not run gitleaks before `git commit` |
 | `DEVKIT_RAW_FS=1` | Prefix of `rm`, `find -delete`, `xargs rm`, `git clean -f`, or an overwriting `cp` or `mv`: lets the command delete or overwrite directly instead of through `dev rm`, `dev mv`, or `dev cp` |
@@ -154,9 +185,11 @@ Never edit the generated files directly; the next install overwrites them, and `
 | `BITBUCKET_TOKEN`, or `BITBUCKET_USERNAME` and `BITBUCKET_APP_PASSWORD` | `dev ci status` for Bitbucket Pipelines, and the Bitbucket sign-in check of `dev doctor` |
 | `AZURE_DEVOPS_EXT_PAT` | `dev ci status` for Azure Pipelines and the `az devops` CLI (`AZURE_DEVOPS_PAT` works too for `dev ci status`) |
 | `DEVKIT_NO_NOTIFY=1` | No desktop notifications from that process |
-| `DEVKIT_THEME=dark\|light` | The banner's color theme (otherwise taken from `COLORFGBG`, default dark) |
+| `DEVKIT_THEME=dark\|light` | The wordmark's ink: paper on dark, charcoal on light (otherwise taken from `COLORFGBG`, default dark) |
+| `DEVKIT_NO_AUTOSYNC=1` | No queued background syncs from that process; bulk operations push once at the end |
 | `NO_COLOR` | Plain output without colors |
-| `DEVKIT_SESSION`, `DEVKIT_AGENT` | Set by devkit in Claude Code sessions so `dev progress` and the work-item changelog know the session and agent; do not set them yourself |
+| `DEVKIT_SESSION`, `DEVKIT_AGENT` | Set by devkit in Claude Code sessions (and `DEVKIT_AGENT=job` in scheduled jobs) so `dev progress`, the work-item changelog, and the audit trail know the session and agent; do not set them yourself |
+| `DEVKIT_JOB` | Set to the job's name while a scheduled job runs |
 | `CODEX_HOME` | Codex home (default `~/.codex`) |
 | `CLAUDE_CODE_TMPDIR` | Claude Code's temp root; devkit treats it as temp and purges it |
 
@@ -179,7 +212,7 @@ These files apply to everyone who installs devkit. Change them in a branch of th
 | `config/codex/config.json` | Codex settings written through Codex's config API (`settings` replaced, `upsert` merged), the `profiles` and the agent roles (`agents`) |
 | `config/codex/hooks.json` | Codex hooks |
 | `config/codex/plugins.json` | Codex marketplaces, plugins, and MCP servers |
-| `config/skills.json` | Third-party skills: repository, pinned commit (`ref`), license, folders, and optional `group` |
+| `config/skills.json` | Third-party skills: repository, pinned commit (`ref`), license, folders, optional `group`, and optional `agents` (`["codex"]` links a skill for one agent only, for example one the other agent's plugin already brings) |
 | `config/skill-rules.json` | Which skills each kind of work requires |
 | `config/docs/` | Default markdownlint and Vale rules for `dev docs check` |
 | `config/git/` | Shared git defaults and the global ignore file |

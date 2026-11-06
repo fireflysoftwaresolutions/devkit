@@ -107,6 +107,8 @@ system-font fallback never overflows a box.
 | `docs/diagrams/handoff-note.json` | Anatomy of a handoff note | [Concepts](concepts.md), this page |
 | `docs/diagrams/status-flow.json` | Progress and the status block, from the agent to every view | [Concepts](concepts.md) and [Progress and communication](progress-and-communication.md) |
 | `docs/diagrams/work-item-lifecycle.json` | The states of a work item: claim, release, expire | [Teams and machines](teams.md) |
+| `docs/diagrams/lesson-lifecycle.json` | The life of a lesson: capture, recall, recur, prevent, sleep, restore | [Lessons](lessons.md) |
+| `docs/diagrams/jobs-audit.json` | A scheduled job's run and the audit trail, from launchd to the handoff repository | [Scheduled jobs and the audit trail](jobs-and-audit.md) |
 | `docs/diagrams/handoff-sync.json` | Locks and sync between two machines | [Teams and machines](teams.md) |
 | `docs/diagrams/delivery.json` | Local-first delivery: one push, one CI run | [Delivery](delivery.md) |
 | `docs/diagrams/delivery-policy.json` | The delivery policy: detect, recommend, record, and where it applies | [Delivery](delivery.md) |

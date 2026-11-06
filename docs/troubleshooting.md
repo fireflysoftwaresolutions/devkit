@@ -8,7 +8,14 @@ with `dev doctor`: every failed check prints the command that fixes it.
 | Path | Content |
 | --- | --- |
 | `~/.local/state/devkit/logs/hooks.log` | Hook errors (with tracebacks), every guard deny and ask, skill reminders, sessions registered at their first prompt |
-| `~/.local/state/devkit/logs/sync.log` | Background syncs (launchd and session hooks); rotated at 2 MB |
+| `~/.local/state/devkit/logs/sync.log` | Background syncs (the `sync` job, the session hooks, and the queued near-real-time syncs); rotated at 2 MB |
+| `~/.local/state/devkit/logs/jobs/<job>.log` | Each scheduled job's output; `<job>.launchd.log` holds launchd's own messages |
+| `~/.local/state/devkit/jobs/journal.jsonl` | Every job run: start, end, exit code, duration, last line (`dev jobs journal`) |
+| `~/.local/state/devkit/audit/YYYY-MM.jsonl` | The audit trail of this machine, kept two years (`dev audit`) |
+| `~/.local/state/devkit/ci/` | Local CI evidence per repository and commit (30 days) and, in `logs/`, the step logs of `dev ci --run` |
+| `~/.local/state/devkit/flaky.jsonl` | CI re-runs with `dev run rerun --flaky` and their reasons |
+| `~/.local/state/devkit/handoff-push-failed.json` | Present while the handoff repository cannot be pushed |
+| `~/.local/state/devkit/lessons-usage.json`, `lesson-signals.jsonl` | How each lesson was used on this machine, and the corrections queued for `dev lesson scan` |
 | `~/.local/state/devkit/logs/config.log` | Settings restored by `dev config repair` and changes refused by ConfigChange |
 | `~/.local/state/devkit/canary.jsonl` | Status block results per reply: marker, format score, excerpt of misses (90 days) |
 | `~/.local/state/devkit/status/` | The latest status block per project, stored as one line |
@@ -21,7 +28,9 @@ with `dev doctor`: every failed check prints the command that fixes it.
 | `~/.local/state/devkit/cache/` | GitHub user and organizations, sizes; `prs/` holds PR lists |
 
 ```bash
-launchctl print gui/$UID/com.devkit.sync | head -30     # is the background job loaded? last exit code
+dev jobs                                                  # every scheduled job: loaded, last run, next run
+dev jobs show sync                                        # one job's recent runs
+launchctl print gui/$UID/com.devkit.job.sync | head -30  # what launchd knows about it
 tail -50 ~/.local/state/devkit/logs/sync.log
 dev sync                                                  # run a sync in the foreground
 ```
@@ -106,6 +115,10 @@ Two machines claimed the same item within seconds; the first push won. Pick anot
 
 ### The handoff repository does not push
 
+`dev` shows "the handoff repository could not be pushed since …" under Needs attention, and `dev audit --action
+handoff.push` lists the failed attempts. devkit already rebased on the remote and tried once more, so the cause is
+one of these:
+
 ```bash
 cd ~/Development/.handoff && git status && git log --oneline -3 && git push
 gh auth status
@@ -114,7 +127,22 @@ gh auth status
 Check that `handoff_repo` in `~/.config/devkit/config.json` matches the `origin` remote, and that `gh auth setup-git`
 has run (`dev install --only git`). If `git status` shows a merge conflict (two people changed the same work item at
 the same moment), resolve it in the handoff repository, commit, and run `dev sync`. If `.gitattributes` lacks the
-devkit merge rules, run `dev install --only handoff`.
+devkit merge rules, run `dev install --only handoff`. The warning disappears with the next push that succeeds.
+
+### A scheduled job fails or does not run
+
+`dev doctor` reports `job <name>` as failing, or you got a notification. Look at the job, then run it in the
+foreground:
+
+```bash
+dev jobs show gc        # schedule, loaded or not, recent runs with their last line
+dev jobs logs gc        # the end of its log
+dev jobs run gc         # run it now, with the output in the log
+```
+
+`not loaded` means launchd does not have the job: run `dev jobs install`. Exit code `124` means the job ran out of
+time; give it more with `"jobs": {"gc": {"timeout": 60}}` and `dev jobs install`. A run recorded as skipped found the
+previous run still going. A job that should not run on this Mac can be turned off with `dev jobs disable <name>`.
 
 ## Configuration
 
@@ -179,6 +207,26 @@ The message `no CI provider for this remote` means the `origin` remote is on a h
 GitLab, Bitbucket, and Azure readers are tested against recorded API responses; report a host that answers
 differently.
 
+### `dev push` says there is no local CI evidence
+
+`dev push`, `dev pr create`, and `dev release` accept a commit only when the files it contains passed the local
+suite. The message says when the last run was and which files changed since; run `dev ci --run` again and commit
+exactly what it tested. When a check cannot run on your Mac, `dev ci --run` says so: run it yourself and record it with
+`dev ci --mark-passed --note "<command>: <result>"`. If the suite passed in this session in another way, pass
+`--ci-passed`.
+
+### `dev pr create` says a section is empty
+
+"What and why" and "How to verify" need text you wrote. Write the pre-filled body to a file with
+`dev pr create --dry-run | sed '1,/^---$/d' > body.md`, fill those sections, and run
+`dev pr create --body-file body.md`; or fill them in your editor with `dev pr create --edit`; or open a draft with
+`--draft`.
+
+### The guard refuses `gh pr merge`, `gh release create`, or `git stash`
+
+Use `dev pr merge`, `dev release`, and `dev commit --wip`: they do the same with the checks devkit requires. When you
+really need gh's own command, prefix it with `DEVKIT_RAW_GH=1`; `gh pr merge --admin` is never allowed.
+
 ## Workspace
 
 ### The guard blocked something legitimate
@@ -225,7 +273,8 @@ echo $DOCKER_HOST          # unix://…/.colima/default/docker.sock (open a new 
 - Restore one file: copy it back from `~/.local/state/devkit/backups/<name>.<timestamp>`.
 - Fetch skills again: delete `~/.local/share/devkit/` and run `dev install --only skills`.
 - Clear caches: delete `~/.local/state/devkit/cache/`.
-- Stop the background job: `launchctl bootout gui/$UID/com.devkit.sync`.
+- Stop a scheduled job: `dev jobs disable <job>` (or `launchctl bootout gui/$UID/com.devkit.job.<job>` until the next
+  `dev install`).
 
 See also [Getting started › What devkit touches](getting-started.md#what-devkit-touches-and-how-to-undo-it),
 [Agents](agents.md), and [Teams and machines](teams.md).

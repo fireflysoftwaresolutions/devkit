@@ -12,7 +12,7 @@ them or for their team, follows the same rules:
   in another language only when the developer asks for it (or devkit config `language` says so), and then only for
   the content they asked for.
 - **The status block first, then the answer.** A message that ends your turn starts with the status block (global
-  instructions §0); nothing goes above it, not even a correction or a note about the last command. Right below the
+  instructions §0); nothing comes before it, not even a correction or a note about the last command. Right below the
   block, lead with the answer: the outcome, the verdict, or the question. Details come after. Every template
   below goes under the block when it ends the turn.
 - **Write plainly.** Use short sentences, everyday words, and concrete nouns ("the login page times out after 30 s,"

@@ -28,10 +28,10 @@ Each starts with a header such as:
 
 | Section | What it tells the agents |
 | --- | --- |
-| 0. Instruction canary and status block | Start every final message with the `[Firefly> DevKit]` status block (see [Concepts › The status block](concepts.md#the-status-block)) |
+| 0. Instruction canary and status block | Start the final message of every turn, without exception and in any language, with the `[Firefly> DevKit]` status block (see [Concepts › The status block](concepts.md#the-status-block)) |
 | 1. Workspace | Where repositories, worktrees, the handoff repository, and scratch files live |
 | 2. Start of every task | Read the session context and the handoff note before anything else |
-| 3. How to work | Scale the process to the task, reproduce bugs first, verify in small steps, show evidence; write plainly in American English; keep the developer informed with `dev progress` and the `communicating` templates; spend tokens where they buy quality |
+| 3. How to work | Scale the process to the task, reproduce bugs first, verify in small steps, show evidence; write plainly in American English; keep the developer informed with `dev progress` and the `communicating` templates; learn from mistakes with lessons (see [Lessons](lessons.md)); spend tokens where they buy quality |
 | 4. Files and disk | No stray files, backups, or reinstalls |
 | 5. Worktrees | Only when needed, through `dev wt new` |
 | 6. Git and GitHub | Branch names, Conventional Commits, CalVer, no AI attribution, no plain force pushes |
@@ -69,7 +69,8 @@ subagent model, and effort.
 ### Plugins, agents, and MCP servers
 
 Plugins are installed from the `claude-plugins-official` marketplace and devkit's own `firefly-devkit` marketplace at
-user scope. The devkit plugin brings the devkit skills, the slash commands and the read-only `scout` agent. MCP
+user scope. The devkit plugin brings the devkit skills, the slash commands and the read-only `scout` agent. The plugin
+carries the devkit icon and its display name, so Claude Code shows it as devkit. MCP
 servers are added with `claude mcp add -s user` and replaced on each install, so their arguments stay current. The
 list and the reasons are in [Skills and plugins](skills-and-plugins.md).
 
@@ -94,6 +95,8 @@ devkit does not edit `config.toml` as text. It starts `codex app-server` and wri
 | `projects."<path>".trust_level` | `trusted` | For the dev root and every repository under it (and new ones from `dev clone`, `dev new`, `dev adopt`) |
 | `shell_environment_policy.set` | Docker, Testcontainers, and telemetry variables | Environment for commands Codex runs |
 | `agents.max_concurrent_threads_per_session` | `4` | At most four subagent threads per session |
+| `review_model` | `gpt-6-astra` | `/review` uses the strongest model |
+| `project_doc_max_bytes` | `131072` | Codex reads a project's AGENTS.md whole (its default stops at 32 KiB; Claude Code reads CLAUDE.md whole) |
 | `mcp_servers` | from `config/codex/plugins.json` | context7, Chrome DevTools, Angular CLI |
 | `hooks.state."<key>".trusted_hash` | the hashes Codex reports | Trust for devkit's hooks |
 
@@ -114,7 +117,8 @@ in that file through `config/batchWrite`. When devkit's hooks change, the next `
 
 ### Plugins
 
-`codex plugin add` installs the devkit plugin from the `firefly-devkit` marketplace, and `superpowers`, `impeccable`
+`codex plugin add` installs the devkit plugin from the `firefly-devkit` marketplace, with its icon, logo, and the
+Firefly amber `#FFB34A` as its brand color, and `superpowers`, `impeccable`
 and `codex-security` from `openai-curated-remote` (see [Skills and plugins](skills-and-plugins.md)).
 
 ## Skills
@@ -136,18 +140,19 @@ works from the Desktop and ChatGPT apps, whose PATH is minimal.
 
 | Event | Claude Code | Codex | What it does |
 | --- | --- | --- | --- |
-| SessionStart | every source, 30 s | `startup\|resume\|clear\|compact`, 30 s | Records the session's starting commit and branch, refreshes the project's generated blocks, exports `DEVKIT_SESSION` (Claude), restores managed settings in the background, clones `node_modules` into a fresh worktree, and prints the workspace context |
-| UserPromptSubmit | 10 s | 10 s | Starts the turn clock; adds real progress records and the branch's CI/CD pipelines when you ask for status; names the skills the request needs; registers a session that missed SessionStart and injects its context. Background notifications (subagent results, system notices) are not treated as your request |
-| PreToolUse | `Bash\|Write\|Edit\|MultiEdit\|NotebookEdit\|Agent\|Task`, 15 s | `^(Bash\|apply_patch)$`, 15 s | The [guard](guard.md): allow silently, or `deny` (both) or `ask` (Claude) with the reason. Starts the call's timer. On Claude's Agent and Task tools, appends the required skills to the subagent's brief |
-| PostToolUse | `Bash\|Agent\|Task\|Write\|Edit\|MultiEdit\|WebFetch\|WebSearch`, 10 s | `^(Bash\|apply_patch)$`, 10 s | Records slow calls; reminds the agent to update you after a long silence |
+| SessionStart | every source, 30 s | `startup\|resume\|clear\|compact`, 30 s | Records the session's starting commit and branch, refreshes the project's generated blocks, exports `DEVKIT_SESSION` (Claude), restores managed settings in the background, clones `node_modules` into a fresh worktree, queues a sync that pulls the claims of other machines, and prints the workspace context |
+| UserPromptSubmit | 10 s | 10 s | Starts the turn clock; adds real progress records and the branch's CI/CD pipelines when you ask for status; names the skills the request needs; reminds the agent of the status block in a session that already missed it once, naming the failure mode (nothing comes before the block); queues a correction from you (a prompt that starts with `no,` or `you forgot`) as a lesson signal; registers a session that missed SessionStart and injects its context. Background notifications (subagent results, system notices) are not treated as your request |
+| PreToolUse | `Bash\|Write\|Edit\|MultiEdit\|NotebookEdit\|Agent\|Task`, 15 s | `^(Bash\|apply_patch)$`, 15 s | The [guard](guard.md): allow silently, or `deny` (both) or `ask` (Claude) with the reason, which is written to the audit trail. Starts the call's timer. On Claude's Agent and Task tools, appends the required skills to the subagent's brief |
+| PostToolUse | `Bash\|Agent\|Task\|Write\|Edit\|MultiEdit\|WebFetch\|WebSearch`, 10 s | `^(Bash\|apply_patch)$`, 10 s | Records slow calls; reminds the agent to update you after a long silence; after a `git commit`, `push`, `merge`, `tag`, `rebase`, `cherry-pick`, or `revert`, or a `gh pr create`, `gh pr merge`, or `gh release create`, queues a sync of the handoff repository (see [Teams and machines › Near-real-time sync](teams.md#near-real-time-sync)) |
 | SubagentStart · SubagentStop | 5 s | 5 s | Tracks running subagents and records their durations |
-| Stop | 10 s | 10 s | Checks, scores, and stores the status block; asks the agent to continue when the block is missing, a plan changed without `dev plan revise`, matching files changed without their required skills, or commits were made without a handoff update; records the turn; and, at most every 10 minutes, starts a background sync that writes the session line, renews locks, and publishes presence |
+| Stop | 10 s | 10 s | Checks, scores, and stores the status block; asks the agent to continue when the block is missing or not first (it says which, quoting the reply's first line), a plan changed without `dev plan revise`, matching files changed without their required skills, or commits were made without a handoff update; once per session after a fix or revert commit, asks whether it deserves a lesson; counts the lessons the reply names as applied; writes a missed block to the audit trail; records the turn; and, at most every 2 minutes, starts a background sync that writes the session line, renews locks, and publishes presence |
 | SessionEnd | 10 s | 3 s | A background sync that writes the session's final line and closes the session record |
-| ConfigChange | `user_settings`, 15 s | — | Refuses changes to devkit-managed keys in `~/.claude/settings.json` and restores them |
+| ConfigChange | `user_settings`, 15 s | — | Refuses changes to devkit-managed keys in `~/.claude/settings.json`, restores them, and writes the refusal to the audit trail |
 | InstructionsLoaded | 10 s | — | Records which instruction files the session loaded, to explain canary misses |
 
 The Stop hook never loops: it asks for one more pass at most once per turn for the status block and for changed
-plans, once per session for each missing skill, and once per session for the handoff note. With `canary.enforce`, `handoff.enforce` or
+plans, once per session for each missing skill, once per session for the handoff note, and once per session for a
+lesson. With `canary.enforce`, `handoff.enforce` or
 `skills.enforce` set to `false`, the matching request is not made.
 
 ### The session context
@@ -159,6 +164,8 @@ At session start (or at the first prompt) the agent receives:
 - other worktrees of the repository and whether they have live sessions, and layout problems;
 - the latest status block, the project's status and priority, its task counts, and its delivery policy (or a reminder
   to record one);
+- up to four known pitfalls: the open [lessons](lessons.md) of the project, its initiatives, and the global ones, each
+  with its prevention rule;
 - each initiative the project belongs to: status, progress, members, this project's workstream, the Now tasks, and the
   README's path;
 - your claimed tasks, the tasks claimed by others ("do NOT work on these"), and who else works on this project now;
@@ -173,16 +180,18 @@ devkit has to be active in every Claude and Codex session to work. These safegua
 | --- | --- |
 | First-prompt registration | A session that missed SessionStart (a failed hook, an untrusted Codex hook, an old client) is registered at its first prompt and gets the full context |
 | Guard on agent settings | Writing `"disableAllHooks": true` or `"devkit@firefly-devkit": false` into a `.claude/settings.json` or `settings.local.json`, or `hooks = false` into a `.codex/config.toml` or `hooks.json`, is denied |
-| Drift repair | Session start runs `dev config repair` in the background; the hourly sync records drift; ConfigChange refuses edits to managed keys in Claude Code |
+| Drift repair | Session start runs `dev config repair` in the background, and so does the `repair` job every 6 hours; the hourly sync records drift; ConfigChange refuses edits to managed keys in Claude Code |
 | Stale plugin copies | Both agents install a snapshot of the devkit plugin. `dev install` compares it with `plugin/` in the checkout and reinstalls a copy that differs |
-| `dev doctor` | Reports project settings under `~/Development` that switch devkit off, whether each agent's plugin copy is current, the sessions that ran with devkit in the last 7 days, and every hook |
+| `dev doctor` | Reports project settings under `~/Development` that switch devkit off, whether each agent's plugin copy is current, the sessions that ran with devkit in the last 7 days, every hook, and the desktop apps, whose bundled agents (Claude Code in Claude Desktop, Codex in the ChatGPT app) must use the same configuration and plugins, with the sessions recorded from each |
+| Results per surface | Every session and status-block result records where it ran (terminal, Claude Desktop, the ChatGPT app, an IDE), so a surface that drops the instructions shows up in `dev doctor` |
 
 **Fail-open.** Every handler catches all errors, logs them and exits with `0` without output, so a devkit bug never
 blocks or breaks a session. Background work is detached, so hooks return in milliseconds.
 
 **Logs.** `~/.local/state/devkit/logs/hooks.log` (errors, every guard decision, skill reminders),
-`~/.local/state/devkit/logs/sync.log` (background syncs) and `~/.local/state/devkit/logs/config.log` (restored and
-refused settings).
+`~/.local/state/devkit/logs/sync.log` (background syncs), `~/.local/state/devkit/logs/config.log` (restored and
+refused settings), `~/.local/state/devkit/logs/jobs/` (one log per scheduled job), and the audit trail in
+`~/.local/state/devkit/audit/` (`dev audit`).
 
 See also [Concepts](concepts.md), [Guard rules](guard.md), [Configuration](configuration.md), and
 [Models and tokens](models-and-tokens.md).

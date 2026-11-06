@@ -3,11 +3,13 @@
 GitHub CI confirms that work is ready; it is not where you find out whether it works. Each push costs a full CI
 cycle (often 30 minutes or more), and each merge to the default branch can trigger the CI of every other open PR
 again. devkit's method, which the global instructions and the devkit `delivery` skill teach both agents, is
-**integrate and verify locally, push once, get one CI run.**
+**integrate and verify locally, push once, get one CI run.** The `dev` commands for git and GitHub
+([Git and GitHub](git-and-github.md)) apply it at every step: `dev push`, `dev pr create`, and `dev release` refuse
+to run without local CI evidence.
 
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="images/diagrams/delivery-dark.svg">
-  <img src="images/diagrams/delivery-light.svg" alt="Local-first delivery: feature branches are merged on one local integration branch and checked with the local equivalent of CI; only a green local run is pushed once as one PR, so CI runs once; a red CI run is reproduced and fixed locally; a green run is merged, tagged with a CalVer version, released, and verified." width="100%">
+  <img src="images/diagrams/delivery-light.svg" alt="Local-first delivery: feature branches are merged on one local integration branch, where dev ci --run runs the local equivalent of CI and records the evidence; only a green local run is pushed once with dev push and opened as one PR with dev pr create, so CI runs once; a red CI run is reproduced and fixed locally; a green run is merged with dev pr merge, tagged and released with dev release under a CalVer version, and verified." width="100%">
 </picture>
 
 ## The delivery policy
@@ -85,6 +87,7 @@ and a test gate that compiles the code and runs the suite with Homebrew's Python
 dev ci                 # workflows, triggers, jobs, runners, matrices, setup actions, every run: command
 dev ci --commands      # only the commands, in order
 dev ci --runs          # plus the recent runs
+dev ci --run --dry-run # which of those steps run on your Mac, and why the others do not
 ```
 
 Use the same tool versions as the setup steps (`setup-node`, `setup-java`, `setup-python`).
@@ -92,31 +95,33 @@ Use the same tool versions as the setup steps (`setup-node`, `setup-java`, `setu
 ## 2. A single change
 
 ```bash
-git fetch origin && git switch -c feat/x origin/main
+dev branch new feat/x                   # from an up-to-date origin/main
 # … small steps, targeted tests while iterating …
-# full local equivalent of CI: lint, types, unit, integration (Testcontainers), build, package
+dev commit -a -m "feat(scope): summary" --body "why"
+dev ci --run            # the full local equivalent of CI: lint, types, unit, integration (Testcontainers), build
 dev sec scan            # secrets, dependencies, code patterns, IaC, workflows
-git push -u origin feat/x
-gh pr create --fill     # then fill the description (see Templates)
-gh pr checks --watch
+dev push                # one push, only with local CI evidence for exactly these files
+dev pr create --dry-run | sed '1,/^---$/d' > body.md   # the pre-filled body; fill "What and why", then:
+dev pr create --body-file body.md
+dev pr checks --watch
 ```
 
 The pull request description follows the template in [Templates › Pull request
 description](templates.md#pull-request-description): what and why, changes, how to verify (with the local results),
-risk and rollback, links. The title is a Conventional Commit.
+risk and rollback, links. `dev pr create` fills the changes, the local CI result, and the links, and refuses a PR
+whose "What and why" or "How to verify" is still empty. The title is a Conventional Commit.
 
 ## 3. Branches or PRs that land together
 
 ```bash
-git fetch origin
-git switch -c release/26.11.4 origin/main
+dev branch new release/26.11.4
 git merge --no-ff origin/feat/a          # oldest dependency first
 git merge --no-ff feat/b                 # local branches of other worktrees work too: same repository
 # resolve conflicts once; bump the version, CHANGELOG and docs once
-# run the full local suite on the result
-git push -u origin release/26.11.4
-gh pr create --fill --title "Release 26.11.4" --body "Integrates #12, #17, #22"
-gh pr checks --watch
+dev ci --run                             # the full local suite on the result
+dev push
+dev pr create --title "chore(release): 26.11.4" --body-file body.md   # "Integrates #12, #17, #22"
+dev pr checks --watch
 ```
 
 Ask the sessions working on those branches to commit locally and stop pushing. Never merge the individual PRs one
@@ -130,7 +135,7 @@ Watch the single run instead of polling it:
 ```bash
 dev ci status            # the branch's runs: state, jobs, current step, elapsed, ETA
 dev ci status --watch    # refresh every 15 seconds until nothing runs
-gh pr checks --watch     # the PR's checks, on GitHub
+dev pr checks --watch    # the PR's checks; prints only the result, with the failing jobs' logs
 ```
 
 `dev ci status` works with GitHub Actions, GitLab CI, Bitbucket Pipelines and Azure Pipelines; the ETA comes from
@@ -139,8 +144,9 @@ the last successful runs of the same pipeline. The details and the sign-in each 
 
 ## 5. When CI fails
 
-1. Read the real error: `gh run view <run-id> --log-failed` (`dev ci status` prints the command for a failed run).
-2. Reproduce it locally with the same command and versions, fix it, run the full local suite.
+1. Read the real error: `dev run view --failed` (or `dev pr checks`) shows the failing step and the relevant lines of
+   its log.
+2. Reproduce it locally with the same command and versions, fix it, and run the full local suite (`dev ci --run`).
 3. Push once. One fix per push, never a "try this and see."
 4. If the failure truly cannot be reproduced on macOS (Linux-only paths, case-sensitive file system, a CI-only
    secret, runner limits), say so, make the smallest targeted fix, push once, and explain it in the PR.
@@ -148,20 +154,22 @@ the last successful runs of the same pipeline. The details and the sign-in each 
    recorded in the handoff note, with an explicit acknowledgement:
 
    ```bash
-   DEVKIT_FLAKY=1 gh run rerun <run-id> --failed
+   dev run rerun <run-id> --flaky "PaymentIT times out on the runner; passed 5 times locally, unrelated to this change"
    ```
+
+   devkit records the reason in the project's session log and re-runs only the failed jobs.
 
 ## 6. Release
 
 Release by the recorded policy (see [The delivery policy](#the-delivery-policy)); `dev delivery` shows it.
 
 1. Run `dev sec scan` on the integration branch and fix or justify every finding.
-2. From the verified, green integration branch, merge with the repository's strategy (squash or merge commit). A
-   squash message repeats the PR title and says what changed and why in one or two sentences, with no attribution
-   lines.
-3. Tag with the policy's format (signed if the project signs tags), push the tag, and create the release with
-   notes from the CHANGELOG: `gh release create vX.Y.Z --notes-file <notes>`. `dev calver` gives the next CalVer
-   version.
+2. From the verified, green integration branch, merge with the repository's strategy: `dev pr merge` (squash or merge
+   commit). A squash message repeats the PR title and says what changed and why in one or two sentences, with no
+   attribution lines; `dev pr merge` writes it from the PR.
+3. Tag with the policy's format (signed if the project signs tags), push the tag, and create the release with notes
+   from the CHANGELOG: `dev release` (`--dry-run` first) does all three, after it checks the version files, the local
+   CI evidence, and the CI of the commit. `dev calver` gives the next CalVer version.
 4. Download or install the published artifact and smoke-test it.
 5. Update the handoff note (version, what shipped, follow-ups) and mark the tasks done with `dev task done <n>`.
 
@@ -179,8 +187,10 @@ Release by the recorded policy (see [The delivery policy](#the-delivery-policy))
 
 | Rule | Behavior |
 | --- | --- |
-| Push budget | The third push of the same branch within 60 minutes is denied with instructions to reproduce locally. Prefix the push with `DEVKIT_LOCAL_CI_PASSED=1` only when the full local suite has just passed in the session. |
-| Blind re-runs | `gh run rerun` is denied unless prefixed with `DEVKIT_FLAKY=1`. |
+| Push budget | The third push of the same branch within 60 minutes is denied with instructions to reproduce locally. `dev push` with evidence from `dev ci --run` passes it; prefix a raw push with `DEVKIT_LOCAL_CI_PASSED=1` only when the full local suite has just passed in the session. |
+| Blind re-runs | `gh run rerun` is denied unless prefixed with `DEVKIT_FLAKY=1`; `dev run rerun` needs `--flaky` with the reason. |
+| Merges and releases | Raw `gh pr merge` and `gh release create` are denied in favor of `dev pr merge` and `dev release` (prefix `DEVKIT_RAW_GH=1` to bypass); `gh pr merge --admin` is always denied. |
+| Pipes | A commit, push, or tag chained after a pipe without `pipefail` is denied: the `&&` would see the pipe's last command, not the check. |
 | Force pushes | Plain `--force`, `-f`, and `+refspec` are denied; `--force-with-lease` is allowed on your own branch, never to `main` or `master`. |
 | Branch names | A branch that breaks `<type>/<ticket>-<topic>` cannot be created, renamed to, or pushed. |
 | Secrets | A commit that contains a secret found by gitleaks is denied. |
@@ -190,5 +200,5 @@ Release by the recorded policy (see [The delivery policy](#the-delivery-policy))
 The budget counts push attempts per repository and branch on this machine
 (`~/.local/state/devkit/ci-pushes.json`). The full rules are in [Guard rules](guard.md).
 
-See also [Guard rules](guard.md), [Commands › dev ci](commands.md#dev-ci-query---commands---runs) and
-[Templates](templates.md).
+See also [Git and GitHub](git-and-github.md), [Guard rules](guard.md),
+[Commands › dev ci](commands.md#dev-ci-query---commands---runs) and [Templates](templates.md).

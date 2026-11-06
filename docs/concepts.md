@@ -73,7 +73,7 @@ nothing falls between them.
 
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="images/diagrams/lifecycle-map-dark.svg">
-  <img src="images/diagrams/lifecycle-map-light.svg" alt="From plan to operate: plan with dev plan new and Superpowers; track the task with dev task; build with dev progress and the required skills; pass the local test gate with dev ci and dev sec scan; review with /code-review and the communicating templates; integrate on one branch with the delivery skill; release by the recorded policy with dev delivery and the release-policy skill; follow CI with dev ci status; deploy through a tag and its pipeline; hand off with the handoff skill and dev sync." width="100%">
+  <img src="images/diagrams/lifecycle-map-light.svg" alt="From plan to operate: plan with dev plan new and Superpowers; track the task with dev task; build with dev progress and the required skills; pass the local test gate with dev ci --run and dev sec scan; open the PR with dev pr create and the communicating templates; integrate on one branch and push once with dev push; release by the recorded policy with dev release and the release-policy skill; follow CI with dev ci status; deploy through a tag and its pipeline; hand off with the handoff skill and dev lesson." width="100%">
 </picture>
 
 | Stage | devkit | Skill | Guide |
@@ -81,13 +81,13 @@ nothing falls between them.
 | Plan | `dev plan new --kind plan\|spec\|spike\|bugfix\|adr` | Superpowers (brainstorming, writing-plans), `architecture` | [Templates](templates.md) |
 | Task | `dev task add`, `dev task start` | `using-devkit` | [Teams and machines](teams.md) |
 | Build | `dev progress`, `dev files`, `dev grep`, `dev diff` | the required skills for the work | [Skills and plugins](skills-and-plugins.md#required-skills) |
-| Test gate | `dev ci --commands`, `dev sec scan` | `delivery`, `devsecops` | [Delivery](delivery.md) |
-| Review and PR | `/code-review`, the PR template | `communicating` | [Templates](templates.md#pull-request-description) |
-| Integrate | one `release/<version>` or `integration/<topic>` branch | `delivery` | [Delivery](delivery.md) |
-| Release | `dev delivery`, `dev calver` | `release-policy` | [Delivery › The delivery policy](delivery.md#the-delivery-policy) |
-| CI status | `dev ci status --watch` | `communicating` | [Commands](commands.md) |
+| Test gate | `dev ci --run`, `dev sec scan` | `delivery`, `devsecops` | [Git and GitHub › Local CI evidence](git-and-github.md#local-ci-evidence) |
+| Review and PR | `/code-review`, `dev pr create` with the PR template | `communicating` | [Git and GitHub › Pull requests](git-and-github.md#pull-requests) |
+| Integrate | one `release/<version>` or `integration/<topic>` branch, `dev push` | `delivery` | [Delivery](delivery.md) |
+| Release | `dev pr merge`, `dev release`, `dev delivery` | `release-policy` | [Git and GitHub › Releases](git-and-github.md#releases) |
+| CI status | `dev pr checks --watch`, `dev ci status --watch` | `communicating` | [Commands](commands.md) |
 | Deploy | a tag and its pipeline (GitOps) | `delivery` | [Delivery](delivery.md) |
-| Handoff | `dev handoff --log`, `dev sync` | `handoff` | [Concepts › Handoff notes](#handoff-notes) |
+| Handoff | `dev handoff --log`, `dev lesson add` | `handoff`, `learning-loop` | [Concepts › Handoff notes](#handoff-notes), [Lessons](lessons.md) |
 
 ## The handoff repository
 
@@ -107,10 +107,12 @@ that you, Claude Code and Codex share across sessions, machines, and developers.
 | `sessions/<scope>/YYYY-MM.md` | Append-only session log | the hooks, `dev handoff --log` |
 | `presence/<user>@<host>.json` | What each machine is doing now: live sessions, progress, held locks | `dev sync` on that machine |
 | `policies/<scope>.json` | The delivery policy of a project (or the release train of an initiative), versioned with its history | `dev delivery apply` only |
+| `lessons/<scope>/L-….md` | Lessons from mistakes, versioned; `lessons/archive/` holds forgotten ones, `lessons/usage/` each machine's usage counts | `dev lesson`, `dev sleep` |
+| `audit/<user>@<host>/YYYY-MM.jsonl` | Each machine's audit trail | the `audit` job |
 | `log/YYYY-MM.md` | Operations: worktree removals, cleanups, adoptions, imports, restored settings | `dev` |
 | `.gitattributes` | Merge rules that keep machines from conflicting | `dev install` |
 
-The guard keeps the generated files, `items/`, `sessions/`, `presence/`, and `policies/` out of reach of direct edits, and keeps a
+The guard keeps the generated files, `items/`, `sessions/`, `presence/`, `policies/`, and `lessons/` out of reach of direct edits, and keeps a
 project session from writing another project's note or plans (see [Guard rules](guard.md#the-handoff-repository)).
 
 ### Handoff notes
@@ -200,8 +202,9 @@ are not detected). The rules are in [Disk and cleanup](disk-and-cleanup.md).
 A pre-tool hook runs before every shell command and file write of Claude Code and Codex. It enforces the workspace
 rules: layout, managed worktrees, canonical clones, no backup copies, no writes outside the workspace, no destructive
 commands, permanent deletes and overwrites through `dev rm`, `dev mv`, and `dev cp`, no plain force pushes, a CI push
-budget, no blind CI re-runs, branch names, tags that follow the delivery policy, no AI attribution, no secrets in
-commits, isolation in the handoff repository, and no settings that switch devkit off. Each denial explains the
+budget, no blind CI re-runs, merges and releases through `dev pr merge` and `dev release`, no shared stash, no commit
+gated on a pipe, branch names, tags that follow the delivery policy, no AI attribution, no secrets in commits,
+isolation in the handoff repository, and no settings that switch devkit off. Each denial explains the
 right way, so the agent corrects itself in one step. It fails open: a bug in the guard never blocks work. The full
 list is in [Guard rules](guard.md).
 
@@ -229,6 +232,11 @@ status block: a bold header with the `[Firefly> DevKit]` marker, then three shor
 Each bullet is one plain sentence of about 100 characters at most, with no internal ids unless they help the reader
 (a PR number helps; a task id does not). If a rule could not be followed or something failed, the block says so.
 
+**Nothing comes before the block.** Not the verdict, a correction, a greeting, or a comment on the last command's
+output: those go right below it, and "lead with the point" applies to that text. The final message is everything the
+agent writes after its last tool call, so a reply that only says it is waiting for background work starts with the
+block too. The update that `dev progress step` prints already is the block.
+
 ### What devkit does with it
 
 <picture>
@@ -236,13 +244,18 @@ Each bullet is one plain sentence of about 100 characters at most, with no inter
   <img src="images/diagrams/status-flow-light.svg" alt="Progress and the status block: the agent records long work with dev progress, which shares steps, estimate, and ETA with the team through presence, dev team, and the dashboard; every final message starts with the status block; after each turn the Stop hook reads it, records the marker and the format score in the canary log, and stores the block as one compact line that dev status, dev overview, the dashboard, and the next session show." width="100%">
 </picture>
 
-- **It is a canary.** The rule lives only in the global instruction files. The session-start hook deliberately does
-  not repeat it, so a reply without the marker means the global instructions were not loaded or not followed, which a
-  hook-injected reminder would hide.
+- **It is a canary.** The rule lives only in the global instruction files, and it applies to every turn without
+  exception: short answers, questions back to you, status updates, replies while background work runs, and replies in
+  any language. The session-start hook deliberately does not repeat it, so the first turn is a clean test: a reply
+  without the marker means the global instructions were not loaded or not followed. Only after a session has missed it
+  once does every later prompt carry a reminder.
 - **It is checked after every turn.** In sessions that devkit tracks under the dev root, the Stop hook reads the final
   reply (Codex passes it as `last_assistant_message`; for Claude Code devkit reads the session transcript) and records
   whether its first non-empty line starts with the marker. In Claude Code a missing marker also shows you a warning at
-  once. With `canary.enforce` on (the default), the hook asks the agent to reply again with the block.
+  once. With `canary.enforce` on (the default), the hook asks the agent to reply again with the block, and says what
+  went wrong: the block is missing, or it is there but some lines come before it, quoting the first one. A reply that
+  carries the block after such a reminder is counted apart, as corrected, so the rate measures first replies. Each miss
+  is also written to the audit trail.
 - **Its format is scored.** devkit checks the bold marker, `<project> · <branch>`, the Done, Check, and Next bullets,
   the check glyph, the bullet length and the absence of task ids, and keeps the share of well-formed blocks.
 - **It is stored and shown.** devkit stores the block as one compact line,
@@ -256,26 +269,30 @@ Each bullet is one plain sentence of about 100 characters at most, with no inter
   not following the format.
 
 Only sessions whose start devkit recorded are tracked, so sessions that were already running when devkit was
-installed are not counted. The results are in `dev canary`, on the dashboard, in `dev doctor` (which fails below 90%
-over 7 days), and in `PROJECTS.md`.
+installed are not counted. Each result records the surface the session ran on (the terminal, Claude Desktop's Code
+tab, the ChatGPT app's Codex, or an IDE). The results are in `dev canary`, on the dashboard, in `dev doctor` (which
+fails below 90% over 7 days), in `dev overview`, and in `PROJECTS.md`; the last three break the rate down by surface
+and count the replies corrected after a reminder.
 
-## Background sync
+## Background sync and scheduled jobs
 
 | Trigger | What runs |
 | --- | --- |
-| Session start (both agents) | Records the session's starting commit, refreshes the project's generated blocks, restores managed settings in the background, injects the context |
+| Session start (both agents) | Records the session's starting commit, refreshes the project's generated blocks, restores managed settings in the background, injects the context, and queues a sync that pulls the claims of other machines |
 | First prompt of a session that missed session start | Registers the session and injects the same context |
-| Stop, at most every 10 minutes per session | `dev sync --offline` in the background: session line, renewal of this machine's locks, presence, map, commit, and push |
+| A commit, push, merge, tag, PR, or release, by an agent or a `dev` command | A background `dev sync --offline` within about 15 seconds; events in that window share one run (see [Teams and machines › Near-real-time sync](teams.md#near-real-time-sync)) |
+| Stop, at most every 2 minutes per session | The same sync: session line, renewal of this machine's locks, presence, map, commit, and push |
 | Session end | The same sync, then the session record is closed |
 | `dev task start`, `release`, `done` | The lock change is committed and pushed at once |
-| Other `dev task`, `dev plan`, and `dev handoff --log` changes | One commit each, pushed by a background sync |
-| launchd `com.devkit.sync`, hourly | `dev sync --scheduled`: pull, release expired locks, refresh PR states and sizes, apply the safe cleanup, rewrite the map, notes, and dashboard, commit and push, rotate logs |
+| Other `dev task`, `dev plan`, `dev lesson`, `dev delivery apply`, and `dev handoff --log` changes | One commit each, pushed by a queued background sync |
+| The scheduled jobs | `sync` every hour (pull, release expired locks, refresh PR states and sizes, rewrite the map, notes, and dashboard, commit and push, rotate logs), `sleep` at 03:30, `gc` at 04:00, `repair` every 6 hours, `audit` at 05:00, `doctor` on Mondays, `lessons` on Fridays (see [Scheduled jobs and the audit trail](jobs-and-audit.md)) |
 
-Syncs take a lock, so they never run at the same time, and commit only when something changed.
+Syncs take a lock, so they never run at the same time, and commit only when something changed. A push rejected
+because another machine pushed first is rebased and tried once more.
 
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="images/diagrams/session-lifecycle-dark.svg">
-  <img src="images/diagrams/session-lifecycle-light.svg" alt="A session with devkit: at session start the hooks read the handoff note, tasks, locks, and last status and give the agent its context; on each prompt they start the turn clock and add progress records when you ask for status; the guard allows or denies each tool call with the right way; after slow work the hooks remind the agent to update you; every final message starts with the status block, which the Stop hook records with the session line and the lock renewal; at session end devkit syncs and pushes the private handoff repo to GitHub." width="100%">
+  <img src="images/diagrams/session-lifecycle-light.svg" alt="A session with devkit: at session start the hooks read the handoff note, tasks, locks, and the lessons that apply and give the agent its context; on each prompt they start the turn clock and add progress records when you ask for status; the guard allows or denies each tool call with the right way; after a commit, push, merge, tag, PR, or release the hooks sync the handoff repository within seconds, and after slow work they remind the agent to update you; every final message starts with the status block, which the Stop hook records with the session line and the lock renewal, and after a fix it asks once for a lesson; at session end devkit syncs and pushes the private handoff repo to GitHub." width="100%">
 </picture>
 
 See also [Commands](commands.md), [Agents](agents.md), [Guard rules](guard.md), and [Teams and machines](teams.md).

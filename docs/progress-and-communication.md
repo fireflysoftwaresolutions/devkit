@@ -15,28 +15,35 @@ Agents run these commands; you can too. The global instructions and the `communi
 
 ```bash
 dev progress start "Export invoices as CSV" --plan "API endpoint; UI button; tests; docs" --estimate 1h
-dev progress step "API endpoint streams CSV; 12 tests pass" --next "UI button"
+dev progress step "API endpoint streams CSV" --check "12 tests pass" --next "UI button"
 dev progress block "need the export permission name" --next "a decision from Finance"
 dev progress done "CSV export merged"
 dev progress                      # every run on this Mac, and the runs of other machines
 ```
 
-`dev progress step` prints the update to post, ready to paste:
+`dev progress step` prints the update to send, and the update is the status block itself, with the plan's checklist
+under it. An update that ends a turn therefore always starts the way the global instructions require:
 
-```text
-**Progress · Export invoices as CSV** — 1/4 · 14m elapsed of ~1h00m · ETA ~38m
-  ✓ 1. API endpoint
-  ▸ 2. UI button
-  ○ 3. tests
-  ○ 4. docs
-- Done: API endpoint streams CSV; 12 tests pass
-- Next: UI button
+```markdown
+**[Firefly> DevKit]** billing · `feat/invoice-export` · Export invoices as CSV
+- **Done:** API endpoint streams CSV
+- **Check:** ✓ 12 tests pass
+- **Progress:** 1/4 · 14m elapsed of ~1h00m · ETA ~38m
+- **Next:** UI button
+
+✓ 1. API endpoint
+▸ 2. UI button
+○ 3. tests
+○ 4. docs
 ```
+
+`--check` fills the Check bullet with the evidence for the step (`✓` is added when you give no glyph). Without it, Check
+reads `⚠ not verified at this step`. A blocked run shows `✗ blocked` and `Next: unblock: …`.
 
 | Command | What it records |
 | --- | --- |
 | `start "<goal>" [--steps N] [--plan "a; b; c"] [--estimate 30m]` | A run for the current session: goal, number of steps (or the named steps of `--plan`), estimate. It prints how long similar work took here |
-| `step "<what finished>" [--next "…"]` | One more step done, the evidence, and what comes next |
+| `step "<what finished>" [--check "<evidence>"] [--next "…"]` | One more step done, its evidence, and what comes next; prints the update as a status block |
 | `block "<why>" [--next "<what is needed>"]` | The run is blocked; you get a desktop notification |
 | `done "<outcome>"` | The run is finished; the actual time is recorded against the estimate, and you get a desktop notification |
 
@@ -68,7 +75,7 @@ Agents are told to use that number, to re-plan at 1.5 times the estimate, and to
 
 | Where | What you see |
 | --- | --- |
-| The agent's messages | The update that `dev progress step` prints, at most five lines |
+| The agent's messages | The status block that `dev progress step` prints, with the plan's checklist |
 | The status block | The `Progress:` bullet, while a run is active (see [Concepts › The status block](concepts.md#the-status-block)) |
 | `dev progress` | Runs on this Mac, and other machines' runs from their presence |
 | `dev team`, the dashboard | Each live session with its run, steps, ETA, and subagents |
@@ -82,7 +89,9 @@ machine's presence file and session line.
 devkit sends a macOS notification when:
 
 - a run is blocked (`dev progress block`) or done (`dev progress done`);
-- an agent turn that lasted `progress.notify_after_minutes` (10) or more finishes.
+- an agent turn that lasted `progress.notify_after_minutes` (10) or more finishes;
+- a scheduled job fails, and after every run of a job with `"notify": "always"`, such as the weekly lesson review (see
+  [Scheduled jobs and the audit trail](jobs-and-audit.md)).
 
 Turn them off with `progress.notify: false` in [Configuration](configuration.md), or for one process with
 `DEVKIT_NO_NOTIFY=1`.
@@ -127,19 +136,25 @@ run.
 ## How agents write to you
 
 The `communicating` skill holds a template for every kind of message. Its rules apply to all of them: use American English
-by default, the answer first, plain words, no filler or buzzwords, real evidence instead of claims, updates of at most
-five lines, and honest estimates given as ranges.
+by default, the status block first and then the answer, plain words, no filler or buzzwords, real evidence instead of
+claims, short updates, and honest estimates given as ranges.
+
+**Nothing comes before the status block.** A message that ends the agent's turn (everything it writes after its last
+tool call) opens with the block, and the template's own content goes below it: the verdict, a correction, a greeting,
+or a comment on the last command never comes before it. "Lead with the point" applies to the first line under the block.
+A note that the agent is waiting for background work is a final message too, so it starts with the block, with what
+runs in Next.
 
 | Template | When the agent uses it | Shape |
 | --- | --- | --- |
-| Kickoff | Before any task longer than a few minutes | Plan with the estimate and steps; checks, risks, what it needs from you |
-| Progress update | After each step, every 8–10 minutes of tool work, when background work finishes | Headline with steps, elapsed, estimate, and ETA; done, now, next, blockers |
-| Status answer | When you ask "how is it going?" or "what's left?" | A one-line verdict, a table per workstream (state, evidence, ETA), the CI/CD pipelines (state, current job and step, elapsed, ETA), what is left, risks, what it needs from you |
+| Kickoff | Before any task longer than a few minutes | The status block (Progress `0 of N steps`), then the plan with the estimate and steps; checks, risks, what it needs from you |
+| Progress update | After each step, every 8–10 minutes of tool work, when background work finishes | The status block that `dev progress step` prints: done, check, progress with ETA, next, and the checklist |
+| Status answer | When you ask "how is it going?" or "what's left?" | The status block, then a one-line verdict, a table per workstream (state, evidence, ETA), the CI/CD pipelines (state, current job and step, elapsed, ETA), what is left, risks, what it needs from you |
 | Background work | When subagents, parallel sessions, or long commands start and end | What runs, what it produces, and when; then the result in one or two lines |
-| Decision request | Only for decisions that are yours: scope, behavior, cost, risk, irreversible, or external effects | Context, options with gains, costs, and effort, a recommendation, and what it does if you do not answer |
+| Decision request | Only for decisions that are yours: scope, behavior, cost, risk, irreversible, or external effects | The status block (Check `– a question`), then context, options with gains, costs, and effort, a recommendation, and what it does if you do not answer |
 | Explanation | When you need to understand something | The answer in one sentence, how it works, an example from your code, what it means for you, where to read more |
 | Final report | At the end of a turn | The status block, then only what the block does not say: what changed, what is not done |
-| Failure or incident | When something fails | What failed and its impact, cause, evidence, what was tried, next step |
+| Failure or incident | When something fails | The status block (Check `✗` with the error), then what failed and its impact, cause, evidence, what was tried, next step |
 | Pull request description | When it opens a PR | What and why, changes, how to verify, risk and rollback, links |
 | Merge message | When it squash-merges | The PR title, then the what and why in one or two sentences |
 | Review comments | When it reviews code | `blocking:`, `suggestion:`, `nit:`, or `question:`, then what is wrong, why, and what to do |

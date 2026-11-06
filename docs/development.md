@@ -12,10 +12,11 @@ bin/dev                 entry point (adds lib/ to sys.path, calls devkit.cli.mai
 lib/devkit/
   cli.py                argument parsing and command implementations
   core.py               paths, configuration and defaults, shell and git helpers, remote parsing, project ids
-  ui.py                 terminal colors, banner, tables, status pills and the status block
+  ui.py                 terminal colors, the wordmark banner and tagline, headings, tables, status pills, status block
+  tui.py                the terminal UI of the setup wizard: select, multiselect, confirm, text, spinner
   registry.py           project discovery and inspection, PROJECTS.md, TASKS.md, ACTIVITY.md, registry.json, notes
   notes.py              handoff and initiative notes: structure, frontmatter, sections, summaries
-  work.py               work items, locks, versions, changelog, session logs, presence
+  work.py               work items, locks, versions, changelog, session logs, presence, the queued near-real-time sync
   plans.py              versioned plans and specs
   progress.py           dev progress runs, ETA, calibration, timing, notifications, progress hooks
   report.py             dev report and its health rules
@@ -30,6 +31,12 @@ lib/devkit/
   cistatus.py           dev ci status: CI/CD runs on GitHub, GitLab, Bitbucket, and Azure, with an ETA
   delivery.py           dev delivery: detect, recommend, and record a delivery policy; the tag check
   fs.py                 dev files, find, grep, diff, rm, mv, and cp: token-light and recoverable
+  gitx.py               dev branch, commit, rebase, push, pr, run, release, issue, git, gh; local CI evidence
+  lessons.py            dev lesson: record, recall, recur, prevent, signals, usage, strength, consolidation
+  sleep.py              dev sleep: consolidate and forget lessons, trim devkit's own old records
+  jobs.py               dev jobs: the scheduled launchd jobs, their journal, and notifications
+  audit.py              dev audit: the audit trail, redaction, publishing to the handoff repository
+  art/                  the Firefly logo, embedded in the dashboard
   gc.py                 safe disk reclamation
   docs.py               dev docs check
   diagram.py            dev diagram: layout, routing, rendering and validation
@@ -39,7 +46,6 @@ lib/devkit/
   wizard.py             dev setup
   toolchain.py          git hosts and clouds: their CLIs, sign-in checks and Homebrew groups
   codexrpc.py           JSON-RPC client for codex app-server
-  art/                  terminal art of the logo
 agents/AGENTS.md        global instructions rendered for Claude Code and Codex
 plugin/                 the devkit plugin: skills, slash commands, the scout agent, icon
 config/                 Claude Code, Codex, git, docs, skill and skill-rule configuration applied by dev install

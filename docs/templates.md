@@ -61,8 +61,9 @@ When placeholders are left, `dev task add` prints the command that replaces the 
 
 ## Pull request description
 
-`templates/github/pull_request.md` is devkit's pull request template. Its sections are the ones the `communicating`
-skill asks agents to fill:
+devkit's pull request template comes in English, `templates/github/pull_request.md`, and in Spanish,
+`templates/github/pull_request.es.md` (Qué y por qué, Cambios, Cómo verificarlo, Riesgo y vuelta atrás, Enlaces). Its
+sections are the ones the `communicating` skill asks agents to fill:
 
 | Section | What goes in it |
 | --- | --- |
@@ -72,10 +73,25 @@ skill asks agents to fill:
 | Risk and rollback | What could break, who would notice, how to undo it. "Low: docs only" is a fine answer |
 | Links | Task, issue (`Closes #…`), plan, design document, related PRs |
 
-A repository's own `.github/pull_request_template.md` wins. To use devkit's in a repository that has none, copy it to
-`.github/pull_request_template.md`.
+### How `dev pr create` uses it
 
-<!-- TODO(devkit-docs): files-and-git — describe how the git/GitHub wrapper fills this template once it is merged. -->
+1. **It picks the template.** The repository's own template wins: `.github/pull_request_template.md`, or the other
+   places GitHub reads (`.github/PULL_REQUEST_TEMPLATE.md`, the repository root, `docs/`). Otherwise it takes devkit's
+   in your `language`, trying `pull_request.<language>.md`, then `pull_request.<base language>.md`, then
+   `pull_request.md`; `--lang` overrides it for one PR.
+2. **It fills what it knows.** Changes gets one line per commit (WIP commits left out). How to verify gets the local
+   CI result, `Local CI: dev ci --run → passed (2 steps: Lint, Unit tests) @ d75a9f9`, or the note of
+   `dev ci --mark-passed`. Links gets the task ids (`T-…`), ticket keys (`PROJ-142`), and `Closes #n` found in the
+   branch name and the commits.
+3. **It checks what only you can write.** "What and why" and "How to verify" are required: comments, empty bullets,
+   and `<placeholders>` do not count as content. A PR with either section empty is refused, unless it is a `--draft`;
+   `dev pr ready` checks again before a draft goes to review. Headings are recognized by meaning, in English and
+   Spanish ("Summary," "Testing," and "Resumen" count too).
+4. **It removes AI attribution** from the body.
+
+`dev pr create --dry-run` prints the pre-filled body and which required sections are still empty; fill them and pass
+the file with `--body-file`, or use `--edit` to fill them in your editor. When neither the repository nor devkit has a
+template, a built-in copy of the English one is used.
 
 The PR title is a Conventional Commit (`feat(invoices): export invoices as CSV`, at most 72 characters), and the
 squash-merge message repeats it with the "What and why" in one or two sentences and no attribution lines.
@@ -93,10 +109,14 @@ one that has no README; it never overwrites one.
 | --- | --- | --- |
 | Status block | A bold `[Firefly> DevKit]` header with project, branch, and task, then Done, Check, Progress, and Next | [Concepts › The status block](concepts.md#the-status-block) |
 | Run steps | `dev progress start --plan "a; b; c"`: a checklist with ✓ done, ▸ current and ○ waiting | [Progress and communication](progress-and-communication.md) |
+| Progress update | `dev progress step --check "…" --next "…"` prints the status block with the Progress bullet, then the checklist | [Progress and communication](progress-and-communication.md#live-progress-with-dev-progress) |
 | Session line | `YYYY-MM-DD HH:MM · user@host · agent · …` | [Teams and machines › Session logs](teams.md#session-logs) |
 | Delegation message | The ask, why it matters, what done means, the deadline, where the task is, how to pick it up | [Teams and machines › Hand a task to a teammate](teams.md#hand-a-task-to-a-teammate) |
 | Status report | `dev report`: a summary table, then per initiative health, progress, done, in progress, next, risks, and team | [Progress and communication › Status reports](progress-and-communication.md#status-reports) |
 | Initiative note | `dev initiative new` writes Goal, Scope, Current state, Workstreams, Tasks, Decisions and gotchas, Risks and open questions, Links | [Initiatives](initiatives.md) |
+| Lesson | `dev lesson add` writes a front matter block, then What happened, Root cause, Fix, Prevention, Detection, Evidence, and a changelog | [Lessons](lessons.md#write-it) |
+| Commit message | `type(scope): summary` in the imperative, at most 72 characters, then the reason in the body | [Git and GitHub › Commits](git-and-github.md#commits) |
+| Audit record | One JSON line: time, user, machine, agent, session, action, target, detail, outcome | [Scheduled jobs and the audit trail](jobs-and-audit.md#the-audit-trail) |
 
 ## Change a template
 

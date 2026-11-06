@@ -2,7 +2,7 @@
   "name": "delivery",
   "kind": "flow",
   "title": "Local-first delivery: one push, one CI run",
-  "desc": "Feature branches are integrated on one local integration or release branch, which runs the same commands as CI locally. Only when the local suite is green is the branch pushed once and opened as one pull request, so CI runs once. If CI fails, the failure is reproduced and fixed locally before the next push. A green CI run is merged, tagged with a CalVer version and released, and the published artefact is verified.",
+  "desc": "Feature branches are integrated on one local integration or release branch, where dev ci --run runs the same commands as CI and records the evidence. Only when the local suite is green does dev push push the branch once and dev pr create open one pull request, so CI runs once. If CI fails, the failure is reproduced and fixed locally before the next push. A green CI run is merged with dev pr merge, tagged and released with dev release under a CalVer version, and the published artifact is verified.",
   "legend": [
     {
       "label": "the one push",
@@ -31,14 +31,14 @@
     {
       "id": "local",
       "label": "Local CI equivalent",
-      "sub": "dev ci · lint · tests · build",
+      "sub": "dev ci --run · lint · tests · build",
       "col": 2,
       "row": 0
     },
     {
       "id": "push",
       "label": "One push, one PR",
-      "sub": "gh pr create · checks --watch",
+      "sub": "dev push · dev pr create",
       "col": 2,
       "row": 1
     },
@@ -53,13 +53,13 @@
     {
       "id": "release",
       "label": "Merge · tag · release",
-      "sub": "vYY.MM.PATCH",
+      "sub": "dev pr merge · dev release",
       "col": 0,
       "row": 1
     },
     {
       "id": "verify",
-      "label": "Verify the artefact",
+      "label": "Verify the artifact",
       "sub": "download · install · smoke test",
       "col": 0,
       "row": 2

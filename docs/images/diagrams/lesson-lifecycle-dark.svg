@@ -1,0 +1,77 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1168" height="1032" viewBox="0 0 1168 1032" role="img" aria-labelledby="dk-title dk-desc">
+<title id="dk-title">The life of a lesson</title>
+<desc id="dk-desc">Signals such as fix and revert commits, repeated guard refusals, missed status blocks, bouncing tasks, and corrections from the developer prompt a lesson. dev lesson add captures it in lessons/&lt;scope&gt;/ in the handoff repository. Every session recalls the open lessons that apply as known pitfalls. When one happens again, dev lesson recur counts the repeat, and a recurring lesson is turned into automation with dev lesson prevent (a test, lint rule, guard rule, required skill, or CI check). Every night dev sleep merges near-duplicates and forgets lessons that no longer help into lessons/archive/, from where dev lesson restore brings one back.</desc>
+<rect width="1168" height="1032" fill="#10110F"/>
+<g font-family="Manrope, 'Manrope Variable', system-ui, -apple-system, 'Segoe UI', Arial, sans-serif">
+<circle cx="68" cy="74" r="4" fill="#FFB34A"/>
+<text x="80" y="78.5" font-size="12" font-weight="600" fill="#BFB8AB" letter-spacing="0.48">THE LIFE OF A LESSON</text>
+<text x="1066.2" y="78.5" font-size="13" font-weight="400" fill="#BFB8AB">stored</text>
+<g transform="translate(1034.2,74)"><rect x="0" y="-7" width="24" height="14" rx="3" fill="#293235" stroke="#8EA3AB" stroke-width="1.5"/></g>
+<text x="942.9" y="78.5" font-size="13" font-weight="400" fill="#BFB8AB">automation</text>
+<g transform="translate(910.9,74)"><rect x="0" y="-7" width="24" height="14" rx="3" fill="#2E3126" stroke="#959C7F" stroke-width="1.5"/></g>
+<text x="851.4" y="78.5" font-size="13" font-weight="400" fill="#BFB8AB">devkit</text>
+<g transform="translate(819.4,74)"><rect x="0" y="-7" width="24" height="14" rx="3" fill="#2C2416" stroke="#FFB34A" stroke-width="1.5"/></g>
+<g transform="translate(64.0,104.0)">
+<path d="M504.0,80.0 L504.0,144.5" fill="none" stroke="#BFB8AB" stroke-width="1.5" stroke-linejoin="round" stroke-linecap="round"/><polygon points="504.0,152.0 500.0,144.0 508.0,144.0" fill="#BFB8AB"/>
+<rect x="452.2" y="104.0" width="103.7" height="24.0" rx="11.0" fill="#10110F"/>
+<text x="504.0" y="120.0" font-size="13" font-weight="400" fill="#BFB8AB" text-anchor="middle">worth a lesson</text>
+<path d="M504.0,232.0 L504.0,300.5" fill="none" stroke="#BFB8AB" stroke-width="1.5" stroke-linejoin="round" stroke-linecap="round"/><polygon points="504.0,308.0 500.0,300.0 508.0,300.0" fill="#BFB8AB"/>
+<rect x="460.9" y="258.0" width="86.2" height="24.0" rx="11.0" fill="#10110F"/>
+<text x="504.0" y="274.0" font-size="13" font-weight="400" fill="#BFB8AB" text-anchor="middle">one commit</text>
+<path d="M372.0,352.0 L124.0,352.0 Q112.0,352.0 112.0,364.0 L112.0,456.5" fill="none" stroke="#BFB8AB" stroke-width="1.5" stroke-linejoin="round" stroke-linecap="round"/><polygon points="112.0,464.0 108.0,456.0 116.0,456.0" fill="#BFB8AB"/>
+<rect x="195.9" y="340.0" width="92.3" height="24.0" rx="11.0" fill="#10110F"/>
+<text x="242.0" y="356.0" font-size="13" font-weight="400" fill="#BFB8AB" text-anchor="middle">session start</text>
+<path d="M504.0,396.0 L504.0,456.5" fill="none" stroke="#BFB8AB" stroke-width="1.5" stroke-linejoin="round" stroke-linecap="round"/><polygon points="504.0,464.0 500.0,456.0 508.0,456.0" fill="#BFB8AB"/>
+<rect x="451.4" y="418.0" width="105.3" height="24.0" rx="11.0" fill="#10110F"/>
+<text x="504.0" y="434.0" font-size="13" font-weight="400" fill="#BFB8AB" text-anchor="middle">happens again</text>
+<path d="M636.0,504.0 L780.5,504.0" fill="none" stroke="#BFB8AB" stroke-width="1.5" stroke-linejoin="round" stroke-linecap="round"/><polygon points="788.0,504.0 780.0,508.0 780.0,500.0" fill="#BFB8AB"/>
+<rect x="670.3" y="492.0" width="83.3" height="24.0" rx="11.0" fill="#10110F"/>
+<text x="712.0" y="508.0" font-size="13" font-weight="400" fill="#BFB8AB" text-anchor="middle">automate it</text>
+<path d="M504.0,544.0 L504.0,608.5" fill="none" stroke="#BFB8AB" stroke-width="1.5" stroke-linejoin="round" stroke-linecap="round"/><polygon points="504.0,616.0 500.0,608.0 508.0,608.0" fill="#BFB8AB"/>
+<rect x="460.4" y="568.0" width="87.1" height="24.0" rx="11.0" fill="#10110F"/>
+<text x="504.0" y="584.0" font-size="13" font-weight="400" fill="#BFB8AB" text-anchor="middle">usage · age</text>
+<path d="M372.0,656.0 L124.0,656.0 Q112.0,656.0 112.0,668.0 L112.0,768.5" fill="none" stroke="#BFB8AB" stroke-width="1.5" stroke-linejoin="round" stroke-linecap="round"/><polygon points="112.0,776.0 108.0,768.0 116.0,768.0" fill="#BFB8AB"/>
+<rect x="214.7" y="644.0" width="54.5" height="24.0" rx="11.0" fill="#10110F"/>
+<text x="242.0" y="660.0" font-size="13" font-weight="400" fill="#BFB8AB" text-anchor="middle">merge</text>
+<path d="M504.0,696.0 L504.0,764.5" fill="none" stroke="#BFB8AB" stroke-width="1.5" stroke-linejoin="round" stroke-linecap="round"/><polygon points="504.0,772.0 500.0,764.0 508.0,764.0" fill="#BFB8AB"/>
+<rect x="478.6" y="722.0" width="50.8" height="24.0" rx="11.0" fill="#10110F"/>
+<text x="504.0" y="738.0" font-size="13" font-weight="400" fill="#BFB8AB" text-anchor="middle">forget</text>
+<path d="M636.0,816.0 L780.5,816.0" fill="none" stroke="#BFB8AB" stroke-width="1.5" stroke-linejoin="round" stroke-linecap="round"/><polygon points="788.0,816.0 780.0,820.0 780.0,812.0" fill="#BFB8AB"/>
+<rect x="662.7" y="804.0" width="98.5" height="24.0" rx="11.0" fill="#10110F"/>
+<text x="712.0" y="820.0" font-size="13" font-weight="400" fill="#BFB8AB" text-anchor="middle">needed again</text>
+<path d="M988.0,816.0 L1004.8,816.0 Q1016.8,816.0 1016.8,804.0 L1016.8,364.0 Q1016.8,352.0 1004.8,352.0 L643.5,352.0" fill="none" stroke="#BFB8AB" stroke-width="1.5" stroke-linejoin="round" stroke-dasharray="6 5" stroke-linecap="butt"/><polygon points="636.0,352.0 644.0,348.0 644.0,356.0" fill="#BFB8AB"/>
+<rect x="994.5" y="572.0" width="44.7" height="24.0" rx="11.0" fill="#10110F"/>
+<text x="1016.8" y="588.0" font-size="13" font-weight="400" fill="#BFB8AB" text-anchor="middle">back</text>
+<rect x="372.0" y="0.0" width="264.0" height="80.0" rx="6.0" fill="#1F201C" stroke="#4C4E45" stroke-width="1.5"/>
+<text x="504.0" y="34.0" font-size="16" font-weight="600" fill="#F3F1EB" text-anchor="middle">Signals</text>
+<text x="504.0" y="56.0" font-size="13" font-weight="400" fill="#BFB8AB" text-anchor="middle">fixes · reverts · refusals · corrections</text>
+<rect x="372.0" y="152.0" width="264.0" height="80.0" rx="6.0" fill="#2C2416" stroke="#FFB34A" stroke-width="1.5"/>
+<text x="504.0" y="186.0" font-size="16" font-weight="600" fill="#F3F1EB" text-anchor="middle">Capture</text>
+<text x="504.0" y="208.0" font-size="13" font-weight="400" fill="#FFB34A" text-anchor="middle">dev lesson add</text>
+<path d="M372.0,316.0 A132.0,8 0 0 1 636.0,316.0 L636.0,388.0 A132.0,8 0 0 1 372.0,388.0 Z" fill="#293235" stroke="#8EA3AB" stroke-width="1.5"/><path d="M372.0,316.0 A132.0,8 0 0 0 636.0,316.0" fill="none" stroke="#8EA3AB" stroke-width="1.5"/>
+<text x="504.0" y="354.0" font-size="16" font-weight="600" fill="#F3F1EB" text-anchor="middle">lessons/&lt;scope&gt;/</text>
+<text x="504.0" y="376.0" font-size="13" font-weight="400" fill="#A4B4B9" text-anchor="middle">blameless · versioned</text>
+<rect x="0.0" y="464.0" width="224.0" height="80.0" rx="6.0" fill="#2C2416" stroke="#FFB34A" stroke-width="1.5"/>
+<text x="112.0" y="498.0" font-size="16" font-weight="600" fill="#F3F1EB" text-anchor="middle">Recall</text>
+<text x="112.0" y="520.0" font-size="13" font-weight="400" fill="#FFB34A" text-anchor="middle">known pitfalls in each session</text>
+<rect x="372.0" y="464.0" width="264.0" height="80.0" rx="6.0" fill="#2C2416" stroke="#FFB34A" stroke-width="1.5"/>
+<text x="504.0" y="498.0" font-size="16" font-weight="600" fill="#F3F1EB" text-anchor="middle">Recur</text>
+<text x="504.0" y="520.0" font-size="13" font-weight="400" fill="#FFB34A" text-anchor="middle">dev lesson recur</text>
+<rect x="788.0" y="464.0" width="200.0" height="80.0" rx="6.0" fill="#FFB34A" stroke="#FFB34A" stroke-width="2"/>
+<text x="888.0" y="498.0" font-size="16" font-weight="600" fill="#272820" text-anchor="middle">Prevent</text>
+<text x="888.0" y="520.0" font-size="13" font-weight="400" fill="#272820" text-anchor="middle">test · lint · guard · skill · CI</text>
+<rect x="372.0" y="616.0" width="264.0" height="80.0" rx="6.0" fill="#2E3126" stroke="#959C7F" stroke-width="1.5"/>
+<text x="504.0" y="650.0" font-size="16" font-weight="600" fill="#F3F1EB" text-anchor="middle">Sleep</text>
+<text x="504.0" y="672.0" font-size="13" font-weight="400" fill="#B9BF9F" text-anchor="middle">dev sleep, every night</text>
+<rect x="0.0" y="776.0" width="224.0" height="80.0" rx="6.0" fill="#2E3126" stroke="#959C7F" stroke-width="1.5"/>
+<text x="112.0" y="810.0" font-size="16" font-weight="600" fill="#F3F1EB" text-anchor="middle">Merge</text>
+<text x="112.0" y="832.0" font-size="13" font-weight="400" fill="#B9BF9F" text-anchor="middle">near-duplicates become one</text>
+<path d="M372.0,780.0 A132.0,8 0 0 1 636.0,780.0 L636.0,852.0 A132.0,8 0 0 1 372.0,852.0 Z" fill="#293235" stroke="#8EA3AB" stroke-width="1.5"/><path d="M372.0,780.0 A132.0,8 0 0 0 636.0,780.0" fill="none" stroke="#8EA3AB" stroke-width="1.5"/>
+<text x="504.0" y="818.0" font-size="16" font-weight="600" fill="#F3F1EB" text-anchor="middle">lessons/archive/</text>
+<text x="504.0" y="840.0" font-size="13" font-weight="400" fill="#A4B4B9" text-anchor="middle">forgotten, never deleted</text>
+<rect x="788.0" y="776.0" width="200.0" height="80.0" rx="6.0" fill="#2C2416" stroke="#FFB34A" stroke-width="1.5"/>
+<text x="888.0" y="810.0" font-size="16" font-weight="600" fill="#F3F1EB" text-anchor="middle">Restore</text>
+<text x="888.0" y="832.0" font-size="13" font-weight="400" fill="#FFB34A" text-anchor="middle">dev lesson restore --why</text>
+</g>
+</g>
+</svg>

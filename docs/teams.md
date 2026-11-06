@@ -17,6 +17,9 @@ It applies equally to one developer with a laptop and a desktop, and to a team t
 - **Finish or give back.** `dev task done <n>` when the work is verified, `dev task release <n>` when you stop
   without finishing. A lock that nobody renews expires after 8 hours.
 - **Look before you start.** `dev team` shows who is working on what, on every machine.
+- **Changes travel in seconds.** Every commit, push, PR, release, and handoff change queues a sync that reaches
+  GitHub within about 15 seconds; other machines get it at their next pull (see
+  [Near-real-time sync](#near-real-time-sync)).
 
 ## Set up a shared handoff repository
 
@@ -124,9 +127,9 @@ Claiming a blocked item keeps it blocked; run `dev task unblock <n>` when the bl
 2. **Respect.** Each session's context lists your claimed tasks and the tasks claimed by others with the line
    `Claimed by others — do NOT work on these`. It also names the people working on the same project right now.
    Changing an item that someone else holds is refused until the lock expires.
-3. **Renew.** While a session works, the Stop hook's background sync (at most every 10 minutes) extends the locks your
+3. **Renew.** While a session works, the Stop hook's background sync (at most every 2 minutes) extends the locks your
    machine holds once less than half of the lock time is left.
-4. **Expire.** The hourly sync on any machine releases locks whose time has run out. The item keeps its status, and
+4. **Expire.** The hourly `sync` job on any machine releases locks whose time has run out. The item keeps its status, and
    the changelog says whose lock expired.
 5. **Finish.** `done` and `release` give the lock back and push at once.
 
@@ -215,6 +218,29 @@ dev team --hours 4
 
 The session context, `dev progress`, the dashboard's Team view and `dev report` read the same files.
 
+## Near-real-time sync
+
+A machine that waits for the hourly sync shows its teammates an old picture. devkit therefore syncs the handoff
+repository right after anything happens that others should see:
+
+| Event | Who notices |
+| --- | --- |
+| An agent runs `git commit`, `push`, `merge`, `tag`, `rebase`, `cherry-pick`, or `revert`, or `gh pr create`, `gh pr merge`, or `gh release create` | The PostToolUse hook |
+| A `dev` command succeeds: `commit`, `push`, `pr`, `release`, `branch`, `rebase`, `wt`, `adopt`, `clone`, `new`, `delivery`, `initiative`, or `note` | `dev` itself |
+| A task, plan, lesson, or delivery policy changes | The handoff write |
+| A session starts | The SessionStart hook, which also pulls the claims of other machines |
+| A turn ends | The Stop hook, at most every 2 minutes: the session line, lock renewal, and presence |
+
+Each event queues one background sync, `dev sync --offline`, after a short delay (about 15 seconds; 10 after a
+handoff write, one at session start). Events inside that window join the queued run instead of starting another, so
+a burst of commits makes one sync, which takes about 3 seconds. The output goes to
+`~/.local/state/devkit/logs/sync.log`.
+
+When the push is rejected because another machine pushed first, devkit rebases on it and pushes once more. A push that
+still fails is recorded in the audit trail as a failed `handoff.push`, and `dev` and `PROJECTS.md` show it under
+"Needs attention" until a push succeeds. [Troubleshooting](troubleshooting.md#the-handoff-repository-does-not-push)
+has the fixes.
+
 ## Merge rules
 
 `dev install --only handoff` appends these lines to the handoff repository's `.gitattributes` and sets the `ours`
@@ -237,6 +263,7 @@ there like any other conflict.
 | Writing a file under `items/`, `sessions/`, or `presence/` | Denied: use `dev task` or `dev handoff --log` |
 | Writing `PROJECTS.md`, `TASKS.md`, `ACTIVITY.md`, `registry.json`, or `log/` | Denied: `dev sync` generates them |
 | Writing a file under `policies/` | Denied: use `dev delivery apply` |
+| Writing a file under `lessons/` | Denied: use `dev lesson add\|recur\|prevent\|retire` |
 | Writing another project's note or plans from a project session | Denied |
 | Writing an initiative the session's project is not a member of | Denied |
 | `dev task -p <other project>` or `-i <initiative it is not in>` from a project session | Denied |

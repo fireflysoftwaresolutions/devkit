@@ -36,7 +36,7 @@ listed in `.worktreeinclude` (for example `.env`). Python: run `uv sync` in the 
 
 `dev gc` (dry run) shows merged/contained worktrees, regenerable build output in idle worktrees and stale temp;
 `dev gc --apply` reclaims it. It never touches uncommitted or unpushed work, live sessions, or main checkouts. The
-hourly background job applies the safe cases automatically. `dev du` reports usage, Docker included.
+nightly `gc` job applies the safe cases automatically. `dev du` reports usage, Docker included.
 
 ## Docker
 

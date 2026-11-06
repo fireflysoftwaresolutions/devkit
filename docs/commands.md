@@ -14,9 +14,28 @@ cancel a picker or press Ctrl-C.
 
 ### `dev`
 
-Prints a greeting, the project you are in (if any), the workspace summary (projects, worktrees, live sessions, the
-handoff repository, the last sync, the canary rate, recently active projects), up to six items that need attention,
-and a tip.
+Prints the devkit wordmark with the tagline ("Every repo in its place. Every agent on the same page."), the version,
+and a greeting. Inside a project it shows the project, its branch and state, and the last status block in two lines
+(`last`: what was done, by which agent, and when; `next`: the next step). Then the workspace in one line (projects,
+worktrees, live sessions, the last sync), how often agents followed the rules this week, and up to five items that
+need attention, similar ones grouped, each with the command that fixes it.
+
+```text
+  Good evening.
+
+  billing  acme/billing ────────────────────────────────────────────────────────
+  feat/PROJ-142-invoice-export  clean
+  last  added the CSV export and its tests (claude, 12 min ago)
+  next  open the PR once the local suite is green
+
+  Workspace ────────────────────────────────────────────────────────────────────
+  14 projects · 6 worktrees · 2 live sessions · synced 3 min ago
+  agents followed the rules in 97% of replies this week, 91% in the full format
+
+  dev status · dev ls · dev dashboard · dev help
+```
+
+In a narrow terminal the wordmark becomes one line.
 
 ## Projects
 
@@ -226,7 +245,7 @@ Live progress of long agent work. See [Progress and communication](progress-and-
 | Command | Effect |
 | --- | --- |
 | `dev progress start "<goal>" [--steps N] [--plan "a; b; c"] [--estimate 30m]` | Starts a run for the current session. `--plan` names the steps (shown as a checklist) and sets `--steps` to their number. Prints how long similar runs took here |
-| `dev progress step "<what finished>" [--next "…"]` | One step finished; prints the update to send |
+| `dev progress step "<what finished>" [--check "<evidence>"] [--next "…"]` | One step finished; prints the update to send, which is the status block with the Progress bullet and the checklist. Without `--check`, Check reads `⚠ not verified at this step` |
 | `dev progress block "<why>" [--next "<what is needed>"]` | The run is blocked; prints the update and sends a desktop notification |
 | `dev progress done "<outcome>"` | The run is finished; records the time against the estimate and sends a desktop notification |
 | `dev progress` | Every run of the last 12 hours on this Mac, and the runs of other machines from their presence |
@@ -254,6 +273,35 @@ outside initiatives. `--days` sets the period (default 7), `-i` or `-p` limits i
 Adopts an older handoff or program repository as an initiative, from a prepared staging folder. `--dry-run` prints
 what it would import. The staging format is in [Initiatives › Adopt an existing handoff
 repository](initiatives.md#adopt-an-existing-handoff-repository).
+
+## Lessons
+
+Learn from mistakes: blameless lessons in the handoff repository, recalled in every session, counted when they repeat,
+and turned into automation. The guide is [Lessons](lessons.md).
+
+### `dev lesson [add | ls | show | recur | prevent | retire | restore | scan | review] [-p PROJECT | -i SLUG | --global]`
+
+The scope is the project you are in (or `-p`), an initiative (`-i`), or `--global`. `<lesson>` is an id, a unique
+start of one, or words of a title.
+
+| Command | Effect |
+| --- | --- |
+| `dev lesson add "<title>" --cause "…" --prevent "…" [options]` | Records a lesson; the root cause and the prevention are required. Options: `--kind bug\|mistake\|process\|tooling\|security\|performance\|design`, `--severity low\|medium\|high`, `--happened`, `--fix`, `--detect`, `--evidence` (repeatable), `--tag` (repeatable), `--retire-when`, `--why` |
+| `dev lesson` · `dev lesson ls [--search WORDS] [--all]` | The lessons of this scope plus the global ones, strongest first; `--all` lists every scope and retired lessons |
+| `dev lesson show <lesson>` | All fields, sections, and the history |
+| `dev lesson recur <lesson> [--evidence "…"] [--why "…"]` | It happened again: counts the repeat, adds the evidence, and reopens a retired lesson |
+| `dev lesson prevent <lesson> --by test\|lint\|type\|guard\|skill\|ci\|rule\|doc --ref "…" --why "…"` | Automation now prevents it; the lesson leaves the session context |
+| `dev lesson retire <lesson> --why "…"` | It no longer applies |
+| `dev lesson restore <lesson> --why "…"` | Brings an archived lesson back as open |
+| `dev lesson scan [--days N]` | Signals worth a lesson that have none yet: reverts, fixes, repeated guard refusals, missed status blocks, corrections, bouncing tasks (default 14 days) |
+| `dev lesson review` | Recurring lessons that are not prevented, and open lessons not seen for four months |
+
+### `dev sleep [--dry-run] [--quiet]`
+
+Consolidates and forgets, like a brain at night: merges near-duplicate lessons, archives lessons that no longer help
+into `lessons/archive/`, keeps at most 25 active lessons per scope, proposes global lessons for patterns seen in
+two or more projects, and trims devkit's own old records, caches, and logs. The `sleep` job runs it every night;
+`--dry-run` shows what would change. See [Lessons › Sleep](lessons.md#sleep).
 
 ## Agents
 
@@ -317,13 +365,27 @@ written.
 | `--commands` | Only the `run:` commands, in order (steps that use secrets are left out) |
 | `--runs` | Also list the 8 most recent CI runs (`gh run list`) |
 
+### `dev ci --run | --mark-passed | --evidence`
+
+Local CI evidence: proof that what CI runs passed on your Mac, on exactly the files you push. `dev push`,
+`dev pr create`, and `dev release` require it. See [Git and GitHub › Local CI evidence](git-and-github.md#local-ci-evidence).
+
+| Option | Effect |
+| --- | --- |
+| `--run` | Runs the `run:` steps of the workflows that run on pushes and pull requests, in order, and records the evidence when all pass. Setup actions, dependency installs, side effects, and steps that need CI secrets are skipped, with the reason |
+| `--dry-run` | With `--run`: the plan, without running anything |
+| `--keep-going` | With `--run`: do not stop at the first failure |
+| `--step-timeout MIN` | With `--run`: minutes per step (default 30) |
+| `--mark-passed [--note "…"]` | Records that you ran the full suite yourself on the current files; the note goes into the PR body |
+| `--evidence [--json]` | Whether HEAD has evidence, and how it was recorded; exits with `2` when it has none |
+
 ### `dev ci status [--watch] [--branch NAME | --all-branches] [--all-jobs] [--limit N] [--json]`
 
 The live state of the CI/CD runs of the repository you are in, on any of four hosts; the provider follows the
 `origin` remote. `dev ci <project> --status` does the same for another project.
 
 ```text
-▸ GitHub Actions · acme/billing · feat/invoice-export
+  GitHub Actions · acme/billing · feat/invoice-export ──────────────────────────
   ▸ ci #142 running · 12m40s elapsed · ETA ~6m20s (usually 19m00s) · push a1b2c3d
       3/5 jobs done · 2 running
       ▸ tests (Python 3.13) · step 4/7 “Unit tests” · 6m10s
@@ -423,6 +485,103 @@ Branded, validated SVG diagrams from JSON specs. See [Diagrams](diagrams.md).
 | `dev diagram new <kind> <name> [--dir DIR]` | Scaffolds a spec: `flow`, `c4`, `state`, `sequence`, `er`, or `timeline` |
 | `dev diagram render <spec \| dir> [--out DIR] [--png]` | Writes `<name>-dark.svg` and `<name>-light.svg` (specs in `docs/diagrams/` go to `docs/images/diagrams/`); `--png` adds 2x previews |
 | `dev diagram check <spec \| svg \| dir>` | Validates specs or SVG files; exits with `1` on problems |
+
+## Git and GitHub
+
+Branches, commits, pushes, pull requests, CI runs, releases, and issues, with the delivery rules built in. Each
+command prints one line or a short table, and a refusal exits with `2` with the command that fixes it. The guide is
+[Git and GitHub](git-and-github.md). `dev pr`, `dev run view`, `dev run rerun`, `dev issue`, and the release page
+of `dev release` need GitHub (or a host listed in `gitx.github_hosts`).
+
+### `dev branch new | rename | ls | clean`
+
+| Command | Effect |
+| --- | --- |
+| `dev branch new <type>/<topic> [--ticket KEY] [--base REF]` | Fetches, then creates the branch from `origin/<default>` (or `--base`) and switches to it; uncommitted changes come along. The name is normalized: `feat/Invoice Export --ticket PROJ-142` → `feat/PROJ-142-invoice-export` |
+| `dev branch rename <type>/<topic> [--ticket KEY]` | Renames the current branch before its first push (or names a detached HEAD); refuses permanent branches and branches already on `origin` |
+| `dev branch ls [--offline] [--json]` | Local branches: upstream with ahead and behind, distance from `origin/<default>`, PR, age, worktree |
+| `dev branch clean [--apply] [--offline] [--json]` | The local branches that are merged, whose PR was merged, or that are gone upstream with every commit on the remote; deleted only with `--apply` |
+
+### `dev commit -m "type(scope): summary" [options] [<paths>…]`
+
+Commits the staged changes, or `-a` every tracked change, or the listed paths. The header must be a Conventional
+Commit with a known type, in the imperative mood, without a final period, and at most 72 characters. Commits on the
+default branch and on non-conforming branches are refused; AI attribution lines are removed; the guard's secret scan
+runs.
+
+| Option | Effect |
+| --- | --- |
+| `-m "…"` | The header; more `-m` options add paragraphs |
+| `--body "…"` | The body: why the change is needed |
+| `-a`, `--all` | Stage every tracked change first |
+| `--amend` | Amend HEAD (keeps its message without `-m`); warns when HEAD was already pushed |
+| `--wip [-m "what"]` | Save everything, untracked files too, as a `wip:` commit instead of a stash |
+| `--unwip` | Undo the WIP commit at HEAD; its changes come back uncommitted |
+
+### `dev rebase [--base REF] [--continue | --abort | --skip]`
+
+Fetches and rebases the current branch on `origin/<default>` (or `--base`). It needs a clean tree, lists the files of
+a conflict, and on the default branch only fast-forwards.
+
+### `dev push [--force-with-lease] [--ci-passed] [--allow-behind] [--dry-run]`
+
+Pushes the current branch once and sets its upstream, after checking the branch (not the default one, a valid name),
+a fresh fetch, that `origin` has nothing you lack, no WIP or fixup commits, a first push that is not behind
+`origin/<default>`, the local CI evidence, and the guard's push budget.
+
+| Option | Effect |
+| --- | --- |
+| `--force-with-lease` | After a rebase or amend, on your own branch; refused when it would drop someone else's commits |
+| `--ci-passed` | Attest that the full local suite passed on these files (instead of `dev ci --run`) |
+| `--allow-behind` | A first push even though `origin/<default>` moved on |
+| `--dry-run` | What would be pushed, the evidence, and the pushes this hour |
+
+### `dev pr create | view | ls | checks | merge | ready | comment | review | diff`
+
+`[n]` is a PR number; without it, the PR of the current branch.
+
+| Command | Effect |
+| --- | --- |
+| `dev pr create [--title T] [--base B] [--draft] [--body-file F \| --edit] [--ci-passed] [--lang L] [--dry-run]` | Opens the PR of the pushed branch with a Conventional title and the body from the PR template, pre-filled with the commits, the local CI result, and the links. Empty "What and why" or "How to verify" sections are refused unless `--draft`. `--dry-run` prints the title, the template used, the evidence, and the body; `--body-file -` reads standard input |
+| `dev pr view [n] [--body] [--json]` | One-line state: branches, checks, review, conflicts, size, author, age, address |
+| `dev pr ls [--all] [--all-projects [--offline]] [--json]` | Your open PRs and those waiting for your review; `--all` adds the others; `--all-projects` covers every project |
+| `dev pr checks [n] [--watch [--fail-fast] [--interval S] [--timeout MIN]] [--lines N] [--json]` | Pass, fail, and pending counts; each failing job with its trimmed log (25 lines). Exits with `0` (passed), `1` (failed), or `8` (pending). `--watch` waits and prints only the result |
+| `dev pr merge [n] [--squash \| --merge \| --rebase] [--auto] [--keep-branch] [--dry-run]` | Merges when the checks passed and the reviews allow it, with the repository's method; a squash commit gets the PR title and its "What and why"; then deletes the branch and updates the default branch locally. `--auto` lets GitHub merge when the checks pass |
+| `dev pr ready [n] [--lang L]` | Marks a draft ready after checking its title and required sections |
+| `dev pr comment [n] -m "…" \| --body-file F` | Comments on a PR |
+| `dev pr review [n] --approve \| --request-changes \| --comment [-m "…"]` | Reviews a PR; `--request-changes` and `--comment` need a message |
+| `dev pr diff [n] [--patch \| --name-only] [--json]` | Files changed with +/−, largest first, or the full patch |
+
+### `dev run ls | view | rerun`
+
+| Command | Effect |
+| --- | --- |
+| `dev run ls [--branch B \| --all-branches] [--limit N] [--json]` | Recent CI runs of the branch on any host (default 8) |
+| `dev run view [id] [--failed] [--lines N] [--json]` | A run's failing jobs and their failing step (default: the branch's latest run); `--failed` adds the trimmed logs (30 lines). Exits with `1` when a job failed |
+| `dev run rerun <id> --flaky "test and evidence" [--all-jobs]` | Re-runs the failed jobs of a run, only with a reason for a proven flaky test, which is recorded in `~/.local/state/devkit/flaky.jsonl` and the project's session log |
+
+### `dev release [--version V] [--notes-file F] [--ci-passed] [--sign] [--draft] [--prerelease] [--dry-run]`
+
+Tags and publishes a release from a clean default branch that is in step with `origin`, by the delivery policy:
+the next CalVer version unless `--version` (required for other schemes), version files that agree, local CI evidence,
+CI on GitHub not failing or running, and notes from the CHANGELOG section. It creates the annotated (or signed) tag,
+pushes it, and creates the GitHub release. A project that releases with release-please or semantic-release is
+refused. See [Git and GitHub › Releases](git-and-github.md#releases).
+
+### `dev issue ls | view | create`
+
+| Command | Effect |
+| --- | --- |
+| `dev issue ls [--mine] [--label L]… [--state open\|closed\|all] [--limit N] [--json]` | Issues, compact (default: 20 open) |
+| `dev issue view <n> [--comments] [--json]` | One issue, with the last five comments when asked |
+| `dev issue create --title "…" [--body "…" \| --body-file F] [--label L]… [--assignee A]` | Opens an issue, with attribution removed |
+
+### `dev git <args>…` · `dev gh <args>…`
+
+Run any git or gh command with the same rules: `dev git push` and `dev git commit` get the `dev push` and `dev commit`
+checks, `dev git stash` is refused in favor of `dev commit --wip`, and `dev gh pr create`, `dev gh pr merge`, and
+`dev gh release create` get the evidence, gate, and policy checks (`--admin` is refused). Everything else passes the
+guard. Put git options before the subcommand after `--`, or use `dev git -C DIR`.
 
 ## Files
 
@@ -557,8 +716,6 @@ folder.
   repository). `dev cp -r` refuses to copy `.git`, `node_modules`, or `.venv` until you choose `--skip-heavy` or
   `--include-heavy`.
 
-<!-- TODO(devkit-docs): files-and-git — the git and GitHub wrapper (dev branch, commit, push, pr, run, release, issue) goes here once it is merged. -->
-
 ## Tracking and disk
 
 ### `dev canary [--days N] [--limit N]`
@@ -566,32 +723,71 @@ folder.
 The instruction-canary report: per agent, how many tracked replies in the last `N` days (default 7) started with the
 `[Firefly> DevKit]` marker, then the most recent replies without it (default 20) with an excerpt. Replies that carry
 the marker are also scored for the format of the status block; `dev`, `dev overview`, and `dev doctor` show that score
-as `format N%`.
+as `format N%`. The rate counts first replies only: a reply that carried the block after a reminder is counted
+apart, and `dev doctor`, `dev overview`, and `PROJECTS.md` show it as `N corrected after a reminder`, with the rate per
+surface (terminal, Claude Desktop, ChatGPT app) when sessions ran on more than one.
 
 ### `dev sync [--offline] [--scheduled] [--no-push] [--quiet]`
 
 Rebuilds the projects map (`PROJECTS.md`, `TASKS.md`, `ACTIVITY.md`, `registry.json`), the generated blocks of the
 handoff notes, this machine's presence file and the dashboard, then commits and pushes the handoff repository when
-something changed.
+something changed. A push that is rejected because another machine pushed first is rebased and tried once more; a
+push that still fails is recorded in the audit trail and shown in "Needs attention" until a push succeeds.
+
+You rarely need to run it: devkit queues a background sync within seconds of every commit, push, merge, tag, PR,
+release, and handoff change (see [Teams and machines › Near-real-time sync](teams.md#near-real-time-sync)), and the
+`sync` job runs it every hour.
 
 | Option | Effect |
 | --- | --- |
 | `--offline` | No network; cached PR data of any age |
-| `--scheduled` | Background mode: pull first, release expired locks, refresh PR states and sizes, apply the safe cleanup when `gc.auto` is on, rotate logs |
+| `--scheduled` | Background mode (the `sync` job): pull first, release expired locks, refresh PR states and sizes, rotate logs. When the `gc` or `sleep` job is not installed, it also applies the safe cleanup (with `gc.auto` on) or runs `dev sleep` once a day |
 | `--no-push` | Commit but do not push |
 | `--quiet` | No output |
 
-### `dev gc [--apply] [-y] [-v]`
+### `dev gc [--apply] [-y] [--auto-only] [-v]`
 
 Plans disk reclamation with fresh PR states and prints what can be reclaimed (a dry run). `-v` also lists what is kept
 and why. `--apply` asks for confirmation in a terminal (skip it with `-y`); in a non-interactive shell it refuses
-unless you pass `--yes`. It then syncs. The rules are in [Disk and cleanup](disk-and-cleanup.md).
+unless you pass `--yes`. `--auto-only` applies only the actions that are safe without a person, which is what the
+nightly `gc` job runs. It then syncs. The rules are in [Disk and cleanup](disk-and-cleanup.md).
 
 ### `dev du [--refresh]`
 
 Sizes of every project's main checkout and worktrees, Claude Code transcripts and temp, the Codex home, devkit temp,
 the npm and Homebrew caches, the Colima VM disk, and `docker system df` when Docker is running. `--refresh` recomputes
 cached sizes.
+
+### `dev jobs [ls | show | run | logs | journal | set | enable | disable | install]`
+
+devkit's scheduled background work as launchd jobs: `sync`, `sleep`, `gc`, `repair`, `audit`, `doctor`, and
+`lessons`. See [Scheduled jobs and the audit trail](jobs-and-audit.md).
+
+| Command | Effect |
+| --- | --- |
+| `dev jobs` · `dev jobs ls` | Every job: state (`on`, `not loaded`, `off`), schedule, last run, next run, and what it does |
+| `dev jobs show <job>` | The job's command, schedule, timeout, notifications, log, and its recent runs |
+| `dev jobs run <job>` | Runs it now, with the same log, journal entry, audit record, and notification |
+| `dev jobs logs <job> [-n N]` | The last lines of its log (default 60) |
+| `dev jobs journal [--days N] [-n N]` | Past runs of every job: start, result, duration, last line |
+| `dev jobs set <job> --every 30m \| --at 03:30 \| --weekly "mon 09:00" [--why "…"]` | Changes the schedule in your configuration and reloads the job |
+| `dev jobs enable <job>` · `dev jobs disable <job> [--why "…"]` | Turns a job on or off |
+| `dev jobs install` | Writes and loads every enabled job from the configuration, unloads the ones turned off, and replaces the old `com.devkit.sync` agent |
+
+### `dev audit [--days N] [--action PREFIX] [--actor TEXT] [--team] [--json] [-n N]`
+
+The audit trail: every changing `dev` command, guard refusal, blocked settings change, missed status block, handoff
+write and push, settings repair, cleanup, and job run, with secrets redacted. See
+[Scheduled jobs and the audit trail › The audit trail](jobs-and-audit.md#the-audit-trail).
+
+| Option | Effect |
+| --- | --- |
+| `--days N` | The window (default 7; fractions work) |
+| `--action PREFIX` | Only actions that start with it: `guard`, `job`, `dev.push`, `handoff` |
+| `--actor TEXT` | Only records whose `user@host agent` contains it |
+| `--team` | Every machine, from `audit/` in the handoff repository, plus this one |
+| `--json` | The records as JSON |
+| `-n N` | The newest N records (default 60) |
 
 ## Environment
 
@@ -615,8 +811,11 @@ push state, layout), the generated instructions and skills, Claude Code (permiss
 plugins, MCP servers), Codex (approval and sandbox, hook trust, profile models, MCP servers, plugins), both agents'
 sign-in and quota, the devkit plugin (validators, and whether each agent's installed copy is current), whether every
 required skill is installed for both agents, project settings that switch devkit off, sessions that ran with devkit
-in the last 7 days, each git host and cloud you chose (its CLI installed and signed in, checked locally), Docker, the
-background job, the instruction canary (fails below 90% over 7 days), and free disk. Each failure prints its fix. Exits with `1` if any
+in the last 7 days, each git host and cloud you chose (its CLI installed and signed in, checked locally), Docker,
+every enabled scheduled job (loaded, and its last run passed), the desktop apps (Claude Desktop's Code tab runs its
+bundled Claude Code on the same `~/.claude` settings, hooks, plugin, and skills; the ChatGPT app's bundled Codex sees
+the same `~/.codex` configuration and has the same plugins enabled), the instruction canary (fails below 90% over 7
+days, per surface, with corrected misses counted apart), and free disk. Each failure prints its fix. Exits with `1` if any
 check fails.
 
 ### `dev agents [status | test] [claude | codex | all] [--json] [--model MODEL] [-v]`
@@ -663,7 +862,7 @@ logo and skills).
 Applies the configuration; safe to run again. `STEPS` is a comma-separated list of
 `config,tools,cli,git,handoff,instructions,skills,claude,codex,docker,docs,launchd`. The `tools` step installs only
 the Homebrew and npm packages that are missing for your stacks, git hosts, and clouds (and the Azure DevOps CLI
-extension), unless `packages.auto` is off. See
+extension), unless `packages.auto` is off. The `launchd` step installs the [scheduled jobs](jobs-and-audit.md). See
 [Getting started › What dev install configures](getting-started.md#what-dev-install-configures).
 
 ### `dev update`
@@ -700,5 +899,7 @@ for `dev` (commands, project ids, worktree branches, Docker actions, install ste
 
 `dev hook <event> --agent claude|codex` is the hook entry point that Claude Code and Codex call (see
 [Agents › Hooks](agents.md#hooks)). `dev __complete <projects|branches|commands>` feeds shell completion.
+`dev jobs exec <job>` is what launchd runs for a scheduled job, `dev audit --publish` is the `audit` job's command,
+and `dev sync --delay N` is the queued near-real-time sync.
 
 See also [Concepts](concepts.md), [Configuration](configuration.md), and [Teams and machines](teams.md).

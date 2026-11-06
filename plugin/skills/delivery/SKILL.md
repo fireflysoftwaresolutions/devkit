@@ -62,7 +62,7 @@ signal to stop and reproduce locally.
 1. From the verified, green integration branch: merge with the repository's strategy (squash vs merge commit).
 2. Version: the project's own scheme, otherwise CalVer `YY.MM.PATCH` (`dev calver` prints the next one). Tag
    `vYY.MM.PATCH` (`git tag -s` if the project signs tags), push the tag, create the GitHub release with notes from the
-   CHANGELOG (`gh release create vYY.MM.PATCH --notes-file …`).
+   CHANGELOG: `dev release` does all three (the guard refuses a raw `gh release create`).
 3. Verify the published artefact: download/install it from the release and smoke-test it.
 4. Update the handoff note: version, what shipped, follow-ups.
 

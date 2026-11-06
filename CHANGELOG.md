@@ -18,7 +18,14 @@ The first release.
   the handoff repository (yours or a shared one), the agents and their permission modes, your stacks, your git hosts
   and clouds (preselected from what the Mac already shows), the Docker VM, automation, and the settings lock; shows
   the plan; installs only the packages you need; applies the configuration; offers the sign-ins; and runs
-  `dev doctor`. `--yes` accepts every default.
+  `dev doctor`. In a terminal it is a full-screen wizard driven with the arrow keys, with **Recommended setup** (what
+  it detected, straight to the review) or **Customize**, a review with the packages per group and **Change a section**,
+  and an apply step with live progress and the fix for each failure. A second run starts from the saved choices and
+  marks what would change. Pipes, `TERM=dumb`, and `--yes` keep the line prompts; `--yes` accepts every default.
+- **The `dev` home and banner:** the hand-drawn devkit wordmark with the amber spark as the dot of its `i`, and the
+  tagline "Every repo in its place. Every agent on the same page." (also in the README hero and the plugin
+  descriptions). The home shows the current project in three lines, the workspace in one, and the items that need
+  attention, grouped, each with its command. Headings are a bold title with a rule.
 - **Git hosts and clouds:** the configuration keys `hosts` (GitHub, GitLab, Bitbucket, Azure DevOps) and `clouds`
   (AWS, Azure, Google Cloud, DigitalOcean, Kubernetes, and OpenTofu or Terraform) choose which CLIs devkit installs, from
   Brewfile groups of the same names, and `dev doctor` checks that each is installed and signed in, with local checks
@@ -30,9 +37,22 @@ The first release.
   instructions and skills, Claude Code and Codex (settings, hooks, hook trust, plugins, MCP servers, profile models),
   sign-in and quota, the devkit plugin and whether each agent's copy is current, required skills, project settings
   that switch devkit off, sessions that ran with devkit, Docker, automation, the status-block canary and free disk.
+  Its Claude Desktop and ChatGPT app checks prove that the apps' bundled agents use the same configuration and
+  plugins as the terminal.
 - **`dev agents`** reports installation, sign-in, plan, and quota for both agents, and `dev agents test` runs a real
   session and checks the hooks, the guard, the status block, the global instructions, and the devkit skills from
   recorded evidence.
+- **Scheduled jobs** (`dev jobs`): `sync` (hourly), `sleep` (03:30), `gc` (04:00), `repair` (every 6 hours), `audit`
+  (05:00), `doctor` (Mondays 09:00), and `lessons` (Fridays 16:00) as launchd agents `com.devkit.job.<name>`, generated
+  from the `jobs` configuration key. `dev jobs show|run|logs|journal|set --every/--at/--weekly|enable|disable|install`.
+  Each run has a timeout, a log, a journal entry, and an audit record, and a failure sends a notification. Custom jobs
+  run any `dev` command. `dev doctor` checks that every enabled job is loaded and its last run passed. The jobs replace
+  the single `com.devkit.sync` agent, which `dev install` removes.
+- **Audit trail** (`dev audit`): every changing `dev` command, guard refusal, blocked settings change, missed status
+  block, handoff write and push, settings repair, cleanup, and job run, with secrets redacted, in
+  `~/.local/state/devkit/audit/YYYY-MM.jsonl`. The `audit` job publishes it daily to `audit/<user>@<host>/` in the
+  handoff repository (`audit.publish`); `dev audit --team` reads every machine's. Filters: `--days`, `--action`,
+  `--actor`, `--json`.
 - **Docker on Colima** (vz, Rosetta, virtiofs) with Compose, Buildx, and Testcontainers settings; `dev docker`.
 - **Git** identity and credentials from the GitHub CLI, shared defaults, and a global ignore file for agent and
   security-tool output.
@@ -41,8 +61,12 @@ The first release.
 
 - **Handoff repository** (default `<github-user>/handoff`, private, or shared by a team): `PROJECTS.md`, `TASKS.md`,
   `ACTIVITY.md`, `registry.json`, one note per project with frontmatter (status, priority, milestone, due date, tags,
-  progress), generated auto and task blocks, plans, and an operations log. It syncs at the end of every session and
-  hourly.
+  progress), generated auto and task blocks, plans, and an operations log.
+- **Near-real-time sync:** every commit, push, merge, tag, rebase, PR, and release (by an agent or a `dev` command),
+  every task, plan, lesson, and policy change, and every session start queue a background sync; events within about
+  15 seconds share one run of about 3 seconds. The Stop hook writes the session line, renews locks, and publishes
+  presence every 2 minutes, and the `sync` job runs hourly. A rejected push is rebased and retried once; a failure is
+  audited and shown under Needs attention until a push succeeds.
 - **The hierarchy** portfolio → initiatives → projects → tasks, plans, and sessions, used by every command, the session
   context, the dashboard, and the reports.
 - **Initiatives** (`dev initiative new|add|rm|ls|show`): cross-project goals with workstreams, cross-project tasks,
@@ -83,6 +107,17 @@ The first release.
 
 - Every final message starts with the **`[Firefly> DevKit]` status block**: a bold header with project, branch and
   task, then Done, Check (✓, ⚠, ✗ or –, with the evidence), Progress while a run is active, and Next.
+- The rule applies to **every turn, without exception**: short answers, questions, status updates, replies during
+  background work, and any language. The first turn stays a clean test of the instructions; a session that missed the
+  block once gets a reminder in every later prompt, and replies corrected after a reminder are counted apart
+  ("N corrected after a reminder" in `dev doctor`, `dev overview`, and `PROJECTS.md`).
+- **Nothing comes before the block:** no verdict, correction, greeting, or comment on the last command before it;
+  "lead with the point" applies below it, and a reply that waits for background work starts with it too. Every
+  `communicating` template that can end a turn (kickoff, progress, status answer, decision, failure) starts with the
+  block. `dev progress step` prints the block itself (Done, Check, Progress, Next, then the checklist), and its new
+  `--check "<evidence>"` fills Check. The Stop hook says whether the block is missing or which line came before it.
+- **Results per surface:** every session and status-block result records where it ran (terminal, Claude Desktop,
+  the ChatGPT app, an IDE), and `dev doctor`, `dev overview`, and `PROJECTS.md` break the rate down by surface.
 - devkit checks the marker after every turn, **scores the format**, stores a compact line as the project's latest
   status, and shows it in `dev status` (as a block with brand pills), `dev overview`, the dashboard, the session log
   and the next session's context. `ui.powerline` adds Nerd Font arrows between the pills. Older one-line forms and the
@@ -93,8 +128,9 @@ The first release.
 - **Global instructions** for both agents from one source, `agents/AGENTS.md`: the status block, method, plain
   writing, progress and time, token use, files and disk, worktrees, branches, Conventional Commits, CalVer, local-first
   delivery, backend practice, documentation, required skills, the team protocol, and handoff.
-- **The devkit plugin** for Claude Code and Codex (`firefly-devkit` marketplace) with the skills `using-devkit`,
-  `handoff`, `communicating`, `working-efficiently`, `workspace`, `delivery`, `backend`, `devsecops`, `docs` and
+- **The devkit plugin** for Claude Code and Codex (`firefly-devkit` marketplace), with the devkit icon, display
+  name, and the Firefly amber as Codex's brand color, and the skills `using-devkit`, `handoff`, `communicating`,
+  `working-efficiently`, `workspace`, `delivery`, `release-policy`, `learning-loop`, `backend`, `devsecops`, `docs`, and
   `diagrams`; the slash commands `/devkit:status`, `overview`, `task`, `handoff`, `standup`, `ship`, `ci`, `dashboard`
   and `doctor`; and the read-only **`scout`** agent. `dev plugin validate` checks it with both agents' parsers.
 - **Hooks** for both agents (SessionStart, UserPromptSubmit, PreToolUse (the guard), PostToolUse, SubagentStart,
@@ -102,17 +138,18 @@ The first release.
 - **Models and tokens:** the `working-efficiently` skill (routing, briefing templates, escalation, context hygiene),
   the `scout` role for Codex in `~/.codex/agents/scout.toml`, the Codex profiles `fast`, `deep`, and `review` in
   `~/.codex/<name>.config.toml`, at most 4 Codex subagent threads, and Claude's fast mode chosen per session. devkit
-  never sets the main model. New keys: `claude.subagent_model`, `claude.subagent_effort`,
-  `claude.fast_mode_per_session`, `codex.max_subagent_threads`, `codex.profiles`, `codex.subagent_model` and
-  `codex.subagent_effort`.
+  never sets the main model. Codex's `review_model` makes `/review` use the strongest model, and
+  `project_doc_max_bytes` = 131072 lets it read a project's AGENTS.md whole instead of stopping at 32 KiB. New keys:
+  `claude.subagent_model`, `claude.subagent_effort`, `claude.fast_mode_per_session`, `codex.max_subagent_threads`,
+  `codex.profiles`, `codex.subagent_model` and `codex.subagent_effort`.
 - **Required skills:** `config/skill-rules.json` maps kinds of work to skills (UI, Angular, React, Spring, Java tests,
-  APIs, databases, workflows, security, docs, diagrams, delivery, communication). The prompt hook names the skills a
+  APIs, databases, workflows, security, docs, diagrams, delivery, communication, lessons). The prompt hook names the skills a
   request needs, Claude subagent briefs get them appended, and the Stop hook sends a turn back once when it changed
   matching files without them. Configure with `skills.enforce` and `skills.rules`.
 - **devkit always on:** a session that missed SessionStart gets the context at its first prompt; the guard refuses
   settings that turn off hooks or the plugin; `dev doctor` reports project overrides, sessions that ran with devkit,
   and stale plugin copies, which `dev install` reinstalls.
-- **Configuration policy:** `dev config diff` previews drift, `repair` restores it (at session start and hourly),
+- **Configuration policy:** `dev config diff` previews drift, `repair` restores it (at session start and every 6 hours),
   `lock` installs a Claude Code managed-settings file, and ConfigChange refuses edits to managed keys.
 
 #### Skills, plugins, and security
@@ -126,6 +163,8 @@ The first release.
 - **Plugins.** Superpowers, context7, frontend-design, commit-commands, security-guidance (tuned),
   claude-md-management, claude-security, and the TypeScript, Python, Java, and PHP language servers for Claude Code;
   Superpowers, impeccable, and codex-security for Codex. Chrome DevTools and Angular CLI MCP servers, pinned.
+- **Both design skills for both agents:** devkit links `impeccable` for Claude Code and `frontend-design` for Codex,
+  pinned, where the agent's plugin does not already bring them, and the UI rule requires both.
 - **`dev sec scan`:** secrets (gitleaks), dependencies (osv-scanner), code (Semgrep), filesystem and IaC (Trivy) and
   GitHub Actions workflows (zizmor), with scanner telemetry, and update checks off.
 
@@ -146,11 +185,48 @@ The first release.
 - **devkit's own CI:** a pinned macOS workflow that runs the suite on Python 3.9 and 3.13, the devkit pull request
   template, and grouped weekly Dependabot updates for the actions.
 - **Templates** for plans, specs, spikes, bug fixes and ADRs (`templates/plans/`), typed tasks (`templates/tasks/`),
-  pull requests (`templates/github/pull_request.md`) and the handoff repository README (`templates/handoff/`).
+  pull requests (`templates/github/pull_request.md`, and `pull_request.es.md` in Spanish) and the handoff repository README (`templates/handoff/`).
 - **Docs tooling:** `dev docs check` (markdownlint, lychee links and anchors, Vale with Google and write-good, SVG
   checks), the `docs` skill, and the `documentation-writer` and `doc-coauthoring` skills.
 - **Diagrams:** `dev diagram render|check|new` renders validated SVG diagrams (flow, architecture, sequence, state,
   C4, ER, timeline) in the Firefly palette, dark and light, and the `diagrams` skill.
+
+#### Git and GitHub
+
+- **`dev branch new|rename|ls|clean`:** branches from an up-to-date `origin/<default>`, with names normalized to the
+  standard (`feat/PROJ-142-invoice-export`), harness names renamed before the first push, and merged or gone branches
+  cleaned after a dry run.
+- **`dev commit`** makes Conventional Commits (known type, imperative mood, no final period, at most 72
+  characters), never on the default branch, AI attribution removed, the secret scan applied; `--wip` and `--unwip`
+  replace the shared stash.
+- **`dev rebase`** on `origin/<default>` with a conflict report.
+- **`dev ci --run`** runs the workflows' `run:` steps locally and records evidence for the exact files tested;
+  `--mark-passed --note` records a suite you ran yourself; `--evidence` shows it.
+- **`dev push`:** one push after the checks: branch name, fresh fetch, no WIP commits, not behind on a first push,
+  local CI evidence, the push budget, and `--force-with-lease` that never drops someone else's commits.
+- **`dev pr create|view|ls|checks|merge|ready|comment|review|diff`** opens PRs from the repository's template, or
+  devkit's in English or Spanish (`templates/github/pull_request.es.md`, chosen by `language`), pre-filled with the
+  commits, the local CI result, and the links; empty required sections are refused unless `--draft`. `dev pr checks --watch` waits
+  and shows the failing jobs' trimmed logs. `dev pr merge` merges only when the checks and reviews allow it, with the
+  repository's method and a clean squash message, then tidies the branches.
+- **`dev run ls|view --failed|rerun --flaky`**, **`dev release`** (tag, push, and GitHub release by the delivery policy,
+  with the CHANGELOG section as notes), and **`dev issue ls|view|create`**.
+- **`dev git …` and `dev gh …`** run any git or gh command with the same checks.
+- New configuration keys `commits.types` and `gitx.github_hosts`.
+
+#### Lessons
+
+- **`dev lesson add|ls|show|recur|prevent|retire|restore|scan|review`:** blameless lessons (what happened, root cause,
+  fix, prevention, detection, evidence) per project, initiative, or globally, in `lessons/` in the handoff repository,
+  versioned with their history. Sessions start with the known pitfalls that apply; the Stop hook asks once for a
+  lesson after a fix or revert commit; `dev lesson scan` finds reverts, fixes, repeated guard refusals, missed status
+  blocks, bouncing tasks, and developer corrections.
+- **Use and decay:** every lesson's use is counted per machine and summed for the team; strength halves every 45 days
+  without use. **`dev sleep`** (nightly) merges near-duplicates, archives retired, long-prevented, and faded lessons
+  into `lessons/archive/` (`dev lesson restore` brings them back), keeps at most 25 active lessons per scope, proposes
+  global lessons, and trims devkit's own old records, caches, and logs.
+- **The `learning-loop` skill**, required for work about lessons, prefers prevention by test, lint, guard, skill, or
+  CI over prose.
 
 #### Files
 
@@ -167,11 +243,13 @@ The first release.
 - **Dashboard:** a self-contained, branded HTML command center with a clear information hierarchy: a summary Home
   (what needs you, team now, initiatives, since yesterday) and Initiatives, Projects, Team, Tasks, Activity, Explorer,
   and Health views, initiative and project pages, a task drawer with lock state, commands and
-  history, live runs and time, search, a command palette and shareable URLs; regenerated on every sync.
+  history, live runs and time, search, a command palette and shareable URLs; regenerated on every sync. Visual first:
+  rings, status bars, member waffles, sparklines, a calendar heatmap, CI strips, session bars, and lock countdowns,
+  with details in accessible quick-look dialogs that have their own links.
 - **Disk:** safe cleanup of merged worktrees, idle build output, stale temp files and the Docker build cache, checked
   again before every removal; copy-on-write `node_modules` for new worktrees; `dev gc` and `dev du`.
 - **Identity:** the devkit wordmark outlined from Manrope with the amber spark as the dot of its letter, banners in
-  the brand's light-trail system, the plugin icon, and the logo as terminal art.
+  the brand's light-trail system, the plugin icon, and the wordmark drawn by hand for the terminal.
 
 ### Security
 
@@ -181,7 +259,11 @@ The first release.
   an hour, blind CI re-runs, non-conforming branch names and AI attribution; keeps the handoff repository's work
   items, logs, presence, policies, and generated files out of direct edits; keeps each project session to its own
   records; steers `rm`, `unlink`, `find -delete`, `xargs rm`, `git clean -f`, and overwriting `cp` and `mv` to the
-  recoverable `dev` commands; and refuses tags that break the delivery policy.
+  recoverable `dev` commands; refuses tags that break the delivery policy; refuses a bare `git stash` (use
+  `dev commit --wip`), raw `gh pr merge` and `gh release create` (use `dev pr merge` and `dev release`, or prefix
+  `DEVKIT_RAW_GH=1`), and always `gh pr merge --admin`; refuses a commit, push, or tag chained after a pipe without
+  `pipefail`; recognizes Copilot, Gemini, and Cursor co-author lines as attribution; and keeps `lessons/` out of
+  direct edits.
   `dev guard check` simulates any decision.
 - **No secrets in commits:** the guard runs gitleaks on what a `git commit` is about to record, including a `git add`
   earlier in the same command, and refuses the commit when it finds a secret.
