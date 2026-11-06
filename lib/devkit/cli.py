@@ -1942,7 +1942,7 @@ def build_parser():
     p.add_argument("--json", action="store_true")
     add("doctor", cmd_doctor, "Verify the setup")
     add("install", cmd_install, "Apply configuration").add_argument(
-        "--only", help="comma list: config,cli,git,handoff,instructions,skills,claude,codex,docker,docs,launchd")
+        "--only", help="comma list: config,tools,cli,git,handoff,instructions,skills,claude,codex,docker,docs,launchd")
     p = add("docs", cmd_docs, "Check documentation: Markdown, links and anchors, prose, diagrams")
     p.add_argument("check", choices=["check"])
     p.add_argument("paths", nargs="*", help="files or folders (default: the whole repository)")

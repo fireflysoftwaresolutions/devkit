@@ -1,4 +1,5 @@
-# devkit toolchain. `dev setup` installs the `# @core`, `# @docker` and `# @agents` groups plus the stacks you choose.
+# devkit toolchain. `dev setup` and `dev install --only tools` install the base groups (core, docker, agents, docs,
+# security) plus the stacks, git hosts and clouds chosen in the wizard (config: stacks, hosts, clouds).
 # @core
 brew "git"
 brew "gh"
@@ -44,6 +45,23 @@ brew "zizmor"        # GitHub Actions security audit (dev sec scan)
 brew "semgrep"
 brew "syft"
 brew "cosign"
+# @gitlab
+brew "glab"
+# @azure-devops   (dev install also adds the azure-devops az extension)
+brew "azure-cli"
+# @aws
+brew "awscli"
+# @azure
+brew "azure-cli"
+# @gcp
+cask "gcloud-cli"
+# @digitalocean
+brew "doctl"
+# @kubernetes
+brew "kubernetes-cli"
+brew "helm"
+# @terraform
+brew "opentofu"
 # @brand  (maintainers only: tools/brand/render.py)
 brew "librsvg"
 brew "webp"

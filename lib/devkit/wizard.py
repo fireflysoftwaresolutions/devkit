@@ -151,6 +151,20 @@ def run(assume_yes=False, skip_packages=False) -> int:
     p.section("Stacks (toolchains, language servers, skills)")
     stacks = p.multi("Stacks you develop in (comma-separated numbers)", STACKS, cfg.get("stacks") or list(STACKS))
 
+    from . import toolchain
+    seen = toolchain.detect()
+    p.section("Git hosts and CI/CD (CLIs, sign-in checks, `dev ci status`)")
+    if seen["evidence"]:
+        print("     " + ui.dim("found on this Mac: " + "; ".join(f"{k} ({v})" for k, v in seen["evidence"].items())))
+    hosts = p.multi("Where your repositories and pipelines live (comma-separated numbers)",
+                    {k: v[0] for k, v in toolchain.HOSTS.items()},
+                    list(dict.fromkeys((cfg.get("hosts") or []) + seen["hosts"])) or ["github"])
+    hosts = list(dict.fromkeys(["github"] + hosts))
+    p.section("Cloud and infrastructure (CLIs and sign-in checks)")
+    clouds = p.multi("Clouds and infrastructure tools you use (numbers, or empty for none)",
+                     {k: v[0] for k, v in toolchain.CLOUDS.items()},
+                     list(dict.fromkeys((cfg.get("clouds") or []) + seen["clouds"])))
+
     p.section("Docker on Colima")
     dk = cfg["docker"]
     cpu = int(p.ask("VM CPUs", str(dk.get("cpu") or max(2, min(8, d["cpus"] // 3)))))
@@ -172,7 +186,7 @@ def run(assume_yes=False, skip_packages=False) -> int:
         "claude": {"default_mode": claude_mode},
         "codex": {"mode": codex_mode, "approval_policy": CODEX_MODES[codex_mode][0],
                   "sandbox_mode": CODEX_MODES[codex_mode][1]},
-        "stacks": stacks, "lock": lock,
+        "stacks": stacks, "lock": lock, "hosts": hosts, "clouds": clouds,
         "docker": {"cpu": cpu, "memory": mem, "disk": disk, "autostart": autostart},
         "gc": {"auto": gc_auto}, "sync": {"interval_minutes": interval},
     })
@@ -181,7 +195,8 @@ def run(assume_yes=False, skip_packages=False) -> int:
     rows = [("config", str(core.tilde(CONFIG_FILE))), ("root", root), ("handoff", f"{handoff} → {root}/.handoff"),
             ("Claude Code", f"{claude_mode}" if use_claude else "skip"),
             ("Codex", f"{codex_mode} ({CODEX_MODES[codex_mode][0]} / {CODEX_MODES[codex_mode][1]})" if use_codex else "skip"),
-            ("stacks", ", ".join(stacks)), ("packages", "skip" if skip_packages else "Homebrew + npm for the stacks"),
+            ("stacks", ", ".join(stacks)), ("git hosts", ", ".join(hosts)), ("clouds", ", ".join(clouds) or "none"),
+            ("packages", "skip" if skip_packages else "Homebrew + npm for the stacks, hosts and clouds"),
             ("Docker VM", f"{cpu} CPU · {mem} GB · {disk} GB" + (" · at login" if autostart else "")),
             ("automation", f"sync every {interval} min · safe cleanup {'on' if gc_auto else 'report only'}"),
             ("lock", "managed settings (sudo)" if lock else "off (drift is still blocked and repaired)")]
@@ -198,7 +213,7 @@ def run(assume_yes=False, skip_packages=False) -> int:
     CONFIG_FILE.write_text(json.dumps(new, indent=2, ensure_ascii=False) + "\n")
     print(f"\n  {ui.OK} saved {core.tilde(CONFIG_FILE)}")
     if not skip_packages:
-        rc = install_packages(stacks, use_claude)
+        rc = install_packages(stacks, use_claude, extra=toolchain.groups({"hosts": hosts, "clouds": clouds}))
         if rc != 0:
             print(f"  {ui.WARN} some packages failed; continuing with the configuration")
     py = sys.executable
@@ -245,8 +260,22 @@ def filtered(path: Path, groups) -> list:
     return out
 
 
-def install_packages(stacks, with_claude=True) -> int:
-    groups = set(BASE_GROUPS) | set(stacks)
+def missing_packages(groups) -> list:
+    """Brewfile entries of these groups that are not installed (fast: `brew bundle check`)."""
+    brew = filtered(DEVKIT_HOME / "Brewfile", groups)
+    with tempfile.NamedTemporaryFile("w", suffix=".Brewfile", delete=False) as tf:
+        tf.write("\n".join(brew) + "\n")
+        bf = tf.name
+    rc, out, err = core.sh(["brew", "bundle", "check", f"--file={bf}", "--verbose", "--no-upgrade"], timeout=300)
+    os.unlink(bf)
+    if rc == 0:
+        return []
+    return [ln.split("→")[-1].strip() for ln in (out + "\n" + err).splitlines()
+            if "needs to be installed" in ln or "is not installed" in ln] or ["(some packages)"]
+
+
+def install_packages(stacks, with_claude=True, extra=()) -> int:
+    groups = set(BASE_GROUPS) | set(stacks) | set(extra or ())
     print(f"\n  {ui.ARROW} Homebrew packages for: {', '.join(sorted(groups))}")
     brew = filtered(DEVKIT_HOME / "Brewfile", groups)
     with tempfile.NamedTemporaryFile("w", suffix=".Brewfile", delete=False) as tf:
@@ -260,6 +289,9 @@ def install_packages(stacks, with_claude=True) -> int:
         rc |= subprocess.call(["npm", "install", "-g", "--no-fund", "--no-audit", *npm])
         if "@playwright/cli" in npm and core.have("playwright-cli"):
             subprocess.call(["playwright-cli", "install", "--skills"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    from . import toolchain
+    for line in toolchain.postinstall([k for k, v in toolchain.ALL.items() if v[4] in groups]):
+        print(f"  {ui.OK} {line}")
     if with_claude and not core.have("claude"):
         print(f"\n  {ui.ARROW} Claude Code (native installer)")
         rc |= subprocess.call(["/bin/bash", "-c", "curl -fsSL https://claude.ai/install.sh | bash"])

@@ -582,6 +582,28 @@ def setup_codex():
     done(f"{len(plugins['plugins'])} plugins installed and enabled")
 
 
+def setup_tools():
+    """Homebrew packages for the configured stacks, git hosts and clouds (only what is missing)."""
+    step("Tools for your stacks, git hosts and clouds")
+    from . import toolchain, wizard
+    if not core.have("brew"):
+        fail("Homebrew not found — run install.sh")
+        return
+    groups = set(wizard.BASE_GROUPS) | set(CFG.get("stacks") or []) | set(toolchain.groups())
+    missing = wizard.missing_packages(groups)
+    if not missing:
+        done(f"all installed · {', '.join(sorted(groups))}")
+    elif not (CFG.get("packages") or {}).get("auto", True):
+        note(f"missing: {', '.join(missing[:8])} (packages.auto is off) — dev install --only tools with it on")
+        return
+    else:
+        rc = wizard.install_packages(CFG.get("stacks") or [], CFG.get("agents", {}).get("claude", True),
+                                     extra=toolchain.groups())
+        done("installed what was missing") if rc == 0 else fail("some packages failed — `brew bundle` output above")
+    for line in toolchain.postinstall(toolchain.selected()):
+        done(line)
+
+
 def setup_docker():
     step("Docker on Colima")
     f = HOME / ".docker" / "config.json"
@@ -654,7 +676,7 @@ def setup_launchd():
 
 def run_install(only=None):
     print(ui.banner("install"))
-    steps = [("config", ensure_config), ("cli", install_cli), ("git", setup_git), ("handoff", setup_handoff),
+    steps = [("config", ensure_config), ("tools", setup_tools), ("cli", install_cli), ("git", setup_git), ("handoff", setup_handoff),
              ("instructions", write_agent_instructions), ("skills", install_skills), ("claude", setup_claude),
              ("codex", setup_codex), ("docker", setup_docker), ("docs", setup_docs_tools), ("launchd", setup_launchd)]
     for name, fn in steps:
@@ -820,6 +842,14 @@ def doctor() -> int:
         check(agent_name, "devkit plugin copy is current", not stale,
               "matches plugin/ in this checkout" if not stale else "older than this checkout (skills or agents missing)",
               f"dev install --only {agent_name.lower()}")
+    from . import toolchain
+    for key in toolchain.selected():
+        if key not in toolchain.ALL:
+            continue
+        r = toolchain.check(key)
+        label = toolchain.ALL[key][0]
+        group = "Hosts" if key in toolchain.HOSTS else "Clouds"
+        check(group, f"{label}", r["installed"] and r["signed_in"], r["detail"], r["fix"])
     from . import skillguard
     for agent_name in ("claude", "codex"):
         gaps = skillguard.coverage(agent_name)
