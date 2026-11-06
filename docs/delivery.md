@@ -2,7 +2,7 @@
 
 GitHub CI confirms that work is ready; it is not where you find out whether it works. Each push costs a full CI
 cycle (often 30 minutes or more), and each merge to the default branch can re-trigger the CI of every other open
-PR. devkit's method, taught to both agents by the global instructions and the `devkit-delivery` skill:
+PR. devkit's method, taught to both agents by the global instructions and the devkit `delivery` skill:
 **integrate and verify locally, push once, get one CI run.**
 
 ```mermaid

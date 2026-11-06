@@ -1,5 +1,5 @@
 ---
-name: devkit-backend
+name: backend
 description: Backend engineering checklists for Java/Spring, Python, PHP and Node services — API contract design, domain layering, database migrations, testing strategy with Testcontainers, resilience, security and operability. Use when designing or changing an API, a database schema, a service's domain logic, integration with external systems, or when reviewing backend code.
 ---
 

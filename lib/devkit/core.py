@@ -39,6 +39,7 @@ DEFAULTS = {
         "grace_hours": 24,          # merged / fully-contained worktrees idle this long are removed
         "idle_artefact_days": 7,    # regenerable build dirs are pruned in worktrees idle this long
         "temp_days": 7,             # temp entries older than this are purged
+        "docker": True,             # also prune dangling images and build cache older than 7 days (never volumes)
     },
     "docker": {"cpu": 6, "memory": 12, "disk": 80, "vm_type": "vz", "rosetta": True,
                "mount_type": "virtiofs", "autostart": False},
@@ -102,6 +103,8 @@ def sh(args, cwd=None, timeout=30, env=None, input=None):
 
 
 def git(path, *args, timeout=30):
+    if path is None:
+        return 128, "", "unknown directory"
     return sh(["git", "-C", str(path), *args], timeout=timeout)
 
 

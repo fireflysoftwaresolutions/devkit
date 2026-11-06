@@ -1,0 +1,25 @@
+{
+  "name": "devkit",
+  "version": "1.0.0",
+  "description": "One workspace for developers, Claude Code and Codex: project context and handoff notes, tasks, a portfolio overview, local-first delivery (one push, one CI run), backend methodology, managed worktrees and a guard.",
+  "author": {
+    "name": "Firefly Software Solutions Inc.",
+    "email": "info@fireflysoftware.io",
+    "url": "https://fireflysoftware.io"
+  },
+  "homepage": "https://github.com/fireflysoftwaresolutions/devkit",
+  "repository": "https://github.com/fireflysoftwaresolutions/devkit",
+  "license": "LicenseRef-Proprietary",
+  "keywords": [
+    "devkit",
+    "firefly",
+    "handoff",
+    "worktrees",
+    "gitops",
+    "ci",
+    "backend",
+    "workspace",
+    "tasks",
+    "dashboard"
+  ]
+}

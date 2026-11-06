@@ -47,11 +47,15 @@ def _session_file(agent: str, sid: str) -> Path:
     return STATE / "sessions" / f"{agent}-{sid}.json"
 
 
-def _spawn_sync(args):
-    """Detached background `dev sync …` so the hook returns immediately."""
-    log = open(STATE / "logs" / "sync.log", "a")
-    subprocess.Popen([sys.executable, str(core.DEVKIT_HOME / "bin" / "dev"), "sync", "--quiet", *args],
+def _spawn(args, logname="sync.log"):
+    """Detached background `dev …` so the hook returns immediately."""
+    log = open(STATE / "logs" / logname, "a")
+    subprocess.Popen([sys.executable, str(core.DEVKIT_HOME / "bin" / "dev"), *args],
                      stdin=subprocess.DEVNULL, stdout=log, stderr=log, start_new_session=True, close_fds=True)
+
+
+def _spawn_sync(args):
+    _spawn(["sync", "--quiet", *args])
 
 
 # --------------------------------------------------------------------------- session start
@@ -75,6 +79,10 @@ def context_for(cwd: str, agent: str) -> str:
     from . import registry
     top = core.gitout(cwd, "rev-parse", "--show-toplevel")
     lines = ["## devkit · workspace context", ""]
+    if top and core.is_temp(top):
+        lines.append(f"Scratch repository in a temp dir ({tilde(top)}): not tracked in the handoff repo. "
+                     f"Real projects live under {tilde(DEV)}/<owner>/<repo>.")
+        return "\n".join(lines)
     if not top:
         reg = core.read_json(HANDOFF / "registry.json", {}) or {}
         ps = sorted(reg.get("projects", []), key=lambda p: -(p.get("last_activity") or 0))
@@ -110,13 +118,37 @@ def context_for(cwd: str, agent: str) -> str:
         cloned = _clone_node_modules(Path(top), main)
         if cloned:
             lines.append(cloned)
+    st = registry.status_line(p["id"])
+    if st:
+        lines.append(f"Last agent status ({st.get('agent')}, {core.ago(st.get('ts'))}): {st.get('line')}")
+    from . import notes as notesmod
     note = core.note_path(p["id"])
-    lines.append(f"Handoff note: {tilde(note)} — read it before starting; update it with the `devkit-handoff` skill "
+    if note.exists():
+        ns = notesmod.summarize(note.read_text())
+        meta = f"status {ns['status']} · priority {ns['priority']}" + (f" · milestone {ns['milestone']}" if ns["milestone"] else "")
+        lines.append(f"Project: {meta} · tasks: {len(ns['tasks']['now'])} now, {ns['tasks']['open']} open "
+                     f"(`dev task` lists them; `dev task add|start|done` edits them)")
+    lines.append(f"Handoff note: {tilde(note)} — read it before starting; update it with the devkit `handoff` skill "
                  f"before you finish or when the user says handoff/pause/wrap up.")
     body = registry.human_sections(p["id"])
     if body:
         lines += ["", "--- handoff note ---", body]
     return "\n".join(lines)
+
+
+def _note_hash(top: str) -> str:
+    """Hash of the human sections of the project's note (to tell whether the session updated it)."""
+    import hashlib
+    from .registry import main_of
+    main = main_of(Path(top)) or Path(top)
+    pid = core.project_identity(main, core.gitout(main, "config", "--get", "remote.origin.url"))[0]
+    f = core.note_path(pid)
+    if not f.exists():
+        return ""
+    from . import notes as notesmod
+    sec = notesmod.sections(f.read_text())
+    sec.pop("Session log", None)
+    return hashlib.sha1(json.dumps(sec, sort_keys=True).encode()).hexdigest()
 
 
 def session_start(agent: str):
@@ -129,7 +161,9 @@ def session_start(agent: str):
         f.parent.mkdir(parents=True, exist_ok=True)
         f.write_text(json.dumps({"agent": agent, "session": sid, "cwd": cwd, "top": top, "started": time.time(),
                                  "head": core.gitout(top, "rev-parse", "HEAD") if top else "",
-                                 "branch": core.gitout(top, "branch", "--show-current") if top else ""}))
+                                 "branch": core.gitout(top, "branch", "--show-current") if top else "",
+                                 "note_hash": _note_hash(top) if top and not core.is_temp(top) else ""}))
+    _spawn(["config", "repair", "--quiet"])  # restore any devkit-managed setting changed outside devkit
     text = context_for(cwd, agent)
     if agent == "codex":
         print(json.dumps({"hookSpecificOutput": {"hookEventName": "SessionStart", "additionalContext": text}}))
@@ -156,7 +190,7 @@ def record_session(spec: str):
     head = s.get("head")
     subjects = core.gitout(top, "log", "--format=%s", f"{head}..HEAD").splitlines() if head else []
     dirty = len([ln for ln in core.gitout(top, "status", "--porcelain").splitlines() if ln.strip()])
-    if not subjects and not dirty:
+    if not subjects and not dirty and not s.get("status"):
         return
     branch = core.gitout(top, "branch", "--show-current") or s.get("branch") or "detached"
     parts = [core.fmt_ts(s["started"]), agent, f"`{branch}`"]
@@ -165,26 +199,55 @@ def record_session(spec: str):
         parts.append(f"{len(subjects)} commit(s): {shown}")
     if dirty:
         parts.append(f"{dirty} uncommitted file(s)")
+    if s.get("status"):
+        parts.append(f"status: {s['status'][:160]}")
     if not core.note_path(pid).exists():
         p = registry.inspect_repo(main, with_prs=False)
         registry.update_note(p)
     registry.add_session_line(pid, " · ".join(parts), sid[:12])
 
 
+def _handoff_nudge(agent: str, data: dict, sess: dict):
+    """Once per session: commits were made but the handoff note was not touched → ask the agent to update it."""
+    if data.get("stop_hook_active") or sess.get("nudged") or not sess.get("top") or core.is_temp(sess["top"]):
+        return None
+    if not core.CFG.get("handoff", {}).get("enforce", True):
+        return None
+    head = sess.get("head")
+    if not head:
+        return None
+    n = len(core.gitout(sess["top"], "log", "--format=%h", f"{head}..HEAD").splitlines())
+    if n == 0 or _note_hash(sess["top"]) != sess.get("note_hash", ""):
+        return None
+    return (f"devkit: this session made {n} commit(s) but the project's handoff note was not updated. Before you "
+            f"finish, update it with the devkit handoff skill (/devkit:handoff) — Current state, Tasks (`dev task done <n>` / "
+            f"`dev task add \"…\"`), Decisions and gotchas — then end your reply as usual.")
+
+
 def stop(agent: str):
     data = _stdin_json()
     from . import canary
-    sf = _session_file(agent, data.get("session_id") or "-")
-    res = None
+    sid = data.get("session_id") or "-"
+    sf = _session_file(agent, sid)
+    out = {}
     if sf.exists():  # only sessions that started with devkit active (they loaded the global instructions)
-        os.utime(sf)
+        sess = core.read_json(sf, {}) or {}
         res = canary.check(agent, data)
-    if res and not res[0] and agent == "claude":
-        print(json.dumps({"systemMessage": f"⚠ DevKit canary missing: this reply did not start with “{canary.MARKER} ·”, "
-                                           f"so the global devkit instructions may not have been loaded or followed. "
-                                           f"`dev canary` shows the history."}))
-    sid = data.get("session_id") or ""
-    if not sid:
+        if res:
+            ok, pid, line = res
+            if ok and line:
+                sess["status"] = line
+                canary.save_status(pid, agent, line, sess.get("branch"))
+            elif not ok and agent == "claude":
+                out["systemMessage"] = canary.miss_message(agent, sid)
+        reason = _handoff_nudge(agent, data, sess)
+        if reason:
+            sess["nudged"] = True
+            out.update({"decision": "block", "reason": reason})
+        sf.write_text(json.dumps(sess))
+    if out:
+        print(json.dumps(out))
+    if sid == "-":
         return
     mark = STATE / "sessions" / f"{agent}-{sid}.stop"
     try:
@@ -195,6 +258,39 @@ def stop(agent: str):
     except OSError:
         return
     _spawn_sync(["--session", f"{agent}:{sid}", "--offline"])
+
+
+def config_change(agent: str):
+    """Claude ConfigChange (user_settings): refuse changes to devkit-managed keys, then restore the file."""
+    data = _stdin_json()
+    from . import policy
+    path = data.get("file_path") or str(core.CLAUDE_HOME / "settings.json")
+    settings = core.read_json(path, None)
+    if settings is None:
+        return
+    drift = [d for d in policy.diff_claude(settings) if not d.key.startswith("hooks.") or policy.lock_status() == "off"]
+    if not drift:
+        return
+    ks = sorted({d.key for d in drift})
+    keys = ", ".join(ks[:6]) + (f" (+{len(ks) - 6} more)" if len(ks) > 6 else "")
+    _log(f"config-change blocked ({agent}): {keys}")
+    policy._log(f"blocked change to devkit-managed keys: {keys}")
+    _spawn(["config", "repair", "--quiet"])
+    print(f"devkit manages these settings: {keys}. Change devkit's configuration instead "
+          f"(config/claude/settings.json in the devkit repo or ~/.config/devkit/config.json) and run `dev install`.",
+          file=sys.stderr)
+    sys.exit(2)
+
+
+def instructions_loaded(agent: str):
+    """Claude InstructionsLoaded: remember which instruction files a session loaded (canary diagnostics)."""
+    data = _stdin_json()
+    sid = data.get("session_id") or "-"
+    f = STATE / "instructions" / f"{agent}-{sid}.jsonl"
+    f.parent.mkdir(parents=True, exist_ok=True)
+    with f.open("a") as fh:
+        fh.write(json.dumps({"ts": round(time.time()), "file": data.get("file_path"), "type": data.get("memory_type"),
+                             "reason": data.get("load_reason")}) + "\n")
 
 
 def session_end(agent: str):
@@ -222,7 +318,8 @@ def guard(agent: str):
                                              "permissionDecisionReason": reason}}))
 
 
-HANDLERS = {"session-start": session_start, "stop": stop, "session-end": session_end, "guard": guard}
+HANDLERS = {"session-start": session_start, "stop": stop, "session-end": session_end, "guard": guard,
+            "config-change": config_change, "instructions-loaded": instructions_loaded}
 
 
 def run(event: str, agent: str) -> int:
@@ -232,6 +329,8 @@ def run(event: str, agent: str) -> int:
     try:
         (STATE / "logs").mkdir(parents=True, exist_ok=True)
         fn(agent)
+    except SystemExit:
+        raise
     except Exception:  # fail open: never break the agent session
         _log(f"{event} {agent} error:\n{traceback.format_exc()}")
     return 0

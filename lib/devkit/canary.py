@@ -72,8 +72,18 @@ def has_marker(text: str) -> bool:
     return bool(MARKER_RE.match(first.strip()))
 
 
+STATUS_RE = re.compile(r"^[\W_]*DevKit\W*·?\s*(.*)$")
+
+
+def status_text(text: str) -> str:
+    """The useful part of the marker line: `DevKit · <project>@<branch> · <outcome> · <verification> · next: …`."""
+    first = next((ln for ln in (text or "").splitlines() if ln.strip()), "")
+    m = STATUS_RE.match(first.strip())
+    return re.sub(r"[*_`]+", "", m.group(1)).strip(" ·") if m else ""
+
+
 def check(agent: str, data: dict):
-    """-> None when not applicable, else (ok, project_id). Records the result."""
+    """-> None when not applicable, else (ok, project_id, status_line). Records the result."""
     if data.get("stop_hook_active"):
         return None
     cwd = data.get("cwd") or os.getcwd()
@@ -87,21 +97,50 @@ def check(agent: str, data: dict):
     ok = has_marker(text)
     top = core.gitout(cwd, "rev-parse", "--show-toplevel")
     pid = None
-    if top:
+    if top and not core.is_temp(top):
         from .registry import main_of
         main = main_of(Path(top)) or Path(top)
         pid = core.project_identity(main, core.gitout(main, "config", "--get", "remote.origin.url"))[0]
+    line = status_text(text) if ok else ""
     rec = {"ts": round(time.time()), "agent": agent, "session": (data.get("session_id") or "")[:12],
            "project": pid, "ok": ok}
-    if not ok:
+    if ok:
+        rec["status"] = line[:200]
+    else:
         rec["excerpt"] = re.sub(r"\s+", " ", text.strip())[:120]
+        rec["instructions_loaded"] = instructions_loaded(agent, data.get("session_id") or "")
     try:
         LOG.parent.mkdir(parents=True, exist_ok=True)
         with LOG.open("a") as f:
             f.write(json.dumps(rec) + "\n")
     except OSError:
         pass
-    return ok, pid
+    return ok, pid, line
+
+
+def instructions_loaded(agent: str, sid: str):
+    """True/False when the InstructionsLoaded hook recorded (or not) the global file; None when unknown (Codex)."""
+    f = STATE / "instructions" / f"{agent}-{sid}.jsonl"
+    if agent != "claude" or not f.exists():
+        return None
+    want = str(core.CLAUDE_HOME / "CLAUDE.md")
+    return any(want in ln for ln in f.read_text().splitlines())
+
+
+def save_status(pid, agent: str, line: str, branch=None):
+    if not pid or not line:
+        return
+    d = STATE / "status"
+    d.mkdir(parents=True, exist_ok=True)
+    (d / (pid.replace("/", "__") + ".json")).write_text(json.dumps(
+        {"ts": round(time.time()), "agent": agent, "line": line[:300], "branch": branch}))
+
+
+def miss_message(agent: str, sid: str) -> str:
+    loaded = instructions_loaded(agent, sid)
+    why = (" ~/.claude/CLAUDE.md was loaded, so the reply ignored the global instructions." if loaded else
+           " ~/.claude/CLAUDE.md was NOT loaded in this session — run `dev doctor`." if loaded is False else "")
+    return (f"⚠ DevKit canary: this reply did not start with “{MARKER} ·”.{why} `dev canary` shows the history.")
 
 
 def records(days: int = 7) -> list:

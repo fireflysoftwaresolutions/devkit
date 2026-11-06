@@ -9,7 +9,7 @@ import socket
 import time
 from pathlib import Path
 
-from . import core
+from . import core, notes as notesmod
 from .core import (DEV, HANDOFF, LOCAL, NOTES, RESERVED_TOP, STATE, WT_ROOT, ago, canonical_path, fmt_ts, git,
                    gitout, human_kb, is_active, is_under, note_path, project_identity, read_json, sh, tilde,
                    write_if_changed)
@@ -464,9 +464,60 @@ def build(with_prs=True, refresh_prs=False, with_sizes=False, refresh_sizes=Fals
                 issues.append(("work", f"{p['id']}: uncommitted work idle {int(idle_d)}d in {tilde(w['path'])}"))
             if w.get("unpushed") and not w.get("active") and idle_d > 2:
                 issues.append(("work", f"{p['id']}: {w['unpushed']} unpushed commit(s) on {w.get('branch')}"))
+    for p in projects:
+        enrich(p)
     projects.sort(key=lambda p: (p["id"].startswith("_local/"), p["id"]))
     return {"version": 1, "host": socket.gethostname().split(".")[0], "dev_root": str(DEV),
             "generated": int(time.time()), "projects": projects, "issues": issues}
+
+
+def commit_activity(path: str, days: int = 30) -> dict:
+    """{YYYY-MM-DD: commits} over all branches for the last `days` days."""
+    import datetime as dt
+    out = gitout(path, "log", "--all", f"--since={days}.days", "--format=%ct", timeout=30)
+    counts = {}
+    for ln in out.splitlines():
+        if ln.isdigit():
+            d = dt.date.fromtimestamp(int(ln)).isoformat()
+            counts[d] = counts.get(d, 0) + 1
+    return counts
+
+
+def status_line(pid: str):
+    return read_json(STATE / "status" / (pid.replace("/", "__") + ".json"), None)
+
+
+def plans_for(pid: str) -> list:
+    d = HANDOFF / "plans" / pid
+    out = []
+    if d.is_dir():
+        for f in sorted(d.rglob("*.md"), key=lambda x: -x.stat().st_mtime):
+            title = next((ln[2:].strip() for ln in f.read_text(errors="ignore").splitlines() if ln.startswith("# ")),
+                         f.stem)
+            out.append({"title": title, "path": str(f.relative_to(HANDOFF)), "mtime": int(f.stat().st_mtime)})
+    return out[:20]
+
+
+def enrich(p: dict):
+    """Add handoff-note summary, activity, latest agent status line and plans to a registry entry."""
+    f = note_path(p["id"])
+    p["note_summary"] = notesmod.summarize(f.read_text()) if f.exists() else None
+    if p.get("main") and p.get("git", True) is not False:
+        p["activity"] = commit_activity(p["path"])
+    p["status_line"] = status_line(p["id"])
+    p["plans"] = plans_for(p["id"])
+
+
+def ops_log(limit: int = 60) -> list:
+    """Recent entries of log/YYYY-MM.md (newest first)."""
+    out = []
+    for f in sorted((HANDOFF / "log").glob("*.md"), reverse=True):
+        for ln in reversed(f.read_text(errors="ignore").splitlines()):
+            if ln.startswith("- "):
+                out.append(ln[2:])
+            if len(out) >= limit:
+                return out
+    return out
 
 
 def find(reg: dict, query: str):
@@ -541,16 +592,20 @@ def render_map(reg: dict) -> str:
     for p in ps:
         groups.setdefault(p["id"].rsplit("/", 1)[0], []).append(p)
     for owner in sorted(groups, key=lambda o: (o == "_local", o)):
-        out += [f"## {owner}", "", "| Project | Stack | Branch | State | Worktrees | Open PRs | Last activity | Size | Note |",
-                "|---|---|---|---|---|---|---|---|---|"]
+        out += [f"## {owner}", "", "| Project | Status | Tasks | Stack | Branch | State | Worktrees | Open PRs | "
+                "Last activity | Size | Note |", "|---|---|---|---|---|---|---|---|---|---|---|"]
         for p in groups[owner]:
             co = p["main"]
             act = sum(1 for w in p["worktrees"] if w.get("active"))
             wt = f"{len(p['worktrees'])}" + (f" ({act} active)" if act else "") if p["worktrees"] else "-"
             branch = co.get("branch") or "-"
-            out.append(f"| [{p['name']}]({p['remote'] or tilde(p['path'])}) | {', '.join(p['stack']) or '-'} | "
-                       f"`{branch}` | {_state(co)} | {wt} | {len(p['prs_open']) if p.get('prs_known') else '-'} | "
-                       f"{fmt_ts(p['last_activity'])} | {human_kb(p.get('size_kb'))} | [note]({p['note']}) |")
+            ns = p.get("note_summary") or {}
+            st = ns.get("status", "-") + (" ·" + ns["priority"] if ns.get("priority") not in (None, "normal") else "")
+            tk = f"{len(ns['tasks']['now'])} now / {ns['tasks']['open']} open" if ns else "-"
+            out.append(f"| [{p['name']}]({p['remote'] or tilde(p['path'])}) | {st} | {tk} | "
+                       f"{', '.join(p['stack']) or '-'} | `{branch}` | {_state(co)} | {wt} | "
+                       f"{len(p['prs_open']) if p.get('prs_known') else '-'} | {fmt_ts(p['last_activity'])} | "
+                       f"{human_kb(p.get('size_kb'))} | [note]({p['note']}) |")
         out.append("")
     wts = [(p, w) for p in ps for w in p["worktrees"]]
     if wts:
@@ -565,26 +620,7 @@ def render_map(reg: dict) -> str:
     return "\n".join(out)
 
 
-NOTE_TEMPLATE = """# {title}
-
-{auto_start}
-{auto_end}
-
-## Purpose
-_What this project is, who uses it, where it runs (1-3 lines)._
-
-## Current state
-_What works, what is half done, what is broken. Keep it true; rewrite rather than append._
-
-## Next steps
-1. _…_
-
-## Decisions and gotchas
-- _Non-obvious facts a newcomer (human or agent) would otherwise rediscover the hard way._
-
-{log_header}
-<!-- Newest first, one line per session. Agents add a one-line summary; `dev` adds the commit list automatically. -->
-"""
+NOTE_TEMPLATE = notesmod.TEMPLATE  # kept for backward compatibility
 
 
 def render_auto(p: dict) -> str:
@@ -614,9 +650,9 @@ def update_note(p: dict, create=True) -> bool:
     if not f.exists():
         if not create:
             return False
-        text = NOTE_TEMPLATE.format(title=p["id"], auto_start=AUTO_START, auto_end=AUTO_END, log_header=LOG_HEADER)
+        text = notesmod.new_note(p["id"])
     else:
-        text = f.read_text()
+        text = notesmod.ensure_structure(f.read_text(), p["id"])
     auto = render_auto(p)
     if AUTO_START in text and AUTO_END in text:
         pre, rest = text.split(AUTO_START, 1)
@@ -626,6 +662,7 @@ def update_note(p: dict, create=True) -> bool:
         head, _, body = text.partition("\n")
         new = head + "\n\n" + auto + "\n" + body
     if f.exists():
+        text = f.read_text()
         old_wo = re.sub(r"_Auto-refreshed by `dev sync` · [^.]*\.", "", text)
         new_wo = re.sub(r"_Auto-refreshed by `dev sync` · [^.]*\.", "", new)
         if old_wo == new_wo:
@@ -671,12 +708,70 @@ def human_sections(pid: str, max_chars=5000) -> str:
     return text
 
 
+def render_tasks(reg: dict) -> str:
+    """TASKS.md: every open task across projects, grouped by project, Now first."""
+    out = ["# Tasks", "", "_Generated by `dev sync` from the Tasks section of each handoff note. Edit the notes "
+           "(or use `dev task`), not this file._", ""]
+    rows = []
+    for p in reg["projects"]:
+        ns = p.get("note_summary")
+        if not ns or not ns["tasks"]["open"]:
+            continue
+        rows.append((ns["priority"] != "high", ns["status"] != "active", p["id"], p, ns))
+    if not rows:
+        return "\n".join(out + ["No open tasks. Add one with `dev task add \"…\" --now`."])
+    total_now = sum(len(r[4]["tasks"]["now"]) for r in rows)
+    total_open = sum(r[4]["tasks"]["open"] for r in rows)
+    out += [f"**{total_open} open tasks** · **{total_now} in progress (Now)** across {len(rows)} projects", ""]
+    for _, _, pid, p, ns in sorted(rows):
+        badge = f"`{ns['status']}`" + (f" · `{ns['priority']}`" if ns["priority"] != "normal" else "") + \
+            (f" · milestone {ns['milestone']}" if ns["milestone"] else "") + (f" · due {ns['due']}" if ns["due"] else "")
+        out += [f"## {pid}", "", badge, ""]
+        for label, key in (("Now", "now"), ("Next", "next"), ("Later", "later")):
+            items = ns["tasks"][key]
+            if items:
+                out.append(f"**{label}**")
+                out += [f"- [ ] {t}" for t in items]
+                out.append("")
+        if ns["tasks"]["overdue"]:
+            out += ["**Overdue:** " + "; ".join(ns["tasks"]["overdue"]), ""]
+    return "\n".join(out).rstrip()
+
+
+def render_activity(reg: dict, days: int = 30) -> str:
+    """ACTIVITY.md: recent sessions and operations, newest first."""
+    out = ["# Activity", "", f"_Generated by `dev sync`: session lines from the handoff notes and operations from "
+           f"`log/` over the last {days} days._", ""]
+    import datetime as dt
+    cutoff = (dt.date.today() - dt.timedelta(days=days)).isoformat()
+    items = []
+    for p in reg["projects"]:
+        ns = p.get("note_summary") or {}
+        for ln in ns.get("sessions", []):
+            if ln[:10] >= cutoff:
+                items.append((ln[:16], f"**{p['id']}** · {ln[17:] if len(ln) > 17 else ln}"))
+    for ln in ops_log(200):
+        if ln[:10] >= cutoff:
+            items.append((ln[:16], ln[19:] if len(ln) > 19 else ln))
+    if not items:
+        return "\n".join(out + ["No activity recorded yet."])
+    day = None
+    for ts, text in sorted(items, reverse=True):
+        if ts[:10] != day:
+            day = ts[:10]
+            out += ["", f"## {day}", ""]
+        out.append(f"- {ts[11:16]} · {text}")
+    return "\n".join(out).rstrip()
+
+
 def write_outputs(reg: dict) -> list:
     changed = []
     HANDOFF.mkdir(parents=True, exist_ok=True)
     for p in reg["projects"]:
         if update_note(p):
             changed.append(p["note"])
+    write_if_changed(HANDOFF / "TASKS.md", render_tasks(reg) + "\n") and changed.append("TASKS.md")
+    write_if_changed(HANDOFF / "ACTIVITY.md", render_activity(reg) + "\n") and changed.append("ACTIVITY.md")
     old = read_json(HANDOFF / "registry.json", {}) or {}
     strip = lambda r: {k: v for k, v in r.items() if k != "generated"}  # noqa: E731
     if strip(old) != strip(json.loads(json.dumps(reg))):

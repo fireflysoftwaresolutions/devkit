@@ -1,5 +1,5 @@
 ---
-name: devkit-delivery
+name: delivery
 description: Local-first GitOps delivery — integrate related branches or PRs on one local integration/release branch, run exactly what CI runs locally, push once and get a single CI run, fix CI failures by reproducing them locally, then release and verify. Use whenever you are about to push, open or merge PRs, combine several branches, cut a release, or when CI is failing.
 ---
 

@@ -36,23 +36,46 @@ def load_conf(name: str):
     return json.loads(render((CONF / name).read_text()))
 
 
-def backup(path: Path):
+def backup(path: Path, keep: int = 10):
+    """Timestamped copy in ~/.local/state/devkit/backups; keeps the newest `keep` per file."""
     if path.exists():
         d = STATE / "backups"
         d.mkdir(parents=True, exist_ok=True)
         shutil.copy2(path, d / f"{path.name}.{time.strftime('%Y%m%d-%H%M%S')}")
+        olds = sorted(d.glob(f"{path.name}.*"))
+        for o in olds[:-keep]:
+            o.unlink()
+
+
+_QUIET = [False]
+
+
+class quiet_mode:
+    """`with quiet_mode(True):` silences step/done/note output (used by `dev config repair` and hooks)."""
+
+    def __init__(self, on=True):
+        self.on, self.prev = on, None
+
+    def __enter__(self):
+        self.prev, _QUIET[0] = _QUIET[0], self.on
+
+    def __exit__(self, *exc):
+        _QUIET[0] = self.prev
 
 
 def step(title):
-    print(f"\n{ui.bold(ui.cyan('▸'))} {ui.bold(title)}")
+    if not _QUIET[0]:
+        print(f"\n{ui.bold(ui.cyan('▸'))} {ui.bold(title)}")
 
 
 def done(msg):
-    print(f"  {ui.OK} {msg}")
+    if not _QUIET[0]:
+        print(f"  {ui.OK} {msg}")
 
 
 def note(msg):
-    print(f"  {ui.WARN} {msg}")
+    if not _QUIET[0]:
+        print(f"  {ui.WARN} {msg}")
 
 
 def fail(msg):
@@ -122,7 +145,12 @@ def install_cli():
     done(f"{tilde(ZSHRC)} sources shell/devkit.zsh (dcd, dwt, completion, Docker env)")
 
 
-def setup_git():
+def setup_git(quiet=False):
+    with quiet_mode(quiet):
+        _setup_git()
+
+
+def _setup_git():
     step("Git identity from GitHub CLI")
     f = STATE / "cache" / "gh-user.json"
     if f.exists():
@@ -165,8 +193,9 @@ def setup_handoff():
             for f in tpl.iterdir():
                 if not (HANDOFF / f.name).exists():
                     shutil.copy2(f, HANDOFF / f.name)
-            (HANDOFF / "projects").mkdir(exist_ok=True)
-            (HANDOFF / "log").mkdir(exist_ok=True)
+            for d in ("projects", "log", "plans"):
+                (HANDOFF / d).mkdir(exist_ok=True)
+                (HANDOFF / d / ".gitkeep").touch()
             if rc != 0:
                 rc2, out, err = sh(["gh", "repo", "create", repo, "--private", "--description",
                                     "Personal map of active projects, handoff notes and activity (managed by devkit)"],
@@ -188,24 +217,30 @@ def setup_handoff():
         done(f"present · origin {remote or 'none'}")
 
 
-def write_agent_instructions():
-    step("Global agent instructions (Claude CLAUDE.md, Codex AGENTS.md)")
+def render_instructions() -> str:
     base = (DEVKIT_HOME / "agents" / "AGENTS.md").read_text()
     personal_f = CONFIG_FILE.parent / "AGENTS.personal.md"
     personal = personal_f.read_text() if personal_f.exists() else ""
     header = (f"{GENERATED_MARK} {core.VERSION} from {tilde(DEVKIT_HOME)}/agents/AGENTS.md"
               f"{' + ' + tilde(personal_f) if personal else ''}; edit those and run `dev install` -->\n")
-    text = header + render(base) + ("\n\n## Personal additions\n\n" + personal if personal else "")
-    for target in (CLAUDE_HOME / "CLAUDE.md", CODEX_HOME / "AGENTS.md"):
-        target.parent.mkdir(parents=True, exist_ok=True)
-        if target.is_symlink():
-            target.unlink()
-        if target.exists() and GENERATED_MARK not in target.read_text()[:200] and target.read_text().strip():
-            backup(target)
-            note(f"existing {tilde(target)} backed up to {tilde(STATE / 'backups')} — move personal rules to "
-                 f"{tilde(personal_f)}")
-        core.write_if_changed(target, text)
-        done(f"{tilde(target)}")
+    return header + render(base) + ("\n\n## Personal additions\n\n" + personal if personal else "")
+
+
+def write_agent_instructions(quiet=False):
+    with quiet_mode(quiet):
+        step("Global agent instructions (Claude CLAUDE.md, Codex AGENTS.md)")
+        text = render_instructions()
+        personal_f = CONFIG_FILE.parent / "AGENTS.personal.md"
+        for target in (CLAUDE_HOME / "CLAUDE.md", CODEX_HOME / "AGENTS.md"):
+            target.parent.mkdir(parents=True, exist_ok=True)
+            if target.is_symlink():
+                target.unlink()
+            if target.exists() and GENERATED_MARK not in target.read_text()[:200] and target.read_text().strip():
+                backup(target)
+                note(f"existing {tilde(target)} backed up to {tilde(STATE / 'backups')} — move personal rules to "
+                     f"{tilde(personal_f)}")
+            core.write_if_changed(target, text)
+            done(f"{tilde(target)}")
 
 
 def _fetch_source(src: dict) -> Path:
@@ -233,7 +268,12 @@ def _fetch_source(src: dict) -> Path:
     return dest
 
 
-def install_skills():
+def install_skills(quiet=False):
+    with quiet_mode(quiet):
+        _install_skills()
+
+
+def _install_skills():
     step("Skills (shared by Claude Code and Codex)")
     manifest = load_conf("skills.json")
     wanted = {}  # name -> directory to link
@@ -280,30 +320,54 @@ def install_skills():
     print("    " + ui.dim(", ".join(sorted(wanted))))
 
 
-def setup_claude():
-    step("Claude Code (CLI + Desktop): settings, hooks, plugins, MCP")
+def write_claude_settings(include_hooks=True):
+    """Merge devkit's managed keys into ~/.claude/settings.json (other keys untouched)."""
     f = CLAUDE_HOME / "settings.json"
     cur = read_json(f, {}) or {}
     frag = load_conf("claude/settings.json")
     plugins = load_conf("claude/plugins.json")
-    backup(f)
     new = core.deep_merge(cur, {k: v for k, v in frag.items() if k != "hooks"})
-    new["hooks"] = merge_hooks(cur.get("hooks") or {}, frag.get("hooks") or {})
+    new["hooks"] = merge_hooks(cur.get("hooks") or {}, frag.get("hooks") or {} if include_hooks else {})
+    if not new["hooks"]:
+        new.pop("hooks")
     ep = dict(new.get("enabledPlugins") or {})
     for p in plugins["plugins"]:
         ep[p] = True
     for p in plugins.get("disabled", []):
         ep[p] = False
     new["enabledPlugins"] = ep
-    f.write_text(json.dumps(new, indent=2, ensure_ascii=False) + "\n")
-    done("settings.json: bypassPermissions by default, no attribution, hooks (SessionStart/Stop/SessionEnd/PreToolUse)")
+    if new != cur:
+        backup(f)
+        f.parent.mkdir(parents=True, exist_ok=True)
+        tmp = f.with_suffix(".json.devkit-tmp")
+        tmp.write_text(json.dumps(new, indent=2, ensure_ascii=False) + "\n")
+        os.replace(tmp, f)
+    return new != cur
+
+
+def setup_claude():
+    step("Claude Code (CLI + Desktop): settings, hooks, plugins, MCP")
+    from . import policy
+    locked = policy.lock_status() != "off"
+    write_claude_settings(include_hooks=not locked)
+    plugins = load_conf("claude/plugins.json")
+    done("settings.json: bypassPermissions by default, no attribution, hooks (SessionStart/Stop/SessionEnd/"
+         "PreToolUse/ConfigChange/InstructionsLoaded)" + (" — hooks served by the managed lock" if locked else ""))
+    if locked and policy.lock_status() == "stale":
+        note("the managed-settings lock is older than this configuration — run `dev config lock` to refresh it")
     if not core.have("claude"):
         fail("claude CLI not found — install Claude Code, then re-run `dev install`")
         return
     for name, src in plugins.get("marketplaces", {}).items():
         rc, out, _ = sh(["claude", "plugin", "marketplace", "list"], timeout=60)
-        if name not in out:
-            sh(["claude", "plugin", "marketplace", "add", src], timeout=180)
+        block = next((b for b in re.split(r"\n\s*(?=❯ )", out) if b.strip().lstrip("❯ ").startswith(name + "\n")
+                      or b.strip().lstrip("❯ ").split("\n")[0].strip() == name), "")
+        if block and src.startswith("/") and src not in block:  # local marketplace registered at an old path
+            sh(["claude", "plugin", "marketplace", "remove", name], timeout=60)
+            block = ""
+        if not block:
+            rc, o, e = sh(["claude", "plugin", "marketplace", "add", src], timeout=180)
+            done(f"marketplace {name} added") if rc == 0 else fail(f"marketplace {name}: {(e or o)[-200:]}")
     sh(["claude", "plugin", "marketplace", "update"], timeout=300)
     _, listed, _ = sh(["claude", "plugin", "list"], timeout=60)
     for p in plugins["plugins"]:
@@ -311,7 +375,9 @@ def setup_claude():
             continue
         rc, out, err = sh(["claude", "plugin", "install", p, "-s", "user", "-y"], timeout=300)
         done(f"installed {p}") if rc == 0 else fail(f"{p}: {(err or out)[-200:]}")
-    done(f"{len(plugins['plugins'])} plugins installed and enabled")
+    sh(["claude", "plugin", "marketplace", "update", "firefly-devkit"], timeout=120)
+    rc, out, err = sh(["claude", "plugin", "update", "devkit@firefly-devkit"], timeout=120)
+    done(f"{len(plugins['plugins'])} plugins installed and enabled (devkit plugin refreshed to {core.VERSION})")
     for name, spec in plugins.get("mcp", {}).items():
         rc, _, _ = sh(["claude", "mcp", "get", name], timeout=30)
         if rc == 0:
@@ -324,48 +390,67 @@ def setup_claude():
         done(f"MCP {name}") if rc == 0 else fail(f"MCP {name}: {err or out}")
 
 
+def write_codex_config(quiet=False):
+    """hooks.json + managed config.toml keys (through Codex's API) + hook trust. No plugin installs."""
+    from .codexrpc import CodexError, CodexRPC
+    with quiet_mode(quiet):
+        conf = load_conf("codex/config.json")
+        plugins = load_conf("codex/plugins.json")
+        hooks_f = CODEX_HOME / "hooks.json"
+        cur = (read_json(hooks_f, {}) or {}).get("hooks", {})
+        ours = load_conf("codex/hooks.json")["hooks"]
+        merged = {"hooks": merge_hooks(cur, ours)}
+        if (read_json(hooks_f, {}) or {}) != merged:
+            backup(hooks_f)
+            hooks_f.write_text(json.dumps(merged, indent=2) + "\n")
+        done(f"{tilde(hooks_f)}: SessionStart / PreToolUse / Stop / SessionEnd")
+        projects = {str(DEV): {"trust_level": "trusted"}}
+        from . import registry
+        mains, _, _ = registry.discover()
+        for m in mains:
+            projects[str(m)] = {"trust_level": "trusted"}
+        try:
+            with CodexRPC() as rpc:
+                edits = [(k, v, "replace") for k, v in conf["settings"].items()]
+                edits += [("projects", projects, "upsert")]
+                for k, v in conf.get("upsert", {}).items():
+                    edits.append((k, v, "upsert"))
+                edits.append(("mcp_servers", plugins.get("mcp", {}), "upsert"))
+                backup(CODEX_HOME / "config.toml")
+                rpc.write(edits)
+                done("config.toml: " + ", ".join(f"{k}={v}" for k, v in conf["settings"].items()))
+                done(f"trusted {len(projects)} project roots · MCP: {', '.join(plugins.get('mcp', {})) or 'none'}")
+                n = rpc.trust_hooks(core.HOME, hooks_f)
+                status = [h.get("trustStatus") for h in rpc.hooks(core.HOME) if str(h.get("sourcePath")) == str(hooks_f)]
+                if status and all(x == "trusted" for x in status):
+                    done(f"devkit hooks trusted ({len(status)}{', ' + str(n) + ' newly' if n else ''})")
+                else:
+                    fail(f"hook trust status: {status} — open Codex and review them with /hooks")
+        except CodexError as e:
+            fail(f"codex app-server: {e}")
+
+
 def setup_codex():
     step("Codex (CLI + ChatGPT app): settings, hooks, plugins, MCP")
     if not core.have("codex"):
-        fail("codex CLI not found — `brew install codex`, then re-run `dev install`")
+        fail("codex CLI not found — `brew install --cask codex`, then re-run `dev install`")
         return
-    from .codexrpc import CodexError, CodexRPC
-    conf = load_conf("codex/config.json")
+    write_codex_config()
     plugins = load_conf("codex/plugins.json")
-    backup(CODEX_HOME / "config.toml")
-    hooks_f = CODEX_HOME / "hooks.json"
-    cur = (read_json(hooks_f, {}) or {}).get("hooks", {})
-    ours = load_conf("codex/hooks.json")["hooks"]
-    backup(hooks_f)
-    hooks_f.write_text(json.dumps({"hooks": merge_hooks(cur, ours)}, indent=2) + "\n")
-    done(f"{tilde(hooks_f)}: SessionStart / PreToolUse / Stop / SessionEnd")
-    projects = {str(DEV): {"trust_level": "trusted"}}
-    from . import registry
-    mains, _, _ = registry.discover()
-    for m in mains:
-        projects[str(m)] = {"trust_level": "trusted"}
-    try:
-        with CodexRPC() as rpc:
-            edits = [(k, v, "replace") for k, v in conf["settings"].items()]
-            edits += [("projects", projects, "upsert")]
-            for k, v in conf.get("upsert", {}).items():
-                edits.append((k, v, "upsert"))
-            edits.append(("mcp_servers", plugins.get("mcp", {}), "upsert"))
-            rpc.write(edits)
-            done("config.toml: " + ", ".join(f"{k}={v}" for k, v in conf["settings"].items()))
-            done(f"trusted {len(projects)} project roots · MCP: {', '.join(plugins.get('mcp', {})) or 'none'}")
-            n = rpc.trust_hooks(HOME, hooks_f)
-            status = [h.get("trustStatus") for h in rpc.hooks(HOME) if str(h.get("sourcePath")) == str(hooks_f)]
-            if status and all(s == "trusted" for s in status):
-                done(f"devkit hooks trusted ({len(status)}{', ' + str(n) + ' newly' if n else ''})")
-            else:
-                fail(f"hook trust status: {status} — open Codex and review them with /hooks")
-    except CodexError as e:
-        fail(f"codex app-server: {e}")
+    _, mk, _ = sh(["codex", "plugin", "marketplace", "list"], timeout=60)
+    for name, src in plugins.get("marketplaces", {}).items():
+        row = next((ln for ln in mk.splitlines() if ln.split()[:1] == [name]), "")
+        if row and src.startswith("/") and src not in row:  # local marketplace registered at an old path
+            sh(["codex", "plugin", "marketplace", "remove", name], timeout=60)
+            row = ""
+        if not row:
+            rc, out, err = sh(["codex", "plugin", "marketplace", "add", src], timeout=180)
+            done(f"marketplace {name} added") if rc == 0 else fail(f"marketplace {name}: {(err or out)[-200:]}")
     _, listed, _ = sh(["codex", "plugin", "list"], timeout=120)
     for p in plugins["plugins"]:
         line = next((ln for ln in listed.splitlines() if ln.startswith(p + " ")), "")
-        if "installed, enabled" in line:
+        current = p.endswith("@firefly-devkit") and core.VERSION in line
+        if "installed, enabled" in line and (current or not p.endswith("@firefly-devkit")):
             continue
         rc, out, err = sh(["codex", "plugin", "add", p], timeout=300)
         done(f"installed {p}") if rc == 0 else fail(f"{p}: {(err or out)[-200:]}")
@@ -387,6 +472,9 @@ def setup_docker():
     rc, out, _ = sh(["docker", "compose", "version"], timeout=20)
     done(f"docker compose/buildx plugins: {out or 'not found'}") if rc == 0 else note("docker compose not found")
     d = CFG["docker"]
+    if d.get("autostart"):
+        rc, _, err = sh(["brew", "services", "start", "colima"], timeout=120)
+        done("Colima starts at login (brew services)") if rc == 0 else note(f"brew services start colima: {err}")
     done(f"`dev docker up` starts Colima ({d['cpu']} CPU, {d['memory']} GB RAM, {d['disk']} GB disk, "
          f"{d['vm_type']}{' + rosetta' if d.get('rosetta') else ''}, {d['mount_type']})")
 
@@ -546,6 +634,9 @@ def doctor() -> int:
         check("Codex", "plugins", not bad, f"{len(wantp) - len(bad)}/{len(wantp)} enabled" +
               (f"; missing: {', '.join(bad)}" if bad else ""), "dev install --only codex")
 
+    from .cli import plugin_checks
+    for name, ok, detail in plugin_checks():
+        check("Plugin", name, ok, detail if isinstance(detail, str) else " ".join(detail), "dev plugin validate")
     rc, out, _ = sh(["colima", "status"], timeout=20)
     check("Docker", "colima VM", rc == 0, "running" if rc == 0 else "stopped", "dev docker up")
     rc, out, _ = sh(["docker", "compose", "version", "--short"], timeout=20)

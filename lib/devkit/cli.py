@@ -25,10 +25,17 @@ COMMANDS = [
         ("adopt <path>", "Move a misplaced repo into the canonical layout (fixes worktrees + agent history)"),
         ("open [query]", "Open a project in your editor"),
     ]),
+    ("Portfolio", [
+        ("dashboard", "Open the HTML command centre: projects, tasks, activity, explorer, health"),
+        ("overview [--json]", "Portfolio digest for you and your agents: status, Now tasks, last sessions"),
+        ("standup [--days N]", "What happened in the last N days and what is in progress"),
+        ("task [add|start|done|ls]", "Project tasks (Now / Next / Later / Done) in the handoff note"),
+        ("note set k=v …", "Project status, priority, milestone, due date, tags"),
+    ]),
     ("Agents", [
         ("claude [query] [-w branch]", "Start Claude Code in a project (optionally in its own worktree)"),
         ("codex [query] [-w branch]", "Start Codex in a project (optionally in its own worktree)"),
-        ("handoff [query] [--edit]", "Show or edit the project's handoff note"),
+        ("handoff [query] [--edit|--log …]", "Show, edit or append to the project's handoff note"),
     ]),
     ("Worktrees", [
         ("wt new <branch>", "Create a managed worktree in ~/Development/.worktrees/<owner>/<repo>/<branch>"),
@@ -46,6 +53,9 @@ COMMANDS = [
     ]),
     ("Environment", [
         ("doctor", "Verify the whole setup (git, gh, Claude, Codex, skills, Docker, automation)"),
+        ("config diff|repair|lock|…", "Preview and enforce the agent settings devkit manages"),
+        ("guard check <cmd>|--write p", "Simulate what the guard decides for a command or a file write"),
+        ("plugin validate", "Validate the devkit plugin with Claude Code's validator and Codex's parser"),
         ("install [--only step]", "Apply the devkit configuration (idempotent)"),
         ("update", "Pull the latest devkit and re-apply it"),
         ("docker up|down|status|prune", "Run Docker on a Colima VM"),
@@ -125,7 +135,7 @@ def print_help():
     print(f"  {ui.dim(COPYRIGHT)}\n")
 
 
-def cmd_dashboard(a):
+def cmd_home(a):
     print(ui.banner(tilde(DEV)))
     print(f"  {ui.bold(ui.greeting(core.gh_user().get('name', '')))} {ui.dim('Here is your workspace.')}")
     reg = _reg(prs=True)
@@ -207,7 +217,7 @@ def cmd_status(a):
     reg = _reg(prs=True)
     p, w = registry.project_for_cwd(reg, os.getcwd()) if not a.query else (_resolve(reg, a.query), None)
     if not p:
-        return cmd_dashboard(a)
+        return cmd_home(a)
     _print_status(p, w)
     mine = [m for k, m in reg["issues"] if p["id"] in m or tilde(p["path"]) in m]
     if mine:
@@ -378,7 +388,11 @@ def cmd_handoff(a):
     p = _resolve(reg, a.query)
     f = core.note_path(p["id"])
     registry.update_note(p)
-    if a.path:
+    if a.log:
+        from . import registry as _r
+        _r.add_session_line(p["id"], f"{core.fmt_ts(time.time())} · {a.agent} · {a.log}", f"m{int(time.time())}")
+        print(f"{ui.OK} logged in {tilde(f)}")
+    elif a.path:
         print(f)
     elif a.edit:
         editor = os.environ.get("EDITOR") or CFG.get("editor") or "vi"
@@ -575,7 +589,10 @@ def cmd_gc(a):
         if pl["actions"]:
             print(f"\n  {ui.dim('dry run — `dev gc --apply` reclaims it')}")
         return 0
-    if not a.yes and sys.stdin.isatty():
+    if not a.yes:
+        if not sys.stdin.isatty():
+            ui.err("non-interactive: pass --yes to apply")
+            return 2
         if input(f"\n  Apply {len(pl['actions'])} action(s)? [y/N] ").strip().lower() not in ("y", "yes"):
             return 1
     print(ui.section("Applying"))
@@ -702,6 +719,316 @@ def cmd_canary(a):
     return 0
 
 
+def _note_project(a):
+    reg = _reg(prs=False)
+    p = _resolve(reg, getattr(a, "project", None))
+    f = core.note_path(p["id"])
+    registry.update_note(p)
+    return p, f
+
+
+def cmd_task(a):
+    from . import notes
+    p, f = _note_project(a)
+    text = f.read_text()
+    try:
+        if a.task_cmd == "add":
+            bucket = "Now" if a.now else "Later" if a.later else "Next"
+            text = notes.add_task(text, " ".join(a.text), bucket)
+            msg = f"added to {bucket}"
+        elif a.task_cmd in ("done", "start", "next", "later"):
+            bucket = {"start": "Now", "next": "Next", "later": "Later"}.get(a.task_cmd, "Done")
+            text = notes.move_task(text, " ".join(a.selector), bucket, done=a.task_cmd == "done")
+            text = notes.prune_done(text)
+            msg = "done" if a.task_cmd == "done" else f"moved to {bucket}"
+        else:
+            msg = None
+    except ValueError as e:
+        ui.err(str(e))
+        return 2
+    if msg:
+        with core.Lock("notes", wait=30):
+            core.write_if_changed(f, text)
+        print(f"{ui.OK} {p['id']}: {msg}")
+    ts = notes.tasks(f.read_text())
+    if a.task_cmd in (None, "ls") or msg:
+        print(ui.section(f"{p['id']} · tasks"))
+        for b in notes.BUCKETS:
+            items = [t for t in ts if t["bucket"] == b]
+            if b == "Done":
+                items = items[:5] if not getattr(a, "all", False) else items
+            if not items:
+                continue
+            print(f"  {ui.bold(b)}")
+            for t in items:
+                mark = ui.green("✓") if t["done"] else ui.cyan(str(t.get("index")).rjust(2))
+                print(f"   {mark} {t['text']}")
+        if not ts:
+            hint = 'no tasks yet — dev task add "…" --now'
+            print(f"  {ui.dim(hint)}")
+    return 0
+
+
+def cmd_note(a):
+    from . import notes
+    p, f = _note_project(a)
+    kv = {}
+    for item in a.pairs:
+        if "=" not in item:
+            ui.err(f"expected key=value, got “{item}” (keys: {', '.join(notes.META_KEYS)})")
+            return 2
+        k, v = item.split("=", 1)
+        if k not in notes.META_KEYS:
+            ui.err(f"unknown key “{k}” (keys: {', '.join(notes.META_KEYS)})")
+            return 2
+        kv[k] = v
+    try:
+        text = notes.set_meta(f.read_text(), **kv)
+    except ValueError as e:
+        ui.err(str(e))
+        return 2
+    with core.Lock("notes", wait=30):
+        core.write_if_changed(f, text)
+    meta, _ = notes.split_frontmatter(text)
+    print(f"{ui.OK} {p['id']}: " + " · ".join(f"{k} {v}" for k, v in meta.items() if v))
+    return 0
+
+
+def overview_data(days=7):
+    reg = core.read_json(HANDOFF / "registry.json", None) or _reg(prs=False)
+    from . import canary
+    import datetime as dt
+    since = (dt.date.today() - dt.timedelta(days=days)).isoformat()
+    out = []
+    for p in reg["projects"]:
+        ns = p.get("note_summary") or {}
+        commits = sum(v for k, v in (p.get("activity") or {}).items() if k >= since)
+        live = sum(1 for w in p.get("worktrees", []) if w.get("active")) + (1 if (p.get("main") or {}).get("active") else 0)
+        out.append({"id": p["id"], "status": ns.get("status", "active"), "priority": ns.get("priority", "normal"),
+                    "milestone": ns.get("milestone"), "due": ns.get("due"), "purpose": (ns.get("purpose") or "")[:160],
+                    "now": (ns.get("tasks") or {}).get("now", []), "open_tasks": (ns.get("tasks") or {}).get("open", 0),
+                    "last_session": (ns.get("sessions") or [None])[0], "status_line": p.get("status_line"),
+                    "branch": (p.get("main") or {}).get("branch"), "open_prs": len(p.get("prs_open", [])),
+                    "worktrees": len(p.get("worktrees", [])), "live_sessions": live, f"commits_{days}d": commits,
+                    "last_activity": p.get("last_activity"), "path": p["path"]})
+    order = {"blocked": 0, "active": 1, "paused": 2, "done": 3, "archived": 4}
+    out.sort(key=lambda x: (order.get(x["status"], 9), x["priority"] != "high", -(x["last_activity"] or 0)))
+    return {"generated": reg.get("generated"), "days": days, "projects": out, "issues": reg.get("issues", []),
+            "canary": canary.summary_line(7)}
+
+
+def cmd_overview(a):
+    data = overview_data(a.days)
+    if a.json:
+        print(json.dumps(data, indent=1, ensure_ascii=False))
+        return 0
+    print(ui.section(f"Portfolio · {len(data['projects'])} projects · canary {data['canary']}"))
+    for x in data["projects"]:
+        if x["status"] in ("archived",) and not a.all:
+            continue
+        badge = {"active": ui.green, "blocked": ui.red, "paused": ui.yellow}.get(x["status"], ui.dim)(x["status"])
+        pr = ui.yellow(" !high") if x["priority"] == "high" else ""
+        live = f" {ui.ACTIVE} {x['live_sessions']} live" if x["live_sessions"] else ""
+        print(f"\n  {ui.bold(x['id'])}  {badge}{pr}{live}  {ui.dim(ago(x['last_activity']))}")
+        if x["purpose"]:
+            print(f"    {ui.dim(x['purpose'])}")
+        if x["status_line"]:
+            print(f"    {ui.cyan('◆')} {x['status_line']['line']}  {ui.dim(x['status_line']['agent'] + ' · ' + ago(x['status_line']['ts']))}")
+        for t in x["now"][:3]:
+            print(f"    {ui.cyan('▸')} {t}")
+        if x["open_tasks"] > len(x["now"][:3]):
+            print(f"    {ui.dim(str(x['open_tasks']) + ' open task(s) — dev task -p ' + x['id'])}")
+        if x["last_session"]:
+            print(f"    {ui.dim('last: ' + x['last_session'][:140])}")
+    if data["issues"]:
+        print(ui.section(f"Needs attention ({len(data['issues'])})"))
+        for _, m in data["issues"][:8]:
+            print(f"  {ui.WARN} {m}")
+    print()
+    return 0
+
+
+def cmd_standup(a):
+    import datetime as dt
+    since = (dt.datetime.now() - dt.timedelta(days=a.days)).strftime("%Y-%m-%d %H:%M")
+    reg = _reg(prs=False)
+    print(ui.section(f"Standup · since {since}"))
+    any_ = False
+    for p in reg["projects"]:
+        ns = p.get("note_summary") or {}
+        sess = [s for s in ns.get("sessions", []) if s[:16] >= since]
+        done = [t for t in (ns.get("tasks") or {}).get("done_recent", []) if t[-10:] >= since[:10]]
+        now = (ns.get("tasks") or {}).get("now", [])
+        commits = core.gitout(p["path"], "log", "--all", f"--since={a.days}.days", "--author",
+                              core.sh(["git", "config", "user.email"])[1] or ".", "--format=%s").splitlines() \
+            if p.get("main") else []
+        if not (sess or done or commits):
+            continue
+        any_ = True
+        print(f"\n  {ui.bold(p['id'])}")
+        if done:
+            print("    " + ui.green("done: ") + "; ".join(t.rsplit(" ✓", 1)[0] for t in done))
+        if commits:
+            print(f"    {ui.dim(str(len(commits)) + ' commit(s):')} " + "; ".join(commits[:4]) + (" …" if len(commits) > 4 else ""))
+        for s_ in sess[:4]:
+            print(f"    {ui.dim('session')} {s_[11:160]}")
+        if now:
+            print("    " + ui.cyan("now: ") + "; ".join(now[:3]))
+    if not any_:
+        print(f"  {ui.dim('nothing recorded in this window')}")
+    print()
+    return 0
+
+
+def cmd_dashboard(a):
+    try:
+        from . import dashboard
+    except ImportError:
+        ui.err("the HTML dashboard module is not installed in this devkit version")
+        return 1
+    reg = _reg(prs=True)
+    path = dashboard.write(reg)
+    if a.path or a.no_open:
+        print(path)
+    if not a.no_open and not a.path:
+        dashboard.open_in_browser(path)
+        print(f"{ui.OK} dashboard → {tilde(path)}")
+    return 0
+
+
+def cmd_config(a):
+    from . import policy, setup
+    act = a.config_cmd or "diff"
+    if act == "show":
+        print(json.dumps({"config_file": str(core.CONFIG_FILE), "devkit": str(core.DEVKIT_HOME),
+                          "effective": CFG}, indent=2, ensure_ascii=False))
+        return 0
+    if act == "validate":
+        return _config_validate()
+    if act == "edit":
+        editor = os.environ.get("EDITOR") or CFG.get("editor") or "vi"
+        os.spawnvp(os.P_WAIT, editor, [editor, str(core.CONFIG_FILE)])
+        if _config_validate() != 0:
+            return 2
+        print(f"{ui.ARROW} run `dev config diff` to preview, `dev install` to apply")
+        return 0
+    if act == "lock":
+        print(f"{ui.ARROW} installing {policy.MANAGED_FILE} (admin password required)")
+        rc = policy.lock()
+        print(f"{ui.OK} Claude Code settings locked: user settings can no longer override devkit's keys" if rc == 0
+              else f"{ui.FAIL} lock failed")
+        return rc
+    if act == "unlock":
+        rc = policy.unlock()
+        print(f"{ui.OK} lock removed" if rc == 0 else f"{ui.FAIL} unlock failed")
+        return rc
+    if act == "repair":
+        with setup.quiet_mode(True):
+            fixed = policy.repair()
+        if not a.quiet:
+            print(f"{ui.OK} restored {len(fixed)} setting(s)" if fixed else f"{ui.OK} nothing to repair")
+            for d in fixed:
+                print(f"    {d.target:<12} {d.key}")
+        return 0
+    if act == "status":
+        print(ui.kv("lock", policy.lock_status(), 10))
+        log = STATE / "logs" / "config.log"
+        if log.exists():
+            print(ui.section("Recent config events"))
+            print("\n".join("  " + ln for ln in log.read_text().splitlines()[-15:]))
+        return 0
+    drift = policy.diff()
+    print(ui.section("devkit-managed settings: desired (devkit config) vs installed"))
+    if not drift:
+        print(f"  {ui.OK} everything matches · lock {policy.lock_status()}")
+        return 0
+    cur_t = None
+    for d in drift:
+        if d.target != cur_t:
+            cur_t = d.target
+            print(f"\n  {ui.bold(cur_t)}")
+        cur = ui.dim("missing") if d.current is policy.MISSING else ui.red(json.dumps(d.current, ensure_ascii=False)[:60])
+        print(f"   {ui.yellow('~')} {d.key:<48} {cur} {ui.ARROW} {ui.green(json.dumps(d.desired, ensure_ascii=False)[:60])}")
+    print(f"\n  {ui.dim(f'{len(drift)} difference(s) — `dev config repair` restores them; edits belong in devkit config')}")
+    return 1
+
+
+def _config_validate() -> int:
+    from .core import DEFAULTS
+    errors = []
+    cfg = core.read_json(core.CONFIG_FILE, None)
+    if cfg is None and core.CONFIG_FILE.exists():
+        errors.append(f"{tilde(core.CONFIG_FILE)} is not valid JSON")
+    for k in (cfg or {}):
+        if k not in DEFAULTS and k not in ("default_host", "host_dirs", "branches", "handoff"):
+            errors.append(f"unknown key “{k}” in {tilde(core.CONFIG_FILE)}")
+    for k, v in (cfg or {}).items():
+        if k in DEFAULTS and isinstance(DEFAULTS[k], dict) and not isinstance(v, dict):
+            errors.append(f"“{k}” must be an object")
+    for rel in ("claude/settings.json", "claude/plugins.json", "codex/config.json", "codex/hooks.json",
+                "codex/plugins.json", "skills.json"):
+        try:
+            json.loads((core.DEVKIT_HOME / "config" / rel).read_text())
+        except (OSError, ValueError) as e:
+            errors.append(f"config/{rel}: {e}")
+    for e in errors:
+        print(f"  {ui.FAIL} {e}")
+    if not errors:
+        print(f"  {ui.OK} configuration is valid")
+    return 1 if errors else 0
+
+
+def cmd_guard(a):
+    from . import guard as g
+    cwd = os.path.abspath(a.cwd or os.getcwd())
+    if a.write:
+        tool, ti = "Write", {"file_path": a.write}
+    else:
+        tool, ti = "Bash", {"command": " ".join(a.command)}
+    v = g.check(tool, ti, cwd, a.agent)
+    if not v:
+        print(f"{ui.OK} allow   ({a.agent}, cwd {tilde(cwd)})")
+        return 0
+    color = ui.yellow if v[0] == "ask" else ui.red
+    print(f"{color(v[0])}   ({a.agent}, cwd {tilde(cwd)})\n  {v[1]}")
+    return 1
+
+
+def plugin_checks():
+    """Validate the devkit plugin with Claude Code's validator and Codex's own manifest parser. -> [(name, ok, detail)]"""
+    root = core.DEVKIT_HOME
+    out = []
+    if core.have("claude"):
+        rc, o, e = core.sh(["claude", "plugin", "validate", str(root / "plugin")], timeout=120)
+        out.append(("Claude Code validator", rc == 0 and "Validation passed" in o + e,
+                    "validation passed" if rc == 0 else (o + e).strip().splitlines()[-1:] or ["failed"]))
+    if core.have("codex"):
+        from .codexrpc import CodexError, CodexRPC
+        try:
+            with CodexRPC(timeout=40) as rpc:
+                for mp in (".agents/plugins/marketplace.json", ".claude-plugin/marketplace.json"):
+                    r = rpc.call("plugin/read", {"marketplacePath": str(root / mp), "pluginName": "devkit"})
+                    p = r.get("plugin") or {}
+                    sm = p.get("summary") or {}
+                    itf = sm.get("interface") or {}
+                    skills = [x.get("name") for x in (p.get("skills") or [])]
+                    ok = (sm.get("version") or sm.get("localVersion")) == core.VERSION and itf.get("logo") and len(skills) >= 4
+                    out.append((f"Codex parser ({mp.split('/')[0]})", bool(ok),
+                                f"v{sm.get('version') or sm.get('localVersion')} · {itf.get('displayName')} · "
+                                f"{len(skills)} skills · logo {'ok' if itf.get('logo') else 'missing'}"))
+        except CodexError as e:
+            out.append(("Codex parser", False, str(e)))
+    return out
+
+
+def cmd_plugin(a):
+    res = plugin_checks()
+    for name, ok, detail in res:
+        detail = detail if isinstance(detail, str) else " ".join(detail)
+        print(f"  {ui.OK if ok else ui.FAIL} {name:<34} {ui.dim(detail)}")
+    return 0 if res and all(ok for _, ok, _ in res) else 1
+
+
 def cmd_version(a):
     print(f"devkit {core.VERSION} · {tilde(core.DEVKIT_HOME)}\n{COPYRIGHT}")
     return 0
@@ -761,6 +1088,44 @@ def build_parser():
     p.add_argument("query", nargs="?")
     p.add_argument("--edit", action="store_true")
     p.add_argument("--path", action="store_true")
+    p.add_argument("--log", metavar="TEXT", help="append a line to the session log")
+    p.add_argument("--agent", default="human", help="who is logging (human, claude, codex)")
+    p = add("task", cmd_task, "Project tasks in the handoff note")
+    p.add_argument("-p", "--project", help="project (default: the one you are in)")
+    p.add_argument("--all", action="store_true", help="show every Done task")
+    tsp = p.add_subparsers(dest="task_cmd")
+    t = tsp.add_parser("add", help="add a task")
+    t.add_argument("text", nargs="+")
+    t.add_argument("--now", action="store_true")
+    t.add_argument("--later", action="store_true")
+    for verb, h in (("start", "move to Now"), ("done", "mark done"), ("next", "move to Next"), ("later", "move to Later")):
+        t = tsp.add_parser(verb, help=h)
+        t.add_argument("selector", nargs="+", help="task number from `dev task` or a unique part of its text")
+    tsp.add_parser("ls", help="list tasks")
+    p = add("note", cmd_note, "Project metadata in the handoff note")
+    p.add_argument("set", choices=["set"])
+    p.add_argument("pairs", nargs="+", help="status=… priority=… milestone=… due=YYYY-MM-DD tags=a,b")
+    p.add_argument("-p", "--project")
+    p = add("overview", cmd_overview, "Portfolio digest")
+    p.add_argument("--json", action="store_true")
+    p.add_argument("--days", type=int, default=7)
+    p.add_argument("--all", action="store_true", help="include archived projects")
+    add("standup", cmd_standup, "Recent work and what is in progress").add_argument("--days", type=int, default=1)
+    p = add("dashboard", cmd_dashboard, "Open the HTML dashboard")
+    p.add_argument("--no-open", action="store_true")
+    p.add_argument("--path", action="store_true", help="print the file path only")
+    p = add("config", cmd_config, "Preview and enforce devkit-managed agent settings")
+    p.add_argument("config_cmd", nargs="?", choices=["diff", "repair", "show", "edit", "validate", "lock", "unlock",
+                                                     "status"])
+    p.add_argument("--quiet", action="store_true")
+    p = add("plugin", cmd_plugin, "Validate the devkit plugin for Claude Code and Codex")
+    p.add_argument("action", choices=["validate"])
+    p = add("guard", cmd_guard, "Simulate the guard")
+    p.add_argument("check", choices=["check"])
+    p.add_argument("command", nargs="*", help="shell command to evaluate")
+    p.add_argument("--write", metavar="PATH", help="evaluate a file write instead")
+    p.add_argument("--agent", default="claude", choices=["claude", "codex"])
+    p.add_argument("--cwd")
     p = add("wt", cmd_wt, "Manage worktrees")
     wsp = p.add_subparsers(dest="wt_cmd", required=True)
     w = wsp.add_parser("new", help="create a managed worktree")
@@ -814,7 +1179,7 @@ def main(argv=None) -> int:
         print_help()
         return 0
     if not a.cmd:
-        return cmd_dashboard(a) or 0
+        return cmd_home(a) or 0
     if getattr(a, "args", None) and a.args[:1] == ["--"]:
         a.args = a.args[1:]
     try:

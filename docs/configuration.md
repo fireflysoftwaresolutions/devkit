@@ -36,7 +36,7 @@ are merged with the defaults, so you only write what you change.
 | `docker.vm_type` | `vz` | Apple Virtualization framework |
 | `docker.rosetta` | `true` | Rosetta for amd64 images (with `vz`) |
 | `docker.mount_type` | `virtiofs` | Host folder sharing |
-| `docker.autostart` | `false` | Informational; start-at-login is switched with `dev docker autostart-on` / `autostart-off` |
+| `docker.autostart` | `false` | When `true`, `dev install` registers Colima with `brew services` so it starts at login (same as `dev docker autostart-on`) |
 | `editor` | `code` | Editor used by `dev open` (and by `dev handoff --edit` when `$EDITOR` is unset) |
 
 Changing `dev_root`, `default_host` or `host_dirs` changes every canonical path: run `dev ls` and `dev adopt` the

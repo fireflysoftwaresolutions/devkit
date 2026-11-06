@@ -72,10 +72,10 @@ devkit's own skills, in `agents/skills/`:
 
 | Skill | Use |
 |---|---|
-| `devkit-handoff` | Update the project's handoff note before finishing or on "handoff / pause / wrap up" |
-| `devkit-workspace` | Layout, `dev` commands, worktrees, disk, Docker, per-project vendor tooling |
-| `devkit-delivery` | Local-first GitOps: integration branch, one push, one CI run, CI failure handling, releases |
-| `devkit-backend` | Backend checklists: API contracts, layering, migrations, testing, resilience, security, operability |
+| `devkit:handoff` | Update the project's handoff note before finishing or on "handoff / pause / wrap up" |
+| `devkit:workspace` | Layout, `dev` commands, worktrees, disk, Docker, per-project vendor tooling |
+| `devkit:delivery` | Local-first GitOps: integration branch, one push, one CI run, CI failure handling, releases |
+| `devkit:backend` | Backend checklists: API contracts, layering, migrations, testing, resilience, security, operability |
 
 ## Settings that tame the plugins
 
@@ -91,7 +91,7 @@ devkit's own skills, in `agents/skills/`:
 ## Per-project vendor tooling
 
 Some of the best tooling is project-scoped and writes files into the repository, so it is enabled per project when
-the user wants it (the `devkit-workspace` skill knows these commands):
+the user wants it (the devkit `workspace` skill knows these commands):
 
 | Stack | Command |
 |---|---|

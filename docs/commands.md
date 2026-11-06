@@ -151,8 +151,7 @@ repository when something changed.
 ### `dev gc [--apply] [-y] [-v]`
 
 Plan disk reclamation with fresh PR states and print what is reclaimable (dry run). `-v` also lists what is kept and
-why. `--apply` asks for confirmation in an interactive terminal (skip with `-y`); in a non-interactive shell it
-applies without asking. It then syncs. Rules: [Disk and cleanup](disk-and-cleanup.md).
+why. `--apply` asks for confirmation in an interactive terminal (skip with `-y`); in a non-interactive shell it refuses unless you pass `--yes`. It then syncs. Rules: [Disk and cleanup](disk-and-cleanup.md).
 
 ### `dev du [--refresh]`
 

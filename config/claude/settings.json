@@ -21,7 +21,11 @@
     "SessionStart": [
       {
         "hooks": [
-          { "type": "command", "command": "'{{DEVKIT}}/bin/dev' hook session-start --agent claude", "timeout": 30 }
+          {
+            "type": "command",
+            "command": "'{{DEVKIT}}/bin/dev' hook session-start --agent claude",
+            "timeout": 30
+          }
         ]
       }
     ],
@@ -29,21 +33,56 @@
       {
         "matcher": "Bash|Write|Edit|MultiEdit|NotebookEdit",
         "hooks": [
-          { "type": "command", "command": "'{{DEVKIT}}/bin/dev' hook guard --agent claude", "timeout": 15 }
+          {
+            "type": "command",
+            "command": "'{{DEVKIT}}/bin/dev' hook guard --agent claude",
+            "timeout": 15
+          }
         ]
       }
     ],
     "Stop": [
       {
         "hooks": [
-          { "type": "command", "command": "'{{DEVKIT}}/bin/dev' hook stop --agent claude", "timeout": 10 }
+          {
+            "type": "command",
+            "command": "'{{DEVKIT}}/bin/dev' hook stop --agent claude",
+            "timeout": 10
+          }
         ]
       }
     ],
     "SessionEnd": [
       {
         "hooks": [
-          { "type": "command", "command": "'{{DEVKIT}}/bin/dev' hook session-end --agent claude", "timeout": 10 }
+          {
+            "type": "command",
+            "command": "'{{DEVKIT}}/bin/dev' hook session-end --agent claude",
+            "timeout": 10
+          }
+        ]
+      }
+    ],
+    "ConfigChange": [
+      {
+        "matcher": "user_settings",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "'{{DEVKIT}}/bin/dev' hook config-change --agent claude",
+            "timeout": 15
+          }
+        ]
+      }
+    ],
+    "InstructionsLoaded": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "'{{DEVKIT}}/bin/dev' hook instructions-loaded --agent claude",
+            "timeout": 10
+          }
         ]
       }
     ]

@@ -1,109 +1,135 @@
-<div align="center">
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/images/hero-dark.webp">
+  <img src="docs/images/hero-light.webp" alt="devkit — one workspace for developers, Claude Code and Codex. By Firefly Software Solutions Inc." width="100%">
+</picture>
 
-```
-                                        ·   ˚  ✦   ⋆  ·  ✧
-    ╲  ╱      ██████╗ ███████╗██╗   ██╗██╗  ██╗██╗████████╗
- ▗▄▖ ◉◉ ▗▄▖   ██╔══██╗██╔════╝██║   ██║██║ ██╔╝██║╚══██╔══╝
- ▝▀▘▐██▌▝▀▘   ██║  ██║█████╗  ██║   ██║█████╔╝ ██║   ██║
-    ▐▓▓▌      ██║  ██║██╔══╝  ╚██╗ ██╔╝██╔═██╗ ██║   ██║
-     ▀▀  ✦    ██████╔╝███████╗ ╚████╔╝ ██║  ██╗██║   ██║
-   ·   ˚      ╚═════╝ ╚══════╝  ╚═══╝  ╚═╝  ╚═╝╚═╝   ╚═╝
-```
+# devkit
 
-**One workspace · every repo in its place · agents that hand off.**
+devkit is how Firefly Software developers work with Claude Code and Codex: every repository in a predictable place,
+every project with a living handoff note and task board, every agent session starting from the current state and
+ending by recording what changed, and a workspace that never fills up with stray worktrees, sibling copies or
+gigabytes of forgotten build output. One install sets up the toolchain, git, Claude Code (CLI and Desktop), Codex (CLI
+and the ChatGPT app), skills, plugins, Docker and the background automation, and keeps them that way.
 
-The development environment standard for you, Claude Code and Codex on macOS.
+[Why](#why-devkit) ·
+[Install](#install) ·
+[Everyday use](#everyday-use) ·
+[For your agents](#for-your-agents) ·
+[How it fits together](#how-it-fits-together) ·
+[What's inside](#whats-inside) ·
+[Docs](#documentation) ·
+[Credits](#credits-and-licence)
 
-`v1.0.0` · macOS 14+ · Apple silicon · Python 3.9+ (stdlib only)
+## Why devkit
 
-</div>
-
----
-
-## Why devkit exists
-
-AI coding agents are fast, but left to their defaults they waste time and disk in the same ways every day:
-
-| Problem | What devkit does about it |
+| Without devkit | With devkit |
 |---|---|
-| Every session rediscovers the project from scratch | A **handoff note** per project is injected at session start (purpose, state, next steps, gotchas, recent sessions), plus the repo's commands and git state. |
-| Worktrees and sibling copies (`repo-pr12`, `repo-ci`) pile up | One managed location, `dev wt` with safety checks, a **guard** that blocks stray `git worktree add`/clones, and automatic removal once the PR is merged. |
-| Gigabytes of duplicated `node_modules`, `.venv`, `dist`, `target/` | Copy-on-write `node_modules` for worktrees, **safe garbage collection** of regenerable build output and stale temp. |
-| Scratch files land in repositories, home or random folders | A defined scratch location, the guard on every write, global rules shared by both agents. |
-| Push → CI → fix → push → CI … | **Local-first delivery**: `dev ci` shows exactly what CI runs; the guard stops CI loops and blind re-runs; one integration branch, one push, one CI run. |
-| Claude and Codex behave differently | **One set of global instructions, skills, hooks and rules** generated for both, verified by `dev doctor`, and an **instruction canary** (`DevKit ·`) proving every reply followed them. |
-| No overview of what is in flight | A live **projects map** (`PROJECTS.md`) and activity log in a private GitHub repo, synced every hour and at the end of every session. |
-| Every laptop and every developer is set up differently | `install.sh` + `dev install`: toolchain, git identity from `gh`, Claude Code, Codex, skills, Docker, automation — idempotent and reproducible. |
+| Each session rediscovers the project | The session starts with the project's handoff note, tasks, git state, commands and the last agent status |
+| Worktrees and `repo-pr12` copies pile up; disks fill | One managed worktree location, a guard that blocks stray ones, and safe automatic cleanup once work is merged |
+| Push → CI → fix → push → CI … | `dev ci` shows what CI runs; integrate locally, push once, one CI run; the guard stops CI loops and blind re-runs |
+| `claude/vigilant-jang-ec71c0` branches and AI attribution | Trunk-based naming (`feat/PROJ-142-invoice-export`) and no attribution, enforced for both agents |
+| Claude and Codex behave differently, and settings drift | One set of rules, skills and hooks for both; drift is blocked and repaired; `dev config diff` previews everything |
+| Nobody knows what is in flight | A private handoff repo with a live projects map, task boards, activity, and a dashboard |
+| "Did the agent even read the rules?" | Every reply starts with a `DevKit ·` status line; devkit checks it, records it and reports deviations |
 
-## Quick start
+## Install
 
 ```bash
-gh auth login -s repo,read:org,workflow,gist          # once, if gh is not signed in
-gh repo clone ancongui/devkit ~/Development/ancongui/devkit
-~/Development/ancongui/devkit/install.sh              # toolchain + configuration (safe to re-run)
-exec zsh && dev doctor                                 # verify everything is green
+gh auth login -s repo,read:org,workflow,gist                      # once
+gh repo clone fireflysoftwaresolutions/devkit ~/Development/fireflysoftwaresolutions/devkit
+~/Development/fireflysoftwaresolutions/devkit/install.sh          # everything, idempotent
+exec zsh && dev doctor                                             # all green
 ```
 
-Then just work: open Claude Code or Codex (CLI, Claude Desktop or the ChatGPT app) inside any project under
-`~/Development`. Context, rules, skills, the guard and tracking are already there.
+`install.sh` installs the toolchain (Java, Python, PHP, Node/TypeScript, language servers, Docker on Colima), signs git
+in with your GitHub identity, creates your private handoff repository (`<you>/handoff`), configures Claude Code and
+Codex, installs the devkit plugin and the curated skills in both, and schedules the hourly sync. Details:
+[Getting started](docs/getting-started.md).
 
 ## Everyday use
 
 ```text
-dev                       dashboard: where you are, what is active, what needs attention
-dcd kit                   jump to a project (fzf picker when several match)
-dev clone acme/api        → ~/Development/acme/api            (any host: dev clone git@gitlab.com:grp/svc.git)
-dev claude api -w feat/x  Claude Code in a managed worktree for feat/x   (dev codex … for Codex)
-dev ci                    what GitHub Actions runs — run it locally before the single push
-dev handoff               the project's handoff note (--edit to change it)
-dev gc                    what can be reclaimed safely (dry run; --apply to do it)
-dev docker up             Docker on a Colima VM (Rosetta, virtiofs, Testcontainers-ready)
-dev doctor                verify the whole setup
+dev                          your workspace at a glance
+dev dashboard                the command centre in the browser: projects, tasks, activity, explorer, health
+dev overview                 every project: status, Now tasks, latest agent status, last session
+dcd kit                      jump into a project            dwt feat/invoice-export   …or a new worktree
+dev task add "Export invoices as CSV" --now      dev task done 1      dev note set status=blocked
+dev claude api -w feat/x     Claude Code in a managed worktree       dev codex api   Codex in the project
+dev ci                       what CI runs — run it locally, then push once
+dev standup                  what happened since yesterday
+dev gc                       what can be reclaimed safely (dry run)
+dev config diff              what devkit manages vs what is installed      dev guard check git push --force
+dev doctor                   verify the whole setup
 ```
 
-Full reference: [docs/commands.md](docs/commands.md).
+All commands: [docs/commands.md](docs/commands.md).
+
+## For your agents
+
+devkit is also a plugin for **Claude Code** and **Codex**, installed automatically:
+
+- **Context in, record out.** Each session receives the project's handoff note, tasks, branch, PRs, commands and the
+  last status line; it ends with its commits and status recorded in the note, and the handoff repo pushed.
+- **Slash commands:** `/devkit:status` · `/devkit:overview` · `/devkit:task` · `/devkit:handoff` · `/devkit:standup` ·
+  `/devkit:ship` · `/devkit:ci` · `/devkit:dashboard` · `/devkit:doctor` (skills of the same name in Codex).
+- **Skills:** `handoff`, `workspace`, `delivery` (local-first GitOps), `backend` (contracts, migrations, testing,
+  resilience), plus a curated set for architecture (ADRs, C4, domain modelling), Angular, React, Spring and testing.
+- **Rules:** one set of global instructions for both agents: method, files and disk, worktrees, branches, commits,
+  delivery, backend practice, handoff, and the `DevKit ·` status line.
+- **Guard:** a pre-tool hook that blocks what wastes time or disk, and explains the right way in one sentence.
 
 ## How it fits together
 
 ```mermaid
 flowchart LR
-  subgraph Agents["Claude Code (CLI + Desktop) · Codex (CLI + ChatGPT app)"]
-    I["Global instructions<br/>~/.claude/CLAUDE.md · ~/.codex/AGENTS.md"]
-    S["Skills<br/>~/.claude/skills · ~/.agents/skills"]
-    H["Hooks: session-start · guard · stop · session-end"]
+  subgraph Agents["Claude Code · CLI + Desktop   |   Codex · CLI + ChatGPT app"]
+    I["Global instructions"]
+    P["devkit plugin<br/>skills · /devkit: commands"]
+    H["Hooks<br/>session-start · guard · stop · session-end · config-change"]
   end
-  D["devkit repo<br/>bin/dev · agents/ · config/"] -->|dev install| I & S & H
-  H -->|context in| A["~/Development/&lt;owner&gt;/&lt;repo&gt;<br/>~/Development/&lt;host&gt;/&lt;group&gt;/&lt;repo&gt;"]
-  H -->|session log, canary| O["~/Development/.handoff<br/>PROJECTS.md · projects/*.md · log/"]
-  L["launchd, hourly<br/>dev sync --scheduled"] --> O
-  L -->|safe gc| W["~/Development/.worktrees · build output · temp"]
-  O -->|git push| G[("private GitHub repo<br/>&lt;you&gt;/handoff")]
+  D["devkit repo<br/>dev CLI · rules · config"] -->|dev install / repair| Agents
+  H -->|context| R["~/Development/&lt;owner&gt;/&lt;repo&gt;<br/>~/Development/&lt;host&gt;/&lt;group&gt;/&lt;repo&gt;"]
+  H -->|sessions · status lines · tasks| O["~/Development/.handoff<br/>PROJECTS · TASKS · ACTIVITY · notes · plans"]
+  L["hourly sync"] --> O
+  L -->|safe gc| W["worktrees · build output · temp"]
+  O -->|push| G[("private repo<br/>&lt;you&gt;/handoff")]
+  O --> V["dev dashboard · dev overview"]
 ```
 
-Concepts in depth: [docs/concepts.md](docs/concepts.md).
+Concepts: [docs/concepts.md](docs/concepts.md).
+
+## What's inside
+
+| Path | What |
+|---|---|
+| `bin/dev`, `lib/devkit/` | The `dev` CLI (Python 3.9+, standard library only) |
+| `plugin/` | The devkit plugin for Claude Code and Codex: skills, slash commands, identity |
+| `agents/AGENTS.md` | The global instructions generated into `~/.claude/CLAUDE.md` and `~/.codex/AGENTS.md` |
+| `config/` | What devkit manages: Claude and Codex settings, hooks, plugins, MCP servers, pinned skills, git defaults |
+| `install.sh`, `Brewfile` | Bootstrap and toolchain |
+| `shell/` | zsh integration (`dcd`, `dwt`, completion, Docker environment) |
+| `templates/handoff/` | The skeleton of a new handoff repository |
+| `tools/brand/` | Renders devkit's icon and banners from the Firefly brand elements |
+| `docs/` | The guides below |
+| `tests/` | Unit tests (`python3 -m unittest discover -s tests`) |
 
 ## Documentation
 
 | Guide | For |
 |---|---|
-| [Getting started](docs/getting-started.md) | Installing on a new Mac, onboarding a developer, first checks |
-| [Concepts](docs/concepts.md) | Layout, handoff, worktree lifecycle, guard, canary, background sync |
+| [Getting started](docs/getting-started.md) | Install on a new Mac, onboard a developer, update, uninstall |
+| [Concepts](docs/concepts.md) | Layout, handoff notes and tasks, worktrees, guard, canary, sync |
 | [Commands](docs/commands.md) | Every `dev` command and option |
+| [Dashboard](docs/dashboard.md) | The HTML command centre: views, filters, explorer, shortcuts |
 | [Configuration](docs/configuration.md) | `~/.config/devkit/config.json`, personal rules, environment variables |
-| [Agents](docs/agents.md) | What is configured in Claude Code and Codex, and how hooks work |
-| [Skills and plugins](docs/skills-and-plugins.md) | The curated catalog, why each item is there, what was left out |
-| [Delivery](docs/delivery.md) | Local-first GitOps: one integration, one push, one CI run |
+| [Agents](docs/agents.md) | What is configured in Claude Code and Codex; hooks; enforcement and lock |
+| [Skills and plugins](docs/skills-and-plugins.md) | The devkit plugin, the curated catalog and what was left out |
+| [Delivery](docs/delivery.md) | Local-first GitOps: branch model, one integration, one push, one CI run |
 | [Guard rules](docs/guard.md) | Everything the guard blocks, and why |
-| [Disk and cleanup](docs/disk-and-cleanup.md) | `dev gc` safety rules, `dev du`, automatic cleanup |
+| [Disk and cleanup](docs/disk-and-cleanup.md) | `dev gc` safety rules and automatic cleanup |
 | [Docker](docs/docker.md) | Colima, Compose, Buildx, Testcontainers |
 | [Troubleshooting](docs/troubleshooting.md) | Logs, common problems, resetting |
-| [Developing devkit](docs/development.md) | Code layout, tests, release process |
-
-## Requirements
-
-- macOS on Apple silicon, Homebrew (installed by `install.sh` if missing), a GitHub account with `gh`.
-- Read access to this private repository (ask the owner to add you as a collaborator).
-- Claude Code and/or Codex accounts. Everything else is installed by `install.sh`.
+| [Developing devkit](docs/development.md) | Code layout, tests, brand assets, release process |
 
 ## Credits and licence
 

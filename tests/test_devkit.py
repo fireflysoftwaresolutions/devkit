@@ -150,6 +150,12 @@ class GuardBashTests(unittest.TestCase):
         self.assertEqual(self.bash("echo hi > /dev/null"), "allow")
         self.assertEqual(self.bash("echo hi > /tmp/x.txt"), "allow")
 
+    def test_unknown_shell_state_is_not_flagged(self):
+        self.assertEqual(self.bash('cd "$E" && printf x > README.md'), "allow")
+        self.assertEqual(self.bash('echo x > "$OUT/file.txt"', agent="codex"), "allow")
+        self.assertEqual(self.bash('git worktree add "$(mktemp -d)/wt"'), "allow")
+        self.assertEqual(self.bash("cd $SOMEWHERE && rm -rf build"), "allow")
+
     def test_unparseable_is_allowed(self):
         self.assertEqual(self.bash("echo 'unterminated"), "allow")
 
@@ -182,6 +188,26 @@ class BranchPolicyTests(unittest.TestCase):
                         "git push origin v1.2.3", "git push --tags", "git branch --show-current"):
                 with self.subTest(cmd=cmd):
                     self.assertEqual(decision("Bash", {"command": cmd}, cwd), "allow")
+
+
+class PackagingTests(unittest.TestCase):
+    ROOT = Path(__file__).resolve().parents[1]
+
+    def test_plugin_versions_match(self):
+        v = (self.ROOT / "VERSION").read_text().strip()
+        for m in ("plugin/.claude-plugin/plugin.json", "plugin/.codex-plugin/plugin.json"):
+            with self.subTest(manifest=m):
+                self.assertEqual(json.loads((self.ROOT / m).read_text())["version"], v)
+
+    def test_marketplaces_point_at_plugin(self):
+        cm = json.loads((self.ROOT / ".claude-plugin/marketplace.json").read_text())
+        xm = json.loads((self.ROOT / ".agents/plugins/marketplace.json").read_text())
+        self.assertEqual(cm["plugins"][0]["source"], "./plugin")
+        self.assertEqual(xm["plugins"][0]["source"]["path"], "./plugin")
+        for skill in ("handoff", "workspace", "delivery", "backend"):
+            self.assertTrue((self.ROOT / "plugin/skills" / skill / "SKILL.md").exists())
+        for asset in ("plugin/assets/icon.png", "plugin/assets/logo.png"):
+            self.assertTrue((self.ROOT / asset).exists())
 
 
 class ParsingTests(unittest.TestCase):

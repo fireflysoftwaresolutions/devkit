@@ -1,0 +1,21 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1600" height="520" viewBox="0 0 1600 520">
+<defs>
+  <radialGradient id="glow"><stop offset="0" stop-color="#FFB34A" stop-opacity="0.45"/>
+    <stop offset="0.45" stop-color="#FFB34A" stop-opacity="0.12"/><stop offset="1" stop-color="#FFB34A" stop-opacity="0"/></radialGradient>
+  <linearGradient id="trail" x1="0" y1="1" x2="1" y2="0"><stop offset="0" stop-color="#FFB34A" stop-opacity="0.2"/>
+    <stop offset="1" stop-color="#FFB34A" stop-opacity="1"/></linearGradient>
+  <linearGradient id="trailsoft" x1="0" y1="1" x2="1" y2="0"><stop offset="0" stop-color="#FFB34A" stop-opacity="0"/>
+    <stop offset="1" stop-color="#FFB34A" stop-opacity="0.55"/></linearGradient>
+  <filter id="blur6" x="-50%" y="-50%" width="200%" height="200%"><feGaussianBlur stdDeviation="6"/></filter>
+  <filter id="blur14" x="-50%" y="-50%" width="200%" height="200%"><feGaussianBlur stdDeviation="14"/></filter>
+</defs>
+<rect width="1600" height="520" fill="#F3F1EB"/>
+<circle cx="1240" cy="108" r="16" fill="#FFB34A" opacity="0.35" filter="url(#blur6)"/><circle cx="1452" cy="300" r="26" fill="#FFB34A" opacity="0.18" filter="url(#blur14)"/><circle cx="1090" cy="210" r="9" fill="#FFB34A" opacity="0.3" filter="url(#blur6)"/><circle cx="1520" cy="120" r="10" fill="#FFB34A" opacity="0.25" filter="url(#blur6)"/><circle cx="1330" cy="400" r="20" fill="#FFB34A" opacity="0.12" filter="url(#blur14)"/>
+<path d="M960 526 C 1216 470, 1328 300, 1416 150" fill="none" stroke="url(#trail)" stroke-opacity="1.0" stroke-width="7" stroke-linecap="round"/><path d="M960 524 C 1216 430, 1328 254, 1416 162" fill="none" stroke="url(#trail)" stroke-opacity="0.75" stroke-width="4" stroke-linecap="round"/><path d="M960 521 C 1216 400, 1328 208, 1416 173" fill="none" stroke="url(#trail)" stroke-opacity="0.5" stroke-width="2.5" stroke-linecap="round"/><path d="M960 519 C 1216 375, 1328 160, 1416 185" fill="none" stroke="url(#trail)" stroke-opacity="0.35" stroke-width="1.6" stroke-linecap="round"/>
+<circle cx="1416" cy="150" r="150.0" fill="url(#glow)"/><g fill="none" stroke="#FFB34A" stroke-width="6.3" stroke-linecap="round" stroke-linejoin="round"><circle cx="1416" cy="150" r="10.5"/><path d="M1416.0 110.1 L1416.0 124.8"/><path d="M1416.0 175.2 L1416.0 189.9"/><path d="M1376.1 150.0 L1390.8 150.0"/><path d="M1441.2 150.0 L1455.9 150.0"/><path d="M1401.3 135.3 L1401.3 135.3"/><path d="M1430.7 135.3 L1430.7 135.3"/><path d="M1401.3 164.7 L1401.3 164.7"/><path d="M1430.7 164.7 L1430.7 164.7"/></g>
+<text x="96" y="300" font-family="Manrope" font-size="188" font-weight="500" letter-spacing="-9" fill="#10110F">devkıt</text>
+<circle cx="497.004" cy="167.46" r="80.0" fill="url(#glow)"/><g fill="none" stroke="#FFB34A" stroke-width="3.4" stroke-linecap="round" stroke-linejoin="round"><circle cx="497.004" cy="167.46" r="5.6"/><path d="M497.0 146.1 L497.0 154.0"/><path d="M497.0 181.0 L497.0 188.8"/><path d="M475.6 167.5 L483.5 167.5"/><path d="M510.5 167.5 L518.4 167.5"/><path d="M489.1 159.6 L489.2 159.6"/><path d="M504.9 159.6 L504.9 159.6"/><path d="M489.1 175.3 L489.2 175.3"/><path d="M504.9 175.3 L504.9 175.3"/></g>
+<text x="102" y="378" font-family="Manrope" font-size="38" font-weight="400" letter-spacing="-0.6" fill="#62645B">One workspace for developers, Claude Code and Codex.</text>
+<line x1="102" y1="446" x2="162" y2="446" stroke="#D8D4CA" stroke-width="2"/>
+<text x="102" y="480" font-family="Manrope" font-size="22" font-weight="650" letter-spacing="0.6" fill="#855414">by Firefly Software Solutions Inc.</text>
+</svg>

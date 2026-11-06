@@ -25,4 +25,4 @@ brew "docker-compose"
 brew "docker-buildx"
 brew "docker-credential-helper"
 # Agents (Claude Code uses its native installer, see install.sh)
-brew "codex"
+cask "codex"

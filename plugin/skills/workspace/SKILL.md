@@ -1,5 +1,5 @@
 ---
-name: devkit-workspace
+name: workspace
 description: How to work with the ~/Development layout and the `dev` CLI — clone or create projects, run parallel work in managed git worktrees, find projects, clean up disk, start Docker, and enable a project's vendor AI tooling (Laravel Boost, Symfony AI Mate, FastAPI library-skills, Next.js MCP, Angular AI config). Use when cloning, creating, moving or locating a repository, when parallel work needs a worktree, when disk is full, or when setting up a new project's agent tooling.
 ---
 

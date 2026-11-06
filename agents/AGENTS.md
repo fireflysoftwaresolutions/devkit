@@ -4,15 +4,19 @@ These rules apply to every project and to both Claude Code and Codex. A reposito
 adds to them and wins on project specifics (build commands, style). The user's explicit request in the session
 wins over both.
 
-## 0. Instruction canary — `DevKit ·`
+## 0. Instruction canary and status line — `DevKit ·`
 
-Start the **final message of every turn** with `DevKit ·` followed by a one-line status:
-`DevKit · <project> · <what you did or found> · <state>` — for example
-`DevKit · kit-consulting · integrated PRs 12/17/22 on release/26.11.4 · local suite green, ready to push once`.
+Start the **final message of every turn** with one status line:
 
-This is how the user verifies that these global instructions are loaded and followed. devkit checks every reply
-automatically; a reply without the marker is recorded as a deviation and reported to the user. Never omit it, never
-fake compliance with the rest of these rules: if you could not follow a rule, say so in that line.
+`DevKit · <project>@<branch> · <what you did or found> · <verification> · next: <next step>`
+
+for example `DevKit · kit-consulting@release/26.11.4 · integrated PRs 12/17/22 · local suite green · next: push once,
+open the release PR`. Use `-` for a part that does not apply (`DevKit · - · answered a question · - · next: -`).
+
+It proves to the user that these global instructions are loaded and followed (devkit checks every reply and reports a
+missing marker as a deviation), and it is useful: devkit stores the line as the project's latest status, adds it to
+the session log of the handoff note, shows it on the dashboard and gives it to the next session. Keep it truthful: if
+you could not follow a rule or something failed, say so in that line.
 
 ## 1. Workspace: where everything lives
 
@@ -101,7 +105,7 @@ never move or rename repositories yourself (`dev adopt` does that, with the user
 ## 7. Delivery: integrate and verify locally, push once, one CI run
 
 GitHub CI is the confirmation, not the test runner. Every push and every merge costs a full CI cycle (often 30+
-minutes) and can re-trigger the CI of every other open PR. Follow the `devkit-delivery` skill; the essentials:
+minutes) and can re-trigger the CI of every other open PR. Follow the devkit `delivery` skill (`/devkit:ship`); the essentials:
 
 1. **Know what CI runs.** `dev ci` lists the workflow jobs and their commands. Run those same commands locally
    (lint, type-check, unit, integration with Testcontainers, build, package) before any push.
@@ -124,7 +128,7 @@ minutes) and can re-trigger the CI of every other open PR. Follow the `devkit-de
 
 ## 8. Backend methodology
 
-Follow the `devkit-backend` skill for the detailed checklists. Always:
+Follow the devkit `backend` skill for the detailed checklists. Always:
 
 - **Contract first:** define or update the API contract (OpenAPI, GraphQL schema, message schema) before the
   implementation; keep changes backward compatible or version them; errors as RFC 9457 problem details when the API
@@ -180,10 +184,24 @@ Follow the `devkit-backend` skill for the detailed checklists. Always:
 - **Containers:** `dev docker up` starts Docker (Colima). Never prune volumes; never pull images or start long-running
   containers the task does not need, and stop the ones you started.
 
-## 11. Handoff (keep the next session from starting cold)
+## 11. Projects, tasks and handoff (keep the next session from starting cold)
+
+The handoff repository is the single source of truth for project state. Use it, keep it current:
+
+- `dev overview` — every project: status, priority, Now tasks, latest status line, last session (`--json` for tools).
+- `dev status` / `dev task` — the current project and its tasks; `dev task add "…" --now|--later`,
+  `dev task start|done <n>`; `dev note set status=blocked priority=high milestone="…" due=YYYY-MM-DD`.
+- `dev standup` — what happened recently; `dev dashboard` — the visual command centre (for the user).
+- Slash commands in Claude Code: `/devkit:status`, `/devkit:overview`, `/devkit:task`, `/devkit:handoff`,
+  `/devkit:standup`, `/devkit:ship`, `/devkit:ci`, `/devkit:doctor` (Codex has the same as skills).
+
+Record work as it happens: add a task when you discover follow-up work, `start` it when you begin, `done` it when it is
+verified. Plans and specs go to `{{DEV}}/.handoff/plans/<project id>/`.
+
+### Handoff
 
 Before you finish a substantial piece of work — and whenever the user says "handoff", "pause", "wrap up" or "stop
-here" — update the project's handoff note with the `devkit-handoff` skill: current state, next steps, decisions and
+here" — update the project's handoff note with the devkit `handoff` skill (`/devkit:handoff`): current state, next steps, decisions and
 gotchas, plus one summary line in the session log. Keep it short and true; rewrite stale text rather than appending.
 devkit records the branch and commits of each session automatically.
 

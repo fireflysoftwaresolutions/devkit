@@ -18,8 +18,8 @@ First release.
 - Hooks for Claude Code and Codex: session context, guard (layout, worktrees, clones, backups, destructive
   commands, force pushes, CI push budget, blind CI re-runs, AI attribution), session tracking, canary.
 - Safe disk reclamation: merged worktrees, regenerable build output in idle worktrees, stale temp, Docker build cache.
-- Curated skills for both agents (pinned upstream commits) and devkit's own skills: `devkit-handoff`,
-  `devkit-workspace`, `devkit-delivery`, `devkit-backend`.
+- Curated skills for both agents (pinned upstream commits) and devkit's own skills: `devkit:handoff`,
+  `devkit:workspace`, `devkit:delivery`, `devkit:backend`.
 - Claude Code: bypassPermissions by default, no attribution, plugins (Superpowers, context7, frontend-design,
   commit-commands, security-guidance, TypeScript/Python/Java/PHP LSP), MCP (Chrome DevTools, Angular CLI).
 - Codex (CLI and ChatGPT app): approval never + full access, hooks trusted through Codex's API, plugins

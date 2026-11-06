@@ -1,0 +1,46 @@
+{
+  "name": "devkit",
+  "version": "1.0.0",
+  "description": "One workspace for developers, Claude Code and Codex: project context and handoff notes, tasks, a portfolio overview, local-first delivery (one push, one CI run), backend methodology, managed worktrees and a guard.",
+  "author": {
+    "name": "Firefly Software Solutions Inc.",
+    "email": "info@fireflysoftware.io",
+    "url": "https://fireflysoftware.io"
+  },
+  "homepage": "https://github.com/fireflysoftwaresolutions/devkit",
+  "repository": "https://github.com/fireflysoftwaresolutions/devkit",
+  "license": "LicenseRef-Proprietary",
+  "keywords": [
+    "devkit",
+    "firefly",
+    "handoff",
+    "worktrees",
+    "gitops",
+    "ci",
+    "backend",
+    "workspace",
+    "tasks",
+    "dashboard"
+  ],
+  "skills": "./skills/",
+  "interface": {
+    "displayName": "devkit",
+    "shortDescription": "One workspace for you, Claude Code and Codex",
+    "longDescription": "devkit keeps every project in its place and every session in context: handoff notes and tasks per project, a portfolio overview and dashboard, local-first delivery with one push and one CI run, backend methodology, managed worktrees and a workspace guard. Installed and kept in sync by the `dev` CLI.",
+    "developerName": "Firefly Software Solutions Inc.",
+    "category": "Coding",
+    "capabilities": [
+      "Read",
+      "Write"
+    ],
+    "websiteURL": "https://github.com/fireflysoftwaresolutions/devkit",
+    "defaultPrompt": [
+      "Where are we on this project? Use devkit.",
+      "Hand off this session with devkit before we stop.",
+      "Integrate these branches locally and ship them with one CI run."
+    ],
+    "brandColor": "#FFB34A",
+    "composerIcon": "./assets/icon.png",
+    "logo": "./assets/logo.png"
+  }
+}

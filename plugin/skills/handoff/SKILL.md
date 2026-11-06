@@ -1,5 +1,5 @@
 ---
-name: devkit-handoff
+name: handoff
 description: Update the project's handoff note in ~/Development/.handoff so the next session (human, Claude or Codex) can continue without rediscovery. Use before finishing substantial work, when the user says handoff, hand over, pause, wrap up, stop here, save progress or "where are we", and when starting work that should resume a previous session.
 ---
 

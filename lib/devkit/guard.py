@@ -36,8 +36,8 @@ WRITE_TOOLS = {"Write", "Edit", "MultiEdit", "NotebookEdit"}
 
 LAYOUT_HINT = (f"Workspace layout: GitHub repos live in {tilde(DEV)}/<owner>/<repo>, other hosts in "
                f"{tilde(DEV)}/<host>/<group>/<repo> (use `dev clone <url|owner/repo>`), "
-               f"projects that are not on GitHub yet live in {tilde(LOCAL)}/<name> (use `dev new <name>`), "
-               f"worktrees in {tilde(WT_ROOT)}/<owner>/<repo>/<branch> (use `dev wt new <branch>`), "
+               f"projects without a remote live in {tilde(LOCAL)}/<name> (use `dev new <name>`), "
+               f"worktrees in {tilde(WT_ROOT)}/<project path>/<branch> (use `dev wt new <branch>`), "
                f"scratch files in a temp dir (your session scratchpad or {tilde(core.TMP_ROOT)}).")
 
 
@@ -87,10 +87,18 @@ def deny(reason):
 
 # --------------------------------------------------------------------------- path rules
 
+UNKNOWN = Path("/__devkit_unknown__")
+
+
 def resolve(path, cwd) -> Path:
+    """Absolute real path, or UNKNOWN when it depends on shell state the hook cannot see ($VAR, $(…), `…`)."""
     p = os.path.expanduser(os.path.expandvars(str(path)))
+    if "$" in p or "`" in p:
+        return UNKNOWN
     if not os.path.isabs(p):
-        p = os.path.join(cwd or os.getcwd(), p)
+        if cwd is None or str(cwd) == str(UNKNOWN):
+            return UNKNOWN
+        p = os.path.join(cwd, p)
     return Path(real(p))
 
 
@@ -105,7 +113,7 @@ def allowed_tops() -> set:
 
 def layout_violation(p: Path, creating_dir=False):
     """Reason string when `p` breaks the ~/Development layout, else None."""
-    if not is_under(p, DEV) or real(p) == real(DEV):
+    if p == UNKNOWN or not is_under(p, DEV) or real(p) == real(DEV):
         return None
     rel = Path(real(p)).relative_to(real(DEV)).parts
     if len(rel) == 1 and not creating_dir and not rel[0].startswith("."):
@@ -122,7 +130,7 @@ def check_write_path(path, cwd, agent):
     if not path:
         return None
     p = resolve(path, cwd)
-    if str(p).startswith("/dev/"):
+    if p == UNKNOWN or str(p).startswith("/dev/"):
         return None
     if is_temp(p) or any(is_under(p, r) for r in CONFIG_ROOTS):
         return None
@@ -270,10 +278,10 @@ def check_worktree_add(args, cwd):
     if not pos:
         return None
     target = resolve(pos[0], cwd)
-    if is_under(target, WT_ROOT) or is_temp(target):
+    if target == UNKNOWN or is_under(target, WT_ROOT) or is_temp(target):
         return None
     return deny(f"Raw `git worktree add {pos[0]}` would create an unmanaged worktree at {tilde(target)}. "
-                f"Use `dev wt new <branch>` (it places it in {tilde(WT_ROOT)}/<owner>/<repo>/<branch>, reuses "
+                f"Use `dev wt new <branch>` (it places it in {tilde(WT_ROOT)}/<project path>/<branch>, reuses "
                 f"dependencies and registers it for cleanup), or your harness's own worktree tool. Only create a "
                 f"worktree when the user asked for one or parallel work really needs it.")
 
@@ -282,7 +290,7 @@ def check_clone(url, dest, cwd):
     src = core.clone_source(url)
     name = (src[0].rsplit("/", 1)[-1] if src else os.path.basename(url.rstrip("/"))).removesuffix(".git")
     target = resolve(dest or name, cwd)
-    if is_temp(target):
+    if target == UNKNOWN or is_temp(target):
         return None
     if src:
         canon = core.canonical_path(src[0])
@@ -302,9 +310,12 @@ def check_rm(args, cwd):
     if not recursive:
         return None
     for a in [a for a in args if not a.startswith("-")]:
-        if a in ("*", "./*", ".", "..") and any(real(cwd) == real(p) for p in [HOME, DEV] + list(_owner_dirs())):
+        if a in ("*", "./*", ".", "..") and cwd and str(cwd) != str(UNKNOWN) and \
+                any(real(cwd) == real(p) for p in [HOME, DEV] + list(_owner_dirs())):
             return deny(f"`rm -r {a}` in {tilde(cwd)} would wipe the workspace. Remove specific paths only.")
         t = resolve(a, cwd)
+        if t == UNKNOWN:
+            continue
         if any(real(t) == real(p) for p in PROTECTED_RM):
             return deny(f"Refusing to recursively delete protected path {tilde(t)}.")
         if t.name == ".git":
@@ -340,6 +351,8 @@ def _attribution(text: str):
 def check_git(argv, cwd, full_segment, envs=frozenset()):
     cdir, sub, args = _git_split(argv)
     gcwd = str(resolve(cdir, cwd)) if cdir else cwd
+    if gcwd == str(UNKNOWN):
+        gcwd = None
     if sub == "worktree" and args[:1] == ["add"]:
         nb = _opt_value(args[1:], ("-b", "-B"))
         v = branch_violation(nb) if nb else None
@@ -523,7 +536,7 @@ def check_bash(cmd: str, cwd: str, agent: str):
                 v = layout_violation(dest, creating_dir=True)
                 if v:
                     res = deny(v)
-                elif not dest.is_dir() and BACKUP_RE.search(dest.name) and is_under(dest, DEV):
+                elif dest != UNKNOWN and not dest.is_dir() and BACKUP_RE.search(dest.name) and is_under(dest, DEV):
                     res = deny(f"Do not create backup copies ({dest.name}); git already keeps history.")
         if res:
             return res
