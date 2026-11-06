@@ -94,5 +94,27 @@ class HandoffStalenessTests(unittest.TestCase):
                                                  "ana@example.com", T0), [])  # no note, nothing to check
 
 
+
+class PlanReasonScopeTests(unittest.TestCase):
+    """A session answers for its own project's plans, not for a plan another session changed in another project."""
+
+    def test_only_this_projects_plans_are_checked(self):
+        with tempfile.TemporaryDirectory() as d:
+            handoff = Path(d)
+            mine = handoff / "plans" / "acme" / "api" / "2026-11-06-export.md"
+            theirs = handoff / "plans" / "acme" / "web" / "2026-11-06-redesign.md"
+            for f in (mine, theirs):
+                f.parent.mkdir(parents=True)
+                f.write_text("# A plan edited without dev plan revise\n")  # no body_sha: needs a recorded revision
+            saved = hooks.HANDOFF
+            hooks.HANDOFF = handoff
+            try:
+                sess = {"started": T0}
+                self.assertEqual(hooks._plans_without_reason(sess, "acme/api"),
+                                 ["plans/acme/api/2026-11-06-export.md"])
+                self.assertEqual(len(hooks._plans_without_reason(sess, None)), 2)  # outside a project: all of them
+            finally:
+                hooks.HANDOFF = saved
+
 if __name__ == "__main__":
     unittest.main()
