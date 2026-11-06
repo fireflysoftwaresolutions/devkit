@@ -2,6 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # The audit records spec (P-fxs8za703yx): schema v2, the hash chain and `dev audit verify`, retention, level,
 # exports, queries and the redactor. One test per acceptance criterion; every test runs in a temporary folder.
+import contextlib
 import csv
 import io
 import json
@@ -602,6 +603,32 @@ class CommandTests(AuditCase):
         rc, text = self.run_cmd("config")
         self.assertEqual(rc, 0)
         self.assertIn("13 months here", text)
+
+
+class CliWiringTests(unittest.TestCase):
+    # `dev audit` must reach the new subcommands, and `dev config validate` must check the audit keys
+    def test_dev_audit_parses_the_new_subcommands_and_filters(self):
+        from devkit import cli
+        a = cli.build_parser().parse_args(["audit", "export", "--format", "ocsf", "--member", "Tank", "-o", "x.json"])
+        self.assertEqual((a.audit_cmd, a.format, a.member, a.out), ("export", "ocsf", "Tank", "x.json"))
+        self.assertEqual(a.fn.__module__, "devkit.audit")
+
+    def test_config_validate_reports_an_audit_setting_below_the_floor(self):
+        from devkit import cli, core
+        bad = {"audit": {"retention": {"local_months": 0}}}
+        with tempfile.TemporaryDirectory() as d:
+            f = os.path.join(d, "config.json")
+            with open(f, "w") as fh:
+                json.dump(bad, fh)
+            saved = core.CONFIG_FILE
+            core.CONFIG_FILE = type(saved)(f)
+            try:
+                with contextlib.redirect_stdout(io.StringIO()) as out, contextlib.redirect_stderr(io.StringIO()):
+                    rc = cli._config_validate()
+            finally:
+                core.CONFIG_FILE = saved
+        self.assertNotEqual(rc, 0)
+        self.assertIn("audit", out.getvalue())
 
 
 if __name__ == "__main__":

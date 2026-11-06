@@ -205,7 +205,7 @@ class PinTests(Sandbox):
         info = setup.pin(self.src, unverified_why="trying the fix for K2 before the release")
         self.assertEqual(info["verified"]["how"], "unverified")
         rec = [r for r in self.audits() if r["action"] == "install.pin"][-1]
-        self.assertEqual(rec["outcome"], "unverified")
+        self.assertEqual((rec["outcome"], rec["ref"]["result"]), ("recorded", "unverified"))  # audit schema v2
         self.assertIn("trying the fix for K2 before the release", rec["detail"])
 
     def test_a_head_whose_test_gate_passed_is_pinned(self):
@@ -326,7 +326,7 @@ class DoctorTests(Sandbox):
         setup.record_install(setup.pin(self.src))  # the fix: `dev install` rebuilds the copy from git
         self.assertEqual(guard.read_text(), "DENY = True\n")
         self.assertTrue(all(ok for ok, _, _ in self.checks().values()), self.checks())
-        self.assertIn("tampered", [r["outcome"] for r in self.audits() if r["action"] == "install.pin"])
+        self.assertIn("tampered", [r.get("ref", {}).get("result") for r in self.audits() if r["action"] == "install.pin"])
 
     def test_doctor_fails_when_a_hook_runs_the_checkout_or_nothing_is_pinned(self):
         self.assertEqual(self.checks(), {"hooks run a pinned copy": (

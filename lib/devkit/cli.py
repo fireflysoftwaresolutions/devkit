@@ -1743,30 +1743,6 @@ def cmd_jobs(a):
     return 0
 
 
-def cmd_audit(a):
-    from . import audit
-    if a.publish:
-        changed = audit.publish()
-        audit.prune()
-        if changed:
-            from . import work
-            work._commit(changed, f"audit: {len(changed)} file(s) from {audit.actor()['host']}")
-        if not a.quiet:
-            print(f"{ui.OK} audit published ({len(changed)} file(s) changed)")
-        return 0
-    rs = audit.records(a.days, a.action, a.actor, a.team)
-    if a.json:
-        print(json.dumps(rs, indent=1, ensure_ascii=False))
-        return 0
-    print(ui.section(f"Audit · last {a.days} days" + (" · team" if a.team else "") + f" · {len(rs)} record(s)"))
-    for r in rs[-a.lines:]:
-        bad = r.get("outcome") not in ("ok", None)
-        who = f"{r.get('user')}@{r.get('host')} {r.get('agent')}"
-        print(f"  {ui.dim(core.fmt_ts(r['ts']))} {(ui.red if bad else ui.cyan)(r.get('action', ''))[:40]:<28} "
-              f"{r.get('target', '')[:70]}  {ui.dim(who)}" + (f"  {ui.red(r['outcome'])}" if bad else ""))
-    return 0
-
-
 def cmd_team(a):
     from . import work
     t = work.team(max_age_h=a.hours)
@@ -1985,6 +1961,7 @@ def _config_validate() -> int:
     from .core import DEFAULTS
     errors = []
     cfg = core.read_json(core.CONFIG_FILE, None)
+    errors += core.config_errors(cfg or {})  # value checks: the audit retention floor, levels and formats
     if cfg is None and core.CONFIG_FILE.exists():
         errors.append(f"{tilde(core.CONFIG_FILE)} is not valid JSON")
     for k in (cfg or {}):
@@ -2466,15 +2443,9 @@ def build_parser():
     x = jsp.add_parser("journal", help="past runs of every job: start, result, duration, last line")
     x.add_argument("--days", type=int, default=7)
     x.add_argument("-n", "--lines", type=int, default=40)
-    p = add("audit", cmd_audit, "The audit trail: every change, decision and job run devkit made")
-    p.add_argument("--days", type=float, default=7)
-    p.add_argument("--action", help="only actions starting with this, e.g. guard, job, task, rm")
-    p.add_argument("--actor", help="user@host or agent")
-    p.add_argument("--team", action="store_true", help="every machine (from the handoff repository)")
-    p.add_argument("--json", action="store_true")
-    p.add_argument("-n", "--lines", type=int, default=60)
-    p.add_argument("--publish", action="store_true", help=argparse.SUPPRESS)
-    p.add_argument("--quiet", action="store_true")
+    from . import audit as audit_mod
+    audit_mod.add_arguments(add("audit", audit_mod.cmd_audit,
+                                "The audit trail: query, verify, export, show, stats and config"))
     p = add("report", cmd_report, "Status report (Markdown): health, progress, done, in progress, next, risks, team")
     p.add_argument("--days", type=int, default=7)
     p.add_argument("-i", "--initiative")
