@@ -8,3 +8,5 @@ typescript-language-server
 @playwright/cli
 # @php
 intelephense
+# @docs
+markdownlint-cli2

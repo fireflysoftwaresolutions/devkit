@@ -166,6 +166,9 @@ Follow the devkit `backend` skill for the detailed checklists. Always:
 - **Frontend:** `frontend-design` (Claude) / `impeccable` (Codex) for UI quality; `angular-developer`,
   `react-best-practices`, `composition-patterns`; Chrome DevTools MCP and `playwright-cli` to verify in a real
   browser. Do not create PRODUCT.md / DESIGN.md unless the user asks.
+- **Documentation and diagrams:** the devkit `docs` skill (README anatomy, Diátaxis, Google style, `dev docs check`)
+  with `documentation-writer` and `doc-coauthoring`; the devkit `diagrams` skill for every diagram (SVG via
+  `dev diagram render`, validated with `dev diagram check`, dark and light). Update docs in the same branch as the code.
 - **Reviews:** before saying a substantial change is ready, run the built-in review (`/code-review` in Claude Code,
   `/review` in Codex) or a security review for auth, input handling and secrets.
 

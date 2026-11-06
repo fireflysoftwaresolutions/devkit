@@ -20,7 +20,7 @@ from .core import CONFIG_FILE, DEVKIT_HOME, HOME, STATE
 
 STACKS = {"java": "Java / Spring (JDK, Maven, Gradle, jdtls)", "python": "Python (uv, pyright)",
           "php": "PHP (php, Composer, intelephense)", "node": "Node / TypeScript / Angular / React (pnpm, tsc, ng)"}
-BASE_GROUPS = ("core", "docker", "agents")
+BASE_GROUPS = ("core", "docker", "agents", "docs")
 CLAUDE_MODES = {"bypassPermissions": "no prompts; the devkit guard protects the workspace (recommended)",
                 "acceptEdits": "edits without prompts, commands ask", "default": "ask before every tool"}
 CODEX_MODES = {"full": ("never", "danger-full-access", "no prompts, full access; the devkit guard protects (recommended)"),

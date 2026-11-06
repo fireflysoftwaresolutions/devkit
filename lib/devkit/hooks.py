@@ -182,8 +182,8 @@ def record_session(spec: str):
     if not s or not s.get("top"):
         return
     top = s["top"]
-    if not os.path.isdir(top):
-        return
+    if not os.path.isdir(top) or core.is_temp(top):
+        return  # scratch repositories are not tracked
     main = registry.main_of(Path(top)) or Path(top)
     remote = core.gitout(main, "config", "--get", "remote.origin.url")
     pid, _, _ = core.project_identity(main, remote)

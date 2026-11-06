@@ -73,9 +73,7 @@ def discover():
             m = top if g.is_dir() else main_of(top)
             if m:
                 add_main(m)
-            if g.is_dir():
-                issues.append(("layout", f"{tilde(top)} is a repo directly in {tilde(DEV)}"))
-            continue
+            continue  # reported once, with the exact `dev adopt` fix, by build()
         if "." in top.name:  # host folder: gitlab.com/<group>/<subgroup>/<repo>, bitbucket.org/<ws>/<repo>, …
             for m in _walk_repos(top, 6):
                 add_main(m)
@@ -324,11 +322,67 @@ def prs(slug: str, refresh=False, max_age=900):
         return read_json(f)
     rc, out, _ = sh(["gh", "pr", "list", "-R", slug, "--state", "all", "--limit", "200", "--json",
                      "number,state,headRefName,title,url,updatedAt,isDraft"], timeout=30)
+    if rc == 0:  # open PRs: add CI checks, review state and author (one extra call, open PRs only)
+        rc2, out2, _ = sh(["gh", "pr", "list", "-R", slug, "--state", "open", "--limit", "50", "--json",
+                           "number,statusCheckRollup,reviewDecision,author,mergeable,additions,deletions"], timeout=45)
+        if rc2 == 0:
+            extra = {p["number"]: p for p in json.loads(out2 or "[]")}
+            merged = json.loads(out or "[]")
+            for p in merged:
+                e = extra.get(p["number"])
+                if e:
+                    p["checks"] = _checks(e.get("statusCheckRollup") or [])
+                    p["review"] = e.get("reviewDecision") or ""
+                    p["author"] = (e.get("author") or {}).get("login", "")
+                    p["mergeable"] = e.get("mergeable") or ""
+                    p["size"] = (e.get("additions") or 0) + (e.get("deletions") or 0)
+            out = json.dumps(merged)
     if rc != 0:
         return read_json(f) if f.exists() else None
     f.parent.mkdir(parents=True, exist_ok=True)
     f.write_text(out)
     return json.loads(out or "[]")
+
+
+def _checks(rollup: list) -> str:
+    """GitHub statusCheckRollup -> passing | failing | pending | none."""
+    if not rollup:
+        return "none"
+    states = []
+    for c in rollup:
+        st = (c.get("conclusion") or c.get("state") or c.get("status") or "").upper()
+        states.append(st)
+    if any(x in ("FAILURE", "ERROR", "TIMED_OUT", "CANCELLED", "ACTION_REQUIRED", "STARTUP_FAILURE") for x in states):
+        return "failing"
+    if any(x in ("PENDING", "QUEUED", "IN_PROGRESS", "EXPECTED", "WAITING", "REQUESTED", "") for x in states):
+        return "pending"
+    return "passing"
+
+
+def live_sessions(max_age_s: int = 6 * 3600) -> list:
+    """Agent sessions devkit is tracking now: agent, project, branch, started, latest DevKit status line."""
+    out = []
+    d = STATE / "sessions"
+    if not d.exists():
+        return out
+    now = time.time()
+    for f in d.glob("*.json"):
+        try:
+            age = now - f.stat().st_mtime
+            if age > max_age_s:
+                continue
+            s = json.loads(f.read_text())
+        except (OSError, ValueError):
+            continue
+        top = s.get("top") or ""
+        if not top or core.is_temp(top):
+            continue
+        main = main_of(Path(top)) or Path(top)
+        pid = core.project_identity(main, gitout(main, "config", "--get", "remote.origin.url"))[0]
+        out.append({"agent": s.get("agent"), "project": pid, "branch": gitout(top, "branch", "--show-current")
+                    or s.get("branch"), "started": int(s.get("started") or 0), "last_seen": int(f.stat().st_mtime),
+                    "status": s.get("status", ""), "path": top, "active": is_active(top)})
+    return sorted(out, key=lambda x: -x["last_seen"])
 
 
 def pr_for_branch(pr_list, branch: str):
@@ -404,7 +458,10 @@ def inspect_repo(main: Path, with_prs=True, refresh_prs=False, pr_max_age=900) -
         "github": gh_slug, "default_branch": default, "canonical": str(canon),
         "canonical_ok": core.real(canon) == core.real(main), "stack": detect_stack(main),
         "commands": detect_commands(main), "main": co, "worktrees": wts,
-        "prs_open": [{"number": p["number"], "title": p["title"], "branch": p["headRefName"], "draft": p.get("isDraft")}
+        "prs_open": [{"number": p["number"], "title": p["title"], "branch": p["headRefName"], "draft": p.get("isDraft"),
+                      "url": p.get("url"), "updated": p.get("updatedAt"), "checks": p.get("checks", "unknown"),
+                      "review": p.get("review", ""), "author": p.get("author", ""), "mergeable": p.get("mergeable", ""),
+                      "size": p.get("size")}
                      for p in (pr_list or []) if p.get("state") == "OPEN"],
         "prs_known": pr_list is not None, "note": str(note_path(pid).relative_to(HANDOFF)),
         "last_activity": activity,
@@ -467,8 +524,14 @@ def build(with_prs=True, refresh_prs=False, with_sizes=False, refresh_sizes=Fals
     for p in projects:
         enrich(p)
     projects.sort(key=lambda p: (p["id"].startswith("_local/"), p["id"]))
+    try:
+        from . import providers
+        prov = providers.cached()
+    except Exception:
+        prov = {}
     return {"version": 1, "host": socket.gethostname().split(".")[0], "dev_root": str(DEV),
-            "generated": int(time.time()), "projects": projects, "issues": issues}
+            "generated": int(time.time()), "projects": projects, "issues": issues,
+            "sessions": live_sessions(), "providers": prov, "github_user": core.github_user()}
 
 
 def commit_activity(path: str, days: int = 30) -> dict:

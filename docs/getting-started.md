@@ -6,7 +6,7 @@ every file devkit touches.
 ## Requirements
 
 - macOS on Apple silicon. Homebrew is installed by `install.sh` if it is missing.
-- A GitHub account with read access to the private `ancongui/devkit` repository.
+- A GitHub account with read access to the private `fireflysoftwaresolutions/devkit` repository.
 - A Claude account for Claude Code and/or a ChatGPT account for Codex.
 
 ## Install on a new Mac
@@ -16,10 +16,10 @@ every file devkit touches.
 gh auth login -h github.com -s repo,read:org,workflow,gist
 
 # 2. devkit itself, in its canonical place
-gh repo clone ancongui/devkit ~/Development/ancongui/devkit
+gh repo clone fireflysoftwaresolutions/devkit ~/Development/fireflysoftwaresolutions/devkit
 
 # 3. Toolchain + configuration (safe to re-run at any time)
-~/Development/ancongui/devkit/install.sh
+~/Development/fireflysoftwaresolutions/devkit/install.sh
 
 # 4. Load the shell integration and verify
 exec zsh
@@ -40,7 +40,7 @@ dev doctor
 Pass `--skip-packages` to skip the Brewfile and npm steps, for example when you only changed configuration:
 
 ```bash
-~/Development/ancongui/devkit/install.sh --skip-packages
+~/Development/fireflysoftwaresolutions/devkit/install.sh --skip-packages
 ```
 
 ### What `dev install` configures
@@ -71,7 +71,7 @@ Details: [Agents](agents.md), [Configuration](configuration.md).
 
 ## Onboarding another developer
 
-1. **Access.** Add them as a collaborator on the private `ancongui/devkit` repository (read access is enough).
+1. **Access.** Make sure they are a member of the `fireflysoftwaresolutions` GitHub organization with read access to the private `fireflysoftwaresolutions/devkit` repository.
 2. **Install.** They follow [Install on a new Mac](#install-on-a-new-mac) with their own GitHub account.
 3. **Their handoff repository is created automatically.** `dev install` detects their login and creates a private
    `<their-login>/handoff` repository. Nobody shares a handoff repository by default; to use a different name, set

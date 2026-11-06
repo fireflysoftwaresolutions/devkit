@@ -25,7 +25,9 @@
       "repo": "likec4/likec4",
       "ref": "3cce820fadd11839d6bd745cf611722085558065",
       "license": "MIT",
-      "skills": { "likec4-dsl": "skills/likec4-dsl" }
+      "skills": {
+        "likec4-dsl": "skills/likec4-dsl"
+      }
     },
     {
       "repo": "vercel-labs/agent-skills",
@@ -52,7 +54,16 @@
       "skills": {
         "java-springboot": "skills/java-springboot",
         "spring-boot-testing": "skills/spring-boot-testing",
-        "java-junit": "skills/java-junit"
+        "java-junit": "skills/java-junit",
+        "documentation-writer": "skills/documentation-writer"
+      }
+    },
+    {
+      "repo": "anthropics/skills",
+      "ref": "ca45fc496a3436251f191354091d557da31c15b5",
+      "license": "per anthropics/skills (Anthropic)",
+      "skills": {
+        "doc-coauthoring": "skills/doc-coauthoring"
       }
     }
   ]

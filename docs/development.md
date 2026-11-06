@@ -45,7 +45,7 @@ install.sh · Brewfile   bootstrap and toolchain
 ## Running the tests
 
 ```bash
-cd ~/Development/ancongui/devkit
+cd ~/Development/fireflysoftwaresolutions/devkit
 python3 -m unittest discover -s tests -v
 /usr/bin/python3 -m unittest discover -s tests -v     # Python 3.9 compatibility
 python3 -m py_compile lib/devkit/*.py && /usr/bin/python3 -m py_compile lib/devkit/*.py

@@ -488,6 +488,15 @@ def setup_docker():
          f"{d['vm_type']}{' + rosetta' if d.get('rosetta') else ''}, {d['mount_type']})")
 
 
+def setup_docs_tools():
+    step("Documentation checks (markdownlint, lychee, Vale)")
+    from . import docs
+    have = {t: core.have(t) for t in ("markdownlint-cli2", "lychee", "vale")}
+    ok = docs.ensure_vale() if have["vale"] else False
+    done(", ".join(f"{t} {'✓' if v else '✗'}" for t, v in have.items()) + (" · Vale styles Google + write-good synced"
+                                                                         if ok else ""))
+
+
 def setup_launchd():
     step("Background sync (launchd)")
     interval = int(CFG["sync"].get("interval_minutes", 60)) * 60
@@ -531,7 +540,7 @@ def run_install(only=None):
     print(ui.banner("install"))
     steps = [("config", ensure_config), ("cli", install_cli), ("git", setup_git), ("handoff", setup_handoff),
              ("instructions", write_agent_instructions), ("skills", install_skills), ("claude", setup_claude),
-             ("codex", setup_codex), ("docker", setup_docker), ("launchd", setup_launchd)]
+             ("codex", setup_codex), ("docker", setup_docker), ("docs", setup_docs_tools), ("launchd", setup_launchd)]
     for name, fn in steps:
         if only and name not in only:
             continue

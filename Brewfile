@@ -28,6 +28,9 @@ brew "docker-buildx"
 brew "docker-credential-helper"
 # @agents
 cask "codex"
+# @docs
+brew "vale"
+brew "lychee"
 # @brand  (maintainers only: tools/brand/render.py)
 brew "librsvg"
 brew "webp"

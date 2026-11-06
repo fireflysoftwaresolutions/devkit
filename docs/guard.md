@@ -124,7 +124,7 @@ effect. Prefer fixing the rule (with a test) when a denial is a false positive.
 The rules are pure functions covered by `tests/test_devkit.py`:
 
 ```bash
-cd ~/Development/ancongui/devkit
+cd ~/Development/fireflysoftwaresolutions/devkit
 python3 -m unittest discover -s tests -v
 /usr/bin/python3 -m unittest discover -s tests -v     # the macOS system Python (3.9)
 ```

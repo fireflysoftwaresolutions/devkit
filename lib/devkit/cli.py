@@ -46,6 +46,7 @@ COMMANDS = [
     ("Delivery", [
         ("ci [--commands]", "Show what GitHub Actions runs, so you run it locally before the one push"),
         ("calver [--next]", "Current and next CalVer version YY.MM.PATCH from the repository's tags"),
+        ("docs check [--online]", "Check docs: Markdown structure, links and anchors, prose (Vale), diagrams"),
     ]),
     ("Tracking and disk", [
         ("canary", "How often Claude/Codex replies carried the “DevKit ·” instruction marker"),
@@ -1140,6 +1141,12 @@ def cmd_setup(a):
     return wizard.run(assume_yes=a.yes, skip_packages=a.skip_packages)
 
 
+def cmd_docs(a):
+    from . import docs
+    top = core.gitout(os.getcwd(), "rev-parse", "--show-toplevel") or os.getcwd()
+    return docs.check(Path(top), paths=a.paths or None, online=a.online, fix=a.fix, prose=not a.no_prose)
+
+
 def cmd_version(a):
     print(f"devkit {core.VERSION} · {tilde(core.DEVKIT_HOME)}\n{COPYRIGHT}")
     return 0
@@ -1278,6 +1285,12 @@ def build_parser():
     add("doctor", cmd_doctor, "Verify the setup")
     add("install", cmd_install, "Apply configuration").add_argument(
         "--only", help="comma list: config,cli,git,handoff,instructions,skills,claude,codex,docker,launchd")
+    p = add("docs", cmd_docs, "Check documentation: Markdown, links and anchors, prose, diagrams")
+    p.add_argument("check", choices=["check"])
+    p.add_argument("paths", nargs="*", help="files or folders (default: the whole repository)")
+    p.add_argument("--online", action="store_true", help="also check external links")
+    p.add_argument("--fix", action="store_true", help="apply markdownlint's automatic fixes")
+    p.add_argument("--no-prose", action="store_true", help="skip Vale")
     p = add("setup", cmd_setup, "Installation and configuration wizard")
     p.add_argument("-y", "--yes", action="store_true", help="accept every default (non-interactive)")
     p.add_argument("--skip-packages", action="store_true", help="do not install Homebrew/npm packages")
