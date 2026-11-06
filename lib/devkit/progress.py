@@ -2662,7 +2662,8 @@ def reconcile_hook(agent: str, data: dict, now: float | None = None) -> list:
     aid = str(data.get("agent_id") or "")
     lane = (run.get("agents") or {}).get(aid) if aid else None
     seen = bool(lane) and now - float(lane.get("last_seen") or 0) >= LAST_SEEN_EVERY
-    fx = approvals.facts(run, sess, now, meta=approvals.meta_reader(data.get("transcript_path")))
+    # the meta files beside the session's own transcript, never beside a path the event names (B1)
+    fx = approvals.facts(run, sess, now, meta=approvals.meta_reader(harness_transcript(agent, sid)))
     if aid in fx["lanes"]:
         fx["lanes"][aid]["last_seen"] = now
     lim = approvals.limits()

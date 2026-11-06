@@ -833,6 +833,33 @@ class EvidenceReplayTests(unittest.TestCase):
         self.assertFalse(pg.confirmed({"agent": "codex", "channel": "E2", "transcript_uuid": "p-1", "covers": "D1"}))
 
 
+class ReconcileTranscriptTests(unittest.TestCase):
+    # Seraph (low, M305): the reconciler reads a lane's meta file next to the session's own transcript
+    # (harness_transcript), never next to a path the hook event names, so a forged event cannot end a member's lane
+    def test_the_reconciler_reads_meta_files_beside_the_sessions_own_transcript_only(self):
+        with TempState() as st, mock.patch.object(core, "CLAUDE_HOME", Path(st.tmp.name) / ".claude"):
+            root = Path(st.tmp.name)
+            own, forged = root / ".claude" / "projects" / "-repo" / "s1.jsonl", root / "forged" / "s1.jsonl"
+
+            def finished_meta(transcript):
+                meta = transcript.with_suffix("") / "subagents" / "agent-a_tank.meta.json"
+                meta.parent.mkdir(parents=True)
+                meta.write_text(json.dumps({"finished": True}))
+                os.utime(meta, (time.time() - 600, time.time() - 600))  # finished 10 minutes ago, no SubagentStop
+            for t in (own, forged):
+                t.parent.mkdir(parents=True, exist_ok=True)
+                t.write_text("")
+            pg.start("Work", plan=["api"])
+            pg.assign("api", "Tank")
+            launch("a_tank", "devkit:tank", "Tank: api")
+            finished_meta(forged)
+            pg.reconcile_hook("claude", {"session_id": "s1", "transcript_path": str(forged)})
+            self.assertEqual(pg.load_run("claude", "s1")["agents"]["a_tank"]["state"], "running")
+            finished_meta(own)
+            pg.reconcile_hook("claude", {"session_id": "s1", "transcript_path": str(forged)})
+            self.assertEqual(pg.load_run("claude", "s1")["agents"]["a_tank"]["state"], "unverified")
+
+
 class HookCallsTests(unittest.TestCase):
     def test_the_hooks_call_only_devkit_functions_that_exist(self):
         # Seraph M111 (4): the prompt hook called scope.resolve, lessons.note_correction and skillguard.on_prompt after
