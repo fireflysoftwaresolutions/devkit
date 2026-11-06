@@ -428,8 +428,15 @@ def setup_claude():
         rc, out, err = sh(["claude", "plugin", "install", p, "-s", "user", "-y"], timeout=300)
         done(f"installed {p}") if rc == 0 else fail(f"{p}: {(err or out)[-200:]}")
     sh(["claude", "plugin", "marketplace", "update", "firefly-devkit"], timeout=120)
-    rc, out, err = sh(["claude", "plugin", "update", "devkit@firefly-devkit"], timeout=120)
-    done(f"{len(plugins['plugins'])} plugins installed and enabled (devkit plugin refreshed to {core.VERSION})")
+    if plugin_copy_stale(CLAUDE_HOME / "plugins" / "cache" / "firefly-devkit" / "devkit"):
+        sh(["claude", "plugin", "marketplace", "update", "firefly-devkit"], timeout=120)
+        sh(["claude", "plugin", "uninstall", "devkit@firefly-devkit"], timeout=120)
+        rc, out, err = sh(["claude", "plugin", "install", "devkit@firefly-devkit", "-s", "user", "-y"], timeout=300)
+        if rc != 0 or plugin_copy_stale(CLAUDE_HOME / "plugins" / "cache" / "firefly-devkit" / "devkit"):
+            fail(f"devkit plugin copy is out of date in Claude Code: {(err or out)[-160:]}")
+        else:
+            done("devkit plugin reinstalled from this checkout (skills, commands, agents)")
+    done(f"{len(plugins['plugins'])} plugins installed and enabled")
     for name, spec in plugins.get("mcp", {}).items():
         rc, _, _ = sh(["claude", "mcp", "get", name], timeout=30)
         if rc == 0:
@@ -517,6 +524,26 @@ def write_codex_agents(conf: dict):
     done(f"agent roles: {', '.join(roles)} (~/.codex/agents)")
 
 
+def plugin_copy_stale(cache_root: Path) -> bool:
+    """True when the agent's installed copy of the devkit plugin differs from this checkout's plugin/ folder.
+    Both Claude Code and Codex install a snapshot, and devkit's version does not change between commits."""
+    import filecmp
+    src = DEVKIT_HOME / "plugin"
+    copies = sorted(cache_root.glob("*")) if cache_root.exists() else []
+    if not copies:
+        return True
+    dst = copies[-1]
+
+    def differs(a: Path, b: Path) -> bool:
+        cmp = filecmp.dircmp(a, b, ignore=[".git", ".DS_Store", "__pycache__"])
+        if cmp.left_only or cmp.diff_files or cmp.funny_files:
+            return True
+        _, mismatch, errors = filecmp.cmpfiles(a, b, cmp.common_files, shallow=False)
+        return bool(mismatch or errors) or any(differs(a / d, b / d) for d in cmp.common_dirs)
+
+    return differs(src, dst)
+
+
 def setup_codex():
     step("Codex (CLI + ChatGPT app): settings, hooks, plugins, MCP")
     if not core.have("codex"):
@@ -543,6 +570,15 @@ def setup_codex():
             continue
         rc, out, err = sh(["codex", "plugin", "add", p], timeout=300)
         done(f"installed {p}") if rc == 0 else fail(f"{p}: {(err or out)[-200:]}")
+    cache = CODEX_HOME / "plugins" / "cache" / "firefly-devkit" / "devkit"
+    if "devkit@firefly-devkit" in plugins["plugins"] and plugin_copy_stale(cache):
+        sh(["codex", "plugin", "marketplace", "upgrade", "firefly-devkit"], timeout=180)
+        sh(["codex", "plugin", "remove", "devkit@firefly-devkit"], timeout=120)
+        rc, out, err = sh(["codex", "plugin", "add", "devkit@firefly-devkit"], timeout=300)
+        if rc != 0 or plugin_copy_stale(cache):
+            fail(f"devkit plugin copy is out of date in Codex: {(err or out)[-160:]}")
+        else:
+            done("devkit plugin reinstalled from this checkout (skills, commands)")
     done(f"{len(plugins['plugins'])} plugins installed and enabled")
 
 
@@ -779,6 +815,11 @@ def doctor() -> int:
           canary.summary_line(7), "`dev canary` lists deviations; check ~/.claude/CLAUDE.md and ~/.codex/AGENTS.md")
     st = os.statvfs(str(HOME))
     free_gb = st.f_bavail * st.f_frsize / 1024 ** 3
+    for agent_name, home in (("Claude", CLAUDE_HOME), ("Codex", CODEX_HOME)):
+        stale = plugin_copy_stale(home / "plugins" / "cache" / "firefly-devkit" / "devkit")
+        check(agent_name, "devkit plugin copy is current", not stale,
+              "matches plugin/ in this checkout" if not stale else "older than this checkout (skills or agents missing)",
+              f"dev install --only {agent_name.lower()}")
     from . import policy as _pol
     offs = _pol.project_overrides()
     check("Agents", "no project switches devkit off", not offs,
