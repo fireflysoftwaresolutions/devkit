@@ -109,10 +109,20 @@ These commands read and write the handoff repository. [Teams and machines](teams
 [Initiatives](initiatives.md), and [Progress and communication](progress-and-communication.md) explain the model
 behind them.
 
-### `dev dashboard [--no-open] [--path]`
+### `dev dashboard [--no-open | --status | --stop | --export FILE | --path]`
 
-Regenerates the HTML command center and opens it in your browser. `--no-open` regenerates and prints the path;
-`--path` prints the path only. See [Dashboard](dashboard.md).
+Starts the dashboard server in the background, or reuses the one that runs already, and opens the live command center
+in your browser with a one-time sign-in link. The server listens on `127.0.0.1` only, reads only, and stops by itself
+after `dashboard.idle_minutes` (30) with no open page. A server from an older devkit version is replaced. See
+[Dashboard](dashboard.md).
+
+| Option | Effect |
+| --- | --- |
+| `--no-open` | Starts or reuses the server and prints the one-time link (valid once, within 60 seconds) instead of opening the browser |
+| `--status` | Whether a server runs: its address, pid, devkit version, snapshot number, open pages, and start time. Exits with `1` when none runs |
+| `--stop` | Stops the running server (only a devkit dashboard process) |
+| `--export FILE` | Writes a static, self-contained copy of the page to `FILE`, without a server |
+| `--path` | Writes the static copy devkit keeps (`~/.local/state/devkit/dashboard/index.html`) and prints its path |
 
 ### `dev overview [--json] [--days N] [--all]`
 
@@ -173,6 +183,7 @@ of the title. See [Teams and machines](teams.md) for locks, versions, and the ch
 | `block <selector> --why "…"` | Marks the item blocked |
 | `unblock <selector> [--why]` | Back to work: todo, or doing while the item is still claimed |
 | `cancel <selector> --why "…"` | Cancels the item and clears its lock |
+| `reopen <selector> --why "…"` | Puts a done or cancelled item back to todo, for an item closed too early; refused on an open item |
 | `move <selector> --to now\|next\|later --why "…"` | Moves the item between buckets |
 | `edit <selector> [--title "…"] [--body-file FILE] [--priority high\|normal\|low] [--due YYYY-MM-DD] --why "…"` | Changes the title, the description, the priority, or the due date |
 | `delegate <selector> --to LOGIN [--why "…"] [--due YYYY-MM-DD] [--no-copy]` | Assigns the item to a teammate, releases your lock, prints the message to send, and copies it to the clipboard |
@@ -195,8 +206,8 @@ Options of `dev task add`:
 | `--body "…"` | Your own description instead of the template |
 | `--no-template` | No description at all |
 
-`--why` records the reason in the item's changelog and in its commit. `edit`, `move`, `block`, `cancel`, and `link`
-refuse to run without it. Changing an item that someone else holds an unexpired lock on
+`--why` records the reason in the item's changelog and in its commit. `edit`, `move`, `block`, `cancel`, `reopen`,
+and `link` refuse to run without it. Changing an item that someone else holds an unexpired lock on
 is refused; coordinate with them or wait for the lock to expire.
 
 ### `dev note set <key=value> … [-p PROJECT | -i SLUG]`
@@ -249,11 +260,11 @@ Live progress of long agent work, with active time, a critical-path ETA and a pl
 | `dev progress step "<what finished>" --check "<evidence>" [--step <n or name>] [--next "…"] [--force]` | Closes the running step (or the one named) with its evidence, and prints the update, which is the status block with the plan under it, then the exact change made. Refused when the description does not match the step, a crew member still owns it, or its dependencies are open; `--no-check` when there is nothing to verify |
 | `dev progress note "<what is happening>" [--next "…"]` | An update while a step is still running: recorded and printed as the status block (Check `–` the step is still running), and no step changes state. From a crew member, it stays in its lane |
 | `dev progress add "<name>=<estimate> [after …]" [--why "…"]` | Adds a step found during the work; add it when it starts. From a crew member, the step goes to its own lane |
-| `dev progress assign <step> --to <member> [--scope "<globs>"]` | Hands a step to a crew member; its time is that member's, and the guard keeps its edits inside the scope |
+| `dev progress assign <step> --to <member> [--scope "<globs>"] [--why "…"]` | Hands a step to a crew member; its time is that member's, and the guard keeps its edits inside the scope. Refused when the crew's RACI does not make that member Responsible for the step's kind of work, unless `--why` gives the reason, which is recorded |
 | `dev progress begin <step>` | Starts a step in parallel with the running one |
 | `dev progress reopen <step> --why "…"` · `dev progress skip <step> --why "…"` | Undoes a wrong close, or skips a step on purpose |
 | `dev progress block "<why>" [--next "<what is needed>"]` | The run is blocked; prints the update and sends a desktop notification |
-| `dev progress done "<outcome>"` | The run is finished; refused while steps are pending or decisions wait; records the active time against the estimate and sends a desktop notification |
+| `dev progress done "<outcome>" [--why "…"]` | The run is finished; refused while steps are pending, decisions wait, or an Accountable member has not approved the work they own. `--why` ends it without that approval and records the reason. Records the active time against the estimate and sends a desktop notification |
 | `dev progress history` | Every step change: when, from → to, by whom (Morpheus, a crew member, devkit), why |
 | `dev progress` | Every run of the last 12 hours on this Mac, and the runs of other machines from their presence |
 | `dev progress time [--days N] [-p PROJECT]` | Same as `dev time` |
@@ -288,11 +299,17 @@ repository](initiatives.md#adopt-an-existing-handoff-repository).
 
 devkit's specialist agents. See [The crew](crew.md).
 
-### `dev crew [show | brief | route | delegate | decline | next | ask | answer | inbox | mode | decide | decisions | sync]`
+### `dev crew [graph | raci | rules | show | brief | route | delegate | decline | next | ask | answer | inbox | mode | decide | decisions | set | history | sync]`
 
 | Command | Effect |
 | --- | --- |
 | `dev crew [--json] [--latest]` | The roster, and in a session with a run: who is working now, the steps assigned to each member, open messages and decisions, and the mode. `--latest` reads the most recent running run on this Mac instead of this session's; `--json` prints the roster and the live state |
+| `dev crew graph [--latest] [--mermaid \| --json]` | The live session as one graph, with Morpheus, the run's steps with their state, owner, kind of work, and the steps each waits for; the crew lanes and nested subagents under their steps; the work items the run tracks; decisions waiting for the developer; approvals owed; and open messages. `--latest` draws the most recent running run on this Mac; `--mermaid` prints a Mermaid flowchart that renders on GitHub; `--json` prints the nodes and edges |
+| `dev crew raci [<work> \| <member> \| "<task>"] [--markdown]` | Who does (R), approves (A), is consulted on (C), and is informed about (I) each kind of work, as one table. With a kind of work, its row; with a member, what they do, approve, and are consulted or informed on; with a task, the kind of work it reads as, and its row. `--markdown` prints the whole matrix as a Markdown table |
+| `dev crew raci <work> --set "R=tank A=seraph C=… I=…" --why "…"` | Changes one row of the RACI for the whole team, recorded in the handoff repository with who and why |
+| `dev crew rules` | Every crew rule, the devkit check that enforces it, and its state (enforced, planned, or guidance). Exits with `1` when a rule's check is missing |
+| `dev crew set <member> <field> "<value>" --why "…"` | Changes a member's definition for the whole team (`name`, `title`, `role`, `summary`, `goal`, `skills`, `procedure`, `tools`, `tier`, and the other fields), recorded in the handoff repository. List fields take `"a; b; c"`; `procedure` takes JSON. The members get it in their briefs; Codex roles with `dev install --only codex` |
+| `dev crew history` | The team's changes to the crew and the RACI, newest first: what changed, who changed it, and why |
 | `dev crew show <name>` | One member: role, personality, when to use it, skills, tools, model tier, keywords |
 | `dev crew brief <name> "<task>" [--scope "<globs>"] [--step <step>]` | A ready brief for the Agent tool or `spawn_agent`, the exact launch line for Claude Code and Codex, and the `dev progress assign` command that links the lane |
 | `dev crew route "<task>" [--files a,b]` · `dev crew route --plan [--apply]` | The best members for a task, with scores and reasons; or a member for every unowned plan step |
@@ -954,10 +971,15 @@ the same `~/.codex` configuration and has the same plugins enabled), the instruc
 days, per surface, with corrected misses counted apart), and free disk. Each failure prints its fix. Exits with `1` if any
 check fails.
 
-### `dev agents [status | test] [claude | codex | all] [--json] [--model MODEL] [-v]`
+### `dev agents [status | test | rules] [claude | codex | all] [--json] [--model MODEL] [-v] [--section SECTION]`
 
 `dev agents` reports, for Claude Code and Codex: version, desktop app, sign-in method, plan, account, login expiry,
 quota and the last self-test. `--json` prints the same as JSON.
+
+`dev agents rules` prints devkit's global rules for agents as `dev install` writes them into `~/.claude/CLAUDE.md`
+and `~/.codex/AGENTS.md`. `--section` prints one section, by its number (`0` to `12`) or words from its title, for
+example `dev agents rules --section "status block"`. The Claude Desktop extension's `devkit_rules` tool returns the
+same text.
 
 `dev agents test [claude|codex]` runs a short real session in a scratch repository and checks the integration from
 recorded evidence: the session ran, the SessionStart hook recorded it, the guard blocked a tool-prefixed branch, the
@@ -993,22 +1015,38 @@ dev guard check --write ~/Desktop/notes.md --agent codex
 Validates the devkit plugin with Claude Code's validator and with Codex's own manifest parser (version, display name,
 logo and skills).
 
-### `dev install [--only STEPS]`
+### `dev install [--only STEPS | --version VERSION | --unverified --why "…"]`
 
-Applies the configuration; safe to run again. `STEPS` is a comma-separated list of
-`config,tools,cli,git,handoff,instructions,skills,claude,codex,docker,docs,launchd`. The `tools` step installs only
-the Homebrew and npm packages that are missing for your stacks, git hosts, and clouds (and the Azure DevOps CLI
-extension), unless `packages.auto` is off. The `launchd` step installs the [scheduled jobs](jobs-and-audit.md). See
+Pins devkit, then applies the configuration; safe to run again. It first makes a read-only, checksummed copy of the
+checkout's commit in `~/.local/share/devkit/releases/<version>-<commit>/` and runs every step from that copy, so the
+hooks, the guard, the status line, `~/.local/bin/dev`, the scheduled jobs, and the Claude Desktop extension run it,
+never the checkout. It pins only a release (a `vYY.MM.PATCH` tag that GitHub has on the same commit) or a commit whose
+`bin/dev ci --run` passed on this Mac, and refuses tracked files with uncommitted changes and code that does not
+compile. It keeps the newest three copies and any copy in use. Run it yourself, in a terminal: the guard refuses
+`dev install`, `dev update`, and `install.sh` from an agent. See
+[Getting started › The pinned copy](getting-started.md#the-pinned-copy).
+
+| Option | Effect |
+| --- | --- |
+| `--only STEPS` | Re-applies only these steps from the installed copy, without pinning. `STEPS` is a comma-separated list of `config,tools,cli,git,handoff,instructions,skills,claude,codex,desktop,docker,docs,launchd` |
+| `--version VERSION` | Switches to a copy pinned by an earlier install, for a rollback: `26.11.2`, or `26.11.2-<commit>`. It checks the copy against its checksums first |
+| `--unverified --why "…"` | Pins the checkout's commit although it is neither a release nor tested; the reason is recorded in the audit trail |
+
+The `tools` step installs only the Homebrew and npm packages that are missing for your stacks, git hosts, and clouds
+(and the Azure DevOps CLI extension), unless `packages.auto` is off. The `desktop` step builds the Claude Desktop
+extension and opens its installer when it is missing or out of date. The `launchd` step installs the
+[scheduled jobs](jobs-and-audit.md). See
 [Getting started › What dev install configures](getting-started.md#what-dev-install-configures).
 
 ### `dev update`
 
-Updates the devkit checkout, then runs `dev install`. What it does depends on where the checkout is:
+Updates the devkit checkout, then runs `dev install`, which pins the new commit. It always updates the checkout,
+even when `dev` runs from the pinned copy. What it does depends on where the checkout is:
 
 | The checkout is | `dev update` |
 | --- | --- |
 | At a release tag (how the installer leaves it) | Fetches the tags and checks out the newest release, the highest `vYY.MM.PATCH` compared as numbers (`v26.11.10` is newer than `v26.11.2`); at the newest release already, it says so and stops without `dev install` |
-| On a branch | `git pull --ff-only` |
+| On a branch | `git pull --ff-only`; `dev install` then pins the new commit only after `bin/dev ci --run` passes for it |
 | At a commit that is neither a release nor a branch | Refuses, and says how to check out a release or a branch |
 | Changed: tracked files have local changes | Refuses, and changes nothing; commit or discard the changes first |
 
@@ -1036,7 +1074,9 @@ Version, install path, and copyright.
 | `dwt <branch> [--base REF]` | Create or reuse a managed worktree and `cd` into it |
 
 It also puts `~/.local/bin` on the PATH, sets the Docker and telemetry environment variables, and loads zsh completion
-for `dev` (commands, project ids, worktree branches, Docker actions, install steps) and `dcd`.
+for `dev` and `dcd`: the commands, project ids, worktree branches, the verbs of `dev task`, `dev progress`, `dev crew`,
+and `dev agents` with their main options, the options of `dev dashboard` and `dev install` (its steps and the pinned
+copies for `--version`), and the Docker actions.
 
 ## Internal commands
 
