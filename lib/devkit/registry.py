@@ -497,6 +497,17 @@ def sizes(paths, refresh=False, max_age=3600) -> dict:
     return {p: cache.get(p, [None, None])[0] for p in paths}
 
 
+def remember_sizes(measured: dict, now: float = None):
+    """Store sizes measured elsewhere (`dev du`) in the same cache, so `dev ls`, the dashboard and `dev du` show the
+    same numbers. `measured`: {path: KB}."""
+    cache_f = core.STATE / "cache" / "sizes.json"
+    cache = read_json(cache_f, {}) or {}
+    now = now or time.time()
+    cache.update({p: [kb, now] for p, kb in measured.items() if kb is not None})
+    cache_f.parent.mkdir(parents=True, exist_ok=True)
+    cache_f.write_text(json.dumps(cache))
+
+
 # --------------------------------------------------------------------------- registry
 
 

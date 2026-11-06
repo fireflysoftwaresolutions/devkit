@@ -68,7 +68,7 @@ TIPS = [
     "`dcd <query>` jumps into any project; `dwt <branch>` creates a worktree and jumps into it.",
     "`dev claude -w feat/x` starts Claude Code in its own worktree: parallel work without sibling copies.",
     "`dev ci` shows exactly what CI runs. Run it locally, then push once: one push, one CI run.",
-    "`dev gc` is a dry run; it only ever removes work that is already safe on the remote.",
+    "`dev du` says what fills your disk and why; `dev free <n>` frees a plan item after asking, never unpushed work.",
     "Say “handoff” to Claude or Codex before you stop: the note is waiting for the next session.",
     "`dev doctor` checks git, gh, Claude, Codex, skills, Docker and the background sync in one go.",
     "Worktrees reuse node_modules copy-on-write when the lockfile matches: no reinstall, ~0 bytes.",
@@ -364,6 +364,20 @@ def duration(secs) -> str:
         return f"{secs // 60} min"
     h, m = divmod(secs // 60, 60)
     return f"{h} h" + (f" {m} min" if m else "")
+
+
+_EIGHTHS = " ▏▎▍▌▋▊▉"
+
+
+def bar(fraction: float, cells: int) -> str:
+    """A bar at most `cells` wide in the default text color: full blocks, then an eighth block for the rest; `#`
+    without UTF-8. A share above zero always shows at least the thinnest mark."""
+    f = min(1.0, max(0.0, fraction or 0.0))
+    if not UTF8:
+        return "#" * max(int(round(f * cells)), 1 if f > 0 else 0)
+    eighths = max(int(round(f * cells * 8)), 1 if f > 0 else 0)
+    full, rest = divmod(eighths, 8)
+    return "█" * full + (_EIGHTHS[rest] if rest else "")
 
 
 def fit_cell(s: str, n: int) -> str:

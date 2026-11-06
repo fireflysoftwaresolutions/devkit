@@ -78,7 +78,7 @@ diagram files without them.
 | Something is off | `dev doctor`, `dev canary` (status block results), `dev agents` (both agents' versions, sign-in, quota), `dev config diff`, `dev guard check "<cmd>"`, `dev plugin validate` | — |
 | Background jobs and history | `dev jobs` (ls, run, set, logs), `dev audit`, `dev sync` (the handoff repository) | — |
 | Files, safely | `dev files`, `dev find`, `dev grep`, `dev diff`, `dev rm` (to the Trash, `--undo`), `dev mv`, `dev cp` | — |
-| Disk and Docker | `dev du`, `dev gc` (merged worktrees, build output, temp), `dev docker up\|status` | `workspace` |
+| Disk and Docker | `dev du` (what fills the disk, why, and the plan), `dev free <n>` (frees a plan item; `dev gc` is its old name), `dev docker up\|status\|trim` | `workspace` |
 | Install, update, or roll back devkit (the developer, in a terminal: the guard refuses them to agents) | `dev setup`, `dev install [--only <steps>]`, `dev install --version <previous>` (rollback), `dev update`, `dev version` | — |
 | Claude Desktop chat and Cowork | `dev desktop status\|pack`; the extension runs `dev mcp` | — |
 

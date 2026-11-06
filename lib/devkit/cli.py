@@ -84,8 +84,8 @@ COMMANDS = [
     ("Tracking and disk", [
         ("canary", "How often Claude/Codex replies carried the “[Firefly> DevKit]” instruction marker"),
         ("sync", "Refresh the projects map and handoff notes, commit and push the handoff repo"),
-        ("gc [--apply]", "Show (or reclaim) merged worktrees, stale build output and temp files"),
-        ("du", "Disk usage of projects, worktrees, agent data, temp and Docker"),
+        ("du [<name>] [--plan|--refresh]", "What fills your disk, why, and the plan to free it safely"),
+        ("free [<n>…|--safe]", "Free items of the dev du plan: asks first, refuses work not committed or pushed"),
     ]),
     ("Environment", [
         ("setup [--yes]", "The installation and configuration wizard (first install, or to change choices)"),
@@ -97,7 +97,7 @@ COMMANDS = [
         ("desktop pack|status", "Claude Desktop extension: build the .mcpb bundle, check what is installed"),
         ("install [--only step]", "Pin the checkout read-only for the hooks, then apply the configuration"),
         ("update", "Move devkit to the newest release (or pull its branch), pin it and re-apply it"),
-        ("docker up|down|status|prune", "Run Docker on a Colima VM"),
+        ("docker up|down|status|trim|prune", "Run Docker on a Colima VM; trim returns its free space to macOS"),
         ("version", "Show the devkit version"),
     ]),
 ]
@@ -1266,6 +1266,15 @@ def _expire_sessions(days=7):
 
 
 def cmd_gc(a):
+    """`dev gc` is `dev free` under its old name (Hamann's decision (b)); `--apply` (and `-v`) keep the unattended
+    cleanup that scripts and the nightly gc job run."""
+    if a.apply or a.verbose:
+        return _gc_unattended(a)
+    from . import disk
+    return disk.cmd_free(a)
+
+
+def _gc_unattended(a):
     print(ui.section("Scanning (PR states refreshed from GitHub)"))
     reg = registry.build(with_prs=True, refresh_prs=True, with_sizes=True)
     pl = gc.plan(reg, with_sizes=True)
@@ -1315,25 +1324,13 @@ def _du_rows(reg: dict) -> list:
 
 
 def cmd_du(a):
-    reg = registry.build(with_prs=False, with_sizes=True, refresh_sizes=a.refresh)
-    print(ui.section("Projects on this Mac (main checkout · its worktrees)"))
-    print(ui.table(_du_rows(reg), ["PROJECT", "MAIN", "WORKTREES", "N"]))
-    away = registry.split_local(reg["projects"])[1]
-    if away:
-        print("\n" + _portfolio_footer(len(away)))
-    print(ui.section("Agent data, temp, caches"))
-    extra = [("Claude transcripts (~/.claude/projects)", core.CLAUDE_HOME / "projects"),
-             ("Claude temp", Path(core.real("/tmp")) / f"claude-{os.getuid()}"),
-             ("Codex home (~/.codex)", core.CODEX_HOME), ("devkit temp (~/Development/.tmp)", core.TMP_ROOT),
-             ("npm cache", core.HOME / ".npm"), ("Homebrew cache", core.HOME / "Library" / "Caches" / "Homebrew"),
-             ("Colima VM disk", core.HOME / ".colima")]
-    for label, path in extra:
-        if path.exists():
-            print(ui.kv(label, human_kb(core.du_kb(path, timeout=120)), key_width=42))
-    if core.have("docker") and core.sh(["docker", "info"], timeout=10)[0] == 0:
-        print(ui.section("Docker"))
-        print("\n".join("  " + ln for ln in core.sh(["docker", "system", "df"], timeout=30)[1].splitlines()))
-    return 0
+    from . import disk
+    return disk.cmd_du(a)
+
+
+def cmd_free(a):
+    from . import disk
+    return disk.cmd_free(a)
 
 
 # --------------------------------------------------------------------------- environment
@@ -1441,6 +1438,9 @@ def cmd_docker(a):
         if core.sh(["docker", "info"], timeout=10)[0] == 0:
             run(["docker", "system", "df"])
         return 0
+    if a.action == "trim":
+        from . import disk
+        return disk.cmd_trim(a)
     if a.action == "prune":
         run(["docker", "system", "prune", "-f"])
         return run(["docker", "builder", "prune", "-f"])
@@ -3294,12 +3294,16 @@ def build_parser():
     p.add_argument("--quiet", action="store_true")
     p.add_argument("--renew", metavar="AGENT", help=argparse.SUPPRESS)
     p.add_argument("--delay", type=int, default=0, help=argparse.SUPPRESS)
-    p = add("gc", cmd_gc, "Reclaim disk safely")
-    p.add_argument("--apply", action="store_true")
+    from . import disk as _disk
+    _disk.add_du_arguments(add("du", cmd_du, "What fills your disk, why, and the plan to free it safely"))
+    _disk.add_free_arguments(add("free", cmd_free, "Free items of the dev du plan by number, or every safe one: "
+                                                   "asks first, refuses work that is not committed or pushed"))
+    p = _disk.add_free_arguments(add("gc", cmd_gc, "Reclaim disk: the same as dev free; --apply runs the unattended "
+                                                   "cleanup of the nightly gc job"))
+    p.add_argument("--apply", action="store_true", help="the unattended cleanup: merged worktrees, idle build "
+                                                         "output, stale temp (asks unless -y)")
     p.add_argument("--auto-only", action="store_true", help="only what is safe without a person (the gc job)")
-    p.add_argument("-y", "--yes", action="store_true")
-    p.add_argument("-v", "--verbose", action="store_true")
-    add("du", cmd_du, "Disk usage report").add_argument("--refresh", action="store_true")
+    p.add_argument("-v", "--verbose", action="store_true", help="with --apply's plan, also what is kept and why")
     p = add("canary", cmd_canary, "Instruction-compliance canary report")
     p.add_argument("--days", type=int, default=7)
     p.add_argument("--limit", type=int, default=20)
@@ -3362,7 +3366,7 @@ def build_parser():
     p.add_argument("--skip-packages", action="store_true", help="do not install Homebrew/npm packages")
     add("update", cmd_update, "Update devkit: the newest release, or a pull of its branch")
     add("docker", cmd_docker, "Docker on Colima").add_argument(
-        "action", choices=["up", "down", "status", "prune", "autostart-on", "autostart-off"])
+        "action", choices=["up", "down", "status", "trim", "prune", "autostart-on", "autostart-off"])
     add("version", cmd_version, "Show version")
     p = add("hook", cmd_hook, argparse.SUPPRESS)
     p.add_argument("event")

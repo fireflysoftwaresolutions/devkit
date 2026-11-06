@@ -947,19 +947,47 @@ release, and handoff change (see [Teams and machines › Near-real-time sync](te
 | `--no-push` | Commit but do not push |
 | `--quiet` | No output |
 
-### `dev gc [--apply] [-y] [--auto-only] [-v]`
+### `dev du [<name>] [--plan] [--refresh] [--json]`
 
-Plans disk reclamation with fresh PR states and prints what can be reclaimed (a dry run). `-v` also lists what is kept
-and why. `--apply` asks for confirmation in a terminal (skip it with `-y`); in a non-interactive shell it refuses
-unless you pass `--yes`. `--auto-only` applies only the actions that are safe without a person, which is what the
-nightly `gc` job runs. It then syncs. The rules are in [Disk and cleanup](disk-and-cleanup.md).
+What fills your disk, why, and what you can safely free. For each project on this Mac (a footer counts the portfolio
+projects that are not): the main checkout, managed worktrees, Claude Code and Codex worktrees, and copies outside the
+layout (flagged `!`), each with its size, branch or PR state, changes, last activity, and its largest ignored folders
+by kind (build output, dependencies, caches), found by measuring. Then Colima (its disk on the Mac, what Docker holds,
+and the free space macOS has not got back), agent data and caches with whether each is safe to clear, and a plan to
+free space, ranked by the space each item frees, with its safety, its risk, and its command. Nothing is deleted.
 
-### `dev du [--refresh]`
+The measurement is cached with its time and shown in under 2 seconds; it is taken again when it is older than 12
+hours. What it measures and what is safe to delete are in [Disk use](disk.md).
 
-Sizes of the main checkout and worktrees of each project on this Mac (a footer counts the portfolio projects that are
-not), Claude Code transcripts and temp, the Codex home, devkit temp,
-the npm and Homebrew caches, the Colima VM disk, and `docker system df` when Docker is running. `--refresh` recomputes
-cached sizes.
+| Option | Effect |
+| --- | --- |
+| `<name>` | One project, by alias or part of its name, and its plan items |
+| `--plan` | Only the plan to free space |
+| `--refresh` | Measure again now, with fresh PR states |
+| `--json` | The measurement and the numbered plan as JSON, with full values (the dashboard reads it) |
+
+### `dev free [<n>…] [--safe] [-y]`
+
+Frees items of the plan that `dev du` showed, by number. Without numbers it prints the plan. With them, it lists
+exactly what it deletes and the space, asks `Delete it? [y/N]` once, checks safety again at that moment (changed
+files, commits that are not pushed, a program working in the folder), then reports what it freed; a refusal says
+why and what to do. A number always means the item you saw: if a newer measurement changed the plan, `dev free`
+prints the new plan and deletes nothing. It removes worktrees and copies with `git worktree remove`, deletes only
+folders git ignores, runs the tool's own command for a cache or Docker images (and says which), and never prunes
+Docker volumes. Every deletion is in the audit trail.
+
+| Option | Effect |
+| --- | --- |
+| `<n>…` | The plan items to free, for example `dev free 2 4` |
+| `--safe` | Every item of the plan marked `safe` |
+| `-y`, `--yes` | Do not ask first (for scripts); in a shell that is not a terminal, `dev free` refuses without it |
+
+### `dev gc [<n>…] [--safe] [-y] [--apply] [--auto-only] [-v]`
+
+The same as `dev free`, under its old name, for scripts. `--apply` runs the unattended cleanup instead: it plans with
+fresh PR states, asks for confirmation in a terminal (skip it with `-y`), and then syncs. `-v` also lists what that
+cleanup keeps and why. `--auto-only` applies only the actions that are safe without a person, which is what the
+nightly `gc` job runs. The rules are in [Disk and cleanup](disk-and-cleanup.md).
 
 ### `dev jobs [ls | show | run | logs | journal | set | enable | disable | install]`
 
@@ -1134,13 +1162,14 @@ even when `dev` runs from the pinned copy. What it does depends on where the che
 | At a commit that is neither a release nor a branch | Refuses, and says how to check out a release or a branch |
 | Changed: tracked files have local changes | Refuses, and changes nothing; commit or discard the changes first |
 
-### `dev docker up | down | status | prune | autostart-on | autostart-off`
+### `dev docker up | down | status | trim | prune | autostart-on | autostart-off`
 
 | Action | Effect |
 | --- | --- |
 | `up` | Start Colima with the configured resources (created on the first run) and print the Docker server summary |
 | `down` | `colima stop` |
 | `status` | `colima status` and `docker system df` |
+| `trim` | Return the space freed inside Colima's virtual machine to macOS: `fstrim` in each running profile, then how much macOS got back. Deletes nothing (see [Disk use › Colima's disk](disk.md#colimas-disk)) |
 | `prune` | `docker system prune -f` and `docker builder prune -f` (never volumes) |
 | `autostart-on` · `autostart-off` | Start Colima at login with `brew services` (or stop doing so) |
 
