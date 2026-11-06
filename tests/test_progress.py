@@ -10,6 +10,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "lib"))
 
+from devkit import canary  # noqa: E402
 from devkit import progress as pg  # noqa: E402
 
 
@@ -57,11 +58,15 @@ class ProgressTests(unittest.TestCase):
         with TempState():
             run = pg.start("Export invoices", steps=3, estimate="30m")
             self.assertEqual(run["state"], "running")
-            run = pg.step("parser done, 12 tests pass", nxt="wire the endpoint")
+            run = pg.step("parser done", nxt="wire the endpoint", check="12 tests pass")
             self.assertEqual(run["step"], 1)
-            text = pg.render_update(run)
+            text = pg.render_update(run, branch="feat/export")
+            self.assertTrue(canary.has_marker(text), text)  # the update is the status block: it passes the canary
+            self.assertEqual(canary.format_issues(text), [], text)
             self.assertIn("1/3", text)
-            self.assertIn("Next: wire the endpoint", text)
+            self.assertIn("**Next:** wire the endpoint", text)
+            self.assertIn("**Check:** ✓ 12 tests pass", text)
+            self.assertIn("⚠ not verified", pg.render_update(pg.step("endpoint wired"), branch="x"))
             run = pg.step("shipped", kind="done")
             self.assertEqual((run["state"], run["step"]), ("done", 3))
             recs = pg.records(1, "run")

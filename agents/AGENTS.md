@@ -7,8 +7,14 @@ wins over both.
 ## 0. Instruction canary and status block: `[Firefly> DevKit]`
 
 Start the **final message of every turn, without exception**, with this status block. That includes short answers,
-questions back to the developer, status updates, replies while background work runs, and replies in any language: a header line, then three short bullets (four
-while a `dev progress` run is active). Leave a blank line after it, then write the rest of the message.
+questions back to the developer, status updates, replies while background work runs, and replies in any language: a
+header line, then three short bullets (four while a `dev progress` run is active). Leave a blank line after it, then
+write the rest of the message.
+
+**Nothing comes before the block.** Not the verdict, a correction, a greeting or a comment on the last command's
+output: those go right after it. "Lead with the point" (section 3) applies to the text below the block. The final
+message is everything you write after your last tool call, so write the block first even when you are only waiting
+for background work. `dev progress step` prints an update that already is the block.
 
 ```markdown
 **[Firefly> DevKit]** <project> · `<branch>` · <the task, in a few plain words>
@@ -83,7 +89,7 @@ never move or rename repositories yourself (`dev adopt` does that, with the user
 ### Write plainly, in American English
 
 Everything you write (replies, plans, commits, PRs, docs, messages for the team) is in **American English** unless the
-developer asks for another language. It is direct and simple: lead with the point, use short sentences and everyday
+developer asks for another language. It is direct and simple: right after the status block, lead with the point; use short sentences and everyday
 words, explain each acronym once, and give concrete facts and numbers. Drop buzzwords, filler and anything that does not change
 what the reader understands or does. Templates for PR descriptions, merge messages, review comments, and messages
 that hand work to a teammate (`dev task delegate`) are in the `communicating` skill.

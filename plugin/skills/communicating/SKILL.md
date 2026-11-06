@@ -11,7 +11,10 @@ them or for their team, follows the same rules:
 - **American English by default.** Use American spelling and conventions in replies, PRs, commits, docs, and messages. Write
   in another language only when the developer asks for it (or devkit config `language` says so), and then only for
   the content they asked for.
-- **Lead with the answer.** The first line is the outcome, the verdict, or the question. Details come after.
+- **The status block first, then the answer.** A message that ends your turn starts with the status block (global
+  instructions §0); nothing goes above it, not even a correction or a note about the last command. Right below the
+  block, lead with the answer: the outcome, the verdict, or the question. Details come after. Every template
+  below goes under the block when it ends the turn.
 - **Write plainly.** Use short sentences, everyday words, and concrete nouns ("the login page times out after 30 s,"
   not "authentication flow latency issues"). Use active voice. Explain each acronym the first time you use it.
 - **Cut whatever says nothing.** No buzzwords: robust, seamless, leverage, comprehensive, cutting-edge, game-changing.
@@ -38,6 +41,12 @@ dev progress start "<goal>" --steps <n> --estimate <30m|2h>
 The command prints how long similar work took here. Use that to set the estimate.
 
 ```markdown
+**[Firefly> DevKit]** <project> · `<branch>` · <goal>
+- **Done:** planned the work; similar work here took ~<median>
+- **Check:** – nothing to verify yet
+- **Progress:** 0 of <n> steps · ~<estimate>
+- **Next:** step 1, <step>
+
 **Plan · <goal>** — ~<estimate> (<n> steps)
 1. <step> 2. <step> 3. <step> …
 Checks: <how you will verify it> · Risks: <the one or two that matter> · I need from you: <nothing | a decision on X>
@@ -49,14 +58,17 @@ Send one after each finished step, every ~8–10 minutes of tool work, when a su
 before a long wait. Record it and send the text that the command prints:
 
 ```bash
-dev progress step "<what finished, with evidence>" --next "<what is next>"
+dev progress step "<what finished>" --check "<evidence>" --next "<what is next>"
 ```
 
+The update it prints is the status block, with the Progress bullet and the plan's checklist under it:
+
 ```markdown
-**Progress · <goal>** — 3/7 · 24m of ~40m · ETA ~15m
-- Done: <evidence-backed result>; <result>
-- Now: <what is running> (subagent X for 6m, expected ~10m)
-- Next: <next step> · Blockers: none
+**[Firefly> DevKit]** billing · `feat/invoice-export` · Invoice export
+- **Done:** the CSV writer streams 10,000 rows in 1.2 s
+- **Check:** ✓ 12 new tests pass
+- **Progress:** 3/7 · 24m elapsed of ~40m · ETA ~15m
+- **Next:** wire the endpoint; the migration agent is running (6 min of ~10)
 ```
 
 ## 3. Status answer, when the developer asks "how is it going?" or "what's left?"
@@ -64,6 +76,11 @@ dev progress step "<what finished, with evidence>" --next "<what is next>"
 The prompt hook adds your real progress records to the context. Use them:
 
 ```markdown
+**[Firefly> DevKit]** <project> · `<branch>` · <task>
+- **Done:** <what is finished, in one sentence>
+- **Check:** <✓ | ⚠ | ✗> <evidence>
+- **Next:** <what is left, and who takes it>
+
 **Status:** <one-line verdict: on track | behind by ~X | blocked on Y>
 | Workstream | State | Evidence | ETA |
 |---|---|---|---|
@@ -80,6 +97,8 @@ successful runs. Use `dev ci status --watch` to follow a run to the end instead 
 
 - **On launch, say what runs in the background.** Name it, say what it produces and when you expect it, for example:
   "3 agents running: A, B, C; I'll integrate as each finishes (~20m)." Then keep working on independent things.
+- **While you wait, the message still starts with the status block.** "Waiting for the build" is a final message
+  like any other: the block first, with what runs in **Next**.
 - **On completion, relay the result briefly (one or two lines).** Say what it found or built, how you verified it,
   and what you plan to do with it. The developer cannot see subagent output.
 - **Never poll or sleep while waiting.** Use notifications (`run_in_background`, `gh pr checks --watch`). If a job
@@ -92,6 +111,11 @@ irreversible or have external effects. Decide everything else yourself and say w
 has one; otherwise:
 
 ```markdown
+**[Firefly> DevKit]** <project> · `<branch>` · <task>
+- **Done:** <what you found that needs the decision>
+- **Check:** – a question, nothing to verify
+- **Next:** your decision on <topic>; meanwhile I <independent work>
+
 **Decision needed · <topic>** — <the question in one line>
 Context: <2–3 lines: what we know and why it matters now>
 | Option | Gains | Costs / risks | Effort |
@@ -104,7 +128,7 @@ If you don't answer: I'll <safe default> / I'll wait on <the blocked part> and c
 
 ## 6. Explanation, when the developer needs to understand something
 
-1. **Start with the answer in one sentence.**
+1. **Start with the answer in one sentence,** right below the status block.
 2. **Explain how it works**: 3–6 numbered steps, or a small diagram when there is a flow (see the `diagrams` skill).
 3. **Show an example from their code or data**, with the file and line (`path:line`).
 4. **Say what it means for them**: what to do, what to avoid, what changes.
@@ -133,6 +157,11 @@ estimate.
 ## 8. Failure or incident
 
 ```markdown
+**[Firefly> DevKit]** <project> · `<branch>` · <task>
+- **Done:** <what failed, in one sentence>
+- **Check:** ✗ <the error line, log or run id>
+- **Next:** <the fix, or the question for you>
+
 **Problem · <what failed>** — impact: <what is affected>
 Cause: <known | suspected: …> · Evidence: <error line, log, run id>
 Done so far: <what you tried and what it showed> · Next: <the fix or the question>

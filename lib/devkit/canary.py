@@ -70,6 +70,18 @@ def _is_human_turn(e) -> bool:
     return False
 
 
+def miss_reason(text: str) -> str:
+    """Why a final message failed the canary, in words the agent can act on at once."""
+    lines = [ln for ln in (text or "").splitlines() if ln.strip()]
+    first = re.sub(r"\s+", " ", lines[0].strip())[:90] if lines else ""
+    at = next((i for i, ln in enumerate(lines) if MARKER_RE.match(ln.strip())), None)
+    if at:
+        return (f"Your final message has the status block, but {at} line(s) come before it, starting with \"{first}\". "
+                "Nothing goes above the block, not a verdict, a correction or a comment on the last command.")
+    return (f"Your final message has no status block; it starts with \"{first}\". Every final message starts with it, "
+            "including short answers and updates while background work runs.")
+
+
 def has_marker(text: str) -> bool:
     first = next((ln for ln in (text or "").splitlines() if ln.strip()), "")
     return bool(MARKER_RE.match(first.strip()))

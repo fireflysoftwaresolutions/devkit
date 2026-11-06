@@ -368,6 +368,13 @@ class CanaryTests(unittest.TestCase):
                          "api@main · fixed · tests ok · next: -")
         self.assertEqual(canary.status_text("**[Firefly> DevKit]** · api@main · fixed"), "api@main · fixed")
 
+    def test_canary_miss_reason_names_what_came_first(self):
+        late = "Both runtimes are fine.\n\n**[Firefly> DevKit]** x · `main` · y\n- **Done:** a\n- **Check:** ✓ b\n- **Next:** c"
+        self.assertFalse(canary.has_marker(late))
+        self.assertIn("1 line(s) come before it", canary.miss_reason(late))
+        self.assertIn('"Both runtimes are fine."', canary.miss_reason(late))
+        self.assertIn("no status block", canary.miss_reason("Waiting for the build."))
+
     def test_canary_counts_by_surface(self):
         import time as _t
         with TempState():

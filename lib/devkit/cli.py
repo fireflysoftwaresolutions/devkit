@@ -1257,11 +1257,11 @@ def cmd_progress(a):
             hints.append(f"median turn {pg.fmt_min(cal['turn_median'])}, p90 {pg.fmt_min(cal['turn_p90'])}")
         if hints:
             print("  " + ui.dim(" · ".join(hints)))
-        print(ui.dim("  update with: dev progress step \"<what finished>\" --next \"<what is next>\""))
+        print(ui.dim("  update with: dev progress step \"<what finished>\" --check \"<evidence>\" --next \"<what is next>\""))
         return 0
     if act in ("step", "block", "done"):
         kind = {"step": "step", "block": "blocked", "done": "done"}[act]
-        run = pg.step(" ".join(a.text), a.next or "", kind=kind)
+        run = pg.step(" ".join(a.text), a.next or "", kind=kind, check=getattr(a, "check", "") or "")
         print(pg.render_update(run))
         return 0
     if act == "time":
@@ -2138,6 +2138,7 @@ def build_parser():
         x = gsp.add_parser(verb, help=h_)
         x.add_argument("text", nargs="+")
         x.add_argument("--next", help="what comes next")
+        x.add_argument("--check", help="the evidence for this step: tests run, command output, CI result")
     x = gsp.add_parser("time", help="how long things take: turns, slow commands, subagents, estimate accuracy")
     x.add_argument("--days", type=int, default=7)
     x.add_argument("-p", "--project")

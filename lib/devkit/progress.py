@@ -180,7 +180,7 @@ def start(goal: str, steps: int = 0, estimate: str = "", cwd: str = None, plan=N
     return run
 
 
-def step(text: str, nxt: str = "", cwd: str = None, kind: str = "step") -> dict:
+def step(text: str, nxt: str = "", cwd: str = None, kind: str = "step", check: str = "") -> dict:
     agent, sid = current_session(cwd)
     run = load_run(agent, sid)
     if not run:
@@ -198,7 +198,7 @@ def step(text: str, nxt: str = "", cwd: str = None, kind: str = "step") -> dict:
                 run["step"] = run["steps"]
             record("run", agent, sid, run.get("goal", ""), time.time() - run["started"], run.get("project", ""),
                    estimate=run.get("estimate") or 0, steps=run.get("steps") or 0)
-    run["updates"].append({"ts": round(time.time()), "kind": kind, "text": text, "next": nxt})
+    run["updates"].append({"ts": round(time.time()), "kind": kind, "text": text, "next": nxt, "check": check})
     run["updates"] = run["updates"][-40:]
     _save(run)
     _publish()
@@ -207,23 +207,35 @@ def step(text: str, nxt: str = "", cwd: str = None, kind: str = "step") -> dict:
     return run
 
 
-def render_update(run: dict) -> str:
-    """The progress update in the communication template, ready to paste."""
+def render_update(run: dict, branch: str = None) -> str:
+    """The progress update as the devkit status block (global instructions §0), ready to send. It is the block,
+    not a separate format, so an update that ends a turn always starts the way the canary expects."""
+    from .canary import MARKER
     last = run["updates"][-1] if run.get("updates") else {}
-    head = {"done": "Done", "blocked": "Blocked"}.get(run.get("state"), "Progress")
-    lines = [f"**{head} · {run.get('goal', '')}** — {headline(run)}"]
-    if run.get("plan"):  # named steps: a checklist
+    if branch is None:
+        branch = core.gitout(run.get("cwd") or os.getcwd(), "branch", "--show-current") or "-"
+    project = (run.get("project") or "-").split("/")[-1]
+    state = run.get("state")
+    done = last.get("text") if last.get("kind") in ("step", "done", "blocked") else ""
+    check = (last.get("check") or "").strip()
+    if check and check[0] not in "✓⚠✗–":
+        check = "✓ " + check
+    if not check:
+        check = "✗ blocked" if state == "blocked" else "⚠ not verified at this step"
+    nxt = last.get("next") or ("—" if state == "done" else "")
+    if state == "blocked":
+        nxt = f"unblock: {nxt or done}"
+    lines = [f"**{MARKER}** {project} · `{branch}` · {run.get('goal', '')}",
+             f"- **Done:** {done or 'started'}",
+             f"- **Check:** {check}",
+             f"- **Progress:** {headline(run)}",
+             f"- **Next:** {nxt or 'continue the plan'}"]
+    if run.get("plan"):  # named steps: a checklist under the block
+        lines.append("")
         k = run.get("step") or 0
         for i, name in enumerate(run["plan"], 1):
-            mark = "✓" if i <= k else ("▸" if i == k + 1 and run.get("state") == "running" else "○")
-            lines.append(f"  {mark} {i}. {name}")
-    done = [u["text"] for u in run.get("updates", []) if u["kind"] == "step"][-3:]
-    if done:
-        lines.append("- Done: " + "; ".join(done))
-    if last.get("next"):
-        lines.append(f"- Next: {last['next']}")
-    if run.get("state") == "blocked":
-        lines.append(f"- Blocked: {last.get('text', '')}")
+            mark = "✓" if i <= k else ("▸" if i == k + 1 and state == "running" else "○")
+            lines.append(f"{mark} {i}. {name}")
     return "\n".join(lines)
 
 

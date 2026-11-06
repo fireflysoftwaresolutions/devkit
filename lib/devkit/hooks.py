@@ -371,10 +371,11 @@ def stop(agent: str):
                 if agent == "claude":
                     out["systemMessage"] = canary.miss_message(agent, sid)
                 if core.CFG.get("canary", {}).get("enforce", True):
-                    reasons.append("Your final message must start with the [Firefly> DevKit] status block (global "
-                                   "instructions, section 0): a header `**[Firefly> DevKit]** <project> · `<branch>` · "
-                                   "<task>`, then the bullets **Done:**, **Check:** (✓/⚠/✗ + evidence) and **Next:**. "
-                                   "Reply now, starting with that block.")
+                    text_ = data.get("last_assistant_message") or canary.last_assistant_text(
+                        data.get("transcript_path")) or ""
+                    reasons.append(canary.miss_reason(text_) + " Reply now with the block as the very first lines: "
+                                   "`**[Firefly> DevKit]** <project> · `<branch>` · <task>`, then the bullets "
+                                   "**Done:**, **Check:** (✓/⚠/✗ + evidence) and **Next:** (global instructions §0).")
         elif data.get("stop_hook_active"):
             text = data.get("last_assistant_message") or canary.last_assistant_text(data.get("transcript_path")) or ""
             if canary.has_marker(text):  # the corrected reply after a reminder: keep it as the latest status
@@ -560,9 +561,10 @@ def prompt(agent: str):
     try:
         sf_ = _session_file(agent, sid) if sid else None
         if sf_ and sf_.exists() and (core.read_json(sf_, {}) or {}).get("canary_missed"):
-            text = ("devkit · reminder: this session missed the status block once. Start your final message with "
-                    "**[Firefly> DevKit]** <project> · `<branch>` · <task>, then Done / Check / Next (global "
-                    "instructions §0), whatever the reply's length or language.") + ("\n\n" + text if text else "")
+            text = ("devkit · reminder: this session missed the status block before. Your final message (everything "
+                    "after your last tool call) opens with **[Firefly> DevKit]** <project> · `<branch>` · <task>, then "
+                    "Done / Check / Next (global instructions §0). Nothing above it: put the verdict, a correction or "
+                    "a comment on the last command below the block.") + ("\n\n" + text if text else "")
     except Exception:
         pass
     skills = ""
