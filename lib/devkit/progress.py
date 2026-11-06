@@ -2963,9 +2963,10 @@ def lane_chain(run: dict, aid: str) -> list:
 
 
 def _lane_level(lane: dict) -> str:
-    """One lane's own tool level: read for a lane whose launch another agent is bound to or that devkit has no
-    launch record of (until Morpheus assigns it a step), else its crew member's `tools`, else all (an ad-hoc agent)."""
-    if lane.get("binding") in ("conflict", "unbound"):
+    """One lane's own tool level: read for a lane whose launch another agent is bound to, that devkit has no launch
+    record of (until Morpheus assigns it a step), or that has not met its launch yet (spec C3: a missing binding
+    grants nothing), else its crew member's `tools`, else all (an ad-hoc agent)."""
+    if lane.get("binding") in ("conflict", "unbound", "pending"):
         return "read"
     try:
         from . import crew

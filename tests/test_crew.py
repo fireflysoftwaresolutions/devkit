@@ -46,7 +46,8 @@ def roster(*members, rule="Write in American English.") -> dict:
     workers = [m["id"] for m in members if isinstance(m, dict) and not m.get("main") and m.get("id")]
     return {"language_rule": rule, "members": members, "warnings": [],  # each member does its own kind of work
             "activities": [{"id": f"work-{w}", "name": f"Work of {w}", "R": [w], "A": w, "C": [], "I": [],
-                            "signals": [f"{w} work"]} for w in workers]}
+                            "signals": [f"{w} work"], "self_approval": "a test roster: nobody else to approve"}
+                           for w in workers]}
 
 
 def frontmatter(text: str) -> dict:

@@ -460,9 +460,9 @@ ENFORCEMENT = (
     ("E-any-language", "The RACI holds in any language",
      "a declared kind of work, the member's own kind, then the files (C13)", "devkit.raci.anchor", "enforced"),
     ("E-words-never-refuse", "Words never refuse work: with no declared kind of work and no files, the member's "
-     "own kind decides (R2-2)", "dev progress assign", "language-neutral hooks", "planned"),
+     "own kind decides (R2-2)", "dev progress assign", "devkit.raci.check_assignment", "enforced"),
     ("E-catalog", "Sessions get the catalog of ids, and lessons at the tool call they apply to (R2-1)",
-     "SessionStart, PreToolUse and PostToolUse", "language-neutral hooks", "planned"),
+     "SessionStart, PreToolUse and PostToolUse", "devkit.hooks.catalog_context", "enforced"),
     ("E-approvals", "A run ends only after each Accountable member approved", "dev progress done",
      "devkit.progress.approvals_owed", "enforced"),
     ("E-no-self-approval", "Nobody approves their own kind of work: Seraph approves code and configuration, "

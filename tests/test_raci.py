@@ -105,6 +105,17 @@ class RosterTests(unittest.TestCase):
         orphan = dict(r, activities=[a for a in r["activities"] if a["R"] != ["ghost"]])
         self.assertIn("`ghost` is Responsible for no activity", " ".join(crew.check(orphan)[0]))
 
+    def test_a_team_change_that_adds_a_raci_hygiene_error_is_refused(self):
+        # the rules of selfcheck.raci_errors (R2-9), on what a change adds: devkit's own roster's known findings
+        # (D7) stay D7's, and the team cannot add more, such as the approver also consulted
+        r = json.loads(crew.ROSTER.read_text())
+        self.assertEqual(raci.check(r)[0], [])
+        research = next(a for a in r["activities"] if a["id"] == "research")
+        changed = dict(r, activities=[dict(a, C=a["C"] + [a["A"]]) if a is research else a for a in r["activities"]])
+        errors = raci.check(changed)[0]
+        self.assertEqual(len(errors), 1, errors)
+        self.assertIn("architect approves `research` and is consulted on it", errors[0])
+
 
 class RoutingTests(unittest.TestCase):
     def test_real_tasks_go_to_the_member_the_raci_makes_responsible(self):
@@ -163,14 +174,15 @@ class AssignmentTests(unittest.TestCase):
 
     def test_a_member_who_is_not_responsible_is_refused_and_an_override_is_recorded(self):
         pg.start("Dashboard", plan=["build the JSON API server", "dashboard audit"], now=self.m(0))
-        with self.assertRaises(pg.StepError) as e:
-            pg.assign("build the JSON API server", "Kid", now=self.m(1))
+        with self.assertRaises(pg.StepError) as e:  # the declared kind of work decides, never the step's words (R2-2)
+            pg.assign("build the JSON API server", "Kid", activity="backend", now=self.m(1))
         self.assertIn("Backend engineer (Tank) does it and Code reviewer (Seraph) approves it", str(e.exception))
         run = pg.assign("build the JSON API server", "Tank", now=self.m(1))
         self.assertEqual(next(s for s in run["plan"] if s["name"].startswith("build"))["activity"], "backend")
         run = pg.assign("dashboard audit", "Sati", now=self.m(1))  # no clear kind of work: no refusal
-        run = pg.assign("build the JSON API server", "Neo", why="Tank is out; Neo pairs with Seraph", now=self.m(2))
-        self.assertEqual(run["raci_overrides"][-1]["why"], "Tank is out; Neo pairs with Seraph")
+        run = pg.assign("build the JSON API server", "Kid", activity="backend", why="Tank is out; Kid pairs with Seraph",
+                        now=self.m(2))
+        self.assertEqual(run["raci_overrides"][-1]["why"], "Tank is out; Kid pairs with Seraph")
 
     def test_a_starting_subagent_gets_its_own_launch_label_not_a_stale_one(self):
         pg.start("Work", plan=["installer", "dashboard server"], now=self.m(0))

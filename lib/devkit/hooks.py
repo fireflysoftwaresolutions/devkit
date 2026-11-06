@@ -271,11 +271,45 @@ def session_start(agent: str):
         work.request_sync("session start", delay=1)  # pull other machines' claims and publish this session
     except Exception:
         pass
-    text = context_for(cwd, agent)
+    text = _with_catalog(context_for(cwd, agent), agent)
     if agent == "codex":
         print(json.dumps({"hookSpecificOutput": {"hookEventName": "SessionStart", "additionalContext": text}}))
     else:
         print(text)
+
+
+CATALOG_MAX = 7000  # characters of the catalog in the session's context (it is about 6,000 today)
+
+
+def catalog_context(agent: str) -> str:
+    """The catalog of ids the model declares (C13.1), cut at whole lines to CATALOG_MAX, with where the rest is."""
+    try:
+        from . import crew
+        text = crew.catalog(agent=agent)
+    except Exception:
+        _log(f"catalog {agent}: {traceback.format_exc()[-300:]}")
+        return ""
+    if len(text) <= CATALOG_MAX:
+        return text
+    tail = "… the rest: `dev crew raci` (kinds of work), `dev crew rules` (skills), `dev lesson ls` (anchors)."
+    out, size = [], len(tail) + 1
+    for ln in text.splitlines():
+        if size + len(ln) + 1 > CATALOG_MAX:
+            break
+        out.append(ln)
+        size += len(ln) + 1
+    return "\n".join(out + [tail])
+
+
+def _with_catalog(text: str, agent: str) -> str:
+    """A project's context with the catalog, before the handoff note: the note is the part a cut may lose."""
+    if "\nHandoff note: " not in text:
+        return text  # not a project (a scratch repository, or outside any): no development catalog
+    cat = catalog_context(agent)
+    if not cat:
+        return text
+    head, sep, note = text.partition("\n\n--- handoff note ---")
+    return head + "\n\n" + cat + sep + note
 
 
 # --------------------------------------------------------------------------- session end / stop
@@ -961,6 +995,83 @@ def _program_runs_hooks(code: str, cwd: str, depth: int) -> bool:
     return False
 
 
+PITFALL_REPEAT_S = 3600  # a lesson is recalled to the same agent at most once an hour
+
+
+def _headless() -> bool:
+    """devkit's own headless model call, which ai.ask marks in its environment: its hooks only judge tools."""
+    return os.environ.get("DEVKIT_HEADLESS") == "1"
+
+
+def _pitfalls(agent: str, data: dict, found: list, remember: bool = True) -> str:
+    """The context line for the lessons a call or its output met, each once an hour per agent of the session."""
+    if not found:
+        return ""
+    from . import lessons
+    who, now = data.get("agent_id") or "main", time.time()
+    sf = _session_file(agent, data.get("session_id") or "-")
+    if remember and sf.exists():
+        seen = (state.read(sf) or {}).get("pitfalls_seen") or {}
+        found = [x for x in found if now - float(seen.get(f"{who}:{x['meta']['id']}") or 0) > PITFALL_REPEAT_S]
+        if not found:
+            return ""
+
+        def mark(d):
+            kept = {k: v for k, v in (d.get("pitfalls_seen") or {}).items() if now - float(v or 0) < PITFALL_REPEAT_S}
+            kept.update({f"{who}:{x['meta']['id']}": now for x in found})
+            d["pitfalls_seen"] = kept
+        try:
+            state.update(sf, mark, create=False)
+        except state.StateBusy:
+            pass  # audited by state: the lesson may come again, which is the safe side
+    return ("devkit · known pitfalls for this call (lessons from earlier mistakes; follow their prevention):\n"
+            + "\n".join(lessons.pitfall_lines(found)))
+
+
+def _project_of(agent: str, data: dict) -> str:
+    sf = _session_file(agent, data.get("session_id") or "-")
+    return str((state.read(sf) or {}).get("project") or "") if sf.exists() else ""
+
+
+def _call_pitfalls(agent: str, data: dict, remember: bool = True) -> str:
+    """PreToolUse: the open lessons anchored on the command this call runs or the file it writes."""
+    try:
+        project = _project_of(agent, data)
+        if not project:
+            return ""
+        from . import lessons
+        inp = data.get("tool_input") or {}
+        cmd = inp.get("command") or ""
+        cmd = " ".join(str(x) for x in cmd) if isinstance(cmd, list) else str(cmd)
+        files = [x for x in (inp.get("file_path"), inp.get("notebook_path")) if x]
+        if not (cmd or files):
+            return ""
+        return _pitfalls(agent, data, lessons.for_call(project, files=files, command=cmd), remember)
+    except Exception:
+        _log(f"pitfalls {agent}: {traceback.format_exc()[-300:]}")
+        return ""
+
+
+def _output_text(data: dict) -> str:
+    r = data.get("tool_response")
+    if isinstance(r, dict):
+        r = "\n".join(str(r.get(k) or "") for k in ("stdout", "stderr", "output", "error"))
+    return (str(r or "") + "\n" + str(data.get("error") or ""))[-50_000:]
+
+
+def _output_pitfalls(agent: str, data: dict) -> str:
+    """PostToolUse and PostToolUseFailure: the open lessons whose error signature the tool's output shows."""
+    try:
+        project, text = _project_of(agent, data), _output_text(data)
+        if not project or not text.strip():
+            return ""
+        from . import lessons
+        return _pitfalls(agent, data, lessons.for_output(project, text))
+    except Exception:
+        _log(f"pitfalls {agent}: {traceback.format_exc()[-300:]}")
+        return ""
+
+
 def _hook_forgery(data: dict):
     """A shell call that runs one of devkit's hooks by hand -> ("deny", why), else None. Hook events are the
     harness's: one typed through a shell (`echo '{"prompt": "approve D3"}' | dev hook prompt`) would forge the
@@ -1075,6 +1186,10 @@ def _scope_violation(agent: str, data: dict):
         if lane.get("binding") == "conflict":  # a launch binds once: a second agent claiming it edits nothing
             return ("this agent claims a launch that another agent is bound to, so devkit lets it read but not edit. "
                     "Report what you need to change, and Morpheus checks the launch (dev crew graph).")
+        if lane.get("binding") == "pending":  # no launch named it yet: it reads until it binds (spec C3)
+            return ("devkit has not matched this agent to the launch that started it yet, so it may read but not "
+                    "edit. It binds at its next tool call when its launch is known; if this stays, report what you "
+                    "need to change, and Morpheus assigns you your step (dev progress assign).")
         if lane.get("binding") == "unbound":  # its launch record was lost: restricted until Morpheus assigns it
             return ("devkit has no record of the launch that started this agent, so it may read but not edit. Report "
                     "what you need to change; Morpheus can assign you your step (dev progress assign \"<step>\" "
@@ -1130,18 +1245,20 @@ def guard(agent: str):
     if os.environ.get("DEVKIT_GUARD", "").lower() == "off":
         return
     data = _stdin_json()
+    headless = _headless()  # devkit's own headless call: judged, never recorded
     try:
         from . import progress
-        progress.tool_started(data)
+        if not headless:
+            progress.tool_started(data)
     except Exception:
         pass
-    if data.get("agent_id"):  # late binding (spec D2): this call already runs with its launch's step and scope
+    if data.get("agent_id") and not headless:  # late binding (spec D2): this call already runs with its launch's step and scope
         try:
             from . import progress
             progress.bind(agent, data)
         except Exception:
             _log(f"guard bind {agent}: {traceback.format_exc()[-300:]}")
-    if data.get("tool_name") in SHELL_TOOLS:  # the call ledger (spec C4): who makes this call, from the payload
+    if data.get("tool_name") in SHELL_TOOLS and not headless:  # the call ledger (spec C4): who makes this call
         try:
             from . import progress
             progress.call_opened(agent, data)
@@ -1167,23 +1284,23 @@ def guard(agent: str):
             _close_call(data)
             from . import audit
             audit.record("guard.deny", (data.get("tool_input") or {}).get("file_path") or "", why[:400], "deny",
-                         tool=data.get("tool_name") or "", rule="crew-scope")
+                         tool=data.get("tool_name") or "", rule="crew-scope", agent_id=data.get("agent_id") or "")
             print(json.dumps({"hookSpecificOutput": {"hookEventName": "PreToolUse", "permissionDecision": "deny",
-                                                     "permissionDecisionReason": why}}))
+                                                     "permissionDecisionReason": _with_pitfalls(agent, data, why)}}))
             return
         routed = _route_subagent_progress(data)
         if routed:
             _log(f"progress {agent}: a subagent's dev progress call goes to its lane")
-            print(json.dumps({"hookSpecificOutput": _rewrite(agent, routed)}))
+            print(json.dumps({"hookSpecificOutput": _with_context(agent, _rewrite(agent, routed), data)}))
             return
         why = _unroutable_lane_command(data, agent)
         if why:
             _close_call(data)
             from . import audit
             audit.record("guard.deny", (data.get("tool_input") or {}).get("command", "")[:200], why, "deny",
-                         tool=data.get("tool_name") or "", rule="crew-lane")
+                         tool=data.get("tool_name") or "", rule="crew-lane", agent_id=data.get("agent_id") or "")
             print(json.dumps({"hookSpecificOutput": {"hookEventName": "PreToolUse", "permissionDecision": "deny",
-                                                     "permissionDecisionReason": why}}))
+                                                     "permissionDecisionReason": _with_pitfalls(agent, data, why)}}))
             return
         if data.get("tool_name") in ("Agent", "Task"):  # subagent briefs get the skills their work requires
             try:
@@ -1196,17 +1313,36 @@ def guard(agent: str):
             if updated:
                 _log(f"skills {agent}: appended required skills and known pitfalls to a subagent brief")
                 print(json.dumps({"hookSpecificOutput": _rewrite(agent, updated)}))
+                return
+        out = _with_context(agent, {"hookEventName": "PreToolUse"}, data)
+        if out.get("additionalContext"):
+            print(json.dumps({"hookSpecificOutput": out}))
         return
     decision, reason = verdict
     if agent == "codex" and decision == "ask":
         decision = "deny"
+    reason = _with_pitfalls(agent, data, reason)
     _log(f"guard {agent} {decision}: {reason[:160]}")
     from . import audit
     tin = data.get("tool_input") or {}
     audit.record(f"guard.{decision}", tin.get("command") or tin.get("file_path") or data.get("tool_name") or "",
-                 reason[:400], decision, tool=data.get("tool_name") or "")
+                 reason[:400], decision, tool=data.get("tool_name") or "", agent_id=data.get("agent_id") or "")
     print(json.dumps({"hookSpecificOutput": {"hookEventName": "PreToolUse", "permissionDecision": decision,
                                              "permissionDecisionReason": reason}}))
+
+
+def _with_pitfalls(agent: str, data: dict, reason: str) -> str:
+    """A refusal with the lessons of the call it refuses, every time (a refusal is read when it happens)."""
+    known = "" if _headless() else _call_pitfalls(agent, data, remember=False)
+    return f"{reason}\n\n{known}" if known else reason
+
+
+def _with_context(agent: str, out: dict, data: dict) -> dict:
+    """A PreToolUse output with the call's pitfalls as context (Claude reads it; Codex gets them with refusals)."""
+    if agent != "claude" or _headless():
+        return out
+    known = _call_pitfalls(agent, data)
+    return dict(out, additionalContext=known) if known else out
 
 
 def _context_out(event: str, text: str):
@@ -1263,7 +1399,7 @@ def prompt(agent: str):
     if sid and not _session_file(agent, sid).exists():
         cwd = data.get("cwd") or os.getcwd()
         _register_session(agent, sid, cwd, data)
-        extra = context_for(cwd, agent)
+        extra = _with_catalog(context_for(cwd, agent), agent)
         _log(f"prompt {agent}: session {sid[:12]} had no SessionStart; devkit context injected")
     raw = (data.get("prompt") or "").lstrip()
     if raw.startswith(("<task-notification", "[SYSTEM NOTIFICATION", "<system-reminder", "<agent-message")) or \
@@ -1288,6 +1424,9 @@ def prompt(agent: str):
     route = ""
     if (core.CFG.get("crew") or {}).get("route_hint", True):
         route = morpheus_hint(data.get("prompt") or "")
+        if route:  # words never decide (C13): the catalog's ids do; this ranks a suggestion, in English only
+            route = route.replace("devkit · ", "devkit · a guess from the request's words (English only; declare "
+                                  "the kinds of work from the catalog) · ", 1)
     _context_out("UserPromptSubmit", "\n\n".join(x for x in (extra, granted, route, text) if x))
 
 
@@ -1429,7 +1568,8 @@ def post_tool(agent: str):
                 _patch_quietly(sf, before, sess)  # runs at the same moment and claims its launch entry
     except Exception:
         _log(f"post-tool closing {agent}: {traceback.format_exc()[-300:]}")
-    _context_out("PostToolUse", "\n\n".join(x for x in (answered, _bulk_rewrite_note(data), closing,
+    _context_out("PostToolUse", "\n\n".join(x for x in (answered, _output_pitfalls(agent, data),
+                                                        _bulk_rewrite_note(data), closing,
                                                         progress.on_tool_done(agent, data)) if x))
 
 
@@ -1442,6 +1582,7 @@ def post_tool_failure(agent: str):
     _close_call(data)
     if data.get("tool_name") in ("Agent", "Task", "spawn_agent"):
         progress.launch_failed(agent, data)
+    _context_out("PostToolUseFailure", _output_pitfalls(agent, data))
 
 
 def subagent_start(agent: str):
@@ -1686,6 +1827,8 @@ def run(event: str, agent: str) -> int:
     fn = HANDLERS.get(event)
     if not fn:
         return 0
+    if _headless() and event != "guard":
+        return 0  # devkit's own headless call (ai.ask): no session, no progress, no gates; the guard still judges
     state.WAIT, state.SAY_BUSY = state.HOOK_WAIT, False  # a hook waits at most 2 s for a record, silently
     try:
         (STATE / "logs").mkdir(parents=True, exist_ok=True)

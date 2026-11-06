@@ -85,7 +85,21 @@ def check(data: dict):
             errors.append(f"activity `{aid}`: `no_files` must be the reason, as text")
     for mid in sorted(ids - responsible - {main}):
         errors.append(f"`{mid}` is Responsible for no activity: give it one in `activities`, or remove it")
-    return errors, warnings
+    return errors + _hygiene_added(data), warnings
+
+
+def _hygiene_added(data: dict) -> list:
+    """The RACI rules of crew review 2 (R2-9, selfcheck.raci_errors) on what a roster adds to devkit's own: a team
+    change that makes an approver consulted or informed, a member both, or self-approval without a reason is an
+    error. The findings devkit's roster already has are D7's (KNOWN in tests/test_consistency.py), not the team's."""
+    try:
+        import json
+        from . import crew, selfcheck
+        base = json.loads(crew.ROSTER.read_text())
+        known = {f.item for f in selfcheck.raci_errors(base)}
+        return [f"{f.evidence} · fix: {f.fix}" for f in selfcheck.raci_errors(data) if f.item not in known]
+    except Exception:  # the base roster unreadable: its own load reports that
+        return []
 
 
 def norm(text: str) -> str:
@@ -262,10 +276,10 @@ def anchor(text: str = "", member=None, files=None, activity=None, roster=None):
 
 
 def check_assignment(member_id: str, text: str, roster=None, activity=None, files=None):
-    """Why giving this task to this member breaks the RACI, or None. In order: an explicit activity decides (the
-    member must be Responsible, Accountable or Consulted for it); files in scope that are the member's own kind of
-    work confirm it; otherwise a task whose words clearly are one kind of work is checked, and a member Responsible
-    for a kind of work that scores close to it may take it."""
+    """Why giving this task to this member breaks the RACI, or None. Only a declared activity refuses: the member
+    must be Responsible, Accountable or Consulted for it. Without one, the member's own Responsible kind of work is
+    the step's anchor (`anchor`), and the task's words, in whatever language, refuse nothing (C13.7; crew gap review
+    2, R2-2)."""
     if activity:
         try:
             act = resolve_activity(activity, roster)
@@ -275,18 +289,7 @@ def check_assignment(member_id: str, text: str, roster=None, activity=None, file
             return None
         return _refusal(member_id, f"“{text}” is marked as {_lower(act['name'])} work (--activity {act['id']})",
                         act, roster)
-    if any(_takes(member_id, a) for a, _ in file_activities(files, roster, text)):
-        return None
-    ranked = classify(text, roster, limit=len(activities(roster)) or 1)
-    if not ranked or ranked[0][1] < MIN_SCORE:
-        return None
-    top, score, hits = ranked[0]
-    if _takes(member_id, top):
-        return None
-    mine = max((s for a, s, _ in ranked if member_id in (a.get("R") or [])), default=0)
-    if mine and mine >= score - MARGIN:
-        return None
-    return _refusal(member_id, f"“{text}” is {_lower(top['name'])} work ({', '.join(hits[:3])})", top, roster)
+    return None
 
 
 def _refusal(member_id: str, what: str, top: dict, roster=None) -> str:
