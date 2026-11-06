@@ -189,6 +189,40 @@ class CrewGateTests(GateCase):
         self.assertIn("test_adds", found[0]["evidence"])
         self.assertIn("dev test audit", found[0]["fix"])
 
+    def test_a_proof_run_through_the_python_interpreter_counts(self):
+        self.tx.skill("superpowers:test-driven-development").skill("testing").skill("communicating")
+        self.tx.bash("python3 bin/dev test")
+        self.tx.bash('/usr/bin/python3 -u /Users/dev/devkit/bin/dev progress step "built it" --check "12 tests pass"')
+        self.assertEqual(self.gates(), [])
+
+    def edit(self, rel, old, new):
+        # The member changes part of a file with the Edit tool.
+        p = self.repo / rel
+        p.write_text(p.read_text().replace(old, new))
+        self.tx.call("Edit", f"The file {p} has been updated successfully.", file_path=str(p), old_string=old,
+                     new_string=new)
+
+    def test_another_members_lines_in_a_shared_file_are_not_blamed_on_this_member(self):
+        (self.repo / "calc.py").write_text("def add(a, b):\n    return a + b\n")
+        (self.repo / "tests").mkdir()
+        (self.repo / "tests" / "test_calc.py").write_text(GOOD_TEST)
+        git(self.repo, "add", "-A")
+        git(self.repo, "commit", "-q", "-m", "calc")
+        with (self.repo / "calc.py").open("a") as fh:  # another member's uncommitted work in the same files
+            fh.write("\n\ndef sub(a, b):\n    return a - b  # TODO theirs\n")
+        with (self.repo / "tests" / "test_calc.py").open("a") as fh:
+            fh.write("\n    def test_theirs(self):\n        self.assertTrue(True)\n")
+        self.edit("calc.py", "    return a + b\n", "    return int(a) + int(b)\n")
+        self.edit("tests/test_calc.py", "        self.assertEqual(add(2, 3), 5)\n",
+                  "        self.assertEqual(add(2, 3), 5)\n        self.assertEqual(add('2', 3), 5)\n")
+        self.complete()
+        self.assertEqual(self.gates(), [])
+        self.edit("calc.py", "    return int(a) + int(b)\n", "    return int(a) + int(b)  # TODO mine\n")
+        found = self.gates()
+        self.assertEqual([f["rule"] for f in found], ["stubs"])
+        self.assertIn("TODO mine", found[0]["evidence"])
+        self.assertNotIn("TODO theirs", found[0]["evidence"])
+
     def test_two_guard_refusals_without_a_lesson_ask_for_one(self):
         self.complete()
         self.tx.refused("git worktree add ../copy")

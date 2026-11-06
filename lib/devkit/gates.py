@@ -37,6 +37,7 @@ DENIAL_RE = re.compile(r"^\s*(?:PreToolUse|PermissionRequest)(?::[^\s:]+)? hook 
 _SPLIT = re.compile(r"\|\||&&|\$\(|[;&|()`\n]")  # where a new simple command starts
 _LEAD = {"then", "do", "else", "elif", "if", "while", "until", "time", "exec", "command", "nohup", "env", "!", "{"}
 _ASSIGN = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*=")
+_PYTHON = re.compile(r"^python(\d+(\.\d+)*)?$")  # `python3 bin/dev test` runs `dev test`
 PROOF_ARGS = {"dev progress step": ' "<what finished>" --check "<evidence>"'}  # proofs that need arguments
 
 
@@ -106,9 +107,54 @@ def _invocations(commands) -> list:
             words = part.split()
             while words and (words[0] in _LEAD or _ASSIGN.match(words[0])):
                 words.pop(0)
+            if words and _PYTHON.match(os.path.basename(words[0])):  # the script is the program: skip the flags
+                rest = words[1:]
+                while rest and rest[0].startswith("-") and rest[0] not in ("-m", "-c"):
+                    rest.pop(0)
+                if rest and not rest[0].startswith("-"):
+                    words = rest
             if words:
                 out.append([os.path.basename(words[0])] + words[1:])
     return out
+
+
+def _written(path) -> dict:
+    """{real path: (whole file?, [the text this member wrote there])} from its own Write, Edit, MultiEdit and
+    NotebookEdit calls: what the stub and test gates may blame on it."""
+    out = {}
+    for rec in _records(path):
+        if rec.get("type") != "assistant":
+            continue
+        for c in (rec.get("message") or {}).get("content") or []:
+            if not isinstance(c, dict) or c.get("type") != "tool_use":
+                continue
+            inp = c.get("input") or {}
+            fp = inp.get("file_path") or inp.get("notebook_path") or ""
+            if not fp:
+                continue
+            whole, texts = out.get(os.path.realpath(fp), (False, []))
+            if c.get("name") == "Write":
+                whole, texts = True, texts + [str(inp.get("content") or "")]
+            elif c.get("name") == "Edit":
+                texts = texts + [str(inp.get("new_string") or "")]
+            elif c.get("name") == "MultiEdit":
+                texts = texts + [str(e.get("new_string") or "") for e in inp.get("edits") or [] if isinstance(e, dict)]
+            elif c.get("name") == "NotebookEdit":
+                texts = texts + [str(inp.get("new_source") or "")]
+            else:
+                continue
+            out[os.path.realpath(fp)] = (whole, texts)
+    return out
+
+
+def _mine(written, top, rel, *needles) -> bool:
+    """Did this member write it: the whole file, or a text it wrote holds one of the needles (the finding's line, or
+    its test's name)? Another member's uncommitted lines in a shared file are theirs."""
+    whole, texts = written.get(os.path.realpath(os.path.join(top, rel)), (False, []))
+    if whole:
+        return True
+    needles = [n.strip() for n in needles if n and n.strip()]
+    return any(n in t for n in needles for t in texts)
 
 
 def _ran(command: str, invocations) -> bool:
@@ -164,9 +210,11 @@ def _skill_findings(m, invocations, loaded, changed, top) -> list:
     return out
 
 
-def _stub_findings(top, files) -> list:
+def _stub_findings(top, files, written=None) -> list:
     from . import stubs
     found = stubs.scan_changes(top, [os.path.relpath(f, top) for f in files])
+    if written is not None:
+        found = [f for f in found if _mine(written, top, f["file"], f.get("text") or "")]
     if not found:
         return []
     where = sorted({f["file"] for f in found})
@@ -177,10 +225,21 @@ def _stub_findings(top, files) -> list:
                      '"<why>"` and name the task on the line; then check with `dev stubs ' + " ".join(where) + "`")]
 
 
-def _test_findings(top, files) -> list:
+def _line(top, rel, n) -> str:
+    try:
+        return (Path(rel if os.path.isabs(rel) else os.path.join(top, rel)).read_text(errors="ignore")
+                .splitlines() or [""])[max(0, int(n or 1) - 1)]
+    except (OSError, IndexError, ValueError):
+        return ""
+
+
+def _test_findings(top, files, written=None) -> list:
     from . import testaudit
     tests = [f for f in files if testaudit.is_test_file(os.path.relpath(f, top))]
     high = [f for f in testaudit.audit(tests, top=top) if f.get("severity") == "high"] if tests else []
+    if written is not None:
+        high = [f for f in high if _mine(written, top, os.path.relpath(f["file"], top) if os.path.isabs(f["file"])
+                                         else f["file"], f.get("test") or "", _line(top, f["file"], f.get("line")))]
     if not high:
         return []
     where = sorted({_rel(f["file"], top) if os.path.isabs(f["file"]) else f["file"] for f in high})
@@ -215,8 +274,9 @@ def crew_gates(member, transcript_path, cwd, roster=None) -> list:
                                       f"run `{proof}{PROOF_ARGS.get(proof, '')}`"))
     found += _skill_findings(m, inv, loaded, paths, top)
     if in_repo:
-        found += _stub_findings(top, in_repo)
-        found += _test_findings(top, in_repo)
+        written = _written(transcript_path)
+        found += _stub_findings(top, in_repo, written)
+        found += _test_findings(top, in_repo, written)
     if not read_only and len(refusals) >= 2 and not (_ran("dev lesson add", inv) or _ran("dev lesson recur", inv)):
         first = (re.sub(r"^[:\s]+", "", DENIAL_RE.sub("", refusals[0], 1)).splitlines() or [""])[0][:120]
         found.append(_finding("lessons", "dev lesson add",
