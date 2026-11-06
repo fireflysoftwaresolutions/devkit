@@ -942,6 +942,366 @@ def as_json(roster=None, view=None) -> dict:
             "warnings": roster.get("warnings") or []}
 
 
+# --------------------------------------------------------------------------- the session graph (dev crew graph)
+#
+# What runs in a session, as one graph: the main session (Morpheus) at the root; its progress run; the run's steps
+# as a DAG (an `after` edge goes from the step waited for to the step that waits); the crew lanes (subagents), each
+# under the steps it owns and a nested subagent under the lane that launched it (the lane's `parent`: that lane's
+# id); the handoff work items the run links (a task id in the goal, a step's name, description, task or `links`),
+# otherwise the project's Now tasks; and what waits: decisions for the developer, approvals owed, open messages.
+# session_graph() builds the nodes and edges (--json); graph_text() draws the tree, graph_mermaid() a flowchart.
+
+TASK_ID_RE = re.compile(r"\b[TFBS]-[0-9a-z]{6,}\b")
+_GLYPH = {"done": "✓", "running": "▸", "ready": "◇", "waiting": "○", "blocked": "✗", "skipped": "–", "recheck": "!"}
+_PAINT = {"done": "green", "running": "cyan", "ready": "blue", "waiting": "gray", "blocked": "red", "skipped": "dim",
+          "recheck": "yellow"}
+_MERMAID_CLASS = {"done": "fill:#e6f4ea,stroke:#1e8e3e,color:#0d3b1e",
+                  "running": "fill:#e8f0fe,stroke:#1a73e8,color:#0b2a5b",
+                  "ready": "fill:#f1f3f4,stroke:#1a73e8,color:#202124,stroke-dasharray: 4 4",
+                  "waiting": "fill:#f1f3f4,stroke:#9aa0a6,color:#3c4043",
+                  "blocked": "fill:#fce8e6,stroke:#d93025,color:#5b0f0a",
+                  "skipped": "fill:#ffffff,stroke:#bdc1c6,color:#5f6368,stroke-dasharray: 4 4",
+                  "recheck": "fill:#fef7e0,stroke:#f9ab00,color:#4a3500"}
+NO_RUN = ('dev progress start "<goal>" --plan "design=30m; build=1h after design" --estimate 2h')
+
+
+def _step_state(run, s) -> str:
+    """A plan step's state for the graph: a pending step is `waiting` (a dependency is open) or `ready`."""
+    from . import progress
+    st = s.get("state") or "pending"
+    if st == "pending":
+        return "waiting" if progress.deps_open(run, s) else "ready"
+    return st
+
+
+def _no_cycle(agents: dict, aid: str) -> bool:
+    """A lane's chain of parents ends (a run edited into a loop of parents is drawn flat)."""
+    seen, p = {aid}, agents[aid].get("parent")
+    while p in agents:
+        if p in seen:
+            return False
+        seen.add(p)
+        p = agents[p].get("parent")
+    return True
+
+
+def _work_items(run, plan, step_ids) -> tuple:
+    """(items, {item id: [node ids]}, source): the work items the run links ("linked"), else the project's open Now
+    tasks ("now"), else none. An id that is not an item of the project is not a link."""
+    from . import work
+    try:
+        items = work.all_items(run.get("project")) if run.get("project") else []
+    except Exception:
+        items = []  # no handoff repository on this machine: the graph has no work items
+    ids = {i["meta"].get("id", ""): i for i in items}
+
+    def resolve(tok):
+        if tok in ids:
+            return tok
+        hits = [k for k in ids if k.startswith(tok)]
+        return hits[0] if len(hits) == 1 else None
+
+    links = {}
+    for target, texts in [("run", [run.get("goal")])] + [
+            (step_ids[i], [s.get(k) for k in ("name", "desc", "task", "label")]
+             + (s.get("links") if isinstance(s.get("links"), list) else [s.get("links")]))
+            for i, s in enumerate(plan)]:
+        for tok in TASK_ID_RE.findall(" ".join(str(x) for x in texts if x)):
+            iid = resolve(tok)
+            if iid and target not in links.setdefault(iid, []):
+                links[iid].append(target)
+    if links:
+        return [ids[k] for k in links], links, "linked"
+    now = [i for i in work.ordered_open(items) if i["meta"].get("bucket") == "now"]
+    return now, {}, "now" if now else "none"
+
+
+def session_graph(run, roster=None, now=None) -> dict:
+    """The session as nodes and edges, for `dev crew graph --json`, the tree and the flowchart.
+
+    Node kinds: session (Morpheus), run, step (state ready | waiting | running | blocked | done | skipped, plus the
+    steps whose reopening it must `recheck`), lane (a subagent), task (a handoff work item), decision, approval,
+    message. Edge kinds: runs (session → run), step (run → each step), after (the step waited for → the step that
+    waits), works_on (lane → the step it owns), launched (session or parent lane → lane), tracks (task → run or
+    step), asks (who asks → decision), approves (approval → step), sends and to (sender → message → recipient).
+    {"run": None, "nodes": [], …} without a run."""
+    from . import progress, raci
+    if not run:
+        return {"session": None, "run": None, "nodes": [], "edges": [], "work_items": "none", "hint": NO_RUN}
+    roster = roster or load()
+    now = now or time.time()
+    run = progress.normalize(dict(run))
+    plan, agents = run.get("plan") or [], run.get("agents") or {}
+    lead = next((m for m in members(roster) if m.get("main")), None)
+    step_ids = [f"s{i}" for i in range(1, len(plan) + 1)]
+    by_name = {}
+    for i, s in enumerate(plan):
+        by_name.setdefault(s.get("name"), step_ids[i])
+    lane_ids = {aid: f"lane{i}" for i, aid in enumerate(agents, 1)}
+    addr = lambda a: "main" if a == "main" else lane_ids.get(a)  # noqa: E731
+    session = {"id": "main", "kind": "session", "label": lead["name"] if lead else "Morpheus",
+               "who": who(lead) if lead else "Morpheus", "agent": run.get("agent") or "",
+               "session": run.get("session") or "", "project": run.get("project") or ""}
+    b = progress.brief(run, now)
+    run_node = {"id": "run", "kind": "run", "label": run.get("goal") or "", "goal": run.get("goal") or "",
+                "state": run.get("state") or "", "mode": progress.mode_of(run),
+                "approved": list(run.get("approved") or []), "headline": b.get("headline"),
+                "eta_min": b.get("eta_min"), "eta_lo": b.get("eta_lo"), "eta_hi": b.get("eta_hi"),
+                "steps": len(plan), "closed": sum(1 for s in plan if s.get("state") in progress.DONE)}
+    nodes, edges = [session, run_node], [{"from": "main", "to": "run", "kind": "runs"}]
+    edge = lambda f, t, k: edges.append({"from": f, "to": t, "kind": k})  # noqa: E731
+    for i, s in enumerate(plan):
+        sid, owner = step_ids[i], s.get("owner") or "main"
+        lane = agents.get(owner) if owner != "main" else None
+        m = _for_label(s["label"], roster) if s.get("label") else (_for_lane(lane, roster) if lane else lead)
+        try:
+            act = raci.step_activity(s, roster)
+        except Exception:
+            act = None  # a broken RACI never hides the graph
+        after = list(dict.fromkeys(by_name[a] for a in s.get("after") or [] if a in by_name))  # a hand edit may repeat
+        waiting = list(dict.fromkeys(by_name[a] for a in progress.deps_open(run, s) if a in by_name))
+        nodes.append({"id": sid, "kind": "step", "ref": i + 1, "label": s.get("name") or "",
+                      "state": _step_state(run, s), "recheck": list(s.get("recheck") or []),
+                      "decision": s.get("waiting") or "",
+                      "owner": who(m) if m else (s.get("label") or (lane or {}).get("persona") or "subagent"),
+                      "member": m["id"] if m else "", "lane": lane_ids.get(owner),
+                      "activity": (act or {}).get("id") or "", "activity_name": (act or {}).get("name") or "",
+                      "after": after, "waiting_for": waiting,
+                      "est": s.get("est"), "min": round(progress.step_minutes(run, s, now), 1),
+                      "scope": s.get("scope") or []})
+        edge("run", sid, "step")
+        for a in after:
+            edge(a, sid, "after")
+        if owner in lane_ids:
+            edge(lane_ids[owner], sid, "works_on")
+    for aid, lane in agents.items():
+        m = _for_lane(lane, roster)
+        parent = lane.get("parent")
+        parent = lane_ids[parent] if parent in lane_ids and parent != aid and _no_cycle(agents, aid) else None
+        nodes.append({"id": lane_ids[aid], "kind": "lane", "ref": aid,
+                      "label": lane.get("label") or lane.get("type") or aid[:8],
+                      "who": who(m) if m else (lane.get("persona") or lane.get("type") or "subagent"),
+                      "member": m["id"] if m else "", "type": lane.get("type") or "",
+                      "state": lane.get("state") or "", "decision": lane.get("waiting") or "",
+                      "min": round(progress.active_minutes(run, lane.get("started"), lane.get("finished") or now,
+                                                           now, aid), 1),
+                      "parent": parent, "steps": [step_ids[i] for i, s in enumerate(plan) if s.get("owner") == aid],
+                      "scope": lane.get("scope") or []})
+        edge(parent or "main", lane_ids[aid], "launched")
+    items, links, source = _work_items(run, plan, step_ids)
+    for k, it in enumerate(items, 1):
+        meta = it["meta"]
+        nodes.append({"id": f"task{k}", "kind": "task", "ref": meta.get("id"), "label": meta.get("title") or "",
+                      "type": meta.get("type") or "", "status": meta.get("status") or "",
+                      "bucket": meta.get("bucket") or "", "linked": source == "linked",
+                      "tracks": links.get(meta.get("id"), [])})
+        for target in links.get(meta.get("id"), []):
+            edge(f"task{k}", target, "tracks")
+    for k, d in enumerate(progress.pending_decisions(run), 1):
+        nodes.append({"id": f"dec{k}", "kind": "decision", "ref": d.get("id"), "label": d.get("question") or "",
+                      "from": d.get("from_name") or "", "options": d.get("options") or [],
+                      "recommend": d.get("recommend") or "", "irreversible": d.get("irreversible") or "",
+                      "note": d.get("note") or ""})
+        edge(addr(d.get("from") or "main") or "main", f"dec{k}", "asks")
+    for k, (mid, names) in enumerate(progress.approvals_owed(run), 1):
+        m = member(mid, roster)
+        steps = [by_name[n] for n in names if n in by_name]
+        nodes.append({"id": f"appr{k}", "kind": "approval", "ref": mid, "label": f"{who(m) if m else mid} approves",
+                      "who": who(m) if m else mid, "member": mid, "steps": steps})
+        for sid in steps:
+            edge(f"appr{k}", sid, "approves")
+    for k, msg in enumerate(open_messages(run), 1):
+        nodes.append({"id": f"msg{k}", "kind": "message", "ref": msg.get("id"), "label": msg.get("text") or "",
+                      "from": msg.get("from_name") or "", "to": msg.get("to_name") or "",
+                      "state": "not delivered" if not msg.get("delivered") else "waiting for an answer",
+                      "reply_to": msg.get("reply_to") or "", "time": _when(msg.get("ts"))})
+        if addr(msg.get("from")):
+            edge(addr(msg.get("from")), f"msg{k}", "sends")
+        if addr(msg.get("to")):
+            edge(f"msg{k}", addr(msg.get("to")), "to")
+    return {"session": session, "run": run_node, "nodes": nodes, "edges": edges, "work_items": source}
+
+
+def _paint(state: str, text: str) -> str:
+    return getattr(ui, _PAINT.get(state, "dim"))(text)
+
+
+def _step_parts(n: dict, nodes: dict) -> list:
+    """[head, state, owner, kind of work] of a step node; the state's words carry it without color."""
+    flag = "recheck" if n["recheck"] and n["state"] in ("done", "running") else n["state"]
+    state = n["state"]
+    if state == "waiting":
+        state = "waiting for " + ", ".join(str(nodes[x]["ref"]) for x in n["waiting_for"])
+    elif state == "blocked" and n.get("decision"):
+        state = f"blocked: waiting for decision {n['decision']}"
+    if n["recheck"]:
+        state += f" · recheck (reopened: {', '.join(n['recheck'])})"
+    return [f"{_paint(flag, _GLYPH.get(flag, '·'))} {n['ref']}. {n['label']}", _paint(flag, state), n["owner"]] + \
+        ([f"[{n['activity']}]"] if n["activity"] else [])
+
+
+def _lane_line(n: dict) -> str:
+    state = f"waiting for decision {n['decision']}" if n.get("decision") else (n["state"] or "-")
+    label = "" if n["label"] in (n["who"], n.get("type")) else n["label"]
+    return " · ".join(x for x in (f"{ui.ACTIVE if n['state'] == 'running' else ui.IDLE} {n['who']}", label, state,
+                                  _mins(n["min"])) if x)
+
+
+def _tree(children, prefix: str) -> list:
+    """[(lines, [children])] drawn with ├─ └─ │; a node's further lines continue under its first."""
+    out = []
+    for i, (lines, kids) in enumerate(children):
+        last = i == len(children) - 1
+        lines = [lines] if isinstance(lines, str) else lines
+        ext = prefix + ui.dim("   " if last else "│  ")
+        out.append(prefix + ui.dim("└─ " if last else "├─ ") + lines[0])
+        out += [ext + ln for ln in lines[1:]]
+        out += _tree(kids, ext)
+    return out
+
+
+def graph_text(g: dict, latest: bool = False) -> str:
+    """The session graph as a terminal tree (dev crew graph)."""
+    if not g.get("run"):
+        where = "No running progress run on this Mac" if latest else "No progress run in this session"
+        return (f"  {where}, so there is no graph to draw.\n  Start one: {NO_RUN}"
+                + ("" if latest else "\n" + ui.dim("  another session's run: dev crew graph --latest")))
+    from . import progress
+    nodes = {n["id"]: n for n in g["nodes"]}
+    kind = lambda k: [n for n in g["nodes"] if n["kind"] == k]  # noqa: E731
+    s, r, lanes = g["session"], g["run"], kind("lane")
+    kids = {}
+    for ln in lanes:
+        kids.setdefault(ln["parent"], []).append(ln)
+    expanded = set()
+
+    def lane_node(ln):
+        first = ln["id"] not in expanded
+        expanded.add(ln["id"])
+        return _lane_line(ln), [lane_node(c) for c in kids.get(ln["id"], [])] if first else []
+
+    try:
+        order = progress.topo_order([{"name": n["id"], "after": n["after"]} for n in kind("step")])
+    except progress.StepError:
+        order = [{"name": n["id"]} for n in kind("step")]  # a run edited into a cycle: plan order
+    steps = []
+    for x in order:
+        n = nodes[x["name"]]
+        parts = _step_parts(n, nodes)
+        rest = parts[2:] + (["after " + ", ".join(str(nodes[a]["ref"]) for a in n["after"])] if n["after"] else [])
+        line = " · ".join(parts[:2] + [ui.dim(" · ".join(rest))])
+        steps.append((line, [lane_node(ln) for ln in lanes if n["id"] in ln["steps"]]))
+    loose = [ln for ln in lanes if not ln["steps"] and not ln["parent"]]
+    if loose:
+        steps.append(("Lanes with no step", [lane_node(ln) for ln in loose]))
+    if not steps:
+        steps.append((ui.dim('no plan steps: dev progress add "<step>=30m"'), []))
+    top = [([ui.bold(f"Run · {r['goal']}"), f"{r['state']} · mode {r['mode']} · {r['headline']}"], steps)]
+    tasks = kind("task")
+    if tasks:
+        name = lambda t: "the run" if t == "run" else f"step {nodes[t]['ref']}"  # noqa: E731
+        rows = [(" · ".join([t["ref"], t["status"], t["label"]] + (
+            [ui.dim("tracks " + ", ".join(name(x) for x in t["tracks"]))] if t["tracks"] else [])), [])
+            for t in tasks[:8]]
+        if len(tasks) > 8:
+            rows.append((ui.dim(f"+{len(tasks) - 8} more: dev task"), []))
+        top.append(("Work items linked to the run" if g["work_items"] == "linked"
+                     else f"Now tasks of {s['project']} (the run links none)", rows))
+    decisions = kind("decision")
+    if decisions:
+        top.append(("Decisions waiting for the developer" + ui.dim(' · dev crew decide <id> "<answer>"'), [
+            (" · ".join(x for x in (f"{d['ref']}", f"{d['from'] or '?'} asks: {ui.trunc(d['label'], 120)}",
+                                    "options " + " | ".join(d["options"]) if d["options"] else "",
+                                    f"recommends {d['recommend']}" if d["recommend"] else "",
+                                    f"irreversible: {d['irreversible']}" if d["irreversible"] else "", d["note"])
+                       if x), []) for d in decisions]))
+    approvals = kind("approval")
+    if approvals:
+        top.append(("Approvals owed", [(f"{a['who']} approves " + ", ".join(
+            f"{nodes[x]['ref']}. {nodes[x]['label']}" for x in a["steps"]), []) for a in approvals]))
+    messages = kind("message")
+    if messages:
+        top.append(("Open messages", [(f"{x['ref']} · {x['from'] or '?'} → {x['to'] or '?'} · {x['state']}"
+                                       + (f" · answer to {x['reply_to']}" if x["reply_to"] else "")
+                                       + f": {ui.trunc(x['label'], 120)}", []) for x in messages]))
+    legend = "  ".join(_paint(k, _GLYPH[k]) + " " + k for k in ("done", "running", "ready", "waiting", "blocked",
+                                                                 "skipped", "recheck"))
+    head = [ui.section(f"Session graph · {s['project'] or '-'}"),
+            "  " + legend + ui.dim(" · [kind of work] · after: the steps it waits for"),
+            f"  {ui.ACTIVE} {s['who']} · main session · {s['agent']} {s['session'][:8]}"]
+    return "\n".join(head + _tree(top, "  ") + [ui.dim("\n  dev crew graph --mermaid | --json · dev crew next: who to "
+                                                       "launch now")])
+
+
+def _mm(text, limit: int = 90) -> str:
+    """Text inside a Mermaid label's quotes: one line, entity codes for what Mermaid or HTML would read (the
+    caller joins lines with <br/>)."""
+    s = ui.trunc(" ".join(ui.ANSI_RE.sub("", str(text or "")).split()), limit)
+    for a, b in (("#", "#35;"), ('"', "#quot;"), ("<", "#lt;"), (">", "#gt;"), ("`", "#96;")):
+        s = s.replace(a, b)
+    return s
+
+
+def graph_mermaid(g: dict) -> str:
+    """The session graph as a Mermaid flowchart that renders on GitHub: steps as nodes, dependencies as edges, lanes
+    as subgraphs holding the steps they own (a nested lane inside its parent's)."""
+    if not g.get("run"):
+        return f'flowchart TD\n  main["{_mm("No progress run: " + NO_RUN, 120)}"]'
+    nodes = {n["id"]: n for n in g["nodes"]}
+    kind = lambda k: [n for n in g["nodes"] if n["kind"] == k]  # noqa: E731
+    s, r, lanes = g["session"], g["run"], kind("lane")
+    out = ["flowchart TD", f'  main(["{_mm(s["who"] + " · main session")}"])',
+           f'  run["{_mm("Run: " + r["goal"])}<br/>{_mm(r["state"] + " · " + r["mode"] + " · " + r["headline"])}"]',
+           "  main --> run"]
+    placed = set()
+
+    def step_def(n, pad):
+        placed.add(n["id"])
+        parts = _step_parts(n, nodes)
+        return f'{pad}{n["id"]}["{_mm(parts[0], 70)}<br/>{_mm(" · ".join(parts[1:]))}"]'
+
+    def subgraph(ln, pad):
+        body = [step_def(nodes[x], pad + "  ") for x in ln["steps"] if x not in placed]
+        for child in [c for c in lanes if c["parent"] == ln["id"]]:
+            body += subgraph(child, pad + "  ")
+        return [f'{pad}subgraph {ln["id"]}["{_mm(_lane_line(ln))}"]'] + (
+            body or [f'{pad}  {ln["id"]}i["{_mm("no plan step")}"]']) + [f"{pad}end"]
+
+    for ln in lanes:
+        if not ln["parent"]:
+            out += subgraph(ln, "  ")
+    out += [step_def(n, "  ") for n in kind("step") if n["id"] not in placed]
+    for n in kind("step"):
+        out += [f"  {a} --> {n['id']}" for a in n["after"]] or [f"  run -.-> {n['id']}"]
+    for t in kind("task"):
+        out.append(f'  {t["id"]}("{_mm(t["ref"] + " · " + t["status"] + " · " + t["label"])}")')
+        out += [f"  {t['id']} -.- {x}" for x in t["tracks"]]
+    for d in kind("decision"):
+        out.append(f'  {d["id"]}{{{{"{_mm(d["ref"] + " · waits for the developer: " + d["label"])}"}}}}')
+        blocked = [n["id"] for n in kind("step") if n.get("decision") == d["ref"]]
+        out += [f"  {d['id']} -.- {x}" for x in blocked] or [f"  main -.- {d['id']}"]
+    for a in kind("approval"):
+        out.append(f'  {a["id"]}>"{_mm(a["label"])}"]')
+        out += [f"  {a['id']} -.-> {x}" for x in a["steps"]]
+    flags = [(n["id"], "recheck" if n["recheck"] and n["state"] in ("done", "running") else n["state"])
+             for n in kind("step")]
+    out += [f"  classDef {c} {_MERMAID_CLASS[c]}" for c in _MERMAID_CLASS if c in {f for _, f in flags}]
+    out += [f"  class {sid} {f}" for sid, f in flags if f in _MERMAID_CLASS]
+    return "\n".join(out)
+
+
+def _graph(a, roster) -> int:
+    latest = bool(getattr(a, "latest", False) or getattr(a, "graph_latest", False))
+    g = session_graph(live_run(latest=latest), roster)
+    if getattr(a, "graph_json", False) or getattr(a, "json", False):
+        print(json.dumps(g, ensure_ascii=False, indent=1))
+    elif getattr(a, "mermaid", False):
+        print(graph_mermaid(g))
+    else:
+        print(graph_text(g, latest))
+    return 0
+
+
 # --------------------------------------------------------------------------- CLI
 
 def _from_agent():
@@ -1328,6 +1688,8 @@ def cmd_crew(a) -> int:
         return 2
     if act == "raci":
         return _raci_cmd(a)
+    if act == "graph":
+        return _graph(a, roster)
     if act == "set":
         try:
             m = set_member(a.name, a.field, " ".join(a.value), a.why or "")
@@ -1430,6 +1792,13 @@ def register(add):
     x.add_argument("--why", required=True, help="the reason, kept in the crew's history")
     sp.add_parser("history", help="the team's changes to the crew, with who and why")
     sp.add_parser("rules", help="every crew rule, the devkit check that enforces it, and its state")
+    x = sp.add_parser("graph", help="the live session as one graph: Morpheus, the run's steps and dependencies, the "
+                                    "crew lanes and nested subagents, work items, and what waits")
+    x.add_argument("--latest", dest="graph_latest", action="store_true",
+                   help="the most recent running progress run on this Mac instead of this session's")
+    x.add_argument("--mermaid", action="store_true", help="a Mermaid flowchart (renders on GitHub)")
+    x.add_argument("--json", dest="graph_json", action="store_true",
+                   help="the graph as nodes and edges, for the dashboard and tools")
     x = sp.add_parser("show", help="everything about one member")
     x.add_argument("name", nargs="+", help="id or name, e.g. neo, Oracle, \"The Keymaker\"")
     x = sp.add_parser("brief", help="a ready-to-paste brief for a member, with the spawn line")
