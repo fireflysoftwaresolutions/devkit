@@ -120,7 +120,8 @@ class MemberToolTests(unittest.TestCase):
                 self.assertIsNotNone(v("mcp__vercel__deploy_project", level))
                 self.assertIsNone(v("mcp__claude_ai_Google_Drive__search_files", level))
         self.assertIsNotNone(v("mcp__claude_ai_Google_Drive__create_file", "review"))
-        self.assertIsNone(v("mcp__claude_ai_Google_Drive__create_file", "build"))
+        self.assertIsNotNone(v("mcp__claude_ai_Google_Drive__create_file", "build"))  # C6: creating outside is tier 2
+        self.assertIsNone(v("mcp__claude_ai_Figma__use_figma", "build"))
         self.assertIsNotNone(v("mcp__chrome-devtools__take_screenshot", "read", {"filePath": "shot.png"}))
 
     def test_a_member_may_not_allowlist_a_secret_with_a_file_tool(self):
