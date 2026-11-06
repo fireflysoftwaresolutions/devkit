@@ -72,6 +72,13 @@ class TranscriptTests(unittest.TestCase):
                     f"echo x >> {CODEX}", f"dev rm {CODEX.parent}"):
             with self.subTest(cmd=cmd[:70]):
                 self.assertIsNotNone(bash(cmd))
+        # reading a transcript, and the memory Claude Code keeps beside the chats, stay open
+        self.assertIsNone(check("Write", {"file_path": str(PROJECTS / "memory" / "notes.md"), "content": "a note"}))
+        self.assertIsNone(check("Read", {"file_path": str(TRANSCRIPT)}))
+        for cmd in (f"tail -5 {TRANSCRIPT}", f"jq -c .type {SUBAGENT}", f"grep -c promptId {CODEX}",
+                    f"python3 -c \"print(sum(1 for _ in open('{TRANSCRIPT}')))\"", f"dev rm {PROJECTS / 'memory'}"):
+            with self.subTest(allowed=cmd[:70]):
+                self.assertIsNone(bash(cmd))
 
     def test_an_open_whose_path_is_a_call_still_counts_as_a_write_to_the_session_record(self):
         # the session record holds the evidence entries; open(os.path.expanduser('…'), 'w') hid the write from the
@@ -80,16 +87,6 @@ class TranscriptTests(unittest.TestCase):
         self.assertIsNotNone(bash(f"python3 -c \"import os; open(os.path.expanduser('{record}'), 'w').write('x')\""))
         self.assertIsNotNone(bash(f"python3 -c \"import os; open(os.path.expanduser('{TRANSCRIPT}'), 'a')\""))
         self.assertIsNone(bash(f"python3 -c \"import os; print(open(os.path.expanduser('{record}')).read())\""))
-
-    def test_reading_transcripts_and_writing_memory_stay_allowed(self):
-        memory = PROJECTS / "memory" / "notes.md"
-        self.assertIsNone(check("Write", {"file_path": str(memory), "content": "a note"}))
-        self.assertIsNone(check("Read", {"file_path": str(TRANSCRIPT)}))
-        for cmd in (f"tail -5 {TRANSCRIPT}", f"jq -c .type {SUBAGENT}", f"grep -c promptId {CODEX}",
-                    f"python3 -c \"print(sum(1 for _ in open('{TRANSCRIPT}')))\"", f"dev rm {PROJECTS / 'memory'}"):
-            with self.subTest(cmd=cmd[:70]):
-                self.assertIsNone(bash(cmd))
-
 
 class EvidenceCallTests(unittest.TestCase):
 
@@ -118,8 +115,7 @@ class EvidenceCallTests(unittest.TestCase):
         self.assertIsNotNone(bash("bash -c \"python3 -c 'from devkit import progress; progress.use_grant()'\""))
         self.assertIsNotNone(bash("node -e \"require('child_process').execSync(\\\"python3 -c 'from devkit import "
                                   "progress; progress.on_human_prompt(1, 2)'\\\")\""))
-
-    def test_devkit_programs_that_only_read_and_text_that_names_the_functions_are_not_a_forgery(self):
+        # devkit programs that only read, and text that only names the functions, are not a forgery
         for cmd in ("python3 -c \"from devkit import guard; print(guard.irreversible_actions('gh pr merge 12', '.'))\"",
                     "python3 -c \"print('on_human_prompt and use_grant')\"", "python3 -m unittest tests.test_evidence",
                     "grep -n 'def use_grant' lib/devkit/progress.py", "git commit -m 'fix: confirmed() reads the "
