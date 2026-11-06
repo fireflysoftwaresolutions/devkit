@@ -23,7 +23,7 @@ from unittest import mock
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "lib"))
 
-from devkit import core, guard  # noqa: E402
+from devkit import audit, core, guard  # noqa: E402
 
 DAY = 86400.0
 
@@ -82,10 +82,21 @@ class GateCase(unittest.TestCase):
         self.tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self.tmp.cleanup)
         self.repo = make_repo(self.tmp.name)
-        self.records = []
-        p = mock.patch.object(guard, "_record", lambda *a, **k: self.records.append((a, k)))
-        p.start()
-        self.addCleanup(p.stop)
+        # the gate records through the real audit.record, into an audit folder of the test's own: a stub recorder
+        # hid a keyword collision that broke every gate record (L-fxzc02legsi). No team policy, no forwarding.
+        root = Path(self.tmp.name)
+        for p in (mock.patch.object(audit, "AUDIT", root / "audit"),
+                  mock.patch.object(audit, "policy_file", lambda: root / "no-policy.json"),
+                  mock.patch.dict(core.CFG, {"audit": json.loads(json.dumps(core.DEFAULTS.get("audit") or {}))}),
+                  mock.patch.dict(os.environ)):
+            p.start()
+            self.addCleanup(p.stop)
+        for k in ("DEVKIT_FROM_AGENT", "DEVKIT_SESSION", "DEVKIT_AGENT"):
+            os.environ.pop(k, None)
+
+    def records(self, action):
+        files = sorted((Path(self.tmp.name) / "audit").glob("*.jsonl"))
+        return [r for f in files for r in map(json.loads, f.read_text().splitlines()) if r["action"] == action]
 
     def acts(self, cmd, cwd=None):
         found = guard.irreversible_actions(cmd, cwd or self.repo)
@@ -102,8 +113,10 @@ class GateCase(unittest.TestCase):
         return v[1] if v else None
 
     def gate_records(self):
-        # (target, outcome, the record's fields) of each guard.irreversible record
-        return [(a[1], a[3], k) for a, k in self.records if a[0] == "guard.irreversible"]
+        # (target, the gate's outcome word, the record) of each guard.irreversible record in the trail; the trail
+        # keeps "allow" as outcome ok and every other word in ref.result
+        return [(r["target"], (r.get("ref") or {}).get("result") or r["outcome"], r)
+                for r in self.records("guard.irreversible")]
 
 
 class ClassifyTests(GateCase):
@@ -316,6 +329,15 @@ class MemberTests(GateCase):
             with self.subTest(cmd=cmd):
                 self.assertIn("never", self.member(cmd) or "")
 
+    def test_a_member_denial_is_recorded_in_the_trail_with_its_class_lane_and_member(self):
+        # Seraph's B2 repro: the gate's record raised TypeError (action= twice), so every member denial came back as
+        # the gate-error text and left no record of the action
+        self.assertIn("Crew members never run", self.member("gh pr merge 12") or "")
+        target, outcome, rec = self.gate_records()[-1]
+        self.assertEqual((target, outcome, rec["ref"]["irreversible"], rec["crew"]["lane"], rec["crew"]["member"]),
+                         ("12", "deny", "merge", "a1", "tank"))
+        self.assertEqual(self.records("guard.failopen"), [])
+
     def test_member_remote_delete_is_denied(self):
         for cmd in ("git push origin --delete feat/x", "gh api -X DELETE repos/o/r/git/refs/heads/x",
                     "git push origin :feat/x"):
@@ -353,9 +375,9 @@ class MemberTests(GateCase):
     def test_gate_error_denies_member_and_audits_main(self):
         why = self.member("git push origin feat/x", grant=Broken())
         self.assertIn("could not verify", why or "")
-        self.records.clear()
+        self.assertEqual(self.records("guard.failopen"), [])
         self.assertIsNone(self.main("dev release --version 26.11.5", grant=Broken(), setting="enforce"))
-        self.assertIn("guard.failopen", [a[0] for a, _ in self.records])
+        self.assertEqual([r["detail"] for r in self.records("guard.failopen")], ["RuntimeError: state busy"])
 
     def test_a_member_command_the_guard_cannot_parse_that_names_an_action_is_denied(self):
         self.assertIsNotNone(self.member("gh pr merge 12 'unclosed"))
@@ -389,8 +411,9 @@ class MainTests(GateCase):
 
     def test_main_tier_1_runs_and_is_recorded(self):
         self.assertIsNone(self.main("git push origin feat/x"))
-        target, outcome, extra = self.gate_records()[-1]
-        self.assertEqual((target, outcome, extra["action"], extra["tier"]), ("feat/x", "allow", "push", 1))
+        target, outcome, rec = self.gate_records()[-1]
+        self.assertEqual((target, outcome, rec["ref"]["irreversible"], rec["ref"]["session"]),
+                         ("feat/x", "ok", "push", "s1"))
 
     def test_main_release_without_grant_is_denied_in_enforce(self):
         why = self.main("dev release --version 26.11.5", setting="enforce")
@@ -400,8 +423,8 @@ class MainTests(GateCase):
 
     def test_main_release_without_grant_runs_with_a_record_in_audit(self):
         self.assertIsNone(self.main("dev release --version 26.11.5", setting="audit"))
-        target, outcome, extra = self.gate_records()[-1]
-        self.assertEqual((target, outcome, extra["action"], extra["tier"]), ("v26.11.5", "audit", "release", 2))
+        target, outcome, rec = self.gate_records()[-1]
+        self.assertEqual((target, outcome, rec["ref"]["irreversible"]), ("v26.11.5", "audit", "release"))
 
     def test_release_grant_opens_one_release(self):
         store = Store({"release v26.11.5": 1})

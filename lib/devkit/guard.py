@@ -3929,9 +3929,16 @@ def _what(a) -> str:
 
 
 def _gate_record(a, outcome, who, setting, lane="", session="", g=None):
-    _record("guard.irreversible", a["target"], a["words"], outcome, action=a["action"], tier=a["tier"],
-            repo=a["repo"], who=who, lane=lane or "", session=session or "", setting=setting,
-            grant=(g or {}).get("id") or "", source=(g or {}).get("source") or "")
+    """One guard.irreversible record; the action class goes as `irreversible` (ref.irreversible), since `action` is
+    the record's own name. It never raises: a record that fails must not turn the gate's decision around (Seraph,
+    B2: `action=` twice made every record raise, and the main gate's except let an ungranted merge run)."""
+    try:
+        _record("guard.irreversible", a["target"], a["words"], outcome, irreversible=a["action"], tier=a["tier"],
+                repo=a["repo"], member="" if who == "main" else who, lane=lane or "", session=session or "",
+                setting=setting, grant=(g or {}).get("id") or "", source=(g or {}).get("source") or "")
+    except Exception as e:
+        _record("guard.irreversible", str(a.get("target") or ""), f"record failed: {type(e).__name__}"[:300],
+                outcome, rule="record-error")
 
 
 UNPARSED_REASON = ("The guard cannot parse this command, and it names an irreversible action (spec C6). Type it as a "
@@ -4064,7 +4071,7 @@ def _member_gate(cmd, cwd, member, lane, agent, session, grant, now) -> str | No
             _gate_record(a, "granted" if used else "audit", who, setting, lane, session, used)
         return None
     except Exception as e:
-        _record("guard.irreversible", "", f"{type(e).__name__}: {e}"[:300], "deny", who=who, lane=lane or "",
+        _record("guard.irreversible", "", f"{type(e).__name__}: {e}"[:300], "deny", member=who, lane=lane or "",
                 session=session or "", rule="gate-error")
         return (f"devkit could not verify the grant for this command ({type(e).__name__}); retry once. If it fails "
                 f"again, ask Morpheus with `dev crew ask \"…\"`.")
