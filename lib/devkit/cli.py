@@ -1322,7 +1322,7 @@ def cmd_progress(a):
                                                      .get("plan") or [])} if not from_agent else {}
         try:
             run = pg.step(" ".join(a.text), a.next or "", kind=kind, check=check, which=getattr(a, "step", None),
-                          from_agent=from_agent, force=getattr(a, "force", False))
+                          from_agent=from_agent, force=getattr(a, "force", False), why=getattr(a, "why", "") or "")
         except ValueError as e:
             ui.err(str(e))
             return 2
@@ -1339,7 +1339,8 @@ def cmd_progress(a):
     if act in ("assign", "begin", "add", "reopen", "skip"):
         try:
             if act == "assign":
-                run = pg.assign(a.which, " ".join(a.to), scope=getattr(a, "scope", "") or "", from_agent=from_agent)
+                run = pg.assign(a.which, " ".join(a.to), scope=getattr(a, "scope", "") or "", from_agent=from_agent,
+                                why=getattr(a, "why", "") or "")
             elif act == "begin":
                 run = pg.begin(a.which, from_agent=from_agent)
             elif act == "add":
@@ -2021,7 +2022,6 @@ def _quota_text(q: dict) -> str:
     return (ui.red("exhausted · ") + txt) if not q.get("available") else (ui.yellow(txt) if (used or 0) >= 80 else txt)
 
 
-def cmd_agents(a):
 def rules_text(section: str = "") -> str:
     """devkit's global rules as `dev install` writes them, or one section ("0", "3", "crew", "status block")."""
     from . import setup
@@ -2041,8 +2041,8 @@ def rules_text(section: str = "") -> str:
     raise ValueError(f"no section {section!r}: give its number (0-12) or words from its title")
 
 
+def cmd_agents(a):
     from . import providers
-    if a.action == "test":
     if a.action == "rules":
         try:
             print(rules_text(getattr(a, "section", "") or ""))
@@ -2050,6 +2050,7 @@ def rules_text(section: str = "") -> str:
             ui.err(str(e))
             return 2
         return 0
+    if a.action == "test":
         targets = ["claude", "codex"] if a.agent in (None, "all") else [a.agent]
         rc = 0
         for t in targets:
@@ -2279,10 +2280,13 @@ def build_parser():
                                                                 "dependencies done, no subagent still on it)")
         if verb == "step":
             x.add_argument("--no-check", action="store_true", help="nothing to verify for this step (shown as ⚠)")
+        if verb == "done":
+            x.add_argument("--why", help="end the run although an Accountable member has not approved (recorded)")
     x = gsp.add_parser("assign", help="hand a plan step to a subagent: the one launched with this description owns it")
     x.add_argument("which", help="step number or part of its name")
     x.add_argument("--to", nargs="+", required=True, help="the subagent's description or name, e.g. Neo")
     x.add_argument("--scope", help="the files it owns, comma-separated globs; the guard keeps its edits inside them")
+    x.add_argument("--why", help="assign a member the crew's RACI does not make Responsible (recorded)")
     x = gsp.add_parser("begin", help="mark a plan step as started (parallel work you do yourself)")
     x.add_argument("which", help="step number or part of its name")
     x = gsp.add_parser("add", help="add a step found during the work: \"name=30m after other\"")
@@ -2422,11 +2426,11 @@ def build_parser():
     p = add("agents", cmd_agents, "Claude Code and Codex: install, sign-in, plan, quota, self-test")
     p.add_argument("action", nargs="?", choices=["status", "test", "rules"], default="status")
     p.add_argument("agent", nargs="?", choices=["claude", "codex", "all"])
+    p.add_argument("--section", help="rules: one section, by number (0-12) or words from its title")
     p.add_argument("--json", action="store_true")
     p.add_argument("--model", help="model for the self-test session")
     p.add_argument("-v", "--verbose", action="store_true", help="show the agent's reply")
     add("calver", cmd_calver, "Current and next CalVer version (YY.MM.PATCH)").add_argument(
-    p.add_argument("--section", help="rules: one section, by number (0-12) or words from its title")
         "--next", action="store_true", help="print only the next version")
     p = add("plugin", cmd_plugin, "Validate the devkit plugin for Claude Code and Codex")
     p.add_argument("action", choices=["validate"])

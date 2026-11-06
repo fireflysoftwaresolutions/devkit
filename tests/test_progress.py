@@ -386,7 +386,7 @@ class CrewCoordinationTests(unittest.TestCase):
                             "agent_transcript_path": str(tr), "last_assistant_message": "Done. The parser works."}
                 sent_back = json.loads(stop(launched))  # launched with the Agent tool: sent back once
                 self.assertEqual(sent_back["decision"], "block")
-                self.assertIn("DevKit · Neo]", sent_back["reason"])  # by the name its launch gave it
+                self.assertIn("DevKit · Senior engineer (Neo)]", sent_back["reason"])  # by the name its launch gave it
                 fixed = dict(launched, stop_hook_active=True, last_assistant_message=(
                     "**[Firefly> DevKit · Neo]** api · `main` · parser\n- **Done:** x\n- **Check:** \u2713 3 tests\n"
                     "- **Next:** review"))

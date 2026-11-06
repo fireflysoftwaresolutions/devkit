@@ -45,8 +45,9 @@ STOP = set("the a an and or of to in on for with by from at as is are be it this
 
 
 def _roster() -> list:
-    data = core.read_json(core.DEVKIT_HOME / "config" / "crew.json", {}) or {}
-    return [m for m in data.get("members") or [] if not m.get("main")]
+    """The crew without Morpheus: devkit's roster with the team's changes from the handoff repository."""
+    from . import crew
+    return crew.members(include_main=False)
 
 
 def _terms(text: str) -> set:
@@ -59,8 +60,20 @@ def _terms(text: str) -> set:
 
 
 def route(task: str, files=None, limit: int = 3) -> list:
-    """-> [(member, score, [reasons])], best first. Scores: the member's keywords (x5), words shared with its role
-    and use_when (x3), summary and skills (x1), and the files the task touches (x4 per matching file kind)."""
+    """-> [(member, score, [reasons])], best first. The crew's RACI decides first: when the task is clearly one kind
+    of work, its Responsible members lead. Then the member scores: keywords (x5), words shared with its role and
+    use_when (x3), summary and skills (x1), and the files the task touches (x4 per matching file kind)."""
+    from . import raci
+    lead = []
+    top = raci.best(task)
+    if top:
+        act, score, hits = top
+        for mid in act.get("R") or []:
+            m = next((x for x in _roster() if x["id"] == mid), None)
+            if m:
+                lead.append((m, float(10 + score), [f"RACI R: {act['name']}",
+                                                    f"approves: {raci.names([act.get('A')])}",
+                                                    "signals: " + ", ".join(hits[:4])]))
     words = _terms(task)
     scored = []
     for m in _roster():
@@ -94,6 +107,12 @@ def route(task: str, files=None, limit: int = 3) -> list:
         if score >= 3:  # at least one keyword, role or file hit: a loose summary word alone does not route
             scored.append((m, round(score, 1), why))
     scored.sort(key=lambda x: (-x[1], x[0]["id"] != "neo"))  # ties: Neo, the generalist, first
+    if lead:
+        ids = {m["id"] for m, _, _ in lead}
+        own = {m["id"]: why for m, _, why in scored}
+        lead = [(m, s, why[:1] + [w for w in own.get(m["id"], []) if w.startswith("file ")] + why[1:])
+                for m, s, why in lead]  # the files the task touches stay visible next to the RACI reason
+        return (lead + [x for x in scored if x[0]["id"] not in ids])[:limit]
     if not scored:  # nothing specific: the senior engineer
         neo = next((m for m in _roster() if m["id"] == "neo"), None)
         return [(neo, 0.0, ["no specialist matched: the generalist"])] if neo else []

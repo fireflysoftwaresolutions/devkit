@@ -30,10 +30,11 @@ TOOLS = {"all": None, "build": "Read, Write, Edit, Grep, Glob, Bash", "review": 
          "read": "Read, Grep, Glob"}
 CLAUDE_MODEL = {"strong": "inherit", "standard": "inherit", "fast": "haiku"}
 CLAUDE_EFFORT = {"strong": "high", "fast": "low"}  # standard: the session's default effort, like Codex
-REQUIRED = ("id", "name", "role", "summary", "personality", "use_when", "skills", "tools", "tier", "returns")
+REQUIRED = ("id", "name", "title", "role", "summary", "personality", "use_when", "skills", "tools", "tier", "returns",
+            "goal", "method", "devkit", "done_when")
 OPTIONAL = ("main", "not_for", "aliases", "keywords")  # keywords: routing words (dev crew route)
-TEXT_FIELDS = ("id", "name", "role", "summary", "personality", "returns")
-LIST_FIELDS = ("use_when", "not_for", "skills", "aliases", "keywords")
+TEXT_FIELDS = ("id", "name", "title", "role", "summary", "personality", "returns", "goal")
+LIST_FIELDS = ("use_when", "not_for", "skills", "aliases", "keywords", "method", "devkit", "done_when")
 LEGACY_ALIASES = {"sparks": ["scout"]}  # agent names older briefs still use; a member's own `aliases` field wins
 ID_RE = re.compile(r"^[a-z][a-z0-9]*(?:-[a-z0-9]+)*$")
 _PREFIXED = re.compile(r"^[a-z0-9][a-z0-9_-]*:(\S+)$")  # devkit:neo -> neo (not "Neo: build the parser")
@@ -102,7 +103,7 @@ def check(data, known=None):
         mid = m.get("id") if isinstance(m.get("id"), str) and m.get("id") else None
         where = f"`{mid}`" if mid else f"member {i}"
         missing = [k for k in REQUIRED if k not in m or m[k] is None or (k in TEXT_FIELDS and m[k] == "")
-                   or (k == "use_when" and m[k] == [])]
+                   or (k in ("use_when", "method", "devkit", "done_when") and m[k] == [])]
         if missing:
             errors.append(f"{where}: missing {', '.join(missing)}")
         for k in TEXT_FIELDS:
@@ -138,20 +139,73 @@ def check(data, known=None):
                                 "plugin of config/claude/plugins.json)")
     if len(mains) > 1:
         errors.append("only one member can be `main`, not " + ", ".join(mains))
-    return errors, warnings
+    from . import raci
+    e2, w2 = raci.check(data)
+    return errors + e2, warnings + w2
 
 
 _CACHE = {}
 
 
-def load(path=None) -> dict:
-    """The validated roster; `warnings` lists what is suspicious but allowed. Raises RosterError."""
-    p = Path(path or ROSTER)
+def overlay_path() -> Path:
+    """The team's changes to the crew, in the handoff repository (written only by `dev crew set|raci --set`)."""
+    return core.HANDOFF / "crew" / "crew.json"
+
+
+def read_overlay(path=None) -> dict:
+    ov = core.read_json(Path(path or overlay_path()), {}) or {}
+    ov = ov if isinstance(ov, dict) else {}
+    for k in ("members", "activities"):
+        ov[k] = ov.get(k) if isinstance(ov.get(k), dict) else {}
+    ov["changelog"] = ov.get("changelog") if isinstance(ov.get("changelog"), list) else []
+    return ov
+
+
+def merge(base: dict, ov: dict) -> dict:
+    """devkit's roster with the team's changes: fields of existing members and activities are replaced, new ones
+    are added (they must be complete)."""
+    import copy
+    out = copy.deepcopy(base)
+    by_id = {m.get("id"): m for m in out.get("members") or []}
+    for mid, fields in (ov.get("members") or {}).items():
+        if not isinstance(fields, dict):
+            continue
+        if mid in by_id:
+            by_id[mid].update(fields)
+        else:
+            out.setdefault("members", []).append(dict(fields, id=mid))
+    acts = {a.get("id"): a for a in out.get("activities") or [] if isinstance(a, dict)}
+    for aid, fields in (ov.get("activities") or {}).items():
+        if not isinstance(fields, dict):
+            continue
+        if aid in acts:
+            acts[aid].update(fields)
+        else:
+            out.setdefault("activities", []).append(dict(fields, id=aid))
+    return out
+
+
+def _stat_key(p: Path):
     try:
         st = p.stat()
+        return (str(p), st.st_mtime_ns, st.st_size)
+    except OSError:
+        return (str(p), None, None)
+
+
+def load(path=None, team: bool = True) -> dict:
+    """The validated roster; `warnings` lists what is suspicious but allowed. Raises RosterError.
+
+    With `team` (the default for devkit's own roster), the team's changes from the handoff repository are merged
+    on top. When they would break the roster, devkit's roster is used and a warning says why. The generated plugin
+    agents use devkit's roster alone (`team=False`), so the devkit checkout never changes."""
+    p = Path(path or ROSTER)
+    try:
+        p.stat()
     except OSError:
         raise RosterError(["the roster file is missing"], p) from None
-    key = (str(p), st.st_mtime_ns, st.st_size)
+    team = team and path is None
+    key = (_stat_key(p), _stat_key(overlay_path()) if team else None)
     if key in _CACHE:
         return _CACHE[key]
     try:
@@ -161,8 +215,19 @@ def load(path=None) -> dict:
     errors, warnings = check(data)
     if errors:
         raise RosterError(errors, p)
+    if team and overlay_path().exists():
+        ov = read_overlay()
+        merged = merge(data, ov)
+        e2, w2 = check(merged)
+        if e2:
+            warnings = warnings + [f"the team's crew changes ({core.tilde(overlay_path())}) are not used: "
+                                   + "; ".join(e2[:3])]
+        else:
+            data, warnings = merged, w2
+            data["team_changes"] = len(ov.get("changelog") or [])
     data["warnings"] = warnings
-    _CACHE.clear()
+    if len(_CACHE) > 8:
+        _CACHE.clear()
     _CACHE[key] = data
     return data
 
@@ -219,8 +284,13 @@ def description(m: dict, alias=None) -> str:
     return d
 
 
+def who(m: dict) -> str:
+    """How developers see a member: the role first, then the name ("Backend engineer (Tank)")."""
+    return f"{m['title']} ({m['name']})" if m.get("title") else m["name"]
+
+
 def status_header(m: dict, project="<project>", branch="<branch>", task="<task>") -> str:
-    return f"**[Firefly> DevKit · {m['name']}]** {project} · `{branch}` · {task}"
+    return f"**[Firefly> DevKit · {who(m)}]** {project} · `{branch}` · {task}"
 
 
 def report_block(m: dict, **header) -> list:
@@ -237,6 +307,7 @@ def body(m: dict, roster=None, alias=None) -> str:
     out = [f"You are {_display(m, alias)}, the crew's {_lc(m['role'])}. {_sentence(m['personality'])} Let that "
            "shape your judgment and tone, always professionally: no role-play and no film quotes.", "",
            "## Mission", "", _sentence(m["summary"]), "",
+           "## Goal", "", _sentence(m["goal"]), "",
            "## When Morpheus sends work to you", ""]
     out += [f"- {x}" for x in m["use_when"]] + [""]
     out += [("Not yours: " + "; ".join(m["not_for"]) if m.get("not_for") else "Not yours: anything outside your brief")
@@ -247,7 +318,13 @@ def body(m: dict, roster=None, alias=None) -> str:
                 ""] + [f"- `{s}`" for s in m["skills"]] + [""]
     else:
         out += ["None. Load a skill only when your brief names one.", ""]
-    out += ["## How you work", ""]
+    out += ["## Your method", ""] + [f"{i}. {_sentence(x)}" for i, x in enumerate(m["method"], 1)] + [""]
+    out += _raci_section(m, roster)
+    out += ["## Your devkit commands", "",
+            "devkit is how the crew works and talks: use these instead of ad-hoc scripts, files or messages."
+            + ("" if shell else " You have no shell: name the command in your report and Morpheus runs it."), ""]
+    out += [f"- `{c}`" for c in m["devkit"]] + [""]
+    out += ["## How you work with the crew", ""]
     if shell:
         out += ["- Stay inside the files and the scope your brief names. Before you go beyond them, ask Morpheus: "
                 '`dev crew ask "<question>"`. Any crew member may ask anything; reply to a message with '
@@ -272,9 +349,37 @@ def body(m: dict, roster=None, alias=None) -> str:
             "## Your report", "",
             "Your final message starts with your own status block; nothing comes before it:", ""]
     out += ["```markdown"] + report_block(m) + ["```", "", f"Then deliver: {_sentence(m['returns'])}", "",
+            "You are done when:", ""] + [f"- {x}" for x in m["done_when"]] + ["",
                               'End with `Needs from Morpheus:` and the decisions or questions for Morpheus, or `nothing`.',
                               "", "## Language", "", _sentence(roster["language_rule"])]
     return "\n".join(out)
+
+
+def _raci_section(m: dict, roster) -> list:
+    """The member's place in the crew's RACI, in the words it acts on."""
+    from . import raci
+    r = raci.roles_of(m["id"], roster)
+    if not any(r.values()):
+        return []
+    out = ["## Your place in the crew's RACI", ""]
+    for a in r["R"]:
+        line = f"- **You do** {raci._lower(a['name'])}."
+        if a.get("A") and a["A"] != m["id"]:
+            line += f" {raci.names([a['A']], roster)} approves it: say so in your report, so Morpheus schedules the review."
+        if a.get("C"):
+            line += (f" Consult {raci.names([x for x in a['C'] if x != m['id']], roster)} before decisions that affect "
+                     "them (`dev crew ask --to <name>`).")
+        out.append(line)
+    for a in r["A"]:
+        if m["id"] not in (a.get("R") or []):
+            out.append(f"- **You approve** {raci._lower(a['name'])} done by {raci.names(a.get('R'), roster)}: review it "
+                       "with evidence, and approve it or send it back with the fixes.")
+    if r["C"]:
+        out.append("- **You are consulted on** " + "; ".join(raci._lower(a["name"]) for a in r["C"])
+                   + ": answer questions from the crew promptly (`dev crew answer <id> \"<text>\"`).")
+    if r["I"]:
+        out.append("- **You are informed about** " + "; ".join(raci._lower(a["name"]) for a in r["I"]) + ".")
+    return out + [""]
 
 
 def render_claude(m: dict, roster=None, alias=None) -> str:
@@ -331,8 +436,9 @@ def codex_roles(roster=None, codex=None) -> dict:
 # --------------------------------------------------------------------------- dev crew sync
 
 def agent_files(roster=None) -> dict:
-    """{file name: text} of every generated Claude Code agent, aliases included."""
-    roster = roster or load()
+    """{file name: text} of every generated Claude Code agent, aliases included (devkit's roster: the plugin ships
+    in the devkit checkout; the team's changes reach the members through their briefs)."""
+    roster = roster or load(team=False)
     out = {}
     for m in members(roster, include_main=False):
         out[f"{m['id']}.md"] = render_claude(m, roster)
@@ -359,7 +465,7 @@ def _rel(path) -> str:
 def sync(check: bool = False, roster=None, agents_dir=None) -> list:
     """Write plugin/agents/<id>.md for every subagent and remove generated files no longer in the roster.
     -> what changed (or, with check=True, what differs) as "new|update|remove <path>"."""
-    roster = roster or load()
+    roster = roster or load(team=False)
     d = Path(agents_dir or AGENTS_DIR)
     want = agent_files(roster)
     out = []
@@ -491,16 +597,16 @@ def roster_text(active=None, roster=None) -> str:
     rows = []
     for m in members(roster):
         when = ("main session: " if m.get("main") else "") + "; ".join(m["use_when"])
-        rows.append([(ui.ACTIVE + " " if m["id"] in busy else "  ") + m["id"], m["name"], m["role"], when,
-                     m["tier"], m["tools"]])
-    out = [ui.table(rows, ["  ID", "NAME", "ROLE", "WHEN TO USE", "TIER", "TOOLS"], max_widths={2: 32, 3: 44})]
+        rows.append([(ui.ACTIVE + " " if m["id"] in busy else "  ") + m.get("title", m["role"]), m["name"], m["id"],
+                     when, m["tier"], m["tools"]])
+    out = [ui.table(rows, ["  ROLE", "NAME", "ID", "WHEN TO USE", "TIER", "TOOLS"], max_widths={0: 24, 3: 48})]
     if active:
         out.append(ui.section("Working now"))
         for lane in active:
             m = member(lane.get("member"), roster) or _for_label(lane.get("label"), roster)
             dot = ui.ACTIVE if lane.get("state") == "running" else ui.IDLE
             scope = f" · scope {', '.join(lane['scope'])}" if lane.get("scope") else ""
-            out.append(f"  {dot} {(m['name'] if m else lane.get('label') or 'subagent'):<18} "
+            out.append(f"  {dot} {(who(m) if m else lane.get('label') or 'subagent'):<30} "
                        f"{lane.get('state') or '-':<8} {_mins(lane.get('min')):>6}  {lane.get('label') or ''}{scope}")
     return "\n".join(out)
 
@@ -636,13 +742,15 @@ def as_json(roster=None, view=None) -> dict:
     roster = roster or load()
     out = []
     for m in members(roster):
-        x = {k: m.get(k) for k in ("id", "name", "role", "main", "summary", "use_when", "not_for", "keywords",
-                                   "skills", "tools", "tier", "returns")}
+        x = {k: m.get(k) for k in ("id", "name", "title", "role", "main", "summary", "goal", "use_when", "not_for", "keywords",
+                                   "skills", "method", "devkit", "done_when", "tools", "tier", "returns")}
         x["aliases"] = aliases(m)
         if not m.get("main"):
             x["spawn"] = {"claude_code": f"devkit:{m['id']}", "codex": m["id"]}
         out.append({k: v for k, v in x.items() if v not in (None, [], False)})
-    return {"members": out, "run": view, "warnings": roster.get("warnings") or []}
+    raci = [{k: a.get(k) for k in ("id", "name", "R", "A", "C", "I")} for a in roster.get("activities") or []]
+    return {"members": out, "raci": raci, "team_changes": roster.get("team_changes") or 0, "run": view,
+            "warnings": roster.get("warnings") or []}
 
 
 # --------------------------------------------------------------------------- CLI
@@ -763,8 +871,9 @@ def _route(a) -> int:
     if not ranked:
         print(f"  no crew member fits: name one with dev crew delegate {_dq(task)} --to <name>")
         return 0
-    print(ui.table([[i, m["name"], m["id"], f"{score:g}", "; ".join(why)] for i, (m, score, why) in
-                    enumerate(ranked, 1)], ["#", "MEMBER", "ID", "SCORE", "WHY"], max_widths={4: 72}))
+    print(ui.table([[i, m.get("title") or m["role"], m["name"], m["id"], f"{score:g}", "; ".join(why)]
+                    for i, (m, score, why) in enumerate(ranked, 1)],
+                   ["#", "ROLE", "NAME", "ID", "SCORE", "WHY"], max_widths={5: 72}))
     best = ranked[0][0]
     print(f"  launch: dev crew brief {best['id']} {_dq(task)}")
     print(ui.dim(f"  or add it to the plan: dev crew delegate {_dq(task)} --to {best['id']}"))
@@ -869,6 +978,147 @@ def _messages(a, act) -> int:
     return 0
 
 
+EDITABLE = ("name", "title", "role", "summary", "personality", "goal", "returns", "use_when", "not_for", "skills", "method",
+            "devkit", "done_when", "keywords", "tools", "tier")
+
+
+def _team_write(ov: dict, what: str, why: str, by: str = "") -> Path:
+    """Validate the team's changes merged on devkit's roster, then write them, the README and one commit."""
+    from . import work
+    if not why.strip():
+        raise ValueError("a change to the crew needs its reason: --why \"<reason>\"")
+    base = json.loads(ROSTER.read_text())
+    errors, _ = check(merge(base, ov))
+    if errors:
+        raise ValueError("that change would break the crew: " + "; ".join(errors[:4]))
+    ov.setdefault("changelog", []).append({"at": work.now_iso(), "by": by or work.actor_str(work.actor()),
+                                           "what": what, "why": why.strip()})
+    f = overlay_path()
+    f.parent.mkdir(parents=True, exist_ok=True)
+    f.write_text(json.dumps(ov, indent=2, ensure_ascii=False) + "\n")
+    _CACHE.clear()
+    readme = f.parent / "README.md"
+    readme.write_text(team_readme(load()))
+    _commit_team([f, readme], f"crew: {what}\n\nwhy: {why.strip()}")
+    return f
+
+
+def _commit_team(paths, message: str):
+    """One commit per crew change in the handoff repository (the audit trail); `dev sync` pushes it."""
+    from . import audit, work
+    h = core.HANDOFF
+    if not (h / ".git").exists():
+        return
+    rel = [str(Path(p).relative_to(h)) for p in paths]
+    core.git(h, "add", "--", *rel)
+    if core.git(h, "diff", "--cached", "--quiet")[0] != 0:
+        core.git(h, "commit", "-q", "-m", message, "--", *rel)
+        audit.record("handoff.crew", ", ".join(rel), message.split("\n")[0][:300])
+    work.request_sync("crew change")
+
+
+def set_member(name: str, field: str, value: str, why: str, by: str = "") -> dict:
+    """Change one field of a member for the whole team (the handoff repository). List fields take "a; b; c"."""
+    m = member(name)
+    if not m:
+        raise ValueError(f"no crew member {name!r}: dev crew lists them")
+    if field not in EDITABLE:
+        raise ValueError(f"`{field}` cannot be changed; these can: {', '.join(EDITABLE)}")
+    v = [x.strip() for x in value.split(";") if x.strip()] if field in LIST_FIELDS else value.strip()
+    ov = read_overlay()
+    ov["members"].setdefault(m["id"], {})[field] = v
+    _team_write(ov, f"{m['name']}: {field}", why, by)
+    return member(m["id"])
+
+
+def set_raci(activity_id: str, changes: dict, why: str, by: str = "") -> dict:
+    """Change the RACI of one kind of work for the whole team: {"R": [ids], "A": id, "C": [...], "I": [...]}."""
+    from . import raci
+    act = raci.activity(activity_id)
+    if not act:
+        raise ValueError(f"no kind of work {activity_id!r}: dev crew raci lists them")
+    ov = read_overlay()
+    fields = ov["activities"].setdefault(act["id"], {})
+    for k, v in changes.items():
+        if k not in raci.LETTERS:
+            raise ValueError(f"`{k}` is not R, A, C or I")
+        ids = [member(x)["id"] if member(x) else x for x in ([v] if isinstance(v, str) else v)]
+        fields[k] = ids[0] if k == "A" else ids
+    _team_write(ov, f"RACI {act['id']}: " + ", ".join(f"{k}={','.join(fields[k]) if isinstance(fields[k], list) else fields[k]}"
+                                                      for k in changes), why, by)
+    return raci.activity(act["id"])
+
+
+def team_readme(roster=None) -> str:
+    """The crew as the team runs it, for people reading the handoff repository (generated)."""
+    from . import raci
+    roster = roster or load()
+    out = ["# The crew", "", "_Generated by `dev crew` from devkit's roster and this folder's `crew.json` (the team's "
+           "changes). Change it with `dev crew set <member> <field> \"…\" --why \"…\"` or `dev crew raci <work> --set "
+           "\"R=… A=…\" --why \"…\"`; never by hand._", "",
+           "Morpheus, the main session, leads every development request: he routes each kind of work to the member "
+           "who does it (R), and the work is not done until the member who approves it (A) has.", "",
+           "## Members", "", "| Member | Role | Goal |", "| --- | --- | --- |"]
+    out += [f"| {m['name']} | {m['role']} | {m.get('goal', '')} |" for m in members(roster)]
+    out += ["", "## RACI", "", "R does the work, A approves it (one member), C is consulted, I is informed.", "",
+            raci.markdown(roster), "", "## Changes", ""]
+    log = read_overlay().get("changelog") or []
+    out += [f"- {c.get('at', '')} · {c.get('by', '')} · {c.get('what', '')} — why: {c.get('why', '')}"
+            for c in reversed(log[-50:])] or ["- none yet: the team runs devkit's roster as shipped"]
+    return "\n".join(out) + "\n"
+
+
+def _raci_cmd(a) -> int:
+    from . import raci
+    if a.set:
+        if not a.work:
+            ui.err('name the kind of work: dev crew raci <work> --set "R=tank A=seraph" --why "…"')
+            return 2
+        changes = {}
+        for part in a.set.replace(";", " ").split():
+            k, _, v = part.partition("=")
+            changes[k.strip().upper()] = [x for x in v.split(",") if x]
+        try:
+            act = set_raci(a.work, changes, a.why or "")
+        except ValueError as e:
+            ui.err(str(e))
+            return 2
+        print(f"{ui.OK} {act['name']}: R {raci.names(act['R'])} · A {raci.names([act['A']])} · "
+              f"C {raci.names(act.get('C')) if act.get('C') else '–'} · I {raci.names(act.get('I')) if act.get('I') else '–'}")
+        print(ui.dim(f"  recorded in {core.tilde(overlay_path())} for the whole team"))
+        return 0
+    if a.work:
+        m = member(a.work)
+        if m:
+            r = raci.roles_of(m["id"])
+            for k, label in (("R", "does"), ("A", "approves"), ("C", "is consulted on"), ("I", "is informed about")):
+                if r[k]:
+                    print(f"  {who(m)} {label}: " + "; ".join(x["name"] for x in r[k]))
+            return 0
+        act = raci.activity(a.work)
+        if not act:
+            ranked = raci.classify(a.work)
+            if not ranked:
+                ui.err(f"no member or kind of work {a.work!r}, and no RACI signal in it: dev crew raci lists them")
+                return 2
+            act = ranked[0][0]
+            print(ui.dim(f"  “{a.work}” reads as {act['name']} ({', '.join(ranked[0][2][:4])})"))
+        rows = [[act["id"], act["name"], raci.names(act["R"]), raci.names([act["A"]]),
+                 raci.names(act.get("C")) if act.get("C") else "–", raci.names(act.get("I")) if act.get("I") else "–"]]
+    else:
+        rows = [[x["id"], x["name"], raci.names(x["R"]), raci.names([x["A"]]),
+                 raci.names(x.get("C")) if x.get("C") else "–", raci.names(x.get("I")) if x.get("I") else "–"]
+                for x in raci.activities()]
+    if a.markdown:
+        print(raci.markdown())
+        return 0
+    print(ui.table(rows, ["ID", "KIND OF WORK", "R · DOES IT", "A · APPROVES", "C · CONSULTED", "I · INFORMED"],
+                   max_widths={1: 30, 2: 30, 3: 30, 4: 40, 5: 30}))
+    print(ui.dim('  dev crew raci <member|work> · dev crew raci <work> --set "R=… A=… C=… I=…" --why "…" · '
+                 "dev crew history"))
+    return 0
+
+
 def cmd_crew(a) -> int:
     act = getattr(a, "crew_cmd", None)
     if act in ("ask", "answer", "inbox", "decide", "decisions", "mode", "route", "delegate", "decline", "next"):
@@ -878,8 +1128,26 @@ def cmd_crew(a) -> int:
     except RosterError as e:
         ui.err(str(e))
         return 2
+    if act == "raci":
+        return _raci_cmd(a)
+    if act == "set":
+        try:
+            m = set_member(a.name, a.field, " ".join(a.value), a.why or "")
+        except ValueError as e:
+            ui.err(str(e))
+            return 2
+        print(f"{ui.OK} {m['name']}: {a.field} changed for the whole team ({core.tilde(overlay_path())})")
+        print(ui.dim("  the members get it in their briefs; Codex roles with dev install --only codex"))
+        return 0
+    if act == "history":
+        log = read_overlay().get("changelog") or []
+        if not log:
+            print("  no team changes: the crew runs devkit's roster as shipped")
+        for c in reversed(log[-40:]):
+            print(f"  {c.get('at', '')}  {c.get('by', '')}  {c.get('what', '')}\n    why: {c.get('why', '')}")
+        return 0
     if act == "sync":
-        changes = sync(check=a.check, roster=roster)
+        changes = sync(check=a.check, roster=load(team=False))
         for w in roster["warnings"]:
             ui.warn(w)
         n = len(agent_files(roster))
@@ -937,6 +1205,17 @@ def register(add):
     p.add_argument("--latest", action="store_true",
                    help="the most recent running progress run on this Mac instead of this session's")
     sp = p.add_subparsers(dest="crew_cmd")
+    x = sp.add_parser("raci", help="who does, approves, is consulted on and informed about each kind of work")
+    x.add_argument("work", nargs="?", help="a kind of work (backend), a member (tank), or a task to classify")
+    x.add_argument("--set", help='change it for the whole team: "R=tank,neo A=seraph C=keymaker I=trinity"')
+    x.add_argument("--why", help="the reason (required with --set)")
+    x.add_argument("--markdown", action="store_true", help="the whole matrix as a Markdown table")
+    x = sp.add_parser("set", help="change a member's definition for the whole team (recorded in the handoff repo)")
+    x.add_argument("name", help="the member: tank, Oracle")
+    x.add_argument("field", help=", ".join(EDITABLE))
+    x.add_argument("value", nargs="+", help='the new value; list fields take "a; b; c"')
+    x.add_argument("--why", required=True, help="the reason, kept in the crew's history")
+    sp.add_parser("history", help="the team's changes to the crew, with who and why")
     x = sp.add_parser("show", help="everything about one member")
     x.add_argument("name", nargs="+", help="id or name, e.g. neo, Oracle, \"The Keymaker\"")
     x = sp.add_parser("brief", help="a ready-to-paste brief for a member, with the spawn line")

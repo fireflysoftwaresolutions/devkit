@@ -157,6 +157,9 @@ def handoff_violation(rel: str, cwd, envs=frozenset()):
     if rel.startswith("policies/"):
         return (f"`{rel}` is a recorded delivery policy, versioned with who and why. Change it with "
                 f"`dev delivery apply --set key=value --why \"…\"`.")
+    if rel.startswith("crew/"):
+        return (f"`{rel}` is the team's crew (members and RACI), versioned with who and why. Change it with "
+                f"`dev crew set <member> <field> \"…\" --why \"…\"` or `dev crew raci <work> --set \"R=… A=…\" --why \"…\"`.")
     if rel.startswith("lessons/"):
         return (f"`{rel}` is a lesson, versioned with who and why. Use `dev lesson add|recur|prevent|retire …`.")
     if rel.startswith("audit/"):

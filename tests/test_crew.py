@@ -29,15 +29,21 @@ except ImportError:  # Python 3.9
 
 
 def member(**kw) -> dict:
-    m = {"id": "pat", "name": "Pat", "role": "Test engineer", "summary": "Writes the tests that matter.",
+    m = {"id": "pat", "name": "Pat", "title": "Test engineer", "role": "Test engineer", "summary": "Writes the tests that matter.",
          "personality": "Curious.", "use_when": ["missing tests"], "skills": ["testing"], "tools": "all",
-         "tier": "standard", "returns": "the tests and their results"}
+         "tier": "standard", "returns": "the tests and their results", "goal": "Tests that catch real bugs.",
+         "method": ["Map what can break.", "Write one test per behavior."], "devkit": ["dev test"],
+         "done_when": ["every new test fails without the change"]}
     m.update(kw)
     return m
 
 
 def roster(*members, rule="Write in American English.") -> dict:
-    return {"language_rule": rule, "members": list(members) or [member()], "warnings": []}
+    members = list(members) or [member()]
+    workers = [m["id"] for m in members if isinstance(m, dict) and not m.get("main") and m.get("id")]
+    return {"language_rule": rule, "members": members, "warnings": [],  # each member does its own kind of work
+            "activities": [{"id": f"work-{w}", "name": f"Work of {w}", "R": [w], "A": w, "C": [], "I": [],
+                            "signals": [f"{w} work"]} for w in workers]}
 
 
 def frontmatter(text: str) -> dict:
@@ -136,7 +142,7 @@ class RosterTests(unittest.TestCase):
     def test_unknown_skills_are_warnings_not_errors(self):
         m = member(skills=["testing", "java-junit", "superpowers:anything", "devkit:testing", "nope", "devkit:nope",
                            "other-plugin:x"], extra=1, keywords=["test", "coverage"])
-        errors, warnings = crew.check({"language_rule": "x", "members": [m]})
+        errors, warnings = crew.check(dict(roster(m), language_rule="x"))
         self.assertEqual(errors, [])
         self.assertEqual([w.split("`")[3] for w in warnings if "unknown skill" in w],
                          ["nope", "devkit:nope", "other-plugin:x"])
@@ -187,9 +193,10 @@ class RenderTests(unittest.TestCase):
         self.assertEqual(body.splitlines()[0], crew.MARK)
         self.assertTrue(body.splitlines()[1].startswith("You are Pat, the crew's test engineer. Curious and exact."))
         heads = [ln for ln in body.splitlines() if ln.startswith("## ")]
-        self.assertEqual(heads, ["## Mission", "## When Morpheus sends work to you", "## Skills to load first",
-                                 "## How you work", "## Your report", "## Language"])
-        self.assertIn("**[Firefly> DevKit · Pat]** <project> · `<branch>` · <task>\n- **Done:**", body)
+        self.assertEqual(heads, ["## Mission", "## Goal", "## When Morpheus sends work to you", "## Skills to load first",
+                                 "## Your method", "## Your place in the crew's RACI", "## Your devkit commands",
+                                 "## How you work with the crew", "## Your report", "## Language"])
+        self.assertIn("**[Firefly> DevKit · Test engineer (Pat)]** <project> · `<branch>` · <task>\n- **Done:**", body)
         self.assertIn("- **Check:** <✓ | ⚠ | ✗>", body)
         self.assertIn("Then deliver: the tests and their results.", body)
         self.assertIn('`Needs from Morpheus:`', body)
@@ -213,7 +220,9 @@ class RenderTests(unittest.TestCase):
         for m in crew.members(r, include_main=False):
             with self.subTest(member=m["id"]):
                 text = crew.render_claude(m, r)
-                self.assertLess(len(text.splitlines()), 70)
+                # a full definition (goal, method, RACI, commands, done-when), still well under 2k tokens
+                self.assertLess(len(text.splitlines()), 100)
+                self.assertLess(len(text), 7000)
                 self.assertTrue(canary.MARKER_RE.match(crew.status_header(m, "api", "main", "parser")))
 
     def test_the_main_session_role_gets_no_agent_and_scout_is_an_alias(self):
@@ -294,7 +303,8 @@ class SyncTests(unittest.TestCase):
 
     def test_only_marked_files_are_removed(self):
         crew.sync(roster=self.r, agents_dir=self.dir)
-        gone = dict(self.r, members=[self.r["members"][1]])  # Pat leaves the roster
+        gone = dict(self.r, members=[self.r["members"][1]],  # Pat leaves the roster, and its kind of work
+                    activities=[x for x in self.r["activities"] if x["R"] != ["pat"]])
         (self.dir / "mine.md").write_text("---\nname: mine\n---\nHand-written.\n")
         (self.dir / "quoted.md").write_text(f"---\nname: quoted\n---\nNotes.\n{crew.MARK}\n")  # mark, not first
         self.assertEqual(self.names(crew.sync(check=True, roster=gone, agents_dir=self.dir)), [("remove", "pat.md")])
@@ -316,7 +326,7 @@ class BriefTests(unittest.TestCase):
                                                       "2", cwd=d))
         for needle in ("subagent_type: devkit:neo", "agent type: neo", 'description: "Neo: ',
                        "You own only these files: `lib/parser/**`, `tests/test_parser.py`", "## Task\n\nBuild the CSV parser.",
-                       "**[Firefly> DevKit · Neo]** <project> · `<branch>` · <the task, in a few words>",
+                       "**[Firefly> DevKit · Senior engineer (Neo)]** <project> · `<branch>` · <the task, in a few words>",
                        "- **Check:** <✓ | ⚠ | ✗>", '`Needs from Morpheus:`', _sentence(neo["returns"]),
                        'dev progress step "<what finished>" --check "<evidence>"', 'dev crew ask "'):
             self.assertIn(needle, text)
@@ -395,7 +405,7 @@ class CrewSessionTests(unittest.TestCase):
                            "2. review → Seraph · pending · waiting for its agent · scope lib/**", "Open messages",
                            "M1 Neo → Morpheus · not delivered: Empty lines?", "Mode guided"):
                 self.assertIn(needle, out)
-            self.assertIn("● neo", out)  # the roster marks who is working
+            self.assertIn("● Senior engineer", out)  # the roster marks who is working
             for argv in (("crew", "--json"), ("crew", "--json", "--latest")):
                 with self.subTest(argv=argv):
                     data = json.loads(run_cli(*argv)[1])
@@ -650,7 +660,9 @@ class WiringTests(unittest.TestCase):
         with TempState():
             data = json.loads(run_cli("crew", "--json", "--latest")[1])
         self.assertIsNone(data["run"])
-        self.assertLess(len(mcp.compact_json(mcp._prune(data))), mcp.MAX_TEXT)  # never cut by mcp.cap()
+        digest = mcp._HANDLERS["devkit_crew"][3]  # what the tool returns: the digest, then the prune
+        self.assertLess(len(mcp.compact_json(mcp._prune(digest(data, {})))), mcp.MAX_TEXT)  # never cut by mcp.cap()
+        self.assertIn("raci", digest(data, {}))
         self.assertEqual(data["members"][0]["id"], "morpheus")
         self.assertNotIn("spawn", data["members"][0])  # the main session's role is never spawned
 

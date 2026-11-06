@@ -94,7 +94,7 @@ STATUS_RE = re.compile(r"^[*`_\s]*" + _MARK + r"[*`\s]*[·:—-]?\s*(.*)$", re.I
 
 SEP = " ❯ "
 GLYPHS = "✓⚠✗–"
-BULLET_RE = re.compile(r"^\s*[-*•]\s+\**\s*(done|check|progress|next)\s*\**\s*:\s*\**\s*(.*)$", re.I)
+BULLET_RE = re.compile(r"^\s*[-*•]\s+\**\s*(done|check|progress|crew|you|next)\s*\**\s*:\s*\**\s*(.*)$", re.I)
 
 
 def _clean(s: str) -> str:
@@ -102,10 +102,11 @@ def _clean(s: str) -> str:
 
 
 def parse_status(text: str):
-    """The status block -> {project, branch, task, done, check, progress, next}, or None without the marker.
+    """The status block -> {project, branch, task, done, check, progress, crew, you, next}, or None without the
+    marker. Progress, Crew and You are optional.
 
     **[Firefly> DevKit]** api · `main` · Invoice export
-    - **Done:** …   - **Check:** ✓ …   - **Progress:** …   - **Next:** …"""
+    - **Done:** …   - **Check:** ✓ …   - **Progress:** …   - **Crew:** …   - **You:** …   - **Next:** …"""
     lines = [ln for ln in (text or "").splitlines() if ln.strip()]
     if not lines:
         return None
@@ -113,9 +114,9 @@ def parse_status(text: str):
     if not m:
         return None
     head = m.group(1).strip()
-    out = {"project": "", "branch": "", "task": "", "done": "", "check": "", "progress": "", "next": "",
-           "legacy": False}
-    for ln in lines[1:7]:
+    out = {"project": "", "branch": "", "task": "", "done": "", "check": "", "progress": "", "crew": "", "you": "",
+           "next": "", "legacy": False}
+    for ln in lines[1:9]:
         b = BULLET_RE.match(ln)
         if not b:
             break
@@ -142,6 +143,10 @@ def status_text(text: str) -> str:
     parts = [f"{p['project'] or '-'} · {p['branch'] or '-'}", p["task"] or "-", p["done"], p["check"]]
     if p["progress"]:
         parts.append("▸ " + p["progress"])
+    if p.get("crew"):
+        parts.append("crew: " + p["crew"])
+    if p.get("you"):
+        parts.append("you → " + p["you"])
     if p["next"]:
         parts.append("next → " + p["next"])
     return SEP.join(x for x in parts if x)
@@ -171,7 +176,7 @@ def format_issues(text: str) -> list:
             issues.append(f"no **{k.capitalize()}:** bullet")
     if p.get("check") and p["check"][:1] not in GLYPHS:
         issues.append("Check does not start with ✓, ⚠, ✗ or –")
-    if any(len(p.get(k) or "") > 160 for k in ("done", "check", "next")):
+    if any(len(p.get(k) or "") > 160 for k in ("done", "check", "crew", "you", "next")):
         issues.append("a bullet is longer than one plain sentence")
     if re.search(r"\bT-[0-9a-z]{8,}\b", " ".join(p.get(k) or "" for k in ("task", "done", "next"))):
         issues.append("internal task IDs in the block (use the task's title)")

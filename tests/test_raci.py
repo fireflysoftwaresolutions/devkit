@@ -1,0 +1,305 @@
+# Copyright (c) 2026 Firefly Software Solutions Inc.
+# SPDX-License-Identifier: Apache-2.0
+"""The crew's RACI: who does, approves, is consulted on and informed about each kind of work; routing from it; the
+refusals at assignment and at the end of a run; and the team's changes in the handoff repository.
+Run: python3 -m unittest"""
+import argparse
+import json
+import os
+import subprocess
+import sys
+import tempfile
+import unittest
+from pathlib import Path
+from unittest import mock
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "lib"))
+
+from devkit import cli, core, crew, dispatch, progress as pg, raci  # noqa: E402
+
+# Real tasks and the member who should do them (the misroutes the developer found are the first rows).
+GOLDEN = [
+    ("build a local HTTP server and JSON API for the dashboard", "tank"),
+    ("security review of a local web server", "keymaker"),
+    ("design the screens for a background work view", "sati"),
+    ("implement the dashboard frontend live updates", "trinity"),
+    ("find bugs in the dashboard and check that it works as expected", "mouse"),
+    ("gap analysis: what is missing in the dashboard for task details", "oracle"),
+    ("a curl installer that works through a pipe", "kid"),
+    ("fix the failing GitHub Actions workflow", "link"),
+    ("add a migration for the invoices table", "dozer"),
+    ("upgrade the app from Angular 15 to 19 and modernize the legacy modules", "trainman"),
+    ("write the getting started guide", "ghost"),
+    ("where is the guard's push limit defined", "sparks"),
+    ("production is down after the deploy", "lock"),
+    ("the orders endpoint is slow, p95 is 2 seconds", "merovingian"),
+    ("check the licenses of our new dependencies", "persephone"),
+    ("threat model the login flow", "keymaker"),
+    ("try to bypass the guard with an adversarial attack", "smith"),
+    ("review the diff before merging", "seraph"),
+    ("which vector database should we use, compare the options", "roland"),
+    ("prioritize the backlog for the next release", "hamann"),
+    ("write acceptance criteria for the export feature", "oracle"),
+    ("design the module boundaries and the API contract for billing", "architect"),
+    ("add an iOS share extension to the mobile app", "switch"),
+    ("add RAG over our docs for the support bot", "rama"),
+    ("set up Terraform and Kubernetes for the staging environment", "niobe"),
+    ("how many users finished onboarding last month, by cohort", "apoc"),
+    ("fix the null pointer crash in checkout", "neo"),
+    ("the tests are flaky and coverage is low", "mouse"),
+    ("cut release 26.11.3 and publish it", "link"),
+    ("plan the work and estimate it", "morpheus"),
+    ("critique the dashboard's visual design and usability", "sati"),
+    ("diseño de la pantalla de tareas", "sati"),
+]
+
+
+def commands():
+    """{command: set of its subcommands or choices} from the real `dev` parser."""
+    p = cli.build_parser()
+    sub = next(a for a in p._actions if isinstance(a, argparse._SubParsersAction))
+    out = {}
+    for name, sp in sub.choices.items():
+        kids = [a for a in sp._actions if isinstance(a, argparse._SubParsersAction)]
+        pos = [a for a in sp._actions if not a.option_strings and a.choices and not isinstance(a, argparse._SubParsersAction)]
+        out[name] = set(kids[0].choices) if kids else set(pos[0].choices) if pos else set()
+    return out
+
+
+class RosterTests(unittest.TestCase):
+    def test_the_shipped_roster_and_raci_are_complete(self):
+        r = crew.load(team=False)
+        self.assertEqual(r["warnings"], [])
+        acts = raci.activities(r)
+        self.assertGreaterEqual(len(acts), 20)
+        for a in acts:
+            with self.subTest(activity=a["id"]):
+                self.assertIsInstance(a["A"], str)  # exactly one approver
+                self.assertTrue(a["R"])
+        for m in crew.members(r, include_main=False):
+            with self.subTest(member=m["id"]):
+                self.assertTrue(raci.roles_of(m["id"], r)["R"], "every member does at least one kind of work")
+                self.assertGreaterEqual(len(m["method"]), 3)
+                self.assertTrue(m["goal"] and m["done_when"])
+
+    def test_every_devkit_command_a_member_names_exists(self):
+        known = commands()
+        for m in crew.members(crew.load(team=False)):
+            for c in m["devkit"]:
+                words = c.split()
+                with self.subTest(member=m["id"], command=c):
+                    self.assertEqual(words[0], "dev")
+                    self.assertIn(words[1], known)
+                    if len(words) > 2 and not words[2].startswith("-") and known[words[1]]:
+                        self.assertIn(words[2], known[words[1]])
+
+    def test_a_broken_raci_is_an_error(self):
+        r = json.loads(crew.ROSTER.read_text())
+        bad = dict(r, activities=[dict(r["activities"][0], A=["morpheus", "hamann"]),
+                                  dict(r["activities"][1], R=["nobody"])] + r["activities"][2:])
+        errors, _ = crew.check(bad)
+        self.assertIn("`A` must be exactly one member", " ".join(errors))
+        self.assertIn("R `nobody` is not a crew member", " ".join(errors))
+        orphan = dict(r, activities=[a for a in r["activities"] if a["R"] != ["ghost"]])
+        self.assertIn("`ghost` is Responsible for no activity", " ".join(crew.check(orphan)[0]))
+
+
+class RoutingTests(unittest.TestCase):
+    def test_real_tasks_go_to_the_member_the_raci_makes_responsible(self):
+        r = crew.load(team=False)
+        for text, want in GOLDEN:
+            with self.subTest(task=text):
+                top = raci.best(text, r)
+                self.assertIsNotNone(top, "no clear kind of work")
+                self.assertIn(want, top[0]["R"])
+
+    def test_route_puts_the_responsible_member_first_with_its_approver(self):
+        with mock.patch.object(dispatch, "_roster", lambda: crew.members(crew.load(team=False), include_main=False)):
+            ranked = dispatch.route("build a local HTTP server and JSON API for the dashboard")
+        self.assertEqual(ranked[0][0]["id"], "tank")
+        self.assertIn("RACI R: Back-end services and APIs", ranked[0][2])
+        self.assertIn("approves: Code reviewer (Seraph)", ranked[0][2])
+
+    def test_an_unclear_task_is_not_routed_by_the_raci(self):
+        self.assertIsNone(raci.best("look at this", crew.load(team=False)))
+
+
+class AssignmentTests(unittest.TestCase):
+    # two hours ago: devkit's sweep for lost subagents compares lanes with the real clock
+    T0 = int(__import__("time").time()) // 60 * 60 - 7200
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        root = Path(self.tmp.name)
+        from devkit import audit
+        self.saved = (pg.RUNS, pg.TIMING, pg.PENDING, pg.SESSIONS, pg._publish, audit.AUDIT,
+                      os.environ.get("DEVKIT_SESSION"))
+        pg.RUNS, pg.TIMING, pg.SESSIONS = root / "runs", root / "timing", root / "sessions"
+        pg.PENDING = pg.TIMING / "pending"
+        pg._publish = lambda: None
+        audit.AUDIT = root / "audit"
+        os.environ["DEVKIT_SESSION"] = "claude:s1"
+        os.environ["DEVKIT_NO_NOTIFY"] = "1"
+        pg.SESSIONS.mkdir(parents=True)
+        (pg.SESSIONS / "claude-s1.json").write_text(json.dumps({"agent": "claude", "session": "s1",
+                                                                 "started": self.T0, "project": "acme/api"}))
+
+    def tearDown(self):
+        from devkit import audit
+        pg.RUNS, pg.TIMING, pg.PENDING, pg.SESSIONS, pg._publish, audit.AUDIT, env = self.saved
+        if env is None:
+            os.environ.pop("DEVKIT_SESSION", None)
+        else:
+            os.environ["DEVKIT_SESSION"] = env
+        self.tmp.cleanup()
+
+    def m(self, minutes):
+        return self.T0 + minutes * 60
+
+    def test_a_member_who_is_not_responsible_is_refused_and_an_override_is_recorded(self):
+        pg.start("Dashboard", plan=["build the JSON API server", "dashboard audit"], now=self.m(0))
+        with self.assertRaises(pg.StepError) as e:
+            pg.assign("build the JSON API server", "Kid", now=self.m(1))
+        self.assertIn("Backend engineer (Tank) does it and Code reviewer (Seraph) approves it", str(e.exception))
+        run = pg.assign("build the JSON API server", "Tank", now=self.m(1))
+        self.assertEqual(next(s for s in run["plan"] if s["name"].startswith("build"))["activity"], "backend")
+        run = pg.assign("dashboard audit", "Sati", now=self.m(1))  # no clear kind of work: no refusal
+        run = pg.assign("build the JSON API server", "Neo", why="Tank is out; Neo pairs with Seraph", now=self.m(2))
+        self.assertEqual(run["raci_overrides"][-1]["why"], "Tank is out; Neo pairs with Seraph")
+
+    def test_the_run_ends_only_when_the_accountable_member_approved(self):
+        pg.start("API", plan=["build the JSON API server", "review"], now=self.m(0))
+        pg.assign("build the JSON API server", "Tank", now=self.m(0))
+        pg.note_agent_launch("claude", {"session_id": "s1", "tool_input": {"description": "Tank: build the JSON API server"}})
+        pg.on_subagent("claude", {"session_id": "s1", "agent_id": "a1", "agent_type": "devkit:tank"}, True, now=self.m(1))
+        pg.on_subagent("claude", {"session_id": "s1", "agent_id": "a1", "agent_type": "devkit:tank"}, False, now=self.m(20))
+        with self.assertRaises(pg.StepError) as e:
+            pg.step("API shipped", kind="done", force=True, now=self.m(22))
+        self.assertIn("Code reviewer (Seraph) approves “build the JSON API server”", str(e.exception))
+        pg.assign("review", "Seraph", now=self.m(22))
+        pg.note_agent_launch("claude", {"session_id": "s1", "tool_input": {"description": "Seraph: review"}})
+        pg.on_subagent("claude", {"session_id": "s1", "agent_id": "a2", "agent_type": "devkit:seraph"}, True, now=self.m(23))
+        pg.on_subagent("claude", {"session_id": "s1", "agent_id": "a2", "agent_type": "devkit:seraph"}, False, now=self.m(30))
+        run = pg.step("API shipped", kind="done", now=self.m(31))
+        self.assertEqual(run["state"], "done")
+
+    def test_ending_without_the_approval_needs_a_reason(self):
+        pg.start("API", plan=["build the JSON API server"], now=self.m(0))
+        pg.assign("build the JSON API server", "Tank", now=self.m(0))
+        pg.note_agent_launch("claude", {"session_id": "s1", "tool_input": {"description": "Tank: build the JSON API server"}})
+        pg.on_subagent("claude", {"session_id": "s1", "agent_id": "a1", "agent_type": "devkit:tank"}, True, now=self.m(1))
+        pg.on_subagent("claude", {"session_id": "s1", "agent_id": "a1", "agent_type": "devkit:tank"}, False, now=self.m(9))
+        run = pg.step("API shipped", kind="done", why="a spike, thrown away", now=self.m(10))
+        self.assertEqual(run["state"], "done")
+        self.assertEqual(run["raci_overrides"][-1]["owed"], [["seraph", ["build the JSON API server"]]])
+
+
+class MorpheusTests(unittest.TestCase):
+    """Morpheus routes every development request, and the crew talks through devkit."""
+
+    def test_a_request_with_several_kinds_of_work_names_each_member_and_approver(self):
+        from devkit import hooks
+        r = crew.load(team=False)
+        text = hooks.morpheus_hint("build the JSON API server for the dashboard and implement the frontend live "
+                                   "updates", r)
+        self.assertIn("you are Morpheus", text)
+        self.assertIn("back-end services and APIs → Backend engineer (Tank) does it, Code reviewer (Seraph) approves", text)
+        self.assertIn("front-end implementation → Frontend engineer (Trinity) does it", text)
+        self.assertIn("Plan one step per kind of work", text)
+        self.assertEqual(hooks.morpheus_hint("please continue", r), "")
+        self.assertEqual(hooks.morpheus_hint("look at this one thing", r), "")
+
+    def test_the_status_block_shows_the_crew_and_what_the_developer_must_decide(self):
+        from devkit import canary
+        run = {"goal": "Dashboard", "state": "running", "project": "acme/api", "cwd": "/",
+               "plan": [{"name": "the API", "owner": "a1", "state": "running", "est": 30},
+                        {"name": "the screens", "owner": "a2", "state": "done", "est": 20}],
+               "agents": {"a1": {"persona": "Tank", "label": "Tank: the API", "state": "running", "started": 1},
+                          "a2": {"persona": "Sati", "label": "Sati: the screens", "state": "done", "started": 1},
+                          "h1": {"label": "compaction", "state": "done", "started": 1}},
+               "decisions": [{"id": "D1", "question": "Read-only or with actions?", "state": "open", "mode": "guided"}],
+               "updates": [{"kind": "step", "text": "contract written", "check": "✓ 4 tests", "next": "the API"}]}
+        with mock.patch.object(pg, "pending_decisions", lambda r: r["decisions"]):
+            block = pg.render_update(run, branch="main", now=100)
+        self.assertIn("- **Crew:** Backend engineer (Tank) ▸ the API · UX designer (Sati) ✓ the screens", block)
+        self.assertIn("- **You:** decide “Read-only or with actions?”", block)
+        parsed = canary.parse_status(block)
+        self.assertEqual(parsed["crew"], "Backend engineer (Tank) ▸ the API · UX designer (Sati) ✓ the screens")
+        self.assertEqual(parsed["next"], "the API")  # Next still parses after the new bullets
+        self.assertEqual(canary.format_issues(block), [])
+        self.assertIn("you → decide", canary.status_text(block))
+
+    def test_a_member_that_never_reported_through_devkit_owes_a_step(self):
+        now = 10_000
+        run = {"plan": [{"name": "the API", "owner": "a1", "state": "running"}],
+               "agents": {"a1": {"persona": "Tank", "started": now - 600, "updates": []},
+                          "a2": {"persona": "Sparks", "started": now - 600, "updates": []}}}
+        self.assertTrue(pg.lane_unreported(run, "a1", now))
+        run["agents"]["a1"]["updates"] = [{"kind": "step", "text": "contract written"}]
+        self.assertFalse(pg.lane_unreported(run, "a1", now))
+        run["plan"].append({"name": "where is X", "owner": "a2", "state": "running"})
+        self.assertFalse(pg.lane_unreported(run, "a2", now))  # read-only: it reports in its message
+        run["agents"]["a1"].update(updates=[], started=now - 60)
+        self.assertFalse(pg.lane_unreported(run, "a1", now))  # a minute of work: nothing owed yet
+
+
+class TeamCrewTests(unittest.TestCase):
+    """The team's changes live in the handoff repository: versioned, with who and why, and merged everywhere."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.handoff = Path(self.tmp.name) / "handoff"
+        subprocess.run(["git", "init", "-q", str(self.handoff)], check=True)
+        from devkit import audit
+        self.p = [mock.patch.object(core, "HANDOFF", self.handoff),
+                  mock.patch.object(audit, "AUDIT", Path(self.tmp.name) / "audit"),
+                  mock.patch.dict(os.environ, {"GIT_AUTHOR_NAME": "ana", "GIT_AUTHOR_EMAIL": "ana@example.com",
+                                               "GIT_COMMITTER_NAME": "ana", "GIT_COMMITTER_EMAIL": "ana@example.com",
+                                               "DEVKIT_NO_AUTOSYNC": "1"})]
+        for x in self.p:
+            x.start()
+        crew._CACHE.clear()
+
+    def tearDown(self):
+        for x in self.p:
+            x.stop()
+        crew._CACHE.clear()
+        self.tmp.cleanup()
+
+    def test_a_raci_change_is_recorded_committed_and_used(self):
+        act = crew.set_raci("frontend", {"R": ["trinity", "neo"], "C": ["sati"]}, "Neo pairs on the dashboard UI",
+                            by="ana@mbp")
+        self.assertEqual(act["R"], ["trinity", "neo"])
+        self.assertIsNone(raci.check_assignment("neo", "implement the dashboard frontend live updates"))
+        ov = json.loads((self.handoff / "crew" / "crew.json").read_text())
+        self.assertEqual(ov["changelog"][-1]["why"], "Neo pairs on the dashboard UI")
+        self.assertIn("| Front-end implementation | Frontend engineer (Trinity) and Senior engineer (Neo) | Code reviewer (Seraph) | UX designer (Sati) |",
+                      (self.handoff / "crew" / "README.md").read_text())
+        log = subprocess.run(["git", "-C", str(self.handoff), "log", "--format=%s"], capture_output=True,
+                             text=True).stdout
+        self.assertIn("crew: RACI frontend", log)
+
+    def test_a_member_change_reaches_the_brief_and_a_change_without_a_reason_is_refused(self):
+        crew.set_member("tank", "method", "Write the OpenAPI file first; Ask Keymaker on every auth change; Test with "
+                        "Testcontainers", "the team's API standard", by="ana@mbp")
+        self.assertEqual(crew.member("tank")["method"][0], "Write the OpenAPI file first")
+        self.assertIn("Write the OpenAPI file first", crew.body(crew.member("tank"), crew.load()))
+        with self.assertRaises(ValueError):
+            crew.set_member("tank", "goal", "Anything", "")
+        with self.assertRaises(ValueError) as e:  # validated before it is written
+            crew.set_raci("backend", {"A": ["nobody"]}, "typo")
+        self.assertIn("would break the crew", str(e.exception))
+
+    def test_the_generated_plugin_agents_ignore_the_team_changes(self):
+        crew.set_member("tank", "goal", "A different goal.", "team wording", by="ana@mbp")
+        self.assertNotIn("A different goal.", crew.agent_files()["tank.md"])
+        self.assertIn("A different goal.", crew.body(crew.member("tank"), crew.load()))
+
+    def test_the_guard_refuses_direct_edits(self):
+        from devkit import guard
+        why = guard.handoff_violation("crew/crew.json", str(self.handoff))
+        self.assertIn("dev crew set", why)
+
+
+if __name__ == "__main__":
+    unittest.main()

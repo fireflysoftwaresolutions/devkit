@@ -480,11 +480,44 @@ def _main_only(from_agent, what: str):
                         "dev progress step)")
 
 
+def _step_text(s: dict, label: str = "") -> str:
+    """What a step is about, for the RACI: its name, its description, and the task in its label ("Tank: the API")."""
+    task = label.split(":", 1)[1] if ":" in (label or "") else ""
+    return " ".join(x for x in (s.get("name") or "", s.get("desc") or "", task) if x)
+
+
+def _raci_assign(run: dict, s: dict, label: str, why: str, now: float):
+    """The crew's RACI decides who does a step: refuse a member who is not Responsible for it (unless `why`, which
+    is recorded), and remember the step's kind of work for the approval at the end of the run."""
+    try:
+        from . import crew, raci
+        mem = crew._for_label(label)
+        text = _step_text(s, label)
+        top = raci.best(text)
+        if top:
+            s["activity"] = top[0]["id"]
+        if not mem:
+            return
+        reason = raci.check_assignment(mem["id"], text)
+    except StepError:
+        raise
+    except Exception:
+        return  # a broken roster must not stop the work; `dev crew sync --check` reports it
+    if reason and not why:
+        raise StepError(reason)
+    if reason:
+        run.setdefault("raci_overrides", []).append({"ts": round(now), "step": s["name"], "to": mem["name"],
+                                                     "why": why})
+        from . import audit
+        audit.record("raci.override", s["name"], f"{mem['name']}: {why}"[:300], "override")
+
+
 def assign(which, label: str, cwd: str | None = None, now: float | None = None, scope: str = "",
-           from_agent: str | None = None) -> dict:
+           from_agent: str | None = None, why: str = "") -> dict:
     """Hand a plan step to a subagent: the next subagent launched with this description (or a running lane with this
     label) owns it, and its time is that subagent's time. `scope`: the files it owns (comma-separated globs); the
-    guard keeps that subagent's edits inside them."""
+    guard keeps that subagent's edits inside them. The crew's RACI must make the member Responsible for the step's
+    kind of work; `why` overrides it, recorded."""
     _main_only(from_agent, "assigns the plan's steps")
     now = now or time.time()
     agent, sid = current_session(cwd)
@@ -492,6 +525,7 @@ def assign(which, label: str, cwd: str | None = None, now: float | None = None, 
     s = _find_step(run, which)
     if not s:
         raise ValueError(f"no step “{which}” in the plan")
+    _raci_assign(run, s, label, why, now)
     s["label"] = label
     if scope:
         globs = [x.strip() for x in scope.split(",") if x.strip()]
@@ -1046,8 +1080,29 @@ def note(text: str, nxt: str = "", cwd: str | None = None, from_agent: str | Non
     return run
 
 
+def member_of_step(run: dict, s: dict):
+    """The crew member who did a step: its lane's persona, or Morpheus for the main session's own steps."""
+    from . import crew
+    owner = s.get("owner") or "main"
+    if owner == "main":
+        return "morpheus"
+    lane = (run.get("agents") or {}).get(owner) or {}
+    m = crew._for_label(lane.get("persona") or lane.get("label") or s.get("label") or "")
+    return m["id"] if m else None
+
+
+def approvals_owed(run: dict) -> list:
+    """[(Accountable member id, [step names])] still to approve the run's finished work. [] when the roster cannot
+    be read (the check never blocks on a broken roster)."""
+    try:
+        from . import raci
+        return raci.approvals_missing(run, lambda s: member_of_step(run, s))
+    except Exception:
+        return []
+
+
 def step(text: str, nxt: str = "", cwd: str | None = None, kind: str = "step", check: str = "", which=None,
-         from_agent: str | None = None, now: float | None = None, force: bool = False) -> dict:
+         from_agent: str | None = None, now: float | None = None, force: bool = False, why: str = "") -> dict:
     now = now or time.time()
     agent, sid = current_session(cwd)
     run = load_run(agent, sid)
@@ -1102,6 +1157,16 @@ def step(text: str, nxt: str = "", cwd: str | None = None, kind: str = "step", c
         if waiting and not force:
             raise StepError("decisions still waiting for the developer: " + ", ".join(
                 f"{d['id']} ({d['question'][:60]})" for d in waiting) + ". Ask, then dev crew decide <id> \"…\".")
+        owed = approvals_owed(run)
+        if owed and not why:
+            from . import raci
+            raise StepError("the work is not approved yet (the crew's RACI): " + "; ".join(
+                f"{raci.names([acc])} approves {', '.join('“' + x + '”' for x in steps)}" for acc, steps in owed) +
+                ". Add a review step for each (dev progress add \"review=20m\" then dev progress assign review --to "
+                f"{raci.handle(owed[0][0])}), or end with --why \"<reason>\".")
+        if owed:
+            run.setdefault("raci_overrides", []).append({"ts": round(now), "step": "(end of run)", "why": why,
+                                                         "owed": [[a, s_] for a, s_ in owed]})
         open_ = [s for s in plan if s.get("state") not in ("done", "skipped") and s.get("state") != "running"]
         if open_ and not force:
             raise StepError("not finished: " + ", ".join(f"“{s['name']}” ({s.get('state')})" for s in open_) +
@@ -1131,6 +1196,24 @@ def step(text: str, nxt: str = "", cwd: str | None = None, kind: str = "step", c
     return run
 
 
+def crew_summary(run: dict, limit: int = 4) -> str:
+    """Who in the crew works on what in this run, running first: "Tank ▸ the API · Kid ✓ installer". '' without
+    crew members (the agent's own helpers are not the crew)."""
+    from . import crew
+    lanes = []
+    for aid, lane in (run.get("agents") or {}).items():
+        m = crew._for_label(lane.get("persona") or "") if lane.get("persona") else None
+        if not m:
+            continue
+        step_ = next((s["name"] for s in run.get("plan") or [] if s.get("owner") == aid), "")
+        what = step_ or (lane.get("label") or "").split(":", 1)[-1].strip()
+        mark = {"running": "▸", "done": "✓", "lost": "✗"}.get(lane.get("state"), "·")
+        lanes.append((lane.get("state") != "running", f"{crew.who(m)} {mark} {what}".strip()))
+    lanes.sort(key=lambda x: x[0])
+    parts = [x for _, x in lanes[:limit]]
+    return " · ".join(parts) + (f" · +{len(lanes) - limit}" if len(lanes) > limit else "")
+
+
 def render_update(run: dict, branch: str | None = None, now: float | None = None) -> str:
     """The progress update as the devkit status block (global instructions §0), ready to send: the block, then the
     plan with each step's state, owner and time, then the subagents."""
@@ -1152,13 +1235,20 @@ def render_update(run: dict, branch: str | None = None, now: float | None = None
     nxt = last.get("next") or ("—" if state == "done" else "")
     if state == "blocked":
         nxt = f"unblock: {nxt or done}"
+    plan = run.get("plan") or []
+    agents = run.get("agents") or {}
     lines = [f"**{MARKER}** {project} · `{branch}` · {run.get('goal', '')}",
              f"- **Done:** {done or 'started'}",
              f"- **Check:** {check}",
-             f"- **Progress:** {headline(run, now)}",
-             f"- **Next:** {nxt or 'continue the plan'}"]
-    plan = run.get("plan") or []
-    agents = run.get("agents") or {}
+             f"- **Progress:** {headline(run, now)}"]
+    crew_line = crew_summary(run)
+    if crew_line:
+        lines.append(f"- **Crew:** {crew_line}")
+    waiting = pending_decisions(run)
+    if waiting:
+        lines.append("- **You:** decide " + "; ".join(f"“{d['question'][:70]}”" for d in waiting[:2])
+                     + (f" (+{len(waiting) - 2} more)" if len(waiting) > 2 else ""))
+    lines.append(f"- **Next:** {nxt or 'continue the plan'}")
     if plan:
         lines.append("")
         for i, s in enumerate(plan, 1):
@@ -1457,6 +1547,23 @@ def on_subagent(agent: str, data: dict, started: bool, now: float | None = None)
             _advance_main(run, now)
         _run_event(agent, sid, finish)
     f.write_text(json.dumps(s))
+
+
+def lane_unreported(run: dict, aid: str, now: float | None = None, min_seconds: float = 180) -> bool:
+    """A crew member who owns a plan step, worked at least `min_seconds`, and never used devkit's communication
+    (`dev progress step|note` from its lane). Read-only members (no shell) report in their message instead."""
+    now = now or time.time()
+    lane = (run.get("agents") or {}).get(aid) or {}
+    if not lane or lane.get("updates") or now - (lane.get("started") or now) < min_seconds:
+        return False
+    if not any(s.get("owner") == aid for s in run.get("plan") or []):
+        return False
+    try:
+        from . import crew
+        m = crew._for_label(lane.get("persona") or lane.get("label") or "")
+    except Exception:
+        m = None
+    return not (m and m.get("tools") == "read")
 
 
 def on_turn_end(agent: str, sid: str, sess: dict):

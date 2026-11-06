@@ -904,6 +904,36 @@ def _context_out(event: str, text: str):
         print(json.dumps({"hookSpecificOutput": {"hookEventName": event, "additionalContext": text}}))
 
 
+def morpheus_hint(text: str, roster=None) -> str:
+    """The route Morpheus takes for a development request: each kind of work it contains (the crew's RACI), who does
+    it, who approves it, and whom to consult. '' when the request is not clearly any kind of work."""
+    try:
+        from . import raci
+        if len(str(text or "").split()) < 4:
+            return ""
+        ranked = [x for x in raci.classify(text, roster, limit=4) if x[1] >= raci.MIN_SCORE]
+    except Exception:
+        return ""
+    if not ranked:
+        return ""
+    parts = []
+    for act, _, hits in ranked:
+        line = f"{raci._lower(act['name'])} → {raci.names(act.get('R'), roster)} does it"
+        if act.get("A") not in (act.get("R") or []):
+            line += f", {raci.names([act['A']], roster)} approves"
+        if act.get("C"):
+            line += f", consult {raci.names(act['C'], roster)}"
+        parts.append(line)
+    if len(parts) == 1:
+        head = f"devkit · you are Morpheus: this request is {parts[0]} (the crew's RACI)."
+    else:
+        head = ("devkit · you are Morpheus: this request spans " + str(len(parts)) + " kinds of work (the crew's "
+                "RACI): " + "; ".join(parts) + ". Plan one step per kind of work and assign each to its member.")
+    return (head + " One kind of work under ten minutes: do it yourself. Otherwise plan it (`dev progress start "
+            "--plan`), assign the steps (`dev progress assign <step> --to <member>`) and brief the members "
+            "(`dev crew brief <member> \"<task>\"`); the run ends when each approver has reviewed.")
+
+
 def prompt(agent: str):
     """UserPromptSubmit: start the turn clock; answer "how is it going?" from real progress records.
 
@@ -962,7 +992,10 @@ def prompt(agent: str):
         skills = skillguard.on_prompt(agent, data.get("prompt") or "", sess)
     except Exception:
         _log(f"prompt skills {agent}: {traceback.format_exc()[-300:]}")
-    _context_out("UserPromptSubmit", "\n\n".join(x for x in (extra, skills, text) if x))
+    route = ""
+    if (core.CFG.get("crew") or {}).get("route_hint", True):
+        route = morpheus_hint(data.get("prompt") or "")
+    _context_out("UserPromptSubmit", "\n\n".join(x for x in (extra, skills, route, text) if x))
 
 
 DELIVERY = re.compile(r"\bgit\s+(?:-C\s+\S+\s+)?(commit|push|merge|tag|rebase|cherry-pick|revert)\b|"
@@ -1110,6 +1143,16 @@ def _launch_meta(data: dict) -> dict:
     return meta if isinstance(meta, dict) and (meta.get("toolUseId") or meta.get("description")) else {}
 
 
+def _who(name: str) -> str:
+    """A crew member as developers see it, role first ("Backend engineer (Tank)"); the name alone otherwise."""
+    try:
+        from . import crew
+        m = crew._for_label(name)
+        return crew.who(m) if m else name
+    except Exception:
+        return name
+
+
 def subagent_stop(agent: str):
     """SubagentStop: a crew member's report must start with its own status block (the canary covers the crew too);
     without it the member is sent back once to write it, and the correction is recorded like the main canary's. Only
@@ -1147,10 +1190,21 @@ def subagent_stop(agent: str):
                 pending[aid] = name
                 sf.write_text(json.dumps(sess))
                 out = {"decision": "block", "reason":
-                       f"devkit · end your report with your status block first, exactly: **[Firefly> DevKit · {name}]** "
+                       f"devkit · end your report with your status block first, exactly: **[Firefly> DevKit · {_who(name)}]** "
                        f"<project> · `<branch>` · <task>, then - **Done:**, - **Check:** (✓/⚠/✗ + evidence) and "
                        f"- **Next:**; then what you deliver and \"Needs from Morpheus:\" (or nothing). Nothing above "
                        f"the block."}
+            elif run and lane and aid not in sess.setdefault("crew_comms", {}) and \
+                    progress.lane_unreported(run, aid) and core.CFG.get("canary", {}).get("enforce", True):
+                from . import audit  # the crew talks through devkit: the step's evidence goes in the run, live
+                audit.record("crew.unreported", pid or "", f"{name} stopped without dev progress step", "miss")
+                sess["crew_comms"][aid] = name
+                sf.write_text(json.dumps(sess))
+                out = {"decision": "block", "reason":
+                       f"devkit · {_who(name)}, record your work through devkit before you stop: `dev progress step "
+                       f"\"<what finished>\" --check \"<evidence>\"` (it goes to your lane, and Morpheus and the "
+                       f"developer see it live). Questions and decisions go through `dev crew ask`, not only in the "
+                       f"report. Then end with the same report."}
     except Exception:
         _log(f"subagent-stop {agent}: {traceback.format_exc()[-300:]}")
     if out:
