@@ -1146,5 +1146,17 @@ class PassthroughTests(unittest.TestCase):
             self.assertEqual(s.execs[-1][0], ["gh", "pr", "list"])
 
 
+
+class SpanishTemplateTests(unittest.TestCase):
+    def test_spanish_template_sections_are_required(self):
+        tpl = (Path(__file__).resolve().parents[1] / "templates" / "github" / "pull_request.es.md").read_text()
+        kinds = [k for k, _, _, _ in gitx.sections(tpl)]
+        self.assertEqual(kinds, ["what", "changes", "verify", "risk", "links"])
+        self.assertEqual(gitx.body_problems(tpl, tpl), ["Qué y por qué", "Cómo verificarlo"])
+        filled = tpl.replace("## Qué y por qué\n", "## Qué y por qué\n\nExporta facturas a CSV para Finanzas.\n", 1)
+        filled = filled.replace("- CI local: `<comando>`", "- CI local: `./mvnw verify` → 214 tests pasan\n- x", 1)
+        self.assertEqual(gitx.body_problems(filled, tpl), [])
+
+
 if __name__ == "__main__":
     unittest.main()

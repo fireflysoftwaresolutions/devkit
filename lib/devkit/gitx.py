@@ -1377,7 +1377,8 @@ SECTION_ALIASES = {
              "qué y por qué", "que y por que", "resumen", "descripción", "descripcion", "contexto"),
     "changes": ("changes", "what changed", "changelog", "cambios"),
     "verify": ("how to verify", "how to test", "testing", "test plan", "tests", "verification", "how was this tested",
-               "how has this been tested", "cómo verificar", "como verificar", "pruebas", "verificación"),
+               "how has this been tested", "cómo verificar", "como verificar", "cómo verificarlo",
+               "como verificarlo", "pruebas", "verificación"),
     "risk": ("risk and rollback", "risk", "risks", "rollback", "riesgo y vuelta atrás", "riesgos", "riesgo"),
     "links": ("links", "related", "references", "related issues", "issues", "enlaces", "referencias"),
 }
