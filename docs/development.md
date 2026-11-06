@@ -114,16 +114,14 @@ devkit follows its own delivery method: integrate locally, run the full suite, p
 2. Run the tests on both Pythons (see [Running the tests](#running-the-tests)), `dev docs check` and
    `dev diagram check docs/diagrams`.
 3. Run `dev install` on your machine, then `dev doctor` and `dev agents test`; every check must pass.
-4. Push the release branch once, open one PR, and watch CI (`gh pr checks --watch`).
-5. Merge, tag, and publish:
-
-   ```bash
-   git tag -a vYY.MM.PATCH -m "devkit vYY.MM.PATCH"
-   git push origin vYY.MM.PATCH
-   gh release create vYY.MM.PATCH --title "devkit vYY.MM.PATCH" --notes-file <(sed -n '/^## \[YY.MM.PATCH\]/,/^## \[/p' CHANGELOG.md | sed '$d')
-   ```
-
-6. Developers update with `dev update`.
+4. Run what CI runs (`dev ci --run`), then push the release branch once (`dev push`), open one PR
+   (`dev pr create`), and watch its CI (`dev pr checks --watch`).
+5. Merge with `dev pr merge`, wait for the CI run on `main` (`dev ci status --watch`), and publish with
+   `dev release`. It tags `vYY.MM.PATCH` on `main` and creates the GitHub release with the CHANGELOG section as its
+   notes. The guard refuses a raw `gh pr merge` or `gh release create`.
+6. Verify what was published: download the source archive into an empty folder
+   (`gh release download vYY.MM.PATCH --archive tar.gz -D <folder>`), compare it with the tag, and run its tests.
+7. Developers update with `dev update`.
 
 ## Conventions
 

@@ -5,6 +5,15 @@ All notable changes to devkit. Versions follow CalVer `YY.MM.PATCH` (PATCH resta
 
 ## [Unreleased]
 
+### Added
+
+- A security policy (`SECURITY.md`) with private vulnerability reporting on GitHub, and a contributing guide
+  (`CONTRIBUTING.md`), now that the repository is public.
+
+### Changed
+
+- The release process in Developing devkit uses `dev pr merge`, `dev release`, and a check of the published archive.
+
 ### Fixed
 
 - `dev agents test` reads the hooks log from the byte offset it recorded, so the guard check no longer reports
