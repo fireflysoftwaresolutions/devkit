@@ -111,6 +111,37 @@ def deny(reason):
     return ("deny", reason)
 
 
+# The escape hatches a command's own prefix sets (DEVKIT_RAW_GH=1 gh pr merge …): the main session may use them, and
+# each use that skips a denial is collected here with that denial (spec F8, rule 2); the hooks write one guard.bypass
+# record per use once the call is allowed (record_bypasses). Crew members never use them (member_escape_refusal).
+_BYPASSES: list = []
+
+
+def _hatch(envs, flag: str, rule: str, denial) -> bool:
+    """True when the command's prefix sets escape hatch `flag`, which skips `denial` (a reason or a deny verdict) of
+    rule `rule`; the use is collected for its guard.bypass record."""
+    if flag not in envs:
+        return False
+    why = denial[1] if isinstance(denial, tuple) else denial
+    _BYPASSES.append({"flag": flag, "rule": rule, "denial": str(why)[:400]})
+    return True
+
+
+def last_bypasses() -> list:
+    """The escape hatches the last check let skip a denial: [{flag, rule, denial}]."""
+    return [dict(b) for b in _BYPASSES]
+
+
+def record_bypasses(cmd, session: str = "", lane: str = "", mode: str = "") -> int:
+    """Write one guard.bypass audit record per hatch use of the last check, with the command (redacted by the audit
+    trail), the rule and the denial it skipped; the hooks call it for an allowed call of the main session. -> count"""
+    uses = last_bypasses()
+    for b in uses:
+        _record("guard.bypass", str(cmd)[:200], b["denial"], "allow", flag=b["flag"], rule=b["rule"],
+                session=session, lane=lane, mode=mode)
+    return len(uses)
+
+
 # --------------------------------------------------------------------------- path rules
 
 UNKNOWN = Path("/__devkit_unknown__")
@@ -510,8 +541,6 @@ def _is_build_output(t: Path) -> bool:
 
 def steer_rm(args, cwd, envs=frozenset()):
     """Plain rm outside scratch areas goes through `dev rm` (recoverable, checked)."""
-    if "DEVKIT_RAW_FS" in envs:
-        return None
     targets = [a for a in args if not a.startswith("-") or a == "-"]
     if not targets:
         return None
@@ -521,7 +550,8 @@ def steer_rm(args, cwd, envs=frozenset()):
             continue
         if _is_build_output(Path(a.rstrip("/"))) or is_temp(t) or _is_build_output(t):
             continue
-        return deny(f"`rm {a}` deletes permanently. " + RAW_FS_HINT)
+        why = deny(f"`rm {a}` deletes permanently. " + RAW_FS_HINT)
+        return None if _hatch(envs, "DEVKIT_RAW_FS", "rm", why) else why
     return None
 
 
@@ -634,13 +664,14 @@ def check_git(argv, cwd, full_segment, envs=frozenset(), pending=None):
         return check_push_budget(gcwd, args, envs)
     if sub == "clean" and any(re.match(r"^-[a-zA-Z]*f", a) or a == "--force" for a in args) and \
             not any(re.match(r"^-[a-zA-Z]*n", a) or a == "--dry-run" for a in args) and \
-            "DEVKIT_RAW_FS" not in envs and gcwd and not is_temp(Path(gcwd)):
+            gcwd and not is_temp(Path(gcwd)):
         rc, out, _ = core.git(gcwd, "clean", "-n", *[a for a in args if not re.match(r"^-[a-zA-Z]*f", a) and a != "--force"])
         n = len([ln for ln in out.splitlines() if ln.strip()]) if rc == 0 else 0
-        if n:
-            return deny(f"`git clean -f` would permanently delete {n} untracked path(s) in {tilde(gcwd)} (untracked work "
-                        f"cannot be recovered from git). Review them with `git clean -n`, then remove them with "
-                        f"`dev rm --discard <paths>` (recoverable from the Trash). To bypass, prefix with DEVKIT_RAW_FS=1.")
+        why = deny(f"`git clean -f` would permanently delete {n} untracked path(s) in {tilde(gcwd)} (untracked work "
+                   f"cannot be recovered from git). Review them with `git clean -n`, then remove them with "
+                   f"`dev rm --discard <paths>` (recoverable from the Trash). To bypass, prefix with DEVKIT_RAW_FS=1.")
+        if n and not _hatch(envs, "DEVKIT_RAW_FS", "git-clean", why):
+            return why
     if sub == "clean" and any(re.match(r"^-[a-zA-Z]*[xX]", a) for a in args):
         return deny("`git clean -x/-X` deletes ignored files too (.env, local config, caches). Use `git clean -fd` "
                     "for untracked files only, or remove specific paths.")
@@ -654,7 +685,7 @@ def check_git(argv, cwd, full_segment, envs=frozenset(), pending=None):
                                                     "-k", "-m", "--keep-index")):
         return deny("`git stash` is shared by every worktree of this repository, so another session can pop your "
                     "changes. Use `dev commit --wip` (a WIP commit on your branch; `dev commit --unwip` undoes it).")
-    if sub == "tag" and gcwd and "DEVKIT_TAG_ANY" not in envs and \
+    if sub == "tag" and gcwd and \
             not any(a in ("-d", "--delete", "-l", "--list", "-v", "--verify", "-n") or a.startswith("--contains")
                     for a in args):
         names = [a for a in args if not a.startswith("-")]
@@ -663,22 +694,23 @@ def check_git(argv, cwd, full_segment, envs=frozenset(), pending=None):
             if pid:
                 from .delivery import tag_violation
                 v = tag_violation(pid, names[0])
-                if v:
+                if v and not _hatch(envs, "DEVKIT_TAG_ANY", "tag-format", v):
                     return deny(v + " (DEVKIT_TAG_ANY=1 bypasses.)")
     if sub in ("commit", "tag", "merge", "notes"):
         a = _attribution(full_segment)
         if a:
             return a
-        if sub == "commit" and gcwd and not os.environ.get("DEVKIT_SKIP_SECRET_SCAN"):
+        if sub == "commit" and gcwd:  # the hatch is the command's own prefix, never dev's environment (F8, rule 4)
             from .security import staged_secrets
             commit_all = any(a == "--all" or (a.startswith("-") and not a.startswith("--") and "a" in a[1:])
                              for a in args)
             found = staged_secrets(gcwd, adds=[a for c, a in pending or [] if c == gcwd], all_tracked=commit_all)
-            if found:
-                return deny("gitleaks found secret-like content in the staged changes: " + "; ".join(found[:5]) +
-                            ". Remove it and load it from the environment or the secret manager (rotate it if it was "
-                            "ever pushed). A false positive: add a `gitleaks:allow` comment on that line or an entry "
-                            "in .gitleaksignore, then commit again.")
+            why = deny("gitleaks found secret-like content in the staged changes: " + "; ".join(found[:5]) +
+                       ". Remove it and load it from the environment or the secret manager (rotate it if it was ever "
+                       "pushed). A false positive: the main session adds a `gitleaks:allow` comment on that line or "
+                       "an entry in .gitleaksignore, then commits again; a crew member reports it to Morpheus.")
+            if found and not _hatch(envs, "DEVKIT_SKIP_SECRET_SCAN", "secret-scan", why):
+                return why
         if sub == "commit":
             for i, x in enumerate(args):
                 if x in ("-F", "--file") and i + 1 < len(args):
@@ -718,11 +750,12 @@ def check_push_budget(cwd, args, envs):
         data = {}
     now = time.time()
     recent = [t for t in data.get(key, []) if now - t < PUSH_WINDOW_S]
-    if len(recent) >= PUSH_LIMIT and "DEVKIT_LOCAL_CI_PASSED" not in envs:
-        return deny(f"This would be push #{len(recent) + 1} of `{branch}` in the last hour, and every push runs CI "
-                    f"again. Stop the push-and-see loop: read the failing log (`gh run view --log-failed`), run what "
-                    f"CI runs locally (`dev ci` shows the exact commands), fix, and push once. If the full local "
-                    f"suite has just passed in this session, prefix the push with DEVKIT_LOCAL_CI_PASSED=1.")
+    why = deny(f"This would be push #{len(recent) + 1} of `{branch}` in the last hour, and every push runs CI "
+               f"again. Stop the push-and-see loop: read the failing log (`gh run view --log-failed`), run what "
+               f"CI runs locally (`dev ci` shows the exact commands), fix, and push once. If the full local "
+               f"suite has just passed in this session, prefix the push with DEVKIT_LOCAL_CI_PASSED=1.")
+    if len(recent) >= PUSH_LIMIT and not _hatch(envs, "DEVKIT_LOCAL_CI_PASSED", "push-budget", why):
+        return why
     recent.append(now)
     data = {k: [t for t in v if now - t < PUSH_WINDOW_S] for k, v in data.items()}
     data[key] = recent
@@ -736,19 +769,54 @@ def check_push_budget(cwd, args, envs):
 
 PIPE_GATE = re.compile(r"\|(?!\|)[^|&;\n]*&&\s*(?:[A-Z_]+=\S*\s+)*(?:git\s+(?:-C\s+\S+\s+)?(?:commit|push|tag)\b|"
                        r"dev\s+(?:commit|push|release)\b|gh\s+(?:pr\s+(?:create|merge)|release\s+create)\b)")
+PIPE_REASON = ("This commits, pushes or tags after a pipeline (`… | … && git commit`): the `&&` sees the exit code of "
+               "the pipe's last command, so a failing check before the pipe still lets it run. Run the check without "
+               "the pipe, use `set -o pipefail;` first, or test its output (`out=$(… | tail -1); [ \"$out\" = OK ] && "
+               "…`). Lesson: gate on the real result.")
+
+
+def _gated(argv) -> bool:
+    """A command the pipe gate protects: git commit|push|tag, dev commit|push|release, gh pr create|merge, gh release
+    create."""
+    if not argv:
+        return False
+    name = os.path.basename(argv[0])
+    if name == "git":
+        return _git_split(argv)[1] in ("commit", "push", "tag")
+    dev = _dev_args(argv)
+    if dev is not None:
+        return dev[:1] in (["commit"], ["push"], ["release"])
+    return name == "gh" and argv[1:3] in (["pr", "create"], ["pr", "merge"], ["release", "create"])
+
+
+def _pipe_gate_open(cmd) -> str:
+    """How the parsed command opens the pipe gate (spec F8, rule 3: parse, do not search the text): 'pipefail' for a
+    `set -o pipefail` (or `set -euo pipefail`) before the gated command, 'hatch' for DEVKIT_PIPE_OK as the prefix of a
+    segment, else ''."""
+    segs = split_commands(cmd) or []
+    argvs = [(argv0, _strip_prefix(argv0)) for argv0, _ in segs]
+    first = next((k for k, (_, argv) in enumerate(argvs) if _gated(argv)), len(argvs))
+    for _, argv in argvs[:first]:
+        if argv[:1] == ["set"] and any(a.startswith("-") and not a.startswith("--") and a.endswith("o") and
+                                       argv[k + 2:k + 3] == ["pipefail"] for k, a in enumerate(argv[1:])):
+            return "pipefail"
+    names = {a.split("=", 1)[0] for argv0, argv in argvs for a in argv0[:len(argv0) - len(argv)] if _ASSIGN.match(a)}
+    return "hatch" if "DEVKIT_PIPE_OK" in names else ""
 
 
 def check_bash(cmd: str, cwd: str, agent: str):
+    _BYPASSES.clear()
     if not cmd or not cmd.strip():
         return None
     v = protected_bash(cmd, cwd or os.getcwd())
     if v:
         return v
-    if PIPE_GATE.search(cmd) and "pipefail" not in cmd and "DEVKIT_PIPE_OK" not in cmd:
-        return deny("This commits, pushes or tags after a pipeline (`… | … && git commit`): the `&&` sees the exit "
-                    "code of the pipe's last command, so a failing check before the pipe still lets it run. Run the "
-                    "check without the pipe, use `set -o pipefail;` first, or test its output "
-                    "(`out=$(… | tail -1); [ \"$out\" = OK ] && …`). Lesson: gate on the real result.")
+    if PIPE_GATE.search(cmd):
+        how = _pipe_gate_open(cmd)
+        if not how:
+            return deny(PIPE_REASON)
+        if how == "hatch":
+            _hatch({"DEVKIT_PIPE_OK"}, "DEVKIT_PIPE_OK", "pipe-gate", PIPE_REASON)
     segs = split_commands(cmd)
     if segs is None:
         return _attribution(cmd) if re.search(r"\b(git|gh)\b", cmd) else None
@@ -791,17 +859,21 @@ def check_bash(cmd: str, cwd: str, agent: str):
             elif argv[1:3] == ["pr", "merge"] and "--admin" in argv:
                 res = deny("`gh pr merge --admin` bypasses branch protection and required reviews. Get the checks and "
                            "reviews green, then `dev pr merge`.")
-            elif argv[1:3] in (["pr", "merge"], ["release", "create"]) and "DEVKIT_RAW_GH" not in envs:
+            elif argv[1:3] in (["pr", "merge"], ["release", "create"]):
                 what = "dev pr merge" if argv[2] == "merge" else "dev release"
                 res = deny(f"Use `{what}`: it checks CI, reviews, conflicts and the delivery policy (tag format, "
                            f"CHANGELOG section) and writes the merge or release text by the template. "
                            f"To bypass, prefix with DEVKIT_RAW_GH=1.")
-            elif argv[1:3] == ["run", "rerun"] and "DEVKIT_FLAKY" not in envs:
+                if _hatch(envs, "DEVKIT_RAW_GH", "gh-merge" if argv[2] == "merge" else "gh-release", res):
+                    res = None
+            elif argv[1:3] == ["run", "rerun"]:
                 res = deny("Re-running CI without a change repeats the same failure and costs a full CI cycle. Read the "
                            "log (`gh run view <id> --log-failed`), reproduce it locally (`dev ci` lists the exact "
                            "commands), fix, run the local suite, then push once. Only if you have evidence the failure "
                            "is a known flaky test (record it in the handoff note), prefix the command with "
                            "DEVKIT_FLAKY=1.")
+                if _hatch(envs, "DEVKIT_FLAKY", "gh-rerun", res):
+                    res = None
             elif argv[1:3] == ["pr", "create"] and _opt_value(argv[3:], ("--head", "-H")) and \
                     branch_violation(_opt_value(argv[3:], ("--head", "-H"))):
                 res = deny(branch_violation(_opt_value(argv[3:], ("--head", "-H"))))
@@ -812,17 +884,20 @@ def check_bash(cmd: str, cwd: str, agent: str):
         elif name in ("rm", "unlink"):
             res = check_rm(argv[1:], ecwd, envs) if name == "rm" else steer_rm(argv[1:], ecwd, envs)
         elif name == "find" and ("-delete" in argv or any(x in argv for x in ("-exec", "-execdir")) and
-                                 any(os.path.basename(x) in ("rm", "unlink") for x in argv)) and \
-                "DEVKIT_RAW_FS" not in envs:
+                                 any(os.path.basename(x) in ("rm", "unlink") for x in argv)):
             roots = [a for a in argv[1:] if not a.startswith("-") and a not in ("(", ")", "!")][:1] or ["."]
             t = resolve(roots[0], ecwd)
             if t == UNKNOWN or not is_temp(t):
                 res = deny("`find … -delete` / `-exec rm` deletes permanently whatever matches. List the matches with "
                            "`dev find <pattern>`, then delete them with `dev rm <paths>` (recoverable). To bypass, "
                            "prefix the command with DEVKIT_RAW_FS=1.")
+                if _hatch(envs, "DEVKIT_RAW_FS", "find-delete", res):
+                    res = None
         elif name == "xargs" and any(os.path.basename(x) in ("rm", "unlink") for x in argv[1:]) and \
-                "DEVKIT_RAW_FS" not in envs and not is_temp(Path(ecwd)):
+                not is_temp(Path(ecwd)):
             res = deny("`xargs rm` deletes permanently whatever it is fed. " + RAW_FS_HINT)
+            if _hatch(envs, "DEVKIT_RAW_FS", "xargs-rm", res):
+                res = None
         elif name in ("mkdir", "touch"):
             for a in [a for a in argv[1:] if not a.startswith("-")]:
                 v = layout_violation(resolve(a, ecwd), creating_dir=(name == "mkdir"))
@@ -837,11 +912,12 @@ def check_bash(cmd: str, cwd: str, agent: str):
                 safe = any(a in ("-n", "-i", "--no-clobber", "--interactive") or
                            (a.startswith("-") and not a.startswith("--") and ("n" in a or "i" in a))
                            for a in argv[1:] if a.startswith("-"))
-                if not v and name in ("cp", "mv") and not safe and "DEVKIT_RAW_FS" not in envs and \
+                if not v and name in ("cp", "mv") and not safe and \
                         dest != UNKNOWN and dest.is_file() and not is_temp(dest):
                     v = (f"`{name}` would overwrite {tilde(dest)} without a copy. Use `dev {name}` (refuses to overwrite; "
                          f"with --force the old version goes to the Trash and `dev rm --undo` restores it), or add -n. "
                          f"To bypass, prefix the command with DEVKIT_RAW_FS=1.")
+                    v = None if _hatch(envs, "DEVKIT_RAW_FS", "overwrite", v) else v
                 if v:
                     res = deny(v)
                 elif dest != UNKNOWN and not dest.is_dir() and BACKUP_RE.search(dest.name) and is_under(dest, DEV):
@@ -852,9 +928,15 @@ def check_bash(cmd: str, cwd: str, agent: str):
 
 
 def check_dev_cross(args, cwd, envs):
-    """`dev task|note|handoff -p X / -i S` from inside another project."""
-    if "DEVKIT_CROSS_PROJECT" in envs or os.environ.get("DEVKIT_CROSS_PROJECT"):
+    """`dev task|note|handoff -p X / -i S` from inside another project. DEVKIT_CROSS_PROJECT as the command's prefix
+    (a recorded use, spec F8) or in the hook's own environment (the developer started the session with it) allows it."""
+    why = _dev_cross_violation(args, cwd)
+    if not why or os.environ.get("DEVKIT_CROSS_PROJECT") or _hatch(envs, "DEVKIT_CROSS_PROJECT", "cross-project", why):
         return None
+    return why
+
+
+def _dev_cross_violation(args, cwd):
     pid = current_project(cwd)
     if not pid:
         return None
@@ -2571,6 +2653,9 @@ def crew_shell_verdict(cmd: str, cwd, scope=None, member=None, level=None, base=
         v = _ScratchShell(cmd, cwd, member).run()
         if v:
             return v
+    why = member_escape_refusal(cmd, cwd, member)
+    if why:
+        return deny(why)
     try:
         level = _strictest(level, member_level(member))
     except Exception as e:  # the roster cannot be read: the lane keeps the level it was given
@@ -2683,6 +2768,311 @@ def scope_owner_across(path, runs=None, me_session="", checkout_of=None):
     return None
 
 
+# --------------------------------------------------------------------------- escape hatches (spec F8, consultation §5)
+#
+# devkit's escape hatches (the DEVKIT_* variables a command sets, env -i or -u, --ci-passed, --no-verify, dev config
+# set, .gitleaksignore and a new secret-scan allow comment) are for the developer and the main session, where each use
+# is recorded. A crew member never uses one, in any shell form: the guard walks every level the shell runs (nested
+# shells, eval, source, xargs, find -exec, the substitutions it expands, an interpreter's inline program). Text a
+# command only carries (a commit message, a heredoc written to a file, a quoted note) is not a use.
+
+HATCH_REASON = ("Crew members do not use devkit's escape hatches: {what}. They are for the developer and the main "
+                "session, where each use is recorded (spec F8). Say what you need under \"Needs from Morpheus\" in "
+                "your report, or ask with `dev crew ask \"…\"`.")
+_SECRET_ALLOW = re.compile(r"gitleaks:allow|\.gitleaksignore")
+_DEVKIT_ENV_CODE = re.compile(
+    r"environ\s*\[\s*['\"]DEVKIT_\w*['\"]\s*\]\s*=(?!=)|(?:putenv|setenv|unsetenv)\s*\(\s*['\"]DEVKIT_|"
+    r"environ\.(?:pop|setdefault|update)\s*\([^)]*DEVKIT_|\bdel\s+os\.environ\s*\[\s*['\"]DEVKIT_|"
+    r"process\.env\.DEVKIT_\w*\s*=(?!=)|\bdelete\s+process\.env\.DEVKIT_|\bENV\s*\[\s*['\"]DEVKIT_\w*['\"]\s*\]\s*=(?!=)|"
+    r"\$ENV\{\s*['\"]?DEVKIT_\w*['\"]?\s*\}\s*=(?!=)|['\"]DEVKIT_\w*['\"]\s*:|\bDEVKIT_\w*\s*=(?!=)")
+_HATCH_TEXT = re.compile(r"\bDEVKIT_\w*\s*=|\b(?:export|unset|declare|typeset)\b[^\n;|&]*\bDEVKIT_|\benv\s+-|"
+                         r"--ci-passed|--no-verify|\bconfig\s+(?:set|unset|edit|reset)\b")
+_COMMIT_VALUE_OPTS = frozenset({"-m", "-F", "-C", "-c", "-t", "--author", "--date", "--template", "--fixup", "--squash",
+                                "--cleanup", "--trailer", "--file", "--message", "--reuse-message", "--reedit-message"})
+
+
+def _walk_segments(cmd: str, cwd, depth: int = 0):
+    """Every segment a shell command runs, at every level, as (words with their prefixes, cwd, the level's heredoc
+    bodies): nested shells, eval, source, xargs, find -exec and the substitutions the shell expands. None when a
+    level cannot be parsed."""
+    if depth > 4:
+        return []
+    segs = split_commands(cmd)
+    if segs is None:
+        return None
+    bodies, out = heredoc_bodies(cmd), []
+    for argv0, _ in segs:
+        more = _walk_argv(list(argv0), cwd, bodies, depth)
+        if more is None:
+            return None
+        out += more
+        argv = _unwrap(argv0)
+        if argv and os.path.basename(argv[0]) in ("cd", "pushd"):
+            cwd = str(core.HOME) if len(argv) == 1 else cwd if argv[1] == "-" else str(resolve(argv[1], cwd))
+    for text in _expansions(cmd):
+        more = _walk_segments(text, cwd, depth + 1)
+        if more is None:
+            return None
+        out += more
+    return out
+
+
+def _walk_argv(argv0, cwd, bodies, depth):
+    out, argv = [(argv0, cwd, bodies)], _unwrap(argv0)
+    if not argv:
+        return out
+    name, args = os.path.basename(argv[0]), argv[1:]
+    texts, inners = [], []
+    if name in _SHELLS:
+        texts = _shell_inputs(args, cwd, bodies)
+    elif name in ("source", ".") and args:
+        texts = [_read_small(resolve(args[0], cwd))]
+    elif name == "eval":
+        texts = [" ".join(args)]
+    elif name == "xargs":
+        i, takes = 0, {"-I", "-n", "-P", "-L", "-d", "-E", "-s", "-a", "-J", "-R", "-S"}
+        while i < len(args) and args[i].startswith("-"):
+            i += 2 if args[i] in takes else 1
+        inners = [args[i:]]
+    elif name == "find":
+        for k, a in enumerate(args):
+            if a in ("-exec", "-execdir", "-ok", "-okdir"):
+                sub = args[k + 1:]
+                inners.append(sub[:next((j for j, x in enumerate(sub) if x in (";", "+")), len(sub))])
+    for text in texts:
+        more = _walk_segments(text, cwd, depth + 1) if text else []
+        if more is None:
+            return None
+        out += more
+    for inner in inners:
+        if inner and depth < 4:
+            out += _walk_argv(list(inner), cwd, bodies, depth + 1) or []
+    return out
+
+
+def _git_commit_skips_hooks(args) -> bool:
+    """True when `git commit` arguments hold -n (its short form of --no-verify), alone or in a cluster such as -nm."""
+    i = 0
+    while i < len(args):
+        a = args[i]
+        if a in _COMMIT_VALUE_OPTS:
+            i += 2
+            continue
+        if a.startswith("-") and not a.startswith("--"):
+            for ch in a[1:]:
+                if ch == "n":
+                    return True
+                if ch in "mFCct":  # the rest of the cluster is this option's value
+                    break
+        i += 1
+    return False
+
+
+def _hatch_use(argv0, cwd, bodies) -> str | None:
+    """Which escape hatch one segment uses (its words with their prefixes), or None."""
+    names, argv = _env_split(argv0)
+    mine = sorted(n for n in names if n.startswith("DEVKIT_"))
+    if mine:
+        return f"it sets {mine[0]} for the command"
+    pre = argv0[:len(argv0) - len(argv)]
+    for k, a in enumerate(pre):
+        if os.path.basename(a) != "env":
+            continue
+        own = pre[k + 1:]
+        own = own[:next((j for j, x in enumerate(own) if os.path.basename(x) in PREFIX_CMDS), len(own))]
+        if any(f in ("-", "-i", "--ignore-environment") or f.startswith(("-u", "--unset")) or
+               (f.startswith("-") and not f.startswith("--") and set(f[1:]) & {"i", "u"}) for f in own):
+            return "`env -i` and `env -u` clear or unset devkit's variables for the command"
+    if not argv:
+        return None
+    name, args = os.path.basename(argv[0]), argv[1:]
+    if any(n.startswith("DEVKIT_") or n == "?" for n in _exports(name, args)):
+        return "it exports a DEVKIT_* variable, or variables the guard cannot see (`export $(…)`)"
+    if name == "unset" and any(a.startswith("DEVKIT_") or "$" in a for a in args if not a.startswith("-")):
+        return "it unsets a DEVKIT_* variable"
+    dev = _dev_args(argv)
+    if dev is not None:
+        if any(a == "--ci-passed" or a.startswith("--ci-passed=") for a in dev):
+            return "`--ci-passed` records a local CI run as passed on your word"
+        if "--no-verify" in dev:
+            return "`--no-verify` skips the project's git hooks"
+        pos = [a for a in dev if not a.startswith("-")]
+        if pos[:1] == ["config"] and pos[1:2] and pos[1] in ("set", "unset", "edit", "reset"):
+            return "`dev config` changes devkit's configuration, which only the developer does"
+        return None
+    if name == "git":
+        _, sub, gargs = _git_split(argv)
+        if "--no-verify" in gargs or (sub == "commit" and _git_commit_skips_hooks(gargs)):
+            return "`--no-verify` (`git commit -n`) skips the project's git hooks"
+    if _INTERP.match(name) and not _repo_script(argv, cwd):
+        code = _program(argv, cwd, bodies)[0]
+        if code and _DEVKIT_ENV_CODE.search(_unescape(code)):
+            return f"this {name} program sets or deletes a DEVKIT_* variable"
+    return None
+
+
+def member_escape_refusal(cmd: str, cwd, member=None) -> str | None:
+    """Why a crew member's shell command uses one of devkit's escape hatches (spec F8, rule 1), or None."""
+    if not cmd or not str(cmd).strip():
+        return None
+    cwd = cwd or os.getcwd()
+    segs = _walk_segments(cmd, cwd)
+    if segs is None:
+        if _HATCH_TEXT.search(_unescape(cmd)):
+            return HATCH_REASON.format(what="this command, which the guard cannot parse, names one")
+        segs = []
+    for argv0, here, bodies in segs:
+        what = _hatch_use(argv0, here, bodies)
+        if what:
+            return HATCH_REASON.format(what=what)
+    if _SECRET_ALLOW.search(_unescape(cmd)) and readonly_refusal(cmd, cwd, member):
+        return HATCH_REASON.format(what="it changes .gitleaksignore or adds a comment that tells the secret scan to "
+                                        "skip a line")
+    return None
+
+
+# MCP tools, judged by their name (spec F8): the first verb of the tool's own name decides; a write verb with a message
+# noun (create_issue_comment) sends; an unknown verb counts as a write. devkit's own server says what its tools do.
+
+_MCP_PUBLISH = frozenset({"publish", "unpublish", "deploy", "release", "share"})
+_MCP_SEND = frozenset({"send", "post", "reply", "email", "mail", "notify", "invite", "tweet", "dm", "forward",
+                       "comment", "message"})
+_MCP_READ = frozenset({"get", "list", "read", "search", "query", "find", "fetch", "view", "show", "describe", "whoami",
+                       "status", "inspect", "wait", "guide", "lookup", "resolve", "take", "analyze", "audit", "lint",
+                       "check", "validate", "count", "help", "navigate", "select", "preview", "browse", "explain"})
+_MCP_WRITE = frozenset({"create", "update", "delete", "remove", "write", "edit", "set", "add", "upload", "download",
+                        "move", "copy", "rename", "apply", "run", "exec", "execute", "start", "stop", "use", "click",
+                        "fill", "drag", "press", "type", "handle", "emulate", "resize", "close", "new", "generate",
+                        "export", "import", "batch", "merge", "push", "commit", "archive", "restore", "map", "connect",
+                        "authenticate", "complete", "cancel", "insert", "replace", "save", "submit", "approve"})
+_MCP_NOUNS = frozenset({"comment", "comments", "message", "messages", "email", "mail", "reply", "post"})
+_MCP_PATH_KEYS = re.compile(r"^(?:file_?path|path|output(?:_?(?:path|file|dir))?|save_?path|dest(?:ination)?(?:_?path)?|"
+                            r"out(?:_?file|_?path|_?dir)?|target_?path|filename)$", re.I)
+
+
+def mcp_kind(tool: str) -> str:
+    """What an MCP tool does, by its name: 'read', 'write', 'send' (a message outside this machine) or 'publish'
+    (a release, a deploy, a share); '' for a tool that is not an MCP tool."""
+    parts = str(tool or "").split("__")
+    if len(parts) < 3 or parts[0] != "mcp":
+        return ""
+    if parts[1] == "devkit":
+        try:
+            from . import mcp
+            spec = next((t for t in mcp.TOOLS if t["name"] == parts[2]), None)
+            if spec is not None:
+                return "read" if (spec.get("annotations") or {}).get("readOnlyHint") else "write"
+        except Exception as e:
+            failopen("mcp-kind", e)
+    words = [w.casefold() for w in re.findall(r"[A-Za-z][a-z]*|[A-Z]+(?![a-z])|\d+", "__".join(parts[2:]))]
+    verb = next((w for w in words if w in _MCP_PUBLISH | _MCP_SEND | _MCP_READ | _MCP_WRITE), None)
+    if verb in _MCP_PUBLISH:
+        return "publish"
+    if verb in _MCP_SEND:
+        return "send"
+    if verb in _MCP_READ:
+        return "read"
+    return "send" if _MCP_NOUNS & set(words) else "write"
+
+
+def _mcp_out_paths(tool_input) -> list:
+    """The local files an MCP tool's input names to write (filePath, output_path, …)."""
+    return [str(v) for k, v in (tool_input or {}).items() if isinstance(v, str) and v and _MCP_PATH_KEYS.match(k)]
+
+
+def _new_allow_comments(tool, tool_input, cwd) -> bool:
+    """True when a file tool adds a secret-scan allow comment that the file did not have."""
+    inp = tool_input or {}
+    if tool == "Write":
+        path = inp.get("file_path") or ""
+        old = _read_small(resolve(path, cwd)) if path else ""
+        pairs = [(old, inp.get("content") or "")]
+    elif tool == "MultiEdit":
+        pairs = [(e.get("old_string") or "", e.get("new_string") or "") for e in inp.get("edits") or []
+                 if isinstance(e, dict)]
+    elif tool == "NotebookEdit":
+        pairs = [("", inp.get("new_source") or "")]
+    else:
+        pairs = [(inp.get("old_string") or "", inp.get("new_string") or "")]
+    return any(len(re.findall("gitleaks:allow", str(new))) > len(re.findall("gitleaks:allow", str(old)))
+               for old, new in pairs)
+
+
+def member_tool_verdict(tool, tool_input, cwd, level=None, member=None, scope=None, base=None):
+    """For a crew member's call of a file or MCP tool (spec F8): ("deny", why) when it sends or publishes through an
+    MCP tool (members never do, spec C6), writes through one from a review or read-only lane or outside its step
+    scope, or changes .gitleaksignore or adds a secret-scan allow comment with a file tool; None otherwise."""
+    tool_input = tool_input or {}
+    try:
+        level = _strictest(level, member_level(member))
+    except Exception as e:
+        failopen("crew-tools", e)
+        level = _strictest(level)
+    kind = mcp_kind(tool)
+    if kind in ("send", "publish"):
+        return deny(f"`{tool}` {'sends a message' if kind == 'send' else 'publishes or deploys'} outside this machine, "
+                    f"which crew members never do (spec C6). Put the text and the target under \"Needs from "
+                    f"Morpheus\" in your report.")
+    outs = _mcp_out_paths(tool_input) if kind else []
+    if level in ("review", "read") and (kind == "write" or outs):
+        return deny(READONLY_REASON.format(what=f"`{tool}` writes" + (f" {outs[0]}" if outs else "")))
+    layers = _layers(scope)
+    for p in outs:
+        if layers and not member_write_exempt(p, cwd, scope, member, base) and \
+                not all(scope_holds(p, cwd, layer, base=base) for layer in layers):
+            return deny(f"`{tool}` writes {p}, which is outside your step's scope. Ask Morpheus to widen it "
+                        f"(`dev crew ask \"…\"`).")
+    if tool in WRITE_TOOLS:
+        path = tool_input.get("file_path") or tool_input.get("notebook_path") or ""
+        if os.path.basename(str(path)) == ".gitleaksignore":
+            return deny(HATCH_REASON.format(what="`.gitleaksignore` tells the secret scan which findings to skip"))
+        if _new_allow_comments(tool, tool_input, cwd):
+            return deny(HATCH_REASON.format(what="it adds a comment that tells the secret scan to skip a line"))
+    return None
+
+
+def webfetch_verdict(tool_input):
+    """A WebFetch whose URL carries a secret (a token, a key, a password) sends it to that host: refused for every
+    agent (spec F8, K7); the reason never repeats the secret."""
+    url = str((tool_input or {}).get("url") or "")
+    try:
+        from . import audit
+        leaks = bool(url) and audit.redact(url) != url
+    except Exception as e:
+        failopen("webfetch", e)
+        return None
+    if leaks:
+        return deny("This URL carries a secret (a token, a key or a password), and fetching it sends the secret to "
+                    "that host and its logs. Fetch the page without it; a page that needs a credential is read with "
+                    "the tool that holds it (gh, an authenticated connector).")
+    return None
+
+
+def stubs_accepted(cmd: str) -> bool:
+    """True when a commit command accepts unfinished work by devkit's rule (spec F8, rule 3: parsed, never searched):
+    DEVKIT_ALLOW_STUBS as the prefix of the commit segment itself, or --wip as an option of `dev commit`."""
+    for argv0, _ in split_commands(cmd or "") or []:
+        names, argv = _env_split(argv0)
+        if not argv:
+            continue
+        dev = _dev_args(argv)
+        commits = (dev is not None and dev[:1] == ["commit"]) or \
+            (os.path.basename(argv[0]) == "git" and _git_split(argv)[1] == "commit")
+        if not commits:
+            continue
+        if "DEVKIT_ALLOW_STUBS" in names:
+            return True
+        i, args = 0, dev[1:] if dev is not None else []
+        while i < len(args):
+            if args[i] in ("-m", "--message", "--body"):
+                i += 2
+                continue
+            if args[i] == "--wip":
+                return True
+            i += 1
+    return False
+
+
 def bulk_rewrite(cmd: str, cwd=None) -> bool:
     """True when a shell command rewrites files with a regex (lesson L-fwyp0n9vzv6): sed or perl/ruby in place, or a
     program that substitutes with re.sub and writes, wherever the shell runs it. Text that mentions one is not one."""
@@ -2732,6 +3122,15 @@ def member_write_exempt(path, cwd, scope=None, member=None, base=None) -> bool:
 
 def check(tool: str, tool_input: dict, cwd: str, agent: str):
     tool_input = tool_input or {}
+    _BYPASSES.clear()
+    if tool == "WebFetch":
+        return webfetch_verdict(tool_input)
+    if str(tool).startswith("mcp__"):  # by name (spec F8); C6 judges sending and publishing (F5)
+        for p in _mcp_out_paths(tool_input):
+            v = protected_write(p, cwd, {}) or check_write_path(p, cwd, agent)
+            if v:
+                return v
+        return None
     if tool in WRITE_TOOLS or "file_path" in tool_input or "notebook_path" in tool_input:
         path = tool_input.get("file_path") or tool_input.get("notebook_path")
         if tool not in READ_TOOLS:

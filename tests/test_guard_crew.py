@@ -351,7 +351,8 @@ class TransparentWrapperTests(unittest.TestCase):
         self.assertEqual(verdict("cat <<EOF\nrm -rf ~\nEOF"), "allow")  # a real heredoc is data
 
     def test_a_lane_call_behind_a_wrapper_or_interpreter_flags_still_runs_as_morpheus(self):
-        for cmd in ("nice -n 5 dev crew decide D1 yes", "env -u X dev crew decide D1 yes",
+        # (env -u X is refused before this, as an escape hatch: tests/test_escape_hatches.py)
+        for cmd in ("nice -n 5 dev crew decide D1 yes", "env -C /tmp dev crew decide D1 yes",
                     "sudo -u me dev crew decide D1 yes", "exec -a x dev crew decide D1 yes",
                     "python3 -u bin/dev crew decide D1 yes", "python3 -I bin/dev crew decide D1 yes",
                     "cd lib && python3 -B -m devkit.cli crew decide D1 yes", "python3 -W ignore bin/dev progress step x",
