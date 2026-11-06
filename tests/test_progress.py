@@ -366,6 +366,9 @@ class CrewCoordinationTests(unittest.TestCase):
             saved, saved_sf = canary.LOG, hooks._session_file
             canary.LOG = Path(d) / "canary.jsonl"
             hooks._session_file = lambda agent, sid: pg.SESSIONS / f"{agent}-{sid}.json"  # noqa: E731
+            gates_off = mock.patch.dict(hooks.core.CFG, {"crew": {"gates": {"enforce": False}}})
+            gates_off.start()  # this test is the report canary's; the crew gates only record here (their own test
+            self.addCleanup(gates_off.stop)  # is test_a_member_missing_a_proof_is_sent_back_once)
 
             def stop(payload):
                 out = io.StringIO()
@@ -394,6 +397,42 @@ class CrewCoordinationTests(unittest.TestCase):
                 with mock.patch.dict(hooks.core.CFG, {"canary": {"enforce": False}}):
                     self.assertEqual(stop(dict(launched, agent_id="a2")), "")  # measured, not sent back
                 self.assertEqual(canary.by_member(1), {"Neo": (0, 2)})
+            finally:
+                canary.LOG, hooks._session_file = saved, saved_sf
+
+    def test_a_member_missing_a_proof_is_sent_back_once(self):
+        import contextlib
+        import io
+        from unittest import mock
+        from devkit import hooks
+        with TempState(), tempfile.TemporaryDirectory() as d:
+            saved, saved_sf = canary.LOG, hooks._session_file
+            canary.LOG = Path(d) / "canary.jsonl"
+            hooks._session_file = lambda agent, sid: pg.SESSIONS / f"{agent}-{sid}.json"  # noqa: E731
+
+            def stop(payload):
+                out = io.StringIO()
+                with mock.patch("sys.stdin", io.StringIO(json.dumps(payload))), contextlib.redirect_stdout(out):
+                    hooks.subagent_stop("claude")
+                return out.getvalue()
+            try:
+                tr = Path(d) / "agent-k1.jsonl"  # Kid's own transcript: it ran the tests, never recorded its step
+                tr.write_text("\n".join(json.dumps(r) for r in (
+                    {"type": "assistant", "isSidechain": True, "message": {"role": "assistant", "content": [
+                        {"type": "tool_use", "id": "toolu_0001", "name": "Bash", "input": {"command": "bin/dev test"}}]}},
+                    {"type": "user", "isSidechain": True, "message": {"role": "user", "content": [
+                        {"type": "tool_result", "tool_use_id": "toolu_0001", "content": "ok", "is_error": False}]}},
+                )) + "\n")
+                (Path(d) / "agent-k1.meta.json").write_text(json.dumps({"toolUseId": "toolu_k",
+                                                                        "description": "Kid: installer"}))
+                report = ("**[Firefly> DevKit · DevEx engineer (Kid)]** api · `main` · installer\n- **Done:** x\n"
+                          "- **Check:** ✓ 3 tests\n- **Next:** review")  # the status block is there
+                data = {"session_id": "s1", "agent_id": "k1", "agent_type": "general-purpose", "cwd": d,
+                        "agent_transcript_path": str(tr), "last_assistant_message": report}
+                first = json.loads(stop(data) or "{}")
+                self.assertEqual(first.get("decision"), "block")
+                self.assertIn("dev progress step", first.get("reason", ""))
+                self.assertEqual(stop(dict(data, stop_hook_active=True)), "")  # once, like the canary
             finally:
                 canary.LOG, hooks._session_file = saved, saved_sf
 

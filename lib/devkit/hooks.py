@@ -1275,6 +1275,12 @@ def subagent_stop(agent: str):
                        f"\"<what finished>\" --check \"<evidence>\"` (it goes to your lane, and Morpheus and the "
                        f"developer see it live). Questions and decisions go through `dev crew ask`, not only in the "
                        f"report. Then end with the same report."}
+            if out is None and (lane or meta):  # the crew gates: proofs, skills, stubs, tests, lessons; once
+                from . import gates
+                ref = copy.deepcopy(sess)
+                out = gates.check(name, data, sess, pid)
+                if sess != ref:  # only the gates' own mark, on the fresh record
+                    _patch_quietly(sf, ref, sess)
     except Exception:
         _log(f"subagent-stop {agent}: {traceback.format_exc()[-300:]}")
     if out:
