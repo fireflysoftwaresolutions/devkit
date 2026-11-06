@@ -1622,6 +1622,9 @@ def build_parser():
     t.add_argument("--due")
     t.add_argument("--why")
     tsp.add_parser("ls", help="list open items")
+    for sub in tsp.choices.values():
+        sub.add_argument("-p", "--project", default=argparse.SUPPRESS, help="project (default: the one you are in)")
+        sub.add_argument("-i", "--initiative", default=argparse.SUPPRESS, help="an initiative instead of a project")
     p = add("note", cmd_note, "Project metadata in the handoff note")
     p.add_argument("set", choices=["set"])
     p.add_argument("pairs", nargs="+", help="status=… priority=… milestone=… due=YYYY-MM-DD tags=a,b progress=0-100")
@@ -1639,6 +1642,9 @@ def build_parser():
         x.add_argument("path")
         x.add_argument("--why", help="the reason for the change (required for revise)")
     psp.add_parser("ls", help="list plans")
+    for sub in psp.choices.values():
+        sub.add_argument("-p", "--project", default=argparse.SUPPRESS)
+        sub.add_argument("-i", "--initiative", default=argparse.SUPPRESS)
     p = add("progress", cmd_progress, "Live progress of agent work: start, step, block, done; ETA from real pace")
     gsp = p.add_subparsers(dest="progress_cmd")
     x = gsp.add_parser("start", help="start a run: goal, steps, estimate")

@@ -156,6 +156,16 @@ class TemplateTests(unittest.TestCase):
             self.assertIn("Deadline: 2026-11-20", msg)
             self.assertIn(f"dev task start {it['meta']['id']} -p acme/api", msg)
 
+    def test_scope_flags_before_or_after_the_verb(self):
+        from devkit import cli
+        ap = cli.build_parser()
+        for argv in (["task", "done", "3", "-p", "acme/x"], ["task", "-p", "acme/x", "done", "3"]):
+            a = ap.parse_args(argv)
+            self.assertEqual((a.project, a.task_cmd), ("acme/x", "done"))
+        a = ap.parse_args(["task", "delegate", "T-1", "--to", "maria", "-i", "lending"])
+        self.assertEqual((a.initiative, a.to), ("lending", "maria"))
+        self.assertEqual(ap.parse_args(["plan", "new", "X", "-p", "a/b", "--kind", "adr"]).project, "a/b")
+
     def test_report_health_rules(self):
         from devkit import report
         self.assertEqual(report.health("blocked", "", 50, {}, 0)[0], "red")
