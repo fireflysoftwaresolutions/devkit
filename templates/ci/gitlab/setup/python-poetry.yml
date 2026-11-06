@@ -1,0 +1,12 @@
+.@{key}:
+  image: @{rt_image}
+  variables:
+    POETRY_CACHE_DIR: .cache/pypoetry
+    POETRY_VIRTUALENVS_IN_PROJECT: "true"
+  cache:
+    key:
+      files: [poetry.lock]
+    paths: [.cache/pypoetry, .venv]
+  before_script:
+    - pip install poetry==@{tool:poetry}
+    - @{install}

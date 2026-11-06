@@ -1,0 +1,6 @@
+          - task: Cache@2
+            inputs:
+              key: 'composer | "$(Agent.OS)" | composer.lock'
+              path: $(COMPOSER_CACHE_DIR)
+          - script: @{install}
+            displayName: Install (the image's PHP and Composer)

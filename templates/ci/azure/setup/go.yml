@@ -1,0 +1,7 @@
+          - task: GoTool@0
+            inputs:
+              version: "@{go}"
+          - task: Cache@2
+            inputs:
+              key: 'go | "$(Agent.OS)" | go.sum'
+              path: $(GOMODCACHE)

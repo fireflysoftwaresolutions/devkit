@@ -1,0 +1,26 @@
+    uv:
+      key:
+        files: [uv.lock]
+      path: ~/.cache/uv
+    poetry:
+      key:
+        files: [poetry.lock]
+      path: ~/.cache/pypoetry
+    npm:
+      key:
+        files: [package-lock.json]
+      path: ~/.npm
+    pnpm:
+      key:
+        files: [pnpm-lock.yaml]
+      path: ~/.local/share/pnpm/store
+    yarn:
+      key:
+        files: [yarn.lock]
+      path: ~/.yarn/berry/cache
+    gomod:
+      key:
+        files: [go.sum]
+      path: ~/go/pkg/mod
+    trivy:
+      path: ~/.cache/trivy

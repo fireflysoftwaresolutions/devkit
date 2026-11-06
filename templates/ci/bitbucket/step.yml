@@ -1,0 +1,15 @@
+    - step: &@{id}
+        name: @{name}
+        image: @{rt_image}
+@{#caches}
+        caches: [@{caches}]
+@{/caches}
+@{#docker}
+        services: [docker]
+@{/docker}
+        script:
+          @{script}
+@{#artifact}
+        artifacts:
+          - dist/**
+@{/artifact}

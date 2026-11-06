@@ -1,0 +1,27 @@
+container-image:
+  stage: build
+@{#needs}
+  needs: [@{needs}]
+@{/needs}
+  image: @{image:docker-cli}
+  services:
+    - name: @{image:docker-dind}
+      alias: docker
+  variables:
+    DOCKER_HOST: tcp://docker:2375
+    DOCKER_TLS_CERTDIR: ""
+  script:
+    - docker build -t "ci-image:$CI_COMMIT_SHORT_SHA" .
+    - docker save -o image.tar "ci-image:$CI_COMMIT_SHORT_SHA"
+  artifacts:
+    paths: [image.tar]
+    expire_in: 1 day
+
+container-scan:
+  stage: build
+  needs: [container-image]
+  image:
+    name: @{image:trivy}
+    entrypoint: [""]
+  script:
+    - trivy image --input image.tar --severity HIGH,CRITICAL --exit-code 1 --ignore-unfixed

@@ -1,0 +1,53 @@
+      - job: release
+        displayName: Release (SBOM, sign, keep the files)
+        timeoutInMinutes: 30
+        steps:
+@{#artifacts}
+          - task: DownloadPipelineArtifact@2
+            inputs:
+              targetPath: $(Build.SourcesDirectory)/builds
+          - script: mkdir -p dist && find builds -type f -exec cp {} dist/ \;
+            displayName: Collect the builds
+@{/artifacts}
+@{^artifacts}
+          - script: |
+              mkdir -p dist
+              git archive --format=tar.gz --prefix="@{project}-$(Build.SourceBranchName)/" -o "dist/@{project}-$(Build.SourceBranchName).tar.gz" HEAD
+            displayName: Source archive
+@{/artifacts}
+          - script: docker run --rm -v "$PWD:/src" -w /src @{image:syft} scan dir:. -o spdx-json=dist/sbom.spdx.json
+            displayName: SBOM (syft)
+          - script: cd dist && sha256sum -- * > SHA256SUMS
+            displayName: Checksums
+          - script: |
+              curl -fsSLo cosign @{bin_url:cosign}
+              echo "@{bin_sha:cosign}  cosign" | sha256sum -c - && chmod +x cosign
+              cd dist && for f in *; do ../cosign sign-blob --yes --key env://COSIGN_PRIVATE_KEY --bundle "$f.sigstore.json" "$f"; done
+            displayName: Sign (cosign; COSIGN_PRIVATE_KEY and COSIGN_PASSWORD are secret variables)
+            env:
+              COSIGN_PRIVATE_KEY: $(COSIGN_PRIVATE_KEY)
+              COSIGN_PASSWORD: $(COSIGN_PASSWORD)
+          - task: PublishPipelineArtifact@1
+            displayName: Publish the release files
+            inputs:
+              targetPath: dist
+              artifact: release
+      - job: verify
+        displayName: Verify the published files
+        dependsOn: release
+        timeoutInMinutes: 10
+        steps:
+          - checkout: none
+          - task: DownloadPipelineArtifact@2
+            inputs:
+              artifact: release
+              targetPath: $(Pipeline.Workspace)/verify
+          - script: |
+              cd "$(Pipeline.Workspace)/verify" && sha256sum -c SHA256SUMS
+              curl -fsSLo /tmp/cosign @{bin_url:cosign}
+              echo "@{bin_sha:cosign}  /tmp/cosign" | sha256sum -c - && chmod +x /tmp/cosign
+              printf '%s' "$COSIGN_PUBLIC_KEY" > /tmp/cosign.pub
+              for f in $(ls | grep -v '\.sigstore\.json$'); do /tmp/cosign verify-blob --key /tmp/cosign.pub --bundle "$f.sigstore.json" "$f"; done
+            displayName: Checksums and signatures
+            env:
+              COSIGN_PUBLIC_KEY: $(COSIGN_PUBLIC_KEY)

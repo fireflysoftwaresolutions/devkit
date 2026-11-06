@@ -1,0 +1,8 @@
+    - step: &container-image
+        name: Container image (build and scan)
+        image: @{image:trivy}
+        services: [docker]
+        caches: [docker, trivy]
+        script:
+          - docker build -t "ci-image:$BITBUCKET_COMMIT" .
+          - trivy image --severity HIGH,CRITICAL --exit-code 1 --ignore-unfixed "ci-image:$BITBUCKET_COMMIT"

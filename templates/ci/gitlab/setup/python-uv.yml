@@ -1,0 +1,11 @@
+.@{key}:
+  image: @{rt_image}
+  variables:
+    UV_CACHE_DIR: .cache/uv
+    UV_LINK_MODE: copy
+  cache:
+    key:
+      files: [uv.lock]
+    paths: [.cache/uv]
+  before_script:
+    - @{install}

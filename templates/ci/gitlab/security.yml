@@ -1,0 +1,38 @@
+secret-scan:
+  stage: lint
+  needs: []
+  image:
+    name: @{image:gitleaks}
+    entrypoint: [""]
+  script:
+    - gitleaks dir --redact --no-banner .
+
+sast:
+  stage: lint
+  needs: []
+  image: @{image:semgrep}
+  script:
+    - semgrep scan --config p/default --error --metrics off --disable-version-check
+
+dependency-scan:
+  stage: lint
+  needs: []
+  image:
+    name: @{image:osv-scanner}
+    entrypoint: [""]
+  script:
+    - /osv-scanner scan source -r --allow-no-lockfiles .
+
+filesystem-and-iac-scan:
+  stage: lint
+  needs: []
+  image:
+    name: @{image:trivy}
+    entrypoint: [""]
+  variables:
+    TRIVY_CACHE_DIR: .cache/trivy
+  cache:
+    key: trivy-db
+    paths: [.cache/trivy]
+  script:
+    - trivy fs --scanners vuln,secret,misconfig --severity HIGH,CRITICAL --exit-code 1 --skip-dirs node_modules --skip-dirs .venv .

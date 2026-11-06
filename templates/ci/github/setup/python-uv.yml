@@ -1,0 +1,17 @@
+      - uses: @{uses:actions/checkout}
+        with:
+          persist-credentials: false
+      - uses: @{uses:astral-sh/setup-uv}
+        with:
+@{#cache}
+          enable-cache: true
+          cache-dependency-glob: uv.lock
+@{/cache}
+@{^cache}
+          enable-cache: false
+@{/cache}
+@{^python_file}
+          python-version: "@{python}"
+@{/python_file}
+      - name: Install
+        run: @{install}

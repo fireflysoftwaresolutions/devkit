@@ -36,3 +36,27 @@ jobs:
         run: python -m unittest discover -s tests
         env:
           DEVKIT_NO_NOTIFY: "1"
+
+  security:
+    name: Security scans
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Secrets (gitleaks)
+        run: docker run --rm -v "$PWD:/src" -w /src ghcr.io/gitleaks/gitleaks:v8.30.1@sha256:c00b6bd0aeb3071cbcb79009cb16a60dd9e0a7c60e2be9ab65d25e6bc8abbb7f dir --redact --no-banner .
+      - name: Code (semgrep)
+        run: >-
+          docker run --rm -v "$PWD:/src" -w /src semgrep/semgrep:1.182.0@sha256:4a34048c04fef049f71665047f074cffb00cc3d89482f965a5cd151d589237af
+          semgrep scan --config p/default --error --metrics off --disable-version-check
+      - name: Dependencies (osv-scanner)
+        run: docker run --rm -v "$PWD:/src" -w /src ghcr.io/google/osv-scanner:v2.7.0@sha256:4f3b7e2c64b9d38a5febc5a7e4a3dfef1d1362f726dea7a2ef4762b46469fcd0 scan source -r --allow-no-lockfiles .
+      - name: Filesystem and IaC (trivy)
+        run: >-
+          docker run --rm -v "$PWD:/src" -w /src ghcr.io/aquasecurity/trivy:0.76.1@sha256:790fd66d1697395d8693d1acaa1ea702406a20f109b6fc7bac8db623eca6c06c
+          fs --scanners vuln,secret,misconfig --severity HIGH,CRITICAL --exit-code 1
+          --skip-dirs node_modules --skip-dirs .venv .
+      - name: Workflows (zizmor)
+        run: docker run --rm -v "$PWD:/src" -w /src ghcr.io/zizmorcore/zizmor:1.31.1@sha256:42d409dbb851d4c5d35a058cf042b828bea1e3f2884378c526eb0974780e18d9 --offline --min-severity medium .github/workflows

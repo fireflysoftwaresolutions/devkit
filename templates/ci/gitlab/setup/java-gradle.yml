@@ -1,0 +1,8 @@
+.@{key}:
+  image: @{rt_image}
+  variables:
+    GRADLE_USER_HOME: .gradle-home
+  cache:
+    key:
+      files: [gradle/wrapper/gradle-wrapper.properties]
+    paths: [.gradle-home/caches, .gradle-home/wrapper]

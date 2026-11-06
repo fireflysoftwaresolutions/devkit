@@ -1,0 +1,10 @@
+      - uses: @{uses:actions/checkout}
+        with:
+          persist-credentials: false
+      - uses: @{uses:actions/setup-java}
+        with:
+          distribution: temurin
+          java-version: "@{java}"
+@{#cache}
+          cache: maven
+@{/cache}

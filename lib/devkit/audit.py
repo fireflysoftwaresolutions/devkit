@@ -29,14 +29,20 @@ SECRET = re.compile(r"(?i)(gh[pousr]_[0-9a-z]{20,}|github_pat_[0-9a-z_]{20,}|xox
 # dev commands that only read; everything else is audited
 READ_ONLY = {"help", "ls", "go", "status", "open", "overview", "standup", "dashboard", "team", "report", "time",
              "files", "find", "grep", "diff", "canary", "du", "doctor", "version", "agents", "calver", "audit",
-             "__complete", "hook", "guard", "plugin", "docs", "diagram", "ci", "mcp"}
+             "__complete", "hook", "guard", "plugin", "docs", "diagram", "stubs", "mcp",
+             "test"}  # dev test run|plan|prove|audit: runs and reads tests (prove in a temp copy), changes nothing
 READ_SUB = {("task", "ls"), ("task", "show"), ("task", "history"), ("task", None), ("plan", "ls"), ("plan", None),
             ("lesson", "ls"), ("lesson", "show"), ("lesson", "scan"), ("lesson", "review"), ("lesson", None),
             ("progress", None), ("progress", "time"), ("delivery", None), ("initiative", "ls"), ("initiative", "show"),
             ("wt", "ls"), ("config", "diff"), ("config", "status"), ("config", "show"), ("config", "validate"),
             ("jobs", "ls"), ("jobs", None), ("jobs", "show"), ("jobs", "logs"), ("jobs", "journal"), ("pr", "ls"),
             ("pr", "view"), ("pr", "checks"), ("pr", "diff"), ("run", "ls"), ("run", "view"), ("branch", "ls"),
-            ("issue", "ls"), ("issue", "view"), ("sec", "scan"), ("desktop", "status")}
+            ("issue", "ls"), ("issue", "view"), ("sec", "scan"), ("desktop", "status"), ("crew", None),
+            ("crew", "show"), ("crew", "brief"), ("crew", "inbox"), ("crew", "decisions"), ("crew", "next"),
+            ("ci", None), ("ci", "status"), ("ci", "audit")}
+# `ci audit --fix` edits workflow files and `ci init` writes a pipeline (unless --dry-run): both are audited
+# crew sync, ask, answer, decide, delegate, decline, mode <guided|auto> and route --apply change state;
+# `crew mode` alone and `crew route` without --apply only read
 
 
 def redact(text: str) -> str:
@@ -77,6 +83,17 @@ def audited(argv: list) -> bool:
     if cmd == "sleep" and "--dry-run" in argv:
         return False
     if cmd == "gc" and "--apply" not in argv:
+        return False
+    if cmd == "crew" and sub == "route":
+        return "--apply" in argv
+    if cmd == "ci":
+        if sub == "audit" and "--fix" in argv:
+            return True
+        if sub == "init":
+            return "--dry-run" not in argv
+        if sub not in (None, "status", "audit"):
+            return False  # `dev ci <project>` shows another project's pipeline
+    if cmd == "crew" and (sub == "sync" and "--check" in argv or sub == "mode" and argv[-1] == "mode"):
         return False
     if (cmd, sub) in READ_SUB or (cmd, None) in READ_SUB and sub is None:
         return False

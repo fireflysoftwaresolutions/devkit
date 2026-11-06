@@ -1,0 +1,23 @@
+  security:
+    name: Security scans
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: @{uses:actions/checkout}
+        with:
+          persist-credentials: false
+      - name: Secrets (gitleaks)
+        run: docker run --rm -v "$PWD:/src" -w /src @{image:gitleaks} dir --redact --no-banner .
+      - name: Code (semgrep)
+        run: >-
+          docker run --rm -v "$PWD:/src" -w /src @{image:semgrep}
+          semgrep scan --config p/default --error --metrics off --disable-version-check
+      - name: Dependencies (osv-scanner)
+        run: docker run --rm -v "$PWD:/src" -w /src @{image:osv-scanner} scan source -r --allow-no-lockfiles .
+      - name: Filesystem and IaC (trivy)
+        run: >-
+          docker run --rm -v "$PWD:/src" -w /src @{image:trivy}
+          fs --scanners vuln,secret,misconfig --severity HIGH,CRITICAL --exit-code 1
+          --skip-dirs node_modules --skip-dirs .venv .
+      - name: Workflows (zizmor)
+        run: docker run --rm -v "$PWD:/src" -w /src @{image:zizmor} --offline --min-severity medium .github/workflows

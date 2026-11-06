@@ -1,0 +1,11 @@
+          - task: UsePythonVersion@0
+            inputs:
+              versionSpec: "@{python}"
+          - task: Cache@2
+            inputs:
+              key: 'uv | "$(Agent.OS)" | uv.lock'
+              path: $(UV_CACHE_DIR)
+          - script: |
+              pip install uv==@{tool:uv}
+              @{install}
+            displayName: Install

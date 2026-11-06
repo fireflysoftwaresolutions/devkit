@@ -1,0 +1,9 @@
+  - package-ecosystem: @{ecosystem}
+    directory: /
+    schedule:
+      interval: weekly
+    cooldown:
+      default-days: 14
+    groups:
+      @{group}:
+        patterns: ["*"]

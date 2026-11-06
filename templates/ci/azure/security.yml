@@ -1,0 +1,17 @@
+      - job: security
+        displayName: Security scans
+        timeoutInMinutes: 20
+        steps:
+          - script: docker run --rm -v "$PWD:/src" -w /src @{image:gitleaks} dir --redact --no-banner .
+            displayName: Secrets (gitleaks)
+          - script: >-
+              docker run --rm -v "$PWD:/src" -w /src @{image:semgrep}
+              semgrep scan --config p/default --error --metrics off --disable-version-check
+            displayName: Code (semgrep)
+          - script: docker run --rm -v "$PWD:/src" -w /src @{image:osv-scanner} scan source -r --allow-no-lockfiles .
+            displayName: Dependencies (osv-scanner)
+          - script: >-
+              docker run --rm -v "$PWD:/src" -w /src @{image:trivy}
+              fs --scanners vuln,secret,misconfig --severity HIGH,CRITICAL --exit-code 1
+              --skip-dirs node_modules --skip-dirs .venv .
+            displayName: Filesystem and IaC (trivy)

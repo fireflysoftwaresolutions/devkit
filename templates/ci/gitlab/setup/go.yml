@@ -1,0 +1,9 @@
+.@{key}:
+  image: @{rt_image}
+  variables:
+    GOPATH: $CI_PROJECT_DIR/.go
+    GOCACHE: $CI_PROJECT_DIR/.cache/go-build
+  cache:
+    key:
+      files: [go.sum]
+    paths: [.go/pkg/mod, .cache/go-build]

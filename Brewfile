@@ -42,6 +42,7 @@ brew "gitleaks"
 brew "osv-scanner"
 brew "trivy"
 brew "zizmor"        # GitHub Actions security audit (dev sec scan)
+brew "actionlint"    # GitHub Actions workflow linter (dev ci audit)
 brew "semgrep"
 brew "syft"
 brew "cosign"

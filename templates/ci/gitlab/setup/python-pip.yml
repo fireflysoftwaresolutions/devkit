@@ -1,0 +1,11 @@
+.@{key}:
+  image: @{rt_image}
+  variables:
+    PIP_CACHE_DIR: .cache/pip
+  cache:
+    key: pip-$CI_COMMIT_REF_SLUG
+    paths: [.cache/pip]
+@{#install}
+  before_script:
+    @{install_list}
+@{/install}

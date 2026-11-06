@@ -1,0 +1,100 @@
+  release:
+    name: Release (tag)
+    needs: [@{needs}]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    environment: release # add required reviewers in Settings → Environments to approve each release
+    permissions:
+      contents: write # create the GitHub release and upload its files
+      id-token: write # sign the provenance attestation with this workflow's identity (OIDC)
+      attestations: write # store the attestation
+@{#docker}
+      packages: write # push the image to ghcr.io
+@{/docker}
+    steps:
+      - uses: @{uses:actions/checkout}
+        with:
+          persist-credentials: false
+@{#artifacts}
+      - name: Download the builds
+        uses: @{uses:actions/download-artifact}
+        with:
+          pattern: "*dist"
+          path: dist
+          merge-multiple: true
+@{/artifacts}
+@{^artifacts}
+      - name: Source archive
+        env:
+          TAG: ${{ github.ref_name }}
+        run: |
+          mkdir -p dist
+          git archive --format=tar.gz --prefix="@{project}-$TAG/" -o "dist/@{project}-$TAG.tar.gz" HEAD
+@{/artifacts}
+      - name: SBOM (syft)
+        run: docker run --rm -v "$PWD:/src" -w /src @{image:syft} scan dir:. -o spdx-json=dist/sbom.spdx.json
+      - name: Checksums
+        run: cd dist && sha256sum -- * > SHA256SUMS
+      - name: Provenance attestation
+        uses: @{uses:actions/attest-build-provenance}
+        with:
+          subject-path: dist/*
+      - name: Publish the GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.ref_name }}
+        run: |
+          gh release view "$TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1 ||
+            gh release create "$TAG" --repo "$GITHUB_REPOSITORY" --verify-tag --generate-notes
+          gh release upload "$TAG" dist/* --repo "$GITHUB_REPOSITORY" --clobber
+      - name: Verify the published files
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.ref_name }}
+        run: |
+          mkdir -p verify
+          gh release download "$TAG" --repo "$GITHUB_REPOSITORY" --dir verify --clobber
+          cd verify && sha256sum -c SHA256SUMS
+          for f in *; do gh attestation verify "$f" --repo "$GITHUB_REPOSITORY"; done
+@{#docker}
+      - name: Image name
+        run: echo "IMAGE=ghcr.io/${GITHUB_REPOSITORY,,}" >> "$GITHUB_ENV"
+      - uses: @{uses:docker/setup-buildx-action}
+      - uses: @{uses:docker/login-action}
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Build the image
+        uses: @{uses:docker/build-push-action}
+        with:
+          context: .
+          load: true
+          tags: ${{ env.IMAGE }}:${{ github.ref_name }}
+      - name: Scan the image before it is pushed (trivy)
+        run: >-
+          docker run --rm -v /var/run/docker.sock:/var/run/docker.sock @{image:trivy}
+          image --severity HIGH,CRITICAL --exit-code 1 --ignore-unfixed "$IMAGE:$GITHUB_REF_NAME"
+      - name: Push the image
+        id: push
+        uses: @{uses:docker/build-push-action}
+        with:
+          context: .
+          push: true
+          provenance: mode=max
+          sbom: true
+          tags: ${{ env.IMAGE }}:${{ github.ref_name }}
+      - name: Attest the image
+        uses: @{uses:actions/attest-build-provenance}
+        with:
+          subject-name: ${{ env.IMAGE }}
+          subject-digest: ${{ steps.push.outputs.digest }}
+          push-to-registry: true
+      - name: Verify the pushed image
+        env:
+          GH_TOKEN: ${{ github.token }}
+          DIGEST: ${{ steps.push.outputs.digest }}
+        run: |
+          docker pull "$IMAGE@$DIGEST"
+          gh attestation verify "oci://$IMAGE@$DIGEST" --repo "$GITHUB_REPOSITORY"
+@{/docker}

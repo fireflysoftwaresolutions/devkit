@@ -1,0 +1,53 @@
+release-sbom:
+  stage: release
+@{#needs}
+  needs: [@{needs}]
+@{/needs}
+  rules:
+    - if: $CI_COMMIT_TAG
+  interruptible: false
+  image:
+    name: @{image:syft-debug}
+    entrypoint: [""]
+  script:
+    - mkdir -p dist
+    - /syft scan dir:. -o spdx-json=dist/sbom.spdx.json
+    - cd dist && sha256sum -- * > SHA256SUMS
+  artifacts:
+    paths: [dist/]
+    expire_in: 1 week
+
+release:
+  stage: release
+  needs: [release-sbom]
+  rules:
+    - if: $CI_COMMIT_TAG
+  interruptible: false
+  environment:
+    name: release # protect it in Settings → CI/CD → Protected environments to approve each release
+  image: @{image:alpine}
+  id_tokens:
+    SIGSTORE_ID_TOKEN:
+      aud: sigstore # keyless signing with this pipeline's identity
+  variables:
+    PACKAGE_URL: $CI_API_V4_URL/projects/$CI_PROJECT_ID/packages/generic/$CI_PROJECT_NAME/$CI_COMMIT_TAG
+  script:
+    - apk add --no-cache curl
+    - curl -fsSLo /usr/local/bin/cosign @{bin_url:cosign}
+    - echo "@{bin_sha:cosign}  /usr/local/bin/cosign" | sha256sum -c - && chmod +x /usr/local/bin/cosign
+    - cd dist && for f in *; do cosign sign-blob --yes --bundle "$f.sigstore.json" "$f"; done && cd ..
+    - |
+      for f in dist/*; do curl -fsS --header "JOB-TOKEN: $CI_JOB_TOKEN" --upload-file "$f" "$PACKAGE_URL/$(basename "$f")"; done
+    - >-
+      curl -fsS --header "JOB-TOKEN: $CI_JOB_TOKEN" --data-urlencode "tag_name=$CI_COMMIT_TAG"
+      --data-urlencode "name=$CI_COMMIT_TAG" --data-urlencode "description=Release $CI_COMMIT_TAG"
+      "$CI_API_V4_URL/projects/$CI_PROJECT_ID/releases"
+    # verify what was published: download it again, check the checksums and the signatures
+    - mkdir -p verify && cd verify
+    - |
+      for f in ../dist/*; do curl -fsSO --header "JOB-TOKEN: $CI_JOB_TOKEN" "$PACKAGE_URL/$(basename "$f")"; done
+    - sha256sum -c SHA256SUMS
+    - >-
+      for f in $(ls | grep -v '\.sigstore\.json$'); do cosign verify-blob --bundle "$f.sigstore.json"
+      --certificate-identity "$CI_PROJECT_URL//.gitlab-ci.yml@refs/tags/$CI_COMMIT_TAG"
+      --certificate-oidc-issuer "$CI_SERVER_URL" "$f"; done
