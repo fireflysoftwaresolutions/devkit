@@ -1243,11 +1243,30 @@ class PageBehaviorTests(unittest.TestCase):
                                 estimate=60, estimate_cal=25.8, total_min=492)
         out = self.probe("""out.card = text($$("#runs .rcard").find(c => text(c).startsWith("Migrate the importer"))); await go("#/background?modal=run%3Acodex-old"); out.figs = text($("#modal .mfigs"));""",
                          hash_="#/background", page=self.variant(change))
-        self.assertIn("4h16m active of about 8h12m", out["card"])                               # 256 active + 236 left
-        self.assertIn("3h09m–4h55m left", out["card"])
-        self.assertNotIn("of about 26m", out["card"] + out["figs"])
-        self.assertIn("Time 4h16m active of about 8h12m first estimate 26m", out["figs"])
-        self.assertIn("Left 3h09m–4h55m", out["figs"])
+        self.assertIn("4h16m active of about 8h10m", out["card"])                               # 256 active + 236 left, to 5 minutes
+        self.assertIn("3h10m–4h55m left", out["card"])
+        self.assertNotIn("of about 25m", out["card"] + out["figs"])
+        self.assertIn("Time 4h16m active of about 8h10m first estimate 25m", out["figs"])
+        self.assertIn("Left 3h10m–4h55m", out["figs"])
+
+    def test_estimates_round_to_five_minutes_and_measured_times_stay_exact(self):
+        # "of about 1h59m" claimed a precision no estimate has: an estimate or a time left rounds to 5 minutes, under 10 minutes
+        # to the minute; active, wall and elapsed time are measured and stay exact
+        def change(d):
+            d["runs"][1].update(seen=int(time.time() - 180), active_min=84, wall_min=84, total_min=119, eta_min=35, eta_lo=27.4, eta_hi=43,
+                                estimate=60, estimate_cal=156)
+            d["runs"][1]["plan"][1].update(est=12, min=7)
+            d["runs"][0].update(eta_min=5, eta_lo=3.2, eta_hi=7.4)
+        out = self.probe("""out.card = text($$("#runs .rcard").find(c => text(c).startsWith("Migrate the importer")));
+            await go("#/background?modal=run%3Acodex-old"); out.figs = text($("#modal .mfigs")); out.steps = $$("#modal ol.steps li").map(text);
+            await go("#/background?modal=run%3Aclaude-rel"); out.short = text($("#modal .mfigs"));""", hash_="#/background", page=self.variant(change))
+        self.assertIn("1h24m active of about 2h00m", out["card"])                               # 119 → 120; 84 measured, not 85
+        self.assertIn("25m–45m left", out["card"])                                              # 27.4 → 25, 43 → 45
+        self.assertIn("7m of ~10m", out["card"])                                                # the step's 12-minute estimate
+        self.assertIn("Time 1h24m active of about 2h00m first estimate 2h35m", out["figs"])     # 156 → 155
+        self.assertIn("Left 25m–45m", out["figs"])
+        self.assertTrue(any("7m of ~10m" in s for s in out["steps"]), out["steps"])
+        self.assertIn("Left 3m–7m", out["short"])                                               # under 10 minutes: to the minute
 
     def test_lists_show_what_a_step_does_and_never_its_code(self):
         def change(d):

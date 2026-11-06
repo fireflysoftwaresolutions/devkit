@@ -2198,6 +2198,9 @@ function iso(s) { const t = Date.parse(s || ""); return isNaN(t) ? 0 : t / 1000;
 /* the window behind a count: the guard log keeps the last N decisions, the session log two months, commits 30 days */
 function guardWindow() { return (W.guard_capped ? ", the last " + W.guard_events : "") + (W.guard_since ? ", since " + shortDay(String(W.guard_since).slice(0, 10)) : ""); }
 function fmtMin(m) { m = Math.max(0, Math.round(m || 0)); return m >= 60 ? Math.floor(m / 60) + "h" + String(m % 60).padStart(2, "0") + "m" : m + "m"; }
+/* an estimate or a time left: to 5 minutes, under 10 minutes to the minute, so "about" claims no more precision than an
+   estimate has; measured time (active, wall, elapsed, over the estimate) keeps fmtMin */
+function fmtAbout(m) { const r = Math.max(0, Math.round(m || 0)); return fmtMin(r < 10 ? r : Math.round(m / 5) * 5); }
 
 /* ---------------------------------------------------------------- data model: work items, projects, initiatives, people */
 const OPEN = ["todo", "doing", "blocked"];
@@ -2436,8 +2439,8 @@ function runState(r) {
 }
 function etaText(r) {
   if (r.state !== "running") return "";
-  if (r.eta_lo != null && r.eta_hi != null) return fmtMin(r.eta_lo) === fmtMin(r.eta_hi) ? "about " + fmtMin(r.eta_hi) + " left" : fmtMin(r.eta_lo) + "–" + fmtMin(r.eta_hi) + " left";
-  return r.eta_min != null ? "about " + fmtMin(r.eta_min) + " left" : "";
+  if (r.eta_lo != null && r.eta_hi != null) return fmtAbout(r.eta_lo) === fmtAbout(r.eta_hi) ? "about " + fmtAbout(r.eta_hi) + " left" : fmtAbout(r.eta_lo) + "–" + fmtAbout(r.eta_hi) + " left";
+  return r.eta_min != null ? "about " + fmtAbout(r.eta_min) + " left" : "";
 }
 function runStateText(r, st) {
   st = st || runState(r);
@@ -2455,7 +2458,7 @@ function runTime(r) {
   const act = r.active_min || 0, wall = r.wall_min || 0, est = runEst(r);
   const plan = r.plan || r.steps || [], done = plan.filter(s => s.state === "done" || s.state === "skipped").length;
   return {steps: plan.length ? done + " of " + plan.length + " steps" : "No steps planned", act, wall, est, over: est && act > est && r.state === "running" ? act - est : 0,
-    text: fmtMin(act) + " active" + (wall - act >= 5 ? " (" + fmtMin(wall) + " wall)" : "") + (est ? " of about " + fmtMin(est) : " · no estimate"), done, total: plan.length};
+    text: fmtMin(act) + " active" + (wall - act >= 5 ? " (" + fmtMin(wall) + " wall)" : "") + (est ? " of about " + fmtAbout(est) : " · no estimate"), done, total: plan.length};
 }
 /* contradictions: shown where they occur, each with its fix (catalog C1 to C11) */
 function flagStr(f) { return f.parts.map(p => typeof p === "string" ? p : p.code).join(""); }
@@ -2826,7 +2829,7 @@ function duePill(due, done, none) {
 function sessBar(s, who, i) {
   const p = s.progress || null, blocked = !!(p && p.state === "blocked"), pct = p ? (p.steps ? Math.min(100, 100 * (p.step || 0) / p.steps) : 0) : null;
   const what = (p && p.goal) || (s.status_parts && s.status_parts.task) || scopeName(s.project || "") || "Session";
-  const text = what + ", " + scopeName(s.project || "") + (s.branch ? " on " + s.branch : "") + ", " + (s.agent || "agent") + (p ? (blocked ? ": blocked" : p.steps ? ": " + (p.step || 0) + " of " + p.steps + " steps" + (p.eta_min != null ? ", about " + fmtMin(p.eta_min) + " left" : "") : "") : "");
+  const text = what + ", " + scopeName(s.project || "") + (s.branch ? " on " + s.branch : "") + ", " + (s.agent || "agent") + (p ? (blocked ? ": blocked" : p.steps ? ": " + (p.step || 0) + " of " + p.steps + " steps" + (p.eta_min != null ? ", about " + fmtAbout(p.eta_min) + " left" : "") : "") : "");
   return h("button", {class: "sbar" + (blocked ? " blocked" : ""), type: "button", "aria-label": text, "data-tip": text, onclick: e => { e.stopPropagation(); openModal("session", who + "~" + i); }},
     h("span", {class: "sb-l"}, h("span", {class: "ell", text: scopeName(s.project || "") || s.agent || "session"}), h("span", {class: "num t2", text: p ? (blocked ? "blocked" : p.steps ? (p.step || 0) + "/" + p.steps : "") : ""})),
     h("span", {class: "sb-b"}, pct != null ? h("i", {style: "width:" + pct.toFixed(0) + "%"}) : null));
@@ -3028,13 +3031,13 @@ function liveRun(s, asOf) {
   const left = p.eta_min != null && p.state === "running" ? Math.max(0, p.eta_min - (now - (asOf || D.rendered || now)) / 60) : null;
   const pct = p.steps ? Math.min(100, 100 * (p.step || 0) / p.steps) : est ? Math.min(100, 100 * el / est) : null;
   const over = est && (p.active_min != null ? p.active_min : el) > est && p.state === "running";
-  const state = p.state === "blocked" ? "blocked" : p.state === "done" ? "done" : left != null ? "about " + fmtMin(left) + " left" : "running";
+  const state = p.state === "blocked" ? "blocked" : p.state === "done" ? "done" : left != null ? "about " + fmtAbout(left) + " left" : "running";
   const steps = p.steps ? (p.step || 0) + " of " + p.steps + " steps" : "step " + (p.step || 0);
   // active time (turns and subagents), with wall-clock time beside it only when they differ
   const act = p.active_min != null ? p.active_min : el, wall = p.wall_min != null ? p.wall_min : el;
-  const timeText = fmtMin(act) + " active" + (wall - act >= 5 ? " (" + fmtMin(wall) + " wall)" : "") + (est ? " of about " + fmtMin(est) : "");
+  const timeText = fmtMin(act) + " active" + (wall - act >= 5 ? " (" + fmtMin(wall) + " wall)" : "") + (est ? " of about " + fmtAbout(est) : "");
   const range = p.eta_lo != null && p.eta_hi != null && p.state === "running"
-    ? (fmtMin(p.eta_lo) === fmtMin(p.eta_hi) ? "about " + fmtMin(p.eta_hi) : fmtMin(p.eta_lo) + "–" + fmtMin(p.eta_hi)) + " left" : null;
+    ? (fmtAbout(p.eta_lo) === fmtAbout(p.eta_hi) ? "about " + fmtAbout(p.eta_hi) : fmtAbout(p.eta_lo) + "–" + fmtAbout(p.eta_hi)) + " left" : null;
   const state2 = p.state === "blocked" ? "blocked" : p.state === "done" ? "done" : range || state;
   const plan = (run && run.plan) || p.plan || [], glyph = {done: "✓", running: "▸", blocked: "■", skipped: "–", pending: "○", unverified: "!"};
   const shown = plan.filter(x => ["running", "blocked", "unverified"].includes(x.state))
@@ -3044,7 +3047,7 @@ function liveRun(s, asOf) {
     shown.map(x => h("li", {class: x.state},
       h("span", {class: "g", "aria-hidden": "true", text: glyph[x.state] || "○"}),
       h("span", {class: "ell", title: stepTitle(x) + " · " + stepWho(x)}, stepTitle(x), x.owner && x.owner !== "main" ? h("span", {class: "who", text: " · " + stepWho(x)}) : null),
-      h("span", {class: "m num", text: x.state === "running" ? fmtMin(x.min || 0) + " of ~" + fmtMin(x.est || 0) : x.state === "unverified" ? stepWord(x.state)[1] : "~" + fmtMin(x.est || 0)}))),
+      h("span", {class: "m num", text: x.state === "running" ? fmtMin(x.min || 0) + " of ~" + fmtAbout(x.est || 0) : x.state === "unverified" ? stepWord(x.state)[1] : "~" + fmtAbout(x.est || 0)}))),
     doneN ? h("li", {class: "more"}, h("span", {class: "g", text: "✓"}), h("span", {text: doneN + " done"}), h("span")) : null) : null;
   const lanes = (p.agents || []).length ? h("div", {class: "lanes", "aria-label": "Crew"},
     p.agents.map(a => h("span", {class: a.state === "running" ? "on" : a.state === "lost" || a.state === "unverified" ? "lost" : "",
@@ -3656,7 +3659,7 @@ function timeBody(t, showProject) {
     sub.n ? [h("h3", {class: "sub3", text: "Subagents, last 7 days"}), h("p", {class: "t2", style: "margin:0 0 6px;font-size:var(--fs-1)", text: plural(sub.n, "subagent") + ", median " + fmtMin(sub.median) + ", p90 " + fmtMin(sub.p90)}),
       slowTable((sub.top || []).slice(0, 4), showProject)] : null,
     (t.recent_runs || []).length ? [h("h3", {class: "sub3", text: "Recent runs: actual against estimate"}), h("ul", {class: "tl-rows"}, t.recent_runs.slice(0, 5).map(r => h("li", {class: "trow"},
-      h("span", {class: "tx ell", title: r.what, text: r.what || "run"}), h("span", {class: "num t2" + (r.estimate && r.secs / 60 > r.estimate * 1.5 ? " bad" : ""), text: fmtMin(r.secs / 60) + " of about " + fmtMin(r.estimate)}))))] : null];
+      h("span", {class: "tx ell", title: r.what, text: r.what || "run"}), h("span", {class: "num t2" + (r.estimate && r.secs / 60 > r.estimate * 1.5 ? " bad" : ""), text: fmtMin(r.secs / 60) + " of about " + fmtAbout(r.estimate)}))))] : null];
 }
 function viewProject(main) {
   const p = BYID.get(S.id);
@@ -3728,8 +3731,8 @@ function runCard(r) {
   const by = new Map(plan.map(s => [s.name, s])), dec = pending(r)[0], qs = r.questions || [], qOld = qs.length ? Math.min(...qs.map(q => q.ts || nowS())) : 0;
   const sess = sessOfRun(r), branch = (sess && sess.branch) || r.branch, eta = etaText(r);
   const stepTxt = s => { const wait = (s.after || []).find(a => by.has(a) && !["done", "skipped"].includes(by.get(a).state));
-    return s.state === "running" ? fmtMin(s.min || 0) + " of ~" + fmtMin(s.est || 0) : s.state === "blocked" ? (s.waiting ? "waiting for you" : "blocked") : s.state === "unverified" ? stepWord(s.state)[1]
-      : wait ? "waits for “" + stepTitle(by.get(wait)) + "”" : s.est ? "~" + fmtMin(s.est) : ""; };
+    return s.state === "running" ? fmtMin(s.min || 0) + " of ~" + fmtAbout(s.est || 0) : s.state === "blocked" ? (s.waiting ? "waiting for you" : "blocked") : s.state === "unverified" ? stepWord(s.state)[1]
+      : wait ? "waits for “" + stepTitle(by.get(wait)) + "”" : s.est ? "~" + fmtAbout(s.est) : ""; };
   const blockedStep = plan.find(s => s.state === "blocked");
   return h("article", {class: "rcard " + st, "data-key": "run~" + r.id, "data-sig": [st, t.done, r.step, r.updated].join("|"), "data-open": "run:" + r.id, onclick: rowClick(() => openModal("run", r.id))},
     h("div", {class: "rh"}, modalLink("run", r.id, r.goal || "Agent run"), h("span", {class: "rst", text: runStateText(r, st)})),
@@ -4374,8 +4377,8 @@ function showAll(key, list, n, rowFn, word) {
 }
 const STEPW = {running: ["▸", "Running"], pending: ["○", "To do"], blocked: ["■", "Blocked"], waiting: ["■", "Waiting for you"], done: ["✓", "Done"], skipped: ["–", "Skipped"], lost: ["!", "Stopped reporting"]};
 function stepTime(s) {
-  if (s.state === "running" || s.state === "done") return fmtMin(s.min || 0) + (s.est ? " of ~" + fmtMin(s.est) : "");
-  return s.est ? "~" + fmtMin(s.est) + (s.est_auto ? ", a default estimate" : "") : "";
+  if (s.state === "running" || s.state === "done") return fmtMin(s.min || 0) + (s.est ? " of ~" + fmtAbout(s.est) : "");
+  return s.est ? "~" + fmtAbout(s.est) + (s.est_auto ? ", a default estimate" : "") : "";
 }
 function findRun(id) { return RUNS.find(x => x.id === id) || RRUNS.find(x => x.id === id) || null; }
 function sessOfRun(r) { for (const x of PEOPLE) for (const s of x.sessions) if (s.session === r.session && s.agent === r.agent) return s; return null; }
@@ -4395,12 +4398,12 @@ function runModal(id) {
       agentName(x.agent), remote ? "on " + x.host : null, updatedNote(det)))];
   if (det.state === "loading") return {head, body: [skeleton()], busy: true};
   const pct = tm_.total ? 100 * tm_.done / tm_.total : 0, cal = x.estimate_cal && x.estimate && x.estimate_cal !== x.estimate ? x.estimate_cal / x.estimate : 0;
-  const first = runFirstEst(x), planned = x.total_min != null && fmtMin(first) !== fmtMin(x.total_min);   /* "of about" is the plan's total, not the first estimate */
+  const first = runFirstEst(x), planned = x.total_min != null && fmtAbout(first) !== fmtAbout(x.total_min);   /* "of about" is the plan's total, not the first estimate */
   const figs = h("div", {class: "mfigs"},
     h("div", null, h("span", {class: "s-l", text: "Progress"}), h("span", {class: "strong num", text: tm_.steps}),
       h("div", {class: "rbar" + (tm_.over ? " over" : ""), role: "progressbar", "aria-valuenow": Math.round(pct), "aria-valuemin": 0, "aria-valuemax": 100, "aria-valuetext": tm_.steps}, h("i", {style: "width:" + pct.toFixed(1) + "%"}))),
-    h("div", null, h("span", {class: "s-l", text: "Time"}), h("span", {class: "num", text: tm_.text + (cal && !planned ? ": estimated " + fmtMin(x.estimate) + ", ×" + cal.toFixed(1) + " from this project's runs" : "")}),
-      planned && first ? h("span", {class: "t2 num", text: "first estimate " + fmtMin(first)}) : null,
+    h("div", null, h("span", {class: "s-l", text: "Time"}), h("span", {class: "num", text: tm_.text + (cal && !planned ? ": estimated " + fmtAbout(x.estimate) + ", ×" + cal.toFixed(1) + " from this project's runs" : "")}),
+      planned && first ? h("span", {class: "t2 num", text: "first estimate " + fmtAbout(first)}) : null,
       tm_.over ? h("span", {class: "warn-t", text: "over the estimate by " + fmtMin(tm_.over)}) : null),
     h("div", null, h("span", {class: "s-l", text: "Left"}), h("span", {class: "num", text: etaText(x).replace(/ left$/, "") || (x.state === "done" ? "Done" : "No estimate")}),
       x.pace && Math.abs(x.pace - 1) >= 0.05 ? h("span", {class: "t2", text: "pace " + (+x.pace).toFixed(1) + "× the estimate"}) : null));
