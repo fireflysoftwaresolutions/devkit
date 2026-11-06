@@ -20,9 +20,9 @@ through this module:
     held(path)                      -> int: the id of this thread's hold on the record, 0 when it holds none
 
 Invariants
-- One lock per session covers both of its records: <state>/locks/rec-<agent>-<sid>.lock (an exclusive `flock`). It is
-  re-entrant per thread (a depth count), so a writer that holds it can call another writer; another thread or
-  process waits. Callers run no subprocess, git or network call while they hold it.
+- One lock per session covers its records (session, run, continuity): <state>/locks/rec-<agent>-<sid>.lock (an
+  exclusive `flock`). It is re-entrant per thread (a depth count), so a writer that holds it can call another
+  writer; another thread or process waits. Callers run no subprocess, git or network call while they hold it.
 - Waits are bounded by WAIT seconds: 10 for `dev` commands, 2 in hooks (hooks.run sets HOOK_WAIT). On timeout
   StateBusy is raised and `state.busy` is audited: the event is dropped whole, never half-applied.
 - A record that exists but does not parse is never written over: the read is tried 3 times within about 50 ms,
@@ -77,10 +77,11 @@ def _audit(action: str, target: str, detail: str, outcome: str):
 # --------------------------------------------------------------------------- the lock
 
 def lock_file(path) -> Path:
-    """The lock of a record: <state>/locks/rec-<agent>-<sid>.lock for both records of a session (their folders,
-    sessions/ and runs/, share a parent); next to the record for a record kept anywhere else."""
+    """The lock of a record: <state>/locks/rec-<agent>-<sid>.lock for the three records of a session (their
+    folders, sessions/, runs/ and continuity/, share a parent); next to the record for a record kept anywhere
+    else."""
     path = Path(path)
-    root = path.parent.parent if path.parent.name in ("sessions", "runs") else path.parent
+    root = path.parent.parent if path.parent.name in ("sessions", "runs", "continuity") else path.parent
     return root / "locks" / f"rec-{re.sub(r'[^A-Za-z0-9_.-]', '', path.stem)[:120] or '-'}.lock"
 
 

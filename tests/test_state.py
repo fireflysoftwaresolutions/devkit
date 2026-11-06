@@ -263,6 +263,25 @@ class LockTests(Records):
         self.assertEqual(self.record()["inner"], 2)
         self.assertNotIn("other", self.record())
 
+    def test_the_continuity_record_takes_the_sessions_lock(self):
+        # STATE/continuity/<agent>-<sid>.json outlives the session record (spec "Continuity module contract",
+        # Records): one lock still covers all three records of a session, so a hold on the run is a hold on it
+        from devkit import state
+        cont = self.root / "continuity" / "claude-s1.json"
+        self.assertEqual(state.lock_file(cont), state.lock_file(self.sf))
+        caught = []
+
+        def other_thread():
+            try:
+                state.update(cont, lambda d: d.update(other=1), wait=0.05)
+            except state.StateBusy:
+                caught.append("busy")
+        with state.hold(pg.run_path("claude", "s1")):
+            t = threading.Thread(target=other_thread)
+            t.start()
+            t.join(5)
+        self.assertEqual(caught, ["busy"])
+
     def test_a_write_leaves_only_the_record_private_to_its_owner(self):
         from devkit import state
         os.chmod(pg.SESSIONS, 0o755)
