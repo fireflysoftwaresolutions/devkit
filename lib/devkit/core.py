@@ -71,6 +71,7 @@ DEFAULTS = {
     "lock": False,
     "handoff": {"enforce": True},
     "canary": {"enforce": True},
+    "dashboard": {"idle_minutes": 30},  # the live dashboard server stops after this long with no page open
 }
 
 
