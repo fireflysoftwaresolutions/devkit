@@ -821,7 +821,7 @@ def cmd_note(a):
 
 
 def overview_data(days=7):
-    reg = core.read_json(HANDOFF / "registry.json", None) or _reg(prs=False)
+    reg = registry.build(with_prs=True, refresh_prs=False, pr_max_age=10 ** 9)  # fresh, local, cached PR data
     from . import canary
     import datetime as dt
     since = (dt.date.today() - dt.timedelta(days=days)).isoformat()
@@ -1214,8 +1214,9 @@ def build_parser():
     tsp = p.add_subparsers(dest="task_cmd")
     t = tsp.add_parser("add", help="add a task")
     t.add_argument("text", nargs="+")
-    t.add_argument("--now", action="store_true")
-    t.add_argument("--later", action="store_true")
+    t.add_argument("--now", action="store_true", help="add to Now (in progress)")
+    t.add_argument("--next", action="store_true", help="add to Next (the default)")
+    t.add_argument("--later", action="store_true", help="add to Later")
     for verb, h in (("start", "move to Now"), ("done", "mark done"), ("next", "move to Next"), ("later", "move to Later")):
         t = tsp.add_parser(verb, help=h)
         t.add_argument("selector", nargs="+", help="task number from `dev task` or a unique part of its text")
