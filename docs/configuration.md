@@ -174,8 +174,8 @@ Never edit the generated files directly; the next install overwrites them, and `
 
 | Variable | Effect |
 | --- | --- |
-| `DEV_ROOT` | Overrides `dev_root` |
-| `DEVKIT_CONFIG` | Path of the config file (default `~/.config/devkit/config.json`) |
+| `DEV_ROOT` | Overrides `dev_root`, only when you set it in your own terminal (see the note after this table) |
+| `DEVKIT_CONFIG` | Path of the config file (default `~/.config/devkit/config.json`), only when you set it in your own terminal |
 | `DEVKIT_GUARD=off` | In the environment of the agent process (`DEVKIT_GUARD=off claude`), turns the guard off for that whole session (see [Guard rules](guard.md#escape-hatches)) |
 | `DEVKIT_LOCAL_CI_PASSED=1` | Prefix of a `git push`: says the full local suite just passed, lifting the push budget for that push. `dev push`, `dev pr create`, and `dev release` accept it like `--ci-passed` |
 | `DEVKIT_FLAKY=1` | Prefix of `gh run rerun`: says the failure is a proven flaky test (prefer `dev run rerun <id> --flaky "…"`) |
@@ -198,6 +198,14 @@ Never edit the generated files directly; the next install overwrites them, and `
 | `DEVKIT_NO_AUTOSYNC=1` | No queued background syncs from that process; bulk operations push once at the end |
 | `NO_COLOR` | Plain output without colors |
 | `DEVKIT_SESSION`, `DEVKIT_AGENT` | Set by devkit in Claude Code sessions (and `DEVKIT_AGENT=job` in scheduled jobs) so `dev progress`, the work-item changelog, and the audit trail know the session and agent; do not set them yourself |
+
+**Who may point devkit elsewhere.** `HOME`, `DEVKIT_CONFIG`, and `DEV_ROOT` decide which state, configuration, and
+handoff repository devkit reads, so devkit takes a non-standard `DEVKIT_CONFIG` or `DEV_ROOT` only from a command you
+run in your own terminal, with no agent among its parent processes. Set by an agent's command or a hook, devkit
+ignores it with a warning on stderr and uses `~/.config/devkit/config.json` and the configured `dev_root`. The guard
+refuses these variables, and every other `DEVKIT_*` variable but the one-command escape hatches, in an agent's
+command (see [Guard rules › devkit's own state, configuration, and
+install](guard.md#devkits-own-state-configuration-and-install)).
 | `DEVKIT_JOB` | Set to the job's name while a scheduled job runs |
 | `CODEX_HOME` | Codex home (default `~/.codex`) |
 | `CLAUDE_CODE_TMPDIR` | Claude Code's temp root; devkit treats it as temp and purges it |

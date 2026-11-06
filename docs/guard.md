@@ -172,6 +172,28 @@ coverage folders), anything in a temp folder or the scratchpad, `rm` in a temp f
 variables the guard cannot see (`$VAR`, `$(…)`). Prefix the command with `DEVKIT_RAW_FS=1` to bypass these rules for
 that command; the protected paths in the previous table stay protected.
 
+### devkit's own state, configuration, and install
+
+devkit keeps runs, sessions, approvals, and the audit trail in `~/.local/state/devkit`, its configuration in
+`~/.config/devkit`, and the [pinned copy](getting-started.md#the-pinned-copy) the hooks run in
+`~/.local/share/devkit`. A forged record there could approve work nobody approved, so agents may not write them:
+devkit's own commands (`dev progress`, `dev task`, `dev crew`, …) write them in their own process. devkit makes the
+three folders readable and writable by your account only (`0700`) every time it starts.
+
+| Action of an agent | Decision |
+| --- | --- |
+| A file write (Write, Edit, `apply_patch`) in those three folders, or in a subagent's meta file | deny, with the `dev` command that owns the record |
+| A shell write there: a redirect, `tee`, `cp`, `mv`, `ln`, `rm`, `dev rm`, `sed -i`, an interpreter that writes files, also inside `sh -c`, `eval`, `xargs`, or `find -exec` | deny |
+| `dev config set safeguards.*` or `dev config edit`, or a `DEVKIT_*` or `DEV_ROOT` value added to the `env` block of an agent settings file or to a shell startup file such as `~/.zshrc` | deny |
+| Replacing, writing, or deleting a `dev` that a shell finds: `~/.local/bin/dev` (the link itself) or another `dev` earlier on `PATH` | deny → the developer runs `dev install --only cli` |
+| `HOME`, `DEVKIT_CONFIG`, `DEV_ROOT`, or another `DEVKIT_*` variable set for `dev`, `python -m devkit`, a program that imports devkit, or a nested `claude` or `codex` session; `launchctl setenv` of one of them | deny; the one-command [escape hatches](#escape-hatches) still work |
+| `dev install`, `dev update`, or `install.sh` | deny: they change what every hook and the guard run, so the developer runs them, in a terminal |
+
+devkit checks this a second time when it starts: it takes a `DEVKIT_CONFIG` other than
+`~/.config/devkit/config.json`, or a `DEV_ROOT` other than the configured `dev_root`, only from your terminal, with no
+agent among its parent processes. Otherwise it warns on stderr, uses the standard values, and drops the variable for
+the processes it starts. Reading these files is always fine. Only the developer changes safeguards, in a terminal.
+
 ### Unfinished work in a commit
 
 | Command | Decision |
