@@ -556,13 +556,15 @@ def start(goal: str, steps: int = 0, estimate: str = "", cwd: str | None = None,
     now = now or time.time()
     agent, sid = current_session(cwd)
     if from_agent:  # a subagent planning its own work: a lane of the main run, never a new main run
-        run = normalize(load_run(agent, sid) or {})
-        if run.get("goal"):
-            lane = _lane(run, from_agent, now)
-            lane.update(goal=goal, plan=[x[0] for x in parse_plan(plan)], done=0)
-            run["updates"].append({"ts": round(now), "kind": "agent", "agent": from_agent, "text": f"plan: {goal}"})
-            _save(run)
-            return run
+        with _tx(agent, sid):
+            run = normalize(load_run(agent, sid) or {})
+            if run.get("goal"):
+                lane = _lane(run, from_agent, now)
+                lane.update(goal=goal, plan=[x[0] for x in parse_plan(plan)], done=0)
+                run["updates"].append({"ts": round(now), "kind": "agent", "agent": from_agent,
+                                       "text": f"plan: {goal}"})
+                _save(run)
+                return run
     sf = SESSIONS / f"{agent}-{sid}.json"
     sess = core.read_json(sf, {}) or {}
     project = sess.get("project") or _project(cwd)
@@ -676,38 +678,39 @@ def assign(which, label: str, cwd: str | None = None, now: float | None = None, 
     _main_only(from_agent, "assigns the plan's steps")
     now = now or time.time()
     agent, sid = current_session(cwd)
-    run = normalize(load_run(agent, sid) or {})
-    s = _find_step(run, which)
-    if not s:
-        raise ValueError(f"no step “{which}” in the plan")
-    _raci_assign(run, s, label, why, now)
-    owner = s.get("owner") or "main"
-    if owner != "main" and s.get("state") != "done" and not _label_matches(label, (run.get("agents") or {}).get(owner)
-                                                                            or {}):
-        old = ((run.get("agents") or {}).get(owner) or {}).get("persona") or owner
-        _log_change(run, s, s.get("state"), "pending", "main", f"reassigned from {old} to {label}", now)
-        s.update(owner="main", state="pending")  # the other member's lane no longer owns it
-    s["label"] = label
-    if scope:
-        globs = [x.strip() for x in scope.split(",") if x.strip()]
-        for k, lane in (run.get("agents") or {}).items():
-            if lane.get("state") == "running" and not _label_matches(label, lane):
-                clash = [g for g in globs for h in lane.get("scope") or [] if _globs_overlap(g, h)]
-                if clash:
-                    raise StepError(f"{', '.join(clash)} overlaps the files {lane.get('persona') or lane.get('label')} "
-                                    f"owns while working ({', '.join(lane.get('scope'))}). Give each member "
-                                    f"different files, or wait until they finish.")
-        s["scope"] = globs
-    lane_id = None if deps_open(run, s) else next((k for k, v in (run.get("agents") or {}).items()
-                                                   if v.get("state") == "running" and _label_matches(label, v)), None)
-    if lane_id:
-        s.update(owner=lane_id, state="running", started=s.get("started") or now)
-        if s.get("scope"):
-            run["agents"][lane_id]["scope"] = s["scope"]
-    elif s.get("state") == "running" and (s.get("owner") or "main") == "main":
-        s["state"] = "pending"  # waits for its subagent
-    _advance_main(run, now)
-    _save(run)
+    with _tx(agent, sid):
+        run = normalize(load_run(agent, sid) or {})
+        s = _find_step(run, which)
+        if not s:
+            raise ValueError(f"no step “{which}” in the plan")
+        _raci_assign(run, s, label, why, now)
+        owner = s.get("owner") or "main"
+        if owner != "main" and s.get("state") != "done" and not _label_matches(label, (run.get("agents") or {}).get(owner)
+                                                                                or {}):
+            old = ((run.get("agents") or {}).get(owner) or {}).get("persona") or owner
+            _log_change(run, s, s.get("state"), "pending", "main", f"reassigned from {old} to {label}", now)
+            s.update(owner="main", state="pending")  # the other member's lane no longer owns it
+        s["label"] = label
+        if scope:
+            globs = [x.strip() for x in scope.split(",") if x.strip()]
+            for k, lane in (run.get("agents") or {}).items():
+                if lane.get("state") == "running" and not _label_matches(label, lane):
+                    clash = [g for g in globs for h in lane.get("scope") or [] if _globs_overlap(g, h)]
+                    if clash:
+                        raise StepError(f"{', '.join(clash)} overlaps the files {lane.get('persona') or lane.get('label')} "
+                                        f"owns while working ({', '.join(lane.get('scope'))}). Give each member "
+                                        f"different files, or wait until they finish.")
+            s["scope"] = globs
+        lane_id = None if deps_open(run, s) else next((k for k, v in (run.get("agents") or {}).items()
+                                                       if v.get("state") == "running" and _label_matches(label, v)), None)
+        if lane_id:
+            s.update(owner=lane_id, state="running", started=s.get("started") or now)
+            if s.get("scope"):
+                run["agents"][lane_id]["scope"] = s["scope"]
+        elif s.get("state") == "running" and (s.get("owner") or "main") == "main":
+            s["state"] = "pending"  # waits for its subagent
+        _advance_main(run, now)
+        _save(run)
     return run
 
 
@@ -823,12 +826,13 @@ def crew_ask(text: str, to: str | None = None, from_agent: str | None = None, cw
     with its next tool call (PostToolUse) or prompt."""
     now = now or time.time()
     agent, sid = current_session(cwd)
-    run = load_run(agent, sid)
-    if not run:
-        raise ValueError("no progress run in this session: Morpheus starts one with dev progress start")
-    run = normalize(run)
-    m = _post(run, from_agent or "main", _addr(run, to or ""), text, now)
-    _save(run, touch_session=False)
+    with _tx(agent, sid):
+        run = load_run(agent, sid)
+        if not run:
+            raise ValueError("no progress run in this session: Morpheus starts one with dev progress start")
+        run = normalize(run)
+        m = _post(run, from_agent or "main", _addr(run, to or ""), text, now)
+        _save(run, touch_session=False)
     _audit("crew.message", f"{m['from_name']} → {m['to_name']}", m["text"][:300], project=run.get("project") or "",
            id=m["id"])
     return m
@@ -847,18 +851,20 @@ def _post(run, frm: str, to: str, text: str, now: float, from_name: str = "") ->
 
 def crew_answer(msg_id: str, text: str, from_agent: str | None = None, cwd: str | None = None, now: float | None = None) -> dict:
     agent, sid = current_session(cwd)
-    run = normalize(load_run(agent, sid) or {})
-    q = next((m for m in run.get("messages") or [] if m["id"].lower() == str(msg_id).lower()), None)
-    if not q:
-        raise ValueError(f"no message {msg_id}")
-    q["answered"] = True
-    _save(run, touch_session=False)
+    with _tx(agent, sid):
+        run = normalize(load_run(agent, sid) or {})
+        q = next((m for m in run.get("messages") or [] if m["id"].lower() == str(msg_id).lower()), None)
+        if not q:
+            raise ValueError(f"no message {msg_id}")
+        q["answered"] = True
+        _save(run, touch_session=False)
     a = crew_ask(text, to=q["from"] if q["from"] != "main" else "main", from_agent=from_agent, cwd=cwd, now=now)
-    run = normalize(load_run(agent, sid))
-    for m in run["messages"]:
-        if m["id"] == a["id"]:
-            m["reply_to"], m["to"], m["to_name"] = q["id"], q["from"], q["from_name"]
-    _save(run, touch_session=False)
+    with _tx(agent, sid):
+        run = normalize(load_run(agent, sid) or {})
+        for m in run.get("messages") or []:
+            if m["id"] == a["id"]:
+                m["reply_to"], m["to"], m["to_name"] = q["id"], q["from"], q["from_name"]
+        _save(run, touch_session=False)
     return a
 
 
@@ -870,21 +876,26 @@ def crew_inbox(from_agent: str | None = None, cwd: str | None = None, mark: bool
 
 
 def _take_messages(agent, sid, me: str, mark=True) -> list:
+    """The messages for `me` not delivered yet; with mark, they are marked delivered (once each, under the lock).
+    Every hook call asks: the lock is taken only when there is something to take."""
+    def mine(run):
+        run = normalize(run)
+        lane = (run.get("agents") or {}).get(me) or {}
+        return run, [m for m in run.get("messages") or [] if not m.get("delivered") and (
+            m.get("to") == me or ((m.get("to") or "").startswith("name:") and me != "main"
+                                  and _label_matches(m["to"][5:], lane)))]
     run = load_run(agent, sid)
-    if not run:
+    if not run or not mine(run)[1]:
         return []
-    run = normalize(run)
-    lane = (run.get("agents") or {}).get(me) or {}
-    out = []
-    for m in run.get("messages") or []:
-        to = m.get("to")
-        mine = to == me or (to.startswith("name:") and me != "main" and _label_matches(to[5:], lane))
-        if mine and not m.get("delivered"):
-            out.append(dict(m))
-            if mark:
-                m["delivered"] = True
-    if out and mark:
-        _save(run, touch_session=False)
+    if not mark:
+        return [dict(m) for m in mine(run)[1]]
+    with _tx(agent, sid):
+        run, new = mine(load_run(agent, sid) or {})
+        out = [dict(m) for m in new]
+        for m in new:
+            m["delivered"] = True
+        if out:
+            _save(run, touch_session=False)
     return out
 
 
@@ -903,18 +914,19 @@ def set_mode(mode: str, approve: str = "", cwd: str | None = None, now: float | 
     if mode not in ("guided", "auto"):
         raise StepError("mode is guided or auto")
     agent, sid = current_session(cwd)
-    run = normalize(load_run(agent, sid) or {})
-    if not run.get("goal"):
-        raise StepError("no progress run in this session: dev progress start \"<goal>\" --plan \"…\" --mode " + mode)
-    approved = [x.strip().lower() for x in (approve or "").split(",") if x.strip()]
-    bad = [x for x in approved if x not in IRREVERSIBLE]
-    if bad:
-        raise StepError(f"unknown action(s) {', '.join(bad)}; known: {', '.join(IRREVERSIBLE)}")
-    run["mode"], run["approved"] = mode, approved if mode == "auto" else []
-    _audit("crew.mode", mode, "approved: " + (", ".join(approved) or "nothing"), project=run.get("project") or "")
-    run.setdefault("history", []).append({"ts": round(now), "step": "(mode)", "from": None, "to": mode,
-                                          "by": "main", "why": "approved: " + (", ".join(approved) or "nothing")})
-    _save(run)
+    with _tx(agent, sid):
+        run = normalize(load_run(agent, sid) or {})
+        if not run.get("goal"):
+            raise StepError("no progress run in this session: dev progress start \"<goal>\" --plan \"…\" --mode " + mode)
+        approved = [x.strip().lower() for x in (approve or "").split(",") if x.strip()]
+        bad = [x for x in approved if x not in IRREVERSIBLE]
+        if bad:
+            raise StepError(f"unknown action(s) {', '.join(bad)}; known: {', '.join(IRREVERSIBLE)}")
+        run["mode"], run["approved"] = mode, approved if mode == "auto" else []
+        _audit("crew.mode", mode, "approved: " + (", ".join(approved) or "nothing"), project=run.get("project") or "")
+        run.setdefault("history", []).append({"ts": round(now), "step": "(mode)", "from": None, "to": mode,
+                                              "by": "main", "why": "approved: " + (", ".join(approved) or "nothing")})
+        _save(run)
     return run
 
 
@@ -925,39 +937,40 @@ def crew_decision(question: str, options=None, recommend: str = "", irreversible
     asking member's lane waits and its step is blocked until Morpheus records the answer (crew_decide)."""
     now = now or time.time()
     agent, sid = current_session(cwd)
-    run = load_run(agent, sid)
-    if not run:
-        raise StepError("no progress run in this session: Morpheus starts one with dev progress start")
-    run = normalize(run)
-    opts = [o.strip() for o in (options if isinstance(options, list) else str(options or "").split("|")) if o.strip()]
-    rec = (recommend or "").strip()
-    if rec and opts and not any(o.lower().startswith(rec.lower()) for o in opts):
-        raise StepError(f"the recommendation “{rec}” is not one of the options: {' | '.join(opts)}")
-    act = (irreversible or "").strip().lower()
-    if act and act not in IRREVERSIBLE:
-        raise StepError(f"unknown irreversible action “{act}”; known: {', '.join(IRREVERSIBLE)}")
-    decs = run.setdefault("decisions", [])
-    d = {"id": f"D{len(decs) + 1}", "ts": round(now), "question": question.strip()[:800], "options": opts,
-         "recommend": rec, "irreversible": act, "from": from_agent or "main",
-         "from_name": _name_of(run, from_agent or "main"), "state": "pending", "answer": "", "by": ""}
-    auto = mode_of(run) == "auto" and (not act or act in (run.get("approved") or []))
-    if auto and rec:
-        d.update(state="decided", answer=rec, by="auto", decided=round(now))
-    else:
-        if from_agent:
-            lane = (run.get("agents") or {}).get(from_agent)
-            if lane:
-                lane["state_before_wait"] = lane.get("state")
-                lane["waiting"] = d["id"]
-            for s in run.get("plan") or []:
-                if s.get("owner") == from_agent and s.get("state") == "running":
-                    _log_change(run, s, "running", "blocked", from_agent, f"waiting for the developer: {d['id']}", now)
-                    s["state"], s["waiting"] = "blocked", d["id"]
-        if not auto and not rec and mode_of(run) == "auto":
-            d["note"] = "auto mode, but no recommendation was given: the developer decides"
-    decs.append(d)
-    run["decisions"] = decs[-200:]
-    _save(run, touch_session=False)
+    with _tx(agent, sid):
+        run = load_run(agent, sid)
+        if not run:
+            raise StepError("no progress run in this session: Morpheus starts one with dev progress start")
+        run = normalize(run)
+        opts = [o.strip() for o in (options if isinstance(options, list) else str(options or "").split("|")) if o.strip()]
+        rec = (recommend or "").strip()
+        if rec and opts and not any(o.lower().startswith(rec.lower()) for o in opts):
+            raise StepError(f"the recommendation “{rec}” is not one of the options: {' | '.join(opts)}")
+        act = (irreversible or "").strip().lower()
+        if act and act not in IRREVERSIBLE:
+            raise StepError(f"unknown irreversible action “{act}”; known: {', '.join(IRREVERSIBLE)}")
+        decs = run.setdefault("decisions", [])
+        d = {"id": f"D{len(decs) + 1}", "ts": round(now), "question": question.strip()[:800], "options": opts,
+             "recommend": rec, "irreversible": act, "from": from_agent or "main",
+             "from_name": _name_of(run, from_agent or "main"), "state": "pending", "answer": "", "by": ""}
+        auto = mode_of(run) == "auto" and (not act or act in (run.get("approved") or []))
+        if auto and rec:
+            d.update(state="decided", answer=rec, by="auto", decided=round(now))
+        else:
+            if from_agent:
+                lane = (run.get("agents") or {}).get(from_agent)
+                if lane:
+                    lane["state_before_wait"] = lane.get("state")
+                    lane["waiting"] = d["id"]
+                for s in run.get("plan") or []:
+                    if s.get("owner") == from_agent and s.get("state") == "running":
+                        _log_change(run, s, "running", "blocked", from_agent, f"waiting for the developer: {d['id']}", now)
+                        s["state"], s["waiting"] = "blocked", d["id"]
+            if not auto and not rec and mode_of(run) == "auto":
+                d["note"] = "auto mode, but no recommendation was given: the developer decides"
+        decs.append(d)
+        run["decisions"] = decs[-200:]
+        _save(run, touch_session=False)
     _audit("crew.decision", d["id"], d["question"][:300], d["state"], project=run.get("project") or "",
            by=d.get("by") or "", answer=d.get("answer") or "", irreversible=d.get("irreversible") or "",
            mode=mode_of(run), asked_by=d["from_name"])
@@ -969,26 +982,27 @@ def crew_decide(decision_id: str, answer: str, cwd: str | None = None, now: floa
     message with the answer waits for that member (delivered when Morpheus resumes it)."""
     now = now or time.time()
     agent, sid = current_session(cwd)
-    run = normalize(load_run(agent, sid) or {})
-    d = next((x for x in run.get("decisions") or [] if x["id"].lower() == str(decision_id).lower()), None)
-    if not d:
-        raise StepError(f"no decision {decision_id}")
-    if d["state"] == "decided" and d.get("by") != "auto":
-        raise StepError(f"{d['id']} was already decided by {d['by']}: “{d['answer']}”")
-    prev = d.get("answer")
-    d.update(state="decided", answer=answer.strip()[:800], by=by, decided=round(now))
-    if prev and prev != d["answer"]:
-        d["overrides"] = prev  # the developer changed an automatic decision
-    for s in run.get("plan") or []:
-        if s.get("waiting") == d["id"]:
-            _log_change(run, s, s.get("state"), "running", "main", f"{d['id']} decided: {d['answer'][:80]}", now)
-            s["state"] = "running"
-            s.pop("waiting", None)
-    for lane in (run.get("agents") or {}).values():
-        if lane.get("waiting") == d["id"]:
-            lane.pop("waiting", None)
-            lane["state"] = lane.pop("state_before_wait", None) or "running"
-    _save(run, touch_session=False)
+    with _tx(agent, sid):
+        run = normalize(load_run(agent, sid) or {})
+        d = next((x for x in run.get("decisions") or [] if x["id"].lower() == str(decision_id).lower()), None)
+        if not d:
+            raise StepError(f"no decision {decision_id}")
+        if d["state"] == "decided" and d.get("by") != "auto":
+            raise StepError(f"{d['id']} was already decided by {d['by']}: “{d['answer']}”")
+        prev = d.get("answer")
+        d.update(state="decided", answer=answer.strip()[:800], by=by, decided=round(now))
+        if prev and prev != d["answer"]:
+            d["overrides"] = prev  # the developer changed an automatic decision
+        for s in run.get("plan") or []:
+            if s.get("waiting") == d["id"]:
+                _log_change(run, s, s.get("state"), "running", "main", f"{d['id']} decided: {d['answer'][:80]}", now)
+                s["state"] = "running"
+                s.pop("waiting", None)
+        for lane in (run.get("agents") or {}).values():
+            if lane.get("waiting") == d["id"]:
+                lane.pop("waiting", None)
+                lane["state"] = lane.pop("state_before_wait", None) or "running"
+        _save(run, touch_session=False)
     _audit("crew.decided", d["id"], d["answer"][:300], project=run.get("project") or "", by=by,
            overrides=d.get("overrides") or "")
     if d["from"] != "main":
@@ -1019,15 +1033,16 @@ def _ready(agent, sid) -> str:
 def decisions_context(agent: str, sid: str) -> str:
     """For the main session: decisions waiting for the developer, newest first, once per decision."""
     run = load_run(agent, sid)
-    if not run:
-        return ""
-    run = normalize(run)
-    new = [d for d in pending_decisions(run) if not d.get("surfaced")]
-    if not new:
-        return ""
-    for d in new:
-        d["surfaced"] = True
-    _save(run, touch_session=False)
+    if not run or not any(not d.get("surfaced") for d in pending_decisions(run)):
+        return ""  # the usual case, without the lock
+    with _tx(agent, sid):
+        run = normalize(load_run(agent, sid) or {})
+        new = [d for d in pending_decisions(run) if not d.get("surfaced")]
+        if not new:
+            return ""
+        for d in new:
+            d["surfaced"] = True
+        _save(run, touch_session=False)
     lines = ["devkit · decisions waiting for the developer (" + mode_of(run) + " mode). Ask with your question tool "
              "(AskUserQuestion / request_user_input) using the decision template, then record the answer with "
              "`dev crew decide <id> \"<answer>\"` and resume the member who asked (SendMessage / send_input):"]
@@ -1056,18 +1071,19 @@ def begin(which, cwd: str | None = None, now: float | None = None, from_agent: s
     _main_only(from_agent, "starts the plan's steps")
     now = now or time.time()
     agent, sid = current_session(cwd)
-    run = normalize(load_run(agent, sid) or {})
-    s = _find_step(run, which)
-    if not s:
-        raise ValueError(f"no step “{which}” in the plan")
-    if s.get("state") != "done":
-        waiting = deps_open(run, s)
-        if waiting:
-            raise StepError(f"step “{s['name']}” waits for {', '.join(waiting)}, not done yet: it starts when "
-                            f"{'that is' if len(waiting) == 1 else 'they are'} done. If the order really changed, "
-                            f"skip what it waits for: dev progress skip \"{waiting[0]}\" --why \"…\"")
-        s.update(state="running", started=s.get("started") or now)
-    _save(run)
+    with _tx(agent, sid):
+        run = normalize(load_run(agent, sid) or {})
+        s = _find_step(run, which)
+        if not s:
+            raise ValueError(f"no step “{which}” in the plan")
+        if s.get("state") != "done":
+            waiting = deps_open(run, s)
+            if waiting:
+                raise StepError(f"step “{s['name']}” waits for {', '.join(waiting)}, not done yet: it starts when "
+                                f"{'that is' if len(waiting) == 1 else 'they are'} done. If the order really changed, "
+                                f"skip what it waits for: dev progress skip \"{waiting[0]}\" --why \"…\"")
+            s.update(state="running", started=s.get("started") or now)
+        _save(run)
     return run
 
 
@@ -1160,32 +1176,33 @@ def add_step(spec: str, cwd: str | None = None, now: float | None = None, why: s
     lane's plan; the main plan is Morpheus's."""
     now = now or time.time()
     agent, sid = current_session(cwd)
-    run = normalize(load_run(agent, sid) or {})
-    if not run.get("goal"):
-        raise StepError("no progress run in this session: dev progress start \"<goal>\" --plan \"…\"")
-    items = parse_plan(spec)
-    if not items:
-        raise StepError("give the step: dev progress add \"<name>=<estimate>\"")
-    if from_agent:
-        lane = _lane(run, from_agent, now)
-        plan = lane.setdefault("plan", [])
+    with _tx(agent, sid):
+        run = normalize(load_run(agent, sid) or {})
+        if not run.get("goal"):
+            raise StepError("no progress run in this session: dev progress start \"<goal>\" --plan \"…\"")
+        items = parse_plan(spec)
+        if not items:
+            raise StepError("give the step: dev progress add \"<name>=<estimate>\"")
+        if from_agent:
+            lane = _lane(run, from_agent, now)
+            plan = lane.setdefault("plan", [])
+            for name, _, _ in items:
+                if name.lower() in (x.lower() for x in plan):
+                    raise StepError(f"step “{name}” is already in your lane's plan")
+                plan.append(name)
+                run["updates"].append({"ts": round(now), "kind": "agent", "agent": from_agent, "text": f"added: {name}"})
+            _save(run)
+            return run
         for name, _, _ in items:
-            if name.lower() in (x.lower() for x in plan):
-                raise StepError(f"step “{name}” is already in your lane's plan")
-            plan.append(name)
-            run["updates"].append({"ts": round(now), "kind": "agent", "agent": from_agent, "text": f"added: {name}"})
+            if _find_step(run, name) and _find_step(run, name)["name"].lower() == name.lower():
+                raise StepError(f"step “{name}” is already in the plan")
+        for s in _build_steps(items, run["plan"]):  # an unknown dependency or a cycle is refused: the plan stays as it is
+            run["plan"].append(s)
+            _log_change(run, s, None, "pending", "main", why or "added during the work", now)
+        _allocate(run)
+        run["steps"] = len(run["plan"])
+        _advance_main(run, now)
         _save(run)
-        return run
-    for name, _, _ in items:
-        if _find_step(run, name) and _find_step(run, name)["name"].lower() == name.lower():
-            raise StepError(f"step “{name}” is already in the plan")
-    for s in _build_steps(items, run["plan"]):  # an unknown dependency or a cycle is refused: the plan stays as it is
-        run["plan"].append(s)
-        _log_change(run, s, None, "pending", "main", why or "added during the work", now)
-    _allocate(run)
-    run["steps"] = len(run["plan"])
-    _advance_main(run, now)
-    _save(run)
     return run
 
 
@@ -1197,38 +1214,39 @@ def reopen(which, why: str, cwd: str | None = None, now: float | None = None, sk
     if not (why or "").strip():
         raise StepError("say why: --why \"…\" (it goes into the run's history)")
     agent, sid = current_session(cwd)
-    run = normalize(load_run(agent, sid) or {})
-    s = _find_step(run, which)
-    if not s:
-        raise StepError(f"no step “{which}” in the plan")
-    old = s.get("state")
-    if skip:
-        if old in ("done", "skipped"):
-            raise StepError(f"step “{s['name']}” is already {old}")
-        s.update(state="skipped", finished=now)
-    else:
-        if old not in ("done", "skipped", "blocked"):
-            raise StepError(f"step “{s['name']}” is {old}, not closed")
-        s.update(state="pending", finished=None)
-        s.pop("recheck", None)  # it is redone now
-        if (s.get("owner") or "main") != "main":
-            s["owner"] = "main"  # back to Morpheus, still assigned to its member: dev crew next launches it again
-        if old in DONE:
-            _recheck_dependents(run, s, now)
-        if not s.get("label") and not deps_open(run, s):
-            for x in run["plan"]:  # the reopened step becomes the main lane's current one
-                if x is not s and x.get("state") == "running" and (x.get("owner") or "main") == "main":
-                    x["state"] = "pending"
-            s["state"] = "running"
-            s["started"] = s.get("started") or now
-        s.pop("untimed", None)
-        s["reopened"] = (s.get("reopened") or 0) + 1
-    _log_change(run, s, old, s["state"], "main", why, now)
-    run["step"] = sum(1 for x in run["plan"] if x.get("state") in ("done", "skipped"))
-    run["updates"].append({"ts": round(now), "kind": "reopen" if not skip else "skip", "text": why,
-                           "step": s["name"]})
-    _advance_main(run, now)
-    _save(run)
+    with _tx(agent, sid):
+        run = normalize(load_run(agent, sid) or {})
+        s = _find_step(run, which)
+        if not s:
+            raise StepError(f"no step “{which}” in the plan")
+        old = s.get("state")
+        if skip:
+            if old in ("done", "skipped"):
+                raise StepError(f"step “{s['name']}” is already {old}")
+            s.update(state="skipped", finished=now)
+        else:
+            if old not in ("done", "skipped", "blocked"):
+                raise StepError(f"step “{s['name']}” is {old}, not closed")
+            s.update(state="pending", finished=None)
+            s.pop("recheck", None)  # it is redone now
+            if (s.get("owner") or "main") != "main":
+                s["owner"] = "main"  # back to Morpheus, still assigned to its member: dev crew next launches it again
+            if old in DONE:
+                _recheck_dependents(run, s, now)
+            if not s.get("label") and not deps_open(run, s):
+                for x in run["plan"]:  # the reopened step becomes the main lane's current one
+                    if x is not s and x.get("state") == "running" and (x.get("owner") or "main") == "main":
+                        x["state"] = "pending"
+                s["state"] = "running"
+                s["started"] = s.get("started") or now
+            s.pop("untimed", None)
+            s["reopened"] = (s.get("reopened") or 0) + 1
+        _log_change(run, s, old, s["state"], "main", why, now)
+        run["step"] = sum(1 for x in run["plan"] if x.get("state") in ("done", "skipped"))
+        run["updates"].append({"ts": round(now), "kind": "reopen" if not skip else "skip", "text": why,
+                               "step": s["name"]})
+        _advance_main(run, now)
+        _save(run)
     return run
 
 
@@ -1262,18 +1280,19 @@ def note(text: str, nxt: str = "", cwd: str | None = None, from_agent: str | Non
     if not (text or "").strip():
         raise StepError("say what is happening: dev progress note \"<what is happening>\" --next \"<what is next>\"")
     agent, sid = current_session(cwd)
-    run = normalize(load_run(agent, sid) or {})
-    if not run.get("goal"):
-        raise StepError("no progress run in this session: dev progress start \"<goal>\" --plan \"…\"")
-    u = {"ts": round(now), "kind": "note", "text": text.strip(), "next": nxt, "check": ""}
-    if from_agent:  # a member's note stays in its lane
-        lane = _lane(run, from_agent, now)
-        lane["updates"] = (lane.get("updates") or [])[-19:] + [u]
-        run["updates"].append({**u, "kind": "agent", "agent": from_agent})
-    else:
-        run["updates"].append(u)
-    run["updates"] = run["updates"][-40:]
-    _save(run)
+    with _tx(agent, sid):
+        run = normalize(load_run(agent, sid) or {})
+        if not run.get("goal"):
+            raise StepError("no progress run in this session: dev progress start \"<goal>\" --plan \"…\"")
+        u = {"ts": round(now), "kind": "note", "text": text.strip(), "next": nxt, "check": ""}
+        if from_agent:  # a member's note stays in its lane
+            lane = _lane(run, from_agent, now)
+            lane["updates"] = (lane.get("updates") or [])[-19:] + [u]
+            run["updates"].append({**u, "kind": "agent", "agent": from_agent})
+        else:
+            run["updates"].append(u)
+        run["updates"] = run["updates"][-40:]
+        _save(run)
     return run
 
 
@@ -1302,91 +1321,95 @@ def step(text: str, nxt: str = "", cwd: str | None = None, kind: str = "step", c
          from_agent: str | None = None, now: float | None = None, force: bool = False, why: str = "") -> dict:
     now = now or time.time()
     agent, sid = current_session(cwd)
-    run = load_run(agent, sid)
-    if from_agent and run:  # a subagent's update: its lane only
-        run = normalize(run)
-        lane = _lane(run, from_agent, now)
-        lane["updates"] = (lane.get("updates") or [])[-19:] + [{"ts": round(now), "kind": kind, "text": text,
-                                                                "check": check}]
+    if not load_run(agent, sid):  # no run yet: start one first (start publishes, so never inside the lock)
+        start(text if kind != "step" else "work in progress", cwd=cwd, now=now)
+        from_agent_lane = False
+    else:
+        from_agent_lane = bool(from_agent)
+    with _tx(agent, sid):
+        run = load_run(agent, sid)
+        if from_agent_lane:  # a subagent's update: its lane only
+            run = normalize(run)
+            lane = _lane(run, from_agent, now)
+            lane["updates"] = (lane.get("updates") or [])[-19:] + [{"ts": round(now), "kind": kind, "text": text,
+                                                                    "check": check}]
+            if kind == "step":
+                lane["done"] = (lane.get("done") or 0) + 1
+            run["updates"].append({"ts": round(now), "kind": "agent", "agent": from_agent, "text": text, "check": check})
+            run["updates"] = run["updates"][-40:]
+            _save(run)
+            return run
+        run = normalize(run or {})
+        plan = run["plan"]
+        target = _find_step(run, which) if which else None
+        if which and not target:
+            raise StepError(f"no step “{which}” in the plan: " + "; ".join(f"{i}. {s['name']}" for i, s in
+                                                                          enumerate(plan, 1)))
         if kind == "step":
-            lane["done"] = (lane.get("done") or 0) + 1
-        run["updates"].append({"ts": round(now), "kind": "agent", "agent": from_agent, "text": text, "check": check})
+            explicit = target is not None
+            if not target:
+                running = [s for s in plan if s.get("state") == "running" and (s.get("owner") or "main") == "main"]
+                if len(running) > 1:
+                    raise StepError("several steps are running (" + ", ".join(s["name"] for s in running) +
+                                    "): say which with --step")
+                target = (running or [None])[0] or next((s for s in plan if s.get("state") in ("pending", "blocked")
+                                                         and (s.get("owner") or "main") == "main"
+                                                         and not s.get("label")), None)
+            if not plan:  # a run without a plan: each step is recorded as it comes
+                target = _new_step(text[:60], est=None)
+                plan.append(target)
+                _allocate(run)
+            else:
+                check_close(run, target, text, explicit, force)
+            old_state = target.get("state")
+            _finish_step(run, target, now, agent, sid)
+            _log_change(run, target, old_state, "done", "main", check or text, now)
+            _advance_main(run, now)
+            run["state"] = "running"
+        elif kind == "blocked":
+            run["state"] = "blocked"
+            cur = target or next((s for s in plan if s.get("state") == "running"), None)
+            if cur:
+                _log_change(run, cur, cur.get("state"), "blocked", "main", text, now)
+                cur["state"] = "blocked"
+        elif kind == "done":
+            waiting = pending_decisions(run)
+            if waiting and not force:
+                raise StepError("decisions still waiting for the developer: " + ", ".join(
+                    f"{d['id']} ({d['question'][:60]})" for d in waiting) + ". Ask, then dev crew decide <id> \"…\".")
+            owed = approvals_owed(run)
+            if owed and not why:
+                from . import raci
+                raise StepError("the work is not approved yet (the crew's RACI): " + "; ".join(
+                    f"{raci.names([acc])} approves {', '.join('“' + x + '”' for x in steps)}" for acc, steps in owed) +
+                    ". Add a review step for each (dev progress add \"review=20m\" then dev progress assign review --to "
+                    f"{raci.handle(owed[0][0])}), or end with --why \"<reason>\".")
+            if owed:
+                run.setdefault("raci_overrides", []).append({"ts": round(now), "step": "(end of run)", "why": why,
+                                                             "owed": [[a, s_] for a, s_ in owed]})
+            open_ = [s for s in plan if s.get("state") not in ("done", "skipped") and s.get("state") != "running"]
+            if open_ and not force:
+                raise StepError("not finished: " + ", ".join(f"“{s['name']}” ({s.get('state')})" for s in open_) +
+                                ". Close or skip each one (dev progress skip \"<step>\" --why \"…\"), or use --force.")
+            for s in plan:
+                if s.get("state") != "done":
+                    old_state = s.get("state")
+                    if s.get("state") == "running" or s is target:
+                        _finish_step(run, s, now, agent, sid)
+                    else:
+                        s["state"] = "skipped"
+                    _log_change(run, s, old_state, s["state"], "main", text, now)
+            run.update(state="done", finished=now)
+            _close(run, "turn", None, now)
+            record("run", agent, sid, run.get("goal", ""), active_minutes(run, now=now) * 60, run.get("project", ""),
+                   estimate=run.get("estimate") or 0, steps=len(plan), wall=round(wall_minutes(run, now) * 60, 1),
+                   basis="active")
+        run["steps"] = len(plan)
+        run["step"] = sum(1 for s in plan if s.get("state") in ("done", "skipped"))
+        run["updates"].append({"ts": round(now), "kind": kind, "text": text, "next": nxt, "check": check,
+                               "step": target["name"] if target else ""})
         run["updates"] = run["updates"][-40:]
         _save(run)
-        return run
-    if not run:
-        run = start(text if kind != "step" else "work in progress", cwd=cwd, now=now)
-    run = normalize(run)
-    plan = run["plan"]
-    target = _find_step(run, which) if which else None
-    if which and not target:
-        raise StepError(f"no step “{which}” in the plan: " + "; ".join(f"{i}. {s['name']}" for i, s in
-                                                                      enumerate(plan, 1)))
-    if kind == "step":
-        explicit = target is not None
-        if not target:
-            running = [s for s in plan if s.get("state") == "running" and (s.get("owner") or "main") == "main"]
-            if len(running) > 1:
-                raise StepError("several steps are running (" + ", ".join(s["name"] for s in running) +
-                                "): say which with --step")
-            target = (running or [None])[0] or next((s for s in plan if s.get("state") in ("pending", "blocked")
-                                                     and (s.get("owner") or "main") == "main"
-                                                     and not s.get("label")), None)
-        if not plan:  # a run without a plan: each step is recorded as it comes
-            target = _new_step(text[:60], est=None)
-            plan.append(target)
-            _allocate(run)
-        else:
-            check_close(run, target, text, explicit, force)
-        old_state = target.get("state")
-        _finish_step(run, target, now, agent, sid)
-        _log_change(run, target, old_state, "done", "main", check or text, now)
-        _advance_main(run, now)
-        run["state"] = "running"
-    elif kind == "blocked":
-        run["state"] = "blocked"
-        cur = target or next((s for s in plan if s.get("state") == "running"), None)
-        if cur:
-            _log_change(run, cur, cur.get("state"), "blocked", "main", text, now)
-            cur["state"] = "blocked"
-    elif kind == "done":
-        waiting = pending_decisions(run)
-        if waiting and not force:
-            raise StepError("decisions still waiting for the developer: " + ", ".join(
-                f"{d['id']} ({d['question'][:60]})" for d in waiting) + ". Ask, then dev crew decide <id> \"…\".")
-        owed = approvals_owed(run)
-        if owed and not why:
-            from . import raci
-            raise StepError("the work is not approved yet (the crew's RACI): " + "; ".join(
-                f"{raci.names([acc])} approves {', '.join('“' + x + '”' for x in steps)}" for acc, steps in owed) +
-                ". Add a review step for each (dev progress add \"review=20m\" then dev progress assign review --to "
-                f"{raci.handle(owed[0][0])}), or end with --why \"<reason>\".")
-        if owed:
-            run.setdefault("raci_overrides", []).append({"ts": round(now), "step": "(end of run)", "why": why,
-                                                         "owed": [[a, s_] for a, s_ in owed]})
-        open_ = [s for s in plan if s.get("state") not in ("done", "skipped") and s.get("state") != "running"]
-        if open_ and not force:
-            raise StepError("not finished: " + ", ".join(f"“{s['name']}” ({s.get('state')})" for s in open_) +
-                            ". Close or skip each one (dev progress skip \"<step>\" --why \"…\"), or use --force.")
-        for s in plan:
-            if s.get("state") != "done":
-                old_state = s.get("state")
-                if s.get("state") == "running" or s is target:
-                    _finish_step(run, s, now, agent, sid)
-                else:
-                    s["state"] = "skipped"
-                _log_change(run, s, old_state, s["state"], "main", text, now)
-        run.update(state="done", finished=now)
-        _close(run, "turn", None, now)
-        record("run", agent, sid, run.get("goal", ""), active_minutes(run, now=now) * 60, run.get("project", ""),
-               estimate=run.get("estimate") or 0, steps=len(plan), wall=round(wall_minutes(run, now) * 60, 1),
-               basis="active")
-    run["steps"] = len(plan)
-    run["step"] = sum(1 for s in plan if s.get("state") in ("done", "skipped"))
-    run["updates"].append({"ts": round(now), "kind": kind, "text": text, "next": nxt, "check": check,
-                           "step": target["name"] if target else ""})
-    run["updates"] = run["updates"][-40:]
-    _save(run)
     _publish()
     if kind in ("blocked", "done"):
         notify(f"{run.get('project') or 'devkit'} · {kind}", text)

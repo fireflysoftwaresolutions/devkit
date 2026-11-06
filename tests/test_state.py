@@ -50,6 +50,27 @@ while not (root / "go").exists():
 hooks.run("subagent-stop", "claude")
 """
 
+# `dev crew ask` in its own process: it reads the run, adds the message (made slow here) and saves the run.
+CHILD_ASK = r"""
+import sys, time
+from pathlib import Path
+sys.path.insert(0, sys.argv[1])
+root, n = Path(sys.argv[2]), sys.argv[3]
+from devkit import audit, progress as pg
+pg.RUNS, pg.SESSIONS, pg.TIMING = root / "runs", root / "sessions", root / "timing"
+pg.PENDING = pg.TIMING / "pending"
+audit.AUDIT = root / "audit"
+post = pg._post
+def slow_post(*a, **k):
+    time.sleep(0.2)
+    return post(*a, **k)
+pg._post = slow_post
+(root / f"ready-{n}").touch()
+while not (root / "go").exists():
+    time.sleep(0.005)
+pg.crew_ask(f"question {n}", from_agent=f"a{n}")
+"""
+
 
 class Records(unittest.TestCase):
     # A temporary devkit state folder with one session, claude:s1.
@@ -100,6 +121,27 @@ class Records(unittest.TestCase):
     def audited(self, action) -> list:
         return [r for r in audit.records(1, action)]
 
+    def run_together(self, script, args, payloads=None) -> None:
+        # one real process per argument, all started before any of them goes on (they wait for the "go" file)
+        env = {k: v for k, v in os.environ.items() if not k.startswith("DEVKIT_HOOK_CAPTURE")}
+        env.update(DEVKIT_SESSION="claude:s1", DEVKIT_NO_NOTIFY="1")
+        procs = []
+        for i, arg in enumerate(args):
+            p = subprocess.Popen([sys.executable, "-c", script, str(LIB), str(self.root), arg], env=env,
+                                 stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+            p.stdin.write(json.dumps((payloads or [{}] * len(args))[i]).encode())
+            p.stdin.close()
+            procs.append(p)
+        deadline = time.time() + 30
+        while not all((self.root / f"ready-{a}").exists() for a in args) and time.time() < deadline:
+            time.sleep(0.01)
+        (self.root / "go").touch()
+        for p in procs:
+            p.wait(timeout=30)
+            p.stdout.close()
+            p.stderr.close()
+        (self.root / "go").unlink()
+
 
 class ConcurrentWriterTests(Records):
     def test_eight_hook_processes_each_add_their_key_and_all_eight_stay(self):
@@ -108,26 +150,17 @@ class ConcurrentWriterTests(Records):
             (self.root / f"agent-{aid}.jsonl").write_text("")
             (self.root / f"agent-{aid}.meta.json").write_text(json.dumps({"toolUseId": f"toolu_{aid}",
                                                                           "description": f"Neo: part {aid}"}))
-        env = {k: v for k, v in os.environ.items() if not k.startswith(("DEVKIT_HOOK_CAPTURE", "DEVKIT_SESSION"))}
-        procs = []
-        for aid in aids:
-            payload = {"session_id": "s1", "agent_id": aid, "agent_type": "general-purpose",
-                       "agent_transcript_path": str(self.root / f"agent-{aid}.jsonl"),
-                       "last_assistant_message": "Done, no status block."}
-            p = subprocess.Popen([sys.executable, "-c", CHILD, str(LIB), str(self.root), aid], env=env,
-                                 stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-            p.stdin.write(json.dumps(payload).encode())
-            p.stdin.close()
-            procs.append(p)
-        deadline = time.time() + 30
-        while not all((self.root / f"ready-{a}").exists() for a in aids) and time.time() < deadline:
-            time.sleep(0.01)
-        (self.root / "go").touch()
-        for p in procs:
-            p.wait(timeout=30)
-            p.stdout.close()
-            p.stderr.close()
+        self.run_together(CHILD, aids, [{"session_id": "s1", "agent_id": aid, "agent_type": "general-purpose",
+                                         "agent_transcript_path": str(self.root / f"agent-{aid}.jsonl"),
+                                         "last_assistant_message": "Done, no status block."} for aid in aids])
         self.assertEqual(sorted(self.record().get("crew_pending") or {}), aids)  # today some are lost
+
+    def test_eight_commands_that_add_a_message_to_the_run_keep_all_eight(self):
+        pg.start("Release", plan=["build=10m"], now=self.now)
+        self.run_together(CHILD_ASK, [str(i) for i in range(8)])
+        msgs = pg.load_run("claude", "s1")["messages"]
+        self.assertEqual(sorted(m["text"] for m in msgs), [f"question {i}" for i in range(8)])
+        self.assertEqual(len({m["id"] for m in msgs}), 8)  # and each has its own id
 
     def test_a_subagent_start_between_stops_read_and_write_survives(self):
         self.set_record(turn_started=self.now - 60, pending_agents=[

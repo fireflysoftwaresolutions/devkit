@@ -135,47 +135,48 @@ def delegate(task: str, to: str = "auto", files=None, scope: str = "", after: st
     joined, or None when Morpheus has to launch the member)."""
     now = now or time.time()
     agent, sid = current_session(cwd)
-    run = load_run(agent, sid)
-    if not run:
-        raise StepError("no progress run in this session: Morpheus starts one with dev progress start")
-    run = normalize(run)
-    if not (task or "").strip():
-        raise StepError("say what to do: dev crew delegate \"<task>\" --to <member>")
-    routed = None
-    if not to or to.lower() == "auto":
-        ranked = route(task, files)
-        if not ranked:
-            raise StepError("no crew member fits; name one with --to")
-        m, routed = ranked[0][0], ranked
-    else:
-        m = _member_name(to)
-        if not m:
-            raise StepError(f"no crew member “{to}”: dev crew lists them")
-    name = re.sub(r"\s+", " ", task.strip())[:60]
-    base, i = name, 2
-    while any(s["name"].lower() == name.lower() for s in run["plan"]):
-        name, i = f"{base} ({i})", i + 1
-    s = _new_step(name, progress.parse_minutes(est) or None)
-    s.update(label=m["name"], requested_by=from_agent or "main", task=task.strip()[:1500])
-    if scope:
-        s["scope"] = [x.strip() for x in scope.split(",") if x.strip()]
-    if after:
-        dep = _find_step(run, after)
-        if not dep:
-            raise StepError(f"no step “{after}” to wait for")
-        s["after"] = [dep["name"]]
-    run["plan"].append(s)
-    progress._allocate(run)
-    run["steps"] = len(run["plan"])
-    by = progress._name_of(run, from_agent or "main")
-    _log_change(run, s, None, "pending", from_agent or "main", f"delegated by {by} to {m['name']}", now)
-    lane_id = next((k for k, v in (run.get("agents") or {}).items() if v.get("state") == "running"
-                    and progress._label_matches(m["name"], v)), None)
-    if lane_id and lane_id != from_agent and not progress.deps_open(run, s):  # a step that waits does not start
-        s.update(owner=lane_id, state="running", started=now)
-        if s.get("scope"):
-            run["agents"][lane_id]["scope"] = sorted(set((run["agents"][lane_id].get("scope") or []) + s["scope"]))
-    progress._save(run, touch_session=False)
+    with progress._tx(agent, sid):
+        run = load_run(agent, sid)
+        if not run:
+            raise StepError("no progress run in this session: Morpheus starts one with dev progress start")
+        run = normalize(run)
+        if not (task or "").strip():
+            raise StepError("say what to do: dev crew delegate \"<task>\" --to <member>")
+        routed = None
+        if not to or to.lower() == "auto":
+            ranked = route(task, files)
+            if not ranked:
+                raise StepError("no crew member fits; name one with --to")
+            m, routed = ranked[0][0], ranked
+        else:
+            m = _member_name(to)
+            if not m:
+                raise StepError(f"no crew member “{to}”: dev crew lists them")
+        name = re.sub(r"\s+", " ", task.strip())[:60]
+        base, i = name, 2
+        while any(s["name"].lower() == name.lower() for s in run["plan"]):
+            name, i = f"{base} ({i})", i + 1
+        s = _new_step(name, progress.parse_minutes(est) or None)
+        s.update(label=m["name"], requested_by=from_agent or "main", task=task.strip()[:1500])
+        if scope:
+            s["scope"] = [x.strip() for x in scope.split(",") if x.strip()]
+        if after:
+            dep = _find_step(run, after)
+            if not dep:
+                raise StepError(f"no step “{after}” to wait for")
+            s["after"] = [dep["name"]]
+        run["plan"].append(s)
+        progress._allocate(run)
+        run["steps"] = len(run["plan"])
+        by = progress._name_of(run, from_agent or "main")
+        _log_change(run, s, None, "pending", from_agent or "main", f"delegated by {by} to {m['name']}", now)
+        lane_id = next((k for k, v in (run.get("agents") or {}).items() if v.get("state") == "running"
+                        and progress._label_matches(m["name"], v)), None)
+        if lane_id and lane_id != from_agent and not progress.deps_open(run, s):  # a step that waits does not start
+            s.update(owner=lane_id, state="running", started=now)
+            if s.get("scope"):
+                run["agents"][lane_id]["scope"] = sorted(set((run["agents"][lane_id].get("scope") or []) + s["scope"]))
+        progress._save(run, touch_session=False)
     progress._audit("crew.delegate", f"{by} → {m['name']}", task.strip()[:300], project=run.get("project") or "",
                     step=name, routed="yes" if routed else "no")
     from . import crew
@@ -195,18 +196,19 @@ def decline(which: str, why: str, from_agent: str | None = None, cwd: str | None
     if not (why or "").strip():
         raise StepError("say why: --why \"…\"")
     agent, sid = current_session(cwd)
-    run = normalize(load_run(agent, sid) or {})
-    s = _find_step(run, which)
-    if not s:
-        raise StepError(f"no step “{which}” in the plan")
-    if from_agent and s.get("owner") not in (from_agent, "main", None):
-        raise StepError(f"step “{s['name']}” is not yours")
-    old = s.get("state")
-    who = s.get("label") or "the member"
-    s.update(state="pending", owner="main", label="", started=None)
-    _log_change(run, s, old, "pending", from_agent or "main", f"declined by {who}: {why}", now)
-    progress._audit("crew.decline", who, why[:300], project=run.get("project") or "", step=s["name"])
-    progress._save(run, touch_session=False)
+    with progress._tx(agent, sid):
+        run = normalize(load_run(agent, sid) or {})
+        s = _find_step(run, which)
+        if not s:
+            raise StepError(f"no step “{which}” in the plan")
+        if from_agent and s.get("owner") not in (from_agent, "main", None):
+            raise StepError(f"step “{s['name']}” is not yours")
+        old = s.get("state")
+        who = s.get("label") or "the member"
+        s.update(state="pending", owner="main", label="", started=None)
+        _log_change(run, s, old, "pending", from_agent or "main", f"declined by {who}: {why}", now)
+        progress._audit("crew.decline", who, why[:300], project=run.get("project") or "", step=s["name"])
+        progress._save(run, touch_session=False)
     progress.crew_ask(f"{who} declined “{s['name']}”: {why}. Route it again: dev crew route \"{s['name']}\"",
                       to="main", from_agent=from_agent, cwd=cwd, now=now)
     return s
@@ -255,16 +257,17 @@ def launch_line(s: dict) -> str:
 def ready_context(agent: str, sid: str) -> str:
     """For Morpheus's next action: steps that just became ready to launch (once per step)."""
     run = load_run(agent, sid)
-    if not run or run.get("state") == "done":
-        return ""
-    run = normalize(run)
-    r = ready(run)
-    new = [s for s in r["launch"] if not s.get("ready_told")]
-    if not new:
-        return ""
-    for s in new:
-        s["ready_told"] = True
-    progress._save(run, touch_session=False)
+    if not run or run.get("state") == "done" or all(s.get("ready_told") for s in ready(run)["launch"]):
+        return ""  # the usual case, without the lock
+    with progress._tx(agent, sid):
+        run = normalize(load_run(agent, sid) or {})
+        r = ready(run)
+        new = [s for s in r["launch"] if not s.get("ready_told")]
+        if not new:
+            return ""
+        for s in new:
+            s["ready_told"] = True
+        progress._save(run, touch_session=False)
     mode = progress.mode_of(run)
     lines = [f"devkit · ready to launch ({r['free']} of {progress.cfg()['max_parallel']} crew slots free, {mode} "
              f"mode{': launch them now, in one message' if mode == 'auto' else ''}):"]
@@ -279,26 +282,27 @@ def assign_plan(apply: bool = False, cwd: str | None = None, now: float | None =
     """Route every plan step nobody owns: -> [(step, member, score, reasons)]; with apply, assign them."""
     now = now or time.time()
     agent, sid = current_session(cwd)
-    run = load_run(agent, sid)
-    if not run:
-        raise StepError("no progress run in this session")
-    run = normalize(run)
-    out = []
-    for s in run.get("plan") or []:
-        if s.get("state") in ("done", "skipped") or s.get("label") or (s.get("owner") or "main") != "main":
-            continue
-        ranked = route(s.get("task") or s["name"])
-        if ranked and ranked[0][1] > 0:
-            m, score, why = ranked[0]
-            out.append((s, m, score, why))
-            if apply:
-                s["label"] = m["name"]
-                if s.get("state") == "running":
-                    s["state"] = "pending"
-                _log_change(run, s, None, "pending", "main", f"routed to {m['name']} ({'; '.join(why)[:120]})", now)
-    if apply and out:
-        progress._advance_main(run, now)
-        progress._save(run)
+    with progress._tx(agent, sid):
+        run = load_run(agent, sid)
+        if not run:
+            raise StepError("no progress run in this session")
+        run = normalize(run)
+        out = []
+        for s in run.get("plan") or []:
+            if s.get("state") in ("done", "skipped") or s.get("label") or (s.get("owner") or "main") != "main":
+                continue
+            ranked = route(s.get("task") or s["name"])
+            if ranked and ranked[0][1] > 0:
+                m, score, why = ranked[0]
+                out.append((s, m, score, why))
+                if apply:
+                    s["label"] = m["name"]
+                    if s.get("state") == "running":
+                        s["state"] = "pending"
+                    _log_change(run, s, None, "pending", "main", f"routed to {m['name']} ({'; '.join(why)[:120]})", now)
+        if apply and out:
+            progress._advance_main(run, now)
+            progress._save(run)
     return out
 
 
