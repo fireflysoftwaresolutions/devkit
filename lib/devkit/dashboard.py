@@ -3558,11 +3558,21 @@ def _esc(s) -> str:
     return str(s).replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;").replace('"', "&quot;")
 
 
-def render(reg: dict, handoff: Path = None, now: float = None) -> str:
-    """The complete, self-contained dashboard HTML for a registry."""
-    data = collect(reg, handoff=handoff, now=now)
+NONCE_RE = re.compile(r"[A-Za-z0-9_\-+/]{16,128}={0,2}")
+
+
+def page(data: dict, nonce: str = "") -> str:
+    """The dashboard HTML for already-collected data (`collect`). Without a nonce it is the self-contained static
+    export; with one (the live server), every inline <script> and <style> carries it, so the server's CSP can allow
+    exactly these and nothing else."""
+    if nonce and not NONCE_RE.fullmatch(nonce):
+        raise ValueError("a nonce is 16-128 base64 characters")
     when = time.strftime("%Y-%m-%d %H:%M", time.localtime(data["generated"]))
     page = HTML
+    if nonce:  # before any substitution: only the template's own tags, never text from the data
+        attr = f' nonce="{nonce}"'
+        page = (page.replace("<script>", f"<script{attr}>").replace("<style>", f"<style{attr}>")
+                .replace('<script id="devkit-data"', f'<script{attr} id="devkit-data"'))
     for key, val in (("__LIGHT__", LIGHT), ("__DARK__", DARK), ("__CSS__", CSS),
                      ("__LOGO_DARK__", _logo("firefly-logo-dark.svg", "ff-dark")),
                      ("__LOGO_LIGHT__", _logo("firefly-logo-light.svg", "ff-light")),
@@ -3571,6 +3581,11 @@ def render(reg: dict, handoff: Path = None, now: float = None) -> str:
         page = page.replace(key, val)
     # script and data last, so placeholders inside them are never substituted
     return page.replace("__JS__", JS.replace("</", "<\\/")).replace("__DATA__", safe_json(data))
+
+
+def render(reg: dict, handoff: Path = None, now: float = None) -> str:
+    """The complete, self-contained dashboard HTML for a registry (the static export)."""
+    return page(collect(reg, handoff=handoff, now=now))
 
 
 def write(reg: dict, handoff: Path = None) -> Path:

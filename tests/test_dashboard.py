@@ -338,6 +338,27 @@ class RenderTests(unittest.TestCase):
         self.assertEqual(strip("devkit@main · no marker"), "devkit@main · no marker")
         self.assertIn("function markerChip", dashboard.JS)
 
+    def test_static_export_is_the_page_of_its_data(self):
+        """`render` (dev sync, --export) is `page(collect(...))` with no nonce: no CSP attributes, no live flag."""
+        self.assertEqual(self.html, dashboard.page(dashboard.collect(self.reg, handoff=self.handoff, now=NOW)))
+        self.assertNotIn("nonce=", self.html)
+        self.assertNotIn("live", self.data)
+        self.assertIn('<script>(function(){try{var t=JSON.parse(localStorage.getItem("devkit.theme"))', self.html)
+        self.assertIn('<script id="devkit-data" type="application/json">', self.html)
+
+    def test_a_nonce_marks_every_inline_script_and_style_and_nothing_else(self):
+        nonce = "Zm9vYmFyYmF6cXV4MTIzNA"
+        live = dashboard.page(self.data, nonce=nonce)
+        tags = re.findall(r"<(script|style)\b([^>]*)>", live)
+        self.assertEqual(sorted(t for t, _ in tags), ["script", "script", "script", "style"])
+        self.assertTrue(all(f'nonce="{nonce}"' in attrs for _, attrs in tags), tags)
+        self.assertEqual(live.replace(f' nonce="{nonce}"', ""), self.html)      # the static page plus nonces, byte for byte
+
+    def test_a_nonce_that_could_break_out_of_the_attribute_is_refused(self):
+        for bad in ('abcdefghijklmnop" onload="alert(1)', "short"):
+            with self.assertRaises(ValueError, msg=bad):
+                dashboard.page(self.data, nonce=bad)
+
     def test_explorer_cap(self):
         files, meta = dashboard.explorer_files(self.handoff, cap=150)
         self.assertTrue(meta["capped"])
