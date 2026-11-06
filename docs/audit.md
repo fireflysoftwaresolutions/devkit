@@ -77,7 +77,7 @@ devkit keeps these out of every record it writes:
 
 Secrets are redacted, as far as the redactor knows their shape. Tokens, keys, passwords, passphrases, credentials,
 passwords in URLs, and the secrets that common commands take (`curl -u`, `mysql -p`, `sshpass -p`, `docker login -p`,
-`gh secret set --body`) are redacted in every text field before a record is written: the target, the details, the
+`gh secret set --body`, and a value echoed into `--password-stdin` or `--with-token`) are redacted in every text field before a record is written: the target, the details, the
 reason, the run and step names, and the branch. The redactor matches known shapes, so a secret in a shape it does
 not know can still reach a record. Add a pattern for it with `audit.redact.extra`.
 

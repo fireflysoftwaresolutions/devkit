@@ -116,6 +116,13 @@ COMMANDS = [
     ("passphrase", f"ssh_passphrase={CMD}", CMD, ["a passphrase-protected key", "passphrases: 2"]),
     ("credentials", f"credentials: {CMD}", CMD,
      ["git config credential.helper osxkeychain", "credential.helper=store", "credentialed: yes"]),
+    # Seraph's batch 4, follow-up 5: a value echoed into a login that reads its secret from standard input
+    ("echo | --password-stdin", f"echo -n '{CMD}' | docker login -u ana --password-stdin ghcr.io", CMD,
+     ["echo done | tee build.log", "cat ~/.pw | docker login --password-stdin ghcr.io",
+      "aws ecr get-login-password | docker login --username AWS --password-stdin 1234.dkr.ecr.example.com",
+      "echo ok; docker login --password-stdin ghcr.io", "echo ok || docker login --password-stdin ghcr.io"]),
+    ("printf | --with-token", f"printf '%s' {CMD}|gh auth login --with-token", CMD,
+     ["printf '%s\\n' done | tee build.log", "gh auth login --with-token < token.txt"]),
 ]
 
 
@@ -254,7 +261,8 @@ class RedactionTests(AuditCase):
         n = 1 << 16
         texts = ["curl -u " * (n // 8), "sshpass -P x " * (n // 13), "mysql -u " * (n // 9),
                  "docker login -u " * (n // 16), "Authorization: token " + "a" * n, "gh secret set X " * (n // 16),
-                 "passphrase credentials " * (n // 23), "https://u:" + "@" * n, "a" * n]
+                 "passphrase credentials " * (n // 23), "https://u:" + "@" * n, "a" * n,
+                 "echo x | sudo " * (n // 14)]
         start = time.perf_counter()
         for t in texts:
             audit.redact(t, extra=[])

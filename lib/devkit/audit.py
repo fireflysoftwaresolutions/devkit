@@ -82,8 +82,10 @@ _RULES = [
      r"[sr]k_(?:live|test)_[0-9a-z]{16,}|glpat-[0-9a-z_-]{20,}|hf_[0-9a-z]{30,}|ya29\.[0-9a-z_-]{20,}|"
      r"dckr_pat_[0-9a-z_-]{20,}))", None),  # tokens (Stripe, GitLab, Hugging Face, Google OAuth, Docker): keep 4
     (r"(?i:(?P<sw>hooks\.slack\.com/services/)" + _NOT_DONE + r"[a-z0-9_/-]{8,})", r"\g<sw>" + MARK),
-    # a command-line flag that takes a secret: --password x, --github-token=x (not --password-stdin, --token-file)
-    (r"(?i:(?P<f>--(?:[a-z0-9]{1,32}-){0,4}(?:password|passwd|token|secret|api-?key|access-key|private-key))"
+    # a command-line flag that takes a secret: --password x, --github-token=x (not --password-stdin, --token-file, nor
+    # gh's --with-token, which reads standard input)
+    (r"(?i:(?P<f>--(?!with-token\b)(?:[a-z0-9]{1,32}-){0,4}(?:password|passwd|token|secret|api-?key|access-key|"
+     r"private-key))"
      r"(?P<fs>[ =][\"']?)" + _NOT_DONE + r"[^\s…\"'-][^\s\"']*)", r"\g<f>\g<fs>" + MARK),
     # short flags that take a secret in the commands that use them (review batch 3); elsewhere -u, -p and -b are a
     # user id, a port or a branch. curl -u user:password keeps the user
@@ -98,6 +100,11 @@ _RULES = [
      r"\s-p(?:\s+|=)?)" + _ARG, r"\g<dl>" + MARK),
     (r"(?P<gs>\bgh\s+secret\s+set\b" + _ARGS + r"\s(?:--body|-b)(?:\s+|=)?)" + _ARG, r"\g<gs>" + MARK),
     # GitHub's `Authorization: token X`: X has a digit, or is long, so "token required" stays
+    # a value echoed into a command that reads its secret from standard input: echo -n x | docker login
+    # --password-stdin, printf '%s' x | gh auth login --with-token (review batch 4). The pipe is a single |
+    (r"(?P<ec>\b(?:echo(?:\s+-[neE]{1,3}){0,3}|printf(?:\s+(?:'%s[^'\n]{0,8}'|\"%s[^\"\n]{0,8}\"))?)\s+)" +
+     _NOT_DONE + r"(?:\"[^\"\n]{1,256}\"|'[^'\n]{1,256}'|[^\s\"'|;&]{1,256})" +
+     r"(?=[ \t]{0,16}\|[^\n|;&]{0,200}?\s--(?:password-stdin|with-token)\b)", r"\g<ec>" + MARK),
     (r"(?i:\b(?P<at>authorization\s*[:=]\s*[\"']?token)\s+" + _NOT_DONE +
      r"(?:(?=[a-z._~+/=-]{0,255}[0-9])[a-z0-9._~+/=-]{8,}|[a-z0-9._~+/=-]{20,}))", r"\g<at> " + MARK),
     # key = "value", "key": "value", key: 'value': a quoted value loses everything up to its closing quote
