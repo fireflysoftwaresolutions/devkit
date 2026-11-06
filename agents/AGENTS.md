@@ -44,6 +44,7 @@ for background work. `dev progress step` prints an update that already is the bl
 For example:
 
 **[Firefly> DevKit]** kit-consulting · `release/26.11.4` · Release 26.11.4
+
 - **Done:** merged PRs 12, 17 and 22 into the release branch and fixed the two conflicts.
 - **Check:** ✓ local suite green, 214 tests
 - **Crew:** Link ✓ release branch · Seraph ▸ review of the merge
