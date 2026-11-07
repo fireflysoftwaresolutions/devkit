@@ -1233,6 +1233,11 @@ def cmd_sync(a):
                 reg["drift"] = [d.as_dict() for d in policy.diff()]
             except Exception:
                 pass
+            try:
+                from . import approvals
+                approvals.sweep()
+            except Exception:
+                pass
         try:
             from . import sleep as _sleep
             if a.scheduled and _sleep.due() and not (core.HOME / "Library" / "LaunchAgents" /
@@ -1953,7 +1958,8 @@ def cmd_progress(a):
                                                      .get("plan") or [])} if not from_agent else {}
         try:
             run = pg.step(" ".join(a.text), a.next or "", kind=kind, check=check, which=getattr(a, "step", None),
-                          from_agent=from_agent, force=getattr(a, "force", False), why=getattr(a, "why", "") or "")
+                          from_agent=from_agent, force=getattr(a, "force", False), why=getattr(a, "why", "") or "",
+                          approves=getattr(a, "approves", "") or "")
         except ValueError as e:
             ui.err(str(e))
             return 2
@@ -2487,6 +2493,18 @@ def cmd_config(a):
         return 0
     if act == "validate":
         return _config_validate()
+    if act == "set":
+        if not a.key or a.value is None:
+            ui.err("dev config set <key> <value>, such as: dev config set progress.max_parallel 6")
+            return 2
+        try:
+            old, new = core.config_set(a.key, a.value)
+        except core.ConfigError as e:
+            ui.err(str(e))
+            return 2
+        print(f"{ui.OK} {a.key}: {json.dumps(old, ensure_ascii=False)} → {json.dumps(new, ensure_ascii=False)} "
+              f"in {tilde(core.CONFIG_FILE)} (audited)")
+        return 0
     if act == "edit":
         editor = os.environ.get("EDITOR") or CFG.get("editor") or "vi"
         run([editor, str(core.CONFIG_FILE)])
@@ -3169,6 +3187,8 @@ def build_parser():
                                                                 "dependencies done, no subagent still on it)")
         if verb == "step":
             x.add_argument("--no-check", action="store_true", help="nothing to verify for this step (shown as ⚠)")
+            x.add_argument("--approves", help="the finished steps this Check approves (✓) or sends back (✗ or ⚠): "
+                                              "\"api, screens\"")
         if verb == "done":
             x.add_argument("--why", help="end the run although an Accountable member has not approved (recorded)")
     x = gsp.add_parser("assign", help="hand a plan step to a subagent: the one launched with this description owns it")
@@ -3312,7 +3332,9 @@ def build_parser():
     dashserver.add_arguments(add("dashboard", dashserver.cmd_dashboard, "Open the live dashboard (a local, read-only app)"))
     p = add("config", cmd_config, "The agent settings devkit manages: what differs, why, and the fix")
     p.add_argument("config_cmd", nargs="?", choices=["diff", "repair", "show", "edit", "validate", "lock", "unlock",
-                                                     "status"])
+                                                     "status", "set"])
+    p.add_argument("key", nargs="?", help="set: the key, such as progress.max_parallel")
+    p.add_argument("value", nargs="?", help='set: the value, as JSON when it parses (6, true, {"70": 0.5})')
     p.add_argument("--quiet", action="store_true")
     p.add_argument("--check", action="store_true", help="one line and exit 1 when a setting differs (for scripts)")
     p = add("agents", cmd_agents, "Claude Code and Codex: install, sign-in, plan, quota, self-test")
