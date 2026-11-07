@@ -160,16 +160,17 @@ for the direction, impeccable for hierarchy, layout, typography, color, and the 
 
 ### impeccable and its engine
 
-impeccable's first setup step runs its launcher, `scripts/impeccable context`, which loads the project's PRODUCT.md,
-DESIGN.md, and surface brief and prints what to follow. The launcher is a small shell script that runs a
-platform binary, the engine, placed beside it. Without one, it would download the engine at its first run, inside an
-agent session. devkit fetches the engine at install time instead:
+impeccable's first setup step is its `context` command, which loads the project's PRODUCT.md, DESIGN.md, and surface
+brief and prints what to follow. The skill runs its commands through a launcher, `scripts/impeccable`, a small shell
+script that runs a platform binary, the engine, placed beside it. Without one, the launcher would download the engine
+at its first run, inside an agent session. devkit fetches the engine at install time instead, and runs it with
+`dev impeccable <verb>`:
 
 | Part | Claude Code | Codex |
 | --- | --- | --- |
 | The skill | `pbakaus/impeccable` at the commit pinned in `config/skills.json` (tag `skill-v4.8.0`), copied to `~/.local/share/devkit/skills/impeccable` and linked as `~/.claude/skills/impeccable` | The `impeccable@openai-curated-remote` plugin (`config/codex/plugins.json`) |
-| The engine | `dev install --only skills` fetches it (below) | Comes with the plugin |
-| Use by default | The `ui` rule requires `frontend-design` and `impeccable`; the Frontend engineer, the UX designer and the Mobile engineer run `impeccable context` once at the start of their work | The same rule. Codex crew members cannot run the launcher yet: the guard trusts only devkit's Claude copy, so they read the project's PRODUCT.md and DESIGN.md instead |
+| The engine | `dev install --only skills` fetches it (below) | Comes with the plugin; `dev impeccable` runs devkit's copy, as on Claude Code |
+| Use by default | The `ui` rule requires `frontend-design` and `impeccable`; the Frontend engineer, the UX designer and the Mobile engineer run `dev impeccable context` once at the start of their work | The same rule and the same procedure |
 
 How the skills step installs the engine:
 
@@ -193,11 +194,29 @@ Claude Code sessions set `IMPECCABLE_NO_UPDATE_CHECK=1`, so the engine does not 
 version (devkit moves impeccable by its pinned commit instead, below), and `IMPECCABLE_NO_TELEMETRY=1`, so it sends
 no telemetry.
 
-Crew members on Claude Code run the launcher too. Read as a script, it would run a program named only at run time,
-which the [guard](guard.md) refuses to crew members. The guard therefore trusts only an absolute or `~/` path to the
-installed launcher, `~/.local/share/devkit/skills/impeccable/scripts/impeccable` or
-`~/.claude/skills/impeccable/scripts/impeccable` through the link to that skill folder, while its content and its
-engine match what the skills step recorded:
+#### How `dev impeccable` runs the engine
+
+`dev impeccable <verb> [args…]` does the launcher's job from devkit's own paths, without a shell:
+
+1. It takes the engine from devkit's skills folder,
+   `~/.local/share/devkit/skills/impeccable/scripts/bin/<os>-<arch>/impeccable`, and refuses a path that goes
+   through a symbolic link. It never takes the engine's path from the current folder, an argument, or the
+   environment.
+2. Before every run, it checks that `~/.local/state/devkit/skill-engines.json` names that file, that the file's
+   SHA-256 matches the one recorded there, and that the file did not change between the check and the start.
+3. It runs the engine in your current folder, with each word after `dev impeccable` as one argument, as typed: no
+   shell reads them. The engine gets `IMPECCABLE_SKILL_DIR` (the skill folder) and `IMPECCABLE_SELF`
+   (`dev impeccable`, the name it prints in the commands it suggests), as the launcher sets them, plus
+   `IMPECCABLE_NO_UPDATE_CHECK=1` and `IMPECCABLE_NO_TELEMETRY=1`. Every other `IMPECCABLE_*` variable is dropped:
+   `IMPECCABLE_BIN` would pick another engine, and the others move its downloads, caches, and plugins.
+4. It exits with the engine's exit code. A missing record, a digest that does not match, or an engine path outside
+   devkit's skills folder runs nothing, prints why, and exits with `1`. The fix is `dev install --only skills`.
+
+Crew members on Claude Code and Codex run impeccable only with `dev impeccable`. The [guard](guard.md) trusts no
+typed path to the launcher. The shell can reach another file than the one the guard reads by the same words (a
+symbolic link, `..` after `cd`, a quoted `~`, a glob, or a folder moved earlier in the same command), and the launcher
+names the program it runs only at run time, so the guard refuses a crew lane that types the launcher's path, as it
+refuses any such script. With `dev impeccable`:
 
 - **Write lanes** run every verb.
 - **Read-only lanes** run only the verbs that read the project, with their reading flags: `context` (with
@@ -205,20 +224,11 @@ engine match what the skills step recorded:
   and `doctor` (with `--json` or `--target`, never `--fix`). These verbs do not change your sources, but the engine
   may still write small cache files of its own, such as its staleness check. Other verbs such as `init`, `document`,
   `extract`, `live`, and `generate` write files or start a session, so a write lane runs them.
-- **`detect` scans a URL when it gets one,** so in a read-only lane it refuses an argument with a colon (a scheme or
-  a port, such as `localhost:3000`), one that starts with `//`, and one whose first part could be a host:
-  `localhost`, a dotted name such as `example.com`, or an address such as `10.0.0.2`. A file in the project's top
-  folder with a dotted name counts too, so write it as a path: `detect ./index.html`.
-- **No trust** in these cases: the launcher or its engine changed; the path is a copy of the launcher, a symbolic
-  link to it or to its `scripts` folder, or a path through `..` (the launcher runs the engine and reads the skill's
-  files beside the path it was run by, so each of these would run another engine); the path is relative, such as
-  `./impeccable` (after `cd` through a link and `..`, the shell may be in another folder than the guard can tell);
-  the path starts with a quoted or escaped `~`, such as `"~/…"` (the shell reads it as a folder named `~` in its own
-  folder); the command sets or exports any variable (`IMPECCABLE_BIN`, `PATH`, `HOME`, and the rest change what it
-  runs); or the session sets `IMPECCABLE_BIN`. The guard then reads the launcher as a script again and refuses it to
-  crew members.
-- **Codex crew lanes** cannot run the launcher yet: the guard trusts only the copy devkit installs for Claude Code,
-  not the one in Codex's impeccable plugin. Codex members read PRODUCT.md and DESIGN.md instead.
+- **`detect` scans a URL when it gets one,** so in a read-only lane no path or flag value may name one. The guard
+  refuses an argument with a colon (a scheme or a port, such as `localhost:3000`), one that starts with `//`, and one
+  whose first part could be a host: `localhost`, a dotted name such as `example.com`, or an address such as
+  `10.0.0.2`. A file in the project's top folder with a dotted name counts too, so write it as a path:
+  `dev impeccable detect ./index.html`.
 
 impeccable offers to write PRODUCT.md and DESIGN.md. devkit's global instructions keep agents from creating them
 unless the developer asks (see [Settings that tame the plugins](#settings-that-tame-the-plugins)).

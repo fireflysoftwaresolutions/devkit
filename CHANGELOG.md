@@ -23,6 +23,13 @@ Not released yet: the date is set when the release is tagged.
   See [Skills and plugins › impeccable and its engine](docs/skills-and-plugins.md#impeccable-and-its-engine).
 - **`dev doctor` checks impeccable:** the skill linked for Claude Code, its engine present with the pinned digest, and
   the Codex plugin enabled, each with its fix.
+- **`dev impeccable <verb>` runs the impeccable engine devkit installed.** It takes the engine from devkit's skills
+  folder (never from the current folder, an argument, or the environment), checks its SHA-256 against the install
+  record before every run, and runs it in the current folder with each word as one argument, without a shell. The
+  engine gets the skill folder, `IMPECCABLE_NO_UPDATE_CHECK=1` and `IMPECCABLE_NO_TELEMETRY=1`, and no other
+  `IMPECCABLE_*` variable. A missing record, a digest mismatch, or an engine outside devkit's skills folder runs
+  nothing and names the fix, `dev install --only skills`. See
+  [Skills and plugins › impeccable and its engine](docs/skills-and-plugins.md#impeccable-and-its-engine).
 
 ### Changed
 
@@ -34,18 +41,17 @@ Not released yet: the date is set when the release is tagged.
   characters, and prints the corrected command otherwise. An irreversible action asked without options is
   `A: yes | B: no`.
 - **Frontend work starts with impeccable.** The Frontend engineer, the UX designer, and the Mobile engineer load
-  `frontend-design` and `impeccable` and run `impeccable context` once at the start of their work; `i18n` work now
-  requires `impeccable` too. On Codex, where crew members cannot run the launcher yet, they read PRODUCT.md and
-  DESIGN.md instead.
+  `frontend-design` and `impeccable` and run `dev impeccable context` once at the start of their work, on Claude Code
+  and on Codex; `i18n` work now requires `impeccable` too.
 
 ### Fixed
 
-- **Crew members can run `impeccable context`.** The guard read the launcher as a script that runs a program named
-  only at run time and refused it in every crew lane. It now trusts the launcher devkit installed, run by an absolute
-  or `~/` path to it (not a relative path, a path with a quoted `~`, a symbolic link to it or to its `scripts` folder,
-  a copy, or a path through `..`, which could run another engine or read another skill folder), while its content and
-  engine match the install record; read-only lanes run only `context`, `detect` on local paths (not a URL, a host and
-  port, or a domain), and `doctor`, with their reading flags.
+- **Crew members can run impeccable, with `dev impeccable`.** The guard reads the skill's launcher as a script that
+  runs a program named only at run time, and refuses it in every crew lane. It still does: the shell can reach another
+  file than the one the guard reads by the same typed path (a symbolic link, `..` after `cd`, a quoted `~`, a glob, or
+  a folder moved earlier in the same command), so no typed launcher path is trusted. Crew lanes run
+  `dev impeccable <verb>` instead: write lanes run every verb, and read-only lanes run only `context`, `detect` on
+  local paths (not a URL, a host and port, or a domain), and `doctor` without `--fix`, with their reading flags.
 
 ## [26.11.3] - Unreleased
 
