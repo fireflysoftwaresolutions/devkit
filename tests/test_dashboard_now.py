@@ -181,9 +181,9 @@ class NowScreenTests(unittest.TestCase):
         self.assertEqual(out["blocks"], 2)
         out = self.probe("""out.h1 = text($("main h1")); out.setup = $$(".now-setup li").map(text); out.safety = text($(".now-safety"));""", name="welcome")
         self.assertEqual(out["h1"], "Welcome to devkit")
-        self.assertEqual(out["setup"], ["Done An agent is signed in", "To do Clone a project with dev clone <owner/repo>, or start one with dev new <name>",
+        self.assertEqual(out["setup"], ["Done An agent is signed in", "To do Add your first project",
                                         "Done The first sync ran"])
-        self.assertEqual(out["safety"], "No branch map yet. dev sync makes one.")
+        self.assertEqual(out["safety"], "No projects yet, so no branches to back up.")
 
     # AC-4 (landing line on Now): the server's words, the page's age prefixes, and the bracket's range.
     def test_each_landing_state_has_its_line_and_its_bracket(self):
@@ -271,7 +271,7 @@ class NowScreenTests(unittest.TestCase):
     def test_a_consent_line_never_reaches_the_clipboard_and_commands_copy_as_written(self):
         out = self.probe("""const got = []; navigator.clipboard.writeText = t => { got.push(t); return Promise.resolve(); };
             for (const b of $$(".now-item button, .now-item kbd")) b.click(); await tick(100); out.got = got;""")
-        self.assertEqual(out["got"], ["dev run view 14 --failed", "gh pr view 45 -R acme/lending-core --comments"])
+        self.assertEqual(out["got"], ["cd -- /Users/ana/Development/acme/lending-rules && dev run view 14 --failed", "gh pr view 45 -R acme/lending-core --comments"])
         self.assertFalse(any("approve" in g for g in out["got"]))
 
     def test_the_safety_and_since_lines_close_the_page(self):
@@ -357,7 +357,7 @@ class NowLiveTests(unittest.TestCase):
         self.assertEqual(out["keys"], ["ci_failed:acme/lending-rules:feat/rules-engine", "pr:acme/lending-core#45", "housekeeping"])
         self.assertEqual(out["h1"], "CI failed on feat/rules-engine")
         self.assertEqual(out["y"], 240)
-        self.assertEqual(out["focus"], "Copy: dev run view 14 --failed")
+        self.assertEqual(out["focus"], "Copy: cd -- /Users/ana/Development/acme/lending-rules && dev run view 14 --failed")
         self.assertEqual(out["lands"], "Lands 15:40–16:15")
 
     def test_an_answered_decision_keeps_an_open_drawer(self):
