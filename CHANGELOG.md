@@ -41,14 +41,24 @@ All notable changes to devkit. Versions follow CalVer `YY.MM.PATCH` (PATCH resta
   `claude plugin marketplace list`, `claude mcp list|get <name>`, `codex plugin list`,
   `codex plugin marketplace list`, `codex mcp list|get <name>`, or a group alone), with `-h`, `--help`, or `--json`
   at most. This allowlist fails closed: any other spelling, `--` or another option included, is refused even when
-  it only reads. The guard finds the program as the shell does (a relative path from the command's folder, a link
-  on the `PATH`, an npm runner, the CLI's script under `node`), refuses one it cannot know before it runs (a
-  variable, a `PATH` the command sets, a copy the command makes), reads a `sh -c` line with the words after it, and
-  applies the rule to a program's code too. `dev ext update --apply` and `dev ext enable|disable --project` also
-  check that you run them in a terminal, and `--team` after a `--` no longer passes the guard as a team edit.
-- **The guard reads every level of a command for its git, gh, and file rules.** A `sh -c` or `eval` line, and the
-  command `find -exec` or `xargs` runs, get the same rules as the command itself, so
-  `find . -exec sh -c 'git push --force origin main' \;` is refused as `git push --force origin main` is.
+  it only reads. The guard finds the program in the forms it reads (a relative path from the command's folder, a
+  link on the `PATH`, a package runner such as `npx`, `npm exec`, `bun x`, `yarn exec`, or `pnpm claude`, the CLI's
+  script under `node`), refuses one it cannot know before it runs (a variable, a `PATH` the command sets, a copy the
+  command makes), reads a `sh -c` line and a `bash -s` input with the words after them, and applies the rule to a
+  program's code too. With `claude` or `codex`, a word the shell expands (`$P`, `"$@"`, `$'…'`, `$(…)`,
+  `{plugin,install}`, `plugi?`) or a word `xargs` adds counts as a group word, so `claude -p "$PROMPT"` is refused
+  as well. `dev ext update --apply` and `dev ext enable|disable --project` also check that you run them in a
+  terminal, and `--team` after a `--` no longer passes the guard as a team edit.
+- **The guard reads every level of a command for its git, gh, and file rules.** A `sh -c` or `eval` line, the
+  command `find -exec` or `xargs` runs, and the command a runner runs (`uv run`, `npx`, `npm exec`, `bun x`,
+  `yarn exec`, `timeout`) get the same rules as the command itself, so
+  `find . -exec sh -c 'git push --force origin main' \;` and `npm exec -- git push --force origin main` are refused
+  as `git push --force origin main` is.
+- **Only your own `dev install` vouches for an extension.** `dev install` and `dev update` started from a program's
+  code (`subprocess.run(['dev', 'install'])`, `os.system`, AppleScript's `do shell script`) are refused as the
+  typed command is. A `dev install` that runs outside your terminal anyway neither accepts a change made outside
+  devkit nor records what ships with the Codex app for the first time: it names them, and they stay as drift. The
+  first record names each MCP server with the command and arguments it runs.
 - **Drift covers what devkit does not manage.** A plugin, MCP server, or skill folder installed outside the catalog,
   for Claude Code and Codex, is reported as `not-in-catalog`. What ships with the Codex app is listed without drift
   only when its own files vouch for it (a bundled plugin whose cached files are all byte-equal to the app bundle's)
@@ -71,6 +81,10 @@ All notable changes to devkit. Versions follow CalVer `YY.MM.PATCH` (PATCH resta
 - Vendor marketplace plugins (`claude-plugins-official`, `openai-curated-remote`) are observed, not pinned: devkit
   records what got installed and reports changes, but cannot hold them at a commit yet.
 - MCP servers started with `npx` are pinned at their top-level version only; their own dependencies are not.
+- The guard reads commands as typed. A program name built at run time (`$(printf claude)`, an alias), a script piped
+  into a shell, a command `tmux`, `screen`, `expect`, or a git alias starts later, and options that load a plugin
+  for one session only get through; drift at the session start, in `dev status`, and in `dev doctor` is the
+  backstop. [What the guard cannot see](docs/guard.md#what-the-guard-cannot-see) lists them.
 
 ### Removed
 

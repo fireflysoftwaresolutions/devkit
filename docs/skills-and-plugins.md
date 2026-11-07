@@ -269,17 +269,25 @@ whole command is one of these read-only forms, optionally with `-h`, `--help`, o
 Any other form is refused even when it only reads, such as `claude -- plugin list` or `claude --debug plugin list`.
 The rule is an allowlist that fails closed: two earlier block lists of verbs each lost to a spelling nobody listed,
 such as an option's value read as the group (`claude --model mcp … plugin install x`). The guard finds the program
-the way the shell does: a relative path from the folder the command runs in, a link with another name on your
-`PATH`, the npm package a runner starts, or the CLI's own script a JS runtime runs. A program it cannot know before
-the command runs (a variable, a `PATH` the command sets, a copy the command makes) counts as one of them. devkit
-itself also refuses `dev ext update --apply` and `dev ext enable|disable --project` outside your terminal.
+in the forms it reads: a relative path from the folder the command runs in, a link with another name on your
+`PATH`, the npm package or command a runner starts (`npx`, `npm exec`, `bun x`, `yarn exec`, `pnpm claude`), or the
+CLI's own script a JS runtime runs. A program it cannot know before the command runs (a variable, a `PATH` the
+command sets, a copy the command makes) counts as one of them. With `claude` or `codex`, a word the shell expands
+(`$P`, `"$@"`, `$(…)`, `{plugin,install}`, `plugi?`) or a word `xargs` adds counts as a group word, so
+`claude -p "$PROMPT"` is refused too. devkit itself also refuses `dev ext update --apply` and
+`dev ext enable|disable --project` outside your terminal.
+
+The guard cannot see everything. A program name built at run time (`$(printf claude)`, an alias), a script piped
+into a shell, a command `tmux`, `screen`, `expect`, or a git alias starts later, and options that load a plugin for
+one session only (`claude --mcp-config`, `--plugin-dir`) get through; [What the guard cannot
+see](guard.md#what-the-guard-cannot-see) lists them. Drift is the backstop for all of these.
 
 Whatever changes outside devkit anyway shows as drift: at the session start, in `dev status`, `dev doctor`, and
 `dev ext ls`, with one `ext.drift` record in the audit trail per change.
 
 | Drift | What it means | What to do |
 | --- | --- | --- |
-| `changed` | A vendor plugin's version, commit, or files differ from the lock, or an agent's folder for a devkit skill is not devkit's copy | Review it with `dev ext outdated <name>`; accept it with `dev install`, or `dev ext update <name> --apply` |
+| `changed` | A vendor plugin's version, commit, or files differ from the lock, or an agent's folder for a devkit skill is not devkit's copy | Review it with `dev ext outdated <name>`; accept it with `dev install` in your terminal, or `dev ext update <name> --apply` |
 | `pin` | A skill or MCP server is installed at another commit or version than its pin | `dev install --only skills,claude,codex` |
 | `enabled` | A plugin is on or off in the agent's settings against devkit's | `dev config repair` |
 | `required-off` | devkit or a security plugin is not installed, or is off in the agent or in a project's `.claude/settings.json` or `.claude/settings.local.json` (the row names the file) | `dev install` puts a missing one back; `dev config lock` keeps required plugins on whatever a project says |
@@ -300,8 +308,11 @@ for it, because agents can write Codex's plugin cache and `config.toml`:
   never count.
 - **An `openai-primary-runtime` plugin** is downloaded by the app, so it counts once `dev install` has recorded it.
 
-`dev install` names each of them the first time it records it, so you see what it accepts. It keeps a plugin's
-version and file digest, and an MCP server's raw text in `config.toml`; a change after that shows as `changed`.
+`dev install` names each of them the first time it records it, so you see what it accepts: a plugin with its
+version, an MCP server with the command and arguments it runs. It keeps a plugin's version and file digest, and an
+MCP server's raw text in `config.toml`; a change after that shows as `changed`. Only a `dev install` that runs in
+your terminal records them for the first time or accepts a change. One started anywhere else, such as from an
+agent's program, only names them, and they stay as drift.
 
 devkit reads Codex's MCP servers only in the form `codex mcp add` writes: a `[mcp_servers.<name>]` table and its
 sub-tables, one `key = value` per line, with a string, number, `true` or `false`, or a one-line array. A server
