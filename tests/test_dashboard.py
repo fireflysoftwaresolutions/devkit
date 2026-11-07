@@ -229,7 +229,7 @@ class RenderTests(unittest.TestCase):
     def test_app_features(self):
         js, css = dashboard.JS, dashboard.CSS
         for needle in ("function openPalette", "function encode(", "function decode(", "hashchange", "localStorage",
-                       "function viewHome", "function viewInitiatives", "function viewInitiative", "function viewProjects", "function viewProject",
+                       "function viewNow", "function viewInitiatives", "function viewInitiative", "function viewProjects", "function viewProject",
                        "function viewTeam", "function viewTasks", "function viewActivity", "function viewExplorer", "function viewHealth",
                        "function viewSearch", "function viewActions", "function renderModal", "function taskCmds", "function changelog",
                        "function pageTabs", "function crumbs", "function fitTables", "function statusCard", "function statusLine", "function liveRun", "function timePanel", "function membersBlock",
@@ -243,10 +243,12 @@ class RenderTests(unittest.TestCase):
         self.assertNotIn("insertAdjacentHTML", js)
         self.assertNotIn("document.write", js)
 
+    # v4: a fixed type scale, two weights, sentence case, no stripes, SVG icons, one amber accent per surface. The views
+    # rebuilt by the redesign use its scale (UX spec 4.3: 12, 14, 16, 20, 32); the others keep v4's four sizes until theirs.
     def test_design_system(self):
-        """v4: four type sizes, two weights, sentence case, no stripes, SVG icons, one amber accent per surface."""
         css, js = dashboard.CSS, dashboard.JS
-        self.assertEqual(set(re.findall(r"font-size:([^;}\"]+)", css + js)), {"var(--fs-1)", "var(--fs-2)", "var(--fs-3)", "var(--fs-4)"})
+        self.assertEqual(set(re.findall(r"font-size:([^;}\"]+)", css + js)), {"var(--fs-1)", "var(--fs-2)", "var(--fs-3)", "var(--fs-4)", "var(--fs-meta)",
+                                                                             "var(--fs-body)", "var(--fs-lead)", "var(--fs-title)", "var(--fs-display)"})
         self.assertEqual(set(re.findall(r"font-weight:(\d+)", css + js)), {"400", "600"})
         self.assertNotIn("uppercase", css)
         self.assertEqual(re.findall(r"border-(?:left|right):\s*[2-9]px", css), [], "no coloured side stripes")
@@ -285,9 +287,9 @@ class RenderTests(unittest.TestCase):
         self.assertIn('<main id="view"', dashboard.HTML)
         self.assertLess(dashboard.HTML.index('<main id="view"'), dashboard.HTML.index('<footer class="foot">'))
 
+    # Quick looks are one native <dialog>: labelled, modal (focus trap), Esc and the backdrop close it, focus returns to the
+    # trigger, and every modal has a deep link.
     def test_dialog_accessibility(self):
-        """Quick looks are one native <dialog>: labelled, modal (focus trap), Esc and the backdrop close it, focus returns to the
-        trigger, and every modal has a deep link."""
         js, html = dashboard.JS, dashboard.HTML
         self.assertIn('<dialog class="modal" id="modal" aria-labelledby="modal-title" aria-modal="true"></dialog>', html)
         self.assertIn("dlg.showModal()", js)
@@ -296,16 +298,16 @@ class RenderTests(unittest.TestCase):
         self.assertIn("if (lastFocus && lastFocus.isConnected) lastFocus.focus({preventScroll: true});", js)
         self.assertIn('h("h2", {id: "modal-title", text})', js)
         self.assertIn('"aria-label": "Close (Esc)"', js)
-        self.assertIn('modal: ""};', js)                                                  # a route key: ?modal=<kind>:<id>
+        self.assertIn('modal: "", all: false};', js)                                      # a route key: ?modal=<kind>:<id>
         self.assertIn('set({modal: kind + ":" + id, task: ""}, true)', js)
         for kind in ("task", "initiative", "project", "person", "session", "action", "actions", "since"):
             self.assertIn(kind + ": ", js[js.index("const MODALS = {"):js.index("const MODALS = {") + 260], kind)
         self.assertIn("dialog.modal::backdrop", dashboard.CSS)
         self.assertNotIn('id="drawer"', html)
 
+    # Every SVG is either a named image (role=img + aria-label) or decorative (aria-hidden); visuals carry tooltips
+    # (hover and focus), and the status colors come from the fixed dataviz palette.
     def test_visuals_are_named(self):
-        """Every SVG is either a named image (role=img + aria-label) or decorative (aria-hidden); visuals carry tooltips
-        (hover and focus), and the status colors come from the fixed dataviz palette."""
         js, css = dashboard.JS, dashboard.CSS
         calls = [m.start() for m in re.finditer(r'sv\("svg", \{', js)]
         self.assertGreaterEqual(len(calls), 7)
@@ -504,7 +506,7 @@ PAIRS = ([(fg, bg, TEXT) for fg in ("ink", "ink-2", "ink-strong") for bg in ("su
          + [("you-ink", "you", TEXT), ("you-ink", "you-hover", TEXT), ("alert-ink", "alert", TEXT), ("ink", "selection", TEXT), ("ink", "highlight", TEXT)]
          + [(fg, bg, GLYPH) for fg in ("ok", "alert", "focus", "you-text") for bg in ("surface-page", "surface-raised", "surface-sunken")])
 # AC-11: the only rules that may read amber (--you, --you-hover): the waiting-for-you glyph and bar, the primary button
-YOU_READERS = {".btn.primary", ".btn.primary:hover", ".now-item.you::before", ".now-glyph.you", ".now-strip .you"}
+YOU_READERS = {".btn.primary", ".btn.primary:hover", ".now-item.you::before", ".now-glyph.you", ".now-strip .you", ".tab .n.you", ".navmore .n.you"}
 RAW_COLOR = re.compile(r"(?<![\w&])#[0-9a-fA-F]{3}(?:[0-9a-fA-F]{3}(?:[0-9a-fA-F]{2})?)?\b|\b(?:rgba?|hsla?|hwb|lab|lch|oklab|oklch)\(")
 FONT_NAME = re.compile(r"Manrope|\bInter\b|Source Serif|SF Mono|Menlo|Consolas|ui-monospace|system-ui|-apple-system|Segoe UI|Arial|Helvetica")
 
@@ -516,14 +518,19 @@ class TokenTests(unittest.TestCase):
     def setUp(self):
         self.light, self.dark = theme_tokens(dashboard.LIGHT), theme_tokens(dashboard.DARK)
 
-    def test_both_themes_offer_the_same_semantic_tokens(self):
+    # The brand offers every semantic token in both themes, and every token the components read without a fallback is
+    # defined: a renamed or misspelled one would silently fall back to the browser's default.
+    def test_both_themes_offer_every_token_the_components_read(self):
         for name, t in (("light", self.light), ("dark", self.dark)):
             self.assertEqual([s for s in SEMANTIC if s not in t], [], f"{name} misses semantic tokens")
         semantic = lambda t: {k for k in t if not k.startswith("ff-")}  # noqa: E731  (primitives are the brand's own)
         self.assertEqual(sorted(semantic(self.light) ^ semantic(self.dark)), [], "a token only one theme defines")
+        defined = set(self.light) | set(re.findall(r"--([\w-]+)\s*:", dashboard.CSS)) | set(re.findall(r"""["'\s;{]--([\w-]+):""", dashboard.JS))
+        read = set(re.findall(r"var\(--([\w-]+)\)", dashboard.CSS + dashboard.JS))
+        self.assertEqual(sorted(read - defined), [], "tokens read but never defined")
 
+    # AC-10 (Firefly): text 4.5:1, glyphs and the focus ring 3:1, light and dark.
     def test_every_text_and_glyph_pair_meets_its_contrast_in_both_themes(self):
-        """AC-10 (Firefly): text 4.5:1, glyphs and the focus ring 3:1, light and dark."""
         low = []
         for name, t in (("light", self.light), ("dark", self.dark)):
             for fg, bg, need in PAIRS:
@@ -533,9 +540,9 @@ class TokenTests(unittest.TestCase):
                     low.append(f"{name}: --{fg} on --{bg} is {ratio:.2f}:1, needs {need}:1")
         self.assertEqual(low, [])
 
+    # AC-11: the rules that read --you or --you-hover are the waiting-for-you glyph and bar and the primary button;
+    # no other token is amber but --you-text (amber as text, dark) and --focus (the dark focus ring).
     def test_amber_is_read_only_by_what_waits_for_you_and_the_primary_button(self):
-        """AC-11: the rules that read --you or --you-hover are the waiting-for-you glyph and bar and the primary button;
-        no other token is amber but --you-text (amber as text, dark) and --focus (the dark focus ring)."""
         readers = set()
         for sel, body in css_rules(dashboard.CSS):
             if re.search(r"var\(--you(?:-hover)?\)", body):
@@ -550,25 +557,18 @@ class TokenTests(unittest.TestCase):
                           and rgb(resolve(t, k)) in amber)
             self.assertEqual(also, [], f"{name}: tokens that are amber in disguise")
 
+    # --warn collided with amber (UX spec, finding 5): at-risk is ink with the ◇ glyph and a word.
     def test_warn_is_gone(self):
-        """--warn collided with amber (UX spec, finding 5): at-risk is ink with the ◇ glyph and a word."""
         for t in (self.light, self.dark):
             self.assertEqual([k for k in ("warn", "warning", "s-warn", "warn-text") if k in t], [])
         self.assertNotRegex(dashboard.CSS + dashboard.JS, r"--(?:warn|warning|s-warn|warn-text)\b")
 
+    # AC-17: only the brand files hold colors and font names, so swapping them changes every one.
     def test_components_hold_no_raw_color_or_font_name(self):
-        """AC-17: only the brand files hold colors and font names, so swapping them changes every one."""
         for part, text in (("styles", dashboard.CSS), ("script", dashboard.JS)):
             self.assertEqual(sorted(set(RAW_COLOR.findall(text))), [], f"raw colors in the {part}")
             self.assertEqual(sorted(set(FONT_NAME.findall(text))), [], f"font names in the {part}")
         self.assertIsNotNone(FONT_NAME.search(dashboard.LIGHT), "the brand names its fonts")
-
-    def test_every_token_the_components_read_is_defined(self):
-        """A renamed or misspelled token silently falls back to the browser's default: each var(--x) without a fallback
-        has a definition."""
-        defined = set(self.light) | set(re.findall(r"--([\w-]+)\s*:", dashboard.CSS)) | set(re.findall(r"""["'\s;{]--([\w-]+):""", dashboard.JS))
-        read = set(re.findall(r"var\(--([\w-]+)\)", dashboard.CSS + dashboard.JS))
-        self.assertEqual(sorted(read - defined), [])
 
 
 class DecisionTests(unittest.TestCase):
@@ -1338,7 +1338,7 @@ class PageBehaviorTests(unittest.TestCase):
         self.assertIn("by ", jobs[2])                                                            # an interval's next run is an upper bound
 
     def test_navigation_never_scrolls_sideways_and_every_view_stays_reachable(self):
-        views = ["overview", "tasks", "background", "team", "projects", "initiatives", "activity", "explorer", "health"]
+        views = ["now", "tasks", "background", "team", "projects", "initiatives", "activity", "explorer", "health"]
         steps = """out.row = $$("#tabs .tab").map(a => a.getAttribute("data-view")); out.menu = $$("#moremenu a").map(a => a.getAttribute("data-view"));
             out.tabs = [$("#tabs").scrollWidth, $("#tabs").clientWidth]; out.page = [document.documentElement.scrollWidth, document.documentElement.clientWidth];
             out.more = text($("#morebtn")); out.tabRoles = $$("[role=tab]").filter(el => !el.closest(".ptabs")).length; out.current = $('nav[aria-label="Views"] [aria-current="page"]').getAttribute("data-view");"""
@@ -1353,7 +1353,7 @@ class PageBehaviorTests(unittest.TestCase):
             if out["menu"]:
                 self.assertEqual(out["more"], "Health", width)                                  # the current view inside More names itself
         out = self.probe(steps, 390, "#/overview")
-        self.assertEqual((out["row"][:3], out["menu"][-1], out["more"]), (["overview", "tasks", "background"], "health", "More"))
+        self.assertEqual((out["row"][:3], out["menu"][-1], out["more"]), (["now", "tasks", "background"], "health", "More"))
 
     def test_the_more_menu_works_with_the_keyboard(self):
         out = self.probe("""const b = $("#morebtn"); out.menu = $$("#moremenu a").map(a => a.getAttribute("data-view")); b.focus(); key(b, "ArrowDown"); out.expanded = b.getAttribute("aria-expanded");
@@ -1368,12 +1368,8 @@ class PageBehaviorTests(unittest.TestCase):
         self.assertFalse(out["menuOpen"])
 
     def test_no_data_and_no_recent_activity_are_never_on_track(self):
-        out = self.probe("""out.dots = Object.fromEntries($$(".ptile").map(t => [text($(".pt-n .strong", t)), $(".pt-h .dot", t).getAttribute("aria-label")]));
-            await go("#/overview"); out.tile = text($$(".stile")[2]);""", 1440, "#/projects")
+        out = self.probe("""out.dots = Object.fromEntries($$(".ptile").map(t => [text($(".pt-n .strong", t)), $(".pt-h .dot", t).getAttribute("aria-label")]));""", 1440, "#/projects")
         self.assertEqual(out["dots"], {"widget": "Off track", "api": "No data", "old": "Quiet"})
-        self.assertIn("1 quiet", out["tile"])
-        self.assertIn("1 no data", out["tile"])
-        self.assertNotIn("on track", out["tile"])
 
     def test_contradictions_are_flagged_where_they_occur(self):
         out = self.probe("""out.project = text($(".phead")); await go("#/health"); out.health = $$("section[aria-label=Contradictions] li").map(text);""", 1440, "#/projects/acme/old")

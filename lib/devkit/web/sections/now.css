@@ -1,0 +1,117 @@
+/* Now (web/sections/now.js): the answer, the Needs you queue, the runs with their landing strips, the closing lines.
+   UX spec 3.1, 4.3 and 4.4. Semantic tokens only; amber only on what waits for you. */
+.now-view{padding-bottom:var(--s6)}
+.now-head{display:flex;flex-wrap:wrap;align-items:flex-start;justify-content:space-between;gap:var(--s2) var(--s5);padding:var(--s3) 0 var(--s6)}
+.now-said{min-width:0;flex:1 1 32rem;max-width:72rem}
+.now-h1{margin:0;font-family:var(--font-display);font-size:var(--fs-display);font-weight:var(--weight-display);line-height:1.15;letter-spacing:-.015em;color:var(--ink-strong);text-wrap:balance}
+.now-line{margin:var(--s2) 0 0;max-width:80ch;font-size:var(--fs-lead);line-height:1.5;color:var(--ink);text-wrap:pretty}
+.now-note{color:var(--ink-2)}
+.now-date{flex:none;padding-top:var(--s3);font-size:var(--fs-body);color:var(--ink-2);white-space:nowrap}
+.now-grid{display:grid;grid-template-columns:repeat(12,minmax(0,1fr));column-gap:var(--s5);row-gap:40px;align-items:start}
+.now-grid>.now-queue{grid-column:span 7}
+.now-grid>.now-runs{grid-column:span 5}
+.now-one{max-width:56rem}
+.now-sh{display:flex;align-items:baseline;flex-wrap:wrap;gap:var(--s1) var(--s3);padding-bottom:var(--s3);border-bottom:1px solid var(--line)}
+.now-h2{margin:0;font-size:var(--fs-title);font-weight:600;line-height:1.3;color:var(--ink-strong)}
+.now-count{font-weight:400;color:var(--ink-2)}
+.now-all{display:inline-flex;align-items:center;gap:2px;margin-left:auto;font-size:var(--fs-body);color:var(--ink-2);text-decoration:none}
+.now-all:hover{color:var(--ink-strong);text-decoration:underline}
+.now-all .i{transform:rotate(-90deg)}
+.now-stale{display:inline-flex;align-items:center;gap:4px;font-size:var(--fs-meta);color:var(--ink)}
+.now-quiet{margin:var(--s4) 0 0;font-size:var(--fs-body);color:var(--ink-2)}
+.now-degraded,.now-error{display:flex;align-items:flex-start;gap:var(--s2);margin:var(--s3) 0 0;max-width:80ch;font-size:var(--fs-body);line-height:1.5;color:var(--ink)}
+.now-error strong{color:var(--ink-strong);font-weight:600}
+
+/* the queue: rows on hairlines, no boxes; the first row's bar and glyph are the screen's only amber */
+.now-items{list-style:none;margin:0;padding:0}
+.now-item{position:relative;display:grid;grid-template-columns:16px minmax(0,1fr);column-gap:var(--s3);padding:var(--s4) 0 var(--s4) var(--s4);border-bottom:1px solid var(--line-soft)}
+.now-item.you::before{content:"";position:absolute;left:0;top:var(--s4);bottom:var(--s4);width:3px;border-radius:2px;background:var(--you)}
+.now-g{padding-top:2px;line-height:0}
+.now-glyph{width:16px;height:16px;flex:none;fill:none;stroke:currentColor;stroke-width:1.6;stroke-linecap:round;stroke-linejoin:round;overflow:visible}
+.now-glyph.you{fill:var(--you);stroke:var(--you-text)}
+.now-glyph.alert,.now-glyph.blocked{color:var(--alert)}
+.now-glyph.caution,.now-glyph.unverified{color:var(--ink)}
+.now-glyph.done{color:var(--ok)}
+.now-glyph.pending{color:var(--ink-2)}
+.now-glyph.running{color:var(--ink);fill:currentColor}
+.now-body{min-width:0}
+.now-t{display:flex;align-items:baseline;gap:var(--s3)}
+.now-tt{flex:1;min-width:0;margin:0;font-size:var(--fs-body);font-weight:600;line-height:1.45;color:var(--ink-strong);overflow-wrap:anywhere}
+.now-id{color:var(--you-text)}
+.now-n{font-weight:400;color:var(--ink-2)}
+.now-tag{display:inline-block;margin-left:var(--s2);padding:0 6px;border:1px solid var(--ink-2);border-radius:var(--radius-control);font-size:var(--fs-meta);font-weight:600;color:var(--ink-strong);vertical-align:1px}
+.now-age{flex:none;font-size:var(--fs-meta);color:var(--ink-2)}
+.now-l{margin:var(--s1) 0 0;max-width:80ch;font-size:var(--fs-body);line-height:1.5;color:var(--ink-2);overflow-wrap:anywhere}
+.now-opts,.now-type{margin:var(--s2) 0 0;max-width:80ch;font-size:var(--fs-body);line-height:1.7;color:var(--ink)}
+.now-type{color:var(--ink-2)}
+.now-key{font-weight:600;color:var(--ink-strong)}
+.now-rec{color:var(--ink-2)}
+.now-type kbd{display:inline-block;min-width:0;padding:0 6px;border:1px solid var(--line);border-radius:var(--radius-control);background:var(--surface-sunken);font-family:var(--font-mono);font-size:var(--fs-body);line-height:1.6;color:var(--ink-strong);text-align:left}
+.now-acts{display:flex;flex-wrap:wrap;align-items:center;gap:var(--s2) var(--s4);margin-top:var(--s3)}
+.now-cmd{display:inline-flex;align-items:center;gap:6px;max-width:100%;min-height:28px;padding:2px 10px 2px 8px;border:1px solid var(--line);border-radius:var(--radius-control);background:var(--surface-sunken);color:var(--ink-strong);cursor:pointer}
+.now-cmd code{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.now-cmd:hover{border-color:var(--ink-2)}
+.now-open{margin-left:auto;font-size:var(--fs-body);font-weight:600;color:var(--ink-strong)}
+.now-item.now-house{padding-top:var(--s3);padding-bottom:var(--s3)}
+.now-hk{margin:0;min-width:0;font-size:var(--fs-body);line-height:1.5;overflow-wrap:anywhere}
+.now-hk a{color:var(--ink-strong);text-decoration:none}
+.now-hk a:hover .now-key,.now-hk a:focus-visible .now-key{text-decoration:underline}
+.now-hk .now-l{margin:0}
+
+/* the runs: goal, where it runs, the landing strip, how far, when it lands */
+.now-runlist{list-style:none;margin:0;padding:0}
+.now-run{padding:var(--s4) 0;border-bottom:1px solid var(--line-soft);cursor:pointer}
+.now-run.now-far{cursor:default}
+.now-rt{margin:0;font-size:var(--fs-body);font-weight:600;line-height:1.45;color:var(--ink-strong);overflow-wrap:anywhere}
+.now-rt a{color:inherit;text-decoration:none}
+.now-run:hover .now-rt a,.now-rt a:hover{text-decoration:underline}
+.now-meta,.now-status{margin:var(--s1) 0 0;font-size:var(--fs-meta);color:var(--ink-2)}
+.now-lands{margin:var(--s1) 0 0;font-size:var(--fs-body);line-height:1.5;color:var(--ink)}
+.now-strip{display:flex;align-items:center;gap:var(--s2);margin:var(--s3) 0 var(--s2);min-width:0;color:var(--ink-2)}
+.now-track{flex:none;overflow:visible}
+.now-seg{fill:none;stroke:var(--ink-2);stroke-width:1.5}
+.now-step{fill:none;stroke:currentColor;stroke-width:1.6;stroke-linecap:round;stroke-linejoin:round;color:var(--ink-2)}
+.now-step.done{color:var(--ok)}
+.now-step.running{color:var(--ink);fill:currentColor}
+.now-step.blocked{color:var(--alert)}
+.now-step.unverified{color:var(--ink)}
+.now-strip .you{color:var(--you)}
+.now-step.you{fill:currentColor;stroke:var(--you-text)}
+.now-out{flex:1 1 auto;min-width:var(--s4);border-top:2px dotted var(--line)}
+.now-out.you{border-top-color:currentColor}
+.now-bracket{flex:none;padding:0 var(--s2);border-left:1px solid var(--ink-2);border-right:1px solid var(--ink-2);font-size:var(--fs-meta);font-weight:600;line-height:1.4;color:var(--ink-strong);white-space:nowrap}
+.now-rest{flex:none;font-size:var(--fs-meta);color:var(--ink-2);white-space:nowrap}
+.now-done{display:flex;align-items:flex-start;gap:var(--s2);margin:var(--s3) 0 0;font-size:var(--fs-body);color:var(--ink-2)}
+.now-more{display:inline-block;margin-top:var(--s3);font-size:var(--fs-body)}
+.now-team{margin:var(--s4) 0 0;font-size:var(--fs-body);color:var(--ink-2)}
+
+/* next up and the first steps */
+.now-nx{display:flex;align-items:center;flex-wrap:wrap;gap:var(--s2) var(--s4);padding:var(--s3) 0;border-bottom:1px solid var(--line-soft)}
+.now-nx .now-body{flex:1 1 16rem}
+.now-st{display:inline-flex;align-items:center;gap:6px;min-width:5rem;font-size:var(--fs-body);color:var(--ink-2)}
+
+/* the closing lines */
+.now-foot{display:grid;gap:var(--s2);margin-top:40px;padding-top:var(--s4);border-top:1px solid var(--line)}
+.now-safety,.now-since{margin:0;max-width:100ch;font-size:var(--fs-body);line-height:1.6;color:var(--ink)}
+.now-safety{display:grid;grid-template-columns:16px minmax(0,1fr);column-gap:var(--s2);align-items:start}
+.now-safety .now-g{padding-top:3px}
+.now-safety .now-stale{vertical-align:-2px}
+.now-since summary{cursor:pointer;color:var(--ink-2)}
+
+/* before the first snapshot: shapes of the real rows, no spinner */
+.now-shape{border-radius:var(--radius-control);background:var(--surface-sunken)}
+.now-shape-h1{width:40%;height:32px;margin:var(--s3) 0 var(--s6)}
+.now-shape-row{height:72px;margin-bottom:var(--s3)}
+.now-shape-run{height:104px;margin-bottom:var(--s3)}
+
+@media (max-width:900px){
+  .now-grid>.now-queue,.now-grid>.now-runs{grid-column:1/-1}
+}
+@media (max-width:600px){
+  .now-head{padding-bottom:var(--s5)}
+  .now-date{display:none}
+  .now-open{margin-left:0}
+}
+@media (pointer:coarse){
+  .now-cmd,.now-open,.now-all{min-height:44px;display:inline-flex;align-items:center}
+}

@@ -2,7 +2,8 @@
 *,*::before,*::after{box-sizing:border-box}
 /* one scale for space, four type sizes (13 / 15 / 18 / 28 px), two weights (400 / 600) */
 :root{--s1:4px;--s2:8px;--s3:12px;--s4:16px;--s5:24px;--s6:32px;--s7:48px;--s8:64px;
-  --fs-1:.8125rem;--fs-2:.9375rem;--fs-3:1.125rem;--fs-4:1.75rem;--radius-surface:10px;--radius-control:6px;--row:44px;--nav-h:56px;--tabs-h:44px;--wide:1600px;
+  --fs-1:.8125rem;--fs-2:.9375rem;--fs-3:1.125rem;--fs-4:1.75rem;
+  --fs-meta:.75rem;--fs-body:.875rem;--fs-lead:1rem;--fs-title:1.25rem;--fs-display:2rem;--radius-surface:10px;--radius-control:6px;--row:44px;--nav-h:56px;--tabs-h:44px;--wide:1600px;
   --ease:cubic-bezier(.2,.8,.2,1)}
 html{-webkit-text-size-adjust:100%;scrollbar-color:var(--line) transparent}
 body{margin:0;background:var(--surface-page);color:var(--ink);font:400 var(--fs-2)/1.5 var(--font-text)}
@@ -44,6 +45,7 @@ kbd{display:inline-block;min-width:20px;padding:0 5px;border:1px solid var(--lin
 .tab[aria-current="page"],.navmore>button.cur{color:var(--ink-strong);font-weight:600;box-shadow:inset 0 -2px 0 var(--ink-strong)}
 .tab.sec{margin-left:var(--s3)}
 .tab .n,.navmore .n{width:7px;height:7px;border-radius:50%;background:var(--alert);flex:none}
+.tab .n.you,.navmore .n.you{background:var(--you);box-shadow:inset 0 0 0 1px var(--you-text)}
 .tab .n.warn,.navmore .n.warn{background:var(--ink);border-radius:0;clip-path:polygon(evenodd,50% 0,100% 50%,50% 100%,0 50%,50% 0,50% 30%,30% 50%,50% 70%,70% 50%,50% 30%)}
 .navmore{position:relative;display:flex;align-items:stretch;flex:none}
 .navmore .menu{top:calc(100% + 2px);left:auto;right:0;min-width:240px}
