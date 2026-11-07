@@ -1994,10 +1994,11 @@ def crew_background_notice(sess: dict) -> str:
         ids = ", ".join("`" + str(t["id"]) + "`" for t in tasks)
         cmds = "; ".join("`" + str(t.get("command") or "") + "`" for t in tasks[:2]) + (" …" if len(tasks) > 2 else "")
         parts.append(f"{rec.get('who') or 'a crew member'} task{'s' if len(tasks) > 1 else ''} {ids} ({cmds}); stop "
-                     f"it with TaskStop `{aid}` if you no longer need it")
+                     f"it with TaskStop `{aid}` only if you no longer need it")
     if not parts:
         return ""
-    return ("devkit · Finished but still running background work: " + ". ".join(parts) + ". Claude Code lists a "
+    return ("devkit · Stopped with background work still running (it may still be working, and resumes when that work "
+            "ends): " + ". ".join(parts) + ". Claude Code lists a "
             "member until its background work ends.")
 
 

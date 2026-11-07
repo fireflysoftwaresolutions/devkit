@@ -446,8 +446,8 @@ class BriefTests(unittest.TestCase):
 
     def test_every_brief_and_agent_file_has_the_member_end_its_background_work_before_it_reports(self):
         # Claude Code kept members listed for hours after their report while a background command they started ran
-        rule = ("Before your final report, every background command you started has ended: wait for it or stop it "
-                "with TaskStop.")
+        rule = ("Before your final report, every background command you started has ended: keep working until it ends, "
+                "or stop it.")
         r = crew.load()
         with tempfile.TemporaryDirectory() as d:
             for m in crew.members(r, include_main=False):

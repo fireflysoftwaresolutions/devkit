@@ -420,6 +420,18 @@ class BackgroundWorkTests(GateCase):
         self.assertIn("background: bin/dev test", recs[0]["detail"])
         self.assertNotIn("crew_background", sess)  # sent back: its lane stays open, the tech lead is not told yet
 
+    def test_a_command_moved_to_the_background_after_some_output_is_found_by_its_result_id(self):
+        # the Code reviewer's review, finding 2: the commonest real shape has output before Claude Code's
+        # "Command was moved to the background" line, and the id only in the result record's backgroundTaskId
+        self.complete()
+        self.tx.call("Bash", "Ran 1595 tests in 212s\nCommand was moved to the background (ID: m0v3d4w4y). "
+                     "You will be notified when it completes.", command="bin/dev test", description="run")
+        self.tx.records[-1]["toolUseResult"] = {"stdout": "Ran 1595 tests in 212s", "backgroundTaskId": "m0v3d4w4y"}
+        out = gates.check("Kid", self.data(), {}, "owner/repo", roster={"members": [KID]})
+        self.assertEqual(out["decision"], "block")
+        self.assertIn("`bin/dev test` (task `m0v3d4w4y`)", out["reason"])
+        self.assertIn("do not end your turn to wait", out["reason"])
+
     def test_a_notification_that_the_task_ended_counts_whatever_its_status(self):
         self.complete()
         tests = self.tx.background("bin/dev test", "b7k2m9x1q")

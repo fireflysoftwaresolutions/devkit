@@ -554,9 +554,8 @@ class CrewCoordinationTests(unittest.TestCase):
                 self.assertEqual(run("subagent_stop", dict(kid, stop_hook_active=True)), "")  # then let through
                 lead = {"session_id": "s1", "prompt": "how is it going?", "cwd": d}
                 told = json.loads(run("prompt", lead))["hookSpecificOutput"]["additionalContext"]
-                self.assertIn("Finished but still running background work: DevEx engineer (Kid) task `b7k2m9x1q`",
-                              told)
-                self.assertIn("stop it with TaskStop `k1` if you no longer need it", told)
+                self.assertIn("resumes when that work ends): DevEx engineer (Kid) task `b7k2m9x1q`", told)
+                self.assertIn("stop it with TaskStop `k1` only if you no longer need it", told)
                 tool = {"session_id": "s1", "tool_name": "Bash", "tool_input": {"command": "git status"}, "cwd": d}
                 self.assertNotIn("b7k2m9x1q", run("post_tool", tool))  # once
                 seraph = member("r1", "devkit:seraph", "Code reviewer (Seraph): review", "c3p0r2d2x")

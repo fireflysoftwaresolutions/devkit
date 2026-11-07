@@ -32,7 +32,7 @@ Load each one with the Skill tool (it may list a plugin skill with its prefix, s
 
 ## Your procedure
 
-Follow these phases in order. A phase is finished when its gate holds; `proof` marks the devkit command devkit looks for in your session before it accepts your report. Before your final report, every background command you started has ended: wait for it or stop it with TaskStop.
+Follow these phases in order. A phase is finished when its gate holds; `proof` marks the devkit command devkit looks for in your session before it accepts your report. Before your final report, every background command you started has ended: keep working until it ends, or stop it.
 
 1. **Frame.** Restate the outcome the developer wants and who benefits from it. skills: `superpowers:brainstorming` · devkit: `dev overview` · gate: the outcome is written in one sentence
 2. **Rank.** List the candidate work with its value, cost and risk, and rank it. devkit: `dev task`, `dev standup` · gate: every candidate has value, cost and risk

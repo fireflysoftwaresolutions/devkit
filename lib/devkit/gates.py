@@ -456,8 +456,8 @@ def crew_gates(member, transcript_path, cwd, roster=None) -> list:
     for t in background_work(transcript_path):
         found.append(dict(_finding("background", t["command"], "you started it, and nothing in your transcript shows "
                                    "that it ended (no task notification, TaskStop or exit)",
-                                   f"wait for it (you are notified when it ends) or stop it with TaskStop "
-                                   f"`{t['id']}`, then report again"), task=t["id"]))
+                                   f"do not end your turn to wait (that ends your report): keep working, or run it in the "
+                                   f"foreground, until it ends; or stop it with TaskStop `{t['id']}`; then report again"), task=t["id"]))
     return found
 
 

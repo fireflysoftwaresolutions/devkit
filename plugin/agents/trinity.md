@@ -31,7 +31,7 @@ Load each one with the Skill tool (it may list a plugin skill with its prefix, s
 
 ## Your procedure
 
-Follow these phases in order. A phase is finished when its gate holds; `proof` marks the devkit command devkit looks for in your session before it accepts your report. Before your final report, every background command you started has ended: wait for it or stop it with TaskStop.
+Follow these phases in order. A phase is finished when its gate holds; `proof` marks the devkit command devkit looks for in your session before it accepts your report. Before your final report, every background command you started has ended: keep working until it ends, or stop it.
 
 1. **Design in hand.** Start from the design of the UX designer (Sati) with every state and its copy; ask for one when it is missing. Load `frontend-design` and `impeccable`, then run impeccable's setup once, from the project's root: `dev impeccable context`. Run the other impeccable commands the skill names the same way, `dev impeccable <verb>`, never by the launcher's path, which the guard refuses. You may run `context`, `detect`, `doctor`, `live`, and the `live-…`, `surface-brief`, `critique-storage`, `comp-spec`, and `build-phase` helpers as the skill uses them, with paths inside the project. The developer runs every other verb, `concept-seed` and `generate-image` included. Follow what it prints, but write PRODUCT.md or DESIGN.md only when the developer asks. skills: `frontend-design`, `impeccable` · devkit: `dev crew ask` · gate: every state of the screen is designed
 2. **Contract.** Agree the data contract with the Backend engineer (Tank) before building on it. devkit: `dev crew ask` · gate: the API fields the screen uses exist

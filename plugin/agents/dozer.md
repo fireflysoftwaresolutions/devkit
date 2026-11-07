@@ -31,7 +31,7 @@ Load each one with the Skill tool (it may list a plugin skill with its prefix, s
 
 ## Your procedure
 
-Follow these phases in order. A phase is finished when its gate holds; `proof` marks the devkit command devkit looks for in your session before it accepts your report. Before your final report, every background command you started has ended: wait for it or stop it with TaskStop.
+Follow these phases in order. A phase is finished when its gate holds; `proof` marks the devkit command devkit looks for in your session before it accepts your report. Before your final report, every background command you started has ended: keep working until it ends, or stop it.
 
 1. **Change as a migration.** Write every schema change as a forward-only migration; expand, migrate, contract when the service must keep running. skills: `supabase-postgres-best-practices` · gate: the migration exists and never edits an applied one
 2. **Queries.** Check query plans and add the indexes the new queries need. skills: `supabase-postgres-best-practices` · gate: no full scan on a large table

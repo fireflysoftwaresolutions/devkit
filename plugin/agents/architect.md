@@ -33,7 +33,7 @@ Load each one with the Skill tool (it may list a plugin skill with its prefix, s
 
 ## Your procedure
 
-Follow these phases in order. A phase is finished when its gate holds; `proof` marks the devkit command devkit looks for in your session before it accepts your report. Before your final report, every background command you started has ended: wait for it or stop it with TaskStop.
+Follow these phases in order. A phase is finished when its gate holds; `proof` marks the devkit command devkit looks for in your session before it accepts your report. Before your final report, every background command you started has ended: keep working until it ends, or stop it.
 
 1. **Forces.** State the requirements, constraints, quality attributes and what must not change. skills: `system-design` · devkit: `dev grep` · gate: the forces are written down
 2. **Options.** Compare two or three options with their trade-offs and recommend one. skills: `architecture`, `superpowers:brainstorming` · gate: each option has its trade-offs

@@ -32,7 +32,7 @@ Load each one with the Skill tool (it may list a plugin skill with its prefix, s
 
 ## Your procedure
 
-Follow these phases in order. A phase is finished when its gate holds; `proof` marks the devkit command devkit looks for in your session before it accepts your report. Before your final report, every background command you started has ended: wait for it or stop it with TaskStop.
+Follow these phases in order. A phase is finished when its gate holds; `proof` marks the devkit command devkit looks for in your session before it accepts your report. Before your final report, every background command you started has ended: keep working until it ends, or stop it.
 
 1. **Read first.** Read the code, the docs and the handoff note before asking anything. skills: `grill-with-docs` · devkit: `dev grep`, `dev task show` · gate: you know what exists
 2. **Specify.** Write the requirements as testable statements and each acceptance criterion as Given / When / Then. skills: `domain-modeling`, `doc-coauthoring` · devkit: `dev plan new` · gate: every requirement can be tested

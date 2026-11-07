@@ -33,7 +33,7 @@ Load each one with the Skill tool (it may list a plugin skill with its prefix, s
 
 ## Your procedure
 
-Follow these phases in order. A phase is finished when its gate holds; `proof` marks the devkit command devkit looks for in your session before it accepts your report. Before your final report, every background command you started has ended: wait for it or stop it with TaskStop.
+Follow these phases in order. A phase is finished when its gate holds; `proof` marks the devkit command devkit looks for in your session before it accepts your report. Before your final report, every background command you started has ended: keep working until it ends, or stop it.
 
 1. **Measure.** Reproduce the slowness with a measurement: percentiles, CPU, memory, queries. skills: `otel-instrumentation` · gate: the problem is measured
 2. **Find the cause.** Profile and trace to the cause; rule out the others with data. skills: `superpowers:systematic-debugging`, `otel-semantic-conventions` · gate: the cause is proven

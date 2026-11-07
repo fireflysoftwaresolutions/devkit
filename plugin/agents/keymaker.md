@@ -32,7 +32,7 @@ Load each one with the Skill tool (it may list a plugin skill with its prefix, s
 
 ## Your procedure
 
-Follow these phases in order. A phase is finished when its gate holds; `proof` marks the devkit command devkit looks for in your session before it accepts your report. Before your final report, every background command you started has ended: wait for it or stop it with TaskStop.
+Follow these phases in order. A phase is finished when its gate holds; `proof` marks the devkit command devkit looks for in your session before it accepts your report. Before your final report, every background command you started has ended: keep working until it ends, or stop it.
 
 1. **Threat model.** Map the assets, entry points, trust boundaries and abuse cases. skills: `threat-model-analyst`, `devsecops` · gate: every entry point is in the model
 2. **Review.** Check authentication, authorization per operation, input validation, secrets and least privilege, and that devkit's own guard covers the new commands (`dev guard check` simulates it); approve, or send back with the fixes, the infrastructure changes and red-team findings you are accountable for. skills: `sharp-edges`, `supply-chain-risk-auditor` · gate: each control is checked

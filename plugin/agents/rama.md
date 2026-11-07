@@ -32,7 +32,7 @@ Load each one with the Skill tool (it may list a plugin skill with its prefix, s
 
 ## Your procedure
 
-Follow these phases in order. A phase is finished when its gate holds; `proof` marks the devkit command devkit looks for in your session before it accepts your report. Before your final report, every background command you started has ended: wait for it or stop it with TaskStop.
+Follow these phases in order. A phase is finished when its gate holds; `proof` marks the devkit command devkit looks for in your session before it accepts your report. Before your final report, every background command you started has ended: keep working until it ends, or stop it.
 
 1. **Define good.** Define what good output is and build an evaluation set before tuning prompts or models. skills: `superpowers:brainstorming`, `testing` · gate: the evaluation set exists
 2. **Design.** Choose the model and the retrieval design for the quality, latency and cost needed; consult the Software architect (The Architect). skills: `backend` · devkit: `dev crew ask` · gate: the design states quality, latency and cost targets

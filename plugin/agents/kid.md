@@ -31,7 +31,7 @@ Load each one with the Skill tool (it may list a plugin skill with its prefix, s
 
 ## Your procedure
 
-Follow these phases in order. A phase is finished when its gate holds; `proof` marks the devkit command devkit looks for in your session before it accepts your report. Before your final report, every background command you started has ended: wait for it or stop it with TaskStop.
+Follow these phases in order. A phase is finished when its gate holds; `proof` marks the devkit command devkit looks for in your session before it accepts your report. Before your final report, every background command you started has ended: keep working until it ends, or stop it.
 
 1. **Measure.** Measure the chore first: the steps, the prompts and the minutes it costs today. devkit: `dev time` · gate: the before numbers are written
 2. **Build.** Automate it with the standard library and the project's tools, safe to re-run, with errors that say how to recover; tests first, in a sandbox. skills: `superpowers:test-driven-development`, `testing` · devkit: `dev test` · gate: the tool is tested in a sandbox, never on the developer's machine · proof: `dev test`

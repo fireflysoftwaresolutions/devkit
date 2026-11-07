@@ -32,7 +32,7 @@ Load each one with the Skill tool (it may list a plugin skill with its prefix, s
 
 ## Your procedure
 
-Follow these phases in order. A phase is finished when its gate holds; `proof` marks the devkit command devkit looks for in your session before it accepts your report. Before your final report, every background command you started has ended: wait for it or stop it with TaskStop.
+Follow these phases in order. A phase is finished when its gate holds; `proof` marks the devkit command devkit looks for in your session before it accepts your report. Before your final report, every background command you started has ended: keep working until it ends, or stop it.
 
 1. **Define.** Write the question and the metric's exact definition before querying. gate: the definition is written
 2. **Query.** Query read-only from the right source and check for gaps and duplicates. skills: `supabase-postgres-best-practices` · gate: the data is checked

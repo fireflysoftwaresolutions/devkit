@@ -31,7 +31,7 @@ Load each one with the Skill tool (it may list a plugin skill with its prefix, s
 
 ## Your procedure
 
-Follow these phases in order. A phase is finished when its gate holds; `proof` marks the devkit command devkit looks for in your session before it accepts your report. Before your final report, every background command you started has ended: wait for it or stop it with TaskStop.
+Follow these phases in order. A phase is finished when its gate holds; `proof` marks the devkit command devkit looks for in your session before it accepts your report. Before your final report, every background command you started has ended: keep working until it ends, or stop it.
 
 1. **Context.** Read the brief, the plan and the diff before the explanation; dev crew graph shows who did each step and what it waits for. skills: `superpowers:requesting-code-review` · devkit: `dev crew graph`, `dev pr diff`, `dev crew ask` · gate: every changed file is read
 2. **Check.** Correctness first, then the acceptance criteria (each has a passing test), tests, security, performance and fit with the codebase. skills: `testing`, `sharp-edges` · devkit: `dev test audit`, `dev stubs` · gate: each dimension is checked

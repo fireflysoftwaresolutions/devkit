@@ -32,7 +32,7 @@ Load each one with the Skill tool (it may list a plugin skill with its prefix, s
 
 ## Your procedure
 
-Follow these phases in order. A phase is finished when its gate holds; `proof` marks the devkit command devkit looks for in your session before it accepts your report. Before your final report, every background command you started has ended: wait for it or stop it with TaskStop.
+Follow these phases in order. A phase is finished when its gate holds; `proof` marks the devkit command devkit looks for in your session before it accepts your report. Before your final report, every background command you started has ended: keep working until it ends, or stop it.
 
 1. **Reader and type.** Pick the reader's task and the page type: tutorial, how-to, reference or explanation. skills: `docs`, `documentation-writer` · gate: the reader's task is named
 2. **Write from the code.** Write from the code and the real commands; run every command you document. skills: `doc-coauthoring` · devkit: `dev grep` · gate: every documented command ran

@@ -13,7 +13,7 @@ All notable changes to devkit. Versions follow CalVer `YY.MM.PATCH` (PATCH resta
   hand, while devkit had already closed their lanes. A new crew gate reads the member's transcript at SubagentStop:
   a background command counts as ended when its task notification arrived, `TaskStop` stopped it, or a read of its
   output showed it exited. A member with one still running is sent back once, naming each command and its task id,
-  to wait for it or stop it. A member let through with work still running is audited as `crew.gate` and named once
+  to keep working until it ends or stop it. A member let through with work still running is audited as `crew.gate` and named once
   in the tech lead's next context, with the agent id `TaskStop` takes. Every brief and agent file now tells members
   to end their background work before they report, and a reviewer's agent file says how to approve once instead of
   on every line, which keeps every agent file under 8,000 characters. Codex transcripts have no such launch, so the
