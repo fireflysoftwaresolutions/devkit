@@ -1078,6 +1078,9 @@ def write_claude_settings(include_hooks=True):
         ep[p] = True
     for p in plugins.get("disabled", []):
         ep[p] = False
+    from . import ext
+    for p in ext.retired_plugin_keys("claude"):  # retired from the team default (dev ext): its key goes too
+        ep.pop(p, None)
     new["enabledPlugins"] = ep
     sl = cur.get("statusLine") or {}
     mine = "hook statusline" in str(sl.get("command") or "")
@@ -1137,6 +1140,7 @@ def setup_claude():
         else:
             done("devkit plugin reinstalled from this checkout (skills, commands, agents)")
     done(f"{len(plugins['plugins'])} plugins installed and enabled")
+    _retire("claude")
     for name, spec in plugins.get("mcp", {}).items():
         rc, _, _ = sh(["claude", "mcp", "get", name], timeout=30)
         if rc == 0:
@@ -1427,6 +1431,18 @@ def setup_codex():
             n = len(list((DEVKIT_HOME / "plugin" / "commands").glob("*.md")))
             done(f"devkit plugin reinstalled from this checkout (skills, and {n} commands as skills)")
     done(f"{len(plugins['plugins'])} plugins installed and enabled")
+    _retire("codex")
+
+
+def _retire(agent: str):
+    """Uninstall the agent's extensions retired from devkit's defaults (`retired` in its plugins.json), each audited
+    as ext.retire; a user overlay that adds one back keeps it (dev ext)."""
+    from . import ext
+    try:
+        for ok, msg in ext.retire(agent, lambda argv, timeout=300: sh(argv, timeout=timeout)):
+            done(msg) if ok else fail(msg)
+    except ext.ExtError as e:
+        fail(f"extensions: {e}")
 
 
 def setup_tools():

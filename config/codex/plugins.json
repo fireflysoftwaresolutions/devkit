@@ -1,5 +1,5 @@
 {
-  "_comment": "Codex plugins and MCP servers (CLI and the ChatGPT desktop app share ~/.codex). See docs/skills-and-plugins.md.",
+  "_comment": "Codex plugins and MCP servers (CLI and the ChatGPT desktop app share ~/.codex). `meta` says why each entry is here, its license and upstream (`dev ext ls`); `retired` entries are removed by `dev install`. See docs/skills-and-plugins.md.",
   "marketplaces": {
     "firefly-devkit": "{{DEVKIT}}"
   },
@@ -10,9 +10,6 @@
     "codex-security@openai-curated-remote"
   ],
   "mcp": {
-    "context7": {
-      "url": "https://mcp.context7.com/mcp"
-    },
     "chrome-devtools": {
       "command": "npx",
       "args": [
@@ -29,6 +26,41 @@
         "@angular/cli@22.2.6",
         "mcp"
       ]
+    }
+  },
+  "retired": [
+    "mcp:context7"
+  ],
+  "meta": {
+    "devkit@firefly-devkit": {
+      "why": "devkit's own skills and commands",
+      "license": "Apache-2.0",
+      "required": true
+    },
+    "superpowers@openai-curated-remote": {
+      "why": "The same process skills as in Claude Code",
+      "license": "MIT",
+      "upstream": "obra/superpowers"
+    },
+    "impeccable@openai-curated-remote": {
+      "why": "UI design quality: critique, audit, polish; Claude Code gets the same skill from devkit",
+      "license": "Apache-2.0",
+      "upstream": "pbakaus/impeccable"
+    },
+    "codex-security@openai-curated-remote": {
+      "why": "Security scans, analysis, validation and investigation of code and diffs",
+      "license": "Proprietary (OpenAI)",
+      "required": true
+    },
+    "mcp:chrome-devtools": {
+      "why": "Performance, network and accessibility debugging in a real browser",
+      "license": "Apache-2.0",
+      "upstream": "npm:chrome-devtools-mcp"
+    },
+    "mcp:angular-cli": {
+      "why": "Angular best practices, documentation search and project tools",
+      "license": "MIT",
+      "upstream": "npm:@angular/cli"
     }
   }
 }

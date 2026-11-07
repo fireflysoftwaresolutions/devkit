@@ -10,6 +10,10 @@ security review, plan mode and worktrees, so devkit does not duplicate them.
 Selection criteria: maintained and widely used, an official vendor source where one exists, a clear license, no
 uncontrolled telemetry or unpinned downloads, and no behavior that conflicts with the workspace rules.
 
+`dev ext ls` shows every one of them on your Mac: its source, what pins it, whether it is installed and enabled, its
+license, and why it is there (`-v`). The reason and license live next to each entry: `meta` in
+`config/claude/plugins.json` and `config/codex/plugins.json`, and `why` in each source of `config/skills.json`.
+
 ## The devkit plugin
 
 devkit ships its own plugin, `devkit@firefly-devkit`, for both agents. Its description is the tagline, "Every repo in
@@ -112,7 +116,6 @@ From the `claude-plugins-official` marketplace, enabled for every project.
 | Plugin | Source · license | Purpose | Why |
 | --- | --- | --- | --- |
 | `superpowers` | obra/superpowers · MIT | Brainstorming, plans, subagent-driven development, TDD, systematic debugging, verification before completion, review requests | One process backbone, used in both agents |
-| `context7` | Upstash · MIT | Up-to-date library documentation (remote MCP) | Version-specific docs when no vendor source exists |
 | `frontend-design` | Anthropic · Apache-2.0 | Distinctive, production-grade UI | The design direction; Codex gets the same skill from devkit (see [Shared skills](#shared-skills-both-agents)) |
 | `commit-commands` | Anthropic · Apache-2.0 | `/commit`, `/commit-push-pr`, `/clean_gone` | Low cost; a consistent commit flow |
 | `security-guidance` | Anthropic · Apache-2.0 | Pattern-based security warnings on edits | Cheap, useful warnings; its costly reviews are off (see the following sections) |
@@ -141,7 +144,6 @@ Codex has no LSP plugin mechanism; its global instructions tell it to run the pr
 
 | Server | Claude Code | Codex | Notes |
 | --- | --- | --- | --- |
-| context7 | through the plugin | `https://mcp.context7.com/mcp` | Queries leave the machine |
 | Chrome DevTools | user scope | yes | `chrome-devtools-mcp@1.12.0` pinned, `--no-usage-statistics --no-performance-crux`; performance, network, and accessibility debugging in a real browser |
 | Angular CLI | user scope | yes | `@angular/cli@22.2.6 mcp`: best practices, documentation search, project tools |
 
@@ -265,14 +267,23 @@ Review the files they write (AGENTS.md, `.mcp.json`, `.codex/config.toml`) befor
 | `openai/skills` as a primary source | Deprecated in favor of `openai/plugins` |
 | Sources without a license (`ast-grep/agent-skill`, `JetBrains/junie-guidelines`, others) | Unclear rights for company work |
 
+### Removed
+
+| Item | Removed in | Reason |
+| --- | --- | --- |
+| `context7` (the Claude Code plugin and the Codex MCP server) | 26.11.4 | Every query left the machine for a third-party service, and the vendor sources it stood in for are now preferred: the project's installed packages, framework MCP servers such as the Angular CLI, then web search. `dev install` uninstalls it from both agents (audited as `ext.retire`) |
+
+An entry removed from devkit's defaults goes to `retired` in its agent's `plugins.json`, and `dev install` uninstalls
+it on every Mac.
+
 ## Add or update a skill
 
 1. Check the source: maintainer, license, recent activity, what files it writes, whether it sends data anywhere.
-2. Add it to `config/skills.json` under its repository, with the full commit SHA in `ref`, the folder path and,
-   for an optional skill, a `group`:
+2. Add it to `config/skills.json` under its repository, with the full commit SHA in `ref`, the license, a one-line
+   `why`, the folder path and, for an optional skill, a `group`:
 
    ```json
-   { "repo": "owner/repo", "ref": "<40-char sha>", "license": "MIT", "group": "iac", "skills": { "my-skill": "skills/my-skill" } }
+   { "repo": "owner/repo", "ref": "<40-char sha>", "license": "MIT", "why": "Terraform style", "group": "iac", "skills": { "my-skill": "skills/my-skill" } }
    ```
 
 3. If a kind of work should require it, add or change a rule in `config/skill-rules.json`.

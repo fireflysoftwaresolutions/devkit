@@ -3,6 +3,21 @@
 All notable changes to devkit. Versions follow CalVer `YY.MM.PATCH` (PATCH restarts at 0 each month); tags are
 `vYY.MM.PATCH`. Sections follow [Keep a Changelog](https://keepachangelog.com/).
 
+## [26.11.4] - Unreleased
+
+### Added
+
+- **`dev ext ls` lists every third-party plugin, skill, and MCP server devkit installs** for Claude Code and Codex:
+  its source, what pins it (a commit, an exact version, or `⚠ observed` for a vendor marketplace plugin, with the
+  version and commit installed), whether it is installed and enabled, its license, its layer, and why it is there
+  (`-v`). `--json` prints every field. Agents may run it: it reads the agents' own files and starts no process.
+
+### Removed
+
+- **Context7 leaves both agents.** `dev install` uninstalls the Claude Code plugin and removes the Codex MCP server,
+  drops its `enabledPlugins` key, and audits each removal as `ext.retire`. Library docs now come from the project's
+  installed packages and framework MCP servers, then web search.
+
 ## [26.11.3] - Unreleased
 
 Not released yet: the date is set when the release is tagged. This release installs devkit with one command, runs its

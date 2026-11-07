@@ -3481,6 +3481,8 @@ def build_parser():
     desktop.register(add)
     from . import crew
     crew.register(add)
+    from . import ext
+    ext.register(add)
     add("doctor", cmd_doctor, "Verify the setup")
     p = add("install", cmd_install, "Pin devkit for the hooks, then apply the configuration")
     p.add_argument("--only", help="comma list: config,tools,cli,git,handoff,instructions,skills,claude,codex,desktop,"

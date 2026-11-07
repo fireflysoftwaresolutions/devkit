@@ -1280,6 +1280,30 @@ dev guard check --write ~/Desktop/notes.md --agent codex
 Validates the devkit plugin with Claude Code's validator and with Codex's own manifest parser (version, display name,
 logo and skills).
 
+### `dev ext ls [--agent claude|codex] [--all] [-v] [--json]`
+
+Lists every third-party plugin, skill, and MCP server devkit installs for Claude Code and Codex: where it comes from,
+what pins it, whether it is installed and enabled, its license, and the layer that put it there. It reads the agents'
+own files and starts no process, so agents may run it.
+
+```text
+$ dev ext ls --agent claude
+NAME             KIND    SOURCE                   PIN                       STATE      ON   LICENSE     LAYER
+superpowers      plugin  claude-plugins-official  ⚠ observed 7.0.0 bb92a77  installed  yes  MIT         team
+impeccable       skill   pbakaus/impeccable       sha 414603bf              linked     yes  Apache-2.0  team
+chrome-devtools  mcp     npm chrome-devtools-mcp  version 1.12.0            added      yes  Apache-2.0  team
+```
+
+| Column | Meaning |
+| --- | --- |
+| `PIN` | What fixes the code: `sha` (a commit), `version` (an exact npm or PyPI version), `local` (devkit's own), and two that devkit cannot pin, marked `⚠`: `observed` (a vendor marketplace plugin: the version and commit that got installed) and `url` (a remote MCP server) |
+| `STATE` | `installed` (plugin), `linked` (skill), `added` (MCP server), or `missing` |
+| `LAYER` | `team` (devkit's configuration), `user` (your overlay), `project` (a repository's `.claude/settings.json`), or `retired` (removed from devkit's defaults and still installed: `dev install` removes it) |
+
+A row that drifted is yellow, with the reason under it. `--all` adds the skill groups this Mac does not install, `-v`
+adds the one-line reason each entry is there, and `--json` prints every field. Ids are
+`plugin:<agent>:<name@marketplace>`, `skill:<agent>:<name>`, and `mcp:<agent>:<name>`.
+
 ### `dev install [--only STEPS | --version VERSION | --unverified --why "…"]`
 
 Pins devkit, then applies the configuration; safe to run again. It first makes a read-only, checksummed copy of the
