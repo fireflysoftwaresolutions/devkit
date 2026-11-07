@@ -447,8 +447,9 @@ kernel-level check of who typed the command lands in 26.11.5.
 
 The acceptance notification is a security notice: `DEVKIT_NO_NOTIFY=1` and `progress.notify: false`, which an agent
 can set, do not turn it off. It shows only on macOS, and only while notifications are allowed for Script Editor, the
-app macOS lists `osascript` notifications under (System Settings › Notifications). Without it, the session-start
-message and the audit trail still show each acceptance.
+app macOS lists `osascript` notifications under (System Settings › Notifications). An agent can change that
+setting (the guard does not yet refuse `defaults write com.apple.ncprefs`), so the session-start message and the
+audit trail are the lasting record of each acceptance.
 
 devkit reads Codex's MCP servers only in the form `codex mcp add` writes: a `[mcp_servers.<name>]` table and its
 sub-tables, one `key = value` per line, with a string, number, `true` or `false`, or a one-line array. A server

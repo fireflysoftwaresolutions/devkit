@@ -1124,9 +1124,10 @@ def _shown(text, width: int = 100) -> str:
     """One entry as the session line, `dev status` and the desktop notice show it, cut to about `width` characters:
     no control characters (an escape sequence must not redraw the terminal or hide the rest) and no format
     characters (Unicode category Cf: the bidirectional controls that reorder what the developer reads, the zero-width
-    ones that split a name invisibly, and the tag characters that carry text only a model reads). Whitespace becomes
+    ones that split a name invisibly, and the tag characters that carry text only a model reads) and no lone
+    surrogates (category Cs, which no program can be started with). Whitespace becomes
     one space. The audit trail keeps the full text."""
-    s = "".join(c for c in str(text or "") if c.isspace() or unicodedata.category(c) not in ("Cc", "Cf"))
+    s = "".join(c for c in str(text or "") if c.isspace() or unicodedata.category(c) not in ("Cc", "Cf", "Cs"))
     s = re.sub(r"\s+", " ", s).strip()
     return s if len(s) <= width else s[:width - 1].rstrip() + "…"
 

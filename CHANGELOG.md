@@ -179,7 +179,8 @@ Not released yet: the date is set when the release is tagged.
   types included, but not a script file or a command built at run time. The notification, the session-start
   message, and the audit trail are the backstop until a kernel-level check lands in 26.11.5. The notification shows
   only on macOS, and only while notifications are allowed for Script Editor, the app macOS lists `osascript`
-  notifications under. See
+  notifications under; an agent can change that setting, so the session-start message and the audit trail are the
+  lasting record. See
   [Who changes extensions](docs/skills-and-plugins.md#who-changes-extensions-and-how-drift-shows).
 
 ### Removed

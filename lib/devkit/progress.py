@@ -3230,6 +3230,8 @@ def notify(title: str, text: str, security: bool = False):
     absolute path keeps an `osascript` planted earlier on PATH from running."""
     if not security and (not cfg().get("notify") or os.environ.get("DEVKIT_NO_NOTIFY")):
         return
+    # a lone surrogate (JSON can carry one) cannot reach a process: it would raise here, and the notice would not show
+    text, title = (str(v).encode("utf-8", "replace").decode("utf-8") for v in (text, title))
     try:
         core.sh(["/usr/bin/osascript", "-e", "on run argv",
                  "-e", "display notification (item 1 of argv) with title (item 2 of argv)", "-e", "end run",

@@ -106,6 +106,20 @@ class DesktopNotificationTests(unittest.TestCase):
                                   "-e", "display notification (item 1 of argv) with title (item 2 of argv)",
                                   "-e", "end run", "--", text, "devkit · run finished · acme/api"]])
 
+    def test_a_lone_surrogate_from_any_caller_still_reaches_osascript(self):
+        # B2-R7: a lone surrogate cannot be passed to a process (UnicodeEncodeError, swallowed), so the notice was lost
+        calls = []
+
+        def sh(args, **kw):
+            calls.append([str(a) for a in args])
+            return 0, "", ""
+        with mock.patch.object(core, "sh", sh):
+            pg.notify("extension \ud800accepted", "7.0.1\udc85 414603b", security=True)
+        (argv,) = calls
+        for a in argv:
+            self.assertEqual(os.fsencode(a).decode("utf-8"), a)
+        self.assertEqual(argv[-2:], ["7.0.1? 414603b", "devkit · extension ?accepted"])
+
 
 class ProgressTests(unittest.TestCase):
     def test_minutes(self):

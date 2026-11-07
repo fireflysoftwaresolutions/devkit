@@ -744,6 +744,16 @@ class DriftSessionStartTests(HookCase):
         self.assertEqual(argv[1:sep:2], ["-e"] * len(script))
         self.assertEqual([ln for ln in script if "superpowers" in ln or "accepted" in ln or "devkit" in ln], [])
 
+    def test_a_lone_surrogate_in_the_entry_does_not_stop_the_notice(self):
+        # B2-R7: the agent that makes the drift chooses its text; a lone surrogate made the process start raise
+        # UnicodeEncodeError (or osascript fail), which notify swallowed, so the notice never showed
+        install_claude_plugin(self.h, "superpowers@claude-plugins-official", "7.0.1\ud800", SHA_A)
+        (argv,) = self.accept_with_notices()
+        for a in argv:
+            self.assertFalse(any(0xD800 <= ord(c) <= 0xDFFF for c in a), repr(a))
+            self.assertEqual(os.fsencode(a).decode("utf-8"), a)
+        self.assertIn("7.0.1", argv[argv.index("--") + 1])
+
     @unittest.skipUnless(Path("/usr/bin/osacompile").exists(), "osacompile ships with macOS only")
     def test_the_acceptance_notification_script_compiles(self):
         (argv,) = self.accept_with_notices()
