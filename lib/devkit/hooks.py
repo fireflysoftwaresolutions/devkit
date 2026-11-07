@@ -288,12 +288,19 @@ def session_start(agent: str):
         pass
     text = "\n\n".join(x for x in (_continuity("on_session_start", agent, data),
                                    _with_catalog(context_for(cwd, agent), agent)) if x)
-    try:  # devkit notices from recorded state only, no network (spec P-fym583l7sg1): a newer release, once a day
-        from . import updatecheck
-        notes = [x for x in (updatecheck.session_line(installed=updatecheck.installed_version()),) if x]
-        text += "".join("\n\n" + x for x in notes)
+    try:  # devkit notices from files only, no network (spec P-fym583l7sg1)
+        from . import ext, updatecheck
+        notices = (lambda: updatecheck.session_line(installed=updatecheck.installed_version()),  # a release, daily
+                   lambda: ext.session_line(cwd))  # extensions changed outside devkit, each drift audited once
     except Exception:
+        notices = ()
         _log(f"session-start notices {agent}: {traceback.format_exc()[-300:]}")
+    for notice in notices:
+        try:
+            line = notice()
+            text += f"\n\n{line}" if line else ""
+        except Exception:
+            _log(f"session-start notice {agent}: {traceback.format_exc()[-300:]}")
     if os.environ.get("DEVKIT_GUARD", "").lower() == "off":  # spec F8, rule 5: never silent
         text = ("devkit · the guard is off in this session (DEVKIT_GUARD=off): it judges no tool call, so the "
                 "workspace rules, the crew's limits and the irreversible-action gate do not hold. That is recorded "

@@ -1140,7 +1140,7 @@ def setup_claude():
         else:
             done("devkit plugin reinstalled from this checkout (skills, commands, agents)")
     done(f"{len(plugins['plugins'])} plugins installed and enabled")
-    _retire("claude")
+    _extensions("claude")
     for name, spec in plugins.get("mcp", {}).items():
         rc, _, _ = sh(["claude", "mcp", "get", name], timeout=30)
         if rc == 0:
@@ -1431,16 +1431,20 @@ def setup_codex():
             n = len(list((DEVKIT_HOME / "plugin" / "commands").glob("*.md")))
             done(f"devkit plugin reinstalled from this checkout (skills, and {n} commands as skills)")
     done(f"{len(plugins['plugins'])} plugins installed and enabled")
-    _retire("codex")
+    _extensions("codex")
 
 
-def _retire(agent: str):
+def _extensions(agent: str):
     """Uninstall the agent's extensions retired from devkit's defaults (`retired` in its plugins.json), each audited
-    as ext.retire; a user overlay that adds one back keeps it (dev ext)."""
+    as ext.retire (a user overlay that adds one back keeps it), then record what its vendor marketplace plugins are
+    now (~/.local/state/devkit/ext-lock.json), so a later change outside devkit shows as drift (dev ext)."""
     from . import ext
     try:
         for ok, msg in ext.retire(agent, lambda argv, timeout=300: sh(argv, timeout=timeout)):
             done(msg) if ok else fail(msg)
+        n = ext.record_lock(agent)
+        if n:
+            done(f"{n} vendor plugin version(s) recorded: a change outside devkit now shows as drift (dev ext ls)")
     except ext.ExtError as e:
         fail(f"extensions: {e}")
 
@@ -2044,6 +2048,9 @@ def doctor() -> int:
             check("Agents", f"{p['name']} quota", bool(q.get("available")),
                   f"{q.get('used_percent')}% used · resets {core.fmt_ts(q.get('resets_at'))}",
                   "wait for the reset or add credits")
+    from . import ext
+    for row in ext.doctor_checks():  # third-party extensions: required ones on, the lock, pins, retired, project
+        check(*row)
     from .cli import plugin_checks
     for name, ok, detail in plugin_checks():
         check("Plugin", name, ok, detail if isinstance(detail, str) else " ".join(detail), "dev plugin validate")

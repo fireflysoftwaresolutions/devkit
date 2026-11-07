@@ -222,6 +222,15 @@ class CommandTests(unittest.TestCase):
         self.assertEqual((doc["newest"], doc["installed"], doc["behind"]), ("v26.11.4", "26.11.3", 1))
 
 
+def no_fetch(real):
+    """core.git that refuses a network fetch, as the session start must never reach the network."""
+    def git_(top, *args, **kw):
+        if "fetch" in args or "pull" in args or "ls-remote" in args:
+            raise AssertionError(f"the session start ran git {' '.join(args)}")
+        return real(top, *args, **kw)
+    return git_
+
+
 class SessionStartTests(HookCase):
     """The session start reads only the recorded result and tells the first session of the day."""
 
@@ -234,7 +243,7 @@ class SessionStartTests(HookCase):
                 mock.patch.object(hooks, "context_for", lambda cwd, agent: "## devkit · workspace context"), \
                 mock.patch.object(hooks, "_spawn", lambda *a, **k: None), \
                 mock.patch("devkit.work.request_sync", lambda *a, **k: None), \
-                mock.patch.object(core, "git", side_effect=AssertionError("the session start ran git")):
+                mock.patch.object(core, "git", side_effect=no_fetch(core.git)):
             for sid in ("s1", "s2"):
                 outs.append(self.hook("session-start", {"session_id": sid, "hook_event_name": "SessionStart",
                                                         "source": "startup", "cwd": str(self.root)}))

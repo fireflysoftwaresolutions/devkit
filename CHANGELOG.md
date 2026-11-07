@@ -16,6 +16,20 @@ All notable changes to devkit. Versions follow CalVer `YY.MM.PATCH` (PATCH resta
   read-only, so agents may run it. A daily `update-check` job records the answer at 09:15; the first session of the
   day and `dev status` then name a pending release, without reaching the network themselves.
 
+### Security
+
+- **A plugin that changes outside devkit is reported.** `dev install` records the version and commit of each vendor
+  marketplace plugin it installs. When one changes on its own, the session start, `dev status`, `dev doctor`, and
+  `dev ext ls` name the change, and the audit trail gets one `ext.drift` record for it. A skill or MCP server off its
+  pin, a required security plugin that is off, and a plugin a repository enables outside devkit's catalog are
+  reported the same way.
+
+### Known limits
+
+- Vendor marketplace plugins (`claude-plugins-official`, `openai-curated-remote`) are observed, not pinned: devkit
+  records what got installed and reports changes, but cannot hold them at a commit yet.
+- MCP servers started with `npx` are pinned at their top-level version only; their own dependencies are not.
+
 ### Removed
 
 - **Context7 leaves both agents.** `dev install` uninstalls the Claude Code plugin and removes the Codex MCP server,

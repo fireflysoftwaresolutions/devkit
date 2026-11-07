@@ -905,14 +905,16 @@ def cmd_status(a):
     return 0
 
 
-def devkit_needs() -> list:
-    """`dev status` "Needs you": devkit's own notices, from recorded state only (no network): a newer release."""
+def devkit_needs(cwd: str = None) -> list:
+    """`dev status` "Needs you": devkit's own notices, from recorded state only (no network): a newer release, and
+    extensions changed outside devkit."""
     out = []
     try:
-        from . import updatecheck
+        from . import ext, updatecheck
         line = updatecheck.status_line(installed=updatecheck.installed_version())
         if line:
             out.append({"kind": "devkit", "text": line, "command": "dev update --check"})
+        out += ext.status_needs(cwd)
     except Exception as e:  # a notice never breaks dev status
         out.append({"kind": "devkit", "text": f"devkit's notices could not be read ({type(e).__name__})",
                     "command": ""})

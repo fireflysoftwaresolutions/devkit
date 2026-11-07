@@ -21,6 +21,7 @@ from __future__ import annotations
 import json
 import os
 import re
+import time
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from urllib.parse import urlparse
@@ -377,7 +378,7 @@ def status(cat: list, observed: dict, lock: dict = None, project: dict = None, r
         if e.agent == "claude" and e.kind == "plugin" and e.spec.get("id") in project:
             on = bool(project[e.spec["id"]]) or e.required
             r["layer_on"] = "project"
-        if e.required and not on:
+        if e.required and (not on or o.get("enabled") is False):
             drift.append({"kind": "required-off", "detail": "required, but off"})
         r["enabled"] = on
         r["drift"] = drift
@@ -516,6 +517,138 @@ def _edit_lock(fn, path: Path = None):
         state.update(path or lock_file(), fn, indent=2)
     except state.StateBusy:
         pass
+
+
+
+# --------------------------------------------------------------------------- lock and drift (step 3)
+
+REPORTED = ("changed", "pin", "required-off", "enabled", "retired", "not-in-catalog")  # `missing`: doctor's own checks
+
+
+def drift_seen_file() -> Path:
+    return core.STATE / "ext-drift.json"
+
+
+def record_lock(agent: str, h: Homes = None, by: str = "dev install", t: dict = None, user: dict = None,
+                path: Path = None) -> int:
+    """`dev install` and `dev ext update --apply`: record what this agent's vendor marketplace plugins are now, so a
+    later change outside devkit shows as drift. -> how many entries were recorded."""
+    t = team() if t is None else t
+    obs = observe(h)
+    now = int(time.time())
+    rows = {e.id: obs[e.id] for e in catalog(t, user_layer() if user is None else user, None)
+            if e.agent == agent and e.pin_kind == "observed" and (obs.get(e.id) or {}).get("installed")}
+
+    def put(doc):
+        for eid, o in rows.items():
+            doc[eid] = {"pin": "observed", "version": o.get("version", ""), "sha": o.get("sha", ""), "at": now,
+                        "by": by}
+    _edit_lock(put, path)
+    return len(rows)
+
+
+def report_drift(rows: list, audit=None, seen: Path = None) -> list:
+    """Write one `ext.drift` audit record for each drift not reported before, and forget the drifts that ended.
+    -> [(row, drift)] reported now."""
+    from . import state
+    if audit is None:
+        from . import audit as _audit
+        audit = _audit.record
+    current = {f"{r['id']}|{d['kind']}|{d['detail']}": (r, d) for r in rows for d in r.get("drift") or []
+               if d["kind"] in REPORTED}
+    new = []
+
+    def upd(doc):
+        for k in [k for k in doc if k not in current]:
+            doc.pop(k)
+        for k, rd in current.items():
+            if k not in doc:
+                doc[k] = int(time.time())
+                new.append(rd)
+    try:
+        state.update(seen or drift_seen_file(), upd, indent=1)
+    except state.StateBusy:
+        return []
+    for r, d in new:
+        audit("ext.drift", r["id"], f"{d['kind']}: {d['detail']}", "drift", layer=r.get("layer"),
+              **({"from": d["from"], "to": d["to"]} if d.get("from") else {}))
+    return new
+
+
+def current_rows(cwd: str = None, h: Homes = None) -> list:
+    t = team()
+    return status(catalog(t, user_layer(), skill_groups()), observe(h), read_lock(), project_plugins(cwd),
+                  retired_ids(t))
+
+
+def drift_text(rows: list, limit: int = 4) -> str:
+    items = [(r, d) for r in rows for d in r.get("drift") or [] if d["kind"] in REPORTED]
+    if not items:
+        return ""
+    parts = [f"{r['name']} ({r['agent']} {r['kind']}) {d['detail']}" for r, d in items[:limit]]
+    more = f"; and {len(items) - limit} more" if len(items) > limit else ""
+    return "; ".join(parts) + more
+
+
+def session_line(cwd: str = None, h: Homes = None):
+    """The session start's line about extensions that changed outside devkit, or None. Files only: no process, no
+    network. Writes each new drift's `ext.drift` record."""
+    try:
+        rows = current_rows(cwd, h)
+    except ExtError as e:
+        return f"devkit · the extension catalog is invalid: {e}. The developer fixes ~/.config/devkit/config.json (ext)."
+    report_drift(rows)
+    text = drift_text(rows)
+    if not text:
+        return None
+    return (f"devkit · extensions changed outside devkit: {text}. `dev ext ls` shows them; the developer reviews "
+            f"with `dev ext outdated <name>` and accepts with `dev install` (or `dev ext update <name> --apply`), in "
+            f"a terminal.")
+
+
+def status_needs(cwd: str = None) -> list:
+    """`dev status`: extensions changed outside devkit, as "Needs you" items."""
+    out = []
+    try:
+        rows = current_rows(cwd)
+    except ExtError as e:
+        return out + [{"kind": "devkit", "text": f"the extension catalog is invalid: {e}", "command": "dev ext ls"}]
+    report_drift(rows)
+    text = drift_text(rows, limit=3)
+    if text:
+        out.append({"kind": "devkit", "text": f"Extensions changed outside devkit: {text}.", "command": "dev ext ls"})
+    return out
+
+
+def doctor_checks(cwd: str = None) -> list:
+    """`dev doctor`'s Extensions group: (group, name, ok, detail, fix)."""
+    g = "Extensions"
+    try:
+        rows = current_rows(cwd)
+    except ExtError as e:
+        return [(g, "catalog", False, str(e), "fix ext in ~/.config/devkit/config.json (dev config edit)")]
+    report_drift(rows)
+
+    def of(kind):
+        return [(r, d) for r in rows for d in r.get("drift") or [] if d["kind"] == kind]
+
+    def names(items):
+        return ", ".join(f"{r['name']} ({r['agent']}): {d['detail']}" for r, d in items[:4])
+    n = len(rows)
+    unpinned = sum(1 for r in rows if r.get("pin_kind") in UNPINNED)
+    out = [(g, "catalog", True, f"{n} extensions, {unpinned} unpinned (observed or url)", "")]
+    for kind, name, fix in (
+            ("required-off", "required extensions on", "dev ext enable <name>, then dev install"),
+            ("changed", "vendor plugins match the lock", "review with dev ext outdated <name>; accept with dev install "
+                                                         "or dev ext update <name> --apply"),
+            ("pin", "installed at their pins", "dev install --only skills,claude,codex"),
+            ("enabled", "enabled as devkit says", "dev config repair"),
+            ("retired", "retired extensions removed", "dev install --only claude,codex"),
+            ("not-in-catalog", "project plugins in the catalog", "remove it from the project's .claude/settings.json, "
+                                                                 "or dev ext add it")):
+        items = of(kind)
+        out.append((g, name, not items, names(items) if items else "none", fix))
+    return out
 
 
 # --------------------------------------------------------------------------- dev ext

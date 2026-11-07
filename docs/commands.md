@@ -1215,8 +1215,9 @@ in the last 7 days, each git host and cloud you chose (its CLI installed and sig
 every enabled scheduled job (loaded, and its last run passed), the desktop apps (Claude Desktop's Code tab runs its
 bundled Claude Code on the same `~/.claude` settings, hooks, plugin, and skills; the ChatGPT app's bundled Codex sees
 the same `~/.codex` configuration and has the same plugins enabled), the instruction canary (fails below 90% over 7
-days, per surface, with corrected misses counted apart), and free disk. Each failure prints its fix. Exits with `1` if any
-check fails.
+days, per surface, with corrected misses counted apart), the third-party extensions (required ones on, vendor plugins
+as `dev install` recorded them, skills and MCP servers at their pins, retired ones removed, no project plugin outside
+devkit's catalog; see `dev ext ls`), and free disk. Each failure prints its fix. Exits with `1` if any check fails.
 
 ### `dev agents [status | test | rules] [claude | codex | all] [--json] [--model MODEL] [-v] [--section SECTION]`
 
@@ -1303,6 +1304,14 @@ chrome-devtools  mcp     npm chrome-devtools-mcp  version 1.12.0            adde
 A row that drifted is yellow, with the reason under it. `--all` adds the skill groups this Mac does not install, `-v`
 adds the one-line reason each entry is there, and `--json` prints every field. Ids are
 `plugin:<agent>:<name@marketplace>`, `skill:<agent>:<name>`, and `mcp:<agent>:<name>`.
+
+**Drift.** `dev install` records the version and commit of each vendor marketplace plugin it leaves installed, in
+`~/.local/state/devkit/ext-lock.json`. When one changes outside devkit (Claude Code can update its official
+marketplace on its own), the session start, `dev status`, `dev doctor`, and `dev ext ls` name the change, from the
+recorded version to the installed one, and the audit trail gets one `ext.drift` record for it. The same goes for a
+skill or MCP server that is not at its pin, a required extension that is off, a retired one still installed, and a
+plugin that a repository's `.claude/settings.json` enables outside the catalog. To accept a vendor change, run
+`dev install` in a terminal.
 
 ### `dev install [--only STEPS | --version VERSION | --unverified --why "…"]`
 

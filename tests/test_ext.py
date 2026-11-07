@@ -7,15 +7,20 @@
 import contextlib
 import io
 import json
+import os
+import shutil
+import subprocess
 import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "lib"))
 
-from devkit import audit, cli, core, ext, setup, ui  # noqa: E402
+from devkit import audit, cli, core, ext, hooks, setup, ui  # noqa: E402
+from test_language_neutral_hooks import HookCase  # noqa: E402
 
 SHA_A = "414603bf14c7a344edb466bb1f85690c77ce8b7d"
 SHA_B = "bb92a77741419a4ab5f06e711a283343f1ada0c3"
@@ -313,6 +318,154 @@ class RetireTests(unittest.TestCase):
         self.assertNotIn("context7@claude-plugins-official", ep)
         self.assertTrue(ep["mine@x"])
         self.assertTrue(ep["superpowers@claude-plugins-official"])
+
+
+class LockAndDriftTests(unittest.TestCase):
+    """superpowers changed outside devkit (lock 7.0.0, installed 7.0.1): the session start, `dev status` and
+    `dev doctor` name it, and one ext.drift record is written (spec R6)."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        root = Path(self.tmp.name)
+        self.h = make_homes(root)
+        self.lock, self.seen = root / "ext-lock.json", root / "ext-drift.json"
+        self.team = fixture_team()
+        install_claude_plugin(self.h, "superpowers@claude-plugins-official", "7.0.0", SHA_B)
+
+    def rows(self):
+        return ext.status(ext.catalog(self.team, {}, set()), ext.observe(self.h), ext.read_lock(self.lock))
+
+    def drift_records(self):
+        return [r for r in audit.records(days=1, action="ext.drift") if r["target"].endswith("superpowers@"
+                                                                                             "claude-plugins-official")]
+
+    def test_dev_install_records_what_the_vendor_plugins_are_now(self):
+        n = ext.record_lock("claude", self.h, t=self.team, user={}, path=self.lock)
+        lk = ext.read_lock(self.lock)["plugin:claude:superpowers@claude-plugins-official"]
+        self.assertEqual((n, lk["pin"], lk["version"], lk["sha"], lk["by"]), (1, "observed", "7.0.0", SHA_B,
+                                                                              "dev install"))
+        self.assertNotIn("plugin:claude:devkit@firefly-devkit", ext.read_lock(self.lock))  # local: nothing to lock
+
+    def test_a_change_outside_devkit_is_drift_with_both_versions(self):
+        ext.record_lock("claude", self.h, t=self.team, user={}, path=self.lock)
+        install_claude_plugin(self.h, "superpowers@claude-plugins-official", "7.0.1", SHA_A)
+        row = {r["id"]: r for r in self.rows()}["plugin:claude:superpowers@claude-plugins-official"]
+        (d,) = row["drift"]
+        self.assertEqual((d["kind"], d["from"], d["to"]), ("changed", "7.0.0 bb92a77", "7.0.1 414603b"))
+        self.assertEqual(ext.pin_text(row), "⚠ observed 7.0.0 bb92a77")  # the lock, until the developer accepts
+
+    def test_no_drift_before_the_first_lock_or_when_nothing_changed(self):
+        self.assertEqual([d for r in self.rows() for d in r["drift"] if d["kind"] == "changed"], [])
+        ext.record_lock("claude", self.h, t=self.team, user={}, path=self.lock)
+        self.assertEqual([d for r in self.rows() for d in r["drift"] if d["kind"] == "changed"], [])
+
+    def test_each_drift_writes_one_audit_record_however_often_it_is_seen(self):
+        ext.record_lock("claude", self.h, t=self.team, user={}, path=self.lock)
+        install_claude_plugin(self.h, "superpowers@claude-plugins-official", "7.0.1", SHA_A)
+        before = len(self.drift_records())
+        first = ext.report_drift(self.rows(), seen=self.seen)
+        ext.report_drift(self.rows(), seen=self.seen)
+        self.assertEqual(len(first), 1)
+        recs = self.drift_records()[before:]
+        self.assertEqual(len(recs), 1)
+        self.assertIn("7.0.0 bb92a77 → 7.0.1 414603b", recs[0]["detail"])
+
+    def test_a_drift_that_ended_and_came_back_is_recorded_again(self):
+        ext.record_lock("claude", self.h, t=self.team, user={}, path=self.lock)
+        install_claude_plugin(self.h, "superpowers@claude-plugins-official", "7.0.1", SHA_A)
+        ext.report_drift(self.rows(), seen=self.seen)
+        ext.record_lock("claude", self.h, t=self.team, user={}, path=self.lock)  # accepted
+        self.assertEqual(ext.report_drift(self.rows(), seen=self.seen), [])
+        install_claude_plugin(self.h, "superpowers@claude-plugins-official", "7.0.2", SHA_B)
+        self.assertEqual(len(ext.report_drift(self.rows(), seen=self.seen)), 1)
+
+    def test_the_drift_text_names_the_plugin_and_the_change(self):
+        ext.record_lock("claude", self.h, t=self.team, user={}, path=self.lock)
+        install_claude_plugin(self.h, "superpowers@claude-plugins-official", "7.0.1", SHA_A)
+        self.assertEqual(ext.drift_text(self.rows()),
+                         "superpowers (claude plugin) 7.0.0 bb92a77 → 7.0.1 414603b outside devkit")
+
+    def test_a_required_plugin_turned_off_in_a_project_is_drift(self):
+        rows = ext.status(ext.catalog(self.team, {}, set()), {}, {},
+                          project={"security-guidance@claude-plugins-official": False, "stranger@x": True})
+        by = {r["id"]: r for r in rows}
+        self.assertTrue(by["plugin:claude:security-guidance@claude-plugins-official"]["enabled"])
+        self.assertEqual([d["kind"] for d in by["plugin:claude:stranger@x"]["drift"]], ["not-in-catalog"])
+
+    def test_a_required_plugin_turned_off_in_the_agent_itself_is_drift(self):
+        observed = {"plugin:claude:security-guidance@claude-plugins-official":
+                    {"installed": True, "version": "2.0.18", "sha": SHA_B, "enabled": False}}
+        row = {r["id"]: r for r in ext.status(ext.catalog(self.team, {}, set()), observed)}[
+            "plugin:claude:security-guidance@claude-plugins-official"]
+        self.assertIn("required-off", [d["kind"] for d in row["drift"]])
+
+    def test_the_lock_file_and_the_config_ext_key_are_protected_from_agents(self):
+        from devkit import guard
+        for path, content in ((core.STATE / "ext-lock.json", "{}"),
+                              (core.CONFIG_FILE, json.dumps({"ext": {"remove": ["x"]}}))):
+            with self.subTest(path=str(path)):
+                v = guard.check("Write", {"file_path": str(path), "content": content}, str(core.DEV), "claude")
+                self.assertEqual(v[0] if v else "allow", "deny")
+
+
+class DriftWiringTests(unittest.TestCase):
+    """The session start and `dev status` read the same rows; the session start reaches no network."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.h = make_homes(Path(self.tmp.name))
+        install_claude_plugin(self.h, "superpowers@claude-plugins-official", "7.0.0", SHA_B)
+        lk = core.STATE / "ext-lock.json"
+        lk.parent.mkdir(parents=True, exist_ok=True)
+        self.addCleanup(lambda: lk.unlink(missing_ok=True))
+        self.addCleanup(lambda: (core.STATE / "ext-drift.json").unlink(missing_ok=True))
+        ext.record_lock("claude", self.h)
+        install_claude_plugin(self.h, "superpowers@claude-plugins-official", "7.0.1", SHA_A)
+
+    def test_the_session_line_names_the_change_and_how_to_accept_it(self):
+        line = ext.session_line(str(self.tmp.name), self.h)
+        self.assertIn("superpowers (claude plugin) 7.0.0 bb92a77 → 7.0.1 414603b", line)
+        self.assertIn("dev install", line)
+
+    def test_dev_status_needs_you_names_the_change(self):
+        with mock.patch.object(ext, "homes", return_value=self.h):
+            needs = cli.devkit_needs(str(self.tmp.name))
+        self.assertEqual([n["command"] for n in needs if "superpowers" in n["text"]], ["dev ext ls"])
+
+    def test_dev_install_records_the_lock_after_installing(self):
+        with mock.patch.object(ext, "homes", return_value=self.h), mock.patch.object(setup, "sh",
+                                                                                      lambda *a, **k: (0, "", "")):
+            setup._extensions("claude")
+        lk = ext.read_lock()["plugin:claude:superpowers@claude-plugins-official"]
+        self.assertEqual((lk["version"], lk["sha"]), ("7.0.1", SHA_A))
+
+    def test_doctor_fails_the_lock_check_and_names_the_plugin(self):
+        with mock.patch.object(ext, "homes", return_value=self.h):
+            rows = {name: (ok, detail) for _, name, ok, detail, _ in ext.doctor_checks(str(self.tmp.name))}
+        ok, detail = rows["vendor plugins match the lock"]
+        self.assertFalse(ok)
+        self.assertIn("superpowers", detail)
+
+
+class DriftSessionStartTests(HookCase):
+    def setUp(self):
+        super().setUp()
+        DriftWiringTests.setUp(self)
+
+    def test_the_session_start_hook_adds_the_line_and_writes_one_drift_record(self):
+        before = len([r for r in audit.records(days=1, action="ext.drift") if "superpowers" in r["target"]])
+        with mock.patch.object(ext, "homes", return_value=self.h), \
+                mock.patch.object(hooks, "context_for", lambda cwd, agent: "## devkit · workspace context"), \
+                mock.patch.object(hooks, "_spawn", lambda *a, **k: None), \
+                mock.patch("devkit.work.request_sync", lambda *a, **k: None):
+            outs = [self.hook("session-start", {"session_id": s, "hook_event_name": "SessionStart",
+                                                "source": "startup", "cwd": str(self.tmp.name)}) for s in ("a", "b")]
+        self.assertIn("superpowers (claude plugin) 7.0.0 bb92a77 → 7.0.1 414603b", outs[0])
+        self.assertIn("superpowers", outs[1])  # every session sees it until the developer accepts it
+        after = [r for r in audit.records(days=1, action="ext.drift") if "superpowers" in r["target"]]
+        self.assertEqual(len(after) - before, 1)
 
 
 class LsCommandTests(unittest.TestCase):
