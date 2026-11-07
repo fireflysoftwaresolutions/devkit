@@ -154,6 +154,28 @@ class InstallTests(EngineCase):
         self.assertEqual(self.urls, [URL, URL])
         self.assertEqual(self.bin.read_bytes(), ENGINE)
 
+    @unittest.skipIf(os.geteuid() == 0, "root writes through folder permissions")
+    def test_an_unwritable_engines_folder_fails_without_raising(self):
+        setup.ENGINES_SHARE.mkdir(parents=True)
+        setup.ENGINES_SHARE.chmod(0o500)  # the kept copy's folder cannot be created
+        self.addCleanup(setup.ENGINES_SHARE.chmod, 0o755)
+        res = self.install()
+        self.assertEqual(res["outcome"], "failed")
+        self.assertIn("Permission denied", res["detail"])
+        self.assertIn("engines/impeccable", res["detail"])  # the folder to fix
+        self.assertIn("dev install --only skills", res["detail"])
+        self.assertEqual(self.executables(), [])
+        self.assertIsNone(self.record())
+        self.assertEqual([r["outcome"] for r in self.audits()], ["failed"])
+
+    def test_a_folder_where_the_engine_goes_fails_without_raising(self):
+        self.bin.mkdir(parents=True)
+        res = self.install()
+        self.assertEqual(res["outcome"], "failed")
+        self.assertIn("Is a directory", res["detail"])
+        self.assertTrue(self.bin.is_dir())  # left for the developer to look at, never removed with its content
+        self.assertIsNone(self.record())
+
     def test_a_platform_without_a_pinned_digest_downloads_nothing(self):
         with mock.patch.object(setup, "engine_platform", lambda: "linux-riscv64"):
             res = self.install()
@@ -179,6 +201,33 @@ class InstallTests(EngineCase):
         self.assertEqual(self.bin.read_bytes(), ENGINE)
         self.assertIn("impeccable engine 0.1.18", out.getvalue())
         self.assertTrue((setup.CLAUDE_HOME / "skills/impeccable/scripts/bin" / PLATFORM / "impeccable").is_file())
+
+    @unittest.skipIf(os.geteuid() == 0, "root writes through folder permissions")
+    def test_the_skills_step_links_its_other_skills_when_the_engine_fails(self):
+        src = Path(tempfile.mkdtemp(dir=self.home))
+        make_skill(src / ".claude/skills/impeccable")
+        (src / "skills/later").mkdir(parents=True)  # a skill of a source after impeccable's
+        (src / "skills/later/SKILL.md").write_text("---\nname: later\n---\n")
+        manifest = {"sources": [
+            {"repo": "pbakaus/impeccable", "ref": "414603bf14c7a344edb466bb1f85690c77ce8b7d", "license": "Apache-2.0",
+             "agents": ["claude"], "skills": {"impeccable": ".claude/skills/impeccable"}},
+            {"repo": "example/later", "ref": "0" * 40, "license": "MIT", "skills": {"later": "skills/later"}}]}
+        shutil.rmtree(self.skill)
+        tree = self.home / "devkit"
+        (tree / "agents/skills").mkdir(parents=True)
+        setup.ENGINES_SHARE.mkdir(parents=True)
+        setup.ENGINES_SHARE.chmod(0o500)
+        self.addCleanup(setup.ENGINES_SHARE.chmod, 0o755)
+        with mock.patch.object(setup, "load_conf", lambda name: manifest), \
+                mock.patch.object(setup, "_fetch_source", lambda s: src), \
+                mock.patch.object(setup, "DEVKIT_HOME", tree), \
+                contextlib.redirect_stdout(io.StringIO()) as out:
+            setup.install_skills()
+        self.assertIn("impeccable engine: ", out.getvalue())
+        for home in (setup.CLAUDE_HOME, setup.AGENTS_HOME):
+            with self.subTest(home=str(home)):
+                self.assertTrue((home / "skills/later/SKILL.md").is_file())
+        self.assertTrue((setup.CLAUDE_HOME / "skills/impeccable/SKILL.md").is_file())
 
 
 class ProtectedLocationTests(unittest.TestCase):

@@ -1075,8 +1075,9 @@ def _engine_record(update: dict | None = None, drop: str = "") -> dict:
 def install_impeccable_engine(skill_dir, repo: str) -> dict:
     """Put the impeccable engine for this platform beside the skill's launcher (see the section comment) ->
     {"outcome": "installed" | "present" | "failed", "detail": …}. A verified copy in place or kept is reused without a
-    download. A digest mismatch or a failed download leaves nothing executable, is audited and reported, and never
-    raises: the rest of the install goes on, and the launcher falls back to its own first-run download."""
+    download. A digest mismatch, a failed download or a file error (a folder it cannot write, a folder where the
+    engine goes) leaves nothing executable, is audited and reported, and never raises: the rest of the install goes
+    on, and the launcher falls back to its own first-run download."""
     skill_dir = Path(skill_dir)
     plat = engine_platform()
     version, asset, digest = _engine_pin(skill_dir, plat)
@@ -1087,9 +1088,15 @@ def install_impeccable_engine(skill_dir, repo: str) -> dict:
 
     def failed(why: str, outcome: str = "failed") -> dict:
         for p in (tmp, target):
-            if p.is_file() or p.is_symlink():
-                p.unlink()
-        _engine_record(drop="impeccable")
+            try:
+                if p.is_file() or p.is_symlink():
+                    p.unlink()
+            except OSError as e:
+                why += f" ({tilde(p)} could not be removed: {e.strerror or e})"
+        try:
+            _engine_record(drop="impeccable")
+        except OSError as e:  # the guard still checks the engine's digest, so a stale record trusts no other file
+            why += f" ({tilde(STATE / ENGINES_FILE)} could not be updated: {e.strerror or e})"
         _audit("install.engine", "impeccable", why, outcome=outcome, check=f"sha256 {digest or 'none pinned'}")
         detail = f"{why}; the launcher would download it at its first run. Retry with `dev install --only skills`"
         fail(f"impeccable engine: {detail}")
@@ -1098,45 +1105,51 @@ def install_impeccable_engine(skill_dir, repo: str) -> dict:
     if not (plat and version and digest):
         return failed(f"no digest for {asset} (engine {version or '?'}) in the pinned engine-checksums.txt, so nothing "
                       f"was downloaded")
-    if target.is_symlink() or (target.exists() and _sha256(target) != digest):
-        target.unlink()  # never leave an engine the pinned digest does not name
     outcome = "present"
-    if not target.exists():
-        if kept.is_file() and _sha256(kept) != digest:
-            kept.unlink()
-        if not kept.is_file():
-            outcome = "installed"
-            kept.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        if target.is_symlink() or (target.exists() and _sha256(target) != digest):
+            target.unlink()  # never leave an engine the pinned digest does not name
+        if not target.exists():
+            if kept.is_file() and _sha256(kept) != digest:
+                kept.unlink()
+            if not kept.is_file():
+                outcome = "installed"
+                kept.parent.mkdir(parents=True, exist_ok=True)
+                try:
+                    _download_engine(url, tmp)
+                except OSError as e:
+                    return failed(f"the download of {url} failed: {e}")
+                got = _sha256(tmp) if tmp.is_file() else ""
+                if got != digest:
+                    return failed(f"the download of {url} does not match the pinned digest (SHA-256 "
+                                  f"{got[:12] or 'none'}…, engine-checksums.txt says {digest[:12]}…), so nothing was "
+                                  f"installed", "refused")
+                os.chmod(tmp, 0o755)  # nosemgrep: python.lang.security.audit.insecure-file-permissions.insecure-file-permissions (an executable the owner runs, as the launcher expects)
+                os.replace(tmp, kept)
+            target.parent.mkdir(parents=True, exist_ok=True)
+            part = target.with_name(f".impeccable.{os.getpid()}")
             try:
-                _download_engine(url, tmp)
-            except OSError as e:
-                return failed(f"the download of {url} failed: {e}")
-            got = _sha256(tmp) if tmp.is_file() else ""
-            if got != digest:
-                return failed(f"the download of {url} does not match the pinned digest (SHA-256 {got[:12] or 'none'}…, "
-                              f"engine-checksums.txt says {digest[:12]}…), so nothing was installed", "refused")
-            os.chmod(tmp, 0o755)  # nosemgrep: python.lang.security.audit.insecure-file-permissions.insecure-file-permissions (an executable the owner runs, as the launcher expects)
-            os.replace(tmp, kept)
-        target.parent.mkdir(parents=True, exist_ok=True)
-        part = target.with_name(f".impeccable.{os.getpid()}")
-        try:
-            os.link(kept, part)  # the same file: no second copy of the engine on disk
-        except OSError:
-            shutil.copyfile(kept, part)
-        os.chmod(part, 0o755)  # nosemgrep: python.lang.security.audit.insecure-file-permissions.insecure-file-permissions (an executable the owner runs, as the launcher expects)
-        os.replace(part, target)
-        if _sha256(target) != digest:
-            return failed(f"{tilde(target)} does not match the pinned digest after it was placed")
-    for old in (ENGINES_SHARE / "impeccable").iterdir() if (ENGINES_SHARE / "impeccable").is_dir() else []:
-        if old.name != version:
-            shutil.rmtree(old, ignore_errors=True)
-    st = os.stat(target)
-    launcher = skill_dir / "scripts" / "impeccable"
-    _engine_record({"impeccable": {
-        "version": version, "platform": plat, "asset": asset, "sha256": digest, "url": url,
-        "engine": str(target), "stat": [st.st_dev, st.st_ino, st.st_size, st.st_mtime_ns, st.st_ctime_ns],
-        "launcher": str(launcher.resolve()), "launcher_sha256": _sha256(launcher) if launcher.is_file() else "",
-        "installed_at": round(time.time(), 3)}})
+                os.link(kept, part)  # the same file: no second copy of the engine on disk
+            except OSError:
+                shutil.copyfile(kept, part)
+            os.chmod(part, 0o755)  # nosemgrep: python.lang.security.audit.insecure-file-permissions.insecure-file-permissions (an executable the owner runs, as the launcher expects)
+            os.replace(part, target)
+            if _sha256(target) != digest:
+                return failed(f"{tilde(target)} does not match the pinned digest after it was placed")
+        for old in (ENGINES_SHARE / "impeccable").iterdir() if (ENGINES_SHARE / "impeccable").is_dir() else []:
+            if old.name != version:
+                shutil.rmtree(old, ignore_errors=True)
+        st = os.stat(target)
+        launcher = skill_dir / "scripts" / "impeccable"
+        _engine_record({"impeccable": {
+            "version": version, "platform": plat, "asset": asset, "sha256": digest, "url": url,
+            "engine": str(target), "stat": [st.st_dev, st.st_ino, st.st_size, st.st_mtime_ns, st.st_ctime_ns],
+            "launcher": str(launcher.resolve()), "launcher_sha256": _sha256(launcher) if launcher.is_file() else "",
+            "installed_at": round(time.time(), 3)}})
+    except OSError as e:
+        where = f": {tilde(e.filename)}" if getattr(e, "filename", None) else ""
+        return failed(f"{e.strerror or e}{where}, so the engine was not placed; fix that path's owner or permissions, "
+                      f"or move away what is in the way")
     detail = (f"engine {version} for {plat}, SHA-256 {digest[:12]}… matches the pinned engine-checksums.txt" +
               (f" (from {url})" if outcome == "installed" else " (the verified copy, no download)"))
     if outcome == "installed":
