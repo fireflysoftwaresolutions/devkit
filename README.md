@@ -83,7 +83,7 @@ Pass options after `bash -s --`, for example `curl -fsSL … | bash -s -- --yes`
 | `DEVKIT_REPO` | The repository to clone, for example your fork |
 | `DEVKIT_REF` | A tag or branch to check out instead of the newest release |
 
-Set a variable for `bash`, not for `curl`: `curl -fsSL … | DEVKIT_REF=v26.11.2 bash`. Everything the installer and the
+Set a variable for `bash`, not for `curl`: `curl -fsSL … | DEVKIT_REF=v26.11.3 bash`. Everything the installer and the
 wizard change on your Mac, and how to undo each change, is listed in
 [Getting started › What devkit touches](docs/getting-started.md#what-devkit-touches-and-how-to-undo-it).
 
