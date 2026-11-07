@@ -2074,8 +2074,10 @@ def register(add):
     x = sp.add_parser("decisions", help="this run's decisions; automatic ones are marked for review")
     x.add_argument("--pending", action="store_true", help="only those waiting for the developer")
     x.add_argument("--ask", nargs="*", metavar="ID", help="the question tool calls that ask the developer these "
-                   "decisions, every pending one without IDs: at most 4 per call, the recommended option first; reword "
-                   "freely, keeping “D<n> ·” up front and the option letters (their evidence, spec C5)")
+                   "decisions, every pending one without IDs: at most 4 per call, the recommended option first. "
+                   "Reword a reversible one as you like, keeping “D<n> ·” up front and the option letters (their "
+                   "evidence, spec C5); send an irreversible one word for word, alone in its call: it counts only in "
+                   "devkit's exact call")
     x.add_argument("--json", dest="ask_json", action="store_true", help="with --ask: the tool input as JSON")
     x = sp.add_parser("route", help="who should do a task, ranked with the reasons; --plan: a member for each open step")
     x.add_argument("task", nargs="*", help="the task, in a sentence")

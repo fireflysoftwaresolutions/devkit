@@ -23,6 +23,9 @@ All notable changes to devkit. Versions follow CalVer `YY.MM.PATCH` (PATCH resta
   says that a new install needs Apple silicon and why. An Intel Mac that already has Homebrew (on its `PATH` or in
   `/usr/local`) still installs, with one warning line. The installer's first line and `--help`, the README, and
   [Getting started](docs/getting-started.md#requirements) say Apple silicon.
+- **`dev --help` lists what it missed:** the `update-check` job, `dev test`, `dev gc`, `dev session`, and
+  `dev update --check`. `dev crew decisions --help` no longer says to reword the questions freely: an irreversible
+  decision counts only in devkit's exact call.
 
 ## [26.11.4] - 2026-11-07
 
