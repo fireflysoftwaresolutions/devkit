@@ -40,6 +40,20 @@ ENGINE = (f"#!{sys.executable} -I\n"
           "               'env': {k: v for k, v in os.environ.items() if k.startswith('IMPECCABLE_')}}, fh)\n"
           "sys.exit(int(os.environ.get('FAKE_ENGINE_RC', '0')))\n").encode()
 FIX = "dev install --only skills"
+# impeccable's verbs that write the agents' settings, hooks or skill folders, in the forms dev passes on: the legacy
+# `skills` namespace, once or more, a first `--`, and doctor's --fix
+HARNESS = (["hooks", "on"], ["install", "--user"], ["skills", "update"], ["pin", "audit"], ["doctor", "--fix"],
+           ["--", "hooks", "off"], ["skills", "skills", "hooks", "on"])
+# the words the engine gets for the verbs agents run (the allowlist)
+AGENT_VERBS = (["context"], ["detect", "src"], ["doctor", "--json"], ["doctor", "--target", "src"], ["live"],
+               ["generate"], ["document"], ["extract"], ["init"])
+# words the engine may run but no agent may: hidden verbs of the 0.1.18 engine, its other visible ones, a design
+# command that is not an engine verb, a verb a newer engine could add, no verb, and the allowlist's verbs spelled
+# otherwise (another case, after `skills` or `--`, doctor with another word)
+DEVELOPER_ONLY = (["hook-admin"], ["hook"], ["hook-before-edit"], ["build-phase", "advance"], ["capture-server"],
+                  ["ignore", "x"], ["ignores", "add", "x"], ["telemetry", "on"], ["check"], ["help"], ["polish"],
+                  ["live-poll"], ["a-verb-a-newer-engine-adds"], [], ["Context"], ["skills", "context"],
+                  ["--", "context"], ["doctor", "--FIX"], ["doctor", "--target", "src", "--fix"], ["doctor", "-f"])
 
 
 class WrapperCase(unittest.TestCase):
@@ -162,10 +176,41 @@ class RefusalTests(WrapperCase):
 class DeveloperOnlyTests(WrapperCase):
     # The verbs that write the agents' settings, hooks or skill folders change every later session, so the command
     # runs them only in the developer's terminal (core.set_by_developer): an agent's call (here, one with Claude
-    # Code's marker) runs nothing, and the developer's runs the engine.
+    # Code's marker) runs nothing, and the developer's runs the engine. Agents get an allowlist, so any other verb,
+    # hidden or added by a newer engine, is the developer's too.
+    def run_as(self, args, developer):
+        # impeccable.run with the words the engine would get, in or outside the developer's terminal ->
+        # (exit code, stderr, the engine's argv or None)
+        if self.out.exists():
+            self.out.unlink()
+        with mock.patch.object(core, "set_by_developer", lambda *a, **k: developer), \
+                mock.patch.dict(os.environ, {"FAKE_ENGINE_OUT": str(self.out)}), \
+                contextlib.redirect_stderr(io.StringIO()) as err:
+            rc = impeccable.run(args, cwd=str(self.project))
+        got = json.loads(self.out.read_text()) if self.out.exists() else {}
+        return rc, err.getvalue(), got.get("argv")
+
+    def test_an_agent_runs_only_the_allowlisted_verbs(self):
+        for args in AGENT_VERBS:
+            with self.subTest(allowed=args):
+                rc, err, argv = self.run_as(args, developer=False)
+                self.assertEqual((rc, argv), (0, args), err)
+        for args in DEVELOPER_ONLY:
+            with self.subTest(refused=args):
+                rc, err, argv = self.run_as(args, developer=False)
+                self.assertEqual((rc, argv), (1, None), err)
+                self.assertIn("only the developer", err)
+        rc, err, argv = self.run_as(["polish"], developer=True)  # the developer runs any verb
+        self.assertEqual((rc, argv), (0, ["polish"]), err)
+        # through bin/dev: its parser drops one first `--`, so a second one reaches the engine and is refused
+        rc, err, got = self.dev("--", "context", env={"CLAUDECODE": "1"})
+        self.assertEqual((rc, got and got["argv"]), (0, ["context"]), err)
+        self.out.unlink()
+        rc, err, got = self.dev("--", "--", "context", env={"CLAUDECODE": "1"})
+        self.assertEqual((rc, got), (1, None), err)
+
     def test_harness_verbs_run_only_in_the_developers_terminal(self):
-        for args in (["hooks", "on"], ["install", "--user"], ["skills", "update"], ["pin", "audit"],
-                     ["doctor", "--fix"], ["--", "hooks", "off"]):
+        for args in HARNESS:
             with self.subTest(args=args):
                 rc, err, got = self.dev(*args, env={"CLAUDECODE": "1"})
                 self.assertEqual((rc, got), (1, None), err)

@@ -68,10 +68,12 @@ Not released yet: the date is set when the release is tagged.
   runs a program named only at run time, and refuses it in every crew lane. It still does: the shell can reach another
   file than the one the guard reads by the same typed path (a symbolic link, `..` after `cd`, a quoted `~`, a glob, or
   a folder moved earlier in the same command), so no typed launcher path is trusted. Crew lanes run
-  `dev impeccable <verb>` instead: write lanes run every verb but the developer's, and read-only lanes run only
-  `context`, `detect` on local paths (not a URL, a host and port, or a domain), and `doctor` without `--fix`, with
-  their reading flags. The guard refuses the verbs that write the agents' settings, hooks, or skill folders to every
-  agent, the main session's included.
+  `dev impeccable <verb>` instead, from an allowlist: every lane runs `context`, `detect`, and `doctor` without
+  `--fix`, and write lanes and the main session also run `live`, `generate`, `document`, `extract`, and `init`.
+  Read-only lanes keep to the reading flags and give `detect` only local path shapes (no URL, host, domain, address,
+  `user@`, query, or fragment). Every other verb, including the engine's hidden ones and any a newer engine adds, is
+  the developer's: the guard refuses it to every agent, the main session's included, and `dev impeccable` runs it
+  only in your terminal.
 
 ## [26.11.3] - 2026-11-06
 

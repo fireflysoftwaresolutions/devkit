@@ -6,9 +6,12 @@
 # its digest itself. The skill's launcher typed by its path is judged like any other script: the shell can reach
 # another file than the one the guard reads by the same words (a link, `..` after `cd`, a quoted `~`, a glob, a folder
 # moved earlier in the same command; the Code reviewer's reviews of 11fd55e, 452dd51 and 1e606b7), so no typed path to
-# it is trusted, in either kind of lane. Read-only lanes run `dev impeccable` with its read verbs and reading flags on
-# local paths only; write lanes run every verb. The skill, a made-up engine and the install record are installed in the
-# run's temporary home with the download faked; nothing runs the launcher or the engine.
+# it is trusted, in either kind of lane. Agents run `dev impeccable` only with the verbs on its allowlist (the tech
+# lead's decision on the Code reviewer's review of the wrapper): read-only lanes `context`, `detect` and `doctor`
+# without --fix, with their reading flags, on local paths only; write lanes and the main session also `live`,
+# `generate`, `document`, `extract` and `init`. Every other verb is the developer's. The skill, a made-up engine and
+# the install record are installed in the run's temporary home with the download faked; nothing runs the launcher or
+# the engine.
 # Run: python3 -m unittest tests.test_guard_impeccable -v
 import contextlib
 import hashlib
@@ -40,10 +43,20 @@ LAUNCHER = ("#!/bin/sh\nset -eu\n"
 BAD = "#!/bin/sh\ngit push --force origin main\n"
 REL = ".claude/skills/impeccable/scripts/impeccable"  # the launcher below the home folder, through the skill's link
 # impeccable's verbs that write the agents' settings, hooks or skill folders (the engine's help and its doctor's
-# hints), in the forms dev passes on: the legacy `skills` namespace, a first `--`, and doctor's --fix
+# hints), in the forms dev passes on: the legacy `skills` namespace, once or more, a first `--`, and doctor's --fix
 HARNESS = ("hooks on", "hooks off", "install", "install --user", "link ../impeccable", "update", "update --user",
            "pin audit", "unpin audit", "doctor --fix", "doctor --json --fix", "skills install", "skills update",
-           "-- hooks on")
+           "-- hooks on", "skills skills hooks on")
+# the verbs agents run (the allowlist), as the engine gets them from dev; the read verbs run in read-only lanes too
+AGENT_VERBS = ("context", "-- context", "detect src", "doctor --json", "doctor --target src", "live", "generate",
+               "document", "extract", "init")
+# what the engine may run but no agent may: its hidden verbs (the Code reviewer's read of the 0.1.18 engine), its
+# other visible ones, the design commands that are not engine verbs, a verb a newer engine could add, no verb, and the
+# allowlist's verbs spelled otherwise (another case, after `skills` or a second `--`, doctor with another word)
+DEVELOPER_ONLY = ("hook-admin", "hook", "hook-before-edit", "build-phase advance", "capture-server", "ignore x",
+                  "ignores add x", "telemetry on", "check", "help", "polish", "live-poll", "a-verb-a-newer-engine-adds",
+                  "", "Context", "DETECT src", "skills context", "-- -- context", "doctor --FIX", "doctor --Fix=true",
+                  "doctor --target src --fix", "doctor --target=--fix", "doctor -f")
 DEVELOPERS = "change what runs in every later session"  # the refusal's reason, in every path
 READER = "seraph"  # a review lane: the read-only allowlist applies
 WRITER = "sati"  # a build lane: the gate applies, the allowlist does not
@@ -148,11 +161,6 @@ class ReadOnlyLaneTests(LauncherCase):
             with self.subTest(args=args):
                 self.assertIsNone(lane(f"dev impeccable {args}", READER))
 
-    def test_a_read_only_lane_leaves_impeccables_write_verbs_to_write_lanes(self):
-        for verb in ("init", "document", "extract", "live", "generate", "polish", "ignores add x", ""):
-            with self.subTest(verb=verb):
-                self.assertIn("write lane", lane(f"dev impeccable {verb}".strip(), READER) or "")
-
     def test_a_read_only_lane_refuses_flags_that_write_or_reach_out(self):
         for args in ("detect --github src", "detect --json https://example.com",
                      "detect --cdp 9222 --json", "detect --json src --viewport 390x844", "context --out notes.md",
@@ -162,13 +170,21 @@ class ReadOnlyLaneTests(LauncherCase):
                 self.assertIn("write lane", lane(f"dev impeccable {args}", READER) or "")
 
     def test_a_read_only_lane_lets_detect_scan_local_paths_but_not_a_host(self):
-        # `detect` scans a URL when it gets one; a host and port or a bare domain is a URL to it, not a local path
-        for args in ("detect --json src", "detect ./index.html", "detect src/index.html", "detect ~/site/a.html"):
+        # `detect` scans a URL when it gets one, so a read-only lane gives it only a path shape: one that starts ./,
+        # ../, / or ~/ (or is . or ..), or whose first part has only letters, digits, _ and - and is not a host on its
+        # own. A host and port, a domain (with a final dot too), an address in any notation, a user@host, a query or
+        # a fragment, a leading space and a bare file name are refused.
+        for args in ("detect --json src", "detect ./index.html", "detect src/index.html", "detect ~/site/a.html",
+                     "detect ../site/a.html", "detect /tmp/site/a.html", "detect .", "detect --scope type,layout src",
+                     "context --target src/app.tsx", "doctor --target src"):
             with self.subTest(args=args):
                 self.assertIsNone(lane(f"dev impeccable {args}", READER))
         for args in ("detect localhost:3000", "detect --json 127.0.0.1:8080/pricing", "detect example.com",
                      "detect example.com/pricing", "detect 192.168.1.20", "detect localhost", "detect //example.com",
-                     "detect [::1]:5173", "detect index.html"):
+                     "detect [::1]:5173", "detect index.html", "detect localhost.", "detect example.com.",
+                     "detect user@example.com", "detect 'example.com?x'", "detect ' example.com'", "detect 2130706433",
+                     "detect 0x7f000001", "detect LOCALHOST/app", "detect src#top", "detect '~user/x'", "detect ''",
+                     "context --target example.com.", "doctor --target 2130706433"):
             with self.subTest(args=args):
                 self.assertIn("local path", lane(f"dev impeccable {args}", READER) or "")
 
@@ -196,7 +212,8 @@ class GateTests(LauncherCase):
 
 class DeveloperOnlyTests(LauncherCase):
     # what writes the agents' settings, hooks or skill folders changes every later session, so it is the developer's,
-    # as `dev ext add` is: refused to the main session's agent and to both lane kinds, nested forms included
+    # as `dev ext add` is: refused to the main session's agent and to both lane kinds, nested forms included. Agents
+    # get an allowlist, not a block list: a hidden verb or one a newer engine adds is the developer's too.
     def test_the_main_session_leaves_impeccables_harness_verbs_to_the_developer(self):
         self.assertIsNone(guard.check("Bash", {"command": "dev impeccable doctor --json"}, CWD, "claude"))
         for args in HARNESS:
@@ -216,6 +233,31 @@ class DeveloperOnlyTests(LauncherCase):
         for args in HARNESS:
             with self.subTest(args=args):
                 self.assertIn(DEVELOPERS, lane(f"dev impeccable {args}", WRITER) or "")
+
+    def test_the_main_session_runs_only_impeccables_allowlisted_verbs(self):
+        for args in AGENT_VERBS:
+            with self.subTest(allowed=args):
+                self.assertIsNone(guard.check("Bash", {"command": f"dev impeccable {args}"}, CWD, "claude"))
+        for args in DEVELOPER_ONLY:
+            with self.subTest(refused=args):
+                v = guard.check("Bash", {"command": f"dev impeccable {args}".strip()}, CWD, "claude")
+                self.assertIn(DEVELOPERS, v[1] if v else "")
+
+    def test_a_write_lane_runs_only_impeccables_allowlisted_verbs(self):
+        for args in AGENT_VERBS:
+            with self.subTest(allowed=args):
+                self.assertIsNone(lane(f"dev impeccable {args}", WRITER))
+        for args in DEVELOPER_ONLY:
+            with self.subTest(refused=args):
+                self.assertIn(DEVELOPERS, lane(f"dev impeccable {args}".strip(), WRITER) or "")
+
+    def test_a_read_only_lane_leaves_write_verbs_to_write_lanes_and_the_rest_to_the_developer(self):
+        for args in ("init", "document", "extract", "live", "generate", "live --target src"):
+            with self.subTest(write=args):
+                self.assertIn("write lane", lane(f"dev impeccable {args}", READER) or "")
+        for args in DEVELOPER_ONLY:
+            with self.subTest(refused=args):
+                self.assertIn(DEVELOPERS, lane(f"dev impeccable {args}".strip(), READER) or "")
 
 
 if __name__ == "__main__":

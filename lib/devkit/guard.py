@@ -2240,8 +2240,10 @@ class _Shell:
             return deny(LOCK_REASON.format(sub=words[1]))
         if args[:1] == ["hook"] and not helps:
             return deny(HOOK_REASON)
-        if args[:1] == ["impeccable"] and impeccable_harness_verb(args[1:]):  # its words reach the engine, help too
-            return deny(IMPECCABLE_REASON)
+        if args[:1] == ["impeccable"]:  # its words reach the engine: agents run only the allowlist's verbs
+            verb = impeccable_developer_verb(impeccable_engine_words(args[1:]))
+            if verb:
+                return deny(IMPECCABLE_REASON.format(verb=verb))
         if args[:1] in (["rm"], ["mv"], ["cp"]):
             return self.segment(args[0], args, [], cwd)
         if args[:1] and (args[0] in _DEV_READ or args[0] in _DEV_TEXT):
@@ -3609,72 +3611,110 @@ def _ro_dev(args) -> str | None:
 # skill's launcher typed by its path is judged like any other script: the shell can reach another file than the one the
 # guard reads by the same words (a link, `..` after `cd`, a quoted `~`, a glob, a folder moved earlier in the same
 # command; the Code reviewer's reviews of 11fd55e, 452dd51 and 1e606b7), and its `exec "$bin"` names its program at
-# run time, so the gate refuses it to crew lanes. Write lanes run every verb of `dev impeccable`. Read-only lanes run
-# only its read verbs with their reading flags (the skill's reference: context loads PRODUCT.md and DESIGN.md, detect
-# scans local HTML and CSS, doctor without --fix reports), on local paths: detect scans a URL when it gets one, so no
-# value or path may name a URL or anything that could pass for a host. init, document, extract, live, generate and the
-# rest write files or start a session and stay with write lanes.
+# run time, so the gate refuses it to crew lanes.
+#
+# Agents get an allowlist of verbs, not a block list (the tech lead's decision on the Code reviewer's review of
+# e498c41..7a1f31b: the engine has verbs its help does not show, such as hook-admin, hook-before-edit, build-phase and
+# capture-server, and an update can add more). The 0.1.18 engine's help shows detect, ignores, help, install, link,
+# update, check and telemetry (and the legacy `skills` namespace); the skill also runs context, doctor and live.
+# - Every lane and the main session: `context` (loads PRODUCT.md, DESIGN.md and the surface brief), `detect` (scans
+#   HTML and CSS) and `doctor` with only --json and --target (reports drift; --fix moves hook entries).
+# - Write lanes and the main session, also: `live` (starts the live server and injects its script into the page),
+#   and `generate`, `document`, `extract` and `init`, the design commands that write project files. 0.1.18 runs them in
+#   the agent's chat, not as engine verbs (init: "not a CLI command"; the others: "Unknown command"), so here they
+#   reach the engine only when a newer one adds them.
+# - Everything else is the developer's, in a terminal: the verbs that write the agents' settings, hooks or skill
+#   folders (hooks, install, link, update, pin, unpin, doctor --fix), the hidden helpers (hook, hook-admin,
+#   hook-before-edit, build-phase, capture-server, live-poll, …), ignore and ignores, telemetry, check, help, no verb,
+#   and the allowlist's verbs spelled any other way (another case, after `skills` or a second `--`): it fails closed.
+# Read-only lanes run the read verbs with their reading flags, on local path shapes only: detect scans a URL when it
+# gets one, so no value or path may name a URL or anything that could pass for a host.
 
-# verb -> (flags that take a value, flags alone, whether local paths may follow)
+# verb -> (flags that take a value: the kind of value, flags alone, whether local paths may follow)
 IMPECCABLE_READS = {
-    "context": (frozenset({"--target"}), frozenset(), False),
-    "detect": (frozenset({"--scope"}), frozenset({"--json", "--quiet", "--list-rules", "--no-config", "--no-advisory",
-                                                  "--no-inline-ignores", "--no-design-system", "--help"}), True),
-    "doctor": (frozenset({"--target"}), frozenset({"--json", "--help"}), False),
+    "context": ({"--target": "path"}, frozenset(), False),
+    "detect": ({"--scope": "names"}, frozenset({"--json", "--quiet", "--list-rules", "--no-config", "--no-advisory",
+                                                "--no-inline-ignores", "--no-design-system", "--help"}), True),
+    "doctor": ({"--target": "path"}, frozenset({"--json", "--help"}), False),
 }
-# a first path part detect could take for a host: localhost, or dotted names and addresses (example.com, 10.0.0.2)
-_HOSTLIKE = re.compile(r"(?:localhost|[A-Za-z0-9_-]+(?:\.[A-Za-z0-9_-]+)+)(?:/|$)", re.I)
-# impeccable's verbs that write the agents' own settings, hooks or skill folders, by the engine's help and its
-# doctor's hints: `hooks on|off` writes the hook manifests (.claude/settings.json, .codex/hooks.json, …); `install`,
-# `link`, `pin` and `unpin` put skills in the harnesses' folders; `update` rewrites them and, with --user, the
-# user-level hook manifest; `doctor --fix` moves hook entries. They change what runs in every later session, so they
-# are the developer's, as `dev ext add` is (the tech lead's decision on the wrapper's review): refused to every agent
-# here and by `dev impeccable` itself outside the developer's terminal (impeccable.run).
-IMPECCABLE_HARNESS = frozenset({"hooks", "install", "link", "update", "pin", "unpin"})
-IMPECCABLE_REASON = ("This command writes the agents' settings, hooks or skill folders: `dev impeccable hooks`, "
-                     "`install`, `link`, `update`, `pin`, `unpin` or `doctor --fix` (also after `skills`), which "
-                     "change what runs in every later session on this Mac. Only the developer does that, in a "
-                     "terminal. Ask them, with the command and why. Agents may run `dev impeccable context`, `detect`, "
-                     f"`doctor` without `--fix`, and the design verbs. {_TAIL}")
+IMPECCABLE_WRITES = ("live", "generate", "document", "extract", "init")
+IMPECCABLE_AGENTS = frozenset(IMPECCABLE_READS) | frozenset(IMPECCABLE_WRITES)
+# a path a read-only lane may give the engine: one that starts ./, ../, / (never //) or ~/, `.` or `..`, or one whose
+# first part has only ASCII letters, digits, _ and - and is not a host on its own (localhost, or a number such as
+# 2130706433 or 0x7f000001); never with a colon (a scheme, a port, an IPv6 address)
+_LOCAL_PATH = re.compile(r"(?:\.\.?/|/(?!/)|~/|\.\.?\Z"
+                         r"|(?!(?:localhost|[0-9]+|0x[0-9a-f]+)(?:/|\Z))[A-Za-z0-9_-]+(?:/|\Z))", re.I)
+_NAMES = re.compile(r"[a-z]+(?:,[a-z]+)*\Z")  # --scope: the detector's design domains, comma-separated
+IMPECCABLE_REASON = ("`dev impeccable {verb}` is the developer's. Agents run `dev impeccable` only with the verbs on "
+                     "its allowlist, spelled exactly and first: `context`, `detect`, and `doctor` (with `--json` or "
+                     "`--target`, never `--fix`) in every lane, and also `live`, `generate`, `document`, `extract`, "
+                     "and `init` in write lanes and the main session. Every other verb the developer runs, in a "
+                     "terminal: some write the agents' settings, hooks or skill folders (`hooks`, `install`, `link`, "
+                     "`update`, `pin`, `unpin`, `doctor --fix`), which change what runs in every later session on this "
+                     "Mac, and an engine update can add more. Ask them, with the command and why. " + _TAIL)
 
 
-def impeccable_harness_verb(args) -> str:
-    """The verb of a `dev impeccable` call that writes the agents' settings, hooks or skill folders, or ''. `args`:
-    the words after `impeccable`. dev drops one first `--`; any further `--` before the verb, and the engine's legacy
-    `skills <verb>` namespace, are read through (fails closed). doctor counts with any word that starts with --fix."""
+def impeccable_engine_words(args) -> list:
+    """The words `dev impeccable` passes to the engine, from the words after `impeccable` as typed: dev's parser drops
+    one first `--` (Python 3.9 and 3.15 alike), and passes every later word as it is."""
     words = [str(w) for w in args]
-    while words[:1] == ["--"]:
-        words = words[1:]
-    if words[:1] and words[0].lower() == "skills":
-        words = words[1:]
-        while words[:1] == ["--"]:
-            words = words[1:]
-    verb = words[0].lower() if words else ""
-    if verb in IMPECCABLE_HARNESS:
-        return verb
-    return "doctor --fix" if verb == "doctor" and any(w.startswith("--fix") for w in words[1:]) else ""
+    return words[1:] if words[:1] == ["--"] else words
+
+
+def _doctor_extra(rest) -> str:
+    """The first word after `doctor` an agent may not give it, or '': only --json, --help and --target <path> (a value
+    that starts with `-` could be a flag to the engine). --fix in any case or spelling counts first."""
+    if any(w.casefold().startswith("--fix") for w in rest):
+        return "--fix"
+    i = 0
+    while i < len(rest):
+        w = rest[i]
+        if w in ("--json", "--help") or (w.startswith("--target=") and not w[9:].startswith("-")):
+            i += 1
+        elif w == "--target" and i + 1 < len(rest) and not rest[i + 1].startswith("-"):
+            i += 2
+        else:
+            return w
+    return ""
+
+
+def impeccable_developer_verb(words) -> str:
+    """'' when an agent may run the engine with `words`, the words it gets (impeccable_engine_words), else the call
+    to name in the refusal: the first word is the verb and must be on the allowlist as it is spelled there
+    (IMPECCABLE_AGENTS), and doctor takes only --json, --help and --target. Anything else is the developer's (fails
+    closed); the name reads through `--` and the legacy `skills` namespace, however often, to the verb the engine would
+    run."""
+    words = [str(w) for w in words]
+    if words[:1] and words[0] in IMPECCABLE_AGENTS:
+        extra = _doctor_extra(words[1:]) if words[0] == "doctor" else ""
+        return f"doctor {extra}" if extra else ""
+    k = 0
+    while k < len(words) and (words[k] == "--" or words[k].casefold() == "skills"):
+        k += 1
+    return " ".join(words[:k + 1])[:80] or "(no verb)"
 
 
 def _ro_impeccable(args) -> str | None:
-    """Why a read-only lane may not run `dev impeccable` with `args`, the words after it, or None. dev drops a first
-    `--` and passes the rest to the engine as they are, so a later `--` is a word the engine reads, never a reading
-    flag."""
-    harness = impeccable_harness_verb(args)
-    if harness:
-        return (f"`dev impeccable {harness}` writes the agents' settings, hooks or skill folders, which change what "
-                f"runs in every later session: only the developer runs it, in a terminal")
-    args = args[1:] if args[:1] == ["--"] else list(args)
-    verb, rest = (args[0], args[1:]) if args else ("", [])
+    """Why a read-only lane may not run `dev impeccable` with `args`, the words after it as typed, or None. dev drops
+    a first `--` and passes the rest to the engine as they are, so a later `--` is a word the engine reads, never a
+    reading flag."""
+    args = impeccable_engine_words(args)
+    verb = impeccable_developer_verb(args)
+    if verb:
+        return IMPECCABLE_REASON.format(verb=verb)
+    verb, rest = args[0], args[1:]
     if verb not in IMPECCABLE_READS:
-        return (f"`dev impeccable {verb or '(no verb)'}` writes files or starts a session, so a write lane runs it; a "
-                f"read-only lane runs {', '.join(IMPECCABLE_READS)} (doctor without --fix)")
+        return (f"`dev impeccable {verb}` writes files or starts a session, so a write lane runs it; a read-only lane "
+                f"runs {', '.join(IMPECCABLE_READS)} (doctor without --fix)")
     takes, alone, paths = IMPECCABLE_READS[verb]
     i = 0
     while i < len(rest):
         a = rest[i]
         flag, eq, value = a.partition("=")
         if flag in takes:
+            kind = takes[flag]
             value = value if eq else (rest[i + 1] if i + 1 < len(rest) else "")
+            shown = a if eq else f"{a} {value}"
             i += 1 if eq else 2
         else:
             i += 1
@@ -3683,11 +3723,18 @@ def _ro_impeccable(args) -> str | None:
             if a.startswith("-") or not paths:
                 return (f"`dev impeccable {verb} {a}` is not one of its reading flags or a local path, so a write lane "
                         f"runs it")
-            value = a
-        if ":" in value or value.startswith("//") or _HOSTLIKE.match(value):
-            local = "" if ":" in value or value.startswith("//") else f"; a local file with this name is `./{value}`"
-            return (f"`dev impeccable {verb} {a}` names a URL or a host (a scheme, a port, a domain or an address), "
-                    f"which the engine fetches, so a write lane runs it. A read-only lane gives it a local path{local}")
+            kind, value, shown = "path", a, a
+        if kind == "names":
+            if not _NAMES.match(value):
+                return (f"`dev impeccable {verb} {shown}` gives {flag} something other than its design domains "
+                        f"(letters and commas, such as type,layout), not a local path, so a write lane runs it")
+        elif ":" in value or not _LOCAL_PATH.match(value):
+            plain = value and ":" not in value and not value.startswith(("/", "~")) and not value[0].isspace()
+            local = f"; a local file with this name is `./{value}`" if plain else ""
+            return (f"`dev impeccable {verb} {shown}` is not a local path shape: it could name a URL or a host (a "
+                    f"scheme, a port, a domain, an address, a user@host, a query), which the engine fetches, so a "
+                    f"write lane runs it. A read-only lane gives a path that starts ./, ../, / or ~/, or whose first "
+                    f"part has only letters, digits, _ and - and is not localhost or a number{local}")
     return None
 
 
@@ -3909,8 +3956,9 @@ def crew_shell_verdict(cmd: str, cwd, scope=None, member=None, level=None, base=
         all(argv == ["cat"] for argv, code in calls[1:])
     for argv, code in calls:
         dev = _dev_args(argv) if code is None else None
-        if dev and dev[:1] == ["impeccable"] and impeccable_harness_verb(dev[1:]):  # the developer's, in every lane
-            return deny(IMPECCABLE_REASON)
+        imp = impeccable_developer_verb(impeccable_engine_words(dev[1:])) if dev and dev[:1] == ["impeccable"] else ""
+        if imp:  # off the allowlist: the developer's, in every lane
+            return deny(IMPECCABLE_REASON.format(verb=imp))
         for kind, args in _dev_calls(argv, code):
             if kind == "lane" and not one_routed:
                 return deny(LANE_REASON)

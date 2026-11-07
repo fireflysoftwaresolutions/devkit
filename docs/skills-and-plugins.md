@@ -216,22 +216,35 @@ Crew members on Claude Code and Codex run impeccable only with `dev impeccable`.
 typed path to the launcher. The shell can reach another file than the one the guard reads by the same words (a
 symbolic link, `..` after `cd`, a quoted `~`, a glob, or a folder moved earlier in the same command), and the launcher
 names the program it runs only at run time, so the guard refuses a crew lane that types the launcher's path, as it
-refuses any such script. With `dev impeccable`:
+refuses any such script. With `dev impeccable`, agents get an allowlist of verbs, not a list of forbidden ones: the
+engine has verbs its help does not show, and an engine update can add more.
 
-- **The developer's verbs:** `hooks`, `install`, `link`, `update`, `pin`, `unpin`, and `doctor --fix`, also after
-  the engine's legacy `skills` namespace. They write the agents' settings, hooks, or skill folders, which change what
-  runs in every later session, so only the developer runs them, in a terminal. The guard refuses them to every agent,
-  in the main session and in every lane, and `dev impeccable` itself refuses them outside the developer's terminal.
-- **Write lanes** run every other verb.
-- **Read-only lanes** run only the verbs that read the project, with their reading flags: `context` (with
-  `--target`), `detect` on local paths (`--json`, `--quiet`, `--scope`, `--list-rules`, and the `--no-…` filters),
-  and `doctor` (with `--json` or `--target`, never `--fix`). These verbs do not change your sources, but the engine
-  may still write small cache files of its own, such as its staleness check. Other verbs such as `init`, `document`,
-  `extract`, `live`, and `generate` write files or start a session, so a write lane runs them.
-- **`detect` scans a URL when it gets one,** so in a read-only lane no path or flag value may name one. The guard
-  refuses an argument with a colon (a scheme or a port, such as `localhost:3000`), one that starts with `//`, and one
-  whose first part could be a host: `localhost`, a dotted name such as `example.com`, or an address such as
-  `10.0.0.2`. A file in the project's top folder with a dotted name counts too, so write it as a path:
+| Verb | Read-only lanes | Write lanes and the main session | What it does |
+| --- | --- | --- | --- |
+| `context` | yes, with `--target` | yes | Loads PRODUCT.md, DESIGN.md, and the surface brief, and prints what to follow |
+| `detect` | yes, on local paths (below) | yes | Scans HTML and CSS for design anti-patterns |
+| `doctor` | yes, with `--json` or `--target` | yes, with `--json` or `--target` | Reports drift between the project's impeccable files and the engine; never `--fix`, which moves hook entries |
+| `live` | no | yes | Starts the live server and adds its script to the page |
+| `generate`, `document`, `extract`, `init` | no | yes | The design commands that write project files. Engine 0.1.18 runs them in the agent's chat, not as engine verbs, so `dev impeccable` reaches them only if a newer engine adds them |
+
+- **Each verb counts only as listed:** the first word, spelled as in the table. A verb after `skills` (the engine's
+  legacy namespace) or after a second `--`, or in another case, such as `Context`, is not on the list.
+- **Every other verb is the developer's,** in a terminal: `hooks`, `install`, `link`, `update`, `pin`, `unpin`, and
+  `doctor --fix` write the agents' settings, hooks, or skill folders, which change what runs in every later session.
+  The same goes for the engine's hidden helpers (`hook`, `hook-admin`, `hook-before-edit`, `build-phase`,
+  `capture-server`, the `live-…` helpers, and others), `ignore` and `ignores`, `telemetry`, `check`, `help`, a call
+  without a verb, and any verb a newer engine adds. The guard refuses them to every agent, in the main session and in every lane, and
+  `dev impeccable` itself refuses them outside the developer's terminal.
+- **Read-only lanes** run the read verbs with their reading flags: `context` with `--target`, `detect` with `--json`,
+  `--quiet`, `--scope`, `--list-rules`, and the `--no-…` filters, and `doctor` with `--json` or `--target`. These
+  verbs do not change your sources, but the engine may still write small cache files of its own, such as its
+  staleness check.
+- **`detect` scans a URL when it gets one,** so in a read-only lane every path and `--target` value must have a local
+  path shape: it starts with `./`, `../`, `/`, or `~/` (or is `.` or `..`), or its first part has only letters,
+  digits, `_`, and `-` and is not a host on its own (`localhost`, or a number such as `2130706433`). The guard
+  refuses anything else: a colon (a scheme or a port, such as `localhost:3000`), a start of `//`, a domain, an
+  address (`example.com`, `example.com.`, `10.0.0.2`), `user@example.com`, a query or a fragment (`?`, `#`), and a
+  leading space. A file in the project's top folder with a dotted name counts too, so write it as a path:
   `dev impeccable detect ./index.html`.
 
 impeccable offers to write PRODUCT.md and DESIGN.md. devkit's global instructions keep agents from creating them
