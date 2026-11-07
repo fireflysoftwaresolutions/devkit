@@ -201,12 +201,20 @@ class AllowlistTests(unittest.TestCase):
         self.assertIsNotNone(lane("touch src/a.py", member="a1b2c3d4", level="read"))
         self.assertIsNotNone(lane("touch src/a.py", member="keymaker", level="review"))  # a helper of a reviewer
 
-    def test_a_lookup_failure_restricts_nothing_and_is_recorded(self):
-        records = []
-        with mock.patch.object(guard, "_record", lambda *a, **k: records.append((a, k))), \
+    def test_a_lookup_failure_makes_the_lane_read_only_and_is_recorded(self):
+        # the roster cannot be read: the lane fails closed at review level, and the real _record writes why
+        import json
+        from devkit import audit
+        self.assertIsNone(lane("touch src/a.py", member="keymaker", level="all"))  # baseline: the roster reads
+        with tempfile.TemporaryDirectory() as d, mock.patch.object(audit, "AUDIT", Path(d) / "audit"), \
                 mock.patch("devkit.crew.member", side_effect=RuntimeError("roster unreadable")):
-            self.assertIsNone(lane("touch src/a.py"))
-        self.assertEqual([a[0] for a, _ in records], ["guard.failopen"])
+            self.assertIn("read-only", lane("touch src/a.py", member="keymaker", level="all") or "")
+            self.assertIsNone(lane("git status", member="keymaker", level="all"))
+            recs = [json.loads(line) for f in sorted((Path(d) / "audit").glob("*.jsonl"))
+                    for line in f.read_text().splitlines() if line.strip()]
+        hits = [r for r in recs if r.get("action") == "guard" and r.get("target") == "crew-readonly"]
+        self.assertTrue(hits, recs)
+        self.assertIn("roster unreadable", hits[0].get("detail", ""))
 
 
 def _git(repo, *args):

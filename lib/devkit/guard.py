@@ -3725,9 +3725,10 @@ def crew_shell_verdict(cmd: str, cwd, scope=None, member=None, level=None, base=
         return deny(why)
     try:
         level = _strictest(level, member_level(member))
-    except Exception as e:  # the roster cannot be read: the lane keeps the level it was given
-        failopen("crew-readonly", e)
-        level = _strictest(level)
+    except Exception as e:  # the roster cannot be read: the lane works read-only, or stricter (fails closed)
+        _record("guard", "crew-readonly", f"the roster cannot be read ({type(e).__name__}: {e}), so the lane works "
+                f"at review or stricter"[:300], "recorded", rule="crew-readonly")
+        level = _strictest(level, "review")
     calls = shell_calls(cmd, cwd)
     if calls is None:  # the shell would read it another way than the tokenizer: judge the words, refuse a lane name
         if _LANE_TEXT.search(cmd):

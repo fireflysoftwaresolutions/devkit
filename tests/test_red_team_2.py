@@ -349,6 +349,16 @@ class RedTeam2(unittest.TestCase):
             with self.subTest(code=code):
                 self.assertIsNone(self.check(f'python3 -c "{code}"'))
 
+    # ---- the software architect's finding (architecture review 26.11, confirmed by the security engineer): when the
+    # roster cannot be read, a crew member's lane kept the level it was given, while docs/guard.md says the lane check
+    # fails closed. It now works at the strictest of that level and review.
+    def test_a_roster_devkit_cannot_read_makes_the_lane_read_only(self):
+        cmd = "python3 -c \"print(1)\""
+        self.assertIsNone(self.member(cmd))  # baseline: an `all` lane runs it
+        with mock.patch.object(guard, "member_level", side_effect=RuntimeError("crew.json unreadable")):
+            self.assertIn("read-only lane", self.member(cmd) or "")
+            self.assertIsNone(self.member("git status"))  # reading still works
+
     def test_m379_no_guard_text_names_the_tech_lead_by_persona_alone(self):
         import ast
         tree = ast.parse((ROOT / "lib" / "devkit" / "guard.py").read_text())
