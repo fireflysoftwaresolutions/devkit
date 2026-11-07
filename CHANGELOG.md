@@ -16,8 +16,10 @@ Not released yet: the date is set when the release is tagged.
 - **The impeccable engine is installed with the skill.** `dev install --only skills` fetches the engine binary for
   this Mac from the upstream release that the pinned skill names, checks its SHA-256 against the pinned skill's own
   `engine-checksums.txt`, and puts it beside the launcher, so `impeccable context` no longer downloads code inside an
-  agent session (0.02 s once warm). A mismatch or a failed download installs nothing, is audited, and does not stop
-  the rest of the install. See [Skills and plugins › impeccable and its engine](docs/skills-and-plugins.md#impeccable-and-its-engine).
+  agent session (0.02 s once warm). A mismatch, a failed download, or a file error (a folder it cannot write)
+  installs nothing, is audited, and does not stop the rest of the install: the other skills are still linked. Claude
+  Code sessions set `IMPECCABLE_NO_UPDATE_CHECK=1`, so the engine does not check the network for a newer version.
+  See [Skills and plugins › impeccable and its engine](docs/skills-and-plugins.md#impeccable-and-its-engine).
 - **`dev doctor` checks impeccable:** the skill linked for Claude Code, its engine present with the pinned digest, and
   the Codex plugin enabled, each with its fix.
 
@@ -32,14 +34,16 @@ Not released yet: the date is set when the release is tagged.
   `A: yes | B: no`.
 - **Frontend work starts with impeccable.** The Frontend engineer, the UX designer, and the Mobile engineer load
   `frontend-design` and `impeccable` and run `impeccable context` once at the start of their work; `i18n` work now
-  requires `impeccable` too.
+  requires `impeccable` too. On Codex, where crew members cannot run the launcher yet, they read PRODUCT.md and
+  DESIGN.md instead.
 
 ### Fixed
 
 - **Crew members can run `impeccable context`.** The guard read the launcher as a script that runs a program named
-  only at run time and refused it in every crew lane. It now trusts the launcher devkit installed, while its content
-  and engine match the install record; read-only lanes run only `context`, `detect`, and `doctor` with their reading
-  flags.
+  only at run time and refused it in every crew lane. It now trusts the launcher devkit installed, run by its own path
+  (not a symbolic link to it, a copy, or a path through `..`, which would run the engine beside that path), while its
+  content and engine match the install record; read-only lanes run only `context`, `detect` on local paths (not a URL,
+  a host and port, or a domain), and `doctor`, with their reading flags.
 
 ## [26.11.3] - Unreleased
 
