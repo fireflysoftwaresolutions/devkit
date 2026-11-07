@@ -11,6 +11,10 @@ All notable changes to devkit. Versions follow CalVer `YY.MM.PATCH` (PATCH resta
   its source, what pins it (a commit, an exact version, or `⚠ observed` for a vendor marketplace plugin, with the
   version and commit installed), whether it is installed and enabled, its license, its layer, and why it is there
   (`-v`). `--json` prints every field. Agents may run it: it reads the agents' own files and starts no process.
+- **`dev update --check` tells you whether a newer devkit release is out**, and what changes in it: the installed and
+  newest releases, the CHANGELOG headings in between, and whether the checkout and the pinned copy are behind. It is
+  read-only, so agents may run it. A daily `update-check` job records the answer at 09:15; the first session of the
+  day and `dev status` then name a pending release, without reaching the network themselves.
 
 ### Removed
 

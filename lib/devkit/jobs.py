@@ -44,6 +44,9 @@ DEFAULT_JOBS = {
     "audit": {"about": "Publishes this machine's audit trail to the handoff repo and prunes it by audit.retention "
                        "(records audit.prune)",
               "cmd": ["audit", "--publish", "--quiet"], "at": "05:00", "timeout": 5},
+    "update-check": {"about": "Checks whether a newer devkit release is out (read-only: fetches tags); sessions and "
+                              "dev status then say so once a day",
+                     "cmd": ["update", "--check", "--quiet", "--record"], "at": "09:15", "timeout": 5},
     "doctor": {"about": "Weekly health check of the whole setup; notifies when a check fails",
                "cmd": ["doctor"], "weekly": "mon 09:00", "timeout": 10},
     "lessons": {"about": "Weekly lesson review: recurring lessons to automate, stale ones to retire",

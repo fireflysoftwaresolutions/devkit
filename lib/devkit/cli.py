@@ -894,6 +894,7 @@ def cmd_status(a):
         print("\n".join(render_home(v)))
         return 0
     v = status_view(reg, p, w)
+    v["needs_you"] += devkit_needs()
     _prompt_refresh(reg, (w or {}).get("path") or p.get("path") if a.query else os.getcwd())
     v["show_all"] = bool(getattr(a, "all", False))
     if getattr(a, "json", False):
@@ -902,6 +903,20 @@ def cmd_status(a):
     print("\n".join(render_status(v)))
     print()
     return 0
+
+
+def devkit_needs() -> list:
+    """`dev status` "Needs you": devkit's own notices, from recorded state only (no network): a newer release."""
+    out = []
+    try:
+        from . import updatecheck
+        line = updatecheck.status_line(installed=updatecheck.installed_version())
+        if line:
+            out.append({"kind": "devkit", "text": line, "command": "dev update --check"})
+    except Exception as e:  # a notice never breaks dev status
+        out.append({"kind": "devkit", "text": f"devkit's notices could not be read ({type(e).__name__})",
+                    "command": ""})
+    return out
 
 
 def cmd_branch(a):
@@ -1476,6 +1491,12 @@ def update_checkout(home: Path):
 
 
 def cmd_update(a):
+    if getattr(a, "check", False):  # read-only: agents may run it (guard)
+        from . import updatecheck
+        return updatecheck.cmd_check(a)
+    if getattr(a, "quiet", False) or getattr(a, "record", False):
+        ui.err("--quiet and --record go with --check")
+        return 2
     home = core.source_home()  # the checkout; `dev` itself may run from the pinned copy, which git never changes
     print(f"{ui.ARROW} updating {tilde(home)}")
     rc, message, install = update_checkout(home)
@@ -3518,7 +3539,12 @@ def build_parser():
     p.add_argument("--skip-packages", action="store_true", help="do not install Homebrew/npm packages")
     add("prompt", cmd_prompt, "What devkit's prompt helper shows here; refresh writes it for this Mac").add_argument(
         "action", nargs="?", choices=["refresh"])
-    add("update", cmd_update, "Update devkit: the newest release, or a pull of its branch")
+    p = add("update", cmd_update, "Update devkit: the newest release, or a pull of its branch; --check only tells")
+    p.add_argument("--check", action="store_true", help="read-only: the newest release, what changes in it, and "
+                                                         "whether the checkout and the pinned copy are behind")
+    p.add_argument("--quiet", action="store_true", help="with --check: print nothing (the daily job)")
+    p.add_argument("--record", action="store_true", help="with --check: record the result for the session start "
+                                                          "and dev status")
     add("docker", cmd_docker, "Docker on Colima").add_argument(
         "action", choices=["up", "down", "status", "trim", "prune", "autostart-on", "autostart-off"])
     add("version", cmd_version, "Show version")

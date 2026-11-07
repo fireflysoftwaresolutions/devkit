@@ -80,7 +80,7 @@ diagram files without them.
 | Third-party plugins, skills, and MCP servers: what is installed, what pins it, why it is there | `dev ext ls [--agent claude\|codex] [-v] [--json]` | `devsecops` |
 | Files, safely | `dev files`, `dev find`, `dev grep`, `dev diff`, `dev rm` (to the Trash, `--undo`), `dev mv`, `dev cp` | — |
 | Disk and Docker | `dev du` (what fills the disk, why, and the plan), `dev free <n>` (frees a plan item; `dev gc` is its old name), `dev docker up\|status\|trim` | `workspace` |
-| Install, update, or roll back devkit, and change its settings (the developer, in a terminal: the guard refuses them to agents) | `dev setup`, `dev setup prompt`, `dev setup commit-template`, `dev install [--only <steps>]`, `dev install --version <previous>` (rollback), `dev update`, `dev config set <key> <value>`, `dev version` | — |
+| Install, update, or roll back devkit, and change its settings (the developer, in a terminal: the guard refuses them to agents) | `dev setup`, `dev setup prompt`, `dev setup commit-template`, `dev install [--only <steps>]`, `dev install --version <previous>` (rollback), `dev update` (`dev update --check` only tells, and agents may run it), `dev config set <key> <value>`, `dev version` | — |
 | Claude Desktop chat and Cowork | `dev desktop status\|pack`; the extension runs `dev mcp` | — |
 
 ## Projects and initiatives

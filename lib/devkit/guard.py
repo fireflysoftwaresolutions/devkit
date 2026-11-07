@@ -1774,6 +1774,15 @@ INSTALL_REASON = ("`dev install` and `dev update` change what every hook, the gu
                   f"installed now. {_TAIL}")
 
 
+_UPDATE_CHECK = frozenset({"--check", "--quiet", "--record"})
+
+
+def _update_check(args) -> bool:
+    """`dev update --check [--quiet] [--record]`: read-only (it fetches tags, never moves the checkout or the pinned
+    copy), so agents may run it. Exact words only: an abbreviation or any other word is the update itself."""
+    return args[:1] == ["update"] and "--check" in args[1:] and set(args[1:]) <= _UPDATE_CHECK
+
+
 LOCK_REASON = ("`dev config {sub}` adds or removes the managed-settings drop-in that keeps user and project settings "
                "from turning off devkit's hooks (`sudo`, outside the agent's reach for a reason). It is a safeguards "
                "change, which only the developer makes, in a terminal (RT5, spec C11). Ask them to run it, and say "
@@ -2181,7 +2190,7 @@ class _Shell:
     def dev(self, args, cwd, names=()):
         helps = _dev_skips(args[1:], "-h", "--help")
         words = _dev_words(args)
-        if args[:1] in (["install"], ["update"]) and not helps:
+        if args[:1] in (["install"], ["update"]) and not helps and not _update_check(args):
             return deny(INSTALL_REASON)
         if args[:1] in (["claude"], ["codex"]):  # dev claude|codex execs the agent with the words after the query
             why = guardless_session(args[0], [args[0], *[a for a in args[1:] if a != "--"]], names)

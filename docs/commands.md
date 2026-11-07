@@ -1127,8 +1127,8 @@ nightly `gc` job runs. The rules are in [Disk and cleanup](disk-and-cleanup.md).
 
 ### `dev jobs [ls | show | run | logs | journal | set | enable | disable | install]`
 
-devkit's scheduled background work as launchd jobs: `sync`, `sleep`, `gc`, `repair`, `audit`, `doctor`, and
-`lessons`. See [Scheduled jobs and the audit trail](jobs-and-audit.md).
+devkit's scheduled background work as launchd jobs: `sync`, `sleep`, `gc`, `repair`, `audit`, `update-check`,
+`doctor`, and `lessons`. See [Scheduled jobs and the audit trail](jobs-and-audit.md).
 
 | Command | Effect |
 | --- | --- |
@@ -1328,9 +1328,28 @@ extension and opens its installer when it is missing or out of date. The `launch
 [scheduled jobs](jobs-and-audit.md). See
 [Getting started › What dev install configures](getting-started.md#what-dev-install-configures).
 
-### `dev update`
+### `dev update [--check [--quiet] [--record]]`
 
-Updates the devkit checkout, then runs `dev install`, which pins the new commit. It always updates the checkout,
+`dev update --check` tells you, without changing anything, whether a newer devkit release is out and what changes in
+it. Agents may run it.
+
+```text
+$ dev update --check
+installed  26.11.3 (pinned copy ~/.local/share/devkit/releases/26.11.3-…)
+checkout   ~/Development/fireflysoftwaresolutions/devkit at v26.11.3 (detached)
+newest     v26.11.4 · 1 release behind (checkout and pinned copy)
+  26.11.4: Added · Removed
+run in a terminal: dev update
+```
+
+It fetches the tags into the checkout's git store, as `dev update` does, and never moves the working tree, `HEAD`, or
+the pinned copy. The lines under `newest` are the `CHANGELOG.md` headings of each newer release. A checkout on a
+branch shows how many commits it is behind its upstream, and a pinned copy older than the checkout says to run
+`dev install`. With no network it says the check could not be done, shows the last recorded result with its date, and
+exits with `1`; it never says up to date. The daily `update-check` job runs `dev update --check --quiet --record`, and
+the first session of the day and `dev status` show the result while a release is pending.
+
+`dev update` itself updates the devkit checkout, then runs `dev install`, which pins the new commit. It always updates the checkout,
 even when `dev` runs from the pinned copy. What it does depends on where the checkout is:
 
 | The checkout is | `dev update` |
