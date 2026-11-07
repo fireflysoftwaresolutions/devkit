@@ -483,6 +483,9 @@ devkit refuses more in this release. Each refusal says why and names the command
 - A grant a step uses for a push or a pull request covers only its own target pattern in its own repository.
 - The dashboard server reads a project's branch map at most every 5 seconds and two at once, answering more with
   429, so a client cannot start unbounded git reads.
+- An agent's push from a folder that is no project (a temporary clone, a folder made in the same command, one a
+  sourced file picks) is refused while any project has an embargo, and a push from inside a git folder, or through
+  `env -C` or `sudo -D`, is judged as that folder's project, so its embargo holds.
 
 ### Known limits
 
