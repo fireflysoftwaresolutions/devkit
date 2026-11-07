@@ -390,6 +390,32 @@ def by_member(days: int = 7) -> dict:
     return out
 
 
+def stop_blocks(days: int = 7) -> dict:
+    """The Stop hook's blocks and the reminders that made one unnecessary (threaded turn endings, R4) ->
+    {"blocked": {(day, rule): n}, "prevented": {(day, rule): n}}, from the audit trail. The day is the developer's
+    local one, as in the deviations list (the record's `time` is UTC)."""
+    from . import audit
+    out = {"blocked": {}, "prevented": {}}
+    for action, key in (("stop.block", "blocked"), ("stop.prevented", "prevented")):
+        for r in audit.records(days, action):
+            rule = (r.get("evidence") or {}).get("rule") or str(r.get("detail") or "?").split(" · ")[0]
+            k = (time.strftime("%Y-%m-%d", time.localtime(r.get("ts") or 0)), rule)
+            out[key][k] = out[key].get(k, 0) + 1
+    return out
+
+
+def stop_block_lines(days: int = 7) -> list:
+    """`dev canary`'s Stop hook section: the turns sent back per day and rule, and the reminders that prevented one."""
+    st = stop_blocks(days)
+    out = []
+    for key, head in (("blocked", "sent back"), ("prevented", "prevented by a reminder")):
+        by_day = {}
+        for (day, rule), n in sorted(st[key].items()):
+            by_day.setdefault(day, []).append(f"{rule} {n}")
+        out += [f"  {head:<24} {day}  " + " · ".join(parts) for day, parts in sorted(by_day.items())]
+    return out or ["  none: no turn was sent back by the Stop hook"]
+
+
 def summary(days: int = 7) -> dict:
     """{agent: (ok, total)} over the window: main sessions' first replies (corrections and crew reports apart)."""
     out = {}

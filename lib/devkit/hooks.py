@@ -437,12 +437,13 @@ def _human_changed_at(note: Path, digest: str) -> float:
     return since if since is not None else note.stat().st_mtime
 
 
-def handoff_staleness(top: str, note: Path, state_file: Path, email: str, now: float) -> list:
+def handoff_staleness(top: str, note: Path, state_file: Path, email: str, now: float) -> tuple:
     """Commits on HEAD by `email` newer than the last change of the note's human sections (Current state, Next
-    steps, Decisions…) -> their hashes. A task or session line written by devkit is not a change; a teammate's commit
-    pulled in is not this developer's work. The first time a note is seen, the handoff history says when it changed."""
+    steps, Decisions…) -> ([(hash, commit time)], newest first; when those sections last changed). A task or session
+    line written by devkit is not a change; a teammate's commit pulled in is not this developer's work. The first
+    time a note is seen, the handoff history says when it changed."""
     if not note.exists():
-        return []
+        return [], now
     digest = _human_digest(note.read_text())
     st = core.read_json(state_file, {}) or {}
     if st.get("hash") != digest:
@@ -455,37 +456,78 @@ def handoff_staleness(top: str, note: Path, state_file: Path, email: str, now: f
         if not ts.isdigit() or int(ts) <= st["changed"]:
             break  # newest first: everything below is older than the note's last change
         if ce.lower() == email.lower():
-            out.append(sha)
-    return out
+            out.append((sha, int(ts)))
+    return out, st["changed"]
 
 
-def _handoff_nudge(agent: str, data: dict, sess: dict):
-    """End of every development turn: the commits made since the handoff note last really changed → update the note
-    and the tasks now, not only at the end. The repository is where the session works now (it may have started
-    outside one, as Claude Desktop sessions do), and the check re-arms after each update."""
-    if data.get("stop_hook_active") or not core.CFG.get("handoff", {}).get("enforce", True):
+HANDOFF_BLOCK = {"block_after_commits": 5, "block_after_minutes": 60}  # handoff.* (threaded turn endings, R3)
+
+
+def _handoff_limits() -> tuple:
+    """(commits, minutes) after which the handoff gate sends the turn back; below them the reminder is enough."""
+    cfg = core.CFG.get("handoff") or {}
+    out = []
+    for k, default in HANDOFF_BLOCK.items():
+        try:
+            out.append(max(1, int(cfg.get(k, default))))
+        except (TypeError, ValueError):
+            out.append(default)
+    return tuple(out)
+
+
+def _handoff_state(agent: str, data: dict, sess: dict, now=None):
+    """(project, [(hash, time)] of the developer's commits newer than the note's last real update, when it changed)
+    in the repository the session works in now (it may have started outside one, as Claude Desktop sessions do).
+    None where the check does not apply: a member (Morpheus records their work), handoff.enforce off, no project or
+    no git identity."""
+    if data.get("agent_id") or not core.CFG.get("handoff", {}).get("enforce", True):
         return None
     top = core.gitout(data.get("cwd") or os.getcwd(), "rev-parse", "--show-toplevel") or sess.get("top") or ""
     if not top or core.is_temp(top):
         return None
-    from . import work
     pid = _session_project(data, sess)
     email = core.gitout(top, "config", "user.email")
     if not pid or not email:
         return None
-    stale = handoff_staleness(top, core.note_path(pid), HANDOFF_CHECK / (pid.replace("/", "__") + ".json"), email,
-                              time.time())
-    if not stale:
+    stale, changed = handoff_staleness(top, core.note_path(pid), HANDOFF_CHECK / (pid.replace("/", "__") + ".json"),
+                                    email, now or time.time())
+    return pid, stale, changed
+
+
+def _handoff_nudge(agent: str, data: dict, sess: dict, now=None):
+    """End of a development turn: the commits made since the handoff note last really changed send the turn back
+    only when it matters (R3): handoff.block_after_commits of them (5), the oldest older than
+    handoff.block_after_minutes (60), or a milestone since the note changed (a step or work item closed, a push, a
+    PR, a release). Below that, the reminder before the end said it (turn_checklist). The check re-arms after each
+    update of the note."""
+    if data.get("stop_hook_active"):
         return None
+    now = now or time.time()
+    st = _handoff_state(agent, data, sess, now)
+    if not st or not st[1]:
+        return None
+    pid, stale, changed = st
+    commits, minutes = _handoff_limits()
+    oldest = min(ts for _, ts in stale)
+    milestone = next((w for ts, w in reversed(sess.get("milestones") or []) if ts > changed), None)
+    if len(stale) >= commits:
+        why = ""
+    elif now - oldest >= minutes * 60:
+        why = f" The oldest is {int((now - oldest) // 60)} minutes old."
+    elif milestone:
+        why = f" They come before a milestone: after `{milestone}` the note is due."
+    else:
+        return None
+    from . import work
     a = work.actor(agent, sess.get("session") or "")
     mine = [i["meta"]["id"] for i in work.all_items(pid) if i["meta"].get("status") == "doing" and
             str(i["meta"].get("claimed_by") or "").startswith(f"{a['user']}@{a['host']}")]
     tasks = (f"Tasks: keep {', '.join(mine)} current (`dev task done <id>` once verified; `dev task add \"…\" --why "
              f"\"…\"` for follow-ups)." if mine else
              "Tasks: claim the work item for this work (`dev task start <id>`) or add it (`dev task add \"…\" --now`).")
-    return (f"devkit: {len(stale)} commit(s) in {pid} are newer than its handoff note. Update the note now with the "
-            f"devkit handoff skill (/devkit:handoff): Current state, Next steps, Decisions and gotchas, short and true. "
-            f"{tasks} devkit asks again after every turn with new commits, so the note never falls behind.")
+    return (f"devkit: {len(stale)} commit(s) in {pid} are newer than its handoff note.{why} Update the note now "
+            f"with the devkit handoff skill (/devkit:handoff): Current state, Next steps, Decisions and gotchas, short "
+            f"and true. {tasks}")
 
 
 def _session_project(data: dict, sess: dict) -> str:
@@ -540,48 +582,87 @@ def _turn_files(data: dict, sess: dict):
     return top, sorted(set(files))
 
 
-def _stub_gate(data: dict, sess: dict):
-    """Unfinished work the turn left in the files it edited (stubs, placeholders, TODOs without a task) sends the
-    turn back: devkit builds things for real. Fails open."""
+def _stub_findings(data: dict, sess: dict) -> tuple:
+    """(repository, the unfinished work the turn left in the files it edited, or None). Fails open."""
     try:
         top, files = _turn_files(data, sess)
         if not files:
-            return None
+            return top, None
         from . import stubs
-        msg = stubs.stop_gate(top, files)
-        if msg:
-            from . import audit
-            audit.record("stubs.gate", top, msg[:300], "blocked")
-        return msg
+        return top, stubs.stop_gate(top, files)
     except Exception:
         _log(f"stop stubs: {traceback.format_exc()[-300:]}")
-        return None
+        return None, None
 
 
-def _test_gate(data: dict, sess: dict):
-    """Tests the turn edited that cannot fail (no assertion, trivial or swallowed assertions, empty bodies) send the
-    turn back with the findings (testaudit.stop_gate). Fails open."""
+def _stub_gate(data: dict, sess: dict):
+    """Unfinished work the turn left in the files it edited (stubs, placeholders, TODOs without a task) sends the
+    turn back: devkit builds things for real. Fails open."""
+    top, msg = _stub_findings(data, sess)
+    if msg:
+        from . import audit
+        audit.record("stubs.gate", top, msg[:300], "blocked")
+    return msg
+
+
+def _test_findings(data: dict, sess: dict) -> tuple:
+    """(repository, the findings on the tests the turn edited that cannot fail, or None). Fails open."""
     try:
         top, edited = _turn_files(data, sess)
         if not top:
-            return None
+            return None, None
         try:
             from .testx import is_test_file
         except Exception:
             is_test_file = TEST_FILE_RE.search
         files = [f for f in edited if is_test_file(f)]
         if not files:
-            return None
+            return top, None
         from . import testaudit
-        msg = testaudit.stop_gate(top, sorted(set(files)))
-        if msg:
-            _log(f"stop tests: {len(set(files))} test file(s) with tests that cannot fail")
-            from . import audit
-            audit.record("tests.gate", top, msg[:300], "blocked")
-        return msg
+        return top, testaudit.stop_gate(top, sorted(set(files)))
     except Exception:
         _log(f"stop tests: {traceback.format_exc()[-300:]}")
-        return None
+        return None, None
+
+
+def _test_gate(data: dict, sess: dict):
+    """Tests the turn edited that cannot fail (no assertion, trivial or swallowed assertions, empty bodies) send the
+    turn back with the findings (testaudit.stop_gate). Fails open."""
+    top, msg = _test_findings(data, sess)
+    if msg:
+        _log("stop tests: test files with tests that cannot fail")
+        from . import audit
+        audit.record("tests.gate", top, msg[:300], "blocked")
+    return msg
+
+
+def turn_checklist(agent: str, data: dict, sess: dict) -> list:
+    """What the Stop gate would ask at this point of the turn, so it reaches the agent before the end (threaded turn
+    endings, R1) -> [(rule, text)] still open: handoff (the developer's commits newer than the project's note),
+    skills (required skills not loaded for the files changed), tests (tests the turn edited that cannot fail), stubs
+    (unfinished work without a task). The Stop gate's own functions; nothing is marked as asked, each fails open.
+    The status block is in every closing reminder (R5)."""
+    items = []
+    try:
+        st = _handoff_state(agent, data, sess)
+        if st and st[1]:
+            n = len(st[1])
+            items.append(("handoff", f"{n} commit{'s' if n != 1 else ''} since the handoff note of {st[0]}: update it "
+                                     f"(the handoff skill) before your final message."))
+    except Exception:
+        _log(f"checklist handoff: {traceback.format_exc()[-300:]}")
+    try:
+        from . import skillguard
+        why = skillguard.on_stop(agent, data, copy.deepcopy(sess))  # on a copy: nothing is marked as asked
+        if why:
+            items.append(("skills", why.replace("devkit: ", "", 1)))
+    except Exception:
+        _log(f"checklist skills: {traceback.format_exc()[-300:]}")
+    for rule, find in (("tests", _test_findings), ("stubs", _stub_findings)):
+        msg = find(data, sess)[1]
+        if msg:
+            items.append((rule, msg))
+    return items
 
 
 def stop(agent: str):
@@ -600,7 +681,7 @@ def stop(agent: str):
         _prompt_refresh(data, force=True)  # the decisions the reply showed leave the prompt at once
         sess = state.read(sf) or {}
         before = copy.deepcopy(sess)  # the gates below take seconds: only what this hook changes is written back
-        reasons, ended = [], False
+        reasons, ended = [], False  # reasons: (rule, text), the rule for the audit (R4)
         classed = None  # what continuity keeps the turn's prompts by: None when the classifier failed (change 5)
         try:  # devkit's process is for development turns only (a recipe or a consulting deck gets nothing)
             from . import scope
@@ -628,9 +709,10 @@ def stop(agent: str):
                 if core.CFG.get("canary", {}).get("enforce", True):
                     text_ = data.get("last_assistant_message") or canary.last_assistant_text(
                         data.get("transcript_path")) or ""
-                    reasons.append(canary.miss_reason(text_) + " Reply now with the block as the very first lines: "
-                                   "`**[Firefly> DevKit]** <project> · `<branch>` · <task>`, then the bullets "
-                                   "**Done:**, **Check:** (✓/⚠/✗ + evidence) and **Next:** (global instructions §0).")
+                    reasons.append(("status", canary.miss_reason(text_) + " Reply now with the block as the very "
+                                    "first lines: `**[Firefly> DevKit]** <project> · `<branch>` · <task>`, then the "
+                                    "bullets **Done:**, **Check:** (✓/⚠/✗ + evidence) and **Next:** (global "
+                                    "instructions §0)."))
         elif data.get("stop_hook_active"):
             text = data.get("last_assistant_message") or canary.last_assistant_text(data.get("transcript_path")) or ""
             if canary.has_marker(text):  # the corrected reply after a reminder: keep it as the latest status
@@ -648,14 +730,14 @@ def stop(agent: str):
             from . import skillguard
             why = skillguard.on_stop(agent, data, sess) if dev_turn else None
             if why:
-                reasons.append(why)
+                reasons.append(("skills", why))
         except Exception:
             _log(f"stop skills {agent}: {traceback.format_exc()[-300:]}")
         if dev_turn and not data.get("stop_hook_active"):
-            for gate in (_stub_gate, _test_gate):
+            for rule, gate in (("stubs", _stub_gate), ("tests", _test_gate)):
                 why = gate(data, sess)
                 if why:
-                    reasons.append(why)
+                    reasons.append((rule, why))
         try:  # lessons the reply names were applied: that use keeps them alive
             from . import lessons as _les
             said = data.get("last_assistant_message") or ""
@@ -670,10 +752,10 @@ def stop(agent: str):
                 fixes = lessons.fixed_in_session(sess["top"], sess.get("head"))
                 if fixes:
                     sess["lesson_nudged"] = True
-                    reasons.append("devkit: this session fixed or reverted something (" + "; ".join(fixes[:3]) +
+                    reasons.append(("lesson", "devkit: this session fixed or reverted something (" + "; ".join(fixes[:3]) +
                                    "). If it was a mistake that could happen again, record a lesson: `dev lesson add "
                                    "\"<title>\" --cause \"…\" --prevent \"…\" --evidence \"commit …\"` (or "
-                                   "`dev lesson recur <id>` if a known pitfall repeated). Skip it for a trivial fix.")
+                                   "`dev lesson recur <id>` if a known pitfall repeated). Skip it for a trivial fix."))
             except Exception:
                 _log(f"stop lessons {agent}: {traceback.format_exc()[-300:]}")
         try:  # crew members may be writing plans right now; their own `dev plan revise` records them
@@ -683,14 +765,15 @@ def stop(agent: str):
             busy = []
         plans = _plans_without_reason(sess, _session_project(data, sess)) if dev_turn and not busy else []
         if plans and not data.get("stop_hook_active"):
-            reasons.append("devkit: you changed plan(s) without recording why: " + ", ".join(plans[:4]) +
-                           ". Run `dev plan revise <file> --why \"…\"` for each (it versions the plan and logs the "
-                           "reason), then finish.")
+            reasons.append(("plans", "devkit: you changed plan(s) without recording why: " + ", ".join(plans[:4]) +
+                            ". Run `dev plan revise <file> --why \"…\"` for each (it versions the plan and logs the "
+                            "reason), then finish."))
         nudge = _handoff_nudge(agent, data, sess) if dev_turn else None
         if nudge:
-            reasons.append(nudge)
+            reasons.append(("handoff", nudge))
+        _audit_turn_end(agent, data, sess, reasons)
         if reasons:
-            out.update({"decision": "block", "reason": " ".join(reasons)})
+            out.update({"decision": "block", "reason": " ".join(text for _, text in reasons)})
         else:
             from . import progress
             progress.on_turn_end(agent, sid, sess)
@@ -712,6 +795,31 @@ def stop(agent: str):
     except OSError:
         return
     _spawn_sync(["--session", f"{agent}:{sid}", "--offline", "--renew", agent])
+
+
+def _audit_turn_end(agent: str, data: dict, sess: dict, reasons: list):
+    """R4: each rule that sends the turn back is a `stop.block`; when the turn ends, each item the reminder gave
+    this turn (turn_checklist) that the turn then satisfied is a `stop.prevented`. `dev canary` counts them per rule
+    and day. Fails open."""
+    try:
+        told = sess.get("checklist_told") or {}
+        told = told.get("rules") or [] if told.get("turn") == sess.get("turn_started") else []
+        blocked = [r for r, _ in reasons]
+        prevented = [] if blocked else [r for r in told if r not in blocked]
+        if not blocked and not prevented:
+            return
+        from . import audit
+        pid = _session_project(data, sess) or sess.get("project") or ""
+        ref = f"{agent}:{(data.get('session_id') or '')[:12]}"
+        turn = time.strftime("%H:%M", time.localtime(sess.get("turn_started") or time.time()))
+        for rule in dict.fromkeys(blocked):
+            audit.record("stop.block", pid or ref, f"{rule} · the turn of {turn}", "blocked", rule=rule, project=pid,
+                         session=ref)
+        for rule in prevented:
+            audit.record("stop.prevented", pid or ref, f"{rule} · the turn of {turn}", "ok", rule=rule, project=pid,
+                         session=ref)
+    except Exception:
+        _log(f"stop audit {agent}: {traceback.format_exc()[-300:]}")
 
 
 def config_change(agent: str):
@@ -1748,6 +1856,28 @@ LAUNCH_TOOLS = {"Agent": "a subagent launch", "Task": "a subagent launch", "spaw
 CLOSING_CMD = re.compile(r"\bdev\s+(?:progress\s+done|handoff\s+--log|sync|task\s+done|push|pr\s+(?:create|merge)|"
                          r"release)\b|\bgit\s+(?:-C\s+\S+\s+)?push\b|\bgh\s+pr\s+(?:create|merge)\b")
 CLOSING_GAP = 120  # seconds: parallel launches, or a closing command right after one, get one reminder
+COMMIT_CMD = re.compile(r"\bgit\s+(?:-C\s+\S+\s+)?commit\b|\bdev\s+commit\b")
+# what makes the handoff note due at once (R3): a plan step or work item closed, a push, a PR, a release
+MILESTONE_CMD = re.compile(r"\bdev\s+(?:progress\s+(?:step|done)|task\s+done|push|pr\s+(?:create|merge)|release)\b|"
+                           r"\bgit\s+(?:-C\s+\S+\s+)?push\b|\bgh\s+(?:pr\s+(?:create|merge)|release\s+create)\b")
+
+
+def _shell_words(data: dict) -> str:
+    if (data.get("tool_name") or "") not in SHELL_TOOLS:
+        return ""
+    cmd = (data.get("tool_input") or {}).get("command") or ""
+    return command_words(" ".join(cmd) if isinstance(cmd, list) else str(cmd))
+
+
+def note_milestone(data: dict, sess: dict, now: float) -> bool:
+    """A main-session command that makes the handoff note due (MILESTONE_CMD) -> recorded in `sess`, the last 20."""
+    if data.get("agent_id"):
+        return False
+    m = MILESTONE_CMD.search(_shell_words(data))
+    if not m:
+        return False
+    sess["milestones"] = (sess.get("milestones") or [])[-19:] + [[round(now), " ".join(m.group(0).split())]]
+    return True
 
 
 def _turn_ending(data: dict) -> str:
@@ -1765,17 +1895,29 @@ def _turn_ending(data: dict) -> str:
     return f"`{' '.join(m.group(0).split())}`" if m else ""
 
 
-def closing_reminder(data: dict, sess: dict, now: float) -> str:
+def closing_reminder(data: dict, sess: dict, now: float, agent: str = "claude") -> str:
     """PostToolUse, main session, development turns: right after a call that usually ends the turn, the status block
-    the final message opens with, with this project and branch filled in. Records when it reminded in `sess`."""
+    the final message opens with, with this project and branch filled in; there and after every commit, the end of
+    turn checklist's open items (turn_checklist), each once per turn (threaded turn endings, R2; on Codex, its shell
+    calls, R6). Records in `sess` when it reminded and what it told."""
     what = _turn_ending(data)
-    if not what or data.get("agent_id"):
+    committed = bool(COMMIT_CMD.search(_shell_words(data)))
+    if not (what or committed) or data.get("agent_id"):
         return ""
     if sess.get("turn_class") == "other" and os.environ.get("DEVKIT_SCOPE") != "all":
         return ""
+    turn = sess.get("turn_started") or 0
+    told = sess.get("checklist_told") or {}
+    if told.get("turn") != turn:
+        told = {"turn": turn, "rules": []}
+    items = [(r, t) for r, t in turn_checklist(agent, data, sess) if r not in told["rules"]]
+    if items:
+        sess["checklist_told"] = {"turn": turn, "rules": told["rules"] + [r for r, _ in items]}
+    todo = ("devkit · before your final message: " + " ".join(f"({i}) {t}" for i, (_, t) in enumerate(items, 1))
+            if items else "")
     last = sess.get("closing_nudge") or 0
-    if last >= (sess.get("turn_started") or 0) and now - last < CLOSING_GAP:
-        return ""
+    if not what or (last >= turn and now - last < CLOSING_GAP):
+        return todo
     sess["closing_nudge"] = now
     # the repository of the command's folder (the session may have started outside one), else the one it started in
     top = (core.gitout(data["cwd"], "rev-parse", "--show-toplevel") if data.get("cwd") else "") or sess.get("top") or ""
@@ -1785,9 +1927,10 @@ def closing_reminder(data: dict, sess: dict, now: float) -> str:
     else:
         project = (sess.get("project") or "").rstrip("/").rsplit("/", 1)[-1] or "<project>"
     branch = (core.gitout(top, "branch", "--show-current") if top else "") or "-"
-    return (f"devkit · after {what}: if you end the turn here (to wait, or because the work is done), your final "
-            f"message opens with the status block: **[Firefly> DevKit]** {project} · `{branch}` · <task>, then "
-            f"Done / Check / Next. Nothing above it: a waiting note or a comment on this output goes below the block.")
+    block = (f"devkit · after {what}: if you end the turn here (to wait, or because the work is done), your final "
+             f"message opens with the status block: **[Firefly> DevKit]** {project} · `{branch}` · <task>, then "
+             f"Done / Check / Next. Nothing above it: a waiting note or a comment on this output goes below the block.")
+    return "\n\n".join(x for x in (block, todo) if x)
 
 
 def post_tool(agent: str):
@@ -1838,9 +1981,9 @@ def post_tool(agent: str):
         if sf.exists():  # only sessions that started with devkit active
             sess = state.read(sf) or {}
             before = copy.deepcopy(sess)
-            closing = closing_reminder(data, sess, time.time())
-            if closing:  # only what the reminder changed, on the fresh record: a background launch's SubagentStart
-                _patch_quietly(sf, before, sess)  # runs at the same moment and claims its launch entry
+            closing = closing_reminder(data, sess, time.time(), agent=agent)
+            if note_milestone(data, sess, time.time()) or sess != before:  # only what changed, on the fresh record:
+                _patch_quietly(sf, before, sess)  # a background launch's SubagentStart claims its entry meanwhile
     except Exception:
         _log(f"post-tool closing {agent}: {traceback.format_exc()[-300:]}")
     _context_out("PostToolUse", "\n\n".join(x for x in (carried, answered, _output_pitfalls(agent, data),

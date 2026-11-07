@@ -115,6 +115,8 @@ and audited; agents are refused.
 | `ui.powerline` | `false` | Draw Nerd Font arrows between the status pills in `dev status` and `dev overview` (needs a Nerd Font in your terminal) |
 | `dashboard.idle_minutes` | `30` | The live dashboard server stops after this many minutes with no page open and no request |
 | `handoff.enforce` | `true` | When a session made commits without updating the handoff note, the Stop hook asks the agent once to update it |
+| `handoff.block_after_commits` | `5` | Below this many commits newer than the handoff note, the reminder before the end of the turn is enough; at it, the Stop hook sends the turn back |
+| `handoff.block_after_minutes` | `60` | The Stop hook also sends the turn back when the oldest commit newer than the note is this many minutes old, or after a milestone (a step or work item closed, a push, a PR, a release) |
 | `canary.enforce` | `true` | When a final message lacks the status block, the Stop hook asks the agent to reply again with it; at SubagentStop, a crew member without its status block or its `dev progress step` is sent back once |
 
 ### Background AI

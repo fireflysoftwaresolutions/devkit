@@ -353,6 +353,7 @@ ACTIONS = {
     "audit.verify": ("security", "info"), "audit.publish": ("security", "critical"),
     "guard": ("refusal", "warning"), "guard.ask": ("decision", "notice"), "guard.allow": ("decision", "info"),
     "stubs.gate": ("refusal", "warning"), "tests.gate": ("refusal", "warning"),
+    "stop": ("refusal", "notice"), "stop.prevented": ("lifecycle", "info"),
     "config": ("config", "notice"), "config.blocked": ("security", "warning"),
     "canary": ("lifecycle", "notice"),
     "crew": ("decision", "info"), "crew.gate": ("refusal", "warning"),

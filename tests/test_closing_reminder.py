@@ -84,14 +84,15 @@ class ClosingReminderTests(unittest.TestCase):
         with mock.patch.dict(os.environ, {"DEVKIT_SCOPE": "all"}):
             self.assertTrue(self.remind(LAUNCH))
 
+    # a subagent's start may claim its launch entry while this hook runs: the hook must keep that change (a comment,
+    # not a docstring: `dev test prove` misreads tests with one)
     def test_the_reminder_never_writes_back_an_old_copy_of_the_session(self):
-        """A subagent's start may claim its launch entry while this hook runs: the hook must keep that change."""
         sf = Path(self.tmp.name) / "claude-s1.json"
         sf.write_text(json.dumps(dict(self.sess, pending_agents=[{"label": "Neo: plan", "type": "", "ts": 1}])))
         real = hooks.closing_reminder
 
-        def start_meanwhile(data, sess, now):
-            out = real(data, sess, now)
+        def start_meanwhile(data, sess, now, **kw):
+            out = real(data, sess, now, **kw)
             d = json.loads(sf.read_text())
             d["pending_agents"] = []  # SubagentStart claimed it in between
             sf.write_text(json.dumps(d))
