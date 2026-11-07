@@ -9,6 +9,7 @@ its questions.
 """
 import json
 import os
+import re
 import select
 import shutil
 import signal
@@ -22,6 +23,27 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 INSTALL = ROOT / "install.sh"
 LIB = str(ROOT / "lib")
+TROUBLESHOOTING = ROOT / "docs" / "troubleshooting.md"
+
+
+def apple_silicon() -> bool:
+    """Whether this computer has Apple silicon, as macOS's own /usr/sbin/sysctl says (1, also under Rosetta)."""
+    try:
+        r = subprocess.run(["/usr/sbin/sysctl", "-n", "hw.optional.arm64"], capture_output=True, text=True)
+    except OSError:
+        return False
+    return r.stdout.strip() == "1"
+
+
+def heading_anchors(markdown: Path) -> set:
+    """The anchors GitHub gives the headings of a Markdown page (not the `#` comments in its code blocks)."""
+    anchors, fenced = set(), False
+    for ln in markdown.read_text().splitlines():
+        if ln.lstrip().startswith("```"):
+            fenced = not fenced
+        elif not fenced and re.match(r"#{1,6} ", ln):
+            anchors.add(re.sub(r"[^\w\- ]", "", ln.lstrip("#").strip().lower()).replace(" ", "-"))
+    return anchors
 
 GIT_ENV = dict(os.environ, GIT_CONFIG_GLOBAL=os.devnull, GIT_CONFIG_NOSYSTEM="1", GIT_AUTHOR_NAME="Ada",
                GIT_AUTHOR_EMAIL="ada@example.com", GIT_COMMITTER_NAME="Ada", GIT_COMMITTER_EMAIL="ada@example.com")
@@ -325,6 +347,11 @@ class IntelMacTests(unittest.TestCase):
         self.assertEqual(self.m.release(), "v26.11.10")
         self.assertEqual(len(self.m.setups()), 1)
         self.assertNotIn("curl", "\n".join(self.m.calls()))
+        # /usr/local/bin is on the default PATH of macOS, so this Homebrew needs no line in ~/.zprofile. The stand-in is
+        # not under /usr/local but in the temporary folder: the installer must know it as the Intel entry of its brew
+        # paths, not by its folder, for this to hold here as on a real Intel Mac.
+        zprofile = self.m.home / ".zprofile"
+        self.assertNotIn("shellenv", zprofile.read_text() if zprofile.exists() else "")
 
     # Apple silicon under Rosetta reports x86_64: whether an x86 brew is on PATH or only the native one is installed,
     # the installer stops before anything changes and asks for a native terminal, never calling the Mac Intel
@@ -336,11 +363,31 @@ class IntelMacTests(unittest.TestCase):
                 self.assertEqual(rc, 1, out)
                 self.assertIn("This terminal runs under Rosetta, so this Mac with Apple silicon reports an x86_64 "
                               "processor. Nothing was changed.", out)
+                # A new window of a Terminal that still runs stays under Rosetta: quit it, clear the box, open it again
+                self.assertIn("1. Quit Terminal (Command-Q).", out)
                 self.assertIn('clear "Open using Rosetta"', out)
+                self.assertNotIn("new Terminal window", out)
+                again = out.split("3. Open Terminal again and run the installer:")[1]
                 self.assertIn("curl -fsSL https://raw.githubusercontent.com/fireflysoftwaresolutions/devkit/main/"
-                              "install.sh | bash -s -- --yes", out)  # the command to run again, from the native one
+                              "install.sh | bash -s -- --yes", again)  # the command to run again, from the native one
+                self.assertIn("In a shell started with arch -x86_64, type exit instead", again)
+                # anything else, such as iTerm2: the Troubleshooting entry, at a heading that exists
+                (anchor,) = re.findall(r"/docs/troubleshooting\.md#([\w-]+)", again)
+                self.assertIn(anchor, heading_anchors(TROUBLESHOOTING))
                 self.assertNotIn("Intel", out)
                 self.nothing_changed()
+
+    # sysctl is in /usr/sbin, which a PATH may leave out, as this one does: the installer still asks macOS's own sysctl,
+    # instead of taking the Mac for an Intel one
+    @unittest.skipUnless(apple_silicon(), "asks this computer's /usr/sbin/sysctl, which says 1 on Apple silicon only")
+    def test_a_rosetta_terminal_is_told_from_intel_when_sysctl_is_not_on_path(self):
+        (self.m.stubs / "sysctl").unlink()
+        self.assertIsNone(shutil.which("sysctl", path=self.m.env()["PATH"]))
+        rc, out = self.m.pipe(STUB_ARCH="x86_64")
+        self.assertEqual(rc, 1, out)
+        self.assertIn("This terminal runs under Rosetta", out)
+        self.assertNotIn("Intel", out)
+        self.nothing_changed()
 
 
 class ExistingCheckoutTests(unittest.TestCase):

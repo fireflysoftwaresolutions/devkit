@@ -7,9 +7,10 @@ share a handoff repository, and lists every file devkit touches. When devkit is 
 ## Requirements
 
 - A Mac with Apple silicon (M1 or later). To check, open **About This Mac**, which shows a chip named Apple M…, or
-  run `sysctl -n hw.optional.arm64`, which prints `1`, also in a terminal that runs under Rosetta. devkit installs its
-  tools with Homebrew, and Homebrew's installer no longer runs on Intel Macs, so a new install needs Apple silicon.
-  The installer installs Homebrew if it is missing. devkit does not run on Linux or Windows.
+  run `sysctl -n hw.optional.arm64`, which prints `1`, also in a terminal that runs under Rosetta; an Intel Mac prints
+  an error instead. devkit installs its tools with Homebrew, and Homebrew's installer no longer runs on Intel Macs, so
+  a new install needs Apple silicon. The installer installs Homebrew if it is missing. devkit does not run on Linux or
+  Windows.
 - An Intel Mac that already has Homebrew can still run devkit. Homebrew no longer supports Intel, so some tools may
   build slowly from source, and Homebrew plans to stop running on Intel in or after September 2027 (see Homebrew's
   [support tiers](https://docs.brew.sh/Support-Tiers)).

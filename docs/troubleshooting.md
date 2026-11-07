@@ -48,15 +48,15 @@ CLI's). Fix that cause, then run the same command again.
 The first step of the installer (**This Mac**) stops before it downloads or changes anything in two cases. The message
 says which one it is.
 
-- **"This terminal runs under Rosetta."** Your Mac has Apple silicon, but the terminal runs as an Intel program, so it
-  reports an `x86_64` processor and would use the Intel Homebrew in `/usr/local`, or none. Open a native terminal and
-  run the installer again:
-  1. Quit Terminal. In Finder, open **Applications** > **Utilities**, select **Terminal**, choose **File** >
-     **Get Info**, and clear **Open using Rosetta**. Other terminal apps, such as iTerm2, have the same checkbox in
-     their Get Info window.
+- **"This terminal runs under Rosetta"**: your Mac has Apple silicon, but the terminal runs as an Intel program, so it
+  reports an `x86_64` processor and would use the Intel Homebrew in `/usr/local`, or none. A new window of a terminal
+  app that still runs stays under Rosetta, so quit the app first. Open a native terminal and run the installer again:
+  1. Quit Terminal (Command-Q). In Finder, open **Applications** > **Utilities**, select **Terminal**, choose
+     **File** > **Get Info**, and clear **Open using Rosetta**. Other terminal apps, such as iTerm2, have the same
+     checkbox in their Get Info window: quit the app the same way before you clear it.
   2. If you started the shell with `arch -x86_64`, type `exit` to leave it.
-  3. Open a new terminal window, check that `uname -m` prints `arm64`, and run the installer command again.
-- **"devkit needs a Mac with Apple silicon for a new install."** The Mac has an Intel processor and no Homebrew.
+  3. Open Terminal again, check that `uname -m` prints `arm64`, and run the installer command again.
+- **"devkit needs a Mac with Apple silicon for a new install"**: the Mac has an Intel processor and no Homebrew.
   Homebrew's installer no longer runs on Intel Macs, so running devkit's installer again fails the same way. An Intel
   Mac that already has Homebrew (on its `PATH` or in `/usr/local`) can run it, with one warning line. Otherwise,
   install devkit on a Mac with Apple silicon.
