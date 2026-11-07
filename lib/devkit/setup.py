@@ -1179,14 +1179,49 @@ def write_codex_config(quiet=False):
                 rpc.write(edits)
                 done("config.toml: " + ", ".join(f"{k}={v}" for k, v in conf["settings"].items()))
                 done(f"trusted {len(projects)} project roots · MCP: {', '.join(plugins.get('mcp', {})) or 'none'}")
-                n = rpc.trust_hooks(core.HOME, hooks_f)
-                status = [h.get("trustStatus") for h in rpc.hooks(core.HOME) if str(h.get("sourcePath")) == str(hooks_f)]
-                if status and all(x == "trusted" for x in status):
-                    done(f"devkit hooks trusted ({len(status)}{', ' + str(n) + ' newly' if n else ''})")
+                n = rpc.trust_hooks(core.HOME, hooks_f, ours)
+                mine, foreign, ok = codex_hooks_state(rpc)
+                if ok:
+                    done(f"devkit hooks trusted ({len(mine)}{', ' + str(n) + ' newly' if n else ''})")
                 else:
-                    fail(f"hook trust status: {status} — open Codex and review them with /hooks")
+                    fail(f"hook trust status: {[h.get('trustStatus') for h in mine]} — open Codex and review them "
+                         "with /hooks")
+                pending = [h for h in foreign if h.get("trustStatus") != "trusted"]
+                if pending:
+                    note(f"not written by devkit, left untrusted: {'; '.join(map(hook_line, pending))} — review "
+                         "them in Codex with /hooks")
         except CodexError as e:
             fail(f"codex app-server: {e}")
+
+
+def codex_hooks_state(rpc):
+    """(devkit's hooks, the other hooks, whether every hook devkit writes is there and trusted) in ~/.codex/hooks.json,
+    as Codex lists them. A hook is devkit's only when it is declared exactly as config/codex/hooks.json renders it."""
+    from .codexrpc import declared_hooks, hook_id, split_hooks
+    ours = load_conf("codex/hooks.json")["hooks"]
+    mine, foreign = split_hooks(rpc.hooks(HOME), CODEX_HOME / "hooks.json", ours)
+    trusted = {hook_id(h) for h in mine if h.get("trustStatus") == "trusted"}
+    return mine, foreign, declared_hooks(ours) <= trusted
+
+
+def hook_line(h: dict) -> str:
+    """One Codex hook for a person: event, command, trust status and the file that declares it."""
+    return (f"{h.get('eventName')} `{h.get('command') or h.get('handlerType')}` "
+            f"({h.get('trustStatus')}, {tilde(h.get('sourcePath'))})")
+
+
+def codex_hook_checks(rpc) -> list:
+    """`dev doctor`'s rows for ~/.codex/hooks.json: devkit's own hooks are all there and trusted; and every hook devkit
+    did not write, with its source. devkit never trusts those (security review G3): the row fails while one waits for
+    the developer's review in Codex, and still lists the ones the developer trusted."""
+    mine, foreign, ok = codex_hooks_state(rpc)
+    pending = [h for h in foreign if h.get("trustStatus") != "trusted"]
+    return [("Codex", "devkit hooks trusted", ok,
+             ", ".join(f"{h.get('eventName')}:{h.get('trustStatus')}" for h in mine) or "none",
+             "dev install --only codex"),
+            ("Codex", "hooks devkit did not write", not pending, "; ".join(map(hook_line, foreign)) or "none",
+             "review them in Codex with /hooks: trust one only if you wrote it, or remove it from "
+             f"{tilde(CODEX_HOME / 'hooks.json')}; devkit never trusts them")]
 
 
 _GIT_ATTRIBUTION = re.compile(rb'"git_attribution"\s*:\s*(true|false)')
@@ -1954,10 +1989,8 @@ def doctor() -> int:
                           "on for your account: Codex adds Co-authored-by: Codex to commits and \"Generated with "
                           "Codex\" to PRs (devkit's guard, dev commit and dev pr create still remove them)",
                           "turn off commit attribution in your Codex account settings")
-                hs = [h for h in rpc.hooks(HOME) if str(h.get("sourcePath")) == str(CODEX_HOME / "hooks.json")]
-                st = {h["eventName"]: h["trustStatus"] for h in hs}
-                check("Codex", "devkit hooks trusted", hs and all(v == "trusted" for v in st.values()),
-                      ", ".join(f"{k}:{v}" for k, v in st.items()) or "none", "dev install --only codex")
+                for row in codex_hook_checks(rpc):
+                    check(*row)
                 try:
                     avail = set(rpc.models())
                     profs = load_conf("codex/config.json").get("profiles") or {}

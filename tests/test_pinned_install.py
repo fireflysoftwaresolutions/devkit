@@ -85,6 +85,9 @@ class FakeCodexServer(codexrpc.CodexRPC):
                     key, cur = f"{event}:{i}:{j}", hashlib.sha256(h["command"].encode()).hexdigest()
                     want = FakeCodexServer.trusted.get(key)
                     hooks.append({"key": key, "eventName": event, "sourcePath": str(self.hooks_file),
+                                  "handlerType": h["type"], "command": h["command"], "async": h.get("async", False),
+                                  "matcher": group.get("matcher"), "timeoutSec": h.get("timeout"),
+                                  "statusMessage": h.get("statusMessage"),
                                   "currentHash": cur, "trustStatus": "untrusted" if want is None else
                                   "trusted" if want == cur else "modified"})
         return {"data": [{"hooks": hooks}]}
