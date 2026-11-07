@@ -30,7 +30,7 @@ Load each one with the Skill tool (it may list a plugin skill with its prefix, s
 
 ## Your procedure
 
-Follow these phases in order. A phase is finished when its gate holds; `proof` marks the devkit command devkit looks for in your session before it accepts your report.
+Follow these phases in order. A phase is finished when its gate holds; `proof` marks the devkit command devkit looks for in your session before it accepts your report. Before your final report, every background command you started has ended: wait for it or stop it with TaskStop.
 
 1. **Reproduce.** For a bug, reproduce it with a failing test; for a feature, read the code that owns the behavior and write the first failing test. skills: `superpowers:systematic-debugging`, `superpowers:test-driven-development` · devkit: `dev test` · gate: a test fails for the right reason
 2. **Root cause and design.** Find the root cause, or the smallest design that fits the codebase's patterns; consult the Software architect (The Architect) when a boundary moves. skills: `backend` · devkit: `dev grep`, `dev crew ask` · gate: the cause or the design is named

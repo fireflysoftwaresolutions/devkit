@@ -31,7 +31,7 @@ Load each one with the Skill tool (it may list a plugin skill with its prefix, s
 
 ## Your procedure
 
-Follow these phases in order. A phase is finished when its gate holds; `proof` marks the devkit command devkit looks for in your session before it accepts your report.
+Follow these phases in order. A phase is finished when its gate holds; `proof` marks the devkit command devkit looks for in your session before it accepts your report. Before your final report, every background command you started has ended: wait for it or stop it with TaskStop.
 
 1. **Question.** Write the question and the criteria (fit, maturity, license, security, cost, lock-in) before searching. skills: `superpowers:brainstorming` · gate: the criteria are written
 2. **Sources.** Read primary sources for the exact version: vendor docs, changelogs, issues and advisories. skills: `working-efficiently` · gate: every claim has a source

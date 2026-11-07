@@ -31,7 +31,7 @@ Load each one with the Skill tool (it may list a plugin skill with its prefix, s
 
 ## Your procedure
 
-Follow these phases in order. A phase is finished when its gate holds; `proof` marks the devkit command devkit looks for in your session before it accepts your report.
+Follow these phases in order. A phase is finished when its gate holds; `proof` marks the devkit command devkit looks for in your session before it accepts your report. Before your final report, every background command you started has ended: wait for it or stop it with TaskStop.
 
 1. **Assess.** Assess the impact, set the severity and name who does what. skills: `incident-response` · gate: the severity and roles are set
 2. **Stabilize.** Stabilize first (roll back, scale, switch off), then find the cause. skills: `superpowers:systematic-debugging` · devkit: `dev run view`, `dev crew ask` · gate: the service is stable
