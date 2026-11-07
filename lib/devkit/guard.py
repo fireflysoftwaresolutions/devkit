@@ -1320,6 +1320,42 @@ def settings_env_violation(path, tool_input: dict, *spellings):
     return deny(_settings_reason(path, changed)) if changed else None
 
 
+_GIT_RUNS = frozenset({"config", "config.worktree", "hooks", "info", "commondir"})
+GIT_DIR_REASON = ("{path} is part of a repository's git folder (its config, hooks or info) or git's own configuration. "
+                  "git runs what it names (a pager, fsmonitor, an ssh command, a hook) under later ordinary git calls, "
+                  "where the guard only sees a `git status` or `git commit`, so agents may not write it (RT11). Use "
+                  "`.gitignore` for ignores; for anything else, ask the developer, and say what and why.")
+
+
+def git_internal(p, itself: bool = True) -> bool:
+    """True when a path is a repository's git folder or file itself, or its config, config.worktree, hooks, info or
+    commondir (also of a submodule or a linked worktree under it), or the user's git configuration (~/.gitconfig,
+    ~/.config/git/config): files whose content git runs or reads configuration from (RT11). macOS folders are
+    case-insensitive, so the names are too. `itself` False leaves out the git folder or file itself: deleting a
+    repository's .git runs nothing."""
+    if not p or p == UNKNOWN:
+        return False
+    s_ = str(p).casefold()
+    if s_ in {str(HOME / ".gitconfig").casefold(), str(HOME / ".config" / "git" / "config").casefold(),
+              real(HOME / ".gitconfig").casefold(), real(HOME / ".config" / "git" / "config").casefold()}:
+        return True
+    parts = Path(s_).parts
+    if ".git" not in parts:
+        return False
+    rest = list(parts[parts.index(".git") + 1:])
+    while len(rest) >= 2 and rest[0] in ("modules", "worktrees"):
+        rest = rest[2:]
+    return (itself and not rest) or bool(rest) and rest[0] in _GIT_RUNS
+
+
+def git_internal_write(path, cwd, itself: bool = True):
+    """A deny for a write to git_internal(path), by its lexical or its resolved path, else None."""
+    for q in (_lexical(path, cwd), resolve(path, cwd)):
+        if git_internal(q, itself):
+            return deny(GIT_DIR_REASON.format(path=tilde(q)))
+    return None
+
+
 def protected_write(path, cwd, tool_input=None):
     """Write, Edit, MultiEdit, NotebookEdit: devkit's state, configuration and install, the `dev` a shell finds, and
     DEVKIT_* keys in settings and shell startup files."""
@@ -1331,6 +1367,9 @@ def protected_write(path, cwd, tool_input=None):
     p = resolve(path, cwd)
     if is_protected(p):
         return deny(protected_reason(p))
+    v = git_internal_write(path, cwd)
+    if v:
+        return v
     return settings_env_violation(p if p != UNKNOWN else path, tool_input or {}, lp, path)
 
 
@@ -1345,6 +1384,9 @@ def protected_patch(patch: str, cwd):
         p = resolve(path, cwd)
         if is_protected(p):
             return deny(protected_reason(p, "delete" if op == "delete" else "write"))
+        v = git_internal_write(path, cwd) if op != "delete" else None
+        if v:
+            return v
         if op != "delete" and env_file_kind(p, lp) and _KEY_TEXT.search(added):
             return deny(_settings_reason(p, sorted(set(_KEY_TEXT.findall(added)))))
     return None
@@ -1672,6 +1714,10 @@ class _Shell:
             return None
         if is_protected(p) or (holds and holds_protected(p)):
             return deny(protected_reason(p, verb))
+        if verb in ("write", "change or delete"):  # a redirect, cp or ln into .git (RT11); rm -rf .git runs nothing
+            v = git_internal_write(t, cwd, itself=verb == "write")
+            if v:
+                return v
         if holds and holds_dev_command(p):
             return deny(dev_command_reason(p, verb))
         if env_file_kind(p, lp) and self.keys:

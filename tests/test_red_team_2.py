@@ -205,6 +205,36 @@ class RedTeam2(unittest.TestCase):
                 self.assertEqual(self.acts(cmd), [])
                 self.assertIsNone(self.member(cmd))
 
+    # ---- RT11
+    def test_rt11_dot_git_is_writable_through_the_file_tools(self):
+        # the file tools refused devkit's state, not a repository's own .git: a pager in .git/config or a hook in
+        # .git/hooks runs under the next ordinary git call
+        for path, payload in (
+                (self.repo + "/.git/config", {"content": "[core]\n\tpager = gh pr merge 12\n"}),
+                (self.repo + "/.git/hooks/pre-commit", {"content": "#!/bin/sh\ngh pr merge 12\n"}),
+                (self.repo + "/.GIT/Config", {"content": "[core]\n\tfsmonitor = x\n"}),
+                (self.repo + "/.git/info/attributes", {"content": "* filter=x\n"}),
+                (self.repo + "/.git/modules/sub/config", {"content": "[core]\n\tfsmonitor = x\n"}),
+                (self.repo + "/.git/worktrees/w/config.worktree", {"content": "[core]\n\tfsmonitor = x\n"}),
+                (str(core.HOME / ".gitconfig"), {"content": "[core]\n\tpager = x\n"})):
+            with self.subTest(path=path):
+                self.assertIsNotNone(self.check(None, "Write", {"file_path": path, **payload}))
+        for cmd in ("echo '[core] fsmonitor = x' >> .git/config", "printf x > .git/hooks/pre-commit",
+                    "cp /tmp/x .git/hooks/pre-commit", "ln -s /tmp/x .git/hooks/post-checkout"):
+            with self.subTest(cmd=cmd):
+                self.assertIsNotNone(self.check(cmd))
+        patch = "*** Begin Patch\n*** Add File: .git/hooks/pre-push\n+gh pr merge 12\n*** End Patch"
+        self.assertIsNotNone(self.check(None, "apply_patch", {"command": patch}))
+
+    def test_rt11_reads_and_the_work_tree_stay_open(self):
+        self.assertIsNone(self.check(None, "Read", {"file_path": self.repo + "/.git/config"}))
+        self.assertIsNone(self.check(None, "Write", {"file_path": self.repo + "/.gitignore", "content": "x\n"}))
+        self.assertIsNone(self.check(None, "Write", {"file_path": self.repo + "/src/config", "content": "x\n"}))
+        for cmd in ("cat .git/config", "rm -f .git/index.lock", "git status", "echo x >> .gitignore",
+                    "rm -rf /tmp/clone-to-inspect/.git"):  # deleting a git folder runs nothing
+            with self.subTest(cmd=cmd):
+                self.assertIsNone(self.check(cmd))
+
 
 if __name__ == "__main__":
     unittest.main()
