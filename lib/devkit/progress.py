@@ -1012,10 +1012,7 @@ def assign(which, label: str, cwd: str | None = None, now: float | None = None, 
         if not s:
             raise ValueError(f"no step “{which}” in the plan")
         globs, rewrites = _scope_globs(globs, run.get("project") or "", cwd)
-        if rewrites:
-            _post(run, "devkit", "main", f"the scope of “{s['name']}” is kept repository-relative, the form the Edit "
-                  f"guard matches: {'; '.join(rewrites)}. It holds those files in every checkout of "
-                  f"{run.get('project') or 'the repository'}.", now, from_name="devkit")
+        _tell_rewrites(run, s["name"], rewrites, now)
         _raci_assign(run, s, label, why, now, activity=activity, files=globs or None)
         owner = s.get("owner") or "main"
         if owner != "main" and s.get("state") != "done" and not _label_matches(label, (run.get("agents") or {}).get(owner)
@@ -1088,10 +1085,17 @@ def _launch_takes(run: dict, aid: str, s: dict) -> bool:
 
 
 def _checkouts(base: str) -> list:
-    """The real paths of every checkout of the repository at `base` (its main checkout and its worktrees), deepest
-    first, so a worktree inside the main checkout wins over it. [] outside a repository: nothing to count from."""
+    """The real paths of every checkout of the repository at `base` (its main checkout and its worktrees) that is
+    still there, deepest first, so a worktree inside the main checkout wins over it. git lists a worktree whose
+    folder was deleted, marked prunable, until `git worktree prune`; it holds no files, so it is left out, and a glob
+    into it is refused like one into any worktree that is not there. [] outside a repository: nothing to count from."""
     out = core.gitout(base, "worktree", "list", "--porcelain") if base and os.path.isdir(base) else ""
-    tops = [core.real(ln[len("worktree "):]) for ln in out.splitlines() if ln.startswith("worktree ")]
+    tops = []
+    for block in out.split("\n\n"):  # one block per checkout: "worktree <path>", then HEAD, branch, prunable, …
+        lines = block.splitlines()
+        path = next((ln[len("worktree "):] for ln in lines if ln.startswith("worktree ")), "")
+        if path and os.path.isdir(path) and not any(ln.startswith("prunable") for ln in lines):
+            tops.append(core.real(path))
     return sorted(tops, key=len, reverse=True)
 
 
@@ -1139,6 +1143,14 @@ def _scope_globs(globs: list, project: str, cwd: str | None) -> tuple:
                             f"(git worktree list). {fix}")
         out.append(g)
     return out, rewrites
+
+
+def _tell_rewrites(run: dict, step: str, rewrites: list, now: float):
+    """Tell the tech lead which globs of a step's scope _scope_globs kept repository-relative (assign, delegate)."""
+    if rewrites:
+        _post(run, "devkit", "main", f"the scope of “{step}” is kept repository-relative, the form the Edit guard "
+              f"matches: {'; '.join(rewrites)}. It holds those files in every checkout of "
+              f"{run.get('project') or 'the repository'}.", now, from_name="devkit")
 
 
 def _globs_overlap(a: str, b: str) -> bool:

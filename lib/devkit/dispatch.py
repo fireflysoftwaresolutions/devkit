@@ -169,8 +169,11 @@ def delegate(task: str, to: str = "auto", files=None, scope: str = "", after: st
             name, i = f"{base} ({i})", i + 1
         s = _new_step(name, progress.parse_minutes(est) or None)
         s.update(label=m["name"], requested_by=from_agent or "main", task=task.strip()[:1500], added=round(now, 1))
-        if scope:
-            s["scope"] = [x.strip() for x in scope.split(",") if x.strip()]
+        if scope:  # repository-relative, as dev progress assign keeps it: the form the Edit guard matches
+            globs, rewrites = progress._scope_globs([x.strip() for x in scope.split(",") if x.strip()],
+                                                    run.get("project") or "", cwd)
+            s["scope"] = globs
+            progress._tell_rewrites(run, name, rewrites, now)
         if after:
             dep = _find_step(run, after)
             if not dep:

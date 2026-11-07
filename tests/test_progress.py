@@ -88,6 +88,19 @@ def launch(aid, kind, label, at=None, sid="s1"):
                      now=at)
 
 
+def repo_with_worktrees(d, *paths):
+    # a repository at <d>/api and a worktree of it at each path (<d>/wt by default) -> (main, *worktrees), built from
+    # files: dev test prove runs the tests in a copy without .git
+    import subprocess
+    main, wts = Path(d) / "api", [Path(p) for p in paths] or [Path(d) / "wt"]
+    subprocess.run(["git", "init", "-q", str(main)], check=True)
+    subprocess.run(["git", "-C", str(main), "-c", "user.email=a@example.com", "-c", "user.name=a", "commit", "-q",
+                    "--allow-empty", "-m", "init"], check=True)
+    for i, wt in enumerate(wts):
+        subprocess.run(["git", "-C", str(main), "worktree", "add", "-q", "-b", f"fix/x{i}", str(wt)], check=True)
+    return (main, *wts)
+
+
 class DesktopNotificationTests(unittest.TestCase):
     def test_a_progress_notification_sends_its_text_and_title_to_osascript_as_arguments(self):
         # B2-R6: json.dumps wrote the title's middle dot as a JSON escape, which AppleScript rejects (-2741), so every
@@ -599,14 +612,7 @@ class AbsoluteScopeTests(unittest.TestCase):
         return self.T0 + minutes * 60
 
     def repo_with_worktree(self, d):
-        # a repository and one worktree of it, built from files (dev test prove runs without .git)
-        import subprocess
-        main, wt = Path(d) / "api", Path(d) / "wt"
-        subprocess.run(["git", "init", "-q", str(main)], check=True)
-        subprocess.run(["git", "-C", str(main), "-c", "user.email=a@example.com", "-c", "user.name=a", "commit", "-q",
-                        "--allow-empty", "-m", "init"], check=True)
-        subprocess.run(["git", "-C", str(main), "worktree", "add", "-q", "-b", "fix/x", str(wt)], check=True)
-        return main, wt
+        return repo_with_worktrees(d)
 
     def test_an_absolute_scope_inside_a_worktree_is_kept_repository_relative(self):
         from devkit import hooks
@@ -645,6 +651,59 @@ class AbsoluteScopeTests(unittest.TestCase):
                 self.assertIn(why, str(e.exception))
                 self.assertIn("repository-relative", str(e.exception))
             self.assertIsNone(pg.load_run("claude", "s1")["plan"][0].get("scope"))  # nothing was assigned
+
+    def test_sibling_worktrees_whose_names_share_a_prefix_each_keep_their_files(self):
+        # fix-a starts the names fix-ab and fix-abc: a path counts in the checkout whose folder holds it, never in one
+        # whose name only starts the same
+        with TempState(), tempfile.TemporaryDirectory() as d:
+            root = Path(d) / "worktrees"
+            wts = root / "acme" / "api"
+            main, a, ab = repo_with_worktrees(d, wts / "fix-a", wts / "fix-ab")
+            pg.start("Feature", plan=["installer"], now=self.m(0))
+            with mock.patch.object(core, "WT_ROOT", root):
+                run = pg.assign("installer", "Kid", scope=f"{ab}/lib/**,{a}/tests/**", cwd=str(main), now=self.m(0))
+                self.assertEqual(run["plan"][0]["scope"], ["lib/**", "tests/**"])
+                for scope, why in ((f"{wts}/fix-a*/lib/**", "2 checkouts"), (f"{wts}/fix-abc/lib/**", "no checkout")):
+                    with self.assertRaises(pg.StepError) as e:
+                        pg.assign("installer", "Kid", scope=scope, cwd=str(main), now=self.m(0))
+                    self.assertIn(why, str(e.exception))
+
+    def test_a_scope_with_dot_dot_counts_in_the_checkout_it_resolves_to(self):
+        with TempState(), tempfile.TemporaryDirectory() as d:
+            main, wt = self.repo_with_worktree(d)
+            pg.start("Feature", plan=["installer"], now=self.m(0))
+            run = pg.assign("installer", "Kid", scope=f"{wt}/lib/../tests/**,{wt}/../api/docs/**", cwd=str(main),
+                            now=self.m(0))
+            self.assertEqual(run["plan"][0]["scope"], ["tests/**", "docs/**"])  # the worktree's, then the main one's
+            with self.assertRaises(pg.StepError) as e:  # climbs above both checkouts
+                pg.assign("installer", "Kid", scope=f"{wt}/../**", cwd=str(main), now=self.m(0))
+            self.assertIn("2 checkouts", str(e.exception))
+
+    def test_a_rewritten_scope_still_clashes_with_a_working_lane_s_files(self):
+        # two working members never share files: the clash check compares the rewritten, repository-relative glob
+        with TempState(), tempfile.TemporaryDirectory() as d:
+            main, wt = self.repo_with_worktree(d)
+            pg.start("Feature", plan=["api", "installer"], now=self.m(0))
+            pg.assign("api", "Tank", scope="lib/**", now=self.m(0))
+            launch("t1", "devkit:tank", "Tank: api", self.m(1))
+            self.assertEqual(pg.load_run("claude", "s1")["agents"]["t1"]["scope"], ["lib/**"])
+            with self.assertRaises(pg.StepError) as e:
+                pg.assign("installer", "Kid", scope=f"{wt}/lib/devkit/install.py", cwd=str(main), now=self.m(2))
+            self.assertIn("lib/devkit/install.py overlaps the files Backend engineer (Tank) owns", str(e.exception))
+
+    def test_a_scope_in_a_deleted_worktree_is_refused(self):
+        # git lists a worktree whose folder was deleted (marked prunable) until git worktree prune: it holds no files,
+        # so a glob into it is refused like one into any worktree that is not there, never kept as a dead scope
+        import shutil
+        with TempState(), tempfile.TemporaryDirectory() as d:
+            root = Path(d) / "worktrees"
+            main, gone = repo_with_worktrees(d, root / "acme" / "api" / "fix-gone")
+            shutil.rmtree(gone)
+            pg.start("Feature", plan=["installer"], now=self.m(0))
+            with mock.patch.object(core, "WT_ROOT", root), self.assertRaises(pg.StepError) as e:
+                pg.assign("installer", "Kid", scope=f"{gone}/lib/**", cwd=str(main), now=self.m(0))
+            self.assertIn("no checkout of acme/api is there", str(e.exception))
+            self.assertIsNone(pg.load_run("claude", "s1")["plan"][0].get("scope"))
 
 
 class FinishedMemberNoticeTests(unittest.TestCase):

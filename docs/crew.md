@@ -97,9 +97,9 @@ short version:
    ```
 
    Write scopes relative to the repository: they match the same files in every checkout of it, the main checkout
-   and each worktree. `assign` rewrites an absolute or `~` path inside one checkout to that form and tells you. It
-   refuses a path that spans more than one checkout or names a worktree that is not there; give the files relative
-   to the repository instead.
+   and each worktree. `assign` and `dev crew delegate --scope` rewrite an absolute or `~` path inside one checkout to
+   that form and tell you. They refuse a path that spans more than one checkout or names a worktree that is not
+   there, a deleted one included; give the files relative to the repository instead.
 
 3. **Brief and launch** them, all parallel members in one message:
 
