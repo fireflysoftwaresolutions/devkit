@@ -71,11 +71,22 @@ exist in the dev root.
 | A file under `items/`, `sessions/`, or `presence/` | deny → `dev task add\|start\|done\|edit\|move\|cancel --why …`, `dev handoff --log "…"` |
 | `PROJECTS.md`, `TASKS.md`, `ACTIVITY.md`, `registry.json`, or anything under `log/` | deny → `dev sync` generates them; edit the note instead |
 | A file under `policies/` | deny → `dev delivery apply --set key=value --why "…"` |
+| A file under `crew/` | deny → `dev crew set <member> <field> "…" --why "…"`, `dev crew raci <work> --set "…" --why "…"` |
 | A file under `lessons/` | deny → `dev lesson add\|recur\|prevent\|retire …` |
+| A file under `audit/` | deny → each machine's `audit` job publishes its trail; read it with `dev audit` |
+| A Write, Edit or `apply_patch` that adds, changes or removes the `embargo:` list or the `backup_policy:` of a project's note (including deleting or moving the note, and an edit the guard cannot apply to the note as it is) | deny → `dev branch embargo <branch> --why "…"`; the lift and the policy are [the developer's](#the-developers-own-decisions) |
+| A shell write to a project's note or to a file under `policies/`, `crew/`, `lessons/` or `audit/`: a redirect, `sed -i`, `perl -pi`, `tee`, `cp`, `mv`, `rm`, `dev rm`, a program that writes and names one of them, or a call into devkit's code that writes the embargo or the policy | deny → the Edit or Write tool for a note's other sections, the `dev` command for a record |
+| `git checkout`, `reset`, `restore`, `revert`, `merge`, `pull`, `rebase`, `stash` or another command that rewrites files, run in the handoff repository | deny → `dev sync` commits, pulls, and pushes it |
 | `projects/<other project>.md` from a session in another project | deny |
 | `plans/<other project>/…` from a session in another project | deny |
 | `initiatives/<slug>/…` from a project that is not a member of that initiative | deny → `dev initiative add <slug> <project>` from a portfolio session |
-| Anything, from a portfolio-level session (started in `~/Development` or in the handoff repository) | allow, except the first two rows |
+| Anything, from a portfolio-level session (started in `~/Development` or in the handoff repository) | allow, except the preceding rows about devkit's records, the embargo list, the backup policy, shell writes, and git |
+
+The file tools keep every other part of a note open: the guard compares the note's `embargo:` list and `backup_policy:`
+before and after the edit, and refuses only a change to them. A shell write cannot be compared, so it is refused for
+the whole note. If an embargo still leaves the note another way (a hand edit, a merge, an older note checked out), it
+keeps holding: devkit also reads the `git.embargo` records of the audit trail, and an embargo whose last record sets
+it holds until `dev branch embargo --lift`.
 
 The same isolation applies to `dev` commands run from a project session:
 
@@ -288,17 +299,22 @@ pre-approved with `dev crew mode auto --approve`.
 ### The developer's own decisions
 
 Lifting an embargo and publishing a branch make its commits public, and the backup policy decides whether devkit
-publishes a project's branches at all. These commands are the action `developer-only`, tier 2:
+publishes a project's branches at all. An embargo keeps a branch off the remote, so pushing an embargoed branch is
+the developer's decision too. These commands are the action `developer-only`, tier 2:
 
 | Command | Grant line that opens it once |
 | --- | --- |
 | `dev branch embargo --lift <branch>` | `grant embargo <branch>` |
+| `git push`, `dev push`, `dev pr create` or `gh pr create` that sends an embargoed branch, or commits its embargo holds (under another name, a commit id, a branch made from it, a tag, `--all`) | `grant embargo <branch>` |
+| `git push`, `dev push`, `dev pr create` or `gh pr create` of any branch while devkit cannot read the project's handoff note | `grant embargo <branch>` |
 | `dev backup --public` | `grant backup <project>` |
 | `dev backup policy on\|off\|ask` | `grant backup <project>` |
 
-A crew member never runs them. In the main session they are refused without a grant in every setting of
+The developer can still push an embargoed branch in a terminal. `dev backup` and `dev sync` hold embargoes
+themselves, so they need no grant for it. A crew member never runs them. In the main session they are refused without a grant in every setting of
 `safeguards.irreversible_main`, the first week's audit included: that week measures the gate's guesses, and these are
-exact commands. A command that names one of them and that the guard cannot parse or check is refused too. Everything
+exact commands. A command that names one of them and that the guard cannot parse or check is refused too, and so is
+a push or a `pr create` the guard cannot parse in a project with an embargo or a note devkit cannot read. Everything
 else keeps the audit week.
 
 Type the grant line on its own in your prompt, for example:

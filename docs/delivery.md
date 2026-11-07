@@ -165,6 +165,18 @@ the branch's tips), until `dev branch embargo --lift fix/x`. When devkit cannot 
 backs up nothing. On a public repository, devkit suggests an embargo when a branch's commits read as a security
 fix.
 
+An embargo keeps the branch off the remote for agents too. When an agent's `git push`, `dev push`, `dev pr create` or
+`gh pr create` would send an embargoed branch or the commits its embargo holds (under another name, from a branch
+made from it, by commit id, with `--all`), the guard refuses it unless you type `grant embargo <branch>`, which opens
+that one push. When devkit cannot read the handoff note, the guard refuses every agent push the same way. You can
+still push in a terminal. Crew members never push an embargoed branch.
+
+The embargo list and the backup policy in the handoff note change only through `dev branch embargo` (`--lift` to
+lift one) and `dev backup policy`. Agents may edit the note's other sections, but the guard refuses any change to those two keys and
+any shell write to the note (see [guard rules](guard.md#the-handoff-repository)). An embargo that disappears from
+the note without its lift record (`git.embargo` in the audit trail) keeps holding, in backups, the branch map and
+the guard, until `dev branch embargo --lift`.
+
 `dev ci init` writes the draft gate, and `dev ci audit --fix` adds it to an existing workflow:
 `types: [opened, synchronize, reopened, ready_for_review]` on `pull_request` and
 `if: github.event.pull_request.draft == false` on the jobs. With `delivery.draft_pr` on, `dev pr create` opens
