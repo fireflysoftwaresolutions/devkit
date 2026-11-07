@@ -153,7 +153,7 @@ dev audit show 01M6SFPEZ2
   "id": "01M6SFPEZ26QJ416WAYP5S80YH",
   "ts": 1794004171.746,
   "time": "2026-11-06T22:29:31.746Z",
-  "actor": {"user": "ancongui", "host": "mac", "agent": "claude", "session": "962d6aba-c6a"},
+  "actor": {"user": "ana", "host": "mac", "agent": "claude", "session": "3f2a91c0-7b1"},
   "action": "audit.verify",
   "category": "security",
   "severity": "info",
@@ -240,7 +240,7 @@ dev audit verify
 
 ```text
   ✓ ~/.local/state/devkit/audit/2026-11.jsonl  1786 record(s), 3324 v1 line(s) outside the chain
-  ✓ ~/Development/.handoff/audit/ancongui@mac/2026-11.jsonl  0 record(s), 1159 v1 line(s) outside the chain
+  ✓ ~/Development/.handoff/audit/ana@mac/2026-11.jsonl  0 record(s), 1159 v1 line(s) outside the chain
 ✓ the chain holds: 1786 record(s) · 1786 not yet published, so not yet anchored
 ```
 

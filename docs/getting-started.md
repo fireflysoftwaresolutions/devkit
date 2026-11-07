@@ -289,7 +289,7 @@ crew members working, the checks of your branch, and a question that waits for y
 nothing. This Mac's Starship prompt with the helper:
 
 ```text
- ancongui  …/fireflysoftwaresolutions/devkit   release/26.11.3 ✦ devkit · 6 working  ! 1 question for you   ♥ 12:58
+ ana  …/acme/lending-core   release/26.11.3 ✦ devkit · 6 working  ! 1 question for you   ♥ 12:58
 ```
 
 | Part | 100 columns and wider | Narrower | Shown while |
