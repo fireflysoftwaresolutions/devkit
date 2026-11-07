@@ -198,6 +198,7 @@ _dev() {
         'mcp:Serve devkit'\''s tools over MCP on stdio'
         'desktop:Claude Desktop extension'
         'crew:devkit'\''s crew of specialist agents'
+        'ext:Third-party plugins, skills and MCP servers for Claude Code and Codex'
         'impeccable:Run the impeccable design engine devkit installed'
         'doctor:Verify the setup'
         'install:Pin devkit for the hooks, then apply the configuration'
@@ -280,6 +281,7 @@ _dev() {
         (mcp) _dev__mcp && ret=0 ;;
         (desktop) _dev__desktop && ret=0 ;;
         (crew) _dev__crew && ret=0 ;;
+        (ext) _dev__ext && ret=0 ;;
         (impeccable) _dev__impeccable && ret=0 ;;
         (doctor) _dev__doctor && ret=0 ;;
         (install) _dev__install && ret=0 ;;
@@ -2263,6 +2265,118 @@ _dev__crew__next() {
     '--why=[why that step goes ahead of the order]:why: '
 }
 
+_dev__ext() {
+  local curcontext=$curcontext state state_descr line ret=1
+  typeset -A opt_args
+  _arguments -C -s -S : \
+    '(- *)'{-h,--help}'[show this help message and exit]' \
+    '1: :->cmds' \
+    '*:: :->args' && ret=0
+  case $state in
+    (cmds)
+      local -a cmds
+      cmds=(
+        'ls:every extension'
+        'outdated:the newest upstream of each entry against its pin, with the changelog…'
+        'update:bump a team pin in the devkit checkout'
+        'add:add your own plugin, skill or MCP server'
+        'remove:remove an extension'
+        'enable:turn an extension on'
+        'disable:turn an extension off'
+        'ack:confirm that the extensions accepted since your last session were yours'
+      )
+      _describe -t commands 'dev ext command' cmds && ret=0 ;;
+    (args)
+      curcontext=${curcontext%:*:*}:dev-ext-$words[1]:
+      case $words[1] in
+        (ls) _dev__ext__ls && ret=0 ;;
+        (outdated) _dev__ext__outdated && ret=0 ;;
+        (update) _dev__ext__update && ret=0 ;;
+        (add) _dev__ext__add && ret=0 ;;
+        (remove) _dev__ext__remove && ret=0 ;;
+        (enable) _dev__ext__enable && ret=0 ;;
+        (disable) _dev__ext__disable && ret=0 ;;
+        (ack) _dev__ext__ack && ret=0 ;;
+      esac ;;
+  esac
+  return ret
+}
+
+_dev__ext__ls() {
+  _arguments -s -S : \
+    '(- *)'{-h,--help}'[show this help message and exit]' \
+    '--agent=[only this agent'\''s extensions]:agent:(claude codex)' \
+    '--all[also the skill groups this Mac does not install]' \
+    '--json[every field, for tools]' \
+    '(--verbose -v)'{-v,--verbose}'[add the one-line why of each entry]'
+}
+
+_dev__ext__outdated() {
+  _arguments -s -S : \
+    '(- *)'{-h,--help}'[show this help message and exit]' \
+    '--agent=[agent]:agent:(claude codex)' \
+    '--json[json]' \
+    '::name: '
+}
+
+_dev__ext__update() {
+  _arguments -s -S : \
+    '(- *)'{-h,--help}'[show this help message and exit]' \
+    '--to=[the new ref: a full commit SHA or an exact version]:to: ' \
+    '--why=[the reason, recorded in the audit trail]:why: ' \
+    '--agent=[agent]:agent:(claude codex)' \
+    '--apply[update a vendor marketplace plugin on this Mac and accept it]' \
+    ':name: '
+}
+
+_dev__ext__add() {
+  _arguments -s -S : \
+    '(- *)'{-h,--help}'[show this help message and exit]' \
+    '--agent=[only this agent]:agent:(claude codex)' \
+    '--repo=[skill: owner/repo on GitHub]:repo: ' \
+    '--ref=[skill: the full 40-character commit SHA]:ref: ' \
+    '--path=[skill: its folder in the repository]:path:_files' \
+    '--url=[MCP server: an https URL]:url: ' \
+    '--license=[its license, such as MIT]:license: ' \
+    '--why=[why you add it]:why: ' \
+    '--team[add it to devkit'\''s defaults in the checkout, on a branch]' \
+    '--command=[MCP server: the command line, quoted, with an exact version, such as…]:command: ' \
+    ':kind:(plugin skill mcp)' \
+    ':name: '
+}
+
+_dev__ext__remove() {
+  _arguments -s -S : \
+    '(- *)'{-h,--help}'[show this help message and exit]' \
+    '--agent=[agent]:agent:(claude codex)' \
+    '--why=[the reason (required, audited)]:why: ' \
+    '--team[retire it from devkit'\''s defaults in the checkout]' \
+    ':name: '
+}
+
+_dev__ext__enable() {
+  _arguments -s -S : \
+    '(- *)'{-h,--help}'[show this help message and exit]' \
+    '--agent=[agent]:agent:(claude codex)' \
+    '--why=[the reason (required, audited)]:why: ' \
+    '--project[Claude Code plugins]' \
+    ':name: '
+}
+
+_dev__ext__disable() {
+  _arguments -s -S : \
+    '(- *)'{-h,--help}'[show this help message and exit]' \
+    '--agent=[agent]:agent:(claude codex)' \
+    '--why=[the reason (required, audited)]:why: ' \
+    '--project[Claude Code plugins]' \
+    ':name: '
+}
+
+_dev__ext__ack() {
+  _arguments -s -S : \
+    '(- *)'{-h,--help}'[show this help message and exit]'
+}
+
 _dev__impeccable() {
   _arguments -s -S : \
     '(- *)'{-h,--help}'[show this help message and exit]' \
@@ -2327,7 +2441,10 @@ _dev__prompt() {
 
 _dev__update() {
   _arguments -s -S : \
-    '(- *)'{-h,--help}'[show this help message and exit]'
+    '(- *)'{-h,--help}'[show this help message and exit]' \
+    '--check[read-only: the newest release, what changes in it, and whether the…]' \
+    '--quiet[with --check]' \
+    '--record[with --check]'
 }
 
 _dev__docker() {

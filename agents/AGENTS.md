@@ -345,8 +345,8 @@ Follow the devkit `backend` skill for the detailed checklists. Always:
   `{{DEV}}/.handoff/plans/<owner>/<repo>/`, not `docs/superpowers/` in the repository, and do not commit them
   unless the user asks. Its worktree step follows section 5: ask before creating one.
 - **Library and framework docs:** prefer the vendor's version-matched source (Angular CLI MCP, the project's
-  installed `node_modules/<pkg>` docs, framework MCPs), then **context7**, then web search. Check the version in the
-  lockfile before using an API.
+  installed `node_modules/<pkg>` docs, framework MCPs), then web search. Check the version in the lockfile before
+  using an API.
 - **Required skills are enforced.** devkit maps kinds of work to skills in `config/skill-rules.json`, for example
   UI → `frontend-design` and `impeccable`, tests → `testing`, pipelines → `cicd`, Spring → `java-springboot`,
   migrations → `supabase-postgres-best-practices`, workflows → `github-actions-hardening`, docs → `docs`, and so on. devkit names the skills for the files you change;

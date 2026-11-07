@@ -1190,10 +1190,52 @@ def impeccable_checks() -> list:
     return rows
 
 
+def claude_plugin_check(listed: str) -> tuple:
+    """The `dev doctor` row for Claude Code's plugins: each plugin of the effective set (the team's, then the dev ext
+    overlay) enabled in `claude plugin list`."""
+    from . import ext
+    want = ext.effective_plugin_ids("claude")
+    blocks = {b.split("\n")[0].strip().strip("❯ ").strip(): b for b in re.split(r"\n\s*(?=❯ )", listed or "")}
+    bad = [p for p in want if p not in blocks or "enabled" not in blocks[p] or "disabled" in blocks[p]]
+    return ("Claude", "plugins", not bad, f"{len(want) - len(bad)}/{len(want)} enabled"
+            + (f"; missing: {', '.join(bad)}" if bad else ""), "dev install --only claude")
+
+
+def claude_mcp_check(mcp_out: str) -> tuple:
+    """The `dev doctor` row for Claude Code's MCP servers: each server of the effective set in `claude mcp list`."""
+    from . import ext
+    want = ext.effective_mcp("claude")
+    miss = [n for n in want if not re.search(rf"^{re.escape(n)}:", mcp_out or "", re.M)]
+    return ("Claude", "MCP servers", not miss, ", ".join(want) + (f"; missing {miss}" if miss else ""),
+            "dev install --only claude")
+
+
+def codex_plugin_check(listed: str) -> tuple:
+    """The `dev doctor` row for Codex's plugins: each plugin of the effective set enabled in `codex plugin list`."""
+    from . import ext
+    want = ext.effective_plugin_ids("codex")
+    lines = (listed or "").splitlines()
+    bad = [p for p in want if not any(ln.startswith(p + " ") and "installed, enabled" in ln for ln in lines)]
+    return ("Codex", "plugins", not bad, f"{len(want) - len(bad)}/{len(want)} enabled"
+            + (f"; missing: {', '.join(bad)}" if bad else ""), "dev install --only codex")
+
+
+def codex_mcp_check(configured: set) -> tuple:
+    """The `dev doctor` row for Codex's MCP servers: each server of the effective set in Codex's configuration."""
+    from . import ext
+    want = set(ext.effective_mcp("codex"))
+    return ("Codex", "MCP servers", want <= configured, ", ".join(sorted(want & configured)) +
+            (f"; missing {sorted(want - configured)}" if want - configured else ""), "dev install --only codex")
+
+
 def impeccable_codex_check(listed: str) -> tuple:
-    """The `dev doctor` row for impeccable on Codex, which gets it from its plugin: enabled in `codex plugin list`."""
-    plugin = next((p for p in load_conf("codex/plugins.json").get("plugins", []) if p.split("@")[0] == "impeccable"),
-                  "impeccable@openai-curated-remote")
+    """The `dev doctor` row for impeccable on Codex, which gets it from its plugin: enabled in `codex plugin list`,
+    when the effective set (the team's, then the dev ext overlay) has it."""
+    from . import ext
+    plugin = next((p for p in ext.effective_plugin_ids("codex") if p.split("@")[0] == "impeccable"), None)
+    if plugin is None:
+        return ("Codex", "impeccable plugin", True, "not in your set: removed or disabled with dev ext",
+                "dev ext ls impeccable")
     ok = any(ln.startswith(plugin + " ") and "installed, enabled" in ln for ln in (listed or "").splitlines())
     return ("Codex", "impeccable plugin", ok, f"{plugin} enabled" if ok else f"{plugin} not enabled in `codex plugin "
             f"list`", "dev install --only codex")
@@ -1210,7 +1252,8 @@ def local_skills(home: Path) -> dict:
 
 def _install_skills():
     step("Skills (shared by Claude Code and Codex)")
-    manifest = load_conf("skills.json")
+    from . import ext
+    manifest = {"sources": ext.effective_skill_sources()}  # skills.json, then the dev ext overlay
     wanted = local_skills(DEVKIT_HOME)  # name -> directory to link
     only = {}  # name -> the agents that get it (default: both)
     groups = set((core.CFG.get("skills") or {}).get("groups") or [])
@@ -1228,6 +1271,16 @@ def _install_skills():
                 fail(f"{name}: SKILL.md missing in {src['repo']}@{src['ref'][:12]}/{rel}")
                 continue
             out = SKILLS_SHARE / name
+            try:  # the folder is deleted next: it must sit right inside the shared skills folder, links and `..`
+                inside = out.resolve().parent == SKILLS_SHARE.resolve()  # resolved (`..` is devkit's install)
+            except (OSError, ValueError, RuntimeError):  # a NUL in the name, a link loop (RuntimeError on 3.9)
+                inside = False
+            # and one folder name, never a path: `x/../kept-skill` resolves inside too, to another skill's folder
+            inside = inside and name not in (".", "..") and Path(name).name == name
+            if not inside:
+                fail(f"{name!r} from {src['repo']}: not a folder name inside {tilde(SKILLS_SHARE)}, so it is skipped "
+                     f"and nothing is deleted; rename the skill in skills.json, on a branch of the devkit checkout")
+                continue
             if out.exists():
                 shutil.rmtree(out)
             shutil.copytree(s, out, symlinks=True)
@@ -1278,10 +1331,14 @@ def write_claude_settings(include_hooks=True):
     if not new["hooks"]:
         new.pop("hooks")
     ep = dict(new.get("enabledPlugins") or {})
-    for p in plugins["plugins"]:
+    from . import ext
+    on, off = ext.effective_claude_plugins(ext.team(), ext.user_layer())  # team default, then the dev ext overlay
+    for p in on:
         ep[p] = True
-    for p in plugins.get("disabled", []):
+    for p in off:
         ep[p] = False
+    for p in ext.retired_plugin_keys("claude"):  # retired from the team default (dev ext): its key goes too
+        ep.pop(p, None)
     new["enabledPlugins"] = ep
     sl = cur.get("statusLine") or {}
     mine = "hook statusline" in str(sl.get("command") or "")
@@ -1306,6 +1363,8 @@ def setup_claude():
     locked = policy.lock_status() != "off"
     write_claude_settings(include_hooks=not locked)
     plugins = load_conf("claude/plugins.json")
+    from . import ext  # what to install: the team default, then the dev ext overlay (spec P-fym583l7sg1 R8)
+    plugins.update(plugins=ext.effective_plugin_ids("claude"), mcp=ext.effective_mcp("claude"))
     frag = load_conf("claude/settings.json")
     done(f"settings.json: {frag['permissions']['defaultMode']} by default, no attribution, hooks: "
          + ", ".join(sorted((frag.get('hooks') or {}).keys())))
@@ -1341,6 +1400,7 @@ def setup_claude():
         else:
             done("devkit plugin reinstalled from this checkout (skills, commands, agents)")
     done(f"{len(plugins['plugins'])} plugins installed and enabled")
+    _extensions("claude")
     for name, spec in plugins.get("mcp", {}).items():
         rc, _, _ = sh(["claude", "mcp", "get", name], timeout=30)
         if rc == 0:
@@ -1359,6 +1419,8 @@ def write_codex_config(quiet=False):
     with quiet_mode(quiet):
         conf = load_conf("codex/config.json")
         plugins = load_conf("codex/plugins.json")
+        from . import ext
+        plugins["mcp"] = ext.effective_mcp("codex")  # the team's, then the dev ext overlay
         hooks_f = CODEX_HOME / "hooks.json"
         cur = (read_json(hooks_f, {}) or {}).get("hooks", {})
         ours = load_conf("codex/hooks.json")["hooks"]
@@ -1600,6 +1662,8 @@ def setup_codex():
     write_codex_profiles(load_conf("codex/config.json"))
     write_codex_agents(load_conf("codex/config.json"))
     plugins = load_conf("codex/plugins.json")
+    from . import ext
+    plugins["plugins"] = ext.effective_plugin_ids("codex")  # the team's, then the dev ext overlay
     codex_root = build_codex_plugin()
     if "firefly-devkit" in plugins.get("marketplaces", {}):
         plugins["marketplaces"]["firefly-devkit"] = str(codex_root)
@@ -1631,6 +1695,46 @@ def setup_codex():
             n = len(list((DEVKIT_HOME / "plugin" / "commands").glob("*.md")))
             done(f"devkit plugin reinstalled from this checkout (skills, and {n} commands as skills)")
     done(f"{len(plugins['plugins'])} plugins installed and enabled")
+    _extensions("codex")
+
+
+def _extensions(agent: str):
+    """Uninstall the agent's extensions retired from devkit's defaults (`retired` in its plugins.json), each audited
+    as ext.retire (a user overlay that adds one back keeps it), then record what its vendor marketplace plugins are
+    now (~/.local/state/devkit/ext-lock.json), so a later change outside devkit shows as drift (dev ext). Accepting a
+    change made outside devkit, and vouching for what ships with the app the first time, is the developer's, in a
+    terminal (core.set_by_developer, F1 of re-review four): from anyone else's run both stay as drift. A process an
+    agent starts in screen, tmux or a Terminal window passes that check, so ext.record_lock audits each acceptance and
+    lists it until the developer runs `dev ext ack` (F1-R4 part 1)."""
+    from . import ext
+    try:
+        for ok, msg in ext.retire(agent, lambda argv, timeout=300: sh(argv, timeout=timeout)):
+            done(msg) if ok else fail(msg)
+        try:
+            developer = core.set_by_developer()
+        except Exception:
+            developer = False  # a check that cannot decide vouches for nothing (fail closed)
+        changes, new = ext.lock_changes(agent), ext.new_app_lines(agent)  # L3, F2: name them before the record
+        if developer:
+            for line in changes:
+                note(f"accepting a change made outside devkit: {line}")
+            for line in new:
+                note(f"recording what ships with the {agent} app for the first time: {line}")
+            if changes or new:  # F1-R4 part 1: a terminal an agent opens can look like the developer's
+                note("each is audited (ext.accept) and listed at the next session start and in dev status until "
+                     "you run dev ext ack")
+        else:
+            for line in changes:
+                note(f"not accepted, a change made outside devkit: {line}")
+            for line in new:
+                note(f"not recorded, seen with the {agent} app for the first time: {line}")
+            if changes or new:
+                note("these stay as drift until the developer runs dev install in a terminal")
+        n = ext.record_lock(agent, accept=developer)
+        if n:
+            done(f"{n} vendor plugin version(s) recorded: a change outside devkit now shows as drift (dev ext ls)")
+    except ext.ExtError as e:
+        fail(f"extensions: {e}")
 
 
 def setup_tools():
@@ -2221,16 +2325,10 @@ def doctor() -> int:
     check("Claude", "devkit hooks", {"SessionStart", "SessionEnd", "PreToolUse", "Stop", "UserPromptSubmit",
                                      "PostToolUse"} <= events, ", ".join(sorted(events)),
           "dev install --only claude")
-    want = load_conf("claude/plugins.json")
     _, listed, _ = sh(["claude", "plugin", "list"], timeout=60) if core.have("claude") else (1, "", "")
-    blocks = {b.split("\n")[0].strip("❯ ").strip(): b for b in re.split(r"\n\s*(?=❯ )", listed)}
-    bad = [p for p in want["plugins"] if p not in blocks or "enabled" not in blocks[p] or "disabled" in blocks[p]]
-    check("Claude", "plugins", not bad, f"{len(want['plugins']) - len(bad)}/{len(want['plugins'])} enabled"
-          + (f"; missing: {', '.join(bad)}" if bad else ""), "dev install --only claude")
+    check(*claude_plugin_check(listed))
     _, mcp_out, _ = sh(["claude", "mcp", "list"], timeout=90) if core.have("claude") else (1, "", "")
-    miss = [n for n in want.get("mcp", {}) if not re.search(rf"^{re.escape(n)}:", mcp_out, re.M)]
-    check("Claude", "MCP servers", not miss, ", ".join(want.get("mcp", {})) + (f"; missing {miss}" if miss else ""),
-          "dev install --only claude")
+    check(*claude_mcp_check(mcp_out))
 
     if core.have("codex"):
         from .codexrpc import CodexError, CodexRPC
@@ -2259,19 +2357,14 @@ def doctor() -> int:
                           "set codex.profiles in ~/.config/devkit/config.json to models from `codex debug models`")
                 except Exception:
                     pass
-                mcps = set((cfg.get("mcp_servers") or {}).keys())
-                wantm = set(load_conf("codex/plugins.json").get("mcp", {}))
-                check("Codex", "MCP servers", wantm <= mcps, ", ".join(sorted(wantm & mcps)) +
-                      (f"; missing {sorted(wantm - mcps)}" if wantm - mcps else ""), "dev install --only codex")
+                check(*codex_mcp_check(set((cfg.get("mcp_servers") or {}).keys())))
         except CodexError as e:
             check("Codex", "app-server", False, str(e), "codex doctor")
         _, listed, _ = sh(["codex", "plugin", "list"], timeout=120)
-        wantp = load_conf("codex/plugins.json")["plugins"]
-        bad = [p for p in wantp if not any(ln.startswith(p + " ") and "installed, enabled" in ln for ln in listed.splitlines())]
-        check("Codex", "plugins", not bad, f"{len(wantp) - len(bad)}/{len(wantp)} enabled" +
-              (f"; missing: {', '.join(bad)}" if bad else ""), "dev install --only codex")
+        check(*codex_plugin_check(listed))
         check(*impeccable_codex_check(listed))
-        for group, name, ok, detail, fix in app_checks(wantp):
+        from . import ext
+        for group, name, ok, detail, fix in app_checks(ext.effective_plugin_ids("codex")):
             check(group, name, ok, detail, fix)
 
     from . import providers
@@ -2288,6 +2381,9 @@ def doctor() -> int:
             check("Agents", f"{p['name']} quota", bool(q.get("available")),
                   f"{q.get('used_percent')}% used · resets {core.fmt_ts(q.get('resets_at'))}",
                   "wait for the reset or add credits")
+    from . import ext
+    for row in ext.doctor_checks():  # third-party extensions: required ones on, the lock, pins, retired, project
+        check(*row)
     from .cli import plugin_checks
     for name, ok, detail in plugin_checks():
         check("Plugin", name, ok, detail if isinstance(detail, str) else " ".join(detail), "dev plugin validate")

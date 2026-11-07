@@ -10,6 +10,10 @@ security review, plan mode and worktrees, so devkit does not duplicate them.
 Selection criteria: maintained and widely used, an official vendor source where one exists, a clear license, no
 uncontrolled telemetry or unpinned downloads, and no behavior that conflicts with the workspace rules.
 
+`dev ext ls` shows every one of them on your Mac: its source, what pins it, whether it is installed and enabled, its
+license, and why it is there (`-v`). The reason and license live next to each entry: `meta` in
+`config/claude/plugins.json` and `config/codex/plugins.json`, and `why` in each source of `config/skills.json`.
+
 ## The devkit plugin
 
 devkit ships its own plugin, `devkit@firefly-devkit`, for both agents. Its description is the tagline, "Every repo in
@@ -112,7 +116,6 @@ From the `claude-plugins-official` marketplace, enabled for every project.
 | Plugin | Source · license | Purpose | Why |
 | --- | --- | --- | --- |
 | `superpowers` | obra/superpowers · MIT | Brainstorming, plans, subagent-driven development, TDD, systematic debugging, verification before completion, review requests | One process backbone, used in both agents |
-| `context7` | Upstash · MIT | Up-to-date library documentation (remote MCP) | Version-specific docs when no vendor source exists |
 | `frontend-design` | Anthropic · Apache-2.0 | Distinctive, production-grade UI | The design direction; Codex gets the same skill from devkit (see [Shared skills](#shared-skills-both-agents)) |
 | `commit-commands` | Anthropic · Apache-2.0 | `/commit`, `/commit-push-pr`, `/clean_gone` | Low cost; a consistent commit flow |
 | `security-guidance` | Anthropic · Apache-2.0 | Pattern-based security warnings on edits | Cheap, useful warnings; its costly reviews are off (see the following sections) |
@@ -141,7 +144,6 @@ Codex has no LSP plugin mechanism; its global instructions tell it to run the pr
 
 | Server | Claude Code | Codex | Notes |
 | --- | --- | --- | --- |
-| context7 | through the plugin | `https://mcp.context7.com/mcp` | Queries leave the machine |
 | Chrome DevTools | user scope | yes | `chrome-devtools-mcp@1.12.0` pinned, `--no-usage-statistics --no-performance-crux`; performance, network, and accessibility debugging in a real browser |
 | Angular CLI | user scope | yes | `@angular/cli@22.2.6 mcp`: best practices, documentation search, project tools |
 
@@ -387,6 +389,144 @@ you want it (the devkit `workspace` skill knows these commands):
 
 Review the files they write (AGENTS.md, `.mcp.json`, `.codex/config.toml`) before you commit them.
 
+## Who changes extensions, and how drift shows
+
+Plugins, skills, and MCP servers run in every session, so only you change them, in a terminal, with `dev ext add`,
+`remove`, `enable`, `disable`, or `dev ext update <name> --apply`. devkit audits each change and records each vendor
+plugin in its lock (`~/.local/state/devkit/ext-lock.json`): the version, the commit, and a digest of the plugin's
+files.
+
+The guard refuses the same changes from an agent, through `dev ext` or through the agents' own CLIs. A `claude`
+or `codex` call whose words include `plugin`, `plugins`, `mcp`, or `marketplace` anywhere is refused unless the
+whole command is one of these read-only forms, optionally with `-h`, `--help`, or `--json`:
+
+- `claude plugin list`, `claude plugin details <name>`, `claude plugin validate <path>`, and
+  `claude plugin marketplace list` (`claude plugins` is the same command)
+- `claude mcp list` and `claude mcp get <name>`
+- `codex plugin list`, `codex plugin marketplace list`, `codex mcp list`, and `codex mcp get <name>`
+- a group alone, such as `claude mcp`, which prints its help
+
+Any other form is refused even when it only reads, such as `claude -- plugin list` or `claude --debug plugin list`.
+The rule is an allowlist that fails closed: two earlier block lists of verbs each lost to a spelling nobody listed,
+such as an option's value read as the group (`claude --model mcp … plugin install x`). The guard finds the program
+in the forms it reads: a relative path from the folder the command runs in, a link with another name on your
+`PATH`, the npm package or command a runner starts (`npx`, `npm exec`, `bun x`, `yarn exec`, `pnpm claude`), or the
+CLI's own script a JS runtime runs. A program it cannot know before the command runs (a variable, a `PATH` the
+command sets, a copy the command makes) counts as one of them. With `claude` or `codex`, a word the shell expands
+(`$P`, `"$@"`, `$(…)`, `{plugin,install}`, `plugi?`) or a word `xargs` adds counts as a group word, so
+`claude -p "$PROMPT"` is refused too. devkit itself also refuses `dev ext update --apply` and
+`dev ext enable|disable --project` outside your terminal.
+
+The guard reads the command `screen`, `tmux`, and `expect -c` start, and refuses opening a Terminal or iTerm window
+or a `.command` file, whose text it cannot follow. Agents cannot type into a `screen` or `tmux` session at all; you
+can: the guard refuses `screen -X` and `-Q`, tmux's `send-keys`, `paste-buffer`, and the other commands that type
+into a pane or carry a command, a tmux command list, and what can build a `#(…)` format from pieces: `set-option -a`
+or `-F`, a format with the `E` or `T` modifier, and a `$` or a backtick in a tmux word other than the shell command
+`tmux new` or `split-window` starts ([the guard's rules](guard.md#devkits-own-state-configuration-and-install) list
+them). In a program's code, a command line the guard cannot read that names `dev`, `claude`, `codex`, `tmux`,
+`screen`, `osascript`, or `open` is refused. It cannot see everything: a
+program name built at run time (`$(printf claude)`, an alias), a script piped into a shell, a command a git alias or
+`at` starts later, and options that load a plugin for one session only (`claude --mcp-config`, `--plugin-dir`) get
+through; [What the guard cannot see](guard.md#what-the-guard-cannot-see) lists them. Drift and the acceptance list are the backstop for all of these.
+
+Whatever changes outside devkit anyway shows as drift: at the session start, in `dev status`, `dev doctor`, and
+`dev ext ls`, with one `ext.drift` record in the audit trail per change.
+
+| Drift | What it means | What to do |
+| --- | --- | --- |
+| `changed` | A vendor plugin's version, commit, or files differ from the lock, or an agent's folder for a devkit skill is not devkit's copy | Review it with `dev ext outdated <name>`; accept it with `dev install` in your terminal, or `dev ext update <name> --apply` |
+| `pin` | A skill or MCP server is installed at another commit or version than its pin | `dev install --only skills,claude,codex` |
+| `enabled` | A plugin is on or off in the agent's settings against devkit's | `dev config repair` |
+| `required-off` | devkit or a security plugin is not installed, or is off in the agent or in a project's `.claude/settings.json` or `.claude/settings.local.json` (the row names the file) | `dev install` puts a missing one back; `dev config lock` keeps required plugins on whatever a project says |
+| `not-in-catalog` | A plugin, MCP server, or skill folder is installed outside devkit's catalog, or a project enables a plugin devkit does not manage | `dev ext add` it, or remove it |
+| `retired` | An entry devkit dropped is still installed | `dev install` removes it |
+
+What ships with the Codex app itself is listed with the layer `agent`, without drift, only when something vouches
+for it, because agents can write Codex's plugin cache and `config.toml`:
+
+- **An `openai-bundled` plugin** counts on its own when every file in its cache folder is byte-equal to the app
+  bundle's file at the same path (`ChatGPT.app/Contents/Resources/plugins/openai-bundled/plugins/<name>`), with no
+  link. The app copies a subset of the bundle, and for some plugins it rewrites a file such as `.mcp.json`: those
+  count only once `dev install` has recorded them.
+- **An MCP server** that runs from the app bundle's `Contents/Resources` (links and `..` resolved), is no
+  interpreter, agent, or package runner (`node`, `python`, `sh`, `codex`, `npx`, …), and whose environment loads
+  no other code counts only once `dev install` has recorded it. A program in the bundle can still run what its
+  arguments name (`rg --pre`, `tectonic -Z shell-escape`), so its place proves nothing. Claude Code's MCP servers
+  never count.
+- **An `openai-primary-runtime` plugin** is downloaded by the app, so it counts once `dev install` has recorded it.
+
+`dev install` names each of them the first time it records it, so you see what it accepts: a plugin with its
+version, an MCP server with the command and arguments it runs. It keeps a plugin's version and file digest, and an
+MCP server's raw text in `config.toml`; a change after that shows as `changed`. Only a `dev install` that devkit
+takes for your terminal records them for the first time or accepts a change. One started anywhere else, such as
+from an agent's program, only names them, and they stay as drift.
+
+A terminal an agent opens can look like yours: a command it starts in `screen`, `tmux`, or a Terminal window has no
+agent marker, a terminal of its own, and launchd as its parent, and no check inside a process can prove that you
+typed it. devkit therefore shows every acceptance until you acknowledge it:
+
+1. Each first record and each change `dev install` or `dev ext update --apply` accepts writes one `ext.accept`
+   record to the audit trail, with the entry, the terminal (`tty`), and the parent processes it ran from, and sends
+   a desktop notification. The acceptance list is written first: when it is busy, does not parse, or cannot be
+   written (a full disk), nothing is accepted and the change stays as drift.
+2. The next session start and `dev status` list them: `extensions accepted since your last session: …`, each entry
+   cut to one short line without control, bidirectional, or zero-width characters, or other characters that render
+   as nothing (variation selectors, Hangul fillers). In Claude Code, the session start
+   shows the list to you as a message, not only to the agent.
+3. If you ran that `dev install`, run `dev ext ack` in your terminal. It clears the list and writes one `ext.ack`
+   record per entry, with its terminal and parent processes; the next Claude Code session start shows you once when
+   and from which terminal it ran. The guard refuses `dev ext ack` to agents in the forms it can read, and
+   `dev ext ack` itself checks that it runs in your terminal. Neither proves that you typed it: see the known
+   limits below.
+4. If you did not, do not acknowledge it. Remove what it accepted (for a Codex MCP server, `codex mcp remove <name>`
+   in your terminal), and read `dev audit --action ext.accept` to see which process accepted it.
+
+**Known limits.** devkit decides that you ran `dev install`, `dev ext update --apply`, or `dev ext ack` from the
+process tree and the terminal, and a process an agent starts through a launcher can look the same: `screen` or
+`tmux`, `expect`, AppleScript's `do script`, `open` of a Terminal window or a `.command` file, or `launchctl`. The
+guard refuses typing into a `screen` or `tmux` session outright, so no key or escape can edit a typed line, and
+reads the command each launcher starts, in the forms it can read: a script file or a program that builds the
+command at run time gets through. Quoting or brace expansion around the command word (`$'dev'`, `$"dev"`,
+`dev {ext,} ack`, `$'screen'`) is not read by the guard's rules until 26.11.5; devkit's own terminal check
+(`set_by_developer()`) still refuses those `dev` commands when an agent runs them directly. The desktop
+notification, the session-start message, and the audit trail are the backstop until a kernel-level check of who
+typed the command lands in 26.11.5.
+
+The acceptance notification is a security notice: `DEVKIT_NO_NOTIFY=1` and `progress.notify: false`, which an agent
+can set, do not turn it off. It shows only on macOS, and only while notifications are allowed for Script Editor, the
+app macOS lists `osascript` notifications under (System Settings › Notifications). An agent can change that
+setting (the guard does not yet refuse `defaults write com.apple.ncprefs`), so the session-start message and the
+audit trail are the lasting record of each acceptance.
+
+devkit reads Codex's MCP servers only in the form `codex mcp add` writes: a `[mcp_servers.<name>]` table and its
+sub-tables, one `key = value` per line, with a string, number, `true` or `false`, or a one-line array. A server
+written another way (a dotted key such as `env.NODE_OPTIONS`, a quoted key, an inline table, a key at the root or
+under `[mcp_servers]`, a quoted name) is never the app's and shows as `not-in-catalog`, naming the line. A line
+devkit cannot give to any server (a multi-line string it cannot follow, a header it cannot parse) makes none of
+them the app's, and shows as the `(config.toml)` row. With Python 3.11 or later, devkit also reads the file as
+TOML, and a server it reads differently counts the same way.
+
+The pins have rules of their own:
+
+- **An MCP server** runs through `npx` or `uvx`, and the first package they run carries the exact version
+  (`npx -y pkg@1.2.3`, `uvx pkg==1.2.3`, or `uvx --from pkg==1.2.3 <command>`); a runner option that can add or
+  swap a package, and variables that load other code or point at another registry (`NODE_OPTIONS`, `PYTHONPATH`,
+  `PYTHONSTARTUP`, `DYLD_*`, `LD_*`, `NPM_CONFIG_*`, `UV_INDEX*`), are refused. Otherwise use an `https` URL.
+- **A skill pin** moves only to a commit on its repository's default branch, because GitHub serves a fork's commits
+  under the parent's name. `dev ext update` checks it, and changes nothing when the review cannot be read.
+- **`dev ext update --apply`** accepts only the version it reviewed; anything else stays drift until you check it.
+- **`dev install`** names each change it accepts before it records the lock.
+- **Your overlay** cannot add a copy of a devkit default, and a required default stays required.
+- **A skill name belongs to one source.** One name is one folder for both agents, so `dev ext add skill` refuses a
+  name that a devkit default already uses, for either agent, or that devkit puts in the shared skills folder itself
+  (a skill from devkit's own tree, or `playwright-cli`), and two sources in `skills.json` with the same skill name
+  make the catalog invalid. Names are compared in any case, as the macOS file system compares them, so
+  `Playwright-CLI` is refused too.
+- **A skill name is a folder name.** It starts with a letter, digit, or underscore, so `dev ext add` refuses `.`,
+  `..`, and hidden names. `skills.json` is not held to that rule, so `dev install` skips a name there that would land
+  outside the shared skills folder (`..`, `.`, an empty name, or one with a `/`), deletes nothing, and names it:
+  rename the skill in `skills.json`, on a branch of the devkit checkout.
+
 ## Left out on purpose
 
 | Item | Reason |
@@ -405,15 +545,28 @@ Review the files they write (AGENTS.md, `.mcp.json`, `.codex/config.toml`) befor
 | `openai/skills` as a primary source | Deprecated in favor of `openai/plugins` |
 | Sources without a license (`ast-grep/agent-skill`, `JetBrains/junie-guidelines`, others) | Unclear rights for company work |
 
+### Removed
+
+| Item | Removed in | Reason |
+| --- | --- | --- |
+| `context7` (the Claude Code plugin and the Codex MCP server) | 26.11.4 | Every query left the machine for a third-party service, and the vendor sources it stood in for are now preferred: the project's installed packages, framework MCP servers such as the Angular CLI, then web search. `dev install` uninstalls it from both agents (audited as `ext.retire`) |
+
+An entry removed from devkit's defaults goes to `retired` in its agent's `plugins.json`, and `dev install` uninstalls
+it on every Mac.
+
 ## Add or update a skill
 
 1. Check the source: maintainer, license, recent activity, what files it writes, whether it sends data anywhere.
-2. Add it to `config/skills.json` under its repository, with the full commit SHA in `ref`, the folder path and,
-   for an optional skill, a `group`:
+2. Add it to `config/skills.json` under its repository, with the full commit SHA in `ref`, the license, a one-line
+   `why`, the folder path and, for an optional skill, a `group`:
 
    ```json
-   { "repo": "owner/repo", "ref": "<40-char sha>", "license": "MIT", "group": "iac", "skills": { "my-skill": "skills/my-skill" } }
+   { "repo": "owner/repo", "ref": "<40-char sha>", "license": "MIT", "why": "Terraform style", "group": "iac", "skills": { "my-skill": "skills/my-skill" } }
    ```
+
+   To move a pinned skill or MCP server to a newer upstream, run `dev ext outdated <name>`, then
+   `dev ext update <name> --why "…"` on a branch of the devkit checkout: it prints the compare link, the commits, and
+   the files changed before it changes only that pin.
 
 3. If a kind of work should require it, add or change a rule in `config/skill-rules.json`.
 4. Run `dev install --only skills`, then `dev doctor`.

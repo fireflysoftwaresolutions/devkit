@@ -1170,8 +1170,8 @@ nightly `gc` job runs. The rules are in [Disk and cleanup](disk-and-cleanup.md).
 
 ### `dev jobs [ls | show | run | logs | journal | set | enable | disable | install]`
 
-devkit's scheduled background work as launchd jobs: `sync`, `sleep`, `gc`, `repair`, `audit`, `doctor`, and
-`lessons`. See [Scheduled jobs and the audit trail](jobs-and-audit.md).
+devkit's scheduled background work as launchd jobs: `sync`, `sleep`, `gc`, `repair`, `audit`, `update-check`,
+`doctor`, and `lessons`. See [Scheduled jobs and the audit trail](jobs-and-audit.md).
 
 | Command | Effect |
 | --- | --- |
@@ -1266,8 +1266,9 @@ in the last 7 days, each git host and cloud you chose (its CLI installed and sig
 every enabled scheduled job (loaded, and its last run passed), the desktop apps (Claude Desktop's Code tab runs its
 bundled Claude Code on the same `~/.claude` settings, hooks, plugin, and skills; the ChatGPT app's bundled Codex sees
 the same `~/.codex` configuration and has the same plugins enabled), the instruction canary (fails below 90% over 7
-days, per surface, with corrected misses counted apart), and free disk. Each failure prints its fix. Exits with `1` if any
-check fails.
+days, per surface, with corrected misses counted apart), the third-party extensions (required ones on, vendor plugins
+as `dev install` recorded them, skills and MCP servers at their pins, retired ones removed, no project plugin outside
+devkit's catalog; see `dev ext ls`), and free disk. Each failure prints its fix. Exits with `1` if any check fails.
 
 ### `dev agents [status | test | rules] [claude | codex | all] [--json] [--model MODEL] [-v] [--section SECTION]`
 
@@ -1331,6 +1332,129 @@ dev guard check --write ~/Desktop/notes.md --agent codex
 Validates the devkit plugin with Claude Code's validator and with Codex's own manifest parser (version, display name,
 logo and skills).
 
+### `dev ext ls [--agent claude|codex] [--all] [-v] [--json]`
+
+Lists every third-party plugin, skill, and MCP server devkit installs for Claude Code and Codex: where it comes from,
+what pins it, whether it is installed and enabled, its license, and the layer that put it there. It reads the agents'
+own files and starts no process, so agents may run it.
+
+```text
+$ dev ext ls --agent claude
+NAME             KIND    SOURCE                   PIN                       STATE      ON   LICENSE     LAYER
+superpowers      plugin  claude-plugins-official  ⚠ observed 7.0.0 bb92a77  installed  yes  MIT         team
+impeccable       skill   pbakaus/impeccable       sha 414603bf              linked     yes  Apache-2.0  team
+chrome-devtools  mcp     npm chrome-devtools-mcp  version 1.12.0            added      yes  Apache-2.0  team
+```
+
+| Column | Meaning |
+| --- | --- |
+| `PIN` | What fixes the code: `sha` (a commit), `version` (an exact npm or PyPI version), `local` (devkit's own), and two that devkit cannot pin, marked `⚠`: `observed` (a vendor marketplace plugin: the version and commit that got installed) and `url` (a remote MCP server) |
+| `STATE` | `installed` (plugin), `linked` (skill), `added` (MCP server), or `missing` |
+| `LAYER` | `team` (devkit's configuration), `user` (your overlay), `project` (a repository's `.claude/settings.json`), or `retired` (removed from devkit's defaults and still installed: `dev install` removes it) |
+
+A row that drifted is yellow, with the reason under it. `--all` adds the skill groups this Mac does not install, `-v`
+adds the one-line reason each entry is there, and `--json` prints every field. Ids are
+`plugin:<agent>:<name@marketplace>`, `skill:<agent>:<name>`, and `mcp:<agent>:<name>`.
+
+**Drift.** `dev install` records the version and commit of each vendor marketplace plugin it leaves installed, in
+`~/.local/state/devkit/ext-lock.json`. When one changes outside devkit (Claude Code can update its official
+marketplace on its own), the session start, `dev status`, `dev doctor`, and `dev ext ls` name the change, from the
+recorded version to the installed one, and the audit trail gets one `ext.drift` record for it. The same goes for a
+skill or MCP server that is not at its pin, a required extension that is off, a retired one still installed, and a
+plugin that a repository's `.claude/settings.json` enables outside the catalog. To accept a vendor change, run
+`dev install`, or `dev ext update <name> --apply --why "…"`, in a terminal.
+
+**Acceptances.** Each change `dev install` or `dev ext update --apply` accepts, and each entry that ships with the
+Codex app that `dev install` records for the first time, writes one `ext.accept` audit record with the terminal and
+the parent processes, sends a desktop notification, and stays listed at the session start and in `dev status` until
+you run [`dev ext ack`](#dev-ext-ack). The notification is a security notice: `DEVKIT_NO_NOTIFY=1` and
+`progress.notify: false` do not turn it off. In Claude Code, the session start shows that list to you as a message, not
+only to the agent. When the list is busy, does not parse, or cannot be written, nothing is accepted: the change stays as
+drift, and `dev ext update --apply` says it was not recorded.
+
+### `dev ext outdated [<name>] [--agent claude|codex] [--json]`
+
+For each extension, shows what upstream has now against its pin, and the compare or release link. It uses your own
+`gh` sign-in and `npm`, with a 15-second limit per call, and reads the Claude marketplace copy that
+`claude plugin marketplace update` keeps. Agents may run it.
+
+```text
+$ dev ext outdated --agent claude
+impeccable  skill  claude  414603bf → 687bc381  https://github.com/pbakaus/impeccable/compare/414603bf…687bc381
+42 up to date
+4 could not be checked: frontend-design (claude): the claude-plugins-official marketplace copy gives no version …
+```
+
+A skill compares its pinned commit with the default branch and counts only the files in its own folder: a repository
+that moved elsewhere leaves the skill up to date. An entry whose upstream could not be reached is listed as could not
+be checked, with the reason, never as up to date, and the command exits with `1`. A remote MCP server shows its host,
+with nothing to pin. With a `<name>`, it also prints the number of commits, the files changed, and a license change.
+
+### `dev ext update <name> [--to <ref>] --why "…" [--agent claude|codex] [--apply]`
+
+Bumps a pin in devkit's team configuration, in the devkit checkout, after printing the review: the compare link, the
+commits, the files changed (and how many in the skill's folder), and any license change. Only that pin changes in
+`config/skills.json` or the agent's `plugins.json`. It refuses the default branch, a detached `HEAD`, and the pinned
+copy, and needs `--why`, which goes in the audit trail as `ext.update`. Agents may run it; commit the change and open
+a PR, which the Security engineer reviews.
+
+```bash
+dev branch new chore/bump-impeccable
+dev ext update impeccable --why "the audit command fixes"            # to the default branch's commit
+dev ext update chrome-devtools --to 1.13.2 --why "the network panel fix"
+```
+
+`--to` takes a full 40-character commit SHA for a skill and an exact version for an MCP server; without it, the
+newest upstream is used. `--apply` updates a vendor marketplace plugin on this Mac instead (`claude plugin update`, or
+`codex plugin add`), after the same review, and records the new version as accepted, so it no longer shows as drift.
+Only you run `--apply`, in a terminal.
+
+### `dev ext ack`
+
+Confirms that the extensions accepted since your last acknowledgement were yours: it prints each one, clears the
+list the session start and `dev status` show, and writes one `ext.ack` audit record per entry with the terminal and
+the parent processes. A terminal an agent opens can look like yours, so devkit lists every acceptance until you run
+this, and the next Claude Code session start shows you once when and from which terminal the last `dev ext ack` ran.
+
+```bash
+dev ext ack
+```
+
+Run it in your own terminal. From an agent, or from a process devkit cannot place in your terminal, it is refused
+and the refusal is audited. If the list names something you did not accept, do not acknowledge it: remove the
+entry and read `dev audit --action ext.accept`, which names the terminal and the processes that accepted it.
+
+### `dev ext add | remove | enable | disable`
+
+`dev ext <verb> … --why "…" [--team | --project]` changes your own set of extensions on top of devkit's, then
+applies that one entry on this Mac. Your choices live
+in `ext` in `~/.config/devkit/config.json` (see [Configuration › Extensions](configuration.md#extensions)), so
+`dev install` and `dev config repair` keep them. Each change needs `--why` and is audited as `ext.add`, `ext.remove`,
+`ext.enable`, or `ext.disable`. Only you run these, in a terminal; devkit's own security plugins and devkit itself
+cannot be removed or turned off.
+
+```bash
+dev ext disable commit-commands --why "I commit with dev commit"
+dev ext add mcp postgres --agent codex --license MIT --why "Postgres tools" --command "npx -y pg-mcp@2.1.0"
+dev ext add mcp docs --license MIT --why "our docs" --url https://docs.example.com/mcp
+dev ext add skill k6 --repo grafana/skills --ref <40-char sha> --path skills/k6 --license Apache-2.0 --why "load tests"
+dev ext add plugin figma@claude-plugins-official --agent claude --license MIT --why "design handoff"
+dev ext disable superpowers --agent claude --project --why "not in this repository"
+```
+
+| Option | Effect |
+| --- | --- |
+| `--team` | With `add` or `remove`: changes devkit's defaults in the checkout instead (a branch only, like `dev ext update`); `remove --team` retires the entry, so `dev install` uninstalls it on every Mac. Agents may run it; the change goes through a PR |
+| `--project` | With `enable` or `disable`: a Claude Code plugin from devkit's catalog, in this project's `.claude/settings.json` (`claude plugin enable\|disable -s project`) |
+| `--command "…"` | An MCP server's command line, quoted, with an exact version: `pkg@1.2.3` (npm) or `pkg==1.2.3` (PyPI) |
+| `--url` | A remote MCP server: `https` only |
+
+The same rules apply to your entries as to devkit's: a skill needs a full 40-character commit SHA, an MCP server an
+exact version or an `https` URL, and every entry a license and a reason. An MCP server, in either agent, and a Codex
+plugin have no on and off switch, so `disable` removes them and `enable` adds them back; a skill is linked or
+unlinked by the skills step. When the managed-settings lock is on
+(`dev config lock`), it keeps devkit's plugin set: run `dev config lock` again after a Claude plugin change.
+
 ### `dev install [--only STEPS | --version VERSION | --unverified --why "…"]`
 
 Pins devkit, then applies the configuration; safe to run again. It first makes a read-only, checksummed copy of the
@@ -1355,9 +1479,28 @@ extension and opens its installer when it is missing or out of date. The `launch
 [scheduled jobs](jobs-and-audit.md). See
 [Getting started › What dev install configures](getting-started.md#what-dev-install-configures).
 
-### `dev update`
+### `dev update [--check [--quiet] [--record]]`
 
-Updates the devkit checkout, then runs `dev install`, which pins the new commit. It always updates the checkout,
+`dev update --check` tells you, without changing anything, whether a newer devkit release is out and what changes in
+it. Agents may run it.
+
+```text
+$ dev update --check
+installed  26.11.3 (pinned copy ~/.local/share/devkit/releases/26.11.3-…)
+checkout   ~/Development/fireflysoftwaresolutions/devkit at v26.11.3 (detached)
+newest     v26.11.4 · 1 release behind (checkout and pinned copy)
+  26.11.4: Added · Removed
+run in a terminal: dev update
+```
+
+It fetches the tags into the checkout's git store, as `dev update` does, and never moves the working tree, `HEAD`, or
+the pinned copy. The lines under `newest` are the `CHANGELOG.md` headings of each newer release. A checkout on a
+branch shows how many commits it is behind its upstream, and a pinned copy older than the checkout says to run
+`dev install`. With no network it says the check could not be done, shows the last recorded result with its date, and
+exits with `1`; it never says up to date. The daily `update-check` job runs `dev update --check --quiet --record`, and
+the first session of the day and `dev status` show the result while a release is pending.
+
+`dev update` itself updates the devkit checkout, then runs `dev install`, which pins the new commit. It always updates the checkout,
 even when `dev` runs from the pinned copy. What it does depends on where the checkout is:
 
 | The checkout is | `dev update` |

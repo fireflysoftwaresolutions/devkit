@@ -16,7 +16,9 @@ Shell commands are tokenized: chains (`&&`, `||`, `;`, `|`, new lines) are check
 the directory used to resolve later paths, leading `VAR=value`, `sudo`, `env`, `command`, `nohup`, `time`, `exec`,
 `builtin`, `nice`, and `caffeinate` prefixes are skipped, heredoc bodies are treated as data, and output redirections
 (`>`, `>>`) are checked as writes. The guard also reads what the shell runs inside a command: `$(…)` and backtick
-substitutions, `sh -c` and `eval` strings, `xargs` and `find -exec` commands, and a pager that git or gh starts. Quoted
+substitutions, `sh -c` and `eval` strings (with the words after a `sh -c` line in place of its `$0`, `$1`, and
+`"$@"`), `xargs` and `find -exec` commands, and a pager that git or gh starts. Every rule applies at each of these
+levels, so `find . -exec sh -c 'git push --force origin main' \;` is denied as the plain command is. Quoted
 text a command only carries, such as a `dev crew ask` message, is data and never read as a command. A heredoc body
 ends at its tag line, and also at a line that starts with the tag and `)`: macOS `/bin/bash` 3.2 ends a heredoc there
 inside `$(…)` and runs what follows, while zsh reads on, so the guard reads it the way that shows what bash runs.
@@ -61,6 +63,7 @@ the net under your own review, not as a replacement for it.
 | Backup-style names: `*.bak`, `*.orig`, `*.backup`, `*.old`, `*.rej`, `*~`, `*_old.*`, `*-copy.*`, `* copy.*`, `* (2).*` | deny |
 | Inside the handoff repository | see [The handoff repository](#the-handoff-repository) |
 | Anywhere else (Desktop, Documents, `~/notes.md`, …) | Claude: ask · Codex: deny |
+| A path with a NUL character, in a file tool's `file_path` or `notebook_path` or an MCP tool's path | deny: the system reads a path up to its first NUL, so another file would be written, and a later rule would fail on it and let the call through |
 
 "Owners you belong to" are your GitHub login and organizations (from `gh`, cached for a day) plus folders that already
 exist in the dev root.
@@ -222,7 +225,13 @@ three folders readable and writable by your account only (`0700`) every time it 
 | Replacing, writing, or deleting a `dev` that a shell finds: `~/.local/bin/dev` (the link itself) or another `dev` earlier on `PATH` | deny → the developer runs `dev install --only cli` |
 | `HOME`, `DEVKIT_CONFIG`, `DEV_ROOT`, or another `DEVKIT_*` variable set for `dev`, `python -m devkit`, a program that imports devkit, or a nested `claude` or `codex` session; `launchctl setenv` of one of them | deny; the one-command [escape hatches](#escape-hatches) still work |
 | `PYTHONPATH`, `PYTHONSTARTUP`, `PYTHONHOME`, `PYTHONUSERBASE`, `PYTHONPLATLIBDIR`, `PYTHONEXECUTABLE`, or `PYTHONBREAKPOINT` set for the same commands | deny: they load other code into devkit's own process. `bin/dev` runs `python3 -I -S`, which ignores them, the current folder, and the user and site-packages folders (and their `.pth` files); the rule also covers `python3 bin/dev`. A repository's own tests may still set `PYTHONPATH` |
-| `dev install`, `dev update`, or `install.sh` | deny: they change what every hook and the guard run, so the developer runs them, in a terminal |
+| `dev install`, `dev update`, or `install.sh`, also from a program's code (`subprocess.run(['dev', 'install'])`, `os.system('dev install')`, AppleScript's `do shell script`) | deny: they change what every hook and the guard run, so the developer runs them, in a terminal. A `dev install` that runs outside the developer's terminal anyway records nothing new for the extensions. A terminal an agent opens can look like the developer's, so devkit audits every acceptance (`ext.accept`) and lists it at the session start and in `dev status` until the developer runs `dev ext ack`: see [Skills and plugins](skills-and-plugins.md#who-changes-extensions-and-how-drift-shows) |
+| A command `screen` starts (`screen -dm dev install`), a `tmux` shell command (`new`, `new-window`, `split-window`, `respawn-*`, `display-popup`, `tmux -c`, a name tmux abbreviates such as `new-w`), an `expect -c` script's `spawn`, `exec`, and `system`, AppleScript's `do script`, `write text`, and `keystroke`, and `xargs dev` or `xargs dev ext` (its input adds the command) | read as the command they run, for every rule: `screen -dm dev install` is refused as `dev install` is. These start the command in a terminal of their own, which passes devkit's own check for the developer's terminal |
+| Typing into a `screen` or `tmux` session: `screen -X` or `-Q` (`stuff`, `exec`, and every other command sent to a session, also after `-S`, `-p`, `-r`, or `-x`), tmux's `send-keys`, `send-prefix`, `paste-buffer`, `set-buffer`, `load-buffer`, `pipe-pane`, and `command-prompt`, a tmux command that carries a command (`run-shell`, `if-shell`, `set-hook`, `source-file`, `bind-key`, `confirm-before`, a menu or chooser template), `set-option` of a hook, `default-command`, `default-shell`, `command-alias`, `lock-command`, `copy-command`, or `editor`, a `#(…)` format, `set-option` or `setw` with `-a` or `-F` and a format with the `E` or `T` modifier (`#{E:@x}`), which can build a `#(…)` from pieces, a tmux command list (`\;`, `';'`, or a command tmux knows right after a tmux call and a `;`; a new line ends the tmux call, so the next line is the shell's own command), a configuration file (`screen -c`, `tmux -f`), a tmux command it does not know, a `screen` or `tmux` word the shell or a runner fills in (`$O`, `{}`), and a `$` or a backtick anywhere in a tmux word, with spaces or without (`"$X(touch f)"` with `X='#'` is a `#(…)` format), except in the shell command that `new`, `new-window`, `split-window`, `respawn-*`, or `display-popup` starts, which the guard reads as `sh -c` | deny, also for a name tmux abbreviates such as `send-k`, inside `sh -c`, `env`, `timeout`, `xargs`, `find -exec`, or `parallel`, and in a program's code: agents cannot type into a terminal session; the developer can. Screen expands `$VAR` and `$:cap:` in what it types and `stuff -k` types a terminal key, so the rule is an allowlist that fails closed instead of a reading of the keys. `screen -ls`, `screen -r x`, `screen -dm <command>`, `tmux ls`, `tmux attach`, and `tmux new -d '<command>'` stay open |
+| `open -a Terminal` or `iTerm` (also by path or `-b` bundle id, and other terminal apps), or `open` of a `.command` or `.tool` file, also from a program's code | deny: the shell it starts is one the guard cannot read, and it looks like the developer's terminal. Opening files, folders, and URLs in other apps is allowed |
+| `dev update --check` (with `--quiet` and `--record` only) | allow: it only fetches tags and reports; any other word makes it the update itself, which is denied |
+| `dev ext update <name> --apply`, `dev ext add`, `remove`, `enable`, `disable` (also with `--project`), `dev ext ack`, and any other `dev ext` verb | deny: they change the plugins, skills, or MCP servers that run in every session on this Mac, or confirm that what was accepted was the developer's, so the developer runs them, in a terminal. The rule is an allowlist that fails closed: `dev ext ls`, `dev ext outdated`, a team pin bump (`dev ext update <name> --to <ref> --why "…"`), and `dev ext add\|remove --team` (a change to devkit's defaults in the checkout, which goes through a PR) are allowed; `--team` counts only before a `--`, after which it is the entry's name |
+| A `claude` or `codex` call whose words include `plugin`, `plugins`, `mcp`, or `marketplace` anywhere (an option's value and any case included), in the forms the guard reads: a path or link that resolves to the binary (a relative one from the folder the command runs in), Claude Code's `~/.local/share/claude/versions/<version>`, a link on the `PATH`, a package runner (`npx`, `bunx`, `bun x`, `npm exec`, `npm x`, `pnpm dlx`, `yarn dlx`, `yarn exec`, `pnpm claude`, `yarn codex`), `node …/@openai/codex/bin/codex.js`, `bash -c`, `bash -s` with its input, `xargs`, `find -exec`, `dev claude … --`, or a program's code (`subprocess.run([...])`) | deny, unless the whole command is one of the read-only forms: `claude plugin list`, `claude plugin details <name>`, `claude plugin validate <path>`, `claude plugin marketplace list`, `claude mcp list`, `claude mcp get <name>`, `codex plugin list`, `codex plugin marketplace list`, `codex mcp list`, `codex mcp get <name>`, or a group alone (`claude mcp`, which prints its help). `claude plugins` is `claude plugin`, and only `-h`, `--help`, and `--json` may come with these forms. Anything else is denied even when it only reads (`claude -- plugin list`, `claude --debug plugin list`): the rule is an allowlist that fails closed, because each block list of verbs lost to a new spelling. With `claude` or `codex`, a word the shell expands counts as one of those words: one with `$` or a backtick (`$P`, `"$@"`, `$'…'`, `$(…)`), or one without spaces with `{`, `*`, `?`, or `[` (`{plugin,install}`, `plugi?`), and a word `xargs` adds counts too. This denies `claude -p "$PROMPT"` too: put the prompt in the command. A program the shell picks at run time (`$c plugin …`, a `PATH` the command sets, a path the command has yet to create) with one of those words is denied too. See [What the guard cannot see](#what-the-guard-cannot-see) and [Skills and plugins](skills-and-plugins.md#who-changes-extensions-and-how-drift-shows) |
 | `dev config lock` or `dev config unlock` | deny: they add or remove the [settings lock](agents.md#the-settings-lock) that keeps settings files from turning off devkit's hooks |
 | `dev impeccable` with a verb or form off its allowlist, in any shell form. Agents run `context` (with `--target` only), `detect` on local paths, `doctor` (with `--json` or `--target`, never `--fix`), `surface-brief read`, and `critique-storage slug` and `trend`, and in write lanes and the main session also `detect` on URLs on `localhost` or `127.0.0.1`, `live`, `generate`, `document`, `extract`, and `init` (these four with no other words), and the skill's helpers in the forms it uses (the `live-…` helpers, `surface-brief write`, `critique-storage`, `comp-spec`, and `build-phase start --direction`), with `--target`, `--file`, `--artifact`, `--build`, `--decision-comp`, `--comp`, `--regions`, and the targets and snapshot file of `surface-brief` and `critique-storage` inside the project (never a URL or a route): the first word, spelled as listed, never after `skills` or a second `--`. `--id`, `--session-id`, and `--crop` take a name (letters, digits, `.`, `_`, and `-`, never `.` or `..` alone), `live-server --port` a port number, and no path, URL, or port may hold a character the shell expands (`$`, a backtick, `{`, `*`, `?`, or `[`) | deny, in the main session and both lane kinds: every other form is the developer's, in a terminal. `hooks`, `install`, `link`, `update`, `pin`, `unpin`, and `doctor --fix` write the agents' settings, hooks, or skill folders, which change what runs in every later session; `concept-seed` and `generate-image` reach the internet; `build-phase advance --force`, `build-phase start --comp` or `--reset`, and `live-complete --force` skip the skill's gates; `comp-spec --out`, `--out-dir`, and `--spec` write outside the project; the engine also has hidden verbs, and an update can add more. `dev impeccable` itself refuses them outside the developer's terminal |
 | `dev impeccable` whose `--target` or `--file` leads, from the folder the shell is in after `cd`, `pushd`, or `env -C`, outside the workspace, into the handoff repository, or outside a write lane's step scope | ask in the main session, as for any write outside the workspace; deny in a write lane. `dev impeccable` itself also refuses an agent's call run outside a project checkout of the workspace, or whose path values (the ones the preceding row lists) lead out of that checkout through a symbolic link or `..` |
@@ -257,6 +266,49 @@ These rules also apply when a package runner starts the agent (`npx @anthropic-a
 
 A nested session with your own settings still runs, and so does a prompt that only names these flags. If the work
 needs another configuration, start that session yourself in a terminal.
+
+### What the guard cannot see
+
+The guard's rules read a command as it is typed, and the commands it hands to a shell, a package runner, `xargs`,
+`find -exec`, or a program's code. A command that decides what runs only when it runs gets through. For the
+extension rule, these are not refused:
+
+- a program name built at run time: `$(printf claude) plugin install x`, or an alias (`alias c=claude; c plugin …`);
+- a script a shell reads from a source the guard cannot read: `curl … | sh`, `echo '…' | sh`, or a file the same
+  command writes;
+- a command another program starts later from text the guard does not read: a git alias that runs a shell command
+  (`git -c 'alias.x=!claude plugin install y' x`), `at` or `batch` with their input, a compiled AppleScript file
+  (`osascript x.scpt`), or an `expect` script file;
+- options that load a plugin or MCP server for one session only: `claude --mcp-config`, `--plugin-dir`.
+
+Quoting or brace expansion around a command word is not read by the guard's rules until 26.11.5: `$'dev' ext ack`,
+`$"dev" install`, `dev {ext,} ack`, and `$'screen' -X …` reach the shell as `dev` and `screen`, but the guard does not
+take them for those commands. devkit's own terminal check (`set_by_developer()`) still refuses those `dev` commands
+when an agent runs them directly. One line form is not read as bash runs it until 26.11.5 either: lines between
+two comments that each hold an apostrophe (`ls # it's` and `dev install # don't` on the next line), because the pair
+reads as one quoted word. A command split by a backslash-newline is read as typed, with every backslash-newline
+removed (`dev \` with `install` on the next line is `dev install`), and with the backslash at the end of a comment
+dropped (bash ends a comment at its newline); a refusal in any of the three readings stands.
+
+Typing into a terminal session is refused outright: agents cannot type into a `screen` or `tmux` session at all. The
+guard refuses each command that types or carries a command, by its name, an alias, or a prefix tmux accepts; a `#(…)`
+format and what can build one from pieces (`set-option -a` or `-F`, a format with the `E` or `T` modifier); a tmux
+command list; a configuration file; a word the shell or a runner fills in; and a `$` or a backtick in any tmux word
+but the shell command a tmux command starts. It refuses them at the top level, in `sh -c`, `env`, `timeout`,
+`xargs`, `find -exec`, and `parallel`, and in the string literals of a program that starts a process; a literal the
+guard cannot read that names `tmux` or `screen` is refused as unreadable. A command the guard does not read at all (a
+script file, a command built at run time) is outside this rule, as
+[What the guard cannot see](#what-the-guard-cannot-see) says.
+
+The rules on git and on deleting files read each word as typed, so they miss what the shell expands
+(`git push {--force,origin} main`), a script a shell reads from its input (`bash <<< 'git push --force …'`), and a
+command `pnpm` or `yarn` runs by its name (`pnpm git push --force …`).
+
+For the extensions, drift and the acceptance list are the backstop: whatever changes outside devkit shows at the
+session start, in `dev status`, and in `dev doctor`; the developer accepts it only with `dev install` in a terminal;
+and every acceptance stays listed until the developer runs `dev ext ack`, because a terminal an agent opens can look
+like the developer's. See
+[Skills and plugins](skills-and-plugins.md#who-changes-extensions-and-how-drift-shows).
 
 ### Commands the guard cannot name
 
@@ -399,8 +451,13 @@ DEVKIT_LOCAL_CI_PASSED=1.
 
 ## Fail-open design
 
-- A command the tokenizer cannot parse (for example unbalanced quotes) is allowed; only the attribution check runs on
-  its raw text.
+- A command the tokenizer cannot read (a quote that is never closed, such as an apostrophe in a comment) is refused,
+  also in a line the command hands to a shell (`sh -c`, `eval`, a heredoc a shell reads), because bash may still run
+  the lines before it. In a program that starts a process, a string literal the guard cannot read is refused when it
+  names `dev`, `claude`, `codex`, `tmux`, `screen`, `osascript`, or `open` as a whole word
+  (`os.system("dev install # don't")`); any other literal, such as `print("don't")`, is data. Heredoc bodies are set
+  aside first, so text with apostrophes can go in one. A script file or a sourced file the guard cannot read is
+  allowed, as before.
 - Most exceptions in the guard are logged to `~/.local/state/devkit/logs/hooks.log` and the call is allowed. These
   checks fail closed instead, because letting the call through would defeat them: a crew member's shell command that
   the lane check cannot read or judge; an irreversible action, in enforce, when the gate itself fails and the text

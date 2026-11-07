@@ -165,7 +165,7 @@ devkit does not edit `config.toml` as text. It starts `codex app-server` and wri
 | `agents.max_concurrent_threads_per_session` | `4` | At most four subagent threads per session |
 | `review_model` | `gpt-6-astra` | `/review` uses the strongest model |
 | `project_doc_max_bytes` | `131072` | Codex reads a project's AGENTS.md whole (its default stops at 32 KiB; Claude Code reads CLAUDE.md whole) |
-| `mcp_servers` | from `config/codex/plugins.json` | context7, Chrome DevTools, Angular CLI |
+| `mcp_servers` | from `config/codex/plugins.json` | Chrome DevTools, Angular CLI (`dev ext ls --agent codex` lists them) |
 | `hooks.state."<key>".trusted_hash` | the hashes Codex reports | Trust for devkit's hooks |
 
 **Attribution in Codex.** Codex can add `Co-authored-by: Codex` to commits and "Generated with Codex" to pull requests, in the terminal and in the ChatGPT app. No `config.toml` key turns it off: it is an account setting on OpenAI's side, which every session records as `git_attribution`. `dev doctor` reads it from your newest session and fails when it is on. Either way, the guard refuses attribution in commits that agents run, and `dev commit` and `dev pr create` remove the lines.

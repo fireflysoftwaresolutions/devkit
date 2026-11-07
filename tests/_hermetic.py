@@ -15,8 +15,9 @@ for a run of one of them alone). It:
    HOME (the run's, or the one a test makes for itself; exporting them pinned to the run's home would override a
    test's own, and devkit refuses a DEV_ROOT or DEVKIT_CONFIG that does not match its HOME); the agents' markers and
    session ids, their socket, token and env file (CLAUDE_ENV_FILE); and devkit's own DEVKIT_* switches. A run under
-   an agent then behaves like a run in CI, which has none of them. DEVKIT_NO_NOTIFY=1 is set, as CI sets it: a test
-   never shows the developer a notification;
+   an agent then behaves like a run in CI, which has none of them. DEVKIT_NO_NOTIFY=1 is set, as CI sets it, and
+   the audit hook refuses osascript (a security notice ignores that switch): a test never shows the developer a
+   notification;
 4. snapshots the real state, configuration and handoff roots (for test_zz_real_state_untouched);
 5. installs an audit hook that refuses, and records, any file access of this process below the real roots, and any
    process started with the real home, with no HOME (Path.home() then falls back to the real one), with a variable
@@ -290,9 +291,39 @@ def _child(argv, env, cwd) -> str:
     return ""
 
 
+_SHELLS = frozenset({"sh", "bash", "zsh", "dash", "ksh", "fish", "csh", "tcsh"})
+# osascript as the program of a shell line: where a command starts (the line's start, or after ; & | ( ) { } ` or a
+# new line), past variable assignments and the launchers that run the next word, by any path, quoted or not
+_OSASCRIPT_LINE = re.compile(
+    r"(?:^|[;&|(){}`\n])\s*"
+    r"(?:(?:[A-Za-z_]\w*=\S*|(?:\S*/)?(?:env|exec|command|nohup|sudo|xcrun|time|nice|timeout)(?:\s+(?:-\S+|\d\S*))*)"
+    r"\s+)*[\"']?(?:\S*/)?osascript[\"']?(?=\s|$|[;&|)}`])")
+
+
+def _runs_osascript(event, args) -> bool:
+    """Whether a process start runs osascript: its program (Popen's executable, the path posix_spawn and exec run) or
+    its argv[0] is osascript, a shell runs it in its line (`sh -c`, shell=True, os.system), or a launcher at the start
+    of its argv runs it (`env X=1 osascript`)."""
+    if event == "os.system":  # (command,)
+        return bool(_OSASCRIPT_LINE.search(os.fsdecode(args[0] or "")))
+    program, argv = args[0], args[1]  # Popen: (executable, args, cwd, env); posix_spawn and exec: (path, argv, env)
+    words = [argv] if isinstance(argv, (str, bytes, os.PathLike)) else list(argv or ())
+    words = [os.fsdecode(w) for w in words if isinstance(w, (str, bytes, os.PathLike))]
+    starts = ([os.fsdecode(program)] if isinstance(program, (str, bytes, os.PathLike)) else []) + words[:1]
+    names = {os.path.basename(w) for w in starts} | {os.path.basename(w.split(None, 1)[0]) for w in starts if w.split()}
+    if "osascript" in names:
+        return True
+    if names & _SHELLS:
+        return any(_OSASCRIPT_LINE.search(w) for w in words[1:])
+    return bool(words and _OSASCRIPT_LINE.match(" ".join(words)))
+
+
 def _hook(event, args):
     if _S["allow"] or not _S["active"]:
         return
+    if event in ("subprocess.Popen", "os.posix_spawn", "os.exec", "os.system") and _runs_osascript(event, args):
+        # a security notice ignores DEVKIT_NO_NOTIFY (devkit's acceptance notice), so the run refuses the program
+        _refuse("process", "osascript", "a test never shows the developer a desktop notification")
     if event == "open":
         p = _protected(_path(args[0]))
         if p:

@@ -65,6 +65,8 @@ DEFAULTS = {
     # installed by default, which the setup wizard offers when the developer picks one of these tools.
     "skills": {"groups": ["security-deep", "postgres", "observability"], "optional": {"iac": ["terraform"]},
                "enforce": True, "rules": []},
+    # ext: the developer's own extensions on top of devkit's (`dev ext add|remove|enable|disable`, spec P-fym583l7sg1)
+    "ext": {"add": [], "remove": [], "disable": [], "enable": []},
     "language": "en-US",
     "hosts": ["github"],
     "clouds": [],

@@ -19,6 +19,7 @@ reschedule, and turn off. Everything devkit changes or decides, in the backgroun
 | `gc` | Daily at 04:00 | `dev gc --apply --yes --auto-only` | Reclaims disk safely: merged worktrees, idle build output, stale temp, Docker build cache (see [Disk and cleanup](disk-and-cleanup.md)) |
 | `repair` | Every 6 hours | `dev config repair --quiet` | Restores devkit-managed agent settings and Codex hook trust if anything drifted |
 | `audit` | Daily at 05:00 | `dev audit --publish --quiet` | Publishes this machine's audit trail to the handoff repository and prunes month files past their retention, 13 months by default (see [The audit trail › Retention](audit.md#retention)) |
+| `update-check` | Daily at 09:15 | `dev update --check --quiet --record` | Checks, read-only, whether a newer devkit release is out and records the answer; the first session of the day and `dev status` then tell you, without reaching the network themselves |
 | `doctor` | Mondays at 09:00 | `dev doctor` | The full health check; you get a notification when a check fails |
 | `lessons` | Fridays at 16:00 | `dev lesson review` | Lists recurring lessons to automate and stale ones to retire, and always notifies you |
 

@@ -1,5 +1,5 @@
 {
-  "_comment": "Claude Code plugins and MCP servers enabled for every project. See docs/skills-and-plugins.md for why each is here and what was left out.",
+  "_comment": "Claude Code plugins and MCP servers enabled for every project. `meta` says why each entry is here, its license and upstream (`dev ext ls`); `retired` entries are uninstalled by `dev install`. See docs/skills-and-plugins.md for what was left out.",
   "marketplaces": {
     "claude-plugins-official": "anthropics/claude-plugins-official",
     "firefly-devkit": "{{DEVKIT}}"
@@ -7,7 +7,6 @@
   "plugins": [
     "devkit@firefly-devkit",
     "superpowers@claude-plugins-official",
-    "context7@claude-plugins-official",
     "frontend-design@claude-plugins-official",
     "commit-commands@claude-plugins-official",
     "security-guidance@claude-plugins-official",
@@ -36,6 +35,78 @@
         "@angular/cli@22.2.6",
         "mcp"
       ]
+    }
+  },
+  "retired": [
+    "context7@claude-plugins-official"
+  ],
+  "meta": {
+    "devkit@firefly-devkit": {
+      "why": "devkit's own skills, commands and crew agents",
+      "license": "Apache-2.0",
+      "required": true
+    },
+    "superpowers@claude-plugins-official": {
+      "why": "One process backbone in both agents: brainstorming, plans, TDD, systematic debugging, verification",
+      "license": "MIT",
+      "upstream": "obra/superpowers"
+    },
+    "frontend-design@claude-plugins-official": {
+      "why": "The design direction for UI work; Codex gets the same skill from devkit",
+      "license": "Apache-2.0",
+      "upstream": "anthropics/claude-plugins-official"
+    },
+    "commit-commands@claude-plugins-official": {
+      "why": "/commit, /commit-push-pr and /clean_gone: one commit flow",
+      "license": "Apache-2.0",
+      "upstream": "anthropics/claude-plugins-official"
+    },
+    "security-guidance@claude-plugins-official": {
+      "why": "Pattern-based security warnings on every edit",
+      "license": "Apache-2.0",
+      "upstream": "anthropics/claude-plugins-official",
+      "required": true
+    },
+    "typescript-lsp@claude-plugins-official": {
+      "why": "TypeScript and JavaScript definitions, references and type errors instead of grepping",
+      "license": "Apache-2.0",
+      "upstream": "anthropics/claude-plugins-official"
+    },
+    "pyright-lsp@claude-plugins-official": {
+      "why": "Python code intelligence (Pyright)",
+      "license": "Apache-2.0",
+      "upstream": "anthropics/claude-plugins-official"
+    },
+    "jdtls-lsp@claude-plugins-official": {
+      "why": "Java code intelligence (Eclipse JDT LS)",
+      "license": "Apache-2.0",
+      "upstream": "anthropics/claude-plugins-official"
+    },
+    "php-lsp@claude-plugins-official": {
+      "why": "PHP code intelligence (Intelephense)",
+      "license": "Apache-2.0",
+      "upstream": "anthropics/claude-plugins-official"
+    },
+    "claude-md-management@claude-plugins-official": {
+      "why": "Audits and improves CLAUDE.md files and captures session learnings",
+      "license": "Apache-2.0",
+      "upstream": "anthropics/claude-plugins-official"
+    },
+    "claude-security@claude-plugins-official": {
+      "why": "Deep vulnerability scans with every finding challenged, and verified patch files",
+      "license": "Proprietary (Anthropic)",
+      "upstream": "anthropics/claude-plugins-official",
+      "required": true
+    },
+    "mcp:chrome-devtools": {
+      "why": "Performance, network and accessibility debugging in a real browser",
+      "license": "Apache-2.0",
+      "upstream": "npm:chrome-devtools-mcp"
+    },
+    "mcp:angular-cli": {
+      "why": "Angular best practices, documentation search and project tools",
+      "license": "MIT",
+      "upstream": "npm:@angular/cli"
     }
   }
 }

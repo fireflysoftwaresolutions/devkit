@@ -50,6 +50,27 @@ Not released yet: the date is set when the release is tagged.
   folders (`hooks`, `install`, `link`, `update`, `pin`, `unpin`, and `doctor --fix`) run only in your terminal. See
   [Skills and plugins › impeccable and its engine](docs/skills-and-plugins.md#impeccable-and-its-engine).
 
+- **`dev ext ls` lists every third-party plugin, skill, and MCP server devkit installs** for Claude Code and Codex:
+  its source, what pins it (a commit, an exact version, or `⚠ observed` for a vendor marketplace plugin, with the
+  version and commit installed), whether it is installed and enabled, its license, its layer, and why it is there
+  (`-v`). `--json` prints every field. Agents may run it: it reads the agents' own files and starts no process.
+- **`dev ext outdated` and `dev ext update`.** `outdated` shows what upstream has now against each pin, with the
+  compare or release link, through your own `gh` and `npm`; a skill counts only changes in its own folder, and an
+  upstream that cannot be reached is reported as could not be checked, never as up to date. `update <name> --why "…"` bumps a team
+  pin in the devkit checkout, on a branch only, after printing the compare link, the commits, the files changed, and
+  any license change. `update --apply` updates a vendor marketplace plugin on this Mac and accepts it; only you run
+  it, in a terminal.
+- **Your own extensions: `dev ext add`, `remove`, `enable`, and `disable`.** Add a plugin, a skill pinned by commit,
+  or an MCP server pinned by exact version or `https` URL, or turn one of devkit's off, with `--why`. Your choices
+  live in `ext` in your devkit configuration, and `dev install`, `dev config repair`, and the managed-settings lock
+  keep them, so a plugin you turned off is no longer turned back on within six hours. `--project` turns a Claude Code
+  plugin on or off for one repository; `--team` changes devkit's defaults in the checkout, on a branch. devkit itself
+  and its security plugins cannot be removed or turned off. Only you run these, in a terminal.
+- **`dev update --check` tells you whether a newer devkit release is out**, and what changes in it: the installed and
+  newest releases, the CHANGELOG headings in between, and whether the checkout and the pinned copy are behind. It is
+  read-only, so agents may run it. A daily `update-check` job records the answer at 09:15; the first session of the
+  day and `dev status` then name a pending release, without reaching the network themselves.
+
 ### Changed
 
 - **Your answer counts even when the question is reworded, except for an irreversible action.** An answer to the
@@ -109,6 +130,142 @@ Not released yet: the date is set when the release is tagged.
   other verb, including `concept-seed`, `generate-image`, the forms that skip the skill's gates,
   the engine's hidden ones, and any a newer engine adds, is the developer's: the guard refuses it to every agent, the
   main session's included, and `dev impeccable` runs it only in your terminal.
+- **Desktop notifications show again.** Every devkit notification on macOS (a run that blocks or finishes, a long
+  turn, a CI run devkit watched, a background job) failed without a word: devkit wrote the `·` in the title as a
+  JSON escape, which AppleScript rejects. The text and title now reach `/usr/bin/osascript` as arguments, so they
+  need no escaping and cannot run as script, and an `osascript` planted earlier on your `PATH` does not run.
+
+### Security
+
+- **A plugin that changes outside devkit is reported.** `dev install` records the version and commit of each vendor
+  marketplace plugin it installs. When one changes on its own, the session start, `dev status`, `dev doctor`, and
+  `dev ext ls` name the change, and the audit trail gets one `ext.drift` record for it. A skill or MCP server off its
+  pin, a required security plugin that is off, and a plugin a repository enables outside devkit's catalog are
+  reported the same way.
+- **Agents cannot change your extensions through the vendor CLIs either.** A `claude` or `codex` call whose words
+  include `plugin`, `plugins`, `mcp`, or `marketplace` anywhere, an option's value included, is refused unless the
+  whole command is one of a few read-only forms (`claude plugin list|details <name>|validate <path>`,
+  `claude plugin marketplace list`, `claude mcp list|get <name>`, `codex plugin list`,
+  `codex plugin marketplace list`, `codex mcp list|get <name>`, or a group alone), with `-h`, `--help`, or `--json`
+  at most. This allowlist fails closed: any other spelling, `--` or another option included, is refused even when
+  it only reads. The guard finds the program in the forms it reads (a relative path from the command's folder, a
+  link on the `PATH`, a package runner such as `npx`, `npm exec`, `bun x`, `yarn exec`, or `pnpm claude`, the CLI's
+  script under `node`), refuses one it cannot know before it runs (a variable, a `PATH` the command sets, a copy the
+  command makes), reads a `sh -c` line and a `bash -s` input with the words after them, and applies the rule to a
+  program's code too. With `claude` or `codex`, a word the shell expands (`$P`, `"$@"`, `$'…'`, `$(…)`,
+  `{plugin,install}`, `plugi?`) or a word `xargs` adds counts as a group word, so `claude -p "$PROMPT"` is refused
+  as well. `dev ext update --apply` and `dev ext enable|disable --project` also check that you run them in a
+  terminal, and `--team` after a `--` no longer passes the guard as a team edit.
+- **The guard reads every level of a command for its git, gh, and file rules.** A `sh -c` or `eval` line, the
+  command `find -exec` or `xargs` runs, and the command a runner runs (`uv run`, `npx`, `npm exec`, `bun x`,
+  `yarn exec`, `timeout`) get the same rules as the command itself, so
+  `find . -exec sh -c 'git push --force origin main' \;` and `npm exec -- git push --force origin main` are refused
+  as `git push --force origin main` is.
+- **Only your own `dev install` vouches for an extension.** `dev install` and `dev update` started from a program's
+  code (`subprocess.run(['dev', 'install'])`, `os.system`, AppleScript's `do shell script`) are refused as the
+  typed command is. A `dev install` that runs outside your terminal anyway neither accepts a change made outside
+  devkit nor records what ships with the Codex app for the first time: it names them, and they stay as drift. The
+  first record names each MCP server with the command and arguments it runs.
+- **Every acceptance shows until you acknowledge it.** A process an agent starts in `screen`, `tmux`, or a Terminal
+  window can look like your terminal, so each change `dev install` or `dev ext update --apply` accepts and each
+  Codex app entry `dev install` records for the first time writes an `ext.accept` audit record (the entry, the
+  terminal, the parent processes), sends a desktop notification, and stays listed at the session start and in
+  `dev status` until you run the new `dev ext ack` in your terminal. The notification is a security notice:
+  `DEVKIT_NO_NOTIFY=1` and `progress.notify: false`, which an agent can set, do not turn it off. Each listed entry is
+  one short line without control, bidirectional, or zero-width characters, or other characters that render as
+  nothing (variation selectors, Hangul fillers). In Claude Code, the session start shows
+  that list to you as a message, and shows the last `dev ext ack` once with its time and terminal. An acceptance the
+  list cannot take (busy, a file that does not parse, or one that cannot be written, such as on a full disk) is not
+  made: the change stays as drift, and the refusal is audited.
+  The guard now reads what `screen`, `tmux`, `expect -c`, and AppleScript's `do script` run, refuses `open` of a
+  Terminal or iTerm window or a `.command` file and `xargs dev`, and skips a package manager's own options before
+  its verb (`npm --silent exec`, `pnpm -C . exec`, `uv --quiet run`, `uv run --with x`). It refuses a command that
+  holds a NUL character, and a file tool's or an MCP tool's path with one. Before, a NUL made the guard or the
+  crew's scope check after it fail, and the call went through.
+- **Agents cannot type into a terminal session; you can.** `screen` expands `$VAR` and `$:cap:` in what `-X stuff`
+  types and `stuff -k` types a terminal key, so no reading of the keys held. The guard now refuses typing outright,
+  as an allowlist that fails closed. It refuses `screen -X` and `-Q` (`stuff`, `exec`, and every other command sent
+  to a session, after `-S`, `-p`, `-r`, or `-x` too) and tmux's `send-keys`, `send-prefix`, `paste-buffer`,
+  `set-buffer`, `load-buffer`, `pipe-pane`, and `command-prompt`. It refuses a tmux command or option that carries a
+  command (`run-shell`, `if-shell`, `set-hook`, `source-file`, `bind-key`, a hook, `default-command`,
+  `default-shell`, `command-alias`, a `#(…)` format), and what can build a `#(…)` from pieces: `set-option` or
+  `setw` with `-a` or `-F`, a format with the `E` or `T` modifier (`#{E:@x}`), and a `$` or a backtick anywhere in
+  a tmux word, with spaces or without (`"$X(touch f)"` with `X='#'` is a `#(…)`), except in the shell command that
+  `new`, `new-window`, `split-window`, `respawn-*`, or `display-popup` starts, which the guard reads as `sh -c`. It
+  refuses a tmux command list (`\;`, `';'`, or a command tmux knows after a tmux call and a `;`): with `&&`, one
+  tmux command per call works. A new line ends the tmux call, so `tmux new -d -s x` with `set -e` on the next line
+  stays open. It refuses a configuration file (`screen -c`, `tmux -f`), a tmux command it does not know, and a
+  `screen` or `tmux` word the shell or a runner fills in without spaces (`$O`, `{}`, a glob). It does so for a name
+  tmux abbreviates (`send-k`), inside `sh -c`, `env`, `timeout`, `xargs`, `find -exec`, or `parallel`, and in a
+  program's code. `screen -ls`, `screen -dm <command>`, `tmux ls`, and `tmux new -d '<command>'` stay open, and the
+  guard still reads the command they start.
+- **The guard refuses a command it cannot read.** A command line with a quote that is never closed was allowed
+  unread, so `dev install # don't` ran `dev install` (bash ignores the apostrophe in the comment), and so did a
+  command on the line before an unmatched quote. Once heredoc bodies are set aside, the guard now refuses such a
+  line, also when the command hands it to a shell (`sh -c`, `eval`, a heredoc a shell reads); the message says to
+  close the quote or drop the comment's apostrophe. In a program that starts a process, a string literal the guard
+  cannot read is refused when it names `dev`, `claude`, `codex`, `tmux`, `screen`, `osascript`, or `open` as a whole
+  word (`os.system("dev install # don't")`, `execSync`, a `python3 -` heredoc); any other literal, such as
+  `print("don't")`, is data. A script file or a sourced file is read as before. `#` stays an ordinary character, so
+  the words after one are read as more commands. A backslash outside single quotes escapes the next character, so
+  `echo \'` opens no quote that hides the next line, and the guard reads each `-exec`, `-execdir`, `-ok`, and
+  `-okdir` command of a `find`, also after `\;` and inside `\( … \)`. A command with a backslash-newline is also
+  read with every pair removed, as bash joins the words (`dev \` with `install` on the next line is `dev install`),
+  and with the backslash at the end of a comment dropped, as bash ends a comment at its newline; a refusal in any
+  reading stands.
+- **Drift covers what devkit does not manage.** A plugin, MCP server, or skill folder installed outside the catalog,
+  for Claude Code and Codex, is reported as `not-in-catalog`. What ships with the Codex app is listed without drift
+  only when its own files vouch for it (a bundled plugin whose cached files are all byte-equal to the app bundle's)
+  or `dev install` recorded it (an MCP server that runs from the bundle, a runtime plugin, a bundled plugin the app
+  rewrote), and `dev install` names each one the first time; a later change shows as `changed`. A server in
+  `~/.codex/config.toml` written in a form devkit does not read (a dotted or quoted key, an inline table, a key at
+  the root, a quoted name) is never the app's, and a line no server owns makes none of them the app's. A required plugin that is not installed, or that a project turns off in `.claude/settings.json` or
+  `.claude/settings.local.json`, is reported as `required-off` with the file, and `dev doctor` points to
+  `dev config lock`. The lock now keeps a digest of each vendor plugin's files, so a rewritten version or commit
+  number no longer hides changed files, and a devkit skill whose folder is not devkit's copy shows as `changed`.
+- **Pins bind what runs.** An MCP server runs only through `npx` or `uvx`, the first package they run carries the
+  exact version, and variables that load other code or another registry (`NODE_OPTIONS`, `PYTHONPATH`, `DYLD_*`,
+  `LD_*`, `NPM_CONFIG_*`, …) are refused. `dev ext update` moves a skill pin only to a commit on the repository's
+  default branch, never to a fork's commit served under the same name, and changes nothing when the review cannot
+  be read. `dev ext update --apply` accepts only the version it reviewed, and `dev install` names each change it
+  accepts. An overlay copy of a devkit default keeps it required, and `dev ext add` refuses one, and a skill whose
+  name a devkit default already uses, for either agent, or that devkit puts in the shared skills folder itself (a
+  skill from its own tree, or `playwright-cli`): one name is one folder for both agents. Names are compared in any
+  case, as the macOS file system compares them, so `Playwright-CLI` is refused too. A skill name is ASCII letters,
+  digits, dot, dash, and underscore, and starts with a letter, digit, or underscore, so `.`, `..`, hidden names, and
+  another Unicode spelling of a name (which macOS opens as the same folder) are refused. `dev install` skips a
+  `skills.json` name that is not one folder name in the shared skills folder (`..`, `x/../other`), deleting nothing.
+
+### Known limits
+
+- Vendor marketplace plugins (`claude-plugins-official`, `openai-curated-remote`) are observed, not pinned: devkit
+  records what got installed and reports changes, but cannot hold them at a commit yet.
+- MCP servers started with `npx` are pinned at their top-level version only; their own dependencies are not.
+- The guard reads commands as typed. A program name built at run time (`$(printf claude)`, an alias), a script piped
+  into a shell, a command `tmux`, `screen`, `expect`, or a git alias starts later, and options that load a plugin
+  for one session only get through; drift at the session start, in `dev status`, and in `dev doctor` is the
+  backstop. [What the guard cannot see](docs/guard.md#what-the-guard-cannot-see) lists them.
+- `dev install`, `dev ext update --apply`, and `dev ext ack` take the process tree and the terminal as proof that
+  you typed them, and a process an agent starts through a launcher can look the same: `screen` or `tmux`, `expect`,
+  AppleScript's `do script`, `open` of a Terminal window or a `.command` file, or `launchctl`. Agents cannot type
+  into a `screen` or `tmux` session at all; the guard reads the command each launcher starts in the forms it can
+  read, but not a script file or a command built at run time. Quoting or brace expansion around the `dev`
+  command word (`$'dev'`, `$"dev"`, `dev {ext,} ack`) is not read by the guard's `dev` rules until 26.11.5; devkit's
+  own terminal check (`set_by_developer()`) still refuses those commands when an agent runs them directly. Two
+  comment lines that each hold an apostrophe are read as one quoted word until 26.11.5, so a command between them
+  (`ls # it's`, then `dev install # don't`) is not read. The
+  notification, the session-start message, and the audit trail are the backstop until a kernel-level check lands in
+  26.11.5. The notification shows
+  only on macOS, and only while notifications are allowed for Script Editor, the app macOS lists `osascript`
+  notifications under; an agent can change that setting, so the session-start message and the audit trail are the
+  lasting record. See
+  [Who changes extensions](docs/skills-and-plugins.md#who-changes-extensions-and-how-drift-shows).
+
+### Removed
+
+- **Context7 leaves both agents.** `dev install` uninstalls the Claude Code plugin and removes the Codex MCP server,
+  drops its `enabledPlugins` key, and audits each removal as `ext.retire`. Library docs now come from the project's
+  installed packages and framework MCP servers, then web search.
 
 ## [26.11.3] - 2026-11-06
 

@@ -210,7 +210,7 @@ _dev_here='tasks steps plans branches worktrees'
 _dev_spec() {
   c= o= v= p=
   case "$1" in
-    '') c='help ls go alias status clone new adopt open claude codex handoff-import handoff session task note plan progress time delivery lesson sleep jobs audit report rm mv cp files find grep diff stubs team initiative overview standup dashboard config agents calver plugin guard wt backup sync du free gc canary ci branch commit rebase push pr run release issue git gh test mcp desktop crew impeccable doctor install docs sec diagram setup prompt update docker version completion' o='-h --help' ;;
+    '') c='help ls go alias status clone new adopt open claude codex handoff-import handoff session task note plan progress time delivery lesson sleep jobs audit report rm mv cp files find grep diff stubs team initiative overview standup dashboard config agents calver plugin guard wt backup sync du free gc canary ci branch commit rebase push pr run release issue git gh test mcp desktop crew ext impeccable doctor install docs sec diagram setup prompt update docker version completion' o='-h --help' ;;
     'help') o='-h --help' ;;
     'ls') o='-h --help --offline --names --all --json' ;;
     'go') o='-h --help' p='l:projects:-:: l:worktrees:@1::' ;;
@@ -379,6 +379,15 @@ _dev_spec() {
     'crew delegate') o='-h --help --to --scope --after --estimate --files' v='--to=l:crew:-:: --scope=n --after=l:steps:-:: --estimate=n --files=n' p='*n' ;;
     'crew decline') o='-h --help --why' v='--why=n' p='*l:steps:-::' ;;
     'crew next') o='-h --help --first --why' v='--first=l:steps:-:: --why=n' ;;
+    'ext') c='ls outdated update add remove enable disable ack' o='-h --help' ;;
+    'ext ls') o='-h --help --agent --all --json -v --verbose' v='--agent=c:claude,codex' ;;
+    'ext outdated') o='-h --help --agent --json' v='--agent=c:claude,codex' p='n' ;;
+    'ext update') o='-h --help --to --why --agent --apply' v='--to=n --why=n --agent=c:claude,codex' p='n' ;;
+    'ext add') o='-h --help --agent --repo --ref --path --url --license --why --team --command' v='--agent=c:claude,codex --repo=n --ref=n --path=f --url=n --license=n --why=n --command=n' p='c:plugin,skill,mcp n' ;;
+    'ext remove') o='-h --help --agent --why --team' v='--agent=c:claude,codex --why=n' p='n' ;;
+    'ext enable') o='-h --help --agent --why --project' v='--agent=c:claude,codex --why=n' p='n' ;;
+    'ext disable') o='-h --help --agent --why --project' v='--agent=c:claude,codex --why=n' p='n' ;;
+    'ext ack') o='-h --help' ;;
     'impeccable') o='-h --help' p='*n' ;;
     'doctor') o='-h --help' ;;
     'install') o='-h --help --only --version --unverified --why --commit-template' v='--only=m:config,tools,cli,git,handoff,instructions,skills,claude,codex,desktop,docker,docs,launchd,prompt,shell --version=l:versions:-:: --why=n --commit-template=c:yes,no' ;;
@@ -387,7 +396,7 @@ _dev_spec() {
     'diagram') o='-h --help' p='*l:-:-:render,check,new:f' ;;
     'setup') o='-h --help --remove -y --yes --skip-packages' p='c:prompt,commit-template,shell' ;;
     'prompt') o='-h --help' p='c:refresh' ;;
-    'update') o='-h --help' ;;
+    'update') o='-h --help --check --quiet --record' ;;
     'docker') o='-h --help' p='c:up,down,status,trim,prune,autostart-on,autostart-off' ;;
     'version') o='-h --help' ;;
     'completion') o='-h --help' p='c:zsh,bash' ;;

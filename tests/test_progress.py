@@ -12,7 +12,7 @@ from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "lib"))
 
-from devkit import canary, continuity, core, prompt  # noqa: E402
+from devkit import canary, continuity, core, ext, prompt  # noqa: E402
 from devkit import progress as pg  # noqa: E402
 
 
@@ -30,7 +30,9 @@ def boundary(root, real_caller=False) -> list:
            mock.patch.object(pg, "TEAM_POLICY", Path(root) / "policy" / "progress.json", create=True),
            mock.patch.object(pg, "QUOTA", Path(root) / "quota"),  # the usage windows and the crew limit last seen
            mock.patch.object(continuity, "CONT", Path(root) / "continuity"),
-           mock.patch.object(prompt, "STATE", Path(root) / "prompt-state")]
+           mock.patch.object(prompt, "STATE", Path(root) / "prompt-state"),
+           # the session start marks the last `dev ext ack` shown in the acceptance list, next to the lock
+           mock.patch.object(ext, "lock_file", lambda: Path(root) / "ext-lock.json")]
     if not real_caller:
         out.append(mock.patch.object(pg, "caller", lambda *a, **k: {"caller": "main", "how": "test"}, create=True))
     return out
@@ -84,6 +86,39 @@ def launch(aid, kind, label, at=None, sid="s1"):
     pg.on_subagent("claude", {"session_id": sid, "agent_id": aid, "agent_type": kind}, True, now=at)
     pg.launch_result("claude", {"session_id": sid, "tool_use_id": f"toolu_{aid}", "tool_response": {"agentId": aid}},
                      now=at)
+
+
+class DesktopNotificationTests(unittest.TestCase):
+    def test_a_progress_notification_sends_its_text_and_title_to_osascript_as_arguments(self):
+        # B2-R6: json.dumps wrote the title's middle dot as a JSON escape, which AppleScript rejects (-2741), so every
+        # progress notification failed silently. As arguments the text needs no escaping and cannot run as script
+        calls = []
+
+        def sh(args, **kw):
+            calls.append([str(a) for a in args])
+            return 0, "", ""
+        text = 'Export → 3 steps " & (system info) & "'
+        with mock.patch.dict(core.CFG, {"progress": {}}), mock.patch.dict(os.environ, {}), \
+                mock.patch.object(core, "sh", sh):
+            os.environ.pop("DEVKIT_NO_NOTIFY", None)
+            pg.notify("run finished · acme/api", text)
+        self.assertEqual(calls, [["/usr/bin/osascript", "-e", "on run argv",
+                                  "-e", "display notification (item 1 of argv) with title (item 2 of argv)",
+                                  "-e", "end run", "--", text, "devkit · run finished · acme/api"]])
+
+    def test_a_lone_surrogate_from_any_caller_still_reaches_osascript(self):
+        # B2-R7: a lone surrogate cannot be passed to a process (UnicodeEncodeError, swallowed), so the notice was lost
+        calls = []
+
+        def sh(args, **kw):
+            calls.append([str(a) for a in args])
+            return 0, "", ""
+        with mock.patch.object(core, "sh", sh):
+            pg.notify("extension \ud800accepted", "7.0.1\udc85 414603b", security=True)
+        (argv,) = calls
+        for a in argv:
+            self.assertEqual(os.fsencode(a).decode("utf-8"), a)
+        self.assertEqual(argv[-2:], ["7.0.1? 414603b", "devkit · extension ?accepted"])
 
 
 class ProgressTests(unittest.TestCase):
