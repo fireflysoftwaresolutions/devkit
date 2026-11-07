@@ -1,6 +1,8 @@
 # Copyright (c) 2026 Firefly Software Solutions Inc.
 # SPDX-License-Identifier: Apache-2.0
 """Work items, locks, history, plans and handoff isolation. Run: python3 -m unittest discover -s tests -v"""
+import contextlib
+import io
 import re
 import sys
 import tempfile
@@ -11,7 +13,7 @@ from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "lib"))
 
-from devkit import core, guard, plans, work  # noqa: E402
+from devkit import audit, core, guard, plans, work  # noqa: E402
 
 A = {"user": "ana", "host": "mbp1", "agent": "claude", "session": "s1"}
 B = {"user": "bob", "host": "mbp2", "agent": "codex", "session": "s2"}
@@ -169,6 +171,102 @@ class ItemRecordTests(unittest.TestCase):
             work.update(work.load(it["path"]), "edit", why="CSV only", a=A, body="Only this.", title="Export CSV")
             again = work.load(it["path"])
             self.assertEqual((again["body"], again["title"]), ("Only this.", "Export CSV"))
+
+    def test_a_task_whose_title_is_in_brackets_is_found_moved_and_finished(self):
+        title = "[API] Export invoices [v2]"
+        with TempHandoff():
+            it = work.create("acme/api", title, why="a reason", a=A, links=["initiative:billing"])
+            for selector in ("Export invoices", "[API]"):
+                self.assertEqual(work.find(selector, "acme/api")["meta"]["id"], it["meta"]["id"])
+            work.update(work.find("[API]", "acme/api"), "move", why="start now", a=A, bucket="now")
+            work.release(work.load(it["path"]), a=A, status="done")
+            again = work.load(it["path"])
+            self.assertEqual((again["title"], again["meta"]["title"]), (title, title))
+            self.assertEqual((again["meta"]["bucket"], again["meta"]["status"]), ("now", "done"))
+            self.assertEqual(again["meta"]["links"], ["initiative:billing"])
+            self.assertIn(f"\n# {title}\n", it["path"].read_text())
+
+    def test_a_write_keeps_the_frontmatter_lines_devkit_does_not_know(self):
+        extra = ["estimate: 3", "labels: [api, export]", "reviewers:", "  - bob", "# set by the sprint tool"]
+        with TempHandoff():
+            it = work.create("acme/api", "Export invoices", why="a reason", a=A)
+            text = it["path"].read_text()
+            it["path"].write_text(text.replace("\n---\n# ", "\n" + "\n".join(extra) + "\n---\n# ", 1))
+            work.update(work.load(it["path"]), "move", why="start now", a=A, bucket="now")
+            front, _ = work.split_frontmatter(it["path"].read_text())
+            self.assertEqual([ln for ln in front.splitlines() if ln in extra], extra)
+            self.assertEqual(work.load(it["path"])["meta"]["bucket"], "now")
+
+
+class WriteRecordTests(unittest.TestCase):
+    def setUp(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        self.dir = Path(tmp.name)
+        self.path = self.dir / "record.md"
+
+    def test_a_write_may_not_drop_lines_of_the_frontmatter(self):
+        cases = {  # (the file on disk, the text a misread would write, the first line it would lose)
+            "another tool's frontmatter":
+                ("---\nauthor: ana\n---\n# Plan\n\nBody.\n", "---\nid: P-x\n---\n# Plan\n\nBody.\n", "author: ana"),
+            "a first --- rule": ("---\n\n# Plan\n\nIntro.\n\n---\n\nMore.\n", "---\nid: P-x\n---\nMore.\n", "# Plan"),
+            "a key devkit does not know": ("---\nid: T-x\nversion: 1\nestimate: 3\n---\n# Task\n",
+                                           "---\nid: T-x\nversion: 2\n---\n# Task\n", "estimate: 3"),
+        }
+        for shape, (before, after, first) in cases.items():
+            with self.subTest(shape):
+                self.path.write_text(before)
+                with self.assertRaises(work.RecordLossError) as cm:
+                    work.write_record(self.path, after)
+                self.assertIn(f"first “{first}”", str(cm.exception))
+                self.assertEqual(self.path.read_text(), before)
+
+    def test_a_reader_that_opened_the_record_before_a_write_reads_the_old_version_whole(self):
+        old = "---\nid: T-x\nversion: 1\n---\n# Task\n\nOld body.\n"
+        self.path.write_text(old)
+        with open(self.path) as reader:
+            work.write_record(self.path, old.replace("version: 1", "version: 2") + "\nNew line.\n")
+            self.assertEqual(reader.read(), old)
+        self.assertTrue(self.path.read_text().endswith("Old body.\n\nNew line.\n"))
+        self.assertEqual([p.name for p in self.dir.iterdir()], ["record.md"])
+
+    def test_a_write_that_fails_leaves_the_record_and_no_temporary_file(self):
+        old = "---\nid: T-x\nversion: 1\n---\n# Task\n"
+        self.path.write_text(old)
+        with mock.patch.object(work.os, "replace", side_effect=OSError("disk full")):
+            with self.assertRaises(OSError):
+                work.write_record(self.path, old.replace("version: 1", "version: 2"))
+        self.assertEqual(self.path.read_text(), old)
+        self.assertEqual([p.name for p in self.dir.iterdir()], ["record.md"])
+
+
+class LockJobReportTests(unittest.TestCase):
+    def test_a_lock_job_reports_the_item_it_cannot_rewrite(self):
+        real = work.render
+
+        def misreading(item):  # a parser bug: a line of the body goes missing
+            return real(item).replace("\nKeep this line.\n", "\n", 1)
+
+        jobs = {"lock renewal": (1, lambda: work.renew_locks(A, hours=8), "lock-renewal-skipped"),
+                "expired-lock release": (-1, work.expire_locks, "lock-release-skipped")}
+        with TempHandoff() as h, mock.patch.object(audit, "AUDIT", h.root / "audit"), \
+                mock.patch.object(audit, "policy_file", lambda: h.root / "no-policy.json"):
+            for job, (hours, run, op) in jobs.items():
+                with self.subTest(job):
+                    it = work.create("acme/api", f"Item for the {job}", body="Context.\n\nKeep this line.", a=A)
+                    it = work.claim(it, a=A, hours=hours)
+                    before = it["path"].read_text()
+                    err = io.StringIO()
+                    with mock.patch.object(work, "render", misreading), contextlib.redirect_stderr(err):
+                        self.assertFalse(run())  # nothing renewed or released
+                    self.assertEqual(it["path"].read_text(), before)
+                    self.assertIn(f"{job}: left ", err.getvalue())
+                    self.assertIn(it["path"].name, err.getvalue())
+                    self.assertIn("“Keep this line.”", err.getvalue())
+                    recs = [r for r in audit.query(days=1, action="handoff.record-skipped")
+                            if r["target"] == f"items/acme/api/{it['path'].name}"]
+                    self.assertEqual([(r["outcome"], r["detail"]) for r in recs],
+                                     [("blocked", f"{it['meta']['id']}: {op}")])
 
 
 class PlanTests(unittest.TestCase):

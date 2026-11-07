@@ -267,8 +267,21 @@ disk, and stops when the new text would lose lines that the command does not cha
 
 1. If the file changed after the command read it (you edited it, or a sync pulled a teammate's change), run the
    command again. It reads the current file.
-2. If it refuses again, devkit misread the file. Leave the file as it is, and report the bug with the file and the
+2. If the quoted line is the task's `#` heading, the heading was edited by hand. devkit writes the heading from the
+   `title` field, so set the title to that heading, then run your command again:
+
+   ```bash
+   dev task edit <id> --title "<that heading>" --why "the heading was edited by hand"
+   ```
+
+3. If it still refuses, devkit misread the file. Leave the file as it is, and report the bug with the file and the
    message.
+
+The sync's lock jobs, which renew your locks and release expired ones, skip an item they can't write for the same
+reason and leave it as it is. They say so in `~/.local/state/devkit/logs/sync.log` (`dev jobs logs sync` for the
+hourly run), in a line that starts with `lock renewal: left <file> as it is` or `expired-lock release: left <file> as
+it is`, and in the audit log: `dev audit --action handoff.record-skipped` lists each one. Fix the file with the steps
+in the preceding list, and the next sync renews or releases its lock.
 
 ### The handoff repository does not push
 

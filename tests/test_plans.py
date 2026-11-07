@@ -103,18 +103,40 @@ class ReviseTests(unittest.TestCase):
         with TempPlans() as t:
             path = t.raw(record(body))
             before = path.read_text()
-            real = plans._split
+            real = plans._read
 
             def misreading(text):  # a parser bug: the last line of the body goes missing
-                meta, b, log = real(text)
-                return meta, b.rsplit("\n", 1)[0], log
+                meta, extra, b, log = real(text)
+                return meta, extra, b.rsplit("\n", 1)[0], log
 
-            with mock.patch.object(plans, "_split", misreading):
-                with self.assertRaises(ValueError) as cm:
+            with mock.patch.object(plans, "_read", misreading):
+                with self.assertRaises(work.RecordLossError) as cm:
                     plans.revise(path, "a revision", a=A)
             self.assertIn("And this one.", str(cm.exception))
             self.assertIn("1 line", str(cm.exception))
             self.assertEqual(path.read_text(), before)
+
+    def test_adopting_keeps_every_line_of_a_plan_that_starts_with_three_dashes(self):
+        raws = {
+            "another tool's frontmatter": "---\nauthor: ana\ntags: [api, export]\n---\n# Plan\n\nBody.\n",
+            "a first --- rule": "---\n\n# Plan\n\nIntro.\n\n---\n\nMore.\n",
+        }
+        for shape, raw in raws.items():
+            with self.subTest(shape), TempPlans() as t:
+                path = t.raw(raw)
+                meta = plans.revise(path, "adopt the hand-written plan", a=A)
+                self.assertEqual(plans._split(path.read_text())[1], raw.strip("\n"))
+                self.assertEqual((meta["title"], meta["id"][:2]), ("Plan", "P-"))
+                self.assertFalse(plans.needs_revision(path))
+
+    def test_revise_keeps_the_frontmatter_lines_devkit_does_not_know(self):
+        extra = ["owner: ana", "reviewers:", "  - bob"]
+        with TempPlans() as t:
+            path = t.raw(record("# Plan\n\nBody.").replace("version: 1\n", "version: 1\n" + "\n".join(extra) + "\n"))
+            plans.revise(path, "a revision", a=A)
+            front, _ = work.split_frontmatter(path.read_text())
+            self.assertEqual([ln for ln in front.splitlines() if ln in extra], extra)
+            self.assertIn("version: 2", front.splitlines())
 
 
 if __name__ == "__main__":
