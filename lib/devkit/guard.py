@@ -3561,13 +3561,15 @@ def _ro_dev(args) -> str | None:
 #
 # The impeccable skill's launcher (a sh script) runs the engine binary beside it. Read as a script, its `exec "$bin"`
 # and `"$1" engine-probe` name their program at run time, which the gate counts as tier 2, so every lane was refused.
-# The launcher devkit installed is that engine: run by its path, with the content and the engine the skills step
-# recorded (setup.install_impeccable_engine, STATE/skill-engines.json, where agents may not write), it is not read as
-# a script. A command that sets or exports a variable (IMPECCABLE_BIN picks the engine; PATH and HOME change what it
-# runs), or a session with IMPECCABLE_BIN, gives it no trust (Security engineer, M486). Read-only lanes run only its
-# read verbs with their reading flags (the skill's reference: context loads PRODUCT.md and DESIGN.md, detect scans
-# local HTML and CSS, doctor without --fix reports); init, document, extract, live, generate and the rest write files
-# or start a session and stay with write lanes.
+# The launcher devkit installed is that engine: run by its own path (not a link to it nor a path through `..`, which
+# make it run the engine beside that path; the Code reviewer's review of 11fd55e), with the content and the engine
+# the skills step recorded (setup.install_impeccable_engine, STATE/skill-engines.json, where agents may not write), it
+# is not read as a script. A command that sets or exports a variable (IMPECCABLE_BIN picks the engine; PATH and HOME
+# change what it runs), or a session with IMPECCABLE_BIN, gives it no trust (Security engineer, M486). Read-only
+# lanes run only its read verbs with their reading flags (the skill's reference: context loads PRODUCT.md and
+# DESIGN.md, detect scans local HTML and CSS, not a URL or anything that could pass for a host, doctor without --fix
+# reports); init, document, extract, live, generate and the rest write files or start a session and stay with write
+# lanes.
 
 # verb -> (flags that take a value, flags alone, whether local paths may follow)
 IMPECCABLE_READS = {
@@ -3578,12 +3580,15 @@ IMPECCABLE_READS = {
 }
 _ENV_SETTERS = frozenset({"export", "declare", "typeset", "readonly", "local", "set", "unset", "env", "source", ".",
                           "eval", "alias"})
+# a first path part detect could take for a host: localhost, or dotted names and addresses (example.com, 10.0.0.2)
+_HOSTLIKE = re.compile(r"(?:localhost|[A-Za-z0-9_-]+(?:\.[A-Za-z0-9_-]+)+)(?:/|$)", re.I)
 _ENGINE_SEEN = {}  # engine path -> the (dev, inode, size, mtime, ctime) whose content matched the digest, this process
 
 
 def impeccable_verb(argv, cwd) -> str | None:
     """The verb (its first argument, '' for none) when `argv` runs the impeccable launcher devkit installed: its path
-    resolves to the recorded launcher below devkit's skills folder, the launcher has the recorded SHA-256, the engine
+    resolves to the recorded launcher below devkit's skills folder, is not a link and has no `..`, and its folder is
+    the launcher's (through a link to a folder at most), the launcher has the recorded SHA-256, the engine
     beside it for this platform is the recorded file (the same (dev, inode, size, mtime, ctime), else the same
     SHA-256), and the session sets no IMPECCABLE_BIN. None otherwise."""
     if not argv or os.path.basename(str(argv[0])) != "impeccable" or "/" not in str(argv[0]) or \
@@ -3597,6 +3602,16 @@ def impeccable_verb(argv, cwd) -> str | None:
         launcher, p = real(str(rec.get("launcher") or "")), resolve(argv[0], cwd)
         if p == UNKNOWN or not rec.get("launcher") or str(p) != launcher or \
                 not launcher.startswith(real(str(SKILLS_SHARE)) + os.sep):
+            return None
+        # The launcher runs the engine below the folder it finds with `cd "$(dirname "$0")"`: the folder of the path
+        # it was run by, not of the file a link points to, with `..` taken by name from the shell's own path. So the
+        # path must not be a link nor go through `..`, and its folder must be the launcher's (a link to that folder,
+        # such as ~/.claude/skills/impeccable, still reaches it); else it runs whatever engine sits beside the path.
+        typed = os.path.expanduser(str(argv[0]))
+        if ".." in typed.split("/"):
+            return None
+        at = os.path.normpath(os.path.join(str(cwd), typed))
+        if os.path.islink(at) or real(os.path.dirname(at)) != os.path.dirname(launcher):
             return None
         if hashlib.sha256(Path(launcher).read_bytes()).hexdigest() != rec.get("launcher_sha256"):
             return None
@@ -3632,9 +3647,13 @@ def _ro_impeccable(verb, args) -> str | None:
         if a.split("=", 1)[0] in takes:
             i += 1 if "=" in a else 2
             continue
-        if a not in alone and (a.startswith("-") or not paths or "://" in a):
+        if a not in alone and (a.startswith("-") or not paths):
             return (f"`impeccable {verb} {a}` is not one of its reading flags or a local path, so a write lane runs "
                     f"it")
+        if a not in alone and (":" in a or a.startswith("//") or _HOSTLIKE.match(a)):
+            local = "" if ":" in a or a.startswith("//") else f"; a local file with this name is `./{a}`"
+            return (f"`impeccable {verb} {a}` names a URL or a host (a scheme, a port, a domain or an address), and "
+                    f"detect fetches those, so a write lane runs it. A read-only lane scans a local path{local}")
         i += 1
     return None
 

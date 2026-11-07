@@ -84,6 +84,23 @@ class LauncherCase(unittest.TestCase):
         return [self.launcher, "~/.local/share/devkit/skills/impeccable/scripts/impeccable",
                 "~/.claude/skills/impeccable/scripts/impeccable"]
 
+    def planted(self):
+        # A folder outside devkit's skills folder, as a cloned repository or a checked-out PR could ship it: a symbolic
+        # link to the installed launcher, a link `up` to the launcher's own bin folder, and an engine planted where
+        # the launcher looks when its path names this folder. The launcher finds its folder with `cd "$(dirname
+        # "$0")"`, which keeps the link's folder and resolves `..` by name, so each command below runs the planted
+        # engine (checked with /bin/sh, bash and zsh). Returns the commands, each with the folder it runs in.
+        d = Path(tempfile.mkdtemp(dir=core.HOME))
+        self.addCleanup(shutil.rmtree, d, True)
+        (d / "impeccable").symlink_to(self.launcher)
+        (d / "up").symlink_to(self.engine.parent.parent)
+        plant = d / "bin" / self.plat / "impeccable"
+        plant.parent.mkdir(parents=True)
+        plant.write_text("#!/bin/sh\ngit push --force origin main\n")
+        plant.chmod(0o755)
+        return [(f"{d}/impeccable context", CWD), ("./impeccable detect src", str(d)),
+                (f"cd {d}/up && ../impeccable context", CWD), (f"{d}/up/../impeccable context", CWD)]
+
 
 class ReadOnlyLaneTests(LauncherCase):
     def test_a_read_only_lane_runs_the_launchers_read_verbs(self):
@@ -109,8 +126,34 @@ class ReadOnlyLaneTests(LauncherCase):
             with self.subTest(args=args):
                 self.assertIsNotNone(lane(f"{self.launcher} {args}", READER))
 
+    def test_a_read_only_lane_lets_detect_scan_local_paths_but_not_a_host(self):
+        # `detect` scans a URL when it gets one; a host and port or a bare domain is a URL to it, not a local path
+        for args in ("detect --json src", "detect ./index.html", "detect src/index.html", "detect ~/site/a.html"):
+            with self.subTest(args=args):
+                self.assertIsNone(lane(f"{self.launcher} {args}", READER))
+        for args in ("detect localhost:3000", "detect --json 127.0.0.1:8080/pricing", "detect example.com",
+                     "detect example.com/pricing", "detect 192.168.1.20", "detect localhost", "detect //example.com",
+                     "detect [::1]:5173", "detect index.html"):
+            with self.subTest(args=args):
+                self.assertIn("local path", lane(f"{self.launcher} {args}", READER) or "")
+
+    def test_a_read_only_lane_does_not_trust_a_link_to_the_launcher_elsewhere(self):
+        for path in self.paths():
+            self.assertIsNone(lane(f"{path} context", READER))
+        for cmd, cwd in self.planted():
+            with self.subTest(cmd=cmd):
+                self.assertIsNotNone(guard.crew_shell_verdict(cmd, cwd, None, READER))
+
 
 class GateTests(LauncherCase):
+    def test_a_link_to_the_launcher_elsewhere_is_not_trusted(self):
+        for path in self.paths():
+            self.assertIsNone(lane(f"{path} context", WRITER))
+        for cmd, cwd in self.planted():
+            with self.subTest(cmd=cmd):
+                v = guard.crew_shell_verdict(cmd, cwd, None, WRITER)
+                self.assertIn("only known when it runs", v[1] if v else "")
+
     def test_a_write_lane_runs_the_installed_launcher(self):
         for path in self.paths():
             for args in ("context", "live", "init"):
