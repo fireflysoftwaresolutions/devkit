@@ -279,6 +279,44 @@ class MainSessionTests(WiringCase):
         self.assertIn("DEVKIT_GUARD=off", out)
 
 
+class CommandTextRecordTests(WiringCase):
+    # the compliance review of 2026-11-07, change 1: the hooks record a refused call (guard.deny) and a call left
+    # without a result (calls.unclosed) with the command line, and the records go to the handoff repository for 13
+    # months, so they keep the command without its message text. The refusal the agent reads stays whole.
+    MESSAGE = "a secret plan for acme"
+    MASKED = "dev crew ask [message text not recorded: 22 characters]"
+
+    def stored(self) -> str:
+        return "".join(f.read_text() for f in sorted(audit.AUDIT.glob("*.jsonl")))
+
+    def test_a_refused_dev_crew_ask_records_no_message_text(self):
+        # the main session's call, refused by the guard's own rules (spec C11: a DEVKIT_* variable set for dev)
+        why = self.deny(self.hook("guard", self.bash(f'DEVKIT_X=1 dev crew ask "{self.MESSAGE}"'), real_guard=True))
+        self.assertTrue((why or "").startswith("This sets DEVKIT_X for a devkit command."), why)
+        self.assertEqual([r["target"] for r in self.records("guard.deny")], [f"DEVKIT_X=1 {self.MASKED}"])
+        self.assertNotIn("secret plan", self.stored())
+
+    def test_a_lanes_refused_dev_crew_ask_records_no_message_text(self):
+        # a member's call devkit cannot route to its lane (the hooks' own refusal, cut at 200 characters)
+        pg.start("Work", plan=["parser"])
+        launch("a_tank", "devkit:tank", "Tank: parser")
+        why = self.deny(self.hook("guard", self.bash(f'cd /tmp && dev crew ask "{self.MESSAGE}"', aid="a_tank")))
+        self.assertTrue(why, "the lane's compound call is refused")
+        recs = self.records("guard.deny")
+        self.assertEqual([r["target"] for r in recs], [f"cd /tmp && {self.MASKED}"])
+        self.assertNotIn("secret plan", self.stored())
+
+    def test_a_call_left_without_a_result_records_no_message_text(self):
+        t0 = time.time()
+        data = self.bash(f'dev crew ask "{self.MESSAGE}"')
+        data["tool_input"]["timeout"] = 120000  # the Bash tool's timeout, in milliseconds
+        pg.call_opened("claude", data, now=t0)
+        self.assertEqual(pg.open_calls("s1", now=t0 + 121), [])
+        self.assertEqual([r["detail"] for r in self.records("calls.unclosed")],
+                         [f"{self.MASKED} (no result within 120 s)"])
+        self.assertNotIn("secret plan", self.stored())
+
+
 class ConfigTests(unittest.TestCase):
     def test_the_guard_hook_sees_webfetch_and_mcp_tools(self):
         conf = json.loads((HOME / "config" / "claude" / "settings.json").read_text())

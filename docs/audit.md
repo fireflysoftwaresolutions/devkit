@@ -67,6 +67,38 @@ devkit keeps these out of every record it writes:
 - **Prompt text and message text.** A crew message is recorded by its id, sender, recipient, and length, and
   `dev crew ask` and `dev crew answer` by their naming arguments (`--to`, the message id) and the length of the text.
   Crew messages often quote the developer's requests, so their text stays in the session's own records.
+- **Free text in a command line.** Since 26.11.5, a record that keeps a command line keeps the program, the
+  subcommands, the ids (`D<n>`, `M<n>`, a task number), the option names, the values that name something (a member,
+  a step, a path, a branch, a number), and the operators and redirections. Each free-text argument becomes
+  `[text not recorded: N characters]`, where N is the length of the argument, or `N+` when the command was cut inside
+  it. `dev crew ask` and `dev crew answer` keep their marker `[message text not recorded: N characters]`, and
+  `dev crew decide` keeps `[free text: N characters]`. These fields hold a command line:
+
+  | Record | Field | What it holds |
+  | --- | --- | --- |
+  | `dev.*` | `target` | The `dev` command's arguments |
+  | `guard.*`, such as `guard.deny`, `guard.ask`, and `guard.bypass` | `target` | The call the guard refused or asked about, or that an escape hatch let through |
+  | `guard.irreversible` | `detail` | The words of the irreversible command |
+  | `calls.unclosed` | `detail` | The call that got no result, and how long devkit waited for it |
+  | `job.*` | `target` | The job's `dev` arguments |
+  | Any record | `evidence.command` | A command line |
+
+  These arguments are free text:
+  - In `dev`: the positional text of `dev task add`, `dev plan new`, `dev lesson add`,
+    `dev progress start|note|step|block|done|add`, and `dev crew ask|answer|decide|brief|delegate|route`; and the
+    value of `--why`, `--check`, `--next`, `--title`, `--body`, `-m` or `--message`, `--log`, `--note`, `--done`,
+    `--evidence`, `--cause`, `--prevent`, `--detect`, `--fix`, `--happened`, `--error`, `--retire-when`,
+    `--verified`, `--breaking`, `--options`, `--flaky`, `--plan`, `--search`, and `--grep`, in any `dev` command,
+    also when it is written `--why=…`.
+  - In `git commit`, `git tag`, `git merge`, `git stash`, and `git notes`: the value of `-m` or `--message`. In
+    `gh pr`, `gh issue`, and `gh release` commands that write text: the value of `--title`, `--body`, `--subject`,
+    `--notes`, or `--comment`, and of their short forms.
+  - In any command: a heredoc's body, a here-string, and a comment.
+
+  For example, `dev task add "Fix the Acme export" --why "Ana asked" --type bug` is recorded as
+  `add [text not recorded: 19 characters] --why [text not recorded: 9 characters] --type bug`. Only the stored
+  record changes: the guard decides as before, and the agent still reads the whole refusal. Other arguments are kept,
+  so a name passed some other way, such as `git commit --author` or a filename, can still reach a record.
 - **The developer's approval lines.** Evidence for a decision or a grant (`crew.evidence`) keeps what it covers (the
   decision id, or a grant's action and target), the channel, and the id of the developer's message in the
   transcript. Of the line itself (`approve D<n>: …`, or the question and answer from the question tool) it keeps only
@@ -105,7 +137,8 @@ Records written before 26.11.3 can hold what the preceding rules now keep out. T
 format, and v2 records sealed before the fix, some of which hold crew message text or a home path. devkit cleans every
 record with the current rules whenever it reads one, so `dev audit`, `dev audit show`, and `dev audit export` do not
 show that text. A v2 record that the cleaning changed is marked `"cleaned": true`. Its `hash` still covers the stored
-line, which is what `dev audit verify` checks.
+line, which is what `dev audit verify` checks. Records written before 26.11.5 can also hold the free text of a
+command line, and reading masks it the same way.
 
 The stored lines still hold the text, in three places:
 

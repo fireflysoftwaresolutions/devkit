@@ -8,6 +8,7 @@ import io
 import json
 import os
 import re
+import shlex
 import socket
 import stat
 import subprocess
@@ -424,9 +425,11 @@ class PersonalDataTests(AuditCase):
         cases = {
             "ask --to Persephone please confirm the Acme roadmap": "ask --to Persephone",
             "answer M12 yes, the roadmap for Acme is fine": "answer M12",
+            # 26.11.5: each text is replaced where it stands, so the option names stay (compliance review, change 1)
             "ask --decision which roadmap for Acme? --options A: ship | B: wait --recommend A --irreversible push":
-                "ask --decision --recommend A --irreversible push",
+                "ask --decision [message text not recorded: 23 characters] --options",
             "--json ask --to=neo the roadmap": "--json ask --to=neo",
+            "delegate the Acme roadmap --to Tank": "delegate",  # what the member should do is free text too
         }
         for target, kept in cases.items():
             with self.subTest(target=target[:20]):
@@ -435,7 +438,7 @@ class PersonalDataTests(AuditCase):
                 self.assertTrue(got.startswith(kept + " "), got)
                 self.assertNotIn("roadmap", got)
                 self.assertIn("characters", got)
-        for target in ("mode auto --approve push", "delegate api --to Tank"):
+        for target in ("mode auto --approve push", "decline 3 --why"):
             with self.subTest(target=target):
                 audit.record("dev.crew", target, "", "ok")
                 self.assertEqual(audit.query(action="dev.crew")[-1]["target"], target)
@@ -661,6 +664,137 @@ class PersonalDataTests(AuditCase):
                 self.assertNotIn(VALUE, out)
                 self.assertNotIn("/Users/fixture-user", out)
                 self.assertIn("fixture-host", out)  # who acted stays: the actor is not text people wrote
+
+
+class CommandTextTests(AuditCase):
+    # the compliance review of 2026-11-07, change 1: under D6 = A the records go to the handoff repository for 13
+    # months and are never rewritten, so a record that keeps a command line keeps the program, the subcommands, the
+    # ids and the option names, and each free-text argument only as its length. Tests carry comments, not docstrings.
+    def stored(self) -> str:
+        return (audit.AUDIT / time.strftime("%Y-%m.jsonl")).read_text()
+
+    def test_dev_task_add_keeps_its_options_but_not_the_title_or_the_reason(self):
+        argv = shlex.split('task add "Fix the Acme invoice export" --why "Ana asked on Friday" --type bug')
+        audit.record("dev." + argv[0], " ".join(argv[1:])[:300], "", "ok")  # as cli.py records every dev command
+        self.assertEqual(audit.query(action="dev.task")[-1]["target"],
+                         "add [text not recorded: 27 characters] --why [text not recorded: 19 characters] --type bug")
+        for words in ("Acme", "Ana", "Friday"):
+            self.assertNotIn(words, self.stored())
+
+    def test_a_shell_command_keeps_its_options_and_ids_but_not_its_free_text(self):
+        # what the hooks keep of a refused call: the shell text, quotes, operators and redirections included
+        cases = {
+            'dev crew answer M12 "yes, ship the Acme roadmap"':
+                "dev crew answer M12 [message text not recorded: 26 characters]",
+            'dev crew decide D3 "after the Acme call"': "dev crew decide D3 [free text: 19 characters]",
+            'dev progress step "Acme parser done" --check="12 tests pass" --next "review"':
+                "dev progress step [text not recorded: 16 characters] --check=[text not recorded: 13 characters] "
+                "--next [text not recorded: 6 characters]",
+            'cd ~/x && dev handoff --log "shipped; next: Acme rooms" > /dev/null 2>&1':
+                "cd ~/x && dev handoff --log [text not recorded: 25 characters] > /dev/null 2>&1",
+            "git commit -am \"fix: keep Acme's totals\" && git push":
+                "git commit -am [text not recorded: 23 characters] && git push",
+            "gh pr create --title \"Acme export\" --body \"Ana's notes\" --base main":
+                "gh pr create --title [text not recorded: 11 characters] --body [text not recorded: 11 characters] "
+                "--base main",
+        }
+        for cmd, kept in cases.items():
+            with self.subTest(cmd=cmd[:24]):
+                audit.record("guard.deny", cmd, "refused for the test", "deny", tool="Bash")
+                self.assertEqual(audit.query(action="guard.deny")[-1]["target"], kept)
+        for words in ("Acme", "Ana", "roadmap", "shipped"):
+            self.assertNotIn(words, self.stored())
+
+    def test_a_heredoc_body_is_free_text(self):
+        cases = {"cat > notes.md <<'EOF'\nAna's salary review\nEOF":
+                 "cat > notes.md <<'EOF'\n[text not recorded: 19 characters]\nEOF",
+                 "git commit -m \"$(cat <<'EOF'\nfix: Acme's totals\n\nIt's Ana's fix\nEOF\n)\"":
+                 "git commit -m [text not recorded: 54 characters]"}
+        for cmd, kept in cases.items():
+            with self.subTest(cmd=cmd[:12]):
+                audit.record("guard.deny", cmd, "", "deny")
+                self.assertEqual(audit.query(action="guard.deny")[-1]["target"], kept)
+        self.assertNotIn("Ana", self.stored())
+
+    def test_a_command_cut_inside_its_text_records_a_lower_bound(self):
+        # the hooks cut a refused command at 200 characters, here inside the quoted message
+        audit.record("guard.deny", ('dev crew ask "' + "x" * 190 + '"')[:200], "", "deny")
+        self.assertEqual(audit.query(action="guard.deny")[-1]["target"],
+                         "dev crew ask [message text not recorded: 186+ characters]")
+
+    def test_the_evidence_command_is_masked_like_the_target(self):
+        audit.record("guard.deny", "Bash", "", "deny", command='dev crew ask "a secret plan for acme"')
+        self.assertEqual(audit.query(action="guard.deny")[-1]["evidence"]["command"],
+                         "dev crew ask [message text not recorded: 22 characters]")
+        self.assertNotIn("secret plan", self.stored())
+
+    def test_records_without_free_text_are_kept_as_they_are(self):
+        cases = [("guard.deny", "rm -rf src", ""),
+                 ("guard.deny", "python3 -m unittest tests.test_audit && ruff format --check src", ""),
+                 ("guard.ask", "git push origin feat/x", ""),
+                 ("guard.irreversible", "main", "git push origin main"),
+                 ("guard.irreversible", "#12", "gh pr merge 12 --squash"),  # its target is no command line
+                 ("calls.unclosed", "main", "sleep 900 (no result within 120 s)"),
+                 ("dev.wt", "new feat/invoice-export", ""),
+                 ("dev.progress", "assign api --to Tank --scope lib/**", ""),
+                 ("dev.task", "done 3", ""),
+                 ("job.sync", "sync --scheduled --quiet", "")]
+        for action, target, detail in cases:
+            audit.record(action, target, detail, "ok")
+        stored = [json.loads(ln) for ln in self.stored().splitlines() if '"audit.config"' not in ln]
+        self.assertEqual([(r["action"], r["target"], r["detail"]) for r in stored], cases)
+        read = [r for r in audit.query(days=1) if r["action"] != "audit.config"]
+        self.assertEqual(read, stored)  # read back as stored, not marked cleaned
+
+    def test_a_record_sealed_before_the_rule_is_masked_on_read_and_still_verifies(self):
+        # records written by 26.11.3 and 26.11.4 hold the text; the current rules write a record that reads back as
+        # it was stored
+        old = [("guard.deny", 'DEVKIT_X=1 dev crew ask "a secret plan for acme"', "refused"),
+               ("calls.unclosed", "main", 'dev crew ask "a secret plan for acme" (no result within 120 s)'),
+               ("dev.task", "add a secret plan for acme --why Ana asked", "")]
+        for action, target, detail in old:
+            ts = round(time.time(), 3)
+            audit._append({"v": 2, "id": audit.new_id(ts), "ts": ts, "time": audit.iso(ts),
+                           "actor": {"user": "fixture-user", "host": "fixture-host", "agent": "claude", "session": ""},
+                           "action": action, "category": "change", "severity": "info", "target": target,
+                           "detail": detail, "outcome": "ok"})
+        for action, target, detail in old:
+            audit.record(action, target, detail, "deny")
+        recs = [r for r in audit.query(days=1) if r["action"] != "audit.config"]
+        sealed, new = recs[:3], recs[3:]
+        self.assertEqual([r.get("cleaned") for r in sealed], [True] * 3)
+        self.assertEqual([(r["target"], r["detail"]) for r in sealed],
+                         [("DEVKIT_X=1 dev crew ask [message text not recorded: 22 characters]", "refused"),
+                          ("main", "dev crew ask [message text not recorded: 22 characters] (no result within 120 s)"),
+                          ("add [text not recorded: 22 characters] --why [text not recorded: 9 characters]", "")])
+        self.assertEqual([(r["target"], r["detail"]) for r in new], [(r["target"], r["detail"]) for r in sealed])
+        stored_new = [json.loads(ln) for ln in self.stored().splitlines()][-3:]
+        self.assertEqual(new, stored_new)  # a record the current rules wrote reads back as stored, unmarked
+        self.assertNotIn("secret plan", self.stored().split("\n", 3)[-1])
+        self.assertTrue(audit.verify(team=False)["ok"])
+
+    def test_every_free_text_argument_of_dev_is_classified(self):
+        # the tables follow dev's parser: every option that takes a value is free text or names something, and every
+        # command with a free-text positional lists its positionals in the parser's order. A new flag or command
+        # (dev room, 26.11.6) fails here until it is classified, so its text cannot reach a record unmasked
+        import argparse
+        from devkit import cli
+        valued, positionals = set(), {}
+
+        def walk(p, path):
+            for act in p._actions:
+                if isinstance(act, argparse._SubParsersAction):
+                    for name, sub in act.choices.items():
+                        walk(sub, path + [name])
+                elif act.option_strings and act.nargs != 0 and not isinstance(act, argparse._HelpAction):
+                    valued.update(act.option_strings)
+                elif not act.option_strings:
+                    positionals.setdefault(" ".join(path), []).append(act.dest)
+        walk(cli.build_parser(), [])
+        self.assertEqual(sorted(valued - audit.TEXT_OPTIONS - audit.NAME_OPTIONS), [])
+        self.assertEqual(sorted(audit.TEXT_OPTIONS & audit.NAME_OPTIONS), [])
+        with_text = {k: tuple(v) for k, v in positionals.items() if set(v) & audit.TEXT_ARGS}
+        self.assertEqual(with_text, dict(audit.COMMAND_ARGS))
 
 
 class IntegrityTests(AuditCase):
@@ -947,15 +1081,15 @@ class ExportTests(AuditCase):
     def test_forward_to_a_file_and_to_syslog(self):
         sink = self.root / "siem" / "devkit.jsonl"
         core.CFG["audit"]["forward"] = str(sink)
-        audit.record("dev.task", "add z")
-        self.assertEqual(json.loads(sink.read_text().splitlines()[-1])["target"], "add z")
+        audit.record("dev.task", "done 7")
+        self.assertEqual(json.loads(sink.read_text().splitlines()[-1])["target"], "done 7")
         srv = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         srv.bind(("127.0.0.1", 0))
         srv.settimeout(5)
         core.CFG["audit"]["forward"] = f"syslog://127.0.0.1:{srv.getsockname()[1]}"
-        audit.record("dev.task", "add w")
+        audit.record("dev.task", "done 8")
         data = ""
-        while "add w" not in data:  # the settings change is forwarded first
+        while "done 8" not in data:  # the settings change is forwarded first
             data = srv.recv(65536).decode()
         srv.close()
         self.assertIn("CEF:0|Firefly Software Solutions|devkit|", data)
@@ -1018,11 +1152,11 @@ class CommandTests(AuditCase):
         return rc, out.getvalue()
 
     def test_verify_exits_1_at_a_broken_link_and_records_the_check(self):
-        audit.record("dev.task", "add 1")
-        audit.record("dev.task", "add 2")
+        audit.record("dev.task", "done 1")
+        audit.record("dev.task", "done 2")
         self.assertEqual(self.run_cmd("verify")[0], 0)
         f = audit.AUDIT / time.strftime("%Y-%m.jsonl")
-        f.write_text(f.read_text().replace("add 1", "add 9"))
+        f.write_text(f.read_text().replace("done 1", "done 9"))
         rc, out = self.run_cmd("verify")
         self.assertEqual(rc, 1)
         self.assertIn("line 1", out)
@@ -1044,10 +1178,10 @@ class CommandTests(AuditCase):
         self.assertEqual(self.run_cmd("--since", "yesterday")[0], 2)
 
     def test_queries_print_their_records(self):
-        audit.record("dev.task", "add x", "", "ok", project="acme/app")
+        audit.record("dev.task", "done 3", "", "ok", project="acme/app")
         rc, text = self.run_cmd("--project", "acme/app", "--format", "csv")
         rows = list(csv.reader(io.StringIO(text)))
-        self.assertEqual((rc, len(rows), rows[1][rows[0].index("target")]), (0, 2, "add x"))
+        self.assertEqual((rc, len(rows), rows[1][rows[0].index("target")]), (0, 2, "done 3"))
         rc, text = self.run_cmd("stats", "--json")
         self.assertEqual((rc, json.loads(text)["categories"]["change"]), (0, 1))
         rc, text = self.run_cmd("config")
