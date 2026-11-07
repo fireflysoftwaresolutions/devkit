@@ -1447,6 +1447,10 @@ def crew_decision(question: str, options=None, recommend: str = "", irreversible
         perf = ""
         if act and opts:
             perf = _named_option(opts, performs, prefix=True) if performs else _default_performs(opts, rec)
+            if perf and performs and _refuses(perf):  # an explicit "B: no" would let a "no" open the action
+                raise StepError(f"--performs “{performs}” names “{perf}”, which reads as not doing it: "
+                                f"{' | '.join(opts)}. Name the option that performs {act} with --performs; only the "
+                                f"developer's choice of it opens {act}")
             if not perf:
                 raise StepError((f"--performs “{performs}” is not one of the options" if performs else
                                  f"no option clearly performs {act}: none reads yes or approve, and the recommended "
@@ -1656,8 +1660,18 @@ def _norm(text) -> str:
 
 
 def ask_text(d: dict) -> str:
-    """The question to put to the developer with the question tool, exactly: only an answer to this text is E1."""
-    return f"{d['id']} · {d['question']}"
+    """The question to put to the developer with the question tool, exactly: only an answer to this text is E1. An
+    irreversible decision's question says, on its one line, which answer runs which action on which target: "D1 ·
+    Release now? (choosing “A: release” runs release v26.11.4)"; without options, "(answering “yes” runs …)"."""
+    text = f"{d['id']} · {d['question']}"
+    act = d.get("irreversible")
+    if not act:
+        return text
+    runs = " ".join(f"{act} {d.get('target') or ''}".split())
+    if d.get("options"):
+        perf = performing_option(d)
+        return f"{text} (choosing “{perf}” runs {runs})" if perf else text
+    return f"{text} (answering “yes” runs {runs})"
 
 
 def option_of(d: dict, text):

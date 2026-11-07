@@ -392,7 +392,9 @@ A decision that leads to an irreversible action (`--irreversible release --targe
 on that target, and only when your own answer chooses the option that performs it. That option is the one named
 with `--performs`, else the one option that reads yes or approve, else the recommended one. `dev crew ask` refuses
 an irreversible decision when no option performs the action for certain, for example when the recommended option
-reads as not doing it, such as `B: wait`. Without options, only `approve D<n>`, or an answer that reads approve or yes, opens
+reads as not doing it, such as `B: wait`, and refuses a `--performs` that names such an option. The question you
+are asked says which choice runs which action on which target, on one line: `D1 · Release now? (choosing “A:
+release” runs release v26.11.4)`. Without options, only `approve D<n>`, or an answer that reads approve or yes, opens
 it. Any other answer (`no`, another option, free text) records your decision and opens nothing; the refusal is
 audited as `crew.grant-refused` with the decision and the option you chose, never the text you typed.
 

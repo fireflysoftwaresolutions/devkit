@@ -389,11 +389,24 @@ class DecisionAnswerGrantTests(EvidenceCase):
         self.assertTrue(pg.crew_decide("D1", "no", now=m(4))["verified"])
         self.assertTrue(pg.crew_decide("D2", "yes", now=m(4))["verified"])
         self.assertIsNone(grant("release", "v26.11.4", consume=False, now=m(5)))
+        self.assertEqual([(r["target"], r["ref"]["id"], r["ref"]["answer"]) for r in self.refusals()],
+                         [("release v26.11.4", "D1", "no")])
         self.assertIsNone(grant("release", "v26.11.4", now=m(5)))
-        refused = self.refusals()
-        self.assertTrue(refused)
-        self.assertEqual({(r["target"], r["ref"]["id"], r["ref"]["answer"]) for r in refused},
-                         {("release v26.11.4", "D1", "no")})
+
+    def test_one_refused_release_through_the_gate_writes_one_refusal(self):
+        # the gate checks without using (consume=False) and uses only a grant it found, so its check is where a
+        # refusal is audited: once per refused command, through the real use_grant and audit.record (L-fxzc02legsi)
+        from devkit import guard
+        self.irreversible("v26.11.4", 1, options="A: release | B: no", recommend="A", performs="A")
+        self.typed("approve D1: no", m(2))
+        pg.crew_decide("D1", "no", now=m(3))
+        with mock.patch.object(guard, "_repo_of", lambda cwd: "acme/api"), \
+                mock.patch.object(core, "load_config", return_value={"safeguards": {"irreversible_main": "enforce"}}):
+            verdict = guard.irreversible_verdict("gh release create v26.11.4", str(self.root), agent="claude",
+                                                 session="s1", now=m(4))
+        self.assertEqual(verdict[0], "deny")
+        self.assertEqual([(r["target"], r["ref"]["id"], r["ref"]["answer"]) for r in self.refusals()],
+                         [("release v26.11.4", "D1", "B: no")])
 
     def test_only_the_option_that_performs_it_opens_it_once(self):
         lettered = {"options": "A: release | B: wait", "recommend": "A"}
@@ -446,10 +459,30 @@ class DecisionAnswerGrantTests(EvidenceCase):
         for kw in ({"options": "A: release | B: wait", "recommend": "B"},  # the default would be "wait"
                    {"options": "A: release | B: wait", "recommend": ""},
                    {"options": "A: release | B: wait", "recommend": "A", "performs": "C"},
-                   {"options": "", "recommend": "yes", "performs": "yes"}):
-            with self.subTest(**kw), self.assertRaises(pg.StepError):
-                pg.crew_decision("Release now?", irreversible="release", target="v26.11.4", now=m(1), **kw)
+                   {"options": "", "recommend": "yes", "performs": "yes"},
+                   # an explicit --performs that names an option reading as not doing it (Seraph's probe: then
+                   # "approve D1: no" opened the release)
+                   {"options": "A: release | B: no", "recommend": "A", "performs": "B"},
+                   {"options": "A: release | B: wait", "recommend": "A", "performs": "wait"}):
+            with self.subTest(**kw):
+                with self.assertRaises(pg.StepError) as e:
+                    pg.crew_decision("Release now?", irreversible="release", target="v26.11.4", now=m(1), **kw)
+                if kw.get("performs") in ("B", "wait"):
+                    self.assertIn("reads as not doing it", str(e.exception))
         self.assertEqual(pg.load_run("claude", "s1").get("decisions") or [], [])
+
+    def test_the_question_names_the_option_that_runs_the_action_and_its_target(self):
+        # the developer sees which choice runs what, on what, in the question itself: the tech lead's hint never
+        # reaches them (Seraph, 26.11.3)
+        self.irreversible("v26.11.4", 1, options="A: release | B: wait", recommend="A")
+        self.irreversible("", 2, options="A: wait | B: release", recommend="A", performs="B")
+        self.irreversible("v26.11.5", 3, options="", recommend="")
+        self.ask("Skip empty lines?", at=4)
+        self.assertEqual([pg.ask_text(self.decision(f"D{n}")) for n in range(1, 5)],
+                         ["D1 · Release now? (choosing “A: release” runs release v26.11.4)",
+                          "D2 · Release now? (choosing “B: release” runs release)",
+                          "D3 · Release now? (answering “yes” runs release v26.11.5)",
+                          "D4 · Skip empty lines?"])
 
     def test_a_no_backs_no_preapproval_and_no_step_grant(self):
         self.irreversible("fix/parser", 1, action="push", question="Push the fix?")

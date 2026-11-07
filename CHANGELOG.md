@@ -443,6 +443,9 @@ devkit refuses more in this release. Each refusal says why and names the command
   only when your answer chooses the option that performs it (`--performs`, else the one option that reads yes or
   approve, else the recommended one); before, any verified answer opened it, `approve D1: no` included. Any other
   answer opens nothing and is audited as `crew.grant-refused`, with the decision and the option, never your text.
+  `dev crew ask` refuses a `--performs` that names an option reading as not doing it (`B: no`), and the question
+  you are asked names the choice that runs the action and its target: `D1 · Release now? (choosing “A: release”
+  runs release v26.11.4)`.
 - The irreversible-action gate sees more: the repository that `gh -R`, `--repo`, or `GH_REPO` names (so a grant for
   one repository never covers another), commands run through `script`, `watch`, GNU `parallel`, `sem`, `arch`,
   `flock`, `unbuffer`, `chronic`, or `yarn workspace`, targets that `xargs` appends, `curl` methods inside short-flag
