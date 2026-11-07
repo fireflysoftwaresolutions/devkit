@@ -270,5 +270,27 @@ class CrewRequestTests(unittest.TestCase):
         self.assertEqual((Path(args[3]).name, args[4:]), ("dev", ["sync", "--quiet", "--offline"]))
 
 
+class BranchLineTests(TurnCase):
+    # The Release engineer (Link)'s line in hooks.py (M365, spec P-fy3bwa0pshk R8): the session-start context says
+    # which branches exist only on this Mac, from the branch map the repository's facts carry (offline: no fetch, no
+    # GitHub call); a branch map that fails leaves the rest of the context as it was
+    def context(self):
+        from devkit import registry
+        with mock.patch.object(registry, "update_note", lambda *a, **k: False), \
+                mock.patch.object(registry, "note_path", lambda pid: self.note), \
+                mock.patch.object(registry, "HANDOFF", self.note.parent):  # never the developer's handoff repository
+            return hooks.context_for(str(self.repo), "claude")
+
+    def test_the_session_start_context_names_the_branches_only_on_this_mac(self):
+        self.commits(2)
+        text = self.context()
+        self.assertIn("Branches: 1 · not backed up: `main`", text)
+        self.assertIn("`dev branch ls` shows the map.", text)
+        with mock.patch("devkit.branches.context_line", side_effect=RuntimeError("no map")):
+            text = self.context()
+        self.assertNotIn("Branches:", text)
+        self.assertIn("Project: **", text)
+
+
 if __name__ == "__main__":
     unittest.main()

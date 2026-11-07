@@ -129,6 +129,14 @@ def context_for(cwd: str, agent: str) -> str:
         live = sum(1 for w in others if w.get("active"))
         lines.append(f"Other worktrees of this repo: {len(others)}" + (f" ({live} with live sessions)" if live else "")
                      + " — `dev wt ls`. Do not edit them from this session.")
+    try:  # the branch map (spec P-fy3bwa0pshk, R8): which branches live only on this Mac, built offline
+        from . import branches as branchmap
+        bl = branchmap.context_line(p.get("branches") or [])
+    except Exception:
+        bl = ""
+        _log(f"context branches: {traceback.format_exc()[-300:]}")
+    if bl:
+        lines.append(bl)
     if not p["canonical_ok"]:
         lines.append(f"Layout: this repo should live at {tilde(p['canonical'])}; the user will move it with "
                      f"`dev adopt`. Keep working here; do not move it yourself.")
