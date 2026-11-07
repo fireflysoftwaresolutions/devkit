@@ -1013,8 +1013,14 @@ def app_checks(codex_plugins=None) -> list:
 # from the upstream release of the engine version the pinned skill names (scripts/VERSION), checked against the
 # engine-checksums.txt of that same pinned commit (never against anything published beside the binary), and placed as
 # scripts/bin/<os>-<arch>/impeccable, the sibling the launcher runs without a check. A verified copy stays in
-# ENGINES_SHARE, since every install copies the skill afresh. STATE/ENGINES_FILE records what was installed: the
-# guard trusts the launcher by that record (guard.impeccable_verb), and both live where agents may not write.
+# ENGINES_SHARE, since every install copies the skill afresh. STATE/ENGINES_FILE records what was installed:
+# `dev impeccable` (impeccable.py) checks the engine against that record before every run, and both live where agents
+# may not write.
+
+def engines_record() -> Path:
+    """The record of the engines the skills step installed: STATE/ENGINES_FILE."""
+    return STATE / ENGINES_FILE
+
 
 def engine_platform() -> str:
     """The launcher's name for this platform, `<os>-<arch>` from uname (darwin-arm64, linux-x64); '' for another."""
@@ -1057,7 +1063,7 @@ def _download_engine(url: str, dest) -> None:
 
 def _engine_record(update: dict | None = None, drop: str = "") -> dict:
     """The engines the skills step installed (STATE/ENGINES_FILE), after setting `update` or dropping `drop`."""
-    f = STATE / ENGINES_FILE
+    f = engines_record()
     rec = read_json(f, {}) or {}
     if not isinstance(rec, dict):
         rec = {}

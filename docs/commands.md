@@ -428,6 +428,25 @@ dev claude widget -- --resume         # pass arguments to claude
 dev codex -- resume --last            # resume the last Codex session in the current project
 ```
 
+### `dev impeccable <verb> [<args>…]`
+
+Runs the engine of the impeccable design skill, the one `dev install --only skills` put in devkit's skills folder, in
+the current folder. Each word after `dev impeccable` reaches the engine as one argument, as typed, with no shell in
+between. Before every run, the command checks the engine's SHA-256 against the install record
+(`~/.local/state/devkit/skill-engines.json`) and refuses an engine reached through a symbolic link out of devkit's
+skills folder. A refusal runs nothing and names the fix, `dev install --only skills`. Otherwise the command exits
+with the engine's exit code.
+
+Crew members run impeccable this way, never by the launcher's path, which the guard refuses. Read-only lanes run only
+`context`, `detect` on local paths, and `doctor` without `--fix`. See
+[Skills and plugins › impeccable and its engine](skills-and-plugins.md#impeccable-and-its-engine).
+
+```bash
+dev impeccable context                  # load PRODUCT.md, DESIGN.md and the surface brief, print what to follow
+dev impeccable detect --json src        # scan the project's HTML and CSS
+dev impeccable doctor                   # the engine's own checks
+```
+
 ### `dev handoff [<query>] [--edit | --path | --log "…" [--agent AGENT]]`
 
 Prints the project's handoff note after refreshing its generated blocks.
