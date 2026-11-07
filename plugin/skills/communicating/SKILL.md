@@ -139,10 +139,13 @@ has one (AskUserQuestion in Claude Code), and ask nicely:
   question is devkit's (with or without its context line, nothing added) under the header `D<n>` or none; the
   labels are word for word (the option that performs the action reads like `A: yes (release v26.11.4)`), with no
   description, preview, or other field beside them. A reworded question or label, a missing or added option,
-  "(Recommended)" on another option, another header, an added field, or another question in the call makes the
-  answer count for nothing, because any of them can make a yes do what the developer meant as a no. A note the
-  developer adds to the answer voids it too: ask again and let them answer without one. Its question names what it
-  acts on (the tag, the branch, the PR): `dev crew ask` refuses one that does not.
+  "(Recommended)" on another option, another header, an added field (a title too), or another question in the call
+  makes the answer count for nothing, because any of them can make a yes do what the developer meant as a no. A note
+  the developer adds to the answer voids it too, and so do an option left selected when the dialog times out, chat
+  text sent instead of an answer, and a request for follow-up questions: ask again and let them answer without one.
+  Their latest answer counts: one that counts for nothing, or their own text, also ends an earlier yes, so ask
+  again before you record it. Its question names what it acts on (the tag, the branch, the PR): `dev crew ask`
+  refuses one that does not.
 
 When there is no question tool (Codex, for now), use this template, and for a devkit decision tell the developer
 to type `approve D<n>: <letter>`:

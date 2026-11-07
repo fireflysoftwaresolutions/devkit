@@ -1427,8 +1427,10 @@ def decision_shape(question: str, options="", recommend: str = "", irreversible:
     """`dev crew ask --decision` in the shape the developer can be asked nicely: a question under 300 characters,
     2 to 4 options, each "<letter>: <what it means>", and a recommendation that is one of them. An irreversible
     approval asked without options (what the guard tells an agent to run) is a yes-or-no question, "A: yes | B: no",
-    A recommended unless the recommendation is no. -> (options, the recommended option's letter). Raises StepError
-    with the corrected command when the shape is wrong."""
+    A recommended unless the recommendation is no. The labels devkit offers for the options (ask_labels) fit
+    together in an audit record (under audit.VALUE_CUT characters), so `dev audit verify` can rebuild the decision
+    from it (the Code reviewer's finding 2). -> (options, the recommended option's letter). Raises StepError with the
+    corrected command when the shape is wrong."""
     q = " ".join(str(question or "").split())
     opts = [o.strip() for o in (options if isinstance(options, list) else str(options or "").split("|")) if o.strip()]
     rec = (recommend or "").strip()
@@ -1459,9 +1461,26 @@ def decision_shape(question: str, options="", recommend: str = "", irreversible:
     if not letter:
         problems.append(f"the recommendation “{rec}” is not one of the options" if rec else
                         "name the option you recommend by its letter")
+    each = None
+    if lettered and letter and 2 <= len(opts) <= 4:
+        from . import audit
+        act = (irreversible or "").strip().lower()
+        shape = {"id": "D0", "options": opts, "recommend": letter, "irreversible": act,
+                 "target": (target or "").strip()}
+        perf = _named_option(opts, performs, prefix=True) if act and performs else None
+        if perf:
+            shape["performs"] = perf
+        size = len(" | ".join(ask_labels(shape)))
+        if size >= audit.VALUE_CUT:
+            each = (audit.VALUE_CUT - 1 - (size - sum(len(o) for o in opts))) // len(opts)
+            problems.append(f"as devkit offers them, the options are {size} characters together, and an audit record "
+                            f"keeps {audit.VALUE_CUT} characters of them: keep them to at most {each} characters "
+                            f"each, and put the details in your report")
     if not problems:
         return opts, letter
     shown = (fixed + [f"{chr(65 + i)}: <another choice>" for i in range(len(fixed), 2)])[:4]
+    if each is not None:
+        shown = [f"{_letter(o)}: <at most {each} characters>" for o in shown]
     shown_q = f"{q} ({target})" if unnamed else q
     cmd = (f"dev crew ask --decision "
            f"{_cli_quote(shown_q if len(shown_q) <= DECISION_QUESTION_MAX else '<the question>')} "
@@ -1753,7 +1772,8 @@ def waiting_context(agent: str, sid: str, since, now: float) -> str:
     if not pend:
         return ""  # the usual case, without reading the session
     sess = state.read(session_path(agent, sid)) or {}
-    answered = {_norm(e.get("covers")) for e in sess.get("human") or [] if isinstance(e, dict) and _live(e, now, run)}
+    latest = {_norm(e.get("covers")): e for e in sess.get("human") or [] if isinstance(e, dict) and _live(e, now, run)}
+    answered = {c for c, e in latest.items() if not e.get("void")}  # a void as the latest word: ask it again
     waiting = [d for d in pend if _norm(d["id"]) not in answered and not (since and (d.get("shown") or 0) >= since)]
     if not waiting or all(d.get("reminded") for d in waiting):
         return ""
@@ -1925,6 +1945,11 @@ def label_match(d: dict, label, offered) -> tuple:
 
 _QUESTION_FIELDS = {"question", "header", "options", "multiSelect"}  # all a question of devkit's exact call holds
 _OPTION_FIELDS = {"label", "description"}  # all an option of it holds, the description empty
+# all the call's top level holds: devkit's questions, and what Claude Code (2.1.319) adds to the tool input and its
+# result when the developer answers, their answers and notes (a note is refused on its own). Never a title shown
+# above the questions, metadata, chat text (response), a follow-up request or an idle timeout (afkTimeoutMs: the
+# option they had selected, not clicked): the Code reviewer's finding 3
+_CALL_FIELDS = {"questions", "answers", "annotations"}
 
 
 def _blank(value) -> bool:
@@ -1939,11 +1964,12 @@ def _blank(value) -> bool:
     return False
 
 
-def _not_devkits_words(run, d: dict, q: dict, label, asked: str, call, notes=None) -> str:
+def _not_devkits_words(run, d: dict, q: dict, label, asked: str, call, top, notes=None) -> str:
     """Why a question tool answer is no evidence for an irreversible decision, '' when it is: only devkit's exact
     call counts (the Security engineer's question audit decision, rule 1, and the Code reviewer's findings 1 to 3 on
     it), an allowlist of its form, since everything the tool shows the developer can redefine the options. The call
-    (`call`, its questions as sent) asks this one question and nothing else; the question is devkit's (asked_how)
+    (`call`, its questions as sent) asks this one question and nothing else; its top level (`top`: the hook's tool
+    input, or the result the transcript keeps) holds nothing beyond _CALL_FIELDS; the question is devkit's (asked_how)
     and holds only question, header (empty or the decision's id), options and multiSelect false; each option holds
     only its label and an empty description, so no description or preview says "hold" beside the label that
     releases; the labels are exactly devkit's (ask_labels: every option once, "(Recommended)" only on the
@@ -1953,6 +1979,8 @@ def _not_devkits_words(run, d: dict, q: dict, label, asked: str, call, notes=Non
     Reasons name no text of the call."""
     if not isinstance(call, list) or call != [q]:
         return "the call asks other questions beside it"
+    if not isinstance(top, dict) or set(top) - _CALL_FIELDS:
+        return "the call carries a field devkit does not send"
     if asked != "exact":
         return "its question is not devkit's own; send it as dev crew decisions --ask prints it"
     if set(q) - _QUESTION_FIELDS:
@@ -2179,6 +2207,8 @@ def _keep_human(agent: str, sid: str, new: list, extra=None) -> list:
         _refuse_replay(agent, sid, str(e.get("transcript_uuid")), f"{e.get('channel')} {e.get('covers')}")
     run = load_run(agent, sid) if any(e.get("answer") for e in kept) else None  # an answer names an option or none
     for e in kept:
+        if e.get("void"):
+            continue  # no evidence: its refusal is audited as crew.evidence-refused
         d = _decision(run, e["covers"]) or {}
         said = e.get("answer") or ""
         _audit("crew.evidence", e["covers"], e["excerpt"], channel=e["channel"], transcript_uuid=e["transcript_uuid"],
@@ -2276,9 +2306,11 @@ def on_question(agent: str, data: dict, now: float | None = None) -> list:
     question that names one decision (asked_decision: "D<n> ·" up front or the header D<n>) is E1 evidence for it.
     A reversible decision's question may be reworded: the option its label picks (label_match), else the
     developer's own text. An irreversible one counts only on devkit's own words (_not_devkits_words), and its
-    question names its target. Each entry keeps how it matched (`match`) and whether the question was devkit's
-    (`asked`). A call that asks one decision twice counts for neither question. Each refusal is audited as
-    crew.evidence-refused, with its reason and never the text. -> the entries recorded."""
+    question names its target; an answer to it that is refused, in any form, is kept as a void entry (`void`, no
+    text of the answer), the developer's latest word on it, so it ends their earlier answers (_decision_evidence).
+    Each entry keeps how it matched (`match`) and whether the question was devkit's (`asked`). A call that asks one
+    decision twice counts for neither question. Each refusal is audited as crew.evidence-refused, with its reason and
+    never the text. -> the entries recorded."""
     now = now or time.time()
     sid = data.get("session_id") or ""
     if data.get("agent_id") or data.get("tool_name") not in QUESTION_TOOLS or not sid:
@@ -2293,13 +2325,14 @@ def on_question(agent: str, data: dict, now: float | None = None) -> list:
     if data.get("tool_use_id") and str(data["tool_use_id"]) in _seen_ids(sess):  # the same answer again (B3)
         _refuse_replay(agent, sid, str(data["tool_use_id"]), "a question tool answer")
         return []
-    call = (data.get("tool_input") or {}).get("questions")
+    top = data.get("tool_input") if isinstance(data.get("tool_input"), dict) else {}
+    call = top.get("questions")
     qs = [q for q in call or [] if isinstance(q, dict)]
     resp = data.get("tool_response") if isinstance(data.get("tool_response"), dict) else {}
     answers = resp.get("answers") if isinstance(resp.get("answers"), dict) else {}
     pending = {d["id"] for d in pending_decisions(run)}
     ids = [asked_decision(q) for q in qs]
-    shown, new, refused = set(), [], {}
+    shown, new, refused, voided = set(), [], {}, set()
     for q, did in zip(qs, ids):
         qt = str(q.get("question") or "")
         shown.update(x for x in [f"D{n}" for n in _DECISION_REF.findall(qt)] + [did] if x in pending)
@@ -2313,9 +2346,13 @@ def on_question(agent: str, data: dict, now: float | None = None) -> list:
         elif not _names_target(d, qt):
             why = f"the question does not name {d['target']}"
         elif d.get("irreversible"):
-            why = _not_devkits_words(run, d, q, label, asked, call, resp.get("annotations"))
+            why = _not_devkits_words(run, d, q, label, asked, call, top, resp.get("annotations"))
         if why:
             refused.setdefault((did, why), True)
+            if d.get("irreversible") and d["id"] not in voided:  # their latest word: no yes (the tech lead's decision)
+                voided.add(d["id"])
+                new.append(_entry(agent, "E1", d["id"], f"[refused: {why}]", data.get("tool_use_id"),
+                                  harness_transcript(agent, sid), run, now, void=True, session=sid))
             continue
         opt, match = (_devkit_option(d, label), "exact") if d.get("irreversible") else label_match(d, label, offered)
         new.append(_entry(agent, "E1", d["id"], f"{qt[:120]} = {label[:70]}", data.get("tool_use_id"),
@@ -2435,12 +2472,14 @@ def _live(e: dict, now: float, run=None) -> bool:
 
 
 def evidence(agent: str, sid: str, pick, now: float | None = None, run=None) -> list:
-    """The session's live, unused entries that `pick(entry)` accepts and the transcript confirms, oldest first."""
+    """The session's live, unused entries that `pick(entry)` accepts and the transcript confirms, oldest first. A
+    void entry is never evidence."""
     now = now or time.time()
     sess = state.read(session_path(agent, sid)) or {}
     if headless(sess):
         return []
-    return [e for e in sess.get("human") or [] if _live(e, now, run) and pick(e) and confirmed(e, sid)]
+    return [e for e in sess.get("human") or [] if _live(e, now, run) and not e.get("void") and pick(e)
+            and confirmed(e, sid)]
 
 
 def _consume(agent: str, sid: str, e: dict, now: float) -> dict | None:
@@ -2568,9 +2607,11 @@ def _when(ts) -> str:
 
 
 def evidence_lines(entries: list) -> str:
-    """The echo of what the developer just granted or approved, for the next context."""
+    """The echo of what the developer just granted or approved, for the next context; a void entry approves nothing."""
     out = []
     for e in entries:
+        if e.get("void"):
+            continue
         how = "by your prompt" if e["channel"] == "E2" else "by your answer to the question tool"
         if e.get("expires"):
             out.append(f"granted: {e['covers']} {how} at {_when(e['ts'])} (one use, until {_when(e['expires'])})")
@@ -2587,20 +2628,26 @@ def _live_grants(agent: str, sid: str, now: float) -> list:
 
 def _decision_evidence(agent: str, sid: str, run: dict, d: dict, answer: str, now: float):
     """The entry that makes `answer` the developer's decision, used now; None without one. Raises StepError when
-    the developer chose something else, so Morpheus records their answer and not his own."""
-    def fits(e):
-        if d.get("shown") is None or e["ts"] < d["shown"]:
-            return False
-        if (e.get("plain") or e.get("free")) and d.get("irreversible"):
-            return False
-        if d.get("irreversible") and e.get("channel") == "E1" and (e.get("match"), e.get("asked")) != ("exact",
-                                                                                                    "exact"):
-            return False  # recorded before devkit's own words were required, or reworded (question audit, rule 1)
-        return True
-    found = evidence(agent, sid, lambda e: _norm(e.get("covers")) == _norm(d["id"]) and fits(e), now, run)
-    if not found:
-        return None
-    e = found[-1]  # the developer's latest word on it
+    the developer chose something else, so Morpheus records their answer and not his own. For an irreversible
+    decision only the developer's latest word on it counts, over all its entries (the tech lead's decision on the
+    Code reviewer's finding 1 on the exact call): a void (an answer refused in any form), their own text, a question
+    tool answer outside devkit's exact call (one recorded before it was required) or an entry the transcript does not
+    confirm makes it None, even after an earlier "yes", until they answer again."""
+    def ours(e):
+        return _norm(e.get("covers")) == _norm(d["id"]) and d.get("shown") is not None and e["ts"] >= d["shown"]
+    if d.get("irreversible"):
+        sess = state.read(session_path(agent, sid)) or {}
+        mine = [] if headless(sess) else [x for x in sess.get("human") or [] if _live(x, now, run) and ours(x)]
+        e = mine[-1] if mine else {}
+        if not e or e.get("void") or e.get("plain") or e.get("free") or (
+                e.get("channel") == "E1" and (e.get("match"), e.get("asked")) != ("exact", "exact")) \
+                or not confirmed(e, sid):
+            return None
+    else:
+        found = evidence(agent, sid, ours, now, run)
+        if not found:
+            return None
+        e = found[-1]  # the developer's latest word on it
     said = _said(d, e)
     if said:
         want = said if e.get("free") else (option_of(d, said) or said)  # their own text names no option
@@ -2650,9 +2697,14 @@ def _answered_call(path, uuid: str):
     return None
 
 
-def _decision_from_record(did: str, ref: dict) -> dict:
+def _decision_from_record(did: str, ref: dict):
     """A decision rebuilt from its crew.decision record: its options, its action, and from the labels devkit
-    offered (ref.labels) the recommended option, the performing one and the target; no question."""
+    offered (ref.labels) the recommended option, the performing one and the target; no question. None when the
+    record kept only the start of its options or labels (audit.VALUE_CUT characters, the Code reviewer's finding 2):
+    the rest is unknown, so the decision is too."""
+    from . import audit
+    if any(len(str(ref.get(k) or "")) >= audit.VALUE_CUT for k in ("options", "labels")):
+        return None
     opts = [x for x in str(ref.get("options") or "").split(" | ") if x]
     act = str(ref.get("irreversible") or "")
     d = {"id": did, "question": None, "options": opts, "irreversible": act, "target": "", "recommend": ""}
@@ -2667,18 +2719,23 @@ def _decision_from_record(did: str, ref: dict) -> dict:
 
 
 def _decision_as_asked(agent: str, sid: str, did: str, ts: float):
-    """The decision `did` the session asked before its evidence at `ts` -> (run, d): the session's run while no later
-    crew.decision record shows `did` asked again (it holds the question, so `asked` is re-derived too), else the
-    decision rebuilt from its last crew.decision record before `ts` (run None); (None, None) without either."""
+    """The decision `did` the session asked before its evidence at `ts` -> (run, d, why not): the session's run while
+    no later crew.decision record shows `did` asked again (it holds the question, so `asked` is re-derived too), else
+    the decision rebuilt from its last crew.decision record before `ts` (run None); (None, None, why) when that
+    record cannot rebuild it; (None, None, '') without either."""
     from . import audit
     recs = [r for r in audit.query(action="crew.decision") if r.get("target") == did
             and (r.get("ref") or {}).get("session") == f"{agent}:{sid}"]
     run = load_run(agent, sid)
     d = _decision(run, did) if run else None
     if d and not any(float(r.get("ts") or 0) > ts for r in recs):
-        return run, d
+        return run, d, ""
     before = [r for r in recs if float(r.get("ts") or 0) <= ts]
-    return (None, _decision_from_record(did, before[-1].get("ref") or {})) if before else (None, None)
+    if not before:
+        return None, None, ""
+    d = _decision_from_record(did, before[-1].get("ref") or {})
+    return None, d, "" if d else (f"its crew.decision record keeps only the first {audit.VALUE_CUT} characters of "
+                                  f"its options or labels")
 
 
 def _rederive(rec: dict, tp, agent: str, sid: str):
@@ -2694,14 +2751,14 @@ def _rederive(rec: dict, tp, agent: str, sid: str):
     label = (res.get("answers") or {}).get(qs[0].get("question")) if len(qs) == 1 else None
     if not isinstance(label, str) or not label.strip():
         return f"{head}: the call in the transcript does not ask {did} once with an answer"
-    run, d = _decision_as_asked(agent, sid, did, float(rec.get("ts") or 0))
-    if not d:
-        return None  # nothing to rerun the matcher against: neither the run nor a crew.decision record holds it
+    run, d, why = _decision_as_asked(agent, sid, did, float(rec.get("ts") or 0))
+    if not d:  # nothing to rerun the matcher against: no problem of the record, so a note at most
+        return audit.Note(f"{head}: devkit cannot rebuild {did} to rerun the matcher: {why}") if why else None
     q, rx = qs[0], audit._extra_rules(audit.settings()["redact"]["extra"])
     offered = [o.get("label") for o in q.get("options") or [] if isinstance(o, dict)]
     asked = asked_how(run, d, q.get("question")) if d.get("question") else None
     if d.get("irreversible"):
-        why = _not_devkits_words(run, d, q, label, asked or "exact", res.get("questions"), res.get("annotations"))
+        why = _not_devkits_words(run, d, q, label, asked or "exact", res.get("questions"), res, res.get("annotations"))
         if why:
             return f"{head}: the transcript's answer is no evidence for an irreversible decision ({why})"
         opt, match = _devkit_option(d, label), "exact"

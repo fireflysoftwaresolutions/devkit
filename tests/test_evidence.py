@@ -7,6 +7,7 @@
 # decision or one action and target, comes after the decision was shown, is used once and expires. The transcript
 # must show it as the developer's own message, so a forged hook event, a relayed comment or tool output never counts.
 # Run: python3 -m unittest tests.test_evidence
+import argparse
 import contextlib
 import io
 import json
@@ -89,7 +90,11 @@ class EvidenceCase(unittest.TestCase):
         return next(d for d in pg.load_run("claude", "s1")["decisions"] if d["id"] == did)
 
     def human(self):
-        return (json.loads(self.state.sess.read_text()).get("human")) or []
+        # the developer's evidence entries; a void entry (an answer refused for an irreversible decision) is none
+        return [e for e in json.loads(self.state.sess.read_text()).get("human") or [] if not e.get("void")]
+
+    def voids(self):
+        return [e["covers"] for e in json.loads(self.state.sess.read_text()).get("human") or [] if e.get("void")]
 
 
 class DecisionEvidenceTests(EvidenceCase):
@@ -571,6 +576,13 @@ def audit_records(action):
     return out
 
 
+# four options of about 80 characters each: as devkit offers them, with "(Recommended)" and what the performing one
+# runs, they are longer than the 300 characters an audit record keeps of them (the Code reviewer's finding 2)
+LONG_OPTIONS = [f"{c}: {w}, and tell the team in the release channel and in the notes"[:80]
+                for c, w in zip("ABCD", ("publish v26.11.4 now", "hold it until Monday", "wait for the CI rerun",
+                                         "drop this release"))]
+
+
 class QuestionAuditTests(EvidenceCase):
     # the Security engineer's question audit decision (26.11.4, review of the reworded questions): an irreversible
     # decision counts only on devkit's own words, its question and its labels as `dev crew decisions --ask` prints
@@ -594,16 +606,17 @@ class QuestionAuditTests(EvidenceCase):
                "options": [{"label": lab, "description": des} for lab, des in zip(labels, descriptions)]}]
         return self.send(qs, {q["question"]: label}, at)
 
-    def send(self, qs, answers, at, notes=None):
+    def send(self, qs, answers, at, notes=None, inputs=None):
         # the tech lead sends a question tool call that asks `qs` as they are; the developer answers {question: label}
-        # and may add notes (the result's annotations)
+        # and may add notes (the result's annotations). `inputs`: more top-level fields of the tool input the hook
+        # gets (Claude Code adds the answers there when the developer answers)
         self.n += 1
         tid = f"toolu_q{self.n:03d}"
         result = {"questions": qs, "answers": answers, **({"annotations": notes} if notes is not None else {})}
         self.append({"type": "user", "uuid": f"u-{self.n}", "isSidechain": False, "toolUseResult": result,
                      "message": {"role": "user", "content": [{"type": "tool_result", "tool_use_id": tid}]}})
         return pg.on_question("claude", {"session_id": "s1", "tool_name": "AskUserQuestion", "tool_use_id": tid,
-                                         "tool_input": {"questions": qs}, "tool_response": result,
+                                         "tool_input": {"questions": qs, **(inputs or {})}, "tool_response": result,
                                          "transcript_path": str(self.transcript)}, now=at)
 
     def click(self, q, at, option=0):
@@ -794,7 +807,7 @@ class QuestionAuditTests(EvidenceCase):
 
     # dev audit verify reruns the same rule on the transcript: evidence recorded before it (26.11.4's first build
     # recorded these as exact) is reported when the transcript's call carried a preview, another header, another
-    # question field or another question, or the answer a note of the developer's
+    # question field or another question, or the answer a note of the developer's, an idle timeout or chat text
     def test_verify_reports_an_irreversible_answer_whose_call_was_not_devkits_exact_call(self):
         self.release()
         q = self.printed("D1")
@@ -808,7 +821,9 @@ class QuestionAuditTests(EvidenceCase):
                              ("header", lambda r: r["questions"][0].update(header="Hold it?")),
                              ("question field", lambda r: r["questions"][0].update(description="Holds it.")),
                              ("second question", lambda r: r["questions"].append(other)),
-                             ("note", lambda r: r.update(annotations={q["question"]: {"notes": "After Monday."}}))):
+                             ("note", lambda r: r.update(annotations={q["question"]: {"notes": "After Monday."}})),
+                             ("idle timeout", lambda r: r.update(afkTimeoutMs=60000)),
+                             ("chat text", lambda r: r.update(response="Hold it until Monday."))):
             with self.subTest(change=name):
                 lines = [json.loads(ln) for ln in clean.splitlines()]
                 change(lines[-1]["toolUseResult"])
@@ -926,6 +941,117 @@ class QuestionAuditTests(EvidenceCase):
         self.assertEqual([(e["covers"], e["answer"]) for e in got], [("D2", "B: keep")])
         self.assertFalse(pg.crew_decide("D1", "A: skip", now=m(3))["verified"])
         self.assertEqual([r["target"] for r in audit_records("crew.evidence-refused")], ["D1"])
+
+    # the Code reviewer's finding 1 on the exact call (P10, P11, P13): the developer clicked devkit's "yes" for the
+    # release, then said no in a form devkit refuses for an irreversible decision. The tech lead's decision: their
+    # latest answer counts, so the refused one voids the yes, and recording "A" opens nothing until they answer again
+    def assert_asked_again(self):
+        with self.assertRaises(pg.StepError) as e:
+            pg.crew_decide("D1", "A", now=m(3))
+        self.assertIn("stays pending", str(e.exception))
+        self.assertIs(self.decision("D1")["verified"], False)
+        self.assertIsNone(self.opens())
+        self.assertEqual(self.voids(), ["D1"])
+
+    def test_a_reworded_no_after_devkits_yes_voids_the_yes(self):
+        self.release()
+        q = self.printed("D1")
+        self.click(q, m(2))
+        self.answer(dict(q, question="D1 · Do we still release v26.11.4 today?"), "B: no", m(2.5),
+                    labels=["A: yes", "B: no"])
+        self.assert_asked_again()
+
+    def test_devkits_no_with_a_note_after_its_yes_voids_the_yes(self):
+        self.release()
+        q = self.printed("D1")
+        self.click(q, m(2))
+        self.send([q], {q["question"]: q["options"][1]["label"]}, m(2.5), notes={q["question"]: {"notes": "hold it"}})
+        self.assert_asked_again()
+
+    def test_text_typed_under_other_after_devkits_yes_voids_the_yes(self):
+        self.release()
+        q = self.printed("D1")
+        self.click(q, m(2))
+        echo = pg.evidence_lines(self.send([q], {q["question"]: "No, wait until Monday"}, m(2.5)))
+        self.assertEqual(echo, "")  # the hook tells the tech lead of no approval
+        self.assert_asked_again()
+
+    def test_devkits_yes_after_a_void_counts_again(self):
+        self.release()
+        q = self.printed("D1")
+        self.click(q, m(2))
+        self.send([q], {q["question"]: "No, wait until Monday"}, m(2.5))
+        self.click(q, m(2.7))
+        self.assertEqual(self.voids(), ["D1"])
+        d = pg.crew_decide("D1", "A", now=m(3))
+        self.assertTrue(d["verified"])
+        self.assertEqual(d["evidence"]["ts"], m(2.7))
+        self.assertEqual(self.opens()["source"], "decision")
+
+    # a void is the developer's latest word, not an answer: their next prompt tells the tech lead to ask again
+    def test_a_release_whose_latest_answer_is_void_waits_for_the_developer_again(self):
+        self.release()
+        q = self.printed("D1")
+        self.click(q, m(2))
+        self.assertNotIn("waits for you", pg.on_prompt("claude", {"session_id": "s1", "prompt": "thanks"}, now=m(3))
+                         or "")
+        self.send([q], {q["question"]: "No, wait until Monday"}, m(4))
+        self.assertIn("1 decision waits for you (D1)",
+                      pg.on_prompt("claude", {"session_id": "s1", "prompt": "so?"}, now=m(60)) or "")
+
+    # the Code reviewer's finding 2: an audit record keeps a decision's labels in 300 characters, so dev crew ask
+    # refuses options devkit could not keep whole, and says how long each may be
+    def test_dev_crew_ask_refuses_options_the_record_cannot_keep_whole(self):
+        with self.assertRaises(pg.StepError) as e:
+            pg.decision_shape("Release v26.11.4 now?", " | ".join(LONG_OPTIONS), "A", "release", "v26.11.4")
+        self.assertIn("as devkit offers them, the options are 361 characters together", str(e.exception))
+        self.assertIn("at most 64 characters each", str(e.exception))
+        short = " | ".join(o[:60] for o in LONG_OPTIONS)
+        self.assertEqual(pg.decision_shape("Release v26.11.4 now?", short, "A", "release", "v26.11.4")[1], "A")
+
+    # finding 2: a crew.decision record cut at 300 characters cannot rebuild its decision once the run no longer holds
+    # it (a decision asked before the cap, or through crew_decision directly). Verify says so and passes, where it
+    # reported the developer's valid release approval as a problem
+    def test_verify_says_it_cannot_rebuild_a_decision_whose_labels_were_cut_and_passes(self):
+        self.release(options=" | ".join(LONG_OPTIONS))
+        q = self.printed("D1")
+        self.click(q, m(2))
+        self.assertTrue(pg.crew_decide("D1", "A", now=m(3))["verified"])
+        self.assertEqual(len(audit_records("crew.decision")[-1]["ref"]["labels"]), 300)  # the record kept a part
+        pg.start("Release v26.11.5", plan=["ship"], now=m(4), replace=True, why="the next release")
+        out = io.StringIO()
+        args = audit.add_arguments(argparse.ArgumentParser()).parse_args(["verify"])
+        with mock.patch.object(core, "HANDOFF", self.root / "handoff"), contextlib.redirect_stdout(out), \
+                contextlib.redirect_stderr(io.StringIO()):
+            res = audit.verify()
+            rc = audit.cmd_audit(args)
+        self.assertEqual(res["problems"], [])
+        self.assertEqual([n["kind"] for n in res["notes"]], ["note"])
+        self.assertIn("cannot rebuild D1", res["notes"][0]["note"])
+        self.assertEqual(rc, 0)
+        self.assertIn("cannot rebuild D1", out.getvalue())
+
+    # the Code reviewer's finding 3: the call's top level holds what devkit sends (questions) and what Claude Code
+    # 2.1.319 adds to the tool input when the developer answers (answers, and annotations without a note). Each other
+    # key opens nothing: a title shown above the questions, metadata, the developer's chat text (response), a request
+    # for follow-up questions, or an idle timeout (the option they had selected, never clicked)
+    def test_a_top_level_field_beyond_devkits_call_and_the_answer_opens_nothing(self):
+        extras = {"title": "Hold v26.11.4 until Monday?", "metadata": {"source": "remember"},
+                  "response": "Hold it until Monday.", "followUp": True, "afkTimeoutMs": 60000}
+        for n, (key, value) in enumerate(extras.items(), 1):
+            with self.subTest(key=key):
+                self.release(at=1 + n / 10, target=f"v26.11.{n}")
+                q = self.printed(f"D{n}")
+                answers = {q["question"]: q["options"][0]["label"]}
+                self.send([q], answers, m(2), inputs={"answers": answers, "annotations": {}, key: value})
+                self.assertNotIn(f"D{n}", [h["covers"] for h in self.human()])
+                self.assertEqual(self.refused()[-1:],
+                                 ["a question tool answer: the call carries a field devkit does not send"])
+        self.release(at=2, target="v26.11.9")
+        q = self.printed(f"D{len(extras) + 1}")
+        answers = {q["question"]: q["options"][0]["label"]}
+        self.send([q], answers, m(2), inputs={"answers": answers, "annotations": {}})  # as Claude Code sends it
+        self.assertEqual([h["covers"] for h in self.human()], [f"D{len(extras) + 1}"])
 
 
 class HookWiringTests(EvidenceCase):

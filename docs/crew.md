@@ -382,9 +382,10 @@ How a decision travels:
 1. A member reaches a decision point and runs
    `dev crew ask --decision "<question>" --options "A: <one choice> | B: <another>" --recommend A`, with
    `--approves "<steps>"` when your answer approves finished work. A decision has a question under 300 characters,
-   2 to 4 options, each with its letter, and a recommendation that is one of them; devkit refuses any other shape
-   and prints the corrected command. An irreversible action asked without options is a yes-or-no question
-   (`A: yes | B: no`).
+   2 to 4 options, each with its letter, and a recommendation that is one of them. Its options, as devkit offers
+   them (with "(Recommended)" and what the performing option runs), stay under 300 characters together, so the
+   audit keeps them whole: about 60 characters each for four. devkit refuses any other shape and prints the corrected
+   command. An irreversible action asked without options is a yes-or-no question (`A: yes | B: no`).
 2. **Auto:** the answer comes back at once, is recorded as decision D3, and the member goes on.
 3. **Guided:** the member's step is blocked, the member stops and reports that it waits for D3, and no tokens are
    spent while it waits. The tech lead sees the decision with his next action and asks you with Claude Code's
@@ -428,7 +429,9 @@ dialog shows an option's preview when you move to it), a header such as “Hold 
 call (“For D1, A means hold”). Your answer counts only when all of these hold, and otherwise it opens nothing and is
 audited as `crew.evidence-refused` with the reason:
 
-- The call asks this one question and nothing else.
+- The call asks this one question and nothing else. It carries no title and no metadata, only what Claude Code adds
+  when you answer: an option left selected when the dialog times out, text you send instead of answering, or a
+  request for follow-up questions counts for nothing.
 - The question is the one `dev crew decisions --ask` prints, with devkit's context line or without it, and nothing
   added. Its header is the decision's id (`D1`) or empty, and it holds no field beyond the question, the header, the
   options, and a single choice.
@@ -440,6 +443,11 @@ audited as `crew.evidence-refused` with the reason:
   `approve D<n>: <option>` in your prompt.
 - You add no note to your answer. A note can qualify the click (“only after Monday”), so a release answer with a
   note does not count: answer again without one.
+
+Your latest answer to the decision is the one that counts. An answer that counts for nothing, in any of these
+forms, or text of your own, also ends an earlier yes to it: “No, wait until Monday” typed under **Other** after you
+clicked the release keeps it closed. The decision waits until you answer again in devkit's exact call or type
+`approve D<n>: <option>`.
 
 `dev audit verify` applies the same rule to the call in the transcript, so evidence recorded before it is reported
 when its call breaks it.

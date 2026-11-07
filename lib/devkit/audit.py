@@ -239,10 +239,10 @@ def evidence_label(label, rx=None) -> str:
 
 
 def _labels(options, rx) -> str:
-    """A decision's option labels as its records keep them: redacted as usual, joined by " | ", at most 300
+    """A decision's option labels as its records keep them: redacted as usual, joined by " | ", at most VALUE_CUT
     characters. Its answers are checked against the same text split again, when written and when read."""
     opts = options.split("|") if isinstance(options, str) else options if isinstance(options, (list, tuple)) else []
-    return _clean(" | ".join(t for t in (str(o).strip() for o in opts) if t), rx)[:300]
+    return _clean(" | ".join(t for t in (str(o).strip() for o in opts) if t), rx)[:VALUE_CUT]
 
 
 def _decided(rec: dict) -> dict:
@@ -419,6 +419,9 @@ SCHEMA = {
     "evidence": (dict, False), "ref": (dict, False), "prev": (str, True), "hash": (str, True),
 }
 _CUT = {"target": 300, "detail": 600, "why": 300, "run": 80}
+# characters a record keeps of each ref and evidence value: a decision's options and labels too, so a value this long
+# may have been cut, and progress refuses a decision whose labels would not fit (the Code reviewer's finding 2)
+VALUE_CUT = 300
 _B32 = "0123456789ABCDEFGHJKMNPQRSTVWXYZ"  # Crockford's base 32: ids sort by time
 
 
@@ -497,7 +500,7 @@ def _value(v, extra):
         v = ", ".join(str(x) for x in v)
     if isinstance(v, bool) or v is None or isinstance(v, (int, float)):
         return v
-    return _clean(str(v), extra)[:300]
+    return _clean(str(v), extra)[:VALUE_CUT]
 
 
 def _place(rec: dict, key: str, v, extra) -> None:
@@ -669,7 +672,12 @@ def kept(rec: dict, level: str) -> bool:
 
 # --------------------------------------------------------------------------- writing and the chain (R2)
 
-CHECKS: list = []  # more checks for verify: fn(record, path, line) -> problem text or None (spec C5 adds one)
+CHECKS: list = []  # more checks for verify: fn(record, path, line) -> problem text, a Note or None (spec C5 adds one)
+
+
+class Note(str):
+    """What a check says about a record that is no problem: it could not check the record, for example. verify
+    reports it, and the chain still holds."""
 
 
 def canonical(rec: dict) -> bytes:
@@ -915,7 +923,7 @@ def _reclean(r: dict, rx) -> dict:
             out[k] = _clean(r[k], rx)[:_CUT.get(k)]
     for group in ("evidence", "ref", "crew"):
         if isinstance(r.get(group), dict):
-            out[group] = {k: _clean(v, rx)[:300] if isinstance(v, str) else v for k, v in r[group].items()}
+            out[group] = {k: _clean(v, rx)[:VALUE_CUT] if isinstance(v, str) else v for k, v in r[group].items()}
     if action in EVIDENCE_ACTIONS and not _UNLINE.fullmatch(str(r.get("detail") or "")) and \
             (out.get("ref") or {}).get("answer"):
         out["ref"] = {**out["ref"], "answer": _option(out["ref"]["answer"], None)}  # never checked against options
@@ -1091,9 +1099,10 @@ def _load_checks():
 
 
 def verify_file(path: Path) -> dict:
-    """The chain of one month file: its first broken link, and what the CHECKS find in the intact records."""
+    """The chain of one month file: its first broken link, and what the CHECKS find in the intact records: their
+    problems (`checks`) and their notes (`notes`, no problem)."""
     _load_checks()
-    res = {"path": str(path), "records": 0, "v1": 0, "first": None, "checks": []}
+    res = {"path": str(path), "records": 0, "v1": 0, "first": None, "checks": [], "notes": []}
     try:
         data = Path(path).read_bytes()
     except OSError as e:
@@ -1123,7 +1132,9 @@ def verify_file(path: Path) -> dict:
                         problem = chk(r, path, n)
                     except Exception as e:
                         problem = f"the check failed: {e}"
-                    if problem:
+                    if isinstance(problem, Note):
+                        res["notes"].append({**where, "kind": "note", "note": str(problem)})
+                    elif problem:
                         res["checks"].append({**where, "kind": "check", "problem": str(problem)})
                 last, tail = r["hash"], b""
             continue
@@ -1144,8 +1155,9 @@ def _diverges(local: bytes, published: bytes):
 
 def verify(team: bool = True) -> dict:
     """Check every local month file's chain and, with `team`, the handoff copies and that each local file extends its
-    published copy (the anchor). -> {ok, first, files, records, unpublished}; `unpublished`: v2 records chained but
-    not yet in the published copy, so not yet anchored."""
+    published copy (the anchor). -> {ok, first, files, records, unpublished, problems, notes}; `unpublished`: v2
+    records chained but not yet in the published copy, so not yet anchored; `notes`: what the checks say that is no
+    problem."""
     out = {"ok": True, "first": None, "files": [], "records": 0, "unpublished": 0 if team else None}
     local = sorted(AUDIT.glob("*.jsonl")) if AUDIT.exists() else []
     files = local + ([f for f in sorted((core.HANDOFF / "audit").rglob("*.jsonl"))]
@@ -1174,6 +1186,7 @@ def verify(team: bool = True) -> dict:
                 out["unpublished"] += sum(1 for ln in data[len(p):].splitlines() if _v2(ln))
     out["first"] = problems[0] if problems else None
     out["problems"] = problems
+    out["notes"] = [n for f in out["files"] for n in f.get("notes") or []]
     out["ok"] = not problems
     return out
 
@@ -1605,6 +1618,8 @@ def _cmd_verify(a, ui) -> int:
               + f": {p['problem']}")
         if len(res["problems"]) > 1:
             print(ui.dim(f"  and {len(res['problems']) - 1} more problem(s) in other files or checks"))
+    for n in res["notes"]:
+        print(f"  {ui.WARN} {core.tilde(n['path'])} line {n['line']}: {n['note']}")
     record("audit.verify", f"{len(res['files'])} file(s)", "the chain holds" if res["ok"] else
            f"{res['first']['kind']} at {core.tilde(res['first']['path'])}:{res['first']['line']}",
            "ok" if res["ok"] else "failed", count=res["records"],
