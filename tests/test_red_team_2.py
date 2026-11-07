@@ -856,6 +856,37 @@ class NotesInAnotherEncoding(EmbargoCase):
                                                       "new_string": "New text."}))
 
 
+class DeployingWorkflowsWithoutABranchFilter(tb.BackupCase):
+    # The code reviewer's follow-up: a workflow that runs on every push (`on: push`, no branches filter) and deploys
+    # (a job with an environment) read as not deploying from a feature branch, so `dev backup --accept-ci` could start
+    # a deploy. Only a filter that leaves the branch out (branches, branches-ignore, tags alone) rules it out.
+    WF = "name: deploy\n{on}\njobs:\n  deploy:\n    runs-on: ubuntu-latest\n    environment: production\n" \
+         "    steps:\n      - run: echo deploy\n"
+
+    def workflow(self, on):
+        wf = self.repo / ".github" / "workflows"
+        wf.mkdir(parents=True, exist_ok=True)
+        (wf / "deploy.yml").write_text(self.WF.format(on=on))
+        return self.commit("ci: deploy from the workflow")
+
+    def test_b2_an_unfiltered_push_trigger_deploys_from_every_branch(self):
+        self.branch("feat/x", 2 * tb.HOUR)
+        for on, deploys in (("on: push", True), ("on: [push, pull_request]", True),
+                            ("on:\n  push:\n    branches-ignore: [main]", True),
+                            ("on:\n  push:\n    paths: ['src/**']", True),
+                            ("on:\n  push:\n    branches-ignore: ['feat/**']", False),
+                            ("on:\n  push:\n    tags: ['v*']", False), ("on:\n  push:\n    branches: [main]", False),
+                            ("on: pull_request", False)):
+            with self.subTest(on=on):
+                sha = self.workflow(on)
+                self.assertEqual(bool(tb.backup._deploys_from(self.repo, "feat/x", sha)), deploys)
+        self.workflow("on: push")
+        res = tb.backup.run(self.repo, ["feat/x"], accept_ci=True)[0]
+        self.assertEqual(res["state"], "skipped")
+        self.assertIn("deploy.yml deploys from it (job deploy, environment production)", res["reason"])
+        self.assertEqual(self.on_origin("feat/x"), "")
+
+
 @unittest.skipUnless(tb.HAS_GITLEAKS, "the backup's secret scan needs gitleaks")
 class TheBackupRemembersItsEmbargoes(tb.BackupCase):
     # B2a: an embargo that left the note without `dev branch embargo --lift` (a hand edit, a bad merge, a checkout of

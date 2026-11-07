@@ -197,9 +197,23 @@ def _prs_of(c, remote, ctx):
     return ctx["remote_prs"][slug]
 
 
+def _push_reaches(push, name) -> bool:
+    """Whether a workflow's `push` trigger can run for a push of branch `name`: with no filter it runs for every
+    branch; only a branches filter that leaves it out, a branches-ignore filter that names it, or a tag filter alone
+    rules it out. A paths filter still counts as running, since the deploy check stays on the safe side."""
+    cfg = push if isinstance(push, dict) else {}
+    from . import pipelines
+    if "branches" in cfg:
+        return pipelines._gh_filter(cfg["branches"], name)
+    if "branches-ignore" in cfg:
+        return not pipelines._gh_filter(cfg["branches-ignore"], name)
+    return not ("tags" in cfg or "tags-ignore" in cfg)
+
+
 def _deploys_from(top, name, sha) -> str:
-    """Why a GitHub Actions workflow of the commit to push deploys from `name`, or "": its push trigger names the
-    branch in `branches:`, and one of its jobs has an `environment:` or a deploy or publish step."""
+    """Why a GitHub Actions workflow of the commit to push deploys from `name`, or "": its push trigger runs for the
+    branch (named in `branches:`, or any branch when nothing filters it out, see _push_reaches), and one of its jobs
+    has an `environment:` or a deploy or publish step."""
     import tempfile
     from . import pipelines
     files = [f for f in core.gitout(top, "ls-tree", "-r", "--name-only", sha, "--", ".github/workflows").splitlines()
@@ -214,8 +228,8 @@ def _deploys_from(top, name, sha) -> str:
         tree = pl.get("tree")
         if pl.get("provider") != "github" or not isinstance(tree, dict):
             continue
-        push = pipelines._gh_events(tree.get("on", tree.get(True))).get("push")
-        if not (isinstance(push, dict) and "branches" in push and pipelines._gh_filter(push["branches"], name)):
+        events = pipelines._gh_events(tree.get("on", tree.get(True)))
+        if "push" not in events or not _push_reaches(events["push"], name):
             continue
         for jid, job in (tree.get("jobs") or {}).items():
             if not isinstance(job, dict):
