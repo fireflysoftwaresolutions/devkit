@@ -1469,9 +1469,29 @@ GUARDLESS_REASON = ("This starts a nested {cli} session with {what}, so its tool
                     f"ask the developer to start it in a terminal. {_TAIL}")
 
 
+_AGENT_PACKAGES = {"claude-code": "claude", "codex": "codex"}  # npm packages whose binary is claude or codex (RT8)
+
+
+def agent_cli(word) -> str:
+    """'claude' or 'codex' when a command word runs one of them: the binary, or the npm package a runner such as
+    npx, bunx, pnpm dlx or yarn dlx starts (`@anthropic-ai/claude-code@latest`, `claude-code`, `@openai/codex`), and
+    '' otherwise (RT8)."""
+    name = os.path.basename(str(word or ""))
+    if name in _AGENT_CLIS:
+        return name
+    pkg = str(word or "")
+    if pkg.startswith("@"):  # @scope/name@version
+        scope, _, rest = pkg.partition("/")
+        pkg = rest.partition("@")[0] if scope in ("@anthropic-ai", "@openai") else ""
+    else:
+        pkg = pkg.partition("@")[0]
+    return _AGENT_PACKAGES.get(pkg.casefold(), "")
+
+
 def guardless_session(name, argv, names=()) -> str | None:
     """Why a nested claude or codex call would run without devkit's hooks or sandbox, or None (RT6)."""
-    if name not in _AGENT_CLIS:
+    name = agent_cli(argv[0]) if argv else ""
+    if not name:
         return None
     home = sorted(set(names) & _AGENT_HOME_ENV)
     if home:
@@ -1701,8 +1721,8 @@ class _Shell:
         python -m devkit…), a program that imports devkit, or an agent session (its hooks run devkit)."""
         if _dev_args(argv) is not None:
             return "a devkit command"
-        if name in _AGENT_CLIS:
-            return f"a nested {name} session, whose hooks run devkit"
+        if agent_cli(argv[0]):
+            return f"a nested {agent_cli(argv[0])} session, whose hooks run devkit"
         if _INTERP.match(name) and len(argv) > 1:
             if argv[1] == "-m" and len(argv) > 2 and argv[2].split(".")[0] == "devkit":
                 return "a devkit command"
@@ -1953,7 +1973,7 @@ def _unwrap(argv):
                 rest = rest[1:]
             argv = rest[1:]
         elif (n in ("uv", "poetry", "pipenv", "pdm", "hatch", "rye") and argv[1:2] == ["run"]) or \
-                (n == "pnpm" and argv[1:2] in (["exec"], ["dlx"])):
+                (n == "pnpm" and argv[1:2] in (["exec"], ["dlx"])) or (n == "yarn" and argv[1:2] == ["dlx"]):
             argv = argv[2:]
             while argv and argv[0].startswith("-"):
                 argv = argv[1:]
