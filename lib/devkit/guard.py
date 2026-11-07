@@ -2447,6 +2447,60 @@ LANE_REASON = ("Run `dev progress …` and `dev crew …` as a command of its ow
                "fine, and read-only crew commands (graph, show, raci, …) work anywhere.")
 
 
+_DATA_HEREDOC = re.compile(r"\$\(cat <<(['\"])([A-Za-z_][A-Za-z0-9_]*)\1\n")
+
+
+def _data_heredoc_end(cmd: str, i: int) -> int:
+    """At a `$(` the shell expands: the end of `$(cat <<'TAG'` + body + a line `TAG` + `)`, a substitution that
+    only prints its quoted heredoc (data, nothing runs), else -1. The body ends at its first `TAG` line, as in the
+    shell, and `)` must follow that line at once."""
+    m = _DATA_HEREDOC.match(cmd, i)
+    if not m:
+        return -1
+    tag, j = m.group(2), m.end()
+    while True:
+        nl = cmd.find("\n", j)
+        if nl < 0:
+            return -1
+        if cmd[j:nl] == tag:
+            return nl + 2 if cmd[nl + 1:nl + 2] == ")" else -1
+        j = nl + 1
+
+
+def runs_one_command(cmd: str) -> bool:
+    """True when the shell does nothing but run this one program (K8): no operator, redirect or newline outside
+    quotes, no command substitution where the shell expands it (unquoted or in double quotes), no unterminated quote.
+    A substitution that only prints a quoted heredoc (`"$(cat <<'EOF'` … `EOF` + `)"`, how a long message is passed
+    to `dev crew ask`) is data: it runs `cat` and nothing else. Single quotes are literal: a `$(` inside them is text,
+    so it never hides the operators around it."""
+    i, n, q = 0, len(cmd), None
+    while i < n:
+        c = cmd[i]
+        if q == "'":
+            q = None if c == "'" else q
+        elif cmd.startswith("$(", i):
+            end = _data_heredoc_end(cmd, i)
+            if end < 0:
+                return False
+            i = end
+            continue
+        elif q == '"':
+            if c == "\\":
+                i += 1
+            elif c == '"':
+                q = None
+            elif c == "`":
+                return False
+        elif c == "\\":
+            i += 1
+        elif c in "'\"":
+            q = c
+        elif c in ";&|<>\n`":
+            return False
+        i += 1
+    return q is None
+
+
 def _subst(s: str, quotes: bool) -> list:
     out, i, n, q = [], 0, len(s), None
     while i < n:

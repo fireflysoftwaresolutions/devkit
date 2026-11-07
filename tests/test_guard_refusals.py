@@ -15,6 +15,9 @@ sys.path.insert(0, str(ROOT / "lib"))
 
 from devkit import audit, core, guard  # noqa: E402
 
+MSG = "$(cat <<'EOF'\nShould I run gh pr merge 12; or wait && ask | Link?\nEOF\n)"
+
+
 class HookEventsAreTheHarnesss(unittest.TestCase):
     # B3 part b: a hook event typed through a shell would forge the developer's prompt or answer; only the harness
     # runs `dev hook`, so guard.check refuses it from every agent tool call, the main session's included
@@ -46,6 +49,48 @@ class HookEventsAreTheHarnesss(unittest.TestCase):
         for cmd in ("dev hook --help", "grep -rn 'dev hook' docs", "echo 'dev hook prompt'", "dev help"):
             with self.subTest(cmd=cmd):
                 self.assertIsNone(self.check(cmd))
+
+
+class QuotedMessagesAreData(unittest.TestCase):
+    # K8: the router sends a member's single `dev crew ask|answer` or `dev progress …` call to its lane; one that
+    # passes its message as a quoted heredoc runs `cat` and nothing else, so it is one command. What the shell
+    # really runs around it, or expands inside it, still makes it more than one.
+
+    def test_a_quoted_message_is_one_command(self):
+        for cmd in ('dev crew ask "use x; then y && z | w > f"',
+                    "dev crew answer 3 'is $(whoami) data? and `id` too'",
+                    f'dev crew ask "{MSG}"', f'dev crew answer 4 "{MSG}"', f"dev crew ask {MSG}",
+                    f'dev progress step "fixed" --check "{MSG}"',
+                    'dev crew ask "before ' + MSG + ' after"',
+                    "dev crew ask \"$(cat <<\"EOF\"\nbody with ) and $(id) as text\nEOF\n)\"",
+                    'dev crew ask "a \\$(id) escaped"'):
+            with self.subTest(cmd=cmd):
+                self.assertTrue(guard.runs_one_command(cmd))
+
+    def test_what_the_shell_runs_is_more_than_one_command(self):
+        for cmd in ('dev crew ask "$(id)"', 'dev crew ask "`id`"', 'dev crew ask "x"; gh pr merge 12',
+                    f'dev crew ask "{MSG}" && gh pr merge 12', 'dev crew ask "x" > /tmp/f', 'dev crew ask "open',
+                    # an unquoted delimiter expands the body: $(id) in it runs
+                    "dev crew ask \"$(cat <<EOF\nexpands $(id)\nEOF\n)\"",
+                    # after the delimiter line the substitution runs more, before its `)`
+                    "dev crew ask \"$(cat <<'EOF'\nx\nEOF\ngh pr merge 12\n)\"",
+                    # a delimiter line inside the body ends it there, as in the shell
+                    "dev crew ask \"$(cat <<'EOF'\nx\nEOF\ngh pr merge 12\ncat <<'EOF'\ny\nEOF\n)\"",
+                    # `<<-` strips tabs from the delimiter line; not taken as data
+                    "dev crew ask \"$(cat <<-'EOF'\nx\n\tEOF\n)\"",
+                    # a `$(` inside single quotes is text: the operators around it run
+                    "dev crew ask '$(cat <<'EOF'\n' ; gh pr merge 12 ; echo '\nEOF\n)'",
+                    "dev crew ask \"$(cat /etc/hosts)\"", "dev crew ask \"$((1 + 2))\""):
+            with self.subTest(cmd=cmd):
+                self.assertFalse(guard.runs_one_command(cmd))
+
+    def test_the_guard_reads_the_heredoc_message_as_data(self):
+        # what the shell runs for a quoted-heredoc message: the dev call and `cat`, no action in the body
+        cwd = str(ROOT)
+        calls = guard.shell_calls(f'dev crew ask "{MSG}"', cwd)
+        self.assertEqual([a[:3] for a, _ in calls], [["dev", "crew", "ask"], ["cat"]])
+        with mock.patch.object(core, "load_config", return_value={"safeguards": {"irreversible_main": "enforce"}}):
+            self.assertEqual(guard.irreversible_actions(f'dev crew ask "{MSG}"', cwd), [])
 
 
 if __name__ == "__main__":
