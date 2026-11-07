@@ -352,6 +352,7 @@ ACTIONS = {
     "audit": ("lifecycle", "notice"), "audit.config": ("config", "notice"), "audit.export": ("data", "notice"),
     "audit.verify": ("security", "info"), "audit.publish": ("security", "critical"),
     "guard": ("refusal", "warning"), "guard.ask": ("decision", "notice"), "guard.allow": ("decision", "info"),
+    "git.backup": ("data", "info"), "git.backup-skipped": ("data", "notice"), "git.embargo": ("decision", "notice"),
     "stubs.gate": ("refusal", "warning"), "tests.gate": ("refusal", "warning"),
     "stop": ("refusal", "notice"), "stop.prevented": ("lifecycle", "info"),
     "config": ("config", "notice"), "config.blocked": ("security", "warning"),

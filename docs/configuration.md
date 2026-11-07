@@ -148,6 +148,7 @@ the job compares the lessons' anchors instead.
 | --- | --- | --- |
 | `commits.types` | `feat`, `fix`, `docs`, `style`, `refactor`, `perf`, `test`, `build`, `ci`, `chore`, `revert`, `deps` | The Conventional Commit types that `dev commit` and PR titles accept; your list replaces the default |
 | `gitx.github_hosts` | `[]` | GitHub Enterprise hosts, for example `["github.acme.com"]`, whose repositories `dev pr`, `dev run`, `dev release`, and `dev issue` treat as GitHub |
+| `delivery.draft_pr` | `false` | When `true`, `dev pr create` opens a draft pull request unless you pass `--ready`; `dev pr ready` marks it ready, which starts the one CI run |
 
 See [Git and GitHub](git-and-github.md).
 

@@ -62,7 +62,7 @@ diagram files without them.
 | Backend | — | `backend`, `java-springboot`, `spring-boot-testing`, `java-junit` |
 | Frontend | Chrome DevTools MCP, `playwright-cli` | `angular-developer`, `react-best-practices`, `composition-patterns`, `frontend-design` / `impeccable` |
 | Security | `dev sec scan` | `devsecops`, `/security-review` |
-| Branch, commit, PR | `dev branch new`, `dev commit`, `dev rebase`, `dev push`, `dev pr create\|checks --watch\|merge`, `dev run view --failed`, `dev issue`; `dev git` and `dev gh` for anything else | `delivery`, `communicating` (PR template) |
+| Branch, commit, PR | `dev branch new`, `dev commit`, `dev rebase`, `dev push`, `dev backup` (a copy on the remote when it starts no CI run; `dev branch embargo` keeps one off), `dev pr create\|ready\|checks --watch\|merge`, `dev run view --failed`, `dev issue`; `dev git` and `dev gh` for anything else | `delivery`, `communicating` (PR template) |
 | Ship | `dev ci --run`, `dev ci status`, `dev calver`, `dev delivery`, `dev release`, `/devkit:ship` | `delivery`, `release-policy` |
 | Document | `dev docs check`, `dev diagram render` | `docs`, `documentation-writer`, `doc-coauthoring`, `diagrams` |
 | Hand off | `dev handoff`, `dev note set status=… priority=…`, `dev task`, `/devkit:handoff`; `dev handoff-import` adopts an older handoff repository; `dev session brief` (what a session kept through compaction or `/clear`) | `handoff` |
