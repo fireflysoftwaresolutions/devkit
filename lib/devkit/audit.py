@@ -842,7 +842,7 @@ def _forward(rec: dict, cfg: dict):
 # dev commands that only read; everything else is audited (and these too at audit.level all)
 READ_ONLY = {"help", "ls", "go", "status", "open", "overview", "standup", "dashboard", "team", "report", "time",
              "files", "find", "grep", "diff", "canary", "du", "doctor", "version", "agents", "calver", "audit",
-             "__complete", "hook", "guard", "plugin", "docs", "diagram", "stubs", "mcp",
+             "__complete", "completion", "hook", "guard", "plugin", "docs", "diagram", "stubs", "mcp",
              "test"}  # dev test run|plan|prove|audit: runs and reads tests (prove in a temp copy), changes nothing
 READ_SUB = {("task", "ls"), ("task", "show"), ("task", "history"), ("task", None), ("plan", "ls"), ("plan", None),
             ("lesson", "ls"), ("lesson", "show"), ("lesson", "scan"), ("lesson", "review"), ("lesson", None),

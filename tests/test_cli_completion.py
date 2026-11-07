@@ -33,6 +33,14 @@ BASH = shutil.which("bash")
 BASH_MAJOR = int(re.search(r"version (\d+)", subprocess.run([BASH, "--version"], capture_output=True, text=True)
                            .stdout).group(1)) if BASH else 0
 ANSI = re.compile(r"\x1b\[[0-9;?]*[A-Za-z]|\x1b[()][A-Za-z0-9]|\x1b[=>]|\r")
+# A printf whose %q writes a leading ~ as \~, as bash 5's does (5.3: \~/Documents); macOS's bash 3.2 leaves it bare.
+BASH5_PRINTF = r"""printf() {
+  builtin printf "$@"
+  if [[ $1 == -v && $3 == %q && $4 == '~'* && ${!2} == '~'* ]]; then
+    builtin printf -v "$2" '\\%s' "${!2}"
+  fi
+}
+"""
 
 ITEM = """---
 id: {id}
@@ -397,10 +405,11 @@ class BashCompletion(unittest.TestCase):
     def tearDownClass(cls):
         cls.fx.tmp.cleanup()
 
-    def complete(self, *words):
-        # COMPREPLY for `dev <words…>` with the cursor on the last word, as bash fills COMP_WORDS on Tab
+    def complete(self, *words, pre=""):
+        # COMPREPLY for `dev <words…>` with the cursor on the last word, as bash fills COMP_WORDS on Tab, after the
+        # shell lines `pre`
         quoted = " ".join("'" + w.replace("'", "'\\''") + "'" for w in ("dev", *words))
-        script = (f"source {REPO / 'shell' / 'completions' / 'dev.bash'}\n_dev_wait=10 _dev_first_wait=10\n"
+        script = (f"source {REPO / 'shell' / 'completions' / 'dev.bash'}\n_dev_wait=10 _dev_first_wait=10\n{pre}"
                   f"COMP_WORDS=({quoted}); COMP_CWORD={len(words)}; _dev; printf '%s\\n' \"${{COMPREPLY[@]}}\"\n")
         r = subprocess.run([BASH, "--norc", "--noprofile", "-c", script], capture_output=True, text=True,
                            timeout=60, env=self.fx.env(), cwd=str(self.fx.widget))
@@ -418,6 +427,16 @@ class BashCompletion(unittest.TestCase):
         self.assertEqual(self.complete("go", "widget", ""), {"feat/login"})
         self.assertEqual(self.complete("go", "gadget", ""), set())
         self.assertIn("api\\ contract", self.complete("progress", "step", "--step", ""))
+
+    # A value that starts with ~ is offered with a bare ~, so the line names a path in your home folder when it runs:
+    # bash 5 escapes it (\~/Documents), which names a folder called ~ in the current one. Checked for a live value (a
+    # plan, by its ~ path) and for the files after ~/, with this bash's printf and with one that quotes as bash 5's.
+    def test_a_leading_tilde_stays_bare(self):
+        (self.fx.home / "Documents").mkdir(exist_ok=True)
+        plan = "~/Development/.handoff/plans/acme/widget/2026-11-01-login.md"
+        for pre in ("", BASH5_PRINTF):
+            self.assertEqual(self.complete("plan", "revise", "", pre=pre), {plan}, pre)
+            self.assertEqual(self.complete("rm", "~/Do", pre=pre), {"~/Documents"}, pre)
 
 
 @unittest.skipUnless(BASH, "bash is not installed")
@@ -516,6 +535,15 @@ class BashValues(unittest.TestCase):
         self.assertEqual(out.splitlines(), ["second T-1", "third T-1"], err)
         self.assertEqual(self.runs(), 1, "a cached value ran the command again")
 
+    # The first Tab of a kind in this shell waits _dev_first_wait, not the _dev_wait a refresh gets: a command that
+    # takes 1.2 s fills it when the first wait is 3 s, while a refresh gives up after 0.05 s (bash 3.2 rounds that up
+    # to 1 s, still too short).
+    def test_the_first_tab_waits_longer_than_a_refresh(self):
+        self.path = fake_dev(self.d, f'echo run >> "{self.count}"\nsleep 1.2\nprintf \'T-1:now · one\\n\'\n')
+        r = self.bash("_dev_wait=0.05 _dev_first_wait=3\n_dev_values tasks ''; echo \"first ${_dev_reply[*]}\"\n")
+        self.assertEqual((r.stdout.splitlines(), r.stderr), (["first T-1"], ""))
+        self.assertEqual(self.runs(), 1)
+
     # Like zsh, bash deletes the value files it left over a day ago, once per shell, and keeps the fresh ones.
     def test_value_files_older_than_a_day_are_deleted(self):
         self.path = fake_dev(self.d, "printf 'T-1:now · one\\n'\n")
@@ -558,15 +586,16 @@ class LiveValues(unittest.TestCase):
         self.assertEqual(lines, ["api contract:step 2 · running · Backend engineer (Tank)", "design:step 1 · done"])
 
     # Text from git or the registry is drawn on the terminal in a listing: its control characters (an escape that sets
-    # the window title or colors the screen, C1 ones included) are dropped, and its words kept.
+    # the window title or colors the screen, C1 ones included) and its bidirectional overrides and isolates (U+202E
+    # shows gnp.exe as exe.png) are dropped, and its words kept.
     def test_values_carry_no_control_characters(self):
         git(self.fx.widget, "checkout", "-q", "-b", "esc/branch")
         self.addCleanup(git, self.fx.widget, "branch", "-q", "-D", "esc/branch")
         git(self.fx.widget, "commit", "-q", "--allow-empty", "-m",
-            "evil \x1b]0;TITLE\x07 \x1b[41mRED\x1b[0m \u009b31m subject")
+            "evil \x1b]0;TITLE\x07 \x1b[41mRED\x1b[0m \u009b31m \u202egnp.exe\u202c \u2066x\u2069 subject")
         git(self.fx.widget, "checkout", "-q", "main")
         line = next(ln for ln in self.fx.dev("__complete", "branches").stdout.splitlines() if ln.startswith("esc/"))
-        self.assertIsNone(re.search(r"[\x00-\x1f\x7f-\x9f]", line), repr(line))
+        self.assertIsNone(re.search(r"[\x00-\x1f\x7f-\x9f\u202a-\u202e\u2066-\u2069]", line), repr(line))
         self.assertTrue(line.endswith(" subject"), repr(line))
 
     # dev go <project> <branch>: the worktree's path, by its branch or a unique part of it; no match lists them.
@@ -617,6 +646,24 @@ class ReadOnlyLanes(unittest.TestCase):
                     "dev __complete worktrees widget"):
             self.assertIsNone(guard.readonly_refusal(cmd, str(REPO)), cmd)
         self.assertIsNotNone(guard.readonly_refusal("dev task add x", str(REPO)))
+
+    # And a read leaves no trace: printing the scripts appends nothing to the audit trail and, in a fresh home, does
+    # not create the audit folder's settings mark (audit/.settings.json) either.
+    def test_printing_the_scripts_writes_no_audit_record(self):
+        fx = Fixture()
+        self.addCleanup(fx.tmp.cleanup)
+        trail = fx.home / ".local" / "state" / "devkit" / "audit"
+
+        def files():
+            return {str(p.relative_to(trail)): p.read_bytes() for p in trail.rglob("*") if p.is_file()} \
+                if trail.exists() else {}
+
+        before = files()
+        for shell, head in (("zsh", "#compdef dev"), ("bash", "# bash completion")):
+            r = fx.dev("completion", shell)
+            self.assertEqual(r.returncode, 0, r.stderr)
+            self.assertTrue(r.stdout.startswith(head), r.stdout[:80])
+        self.assertEqual(files(), before)
 
 
 class ShellHelpersConsent(unittest.TestCase):

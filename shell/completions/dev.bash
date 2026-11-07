@@ -84,12 +84,20 @@ _dev_add() {
   done < <(compgen "$@")
 }
 
+# _dev_q VALUE: q (the caller's) = VALUE escaped as the shell reads it back, with a leading ~ left bare: bash 5's %q
+# writes ~/Documents as \~/Documents, which names a folder called ~ in the current one instead of your home folder's.
+_dev_q() {
+  printf -v q '%q' "$1"
+  [[ $q == '\~'* ]] && q=${q#\\}
+  return 0
+}
+
 # _dev_files -f|-d: add the files (-f) or folders (-d) that start with the word being typed to COMPREPLY, each escaped
 # as the shell reads it back: x\[1\].txt, not a pattern that names x1.txt when the line runs.
 _dev_files() {
   local x q
   while IFS= read -r x; do
-    printf -v q '%q' "$x"
+    _dev_q "$x"
     COMPREPLY+=("$q")
   done < <(compgen "$1" -- "$_dev_cur")
 }
@@ -119,7 +127,7 @@ _dev_complete_with() {
            _dev_values "$k" "$arg"
            for v in "${_dev_reply[@]}"; do
              [[ $v == "$cur"* ]] || continue
-             printf -v q '%q' "$v"
+             _dev_q "$v"
              COMPREPLY+=("$q")
            done
          done
