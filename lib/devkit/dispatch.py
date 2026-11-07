@@ -11,7 +11,8 @@ only dispatcher:
   delegate   anyone adds a step for another member; it joins the plan with who asked. If that member is working,
              the step goes to its lane and the member gets a message; otherwise Morpheus is told to launch it
   decline    a member hands a delegated step back to Morpheus, with the reason
-  ready      steps whose dependencies are done, assigned to a member who is not working, within the parallel limit:
+  ready      steps whose dependencies are done (progress.deps_open: a review step also takes unverified work), assigned
+             to a member who is not working, within the parallel limit:
              Morpheus is told once per step, with the exact launch command
 
 Everything is deterministic: routing scores come from the roster's words and file patterns, not from a model.
@@ -230,7 +231,7 @@ def _sorted(run):
     for s in run.get("plan") or []:
         if s.get("state") not in ("pending", "blocked") or not s.get("label") or (s.get("owner") or "main") != "main":
             continue
-        deps = progress.deps_open(run, s)  # the plan's one dependency rule: done or skipped satisfies a step
+        deps = progress.deps_open(run, s)  # the plan's one dependency rule: done or skipped, or unverified for a review
         if s.get("waiting"):
             waiting.append((s, f"decision {s['waiting']}"))
         elif deps:

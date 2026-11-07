@@ -439,7 +439,8 @@ def _new_step(name, est=None):
 # below are the only place that decides about it. Every transition that starts, owns or closes a step asks them.
 #   entering   start and add resolve each `after` to one step of the plan and refuse a name that is not a step, a
 #              name that matches several, two steps with one name, and a cycle (spelled out step by step)
-#   done       a dependency is satisfied when its step is done or skipped (DONE)
+#   done       a dependency is satisfied when its step is done or skipped (DONE); for a review step (is_review_step)
+#              an unverified one is too, since that review is what approves it (spec F6, B-fy3i742ews7)
 #   waiting    a step with an open dependency (deps_open) is never started: start and the main lane's advance pass it
 #              over, begin refuses it, assign and a subagent's start leave it pending (the subagent's lane runs
 #              without it, and Morpheus is told), and the launch queue (dispatch.ready) holds it back
@@ -457,14 +458,33 @@ def _by_name(plan) -> dict:
     return {s["name"]: s for s in plan or []}
 
 
+def is_review_step(s) -> bool:
+    """A review step, told the way F6 tells it: its kind of work is review (approvals.from_review), or the member it
+    is assigned to works review-only (crew.json `tools`, as launch_cost reads it). A RACI that cannot be read makes
+    no step a review step, so the step keeps waiting."""
+    try:
+        from . import raci
+        act = raci.step_activity(s)
+    except Exception:
+        return False
+    if act and act.get("id") == "review":
+        return True
+    m = _member_named("", f"{s['label']}: {s.get('name') or ''}") if s.get("label") else None
+    return bool(m and m.get("tools") == "review")
+
+
 def deps_open(run, s) -> list:
-    """The steps `s` waits for that are not done or skipped yet, in the order of its `after`."""
+    """The steps `s` waits for that are not done or skipped yet, in the order of its `after`. A review step does not
+    wait for an unverified one: its Check is the verdict that approves that work (spec F6)."""
     steps = _by_name((run or {}).get("plan"))
-    return [a for a in s.get("after") or [] if a in steps and steps[a].get("state") not in DONE]
+    out = [a for a in s.get("after") or [] if a in steps and steps[a].get("state") not in DONE]
+    if any(steps[a].get("state") == "unverified" for a in out) and is_review_step(s):
+        out = [a for a in out if steps[a].get("state") != "unverified"]
+    return out
 
 
 def ready(run) -> list:
-    """The pending steps whose dependencies are all done or skipped, in plan order."""
+    """The pending steps whose dependencies are all satisfied (deps_open), in plan order."""
     return [s for s in (run or {}).get("plan") or [] if s.get("state") == "pending" and not deps_open(run, s)]
 
 
@@ -3628,11 +3648,43 @@ def scope_written(agent: str, sid: str, aid: str, paths: list, now: float | None
     return writes
 
 
+def _verified_by_review(run: dict, st: dict, check: str, now: float, agent: str, sid: str, aid: str) -> list:
+    """A review step (kind of work review, as approvals.from_review reads it) that ended done with Check ✓: the
+    unverified steps it comes after whose approver is its member (approvals.approver, never their own work) end done,
+    the review being their evidence, so from_review records the approval on them. Any other unverified step stays so,
+    for Morpheus to close with evidence (and its own approver to approve). -> the names of the steps it closed."""
+    from . import approvals, raci
+    act = raci.step_activity(st)
+    if not act or act.get("id") != "review":
+        return []
+    try:
+        if approvals.verdict_of(check) != "approved":
+            return []
+    except approvals.ApprovalError:
+        return []
+    who = member_of_step(run, st)
+    if not who:
+        return []
+    steps, out = _by_name(run.get("plan")), []
+    for n in st.get("after") or []:
+        x = steps.get(n)
+        if not x or x.get("state") != "unverified":
+            continue
+        did = member_of_step(run, x)
+        if did == who or approvals.approver(raci.step_activity(x), did) != who:
+            continue
+        _finish_step(run, x, now, agent, sid)
+        _log_change(run, x, "unverified", "done", aid, f"verified by the review “{st['name']}”: {check}", now)
+        out.append(n)
+    return out
+
+
 def _end_member_step(run: dict, st: dict, lane: dict, aid: str, report: str, now: float, agent: str, sid: str):
     """A member's step at its SubagentStop (spec F6, R2-4): done with the evidence of its report's Check or its last
     `dev progress step --check` (approvals.ending), and a review step's Check is its verdict on the work it follows
-    (approvals.from_review); otherwise unverified, for Morpheus to close with evidence or reopen. A review or
-    read-only lane whose shell wrote files (scope_writes) ends unverified whatever it reports."""
+    (approvals.from_review), whose ✓ also ends done the unverified work it approves (_verified_by_review);
+    otherwise unverified, for Morpheus to close with evidence or reopen. A review or read-only lane whose shell wrote
+    files (scope_writes) ends unverified whatever it reports."""
     from . import approvals
     old = st.get("state")
     state_, why, check = approvals.ending(lane, report)
@@ -3647,6 +3699,7 @@ def _end_member_step(run: dict, st: dict, lane: dict, aid: str, report: str, now
     _finish_step(run, st, now, agent, sid)
     _log_change(run, st, old, "done", aid, f"{who} finished; {why}", now)
     try:
+        _verified_by_review(run, st, check, now, agent, sid, aid)
         approvals.from_review(run, st, check, now, doer_of=lambda s_: member_of_step(run, s_))
     except approvals.ApprovalError as e:  # a review that may approve nothing: its step still ends
         _audit("crew.approval-refused", st.get("name") or "", str(e)[:300], "refused", project=run.get("project") or "")
