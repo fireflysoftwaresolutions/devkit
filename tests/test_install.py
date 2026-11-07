@@ -1,9 +1,10 @@
 # Copyright (c) 2026 Firefly Software Solutions Inc.
 # SPDX-License-Identifier: Apache-2.0
 """install.sh, the one-line installer, run through a pipe as `curl … | bash` runs it: against a local repository with
-release tags, with stub `brew`, `gh`, `uname` and `sw_vers` first on PATH and a temporary HOME. Nothing here touches
-Homebrew, the network, ~/.claude, ~/.codex or the shell profile. The repository's `bin/dev` is a stand-in that records
-how the setup wizard was started and, with the real devkit library, whether the wizard would ask its questions.
+release tags, with stub `brew`, `gh`, `uname`, `sysctl` and `sw_vers` first on PATH, a temporary HOME, and the folders
+where it looks for Homebrew (`DEVKIT_BREW_PATHS`) moved into the temporary folder. Nothing here touches Homebrew, the
+network, ~/.claude, ~/.codex or the shell profile. The repository's `bin/dev` is a stand-in that records how the setup
+wizard was started and, with the real devkit library, whether the wizard would ask its questions.
 """
 import json
 import os
@@ -28,6 +29,14 @@ STUBS = {
     "uname": """#!/bin/sh
 echo "uname $*" >> "$STUB_LOG"
 case "$1" in -m) echo "${STUB_ARCH:-arm64}" ;; *) echo "${STUB_OS:-Darwin}" ;; esac
+""",
+    # hw.optional.arm64 is 1 on Apple silicon, also in a terminal under Rosetta (STUB_ROSETTA=1), and unknown on Intel
+    "sysctl": """#!/bin/sh
+echo "sysctl $*" >> "$STUB_LOG"
+case "${STUB_ARCH:-arm64}/${STUB_ROSETTA:-}" in arm64/* | */1) arm64=1 ;; *) arm64="" ;; esac
+if [ "$*" = "-n hw.optional.arm64" ] && [ -n "$arm64" ]; then echo 1; exit 0; fi
+echo "sysctl: unknown oid '$2'" >&2
+exit 1
 """,
     "sw_vers": """#!/bin/sh
 echo 26.1
@@ -106,12 +115,24 @@ class Machine:
         py.chmod(0o755)
         self.remote = make_remote(root)
         self.log, self.setup_log, self.signed_in = root / "calls.log", root / "setup.jsonl", root / "gh-signed-in"
+        # Where the installer looks for a brew that is not on PATH: stand-ins for /opt/homebrew and /usr/local, empty
+        # until a test puts brew there, so that no test reaches this Mac's own Homebrew.
+        self.brew_paths = (root / "opt" / "homebrew" / "bin" / "brew", root / "usr" / "local" / "bin" / "brew")
+
+    def move_brew(self, to: Path) -> dict:
+        """Take brew off PATH and put it at `to`, one of `brew_paths`, with a python3 next to it, as Homebrew has.
+        Returns the environment that makes that brew report its prefix."""
+        prefix = to.parent.parent
+        (prefix / "bin").mkdir(parents=True, exist_ok=True)
+        shutil.move(str(self.stubs / "brew"), str(to))
+        shutil.copy(str(self.prefix / "bin" / "python3"), str(prefix / "bin" / "python3"))
+        return {"STUB_PREFIX": str(prefix)}
 
     def env(self, **extra) -> dict:
         env = dict(GIT_ENV, HOME=str(self.home), PATH=f"{self.stubs}:/usr/bin:/bin", TERM="xterm-256color",
                    LANG="en_US.UTF-8", STUB_LOG=str(self.log), STUB_PREFIX=str(self.prefix),
                    STUB_GH_SIGNED_IN=str(self.signed_in), SETUP_LOG=str(self.setup_log), REAL_LIB=LIB,
-                   DEVKIT_REPO=f"file://{self.remote}",
+                   DEVKIT_REPO=f"file://{self.remote}", DEVKIT_BREW_PATHS=":".join(map(str, self.brew_paths)),
                    # if a real gh or brew were ever reached (a hardcoded path), it must not prompt, update, or reach
                    # the network: every HTTP(S) request goes to a closed local port and fails at once
                    GH_PROMPT_DISABLED="1", GH_CONFIG_DIR=str(self.home / ".config" / "gh"),
@@ -248,7 +269,8 @@ exit 22
 
 class IntelMacTests(unittest.TestCase):
     """Homebrew's own installer stops on Intel Macs (Homebrew/install PR #1140, merged 2026-09-11) and its .pkg is
-    Apple silicon only: a new install needs Apple silicon, and an Intel Mac that already has Homebrew still runs."""
+    Apple silicon only: a new install needs Apple silicon, and an Intel Mac that already has Homebrew still runs.
+    A terminal under Rosetta makes an Apple silicon Mac report x86_64: the installer tells it from an Intel Mac."""
 
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
@@ -260,8 +282,14 @@ class IntelMacTests(unittest.TestCase):
     def tearDown(self):
         self.tmp.cleanup()
 
-    # brew is neither on PATH nor in /usr/local: the installer says why in its own words and touches nothing
-    @unittest.skipIf(os.path.exists("/usr/local/bin/brew"), "this machine has Homebrew in /usr/local")
+    def nothing_changed(self):
+        # only uname and sysctl ran: no curl, brew or gh, no checkout, no shell profile, no wizard
+        self.assertEqual([c for c in self.m.calls() if not c.startswith(("uname ", "sysctl "))], [])
+        self.assertFalse(self.m.devkit.exists())
+        self.assertFalse((self.m.home / ".zprofile").exists())
+        self.assertEqual(self.m.setups(), [])
+
+    # brew is neither on PATH nor where Homebrew installs it: the installer says why in its own words, touches nothing
     def test_an_intel_mac_without_homebrew_stops_before_changing_anything(self):
         (self.m.stubs / "brew").unlink()
         rc, out = self.m.pipe(STUB_ARCH="x86_64")
@@ -270,10 +298,8 @@ class IntelMacTests(unittest.TestCase):
                       "on Intel Macs. Nothing was changed.", out)
         self.assertIn("An Intel Mac that already has Homebrew can still run this installer.", out)
         self.assertNotIn("run the installer again", out)  # a retry would fail the same way
-        self.assertEqual([c for c in self.m.calls() if not c.startswith("uname")], [])  # no curl, brew or gh
-        self.assertFalse(self.m.devkit.exists())
-        self.assertFalse((self.m.home / ".zprofile").exists())
-        self.assertEqual(self.m.setups(), [])
+        self.assertNotIn("Rosetta", out)  # sysctl says this Mac has no Apple silicon: Rosetta is not the cause
+        self.nothing_changed()
 
     # brew is on PATH: the install goes on, with one warning line
     def test_an_intel_mac_with_homebrew_continues_with_one_warning(self):
@@ -286,6 +312,34 @@ class IntelMacTests(unittest.TestCase):
         self.assertEqual(self.m.release(), "v26.11.10")
         self.assertEqual(len(self.m.setups()), 1)
         self.assertNotIn("curl", "\n".join(self.m.calls()))
+
+    # brew is only in /usr/local/bin, not on PATH: the first step and the Homebrew step find the same brew
+    def test_an_intel_mac_with_homebrew_only_in_usr_local_continues_with_that_homebrew(self):
+        usr_local = self.m.brew_paths[1]
+        rc, out = self.m.pipe(STUB_ARCH="x86_64", **self.m.move_brew(usr_local))
+        self.assertEqual(rc, 0, out)
+        self.assertIn("macOS 26.1 on Intel", out)
+        self.assertEqual(len([ln for ln in out.splitlines() if ln.lstrip().startswith("!") and "Intel" in ln]), 1, out)
+        self.assertIn(f"Homebrew 4.6.0 in {usr_local.parent.parent}", out)
+        self.assertEqual(self.m.release(), "v26.11.10")
+        self.assertEqual(len(self.m.setups()), 1)
+        self.assertNotIn("curl", "\n".join(self.m.calls()))
+
+    # Apple silicon under Rosetta reports x86_64: whether an x86 brew is on PATH or only the native one is installed,
+    # the installer stops before anything changes and asks for a native terminal, never calling the Mac Intel
+    def test_a_rosetta_terminal_on_apple_silicon_stops_and_asks_for_a_native_terminal(self):
+        for brew in ("on PATH", "only in /opt/homebrew"):
+            with self.subTest(brew=brew):
+                extra = {} if brew == "on PATH" else self.m.move_brew(self.m.brew_paths[0])
+                rc, out = self.m.pipe("--yes", STUB_ARCH="x86_64", STUB_ROSETTA="1", **extra)
+                self.assertEqual(rc, 1, out)
+                self.assertIn("This terminal runs under Rosetta, so this Mac with Apple silicon reports an x86_64 "
+                              "processor. Nothing was changed.", out)
+                self.assertIn('clear "Open using Rosetta"', out)
+                self.assertIn("curl -fsSL https://raw.githubusercontent.com/fireflysoftwaresolutions/devkit/main/"
+                              "install.sh | bash -s -- --yes", out)  # the command to run again, from the native one
+                self.assertNotIn("Intel", out)
+                self.nothing_changed()
 
 
 class ExistingCheckoutTests(unittest.TestCase):

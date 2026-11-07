@@ -125,13 +125,22 @@ check_mac() {
     exit 1
   fi
   machine="$(uname -m)"
+  # Under Rosetta, uname -m says x86_64 on Apple silicon too; hw.optional.arm64 is 1 on Apple silicon only, Rosetta
+  # included. Such a terminal would run the Intel Homebrew in /usr/local, or none: it needs a native one.
+  if [ "$machine" = x86_64 ] && [ "$(sysctl -n hw.optional.arm64 2>/dev/null || true)" = 1 ]; then
+    fail "This terminal runs under Rosetta, so this Mac with Apple silicon reports an x86_64 processor." \
+      "Nothing was changed."
+    printf '    devkit and Homebrew need a native terminal. If Terminal opens under Rosetta: in Finder, select Terminal\n' >&2
+    printf '    in Applications > Utilities, choose File > Get Info, and clear "Open using Rosetta".\n' >&2
+    printf '    Then, in a new Terminal window, run the installer again:\n      %s\n' "$RETRY" >&2
+    exit 1
+  fi
   # Homebrew's own installer stops on Intel Macs (Homebrew/install PR #1140): only a Homebrew already there can serve.
-  if [ "$machine" != arm64 ] && ! command -v brew >/dev/null 2>&1 && [ ! -x /usr/local/bin/brew ]; then
+  if [ "$machine" != arm64 ] && ! find_brew >/dev/null; then
     fail "devkit needs a Mac with Apple silicon for a new install, because Homebrew no longer installs on Intel Macs." \
       "Nothing was changed."
     printf '    This Mac reports an Intel processor (%s) and has no Homebrew.\n' "$machine" >&2
     printf '    An Intel Mac that already has Homebrew can still run this installer.\n' >&2
-    printf '    On a Mac with Apple silicon, a terminal under Rosetta reports Intel too: open a native one.\n' >&2
     exit 1
   fi
   case "$machine" in arm64) arch="Apple silicon" ;; x86_64) arch="Intel" ;; *) arch="$machine" ;; esac
@@ -143,11 +152,12 @@ check_mac() {
   fi
 }
 
-# Homebrew lives in /opt/homebrew on Apple silicon and in /usr/local on Intel.
+# Prints the brew to use: the one on PATH, else the first of BREW_PATHS that exists. Fails when there is none.
 find_brew() {
-  local b
+  local b paths=()
   if command -v brew >/dev/null 2>&1; then command -v brew; return 0; fi
-  for b in /opt/homebrew/bin/brew /usr/local/bin/brew; do
+  IFS=: read -r -a paths <<<"$BREW_PATHS"
+  for b in ${paths[@]+"${paths[@]}"}; do
     if [ -x "$b" ]; then printf '%s\n' "$b"; return 0; fi
   done
   return 1
@@ -366,6 +376,9 @@ main() {
   set -eEuo pipefail
   INSTALL_URL="https://raw.githubusercontent.com/fireflysoftwaresolutions/devkit/main/install.sh"
   DEFAULT_REPO="https://github.com/fireflysoftwaresolutions/devkit.git"
+  # Where Homebrew installs brew when it is not on PATH, colon-separated: /opt/homebrew on Apple silicon, /usr/local
+  # on Intel. The tests point DEVKIT_BREW_PATHS at a temporary folder, so they never reach the Homebrew of the Mac.
+  BREW_PATHS="${DEVKIT_BREW_PATHS:-/opt/homebrew/bin/brew:/usr/local/bin/brew}"
   SETUP_ARGS=() NO_SETUP=0 YES=0 STEP="start" BREW_PREFIX="" PY="" SETUP_RC=0 GITHUB=0
   local arg src here=""
   for arg in "$@"; do

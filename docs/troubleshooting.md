@@ -43,6 +43,24 @@ The installer names the step that failed and the command to run it again; it is 
 done already. The lines before the message are the failing command's own output (Homebrew's, git's, or the GitHub
 CLI's). Fix that cause, then run the same command again.
 
+### The installer stops on an Intel Mac or in a Rosetta terminal
+
+The first step of the installer (**This Mac**) stops before it downloads or changes anything in two cases. The message
+says which one it is.
+
+- **"This terminal runs under Rosetta."** Your Mac has Apple silicon, but the terminal runs as an Intel program, so it
+  reports an `x86_64` processor and would use the Intel Homebrew in `/usr/local`, or none. Open a native terminal and
+  run the installer again:
+  1. Quit Terminal. In Finder, open **Applications** > **Utilities**, select **Terminal**, choose **File** >
+     **Get Info**, and clear **Open using Rosetta**. Other terminal apps, such as iTerm2, have the same checkbox in
+     their Get Info window.
+  2. If you started the shell with `arch -x86_64`, type `exit` to leave it.
+  3. Open a new terminal window, check that `uname -m` prints `arm64`, and run the installer command again.
+- **"devkit needs a Mac with Apple silicon for a new install."** The Mac has an Intel processor and no Homebrew.
+  Homebrew's installer no longer runs on Intel Macs, so running devkit's installer again fails the same way. An Intel
+  Mac that already has Homebrew (on its `PATH` or in `/usr/local`) can run it, with one warning line. Otherwise,
+  install devkit on a Mac with Apple silicon.
+
 ### The installer says there is no terminal
 
 When the installer runs from CI, a provisioning script, or another program with no terminal, nothing can answer
@@ -59,13 +77,14 @@ gh auth login -h github.com -p https -w -s repo,read:org,workflow,gist
 In a terminal, `curl … | bash` is interactive: the installer reads the answers from the terminal (`/dev/tty`), not
 from the pipe.
 
-### `brew` is not found in a new terminal (Apple Silicon or Intel)
+### `brew` is not found in a new terminal
 
-Homebrew lives in `/opt/homebrew` on Apple Silicon and in `/usr/local` on Intel Macs. The installer finds either one.
-`/usr/local/bin` is on the default `PATH` of macOS, so Intel needs nothing more. On Apple Silicon, the installer adds
-`eval "$(/opt/homebrew/bin/brew shellenv)"` to `~/.zprofile` when Homebrew was not on your `PATH`; if you keep your
-`PATH` in another file, add that line there, then open a new terminal. A terminal that runs under Rosetta reports
-`x86_64` and uses the Intel Homebrew in `/usr/local`: open a native terminal for devkit.
+Homebrew lives in `/opt/homebrew` on Apple silicon, and in `/usr/local` on an Intel Mac that already has it. The
+installer finds either one. `/usr/local/bin` is on the default `PATH` of macOS, so an Intel Mac needs nothing more. On
+Apple silicon, the installer adds `eval "$(/opt/homebrew/bin/brew shellenv)"` to `~/.zprofile` when Homebrew was not on
+your `PATH`; if you keep your `PATH` in another file, add that line there, then open a new terminal. In a terminal that
+runs under Rosetta, the installer stops instead: see
+[The installer stops on an Intel Mac or in a Rosetta terminal](#the-installer-stops-on-an-intel-mac-or-in-a-rosetta-terminal).
 
 ### The installer left an existing checkout as it is
 

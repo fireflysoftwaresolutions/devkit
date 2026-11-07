@@ -16,13 +16,18 @@ All notable changes to devkit. Versions follow CalVer `YY.MM.PATCH` (PATCH resta
   26.11.5 now say they are planned. The Next.js MCP server is added with `dev ext add`, because agents cannot run
   `claude mcp add`. [The crew](docs/crew.md#rooms-planned-for-26116) describes rooms, planned for 26.11.6 and not
   available yet. Disk use is in the index, and `skills.optional` is in Configuration.
-- **The installer says Apple silicon, and stops early on an Intel Mac without Homebrew.** Homebrew's own installer
-  stops on Intel Macs since September 2026 (Homebrew/install PR #1140), and its `.pkg` is for Apple silicon only. A
-  fresh Intel Mac failed at the installer's Homebrew step with Homebrew's message, and the advice to run the
-  installer again, which failed the same way. Now the first step stops before it downloads or changes anything, and
-  says that a new install needs Apple silicon and why. An Intel Mac that already has Homebrew (on its `PATH` or in
-  `/usr/local`) still installs, with one warning line. The installer's first line and `--help`, the README, and
-  [Getting started](docs/getting-started.md#requirements) say Apple silicon.
+- **The installer says Apple silicon, and stops early on an Intel Mac without Homebrew or in a Rosetta terminal.**
+  Homebrew's own installer stops on Intel Macs since September 2026 (Homebrew/install PR #1140), and its `.pkg` is
+  for Apple silicon only. A fresh Intel Mac failed at the installer's Homebrew step with Homebrew's message, and the
+  advice to run the installer again, which failed the same way. Now the first step stops before it downloads or
+  changes anything, and says that a new install needs Apple silicon and why. An Intel Mac that already has Homebrew
+  (on its `PATH` or in `/usr/local`) still installs, with one warning line. A terminal that runs under Rosetta makes
+  a Mac with Apple silicon report an `x86_64` processor; the first step tells it apart from an Intel Mac
+  (`sysctl hw.optional.arm64`) and stops, asking for a native terminal, instead of installing with the Intel Homebrew
+  in `/usr/local` or refusing as if the Mac were Intel. The installer's first line and `--help`, the README, and
+  [Getting started](docs/getting-started.md#requirements) say Apple silicon, and
+  [Troubleshooting](docs/troubleshooting.md#the-installer-stops-on-an-intel-mac-or-in-a-rosetta-terminal) says what
+  to do when the installer stops.
 - **`dev --help` lists what it missed:** the `update-check` job, `dev test`, `dev gc`, `dev session`, and
   `dev update --check`. `dev crew decisions --help` no longer says to reword the questions freely: an irreversible
   decision counts only in devkit's exact call.
