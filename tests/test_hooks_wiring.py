@@ -130,14 +130,13 @@ class ScopeBaseTests(WiringCase):
 
 class FailOpenTests(WiringCase):
     def test_each_guard_rule_that_fails_lets_the_call_run_and_is_recorded(self):
-        # a rule that never runs is seen (spec G12): one guard.failopen record named for the rule
+        # a rule that never runs is seen (spec G12): one guard.failopen record named for the rule. A member's shell
+        # checked against its lane is not one of them: it fails closed (FailClosedTests)
         boom = mock.Mock(side_effect=RuntimeError("boom"))
         edit = self.tool("Edit", {"file_path": str(self.repo / "a.py")}, aid="a1")
         commit = self.bash("git commit -m x")
         commit["cwd"] = str(self.repo)
         cases = [("crew-scope", mock.patch.object(pg, "lane_of", boom), lambda: hooks._scope_violation("claude", edit)),
-                 ("crew-lane", mock.patch.object(pg, "lane_of", boom),
-                  lambda: hooks._unroutable_lane_command(self.bash("ls", aid="a1"))),
                  ("crew-limits", mock.patch.object(pg, "load_run", boom),
                   lambda: hooks._crew_limits("claude", self.tool("Edit", {"file_path": "a.py"}))),
                  ("stub-gate", mock.patch.object(stubs, "commit_gate", boom), lambda: hooks._stub_commit_gate(commit))]
@@ -147,6 +146,24 @@ class FailOpenTests(WiringCase):
                 self.assertIsNone(call())
                 recs = self.records("guard.failopen")[before:]
                 self.assertEqual([r["evidence"].get("rule") for r in recs], [rule])
+
+
+class FailClosedTests(WiringCase):
+    def test_a_members_command_the_lane_check_cannot_judge_is_refused_and_recorded(self):
+        # The Keymaker's review: when devkit cannot read the member's lane (lane_of) or judge its command
+        # (crew_shell_verdict), the command is refused instead of running unchecked, and the refusal is recorded
+        pg.start("Work", plan=["parser"])
+        launch("a_tank", "devkit:tank", "Tank: parser")
+        boom = mock.Mock(side_effect=RuntimeError("boom"))
+        for name, patch in (("lane_of", mock.patch.object(pg, "lane_of", boom)),
+                            ("crew_shell_verdict", mock.patch.object(guard, "crew_shell_verdict", boom))):
+            with self.subTest(name), patch:
+                before = len(self.records("guard.deny"))
+                why = self.deny(self.hook("guard", self.bash("ls", aid="a_tank")))
+                self.assertIn("could not check this command against your lane", why or "")
+                self.assertEqual([r["evidence"].get("rule") for r in self.records("guard.deny")[before:]],
+                                 ["crew-lane"])
+        self.assertIsNone(self.deny(self.hook("guard", self.bash("ls", aid="a_tank"))))  # checked, it runs
 
 
 class MemberToolTests(WiringCase):

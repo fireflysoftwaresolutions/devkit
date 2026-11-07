@@ -84,6 +84,10 @@
       "description": "The crew of specialist agents with the RACI (who does and approves each kind of work) and, during a run, who works now, open messages and decisions waiting for you."
     },
     {
+      "name": "devkit_resume",
+      "description": "What devkit kept of a project's latest agent session, to pick it up after a summary or in a new chat: the run, the crew working now, what waits for you, git; your request text only when this app is that session's provider."
+    },
+    {
       "name": "devkit_rules",
       "description": "devkit's global rules for agents, or one section: the status block, Morpheus and the crew's RACI, Git, delivery and the handoff."
     },

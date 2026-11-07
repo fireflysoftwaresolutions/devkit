@@ -56,7 +56,9 @@ INSTRUCTIONS = (
     "(progress steps, crew questions, status blocks). In Claude Desktop, development happens in the Code tab (Claude "
     "Code, with devkit's guard, hooks and crew); here in chat or Cowork, report and plan from devkit's data, and when "
     "the developer asks for a code change, tell them to open the project in the Code tab. devkit_rules returns the "
-    "complete rules, or one section, whenever you need them."
+    "complete rules, or one section, whenever you need them.\n\n"
+    "After a conversation summary or a resume, call devkit_resume before you report or plan development work: devkit's "
+    "record of the session wins over the summary."
 )
 
 # --------------------------------------------------------------------------- tool definitions
@@ -286,6 +288,17 @@ _tool("devkit_crew", "Crew",
       "messages, the mode (guided: the developer decides; auto: the crew goes on and records) with its approvals, "
       "and the decisions waiting for the developer.",
       {}, lambda a: ["crew", "--json", "--latest"], READ, json_out=True, digest=_digest_crew)
+
+_tool("devkit_resume", "Resume",
+      "What devkit kept of a project's latest agent session (open run or requests, last 12 hours), so you can pick it "
+      "up after a summary, a resume or a new chat: the run and its current step, the crew working now, the "
+      "decisions and messages waiting, the last status block and git. devkit's record wins over a summary. The "
+      "developer's request text is shown, cut to 200 characters, only when this app is the session's own provider; "
+      "otherwise their count and times.",
+      {"project": PROJECT},
+      lambda a: ["session", "brief", "--latest", "--for-chat"]
+      + ([f"--project={a['project']}"] if a.get("project") else [])
+      + ([f"--provider={a['_client']}"] if a.get("_client") else []), READ)
 
 _tool("devkit_rules", "devkit rules",
       "devkit's global rules for agents, exactly as Claude Code and Codex get them: the status block, the workspace, "
@@ -518,14 +531,27 @@ def compact_json(x) -> str:
     return json.dumps(x, ensure_ascii=False, separators=(",", ":"))
 
 
-def call_tool(name: str, args, call: Call = None, progress=None, structured: bool = True) -> dict:
+def client_provider(info) -> str | None:
+    """The provider of the app that connected, from initialize's clientInfo (the server's own handshake, never a tool
+    argument the model writes): claude for Anthropic's apps, codex for OpenAI's; None when the name says neither,
+    and devkit_resume then shows no request text."""
+    name = str((info or {}).get("name") or "").lower() if isinstance(info, dict) else ""
+    if re.search(r"claude|anthropic", name):
+        return "claude"
+    if re.search(r"openai|chatgpt|codex", name):
+        return "codex"
+    return None
+
+
+def call_tool(name: str, args, call: Call = None, progress=None, structured: bool = True, client=None) -> dict:
     """Run a tool -> an MCP CallToolResult. Unknown tools raise KeyError (a protocol error); everything else, bad
-    arguments included, comes back as a result with isError so the model can correct itself."""
+    arguments included, comes back as a result with isError so the model can correct itself. `client`: the
+    connected app's provider (client_provider), which only the server sets."""
     if name not in _HANDLERS:
         raise KeyError(name)
     _, timeout, json_out, digest, report_on_exit1 = _HANDLERS[name]
     try:
-        a = validate(name, args)
+        a = dict(validate(name, args), _client=client)
         argv = build_argv(name, a)
     except ValueError as e:
         return _result(f"Invalid arguments for {name}: {e}", error=True)
@@ -586,6 +612,7 @@ class Server:
         self.rfile, self.wfile = rfile, wfile
         self.lock = threading.Lock()
         self.version = PROTOCOL_VERSIONS[0]
+        self.client = None   # the connected app's provider, from initialize (client_provider)
         self.calls = {}      # request id (JSON) -> Call
         self.threads = []
         self.closed = False
@@ -658,6 +685,7 @@ class Server:
             if method == "initialize":
                 asked = params.get("protocolVersion")
                 self.version = asked if asked in PROTOCOL_VERSIONS else PROTOCOL_VERSIONS[0]
+                self.client = client_provider(params.get("clientInfo"))
                 return {"jsonrpc": "2.0", "id": mid, "result": {
                     "protocolVersion": self.version, "capabilities": {"tools": {"listChanged": False}},
                     "serverInfo": {"name": "devkit", "version": core.VERSION}, "instructions": INSTRUCTIONS}}
@@ -698,7 +726,7 @@ class Server:
                                       "message": f"{params.get('name')} still running ({seconds:.0f} s)"}})
         try:
             result = call_tool(params["name"], params.get("arguments"), call, progress,
-                               structured=self.version >= "2025-06-18")
+                               structured=self.version >= "2025-06-18", client=self.client)
             return None if call.cancelled else {"jsonrpc": "2.0", "id": mid, "result": result}
         except Exception as e:
             _log(f"internal error in {params.get('name')}: {e!r}")

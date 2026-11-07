@@ -25,7 +25,7 @@ TESTS = Path(__file__).resolve().parent
 LIB = TESTS.parent / "lib"
 sys.path.insert(0, str(LIB))
 
-from devkit import audit, core, crew, hooks, state, work  # noqa: E402
+from devkit import audit, core, crew, hooks, state, ui, work  # noqa: E402
 from devkit import continuity as ct  # noqa: E402
 from devkit import progress as pg  # noqa: E402
 
@@ -63,7 +63,10 @@ print(ct.on_tool("claude", payload, now=float(sys.argv[4])))
 
 
 def fixture(name: str) -> dict:
-    return json.loads((CLAUDE / f"{name}.json").read_text())
+    d = json.loads((CLAUDE / f"{name}.json").read_text())
+    if name == "PostCompact.manual":  # the capture keeps 200 characters of the summary; the spike's whole one:
+        d["compact_summary"] = (CLAUDE / "transcript" / "compact-summary.txt").read_text()
+    return d
 
 
 def line(obj) -> bytes:
@@ -178,14 +181,15 @@ class Base(unittest.TestCase):
     def audited(self, action) -> list:
         return audit.records(1, action)
 
-    def cli(self, *argv) -> str:
+    def cli(self, *argv, rc=0) -> str:
+        # `dev session …` -> what it printed: stdout when it succeeds, stderr when it refuses (rc 2)
         p = argparse.ArgumentParser(prog="dev session")
         ct.add_arguments(p)
-        out = io.StringIO()
-        with contextlib.redirect_stdout(out):
-            rc = ct.cmd_session(p.parse_args(list(argv)))
-        self.assertEqual(rc, 0)
-        return out.getvalue()
+        out, err = io.StringIO(), io.StringIO()
+        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+            got = ct.cmd_session(p.parse_args(list(argv)))
+        self.assertEqual(got, rc, err.getvalue())
+        return out.getvalue() if rc == 0 else err.getvalue()
 
 
 class ReaderTests(Base):
@@ -640,13 +644,21 @@ class CommandTests(Base):
         self.assertNotIn("keep this one", json.dumps(recs))
 
     def test_a_member_cannot_read_the_brief_or_move_the_run(self):
+        # the refusal is one line on stderr and exit 2, like the other dev commands, never a traceback (M342)
         lane = {"caller": "a-tank", "how": "ledger", "agent": "claude", "session": SID}
         with mock.patch.object(pg, "caller", lambda *a, **k: lane):
             for argv in (["brief"], ["brief", "--latest", "--project", "acme/api"], ["carry", "--from", "x"],
                          ["forget", "--all"]):
-                with self.assertRaisesRegex(ValueError, "only Morpheus"):
-                    self.cli(*argv)
+                with self.subTest(argv=argv):
+                    err = self.cli(*argv, rc=2)
+                    self.assertTrue(err.startswith(f"{ui.FAIL} only Morpheus "), err)
+                    self.assertEqual(err.count("\n"), 1, err)
         self.assertTrue(ct.record_path("claude", SID).exists())
+
+    def test_a_missing_argument_is_one_line_and_exit_2(self):
+        self.assertEqual(self.cli("forget", rc=2),
+                         f"{ui.FAIL} say which: --session <agent>:<session id> or --all\n")
+        self.assertIn("give the transcript", self.cli("compactions", rc=2))
 
 
 class FailOpenTests(Base):

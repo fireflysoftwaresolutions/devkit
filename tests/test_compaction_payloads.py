@@ -34,6 +34,12 @@ def codex(name: str) -> dict:
     return json.loads((CODEX / f"{name}.schema.json").read_text())
 
 
+def summary() -> str:
+    """The whole compact_summary the spike's PostCompact carried; the payload fixture keeps its first 200 characters,
+    as a capture does (hooks.CAPTURE_CUT_KEYS)."""
+    return (CLAUDE / "transcript" / "compact-summary.txt").read_text()
+
+
 def transcript() -> list:
     return [json.loads(line) for line in (CLAUDE / "transcript" / "compact.jsonl").read_text().splitlines() if line]
 
@@ -59,18 +65,18 @@ class ClaudeCompactionTests(unittest.TestCase):
     def test_post_compact_gives_the_whole_summary_devkit_checks_for_missing_items(self):
         # The "Not in the summary" list (C12.3) is computed from compact_summary: the <summary> block the
         # summarizer wrote, with its "All user messages" section.
-        summary = claude("PostCompact.manual")["compact_summary"]
-        self.assertIn("<summary>", summary)
-        self.assertIn("</summary>", summary)
-        self.assertIn("All user messages", summary)
+        whole = summary()
+        self.assertTrue(whole.startswith(claude("PostCompact.manual")["compact_summary"][:-1]))
+        self.assertIn("<summary>", whole)
+        self.assertIn("</summary>", whole)
+        self.assertIn("All user messages", whole)
 
     def test_pre_compact_stdout_and_claude_md_compact_instructions_both_reach_the_summarizer(self):
         # The capture hook printed "Include the exact word QUOKKA-PRE in the summary." at PreCompact (exit 0), and
         # the project CLAUDE.md had a "## Compact Instructions" section asking for ZEPHYR-CMD. Both words are in the
         # summary: devkit can steer the summarizer from PreCompact, and the global rules section works too.
-        summary = claude("PostCompact.manual")["compact_summary"]
-        self.assertIn("QUOKKA-PRE", summary)
-        self.assertIn("ZEPHYR-CMD", summary)
+        self.assertIn("QUOKKA-PRE", summary())
+        self.assertIn("ZEPHYR-CMD", summary())
 
     def test_session_start_compact_has_no_resume_fields_and_names_the_model(self):
         start = claude("SessionStart.compact")
@@ -125,7 +131,8 @@ class ClaudeCompactionTests(unittest.TestCase):
 
     def test_the_fixtures_hold_no_tokens_home_paths_or_uncut_text(self):
         files = sorted(CLAUDE.glob("*Compact*.json")) + sorted(CLAUDE.glob("*.c*-*.json")) + \
-            sorted(CLAUDE.glob("*.clear.json")) + [CLAUDE / "transcript" / "compact.jsonl"]
+            sorted(CLAUDE.glob("*.clear.json")) + [CLAUDE / "transcript" / "compact.jsonl",
+                                                   CLAUDE / "transcript" / "compact-summary.txt"]
         for f in files:
             with self.subTest(f.name):
                 text = f.read_text()

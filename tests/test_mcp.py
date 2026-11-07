@@ -146,7 +146,7 @@ class ServerTests(unittest.TestCase):
     def test_tools_list_matches_the_definitions(self):
         tools = self.s.request("tools/list")["result"]["tools"]
         self.assertEqual([t["name"] for t in tools], [t["name"] for t in mcp.TOOLS])
-        self.assertEqual(len(tools), 19)
+        self.assertEqual(len(tools), 20)
         for t in tools:
             with self.subTest(tool=t["name"]):
                 self.assertTrue(t["name"].startswith("devkit_"))

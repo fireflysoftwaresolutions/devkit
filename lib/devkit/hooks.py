@@ -277,7 +277,8 @@ def session_start(agent: str):
         work.request_sync("session start", delay=1)  # pull other machines' claims and publish this session
     except Exception:
         pass
-    text = _with_catalog(context_for(cwd, agent), agent)
+    text = "\n\n".join(x for x in (_continuity("on_session_start", agent, data),
+                                   _with_catalog(context_for(cwd, agent), agent)) if x)
     if os.environ.get("DEVKIT_GUARD", "").lower() == "off":  # spec F8, rule 5: never silent
         text = ("devkit · the guard is off in this session (DEVKIT_GUARD=off): it judges no tool call, so the "
                 "workspace rules, the crew's limits and the irreversible-action gate do not hold. That is recorded "
@@ -287,6 +288,43 @@ def session_start(agent: str):
         print(json.dumps({"hookSpecificOutput": {"hookEventName": "SessionStart", "additionalContext": text}}))
     else:
         print(text)
+
+
+def _continuity(fn: str, agent: str, data: dict, **kw):
+    """Call a continuity hook entry point (spec C12). Each fails open itself; this also keeps an import error from
+    reaching the hook. -> its text ("" on any error)."""
+    try:
+        from . import continuity
+        return getattr(continuity, fn)(agent, data, **kw) or ""
+    except Exception:
+        _log(f"continuity {fn} {agent}: {traceback.format_exc()[-300:]}")
+        return ""
+
+
+def _prompt_refresh(data: dict, force: bool = False):
+    """The shell prompt's facts for the event's folder (spec R9): a few file reads, no git, network or subprocess.
+    A tool call refreshes at most every 5 s; `force` for the events that change what the prompt shows."""
+    try:
+        from . import prompt
+        prompt.safe_refresh(data.get("cwd") or os.getcwd(), force=force)
+    except Exception:
+        _log(f"prompt refresh: {traceback.format_exc()[-300:]}")
+
+
+def pre_compact(agent: str):
+    """PreCompact: the checkpoint and the compaction's record; in Claude's main session, devkit's preservation
+    instructions on stdout, which Claude adds to the summarizer's. Never blocks: always exit 0, never a decision
+    (a member's stdout is ignored, and Codex gets nothing)."""
+    data = _stdin_json()
+    text = _continuity("on_pre_compact", agent, data)
+    if text and agent == "claude" and not data.get("agent_id"):
+        print(text)
+
+
+def post_compact(agent: str):
+    """PostCompact: closes the compaction and keeps "Not in the summary" for the next hook. Prints nothing: the
+    output of this event is display only, and the summary is compared, never re-injected."""
+    _continuity("on_post_compact", agent, _stdin_json())
 
 
 CATALOG_MAX = 7000  # characters of the catalog in the session's context (it is about 6,000 today)
@@ -559,12 +597,15 @@ def stop(agent: str):
                 data.get("transcript_path")) or "")
         except Exception:
             _log(f"stop shown {agent}: {traceback.format_exc()[-300:]}")
+        _prompt_refresh(data, force=True)  # the decisions the reply showed leave the prompt at once
         sess = state.read(sf) or {}
         before = copy.deepcopy(sess)  # the gates below take seconds: only what this hook changes is written back
-        reasons = []
+        reasons, ended = [], False
+        classed = None  # what continuity keeps the turn's prompts by: None when the classifier failed (change 5)
         try:  # devkit's process is for development turns only (a recipe or a consulting deck gets nothing)
             from . import scope
             dev_turn = scope.decide(data, sess)
+            classed = bool(dev_turn)
         except Exception:
             dev_turn = True
         if not dev_turn:
@@ -654,7 +695,10 @@ def stop(agent: str):
             from . import progress
             progress.on_turn_end(agent, sid, sess)
             sess["turn_started"] = None
+            ended = True
         _patch_quietly(sf, before, sess)  # a subagent that started meanwhile stays; an ended session stays ended
+        if ended:  # the turn is not sent back: keep its prompts only for development work, refresh the checkpoint
+            _continuity("on_stop", agent, data, sess=sess, dev_turn=classed)
     if out:
         print(json.dumps(out))
     if sid == "-":
@@ -742,6 +786,7 @@ def instructions_loaded(agent: str):
 def session_end(agent: str):
     data = _stdin_json()
     sid = data.get("session_id") or ""
+    _continuity("on_session_end", agent, data)  # /clear: the clear link, and the old checkpoint's prompts go
     if sid:
         _spawn_sync(["--session", f"{agent}:{sid}", "--finish"])
 
@@ -802,14 +847,14 @@ def _unroutable_lane_command(data: dict, agent: str = "claude"):
             scope, member = progress.lane_scope(run, aid), _member_folder(run, aid)
             level = progress.lane_tools(run, aid)
             base = guard.scope_base((run or {}).get("project"), cwd)
-    except Exception as e:
-        guard.failopen("crew-lane", e)
-    try:  # the lane's id finds its step grant for a tier-1 push or PR (spec C6, M180)
+        # the lane's id finds its step grant for a tier-1 push or PR (spec C6, M180)
         v = guard.crew_shell_verdict(cmd, cwd, scope, member, level=level, base=base, lane=aid, session=sid,
                                      agent=agent)
-    except Exception as e:
-        guard.failopen("crew-lane", e)
-        return None
+    except Exception as e:  # unchecked is not allowed: the member's command fails closed (the Keymaker's review)
+        _log(f"crew-lane {agent} {aid}: {traceback.format_exc()[-300:]}")
+        return (f"devkit could not check this command against your lane ({type(e).__name__}), so it is refused "
+                f"rather than run unchecked. Run it once more; if it is refused again, ask Morpheus with "
+                f"`dev crew ask \"…\"` and name the command.")
     return v[1] if v else None
 
 
@@ -1621,12 +1666,16 @@ def prompt(agent: str):
             "<task-notification>" in raw[:400]:
         _context_out("UserPromptSubmit", extra)  # background events are not the developer's request
         return
+    # the prompt waits as pending in the checkpoint until Stop classes the turn; then what waits for the main session
+    # (a late compaction's brief, "Not in the summary"), first in the context
+    carried = _continuity("on_prompt", agent, data)
     granted = ""
     try:  # the developer's grant lines (spec C5, E2): recorded, and echoed so Morpheus and the developer see them
         granted = progress.evidence_lines(progress.on_human_prompt(agent, data))
     except Exception:
         _log(f"prompt evidence {agent}: {traceback.format_exc()[-300:]}")
     text = progress.on_prompt(agent, data)
+    _prompt_refresh(data, force=True)  # an answered decision leaves the prompt at once
     try:
         sf_ = _session_file(agent, sid) if sid else None
         if sf_ and sf_.exists() and (core.read_json(sf_, {}) or {}).get("canary_missed"):
@@ -1647,7 +1696,7 @@ def prompt(agent: str):
         hatches = bypass_context(agent, sid)
     except Exception:
         _log(f"prompt hatches {agent}: {traceback.format_exc()[-300:]}")
-    _context_out("UserPromptSubmit", "\n\n".join(x for x in (extra, granted, hatches, route, text) if x))
+    _context_out("UserPromptSubmit", "\n\n".join(x for x in (carried, extra, granted, hatches, route, text) if x))
 
 
 DELIVERY = re.compile(r"\bgit\s+(?:-C\s+\S+\s+)?(commit|push|merge|tag|rebase|cherry-pick|revert)\b|"
@@ -1750,6 +1799,7 @@ def post_tool(agent: str):
     _check_writes(agent, data)
     _close_call(data)
     _reconcile(agent, data)
+    _prompt_refresh(data)
     try:
         if data.get("tool_name") in ("Agent", "Task"):  # the launch names the agent it started: an exact binding
             progress.launch_result(agent, data)
@@ -1757,6 +1807,9 @@ def post_tool(agent: str):
             progress.bind(agent, data)
     except Exception:
         _log(f"post-tool bind {agent}: {traceback.format_exc()[-300:]}")
+    # main: a compaction only the transcript shows (its brief) or "Not in the summary"; a member: its reminder after
+    # its own compaction. Each once
+    carried = _continuity("on_tool", agent, data)
     answered = ""
     if data.get("tool_name") in progress.QUESTION_TOOLS:  # the developer's answer to a decision (spec C5, E1)
         try:
@@ -1790,7 +1843,7 @@ def post_tool(agent: str):
                 _patch_quietly(sf, before, sess)  # runs at the same moment and claims its launch entry
     except Exception:
         _log(f"post-tool closing {agent}: {traceback.format_exc()[-300:]}")
-    _context_out("PostToolUse", "\n\n".join(x for x in (answered, _output_pitfalls(agent, data),
+    _context_out("PostToolUse", "\n\n".join(x for x in (carried, answered, _output_pitfalls(agent, data),
                                                         _bulk_rewrite_note(data), closing,
                                                         progress.on_tool_done(agent, data)) if x))
 
@@ -1810,7 +1863,9 @@ def post_tool_failure(agent: str):
 
 def subagent_start(agent: str):
     from . import progress
-    progress.on_subagent(agent, _stdin_json(), True)
+    data = _stdin_json()
+    progress.on_subagent(agent, data, True)
+    _prompt_refresh(data, force=True)  # a lane opened: the prompt's crew count follows
 
 
 def _launch_meta(data: dict) -> dict:
@@ -1837,10 +1892,17 @@ def subagent_stop(agent: str):
     """SubagentStop: a crew member's report must start with its own status block (the canary covers the crew too);
     without it the member is sent back once to write it, and the correction is recorded like the main canary's. Only
     subagents someone launched owe a report (a lane, or the Agent tool's launch record); the agent's own helpers do
-    not. Then its lane and step are closed."""
+    not. Then its lane and step are closed. The compaction summarizer's stop is none of these: it returns at once,
+    and nothing is written or bound (spec F2 amendment)."""
     from . import progress
     data = _stdin_json()
     out = None
+    try:
+        from . import continuity
+        if continuity.is_summarizer(agent, data, state.read(_session_file(agent, data.get("session_id") or "-"))):
+            return
+    except Exception:
+        _log(f"subagent-stop summarizer {agent}: {traceback.format_exc()[-300:]}")
     try:
         sid = data.get("session_id") or "-"
         aid = data.get("agent_id") or ""
@@ -1905,6 +1967,8 @@ def subagent_stop(agent: str):
         print(json.dumps(out))
         return
     progress.on_subagent(agent, data, False)
+    _continuity("on_subagent_stop", agent, data)  # a last read of its transcript: a compaction no hook saw
+    _prompt_refresh(data, force=True)  # a lane closed: the prompt's crew count follows
 
 
 QUOTA = STATE / "quota"
@@ -1966,15 +2030,17 @@ def statusline(agent: str):
 HANDLERS = {"session-start": session_start, "stop": stop, "session-end": session_end, "guard": guard,
             "config-change": config_change, "instructions-loaded": instructions_loaded, "prompt": prompt,
             "post-tool": post_tool, "post-tool-failure": post_tool_failure, "subagent-start": subagent_start,
-            "subagent-stop": subagent_stop, "statusline": statusline}
+            "subagent-stop": subagent_stop, "statusline": statusline, "pre-compact": pre_compact,
+            "post-compact": post_compact}
 
 
 # --------------------------------------------------------------------------- payload capture (spec C9)
 
 CAPTURES = STATE / "captures"
 CAPTURE_KEEP = 20  # captures kept per event (tool events: per event and tool)
-CAPTURE_CUT = 200  # characters kept of prompts, tool input and output, and the last assistant message
-CAPTURE_CUT_KEYS = ("prompt", "tool_input", "tool_response", "last_assistant_message")
+CAPTURE_CUT = 200  # characters kept of prompts, tool input and output, the last assistant message and a
+                  # compaction's summary
+CAPTURE_CUT_KEYS = ("prompt", "tool_input", "tool_response", "last_assistant_message", "compact_summary")
 _CAPTURE_TOKEN = re.compile(r"(?i)\bbearer\s+[a-z0-9._~+/=-]{8,}|\beyJ[a-z0-9_-]{8,}\.[a-z0-9_-]{8,}\.[a-z0-9_-]{4,}")
 _CAPTURE_SECRET_KEY = re.compile(r"(?i)token|secret|passw|api[_-]?key|authorization|cookie|credential")
 

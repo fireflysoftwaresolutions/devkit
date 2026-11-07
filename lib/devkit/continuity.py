@@ -1581,6 +1581,18 @@ def _reader(given, chat: bool, cwd: str):
 
 
 def cmd_session(a) -> int:
+    """dev session brief | carry | compactions | forget. A refusal (a crew member's call, which only Morpheus may
+    make, or a missing argument) is one line on stderr and exit 2, as with the other dev commands, never a
+    traceback."""
+    from . import ui
+    try:
+        return _session_command(a)
+    except ValueError as e:  # progress.StepError is one
+        ui.err(str(e))
+        return 2
+
+
+def _session_command(a) -> int:
     cwd = os.getcwd()
     act = a.session_cmd
     if act == "compactions":
