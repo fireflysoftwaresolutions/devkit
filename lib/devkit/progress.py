@@ -2531,23 +2531,31 @@ def _word_on(d: dict, r: dict) -> bool:
 
 
 def _member_results(path, since: str):
-    """The question tool results in the session's crew member transcripts (Claude Code keeps a member's at <main
-    transcript without .jsonl>/subagents/agent-<id>.jsonl) written after `since`, the ISO time of a main transcript
-    record: each file read from its end back to its first record at or before that time. Without `since`, or for a
-    record without a time, every one counts (fail closed)."""
-    for f in sorted((Path(path).with_suffix("") / "subagents").glob("agent-*.jsonl")):
-        for ln in _lines_back(f, b"", block=1 << 16):
+    """The tool results in the session's crew member transcripts (Claude Code keeps a member's at <main transcript
+    without .jsonl>/subagents/agent-<id>.jsonl) not timed before `since`, the ISO time of a main transcript record.
+    Each file is read whole: its records are not in time order (Claude Code writes a message queued for a member when
+    the member takes it, with the time it was queued, minutes back), so no record's time says where to stop. A result
+    in the same millisecond as `since`, a result without a time, and every result without `since` count (fail
+    closed). Raises OSError when the members' folder is there but cannot be listed, or a file cannot be read: then
+    nothing tells what a member was answered."""
+    folder = Path(path).with_suffix("") / "subagents"
+    try:
+        with os.scandir(folder) as it:
+            names = sorted(f.name for f in it if f.name.startswith("agent-") and f.name.endswith(".jsonl"))
+    except FileNotFoundError:
+        return  # no member has run in this session
+    for name in names:
+        for ln in _lines_back(folder / name, b"toolUseResult"):
             try:
                 r = json.loads(ln)
             except (ValueError, RecursionError):
                 continue
-            if not isinstance(r, dict):
+            if not isinstance(r, dict) or r.get("type") != "user" or "toolUseResult" not in r:
                 continue
             ts = r.get("timestamp")
-            if since and isinstance(ts, str) and ts <= since:
-                break
-            if r.get("type") == "user" and "toolUseResult" in r:
-                yield r
+            if since and isinstance(ts, str) and ts < since:
+                continue
+            yield r
 
 
 def _said_later(path, e: dict, d: dict) -> bool:

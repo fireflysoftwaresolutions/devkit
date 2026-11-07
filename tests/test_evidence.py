@@ -617,30 +617,43 @@ class QuestionAuditTests(EvidenceCase):
         # the tech lead sends a question tool call that asks `qs` as they are; the developer answers {question: label}
         # and may add notes (the result's annotations). `inputs`: more top-level fields of the tool input the hook
         # gets (Claude Code adds the answers there when the developer answers)
+        return self.written(qs, answers, at, notes, inputs)(at)
+
+    def written(self, qs, answers, at, notes=None, inputs=None):
+        # send's answer in the transcript at `at`, without its hook: -> the hook (PostToolUse), run with its own time
         self.n += 1
         tid = f"toolu_q{self.n:03d}"
         result = {"questions": qs, "answers": answers, **({"annotations": notes} if notes is not None else {})}
         self.append({"type": "user", "uuid": f"u-{self.n}", "isSidechain": False, "toolUseResult": result,
                      "timestamp": iso(at),
                      "message": {"role": "user", "content": [{"type": "tool_result", "tool_use_id": tid}]}})
-        return pg.on_question("claude", {"session_id": "s1", "tool_name": "AskUserQuestion", "tool_use_id": tid,
-                                         "tool_input": {"questions": qs, **(inputs or {})}, "tool_response": result,
-                                         "transcript_path": str(self.transcript)}, now=at)
+        return lambda now: pg.on_question("claude", {"session_id": "s1", "tool_name": "AskUserQuestion",
+                                                     "tool_use_id": tid,
+                                                     "tool_input": {"questions": qs, **(inputs or {})},
+                                                     "tool_response": result,
+                                                     "transcript_path": str(self.transcript)}, now=now)
+
+    def member_transcript(self, aid="agent-x"):
+        # Claude Code keeps a crew member's transcript at <main transcript without .jsonl>/subagents/agent-<id>.jsonl
+        return self.transcript.with_suffix("") / "subagents" / f"agent-{aid}.jsonl"
+
+    def member_record(self, rec, aid="agent-x"):
+        own = self.member_transcript(aid)
+        own.parent.mkdir(parents=True, exist_ok=True)
+        with own.open("a") as fh:
+            fh.write(json.dumps(rec) + "\n")
 
     def member_answers(self, q, label, at, aid="agent-x"):
         # a crew member asks q with the question tool and the developer answers: Claude Code keeps the result in the
-        # member's own transcript (<main transcript without .jsonl>/subagents/agent-<id>.jsonl), and its hook event
-        # names the member (agent_id) and the main session's transcript
+        # member's own transcript (member_transcript), and its hook event names the member (agent_id) and the main
+        # session's transcript
         self.n += 1
         tid = f"toolu_m{self.n:03d}"
         result = {"questions": [q], "answers": {q["question"]: label}}
-        own = self.transcript.with_suffix("") / "subagents" / f"agent-{aid}.jsonl"
-        own.parent.mkdir(parents=True, exist_ok=True)
-        with own.open("a") as fh:
-            fh.write(json.dumps({"type": "user", "uuid": f"u-{self.n}", "isSidechain": True, "agentId": aid,
-                                 "toolUseResult": result, "timestamp": iso(at),
-                                 "message": {"role": "user", "content": [{"type": "tool_result",
-                                                                          "tool_use_id": tid}]}}) + "\n")
+        self.member_record({"type": "user", "uuid": f"u-{self.n}", "isSidechain": True, "agentId": aid,
+                            "toolUseResult": result, "timestamp": iso(at),
+                            "message": {"role": "user", "content": [{"type": "tool_result", "tool_use_id": tid}]}},
+                           aid)
         return pg.on_question("claude", {"session_id": "s1", "agent_id": aid, "tool_name": "AskUserQuestion",
                                          "tool_use_id": tid, "tool_input": {"questions": [q]},
                                          "tool_response": result, "transcript_path": str(self.transcript)}, now=at)
@@ -1112,6 +1125,44 @@ class QuestionAuditTests(EvidenceCase):
         self.assertTrue(d["verified"])
         self.assertEqual(d["evidence"]["ts"], m(3.2))
         self.assertEqual(self.opens()["source"], "decision")
+
+    # the Code reviewer's re-review, finding 1: a member's transcript is not in time order. Claude Code writes a
+    # message queued for the member (an attachment of type queued_command) when the member takes it, with the time it
+    # was queued, up to minutes back. One queued before the yes and written after the member's no hides nothing
+    def test_a_members_no_followed_by_a_record_timed_before_the_yes_still_ends_the_yes(self):
+        self.lose_the_no(lambda q: self.member_answers(q, q["options"][1]["label"], m(2.5)))
+        self.member_record({"type": "attachment", "isSidechain": True, "agentId": "agent-x", "uuid": "u-queued",
+                            "attachment": {"type": "queued_command", "prompt": "Check the tag first.",
+                                           "commandMode": "prompt", "timestamp": iso(m(1.5))},
+                            "timestamp": iso(m(1.5))})
+        self.assert_still_closed()
+
+    # re-review finding 2: a member's no in the same millisecond as the yes counts as after it (fail closed)
+    def test_a_members_no_in_the_same_millisecond_as_the_yes_still_ends_the_yes(self):
+        self.lose_the_no(lambda q: self.member_answers(q, q["options"][1]["label"], m(2)))
+        self.assert_still_closed()
+
+    # re-review finding 3: a members folder devkit cannot list could hold a member's no, so the yes does not count
+    @unittest.skipIf(hasattr(os, "geteuid") and os.geteuid() == 0, "root lists a folder without permissions")
+    def test_a_members_folder_that_cannot_be_listed_ends_the_yes(self):
+        self.lose_the_no(lambda q: self.member_answers(q, q["options"][1]["label"], m(2.5)))
+        folder = self.member_transcript().parent
+        folder.chmod(0)
+        self.addCleanup(folder.chmod, 0o755)
+        self.assert_still_closed()
+
+    # the Code reviewer's H6: two answers' hooks can run out of order. The no's hook runs first, so the session record
+    # ends on the yes, while the transcript holds the yes, then the no: the transcript has the last word
+    def test_a_no_whose_hook_runs_before_the_yes_hook_still_ends_the_yes(self):
+        self.release()
+        q = self.printed("D1")
+        yes = self.written([q], {q["question"]: q["options"][0]["label"]}, m(2))
+        no = self.written([q], {q["question"]: "No, wait until Monday"}, m(2.1))
+        no(m(2.2))
+        yes(m(2.3))
+        record = json.loads(self.state.sess.read_text())["human"]
+        self.assertEqual([(e["covers"], bool(e.get("void"))) for e in record], [("D1", True), ("D1", False)])
+        self.assert_still_closed()
 
     # the Code reviewer's finding 2: an audit record keeps a decision's labels in 300 characters, so dev crew ask
     # refuses options devkit could not keep whole, and says how long each may be
