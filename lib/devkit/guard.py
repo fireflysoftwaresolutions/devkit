@@ -1465,6 +1465,12 @@ def guardless_session(name, argv, names=()) -> str | None:
     return None
 
 
+HOOK_REASON = ("`dev hook <event>` runs one of devkit's hooks, and only the harness runs them, when its event fires: "
+               "a hook event typed through a shell could forge the developer's prompt or answer, or a session's "
+               "start or end (spec C5, B3). No agent tool call runs it, the main session's included. To try a hook, "
+               "run its tests (tests/test_evidence.py shows how).")
+
+
 def _env_split(argv0):
     """-> (names, argv): the variables a segment sets for the command it runs (VAR=…, env VAR=…, sudo VAR=…, also
     after timeout or uv run), and that command."""
@@ -1760,6 +1766,8 @@ class _Shell:
             return deny(protected_reason(Path(real(core.CONFIG_FILE)), "edit"))
         if args[:2] in (["config", "lock"], ["config", "unlock"]) and not {"-h", "--help"} & set(args[2:]):
             return deny(LOCK_REASON.format(sub=args[1]))
+        if args[:1] == ["hook"] and not {"-h", "--help"} & set(args[1:]):
+            return deny(HOOK_REASON)
         if args[:1] in (["rm"], ["mv"], ["cp"]):
             return self.segment(args[0], args, [], cwd)
         if args[:1] and (args[0] in _DEV_READ or args[0] in _DEV_TEXT):
@@ -1839,6 +1847,13 @@ class _Shell:
                 inames, inner = _env_split(inner)
                 iname = os.path.basename(inner[0]) if inner else ""
                 v = self.forged_env(iname, inner, cwd, inames) if inner else None
+                if v:
+                    return v
+                why = guardless_session(iname, inner, inames) if inner else None
+                if why:
+                    return deny(why)
+                idev = _dev_args(inner) if inner else None
+                v = self.dev(idev, cwd) if idev is not None else None
                 if v:
                     return v
                 inplace = iname in ("sed", "yq") and any(x.startswith("-i") or x.startswith("--in") for x in inner)
