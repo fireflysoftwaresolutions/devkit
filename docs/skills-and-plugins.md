@@ -286,6 +286,10 @@ it on every Mac.
    { "repo": "owner/repo", "ref": "<40-char sha>", "license": "MIT", "why": "Terraform style", "group": "iac", "skills": { "my-skill": "skills/my-skill" } }
    ```
 
+   To move a pinned skill or MCP server to a newer upstream, run `dev ext outdated <name>`, then
+   `dev ext update <name> --why "…"` on a branch of the devkit checkout: it prints the compare link, the commits, and
+   the files changed before it changes only that pin.
+
 3. If a kind of work should require it, add or change a rule in `config/skill-rules.json`.
 4. Run `dev install --only skills`, then `dev doctor`.
 5. Record the change in `CHANGELOG.md` and in `NOTICE`.

@@ -468,6 +468,269 @@ class DriftSessionStartTests(HookCase):
         self.assertEqual(len(after) - before, 1)
 
 
+class FakeUpstream:
+    """The upstream adapter `dev ext outdated` and `update` are given: answers from a table, or fails like a network
+    that is down."""
+
+    def __init__(self, latest=None, compare=None, down=False):
+        self.latest_, self.compare_, self.down = latest or {}, compare or {}, down
+        self.asked = []
+
+    def latest(self, e):
+        self.asked.append(e.id)
+        if self.down or e.id not in self.latest_:
+            raise ext.UpstreamError("gh api: error connecting to api.github.com" if self.down else "no answer")
+        return self.latest_[e.id]
+
+    def compare(self, e, old, new, full=False):
+        if self.down:
+            raise ext.UpstreamError("gh api: error connecting to api.github.com")
+        return self.compare_.get(e.id, {})
+
+
+SHA_C = "9c1e0d2b3a4f5e6d7c8b9a0f1e2d3c4b5a697887"
+
+
+class OutdatedTests(unittest.TestCase):
+    def setUp(self):
+        self.cat = ext.catalog(fixture_team(), {}, set())
+        self.obs = {"plugin:claude:superpowers@claude-plugins-official": {"installed": True, "version": "7.0.0",
+                                                                          "sha": SHA_B}}
+
+    def test_newer_upstreams_are_outdated_with_their_link(self):
+        up = FakeUpstream(latest={
+            "skill:claude:impeccable": {"ref": SHA_C, "label": "",
+                                        "link": f"https://github.com/pbakaus/impeccable/compare/{SHA_A[:12]}...x"},
+            "mcp:claude:chrome-devtools": {"ref": "1.13.2", "link": "https://github.com/ChromeDevTools/x/releases"},
+            "plugin:claude:superpowers@claude-plugins-official": {"ref": "7.0.1", "sha": SHA_C, "link": "l"}},
+            compare={"skill:claude:impeccable": {"commits": 4, "files": 9,
+                                                 "paths": [".claude/skills/impeccable/SKILL.md", "src/x.ts"]}})
+        rows = {r["id"]: r for r in ext.outdated(self.cat, up, observed=self.obs)}
+        im = rows["skill:claude:impeccable"]
+        self.assertEqual((im["status"], im["current"], im["latest"], im["detail"]["skill_files"]),
+                         ("outdated", SHA_A, SHA_C, 1))
+        self.assertEqual((rows["mcp:claude:chrome-devtools"]["status"], rows["mcp:claude:chrome-devtools"]["latest"]),
+                         ("outdated", "1.13.2"))
+        self.assertEqual(rows["plugin:claude:superpowers@claude-plugins-official"]["status"], "outdated")
+        self.assertNotIn("plugin:claude:devkit@firefly-devkit", rows)  # devkit's own: dev update --check
+
+    def test_a_repository_that_moved_outside_the_skill_folder_leaves_the_skill_current(self):
+        up = FakeUpstream(latest={"skill:claude:impeccable": {"ref": SHA_C, "label": "", "link": "l"}},
+                          compare={"skill:claude:impeccable": {"commits": 30, "files": 2, "paths": ["engine/a.ts",
+                                                                                                  "README.md"]}})
+        (r,) = ext.outdated(self.cat, up, name="impeccable", agent="claude", observed=self.obs)
+        self.assertEqual(r["status"], "current")
+        self.assertIn("did not change", r["reason"])
+
+    def test_a_marketplace_entry_without_a_version_could_not_be_checked(self):
+        root = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, root)
+        h = make_homes(root)
+        mk = h.claude / "plugins" / "marketplaces" / "claude-plugins-official" / ".claude-plugin"
+        mk.mkdir(parents=True)
+        (mk / "marketplace.json").write_text(json.dumps({"plugins": [{"name": "superpowers",
+                                                                       "source": "./plugins/superpowers"}]}))
+        sp = next(e for e in self.cat if e.id == "plugin:claude:superpowers@claude-plugins-official")
+        with self.assertRaises(ext.UpstreamError) as cm:
+            ext.Upstream(run=FakeRun(), h=h).latest(sp)
+        self.assertIn("no version", str(cm.exception))
+
+    def test_an_unreachable_upstream_is_could_not_be_checked_never_up_to_date(self):
+        rows = ext.outdated(self.cat, FakeUpstream(down=True), observed=self.obs)
+        checked = [r for r in rows if r["pin_kind"] != "url"]
+        self.assertTrue(checked)
+        self.assertEqual({r["status"] for r in checked}, {"unchecked"})
+        self.assertIn("error connecting", checked[0]["reason"])
+        text = "\n".join(ext.outdated_lines(rows))
+        shown = [r for r in ext.merge_agents(rows) if r["status"] == "unchecked"]  # a skill both agents get: one row
+        self.assertLess(len(shown), len(checked))
+        self.assertIn(f"{len(shown)} could not be checked", text)
+        self.assertNotIn("up to date", text)
+
+    def test_a_remote_mcp_server_is_unpinned_and_names_its_host(self):
+        rows = {r["id"]: r for r in ext.outdated(self.cat, FakeUpstream(), observed=self.obs)}
+        self.assertEqual(rows["mcp:codex:docs"]["status"], "unpinned")
+        self.assertIn("docs.example.com", rows["mcp:codex:docs"]["reason"])
+
+    def test_with_a_name_it_adds_commits_files_and_a_license_change(self):
+        up = FakeUpstream(latest={"skill:claude:impeccable": {"ref": SHA_C, "label": "", "link": "l"}},
+                          compare={"skill:claude:impeccable": {"commits": 12, "files": 7, "license": "MIT",
+                                                               "link": "https://github.com/c",
+                                                               "paths": [".claude/skills/impeccable/a.md"]}})
+        (r,) = ext.outdated(self.cat, up, name="impeccable", observed=self.obs)
+        self.assertEqual((r["detail"]["commits"], r["detail"]["files"], r["detail"]["license_change"]),
+                         (12, 7, "Apache-2.0 → MIT"))
+        text = "\n".join(ext.detail_lines(r))
+        self.assertIn("https://github.com/c", text)
+        self.assertIn("12 commit(s), 7 file(s) changed", text)
+        self.assertIn("license changed", text)
+
+    def test_a_short_name_selects_every_match_and_a_name_of_two_kinds_is_an_error(self):
+        team = fixture_team()
+        team["codex"]["mcp"]["chrome-devtools"] = dict(team["claude"]["mcp"]["chrome-devtools"])
+        team["codex"]["meta"]["mcp:chrome-devtools"] = {"why": "w", "license": "Apache-2.0"}
+        cat = ext.catalog(team, {}, set())
+        self.assertEqual(sorted(e.id for e in ext.select(cat, "chrome-devtools")),
+                         ["mcp:claude:chrome-devtools", "mcp:codex:chrome-devtools"])
+        self.assertEqual([e.id for e in ext.select(cat, "chrome-devtools", agent="codex")],
+                         ["mcp:codex:chrome-devtools"])
+        team["skills"]["sources"][0]["skills"]["superpowers"] = "x"
+        with self.assertRaises(ext.ExtError) as cm:
+            ext.select(ext.catalog(team, {}, set()), "superpowers")
+        self.assertIn("more than one kind", str(cm.exception))
+
+
+class BumpTests(unittest.TestCase):
+    def test_bump_changes_only_that_pin_and_keeps_the_format(self):
+        text = (ROOT / "config" / "skills.json").read_text()
+        cat = ext.catalog(ext.team(), {}, {"all"})
+        im = next(e for e in cat if e.id == "skill:claude:impeccable")
+        new = ext.bump(text, im, SHA_C)
+        changed = [(a, b) for a, b in zip(text.splitlines(), new.splitlines()) if a != b]
+        self.assertEqual(changed, [(f'      "ref": "{im.pin}",', f'      "ref": "{SHA_C}",')])
+        self.assertEqual(ext.bump(text, im, im.pin), text)  # unchanged: the same bytes
+
+    def test_bump_of_an_mcp_version_changes_its_package_argument(self):
+        text = (ROOT / "config" / "claude" / "plugins.json").read_text()
+        cd = next(e for e in ext.catalog(ext.team(), {}, set()) if e.id == "mcp:claude:chrome-devtools")
+        new = json.loads(ext.bump(text, cd, "1.13.2"))
+        self.assertEqual(new["mcp"]["chrome-devtools"]["args"][1], "chrome-devtools-mcp@1.13.2")
+
+    def test_an_observed_plugin_has_no_team_pin_to_bump(self):
+        sp = next(e for e in ext.catalog(fixture_team(), {}, set()) if e.name == "superpowers")
+        with self.assertRaises(ext.ExtError):
+            ext.bump("{}", sp, "7.0.1")
+
+
+class UpdateCommandTests(unittest.TestCase):
+    """`dev ext update impeccable --to <sha> --why …` in a devkit checkout on a branch (spec R3)."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.home = Path(self.tmp.name) / "devkit"
+        shutil.copytree(ROOT / "config", self.home / "config")
+        env = dict(os.environ, GIT_AUTHOR_NAME="Ada", GIT_AUTHOR_EMAIL="a@example.com", GIT_COMMITTER_NAME="Ada",
+                   GIT_COMMITTER_EMAIL="a@example.com", GIT_CONFIG_GLOBAL=os.devnull, GIT_CONFIG_NOSYSTEM="1")
+        for args in (["init", "-q", "-b", "main"], ["add", "-A"], ["commit", "-q", "-m", "base"]):
+            subprocess.run(["git", *args], cwd=self.home, check=True, capture_output=True, env=env)
+        self.git_env = mock.patch.dict(core.GIT_ENV, {"GIT_CONFIG_GLOBAL": os.devnull, "GIT_CONFIG_NOSYSTEM": "1"})
+        self.git_env.start()
+        self.addCleanup(self.git_env.stop)
+        self.env = env
+        self.up = FakeUpstream(latest={"skill:claude:impeccable": {"ref": SHA_C, "label": "skill-v4.9.0",
+                                                                   "link": "l"}},
+                               compare={"skill:claude:impeccable": {"commits": 3, "files": 5, "license":
+                                                                    "Apache-2.0", "link": "https://cmp"}})
+
+    def branch(self, name):
+        subprocess.run(["git", "switch", "-q", "-c", name], cwd=self.home, check=True, capture_output=True,
+                       env=self.env)
+
+    def run_update(self, *args):
+        out, err = io.StringIO(), io.StringIO()
+        with mock.patch.object(core, "source_home", return_value=self.home), \
+                mock.patch.object(ext, "upstream", return_value=self.up), \
+                contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+            rc = cli.main(["ext", "update", *args])
+        return rc, plain(out.getvalue() + err.getvalue())
+
+    def test_on_a_branch_only_that_ref_changes_and_the_review_comes_first(self):
+        self.branch("chore/bump-impeccable")
+        before = (self.home / "config" / "skills.json").read_text()
+        rc, out = self.run_update("impeccable", "--to", SHA_C, "--why", "skill-v4.9.0 fixes the audit")
+        self.assertEqual(rc, 0, out)
+        after = (self.home / "config" / "skills.json").read_text()
+        diff = [(a, b) for a, b in zip(before.splitlines(), after.splitlines()) if a != b]
+        self.assertEqual(len(diff), 1)
+        self.assertIn(SHA_C, diff[0][1])
+        self.assertLess(out.index("https://cmp"), out.index("config/skills.json"))
+        self.assertIn("3 commit(s), 5 file(s) changed", out)
+        rec = audit.records(days=1, action="ext.update")[-1]
+        self.assertEqual((rec["target"], rec.get("why")), ("skill:claude:impeccable", "skill-v4.9.0 fixes the audit"))
+
+    def test_on_the_default_branch_it_refuses_and_changes_nothing(self):
+        before = (self.home / "config" / "skills.json").read_text()
+        rc, out = self.run_update("impeccable", "--to", SHA_C, "--why", "x")
+        self.assertEqual(rc, 1)
+        self.assertIn("default branch", out)
+        self.assertEqual((self.home / "config" / "skills.json").read_text(), before)
+
+    def test_it_needs_a_why_and_a_full_sha(self):
+        self.branch("chore/bump-impeccable")
+        self.assertEqual(self.run_update("impeccable", "--to", SHA_C)[0], 2)
+        rc, out = self.run_update("impeccable", "--to", "9c1e0d2", "--why", "x")
+        self.assertEqual(rc, 2)
+        self.assertIn("40-character", out)
+
+
+class ApplyTests(unittest.TestCase):
+    """`dev ext update <name> --apply`: the developer updates a vendor plugin on this Mac and accepts it."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.h = make_homes(Path(self.tmp.name))
+        self.lock = Path(self.tmp.name) / "ext-lock.json"
+        install_claude_plugin(self.h, "superpowers@claude-plugins-official", "7.0.0", SHA_B)
+        self.calls = []
+
+    def run_cli(self, *args):
+        def run(argv, timeout=300):
+            self.calls.append(list(argv))
+            install_claude_plugin(self.h, "superpowers@claude-plugins-official", "7.0.1", SHA_A)
+            return 0, "", ""
+        up = FakeUpstream(latest={"plugin:claude:superpowers@claude-plugins-official":
+                                  {"ref": "7.0.1", "sha": SHA_A, "label": "marketplace copy", "link": "https://rel"}})
+        out = io.StringIO()
+        with mock.patch.object(ext, "homes", return_value=self.h), mock.patch.object(ext, "runner", return_value=run), \
+                mock.patch.object(ext, "upstream", return_value=up), \
+                mock.patch.object(ext, "lock_file", return_value=self.lock), \
+                contextlib.redirect_stdout(out), contextlib.redirect_stderr(out):
+            rc = cli.main(["ext", "update", *args])
+        return rc, plain(out.getvalue())
+
+    def test_apply_updates_the_plugin_and_records_the_new_version(self):
+        rc, out = self.run_cli("superpowers", "--agent", "claude", "--apply", "--why", "reviewed 7.0.1")
+        self.assertEqual(rc, 0, out)
+        self.assertEqual(self.calls, [["claude", "plugin", "update", "superpowers@claude-plugins-official"]])
+        self.assertLess(out.index("https://rel"), out.index("updated"))
+        lk = ext.read_lock(self.lock)["plugin:claude:superpowers@claude-plugins-official"]
+        self.assertEqual((lk["version"], lk["sha"], lk["by"]), ("7.0.1", SHA_A, "dev ext update --apply"))
+        rec = audit.records(days=1, action="ext.apply")[-1]
+        self.assertEqual((rec["target"], rec.get("why")), ("plugin:claude:superpowers@claude-plugins-official",
+                                                           "reviewed 7.0.1"))
+
+    def test_apply_refuses_an_entry_devkit_pins(self):
+        rc, out = self.run_cli("codebase-design", "--apply", "--why", "x")  # a skill: pinned by commit
+        self.assertEqual(rc, 2)
+        self.assertIn("--to", out)
+        self.assertEqual(self.calls, [])
+
+
+class GuardTests(unittest.TestCase):
+    """Who may run what (spec guard contract): reading and team pin bumps are open to agents; anything that changes
+    what runs in every session on this Mac is the developer's."""
+
+    def verdict(self, cmd):
+        from devkit import guard
+        v = guard.check("Bash", {"command": cmd}, str(core.DEV), "claude")
+        return (v[0], v[1]) if v else ("allow", "")
+
+    def test_agents_may_read_and_bump_a_team_pin(self):
+        for cmd in ("dev ext ls", "dev ext ls --json", "dev ext outdated", "dev ext outdated impeccable",
+                    f"dev ext update impeccable --to {SHA_C} --why 'fixes the audit'", "dev ext update --help"):
+            with self.subTest(cmd=cmd):
+                self.assertEqual(self.verdict(cmd)[0], "allow")
+
+    def test_updating_a_plugin_on_this_mac_is_the_developers(self):
+        for cmd in ("dev ext update superpowers --apply --why x", "bin/dev ext update superpowers --why x --apply"):
+            with self.subTest(cmd=cmd):
+                v, why = self.verdict(cmd)
+                self.assertEqual(v, "deny")
+                self.assertIn("terminal", why)
+
+
 class LsCommandTests(unittest.TestCase):
     def ls(self, *args) -> str:
         out = io.StringIO()

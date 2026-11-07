@@ -11,6 +11,12 @@ All notable changes to devkit. Versions follow CalVer `YY.MM.PATCH` (PATCH resta
   its source, what pins it (a commit, an exact version, or `⚠ observed` for a vendor marketplace plugin, with the
   version and commit installed), whether it is installed and enabled, its license, its layer, and why it is there
   (`-v`). `--json` prints every field. Agents may run it: it reads the agents' own files and starts no process.
+- **`dev ext outdated` and `dev ext update`.** `outdated` shows what upstream has now against each pin, with the
+  compare or release link, through your own `gh` and `npm`; a skill counts only changes in its own folder, and an
+  upstream that cannot be reached is reported as could not be checked, never as up to date. `update <name> --why "…"` bumps a team
+  pin in the devkit checkout, on a branch only, after printing the compare link, the commits, the files changed, and
+  any license change. `update --apply` updates a vendor marketplace plugin on this Mac and accepts it; only you run
+  it, in a terminal.
 - **`dev update --check` tells you whether a newer devkit release is out**, and what changes in it: the installed and
   newest releases, the CHANGELOG headings in between, and whether the checkout and the pinned copy are behind. It is
   read-only, so agents may run it. A daily `update-check` job records the answer at 09:15; the first session of the

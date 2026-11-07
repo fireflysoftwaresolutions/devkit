@@ -530,14 +530,15 @@ def drift_seen_file() -> Path:
 
 
 def record_lock(agent: str, h: Homes = None, by: str = "dev install", t: dict = None, user: dict = None,
-                path: Path = None) -> int:
-    """`dev install` and `dev ext update --apply`: record what this agent's vendor marketplace plugins are now, so a
-    later change outside devkit shows as drift. -> how many entries were recorded."""
+                path: Path = None, only: set = None) -> int:
+    """`dev install` and `dev ext update --apply`: record what this agent's vendor marketplace plugins are now (or
+    only the ids in `only`), so a later change outside devkit shows as drift. -> how many entries were recorded."""
     t = team() if t is None else t
     obs = observe(h)
     now = int(time.time())
     rows = {e.id: obs[e.id] for e in catalog(t, user_layer() if user is None else user, None)
-            if e.agent == agent and e.pin_kind == "observed" and (obs.get(e.id) or {}).get("installed")}
+            if e.agent == agent and e.pin_kind == "observed" and (obs.get(e.id) or {}).get("installed")
+            and (only is None or e.id in only)}
 
     def put(doc):
         for eid, o in rows.items():
@@ -651,6 +652,419 @@ def doctor_checks(cwd: str = None) -> list:
     return out
 
 
+
+# --------------------------------------------------------------------------- outdated and update (step 4)
+
+class UpstreamError(RuntimeError):
+    """An upstream that could not be checked; the message is the reason."""
+
+
+def _sh(argv, timeout=15):
+    return core.sh(argv, timeout=timeout)
+
+
+class Upstream:
+    """What upstream has now, through the developer's own `gh` and `npm` (15 s each). Tests inject a fake."""
+
+    def __init__(self, run=None, timeout: int = 15, h: Homes = None):
+        self.run, self.timeout, self.h = run or _sh, timeout, h
+
+    def _json(self, argv):
+        try:
+            rc, out, err = self.run(argv, timeout=self.timeout)
+        except Exception as e:  # a missing tool, a timeout the runner raises
+            raise UpstreamError(f"{argv[0]}: {e}") from None
+        if rc != 0:
+            raise UpstreamError(f"{' '.join(argv[:3])}: {(err or out or f'exit {rc}').strip().splitlines()[-1][:160]}")
+        try:
+            return json.loads(out)
+        except ValueError:
+            raise UpstreamError(f"{' '.join(argv[:3])}: not JSON") from None
+
+    def latest(self, e: Ext) -> dict:
+        """{"ref", "label", "link"} of what upstream has now: the default branch's commit (a skill: a repository's
+        releases often follow another part of it), the npm version, or the marketplace copy's version."""
+        if e.pin_kind == "sha":
+            sha = str(self._json(["gh", "api", f"repos/{e.source}/commits/HEAD"]).get("sha") or "")
+            if not SHA_RE.match(sha):
+                raise UpstreamError(f"gh api repos/{e.source}: no commit SHA in the answer")
+            return {"ref": sha, "label": "", "link": f"https://github.com/{e.source}/compare/{e.pin[:12]}...{sha[:12]}"}
+        if e.pin_kind == "version":
+            reg, _, pkg = e.upstream.partition(":")
+            if reg != "npm":
+                raise UpstreamError(f"no upstream check for {reg or 'this registry'} packages yet")
+            doc = self._json(["npm", "view", pkg, "version", "time", "repository", "--json"])
+            repo = str((doc.get("repository") or {}).get("url") or "")
+            m = re.search(r"github\.com[/:]([\w.\-]+/[\w.\-]+?)(?:\.git)?$", repo)
+            link = f"https://github.com/{m.group(1)}/releases" if m else f"https://www.npmjs.com/package/{pkg}"
+            return {"ref": str(doc.get("version") or ""), "label": "", "link": link,
+                    "published": str((doc.get("time") or {}).get(str(doc.get("version")), ""))}
+        if e.pin_kind == "observed" and e.agent == "claude":
+            h = self.h or homes()
+            f = h.claude / "plugins" / "marketplaces" / e.source / ".claude-plugin" / "marketplace.json"
+            doc = _read_json(f)
+            if not isinstance(doc, dict):
+                raise UpstreamError(f"no copy of the {e.source} marketplace (claude plugin marketplace update)")
+            p = next((x for x in doc.get("plugins") or [] if x.get("name") == e.name), None)
+            if not p:
+                raise UpstreamError(f"{e.name} is not in the {e.source} marketplace any more")
+            src = p.get("source") if isinstance(p.get("source"), dict) else {}
+            up = e.upstream or (str(src.get("url") or "").replace("https://github.com/", "").removesuffix(".git"))
+            ref = str(p.get("version") or src.get("sha") or "")
+            if not ref:
+                raise UpstreamError(f"the {e.source} marketplace copy gives no version for {e.name}")
+            return {"ref": ref, "sha": str(src.get("sha") or ""), "label": "marketplace copy",
+                    "link": f"https://github.com/{up}/releases" if up else ""}
+        if e.pin_kind == "observed":
+            raise UpstreamError("the remote catalog reports only the installed version")
+        if e.pin_kind == "url":
+            raise UpstreamError(f"remote server at {e.source}: nothing local to pin")
+        raise UpstreamError("devkit's own: dev update --check")
+
+    def compare(self, e: Ext, old: str, new: str, full: bool = False) -> dict:
+        """Commits, changed files (and their paths) between two refs of a sha-pinned entry; with `full`, also the
+        repository's license now."""
+        out = {}
+        if e.pin_kind == "sha":
+            c = self._json(["gh", "api", f"repos/{e.source}/compare/{old}...{new}"])
+            out["commits"] = int(c.get("total_commits") or 0)
+            out["paths"] = [str(f.get("filename") or "") for f in c.get("files") or []]
+            out["files"] = len(out["paths"])
+            out["link"] = str(c.get("html_url") or f"https://github.com/{e.source}/compare/{old[:12]}...{new[:12]}")
+            if full:
+                lic = self._json(["gh", "api", f"repos/{e.source}/license"])
+                out["license"] = str(((lic.get("license") or {}).get("spdx_id")) or "")
+        return out
+
+
+def _base_license(text: str) -> str:
+    return re.split(r" \(|;", str(text or ""))[0].strip()
+
+
+def outdated(cat: list, upstream, name: str = None, agent: str = None, observed: dict = None) -> list:
+    """One row per checked entry: {"id", "name", "kind", "agent", "current", "latest", "link", "status", "reason"};
+    status is outdated, current, unchecked (with the reason) or unpinned. With `name`: also `detail` (commits, files,
+    license change, host)."""
+    picked = select(cat, name, agent) if name else [e for e in cat if not agent or e.agent == agent]
+    observed = observe() if observed is None else observed
+    rows, seen, compared = [], {}, {}
+    for e in picked:
+        if e.pin_kind == "local":
+            continue
+        o = observed.get(e.id) or {}
+        cur = e.pin if e.pin_kind in ("sha", "version") else _vs(o) if e.pin_kind == "observed" else e.pin
+        r = {"id": e.id, "name": e.name, "kind": e.kind, "agent": e.agent, "pin_kind": e.pin_kind,
+             "current": cur, "latest": "", "link": "", "status": "", "reason": ""}
+        if e.pin_kind == "url":
+            r.update(status="unpinned", reason=f"remote server at {e.source}: nothing local to pin")
+            rows.append(r)
+            continue
+        key = (e.pin_kind, e.source, e.upstream, e.name if e.pin_kind == "observed" else "", e.agent
+               if e.pin_kind == "observed" else "")
+        if key not in seen:
+            try:
+                seen[key] = upstream.latest(e)
+            except UpstreamError as err:
+                seen[key] = str(err)
+        up = seen[key]
+        if isinstance(up, str):  # the same upstream failed for an entry before: the same reason
+            r.update(status="unchecked", reason=up)
+            rows.append(r)
+            continue
+        latest = up["ref"]
+        r.update(latest=latest, label=up.get("label", ""), link=up.get("link", ""))
+        if e.pin_kind == "observed":
+            same = latest in (o.get("version"), o.get("sha")) or (up.get("sha") and up["sha"] == o.get("sha"))
+            r["status"] = "current" if same else "outdated"
+        else:
+            r["status"] = "current" if latest == e.pin else "outdated"
+        if e.pin_kind == "sha" and r["status"] == "outdated":  # one comparison per repository and pair of refs
+            ck = (e.source, e.pin, latest, bool(name))
+            if ck not in compared:
+                try:
+                    compared[ck] = upstream.compare(e, e.pin, latest, full=bool(name))
+                except UpstreamError as err:
+                    compared[ck] = {"error": str(err)}
+            d = dict(compared[ck])
+            if "error" not in d:
+                prefix = str(e.spec.get("path") or "").rstrip("/") + "/"
+                d["skill_files"] = sum(1 for p in d.get("paths") or [] if p.startswith(prefix))
+                if not d["skill_files"]:
+                    r.update(status="current", reason=f"upstream moved {d.get('commits', 0)} commit(s); this "
+                                                      f"skill's folder did not change")
+            r["detail"] = d
+            r["link"] = d.get("link") or r["link"]
+        if name and r["status"] == "outdated":
+            d = r.setdefault("detail", {})
+            if d.get("license") and _base_license(d["license"]) != _base_license(e.license):
+                d["license_change"] = f"{_base_license(e.license)} → {d['license']}"
+        rows.append(r)
+    return rows
+
+
+def select(cat: list, name: str, agent: str = None, kinds=None) -> list:
+    """The entries a name selects: a full id, or a short name (or name@marketplace) for every match of one kind.
+    ExtError when nothing matches or the name matches two kinds."""
+    if name in {e.id for e in cat}:
+        return [e for e in cat if e.id == name]
+    hits = [e for e in cat if (e.name == name or e.spec.get("id") == name) and (not agent or e.agent == agent)
+            and (not kinds or e.kind in kinds)]
+    if not hits:
+        raise ExtError(f"no extension named {name}" + (f" for {agent}" if agent else "") + ": dev ext ls lists them")
+    if len({e.kind for e in hits}) > 1:
+        raise ExtError(f"{name} names more than one kind: " + ", ".join(sorted(e.id for e in hits)) +
+                       "; use the full id")
+    return hits
+
+
+def bump(text: str, e: Ext, new: str) -> str:
+    """The config file `text` with only `e`'s pin set to `new`, in the file's own format (indent 2, a final
+    newline). An unchanged pin gives back the same bytes."""
+    doc = json.loads(text)
+    if e.kind == "skill":
+        hits = [s for s in doc.get("sources") or [] if s.get("repo") == e.source and s.get("ref") == e.pin and
+                e.name in (s.get("skills") or {})]
+        if len(hits) != 1:
+            raise ExtError(f"{e.id}: no single source {e.source}@{e.pin[:12]} lists it in skills.json")
+        hits[0]["ref"] = new
+    elif e.kind == "mcp" and e.pin_kind == "version":
+        spec = (doc.get("mcp") or {}).get(e.name)
+        if not spec:
+            raise ExtError(f"{e.id}: not in this plugins.json")
+        pkg = e.upstream.partition(":")[2]
+        sep = "==" if e.upstream.startswith("pypi:") else "@"
+        old = f"{pkg}{sep}{e.pin}"
+        if old not in spec.get("args", []):
+            raise ExtError(f"{e.id}: {old} is not in its args")
+        spec["args"] = [f"{pkg}{sep}{new}" if a == old else a for a in spec["args"]]
+    else:
+        raise ExtError(f"{e.id}: a {e.pin_kind} entry has no team pin to bump")
+    return json.dumps(doc, indent=2, ensure_ascii=False) + "\n"
+
+
+def _config_file(home: Path, e: Ext) -> Path:
+    return home / "config" / ("skills.json" if e.kind == "skill" else f"{e.agent}/plugins.json")
+
+
+def team_at(home: Path) -> dict:
+    """The team layer as the checkout at `home` has it (raw: placeholders stay; the catalog does not need them)."""
+    out = {}
+    for key, rel in (("claude", "claude/plugins.json"), ("codex", "codex/plugins.json"), ("skills", "skills.json")):
+        out[key] = _read_json(home / "config" / rel) or {}
+    return out
+
+
+def checkout_refusal(home: Path):
+    """Why the team configuration in `home` may not be changed here, or None: the pinned copy, a detached HEAD, or
+    the default branch."""
+    if core.is_pinned(home):
+        return f"{core.tilde(home)} is a pinned copy, which never changes: run this in the devkit checkout, on a branch"
+    branch = core.gitout(home, "symbolic-ref", "-q", "--short", "HEAD")
+    if not branch:
+        return f"{core.tilde(home)} is not on a branch (detached HEAD): dev branch new chore/bump-<name> first"
+    default = core.gitout(home, "symbolic-ref", "-q", "--short", "refs/remotes/origin/HEAD").partition("/")[2] or "main"
+    if branch in (default, "main", "master"):
+        return f"{branch} is the default branch: a pin bump goes through a branch and a PR (dev branch new chore/bump-<name>)"
+    return None
+
+
+def detail_lines(r: dict) -> list:
+    """The review detail printed before any update (the Security engineer's condition 4)."""
+    out = [f"{r['name']} ({r['agent']} {r['kind']}): {r['current'][:12]} → {r['latest'][:12]}"
+           + (f" ({r['label']})" if r.get("label") else "")]
+    d = r.get("detail") or {}
+    if r.get("link"):
+        out.append(f"  compare: {r['link']}")
+    if "commits" in d:
+        out.append(f"  {d['commits']} commit(s), {'300 or more' if d['files'] >= 300 else d['files']} file(s) changed"
+                   + (f", {d['skill_files']} in this skill's folder" if "skill_files" in d else ""))
+    if d.get("license_change"):
+        out.append(f"  ⚠ license changed: {d['license_change']}")
+    elif d.get("license"):
+        out.append(f"  license: {d['license']}")
+    if d.get("error"):
+        out.append(f"  ⚠ the comparison could not be read: {d['error']}")
+    return out
+
+
+def upstream() -> Upstream:
+    return Upstream()
+
+
+def runner():
+    """The command runner for vendor CLIs (`claude plugin`, `codex plugin`); tests inject a fake."""
+    return lambda argv, timeout=300: core.sh(argv, timeout=timeout)
+
+
+def merge_agents(rows: list) -> list:
+    """One row for the same entry in both agents (a skill both get): agent `claude+codex`."""
+    out, at = [], {}
+    for r in (dict(x) for x in rows):
+        key = (r["kind"], r["name"], r["current"], r["latest"], r["status"])
+        if key in at and r["pin_kind"] in ("sha", "version"):
+            at[key]["agent"] = "+".join(sorted(set(at[key]["agent"].split("+")) | {r["agent"]}))
+            at[key].setdefault("ids", [at[key]["id"]]).append(r["id"])
+            continue
+        at[key] = r
+        out.append(r)
+    return out
+
+
+def _short(ref: str) -> str:
+    return ref[:8] if SHA_RE.match(ref or "") else ref
+
+
+def outdated_lines(rows: list) -> list:
+    rows = merge_agents(rows)
+    old = [r for r in rows if r["status"] == "outdated"]
+    width = max([len(r["name"]) for r in old] + [8])
+    lines = [f"{r['name']:<{width}}  {r['kind']:<6} {r['agent']:<12} {_short(r['current'])}"
+             + (f" ({r['label']})" if r.get("label") and r["pin_kind"] != "observed" else "")
+             + f" → {_short(r['latest'])}  {r.get('link') or ''}".rstrip() for r in old]
+    current = [r for r in rows if r["status"] == "current"]
+    if current:
+        lines.append(f"{len(current)} up to date")
+    for r in rows:
+        if r["status"] == "unpinned":
+            lines.append(f"{r['name']} ({r['agent']} {r['kind']}) is unpinned: {r['reason']}")
+    unchecked = [r for r in rows if r["status"] == "unchecked"]
+    if unchecked:
+        lines.append(f"{len(unchecked)} could not be checked: " +
+                     "; ".join(f"{r['name']} ({r['agent']}): {r['reason']}" for r in unchecked))
+    return lines
+
+
+def cmd_outdated(a) -> int:
+    from . import ui
+    try:
+        cat = catalog(team(), user_layer(), skill_groups())
+        rows = outdated(cat, upstream(), a.name, a.agent)
+    except ExtError as e:
+        ui.err(str(e))
+        return 2
+    if a.json:
+        print(json.dumps(rows, indent=1, ensure_ascii=False))
+    else:
+        for ln in outdated_lines(rows):
+            print(ui.yellow(ln) if "could not be checked" in ln else ln)
+        for r in rows if a.name else []:
+            if r["status"] == "outdated":
+                print("\n".join(detail_lines(r)))
+    return 1 if any(r["status"] == "unchecked" for r in rows) else 0
+
+
+def _review(e: Ext, latest: str, up, label: str = "", link: str = "") -> dict:
+    r = {"id": e.id, "name": e.name, "kind": e.kind, "agent": e.agent, "pin_kind": e.pin_kind, "current": e.pin,
+         "latest": latest, "label": label, "link": link, "status": "outdated"}
+    try:
+        d = up.compare(e, e.pin, latest, full=True)
+        if e.kind == "skill" and "paths" in d:
+            prefix = str(e.spec.get("path") or "").rstrip("/") + "/"
+            d["skill_files"] = sum(1 for p in d["paths"] if p.startswith(prefix))
+        if d.get("license") and _base_license(d["license"]) != _base_license(e.license):
+            d["license_change"] = f"{_base_license(e.license)} → {d['license']}"
+        r["detail"], r["link"] = d, d.get("link") or link
+    except UpstreamError as err:
+        r["detail"] = {"error": str(err)}
+    return r
+
+
+def cmd_update(a) -> int:
+    """`dev ext update <name> [--to <ref>] --why "…"`: bump a team pin in the devkit checkout, after printing the
+    review detail. With --apply: update a vendor marketplace plugin on this Mac (the developer's, in a terminal)."""
+    from . import audit, ui
+    if not (a.why or "").strip():
+        ui.err('dev ext update needs --why "<reason>": it goes in the audit trail and the commit')
+        return 2
+    if a.apply:
+        return _apply_update(a)
+    home = core.source_home()
+    refusal = checkout_refusal(home)
+    if refusal:
+        ui.err(refusal)
+        return 1
+    try:
+        cat = catalog(team_at(home), {}, {"all"})
+        pinnable = [e for e in cat if e.pin_kind in ("sha", "version")]
+        hits = select(pinnable, a.name, a.agent) if any(a.name in (e.id, e.name) for e in pinnable) else \
+            select(cat, a.name, a.agent)
+    except ExtError as e:
+        ui.err(str(e))
+        return 2
+    pinned = [e for e in hits if e.pin_kind in ("sha", "version")]
+    if not pinned:
+        ui.err(f"{a.name} is {hits[0].pin_kind}: devkit's config has no pin for it. A vendor marketplace plugin is "
+               f"updated on this Mac with dev ext update {a.name} --apply --why \"…\", in a terminal")
+        return 2
+    if a.to and pinned[0].pin_kind == "sha" and not SHA_RE.match(a.to):
+        ui.err("--to needs a full 40-character commit SHA (not a tag, branch or short SHA)")
+        return 2
+    if a.to and pinned[0].pin_kind == "version" and not re.match(r"^\d+\.\d+\.\d+(?:[-+][0-9A-Za-z.\-]+)?$", a.to):
+        ui.err("--to needs an exact version such as 1.13.2")
+        return 2
+    up, done_, rc = upstream(), set(), 0
+    for e in pinned:
+        f = _config_file(home, e)
+        key = (str(f), e.source, e.pin, e.name if e.kind == "mcp" else "")
+        if key in done_:
+            continue
+        done_.add(key)
+        try:
+            info = {"ref": a.to} if a.to else up.latest(e)
+        except UpstreamError as err:
+            ui.err(f"{e.id}: the newest upstream could not be checked ({err}); name it with --to")
+            rc = 1
+            continue
+        new = info["ref"]
+        if new == e.pin:
+            print(f"{e.name} ({e.agent} {e.kind}) is already at {_short(new)}")
+            continue
+        r = _review(e, new, up, info.get("label", ""), info.get("link", ""))
+        print("\n".join(detail_lines(r)))
+        f.write_text(bump(f.read_text(), e, new))
+        audit.record("ext.update", e.id, f"{e.pin} → {new} in {f.relative_to(home)}", "ok", why=a.why.strip(),
+                     layer="team")
+        print(f"changed {f.relative_to(home)}: {e.name} {_short(e.pin)} → {_short(new)}")
+    if done_ and rc == 0:
+        print("next: commit it (dev commit --why …) and open a PR; the Security engineer reviews dependency changes")
+    return rc
+
+
+def _apply_update(a) -> int:
+    from . import audit, ui
+    try:
+        cat = catalog(team(), user_layer(), skill_groups())
+        seen = [e for e in cat if e.pin_kind == "observed"]
+        hits = select(seen, a.name, a.agent) if any(a.name in (e.id, e.name, e.spec.get("id")) for e in seen) else \
+            select(cat, a.name, a.agent)
+    except ExtError as e:
+        ui.err(str(e))
+        return 2
+    obs = [e for e in hits if e.pin_kind == "observed"]
+    if not obs:
+        ui.err(f"{a.name} is pinned in devkit's config ({hits[0].pin_kind}): bump the pin with dev ext update "
+               f"{a.name} --to <ref> --why \"…\" on a branch of the devkit checkout, then dev install")
+        return 2
+    up, run, rc = upstream(), runner(), 0
+    for row in outdated(obs, up, observed=observe()):
+        print("\n".join(detail_lines(row)) if row["status"] == "outdated" else
+              f"{row['name']} ({row['agent']}): {row['status']}" + (f" ({row['reason']})" if row["reason"] else ""))
+    for e in obs:
+        argv = ["claude", "plugin", "update", e.spec["id"]] if e.agent == "claude" else \
+            ["codex", "plugin", "add", e.spec["id"]]
+        (ok, msg), = apply([("apply", e.id, argv)], run,
+                           audit=lambda *x, **k: audit.record(*x, why=a.why.strip(), **k))
+        if not ok:
+            ui.err(msg)
+            rc = 1
+            continue
+        record_lock(e.agent, by="dev ext update --apply", only={e.id})
+        now = observe().get(e.id) or {}
+        print(f"updated {e.name} ({e.agent}): now {_vs(now)}, recorded as accepted"
+              + (" · restart the agent to load it" if e.agent == "claude" else ""))
+    return rc
+
+
 # --------------------------------------------------------------------------- dev ext
 
 def _columns(rows: list, cols: list) -> list:
@@ -697,17 +1111,32 @@ def cmd_ls(a) -> int:
 
 
 def cmd_ext(a) -> int:
-    if a.ext_cmd == "ls":
-        return cmd_ls(a)
-    return 2
+    return {"ls": cmd_ls, "outdated": cmd_outdated, "update": cmd_update}[a.ext_cmd](a)
 
 
 def register(add):
-    """Wire `dev ext` into the parser. `add(name, fn, help)` returns an argparse subparser."""
-    p = add("ext", cmd_ext, "Third-party plugins, skills and MCP servers for Claude Code and Codex: ls")
+    """Wire `dev ext` into the parser. `add(name, fn, help)` returns an argparse subparser. No abbreviated options:
+    the guard reads `--apply` and the other words exactly."""
+    p = add("ext", cmd_ext, "Third-party plugins, skills and MCP servers for Claude Code and Codex: ls, outdated, "
+                            "update")
     sp = p.add_subparsers(dest="ext_cmd", required=True)
-    q = sp.add_parser("ls", help="every extension: source, pin, installed and enabled state, license, layer")
+    q = sp.add_parser("ls", allow_abbrev=False,
+                      help="every extension: source, pin, installed and enabled state, license, layer")
     q.add_argument("--agent", choices=AGENTS, help="only this agent's extensions")
     q.add_argument("--all", action="store_true", help="also the skill groups this Mac does not install")
     q.add_argument("--json", action="store_true", help="every field, for tools")
     q.add_argument("-v", "--verbose", action="store_true", help="add the one-line why of each entry")
+    q = sp.add_parser("outdated", allow_abbrev=False,
+                      help="the newest upstream of each entry against its pin, with the changelog or compare link")
+    q.add_argument("name", nargs="?", help="one entry: also its commits, changed files and license change")
+    q.add_argument("--agent", choices=AGENTS)
+    q.add_argument("--json", action="store_true")
+    q = sp.add_parser("update", allow_abbrev=False,
+                      help="bump a team pin in the devkit checkout (on a branch), or --apply a vendor plugin update "
+                           "on this Mac (the developer, in a terminal)")
+    q.add_argument("name", help="a name or a full id (dev ext ls)")
+    q.add_argument("--to", help="the new ref: a full commit SHA or an exact version (default: the newest upstream)")
+    q.add_argument("--why", help="the reason, recorded in the audit trail; required")
+    q.add_argument("--agent", choices=AGENTS)
+    q.add_argument("--apply", action="store_true", help="update a vendor marketplace plugin on this Mac and accept "
+                                                        "it (the developer, in a terminal)")

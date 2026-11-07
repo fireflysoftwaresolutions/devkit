@@ -1311,7 +1311,44 @@ marketplace on its own), the session start, `dev status`, `dev doctor`, and `dev
 recorded version to the installed one, and the audit trail gets one `ext.drift` record for it. The same goes for a
 skill or MCP server that is not at its pin, a required extension that is off, a retired one still installed, and a
 plugin that a repository's `.claude/settings.json` enables outside the catalog. To accept a vendor change, run
-`dev install` in a terminal.
+`dev install`, or `dev ext update <name> --apply --why "…"`, in a terminal.
+
+### `dev ext outdated [<name>] [--agent claude|codex] [--json]`
+
+Shows, for each extension, what upstream has now against its pin, with the compare or release link. It uses your own
+`gh` sign-in and `npm`, with a 15-second limit per call, and reads the Claude marketplace copy that
+`claude plugin marketplace update` keeps. Agents may run it.
+
+```text
+$ dev ext outdated --agent claude
+impeccable  skill  claude  414603bf → 687bc381  https://github.com/pbakaus/impeccable/compare/414603bf…687bc381
+42 up to date
+4 could not be checked: frontend-design (claude): the claude-plugins-official marketplace copy gives no version …
+```
+
+A skill compares its pinned commit with the default branch and counts only the files in its own folder: a repository
+that moved elsewhere leaves the skill up to date. An entry whose upstream could not be reached is listed as could not
+be checked, with the reason, never as up to date, and the command exits with `1`. A remote MCP server shows its host,
+with nothing to pin. With a `<name>`, it also prints the number of commits, the files changed, and a license change.
+
+### `dev ext update <name> [--to <ref>] --why "…" [--agent claude|codex] [--apply]`
+
+Bumps a pin in devkit's team configuration, in the devkit checkout, after printing the review: the compare link, the
+commits, the files changed (and how many in the skill's folder), and any license change. Only that pin changes in
+`config/skills.json` or the agent's `plugins.json`. It refuses the default branch, a detached `HEAD`, and the pinned
+copy, and needs `--why`, which goes in the audit trail as `ext.update`. Agents may run it; commit the change and open
+a PR, which the Security engineer reviews.
+
+```bash
+dev branch new chore/bump-impeccable
+dev ext update impeccable --why "the audit command fixes"            # to the default branch's commit
+dev ext update chrome-devtools --to 1.13.2 --why "the network panel fix"
+```
+
+`--to` takes a full 40-character commit SHA for a skill and an exact version for an MCP server; without it, the
+newest upstream is used. `--apply` updates a vendor marketplace plugin on this Mac instead (`claude plugin update`, or
+`codex plugin add`), after the same review, and records the new version as accepted, so it no longer shows as drift.
+Only you run `--apply`, in a terminal.
 
 ### `dev install [--only STEPS | --version VERSION | --unverified --why "…"]`
 

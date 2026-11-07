@@ -1774,6 +1774,18 @@ INSTALL_REASON = ("`dev install` and `dev update` change what every hook, the gu
                   f"installed now. {_TAIL}")
 
 
+EXT_REASON = ("This `dev ext` command changes the plugins, skills or MCP servers that run in every session on this Mac "
+              "(spec P-fym583l7sg1, K1): only the developer does that, in a terminal. Ask them, with the command and "
+              "why. Agents may run `dev ext ls`, `dev ext outdated`, and `dev ext update <name> --to <ref> --why "
+              f"\"…\"` (a team pin, on a branch of the devkit checkout). {_TAIL}")
+
+
+def _ext_refusal(args) -> bool:
+    """`dev ext update … --apply` updates a vendor plugin on this Mac: the developer's. The parser takes no
+    abbreviated options, so the exact word is enough."""
+    return args[:1] == ["ext"] and args[1:2] == ["update"] and "--apply" in args[2:]
+
+
 _UPDATE_CHECK = frozenset({"--check", "--quiet", "--record"})
 
 
@@ -2192,6 +2204,8 @@ class _Shell:
         words = _dev_words(args)
         if args[:1] in (["install"], ["update"]) and not helps and not _update_check(args):
             return deny(INSTALL_REASON)
+        if _ext_refusal(args) and not helps:
+            return deny(EXT_REASON)
         if args[:1] in (["claude"], ["codex"]):  # dev claude|codex execs the agent with the words after the query
             why = guardless_session(args[0], [args[0], *[a for a in args[1:] if a != "--"]], names)
             if why:
