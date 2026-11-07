@@ -110,11 +110,11 @@ class CrewShellTests(unittest.TestCase):
             with self.subTest(cmd=cmd):
                 self.assertIsNone(refusal(cmd))
 
-    def test_changes_to_the_team_crew_are_refused_and_name_morpheus(self):
+    def test_changes_to_the_team_crew_are_refused_and_name_the_tech_lead(self):
         for cmd in ('dev crew raci backend --set "R=tank A=seraph" --why x', "dev crew raci backend --set=R=tank",
                     'dev crew set neo role "x" --why y', 'dev crew brief neo "add a column"'):
             with self.subTest(cmd=cmd):
-                self.assertIn("Morpheus runs it", refusal(cmd) or "")
+                self.assertIn("the tech lead runs it", refusal(cmd) or "")
 
     def test_a_lane_call_the_router_cannot_take_is_refused(self):
         for cmd in ('cd lib && dev progress step "x" --check y', 'dev crew decide D1 "A"; echo ok',

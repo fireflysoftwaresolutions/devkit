@@ -772,7 +772,7 @@ def check_git(argv, cwd, full_segment, envs=frozenset(), pending=None):
             why = deny("gitleaks found secret-like content in the staged changes: " + "; ".join(found[:5]) +
                        ". Remove it and load it from the environment or the secret manager (rotate it if it was ever "
                        "pushed). A false positive: the main session adds a `gitleaks:allow` comment on that line or "
-                       "an entry in .gitleaksignore, then commits again; a crew member reports it to Morpheus.")
+                       "an entry in .gitleaksignore, then commits again; a crew member reports it to the tech lead.")
             if found and not _hatch(envs, "DEVKIT_SKIP_SECRET_SCAN", "secret-scan", why):
                 return why
         if sub == "commit":
@@ -2580,7 +2580,7 @@ _SPAWNS = re.compile(
 _SPAWNS_QUOTED = re.compile(r"`[^`]*`|\bqx\b|%x[\[{(]")  # backticks run a command in perl, ruby and php only
 LANE_REASON = ("Run `dev progress …` and `dev crew …` as a command of its own (no `&&`, `;`, pipes, `$(…)`, `bash -c`, "
                "`env` or `timeout` around it), so devkit can route it to your lane; anywhere else it would act as "
-               "Morpheus. Text that only mentions these commands (a quoted message, a heredoc written to a file) is "
+               "the tech lead. Text that only mentions these commands (a quoted message, a heredoc written to a file) is "
                "fine, and read-only crew commands (graph, show, raci, …) work anywhere.")
 
 
@@ -2889,7 +2889,7 @@ def _sync_verdict(argv, cwd, scope, base=None):
         return None
     where = "; ".join(", ".join(layer) for layer in layers) or "no step scope"
     return deny(f"`dev crew sync` rewrites and removes the generated files in {tilde(agents)}/, which your step's "
-                f"scope ({where}) does not hold. Ask Morpheus to add plugin/agents/** to your step (`dev crew ask "
+                f"scope ({where}) does not hold. Ask the tech lead to add plugin/agents/** to your step (`dev crew ask "
                 f"\"…\"`), or run `dev crew sync --check` and report what differs.")
 
 
@@ -2915,7 +2915,7 @@ def scratch_refusal(path, member, holds=False):
     pad = m.group(1) if m else p
     return (f"{tilde(p)} is not in your scratch folder. In the session scratchpad each crew member writes and deletes "
             f"only in scratchpad/{member}/ ({tilde(pad)}/{member}/); the shared top level and the other members' "
-            f"folders hold their work (L-fxs9q5evz83). Put your files in your folder, and ask Morpheus about others.")
+            f"folders hold their work (L-fxs9q5evz83). Put your files in your folder, and ask the tech lead about others.")
 
 
 class _ScratchShell(_Shell):
@@ -2945,7 +2945,7 @@ class _ScratchShell(_Shell):
 # is the backstop for what an allowed check writes when it runs.
 
 TOOL_LEVELS = ("all", "build", "review", "read")  # least to most restrictive, as progress.TOOL_LEVELS
-READONLY_REASON = ("read-only lane: {what}. Report the change with file:line and the fix, or ask Morpheus to run it "
+READONLY_REASON = ("read-only lane: {what}. Report the change with file:line and the fix, or ask the tech lead to run it "
                    "(`dev crew ask \"…\"`). Readers (cat, grep, rg, sed -n '1,20p', find, git log|diff|show, gh pr "
                    "view, dev status|grep|diff, …) and the project's checks (pytest, python3 -m unittest, ruff check, "
                    "tsc --noEmit, …) run; redirects only to /dev/null or a temp folder.")
@@ -3404,7 +3404,7 @@ def crew_shell_verdict(cmd: str, cwd, scope=None, member=None, level=None, base=
                 return deny(LANE_REASON)
             if kind == "team":
                 sub = next((a for a in args[1:] if not a.startswith("-")), "")
-                return deny(f"`dev crew {sub}` changes the team's crew or briefs a member: Morpheus runs it. Ask him "
+                return deny(f"`dev crew {sub}` changes the team's crew or briefs a member: the tech lead runs it. Ask "
                             f"with `dev crew ask \"…\"` and say what should change and why.")
             if kind == "sync":
                 v = _sync_verdict(argv, cwd, scope, base)
@@ -3510,7 +3510,7 @@ def scope_owner_across(path, runs=None, me_session="", checkout_of=None):
 # command only carries (a commit message, a heredoc written to a file, a quoted note) is not a use.
 
 HATCH_REASON = ("Crew members do not use devkit's escape hatches: {what}. They are for the developer and the main "
-                "session, where each use is recorded (spec F8). Say what you need under \"Needs from Morpheus\" in "
+                "session, where each use is recorded (spec F8). Say what you need under \"Needs from the tech lead\" in "
                 "your report, or ask with `dev crew ask \"…\"`.")
 _SECRET_ALLOW = re.compile(r"gitleaks:allow|\.gitleaksignore")
 _DEVKIT_ENV_CODE = re.compile(
@@ -3752,7 +3752,7 @@ def member_tool_verdict(tool, tool_input, cwd, level=None, member=None, scope=No
         what = "publishes or deploys" if ext == "publish" else \
             "sends a message" if kind == "send" else "creates or deletes something, or does what devkit cannot tell,"
         return deny(f"`{tool}` {what} outside this machine, which crew members never do (spec C6, tier 2). Put the "
-                    f"text and the target under \"Needs from Morpheus\" in your report.")
+                    f"text and the target under \"Needs from the tech lead\" in your report.")
     outs = _mcp_out_paths(tool_input) if kind else []
     if level in ("review", "read") and (kind == "write" or outs):
         return deny(READONLY_REASON.format(what=f"`{tool}` writes" + (f" {outs[0]}" if outs else "")))
@@ -3760,7 +3760,7 @@ def member_tool_verdict(tool, tool_input, cwd, level=None, member=None, scope=No
     for p in outs:
         if layers and not member_write_exempt(p, cwd, scope, member, base) and \
                 not all(scope_holds(p, cwd, layer, base=base) for layer in layers):
-            return deny(f"`{tool}` writes {p}, which is outside your step's scope. Ask Morpheus to widen it "
+            return deny(f"`{tool}` writes {p}, which is outside your step's scope. Ask the tech lead to widen it "
                         f"(`dev crew ask \"…\"`).")
     if tool in WRITE_TOOLS:
         path = tool_input.get("file_path") or tool_input.get("notebook_path") or ""
@@ -5087,7 +5087,7 @@ def _member_gate(cmd, cwd, member, lane, agent, session, grant, now) -> str | No
             if setting == "enforce":
                 return (f"Crew members never run `{a['words']}`: it {_what(a)}, which cannot be undone (spec C6, tier "
                         f"2), granted or not. Put the exact command and why it is needed under \"Needs from "
-                        f"Morpheus\" in your report.")
+                        f"the tech lead\" in your report.")
         tier1 = [a for a in acts if a["tier"] == 1]
         if not tier1:
             return None
@@ -5098,20 +5098,21 @@ def _member_gate(cmd, cwd, member, lane, agent, session, grant, now) -> str | No
         if missing and setting == "enforce":
             _gate_record(missing, "deny", who, setting, lane, session)
             return (f"`{missing['words']}` {_what(missing)}, and crew members push and open PRs only with a step grant "
-                    f"(spec C6, tier 1). Ask Morpheus with `dev crew ask \"…\"`: once the developer agrees, he assigns "
-                    f"your step with `dev progress assign <step> --to <you> --allow push,pr`, or pushes it himself.")
+                    f"(spec C6, tier 1). Ask the tech lead with `dev crew ask \"…\"`: once the developer agrees, the "
+                    f"tech lead assigns your step with `dev progress assign <step> --to <you> --allow push,pr`, or "
+                    f"pushes it.")
         for a, g in found:
             used = look(a["action"], a["target"], a["repo"], True) if g else None
             if g and not used and setting == "enforce":
                 _gate_record(a, "deny", who, setting, lane, session)
-                return f"The step grant for `{a['words']}` was used up a moment ago; ask Morpheus for a new one."
+                return f"The step grant for `{a['words']}` was used up a moment ago; ask the tech lead for a new one."
             _gate_record(a, "granted" if used else "audit", who, setting, lane, session, used)
         return None
     except Exception as e:
         _record("guard.irreversible", "", f"{type(e).__name__}: {e}"[:300], "deny", member=who, lane=lane or "",
                 session=session or "", rule="gate-error")
         return (f"devkit could not verify the grant for this command ({type(e).__name__}); retry once. If it fails "
-                f"again, ask Morpheus with `dev crew ask \"…\"`.")
+                f"again, ask the tech lead with `dev crew ask \"…\"`.")
 
 
 def stubs_accepted(cmd: str) -> bool:

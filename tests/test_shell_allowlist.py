@@ -193,7 +193,7 @@ class AllowlistTests(unittest.TestCase):
         why = lane("sed -i '' s/a/b/ lib/devkit/guard.py")
         self.assertIn("read-only", why)
         self.assertIn("file:line", why)
-        self.assertIn("Morpheus", why)
+        self.assertIn("ask the tech lead", why)
 
     def test_a_build_lane_keeps_its_shell_and_an_explicit_level_wins_over_the_member(self):
         self.assertIsNone(lane("sed -i '' s/a/b/ src/a.py", member="keymaker"))  # keymaker is a build member

@@ -329,6 +329,23 @@ class RedTeam2(unittest.TestCase):
         self.assertEqual(self.acts("python3 -c \"import os; os.system('gh pr merge 12')\""), ["merge"])
         self.assertEqual(self.acts("node -e \"require('child_process').execSync('gh pr merge 12')\""), ["merge"])
 
+    # ---- M379: the role check sends back a member's report that names Morpheus alone, and members echo the
+    # guard's refusals, so every text the guard shows names the role
+    def test_m379_no_guard_text_names_the_tech_lead_by_persona_alone(self):
+        import ast
+        tree = ast.parse((ROOT / "lib" / "devkit" / "guard.py").read_text())
+        docs = {id(n.body[0].value) for n in ast.walk(tree)
+                if isinstance(n, (ast.Module, ast.FunctionDef, ast.ClassDef)) and n.body
+                and isinstance(n.body[0], ast.Expr) and isinstance(n.body[0].value, ast.Constant)}
+        texts = [(n.lineno, n.value) for n in ast.walk(tree) if isinstance(n, ast.Constant)
+                 and isinstance(n.value, str) and id(n) not in docs and "Morpheus" in n.value]
+        self.assertEqual(texts, [])
+
+    def test_m379_member_refusals_name_the_tech_lead(self):
+        self.assertIn("the tech lead runs it", self.member('dev crew brief neo "add a column"') or "")
+        self.assertIn("Ask the tech lead", self.member("dev push") or "")
+        self.assertIn('"Needs from the tech lead"', self.member("gh pr merge 12") or "")
+
 
 if __name__ == "__main__":
     unittest.main()
