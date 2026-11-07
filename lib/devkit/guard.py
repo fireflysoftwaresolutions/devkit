@@ -4474,7 +4474,8 @@ def _embargo_anywhere() -> str:
     try:
         from . import audit, branches
         if not Path(core.HANDOFF).is_dir():
-            return f"the handoff repository {core.tilde(core.HANDOFF)} is not on this Mac"
+            return (f"the handoff repository {core.tilde(core.HANDOFF)} is not on this Mac (`dev setup` creates it; "
+                    f"run `dev doctor` to repair the setup)")
         root = Path(core.NOTES)
         pids = {p.relative_to(root).with_suffix("").as_posix() for p in root.rglob("*.md")} if root.is_dir() else set()
         trails = sorted(Path(audit.AUDIT).glob("*.jsonl")) if Path(audit.AUDIT).is_dir() else []

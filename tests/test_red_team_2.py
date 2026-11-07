@@ -1032,6 +1032,14 @@ class EmbargoedBranchesStayOffTheRemote(EmbargoCase):
             with self.subTest(cmd=cmd, embargo=False):
                 self.assertNotIn(unknown, [(a["action"], a["target"]) for a in
                                            guard.irreversible_actions(cmd, str(here))])
+        # the tech lead's decision: a Mac without a handoff repository stays fail closed (only a broken setup has
+        # none), and the refusal says how to repair it
+        with mock.patch.object(core, "HANDOFF", self.root / "nowhere"), \
+                mock.patch.object(core, "NOTES", self.root / "nowhere" / "projects"), settings():
+            reason = (guard.irreversible_verdict(held[0], str(here), agent="claude", session="s1",
+                                                 grant=DenyAll()) or (None, ""))[1]
+        self.assertIn("is not on this Mac", reason)
+        self.assertIn("`dev doctor`", reason)
 
     def test_b2b_the_release_push_and_the_handoff_repositorys_pushes_still_pass(self):
         # The two pushes this fix must leave alone while acme/widget holds fix/hole: a release branch pushed from its
@@ -1045,15 +1053,19 @@ class EmbargoedBranchesStayOffTheRemote(EmbargoCase):
         _git(self.handoff, "commit", "-q", "-m", "notes")
         _git(self.handoff, "remote", "add", "origin", "git@github.com:ana/handoff.git")
         h = shq(self.handoff)
-        for cmd, cwd in (("git push", self.repo), ("git push -u origin release/26.11.3", self.repo),
-                         ("dev push", self.repo), (f"git -C {h} push origin sync/mac", str(here)),
-                         ("git push origin sync/mac", str(self.handoff)), (f"cd {h}/.git && git push", str(here))):
-            with self.subTest(cmd=cmd, cwd=cwd):
-                found = guard.irreversible_actions(cmd, cwd) or []
-                self.assertTrue(found and all(a["action"] in ("push", "push-destructive") for a in found), found)
-                with settings():
-                    self.assertIsNone(guard.irreversible_verdict(cmd, cwd, agent="claude", session="s1",
-                                                                 grant=DenyAll()))
+        cases = (("git push", self.repo), ("git push -u origin release/26.11.3", self.repo),
+                 ("dev push", self.repo), (f"git -C {h} push origin sync/mac", str(here)),
+                 ("git push origin sync/mac", str(self.handoff)), (f"cd {h}/.git && git push", str(here)))
+        for embargo in (True, False):  # with acme/widget's embargo on fix/hole, then with no embargo anywhere
+            if not embargo:
+                self.note.write_text("---\nstatus: active\n---\n# acme/widget\n")
+            for cmd, cwd in cases:
+                with self.subTest(cmd=cmd, cwd=cwd, embargo=embargo):
+                    found = guard.irreversible_actions(cmd, cwd) or []
+                    self.assertTrue(found and all(a["action"] in ("push", "push-destructive") for a in found), found)
+                    with settings():
+                        self.assertIsNone(guard.irreversible_verdict(cmd, cwd, agent="claude", session="s1",
+                                                                     grant=DenyAll()))
 
     def test_b2b_an_unparsed_push_with_an_embargo_in_place_is_refused_in_the_audit_week(self):
         self.assertIsNotNone(self.main("git push origin fix/hole 'unclosed", setting="audit"))
