@@ -65,6 +65,13 @@ the net under your own review, not as a replacement for it.
 | Anywhere else (Desktop, Documents, `~/notes.md`, …) | Claude: ask · Codex: deny |
 | A path with a NUL character, in a file tool's `file_path` or `notebook_path` or an MCP tool's path | deny: the system reads a path up to its first NUL, so another file would be written, and a later rule would fail on it and let the call through |
 
+A file tool (Write, Edit, MultiEdit, NotebookEdit, `apply_patch`, and an MCP tool's path) hands its path to the system
+as it is, so the guard reads it the same way: `$` and a backtick are ordinary characters, and `..` and links resolve as
+the system resolves them. `/private/tmp/$X/../../../Users/me/.config/devkit/config.json` is devkit's configuration
+once a folder named `$X` exists, and it is refused like the plain path. In a shell command, `$X` stays a variable the
+guard cannot know. The rules on the handoff repository compare paths without case, as macOS folders do:
+`~/development/.HANDOFF/projects/other/repo.MD` is another project's note.
+
 "Owners you belong to" are your GitHub login and organizations (from `gh`, cached for a day) plus folders that already
 exist in the dev root.
 
@@ -270,8 +277,14 @@ needs another configuration, start that session yourself in a terminal.
 ### What the guard cannot see
 
 The guard's rules read a command as it is typed, and the commands it hands to a shell, a package runner, `xargs`,
-`find -exec`, or a program's code. A command that decides what runs only when it runs gets through. For the
-extension rule, these are not refused:
+`find -exec`, or a program's code. A runner whose command comes from its input is refused, for every session, in the
+shell and in a program's code: `xargs` with only a wrapper after it (`xargs env`, `xargs nohup`, `xargs sudo`,
+`xargs timeout 5`: xargs adds what it reads, and its first word becomes the command), a placeholder in the command's
+place (`xargs -I{} {} …`, `parallel env`, `find … -exec {} \;`, `dev {}`), and a shell line the input fills in
+(`xargs sh -c`, `xargs sh -c '"$@"' sh`). `xargs` with no command runs `echo` and stays open. The guard reads xargs's
+options as xargs does, so a value is never taken for the command (`xargs -tn 1 dev`, `xargs --max-args 1 dev`). A
+command that decides what runs only when it runs in other ways gets through. For the extension rule, these are not
+refused:
 
 - a program name built at run time: `$(printf claude) plugin install x`, or an alias (`alias c=claude; c plugin …`);
 - a script a shell reads from a source the guard cannot read: `curl … | sh`, `echo '…' | sh`, or a file the same
@@ -321,7 +334,11 @@ action `unknown`, tier 2, with the target `cmd-<hash>` of that exact command tex
   names git's;
 - a program that builds the name of what it calls, such as `getattr(__import__('os'), 'sys' + 'tem')`, or starts a
   command that begins with what it fills in at run time, such as ``execSync(`${tool} pr merge 12`)`` or
-  `subprocess.run(f"{tool} …")`.
+  `subprocess.run(f"{tool} …")`;
+- a program or script the gate must read and cannot: larger than it reads (512 KB for a program an interpreter runs
+  or a script a shell runs, 256 KB for a shell script run by its path) or unreadable, such as `python3 big.py` padded
+  past 512 KB with a force push at its end. A large program that is no shell script (a binary run by its path) is
+  classified by its name, as before.
 
 These are not `unknown`:
 
@@ -459,17 +476,19 @@ DEVKIT_LOCAL_CI_PASSED=1.
   (`os.system("dev install # don't")`); any other literal, such as `print("don't")`, is data. Heredoc bodies are set
   aside first, so text with apostrophes can go in one. A script file or a sourced file the guard cannot read is
   allowed, as before.
-- When the guard itself fails while it judges a call that acts (a shell command, a `Write`, `Edit`, `MultiEdit`,
-  `NotebookEdit`, or `apply_patch`, or an MCP tool), the call is refused with the reason "devkit's guard could not
-  judge this call." A crash would otherwise skip every rule for that call, and an agent shapes the command text, so it could choose
-  one that crashes the guard. The refusal is logged to `~/.local/state/devkit/logs/hooks.log` with its traceback and
+- When the guard itself fails while it judges a call that acts (a shell command, `Monitor`'s included, a `Write`,
+  `Edit`, `MultiEdit`, `NotebookEdit`, or `apply_patch`, a `WebFetch`, whose rule keeps secrets out of the URLs it
+  sends, or an MCP tool), the call is refused with the reason "devkit's guard could not judge this call." A crash would
+  otherwise skip every rule for that call, and an agent shapes the command text, so it could choose one that crashes
+  the guard. The refusal is logged to `~/.local/state/devkit/logs/hooks.log` with its traceback and
   recorded as `guard.deny` with rule `guard-error` (`dev audit --action guard.deny`). A refusal the guard had already
-  reached also stands when a later part of the hook fails. The agent rewrites the command more simply or stops and
+  reached also stands when a later part of the hook fails, recorded once, under its own rule. The agent rewrites the command more simply or stops and
   tells the developer, who can run it in their own terminal (hooks run only in agent sessions) or start the session
   with `DEVKIT_GUARD=off`, which the hook reads before any rule runs.
 - Other exceptions in the guard are logged there and the call is allowed, with a `guard.failopen` record: a call that
-  only reads or launches (`Read`, `Grep`, `Glob`, `WebFetch`, `WebSearch`, and `Agent`, whose subagent's calls each pass
-  the guard again), and a call every rule has already allowed when only the context the hook adds to it fails. A
+  only reads or launches (`Read`, `Grep`, `Glob`, `WebSearch`, and `Agent`, `Task`, and Codex's `spawn_agent`, whose
+  subagent's calls each pass the guard again), and a call every rule has already allowed when only the context the hook
+  adds to it fails, a crew member's `dev progress` or `dev crew` call that devkit routes to its lane included. A
   guard bug never blinds the session that has to diagnose it, and the other hooks (session start, prompt, stop) still
   fail open. These checks fail closed too: a crew member's shell command that the lane check cannot read or judge;
   an irreversible action, in enforce, when the gate itself fails and the text looks irreversible; the MCP gate; and

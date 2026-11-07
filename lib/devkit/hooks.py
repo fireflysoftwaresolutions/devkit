@@ -961,7 +961,8 @@ def session_end(agent: str):
 
 # --------------------------------------------------------------------------- guard
 
-SHELL_TOOLS = ("Bash", "exec_command", "shell", "local_shell", "unified_exec")
+# Claude Code's Monitor runs its `command` in the same shell as Bash: it is judged, gated and counted as one
+SHELL_TOOLS = ("Bash", "Monitor", "exec_command", "shell", "local_shell", "unified_exec")
 # what a subagent runs as itself: dev progress …, and dev crew ask, answer, inbox, decide, decisions, mode, delegate,
 # decline and route
 DEV_LANE_CMD = re.compile(r"^\s*(?:\S*/)?dev\s+(?:progress(?:\s|$)|"
@@ -1683,6 +1684,7 @@ def _guard(agent: str, data: dict, held: dict):
         verdict = _identity_verdict(data) or _crew_limits(agent, data) or _stub_commit_gate(data) or \
             _irreversible_main(agent, data)
     held["verdict"] = verdict
+    held["rule"] = None  # a verdict of the guard's own rules is recorded with no rule of its own
     if verdict and (verdict[0] == "deny" or agent == "codex"):  # Codex turns ask into deny below
         _close_call(data)  # a refused call never runs: it leaves no open entry
     if not verdict:
@@ -1694,28 +1696,36 @@ def _guard(agent: str, data: dict, held: dict):
                 pass
         why = _scope_violation(agent, data)
         if why:
-            held["verdict"] = ("deny", why)
+            held["verdict"], held["rule"] = ("deny", why), "crew-scope"
             _log(f"guard {agent} deny: {why[:160]}")
             _close_call(data)
             from . import audit
             audit.record("guard.deny", (data.get("tool_input") or {}).get("file_path") or data.get("tool_name") or "",
                          why[:400], "deny", tool=data.get("tool_name") or "", rule="crew-scope",
                          agent_id=data.get("agent_id") or "")
+            held["recorded"] = True  # a failure after this keeps the refusal, and records it no second time
             print(json.dumps({"hookSpecificOutput": {"hookEventName": "PreToolUse", "permissionDecision": "deny",
                                                      "permissionDecisionReason": _with_pitfalls(agent, data, why)}}))
             return
         routed = _route_subagent_progress(data)
         if routed:
+            out = _rewrite(agent, routed)
+            held["done"] = True  # judged and routed to its lane: a failure adding its context must not refuse it
+            try:
+                out = _with_context(agent, out, data)
+            except Exception as e:  # without the pitfalls, the call still goes to its lane
+                g.failopen("guard-context", e)
             _log(f"progress {agent}: a subagent's dev progress call goes to its lane")
-            print(json.dumps({"hookSpecificOutput": _with_context(agent, _rewrite(agent, routed), data)}))
+            print(json.dumps({"hookSpecificOutput": out}))
             return
         why = _unroutable_lane_command(data, agent)
         if why:
-            held["verdict"] = ("deny", why)
+            held["verdict"], held["rule"] = ("deny", why), _lane_rule(why)
             _close_call(data)
             from . import audit
             audit.record("guard.deny", (data.get("tool_input") or {}).get("command", "")[:200], why, "deny",
-                         tool=data.get("tool_name") or "", rule=_lane_rule(why), agent_id=data.get("agent_id") or "")
+                         tool=data.get("tool_name") or "", rule=held["rule"], agent_id=data.get("agent_id") or "")
+            held["recorded"] = True
             print(json.dumps({"hookSpecificOutput": {"hookEventName": "PreToolUse", "permissionDecision": "deny",
                                                      "permissionDecisionReason": _with_pitfalls(agent, data, why)}}))
             return
@@ -1750,17 +1760,19 @@ def _guard(agent: str, data: dict, held: dict):
     tin = data.get("tool_input") or {}
     audit.record(f"guard.{decision}", tin.get("command") or tin.get("file_path") or data.get("tool_name") or "",
                  reason[:400], decision, tool=data.get("tool_name") or "", agent_id=data.get("agent_id") or "")
+    held["recorded"] = True
     print(json.dumps({"hookSpecificOutput": {"hookEventName": "PreToolUse", "permissionDecision": decision,
                                              "permissionDecisionReason": reason}}))
 
 
 # The guard fails closed for a call that acts (D10 = C, docs/guard.md › Fail-open design): a crash while judging a
 # shell command, a file write or patch, or an MCP tool would otherwise skip every rule for that call, and the command
-# text is the agent's to shape (26.11.4 failed open on an xargs with no command in a program's code). A call that only
-# reads or launches (Read, Grep, Glob, WebFetch, WebSearch, Agent: each subagent call passes the guard again) still
-# fails open, so a guard bug never blinds the session that has to diagnose it. Kept here, not in guard.py, so it holds
-# when guard.py itself cannot load.
-_ACTING_TOOLS = frozenset({"Write", "Edit", "MultiEdit", "NotebookEdit", "apply_patch"})
+# text is the agent's to shape (26.11.4 failed open on an xargs with no command in a program's code). WebFetch fails
+# closed too: its rule keeps secrets out of the URLs it sends (webfetch_verdict). A call that only reads or launches
+# (Read, Grep, Glob, WebSearch, and Agent, Task or Codex's spawn_agent: each subagent call passes the guard again)
+# still fails open, so a guard bug never blinds the session that has to diagnose it. Kept here, not in guard.py, so it
+# holds when guard.py itself cannot load.
+_ACTING_TOOLS = frozenset({"Write", "Edit", "MultiEdit", "NotebookEdit", "apply_patch", "WebFetch"})
 GUARD_ERROR_REASON = ("devkit's guard could not judge this call (an internal error, {err}, recorded in the audit trail "
                       "as rule guard-error), so it is refused rather than run unchecked. Rewrite it more simply (one "
                       "command per call, or a script file) and try once more; if it is refused again, stop and tell "
@@ -1770,23 +1782,26 @@ GUARD_ERROR_REASON = ("devkit's guard could not judge this call (an internal err
 
 def _acts(data: dict) -> bool:
     """True for a call the guard must judge before it runs: a shell command (any tool input with a command, which
-    guard.check reads as one), a file write or patch, an MCP tool."""
+    guard.check reads as one, Monitor's included), a file write or patch, a WebFetch, an MCP tool."""
     tool, inp = str(data.get("tool_name") or ""), data.get("tool_input")
     return tool in SHELL_TOOLS or tool in _ACTING_TOOLS or tool.startswith("mcp__") or \
         (isinstance(inp, dict) and isinstance(inp.get("command"), (str, list)))
 
 
 def _guard_failed(agent: str, data: dict, held: dict, exc: BaseException) -> bool:
-    """The guard hook raised while it handled a call. A deny or ask it had already reached still stands; a call that
-    acts and was not yet judged in full is refused (GUARD_ERROR_REASON) and recorded as guard.deny, rule guard-error.
+    """The guard hook raised while it handled a call. A deny or ask it had already reached still stands, recorded
+    once, under its own rule (`held`: `rule`, and `recorded` once the hook wrote it); a call that acts and was not
+    yet judged in full is refused (GUARD_ERROR_REASON) and recorded as guard.deny, rule guard-error.
     -> False when the call may run (judged and allowed, or one that only reads): run() records guard.failopen."""
     verdict = held.get("verdict")
     if verdict and verdict[0] in ("deny", "ask"):
         decision, reason = ("deny" if agent == "codex" else verdict[0]), str(verdict[1])
+        rule, detail = held.get("rule"), f"{str(verdict[1])[:300]} (hook error after it: {type(exc).__name__}: {exc})"
     elif held.get("done") or not _acts(data):
         return False
     else:
         decision, reason = "deny", GUARD_ERROR_REASON.format(err=type(exc).__name__)
+        rule, detail = "guard-error", f"{reason[:300]} ({type(exc).__name__}: {exc})"[:400]
     _log(f"guard {agent} {decision} (guard-error):\n{traceback.format_exc()}")
     try:
         _close_call(data)  # a refused call never runs: it leaves no open entry
@@ -1795,10 +1810,11 @@ def _guard_failed(agent: str, data: dict, held: dict, exc: BaseException) -> boo
     try:
         from . import audit
         tin = data.get("tool_input") if isinstance(data.get("tool_input"), dict) else {}
-        audit.record(f"guard.{decision}", str(tin.get("command") or tin.get("file_path") or data.get("tool_name") or
-                                              "")[:400],
-                     f"{reason[:300]} ({type(exc).__name__}: {exc})"[:400], decision,
-                     tool=data.get("tool_name") or "", rule="guard-error", agent_id=data.get("agent_id") or "")
+        if not held.get("recorded"):
+            audit.record(f"guard.{decision}", str(tin.get("command") or tin.get("file_path") or
+                                                  data.get("tool_name") or "")[:400],
+                         detail[:400], decision, tool=data.get("tool_name") or "", agent_id=data.get("agent_id") or "",
+                         **({"rule": rule} if rule else {}))
     except Exception:
         pass  # the refusal stands without its record
     print(json.dumps({"hookSpecificOutput": {"hookEventName": "PreToolUse", "permissionDecision": decision,

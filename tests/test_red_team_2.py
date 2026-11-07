@@ -577,7 +577,7 @@ class RedTeam2(unittest.TestCase):
         alone = guard.check_bash("git push --force origin main", self.repo, "claude")
         self.assertEqual((alone or ("",))[0], "deny")
         install = guard.deny(guard.INSTALL_REASON)
-        for xargs in ("xargs", "xargs -0", "xargs -n 1", "xargs --", "xargs env", "xargs nohup", "xargs timeout 5"):
+        for xargs in ("xargs", "xargs -0", "xargs -n 1", "xargs --"):
             for code in (f"python3 -c \"import os; os.system('echo a | {xargs}')\"",
                          f"node -e \"require('child_process').execSync('echo a | {xargs}')\"",
                          f"perl -e 'system(\"echo a | {xargs}\")'"):
@@ -588,6 +588,89 @@ class RedTeam2(unittest.TestCase):
                     self.assertEqual(guard.check_bash(f"{code}; dev install", self.repo, "claude"), install)
         dev = "python3 -c \"import os; os.system('echo install | xargs dev')\""  # an xargs with a command is read
         self.assertEqual(guard.check_bash(dev, self.repo, "claude"), install)
+
+    def test_an_xargs_of_wrappers_alone_runs_its_input_as_the_command_and_is_refused(self):
+        # `xargs env|nohup|sudo|timeout 5` strip to no command, so the
+        # guard read them as echo, while xargs adds what it reads and its first word runs: `echo dev install | xargs
+        # env` ran dev install, and `echo git push --force origin main | xargs env` a force push, past every rule
+        refused = guard.deny(guard.INPUT_COMMAND_REASON)
+        for xargs in ("xargs env", "xargs nohup", "xargs sudo", "xargs timeout 5", "xargs -n 2 env FOO=1",
+                      "xargs -- nice -n 5", "xargs env -S", "xargs uv run"):
+            for cmd in (f"echo dev install | {xargs}", f"echo git push --force origin main | {xargs}",
+                        f"python3 -c \"import os; os.system('echo dev install | {xargs}')\"",
+                        f"node -e \"require('child_process').execSync('echo dev install | {xargs}')\""):
+                with self.subTest(cmd=cmd):
+                    self.assertEqual(guard.check_bash(cmd, self.repo, "claude"), refused)
+            with self.subTest(gate=xargs):  # the irreversible gate cannot read it either: it judges the text
+                self.assertIsNone(guard.irreversible_actions(f"echo git push --force origin main | {xargs}",
+                                                             str(self.repo)))
+                self.assertIn("input names", guard.readonly_refusal(f"echo a | {xargs}", str(self.repo)) or "")
+        for cmd in ("echo a | xargs", "echo a | xargs -0", "echo a | xargs -n 1", "echo a | xargs --",
+                    "echo a | xargs echo", "echo a | xargs -n 1 sh -c 'echo $0'", "find . -exec env \\;"):
+            with self.subTest(open=cmd):  # no command (echo), or a command that is named
+                self.assertIsNone(guard.check_bash(cmd, self.repo, "claude"))
+        self.assertEqual(guard.irreversible_actions("echo a | xargs", str(self.repo)), [])
+
+    def test_a_runner_placeholder_or_a_shell_line_in_the_commands_place_is_refused(self):
+        # the same shape (the program comes from the input) through xargs' replace string, GNU parallel, find -exec
+        # and a shell line the input fills in
+        refused = guard.deny(guard.INPUT_COMMAND_REASON)
+        for cmd in ("echo dev | xargs -I{} {} install", "echo dev | xargs -I% env % install",
+                    "echo dev | xargs --replace env {} install", "echo dev install | xargs sh -c",
+                    "echo dev install | xargs -0 sh -c", "echo dev install | xargs sh -c '\"$@\"' sh",
+                    "echo dev install | xargs -I{} sh -c {}", "echo dev install | xargs eval",
+                    "echo dev install | parallel env", "echo dev | parallel {} install", "echo a | parallel dev",
+                    "echo a | xargs -I{} dev {}", "find . -name dev -exec {} install \\;",
+                    "find . -name dev -execdir env {} install \\;", "find . -exec timeout 5 {} \\;",
+                    "find . -exec dev {} \\;"):
+            with self.subTest(cmd=cmd):
+                self.assertEqual(guard.check_bash(cmd, self.repo, "claude"), refused)
+        self.assertEqual(guard.check_bash("python3 -c \"import os; os.system('echo a | parallel env')\"",
+                                          self.repo, "claude"), refused)
+
+    def test_a_script_the_gate_cannot_read_is_an_unknown_action(self):
+        # a script padded past the read cap read as empty, so `python3 big.py`
+        # ending in a force push passed the gate; such a program is an unknown action (tier 2), refused in enforce
+        push = "git push --force origin main"
+        root = Path(core.real(self.tmp.name))
+        files = {"big.py": ("python3 {p}", "#" * (1 << 19) + f"\nimport os\nos.system('{push}')\n"),
+                 "big.js": ("node {p}", "//" + "x" * (1 << 19) + f"\nrequire('child_process').execSync('{push}');\n"),
+                 "big.sh": ("{p}", "#!/bin/sh\n" + "# pad\n" * 45000 + f"{push}\n"),
+                 "big-by-sh.sh": ("sh {p}", "# pad\n" * 90000 + f"{push}\n"),
+                 "big-sourced.sh": (". {p}", "# pad\n" * 90000 + f"{push}\n")}
+        for name, (run, text) in files.items():
+            p = root / name
+            p.write_text(text)
+            p.chmod(0o755)
+            cmd = run.format(p=p)
+            with self.subTest(cmd=name):
+                acts = guard.irreversible_actions(cmd, str(self.repo))
+                self.assertIn(("unknown", 2, ("unread", str(p))),
+                              [(a["action"], a["tier"], tuple(a.get("why") or ())) for a in acts])
+                with settings():
+                    v = guard.irreversible_verdict(cmd, self.repo, agent="claude", session="s1", grant=DenyAll())
+                self.assertEqual((v or ("",))[0], "deny")
+                self.assertIn("larger than the guard reads", v[1])
+        small = root / "small.py"
+        small.write_text(f"import os\nos.system('{push}')\n")
+        self.assertIn("push-destructive", [a["action"] for a in guard.irreversible_actions(f"python3 {small}",
+                                                                                          str(self.repo))])
+        binary = root / "tool"  # a large program that is no shell script runs as before: its name is what counts
+        binary.write_bytes(b"\xcf\xfa\xed\xfe" + b"\0" * (1 << 19))
+        binary.chmod(0o755)
+        self.assertNotIn("unknown", [a["action"] for a in guard.irreversible_actions(str(binary), str(self.repo))])
+
+    def test_an_xargs_option_value_is_never_read_as_its_command(self):
+        # `xargs -tn 1 dev` (a cluster) and GNU's `--max-args 1 dev` ran `dev <input>` while the guard read `1` as
+        # the command; xargs' own parser takes the value
+        install = guard.deny(guard.INSTALL_REASON)
+        for xargs in ("xargs -tn 1 dev", "xargs --max-args 1 dev", "xargs --max-a 1 dev", "xargs -n1 dev",
+                      "xargs -L 1 -P 2 dev", "xargs -0 -- dev"):
+            with self.subTest(xargs=xargs):
+                self.assertEqual(guard.check_bash(f"echo install | {xargs}", self.repo, "claude"), install)
+        self.assertEqual(guard._xargs_parts(["-tn", "1", "-I", "%", "git", "rm", "%"]), (["git", "rm", "%"], "%"))
+        self.assertEqual(guard._xargs_command(["-i", "git", "rm", "{}"]), ["git", "rm", "{}"])
+        self.assertEqual(guard._xargs_parts(["--replace=X", "--max-args=2", "cp", "X", "d"]), (["cp", "X", "d"], "X"))
 
 
 class DeveloperOnlyGrants(tp.TranscriptCase):

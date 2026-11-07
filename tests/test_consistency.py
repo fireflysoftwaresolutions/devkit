@@ -191,5 +191,29 @@ class MachineDrift(unittest.TestCase):
         self.assertEqual([f.item for f in selfcheck.d10_lesson_anchors(lessons)], ["lesson L-1"])
 
 
+class HookMatchers(unittest.TestCase):
+    # Monitor runs a shell command and was missing from the PreToolUse matcher, and
+    # the hooks table of docs/agents.md showed an older matcher than the config. Each event the config registers with a
+    # matcher shows that exact matcher in its column of the table, for Claude Code and for Codex
+    def test_each_documented_matcher_is_the_one_the_config_registers(self):
+        import json
+        import re
+        root = Path(__file__).resolve().parents[1]
+        configs = {"claude": json.loads((root / "config" / "claude" / "settings.json").read_text())["hooks"],
+                   "codex": json.loads((root / "config" / "codex" / "hooks.json").read_text())["hooks"]}
+        rows = {r[0]: r for r in selfcheck._table((root / "docs" / "agents.md").read_text(), "## Hooks")}
+        checked = 0
+        for col, agent in ((1, "claude"), (2, "codex")):
+            for event, entries in configs[agent].items():
+                for matcher in [e.get("matcher") for e in entries if e.get("matcher")]:
+                    with self.subTest(agent=agent, event=event):
+                        cell = rows.get(event, [""] * 3)[col]
+                        shown = [m.replace("\\|", "|") for m in re.findall(r"`([^`]+)`", cell)]
+                        self.assertIn(matcher, shown, f"docs/agents.md › Hooks, {event}: {cell!r}")
+                        checked += 1
+        self.assertGreaterEqual(checked, 8)
+        self.assertIn("Monitor", configs["claude"]["PreToolUse"][0]["matcher"].split("|"))
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -7,6 +7,8 @@
 # failed rule recorded as it fails open; and the PreToolUse matcher that lets the guard see WebFetch and MCP tools.
 # Tests carry comments, not docstrings (`dev test prove` leaves out tests with one).
 # Run: python3 -m unittest tests.test_hooks_wiring
+import contextlib
+import io
 import json
 import os
 import re
@@ -201,13 +203,17 @@ class GuardCrashTests(WiringCase):
     def test_a_crash_refuses_a_write_or_mcp_call_and_lets_a_read_a_launch_or_a_judged_call_run(self):
         # a read or a subagent launch (each of its calls passes the guard again) runs with a guard.failopen record,
         # so a guard bug never blinds the session that has to diagnose it; so does a call every rule has allowed
-        # when only its context (the pitfalls) fails
+        # when only its context (the pitfalls) fails. A WebFetch fails closed: its rule keeps secrets out of URLs
         path = str(self.repo / "a.py")
         acting = [self.tool("Write", {"file_path": path, "content": "x"}),
                   self.tool("Edit", {"file_path": path, "old_string": "a", "new_string": "b"}),
-                  self.tool("mcp__mail__send", {"to": "a@example.com"})]
+                  self.tool("mcp__mail__send", {"to": "a@example.com"}),
+                  self.tool("WebFetch", {"url": "https://example.com/?token=x", "prompt": "read it"}),
+                  self.tool("Monitor", {"command": "tail -f build.log", "description": "build"})]
         running = [self.tool("Read", {"file_path": path}),
-                   self.tool("Agent", {"description": "Neo: parser", "prompt": "fix it"})]
+                   self.tool("Agent", {"description": "Neo: parser", "prompt": "fix it"}),
+                   self.tool("Task", {"description": "Neo: parser", "prompt": "fix it"}),
+                   self.tool("spawn_agent", {"message": "Neo: fix the parser"})]
         with mock.patch.object(guard, "check", mock.Mock(side_effect=RuntimeError("boom"))):
             for payload in acting:
                 with self.subTest(tool=payload["tool_name"]):
@@ -217,17 +223,86 @@ class GuardCrashTests(WiringCase):
                     self.assertIsNone(self.deny(self.hook("guard", payload, True)))
         with mock.patch.object(hooks, "_call_pitfalls", mock.Mock(side_effect=RuntimeError("boom"))):
             self.assertIsNone(self.deny(self.hook("guard", self.bash("ls"), real_guard=True)))
-        self.assertEqual([r["evidence"].get("rule") for r in self.records("guard.deny")], ["guard-error"] * 3)
-        self.assertEqual([r["evidence"].get("rule") for r in self.records("guard.failopen")], ["guard-hook"] * 3)
+        self.assertEqual([r["evidence"].get("rule") for r in self.records("guard.deny")], ["guard-error"] * 5)
+        self.assertEqual([r["evidence"].get("rule") for r in self.records("guard.failopen")], ["guard-hook"] * 5)
 
     def test_a_refusal_the_guard_reached_stands_when_the_hook_fails_after_it(self):
-        # the pitfalls a refusal carries come from the lessons: a failure there lost the deny, and the push ran
+        # the pitfalls a refusal carries come from the lessons: a failure there lost the deny, and the push ran. The
+        # refusal is recorded once, as the guard's own refusal, not as a guard-error
         push = self.in_repo(self.bash("git push --force origin main"))
         expected = guard.check("Bash", push["tool_input"], push["cwd"], "claude")
         self.assertEqual((expected or ("",))[0], "deny")
+        self.assertEqual(self.deny(self.hook("guard", push, real_guard=True)), expected[1])
+        normal = [r["evidence"].get("rule") for r in self.records("guard.deny")]
         with mock.patch.object(hooks, "_call_pitfalls", mock.Mock(side_effect=RuntimeError("boom"))):
             self.assertEqual(self.deny(self.hook("guard", push, real_guard=True)), expected[1])
-        self.assertEqual([r["evidence"].get("rule") for r in self.records("guard.deny")], ["guard-error"])
+        recs = self.records("guard.deny")
+        self.assertEqual([r["evidence"].get("rule") for r in recs], normal * 2)
+        self.assertNotIn("guard-error", [r["evidence"].get("rule") for r in recs])
+
+    def test_a_crew_refusal_is_recorded_once_under_its_rule_when_the_hook_fails_after_it(self):
+        # a scope refusal was recorded, then recorded again as guard-error
+        # when the pitfalls failed on its way out
+        self.run_in_repo()
+        pg.assign("parser", "Tank", scope="lib/**")
+        launch("a_tank", "devkit:tank", "Tank: parser")
+        outside = self.tool("Edit", {"file_path": str(self.repo / "docs" / "b.md"), "old_string": "a",
+                                     "new_string": "b"}, aid="a_tank")
+        with mock.patch.object(hooks, "_call_pitfalls", mock.Mock(side_effect=RuntimeError("boom"))):
+            self.assertIn("outside", self.deny(self.hook("guard", outside)) or "")
+        self.assertEqual([r["evidence"].get("rule") for r in self.records("guard.deny")], ["crew-scope"])
+
+    def test_a_members_routed_progress_call_still_routes_when_its_context_fails(self):
+        # the routed `dev progress` call was refused as guard-error when
+        # only the pitfalls (its context) failed; it is judged, so it goes to the member's lane without them
+        pg.start("Work", plan=["parser"])
+        launch("a_tank", "devkit:tank", "Tank: parser")
+        call = self.bash('dev progress step "parser done" --check "3 tests"', aid="a_tank")
+        with mock.patch.object(hooks, "_call_pitfalls", mock.Mock(side_effect=RuntimeError("boom"))):
+            out = self.hook("guard", call)
+        self.assertIsNone(self.deny(out))
+        self.assertTrue(json.loads(out)["hookSpecificOutput"]["updatedInput"]["command"].startswith(
+            "DEVKIT_FROM_AGENT=a_tank dev progress step"), out)
+        self.assertEqual(self.records("guard.deny"), [])
+        self.assertEqual([r["evidence"].get("rule") for r in self.records("guard.failopen")], ["guard-context"])
+
+    def codex(self, payload) -> str:
+        out = io.StringIO()
+        with mock.patch("sys.stdin", io.StringIO(json.dumps(payload))), contextlib.redirect_stdout(out):
+            hooks.run("guard", "codex")
+        return out.getvalue()
+
+    def test_codex_calls_fail_closed_and_a_held_ask_becomes_a_deny(self):
+        # Codex has no ask, so an ask the guard held when the hook failed is
+        # a deny; a crash on apply_patch or on a command given as a list refuses the call
+        with mock.patch.object(guard, "check", mock.Mock(return_value=("ask", "a write outside the workspace"))), \
+                mock.patch.object(hooks, "_call_pitfalls", mock.Mock(side_effect=RuntimeError("boom"))):
+            out = self.codex(self.tool("Bash", {"command": "touch /opt/x"}))
+        self.assertEqual(json.loads(out)["hookSpecificOutput"]["permissionDecision"], "deny")
+        self.assertEqual(self.deny(out), "a write outside the workspace")
+        patch = "*** Begin Patch\n*** Add File: a.py\n+x\n*** End Patch\n"
+        with mock.patch.object(guard, "check", mock.Mock(side_effect=RuntimeError("boom"))):
+            for payload in (self.tool("apply_patch", {"command": patch}),
+                            self.tool("exec_command", {"command": ["bash", "-lc", "ls"]})):
+                with self.subTest(tool=payload["tool_name"]):
+                    self.assertIn("could not judge this call", self.deny(self.codex(payload)) or "")
+        listed = self.in_repo(self.tool("exec_command", {"command": ["git", "push", "--force", "origin", "main"]}))
+        self.assertIn("force-push", self.deny(self.codex(listed)) or "")  # judged, not crashed
+        self.assertEqual([r["evidence"].get("rule") for r in self.records("guard.deny")],
+                         [None, "guard-error", "guard-error", None])
+
+    def test_monitor_and_an_xargs_of_wrappers_are_judged_through_the_hook(self):
+        # Monitor runs a shell command and never reached the guard, and `xargs env` ran its input as the command
+        for payload in (self.in_repo(self.tool("Monitor", {"command": "git push --force origin main",
+                                                          "description": "push", "timeout_ms": 1000})),
+                        self.in_repo(self.bash("echo git push --force origin main | xargs env")),
+                        self.in_repo(self.bash("echo dev install | xargs timeout 5")),
+                        self.in_repo(self.bash("python3 -c \"import os; os.system('echo dev install | xargs nohup')\""))):
+            with self.subTest(payload=payload["tool_input"]["command"]):
+                self.assertIsNotNone(self.deny(self.hook("guard", payload, real_guard=True)))
+        self.assertIsNone(self.deny(self.hook("guard", self.in_repo(self.bash("echo a | xargs")), real_guard=True)))
+        self.assertIn("Monitor", hooks.SHELL_TOOLS)
+        self.assertEqual(self.records("guard.failopen"), [])
 
 
 class MemberToolTests(WiringCase):

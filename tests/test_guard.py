@@ -6,8 +6,10 @@
 import ast
 import re
 import sys
+import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "tests"))
@@ -16,7 +18,7 @@ import _hermetic  # noqa: E402
 _hermetic.activate()  # run alone, this module gets the suite's temporary home too (tests/_hermetic.py)
 sys.path.insert(0, str(ROOT / "lib"))
 
-from devkit import audit, guard  # noqa: E402
+from devkit import audit, core, guard  # noqa: E402
 
 GUARD = ROOT / "lib" / "devkit" / "guard.py"
 # a str.format field in a template's quote: `{key}`, `dev config {sub}`
@@ -64,6 +66,61 @@ class RefusalQuotes(unittest.TestCase):
             elif isinstance(node, ast.Constant) and isinstance(node.value, str) and id(node) not in docstrings:
                 found += [(node.lineno, m.group()) for m in _TEMPLATE_FIELD.finditer(node.value)]
         self.assertEqual(sorted(found), [])
+
+
+class FileToolPaths(unittest.TestCase):
+    # A file tool hands its path to the system as it is, and macOS folders
+    # are case-insensitive, so the guard reads a file tool's path the same way
+
+    def setUp(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        self.base = Path(core.real(tmp.name))
+
+    def calls(self, path):
+        patch = f"*** Begin Patch\n*** Add File: {path}\n+{{}}\n*** End Patch\n"
+        return [("Write", {"file_path": path, "content": "{}"}),
+                ("Edit", {"file_path": path, "old_string": "a", "new_string": "b"}),
+                ("MultiEdit", {"file_path": path, "edits": [{"old_string": "a", "new_string": "b"}]}),
+                ("NotebookEdit", {"notebook_path": path, "new_source": "x"}),
+                ("apply_patch", {"command": patch}),
+                ("mcp__fs__write_file", {"path": path, "content": "{}"})]
+
+    def test_a_dollar_or_a_backtick_in_a_file_tools_path_is_a_character_not_a_variable(self):
+        # `/tmp/$X/../../…/.config/devkit/config.json` opens devkit's configuration once a folder `$X` exists (any
+        # Write creates it); the guard read `$X` as a variable it cannot know and let every file tool through
+        target = Path(core.CONFIG_FILE)
+        up = "../" * (len(self.base.parts))  # from <base>/$X up to /
+        for word in ("$X", "${HOME}", "`id`", "$(id)"):
+            path = f"{self.base}/{word}/{up}{str(target).lstrip('/')}"
+            for tool, inp in self.calls(path):
+                with self.subTest(word=word, tool=tool):
+                    v = guard.check(tool, inp, str(self.base), "codex" if tool == "apply_patch" else "claude")
+                    self.assertEqual((v or ("",))[0], "deny", v)
+                    self.assertIn("configuration", v[1])
+        (self.base / "$L").symlink_to(target.parent)  # a folder named `$L` that leads into the protected one
+        v = guard.check("Write", {"file_path": f"{self.base}/$L/{target.name}", "content": "{}"}, str(self.base),
+                        "claude")
+        self.assertEqual((v or ("",))[0], "deny", v)
+        seed = guard.check("Write", {"file_path": f"{self.base}/$X/seed", "content": ""}, str(self.base), "claude")
+        self.assertIsNone(seed)  # a temp file whose name holds a `$` stays a temp file
+
+    def test_the_handoff_rule_reads_paths_in_any_case(self):
+        # ~/development/.HANDOFF/projects/other/repo.MD is another project's note on macOS: it got ask, and
+        # Projects/Other/Repo.md and TASKS.MD were allowed
+        handoff = str(core.real(core.HANDOFF))
+        folded = handoff.replace("/Development/", "/development/").replace("/.handoff", "/.HANDOFF")
+        with mock.patch.object(guard, "current_project", return_value="acme/api"):
+            for root in (handoff, folded):
+                for rel in ("projects/other/repo.md", "projects/other/repo.MD", "Projects/Other/Repo.md", "TASKS.MD",
+                            "Plans/other/x.md", "CREW/crew.json"):
+                    with self.subTest(root=root, rel=rel):
+                        v = guard.check("Write", {"file_path": f"{root}/{rel}", "content": "x"}, str(self.base),
+                                        "claude")
+                        self.assertEqual((v or ("",))[0], "deny", v)
+                with self.subTest(root=root, own=True):  # the session's own note, in any case
+                    self.assertIsNone(guard.check("Write", {"file_path": f"{root}/projects/acme/API.md",
+                                                            "content": "x"}, str(self.base), "claude"))
 
 
 if __name__ == "__main__":
