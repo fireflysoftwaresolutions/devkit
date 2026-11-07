@@ -31,9 +31,10 @@ It is not a sandbox. A determined program can still find a form the guard does n
 it assembles at run time from pieces the guard cannot read, or a file it unpacks and git later runs. Each such form
 the red team finds becomes a rule here and a test, but the list can never be complete.
 
-The lasting boundary is credentials: what an agent's tools can reach is limited by the tokens and keys they hold.
-Separating the agents' credentials from yours is planned for devkit 26.11.4. Until then, treat the guard as the net
-under your own review, not as a replacement for it.
+Agents work with your own credentials: devkit uses the GitHub account you are signed in to with `gh`, and the tokens
+and keys on your Mac, with no separate identity for agents: what an agent's tools can reach is what you can reach.
+The guard, the grants you type, and the actions only you may run hold the irreversible steps for you; treat them as
+the net under your own review, not as a replacement for it.
 
 ## Decisions
 

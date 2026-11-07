@@ -36,7 +36,7 @@ anyone else gets access to the handoff repository, or before the first published
 `team_months` (at 13 months, 2027-12), whichever comes first.
 
 Each machine prunes only its own folder. The folder of a retired machine stays until that cleanup also covers other
-machines' folders (planned for 26.11.4).
+machines' folders (planned for 26.11.5).
 
 ## Personal data and the GDPR
 
@@ -96,7 +96,7 @@ line, which is what `dev audit verify` checks.
 
 The stored lines still hold the text, in three places:
 
-- On this machine, in `~/.local/state/devkit/audit/`, until the re-seal planned for 26.11.4 (`dev audit reseal`)
+- On this machine, in `~/.local/state/devkit/audit/`, until the re-seal planned for 26.11.5 (`dev audit reseal`)
   rewrites them with the current rules and records the migration.
 - In the handoff repository's working copy, until the first publish after that re-seal.
 - In the handoff repository's git history, until the purge described in [What git keeps](#what-git-keeps).
@@ -122,7 +122,7 @@ access:
 4. Purge the history first ([What git keeps](#what-git-keeps)): until then, git still holds the message text of
    records written before 26.11.3.
 
-The planned design for shared repositories (26.11.4) publishes, per month file, a seal (the chain's last hash and the
+The planned design for shared repositories (26.11.5) publishes, per month file, a seal (the chain's last hash and the
 record count) plus the refusal, security, and configuration records, instead of every record. The seal still lets
 `dev audit verify` prove that nothing was changed.
 
