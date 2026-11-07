@@ -199,8 +199,11 @@ class GuardBashTests(unittest.TestCase):
 
     def test_unparseable_is_refused(self):
         # D10 (round ten): a line the tokenizer cannot read is refused; bash may still run the lines before it
-        self.assertEqual(self.bash("echo 'unterminated"), "deny")
-        self.assertEqual(self.bash("dev status\necho 'unterminated"), "deny")
+        cwd = str(DEV / OWNER / "repo")
+        for cmd in ("echo 'unterminated", "dev status\necho 'unterminated"):
+            with self.subTest(cmd=cmd):
+                self.assertEqual(guard.check("Bash", {"command": cmd}, cwd, "claude"),
+                                 ("deny", guard.UNREADABLE_REASON))
 
 
 class BranchPolicyTests(unittest.TestCase):

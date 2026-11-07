@@ -515,6 +515,24 @@ class CommandLinesAreReadWithTheBaseTokenizer(unittest.TestCase):
     setUp = HookEventsAreTheHarnesss.setUp
     check = HookEventsAreTheHarnesss.check
 
+    def test_a_line_continuation_joins_the_words_bash_joins(self):
+        # Round eleven, the tech lead's decision on the code reviewer's round ten finding 3: a command with a
+        # backslash-newline is also read with every pair removed, and with a comment line's backslash dropped (bash
+        # ends a comment at its newline, backslash or not); a refusal in any reading stands
+        for cmd in ("dev \\\ninstall", "dev inst\\\nall", 'dev "inst\\\nall"', "ls # x \\\ndev install",
+                    "sh -c 'dev \\\ninstall'"):
+            with self.subTest(cmd=cmd):
+                self.assertEqual(self.check(cmd), guard.INSTALL_REASON)
+        self.assertIn("force-push", self.check("git push --fo\\\nrce origin main") or "")
+        self.assertIn("Agents may not change or delete it", self.check("rm -rf \\\n~") or "")
+        for cmd in ("ls -la \\\n  docs", "pytest -q \\\n  tests/  # the unit tests",
+                    "dev commit -m \"fix: x\" \\\n  --why \"it is safer\" \\\n  --verified \"12 tests pass\""):
+            with self.subTest(cmd=cmd):
+                self.assertIsNone(self.check(cmd))
+        # the main session's escape hatch is recorded once for its guard.bypass record, however many readings used it
+        self.assertIsNone(self.check("DEVKIT_RAW_GH=1 gh pr merge 12 \\\n  --squash"))
+        self.assertEqual([(b["flag"], b["rule"]) for b in guard.last_bypasses()], [("DEVKIT_RAW_GH", "gh-merge")])
+
     def test_a_newline_after_an_escaped_quote_ends_the_command(self):
         for cmd in ("echo \\'\ndev install", 'echo \\"\ndev install', "echo a\\ #; dev install", "echo a#; dev install",
                     "echo ${#x}; dev install"):
@@ -570,6 +588,24 @@ class CommandsTheGuardCannotReadAreRefused(unittest.TestCase):
             with self.subTest(cmd=cmd):
                 self.assertIsNone(self.check(cmd))
 
+    def test_an_unreadable_line_in_a_programs_code_is_refused_when_it_names_a_command_the_rules_judge(self):
+        # Round eleven, the code reviewer's round ten finding 1: D10 stopped at a program's code, so
+        # os.system("dev install # don't") ran unread. A string literal the tokenizer cannot read that names dev,
+        # claude, codex, tmux, screen, osascript or open as a whole word is refused; other literals stay data
+        for call in ("dev install", "dev hook prompt", "claude -p hi --dangerously-skip-permissions",
+                     "tmux send-keys -t x ls Enter", "codex --yolo", "screen -S x -X stuff ls", "osascript -e x",
+                     "open -a Terminal ."):
+            for cmd in (f"python3 -c \"import os; os.system(\\\"{call} # don't\\\")\"",
+                        f"node -e \"require('child_process').execSync(\\\"{call} # don't\\\")\"",
+                        f"python3 - <<'EOF'\nimport os\nos.system(\"{call} # don't\")\nEOF"):
+                with self.subTest(cmd=cmd):
+                    self.assertEqual(self.check(cmd), guard.UNREADABLE_REASON)
+        for cmd in ("python3 -c \"import subprocess; print(\\\"don't\\\"); subprocess.run(['ls'])\"",
+                    "python3 -c \"import os; print(\\\"the devtools aren't here\\\"); os.system('ls')\"",
+                    "node -e \"console.log(\\\"it's done\\\"); require('child_process').execSync('ls')\""):
+            with self.subTest(cmd=cmd):
+                self.assertIsNone(self.check(cmd))
+
 
 class FindReadsEveryCommandItRuns(unittest.TestCase):
     # Round ten: with the base split, find's `\;`, `\(` and `\)` end a segment, so the rest of its expression arrives
@@ -621,12 +657,36 @@ class TmuxListsAndBuiltFormatsAreRefused(unittest.TestCase):
                     f"tmux new -d \\; send-keys -t x 'dev install' Enter \\; display '{MARK}'",
                     f"echo '{MARK}'; tmux new -d ';' send-keys x Enter",
                     "python3 -c \"import os; os.system('tmux new -d \\\\\\\\; kill-server')\"",
-                    # a newline after a tmux call reads as a `;`: the guard cannot tell them apart, so it fails closed
-                    "tmux new -d -s x\nls"):
+                    "tmux new -d -s x; ls"):
             with self.subTest(cmd=cmd):
                 self.assertEqual(self.check(cmd), guard.TERMINAL_TYPING_REASON)
         for cmd in ("tmux new -d -s x; tmux ls", "tmux new -d -s x && ls -la", "tmux new -d -s x; sleep 1",
                     "tmux kill-server; echo done", "tmux ls\ngit status"):
+            with self.subTest(cmd=cmd):
+                self.assertIsNone(self.check(cmd))
+
+    def test_the_next_line_after_a_tmux_call_is_no_list(self):
+        # Round eleven, the code reviewer's round ten finding 4: tmux never sees a newline, so the next line is the
+        # shell's next command, also when it starts with a word tmux knows (`set`, `show`, `display`, `if`)
+        for nxt in ("ls", "set -e", "find . -name x", "source .venv/bin/activate", "if true; then echo; fi",
+                    "command -v x", "wait", "show", "display"):
+            with self.subTest(cmd="tmux new -d -s x\n" + nxt):
+                self.assertIsNone(self.check("tmux new -d -s x\n" + nxt))
+
+    def test_a_dollar_or_backtick_in_a_tmux_word_is_refused_with_or_without_spaces(self):
+        # Round eleven, the code reviewer's round ten finding 2: a `$` or a backtick in a word with spaces was read as
+        # text, so "$X(touch /tmp/pwn)" with X='#' reached tmux as a #() format. A `$` or a backtick anywhere in a tmux
+        # word is refused, except in the shell command new, new-window, split-window, respawn-* and display-popup
+        # start, which the guard reads as `sh -c`
+        for cmd in ("X='#'; tmux display -p \"$X(touch /tmp/pwn)\"",
+                    "tmux display -p \"$(printf '#')(touch /tmp/pwn)\"",
+                    "tmux display -p \"`printf '#'`(touch /tmp/pwn)\"",
+                    "tmux set -g status-right \"$(printf '\\043')(touch /tmp/pwn)\"",
+                    "tmux rename-window \"$X(touch /tmp/pwn)\"", "tmux new -d -n \"$X(touch /tmp/pwn) x\" 'ls'"):
+            with self.subTest(cmd=cmd):
+                self.assertEqual(self.check(cmd), guard.TERMINAL_TYPING_REASON)
+        for cmd in ("tmux new -d 'echo $HOME'", "tmux neww -d \"cd $HOME && make test\"",
+                    "tmux split-window -h 'echo `date` done'"):
             with self.subTest(cmd=cmd):
                 self.assertIsNone(self.check(cmd))
 

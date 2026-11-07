@@ -154,20 +154,30 @@ Not released yet: the date is set when the release is tagged.
   `set-buffer`, `load-buffer`, `pipe-pane`, and `command-prompt`. It refuses a tmux command or option that carries a
   command (`run-shell`, `if-shell`, `set-hook`, `source-file`, `bind-key`, a hook, `default-command`,
   `default-shell`, `command-alias`, a `#(…)` format), and what can build a `#(…)` from pieces: `set-option` or
-  `setw` with `-a` or `-F`, and a format with the `E` or `T` modifier (`#{E:@x}`). It refuses a tmux command list
-  (`\;`, `';'`): with `&&`, one tmux command per call works. It refuses a configuration file (`screen -c`,
-  `tmux -f`), a tmux command it does not know, and a `screen` or `tmux` word the shell or a runner fills in. It does
-  so for a name tmux abbreviates (`send-k`), inside `sh -c`, `env`, `timeout`, `xargs`, `find -exec`, or
-  `parallel`, and in a program's code. `screen -ls`, `screen -dm <command>`, `tmux ls`, and
-  `tmux new -d '<command>'` stay open, and the guard still reads the command they start.
+  `setw` with `-a` or `-F`, a format with the `E` or `T` modifier (`#{E:@x}`), and a `$` or a backtick anywhere in
+  a tmux word, with spaces or without (`"$X(touch f)"` with `X='#'` is a `#(…)`), except in the shell command that
+  `new`, `new-window`, `split-window`, `respawn-*`, or `display-popup` starts, which the guard reads as `sh -c`. It
+  refuses a tmux command list (`\;`, `';'`, or a command tmux knows after a tmux call and a `;`): with `&&`, one
+  tmux command per call works. A new line ends the tmux call, so `tmux new -d -s x` with `set -e` on the next line
+  stays open. It refuses a configuration file (`screen -c`, `tmux -f`), a tmux command it does not know, and a
+  `screen` or `tmux` word the shell or a runner fills in without spaces (`$O`, `{}`, a glob). It does so for a name
+  tmux abbreviates (`send-k`), inside `sh -c`, `env`, `timeout`, `xargs`, `find -exec`, or `parallel`, and in a
+  program's code. `screen -ls`, `screen -dm <command>`, `tmux ls`, and `tmux new -d '<command>'` stay open, and the
+  guard still reads the command they start.
 - **The guard refuses a command it cannot read.** A command line with a quote that is never closed was allowed
   unread, so `dev install # don't` ran `dev install` (bash ignores the apostrophe in the comment), and so did a
   command on the line before an unmatched quote. Once heredoc bodies are set aside, the guard now refuses such a
   line, also when the command hands it to a shell (`sh -c`, `eval`, a heredoc a shell reads); the message says to
-  close the quote or drop the comment's apostrophe. A script file or a sourced file is read as before. `#` stays an
-  ordinary character, so the words after one are read as more commands. A backslash outside single quotes escapes
-  the next character, so `echo \'` opens no quote that hides the next line, and the guard reads each `-exec`,
-  `-execdir`, `-ok`, and `-okdir` command of a `find`, also after `\;` and inside `\( … \)`.
+  close the quote or drop the comment's apostrophe. In a program that starts a process, a string literal the guard
+  cannot read is refused when it names `dev`, `claude`, `codex`, `tmux`, `screen`, `osascript`, or `open` as a whole
+  word (`os.system("dev install # don't")`, `execSync`, a `python3 -` heredoc); any other literal, such as
+  `print("don't")`, is data. A script file or a sourced file is read as before. `#` stays an ordinary character, so
+  the words after one are read as more commands. A backslash outside single quotes escapes the next character, so
+  `echo \'` opens no quote that hides the next line, and the guard reads each `-exec`, `-execdir`, `-ok`, and
+  `-okdir` command of a `find`, also after `\;` and inside `\( … \)`. A command with a backslash-newline is also
+  read with every pair removed, as bash joins the words (`dev \` with `install` on the next line is `dev install`),
+  and with the backslash at the end of a comment dropped, as bash ends a comment at its newline; a refusal in any
+  reading stands.
 - **Drift covers what devkit does not manage.** A plugin, MCP server, or skill folder installed outside the catalog,
   for Claude Code and Codex, is reported as `not-in-catalog`. What ships with the Codex app is listed without drift
   only when its own files vouch for it (a bundled plugin whose cached files are all byte-equal to the app bundle's)
@@ -206,7 +216,9 @@ Not released yet: the date is set when the release is tagged.
   into a `screen` or `tmux` session at all; the guard reads the command each launcher starts in the forms it can
   read, but not a script file or a command built at run time. Quoting or brace expansion around the `dev`
   command word (`$'dev'`, `$"dev"`, `dev {ext,} ack`) is not read by the guard's `dev` rules until 26.11.5; devkit's
-  own terminal check (`set_by_developer()`) still refuses those commands when an agent runs them directly. The
+  own terminal check (`set_by_developer()`) still refuses those commands when an agent runs them directly. Two
+  comment lines that each hold an apostrophe are read as one quoted word until 26.11.5, so a command between them
+  (`ls # it's`, then `dev install # don't`) is not read. The
   notification, the session-start message, and the audit trail are the backstop until a kernel-level check lands in
   26.11.5. The notification shows
   only on macOS, and only while notifications are allowed for Script Editor, the app macOS lists `osascript`
