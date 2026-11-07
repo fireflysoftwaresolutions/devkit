@@ -1,12 +1,19 @@
 
+  /* brand-firefly, light. With theme-dark.css, the only place for raw colors and font names (UX spec 4.2, AC-17):
+     the primitives, then the semantic tokens the components read. Amber means "your move", red broken, green a passing ✓. */
   color-scheme: light;
-  --page:#f3f1eb; --raised:#fbfaf7; --wash:#e9e6de; --hover:#ebe8e0; --select:rgba(255,179,74,.35);
-  --line:#d8d4ca; --line-soft:#e3dfd6; --text:#272820; --strong:#10110f; --text-2:#62645b;
+  --ff-charcoal:#10110f; --ff-ink:#272820; --ff-ink-2:#62645b; --ff-paper:#f3f1eb; --ff-paper-2:#fbfaf7; --ff-paper-3:#e9e6de;
+  --ff-stone:#d8d4ca; --ff-stone-2:#e3dfd6; --ff-amber:#ffb34a; --ff-amber-2:#ffbe63; --ff-amber-ink:#855414;
+  --ff-red:#d03b3b; --ff-red-text:#a52a2a; --ff-green:#2f7d3f; --ff-white:#ffffff;
+  --font-text:"Manrope","Manrope Variable",system-ui,-apple-system,"Segoe UI",Arial,sans-serif; --font-display:var(--font-text);
+  --weight-display:600; --font-mono:ui-monospace,"SF Mono",Menlo,Consolas,monospace;
+  --surface-page:var(--ff-paper); --surface-raised:var(--ff-paper-2); --surface-sunken:var(--ff-paper-3); --surface-hover:#ebe8e0;
+  --line:var(--ff-stone); --line-soft:var(--ff-stone-2); --ink:var(--ff-ink); --ink-2:var(--ff-ink-2); --ink-strong:var(--ff-charcoal);
+  --you:var(--ff-amber); --you-hover:var(--ff-amber-2); --you-ink:var(--ff-charcoal); --you-text:var(--ff-amber-ink);
+  --alert:var(--ff-red); --alert-ink:var(--ff-white); --alert-text:var(--ff-red-text); --ok:var(--ff-green);
+  --focus:var(--ff-amber-ink); --selection:var(--ff-stone); --highlight:var(--ff-stone);
   --mark:#474a42; --track:#dedad0; --grid:#e3dfd6; --axis:#c9c4b8; --deemph:#bfb8ab;
-  --accent:#ffb34a; --accent-hover:#ffbe63; --accent-ink:#10110f; --focus:#855414;
-  --good:#0ca30c; --warn:#fab219; --bad:#d03b3b; --warning:#fab219; --critical:#d03b3b;
-  --s-ok:#0ca30c; --s-warn:#fab219; --s-risk:#d03b3b; --s-done:#8f8a7e; --s-none:#dedad0;
-  --h0:#e6e2d9; --h1:#aaa394; --h2:#857f71; --h3:#56584f; --h4:#272820; --card:#fbfaf7; --card-hover:#fffefa;
-  --good-text:#1d6b2f; --warn-text:#7a5200; --bad-text:#a52a2a; --hl:rgba(255,179,74,.45);
-  --overlay:rgba(16,17,15,.32); --shadow:0 2px 6px rgba(16,17,15,.06),0 16px 32px rgba(16,17,15,.10); --elev-border:0 solid transparent;
-  --logo-dark:none; --logo-light:block;
+  --s-ok:var(--ff-green); --s-caution:var(--ff-ink-2); --s-risk:var(--ff-red); --s-done:#8f8a7e; --s-none:#dedad0;
+  --h0:#e6e2d9; --h1:#aaa394; --h2:#857f71; --h3:#56584f; --h4:#272820; --card:var(--ff-paper-2); --card-hover:#fffefa;
+  --overlay:rgba(16,17,15,.32); --shadow:0 2px 6px rgba(16,17,15,.06),0 16px 32px rgba(16,17,15,.10); --shadow-sm:0 1px 2px rgba(16,17,15,.08);
+  --elev-border:0 solid transparent; --logo-dark:none; --logo-light:block;

@@ -1,12 +1,18 @@
 
+  /* brand-firefly, dark: the same semantic tokens as theme-light.css, charcoal and paper swapped. */
   color-scheme: dark;
-  --page:#10110f; --raised:#191a17; --wash:#22231f; --hover:#1c1d19; --select:rgba(255,179,74,.30);
-  --line:#474a42; --line-soft:#2b2d28; --text:#f3f1eb; --strong:#ffffff; --text-2:#bfb8ab;
+  --ff-charcoal:#10110f; --ff-charcoal-2:#191a17; --ff-charcoal-3:#22231f; --ff-paper:#f3f1eb; --ff-paper-dim:#bfb8ab;
+  --ff-stone:#474a42; --ff-stone-2:#2b2d28; --ff-amber:#ffb34a; --ff-amber-2:#ffc06b;
+  --ff-red:#d03b3b; --ff-red-text:#f29b95; --ff-green:#6fbf7f; --ff-white:#ffffff;
+  --font-text:"Manrope","Manrope Variable",system-ui,-apple-system,"Segoe UI",Arial,sans-serif; --font-display:var(--font-text);
+  --weight-display:600; --font-mono:ui-monospace,"SF Mono",Menlo,Consolas,monospace;
+  --surface-page:var(--ff-charcoal); --surface-raised:var(--ff-charcoal-2); --surface-sunken:var(--ff-charcoal-3); --surface-hover:#1c1d19;
+  --line:var(--ff-stone); --line-soft:var(--ff-stone-2); --ink:var(--ff-paper); --ink-2:var(--ff-paper-dim); --ink-strong:var(--ff-white);
+  --you:var(--ff-amber); --you-hover:var(--ff-amber-2); --you-ink:var(--ff-charcoal); --you-text:var(--ff-amber);
+  --alert:var(--ff-red); --alert-ink:var(--ff-white); --alert-text:var(--ff-red-text); --ok:var(--ff-green);
+  --focus:var(--ff-amber); --selection:var(--ff-stone); --highlight:var(--ff-stone);
   --mark:#bfb8ab; --track:#30322c; --grid:#2b2d28; --axis:#474a42; --deemph:#62645b;
-  --accent:#ffb34a; --accent-hover:#ffc06b; --accent-ink:#10110f; --focus:#ffb34a;
-  --good:#0ca30c; --warn:#fab219; --bad:#d03b3b; --warning:#fab219; --critical:#d03b3b;
-  --s-ok:#0ca30c; --s-warn:#fab219; --s-risk:#d03b3b; --s-done:#77796f; --s-none:#30322c;
+  --s-ok:var(--ff-green); --s-caution:var(--ff-paper-dim); --s-risk:var(--ff-red); --s-done:#77796f; --s-none:#30322c;
   --h0:#22231f; --h1:#5f6158; --h2:#8d8a7f; --h3:#bfb8ab; --h4:#f3f1eb; --card:#181915; --card-hover:#1e1f1b;
-  --good-text:#6fd08a; --warn-text:#fab219; --bad-text:#f29b95; --hl:rgba(255,179,74,.32);
-  --overlay:rgba(0,0,0,.6); --shadow:none; --elev-border:1px solid #474a42;
-  --logo-dark:block; --logo-light:none;
+  --overlay:rgba(0,0,0,.6); --shadow:none; --shadow-sm:0 1px 2px rgba(0,0,0,.3);
+  --elev-border:1px solid var(--ff-stone); --logo-dark:block; --logo-light:none;

@@ -253,9 +253,10 @@ class RenderTests(unittest.TestCase):
         for glyph in "⧉⎇⌕◐▲▼❚":                                            # icons are authored SVG, not Unicode glyphs
             self.assertNotIn(glyph, js, glyph)
         self.assertNotIn("backdrop-filter", css)
-        self.assertEqual(css.count("background:var(--accent)"), 1, "amber fills only the primary button")
-        self.assertIn("--accent:#ffb34a", dashboard.LIGHT)
-        self.assertIn("--accent:#ffb34a", dashboard.DARK)
+        # amber is one brand value, "your move"; which rules may read it is TokenTests' (AC-11)
+        for theme in (dashboard.LIGHT, dashboard.DARK):
+            self.assertIn("--ff-amber:#ffb34a", theme)
+            self.assertIn("--you:var(--ff-amber)", theme)
         # elevation is declared once: a shadow in light, a hairline in dark
         self.assertIn("--elev-border:0 solid transparent", dashboard.LIGHT)
         self.assertIn("--shadow:none", dashboard.DARK)
@@ -317,7 +318,7 @@ class RenderTests(unittest.TestCase):
         self.assertIn('document.addEventListener("focusin"', js)
         self.assertIn('document.addEventListener("pointerover"', js)
         self.assertGreaterEqual(js.count('"data-tip"'), 12)
-        for token in ("--s-ok:#0ca30c", "--s-warn:#fab219", "--s-risk:#d03b3b"):
+        for token in ("--s-ok:var(--ff-green)", "--s-caution:var(--ff-", "--s-risk:var(--ff-red)", "--ff-red:#d03b3b"):
             self.assertIn(token, dashboard.LIGHT)
             self.assertIn(token, dashboard.DARK)
 
@@ -432,6 +433,142 @@ class RenderTests(unittest.TestCase):
         self.assertEqual(d["kpis"]["not_cloned"], 77)
         self.assertEqual(d["kpis"]["prs_failing"], 13)
         self.assertLess(len(html), 3_000_000)
+
+
+# --------------------------------------------------------------------------- the token layers (UX spec 4.2)
+
+def theme_tokens(text: str) -> dict:
+    """The custom properties a theme (brand) file declares: name -> raw value."""
+    return {k: v.strip() for k, v in re.findall(r"--([\w-]+)\s*:\s*([^;]+);", re.sub(r"/\*.*?\*/", "", text, flags=re.S))}
+
+
+def resolve(tokens: dict, name: str, seen=()) -> str:
+    v = tokens[name]
+    m = re.fullmatch(r"var\(--([\w-]+)\)", v)
+    if not m:
+        return v
+    if m.group(1) in seen:
+        raise AssertionError(f"--{name} refers to itself through {seen}")
+    return resolve(tokens, m.group(1), seen + (name,))
+
+
+def rgb(value: str, under=(255, 255, 255)) -> tuple:
+    """#rgb, #rrggbb or rgba(r,g,b,a) as an opaque (r, g, b), a translucent color composited over `under`."""
+    v = value.strip().lower()
+    if v.startswith("#"):
+        h = v[1:]
+        h = "".join(c * 2 for c in h) if len(h) == 3 else h
+        return tuple(int(h[i:i + 2], 16) for i in (0, 2, 4))
+    m = re.fullmatch(r"rgba?\(\s*([\d.]+)\s*,\s*([\d.]+)\s*,\s*([\d.]+)\s*(?:,\s*([\d.]+)\s*)?\)", v)
+    if not m:
+        raise AssertionError(f"not a color: {value}")
+    a = float(m.group(4)) if m.group(4) else 1.0
+    return tuple(round(float(m.group(i + 1)) * a + under[i] * (1 - a)) for i in range(3))
+
+
+def contrast(fg: tuple, bg: tuple) -> float:
+    def lum(c):
+        ch = [x / 255 for x in c]
+        ch = [x / 12.92 if x <= 0.04045 else ((x + 0.055) / 1.055) ** 2.4 for x in ch]
+        return 0.2126 * ch[0] + 0.7152 * ch[1] + 0.0722 * ch[2]
+    a, b = sorted((lum(fg), lum(bg)), reverse=True)
+    return (a + 0.05) / (b + 0.05)
+
+
+def css_rules(css: str) -> list:
+    """(selector, declarations) for every rule; at-rules (@media …) prefix the selector, so `.x` inside @media stays `.x`."""
+    out, stack, start = [], [], 0
+    css = re.sub(r"/\*.*?\*/", "", css, flags=re.S)
+    for i, ch in enumerate(css):
+        if ch == "{":
+            stack.append(css[start:i].strip())
+            start = i + 1
+        elif ch == "}":
+            body = css[start:i].strip()
+            if body and stack:
+                out.append((stack[-1], body))
+            if stack:
+                stack.pop()
+            start = i + 1
+    return out
+
+
+# what a theme must offer the components: the semantic tokens of the UX spec 4.2, plus the chart and elevation tokens
+SEMANTIC = ("surface-page", "surface-raised", "surface-sunken", "surface-hover", "line", "line-soft", "ink", "ink-2", "ink-strong",
+            "you", "you-hover", "you-ink", "you-text", "alert", "alert-ink", "alert-text", "ok", "focus", "selection", "highlight",
+            "font-text", "font-display", "font-mono", "weight-display")
+TEXT, GLYPH = 4.5, 3.0
+# AC-10: every text and glyph pair of the components, by the semantic names they use
+PAIRS = ([(fg, bg, TEXT) for fg in ("ink", "ink-2", "ink-strong") for bg in ("surface-page", "surface-raised", "surface-sunken", "surface-hover", "card")]
+         + [(fg, bg, TEXT) for fg in ("you-text", "alert-text") for bg in ("surface-page", "surface-raised", "surface-sunken")]
+         + [("you-ink", "you", TEXT), ("you-ink", "you-hover", TEXT), ("alert-ink", "alert", TEXT), ("ink", "selection", TEXT), ("ink", "highlight", TEXT)]
+         + [(fg, bg, GLYPH) for fg in ("ok", "alert", "focus", "you-text") for bg in ("surface-page", "surface-raised", "surface-sunken")])
+# AC-11: the only rules that may read amber (--you, --you-hover): the waiting-for-you glyph and bar, the primary button
+YOU_READERS = {".btn.primary", ".btn.primary:hover", ".now-item.you::before", ".now-glyph.you", ".now-strip .you"}
+RAW_COLOR = re.compile(r"(?<![\w&])#[0-9a-fA-F]{3}(?:[0-9a-fA-F]{3}(?:[0-9a-fA-F]{2})?)?\b|\b(?:rgba?|hsla?|hwb|lab|lch|oklab|oklch)\(")
+FONT_NAME = re.compile(r"Manrope|\bInter\b|Source Serif|SF Mono|Menlo|Consolas|ui-monospace|system-ui|-apple-system|Segoe UI|Arial|Helvetica")
+
+
+class TokenTests(unittest.TestCase):
+    """The page's colors and fonts come in two layers (UX spec 4.2): the brand files (theme-light.css, theme-dark.css)
+    hold every raw value; the component styles and the script read semantic tokens only."""
+
+    def setUp(self):
+        self.light, self.dark = theme_tokens(dashboard.LIGHT), theme_tokens(dashboard.DARK)
+
+    def test_both_themes_offer_the_same_semantic_tokens(self):
+        for name, t in (("light", self.light), ("dark", self.dark)):
+            self.assertEqual([s for s in SEMANTIC if s not in t], [], f"{name} misses semantic tokens")
+        semantic = lambda t: {k for k in t if not k.startswith("ff-")}  # noqa: E731  (primitives are the brand's own)
+        self.assertEqual(sorted(semantic(self.light) ^ semantic(self.dark)), [], "a token only one theme defines")
+
+    def test_every_text_and_glyph_pair_meets_its_contrast_in_both_themes(self):
+        """AC-10 (Firefly): text 4.5:1, glyphs and the focus ring 3:1, light and dark."""
+        low = []
+        for name, t in (("light", self.light), ("dark", self.dark)):
+            for fg, bg, need in PAIRS:
+                back = rgb(resolve(t, bg))
+                ratio = contrast(rgb(resolve(t, fg), back), back)
+                if ratio < need:
+                    low.append(f"{name}: --{fg} on --{bg} is {ratio:.2f}:1, needs {need}:1")
+        self.assertEqual(low, [])
+
+    def test_amber_is_read_only_by_what_waits_for_you_and_the_primary_button(self):
+        """AC-11: the rules that read --you or --you-hover are the waiting-for-you glyph and bar and the primary button;
+        no other token is amber but --you-text (amber as text, dark) and --focus (the dark focus ring)."""
+        readers = set()
+        for sel, body in css_rules(dashboard.CSS):
+            if re.search(r"var\(--you(?:-hover)?\)", body):
+                readers |= {s.strip() for s in sel.split(",")}
+        self.assertEqual(sorted(readers - YOU_READERS), [], "rules that read amber")
+        self.assertIn(".btn.primary", readers)
+        self.assertNotRegex(dashboard.JS, r"--you\b", "the script never sets amber itself")
+        for name, t in (("light", self.light), ("dark", self.dark)):
+            amber = {rgb(resolve(t, "you")), rgb(resolve(t, "you-hover"))}
+            also = sorted(k for k in t if not k.startswith("ff-") and k not in ("you", "you-hover", "you-text", "focus")
+                          and re.fullmatch(r"#[0-9a-fA-F]{3,6}|var\(--[\w-]+\)", t[k]) and resolve(t, k).startswith("#")
+                          and rgb(resolve(t, k)) in amber)
+            self.assertEqual(also, [], f"{name}: tokens that are amber in disguise")
+
+    def test_warn_is_gone(self):
+        """--warn collided with amber (UX spec, finding 5): at-risk is ink with the ◇ glyph and a word."""
+        for t in (self.light, self.dark):
+            self.assertEqual([k for k in ("warn", "warning", "s-warn", "warn-text") if k in t], [])
+        self.assertNotRegex(dashboard.CSS + dashboard.JS, r"--(?:warn|warning|s-warn|warn-text)\b")
+
+    def test_components_hold_no_raw_color_or_font_name(self):
+        """AC-17: only the brand files hold colors and font names, so swapping them changes every one."""
+        for part, text in (("styles", dashboard.CSS), ("script", dashboard.JS)):
+            self.assertEqual(sorted(set(RAW_COLOR.findall(text))), [], f"raw colors in the {part}")
+            self.assertEqual(sorted(set(FONT_NAME.findall(text))), [], f"font names in the {part}")
+        self.assertIsNotNone(FONT_NAME.search(dashboard.LIGHT), "the brand names its fonts")
+
+    def test_every_token_the_components_read_is_defined(self):
+        """A renamed or misspelled token silently falls back to the browser's default: each var(--x) without a fallback
+        has a definition."""
+        defined = set(self.light) | set(re.findall(r"--([\w-]+)\s*:", dashboard.CSS)) | set(re.findall(r"""["'\s;{]--([\w-]+):""", dashboard.JS))
+        read = set(re.findall(r"var\(--([\w-]+)\)", dashboard.CSS + dashboard.JS))
+        self.assertEqual(sorted(read - defined), [])
 
 
 class DecisionTests(unittest.TestCase):
