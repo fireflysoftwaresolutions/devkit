@@ -937,6 +937,28 @@ class PrTests(unittest.TestCase):
             self.assertEqual(len(watch), 1)
             self.assertEqual(s.gh.called("run", "view", "111")[0][-2:], ["--job", "222"])
 
+    def test_every_check_skipped_waits_for_the_real_run(self):
+        # B3: a draft's run skips every job with the draft gate; after `dev pr ready` the real run starts. Until then
+        # the checks are "no checks yet": --watch waits and says so, and merge refuses, never green.
+        with Sandbox() as s:
+            s.branch("feat/invoice")
+            s.commit("ci: add the workflow", {".github/workflows/ci.yml": (
+                "on: [pull_request]\njobs:\n  t:\n    if: github.event.pull_request.draft == false\n"
+                "    runs-on: ubuntu-latest\n    steps:\n      - run: echo hi\n")})
+            s.gh.on(["pr", "checks"], [{"name": "t", "bucket": "skipping", "workflow": "CI", "link": "x"}])
+            rc, out, _ = dev("pr", "checks", "7", "--watch")
+            self.assertEqual(rc, 8, out)
+            self.assertIn("no checks yet for 7: every check was skipped", out)
+            self.assertNotIn("✓", out)
+            self.assertGreaterEqual(len(s.gh.called("pr", "checks")), 6)  # it waited for the real run to report
+            s.gh.on(["repo", "view"], {"squashMergeAllowed": True, "viewerDefaultMergeMethod": "SQUASH"})
+            s.gh.on(["pr", "merge"], "")
+            s.gh.on(["pr", "view"], _pr(statusCheckRollup=[{"conclusion": "SKIPPED"}, {"conclusion": "SKIPPED"}]))
+            rc, _, err = dev("pr", "merge", "7")
+            self.assertEqual(rc, 2)
+            self.assertIn("every check was skipped, so no real run has reported yet (dev pr checks 7 --watch)", err)
+            self.assertEqual(s.gh.called("pr", "merge"), [])
+
     def test_ls_mine_and_review(self):
         with Sandbox() as s:
             prs = [_pr(1, author={"login": "ana"}), _pr(2, title="fix: y", author={"login": "bob"}),

@@ -2165,9 +2165,9 @@ def _pr_checks(c, a) -> int:
         if sys.stderr.isatty():
             print(ui.dim(f"  watching the checks of {sel} (gh pr checks --watch); only the result is printed"),
                   file=sys.stderr)
-        for _ in range(6):  # a fresh push: wait up to ~2 minutes for the checks to be reported
-            rc, out, err = GH(["pr", "checks", sel, "-R", c.slug, "--json", "name"], cwd=c.top, timeout=60)
-            if "no checks reported" not in (out + err).lower():
+        for _ in range(6):  # a fresh push or `dev pr ready`: wait up to ~2 minutes for the real run to report
+            rc, out, err = GH(["pr", "checks", sel, "-R", c.slug, "--json", "name,bucket"], cwd=c.top, timeout=60)
+            if "no checks reported" not in (out + err).lower() and not _only_skipped(out):
                 break
             SLEEP(20)
         args = ["pr", "checks", sel, "-R", c.slug, "--watch", "--interval", str(a.interval)]
@@ -2189,6 +2189,10 @@ def _pr_checks(c, a) -> int:
     for ch in checks:
         count[ch.get("bucket") or "pending"] = count.get(ch.get("bucket") or "pending", 0) + 1
     nfail, npend = count.get("fail", 0) + count.get("cancel", 0), count.get("pending", 0)
+    if checks and count.get("skipping", 0) == len(checks):  # a draft's run: no real run yet, never green (B3)
+        print(f"{ui.INFO} no checks yet for {sel}: every check was skipped (a draft's run, or the real run has not "
+              f"reported); the real run starts when the PR is ready (dev pr ready), then dev pr checks {sel} --watch")
+        return 8
     mark = ui.FAIL if nfail else ui.INFO if npend else ui.OK
     print(f"{mark} checks {('#' + sel) if sel.isdigit() else sel}: {count.get('pass', 0)} pass · {nfail} fail · "
           f"{npend} pending" + (f" · {count['skipping']} skipped" if count.get("skipping") else ""))
@@ -2203,6 +2207,22 @@ def _pr_checks(c, a) -> int:
                 print("    " + ln)
         info("reproduce locally (dev ci --run), fix, then push once")
     return 1 if nfail else 8 if npend else 0
+
+
+def _only_skipped(text) -> bool:
+    """True when `gh pr checks --json name,bucket` lists checks and every one was skipped."""
+    try:
+        rows = json.loads(text or "[]")
+    except ValueError:
+        return False
+    return isinstance(rows, list) and bool(rows) and all(
+        isinstance(r, dict) and r.get("bucket") == "skipping" for r in rows)
+
+
+def _rollup_skipped(rollup) -> bool:
+    """True when a statusCheckRollup holds checks and every one was skipped."""
+    return bool(rollup) and all(str(c.get("conclusion") or c.get("state") or c.get("status") or "").upper() ==
+                                "SKIPPED" for c in rollup if isinstance(c, dict))
 
 
 def _pr_workflows(top) -> bool:
@@ -2225,6 +2245,8 @@ def merge_gate(c, p, auto=False) -> list:
         why.append(f"checks are failing (dev pr checks {n})")
     elif checks == "pending" and not auto:
         why.append(f"checks are still running (dev pr checks {n} --watch, or dev pr merge {n} --auto)")
+    elif checks == "none" and _rollup_skipped(p.get("statusCheckRollup")):
+        why.append(f"every check was skipped, so no real run has reported yet (dev pr checks {n} --watch)")
     elif checks == "none" and _pr_workflows(c.top):
         why.append("no checks reported yet")
     review = p.get("reviewDecision") or ""

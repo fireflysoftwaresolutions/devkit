@@ -346,7 +346,8 @@ def prs(slug: str, refresh=False, max_age=900):
 
 
 def _checks(rollup: list) -> str:
-    """GitHub statusCheckRollup -> passing | failing | pending | none."""
+    """GitHub statusCheckRollup -> passing | failing | pending | none. A rollup whose every check was skipped is
+    none: a draft's run skips the jobs with the draft gate, and the real run starts with `dev pr ready` (B3)."""
     if not rollup:
         return "none"
     states = []
@@ -357,6 +358,8 @@ def _checks(rollup: list) -> str:
         return "failing"
     if any(x in ("PENDING", "QUEUED", "IN_PROGRESS", "EXPECTED", "WAITING", "REQUESTED", "") for x in states):
         return "pending"
+    if all(x == "SKIPPED" for x in states):
+        return "none"
     return "passing"
 
 
