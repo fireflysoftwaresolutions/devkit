@@ -369,6 +369,8 @@ ACTIONS = {
     "state": ("lifecycle", "warning"), "install": ("lifecycle", "notice"),
     # dev ext: a change to the plugins, skills and MCP servers that run (supply chain), and drift found
     "ext": ("security", "notice"), "ext.drift": ("security", "warning"),
+    # an extension recorded or a change accepted (F1-R4: shown until the developer acknowledges it), the acknowledgement
+    "ext.accept": ("security", "warning"), "ext.ack": ("security", "notice"),
     "caller": ("security", "warning"), "caller.unverified": ("security", "notice"),
     "calls": ("lifecycle", "notice"), "progress": ("decision", "notice"), "session": ("lifecycle", "info"),
     "run": ("lifecycle", "notice"),  # a run orphaned by its ended session, or taken back by its resumed one

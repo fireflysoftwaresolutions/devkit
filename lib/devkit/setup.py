@@ -1447,7 +1447,9 @@ def _extensions(agent: str):
     as ext.retire (a user overlay that adds one back keeps it), then record what its vendor marketplace plugins are
     now (~/.local/state/devkit/ext-lock.json), so a later change outside devkit shows as drift (dev ext). Accepting a
     change made outside devkit, and vouching for what ships with the app the first time, is the developer's, in a
-    terminal (core.set_by_developer, F1 of re-review four): from anyone else's run both stay as drift."""
+    terminal (core.set_by_developer, F1 of re-review four): from anyone else's run both stay as drift. A process an
+    agent starts in screen, tmux or a Terminal window passes that check, so ext.record_lock audits each acceptance and
+    lists it until the developer runs `dev ext ack` (F1-R4 part 1)."""
     from . import ext
     try:
         for ok, msg in ext.retire(agent, lambda argv, timeout=300: sh(argv, timeout=timeout)):
@@ -1462,6 +1464,9 @@ def _extensions(agent: str):
                 note(f"accepting a change made outside devkit: {line}")
             for line in new:
                 note(f"recording what ships with the {agent} app for the first time: {line}")
+            if changes or new:  # F1-R4 part 1: a terminal an agent opens can look like the developer's
+                note("each is audited (ext.accept) and listed at the next session start and in dev status until "
+                     "you run dev ext ack")
         else:
             for line in changes:
                 note(f"not accepted, a change made outside devkit: {line}")

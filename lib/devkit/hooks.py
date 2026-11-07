@@ -291,7 +291,8 @@ def session_start(agent: str):
     try:  # devkit notices from files only, no network (spec P-fym583l7sg1)
         from . import ext, updatecheck
         notices = (lambda: updatecheck.session_line(installed=updatecheck.installed_version()),  # a release, daily
-                   lambda: ext.session_line(cwd))  # extensions changed outside devkit, each drift audited once
+                   lambda: ext.session_line(cwd),  # extensions changed outside devkit, each drift audited once
+                   lambda: ext.accepted_line())  # extensions accepted since the developer's last `dev ext ack`
     except Exception:
         notices = ()
         _log(f"session-start notices {agent}: {traceback.format_exc()[-300:]}")

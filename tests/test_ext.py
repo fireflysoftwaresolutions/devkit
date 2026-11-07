@@ -383,6 +383,20 @@ class LockAndDriftTests(unittest.TestCase):
         install_claude_plugin(self.h, "superpowers@claude-plugins-official", "7.0.2", SHA_B)
         self.assertEqual(len(ext.report_drift(self.rows(), seen=self.seen)), 1)
 
+    def test_an_accepted_outside_change_is_audited_and_a_first_plugin_record_is_not(self):
+        rid = "plugin:claude:superpowers@claude-plugins-official"
+        before = len(audit.records(days=1, action="ext.accept"))
+        with mock.patch.object(core, "set_by_developer", return_value=True):
+            ext.record_lock("claude", self.h, t=self.team, user={}, path=self.lock)  # devkit installed it
+            self.assertEqual(ext.pending_acceptances(self.lock), [])
+            install_claude_plugin(self.h, "superpowers@claude-plugins-official", "7.0.1", SHA_A)
+            ext.record_lock("claude", self.h, t=self.team, user={}, path=self.lock)
+        recs = audit.records(days=1, action="ext.accept")[before:]
+        self.assertEqual([r["target"] for r in recs], [rid])
+        self.assertIn("superpowers (claude plugin) 7.0.0 bb92a77 → 7.0.1 414603b; accepted by dev install",
+                      recs[0]["detail"])
+        self.assertEqual([p["id"] for p in ext.pending_acceptances(self.lock)], [rid])
+
     def test_the_drift_text_names_the_plugin_and_the_change(self):
         ext.record_lock("claude", self.h, t=self.team, user={}, path=self.lock)
         install_claude_plugin(self.h, "superpowers@claude-plugins-official", "7.0.1", SHA_A)
@@ -422,6 +436,8 @@ class DriftWiringTests(unittest.TestCase):
         lk.parent.mkdir(parents=True, exist_ok=True)
         self.addCleanup(lambda: lk.unlink(missing_ok=True))
         self.addCleanup(lambda: (core.STATE / "ext-drift.json").unlink(missing_ok=True))
+        (core.STATE / "ext-accepted.json").unlink(missing_ok=True)  # another test's acceptances
+        self.addCleanup(lambda: (core.STATE / "ext-accepted.json").unlink(missing_ok=True))
         ext.record_lock("claude", self.h)
         install_claude_plugin(self.h, "superpowers@claude-plugins-official", "7.0.1", SHA_A)
 
@@ -456,6 +472,36 @@ class DriftWiringTests(unittest.TestCase):
         self.assertIn("superpowers (claude plugin) 7.0.0 bb92a77 → 7.0.1 414603b", out)
         self.assertIn("until the developer runs dev install in a terminal", out)
 
+    def ack(self, developer: bool):
+        out = io.StringIO()
+        with mock.patch.object(core, "set_by_developer", return_value=developer), contextlib.redirect_stdout(out), \
+                contextlib.redirect_stderr(out):
+            rc = cli.main(["ext", "ack"])
+        return rc, plain(out.getvalue())
+
+    def test_an_acceptance_is_listed_at_session_start_and_in_dev_status_until_acknowledged(self):
+        self.install(developer=True)  # accepts superpowers 7.0.1
+        line = ext.accepted_line()
+        self.assertIn("accepted since your last session: superpowers (claude plugin) 7.0.0 bb92a77 → 7.0.1 414603b",
+                      line)
+        self.assertIn("dev ext ack", line)
+        with mock.patch.object(ext, "homes", return_value=self.h):
+            needs = cli.devkit_needs(str(self.tmp.name))
+        self.assertEqual([n["command"] for n in needs if "accepted since" in n["text"]], ["dev ext ack"])
+        rc, out = self.ack(developer=True)
+        self.assertEqual(rc, 0)
+        self.assertIn("superpowers", out)
+        self.assertIsNone(ext.accepted_line())
+        rec = audit.records(days=1, action="ext.ack")[-1]
+        self.assertEqual((rec["target"], rec["outcome"]), ("plugin:claude:superpowers@claude-plugins-official", "ok"))
+
+    def test_only_the_developer_acknowledges_an_acceptance(self):
+        self.install(developer=True)
+        rc, out = self.ack(developer=False)
+        self.assertEqual(rc, 1)
+        self.assertIn("superpowers", ext.accepted_line() or "")
+        self.assertEqual(audit.records(days=1, action="ext.ack")[-1]["outcome"], "blocked")
+
     def test_doctor_fails_the_lock_check_and_names_the_plugin(self):
         with mock.patch.object(ext, "homes", return_value=self.h):
             rows = {name: (ok, detail) for _, name, ok, detail, _ in ext.doctor_checks(str(self.tmp.name))}
@@ -481,6 +527,16 @@ class DriftSessionStartTests(HookCase):
         self.assertIn("superpowers", outs[1])  # every session sees it until the developer accepts it
         after = [r for r in audit.records(days=1, action="ext.drift") if "superpowers" in r["target"]]
         self.assertEqual(len(after) - before, 1)
+
+    def test_the_session_start_lists_what_was_accepted_since_the_last_session(self):
+        DriftWiringTests.install(self, developer=True)
+        with mock.patch.object(ext, "homes", return_value=self.h), \
+                mock.patch.object(hooks, "context_for", lambda cwd, agent: "## devkit · workspace context"), \
+                mock.patch.object(hooks, "_spawn", lambda *a, **k: None), \
+                mock.patch("devkit.work.request_sync", lambda *a, **k: None):
+            out = self.hook("session-start", {"session_id": "c", "hook_event_name": "SessionStart",
+                                              "source": "startup", "cwd": str(self.tmp.name)})
+        self.assertIn("accepted since your last session: superpowers (claude plugin)", out)
 
 
 class FakeUpstream:
@@ -790,6 +846,15 @@ class GuardTests(unittest.TestCase):
                     f"dev ext update impeccable --to {SHA_C} --why 'fixes the audit'", "dev ext update --help"):
             with self.subTest(cmd=cmd):
                 self.assertEqual(self.verdict(cmd)[0], "allow")
+
+    def test_acknowledging_an_acceptance_is_the_developers(self):
+        for cmd in ("dev ext ack", "bin/dev ext ack", "dev ext frobnicate",
+                    "python3 -c \"import subprocess; subprocess.run(['dev', 'ext', 'ack'])\""):
+            with self.subTest(cmd=cmd):
+                v, why = self.verdict(cmd)
+                self.assertEqual(v, "deny")
+                self.assertIn("terminal", why)
+        self.assertEqual(self.verdict("dev ext ack --help")[0], "allow")
 
     def test_updating_a_plugin_on_this_mac_is_the_developers(self):
         for cmd in ("dev ext update superpowers --apply --why x", "bin/dev ext update superpowers --why x --apply"):
@@ -1432,6 +1497,27 @@ class CodexAppTests(unittest.TestCase):
         self.assertIn("until the developer runs dev install in a terminal", out)
         self.install(developer=True)
         self.assertIn("mcp:codex:rg_pre", ext.read_lock(self.lock))
+
+    def test_a_first_record_is_audited_with_its_terminal_and_listed_until_acknowledged(self):
+        # F1-R4 part 1: a process an agent starts in screen, tmux or a Terminal window passes set_by_developer(), so
+        # each acceptance is audited (the entry, the terminal, the parent processes) and listed until acknowledged
+        before = len(audit.records(days=1, action="ext.accept"))
+        self.record()
+        recs = audit.records(days=1, action="ext.accept")[before:]
+        ids = ["mcp:codex:node_repl", "plugin:codex:browser@openai-bundled", "plugin:codex:pdf@openai-primary-runtime"]
+        self.assertEqual(sorted(r["target"] for r in recs), ids)
+        node = next(r for r in recs if r["target"] == "mcp:codex:node_repl")
+        self.assertIn(f"node_repl (codex app mcp): {self.app / NODE_REPL} -e PAYLOAD", node["detail"])
+        self.assertRegex(node["detail"], r"first record by dev install; tty \S+; parents: \S")
+        self.assertEqual(sorted(p["id"] for p in ext.pending_acceptances(self.lock)), ids)
+        self.record()  # the same entries again: nothing new was accepted
+        self.assertEqual(len(audit.records(days=1, action="ext.accept")) - before, 3)
+        self.assertEqual(len(ext.pending_acceptances(self.lock)), 3)
+
+    def test_a_record_that_vouches_for_nothing_writes_no_acceptance(self):
+        with mock.patch.object(core, "set_by_developer", return_value=False):
+            self.record()
+        self.assertEqual(ext.pending_acceptances(self.lock), [])
 
 
 class ProjectSettingsTests(unittest.TestCase):

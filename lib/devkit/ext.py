@@ -976,11 +976,15 @@ def record_lock(agent: str, h: Homes = None, by: str = "dev install", t: dict = 
     server, a digest of its table. A later change outside devkit then shows as drift. Accepting a change made outside
     devkit, or recording what ships with the app for the first time, is the developer's (F1 of re-review four): only
     when core.set_by_developer() holds, here in the writer too, since a program can call it past dev install; `accept`
-    False narrows it further. Otherwise both stay as drift. Compared with the lock under its state lock, so nothing
-    changes between the check and the record. -> how many were recorded."""
+    False narrows it further. Otherwise both stay as drift. No check inside a process proves that a person typed the
+    command (a process an agent starts in screen, tmux or a Terminal window passes it), so each acceptance is also
+    made visible (F1-R4 part 1): one `ext.accept` audit record with the entry, the terminal and the parent processes,
+    and an entry in the acceptance list that the session start and `dev status` show until the developer runs
+    `dev ext ack`. Compared with the lock under its state lock, so nothing changes between the check and the record.
+    -> how many were recorded."""
     now = int(time.time())
     rows = _lockable(agent, h, t, user, only)
-    count = [0]
+    count, accepted = [0], []
     try:
         accept = bool(accept) and core.set_by_developer()
     except Exception:
@@ -993,12 +997,96 @@ def record_lock(agent: str, h: Homes = None, by: str = "dev install", t: dict = 
             if "spec" in o:
                 new["spec"] = o["spec"]
             lk = doc.get(eid)
-            if not accept and ((o.get("app") and not lk) or (lk and _lock_change(lk, new))):
+            change = _lock_change(lk, new) if lk else ""
+            first_app = bool(o.get("app") and not lk)
+            if not accept and (first_app or change):
                 continue
             doc[eid] = new
             count[0] += 1
+            if first_app:
+                accepted.append((eid, f"{_app_line(agent, eid, o)}; first record by {by}"))
+            elif change:
+                accepted.append((eid, f"{_what(agent, eid, o)}{':' if 'spec' in o else ''} {change}; accepted by {by}"))
     _edit_lock(put, path)
+    if accepted:
+        _note_accepted(accepted, now, by, path)
     return count[0]
+
+
+ACCEPTED_LIMIT = 200  # entries kept in the acceptance list; the audit trail keeps every one
+
+
+def accepted_file(lock: Path = None) -> Path:
+    """The acceptance list, next to the lock it belongs to (a temporary lock keeps its own list)."""
+    return (lock or lock_file()).with_name("ext-accepted.json")
+
+
+def _tty() -> str:
+    for fd in (0, 1, 2):
+        try:
+            return os.ttyname(fd)
+        except OSError:
+            continue
+    return ""
+
+
+def _parents(limit: int = 8) -> list:
+    """The parent processes' command lines, nearest first, each cut to 80 characters; [] when `ps` gives none."""
+    try:
+        chain = core._ancestry() or []
+    except Exception:
+        chain = []
+    return [c if len(c) <= 80 else c[:79] + "…" for c in chain[:limit]]
+
+
+def _note_accepted(items: list, now: int, by: str, lock: Path = None):
+    """Write one `ext.accept` audit record per accepted entry, with the terminal and the parent processes it was
+    accepted from, and add it to the acceptance list (F1-R4 part 1)."""
+    from . import audit, state
+    tty, parents = _tty(), _parents()
+    where = f"tty {tty or 'none'}; parents: {' ← '.join(parents) or 'unknown'}"
+    if lock and Path(lock) != lock_file():
+        where += f"; lock {lock}"
+    out = []
+    for eid, what in items:
+        rec = audit.record("ext.accept", eid, f"{what}; {where}", "accepted")
+        out.append({"id": eid, "what": what, "at": now, "by": by, "tty": tty, "parents": parents,
+                    "record": (rec or {}).get("id", "")})
+
+    def add(doc):
+        doc["pending"] = (list(doc.get("pending") or []) + out)[-ACCEPTED_LIMIT:]
+    try:
+        state.update(accepted_file(lock), add, indent=1)
+    except state.StateBusy:
+        pass
+
+
+def pending_acceptances(lock: Path = None) -> list:
+    """What was accepted since the developer last acknowledged (`dev ext ack`), oldest first."""
+    doc = _read_json(accepted_file(lock))
+    items = doc.get("pending") if isinstance(doc, dict) else None
+    return [p for p in items or [] if isinstance(p, dict) and p.get("id")]
+
+
+def accepted_text(items: list, limit: int = 4) -> str:
+    def one(p):
+        when = time.strftime("%d %b %H:%M", time.localtime(int(p.get("at") or 0)))
+        return f"{p.get('what') or p['id']} ({when}, tty {p.get('tty') or 'none'})"
+    more = f"; and {len(items) - limit} more" if len(items) > limit else ""
+    return "; ".join(one(p) for p in items[:limit]) + more
+
+
+def accepted_line(lock: Path = None):
+    """The session start's line about what was accepted since the developer's last acknowledgement, or None. A
+    terminal an agent opens can look like the developer's, so every acceptance shows until the developer says it was
+    theirs."""
+    items = pending_acceptances(lock)
+    if not items:
+        return None
+    return (f"devkit · extensions accepted since your last session: {accepted_text(items)}. A process an agent "
+            f"starts can look like your terminal: if you did not run these, remove the entry and review the audit "
+            f"trail (`dev audit --action ext.accept`). The developer acknowledges them with `dev ext ack`, in a "
+            f"terminal.")
 
 
 def _lock_change(lk: dict, new: dict) -> str:
@@ -1058,14 +1146,17 @@ def new_app_entries(agent: str, h: Homes = None, t: dict = None, user: dict = No
     return sorted(rid.split(":", 2)[2].partition("@")[0] for rid in _new_app(agent, h, t, user, path))
 
 
+def _app_line(agent: str, rid: str, o: dict) -> str:
+    """One entry that ships with the app as the developer reads it: a plugin with its version, an MCP server with the
+    command and arguments it runs."""
+    run = shlex.join([o["command"], *o.get("args", [])]) if o.get("command") else o.get("url", "")
+    return f"{_what(agent, rid, o)}: {run}" if "spec" in o else f"{_what(agent, rid, o)} {_vs(o)}"
+
+
 def new_app_lines(agent: str, h: Homes = None, t: dict = None, user: dict = None, path: Path = None) -> list:
     """new_app_entries() as `dev install` names them, one line each: a plugin with its version, an MCP server with
     the command and arguments it runs (F1 of re-review four: the developer sees what the record will vouch for)."""
-    out = []
-    for rid, o in _new_app(agent, h, t, user, path).items():
-        run = shlex.join([o["command"], *o.get("args", [])]) if o.get("command") else o.get("url", "")
-        out.append(f"{_what(agent, rid, o)}: {run}" if "spec" in o else f"{_what(agent, rid, o)} {_vs(o)}")
-    return out
+    return [_app_line(agent, rid, o) for rid, o in _new_app(agent, h, t, user, path).items()]
 
 
 def report_drift(rows: list, audit=None, seen: Path = None) -> list:
@@ -1127,8 +1218,11 @@ def session_line(cwd: str = None, h: Homes = None):
 
 
 def status_needs(cwd: str = None) -> list:
-    """`dev status`: extensions changed outside devkit, as "Needs you" items."""
-    out = []
+    """`dev status`: extensions accepted since the developer's last acknowledgement, and extensions changed outside
+    devkit, as "Needs you" items."""
+    items = pending_acceptances()
+    out = [{"kind": "devkit", "text": f"Extensions accepted since your last session: {accepted_text(items, 3)}.",
+            "command": "dev ext ack"}] if items else []
     try:
         rows = current_rows(cwd)
     except ExtError as e:
@@ -1581,7 +1675,7 @@ def cmd_update(a) -> int:
     return rc
 
 
-def _developer_only(verb: str, a) -> bool:
+def _developer_only(verb: str, a, what: str = "changes what runs in every session on this Mac") -> bool:
     """L2: what changes the extensions on this Mac outside devkit's configuration (the vendor CLIs, the project's
     settings) is the developer's, in a terminal (core.set_by_developer), as an overlay change is through
     core.config_set. False, after the refusal is printed and audited, for anyone else."""
@@ -1593,8 +1687,8 @@ def _developer_only(verb: str, a) -> bool:
     if not ok:
         audit.record(f"ext.{verb}", str(a.name or ""), "not the developer's terminal", "refused",
                      why=str(a.why or "").strip())
-        ui.err(f"dev ext {verb} changes what runs in every session on this Mac, which only the developer does, in a "
-               f"terminal (spec P-fym583l7sg1, K1). Ask them, with the command and why.")
+        ui.err(f"dev ext {verb} {what}, which only the developer does, in a terminal (spec P-fym583l7sg1, K1). Ask "
+               f"them, with the command and why.")
     return ok
 
 
@@ -2030,16 +2124,47 @@ def cmd_ls(a) -> int:
     return 0
 
 
+def cmd_ack(a) -> int:
+    """`dev ext ack`: the developer confirms the acceptances listed since the last one were theirs (F1-R4 part 1).
+    Only in the developer's terminal (the guard refuses it to agents as well), and audited as `ext.ack`."""
+    from . import audit, state, ui
+    a.name = getattr(a, "name", None) or "acceptances"
+    a.why = getattr(a, "why", None) or ""
+    if not _developer_only("ack", a, "confirms that the extensions accepted since the last session were the "
+                                      "developer's"):
+        return 1
+    items = pending_acceptances()
+    if not items:
+        print("Nothing to acknowledge: no extension was accepted since the last acknowledgement.")
+        return 0
+    done = {(p["id"], p.get("at"), p.get("record")) for p in items}
+
+    def drop(doc):
+        doc["pending"] = [p for p in doc.get("pending") or [] if isinstance(p, dict) and
+                          (p.get("id"), p.get("at"), p.get("record")) not in done]
+    try:
+        state.update(accepted_file(), drop, indent=1)
+    except state.StateBusy:
+        ui.err("The acceptance list is busy (another dev command writes it). Run `dev ext ack` again in a moment.")
+        return 1
+    for p in items:
+        audit.record("ext.ack", p["id"], f"acknowledged: {p.get('what') or p['id']}", "ok",
+                     id=p.get("record") or "")
+        print(f"  ✓ {p.get('what') or p['id']}")
+    print(f"{len(items)} acceptance(s) acknowledged; the audit trail keeps them (`dev audit --action ext`).")
+    return 0
+
+
 def cmd_ext(a) -> int:
     return {"ls": cmd_ls, "outdated": cmd_outdated, "update": cmd_update, "add": cmd_change, "remove": cmd_change,
-            "enable": cmd_change, "disable": cmd_change}[a.ext_cmd](a)
+            "enable": cmd_change, "disable": cmd_change, "ack": cmd_ack}[a.ext_cmd](a)
 
 
 def register(add):
     """Wire `dev ext` into the parser. `add(name, fn, help)` returns an argparse subparser. No abbreviated options:
     the guard reads `--apply` and the other words exactly."""
     p = add("ext", cmd_ext, "Third-party plugins, skills and MCP servers for Claude Code and Codex: ls, outdated, "
-                            "update")
+                            "update, ack")
     sp = p.add_subparsers(dest="ext_cmd", required=True)
     q = sp.add_parser("ls", allow_abbrev=False,
                       help="every extension: source, pin, installed and enabled state, license, layer")
@@ -2086,3 +2211,6 @@ def register(add):
             q.add_argument("--team", action="store_true", help="retire it from devkit's defaults in the checkout")
         else:
             q.add_argument("--project", action="store_true", help="Claude Code plugins: this project only")
+    sp.add_parser("ack", allow_abbrev=False,
+                  help="confirm that the extensions accepted since your last session were yours (the developer, in a "
+                       "terminal; audited)")

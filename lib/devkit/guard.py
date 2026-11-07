@@ -1834,26 +1834,29 @@ INSTALL_REASON = ("`dev install` and `dev update` change what every hook, the gu
 
 EXT_REASON = ("This command changes the plugins, skills or MCP servers that run in every session on this Mac: "
               "`dev ext add|remove|enable|disable`, `dev ext update --apply`, or a `claude plugin|mcp` or `codex "
-              "plugin|mcp` verb that adds, removes, switches or updates one (spec P-fym583l7sg1, K1). Only the "
-              "developer does that, in a terminal, with `dev ext`, which audits it and records it in the lock. Ask "
+              "plugin|mcp` verb that adds, removes, switches or updates one (spec P-fym583l7sg1, K1), or `dev ext "
+              "ack`, which confirms that the extensions accepted since the last session were the developer's. Only "
+              "the developer does that, in a terminal, with `dev ext`, which audits it and records it in the lock. Ask "
               "them, with the command and why. Agents may run `dev ext ls`, `dev ext outdated`, `dev ext update "
               "<name> --to <ref> --why \"…\"` (a team pin, on a branch of the devkit checkout) and the vendor CLIs' "
               f"read-only verbs (`list`, `get`, `details`). {_TAIL}")
 
 
 def _ext_refusal(args) -> bool:
-    """What changes the extensions that run on this Mac is the developer's: `dev ext update … --apply`, and
-    `dev ext add|remove|enable|disable` unless it is a team edit (`add|remove --team`, no `--project`) in the devkit
-    checkout. The parser takes no abbreviated options, so the exact words are enough; `--team` counts only before
+    """What changes the extensions that run on this Mac, or acknowledges what was accepted, is the developer's: an
+    allowlist that fails closed (L-fyrlq1cola2): `dev ext ls|outdated`, a team edit (`add|remove --team`, no
+    `--project`) and `update` without `--apply` stay open; `ack`, `enable`, `disable` and any other verb are refused. The parser takes no abbreviated options, so the exact words are enough; `--team` counts only before
     the `--` that ends the options (after it, it is the entry's name: L1)."""
     if args[:1] != ["ext"]:
         return False
     sub, words = (args[1:2] or [""])[0], args[2:]  # an MCP server's own command line is one quoted word
+    if sub in ("", "-h", "--help", "ls", "outdated"):
+        return False
     if sub == "update":
         return "--apply" in words
     if sub in ("add", "remove"):
         return "--team" not in _dev_opts(words) or "--project" in words
-    return sub in ("enable", "disable")
+    return True  # enable, disable, ack (F1-R4: the developer's acknowledgement) and any verb a later devkit adds
 
 
 # H1 and its re-reviews (the Security engineer): the agents' own CLIs change the same plugins, marketplaces and MCP
