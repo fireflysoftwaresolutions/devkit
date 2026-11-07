@@ -388,6 +388,14 @@ How a decision travels:
    it; the member keeps everything it knew.
 4. The run cannot be closed while a decision is pending, and the final report lists the automatic decisions.
 
+A decision that leads to an irreversible action (`--irreversible release --target v26.11.4`) opens that action once,
+on that target, and only when your own answer chooses the option that performs it. That option is the one named
+with `--performs`, else the one option that reads yes or approve, else the recommended one. `dev crew ask` refuses
+an irreversible decision when no option performs the action for certain, for example when the recommended option
+reads as not doing it, such as `B: wait`. Without options, only `approve D<n>`, or an answer that reads approve or yes, opens
+it. Any other answer (`no`, another option, free text) records your decision and opens nothing; the refusal is
+audited as `crew.grant-refused` with the decision and the option you chose, never the text you typed.
+
 ## Guardrails
 
 Each guardrail cites the rule of `dev crew rules` that enforces it. A rule marked planned is not checked yet.

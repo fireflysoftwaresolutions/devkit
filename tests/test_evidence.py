@@ -363,6 +363,104 @@ class GateContractTests(EvidenceCase):
         self.assertIsNone(grant("push", "feat/parser", now=m(4)))  # the step's grant is the lane's, not main's
 
 
+class DecisionAnswerGrantTests(EvidenceCase):
+    # 26.11.3 consent bug (the Senior engineer's probe): an irreversible decision opens its action only when the
+    # developer's answer chooses the option that performs it; "no", another option, free text or an answer to another
+    # decision opens nothing, and the refusal is audited without the answer's free text
+
+    def irreversible(self, target, at, options="yes | no", recommend="yes", action="release",
+                     question="Release now?", **more):
+        d = pg.crew_decision(question, options=options, recommend=recommend, irreversible=action, target=target,
+                             now=m(at), **more)
+        self.shown(f"{d['id']} waits for you.", m(at) + 1)
+        return d
+
+    def refusals(self):
+        out = []
+        for f in sorted(audit.AUDIT.glob("*.jsonl")):
+            out += [r for r in map(json.loads, f.read_text().splitlines()) if r.get("action") == "crew.grant-refused"]
+        return out
+
+    def test_a_no_opens_nothing_and_the_refusal_names_the_decision_and_option(self):
+        self.irreversible("v26.11.4", 1)
+        self.irreversible("v26.11.5", 2)
+        self.typed("approve D1: no", m(3))
+        self.typed("approve D2", m(3))  # an answer to another decision, for another target
+        self.assertTrue(pg.crew_decide("D1", "no", now=m(4))["verified"])
+        self.assertTrue(pg.crew_decide("D2", "yes", now=m(4))["verified"])
+        self.assertIsNone(grant("release", "v26.11.4", consume=False, now=m(5)))
+        self.assertIsNone(grant("release", "v26.11.4", now=m(5)))
+        refused = self.refusals()
+        self.assertTrue(refused)
+        self.assertEqual({(r["target"], r["ref"]["id"], r["ref"]["answer"]) for r in refused},
+                         {("release v26.11.4", "D1", "no")})
+
+    def test_only_the_option_that_performs_it_opens_it_once(self):
+        lettered = {"options": "A: release | B: wait", "recommend": "A"}
+        self.irreversible("v26.11.4", 1, **lettered)
+        d2 = self.irreversible("v26.11.5", 2, **lettered)
+        self.typed("approve D1: B", m(3))
+        self.answered(pg.ask_text(d2), "A: release (Recommended)", m(3), options=("A: release", "B: wait"))
+        pg.crew_decide("D1", "B", now=m(4))
+        pg.crew_decide("D2", "A: release", now=m(4))
+        self.assertIsNone(grant("release", "v26.11.4", now=m(5)))
+        self.assertEqual(grant("release", "v26.11.5", now=m(5))["source"], "decision")
+        self.assertIsNone(grant("release", "v26.11.5", now=m(6)))  # used once
+
+    def test_free_text_opens_nothing_and_stays_out_of_the_audit(self):
+        self.irreversible("v26.11.4", 1, options="", recommend="")
+        self.irreversible("v26.11.5", 2, options="", recommend="")
+        said = "only after the demo with Jane Roe"
+        self.typed(f"approve D1: {said}", m(3))
+        self.typed("approve D2", m(3))  # no options: the approve line itself approves
+        pg.crew_decide("D1", said, now=m(4))
+        pg.crew_decide("D2", "approve", now=m(4))
+        self.assertIsNone(grant("release", "v26.11.4", now=m(5)))
+        self.assertEqual(grant("release", "v26.11.5", now=m(5))["source"], "decision")
+        refused = self.refusals()
+        self.assertEqual([r["ref"]["answer"] for r in refused], [f"[free text: {len(said)} characters]"])
+        self.assertNotIn("Jane", json.dumps(refused))
+
+    def test_the_recommended_option_performs_it_unless_one_option_approves(self):
+        self.irreversible("old-tags", 1, action="push", recommend="no", question="Delete the old tags?")
+        self.irreversible("v26.11.5", 2, options="A: release | B: wait", recommend="A")
+        self.typed("approve D1", m(3))  # the recommended "no": "yes" performs the push, so it opens nothing
+        self.typed("approve D2", m(3))  # the recommended A performs the release
+        pg.crew_decide("D1", "no", now=m(4))
+        pg.crew_decide("D2", "A", now=m(4))
+        self.assertIsNone(grant("push", "old-tags", now=m(5)))
+        self.assertEqual(grant("release", "v26.11.5", now=m(5))["source"], "decision")
+
+    def test_an_explicit_performing_option_wins_over_the_recommendation(self):
+        explicit = {"options": "A: wait | B: release", "recommend": "A", "performs": "B"}
+        self.irreversible("v26.11.4", 1, **explicit)
+        self.irreversible("v26.11.5", 2, **explicit)
+        self.typed("approve D1", m(3))  # the recommended A: wait
+        self.typed("approve D2: B", m(3))
+        pg.crew_decide("D1", "A", now=m(4))
+        pg.crew_decide("D2", "B", now=m(4))
+        self.assertIsNone(grant("release", "v26.11.4", now=m(5)))
+        self.assertEqual(grant("release", "v26.11.5", now=m(5))["source"], "decision")
+
+    def test_ask_refuses_an_irreversible_decision_no_option_clearly_performs(self):
+        for kw in ({"options": "A: release | B: wait", "recommend": "B"},  # the default would be "wait"
+                   {"options": "A: release | B: wait", "recommend": ""},
+                   {"options": "A: release | B: wait", "recommend": "A", "performs": "C"},
+                   {"options": "", "recommend": "yes", "performs": "yes"}):
+            with self.subTest(**kw), self.assertRaises(pg.StepError):
+                pg.crew_decision("Release now?", irreversible="release", target="v26.11.4", now=m(1), **kw)
+        self.assertEqual(pg.load_run("claude", "s1").get("decisions") or [], [])
+
+    def test_a_no_backs_no_preapproval_and_no_step_grant(self):
+        self.irreversible("fix/parser", 1, action="push", question="Push the fix?")
+        self.typed("approve D1: no", m(2))
+        pg.crew_decide("D1", "no", now=m(3))
+        pg.set_mode("auto", approve="push fix/parser", now=m(4))
+        self.assertEqual(pg.load_run("claude", "s1")["preapprovals"], [])
+        pg.assign("build", "Tank", allow="push", now=m(5))
+        self.assertEqual(pg.load_run("claude", "s1")["plan"][0]["allow"], [])
+
+
 class HookWiringTests(EvidenceCase):
     def test_settings_send_question_tool_answers_to_the_hook(self):
         hooks_ = json.loads(SETTINGS.read_text())["hooks"]

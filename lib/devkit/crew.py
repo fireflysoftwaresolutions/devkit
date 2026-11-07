@@ -1464,14 +1464,15 @@ def _ask_decision(a, me) -> int:
         return 2
     d = progress.crew_decision(" ".join(a.text), options=a.options or "", recommend=a.recommend or "",
                                irreversible=a.irreversible or "", from_agent=me, target=a.target or "",
-                               approves=getattr(a, "approves", "") or "")
+                               approves=getattr(a, "approves", "") or "", performs=getattr(a, "performs", "") or "")
     if d["state"] == "decided":
         print(f"{ui.OK} auto mode: go ahead with {_option(d, d['answer'])} ({d['id']}, recorded; the developer can "
               "revisit it with dev crew decisions)")
         return 0
     print(f"{ui.WARN} {d['id']}: {d['question']}" + (f" · options {' | '.join(d['options'])}" if d["options"] else "")
           + (f" · recommends {d['recommend']}" if d["recommend"] else "")
-          + (f" · irreversible: {d['irreversible']}" if d["irreversible"] else ""))
+          + (f" · irreversible: {d['irreversible']}" if d["irreversible"] else "")
+          + (f" · only “{d['performs']}” opens it" if d.get("performs") else ""))
     if d.get("note"):
         print(ui.dim(f"  {d['note']}"))
     if me:
@@ -1521,8 +1522,11 @@ def _ask(run, did) -> int:
     print(f"Or they type a line of its own in their prompt: approve {d['id']}" + (": <option>" if d.get("options")
                                                                                  else ""))
     if d.get("irreversible"):
+        perf = progress.performing_option(d)
         print(ui.dim(f"  it leads to an irreversible action ({d['irreversible']}): only one of the options, or the "
-                     "approve line, counts; a free-text answer does not"))
+                     "approve line, counts; a free-text answer does not. "
+                     + (f"Only “{perf}” opens it" if perf else "No option opens it" if d.get("options")
+                        else "Only approve or yes opens it")))
     return 0
 
 
@@ -2022,6 +2026,9 @@ def register(add):
     x.add_argument("--irreversible", help="the irreversible action it leads to: " + ", ".join(_irreversible()))
     x.add_argument("--target", help="what that action acts on (a branch, a tag, a PR number): the developer's "
                                     "answer opens that action on that target once")
+    x.add_argument("--performs", help="with --irreversible and --options: the option that performs the action; only "
+                                      "the developer's choice of it opens the action (default: the one option that "
+                                      "reads yes or approve, else the recommended one)")
     x.add_argument("--approves", help="with --decision: the finished steps the developer's answer approves, "
                                       "\"api, screens\" (checked against the plan)")
     x = sp.add_parser("answer", help="answer a crew message by its id")

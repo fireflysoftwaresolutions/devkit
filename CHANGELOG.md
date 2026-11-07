@@ -439,6 +439,10 @@ devkit refuses more in this release. Each refusal says why and names the command
   functions or devkit's state is refused, also when it loads them through the agent's own files (three levels deep)
   or through code decoded at run time. On Codex, devkit reads no transcript yet, so a grant or an answer you type
   there opens nothing: run irreversible actions on Codex yourself, in a terminal.
+- **A "no" never opens an irreversible action.** A decision that leads to a release, merge, push, or deploy opens it
+  only when your answer chooses the option that performs it (`--performs`, else the one option that reads yes or
+  approve, else the recommended one); before, any verified answer opened it, `approve D1: no` included. Any other
+  answer opens nothing and is audited as `crew.grant-refused`, with the decision and the option, never your text.
 - The irreversible-action gate sees more: the repository that `gh -R`, `--repo`, or `GH_REPO` names (so a grant for
   one repository never covers another), commands run through `script`, `watch`, GNU `parallel`, `sem`, `arch`,
   `flock`, `unbuffer`, `chronic`, or `yarn workspace`, targets that `xargs` appends, `curl` methods inside short-flag
