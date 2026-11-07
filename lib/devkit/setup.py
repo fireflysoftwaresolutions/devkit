@@ -2245,13 +2245,15 @@ def install_commands(packages) -> str:
 
 def tools_check(stacks, have=None) -> tuple:
     """doctor's required-tools row: the base groups' tools on every Mac, and a stack's tools (its language server
-    included) only when the developer chose the stack (config `stacks`, which the wizard records). A stack not chosen
-    is no failure: the row names it, and `dev setup` adds it. The fix is the exact command that installs what is
-    missing. `have` stands in for the PATH lookup (the tests)."""
+    included) only when the developer chose the stack (config `stacks`, which the wizard records). `claude` and
+    `codex` only when that agent is on in config `agents`, which `dev install` reads the same way (on unless false).
+    A stack not chosen or an agent turned off is no failure: the row names it, and `dev setup` changes it. The fix is
+    the exact command that installs what is missing. `have` stands in for the PATH lookup (the tests)."""
     from . import wizard
     have = have or core.have
+    off = [a for a in wizard.AGENT_NAMES if not CFG.get("agents", {}).get(a, True)]
     tools = {t: how for g, group in wizard.DOCTOR_TOOLS.items() if g in wizard.BASE_GROUPS or g in stacks
-             for t, how in group.items()}
+             for t, how in group.items() if not (g == "agents" and t in off)}  # the agents group's tools are the agents
     missing = [t for t in tools if not have(t)]
     skipped = [wizard.STACK_UI[s][0] for s in wizard.STACKS if s not in stacks]
     detail = f"{len(tools) - len(missing)}/{len(tools)} present"
@@ -2259,6 +2261,8 @@ def tools_check(stacks, have=None) -> tuple:
         detail += f"; missing: {', '.join(missing)}"
     if skipped:
         detail += f" · not chosen: {', '.join(skipped)} (dev setup adds a stack)"
+    if off:
+        detail += f" · turned off: {', '.join(wizard.AGENT_NAMES[a] for a in off)} (dev setup turns an agent on)"
     return "Toolchain", "required tools", not missing, detail, install_commands(tools[t] for t in missing)
 
 

@@ -8,6 +8,7 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "lib"))
 
@@ -85,6 +86,12 @@ class RequiredToolsTests(unittest.TestCase):
     # a stack's tools only when the developer chose it. `have` stands in for PATH, so the developer's Mac never counts.
     JAVA_PHP = {"java", "mvn", "gradle", "jdtls", "php", "composer", "intelephense"}
 
+    def setUp(self):
+        # both agents on (the default), whatever the developer's own config says
+        patch = mock.patch.dict(setup.CFG, {"agents": {}})
+        patch.start()
+        self.addCleanup(patch.stop)
+
     def test_python_and_node_without_java_or_php_tools_pass(self):
         # the Recommended setup: 24 tools before, 7 of them for the Java and PHP stacks nobody chose
         group, name, ok, detail, fix = setup.tools_check(["python", "node"], have=lambda t: t not in self.JAVA_PHP)
@@ -107,6 +114,22 @@ class RequiredToolsTests(unittest.TestCase):
         self.assertFalse(ok)
         self.assertIn("missing: pyright", detail)
         self.assertEqual(fix, "npm install -g pyright")
+
+    def test_an_agent_turned_off_in_config_is_not_required(self):
+        # config agents.codex false, as `dev setup` records it: `dev install` skips Codex, so doctor must not want it
+        with mock.patch.dict(setup.CFG, {"agents": {"claude": True, "codex": False}}):
+            _, _, ok, detail, fix = setup.tools_check(["python"], have=lambda t: t != "codex")
+        self.assertTrue(ok)
+        self.assertIn("turned off: Codex", detail)
+        self.assertEqual(fix, "")
+
+    def test_an_agent_left_on_stays_required_when_the_other_is_off(self):
+        with mock.patch.dict(setup.CFG, {"agents": {"claude": False}}):
+            _, _, ok, detail, fix = setup.tools_check(["python"], have=lambda t: t not in ("claude", "codex"))
+        self.assertFalse(ok)
+        self.assertIn("missing: codex", detail)
+        self.assertNotIn("claude", detail.split("missing: ")[1].split(" · ")[0])
+        self.assertEqual(fix, "brew install --cask codex")
 
 
 class CrewRaciCheckTests(unittest.TestCase):
