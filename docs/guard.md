@@ -15,7 +15,9 @@ It inspects:
 Shell commands are tokenized: chains (`&&`, `||`, `;`, `|`, new lines) are checked one by one, `cd` and `pushd` change
 the directory used to resolve later paths, leading `VAR=value`, `sudo`, `env`, `command`, `nohup`, `time`, `exec`,
 `builtin`, `nice`, and `caffeinate` prefixes are skipped, heredoc bodies are treated as data, and output redirections
-(`>`, `>>`) are checked as writes.
+(`>`, `>>`) are checked as writes. The guard also reads what the shell runs inside a command: `$(…)` and backtick
+substitutions, `sh -c` and `eval` strings, `xargs` and `find -exec` commands, and a pager that git or gh starts. Quoted
+text a command only carries, such as a `dev crew ask` message, is data and never read as a command.
 
 ## Decisions
 
@@ -99,6 +101,7 @@ If devkit really should be off somewhere, change devkit's own configuration (see
 | `git tag <name>` that breaks the project's recorded delivery policy (a non-CalVer tag in a CalVer project, a non-SemVer tag in a SemVer project) | deny, with the version to use, unless prefixed `DEVKIT_TAG_ANY=1` |
 | `git commit`, `tag`, `merge`, or `notes` whose message (inline or `-F` file) contains AI attribution | deny |
 | `git init <dir>` that breaks the layout | deny |
+| `git config` that sets `core.pager`, `pager.<command>`, or a key the guard cannot read (`git config $K …`), in any scope or file, also as `git config set` | deny: git runs the pager as a command each time it pages, under every later read. Use `git --no-pager` or `-P` for one call |
 
 AI attribution means any of: `Co-Authored-By: Claude`, `Codex`, `ChatGPT`, `OpenAI`, `Anthropic`, `Copilot`,
 `GitHub Copilot`, `Gemini`, or `Cursor`, `noreply@anthropic.com`, `noreply@openai.com`, `copilot@github.com`,
@@ -139,6 +142,7 @@ apply the same rule. Change the lists with `branches.types` and `branches.forbid
 | `gh pr merge --admin` | always deny: it bypasses branch protection and required reviews |
 | `gh pr create --head <branch>` with a branch that breaks the naming rule | deny |
 | `gh pr …`, `gh issue …`, `gh release …`, `gh api …` containing AI attribution | deny |
+| `gh config set pager …` (or a key the guard cannot read) | deny: gh runs its pager as a command for every later read |
 
 ### Files and folders from the shell
 
@@ -187,12 +191,60 @@ three folders readable and writable by your account only (`0700`) every time it 
 | `dev config set safeguards.*` or `dev config edit`, or a `DEVKIT_*` or `DEV_ROOT` value added to the `env` block of an agent settings file or to a shell startup file such as `~/.zshrc` | deny |
 | Replacing, writing, or deleting a `dev` that a shell finds: `~/.local/bin/dev` (the link itself) or another `dev` earlier on `PATH` | deny → the developer runs `dev install --only cli` |
 | `HOME`, `DEVKIT_CONFIG`, `DEV_ROOT`, or another `DEVKIT_*` variable set for `dev`, `python -m devkit`, a program that imports devkit, or a nested `claude` or `codex` session; `launchctl setenv` of one of them | deny; the one-command [escape hatches](#escape-hatches) still work |
+| `PYTHONPATH`, `PYTHONSTARTUP`, `PYTHONHOME`, `PYTHONUSERBASE`, `PYTHONPLATLIBDIR`, `PYTHONEXECUTABLE`, or `PYTHONBREAKPOINT` set for the same commands | deny: they load other code into devkit's own process. `bin/dev` runs `python3 -I -S`, which ignores them, the current folder, and the user and site-packages folders (and their `.pth` files); the rule also covers `python3 bin/dev`. A repository's own tests may still set `PYTHONPATH` |
 | `dev install`, `dev update`, or `install.sh` | deny: they change what every hook and the guard run, so the developer runs them, in a terminal |
+| `dev config lock` or `dev config unlock` | deny: they add or remove the [settings lock](agents.md#the-settings-lock) that keeps settings files from turning off devkit's hooks |
+| `dev hook <event>`, in any shell form (a pipe, `sudo`, `bash -c`, `eval`, `find -exec`, `python3 bin/dev`) | deny, for every session: only the harness runs a hook, when its event fires. A hook event typed through a shell could forge your prompt or answer |
+| A write, move, or delete of a Claude Code transcript (`~/.claude/projects/**/*.jsonl`, a subagent's too) or a Codex session file (`~/.codex/sessions`, `archived_sessions`), with a file tool, a patch, or the shell | deny: devkit reads your approvals from them. Claude Code's memory files stay writable |
+| A program an agent runs (inline, from its input or a pipe, or a script outside the workspace) that loads a devkit module and reaches a function that records or uses your prompts, answers, and grants, or `devkit.state`'s writers | deny, for every session. The guard also reads the agent's own files the program loads (`sys.path` plus `import`, `python -m`, `runpy`, `exec(open(…).read())`, `SourceFileLoader`), three levels deep, and refuses code the program decodes and runs at run time. A repository's own scripts and tests are not judged by this rule |
 
 devkit checks this a second time when it starts: it takes a `DEVKIT_CONFIG` other than
 `~/.config/devkit/config.json`, or a `DEV_ROOT` other than the configured `dev_root`, only from your terminal, with no
 agent among its parent processes. Otherwise it warns on stderr, uses the standard values, and drops the variable for
 the processes it starts. Reading these files is always fine. Only the developer changes safeguards, in a terminal.
+
+### Nested agent sessions
+
+An agent may start another `claude` or `codex` session, which runs with devkit's hooks like any other. A session
+started without them would have no guard, so these are denied to every agent:
+
+| Command | Why |
+| --- | --- |
+| `claude --settings …`, `--setting-sources …` | They load other settings, or leave out the ones with devkit's hooks |
+| `claude --bare` | It skips every hook |
+| `claude --dangerously-*`, `--allow-dangerously-*`, or `--permission-mode bypassPermissions` | They drop the permission checks |
+| `codex -c` or `--config` on a key that names hooks, the sandbox, approvals, or `features`, or a key the guard cannot read | They rewrite the hooks, the sandbox, or the approval policy |
+| `codex --sandbox danger-full-access`, `--dangerously-*`, `--yolo`, or `--disable <feature>` | They turn the sandbox or a feature off |
+| `CLAUDE_CONFIG_DIR` or `CODEX_HOME` set for either | They point the session at another settings folder |
+
+A nested session with your own settings still runs, and so does a prompt that only names these flags. If the work
+needs another configuration, start that session yourself in a terminal.
+
+### Commands the guard cannot name
+
+The [irreversible-action gate](crew.md#guardrails) classifies each command by the program it runs and the command it
+gives it. When the shell names the program only when it runs, the guard cannot know what it does, so the command is the
+action `unknown`, tier 2, with the target `cmd-<hash>` of that exact command text. For example:
+
+- `$(printf gh) pr merge 12`, `${X:-gh} pr merge 12`, `g=gh; $g pr merge 12`, or `env -S 'gh pr merge 12'`;
+- `gh $SUB merge 12` or `gh pr $ACT 12`, where a variable names gh's command;
+- a program that builds the name of what it calls, such as `getattr(__import__('os'), 'sys' + 'tem')`.
+
+A pager is a command too: `git -c core.pager=…`, `-c pager.<command>=…`, `GIT_PAGER`, and `PAGER` for git, and
+`GH_PAGER` and `PAGER` for gh, are classified as the command they name. A pager from a source the guard cannot read
+(`--config-env`, `GIT_CONFIG_PARAMETERS`) is `unknown`.
+
+A crew member never runs tier 2, even with a grant. In the main session, while `safeguards.irreversible_main` enforces,
+the refusal names the command's target. Write the program's name out as a plain word when you can. If it must run as
+it is, type this line on its own in your prompt:
+
+```text
+grant unknown cmd-<hash>
+```
+
+The grant opens that one command text, once, in the repository of the session you typed it in, and expires after 30
+minutes. `unknown` is never
+pre-approved with `dev crew mode auto --approve`.
 
 ### Unfinished work in a commit
 
@@ -213,6 +265,10 @@ These rules apply while a progress run has crew members working ([The crew](crew
 | A crew member edits a file outside the scope of its step (`dev progress assign … --scope`) | deny, and how to ask for more |
 | The main session edits a file inside a working member's scope | deny, and how to ask that member |
 | A crew member records a decision (`dev crew decide`) | refused by `dev crew`: only Morpheus records the developer's answers |
+| A crew member runs `dev progress …` or `dev crew ask\|answer\|…` | routed to its own lane when the shell runs only that one command; otherwise refused, since it would act as Morpheus |
+
+A message is data, so quoted operators in it (`dev crew ask "x; y && z"`) keep the call a single command. A `$(…)` or
+backtick that the shell expands in a message runs a command of its own, so it makes the call more than one command.
 
 ## Example messages
 
@@ -251,7 +307,9 @@ DEVKIT_LOCAL_CI_PASSED=1.
 - Every deny and ask is logged there too, and written to the audit trail (`dev audit --action guard`), so you can
   review what was blocked.
 
-The guard sees the command text, not the inner commands of `$( … )` substitutions or the scripts a command runs.
+The guard reads the command text and the commands the shell runs inside it, but not what a program decides to run at
+run time. Such a command is the `unknown` action (see
+[Commands the guard cannot name](#commands-the-guard-cannot-name)).
 
 ## Escape hatches
 
@@ -285,7 +343,8 @@ dev guard check --write ~/Development/.handoff/items/acme/api/T-x.md
 dev guard check --write ~/Desktop/notes.md --agent codex
 ```
 
-The rules are pure functions covered by `tests/test_devkit.py`:
+The rules are pure functions covered by `tests/test_devkit.py`, and the bypasses found by red-team testing by
+`tests/test_red_team.py` and `tests/test_guard_refusals.py`:
 
 ```bash
 cd ~/Development/fireflysoftwaresolutions/devkit
