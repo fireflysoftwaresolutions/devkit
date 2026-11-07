@@ -310,6 +310,178 @@ def _toml_sections(text: str) -> dict:
     return out
 
 
+# N5: Codex's MCP servers, read from the `mcp_servers` region of config.toml so that a form the reader does not know
+# fails closed. TOML can write a server in many ways (dotted and quoted keys, inline tables, keys at the root or under
+# `[mcp_servers]`, quoted names); the reader reads only the one-line `bare_key = value` lines under a
+# `[mcp_servers.<name>]` header or its sub-tables, with a value JSON reads (a basic string, a number, true or false,
+# an array of them) or a literal string. Every other line in the region is unread: one it can give to a server takes
+# that server out of the app's; one it cannot (a multi-line string, a header or root key it cannot parse) takes them
+# all. A server's digest is the raw text of its lines, so any change to them shows. On Python 3.11+ tomllib reads the
+# file too, and a server it reads differently, or one only it sees, is unread as well.
+_TOML_PART = r'(?:[A-Za-z0-9_-]+|"[^"\\\n]*"|\'[^\'\n]*\')'
+_TOML_KEY = rf"{_TOML_PART}(?:[ \t]*\.[ \t]*{_TOML_PART})*"
+_TOML_HEADER = re.compile(rf"^[ \t]*(\[\[?)[ \t]*({_TOML_KEY})[ \t]*(\]\]?)[ \t]*(?:#.*)?$")
+_TOML_PAIR = re.compile(rf"^[ \t]*({_TOML_KEY})[ \t]*=[ \t]*(.*?)[ \t]*$")
+_TOML_TAIL = re.compile(r"^[ \t]*(?:#.*)?$")
+UNREAD_DETAIL = ("Codex's config.toml writes it in a form devkit does not read ({where}), so devkit cannot tell what "
+                 "runs: write it as `codex mcp add` does, or remove it")
+
+
+def _toml_parts(key: str) -> tuple:
+    return tuple(p[1:-1] if p[:1] in "\"'" else p for p in re.findall(_TOML_PART, key))
+
+
+def _toml_value(text: str):
+    """A one-line value the reader reads, or _UNREAD."""
+    m = re.match(r"^'([^'\n]*)'(.*)$", text)
+    if m:
+        return m.group(1) if _TOML_TAIL.match(m.group(2)) else _UNREAD
+    try:
+        v, end = json.JSONDecoder().raw_decode(text)
+    except ValueError:
+        return _UNREAD
+    plain = (lambda x: isinstance(x, (str, bool, int)) or (isinstance(x, float) and x == x and abs(x) != float("inf"))
+             or (isinstance(x, list) and all(plain(y) for y in x)))
+    return v if plain(v) and _TOML_TAIL.match(text[end:]) else _UNREAD
+
+
+_UNREAD = object()
+
+
+_DELIMS = ('"""', "'''")
+
+
+def _string_end(s: str, delim: str, start: int) -> int:
+    """The index just after the delimiter that closes a multi-line string in `s`, from `start` (a basic string's
+    escapes skipped; up to two more quotes are its content), or -1."""
+    i = start
+    while i < len(s):
+        if delim == '"""' and s[i] == "\\":
+            i += 2
+            continue
+        if s.startswith(delim, i):
+            e = i + 3
+            while e < len(s) and e < i + 5 and s[e] == delim[0]:
+                e += 1
+            return e
+        i += 1
+    return -1
+
+
+def _toml_owner(path):
+    """Whom a line in table `path` belongs to: a server's name, "" for the region with no server (the root,
+    `[mcp_servers]`, or after a header the reader cannot parse: path None), None for a table outside the region."""
+    if path is None or len(path) < 2 and path in ((), ("mcp_servers",)):
+        return ""
+    return path[1] if path[0] == "mcp_servers" else None
+
+
+def codex_mcp_servers(text: str) -> tuple:
+    """-> ({name: {"table", "raw", "unread"}}, loose): each server's table as read, its raw lines and the lines of it
+    the reader does not read ("line 12"), and the unread lines of the region no server owns (N5)."""
+    servers, loose, cur, inside = {}, [], (), None
+    srv = (lambda name: servers.setdefault(name, {"table": {}, "raw": [], "unread": []}))
+
+    def unread(who, where, s):
+        if who:
+            srv(who)["raw"].append(s)
+            srv(who)["unread"].append(where)
+        elif who == "":
+            loose.append(where)
+
+    for n, ln in enumerate(text.splitlines(), 1):
+        s, where = ln.strip(), f"line {n}"
+        if inside:  # in a multi-line string: its lines belong to the key that opened it
+            unread(inside[1], where, s)
+            end = _string_end(s, inside[0], 0)
+            if end >= 0:
+                inside = None
+                if any(d in s[end:] for d in _DELIMS):
+                    loose.append(where)
+                    cur = None
+            continue
+        if not s or s.startswith("#"):
+            continue
+        m = _TOML_PAIR.match(ln)
+        if any(d in s for d in _DELIMS):
+            value = m.group(2) if m else ""
+            d = next((x for x in _DELIMS if value.startswith(x)), None)
+            if not d:  # a delimiter inside another value, or in an array: where the string ends is not plain
+                loose.append(where)
+                cur = None
+                continue
+            who = _toml_owner(None if cur is None else cur + _toml_parts(m.group(1)))
+            unread(who, where, s)
+            end = _string_end(value, d, 3)
+            if end < 0:
+                inside = (d, who)
+            elif any(x in value[end:] for x in _DELIMS):
+                loose.append(where)
+                cur = None
+            continue
+        if s.startswith("["):
+            h = _TOML_HEADER.match(ln)
+            if not h or len(h.group(1)) != len(h.group(3)):
+                loose.append(where)  # a header the reader cannot parse may name the region
+                cur = None
+                continue
+            cur = _toml_parts(h.group(2))
+            who = _toml_owner(cur)
+            if who:
+                srv(who)["raw"].append(s)
+                if h.group(1) == "[[" or "\"" in h.group(2) or "'" in h.group(2):
+                    srv(who)["unread"].append(where)
+                table = srv(who)["table"]
+                for part in cur[2:]:  # a sub-table exists once its header does, as TOML reads it
+                    table = table.setdefault(part, {}) if isinstance(table, dict) else None
+            elif who == "" and h.group(1) == "[[":
+                loose.append(where)
+            continue
+        if not m or cur is None:  # a value's continuation, or a line the reader does not know
+            unread(_toml_owner(cur), where, s)
+            continue
+        key = _toml_parts(m.group(1))
+        who = _toml_owner(cur + key)
+        if not who:
+            if who == "":
+                loose.append(where)  # `mcp_servers = {…}`: an inline table of servers
+            continue
+        entry = srv(who)
+        entry["raw"].append(s)
+        value = _toml_value(m.group(2))
+        table = entry["table"]
+        for part in cur[2:]:
+            table = table.setdefault(part, {}) if isinstance(table, dict) else None
+        if len(cur) < 2 or len(key) != 1 or not re.fullmatch(r"[A-Za-z0-9_-]+", m.group(1).strip()) \
+                or value is _UNREAD or not isinstance(table, dict):
+            entry["unread"].append(where)
+            continue
+        table[key[0]] = value
+    _toml_check(text, servers, loose)
+    return servers, loose
+
+
+def _toml_check(text: str, servers: dict, loose: list):
+    """On Python 3.11+, tomllib's reading of the region must match the line reader's (N5)."""
+    try:
+        import tomllib
+    except ImportError:  # Python 3.9 and 3.10: the line reader alone, which fails closed
+        return
+    try:
+        real = tomllib.loads(text).get("mcp_servers", {})
+    except tomllib.TOMLDecodeError:
+        loose.append("the file is not valid TOML")
+        return
+    if not isinstance(real, dict):
+        loose.append("mcp_servers is no table")
+        return
+    for name in set(real) - set(servers):
+        loose.append(f"a server only TOML sees ({len(name)} characters)")
+    for name, entry in servers.items():
+        if not entry["unread"] and real.get(name) != entry["table"]:
+            entry["unread"].append("TOML reads it differently")
+
+
 def _args_version(args) -> str:
     for a in args or []:
         m = NPM_EXACT.match(str(a)) or PYPI_EXACT.match(str(a))
@@ -341,9 +513,10 @@ def observe(h: Homes = None) -> dict:
         out[f"mcp:claude:{name}"] = {"installed": True, "version": _args_version(spec.get("args")),
                                      "url": spec.get("url") or "", "command": str(spec.get("command") or "")}
     try:
-        toml = _toml_sections((h.codex / "config.toml").read_text())
-    except OSError:
-        toml = {}
+        text = (h.codex / "config.toml").read_text()
+    except (OSError, UnicodeDecodeError):
+        text = ""
+    toml = _toml_sections(text)
     cache = h.codex / "plugins" / "cache"
     if cache.is_dir():
         for market in sorted(p for p in cache.iterdir() if p.is_dir()):
@@ -355,22 +528,30 @@ def observe(h: Homes = None) -> dict:
                 flag = (toml.get(f'plugins."{pid}"') or {}).get("enabled")
                 o = {"installed": True, "version": versions[-1], "sha": "", "path": str(plug / versions[-1]),
                      "enabled": None if flag is None else flag == "true"}
-                if market.name == RUNTIME or (market.name == BUNDLED and _bundled(h.apps, plug.name)):
-                    o["app"] = "runtime" if market.name == RUNTIME else "bundle"  # F2
+                if market.name == RUNTIME:
+                    o["app"] = "record"  # F2: the app downloads it, so only dev install's record vouches for it
+                elif market.name == BUNDLED and _bundled(h.apps, plug.name):
+                    # N6: the app copies its bundled plugin into the cache, so a copy of the bundle's files vouches
+                    # for itself; one the app rewrote, or anyone changed, only once dev install recorded it
+                    o["app"] = "bundle" if _bundle_copy(h.apps, plug.name, plug / versions[-1]) else "record"
                 out[plugin_id("codex", pid)] = o
-    for sec, kv in toml.items():
-        if sec.startswith("mcp_servers.") and sec.count(".") == 1:
-            try:
-                args = json.loads(kv.get("args", "[]"))
-            except ValueError:
-                args = []
-            cmd = kv.get("command", "").strip('"')
-            o = {"installed": True, "version": _args_version(args), "url": kv.get("url", "").strip('"'),
-                 "command": cmd, "spec": _toml_table_digest(toml, sec)}
-            env = set(toml.get(f"{sec}.env") or {}) | set(re.findall(r"([A-Za-z_]\w*)\s*=", kv.get("env", "")))
-            if _app_server(cmd, env, h.apps):
-                o["app"] = "bundle"  # F2
-            out[f"mcp:codex:{sec.split('.', 1)[1]}"] = o
+    servers, loose = codex_mcp_servers(text)
+    for name, entry in servers.items():
+        tbl = entry["table"]
+        args = tbl.get("args") if isinstance(tbl.get("args"), list) else []
+        cmd = tbl.get("command") if isinstance(tbl.get("command"), str) else ""
+        url = tbl.get("url") if isinstance(tbl.get("url"), str) else ""
+        o = {"installed": True, "version": _args_version(args), "url": url, "command": cmd,
+             "spec": "sha256:" + hashlib.sha256("\n".join(entry["raw"]).encode()).hexdigest()}
+        env = tbl.get("env") if isinstance(tbl.get("env"), dict) else {}
+        passed = tbl.get("env_vars") if isinstance(tbl.get("env_vars"), list) else []  # taken from Codex's own
+        if entry["unread"]:
+            o["unread"] = entry["unread"][0]
+        elif not loose and _app_server(cmd, set(env) | {str(v) for v in passed}, h.apps):
+            o["app"] = "record"  # N4: only dev install's record of its table vouches for it
+        out[f"mcp:codex:{name}"] = o
+    if loose:  # N5: a line no server owns could change any of them, so none is the app's, and the file is drift
+        out[CONFIG_ROW] = {"installed": True, "version": "", "url": "", "command": "", "unread": loose[0]}
     skill_homes = (("claude", h.claude / "skills"), ("codex", h.agents_skills))
     if h.skills_share.is_dir():
         for d in sorted(p for p in h.skills_share.iterdir() if p.is_dir()):
@@ -453,12 +634,15 @@ def _row(e: Ext, layer: str = None) -> dict:
 
 
 # What ships with the Codex app (H1, F2), listed with layer `agent`. Agents can write Codex's plugin cache and its
-# config.toml, so a folder name or a path prefix proves nothing; observe() marks an entry `app` only when the app
-# vouches for it: `bundle` for a plugin of its bundled marketplace that the app bundle holds, and for an MCP server
-# that runs from the bundle's Resources and is no interpreter; `runtime` for a plugin of its runtime marketplace, which
-# the app downloads, so only `dev install`'s record of it vouches for it. `dev install` records all of them (version,
-# file digest; an MCP server's whole table), so a change after it is drift. Claude Code ships none.
+# config.toml, so a folder name, a path prefix or a program's place in the bundle proves nothing. observe() marks an
+# entry `app` when the app may vouch for it: `bundle` for a cached plugin of its bundled marketplace whose files are
+# all byte-equal to the bundle's (N6), which needs nothing more; `record` for a plugin of its runtime marketplace,
+# a bundled plugin the app rewrote, and an MCP server that runs from the bundle's Resources with no interpreter and no
+# environment that loads other code: those count as the app's only once `dev install` recorded them (N4), and it names
+# each the first time. The record holds a version and file digest, or a server's raw text, so a later change is drift.
+# A server written in a form the reader does not read is never the app's (N5). Claude Code ships none.
 BUNDLED, RUNTIME = "openai-bundled", "openai-primary-runtime"
+CONFIG_ROW = "mcp:codex:(config.toml)"  # N5: what no server owns in config.toml's mcp_servers region
 # programs that run whatever code their arguments, input or environment name: never the app's own server
 APP_INTERPRETERS = re.compile(r"^(?:node(?:js)?[\d.]*|bun|deno|python[\d.]*w?|ruby|perl[\d.]*|php|lua|osascript|env|"
                               r"corepack|npx|npm|pnpm|yarn|uvx?|codex|claude|(?:ba|z|da|k|c|tc|fi)?sh)$", re.I)
@@ -467,10 +651,44 @@ OUTSIDE_DETAIL = {"plugin": "installed, but not in devkit's catalog: dev ext add
                   "skill": "a skill folder devkit did not put there: dev ext add it, or remove the folder"}
 
 
+def _bundle_dirs(apps, name: str) -> list:
+    if name in ("", ".", "..") or "/" in name:
+        return []
+    dirs = (Path(app) / "Contents" / "Resources" / "plugins" / BUNDLED / "plugins" / name for app in apps)
+    return [d for d in dirs if d.is_dir()]
+
+
 def _bundled(apps, name: str) -> bool:
     """The app bundle itself holds the bundled marketplace's plugin `name` (F2)."""
-    return name not in ("", ".", "..") and "/" not in name and any(
-        (Path(app) / "Contents" / "Resources" / "plugins" / BUNDLED / "plugins" / name).is_dir() for app in apps)
+    return bool(_bundle_dirs(apps, name))
+
+
+def _bundle_copy(apps, name: str, path) -> bool:
+    """N6: the cached plugin at `path` is a copy of the bundle's plugin `name`: it holds at least one file, every
+    entry in it is a regular file (no link), and each is byte-equal to the bundle's file at the same path (the app
+    copies a subset). Sizes first, so a changed file costs no read."""
+    root = Path(path)
+    files = []
+    for dp, dns, fns in os.walk(root):
+        for d in dns:
+            if Path(dp, d).is_symlink():
+                return False
+        for f in fns:
+            p = Path(dp, f)
+            if p.is_symlink() or not p.is_file():
+                return False
+            files.append(p.relative_to(root))
+    if not files:
+        return False
+    for src in _bundle_dirs(apps, name):
+        pairs = [(root / rel, src / rel) for rel in files]
+        try:
+            if all(b.is_file() and a.stat().st_size == b.stat().st_size for a, b in pairs) and \
+                    all(a.read_bytes() == b.read_bytes() for a, b in pairs):
+                return True
+        except OSError:
+            continue
+    return False
 
 
 def _app_server(cmd: str, env_keys, apps) -> bool:
@@ -486,12 +704,6 @@ def _app_server(cmd: str, env_keys, apps) -> bool:
         return False
     return os.path.isfile(real) and any(
         real.startswith(os.path.realpath(Path(app) / "Contents" / "Resources") + os.sep) for app in apps)
-
-
-def _toml_table_digest(toml: dict, sec: str) -> str:
-    """sha256 of a TOML table and its sub-tables (an MCP server: command, args, env, tools…), raw values."""
-    parts = sorted((s, sorted(kv.items())) for s, kv in toml.items() if s == sec or s.startswith(sec + "."))
-    return "sha256:" + hashlib.sha256(json.dumps(parts).encode()).hexdigest()
 
 
 def _app_drift(o: dict, lk: dict) -> list:
@@ -552,6 +764,8 @@ def status(cat: list, observed: dict, lock: dict = None, project: dict = None, r
                                                        "links it again"})
         if installed and e.kind == "mcp" and e.pin_kind == "version" and o.get("version") and o["version"] != e.pin:
             drift.append({"kind": "pin", "detail": f"{o['version']} installed, {e.pin} pinned"})
+        if installed and o.get("unread"):  # N5: devkit cannot tell what runs
+            drift.append({"kind": "changed", "detail": UNREAD_DETAIL.format(where=o["unread"])})
         if installed and e.pin_kind == "observed" and lk:
             if (lk.get("version"), lk.get("sha") or r["sha"]) != (r["version"], r["sha"]):
                 drift.append({"kind": "changed", "detail": f"{_vs(lk)} → {_vs(r)} outside devkit",
@@ -595,13 +809,13 @@ def status(cat: list, observed: dict, lock: dict = None, project: dict = None, r
         if kind not in OUTSIDE_DETAIL or (kind == "skill" and not o.get("unmanaged")):
             continue  # a managed skill of a group this Mac does not install: the skills step's business
         app, lk = (o.get("app") if agent == "codex" else ""), lock.get(rid)
-        if app == "bundle" or (app == "runtime" and lk):  # F2: what the app or dev install's record vouches for
+        if app == "bundle" or (app and lk):  # F2, N4: what the bundle's own files or dev install's record vouch for
             rows.append(_extra_row(rid, "agent", f"ships with the {agent} app", STATE_WORD[kind], o,
                                    o.get("enabled") is not False, _app_drift(o, lk)))
         else:
+            detail = UNREAD_DETAIL.format(where=o["unread"]) if o.get("unread") else OUTSIDE_DETAIL[kind]
             rows.append(_extra_row(rid, "outside", "installed outside devkit", STATE_WORD[kind], o,
-                                   o.get("enabled") is not False,
-                                   [{"kind": "not-in-catalog", "detail": OUTSIDE_DETAIL[kind]}]))
+                                   o.get("enabled") is not False, [{"kind": "not-in-catalog", "detail": detail}]))
         listed.add(rid)
     for pid, v in sorted(project.items()):
         rid = plugin_id("claude", pid)
