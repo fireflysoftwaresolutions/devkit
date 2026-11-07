@@ -40,10 +40,11 @@ Not released yet: the date is set when the release is tagged.
 ### Fixed
 
 - **Crew members can run `impeccable context`.** The guard read the launcher as a script that runs a program named
-  only at run time and refused it in every crew lane. It now trusts the launcher devkit installed, run by its own path
-  (not a symbolic link to it, a copy, or a path through `..`, which would run the engine beside that path), while its
-  content and engine match the install record; read-only lanes run only `context`, `detect` on local paths (not a URL,
-  a host and port, or a domain), and `doctor`, with their reading flags.
+  only at run time and refused it in every crew lane. It now trusts the launcher devkit installed, run by an absolute
+  or `~/` path to it (not a relative path, a path with a quoted `~`, a symbolic link to it or to its `scripts` folder,
+  a copy, or a path through `..`, which could run another engine or read another skill folder), while its content and
+  engine match the install record; read-only lanes run only `context`, `detect` on local paths (not a URL, a host and
+  port, or a domain), and `doctor`, with their reading flags.
 
 ## [26.11.3] - Unreleased
 

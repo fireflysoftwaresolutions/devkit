@@ -3561,11 +3561,14 @@ def _ro_dev(args) -> str | None:
 #
 # The impeccable skill's launcher (a sh script) runs the engine binary beside it. Read as a script, its `exec "$bin"`
 # and `"$1" engine-probe` name their program at run time, which the gate counts as tier 2, so every lane was refused.
-# The launcher devkit installed is that engine: run by its own path (not a link to it nor a path through `..`, which
-# make it run the engine beside that path; the Code reviewer's review of 11fd55e), with the content and the engine
-# the skills step recorded (setup.install_impeccable_engine, STATE/skill-engines.json, where agents may not write), it
-# is not read as a script. A command that sets or exports a variable (IMPECCABLE_BIN picks the engine; PATH and HOME
-# change what it runs), or a session with IMPECCABLE_BIN, gives it no trust (Security engineer, M486). Read-only
+# The launcher devkit installed is that engine: run by an absolute or `~/` path to it (not a path relative to the
+# shell's folder, which the guard cannot know after `cd <link>/..`, nor a link to it, a link to its scripts folder or
+# a path through `..`, which make it run the engine or read the skill files beside that path; the Code reviewer's
+# reviews of 11fd55e and 452dd51), with the content and the engine the skills step recorded
+# (setup.install_impeccable_engine, STATE/skill-engines.json, where agents may not write), it is not read as a script.
+# A command that sets or exports a variable (IMPECCABLE_BIN picks the engine; PATH and HOME change what it runs), or a
+# session with IMPECCABLE_BIN, gives it no trust (Security engineer, M486); so does a command with a quoted or escaped
+# `~` at a word's start, a folder named ~ to the shell but the home folder to the guard's words (M542). Read-only
 # lanes run only its read verbs with their reading flags (the skill's reference: context loads PRODUCT.md and
 # DESIGN.md, detect scans local HTML and CSS, not a URL or anything that could pass for a host, doctor without --fix
 # reports); init, document, extract, live, generate and the rest write files or start a session and stay with write
@@ -3582,16 +3585,27 @@ _ENV_SETTERS = frozenset({"export", "declare", "typeset", "readonly", "local", "
                           "eval", "alias"})
 # a first path part detect could take for a host: localhost, or dotted names and addresses (example.com, 10.0.0.2)
 _HOSTLIKE = re.compile(r"(?:localhost|[A-Za-z0-9_-]+(?:\.[A-Za-z0-9_-]+)+)(?:/|$)", re.I)
+# a `~` at a word's start that the shell does not expand: quoted, escaped or after empty quotes ("~/x", '~'/x, \~/x,
+# ""~/x, and the same inside a quoted inner command). The shell reads that word as a path below its own folder (a
+# folder named ~), the guard's words, which drop the quotes, as one below the home folder; so the launcher's trust
+# needs a bare `~/` (found with finding A of the Code reviewer's review of 452dd51; M542).
+_QUOTED_TILDE = re.compile(r"(?:^|[\s;&|()<>`])[\"'\\]+~")
 _ENGINE_SEEN = {}  # engine path -> the (dev, inode, size, mtime, ctime) whose content matched the digest, this process
 
 
 def impeccable_verb(argv, cwd) -> str | None:
     """The verb (its first argument, '' for none) when `argv` runs the impeccable launcher devkit installed: its path
-    resolves to the recorded launcher below devkit's skills folder, is not a link and has no `..`, and its folder is
-    the launcher's (through a link to a folder at most), the launcher has the recorded SHA-256, the engine
-    beside it for this platform is the recorded file (the same (dev, inode, size, mtime, ctime), else the same
-    SHA-256), and the session sets no IMPECCABLE_BIN. None otherwise."""
-    if not argv or os.path.basename(str(argv[0])) != "impeccable" or "/" not in str(argv[0]) or \
+    is absolute or starts with `~/`, resolves to the recorded launcher below devkit's skills folder, is not a link and
+    has no `..`, its folder is the launcher's and the folder above that is the launcher's skill folder (through links
+    to folders at most), the launcher has the recorded SHA-256, the engine beside it for this platform is the recorded
+    file (the same (dev, inode, size, mtime, ctime), else the same SHA-256), and the session sets no IMPECCABLE_BIN.
+    None otherwise."""
+    # Only a path that does not depend on the shell's folder: the shell's `cd` takes `..` by name (and follows a
+    # CDPATH from the developer's profile), so after `cd <d>/up/..` or `cd <d>/up && cd ..` with `up` a link into the
+    # skill, the shell is in <d> while `cwd` is the real folder the link names, and a relative `./impeccable` would
+    # run <d>'s own file (the Code reviewer's review of 452dd51).
+    typed = str(argv[0]) if argv else ""
+    if not (typed.startswith("/") or typed.startswith("~/")) or os.path.basename(typed) != "impeccable" or \
             os.environ.get("IMPECCABLE_BIN"):
         return None
     import hashlib
@@ -3604,14 +3618,18 @@ def impeccable_verb(argv, cwd) -> str | None:
                 not launcher.startswith(real(str(SKILLS_SHARE)) + os.sep):
             return None
         # The launcher runs the engine below the folder it finds with `cd "$(dirname "$0")"`: the folder of the path
-        # it was run by, not of the file a link points to, with `..` taken by name from the shell's own path. So the
-        # path must not be a link nor go through `..`, and its folder must be the launcher's (a link to that folder,
-        # such as ~/.claude/skills/impeccable, still reaches it); else it runs whatever engine sits beside the path.
-        typed = os.path.expanduser(str(argv[0]))
-        if ".." in typed.split("/"):
+        # it was run by, not of the file a link points to, with `..` taken by name from the shell's own path, and
+        # sets IMPECCABLE_SKILL_DIR, where the engine reads reference/*.md and command-metadata.json, from that
+        # folder's `..` by name. So the path must not be a link nor go through `..`, its folder must be the
+        # launcher's and the folder above it the launcher's skill folder (a link to the skill folder, such as
+        # ~/.claude/skills/impeccable, still reaches both; a link to the scripts folder does not); else it runs
+        # whatever engine, or reads whatever skill files, sit beside the path.
+        at = os.path.expanduser(typed)
+        if ".." in at.split("/"):
             return None
-        at = os.path.normpath(os.path.join(str(cwd), typed))
-        if os.path.islink(at) or real(os.path.dirname(at)) != os.path.dirname(launcher):
+        at = os.path.normpath(at)
+        if os.path.islink(at) or real(os.path.dirname(at)) != os.path.dirname(launcher) or \
+                real(os.path.dirname(os.path.dirname(at))) != os.path.dirname(os.path.dirname(launcher)):
             return None
         if hashlib.sha256(Path(launcher).read_bytes()).hexdigest() != rec.get("launcher_sha256"):
             return None
@@ -3662,10 +3680,11 @@ def _impeccable_overridden(cmd, cwd):
     """The words of the installed impeccable launcher in a command that also sets or exports a variable at any level
     (a prefix, env, export, declare, typeset, readonly, local, set, unset, source, eval): the launcher picks its engine
     with IMPECCABLE_BIN and runs uname and dirname from PATH, so what such a run starts is only known when it runs.
-    None otherwise."""
+    The same for a command with a quoted or escaped `~` at a word's start (_QUOTED_TILDE): the guard's words name the
+    launcher where the shell may run a file below its own folder. None otherwise."""
     if "impeccable" not in str(cmd or ""):
         return None
-    runs, sets = None, False
+    runs, sets = None, bool(_QUOTED_TILDE.search(str(cmd)))
     for argv0, here, _ in _walk_segments(cmd, cwd) or []:
         argv = _unwrap(argv0)
         pre = argv0[:len(argv0) - len(argv)]
@@ -3807,6 +3826,11 @@ def readonly_refusal(cmd: str, cwd, member=None) -> str | None:
     if segs is None:
         return READONLY_REASON.format(what="the guard cannot parse this command, so it cannot tell what it writes")
     here = str(cwd or os.getcwd())
+    if _QUOTED_TILDE.search(cmd) and _impeccable_overridden(cmd, here):
+        return READONLY_REASON.format(what="a quoted or escaped `~` is a folder named ~ in the shell's own folder, not "
+                                           "your home folder, so this may run another file than the impeccable "
+                                           "launcher. Type the launcher with a bare `~`: "
+                                           "`~/.claude/skills/impeccable/scripts/impeccable`")
     for argv0, redirs in segs:
         argv0, extra = list(argv0), []
         while any(t in (">|", ">>|") for t in argv0):  # `>|` reaches argv as a token; its target follows it

@@ -193,9 +193,10 @@ Claude Code sessions set `IMPECCABLE_NO_UPDATE_CHECK=1`, so the engine does not 
 version; devkit moves impeccable by its pinned commit instead (below).
 
 Crew members on Claude Code run the launcher too. Read as a script, it would run a program named only at run time,
-which the [guard](guard.md) refuses to crew members. The guard therefore trusts the installed launcher, run by its
-own path in `~/.local/share/devkit/skills/impeccable/scripts`, or through the `~/.claude/skills/impeccable` link to
-that skill folder, while its content and its engine match what the skills step recorded:
+which the [guard](guard.md) refuses to crew members. The guard therefore trusts only an absolute or `~/` path to the
+installed launcher, `~/.local/share/devkit/skills/impeccable/scripts/impeccable` or
+`~/.claude/skills/impeccable/scripts/impeccable` through the link to that skill folder, while its content and its
+engine match what the skills step recorded:
 
 - **Write lanes** run every verb.
 - **Read-only lanes** run only the verbs that read the project, with their reading flags: `context` (with
@@ -208,10 +209,13 @@ that skill folder, while its content and its engine match what the skills step r
   `localhost`, a dotted name such as `example.com`, or an address such as `10.0.0.2`. A file in the project's top
   folder with a dotted name counts too, so write it as a path: `detect ./index.html`.
 - **No trust** in these cases: the launcher or its engine changed; the path is a copy of the launcher, a symbolic
-  link to it, or a path through `..` (the launcher runs the engine beside the path it was run by, so each of these
-  would run another engine); the command sets or exports any variable (`IMPECCABLE_BIN`, `PATH`, `HOME`, and the rest
-  change what it runs); or the session sets `IMPECCABLE_BIN`. The guard then reads the launcher as a script again and
-  refuses it to crew members.
+  link to it or to its `scripts` folder, or a path through `..` (the launcher runs the engine and reads the skill's
+  files beside the path it was run by, so each of these would run another engine); the path is relative, such as
+  `./impeccable` (after `cd` through a link and `..`, the shell may be in another folder than the guard can tell);
+  the path starts with a quoted or escaped `~`, such as `"~/…"` (the shell reads it as a folder named `~` in its own
+  folder); the command sets or exports any variable (`IMPECCABLE_BIN`, `PATH`, `HOME`, and the rest change what it
+  runs); or the session sets `IMPECCABLE_BIN`. The guard then reads the launcher as a script again and refuses it to
+  crew members.
 - **Codex crew lanes** cannot run the launcher yet: the guard trusts only the copy devkit installs for Claude Code,
   not the one in Codex's impeccable plugin. Codex members read PRODUCT.md and DESIGN.md instead.
 
