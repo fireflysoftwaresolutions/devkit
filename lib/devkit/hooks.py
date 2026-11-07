@@ -1353,8 +1353,11 @@ def _stub_commit_gate(data: dict):
 
 def _crew_limits(agent: str, data: dict):
     """Coordination guardrails -> ("deny", reason) or None:
-    - at most `progress.max_parallel` crew members at once (default 4; 1 while the 5-hour usage is above
-      progress.quota_percent), counting the helpers members launch, and no launch deeper than progress.max_depth;
+    - the crew's slots (progress.launch_verdict): `progress.max_parallel` (default 4) under the team's ceiling,
+      lowered step by step as the plan's 5-hour or weekly usage rises (progress.quota_steps; one at a time from
+      progress.quota_percent), each launch costing its progress.slot_weights (a scout lookup nothing), the helpers
+      members launch included, progress.reserve kept for the developer's own request, and no launch deeper than
+      progress.max_depth;
     - the main session does not edit files a running crew member owns, in this session's run or in another live run
       of the repository (spec F7, G13; DEVKIT_SCOPE_OVERRIDE=1 for an emergency)."""
     from . import guard
