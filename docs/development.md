@@ -54,6 +54,7 @@ lib/devkit/
   docs.py               dev docs check
   diagram.py            dev diagram: layout, routing, rendering and validation
   dashboard.py          the HTML command center
+  web/                  the dashboard page: brand themes, styles, markup, script, and one file per rebuilt section
   dashserver.py         the dashboard as a local, live, read-only server
   desktop.py · mcp.py   the Claude Desktop extension and the MCP server (dev mcp) it runs
   providers.py          Claude Code and Codex status, quota and self-tests
