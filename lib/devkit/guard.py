@@ -1832,6 +1832,40 @@ INSTALL_REASON = ("`dev install` and `dev update` change what every hook, the gu
                   f"installed now. {_TAIL}")
 
 
+TERMINAL_REASON = ("Opening a Terminal or iTerm window, or a .command or .tool file (which macOS runs in one), starts "
+                   "a shell the guard cannot read, with no agent marker, re-parented to launchd and with a terminal: "
+                   "to devkit it looks like the developer's terminal, where `dev install` and `dev ext ack` are "
+                   "theirs (F1-R4, spec C10, K1). Run the command itself through the Bash tool, where the guard reads "
+                   "it, or ask the developer to run it in their terminal. Opening files, folders and URLs in other "
+                   f"apps stays open. {_TAIL}")
+_TERMINAL_APPS = re.compile(r"(?:^|/)(?:terminal|iterm2?|iterm 2|warp|ghostty|alacritty|kitty|wezterm|hyper)"
+                            r"(?:\.app)?/?$|^com\.(?:apple\.terminal|googlecode\.iterm2|mitchellh\.ghostty)$|"
+                            r"^dev\.warp\.", re.I)
+_OPEN_VALUES = frozenset({"-a", "-b", "--env", "--stdin", "--stdout", "--stderr", "-u", "--url", "-s", "--arch"})
+
+
+def terminal_open_refusal(argv) -> bool:
+    """F1-R4 part 2: `open -a Terminal|iTerm …`, `open -b <a terminal's bundle id>`, and `open` of a .command or
+    .tool file (Terminal runs it) start a shell the guard cannot read, which passes set_by_developer()."""
+    if not argv or os.path.basename(str(argv[0])) != "open":
+        return False
+    args, i = [str(a) for a in argv[1:]], 0
+    while i < len(args):
+        a = args[i]
+        if a in ("-a", "-b") or (a.startswith("-") and not a.startswith("--") and a[-1:] in ("a", "b") and len(a) > 2):
+            if i + 1 < len(args) and _TERMINAL_APPS.search(args[i + 1].strip().rstrip("/")):
+                return True
+            i += 2
+            continue
+        if a in _OPEN_VALUES:
+            i += 2
+            continue
+        if not a.startswith("-") and a.casefold().rstrip("/").endswith((".command", ".tool")):
+            return True
+        i += 1
+    return False
+
+
 EXT_REASON = ("This command changes the plugins, skills or MCP servers that run in every session on this Mac: "
               "`dev ext add|remove|enable|disable`, `dev ext update --apply`, or a `claude plugin|mcp` or `codex "
               "plugin|mcp` verb that adds, removes, switches or updates one (spec P-fym583l7sg1, K1), or `dev ext "
@@ -2336,6 +2370,8 @@ class _Shell:
             return deny(why)
         if vendor_ext_refusal(argv, cwd, set(names) | self.exported):
             return deny(EXT_REASON)
+        if terminal_open_refusal(argv):
+            return deny(TERMINAL_REASON)
         if _INTERP.match(name) and _dev_args(argv) is None:
             why = code_session_refusal(argv, cwd, self.bodies)
             if why:
@@ -2486,6 +2522,9 @@ class _Shell:
         names, inner = _env_split(args[i:])
         if not inner:
             return None
+        why = _xargs_dev_refusal(inner)
+        if why:
+            return deny(why)
         name = os.path.basename(inner[0])
         if name not in _READERS:  # it adds paths read from its input, which the guard cannot see
             self.unresolved.append(f"xargs {name}")
@@ -2593,22 +2632,23 @@ def _unwrap(argv):
             while rest and rest[0].startswith("-"):
                 rest = rest[1:]
             argv = rest[1:]
-        elif (n in ("uv", "poetry", "pipenv", "pdm", "hatch", "rye") and argv[1:2] == ["run"]) or \
-                (n == "pnpm" and argv[1:2] in (["exec"], ["dlx"])) or (n == "yarn" and argv[1:2] in (["dlx"], ["exec"])):
-            argv = argv[2:]
-            while argv and argv[0].startswith("-"):
-                argv = argv[1:]
-        elif n in ("npx", "pnpx", "bunx") or (n == "npm" and argv[1:2] in (["exec"], ["x"])) or \
-                (n == "bun" and argv[1:2] == ["x"]):
-            argv = _runner_command(argv[1 if n in ("npx", "pnpx", "bunx") else 2:], calls=n in ("npx", "npm"))
-        elif n == "uvx":
-            argv = argv[1:]
-            while argv and argv[0].startswith("-"):
-                argv = argv[1:]
+        elif n in _PACKAGE_MANAGERS and _pm_runs(n, *_pm_verb(argv[1:])):
+            verb, rest = _pm_verb(argv[1:])
+            argv = _runner_command(rest, calls=n == "npm")
+        elif n in ("npx", "pnpx", "bunx", "uvx"):
+            argv = _runner_command(argv[1:], calls=n == "npx")
         elif n in ("pnpm", "yarn") and agent_cli((_runner_command(argv[1:]) or [""])[0]):
             argv = _runner_command(argv[1:])  # `pnpm claude …` runs the package's bin, or the PATH's
         elif n in _WRAPPERS:
             argv = _wrapped(n, argv[1:])
+        elif n == "screen":
+            argv = _screen_command(argv[1:])
+        elif n == "tmux":
+            argv = _tmux_command(argv[1:])
+        elif argv[0] in _TMUX_RUNS:  # a command after tmux's `\;` or `';'`, which the tokenizer reads as a new segment
+            argv = _tmux_command(argv)
+        elif n == "expect":
+            argv = _expect_command(argv[1:])
         elif n == "yarn" and argv[1:3] == ["workspaces", "foreach"]:  # runs `yarn <command>` in each workspace
             rest, i = argv[3:], 0
             while i < len(rest) and rest[i].startswith("-"):
@@ -2620,10 +2660,33 @@ def _unwrap(argv):
             return argv
 
 
-# options of the package runners that take a value (`npx -p <pkg>`, `npm exec --package <pkg>`, pnpm's `--filter`),
-# so the word after one is no command; a runner's `-c '<line>'` (npx, npm exec) hands the line to a shell
+# options of the package runners that take a value (`npx -p <pkg>`, `npm exec --package <pkg>`, pnpm's `--filter`,
+# uv's `--with <pkg>`), so the word after one is no command; a runner's `-c '<line>'` (npx, npm exec) hands the line to
+# a shell. The package managers' own options before their verb (`npm --prefix . exec`, `uv --directory . run`) are read
+# with the same list (F3-R4).
 _RUNNER_VALUES = frozenset({"-p", "--package", "-w", "--workspace", "--prefix", "--registry", "--cache", "--userconfig",
-                            "--loglevel", "--script-shell", "--filter", "-F", "-C", "--dir", "--cwd"})
+                            "--loglevel", "--script-shell", "--filter", "-F", "-C", "--dir", "--cwd",
+                            "--with", "--python", "--directory", "--project", "--env-file", "--group", "--extra",
+                            "--index", "--with-requirements", "--with-editable", "--from", "--default-index",
+                            "--index-url", "--extra-index-url", "--find-links", "-f", "--cache-dir", "--config-file",
+                            "--package", "-P", "--only-group", "--no-group", "--python-preference", "--color"})
+_PACKAGE_MANAGERS = frozenset({"npm", "pnpm", "yarn", "bun", "uv", "poetry", "pipenv", "pdm", "hatch", "rye"})
+
+
+def _pm_verb(args) -> tuple:
+    """A package manager's verb and the words after it, past its own options and their values (_RUNNER_VALUES):
+    `npm --silent exec -- x` -> ("exec", ["--", "x"])."""
+    i = 0
+    while i < len(args) and args[i].startswith("-") and args[i] != "--":
+        i += 2 if args[i] in _RUNNER_VALUES else 1
+    return (args[i] if i < len(args) else ""), list(args[i + 1:])
+
+
+def _pm_runs(n: str, verb: str, rest) -> bool:
+    """True when this package manager's verb runs the command after it (npm exec|x, pnpm exec|dlx, yarn exec|dlx,
+    bun x, uv|poetry|pipenv|pdm|hatch|rye run)."""
+    return verb in {"npm": ("exec", "x"), "pnpm": ("exec", "dlx"), "yarn": ("exec", "dlx"), "bun": ("x",)}.get(
+        n, ("run",))
 
 
 def _runner_command(args, calls=False) -> list:
@@ -2687,6 +2750,108 @@ def _wrapped(n, args):
     return rest
 
 
+# F1-R4 part 2: screen, tmux and expect start a command in a terminal of their own, which is re-parented to launchd
+# and has a pty, so it passes set_by_developer(); the guard reads what each one runs, as a shell line where the tool
+# hands it to one
+_SCREEN_VALUES = frozenset({"-c", "-e", "-h", "-p", "-S", "-t", "-T", "-s", "-Logfile"})
+_SCREEN_EOL = re.compile(r"\^[MJ]|\\[nr]")
+
+
+def _screen_command(args) -> list:
+    """What `screen [options] [command …]` runs: the command after its options; with `-X`, the screen command it
+    sends to a session (`stuff '<keys>'` types a line, `exec|screen <command>` starts one). [] when it runs none."""
+    i = 0
+    while i < len(args) and args[i].startswith("-") and args[i] != "-":
+        a = args[i]
+        if a == "--":
+            i += 1
+            break
+        if a == "-X" or (a.startswith("-") and not a.startswith("--") and a.endswith("X")):
+            sent = args[i + 1:]
+            verb, rest = (sent[0] if sent else ""), sent[1:]
+            if verb == "stuff":  # screen reads ^M, ^J, \n and \r in the text as the end of a line
+                return ["sh", "-c", _SCREEN_EOL.sub("\n", " ".join(rest))] if rest else []
+            if verb == "exec":  # exec [fdpat] command …: the fd pattern is made of `.`, `!` and `|`
+                return rest[1:] if rest and set(rest[0]) <= set(".!|") else rest
+            return _screen_command(rest) if verb == "screen" else []
+        last = a[-1:] if not a.startswith("--") else ""
+        i += 2 if a in _SCREEN_VALUES or ("-" + last) in _SCREEN_VALUES and len(a) > 2 and a != "-ls" else 1
+    return list(args[i:])
+
+
+_TMUX_GLOBAL_VALUES = frozenset({"-f", "-L", "-S", "-T"})
+_TMUX_RUNS = {  # a tmux command that runs a shell command or types keys -> its options that take a value
+    "new-session": {"-c", "-e", "-F", "-f", "-n", "-s", "-t", "-x", "-y"}, "new": None,
+    "new-window": {"-c", "-e", "-F", "-n", "-t"}, "neww": None,
+    "split-window": {"-c", "-e", "-F", "-l", "-p", "-t"}, "splitw": None,
+    "respawn-pane": {"-c", "-e", "-t"}, "respawnp": None, "respawn-window": {"-c", "-e", "-t"}, "respawnw": None,
+    "run-shell": {"-c", "-d", "-t"}, "run": None, "send-keys": {"-N", "-t"}, "send": None,
+    "pipe-pane": {"-t"}, "pipep": None, "display-popup": {"-c", "-d", "-e", "-h", "-s", "-S", "-t", "-T", "-w", "-x",
+                                                          "-y", "-b"}, "popup": None,
+}
+for _short, _long in (("new", "new-session"), ("neww", "new-window"), ("splitw", "split-window"),
+                      ("respawnp", "respawn-pane"), ("respawnw", "respawn-window"), ("run", "run-shell"),
+                      ("send", "send-keys"), ("pipep", "pipe-pane"), ("popup", "display-popup")):
+    _TMUX_RUNS[_short] = _TMUX_RUNS[_long]
+_TMUX_KEYS = re.compile(r"^(?:Enter|C-[mjM]|KPEnter|Escape|Space|Tab|BSpace)$")
+
+
+def _tmux_command(args) -> list:
+    """What a tmux call runs, as `sh -c <line>`: the shell command of new-session, new-window, split-window,
+    respawn-*, run-shell, pipe-pane and display-popup, and the words send-keys types, for each command of a `;`
+    list; `tmux -c <line>` runs the line in a shell too. [] when it runs none (`tmux ls`, `tmux attach`)."""
+    i, lines = 0, []
+    while i < len(args) and args[i].startswith("-") and args[i] != "--":
+        a = args[i]
+        if a == "-c" and i + 1 < len(args):
+            return ["sh", "-c", args[i + 1]]
+        i += 2 if a in _TMUX_GLOBAL_VALUES else 1
+    rest, cmds, cur = args[i + (1 if args[i:i + 1] == ["--"] else 0):], [], []
+    for w in rest:
+        if w in (";", "\\;"):
+            cmds.append(cur)
+            cur = []
+        elif w.endswith("\\;") or (w.endswith(";") and len(w) > 1):
+            cur.append(w.rstrip(";").rstrip("\\"))
+            cmds.append(cur)
+            cur = []
+        else:
+            cur.append(w)
+    cmds.append(cur)
+    for cmd in cmds:
+        if not cmd or cmd[0] not in _TMUX_RUNS:
+            continue
+        takes, k = _TMUX_RUNS[cmd[0]], 1
+        while k < len(cmd) and cmd[k].startswith("-") and cmd[k] != "--":
+            k += 2 if cmd[k] in takes or (cmd[k][-1:] and "-" + cmd[k][-1] in takes and len(cmd[k]) > 2) else 1
+        words = cmd[k + (1 if cmd[k:k + 1] == ["--"] else 0):]
+        if cmd[0] in ("send-keys", "send"):
+            words = [w for w in words if not _TMUX_KEYS.match(w)]
+        if words:
+            lines.append(" ".join(words))
+    return ["sh", "-c", "; ".join(lines)] if lines else []
+
+
+_EXPECT_RUN = re.compile(r"(?:^|[;\n\[{]|\bthen\b)\s*(?:spawn|exec|system)\s+([^;\n\]}]*)")
+_EXPECT_SPAWN_OPTS = frozenset({"-noecho", "-console", "-nottycopy", "-nottyinit", "-pty", "-ignore", "-open",
+                                "-leaveopen"})
+
+
+def _expect_command(args) -> list:
+    """What `expect -c '<script>'` runs, as `sh -c <lines>`: each `spawn`, `exec` and `system` command of the script
+    (Tcl words read as shell words, past spawn's own options). [] when it runs none the guard can see."""
+    scripts = [args[k + 1] for k, a in enumerate(args[:-1]) if a == "-c"]
+    lines = []
+    for script in scripts:
+        for m in _EXPECT_RUN.finditer(script):
+            words = m.group(1).replace("{", " ").replace("}", " ").split()
+            while words and words[0] in _EXPECT_SPAWN_OPTS:
+                words = words[2:] if words[0] in ("-ignore", "-open", "-leaveopen") else words[1:]
+            if words:
+                lines.append(" ".join(words))
+    return ["sh", "-c", "; ".join(lines)] if lines else []
+
+
 _PY_FLAGS = frozenset("uIBEsSOqbdvxRP")  # python's own flags without a value; -W and -X take one
 
 
@@ -2710,6 +2875,19 @@ def _dev_args(argv):
             return _dev_command(argv[i + 1:])
         if argv[i:i + 2] in (["-m", "devkit"], ["-m", "devkit.cli"]):
             return _dev_command(argv[i + 2:])
+    return None
+
+
+def _xargs_dev_refusal(inner) -> str | None:
+    """F1-R4 part 2: xargs adds the words it reads from its input, so `xargs dev` (or `xargs dev ext`) may run
+    `dev install` or `dev ext ack`; like `xargs claude`, a dev call whose command comes from the input is refused."""
+    dargs = _dev_args(list(inner))
+    if dargs is None:
+        return None
+    if not dargs:
+        return INSTALL_REASON
+    if dargs == ["ext"]:
+        return EXT_REASON
     return None
 
 
@@ -3236,8 +3414,10 @@ _DEV_IN_CODE = re.compile(r"(?<![\w.-])dev[\s'\",\[\]]{1,6}(progress|crew)\b(?:[
 _SPAWNS = re.compile(
     r"\bsubprocess\b|\bos\.(?:system|popen|exec\w*|spawn\w*|posix_spawn\w*)\b|\bpty\.spawn\b|\bchild_process\b|"
     r"\b(?:execSync|spawnSync|execFile\w*|spawn|exec|system|popen|proc_open|shell_exec|passthru)\s*\(|"
-    r"\bIO\.popen\b|\bOpen3\b|\bProcess\.(?:spawn|exec)\b|\bdo shell script\b|\bDeno\.(?:run|Command)\b|"
-    r"\bBun\.(?:spawn|\$)")
+    r"\bIO\.popen\b|\bOpen3\b|\bProcess\.(?:spawn|exec)\b|\bDeno\.(?:run|Command)\b|\bBun\.(?:spawn|\$)|"
+    # AppleScript: do shell script runs a line; Terminal's do script, iTerm's write text and keystroke type one into
+    # a terminal (F1-R4 part 2)
+    r"\bdo (?:shell )?script\b|\bwrite text\b|\bkeystroke\b")
 _SPAWNS_QUOTED = re.compile(r"`[^`]*`|\bqx\b|%x[\[{(]")  # backticks run a command in perl, ruby and php only
 LANE_REASON = ("Run `dev progress …` and `dev crew …` as a command of its own (no `&&`, `;`, pipes, `$(…)`, `bash -c`, "
                "`env` or `timeout` around it), so devkit can route it to your lane; anywhere else it would act as "
@@ -5361,6 +5541,12 @@ def code_session_refusal(argv, cwd, bodies, depth: int = 0) -> str | None:
             helps = dargs is not None and _dev_skips(dargs[1:], "-h", "--help")
             if vendor_ext_refusal(inner, cwd) or (dargs is not None and _ext_refusal(dargs) and not helps):
                 return EXT_REASON
+            if terminal_open_refusal(inner):
+                return TERMINAL_REASON
+            if os.path.basename(inner[0]) == "xargs":
+                why = _xargs_dev_refusal(_unwrap(_xargs_command(inner[1:])))
+                if why:
+                    return why
             if dargs is not None and dargs[:1] in (["install"], ["update"]) and not helps and \
                     not _update_check(dargs):  # F1 (re-review four): as the shell form is (_Shell.dev)
                 return INSTALL_REASON

@@ -296,7 +296,94 @@ class PackageRunnersRunTheirCommand(unittest.TestCase):
         for cmd in ("npm exec -- eslint .", "npm exec --yes -- prettier --check .", "npx tsc --noEmit",
                     "npm x -- vitest run", "bun x tsc --noEmit", "yarn exec jest", "pnpm test", "pnpm lint",
                     "pnpm install --frozen-lockfile", "yarn add -D vitest", "npm exec -- claude plugin list",
-                    "pnpm claude mcp list", "yarn claude --version", "uv run pytest -q", "timeout 600 git status"):
+                    "pnpm claude mcp list", "yarn claude --version", "uv run pytest -q", "timeout 600 git status",
+                    "npm --silent exec -- eslint .", "pnpm -C web exec vitest run", "pnpm --filter web test",
+                    "uv run --with pytest pytest -q", "uv --quiet run ruff check .", "poetry run -C . pytest",
+                    "uvx --from ruff==0.6.0 ruff check .", "bun --silent x tsc --noEmit"):
+            with self.subTest(cmd=cmd):
+                self.assertIsNone(self.check(cmd))
+
+    # F3-R4: a package manager's own options come before its verb, and some take a value; uv run, poetry run and uvx
+    # skip their options' values like the other runners
+    GLOBAL_FORMS = ("npm --silent exec -- {c}", "npm -s exec -- {c}", "npm --prefix . exec -- {c}",
+                    "pnpm -C . exec {c}", "pnpm --filter x exec {c}", "pnpm --silent exec {c}",
+                    "yarn --silent exec {c}", "bun --silent x {c}", "uv --quiet run {c}",
+                    "uv --directory . run {c}", "uv run --with requests {c}", "uv run --python 3.12 {c}",
+                    "uv run --project . {c}", "uv run --env-file .env {c}", "uv run --group dev {c}",
+                    "uv run --extra x {c}", "uv run --index https://pypi.org/simple {c}",
+                    "uv run --with-requirements r.txt {c}", "poetry run -C . {c}", "uvx --from x {c}")
+
+    def test_a_force_push_after_a_package_managers_own_options_is_refused(self):
+        for form in self.GLOBAL_FORMS:
+            cmd = form.format(c="git push --force origin main")
+            with self.subTest(cmd=cmd):
+                self.assertIn("force-push", self.check(cmd) or "")
+
+    def test_a_vendor_verb_after_a_package_managers_own_options_is_refused(self):
+        for form in self.GLOBAL_FORMS:
+            cmd = form.format(c="claude plugin install evil@m")
+            with self.subTest(cmd=cmd):
+                self.assertEqual(self.check(cmd), guard.EXT_REASON)
+        for cmd in ("yarn -s dlx @anthropic-ai/claude-code plugin install evil@m",
+                    "bun --silent x @openai/codex mcp add evil -- bash"):
+            with self.subTest(cmd=cmd):
+                self.assertEqual(self.check(cmd), guard.EXT_REASON)
+
+
+class TerminalLaunchersRunTheirCommand(unittest.TestCase):
+    # F1-R4 part 2: a command an agent starts in screen, tmux, expect or a Terminal window it opens has no agent
+    # marker, is re-parented to launchd and has a pty, so it passes set_by_developer(); the guard reads what each
+    # launcher runs, and refuses opening a terminal or a .command/.tool file, whose text it cannot follow
+
+    setUp = HookEventsAreTheHarnesss.setUp
+    check = HookEventsAreTheHarnesss.check
+
+    def test_each_launch_form_of_dev_install_is_refused(self):
+        for cmd in ("screen -dm dev install", "screen -d -m -S x dev install", "screen -dmS x dev install",
+                    "screen -dm sh -c 'dev install'", "screen -S x -X stuff 'dev install\n'",
+                    "screen -S x -X stuff 'dev install\\n'", "screen -S x -X stuff 'dev install^M'",
+                    "screen -S x -X exec dev install", "tmux new -d 'dev install'",
+                    "tmux new-session -d -s x 'dev install --only codex'", "tmux new-session -d -s x dev install",
+                    "tmux -L sock new -d 'dev install'", "tmux new-window 'dev install'",
+                    "tmux split-window -h 'dev install'", "tmux run-shell 'dev install'", "tmux run 'dev install'",
+                    "tmux send-keys -t x 'dev install' Enter", "tmux new -d \\; send-keys 'dev install' C-m",
+                    "expect -c 'spawn dev install; expect eof'", "expect -c 'spawn -noecho dev install'",
+                    "expect -c 'exec dev install'",
+                    "osascript -e 'tell application \"Terminal\" to do script \"dev install\"'",
+                    "osascript -e 'tell app \"iTerm\" to do script \"dev install\"'",
+                    "echo install | xargs dev", "xargs dev < args.txt", "xargs -n1 bin/dev < args.txt",
+                    "python3 -c \"import subprocess; subprocess.run(['screen','-dm','dev','install'], env={})\"",
+                    "python3 -c \"import subprocess; subprocess.run(['osascript','-e','tell app \\\"Terminal\\\" "
+                    "to do script \\\"dev install\\\"'])\""):
+            with self.subTest(cmd=cmd):
+                self.assertEqual(self.check(cmd), guard.INSTALL_REASON)
+
+    def test_the_developers_acknowledgement_through_a_launcher_is_refused(self):
+        for cmd in ("screen -dm dev ext ack", "tmux new -d 'dev ext ack'", "expect -c 'spawn dev ext ack'",
+                    "echo ack | xargs dev ext"):
+            with self.subTest(cmd=cmd):
+                self.assertEqual(self.check(cmd), guard.EXT_REASON)
+
+    def test_a_force_push_through_a_terminal_launcher_is_refused(self):
+        for cmd in ("screen -dm git push --force origin main", "tmux new -d 'git push --force origin main'",
+                    "expect -c 'spawn git push --force origin main'"):
+            with self.subTest(cmd=cmd):
+                self.assertIn("force-push", self.check(cmd) or "")
+
+    def test_opening_a_terminal_or_a_command_file_is_refused(self):
+        for cmd in ("open -a Terminal x.command", "open x.command", "open ~/x.tool", "open -a Terminal",
+                    "open -a iTerm", "open -a 'iTerm 2' .", "open -a /System/Applications/Utilities/Terminal.app .",
+                    "open -b com.apple.Terminal .", "open -b com.googlecode.iterm2", "open -na Terminal",
+                    "python3 -c \"import subprocess; subprocess.Popen(['open','-a','Terminal','/tmp/x.command'])\""):
+            with self.subTest(cmd=cmd):
+                self.assertEqual(self.check(cmd), guard.TERMINAL_REASON)
+
+    def test_everyday_launcher_commands_stay_open(self):
+        for cmd in ("screen -ls", "screen -r x", "tmux ls", "tmux attach -t x", "tmux new -d 'pytest -q'",
+                    "screen -dm python3 -m http.server", "expect -c 'spawn ssh-add -l; expect eof'",
+                    "open README.md", "open https://example.com", "open -a Safari index.html", "open .",
+                    "git ls-files '*.py' | xargs grep -n foo", "echo x | xargs dev guard check",
+                    "osascript -e 'display notification \"done\"'"):
             with self.subTest(cmd=cmd):
                 self.assertIsNone(self.check(cmd))
 
