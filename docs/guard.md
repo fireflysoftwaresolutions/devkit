@@ -69,7 +69,13 @@ A file tool (Write, Edit, MultiEdit, NotebookEdit, `apply_patch`, and an MCP too
 as it is, so the guard reads it the same way: `$` and a backtick are ordinary characters, and `..` and links resolve as
 the system resolves them. `/private/tmp/$X/../../../Users/me/.config/devkit/config.json` is devkit's configuration
 once a folder named `$X` exists, and it is refused like the plain path. In a shell command, `$X` stays a variable the
-guard cannot know. The rules on the handoff repository compare paths without case, as macOS folders do:
+guard cannot know. A leading `~` is your home folder for Claude's file tools, which expand it. Codex's `apply_patch`
+and an MCP server may write `<folder>/~/…` instead, so the guard judges their paths both ways and refuses the write
+when either reading is refused. A path with a link followed by `..` (`link/../x`) is judged both as the system reads
+it (the link's target, then `..`) and as a program that cleans the path first reads it (`x` beside the link): a write
+that either reading puts in devkit's state, configuration, or install is refused. `apply_patch` is judged by its patch
+under any key Codex sends it in (`input`, `patch`, or `command`), and a `Bash` or `Monitor` command is always judged
+as a shell command, even one that starts like a patch. The rules on the handoff repository compare paths without case, as macOS folders do:
 `~/development/.HANDOFF/projects/other/repo.MD` is another project's note.
 
 "Owners you belong to" are your GitHub login and organizations (from `gh`, cached for a day) plus folders that already
@@ -207,7 +213,7 @@ unsaved work (see [Commands › Files](commands.md#files)).
 | --- | --- |
 | `rm <path>` or `unlink <path>` | deny → `dev rm <path>` |
 | `find … -delete`, or `find … -exec rm` | deny → list the matches with `dev find`, then `dev rm` them |
-| `xargs rm` | deny → `dev rm` |
+| `xargs rm` or `xargs unlink`, in any folder (a temp folder too: what it deletes comes from its input) | deny → `dev rm` |
 | `git clean -f` (without `-n`) when it would delete untracked paths | deny → review with `git clean -n`, then `dev rm --discard <paths>` |
 | `cp` or `mv` onto an existing file, without `-n` or `-i` | deny → `dev cp` or `dev mv` (with `--force`, the old version goes to the Trash) |
 
@@ -280,10 +286,17 @@ The guard's rules read a command as it is typed, and the commands it hands to a 
 `find -exec`, or a program's code. A runner whose command comes from its input is refused, for every session, in the
 shell and in a program's code: `xargs` with only a wrapper after it (`xargs env`, `xargs nohup`, `xargs sudo`,
 `xargs timeout 5`: xargs adds what it reads, and its first word becomes the command), a placeholder in the command's
-place (`xargs -I{} {} …`, `parallel env`, `find … -exec {} \;`, `dev {}`), and a shell line the input fills in
-(`xargs sh -c`, `xargs sh -c '"$@"' sh`). `xargs` with no command runs `echo` and stays open. The guard reads xargs's
-options as xargs does, so a value is never taken for the command (`xargs -tn 1 dev`, `xargs --max-args 1 dev`). A
-command that decides what runs only when it runs in other ways gets through. For the extension rule, these are not
+place (`xargs -I{} {} …`, `parallel env`, `find … -exec {} \;`, `dev {}`), a shell line the input fills in
+(`xargs sh -c`, `xargs sh -c '"$@"' sh`), and a shell or interpreter whose script, code, or module the input names,
+or that gets no program at all (`xargs sh`, `xargs python3 -c`, `xargs node -r`, `xargs -I{} node`,
+`find … -exec sh {} \;`, `parallel python3 ::: a.py`). `xargs` with no command runs `echo` and stays open, and so does
+a program that is named with its script (`xargs python3 tool.py`, `xargs -n1 python3 -m py_compile`). The guard reads
+xargs's options as xargs does, so a value is never taken for the command (`xargs -tn 1 dev`,
+`xargs --max-args 1 dev`). For GNU `parallel` it reads each string an option names for the input as the placeholder
+(`-I`, `--replace`, `--er`, `--bnr`, `--dnr`, `--bner`, `--seqreplace`, `--slotreplace`, the tag of `--rpl`), and any
+`{…}` in the command too (`{.}`, `{..}`, `{+/}`, `{=…=}`), so `parallel -I % % install` is refused. A command given
+as one word with spaces is the shell line parallel runs (`parallel 'gzip -9 {}' ::: a.log` is `sh -c 'gzip -9 {}'`).
+A command that decides what runs only when it runs in other ways gets through. For the extension rule, these are not
 refused:
 
 - a program name built at run time: `$(printf claude) plugin install x`, or an alias (`alias c=claude; c plugin …`);
@@ -293,6 +306,16 @@ refused:
   (`git -c 'alias.x=!claude plugin install y' x`), `at` or `batch` with their input, a compiled AppleScript file
   (`osascript x.scpt`), or an `expect` script file;
 - options that load a plugin or MCP server for one session only: `claude --mcp-config`, `--plugin-dir`.
+
+The [irreversible-action gate](#commands-the-guard-cannot-name) reads a program an interpreter runs, but not yet
+these, and a fix is planned:
+
+- local code the program loads: `import big_mod` of a large module beside it, `python3 -m big_mod`, `runpy`,
+  `importlib`, or `exec(open(…).read())`;
+- a zip app or a package folder an interpreter runs (`python3 app.pyz`, `python3 pkg/`, `node pkg/`);
+- a command the program decodes when it runs (base64, rot13, hex);
+- GNU `parallel` options other than its replacement strings: `--arg-sep`, `--limit`, `--filter`, `--ssh`, a profile
+  (`-J`), and a Perl expression `{=…=}` in an argument of a named program (`parallel echo '{=system(…)=}'`).
 
 The guard's rules do not read quoting or brace expansion around a command word yet; a fix is planned. `$'dev' ext ack`,
 `$"dev" install`, `dev {ext,} ack`, and `$'screen' -X …` reach the shell as `dev` and `screen`, but the guard does not
@@ -337,8 +360,19 @@ action `unknown`, tier 2, with the target `cmd-<hash>` of that exact command tex
   `subprocess.run(f"{tool} …")`;
 - a program or script the gate must read and cannot: larger than it reads (512 KB for a program an interpreter runs
   or a script a shell runs, 256 KB for a shell script run by its path) or unreadable, such as `python3 big.py` padded
-  past 512 KB with a force push at its end. A large program that is no shell script (a binary run by its path) is
-  classified by its name, as before.
+  past 512 KB with a force push at its end. A program run by its path is read as the system runs it: with a python,
+  node, or other interpreter's shebang as that interpreter's script (`./big.py` is `python3 ./big.py`, with the same
+  cap), and an executable text file with no shebang, or with a byte-order mark before `#!`, as the `sh` script the
+  shell runs it as (also one that is not executable yet when the command runs `chmod`). A shell or interpreter reads its program from a redirect or a pipe the same way: `sh < f`, `< f sh`, `sh 0< f`,
+  `sh <(cat f)`, `python3 < f`, `python3 /dev/stdin < f`, and `cat f | python3` are read like `sh f` and
+  `python3 f`. A path the system cannot encode (a lone surrogate) counts as unreadable. A binary is classified by its
+  name, as before. A script inside the workspace is the repository's own and is not counted as unknown when it is
+  large (autotools' `./configure`), as for `python3 tools/x.py`;
+- a subcommand that `xargs`, `parallel`, or `find -exec` fills in for a program whose subcommand the gate reads (npm,
+  pnpm, yarn, cargo, docker, twine, terraform, gem, make, and the other publish and deploy tools): `echo publish |
+  xargs npm`, `xargs -I{} npm {}`, `parallel npm ::: publish`. The guard counts a filled word up to the second word
+  that is no option, so `xargs npm install` and `find … -exec docker load -i {} \;` count too. `git push` with any
+  word the input fills in (`echo --force origin main | xargs git push`) is `unknown` as well.
 
 These are not `unknown`:
 

@@ -672,6 +672,142 @@ class RedTeam2(unittest.TestCase):
         self.assertEqual(guard._xargs_command(["-i", "git", "rm", "{}"]), ["git", "rm", "{}"])
         self.assertEqual(guard._xargs_parts(["--replace=X", "--max-args=2", "cp", "X", "d"]), (["cp", "X", "d"], "X"))
 
+    def test_parallels_own_replacement_strings_count_as_its_placeholder(self):
+        # `parallel -I % % install` ran the program its input named while the guard read `%` as the
+        # program; every string parallel replaces with its input, and any {…} in its command, is the placeholder
+        refused = guard.deny(guard.INPUT_COMMAND_REASON)
+        for cmd in ("echo dev | parallel -I % % install", "echo gh | parallel -I % % pr merge 12",
+                    "echo dev | parallel -I% % install", "echo dev | parallel -kI @@ @@ install",
+                    "echo dev | parallel --replace=% % install", "echo dev | parallel --repl % % install",
+                    "echo dev.x | parallel --er @ @ install", "echo dev | parallel --bnr @ @ install",
+                    "echo dev | parallel --dnr @ @ install", "echo dev | parallel --rpl '%% s/x//' %% install",
+                    "parallel {..} install ::: dev.x.y", "parallel --plus {+.} install ::: dev.x",
+                    "parallel '{} install' ::: dev", "sem -I % % install"):
+            with self.subTest(cmd=cmd):
+                self.assertEqual(guard.check_bash(cmd, self.repo, "claude"), refused)
+        self.assertIn("unknown", self.acts("parallel -I@@ git @@ --force origin main ::: push"))
+
+    def test_parallels_command_in_one_quoted_word_is_a_shell_line(self):
+        # `parallel 'gzip -9 {}' ::: a b` was refused, as if `gzip -9 {}` were a program the input names
+        for cmd in ("parallel 'gzip -9 {}' ::: a.log b.log", "parallel -j4 'wc -l {}' ::: a b", "parallel echo ::: a b",
+                    "parallel -l git status ::: x"):
+            with self.subTest(cmd=cmd):
+                self.assertIsNone(guard.check_bash(cmd, self.repo, "claude"))
+        self.assertEqual(self.acts("parallel 'git push --force origin {}' ::: main"), ["unknown"])  # read as sh -c
+        self.assertEqual(self.acts("sem -j1 git push"), ["push"])  # sem reads no input: its command as written
+
+    def test_a_shell_or_interpreter_whose_program_comes_from_the_input_is_refused(self):
+        # `xargs -0 python3 -c` and `xargs sh` with `-c 'dev install'` as input ran code the input carried, and
+        # `xargs sh`, `find -exec sh {}` and `parallel python3` a script the input names
+        refused = guard.deny(guard.INPUT_COMMAND_REASON)
+        for cmd in ("printf x | xargs -0 python3 -c", "echo \"-c 'dev install'\" | xargs sh", "echo x | xargs sh",
+                    "echo x | xargs -I{} sh {}", "echo x | xargs bash", "echo x | xargs -n1 sh", "echo x | xargs python3",
+                    "echo x | xargs node", "echo x | xargs -I{} python3 {}", "echo x | xargs -I{} node",
+                    "echo x | xargs node -r", "echo x | xargs perl -e", "echo x | xargs php -r", "echo x | xargs sh -s",
+                    "find . -name x -exec sh {} \\;", "find . -name x -execdir sh {} +",
+                    "find . -name x -exec sh -c '. \"$1\"' sh {} \\;", "parallel python3 ::: a.py",
+                    "parallel --pipe -j1 sh", "python3 -c \"import os; os.system('echo x | xargs sh')\""):
+            with self.subTest(cmd=cmd):
+                self.assertEqual(guard.check_bash(cmd, self.repo, "claude"), refused)
+        for cmd in ("echo a | xargs python3 tool.py", "echo a | xargs -n1 python3 -m py_compile",
+                    "echo a | xargs awk '{print $1}'", "echo a | xargs -n 1 sh -c 'echo $0'",
+                    "find . -name '*.py' -exec python3 -m py_compile {} +", "echo a | xargs perl -pi -e 's/a/b/'",
+                    "echo a | xargs node -e 'console.log(1)'", "echo a | xargs python3 -W ignore tool.py",
+                    "echo a | xargs python3 -I tool.py", "echo a | xargs python3 -Bc 'print(1)'",
+                    "python3 -c \"import json; json.dump({}, open('x.json', 'w'))\"", "node -e 'f({})'"):
+            with self.subTest(open=cmd):
+                self.assertIsNone(guard.check_bash(cmd, self.repo, "claude"))
+
+    def test_a_shell_or_interpreter_reads_its_program_from_a_redirect_or_a_substitution(self):
+        # `cat f | sh` was read; `sh < f`, `< f sh`, `sh 0< f`, `sh <(cat f)` and `python3 < f` were not
+        root = Path(core.real(self.tmp.name))
+        push = "git push --force origin main"
+        (root / "cmds.txt").write_text(push + "\n")
+        (root / "prog.py").write_text(f"import os\nos.system('{push}')\n")
+        (root / "prog.js").write_text(f"require('child_process').execSync('{push}');\n")
+        (root / "big.txt").write_text("# pad\n" * 90000 + push + "\n")
+        c, py, js, big = root / "cmds.txt", root / "prog.py", root / "prog.js", root / "big.txt"
+        for cmd in (f"sh < {c}", f"bash < {c}", f"zsh 0< {c}", f"< {c} sh", f"sh <{c}", f"env sh < {c}",
+                    f"exec sh < {c}", f"sh -s x < {c}", f"sh <(cat {c})", f"sh /dev/stdin < {c}", f"sh <> {c}",
+                    f"python3 < {py}", f"python3 - < {py}", f"python3 /dev/stdin < {py}", f"cat {py} | python3",
+                    f"node < {js}", f"python3 <(cat {py})"):
+            with self.subTest(cmd=cmd):
+                self.assertIn("push-destructive", self.acts(cmd))
+                self.assertIsNotNone(self.main(cmd))
+        for cmd in (f"sh < {big}", f"cat {big} | sh"):  # too large to read: an unknown action
+            with self.subTest(cmd=cmd):
+                self.assertEqual(self.acts(cmd), ["unknown"])
+        for cmd in (f"sh 2< {c}", f"sh -c 'echo hi' < {c}", f"python3 -c 'print(1)' < {py}", f"wc -l < {c}"):
+            with self.subTest(open=cmd):  # the program is in the words: what it reads is data
+                self.assertEqual(self.acts(cmd), [])
+
+    def test_a_subcommand_the_input_fills_in_is_an_unknown_action(self):
+        # `echo publish | xargs npm` published with no grant: the gate read `npm {}` as no action
+        for cmd in ("echo publish | xargs npm", "echo publish | xargs cargo", "echo push x/y | xargs docker",
+                    "echo upload dist/x | xargs twine", "echo publish | xargs pnpm", "echo publish | xargs yarn npm",
+                    "echo apply -auto-approve | xargs terraform", "echo push | xargs gem",
+                    "echo publish | xargs -I{} npm {}", "parallel npm ::: publish", "find . -exec npm {} \\;",
+                    "echo deploy | xargs -n1 make", "echo --force origin main | xargs git push",
+                    "echo origin +main | xargs git push"):
+            with self.subTest(cmd=cmd):
+                self.assertEqual(self.acts(cmd), ["unknown"])
+                self.assertIsNotNone(self.main(cmd))
+        for cmd in ("echo a.py | xargs git add", "ls | xargs -n 1 wc -l", "echo a | xargs npm run lint --"):
+            with self.subTest(open=cmd):
+                self.assertNotIn("unknown", self.acts(cmd))
+
+    def test_a_program_run_by_its_path_is_read_as_the_system_runs_it(self):
+        # `./big.py` with a python shebang, a script with no shebang (the shell runs it as sh) and one with a
+        # byte-order mark before `#!` passed the gate unread
+        push = "git push --force origin main"
+        root = Path(core.real(self.tmp.name))
+        files = {"py_small": (f"#!/usr/bin/env python3\nimport os\nos.system('{push}')\n", "push-destructive"),
+                 "py_big": (f"#!/usr/bin/env python3\n{'#' * (1 << 19)}\nimport os\nos.system('{push}')\n", "unknown"),
+                 "node_big": (f"#!/usr/bin/env node\n//{'x' * (1 << 19)}\nrequire('child_process').execSync('{push}');"
+                              "\n", "unknown"),
+                 "plain_small": (push + "\n", "push-destructive"),
+                 "plain_big": ("# pad\n" * 45000 + push + "\n", "unknown"),
+                 "bom_big": ("﻿#!/bin/sh\n" + "# pad\n" * 45000 + push + "\n", "unknown")}
+        for name, (text, action) in files.items():
+            p = root / name
+            p.write_text(text)
+            p.chmod(0o755)
+            with self.subTest(name=name):
+                self.assertIn(action, self.acts(str(p)))
+                self.assertIn(action, self.acts(f"cd {root} && ./{name}"))
+        notes = root / "notes.txt"  # a text file no one can run is no script, unless the command makes it runnable
+        notes.write_text(push + "\n")
+        self.assertEqual(self.acts(str(notes)), [])
+        self.assertIn("push-destructive", self.acts(f"chmod +x {notes} && {notes}"))
+
+    def test_xargs_rm_is_refused_in_a_temp_folder_too(self):
+        # from a temp folder `echo ~/Development | xargs rm -rf` deleted the dev root, which `rm -rf` names refuse:
+        # xargs takes what it deletes from its input, so the folder it runs in says nothing about it
+        for cmd in (f"echo {core.DEV} | xargs rm -rf", f"echo -rf {core.HOME} | xargs rm", "xargs -0 rm < list",
+                    "echo a | xargs unlink"):
+            with self.subTest(cmd=cmd):
+                v = guard.check_bash(cmd, self.tmp.name, "claude")
+                self.assertEqual((v or ("",))[0], "deny", v)
+                self.assertIn("xargs rm", v[1])
+        self.assertIsNone(guard.check_bash("DEVKIT_RAW_FS=1 xargs rm < list", self.tmp.name, "claude"))
+        self.assertIsNone(guard.check_bash("rm -f a.log", self.tmp.name, "claude"))  # a named file stays open
+
+    def test_a_large_script_inside_the_workspace_is_the_repositorys_own(self):
+        # autotools' ./configure, a #!/bin/sh script of several hundred KB in the repository, was an unknown action
+        core.DEV.mkdir(parents=True, exist_ok=True)
+        ws = tempfile.TemporaryDirectory(dir=core.DEV)
+        self.addCleanup(ws.cleanup)
+        configure = Path(core.real(ws.name)) / "configure"
+        configure.write_text("#!/bin/sh\n" + "# generated by autoconf\n" * 13000 + "echo done\n")
+        configure.chmod(0o755)
+        self.assertGreater(configure.stat().st_size, 300_000)
+        self.assertEqual(guard.irreversible_actions("./configure --prefix=/usr/local", ws.name), [])
+        self.assertEqual(guard.irreversible_actions(f"{configure}", ws.name), [])
+        outside = Path(core.real(self.tmp.name)) / "configure"  # the same script outside the workspace is unread
+        outside.write_text(configure.read_text())
+        outside.chmod(0o755)
+        self.assertEqual(self.acts(str(outside)), ["unknown"])
+
 
 class DeveloperOnlyGrants(tp.TranscriptCase):
     # B2 follow-up (the tech lead's decisions): the developer opens one developer-only action with a line that reads

@@ -36,13 +36,13 @@ import re
 from pathlib import Path
 
 from . import core, skillguard
+from .hooks import SHELL_TOOLS  # Bash, Monitor and Codex's shells
 
 RULES = ("proofs", "skills", "stubs", "tests", "lessons", "background")
 LABELS = {"proofs": "proof not run", "skills": "skill not loaded", "stubs": "unfinished work in",
           "tests": "tests that cannot fail in", "lessons": "no lesson after repeated refusals:",
           "background": "still running in the background:"}
 MAX_BYTES = 8_000_000  # the end of a very long member transcript is enough
-SHELL_TOOLS = {"Bash", "exec_command", "shell", "local_shell", "unified_exec"}
 # A hook's denial as Claude Code writes it into the tool result: "PreToolUse:Bash hook error: <the guard's reason>".
 DENIAL_RE = re.compile(r"^\s*(?:PreToolUse|PermissionRequest)(?::[^\s:]+)? hook (?:blocking )?error\b", re.I)
 _SPLIT = re.compile(r"\|\||&&|\$\(|[;&|()`\n]")  # where a new simple command starts

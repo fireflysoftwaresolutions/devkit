@@ -24,6 +24,8 @@ import json
 import os
 import re
 
+from .hooks import SHELL_TOOLS  # Bash, Monitor and Codex's shells
+
 CONSULTING_SKILL_RE = re.compile(r"\bfirefly-(consult|deck|document|pitch|cobrand|review|event|storytelling|proposal|"
                                  r"research|problem-solving|business-design|transformation|architecture|"
                                  r"tech-documentation|house-style)\b")
@@ -38,8 +40,7 @@ STRONG_CMD_RE = re.compile(
     r"progress)\b")
 WEAK_CMD_RE = re.compile(r"\bgit\b|\bdev\b|\bgh\b|\bnode\b|\bnpm\b|\bpython3?\b|\brg\b|\bgrep\b")
 EDIT_TOOLS = {"Edit", "Write", "MultiEdit", "NotebookEdit", "apply_patch"}
-SHELL_TOOLS = {"Bash", "exec_command", "shell", "local_shell", "unified_exec"}
-REPO_TOOLS = EDIT_TOOLS | SHELL_TOOLS | {"Read", "Grep", "Glob", "LSP", "NotebookRead", "read_file", "list_dir",
+REPO_TOOLS = EDIT_TOOLS | set(SHELL_TOOLS) | {"Read", "Grep", "Glob", "LSP", "NotebookRead", "read_file", "list_dir",
                                        "grep", "view_image"}
 
 

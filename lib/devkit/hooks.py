@@ -2171,7 +2171,7 @@ def post_tool(agent: str):
         if isinstance(cmd, list):
             cmd = " ".join(cmd)
         words = command_words(cmd)
-        if data.get("tool_name") in ("Bash", "exec_command", "shell") and DELIVERY.search(words):
+        if data.get("tool_name") in SHELL_TOOLS and DELIVERY.search(words):
             from . import work
             work.request_sync("delivery: " + DELIVERY.search(words).group(0))
         if data.get("tool_name") in SHELL_TOOLS and CI_TRIGGER.search(words) and not data.get("agent_id"):

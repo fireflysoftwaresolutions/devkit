@@ -215,5 +215,25 @@ class HookMatchers(unittest.TestCase):
         self.assertIn("Monitor", configs["claude"]["PreToolUse"][0]["matcher"].split("|"))
 
 
+class ShellTools(unittest.TestCase):
+    # the gates, the scope check and the delivery sync each kept a list of shell tools without Monitor;
+    # hooks.SHELL_TOOLS is the one list, and no module writes another
+    def test_every_module_uses_the_one_list_of_shell_tools(self):
+        import ast
+        root = Path(__file__).resolve().parents[1] / "lib" / "devkit"
+        own = []
+        for path in sorted(root.glob("*.py")):
+            for node in ast.walk(ast.parse(path.read_text())):
+                if isinstance(node, (ast.Set, ast.Tuple, ast.List)):
+                    words = {e.value for e in node.elts if isinstance(e, ast.Constant)}
+                    if {"Bash", "exec_command"} <= words or {"Bash", "shell"} <= words:
+                        own.append(f"{path.name}:{node.lineno}")
+        self.assertEqual([o.split(":")[0] for o in own], ["hooks.py"], own)  # its SHELL_TOOLS, nothing else
+        from devkit import gates, hooks, scope
+        self.assertIs(gates.SHELL_TOOLS, hooks.SHELL_TOOLS)
+        self.assertIs(scope.SHELL_TOOLS, hooks.SHELL_TOOLS)
+        self.assertIn("Monitor", scope.REPO_TOOLS)
+
+
 if __name__ == "__main__":
     unittest.main()

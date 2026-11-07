@@ -122,6 +122,73 @@ class FileToolPaths(unittest.TestCase):
                     self.assertIsNone(guard.check("Write", {"file_path": f"{root}/projects/acme/API.md",
                                                             "content": "x"}, str(self.base), "claude"))
 
+    def test_a_tilde_is_the_home_folder_only_for_claudes_file_tools(self):
+        # Codex's apply_patch and an MCP server may write `<cwd>/~/…`, so their paths are judged both ways: here
+        # `<cwd>/~/.claude` leads into devkit's configuration, while ~/.claude is an agent's own folder
+        target = Path(core.CONFIG_FILE)
+        (self.base / "~").mkdir()
+        (self.base / "~" / ".claude").symlink_to(target.parent)
+        for tool, inp in self.calls(f"~/.claude/{target.name}"):
+            with self.subTest(tool=tool):
+                v = guard.check(tool, inp, str(self.base), "codex" if tool == "apply_patch" else "claude")
+                if tool in ("apply_patch", "mcp__fs__write_file"):
+                    self.assertEqual((v or ("",))[0], "deny", v)
+                    self.assertIn("configuration", v[1])
+                else:  # Claude's file tools expand it: ~/.claude/config.json, an agent's own folder
+                    self.assertIsNone(v)
+        for tool, inp in self.calls(f"~/{target.relative_to(core.HOME)}"):
+            with self.subTest(tool=tool, expanded=True):  # and the expanded reading still counts for every tool
+                v = guard.check(tool, inp, str(self.base), "codex" if tool == "apply_patch" else "claude")
+                self.assertEqual((v or ("",))[0], "deny", v)
+
+    def test_a_link_followed_by_dotdot_is_judged_as_written_too(self):
+        # `<link>/../x` is `<link's target>/../x` for the system, and `x` beside the link for a program that cleans
+        # the path first: a write whose cleaned reading is devkit's configuration is refused
+        target = Path(core.CONFIG_FILE)
+        (self.base / "a" / "b").mkdir(parents=True)
+        target.parent.parent.mkdir(parents=True, exist_ok=True)
+        link = target.parent.parent / f"link-{self.base.name}"
+        link.symlink_to(self.base / "a" / "b")
+        self.addCleanup(link.unlink)
+        path = f"{link}/../{target.parent.name}/{target.name}"
+        with guard._literal_paths():
+            self.assertTrue(core.is_temp(guard.resolve(path, str(self.base))))  # the system's reading: a temp file
+        for tool, inp in self.calls(path):
+            with self.subTest(tool=tool):
+                v = guard.check(tool, inp, str(self.base), "codex" if tool == "apply_patch" else "claude")
+                self.assertEqual((v or ("",))[0], "deny", v)
+                self.assertIn("configuration", v[1])
+
+
+class ToolDispatch(unittest.TestCase):
+    # A shell tool is always judged as a shell command, and apply_patch by the patch it carries, under any key
+
+    def test_a_shell_tool_is_judged_as_a_shell_command_whatever_it_starts_with_or_holds(self):
+        install = guard.deny(guard.INSTALL_REASON)
+        for tool in ("Bash", "Monitor", "exec_command"):
+            for inp in ({"command": "*** Begin Patch\n*** End Patch\ndev install"},
+                        {"command": "dev install", "file_path": "/tmp/x"},
+                        {"command": "dev install", "description": "watch", "timeout_ms": 1000}):
+                with self.subTest(tool=tool, inp=inp):
+                    self.assertEqual(guard.check(tool, inp, str(core.HOME), "claude"), install)
+
+    def test_apply_patch_is_judged_by_the_patch_under_any_key(self):
+        patch = f"*** Begin Patch\n*** Add File: {core.CONFIG_FILE}\n+{{}}\n*** End Patch"
+        for key in ("input", "patch", "command"):
+            with self.subTest(key=key):
+                v = guard.check("apply_patch", {key: patch}, str(core.HOME), "codex")
+                self.assertEqual((v or ("",))[0], "deny", v)
+        self.assertIsNone(guard.check("apply_patch", {"input": "*** Begin Patch\n*** End Patch"}, str(core.HOME),
+                                      "codex"))
+
+    def test_a_judgment_that_is_no_result_refuses_instead_of_allowing(self):
+        # the hook refuses a call when the guard raises (guard-error); a branch that returns None or False is no
+        # verdict the caller may read as allow
+        for wrong in (None, False, ("deny", "x")):
+            with self.subTest(wrong=wrong), mock.patch.object(guard, "_file_tool_verdict", return_value=wrong):
+                with self.assertRaises(TypeError):
+                    guard.check("Write", {"file_path": "/tmp/x", "content": ""}, str(core.HOME), "claude")
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -304,6 +304,23 @@ class GuardCrashTests(WiringCase):
         self.assertIn("Monitor", hooks.SHELL_TOOLS)
         self.assertEqual(self.records("guard.failopen"), [])
 
+    def test_a_shell_command_that_starts_like_a_patch_is_judged_as_a_shell_command(self):
+        # a Bash or Monitor command that began with `*** Begin Patch` was judged as a patch, which
+        # names no file, so every shell rule was skipped and `dev install` on its last line ran
+        cmd = "*** Begin Patch\n*** End Patch\ndev install"
+        for payload in (self.in_repo(self.bash(cmd)),
+                        self.in_repo(self.tool("Monitor", {"command": cmd, "description": "x", "timeout_ms": 1000}))):
+            with self.subTest(tool=payload["tool_name"]):
+                self.assertIn("dev install", self.deny(self.hook("guard", payload, real_guard=True)) or "")
+        self.assertEqual(self.records("guard.failopen"), [])
+
+    def test_a_program_fed_from_a_path_the_system_cannot_encode_is_refused(self):
+        # a lone surrogate in a path made realpath raise inside the irreversible gate (Python 3.15), which ran the
+        # call with a guard.failopen record; such a path is a program the gate cannot read: tier 2, refused
+        payload = self.in_repo(self.bash("sh < /tmp/\ud800"))
+        self.assertIsNotNone(self.deny(self.hook("guard", payload, real_guard=True)))
+        self.assertEqual(self.records("guard.failopen"), [])
+
 
 class MemberToolTests(WiringCase):
     def test_a_member_never_sends_through_an_mcp_tool(self):

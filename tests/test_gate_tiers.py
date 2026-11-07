@@ -351,7 +351,8 @@ class ClassifyTests(GateCase):
         for cmd in ("echo 12 | xargs gh pr merge", "xargs -n1 gh pr merge < prs.txt", "parallel gh pr merge ::: 12"):
             with self.subTest(cmd=cmd):
                 self.assertEqual(self.acts(cmd), [("merge", 2, "{}")])
-        self.assertEqual(self.acts("echo feat/y | xargs git push origin"), [("push", 1, "{}")])
+        # a push whose words the input adds may be forced (`echo --force main | xargs git push origin`): unknown
+        self.assertEqual([a[:2] for a in self.acts("echo feat/y | xargs git push origin")], [("unknown", 2)])
         self.assertEqual(self.acts("echo 12 | xargs -I{} gh pr merge {}"), [("merge", 2, "{}")])
 
     def test_a_repository_named_before_the_command_or_in_gh_repo_is_the_one_acted_on(self):
