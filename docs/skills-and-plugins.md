@@ -427,7 +427,8 @@ typed it. devkit therefore shows every acceptance until you acknowledge it:
    a desktop notification. The acceptance list is written first: when it is busy, does not parse, or cannot be
    written (a full disk), nothing is accepted and the change stays as drift.
 2. The next session start and `dev status` list them: `extensions accepted since your last session: …`, each entry
-   cut to one short line without control, bidirectional, or zero-width characters. In Claude Code, the session start
+   cut to one short line without control, bidirectional, or zero-width characters, or other characters that render
+   as nothing (variation selectors, Hangul fillers). In Claude Code, the session start
    shows the list to you as a message, not only to the agent.
 3. If you ran that `dev install`, run `dev ext ack` in your terminal. It clears the list and writes one `ext.ack`
    record per entry, with its terminal and parent processes; the next Claude Code session start shows you once when
@@ -442,7 +443,10 @@ process tree and the terminal, and a process an agent starts through a launcher 
 `tmux`, `expect`, AppleScript's `do script`, `open` of a Terminal window or a `.command` file, or `launchctl`. The
 guard refuses the forms it can read (it decodes the octal escapes such as `\015` and the caret controls such as `^m`
 that `screen -X stuff` types), not every one: a script file or a program that builds the command at run time gets
-through. The desktop notification, the session-start message, and the audit trail are the backstop until a
+through. `screen -X stuff` keys that hold any other control key (`^@`, `^A`, `^H`, `^O`, DEL, or ESC, as `^X`, `\NNN`,
+or the character itself) are refused whatever they type, because the shell edits the line with them and the guard
+cannot read the result. `tmux send-keys` with editing keys (`C-a`) or hex keys (`-H`) still gets through until
+26.11.5. The desktop notification, the session-start message, and the audit trail are the backstop until a
 kernel-level check of who typed the command lands in 26.11.5.
 
 The acceptance notification is a security notice: `DEVKIT_NO_NOTIFY=1` and `progress.notify: false`, which an agent
@@ -473,7 +477,12 @@ The pins have rules of their own:
 - **A skill name belongs to one source.** One name is one folder for both agents, so `dev ext add skill` refuses a
   name that a devkit default already uses, for either agent, or that devkit puts in the shared skills folder itself
   (a skill from devkit's own tree, or `playwright-cli`), and two sources in `skills.json` with the same skill name
-  make the catalog invalid.
+  make the catalog invalid. Names are compared in any case, as the macOS file system compares them, so
+  `Playwright-CLI` is refused too.
+- **A skill name is a folder name.** It starts with a letter, digit, or underscore, so `dev ext add` refuses `.`,
+  `..`, and hidden names. `skills.json` is not held to that rule, so `dev install` skips a name there that would land
+  outside the shared skills folder (`..`, `.`, an empty name, or one with a `/`), deletes nothing, and names it:
+  rename the skill in `skills.json`, on a branch of the devkit checkout.
 
 ## Left out on purpose
 

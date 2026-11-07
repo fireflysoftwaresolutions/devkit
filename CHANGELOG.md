@@ -137,13 +137,17 @@ Not released yet: the date is set when the release is tagged.
   terminal, the parent processes), sends a desktop notification, and stays listed at the session start and in
   `dev status` until you run the new `dev ext ack` in your terminal. The notification is a security notice:
   `DEVKIT_NO_NOTIFY=1` and `progress.notify: false`, which an agent can set, do not turn it off. Each listed entry is
-  one short line without control, bidirectional, or zero-width characters. In Claude Code, the session start shows
+  one short line without control, bidirectional, or zero-width characters, or other characters that render as
+  nothing (variation selectors, Hangul fillers). In Claude Code, the session start shows
   that list to you as a message, and shows the last `dev ext ack` once with its time and terminal. An acceptance the
   list cannot take (busy, a file that does not parse, or one that cannot be written, such as on a full disk) is not
   made: the change stays as drift, and the refusal is audited.
   The guard now reads what `screen`, `tmux`, `expect -c`, and AppleScript's `do script` run, refuses `open` of a
   Terminal or iTerm window or a `.command` file and `xargs dev`, and skips a package manager's own options before
-  its verb (`npm --silent exec`, `pnpm -C . exec`, `uv --quiet run`, `uv run --with x`).
+  its verb (`npm --silent exec`, `pnpm -C . exec`, `uv --quiet run`, `uv run --with x`). It refuses `screen -X stuff`
+  keys that hold a control key other than tab, carriage return, or line feed (`^@`, `^A`, `^H`, `^O`, DEL, or ESC,
+  as `^X`, `\NNN`, or the character itself), because the shell edits the line with them, and a command that holds a
+  NUL character. Before, a NUL made the guard fail and let the command through.
 - **Drift covers what devkit does not manage.** A plugin, MCP server, or skill folder installed outside the catalog,
   for Claude Code and Codex, is reported as `not-in-catalog`. What ships with the Codex app is listed without drift
   only when its own files vouch for it (a bundled plugin whose cached files are all byte-equal to the app bundle's)
@@ -161,7 +165,10 @@ Not released yet: the date is set when the release is tagged.
   be read. `dev ext update --apply` accepts only the version it reviewed, and `dev install` names each change it
   accepts. An overlay copy of a devkit default keeps it required, and `dev ext add` refuses one, and a skill whose
   name a devkit default already uses, for either agent, or that devkit puts in the shared skills folder itself (a
-  skill from its own tree, or `playwright-cli`): one name is one folder for both agents.
+  skill from its own tree, or `playwright-cli`): one name is one folder for both agents. Names are compared in any
+  case, as the macOS file system compares them, so `Playwright-CLI` is refused too. A skill name starts with a
+  letter, digit, or underscore, so `.`, `..`, and hidden names are refused, and `dev install` skips a `skills.json`
+  name that would land outside the shared skills folder, deleting nothing.
 
 ### Known limits
 
@@ -176,7 +183,8 @@ Not released yet: the date is set when the release is tagged.
   you typed them, and a process an agent starts through a launcher can look the same: `screen` or `tmux`, `expect`,
   AppleScript's `do script`, `open` of a Terminal window or a `.command` file, or `launchctl`. The guard refuses the
   forms it can read, the octal escapes such as `\015` and the caret controls such as `^m` that `screen -X stuff`
-  types included, but not a script file or a command built at run time. The notification, the session-start
+  types included, but not a script file or a command built at run time. `tmux send-keys` with editing keys
+  (`C-a`) or hex keys (`-H`) still gets through until 26.11.5. The notification, the session-start
   message, and the audit trail are the backstop until a kernel-level check lands in 26.11.5. The notification shows
   only on macOS, and only while notifications are allowed for Script Editor, the app macOS lists `osascript`
   notifications under; an agent can change that setting, so the session-start message and the audit trail are the
