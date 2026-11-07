@@ -605,8 +605,43 @@ def _attribution(text: str):
     return None
 
 
+PAGER_CONFIG_REASON = ("This writes `{key}` into {where}. A pager there is a command line that runs each time {tool} "
+                       "pages its output, under every later read in every session, so it would run whatever it names "
+                       "where the guard only sees a `{tool} log` or `{tool} pr view` (RT3). Agents may not set it. For "
+                       "one call use `git --no-pager` or `-P`; to change the pager, ask the developer.")
+_GIT_CONFIG_VALUES = {"-f", "--file", "--blob", "--type", "--default", "--comment", "--value", "--worktree-path"}
+_GIT_CONFIG_READS = {"--get", "--get-all", "--get-regexp", "--get-urlmatch", "--get-color", "--get-colorbool", "-l",
+                     "--list", "--unset", "--unset-all", "--remove-section", "--rename-section", "-e", "--edit",
+                     "--show-origin", "--show-scope", "--name-only"}
+
+
+def pager_config_write(args) -> str | None:
+    """The pager key a `git config` call (its arguments after `config`) sets, or None: core.pager, pager.<command>,
+    or a key the guard cannot read (`git config $K …`), in any scope or file (RT3)."""
+    if args[:1] and args[0] in ("get", "list", "unset", "remove-section", "rename-section", "edit"):
+        return None
+    if args[:1] == ["set"]:
+        args = args[1:]
+    elif {a.split("=", 1)[0] for a in args if a.startswith("-")} & _GIT_CONFIG_READS:
+        return None
+    pos = _positionals(args, _GIT_CONFIG_VALUES)
+    if len(pos) < 2:
+        return None
+    return pos[0] if _PAGER_KEY.match(pos[0]) or _dynamic_name(pos[0]) else None
+
+
+def gh_pager_config_write(args) -> str | None:
+    """The key `gh config set` (its arguments after `set`) writes when it is gh's pager or unreadable, else None."""
+    pos = _positionals(args, {"-h", "--host"})
+    return pos[0] if pos and (pos[0] == "pager" or _dynamic_name(pos[0])) else None
+
+
 def check_git(argv, cwd, full_segment, envs=frozenset(), pending=None):
     cdir, sub, args = _git_split(argv)
+    if sub == "config":
+        key = pager_config_write(args)
+        if key:
+            return deny(PAGER_CONFIG_REASON.format(key=key, where="git's configuration", tool="git"))
     gcwd = str(resolve(cdir, cwd)) if cdir else cwd
     if gcwd == str(UNKNOWN):
         gcwd = None
@@ -861,6 +896,8 @@ def check_bash(cmd: str, cwd: str, agent: str):
                 pos = _positionals(argv[3:], {"-u", "--upstream-remote-name"})
                 if pos:
                     res = check_clone(pos[0], pos[1] if len(pos) > 1 else None, ecwd)
+            elif argv[1:3] == ["config", "set"] and (gkey := gh_pager_config_write(argv[3:])):
+                res = deny(PAGER_CONFIG_REASON.format(key=gkey, where="gh's configuration", tool="gh"))
             elif argv[1:3] == ["pr", "merge"] and "--admin" in argv:
                 res = deny("`gh pr merge --admin` bypasses branch protection and required reviews. Get the checks and "
                            "reviews green, then `dev pr merge`.")
@@ -3923,6 +3960,8 @@ def _gh_actions(args, cwd) -> list:
             return []
         else:
             args = args[1:]
+    if args and (_dynamic_name(args[0]) or (args[0] != "api" and len(args) > 1 and _dynamic_name(args[1]))):
+        return [_unknown("gh " + " ".join(args))]  # `gh $SUB merge 12`: the command is named only when it runs
     if lead:
         args = [*args[:2], "-R", lead, *args[2:]] if args[:1] != ["api"] else [args[0], "-R", lead, *args[1:]]
     if not args:
@@ -4525,8 +4564,13 @@ def _text_actions(text, cwd, depth=0):
         if more is None:
             return None
         out += more
+        pagers, unknown = [], False
         if name == "git":  # the pager it runs through the shell is a command like any other (RT3)
             pagers, unknown = _git_pagers(argv, {**shell_env, **assigns})
+        elif name == "gh":  # gh starts GH_PAGER, else PAGER, for its output
+            env = {**shell_env, **assigns}
+            pagers = [p for p in (env.get("GH_PAGER") or env.get("PAGER") or "",) if p.strip()]
+        if name in ("git", "gh"):
             if unknown:
                 out += _found([_unknown(text)], argv0, cwd)
             for pager in pagers:

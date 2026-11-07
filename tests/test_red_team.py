@@ -131,6 +131,41 @@ class RedTeam(unittest.TestCase):
             with self.subTest(cmd=cmd):
                 self.assertIsNotNone(self.member(cmd))
 
+    def test_rt1_variant_a_variable_as_the_gh_subcommand_is_unknown(self):
+        # the program is named, but the command it runs is only known when the shell expands the variable
+        for cmd in ("gh $SUB merge 12", "gh pr $ACT 12", "gh ${G:-pr} merge 12", "gh -R o/r $SUB merge 12"):
+            with self.subTest(cmd=cmd):
+                self.assertEqual([a["action"] for a in guard.irreversible_actions(cmd, self.repo)], ["unknown"])
+                self.assertIsNotNone(self.member(cmd))
+                self.assertIsNotNone(self.main(cmd))
+        self.assertEqual(guard.irreversible_actions("gh pr view $N", self.repo), [])  # a variable target is a read
+
+    def test_rt3_variant_a_pager_written_into_config_is_refused(self):
+        # a pager in the repository's (or the user's) git config runs under every later `git log`, for every
+        # session; gh's own pager setting does the same for gh
+        for cmd in ("git config core.pager 'gh pr merge 12'", "git config --local pager.log 'gh pr merge 12'",
+                    "git config --global Core.Pager 'gh pr merge 12'", "git config set core.pager 'gh pr merge 12'",
+                    "git -C . config --add pager.diff x", "git config --file=.git/config core.pager x",
+                    "git config $K 'gh pr merge 12'", "gh config set pager 'gh pr merge 12'",
+                    "gh config set -h github.com pager x"):
+            with self.subTest(cmd=cmd):
+                self.assertIn("pager", self.check(cmd) or "")
+        for cmd in ("git config core.pager", "git config --get pager.log", "git config --unset core.pager",
+                    "git config user.name t", "git config get core.pager", "gh config set editor vim",
+                    "gh config get pager"):
+            with self.subTest(cmd=cmd):
+                self.assertIsNone(self.check(cmd))
+
+    def test_rt3_variant_gh_pager_runs_an_arbitrary_command(self):
+        # gh starts GH_PAGER (or PAGER) for its output, so a read runs whatever it names
+        for cmd in ("GH_PAGER='gh pr merge 12' gh pr view 1", "PAGER='gh pr merge 12' gh pr list",
+                    "export GH_PAGER='gh pr merge 12'; gh pr view 1"):
+            with self.subTest(cmd=cmd):
+                self.assertIn("merge", [a["action"] for a in guard.irreversible_actions(cmd, self.repo)])
+                self.assertIsNotNone(self.member(cmd))
+                self.assertIsNotNone(self.main(cmd))
+        self.assertEqual(guard.irreversible_actions("GH_PAGER=cat gh pr view 1", self.repo), [])
+
     # ------------------------------------------------------------------ RT4 (critical): PYTHONPATH code injection
     def test_rt4_python_env_on_a_dev_call_injects_code_into_devkits_process(self):
         # bin/dev was `#!/usr/bin/env python3` (no -E/-I) and PYTHONPATH is searched before the stdlib, so a planted
