@@ -366,6 +366,12 @@ class TerminalLaunchersRunTheirCommand(unittest.TestCase):
             with self.subTest(cmd=cmd):
                 self.assertEqual(self.check(cmd), reason)
 
+    def test_screen_stuff_reads_caret_controls_as_screen_maps_them(self):
+        # screen types ^X as X & 0x1f: ^M, ^m and ^- are a carriage return, ^J, ^j and ^* a line feed
+        for caret in "MmJj-*":
+            with self.subTest(caret=caret):
+                self.assertEqual(self.check(f"screen -S x -X stuff 'dev install^{caret}'"), guard.INSTALL_REASON)
+
     def test_the_developers_acknowledgement_through_a_launcher_is_refused(self):
         for cmd in ("screen -dm dev ext ack", "tmux new -d 'dev ext ack'", "expect -c 'spawn dev ext ack'",
                     "echo ack | xargs dev ext"):

@@ -2804,8 +2804,16 @@ def _wrapped(n, args):
 # and has a pty, so it passes set_by_developer(); the guard reads what each one runs, as a shell line where the tool
 # hands it to one
 _SCREEN_VALUES = frozenset({"-c", "-e", "-h", "-p", "-S", "-t", "-T", "-s", "-Logfile"})
-_SCREEN_EOL = re.compile(r"\^[MJ]|\\[nr]|[\r\n]")
+_SCREEN_EOL = re.compile(r"\\[nr]|[\r\n]")
 _SCREEN_OCTAL = re.compile(r"\\([0-7]{1,3})")  # `stuff 'd\145v install\015'` types `dev install` and Enter
+_SCREEN_CARET = re.compile(r"\^([!-~])")  # ^X types control-X: ^? is DEL, any other X is X & 0x1f
+
+
+def _screen_keys(text: str) -> str:
+    """The keys `screen -X stuff '<text>'` types: \\NNN octal escapes, then ^X controls as screen maps them, so ^M,
+    ^m and ^- are a carriage return and ^J, ^j and ^* a line feed."""
+    text = _SCREEN_OCTAL.sub(lambda m: chr(int(m.group(1), 8) & 0xFF), text)
+    return _SCREEN_CARET.sub(lambda m: chr(0x7F) if m.group(1) == "?" else chr(ord(m.group(1)) & 0x1F), text)
 
 
 def _screen_command(args) -> list:
@@ -2820,9 +2828,8 @@ def _screen_command(args) -> list:
         if a == "-X" or (a.startswith("-") and not a.startswith("--") and a.endswith("X")):
             sent = args[i + 1:]
             verb, rest = (sent[0] if sent else ""), sent[1:]
-            if verb == "stuff":  # screen reads ^M, ^J, \n and \r in the text as the end of a line, and \NNN as octal
-                text = _SCREEN_OCTAL.sub(lambda m: chr(int(m.group(1), 8) & 0xFF), " ".join(rest))
-                return ["sh", "-c", _SCREEN_EOL.sub("\n", text)] if rest else []
+            if verb == "stuff":  # a carriage return, a line feed, \n or \r in the typed keys ends the line
+                return ["sh", "-c", _SCREEN_EOL.sub("\n", _screen_keys(" ".join(rest)))] if rest else []
             if verb == "exec":  # exec [fdpat] command …: the fd pattern is made of `.`, `!` and `|`
                 return rest[1:] if rest and set(rest[0]) <= set(".!|") else rest
             return _screen_command(rest) if verb == "screen" else []
