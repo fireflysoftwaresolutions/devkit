@@ -108,6 +108,22 @@ def plain(s: str) -> str:
 
 
 class CatalogTests(unittest.TestCase):
+    def test_two_team_sources_that_name_the_same_skill_are_refused(self):
+        t = fixture_team()
+        t["skills"]["sources"].append({"repo": "someone/skills", "ref": SHA_C, "license": "MIT", "why": "w",
+                                       "skills": {"codebase-design": "skills/cd"}})
+        with self.assertRaisesRegex(ext.ExtError, "codebase-design.*mattpocock/skills.*someone/skills"):
+            ext.catalog(t, {}, None)
+
+    def test_an_overlay_skill_that_takes_a_team_skills_name_is_refused_for_any_agent(self):
+        add = {"kind": "skill", "name": "impeccable", "repo": "someone/skills", "ref": SHA_C, "path": "s/i",
+               "license": "MIT", "why": "w", "agents": ["codex"]}
+        with self.assertRaisesRegex(ext.ExtError, "impeccable.*pbakaus/impeccable"):
+            ext.catalog(fixture_team(), {"add": [add]}, None)
+        # and the skills step falls back to the team's sources alone: no overlay repository is fetched
+        sources = ext.effective_skill_sources(fixture_team(), {"add": [add]})
+        self.assertNotIn("someone/skills", [s["repo"] for s in sources])
+
     def test_each_kind_gets_its_id_source_and_pin_kind(self):
         cat = by_id(ext.catalog(fixture_team(), {}, {"postgres"}))
         sp = cat["plugin:claude:superpowers@claude-plugins-official"]
@@ -1084,11 +1100,11 @@ class EffectiveSetTests(unittest.TestCase):
         self.assertIn("chrome-devtools", claude_mcp)
 
     def test_the_skills_step_gets_overlay_skills_and_drops_removed_ones(self):
-        add = {"kind": "skill", "name": "k6", "repo": "grafana/skills", "ref": SHA_C, "path": "skills/k6",
+        add = {"kind": "skill", "name": "k6-load", "repo": "grafana/skills", "ref": SHA_C, "path": "skills/k6",
                "license": "Apache-2.0", "why": "load tests", "agents": ["claude"]}
         with self.overlay({"add": [add], "disable": ["skill:codex:codebase-design"]}):
             sources = ext.effective_skill_sources()
-        mine = [s for s in sources if "k6" in s["skills"] and s["ref"] == SHA_C]  # the team has a k6 too
+        mine = [s for s in sources if "k6-load" in s["skills"]]
         self.assertEqual([(s["repo"], s["ref"], s["agents"]) for s in mine], [("grafana/skills", SHA_C, ["claude"])])
         cd = [s for s in sources if "codebase-design" in s["skills"]]
         self.assertEqual([s.get("agents") for s in cd], [["claude"]])
@@ -1192,6 +1208,16 @@ class ChangeCommandTests(unittest.TestCase):
                 self.assertEqual(rc, 2)
                 self.assertIn("required", out)
         self.assertEqual((self.overlay(), self.run.calls), ({}, []))
+
+    def test_add_refuses_a_skill_whose_name_a_team_source_uses_for_another_agent(self):
+        # the team ships impeccable to Claude only; one name shares one folder, so a Codex copy would replace it
+        rc, out = self.dev("add", "skill", "impeccable", "--agent", "codex", "--repo", "someone/skills", "--ref",
+                           SHA_C, "--path", "skills/impeccable", "--license", "MIT", "--why", "w")
+        self.assertEqual(rc, 2, out)
+        self.assertIn("impeccable", out)
+        self.assertIn("pbakaus/impeccable", out)
+        self.assertEqual(self.overlay(), {})
+        self.assertEqual(self.run.calls, [])
 
     def test_add_mcp_takes_its_command_line_and_checks_its_pin(self):
         rc, out = self.dev("add", "mcp", "pg", "--agent", "codex", "--license", "MIT", "--why", "Postgres tools",

@@ -250,6 +250,16 @@ def catalog(t: dict, user: dict = None, groups=None) -> list:
             out.append(_plugin(agent, pid, meta.get(pid) or {}, "team", pid not in off))
         for name, spec in (conf.get("mcp") or {}).items():
             out.append(_mcp(agent, name, spec, meta.get(f"mcp:{name}") or {}, "team"))
+    # one skill name is one folder in the shared skills directory for both agents: two sources with the same name
+    # would replace each other's files (and the second would inherit what devkit trusts the first for, such as
+    # impeccable's engine), so a name belongs to one source, whatever its group or agents
+    named = {}
+    for src in (t.get("skills") or {}).get("sources") or []:
+        for name in src.get("skills") or {}:
+            if name in named:
+                raise ExtError(f"skills.json: the skill {name} comes from both {named[name]} and {src.get('repo')}; "
+                               f"one name is one folder, so keep one source for it")
+            named[name] = src.get("repo")
     for src in (t.get("skills") or {}).get("sources") or []:
         g = src.get("group")
         if g and groups is not None and g not in groups and "all" not in groups:
@@ -263,6 +273,16 @@ def catalog(t: dict, user: dict = None, groups=None) -> list:
     out = [e for e in out if e.id not in retired]
     required = {e.id for e in out if e.required}  # M1: from the team layer, before an overlay entry can replace one
     added = [e for item in user["add"] for e in _user_items(item)]
+    mine = {}
+    for e in added:
+        if e.kind != "skill":
+            continue
+        if e.name in named:
+            raise ExtError(f"ext.add skill {e.name}: the team's skill {e.name} (from {named[e.name]}) has that name, "
+                           f"and one name is one folder for both agents; give yours another name, or change the team "
+                           f"entry on a branch of the devkit checkout (dev ext add --team)")
+        if mine.setdefault(e.name, e.source) != e.source or sum(1 for x in added if x.id == e.id) > 1:
+            raise ExtError(f"ext.add skill {e.name}: the overlay names it twice; keep one entry")
     ids = {e.id for e in added}
     # a user entry replaces a team one with the same id (`dev ext add` refuses that; a hand-written overlay may), and
     # a required team entry stays required
@@ -1784,7 +1804,7 @@ def effective(agent: str, kind: str, t: dict = None, user: dict = None, groups=N
 def overlay_skill_sources(user: dict = None) -> list:
     """The overlay's skills as config/skills.json sources, for the skills step."""
     out = []
-    for item in (user_layer() if user is None else user)["add"]:
+    for item in (user_layer() if user is None else user).get("add") or []:  # {}: an overlay that failed validation
         if isinstance(item, dict) and item.get("kind") == "skill":
             _user_items(item)  # validates
             out.append({"repo": item["repo"], "ref": item["ref"], "license": item["license"], "why": item["why"],
