@@ -1064,6 +1064,82 @@ class CommandTests(AuditCase):
         self.assertIn("git history keeps every published month", json.loads(text)["team"]["history"])
 
 
+class PublishLimitTests(AuditCase):
+    # the 26.11.3 stopgap: GitHub refuses a file over 100 MB, and then every handoff push, so the audit job never
+    # publishes a month file over 45 MB (26.11.5 replaces whole months with daily gzipped segments)
+    MB = 1024 * 1024
+
+    def month(self) -> Path:
+        return audit.AUDIT / time.strftime("%Y-%m.jsonl")
+
+    def grow(self, size: int, at: int = 0):
+        # the month file at `size` bytes: its first `at` bytes (what is already published), a hole, then the rest of
+        # its records, so the file still extends its published copy and no test writes tens of megabytes
+        data = self.month().read_bytes()
+        with open(self.month(), "wb") as fh:
+            fh.write(data[:at])
+            fh.seek(size - (len(data) - at) - 1)
+            fh.write(b"\n" + data[at:])
+
+    def run_cmd(self, *argv):
+        import argparse
+        a = audit.add_arguments(argparse.ArgumentParser()).parse_args(list(argv))
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(io.StringIO()):
+            rc = audit.cmd_audit(a)
+        return rc, out.getvalue()
+
+    def test_a_month_over_45_mb_keeps_its_published_copy_and_records_one_warning(self):
+        audit.record("dev.task", "add 1")
+        self.assertEqual(len(audit.publish()), 1)  # published while small, as on every day before
+        published = audit.team_dir() / self.month().name
+        before = published.read_bytes()
+        audit.record("dev.task", "add 2")
+        self.grow(46 * self.MB, at=len(before))
+        last = audit.AUDIT / f"{audit.months_back(time.time(), 1)}.jsonl"
+        last.write_bytes(b'{"ts": 1, "action": "dev.task", "target": "last month"}\n')
+        self.assertEqual(audit.publish(), [audit.team_dir() / last.name])  # the other months publish as before
+        self.assertEqual(published.read_bytes(), before)
+        warn = audit.query(action="audit.publish")
+        self.assertEqual(len(warn), 1)
+        self.assertEqual((warn[0]["outcome"], warn[0]["severity"]), ("blocked", "warning"))
+        self.assertEqual(warn[0]["target"], core.tilde(self.month()))
+        self.assertIn("46.0 MB", warn[0]["detail"])
+        self.assertIn("45.0 MB limit", warn[0]["detail"])
+
+    def test_the_limit_is_45_mb_inclusive(self):
+        audit.record("dev.task", "add 1")
+        self.grow(45 * self.MB)
+        published = audit.team_dir() / self.month().name
+        self.assertEqual(audit.publish(), [published])
+        self.assertEqual(published.read_bytes(), self.month().read_bytes())  # byte for byte, as today
+        with open(self.month(), "ab") as fh:
+            fh.write(b"\n")
+        self.assertEqual(audit.publish(), [])
+        self.assertEqual(published.stat().st_size, 45 * self.MB)
+
+    def test_stats_says_which_month_is_held_and_what_to_do(self):
+        audit.record("dev.task", "add 1")
+        self.assertEqual(json.loads(self.run_cmd("stats", "--json")[1]).get("held"), [])  # while every month fits
+        self.grow(46 * self.MB)
+        rc, text = self.run_cmd("stats")
+        self.assertEqual(rc, 0)
+        self.assertIn(f"{self.month().stem} is not published: 46.0 MB here, over the 45.0 MB limit", text)
+        self.assertIn("dev update", text)
+        held = json.loads(self.run_cmd("stats", "--json")[1])["held"]
+        self.assertEqual([(h["month"], h["bytes"]) for h in held], [(self.month().stem, 46 * self.MB)])
+
+    def test_doctor_fails_its_row_for_a_held_month_and_says_what_to_do(self):
+        # dev doctor prints each row as (group, name, ok, detail, fix)
+        audit.record("dev.task", "add 1")
+        self.assertEqual([row[2] for row in audit.publish_checks()], [True])
+        self.grow(46 * self.MB)
+        rows = audit.publish_checks()
+        self.assertEqual([row[2] for row in rows], [False])
+        self.assertIn(f"{self.month().stem} is not published: 46.0 MB here, over the 45.0 MB limit", rows[0][3])
+        self.assertIn("dev update", rows[0][4])
+
+
 class CliWiringTests(unittest.TestCase):
     # `dev audit` must reach the new subcommands, and `dev config validate` must check the audit keys
     def test_dev_audit_parses_the_new_subcommands_and_filters(self):

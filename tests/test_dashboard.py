@@ -1008,12 +1008,24 @@ class BranchMapTests(unittest.TestCase):
 # --------------------------------------------------------------------------- the page itself, in a real browser
 
 def find_chrome():
-    """A Chrome or Chromium for the page's behavior tests: $DEVKIT_TEST_CHROME, Google Chrome, or a Playwright build."""
-    home = Path.home() / "Library/Caches/ms-playwright"
+    """A Chrome or Chromium for the page's behavior tests: $DEVKIT_TEST_CHROME, Google Chrome, or a Playwright build.
+
+    The run's HOME is a temporary one (tests/_hermetic.py), so Playwright's browsers are looked up in the account's own
+    home too. A full browser comes before Playwright's headless shell: CI's macOS runner has Google Chrome, and only a
+    full browser shows what it does there at start and exit (the login keychain, see run_chrome)."""
+    homes = [Path.home()]
+    try:
+        import pwd
+        homes.append(Path(pwd.getpwuid(os.getuid()).pw_dir))
+    except (ImportError, KeyError, OSError):
+        pass
+    caches = [h / "Library/Caches/ms-playwright" for h in dict.fromkeys(homes)]
     cands = [os.environ.get("DEVKIT_TEST_CHROME"), "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
              "/Applications/Chromium.app/Contents/MacOS/Chromium"]
-    cands += sorted(glob.glob(str(home / "chromium_headless_shell-*/chrome-headless-shell-*/chrome-headless-shell")), reverse=True)
-    cands += sorted(glob.glob(str(home / "chromium-*/chrome-mac*/*.app/Contents/MacOS/*")), reverse=True)
+    for cache in caches:
+        cands += sorted(glob.glob(str(cache / "chromium-*/chrome-mac*/*.app/Contents/MacOS/*")), reverse=True)
+    for cache in caches:
+        cands += sorted(glob.glob(str(cache / "chromium_headless_shell-*/chrome-headless-shell-*/chrome-headless-shell")), reverse=True)
     cands += [shutil.which(n) for n in ("google-chrome", "chromium", "chromium-browser")]
     return next((c for c in cands if c and os.path.isfile(c) and os.access(c, os.X_OK)), None)
 
@@ -1029,14 +1041,41 @@ const key = (el, k) => el.dispatchEvent(new KeyboardEvent("keydown", {key: k, bu
 await tick(100);
 try { %s } catch (e) { out.probeError = String(e && e.stack || e); }
 out.pageError = text($("#dk-error"));
-const pre = document.createElement("pre"); pre.id = "probe-out"; pre.textContent = JSON.stringify(out); document.body.append(pre); })();</script>"""
+const pre = document.createElement("pre"); pre.id = "probe-out"; pre.textContent = JSON.stringify(out); document.body.append(pre);
+if (window.parent !== window) parent.postMessage(pre.textContent, "*"); })();</script>"""
+CHROME_MIN_WIDTH = 500  # a full Chrome never makes its window narrower, headless or not: a 390 window is 500 wide
+# a narrower width: the page in an iframe that wide (its media queries and widths are a phone's), whose probe hands
+# `out` to this page, the one Chrome dumps
+NARROW = """<!doctype html><html><head><meta charset="utf-8"><style>html, body { margin: 0 } iframe { border: 0; display: block }</style></head>
+<body><iframe src="%s" width="%d" height="%d"></iframe><script>addEventListener("message", e => {
+const pre = document.createElement("pre"); pre.id = "probe-out"; pre.textContent = e.data; document.body.append(pre); });</script></body></html>"""
+
+
+_CHROME_HUNG = []  # the page of the first call that ran out of time: every later call fails at once
+
+
+def run_chrome(url: str, width: int, height: int = 900, budget: int = 6000, timeout: int = 120) -> subprocess.CompletedProcess:
+    """Headless Chrome dumping the DOM of `url` once its virtual time `budget` (ms) has run.
+
+    --use-mock-keychain: the run's HOME has no login keychain (tests/_hermetic.py), and a full Chrome that reaches for
+    it there stalls at exit until its teardown watchdog kills it, or hangs until the timeout, test after test (the CI
+    run of PR #6 was cancelled after 15 minutes). One call that runs out of time makes every later call fail at once,
+    so a browser that hangs costs one timeout, not one per test."""
+    if _CHROME_HUNG:
+        raise AssertionError(f"headless Chrome ran out of time in an earlier test ({_CHROME_HUNG[0]}); not started again")
+    with tempfile.TemporaryDirectory() as prof:
+        try:
+            return subprocess.run([CHROME, "--headless", "--use-mock-keychain", "--disable-gpu", "--no-first-run", "--no-default-browser-check",
+                                   "--hide-scrollbars", f"--user-data-dir={prof}", f"--window-size={width},{height}",
+                                   f"--virtual-time-budget={budget}", "--dump-dom", url], capture_output=True, text=True, timeout=timeout)
+        except subprocess.TimeoutExpired as e:
+            _CHROME_HUNG.append(url)
+            err = e.stderr.decode(errors="replace") if isinstance(e.stderr, bytes) else (e.stderr or "")
+            raise AssertionError(f"headless Chrome did not finish in {timeout} s: {err[-1500:]}") from None
 
 
 def chrome(url: str, width: int, height: int = 900, budget: int = 6000) -> str:
-    with tempfile.TemporaryDirectory() as prof:
-        res = subprocess.run([CHROME, "--headless", "--disable-gpu", "--no-first-run", "--no-default-browser-check", "--hide-scrollbars",
-                              f"--user-data-dir={prof}", f"--window-size={width},{height}", f"--virtual-time-budget={budget}", "--dump-dom", url],
-                             capture_output=True, text=True, timeout=120)
+    res = run_chrome(url, width, height, budget)
     m = re.search(r'<pre id="probe-out">(.*?)</pre>', res.stdout, re.S)
     if not m:
         raise AssertionError("the probe did not finish: " + res.stderr[-1500:])
@@ -1044,11 +1083,16 @@ def chrome(url: str, width: int, height: int = 900, budget: int = 6000) -> str:
 
 
 def browse(page: str, steps: str, width: int = 1440, hash_: str = "", budget: int = 6000) -> dict:
-    """Load a page in headless Chromium at a width, run the probe's `steps` (JS that fills `out`) and return `out`."""
+    """Load a page in headless Chromium at a width, run the probe's `steps` (JS that fills `out`) and return `out`.
+    Below CHROME_MIN_WIDTH the page runs in an iframe of that width (NARROW)."""
     with tempfile.TemporaryDirectory() as t:
         f = Path(t) / "page.html"
         f.write_text(page.replace("</body>", PROBE % steps + "</body>"), encoding="utf-8")
-        return chrome(f.as_uri() + hash_, width, budget=budget)
+        if width >= CHROME_MIN_WIDTH:
+            return chrome(f.as_uri() + hash_, width, budget=budget)
+        narrow = Path(t) / "narrow.html"
+        narrow.write_text(NARROW % (htmlmod.escape(f.name + hash_), width, 900), encoding="utf-8")
+        return chrome(narrow.as_uri(), CHROME_MIN_WIDTH, budget=budget)
 
 
 def fixture_data(root: Path) -> dict:
@@ -1120,6 +1164,28 @@ def fixture_data(root: Path) -> dict:
             x["sessions"][0]["progress"] = {"goal": "Reconcile ledgers", "state": "running", "step": 1, "steps": 3, "estimate": 40, "started": int(t - 1200),
                                             "eta_min": 25, "active_min": 18, "wall_min": 20, "plan": [], "agents": [], "last": "matching rows", "next": "", "updated": int(t - 300)}
     return d
+
+
+@unittest.skipUnless(CHROME, NO_CHROME)
+class HeadlessChromeTests(unittest.TestCase):
+
+    # The run's HOME has no login keychain: a Chrome that reaches for it stalls at exit and its teardown watchdog
+    # kills it (exit 2), or it hangs until the timeout, as every browser test did on CI's macOS runner for PR #6
+    def test_chrome_dumps_the_page_and_exits_cleanly_under_the_runs_home(self):
+        with tempfile.TemporaryDirectory() as t:
+            f = Path(t) / "page.html"
+            f.write_text('<html><body><pre id="probe-out">{"ok": 1}</pre></body></html>', encoding="utf-8")
+            res = run_chrome(f.as_uri(), 800, budget=1000, timeout=60)
+        self.assertEqual(res.returncode, 0, res.stderr[-1500:])
+        self.assertIn('<pre id="probe-out">{"ok": 1}</pre>', res.stdout)
+
+    # Chrome's window is never narrower than 500: a phone width must still reach the page's media queries
+    def test_a_phone_width_below_chromes_window_minimum_is_the_pages_own_width(self):
+        page = "<html><head><style>body { margin: 0 } @media (max-width: 400px) { p { width: 10px } }</style></head><body><p>x</p></body></html>"
+        out = browse(page, 'out.inner = innerWidth; out.client = document.documentElement.clientWidth; out.p = $("p").offsetWidth;', 390, budget=1000)
+        self.assertEqual((out["inner"], out["client"], out["p"]), (390, 390, 10))
+        out = browse(page, 'out.inner = innerWidth; out.p = $("p").offsetWidth;', 768, budget=1000)
+        self.assertEqual((out["inner"], out["p"]), (768, 768))
 
 
 @unittest.skipUnless(CHROME, NO_CHROME)

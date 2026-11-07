@@ -157,7 +157,7 @@ _dev_here='tasks steps plans branches worktrees'
 _dev_spec() {
   c= o= v= p=
   case "$1" in
-    '') c='help ls go alias status clone new adopt open claude codex handoff-import handoff session task note plan progress time delivery lesson sleep jobs audit report rm mv cp files find grep diff stubs team initiative overview standup dashboard config agents calver plugin guard wt backup sync du free gc canary ci branch commit rebase push pr run release issue git gh test mcp desktop crew doctor install docs sec diagram setup prompt update docker version completion' o='-h --help' ;;
+    '') c='help ls go alias status clone new adopt open claude codex handoff-import handoff session task note plan progress time delivery lesson sleep jobs audit report rm mv cp files find grep diff stubs team initiative overview standup dashboard config agents calver plugin guard wt backup sync du free gc canary ci branch commit rebase push pr run release issue git gh test mcp desktop crew impeccable doctor install docs sec diagram setup prompt update docker version completion' o='-h --help' ;;
     'help') o='-h --help' ;;
     'ls') o='-h --help --offline --names --all --json' ;;
     'go') o='-h --help' p='l:projects:-:: l:worktrees:@1::' ;;
@@ -316,16 +316,17 @@ _dev_spec() {
     'crew show') o='-h --help' p='*l:crew:-::' ;;
     'crew brief') o='-h --help --scope --step --activity' v='--scope=n --step=l:steps:-:: --activity=l:activities:-::' p='l:crew:-:: *n' ;;
     'crew sync') o='-h --help --check' ;;
-    'crew ask') o='-h --help --to --decision --options --recommend --irreversible --target --approves' v='--to=l:crew:-:: --options=n --recommend=n --irreversible=n --target=n --approves=l:steps:-::' p='*n' ;;
+    'crew ask') o='-h --help --to --decision --options --recommend --irreversible --target --performs --approves' v='--to=l:crew:-:: --options=n --recommend=n --irreversible=n --target=n --performs=n --approves=l:steps:-::' p='*n' ;;
     'crew answer') o='-h --help' p='n *n' ;;
     'crew inbox') o='-h --help' ;;
     'crew mode') o='-h --help --approve' v='--approve=n' p='c:guided,auto' ;;
     'crew decide') o='-h --help' p='n *n' ;;
-    'crew decisions') o='-h --help --pending --ask' v='--ask=n' ;;
+    'crew decisions') o='-h --help --pending --ask --json' v='--ask=n' ;;
     'crew route') o='-h --help --files --plan --apply' v='--files=n' p='*n' ;;
     'crew delegate') o='-h --help --to --scope --after --estimate --files' v='--to=l:crew:-:: --scope=n --after=l:steps:-:: --estimate=n --files=n' p='*n' ;;
     'crew decline') o='-h --help --why' v='--why=n' p='*l:steps:-::' ;;
     'crew next') o='-h --help --first --why' v='--first=l:steps:-:: --why=n' ;;
+    'impeccable') o='-h --help' p='*n' ;;
     'doctor') o='-h --help' ;;
     'install') o='-h --help --only --version --unverified --why --commit-template' v='--only=m:config,tools,cli,git,handoff,instructions,skills,claude,codex,desktop,docker,docs,launchd,prompt,shell --version=l:versions:-:: --why=n --commit-template=c:yes,no' ;;
     'docs') o='-h --help --online --fix --no-prose' p='c:check *f' ;;

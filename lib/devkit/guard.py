@@ -13,7 +13,6 @@ Pure functions; the hook wrapper fails open on any error.
 """
 from __future__ import annotations
 
-import contextvars
 import fnmatch
 import functools
 import json
@@ -423,6 +422,33 @@ def split_commands(cmd: str, ops: bool = False):
     return segs
 
 
+def _prefix_opts(name, argv, i):
+    """The options of prefix command `name` from argv[i] on -> ([(flag, value or None)], index of the first word after
+    them). A short cluster ends at a flag that takes a value: `env -iC dir`, `sudo -iu root` (the value is the rest of
+    the word or the next word)."""
+    takes, opts = _PREFIX_VALUE_FLAGS.get(name, ()), []
+    while i < len(argv) and argv[i].startswith("-"):
+        f = argv[i]
+        i += 1
+        if f == "--":
+            break
+        if f.startswith("--"):
+            key, eq, val = f.partition("=")
+            if not eq and key in takes and i < len(argv):
+                val, i = argv[i], i + 1
+            opts.append((key, val if eq or key in takes else None))
+            continue
+        for j in range(1, len(f)):
+            if "-" + f[j] in takes:
+                val = f[j + 1:]
+                if not val and i < len(argv):
+                    val, i = argv[i], i + 1
+                opts.append(("-" + f[j], val))
+                break
+            opts.append(("-" + f[j], None))
+    return opts, i
+
+
 def _strip_prefix(argv):
     i = 0
     while i < len(argv):
@@ -430,16 +456,30 @@ def _strip_prefix(argv):
         if re.match(r"^[A-Za-z_][A-Za-z0-9_]*=", a):
             i += 1
         elif os.path.basename(a) in PREFIX_CMDS:
-            takes = _PREFIX_VALUE_FLAGS.get(os.path.basename(a), ())
-            i += 1
-            while i < len(argv) and argv[i].startswith("-"):
-                f = argv[i]
-                i += 2 if f in takes else 1
-                if f == "--":
-                    break
+            i = _prefix_opts(os.path.basename(a), argv, i + 1)[1]
         else:
             break
     return argv[i:]
+
+
+# the prefix flags that run the command in another folder: `env -C dir`, `env --chdir=dir`, `sudo -D dir`
+_CHDIR_OPTS = {"env": ("-C", "--chdir"), "sudo": ("-D", "--chdir")}
+
+
+def _prefix_chdir(pre, cwd):
+    """The folder a segment's command runs in after its prefix words `pre` (the code reviewer's finding on cc259b7:
+    `env -C <repo> git push` pushes from <repo>); UNKNOWN when the folder is known only at run time."""
+    i = 0
+    while i < len(pre):
+        name = os.path.basename(pre[i])
+        if name not in PREFIX_CMDS:
+            i += 1
+            continue
+        opts, i = _prefix_opts(name, pre, i + 1)
+        for flag, val in opts:
+            if flag in _CHDIR_OPTS.get(name, ()) and val is not None:
+                cwd = str(resolve(val, cwd)) if val else cwd
+    return cwd
 
 
 def _env_runs_string(argv0) -> bool:
@@ -468,6 +508,38 @@ def _git_split(argv):
         else:
             return cdir, a, argv[i + 1:]
     return cdir, None, []
+
+
+def _git_where(argv, cwd) -> str:
+    """The folder whose repository a git command acts on (B2b): its -C folders in turn, then --git-dir (the folder
+    that holds a `.git` it names, else the git folder itself). UNKNOWN when -C, --git-dir or --work-tree is known only
+    at run time; a literal --work-tree alone leaves the repository git finds from the folder."""
+    i, here, gdir, tree = 1, cwd, None, None
+    while i < len(argv):
+        a = argv[i]
+        if a == "-C" and i + 1 < len(argv):
+            here, i = str(resolve(argv[i + 1], here)) if argv[i + 1] else here, i + 2
+        elif a in ("--git-dir", "--work-tree") and i + 1 < len(argv):
+            gdir, tree = (argv[i + 1], tree) if a == "--git-dir" else (gdir, argv[i + 1])
+            i += 2
+        elif a.startswith(("--git-dir=", "--work-tree=")):
+            val = a.split("=", 1)[1]
+            gdir, tree = (val, tree) if a.startswith("--git-dir=") else (gdir, val)
+            i += 1
+        elif a in ("-c", "--namespace", "--config-env") and i + 1 < len(argv):
+            i += 2
+        elif a.startswith("-"):
+            i += 1
+        else:
+            break
+    if not here or str(here) == str(UNKNOWN) or (tree is not None and resolve(tree, here) == UNKNOWN):
+        return str(UNKNOWN)
+    if gdir is None:
+        return str(here)
+    g = resolve(gdir, here)
+    if g == UNKNOWN:
+        return str(UNKNOWN)
+    return str(g.parent if g.name == ".git" else g)
 
 
 def _positionals(args, value_opts):
@@ -2168,6 +2240,8 @@ class _Shell:
             return deny(LOCK_REASON.format(sub=words[1]))
         if args[:1] == ["hook"] and not helps:
             return deny(HOOK_REASON)
+        if args[:1] == ["impeccable"] and impeccable_harness_verb(args[1:]):  # its words reach the engine, help too
+            return deny(IMPECCABLE_REASON)
         if args[:1] in (["rm"], ["mv"], ["cp"]):
             return self.segment(args[0], args, [], cwd)
         if args[:1] and (args[0] in _DEV_READ or args[0] in _DEV_TEXT):
@@ -3517,6 +3591,8 @@ def _ro_dev(args) -> str | None:
         return None
     pos = _dev_words(args)  # options take values (--action guard, --search add): the subcommand is the next word
     sub = pos[0] if pos else ""
+    if sub == "impeccable":  # its words go to the engine as they are: the read verbs' own rules decide
+        return _ro_impeccable(args[args.index(sub) + 1:])
     if sub in _RO_DEV and (_RO_DEV[sub] is None or (pos[1] if len(pos) > 1 else "") in _RO_DEV[sub]):
         if sub == "ci" and _dev_sets(args, "--run", "--resume"):
             return "`dev ci --run` runs the pipeline's build and package steps"
@@ -3524,6 +3600,95 @@ def _ro_dev(args) -> str | None:
             return "`dev audit --publish` commits the audit trail to the handoff repository, and `-o` writes a file"
         return None
     return f"`dev {' '.join(pos[:2]) or '…'}` changes devkit's records or the repository"
+
+
+# --------------------------------------------------------------------------- dev impeccable (spec F7, C6)
+#
+# Crew members run impeccable's engine with `dev impeccable <verb>` (impeccable.py), which takes the engine from
+# devkit's own skills folder and checks its digest against the install record before every run, without a shell. The
+# skill's launcher typed by its path is judged like any other script: the shell can reach another file than the one the
+# guard reads by the same words (a link, `..` after `cd`, a quoted `~`, a glob, a folder moved earlier in the same
+# command; the Code reviewer's reviews of 11fd55e, 452dd51 and 1e606b7), and its `exec "$bin"` names its program at
+# run time, so the gate refuses it to crew lanes. Write lanes run every verb of `dev impeccable`. Read-only lanes run
+# only its read verbs with their reading flags (the skill's reference: context loads PRODUCT.md and DESIGN.md, detect
+# scans local HTML and CSS, doctor without --fix reports), on local paths: detect scans a URL when it gets one, so no
+# value or path may name a URL or anything that could pass for a host. init, document, extract, live, generate and the
+# rest write files or start a session and stay with write lanes.
+
+# verb -> (flags that take a value, flags alone, whether local paths may follow)
+IMPECCABLE_READS = {
+    "context": (frozenset({"--target"}), frozenset(), False),
+    "detect": (frozenset({"--scope"}), frozenset({"--json", "--quiet", "--list-rules", "--no-config", "--no-advisory",
+                                                  "--no-inline-ignores", "--no-design-system", "--help"}), True),
+    "doctor": (frozenset({"--target"}), frozenset({"--json", "--help"}), False),
+}
+# a first path part detect could take for a host: localhost, or dotted names and addresses (example.com, 10.0.0.2)
+_HOSTLIKE = re.compile(r"(?:localhost|[A-Za-z0-9_-]+(?:\.[A-Za-z0-9_-]+)+)(?:/|$)", re.I)
+# impeccable's verbs that write the agents' own settings, hooks or skill folders, by the engine's help and its
+# doctor's hints: `hooks on|off` writes the hook manifests (.claude/settings.json, .codex/hooks.json, …); `install`,
+# `link`, `pin` and `unpin` put skills in the harnesses' folders; `update` rewrites them and, with --user, the
+# user-level hook manifest; `doctor --fix` moves hook entries. They change what runs in every later session, so they
+# are the developer's, as `dev ext add` is (the tech lead's decision on the wrapper's review): refused to every agent
+# here and by `dev impeccable` itself outside the developer's terminal (impeccable.run).
+IMPECCABLE_HARNESS = frozenset({"hooks", "install", "link", "update", "pin", "unpin"})
+IMPECCABLE_REASON = ("This command writes the agents' settings, hooks or skill folders: `dev impeccable hooks`, "
+                     "`install`, `link`, `update`, `pin`, `unpin` or `doctor --fix` (also after `skills`), which "
+                     "change what runs in every later session on this Mac. Only the developer does that, in a "
+                     "terminal. Ask them, with the command and why. Agents may run `dev impeccable context`, `detect`, "
+                     f"`doctor` without `--fix`, and the design verbs. {_TAIL}")
+
+
+def impeccable_harness_verb(args) -> str:
+    """The verb of a `dev impeccable` call that writes the agents' settings, hooks or skill folders, or ''. `args`:
+    the words after `impeccable`. dev drops one first `--`; any further `--` before the verb, and the engine's legacy
+    `skills <verb>` namespace, are read through (fails closed). doctor counts with any word that starts with --fix."""
+    words = [str(w) for w in args]
+    while words[:1] == ["--"]:
+        words = words[1:]
+    if words[:1] and words[0].lower() == "skills":
+        words = words[1:]
+        while words[:1] == ["--"]:
+            words = words[1:]
+    verb = words[0].lower() if words else ""
+    if verb in IMPECCABLE_HARNESS:
+        return verb
+    return "doctor --fix" if verb == "doctor" and any(w.startswith("--fix") for w in words[1:]) else ""
+
+
+def _ro_impeccable(args) -> str | None:
+    """Why a read-only lane may not run `dev impeccable` with `args`, the words after it, or None. dev drops a first
+    `--` and passes the rest to the engine as they are, so a later `--` is a word the engine reads, never a reading
+    flag."""
+    harness = impeccable_harness_verb(args)
+    if harness:
+        return (f"`dev impeccable {harness}` writes the agents' settings, hooks or skill folders, which change what "
+                f"runs in every later session: only the developer runs it, in a terminal")
+    args = args[1:] if args[:1] == ["--"] else list(args)
+    verb, rest = (args[0], args[1:]) if args else ("", [])
+    if verb not in IMPECCABLE_READS:
+        return (f"`dev impeccable {verb or '(no verb)'}` writes files or starts a session, so a write lane runs it; a "
+                f"read-only lane runs {', '.join(IMPECCABLE_READS)} (doctor without --fix)")
+    takes, alone, paths = IMPECCABLE_READS[verb]
+    i = 0
+    while i < len(rest):
+        a = rest[i]
+        flag, eq, value = a.partition("=")
+        if flag in takes:
+            value = value if eq else (rest[i + 1] if i + 1 < len(rest) else "")
+            i += 1 if eq else 2
+        else:
+            i += 1
+            if a in alone:
+                continue
+            if a.startswith("-") or not paths:
+                return (f"`dev impeccable {verb} {a}` is not one of its reading flags or a local path, so a write lane "
+                        f"runs it")
+            value = a
+        if ":" in value or value.startswith("//") or _HOSTLIKE.match(value):
+            local = "" if ":" in value or value.startswith("//") else f"; a local file with this name is `./{value}`"
+            return (f"`dev impeccable {verb} {a}` names a URL or a host (a scheme, a port, a domain or an address), "
+                    f"which the engine fetches, so a write lane runs it. A read-only lane gives it a local path{local}")
+    return None
 
 
 def _own_scratch_script(argv, cwd, member) -> bool:
@@ -3743,6 +3908,9 @@ def crew_shell_verdict(cmd: str, cwd, scope=None, member=None, level=None, base=
     one_routed = routed and lanes == [1] and [k for k, _ in _dev_calls(*calls[0])] == ["lane"] and \
         all(argv == ["cat"] for argv, code in calls[1:])
     for argv, code in calls:
+        dev = _dev_args(argv) if code is None else None
+        if dev and dev[:1] == ["impeccable"] and impeccable_harness_verb(dev[1:]):  # the developer's, in every lane
+            return deny(IMPECCABLE_REASON)
         for kind, args in _dev_calls(argv, code):
             if kind == "lane" and not one_routed:
                 return deny(LANE_REASON)
@@ -4315,11 +4483,28 @@ _MCP_EXTERNAL = frozenset({"create", "delete", "remove", "upload", "share", "pos
                            "approve"})
 
 
+def _work_folder(cwd):
+    """The folder whose project a command at `cwd` acts on: `cwd`, or inside a git folder (`<repo>/.git`, a worktree's
+    `.git/worktrees/<name>`), where git pushes too but has no work tree, the main checkout of its repository (git's
+    --git-common-dir; the code reviewer's finding on cc259b7)."""
+    if not cwd or str(cwd) == str(UNKNOWN) or core.gitout(cwd, "rev-parse", "--show-toplevel"):
+        return cwd
+    from .registry import main_of
+    main = main_of(Path(cwd))
+    return str(main) if main else cwd
+
+
+def _is_handoff(cwd) -> bool:
+    top = core.gitout(cwd, "rev-parse", "--show-toplevel") if cwd and str(cwd) != str(UNKNOWN) else ""
+    return bool(top) and real(top) == real(core.HANDOFF)
+
+
 @functools.lru_cache(maxsize=64)
 def _repo_of(cwd) -> str:
     """The repository an action at `cwd` acts on: its project id, else its top folder."""
     if not cwd:
         return ""
+    cwd = _work_folder(cwd)
     return current_project(cwd) or core.gitout(cwd, "rev-parse", "--show-toplevel") or ""
 
 
@@ -4369,13 +4554,39 @@ def _local_remote(cwd, remote: str) -> bool:
 # tag, --all), is the developer-only action embargo/<branch>: refused without the developer's typed
 # `grant embargo <branch>`, in every setting. A note devkit cannot read refuses every push (never "no embargo"). The
 # developer still pushes in a terminal, and `dev backup` and `dev sync` hold embargoes themselves. A push or PR whose
-# folder is only known when it runs (`git -C "$(…)" push`, `cd "$X" && dev push`) is judged by the session's own
-# folder: an embargo there, a note devkit cannot read, or a folder that is no project refuses it as the developer-only
-# action `?` (fail closed; the code reviewer's trace of 202e88d).
+# folder is only known when it runs (`git -C "$(…)" push`, `cd "$X" && dev push`, `GIT_DIR=$G git push`) may send
+# from any project on this Mac: an embargo in any of them, or an embargo list devkit cannot read, refuses it as the
+# developer-only action `?` (fail closed; the code reviewer's trace of 202e88d and the tech lead's follow-up). So does
+# a push from a folder devkit maps to no project (a temporary clone, a folder that does not exist yet), the handoff
+# repository's own pushes excepted; a push from inside a git folder is judged as its repository's project (the code
+# reviewer's findings on cc259b7).
 _PSEUDO_TARGETS = frozenset({"mirror", "all-branches", "prune", "all-tags", "HEAD", ""})
-# the session's own folder while irreversible_actions classifies one command: what a push from an unknown folder is
-# judged by. Unset means unknown.
-_SESSION_CWD = contextvars.ContextVar("devkit_guard_session_cwd", default=None)
+
+
+def _embargo_anywhere() -> str:
+    """Why a push from a folder the guard cannot name may send an embargoed branch: the first project on this Mac
+    whose handoff note or audit trail holds an embargo, or why the embargo list cannot be read; '' when no project
+    holds one. Any failure is a reason (B2b: never "no embargo")."""
+    try:
+        from . import audit, branches
+        if not Path(core.HANDOFF).is_dir():
+            return (f"the handoff repository {core.tilde(core.HANDOFF)} is not on this Mac (`dev setup` creates it; "
+                    f"run `dev doctor` to repair the setup)")
+        root = Path(core.NOTES)
+        pids = {p.relative_to(root).with_suffix("").as_posix() for p in root.rglob("*.md")} if root.is_dir() else set()
+        trails = sorted(Path(audit.AUDIT).glob("*.jsonl")) if Path(audit.AUDIT).is_dir() else []
+        team = Path(core.HANDOFF) / "audit"
+        trails += sorted(team.rglob("*.jsonl")) if team.is_dir() else []
+        pids |= {r["project"] for f in trails for r in branches._embargo_records(f) if r["project"]}
+        for pid in sorted(pids):
+            held, why = branches.read_embargoes(pid)
+            if held is None:
+                return f"devkit cannot read the embargo list of {pid} ({why})"
+            if held:
+                return f"{pid} has an embargo in place ({', '.join(sorted(held))})"
+        return ""
+    except Exception as e:
+        return f"devkit cannot read the embargo lists ({type(e).__name__}: {e})"[:300]
 
 
 def _embargo_holds(found, cwd, srcs=()) -> list:
@@ -4384,17 +4595,14 @@ def _embargo_holds(found, cwd, srcs=()) -> list:
     pushes = [f for f in found if f[0] in ("push", "push-destructive", "pr")]
     if not pushes:
         return []
-    if not cwd or str(cwd) == str(UNKNOWN):  # an unknown folder is never "no embargo": the session's own decides
-        home = _SESSION_CWD.get()
-        at = _embargo_at(home)
-        if at is False:
-            return []
-        why = "this session's folder is no project devkit knows" if at is None else \
-            "this session's project has an embargo in place, or a handoff note devkit cannot read"
-        return [("developer-only", "?", "", ("folder", why))]
+    if not cwd or str(cwd) == str(UNKNOWN):  # an unknown folder is never "no embargo": every project's decides
+        why = _embargo_anywhere()
+        return [("developer-only", "?", "", ("folder", why))] if why else []
+    cwd = _work_folder(cwd)
     pid = current_project(cwd)
-    if not pid:
-        return []
+    if not pid:  # nor is a folder that is no project, but for the handoff repository's own pushes
+        why = "" if _is_handoff(cwd) else _embargo_anywhere()
+        return [("developer-only", "?", "", ("noproject", why))] if why else []
     names = {str(f[1]).rsplit(":", 1)[-1] for f in pushes} | {s for s in srcs if not s.startswith("-")}
     names = {re.sub(r"^refs/heads/", "", n) for n in names}
     try:
@@ -4425,13 +4633,15 @@ def _embargo_holds(found, cwd, srcs=()) -> list:
 
 def _embargo_at(cwd):
     """Whether the project at `cwd` holds an embargo: True for one, or for a note devkit cannot read; False for none;
-    None when `cwd` is unknown or no project. Any failure is True (B2b: never "no embargo")."""
+    None when `cwd` is unknown. A folder that is no project holds one while any project does, the handoff repository
+    excepted. Any failure is True (B2b: never "no embargo")."""
     if not cwd or str(cwd) == str(UNKNOWN):
         return None
     try:
+        cwd = _work_folder(cwd)
         pid = current_project(cwd)
         if not pid:
-            return None
+            return None if _is_handoff(cwd) else bool(_embargo_anywhere())
         from . import branches
         held, _ = branches.read_embargoes(pid)
         return held is None or bool(held)
@@ -4695,7 +4905,7 @@ def _dev_actions(dargs, cwd, depth=0) -> list:
         cdir, gsub, gargs = _git_split(["git", *rest])
         if gsub != "push":
             return []
-        gcwd, srcs = str(resolve(cdir, cwd)) if cdir else cwd, []
+        gcwd, srcs = _git_where(["git", *rest], cwd), []  # -C, --git-dir, --work-tree (B2b)
         acts = _push_actions(gargs, gcwd, srcs)
         return _embargo_holds(acts, gcwd, srcs) + acts  # developer-only first
     if _dev_skips(dargs, "-h", "--help", "--dry-run"):
@@ -5081,7 +5291,7 @@ def _segment_actions(argv, cwd, bodies, depth) -> list:
         found = _dev_actions(dev, cwd)
     elif name == "git":
         cdir, sub, args = _git_split(argv)
-        gcwd = str(resolve(cdir, cwd)) if cdir else cwd
+        gcwd = _git_where(argv, cwd)  # -C, --git-dir, --work-tree: the repository it acts on (B2b)
         alias = "" if sub and _dynamic_name(sub) else _git_alias(argv, sub, gcwd if gcwd != str(UNKNOWN) else None)
         if sub and _dynamic_name(sub):  # `git $SUB …`: the subcommand is only known when it runs (RT13)
             found = [_unknown(" ".join(argv))]
@@ -5290,10 +5500,21 @@ def _text_actions(text, cwd, depth=0, from_code=False):
             continue
         if name == "gh" and (sets or gh_repo):  # GH_REPO names the repository gh acts on
             argv = [argv[0], "-R", (sets or [gh_repo])[-1], *argv[1:]]
-        more = _argv_actions(argv, cwd, bodies, depth)
+        genv = {**shell_env, **assigns}  # GIT_DIR and GIT_WORK_TREE choose the repository git acts on (B2b)
+        gopts = [f"--{'git-dir' if k == 'GIT_DIR' else 'work-tree'}={genv[k]}" for k in ("GIT_DIR", "GIT_WORK_TREE")
+                 if k in genv]
+        here = _prefix_chdir(pre, cwd)  # `env -C dir`, `sudo -D dir`: the command runs there
+        if gopts and name == "git":  # as --git-dir and --work-tree
+            argv = [argv[0], *gopts, *argv[1:]]
+        elif gopts:  # dev, gh and anything else that runs git inherit them: it acts on that repository
+            here = _git_where(["git", *gopts], here)
+        more = _argv_actions(argv, here, bodies, depth)
         if more is None:
             return None
         out += more
+        if name in ("source", "."):  # the file may cd or export GIT_DIR, now or once it changes: both are unknown
+            cwd, shell_env["GIT_DIR"] = str(UNKNOWN), "$(source)"
+            continue
         pagers, unknown = [], False
         if name == "git":  # the pager it runs through the shell is a command like any other (RT3)
             pagers, unknown = _git_pagers(argv, {**shell_env, **assigns})
@@ -5329,12 +5550,7 @@ def _text_actions(text, cwd, depth=0, from_code=False):
 def irreversible_actions(cmd: str, cwd):
     """The irreversible actions a shell command runs, at every level the shell runs it: [{action, tier, target, repo,
     words}], one per action and target; [] for none; None when the command cannot be parsed."""
-    cwd = cwd or os.getcwd()
-    token = _SESSION_CWD.set(str(cwd))  # what a push from a folder named at run time is judged by (B2b)
-    try:
-        found = _text_actions(cmd or "", cwd)
-    finally:
-        _SESSION_CWD.reset(token)
+    found = _text_actions(cmd or "", cwd or os.getcwd())
     if found is None:
         return None
     out, seen = [], set()
@@ -5504,6 +5720,9 @@ def _main_reason(a) -> str:
                 f"its folder is only known when it runs, so the guard cannot tell which project it pushes from or "
                 f"whether that project has an embargo, and {why}. Write the folder out as a plain path (`git -C "
                 f"<path> push …`, `cd <path> && dev push`) so the guard checks that project's embargo" if kind == "folder"
+                else f"its folder is no project devkit knows (a temporary clone, a folder that does not exist yet), so "
+                f"the guard cannot tell whether it sends an embargoed branch, and {why}. Push from the project's own "
+                f"checkout (`git -C <checkout> push …`) so the guard checks that project's embargo" if kind == "noproject"
                 else f"it sends {t}, or commits its embargo holds, and {t} is embargoed" + (f" ({why})" if why else ""))
         return (f"`{a['words']}`: {head}. An embargo keeps a branch and its commits off the remote, so pushing it or "
                 f"opening a pull request from it is the developer's own decision (B2b). The developer pushes it in a "

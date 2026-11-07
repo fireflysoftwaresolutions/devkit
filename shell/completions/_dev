@@ -188,6 +188,7 @@ _dev() {
         'mcp:Serve devkit'\''s tools over MCP on stdio'
         'desktop:Claude Desktop extension'
         'crew:devkit'\''s crew of specialist agents'
+        'impeccable:Run the impeccable design engine devkit installed'
         'doctor:Verify the setup'
         'install:Pin devkit for the hooks, then apply the configuration'
         'docs:Check documentation'
@@ -269,6 +270,7 @@ _dev() {
         (mcp) _dev__mcp && ret=0 ;;
         (desktop) _dev__desktop && ret=0 ;;
         (crew) _dev__crew && ret=0 ;;
+        (impeccable) _dev__impeccable && ret=0 ;;
         (doctor) _dev__doctor && ret=0 ;;
         (install) _dev__install && ret=0 ;;
         (docs) _dev__docs && ret=0 ;;
@@ -2174,10 +2176,11 @@ _dev__crew__ask() {
     '(- *)'{-h,--help}'[show this help message and exit]' \
     '--to=[the tech lead]:crew member: _dev_live crew -' \
     '--decision[a decision point]' \
-    '--options=[the options, separated by |]:options: ' \
-    '--recommend=[the option you recommend, e.g. A]:recommend: ' \
+    '--options=[2 to 4 options, each with its letter, separated by |]:options: ' \
+    '--recommend=[the letter of the option you recommend, e.g. A]:recommend: ' \
     '--irreversible=[the irreversible action it leads to]:irreversible: ' \
     '--target=[what that action acts on]:target: ' \
+    '--performs=[with --irreversible and --options]:performs: ' \
     '--approves=[with --decision]:plan step: _dev_live steps -' \
     '*:text: '
 }
@@ -2212,7 +2215,8 @@ _dev__crew__decisions() {
   _arguments -s -S : \
     '(- *)'{-h,--help}'[show this help message and exit]' \
     '--pending[only those waiting for the developer]' \
-    '--ask=[the exact question and options to ask the developer with the question…]:id: '
+    '--ask=[the question tool calls that ask the developer these decisions, every…]:id: ' \
+    '--json[with --ask: the tool input as JSON]'
 }
 
 _dev__crew__route() {
@@ -2247,6 +2251,12 @@ _dev__crew__next() {
     '(- *)'{-h,--help}'[show this help message and exit]' \
     '--first=[the tech lead]:plan step: _dev_live steps -' \
     '--why=[why that step goes ahead of the order]:why: '
+}
+
+_dev__impeccable() {
+  _arguments -s -S : \
+    '(- *)'{-h,--help}'[show this help message and exit]' \
+    '*::args: '
 }
 
 _dev__doctor() {

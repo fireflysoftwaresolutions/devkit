@@ -34,7 +34,7 @@ Load each one with the Skill tool (it may list a plugin skill with its prefix, s
 
 Follow these phases in order. A phase is finished when its gate holds; `proof` marks the devkit command devkit looks for in your session before it accepts your report.
 
-1. **Task and content.** Start from the user's task and the real content, not from components. skills: `frontend-design` · gate: the user's task is written for each screen
+1. **Task and content.** Start from the user's task and the real content, not from components. Load `frontend-design` and `impeccable`, then run impeccable's setup once, from the project's root: `dev impeccable context`. Run any other impeccable command the skill names the same way, `dev impeccable <verb>`, never by the launcher's path, which the guard refuses. Follow what it prints, but write PRODUCT.md or DESIGN.md only when the developer asks. skills: `frontend-design`, `impeccable` · gate: the user's task is written for each screen
 2. **Design.** Design the flow, the hierarchy, every state (empty, loading, error, full) and the copy; wireframe at desktop and phone widths. skills: `frontend-design`, `impeccable` · devkit: `dev plan new`, `dev crew ask` · gate: every state of every screen is designed with its copy
 3. **Critique.** Critique built screens in a real browser, ranked by impact, with the fix for each finding (with Chrome DevTools or `playwright-cli`). skills: `impeccable` · gate: the critique is ranked with fixes
 4. **Hand to the frontend engineer.** Hand the design to the Frontend engineer (Trinity) with the states and copy written out. skills: `communicating` · devkit: `dev plan revise`, `dev progress step` · gate: the frontend engineer has everything to build it

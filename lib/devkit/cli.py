@@ -55,6 +55,7 @@ COMMANDS = [
     ("Agents", [
         ("claude [query] [-w branch]", "Start Claude Code in a project (optionally in its own worktree)"),
         ("codex [query] [-w branch]", "Start Codex in a project (optionally in its own worktree)"),
+        ("impeccable <verb> [args…]", "Run the impeccable design engine devkit installed (its digest checked, no shell)"),
         ("handoff [query] [--edit|--log …]", "Show, edit or append to the project's handoff note"),
     ]),
     ("Worktrees", [
@@ -3505,6 +3506,8 @@ def build_parser():
     desktop.register(add)
     from . import crew
     crew.register(add)
+    from . import impeccable
+    impeccable.register(add)
     add("doctor", cmd_doctor, "Verify the setup")
     p = add("install", cmd_install, "Pin devkit for the hooks, then apply the configuration")
     p.add_argument("--only", help="comma list: config,tools,cli,git,handoff,instructions,skills,claude,codex,desktop,"

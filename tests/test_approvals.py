@@ -127,6 +127,16 @@ class ApprovalTests(unittest.TestCase):
         d["verified"] = True
         self.assertEqual(ap.owed(run, roster=roster), [])
 
+    def test_a_lettered_approving_option_approves_and_its_alternative_does_not(self):
+        # developer questions: a decision's options carry letters, so "A: approve", or "A" or "approve" when its
+        # options spell it out, approves like a bare "approve"; "B: changes" asks for changes
+        roster = developer_roster()
+        for answer, owed in (("A: approve", []), ("A", []), ("approve", []), ("B: changes", [("developer", ["scope"])])):
+            run = run_of(step("scope", "hamann", "scope"))
+            run["decisions"] = [{"id": "D1", "state": "decided", "answer": answer, "options": ["A: approve", "B: changes"],
+                                 "by": "developer", "verified": True, "decided": T + 60, "approves": ["scope"]}]
+            self.assertEqual(ap.owed(run, roster=roster), owed, answer)
+
     def test_a_direct_developer_approval_needs_fresh_developer_evidence_used_once(self):
         roster = developer_roster()
         run = run_of(step("scope", "hamann", "scope"))

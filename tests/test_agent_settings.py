@@ -102,11 +102,15 @@ class FakeCodex:
     def write(self, edits, reload=True):
         FakeCodex.edits = list(edits)
 
-    def trust_hooks(self, cwd, path):
+    def trust_hooks(self, cwd, path, own):
         return 0
 
-    def hooks(self, cwd):
-        return [{"sourcePath": FakeCodex.hooks_file, "trustStatus": "trusted"}]
+    def hooks(self, cwd):  # devkit's own hooks, trusted, as hooks/list reports them
+        return [{"sourcePath": FakeCodex.hooks_file, "eventName": event, "handlerType": "command", "command": h["command"],
+                 "matcher": g.get("matcher"), "timeoutSec": h.get("timeout"), "statusMessage": h.get("statusMessage"),
+                 "trustStatus": "trusted"}
+                for event, groups in setup.load_conf("codex/hooks.json")["hooks"].items() for g in groups
+                for h in g["hooks"]]
 
 
 class CodexSettingsTests(unittest.TestCase):

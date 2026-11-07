@@ -4,7 +4,8 @@
 
 devkit configures Codex through Codex's own API instead of editing config.toml by
 hand: Codex then writes its file in its own format, validates values, and
-computes hook-trust hashes itself (hooks/list -> currentHash).
+computes hook-trust hashes itself (hooks/list -> currentHash). devkit trusts only
+the hooks it writes, matched by their whole declaration (split_hooks).
 """
 from __future__ import annotations
 
@@ -96,10 +97,51 @@ class CodexRPC:
             out += entry.get("hooks", [])
         return out
 
-    def trust_hooks(self, cwd, source_path):
-        """Trust every hook declared in `source_path` (our own hooks.json). -> number trusted."""
-        pending = {h["key"]: h["currentHash"] for h in self.hooks(cwd)
-                   if str(h.get("sourcePath")) == str(source_path) and h.get("trustStatus") in ("untrusted", "modified")}
+    def trust_hooks(self, cwd, source_path, own):
+        """Trust devkit's own hooks in `source_path` that are untrusted or modified -> number trusted. `own` is the
+        hooks object devkit writes there; a hook counts as devkit's only when it is declared exactly as in `own`.
+        Anything else in the file (a hook an agent added, or devkit's command declared another way) is never trusted
+        here: Codex does not run it until the developer reviews it with /hooks (security review G3)."""
+        mine, _ = split_hooks(self.hooks(cwd), source_path, own)
+        pending = {h["key"]: h["currentHash"] for h in mine if h.get("trustStatus") in ("untrusted", "modified")}
         if pending:
             self.write([("hooks.state", {k: {"trusted_hash": v} for k, v in pending.items()}, "upsert")])
         return len(pending)
+
+
+# ------------------------------------------------------------------ which hooks are devkit's
+# A hook's identity is what Codex hashes for trust (codex 0.166, hooks/list -> currentHash): the event, the group's
+# matcher, and the handler's command, timeout, async flag, status message and context limit. commandWindows is left
+# out: hooks/list does not report it, and Codex does not run it on macOS or Linux.
+
+def _event(name) -> str:
+    """PreToolUse (hooks.json), preToolUse (hooks/list) and pre_tool_use (hook keys) are one event."""
+    return str(name or "").replace("_", "").lower()
+
+
+def declared_hooks(hooks: dict) -> set:
+    """The identity of each command hook in a hooks.json `hooks` object."""
+    return {(_event(event), group.get("matcher"), h.get("command"), h.get("timeout"), bool(h.get("async", False)),
+             h.get("statusMessage"), h.get("additionalContextLimit"))
+            for event, groups in (hooks or {}).items() for group in groups or [] for h in group.get("hooks") or []
+            if h.get("type") == "command"}
+
+
+def hook_id(h: dict):
+    """The identity of one hook as hooks/list reports it (the handler's fields flattened in); None if it runs no
+    command."""
+    if h.get("handlerType") != "command":
+        return None
+    return (_event(h.get("eventName")), h.get("matcher"), h.get("command"), h.get("timeoutSec"),
+            bool(h.get("async", False)), h.get("statusMessage"), h.get("additionalContextLimit"))
+
+
+def split_hooks(listed, source_path, own) -> tuple:
+    """(devkit's, foreign): the hooks of `listed` (hooks/list) declared in `source_path`, split by whether each one is
+    declared exactly as a hook of `own`, the hooks object devkit writes to that file."""
+    ids = declared_hooks(own)
+    mine, foreign = [], []
+    for h in listed:
+        if str(h.get("sourcePath")) == str(source_path):
+            (mine if hook_id(h) in ids else foreign).append(h)
+    return mine, foreign

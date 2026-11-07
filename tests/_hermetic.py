@@ -78,7 +78,7 @@ LIVE_WRITERS = {
 }
 
 _S = {"active": False, "late": False, "owner": None, "root": None, "home": None, "real": {}, "snapshot": {},
-      "violations": [], "allow": 0, "scrubbed": [], "prefixes": [], "named": None, "homes": set()}
+      "violations": [], "allow": 0, "scrubbed": [], "prefixes": [], "named": None, "homes": set(), "own": set()}
 
 
 # --------------------------------------------------------------------------- the developer's real devkit
@@ -168,18 +168,41 @@ def _carries(path: str, since: int, marks) -> bool:
     return any(m.encode() in data for m in marks if m)
 
 
-def changes(before: dict, after: dict, roots: dict, marks) -> tuple:
+def outputs(roots: dict, snap: dict, fds=(1, 2)) -> set:
+    """The files below `roots` that this process's stdout and stderr (`fds`) write to, as "<name>: <relative path>".
+    A caller that sends the run's output below a real root (dev ci --run streams its steps into
+    state/ci/logs/<key>/) chose that file; the run's own output there carries its mark but is no leak."""
+    own = set()
+    for fd in fds:
+        try:
+            st = os.fstat(fd)
+        except OSError:
+            continue
+        for name, root in roots.items():
+            for rel, entry in snap.get(name, {}).items():
+                if entry[2] != st.st_ino:
+                    continue
+                try:
+                    if os.lstat(os.path.join(root, rel)).st_dev == st.st_dev:
+                        own.add(f"{name}: {rel}")
+                except OSError:
+                    continue
+    return own
+
+
+def changes(before: dict, after: dict, roots: dict, marks, own=()) -> tuple:
     """(leaks, others): the files below `roots` created, changed or removed between the snapshots, as
     "<name>: <relative path> (<how>)". With `marks` (an isolated run), a change whose path or new bytes (an append's
     new bytes only) carry one is a leak and any other is another process's. Without (a run that is not isolated),
-    every change is a leak, but a live writer's (LIVE_WRITERS), which is another process's."""
+    every change is a leak, but a live writer's (LIVE_WRITERS), which is another process's. The run's own output
+    files (`own`, from outputs()) are left out."""
     leaks, others = [], []
     marks = [m for m in marks or () if m]
     for name, root in roots.items():
         b, a = before.get(name, {}), after.get(name, {})
         for rel in sorted(set(b) | set(a)):
             old, new = b.get(rel), a.get(rel)
-            if old == new:
+            if old == new or f"{name}: {rel}" in own:
                 continue
             entry = f"{name}: {rel} ({'created' if old is None else 'removed' if new is None else 'changed'})"
             grown = old is not None and new is not None and new[2] == old[2] and new[1] >= old[1]
@@ -342,7 +365,8 @@ def activate() -> dict:
         _S["scrubbed"].append(k)
         del os.environ[k]
     os.environ.update({"HOME": home, MARK: home, **KEEP})
-    _S.update(root=root, home=home, owner=os.getpid(), snapshot=snapshot(watched()))
+    snap = snapshot(watched())
+    _S.update(root=root, home=home, owner=os.getpid(), snapshot=snap, own=outputs(watched(), snap))
     atexit.register(_cleanup, root, os.getpid())
     _S["active"] = True
     sys.addaudithook(_hook)
@@ -354,7 +378,8 @@ def watch_late():
     runs (unittest imports every module before it runs any test), so test_zz still sees what the tests changed."""
     if _S["late"] and not _S["owner"]:
         _record_real(os.path.expanduser("~"), real_homes())
-        _S.update(owner=os.getpid(), snapshot=snapshot(watched()))
+        snap = snapshot(watched())
+        _S.update(owner=os.getpid(), snapshot=snap, own=outputs(watched(), snap))
 
 
 def watched() -> dict:
@@ -369,7 +394,7 @@ def report() -> tuple:
         return [], []
     root = _S["root"]
     marks = [root, os.path.realpath(root), os.path.basename(root)] if root else []
-    leaks, others = changes(_S["snapshot"], snapshot(watched()), watched(), marks)
+    leaks, others = changes(_S["snapshot"], snapshot(watched()), watched(), marks, own=_S["own"])
     return list(_S["violations"]) + leaks, others
 
 

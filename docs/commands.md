@@ -384,8 +384,8 @@ devkit's specialist agents. See [The crew](crew.md).
 | `dev crew next` | Ready to launch (with the commands), queued until a slot frees, waiting and why, and who is busy |
 | `dev crew next --first <step> --why "…"` | The tech lead (Morpheus) launches that step ahead of the order; the reason is recorded and audited. Both options are required |
 | `dev crew ask "<text>" [--to <name>]` · `dev crew answer <id> "<text>"` · `dev crew inbox` | Messages between members; delivered with the recipient's next action |
-| `dev crew ask --decision "<question>" [--options "A \| B"] [--recommend A] [--irreversible push] [--target v26.11.4] [--approves "api, screens"]` | A decision point: decided at once in auto mode, waits for the developer in guided mode or for irreversible actions. `--target` is what the irreversible action acts on; the developer's answer opens that action on that target once. `--approves` names the finished steps the developer's answer approves, checked against the plan |
-| `dev crew mode [guided\|auto] [--approve "push feat/*, release v26.11.4"]` · `dev crew decide <id> "<answer>"` · `dev crew decisions [--pending] [--ask <id>]` | The mode (`--approve` names each action with its target; publish and deploy never), the developer's answers (recorded by the tech lead (Morpheus) only), and every decision with who took it. `--ask <id>` prints the exact question and options to ask with the question tool; only an answer to it, or a typed `approve <id>[: <option>]`, makes the decision the developer's |
+| `dev crew ask --decision "<question>" --options "A: <choice> \| B: <choice>" --recommend A [--irreversible push] [--target v26.11.4] [--performs A] [--approves "api, screens"]` | A decision point: a question under 300 characters, 2 to 4 options each with its letter, and the recommended one (refused otherwise, with the corrected command; an irreversible action without options is asked as `A: yes \| B: no`). Decided at once in auto mode, waits for the developer in guided mode or for irreversible actions. `--target` is what the irreversible action acts on, and the question names it as a word of its own; the developer's answer opens that action on that target once, and only when it chooses the option that performs it: `--performs`, else the one option that reads yes or approve, else the recommended one ([The crew › Guided or automatic](crew.md#guided-or-automatic)). `--approves` names the finished steps the developer's answer approves, checked against the plan |
+| `dev crew mode [guided\|auto] [--approve "push feat/*, release v26.11.4"]` · `dev crew decide <id> "<answer>"` · `dev crew decisions [--pending] [--ask [<id>…] [--json]]` | The mode (`--approve` names each action with its target; publish and deploy never), the developer's answers (recorded by the tech lead (Morpheus) only), and every decision with who took it. `--ask` prints the pending decisions (or the ones named) as question tool calls, at most 4 per call, the recommended option first, `--json` for the tool's input; the tech lead may reword a reversible one. Only an answer to a question with `D<n> ·` up front (or the header `D<n>`) that picks one of its options by letter or words, or a typed `approve <id>[: <option>]`, makes the decision the developer's. An irreversible one counts only as printed: its question, its labels word for word (the performing option's label says what it runs, `A: yes (release v26.11.4)`), and no descriptions |
 | `dev crew sync [--check]` | Regenerates the Claude Code agents from `config/crew.json` |
 
 ## Lessons
@@ -429,6 +429,27 @@ worktree for that branch, which is created when needed. Arguments after `--` go 
 dev claude widget -w feat/search      # Claude Code in ~/Development/.worktrees/<id>/feat-search
 dev claude widget -- --resume         # pass arguments to claude
 dev codex -- resume --last            # resume the last Codex session in the current project
+```
+
+### `dev impeccable <verb> [<args>…]`
+
+Runs the engine of the impeccable design skill, the one `dev install --only skills` put in devkit's skills folder, in
+the current folder. Each word after `dev impeccable` reaches the engine as one argument, as typed, with no shell in
+between. Before every run, the command checks the engine's SHA-256 against the install record
+(`~/.local/state/devkit/skill-engines.json`) and refuses an engine reached through a symbolic link out of devkit's
+skills folder. A refusal runs nothing and names the fix, `dev install --only skills`. Otherwise the command exits
+with the engine's exit code.
+
+The verbs that write the agents' settings, hooks, or skill folders (`hooks`, `install`, `link`, `update`, `pin`,
+`unpin`, and `doctor --fix`) are the developer's: the command runs them only in your terminal, and the guard refuses
+them to every agent. Crew members run impeccable this way, never by the launcher's path, which the guard refuses.
+Read-only lanes run only `context`, `detect` on local paths, and `doctor` without `--fix`. See
+[Skills and plugins › impeccable and its engine](skills-and-plugins.md#impeccable-and-its-engine).
+
+```bash
+dev impeccable context                  # load PRODUCT.md, DESIGN.md, and the surface brief; print what to follow
+dev impeccable detect --json src        # scan the project's HTML and CSS
+dev impeccable doctor                   # the engine's own checks
 ```
 
 ### `dev handoff [<query>] [--edit | --path | --log "…" [--agent AGENT]]`
@@ -693,7 +714,7 @@ of `dev release` need GitHub (or a host listed in `gitx.github_hosts`).
 | `dev branch rename <type>/<topic> [--ticket KEY]` | Renames the current branch before its first push (or names a detached HEAD); refuses permanent branches and branches already on `origin` |
 | `dev branch ls [--offline] [--json]` | The branch map: every local branch, where it lives (local only, or local and its remote), ahead and behind its upstream and `origin/<default>`, the branch that has its commits (`merged into …`), its last backup or why it is not backed up, its embargo, worktree, PR (draft or ready, checks) and linked task. `--offline` uses the cached PR list; `--json` prints the rows (below) |
 | `dev branch clean [--apply] [--offline] [--json]` | The local branches that are merged, whose PR was merged, or that are gone upstream with every commit on the remote; deleted only with `--apply` |
-| `dev branch embargo <branch> --why "…" [--until "<step or date>"]` | Keeps the branch off the remote: `dev backup` and `dev sync` never push it, nor a branch that holds any of its commits. Stored in the `embargo:` list of the handoff note's metadata (with who and when), so every machine sees it; audited as `git.embargo`. The record also keeps the branch's tips (`commits:`, updated by every backup run), so the embargo holds its commits after the branch is merged into another and deleted. Every branch view shows it. Without a branch, lists the embargoes (`--json` too) |
+| `dev branch embargo <branch> --why "…" [--until "<step or date>"]` | Keeps the branch off the remote (see [Guard rules › The developer's own decisions](guard.md#the-developers-own-decisions) for what an agent's push is held from until 26.11.4): `dev backup` and `dev sync` never push it, nor a branch that holds any of its commits. Stored in the `embargo:` list of the handoff note's metadata (with who and when), so every machine sees it; audited as `git.embargo`. The record also keeps the branch's tips (`commits:`, updated by every backup run), so the embargo holds its commits after the branch is merged into another and deleted. Every branch view shows it. Without a branch, lists the embargoes (`--json` too) |
 | `dev branch embargo --lift <branch>` | Ends the embargo; the next backup may push the branch and the branches that carry its commits. The developer's own decision: devkit refuses it from a crew member's lane, and the guard asks the main session for the developer's grant (`grant embargo <branch>`) |
 
 The same rows feed the handoff note's generated block (one line per branch, with dates instead of "4 min ago"),
