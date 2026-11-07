@@ -439,9 +439,9 @@ typed it. devkit therefore shows every acceptance until you acknowledge it:
 
 **Known limits.** devkit decides that you ran `dev install`, `dev ext update --apply`, or `dev ext ack` from the
 process tree and the terminal, and a process an agent starts through a launcher can look the same: `screen` or
-`tmux` (including `screen -X stuff` with octal escapes such as `\015`, which the guard does not decode), `expect`,
-AppleScript's `do script`, `open` of a Terminal window or a `.command` file, or `launchctl`. The guard refuses the
-forms it can read, not every one. The notification, the session-start message, and the audit trail are the
+`tmux`, `expect`, AppleScript's `do script`, `open` of a Terminal window or a `.command` file, or `launchctl`. The
+guard refuses the forms it can read (it decodes `screen -X stuff` octal escapes such as `\015`), not every one: a
+script file or a program that builds the command at run time gets through. The notification, the session-start message, and the audit trail are the
 backstop until a kernel-level check of who typed the command lands in 26.11.5 (tasks B-fywplysktjc and
 B-fyxqtml4lw3).
 

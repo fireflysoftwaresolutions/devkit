@@ -2804,7 +2804,8 @@ def _wrapped(n, args):
 # and has a pty, so it passes set_by_developer(); the guard reads what each one runs, as a shell line where the tool
 # hands it to one
 _SCREEN_VALUES = frozenset({"-c", "-e", "-h", "-p", "-S", "-t", "-T", "-s", "-Logfile"})
-_SCREEN_EOL = re.compile(r"\^[MJ]|\\[nr]")
+_SCREEN_EOL = re.compile(r"\^[MJ]|\\[nr]|[\r\n]")
+_SCREEN_OCTAL = re.compile(r"\\([0-7]{1,3})")  # `stuff 'd\145v install\015'` types `dev install` and Enter
 
 
 def _screen_command(args) -> list:
@@ -2819,8 +2820,9 @@ def _screen_command(args) -> list:
         if a == "-X" or (a.startswith("-") and not a.startswith("--") and a.endswith("X")):
             sent = args[i + 1:]
             verb, rest = (sent[0] if sent else ""), sent[1:]
-            if verb == "stuff":  # screen reads ^M, ^J, \n and \r in the text as the end of a line
-                return ["sh", "-c", _SCREEN_EOL.sub("\n", " ".join(rest))] if rest else []
+            if verb == "stuff":  # screen reads ^M, ^J, \n and \r in the text as the end of a line, and \NNN as octal
+                text = _SCREEN_OCTAL.sub(lambda m: chr(int(m.group(1), 8) & 0xFF), " ".join(rest))
+                return ["sh", "-c", _SCREEN_EOL.sub("\n", text)] if rest else []
             if verb == "exec":  # exec [fdpat] command …: the fd pattern is made of `.`, `!` and `|`
                 return rest[1:] if rest and set(rest[0]) <= set(".!|") else rest
             return _screen_command(rest) if verb == "screen" else []

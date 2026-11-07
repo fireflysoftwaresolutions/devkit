@@ -358,6 +358,14 @@ class TerminalLaunchersRunTheirCommand(unittest.TestCase):
             with self.subTest(cmd=cmd):
                 self.assertEqual(self.check(cmd), guard.INSTALL_REASON)
 
+    def test_screen_stuff_with_octal_escapes_is_read_as_screen_types_it(self):
+        # screen's stuff decodes \NNN octal escapes: \015 ends the line, \145 is an e
+        for cmd, reason in (("screen -S x -X stuff 'dev install\\015'", guard.INSTALL_REASON),
+                            ("screen -S x -X stuff 'd\\145v install\\012'", guard.INSTALL_REASON),
+                            ("screen -S x -X stuff 'dev ext ack\\15'", guard.EXT_REASON)):
+            with self.subTest(cmd=cmd):
+                self.assertEqual(self.check(cmd), reason)
+
     def test_the_developers_acknowledgement_through_a_launcher_is_refused(self):
         for cmd in ("screen -dm dev ext ack", "tmux new -d 'dev ext ack'", "expect -c 'spawn dev ext ack'",
                     "echo ack | xargs dev ext"):
