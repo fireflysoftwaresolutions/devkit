@@ -582,6 +582,24 @@ def _turn_files(data: dict, sess: dict):
     return top, sorted(set(files))
 
 
+_UNSET = object()
+
+
+def _unroled(data: dict, transcript: str) -> list:
+    """The crew members a final message's prose names outside `<role> (<Name>)` (the developer's role rule, M346;
+    canary.bare_names) -> their names; [] when canary.enforce or canary.roles is off. Fails open."""
+    cfg = core.CFG.get("canary", {}) or {}
+    if not (cfg.get("enforce", True) and cfg.get("roles", True)):
+        return []
+    try:
+        from . import canary
+        text = data.get("last_assistant_message") or canary.last_assistant_text(data.get(transcript)) or ""
+        return canary.bare_names(text)
+    except Exception:
+        _log(f"roles: {traceback.format_exc()[-300:]}")
+        return []
+
+
 def _stub_findings(data: dict, sess: dict) -> tuple:
     """(repository, the unfinished work the turn left in the files it edited, or None). Fails open."""
     try:
@@ -726,6 +744,12 @@ def stop(agent: str):
                     canary.save_status(pid_, agent, line, core.gitout(top, "branch", "--show-current"), path=top)
                     if sess.get("canary_missed"):
                         canary.record_corrected(agent, sid, pid_, line)
+        if dev_turn and not data.get("stop_hook_active") and sess.get("roles_told", _UNSET) != sess.get("turn_started"):
+            names = _unroled(data, "transcript_path")  # the role rule (M346), once per turn: a false one cannot loop
+            if names:
+                sess["roles_told"] = sess.get("turn_started")
+                reasons.append(("roles", f"devkit: your final message {canary.roles_reason(names)} Reply again with "
+                                         f"the message fixed."))
         try:
             from . import skillguard
             why = skillguard.on_stop(agent, data, sess) if dev_turn else None
@@ -1929,7 +1953,8 @@ def closing_reminder(data: dict, sess: dict, now: float, agent: str = "claude") 
     branch = (core.gitout(top, "branch", "--show-current") if top else "") or "-"
     block = (f"devkit · after {what}: if you end the turn here (to wait, or because the work is done), your final "
              f"message opens with the status block: **[Firefly> DevKit]** {project} · `{branch}` · <task>, then "
-             f"Done / Check / Next. Nothing above it: a waiting note or a comment on this output goes below the block.")
+             f"Done / Check / Next. Nothing above it: a waiting note or a comment on this output goes below the block. "
+             f"Name crew members as <role> (<Name>), such as Backend engineer (Tank), never by the name alone.")
     return "\n\n".join(x for x in (block, todo) if x)
 
 
@@ -2068,6 +2093,12 @@ def subagent_stop(agent: str):
                 or label.split(":")[0].strip() or "Agent"
             pid = (run or {}).get("project") or sess.get("project")
             pending = sess.setdefault("crew_pending", {})
+            # the role rule (M346), once per member and joined to the first send-back: a false one cannot loop
+            roles = [] if data.get("stop_hook_active") or not (lane or meta) or aid in sess.get("crew_roles", {}) \
+                else _unroled(data, "agent_transcript_path")
+            also = f" Also, your report {canary.roles_reason(roles)}" if roles else ""
+            if roles:
+                sess.setdefault("crew_roles", {})[aid] = name
             if not (lane or meta):
                 pass  # not launched by anyone: no brief, so no report is owed
             elif data.get("stop_hook_active"):
@@ -2086,7 +2117,7 @@ def subagent_stop(agent: str):
                        f"devkit · end your report with your status block first, exactly: **[Firefly> DevKit · {_who(name)}]** "
                        f"<project> · `<branch>` · <task>, then - **Done:**, - **Check:** (✓/⚠/✗ + evidence) and "
                        f"- **Next:**; then what you deliver and \"Needs from Morpheus:\" (or nothing). Nothing above "
-                       f"the block."}
+                       f"the block.{also}"}
             elif run and lane and aid not in sess.setdefault("crew_comms", {}) and \
                     progress.lane_unreported(run, aid) and core.CFG.get("canary", {}).get("enforce", True):
                 from . import audit  # the crew talks through devkit: the step's evidence goes in the run, live
@@ -2097,7 +2128,14 @@ def subagent_stop(agent: str):
                        f"devkit · {_who(name)}, record your work through devkit before you stop: `dev progress step "
                        f"\"<what finished>\" --check \"<evidence>\"` (it goes to your lane, and Morpheus and the "
                        f"developer see it live). Questions and decisions go through `dev crew ask`, not only in the "
-                       f"report. Then end with the same report."}
+                       f"report. Then end with the same report.{also}"}
+            elif roles:
+                from . import audit
+                audit.record("canary.crew-roles", pid or "", f"{name}'s report named {', '.join(roles)} without "
+                                                             f"their role", "miss")
+                _patch_quietly(sf, before, sess)
+                out = {"decision": "block", "reason": f"devkit · {_who(name)}, your report {canary.roles_reason(roles)} "
+                                                      f"Then end with the same report, fixed."}
             if out is None and (lane or meta):  # the crew gates: proofs, skills, stubs, tests, lessons; once
                 from . import gates
                 ref = copy.deepcopy(sess)

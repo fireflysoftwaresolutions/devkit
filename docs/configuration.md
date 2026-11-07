@@ -118,6 +118,7 @@ and audited; agents are refused.
 | `handoff.block_after_commits` | `5` | Below this many commits newer than the handoff note, the reminder before the end of the turn is enough; at it, the Stop hook sends the turn back |
 | `handoff.block_after_minutes` | `60` | The Stop hook also sends the turn back when the oldest commit newer than the note is this many minutes old, or after a milestone (a step or work item closed, a push, a PR, a release) |
 | `canary.enforce` | `true` | When a final message lacks the status block, the Stop hook asks the agent to reply again with it; at SubagentStop, a crew member without its status block or its `dev progress step` is sent back once |
+| `canary.roles` | `true` | When a final message or a crew member's report names a crew member alone instead of `<role> (<Name>)`, such as Backend engineer (Tank), the Stop or SubagentStop hook sends it back once per turn (per member for reports). The role can be in any language; the status block's header and Crew line count, and names in code spans and commands do not. Morpheus, the session itself, is not checked. Off with `canary.enforce` too |
 
 ### Background AI
 

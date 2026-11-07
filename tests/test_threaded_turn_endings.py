@@ -5,7 +5,9 @@
 # the Stop hook does not have to send the turn back. R1 one checklist from the Stop gate's own functions; R2 given at
 # the closing calls and at every commit, once per item per turn; R3 the handoff gate blocks only at 5 commits, an
 # hour, or a milestone, and never a member; R4 every block audited as stop.block and every reminder the turn then
-# satisfied as stop.prevented, shown per rule per day by `dev canary`; R5 the status block stays enforced.
+# satisfied as stop.prevented, shown per rule per day by `dev canary`; R5 the status block stays enforced. Also the
+# developer's role rule (M346): a final message or a member's report that names a crew member outside
+# `<role> (<Name>)` is sent back once per turn (per member for reports); the detection itself is tests/test_canary.py.
 # Tests carry comments, not docstrings (`dev test prove` leaves out tests with one).
 # Run: python3 -m unittest tests.test_threaded_turn_endings
 import contextlib
@@ -72,13 +74,15 @@ class TurnCase(HookCase):
     def shell(self, cmd):
         return dict(self.data, tool_name="Bash", tool_input={"command": cmd})
 
-    def stop(self, message, told=(), carried=True):
+    def stop(self, message, told=(), carried=True, again=False):
         # the Stop hook on this turn; `carried`: whether the final message carried the status block (the canary's
-        # verdict, which skips folders outside ~/Development)
+        # verdict, which skips folders outside ~/Development); `again`: a later stop of the same turn, on the session
+        # record the first one left
         sf = hooks._session_file("claude", "s1")
         sf.parent.mkdir(parents=True, exist_ok=True)
-        state.replace(sf, dict(self.sess, agent="claude",
-                               checklist_told={"turn": self.sess["turn_started"], "rules": list(told)}))
+        if not again:
+            state.replace(sf, dict(self.sess, agent="claude",
+                                   checklist_told={"turn": self.sess["turn_started"], "rules": list(told)}))
         payload = dict(self.data, hook_event_name="Stop", last_assistant_message=message, stop_hook_active=False)
         out = io.StringIO()
         with mock.patch("sys.stdin", io.StringIO(json.dumps(payload))), contextlib.redirect_stdout(out), \
@@ -178,6 +182,51 @@ class MeasuredTests(TurnCase):
         lines = canary.stop_block_lines(7)  # what `dev canary` prints under "Stop hook"
         self.assertIn(f"  sent back                {day}  handoff 2 · status 1", lines)
         self.assertIn(f"  prevented by a reminder  {day}  skills 1", lines)
+
+
+class RoleNameTests(TurnCase):
+    def subagent_stop(self, data):
+        out = io.StringIO()
+        with mock.patch("sys.stdin", io.StringIO(json.dumps(data))), contextlib.redirect_stdout(out), \
+                mock.patch.dict(core.CFG, {"crew": {"gates": {"enforce": False}}}):  # the crew gates have own tests
+            hooks.run("subagent-stop", "claude")
+        return json.loads(out.getvalue()) if out.getvalue().strip() else {}
+
+    def member(self, aid, report):
+        # a crew member the Agent tool launched (its launch record next to its transcript), ending with `report`
+        tr = Path(self.tmp.name) / f"agent-{aid}.jsonl"
+        tr.write_text("")
+        (Path(self.tmp.name) / f"agent-{aid}.meta.json").write_text(json.dumps({"toolUseId": f"toolu_{aid}",
+                                                                              "description": "Tank: the API"}))
+        return dict(self.data, agent_id=aid, agent_type="general-purpose", agent_transcript_path=str(tr),
+                    last_assistant_message=report)
+
+    def test_a_final_message_naming_a_member_alone_is_sent_back_once_per_turn(self):
+        said = DONE + "\n\nTank finished the API; the Code reviewer (Seraph) reviews it."
+        out = self.stop(said)
+        self.assertEqual(out.get("decision"), "block")
+        self.assertIn("without their role: Tank.", out["reason"])
+        self.assertIn("Backend engineer (Tank)", out["reason"])
+        self.assertEqual([r["evidence"]["rule"] for r in audit.records(1, "stop.block")], ["roles"])
+        self.assertEqual(self.stop(said, again=True), {})  # the same turn: never twice, even without stop_hook_active
+        self.sess["turn_started"] = self.now + 60  # the next turn: the role form and a command pass
+        fixed = DONE + "\n\nThe Backend engineer (Tank) finished the API; `dev crew brief link \"…\"` is next."
+        self.assertEqual(self.stop(fixed), {})
+        with mock.patch.dict(core.CFG, {"canary": {"roles": False}}):  # the developer can turn the rule off
+            self.assertEqual(self.stop(said), {})
+
+    def test_a_member_report_naming_a_member_alone_is_sent_back_once(self):
+        sf = hooks._session_file("claude", "s1")
+        sf.parent.mkdir(parents=True, exist_ok=True)
+        state.replace(sf, dict(self.sess, agent="claude"))
+        report = ("**[Firefly> DevKit · Tank]** api · `main` · the API\n- **Done:** built it\n- **Check:** ✓ 12 tests"
+                  "\n- **Next:** review\n\nNeeds from Morpheus: nothing")
+        first = self.subagent_stop(self.member("a1", report))
+        self.assertEqual(first.get("decision"), "block")
+        self.assertIn("Backend engineer (Tank)", first["reason"])
+        self.assertEqual(self.subagent_stop(self.member("a1", report)), {})  # once per member
+        fixed = report.replace("DevKit · Tank]", "DevKit · Backend engineer (Tank)]")
+        self.assertEqual(self.subagent_stop(self.member("a2", fixed)), {})
 
 
 class AcceptanceTests(TurnCase):

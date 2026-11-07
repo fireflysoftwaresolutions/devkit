@@ -27,8 +27,8 @@ from .core import DEV, STATE
 MARKER = "[Firefly> DevKit]"
 # The marker, optionally wrapped in ** or backticks. The legacy `DevKit ·` (before 26.11.0) is still accepted, so
 # sessions that loaded the older instructions are not reported as misses.
-_MARK = r"(?:\[\s*firefly\s*>\s*devkit(?:\s*·\s*[^\]\n]{1,40})?\s*\]|devkit\b)"  # crew: [Firefly> DevKit · Neo]
-CREW_RE = re.compile(r"^[*`_\s]*\[\s*firefly\s*>\s*devkit\s*·\s*([^\]\n]{1,40}?)\s*\]", re.I)
+_MARK = r"(?:\[\s*firefly\s*>\s*devkit(?:\s*·\s*[^\]\n]{1,80})?\s*\]|devkit\b)"  # crew: [Firefly> DevKit · Neo]
+CREW_RE = re.compile(r"^[*`_\s]*\[\s*firefly\s*>\s*devkit\s*·\s*([^\]\n]{1,80}?)\s*\]", re.I)
 MARKER_RE = re.compile(r"^[*`_\s]*" + _MARK, re.I)
 LOG = STATE / "canary.jsonl"
 
@@ -87,6 +87,71 @@ def miss_reason(text: str) -> str:
 def has_marker(text: str) -> bool:
     first = next((ln for ln in (text or "").splitlines() if ln.strip()), "")
     return bool(MARKER_RE.match(first.strip()))
+
+
+# The role check (the developer, M346; lesson L-fy2lfvacp64): a final message names a crew member as
+# `<role> (<Name>)`, the role in any language, so the Matrix names never stand alone. It reads the structure only: the
+# roster's name inside parentheses right after other words. Code blocks, code spans and links are not prose.
+_NOT_PROSE = (re.compile(r"(?ms)^[ \t]*(`{3,}|~{3,}).*?(?:^[ \t]*\1[ \t]*$|\Z)"),  # fenced code blocks
+              re.compile(r"(`+)[^\n]*?\1"),  # code spans, commands among them
+              re.compile(r"\b[a-z][a-z0-9+.-]*://\S+"))  # links
+_ROLE_BEFORE = re.compile(r"[\w)\]*]\s*[(（]$")  # "Backend engineer (", "バックエンドエンジニア（"
+_ROLE_AFTER = re.compile(r"[)）]")
+
+
+def _prose(text: str) -> str:
+    for pat in _NOT_PROSE:
+        text = pat.sub(" ", text)
+    return text
+
+
+def _name_patterns(roster=None) -> list:
+    """[(compiled pattern, member name)] for every crew member but the main one (Morpheus is the session itself,
+    and the report contract's "Needs from Morpheus:" names him): the name and each alias as written, a leading
+    "The " optional or lowercase. A name inside a path, a file name or a longer word is not one."""
+    from . import crew
+    out = []
+    for m in crew.members(roster, include_main=False):
+        for n in [m.get("name")] + list(crew.aliases(m)):
+            if not isinstance(n, str) or not n.strip():
+                continue
+            n = n.strip()
+            core_ = n[4:] if n.startswith("The ") else n
+            pat = r"\s+".join(re.escape(w) for w in core_.split())
+            if core_ != n:
+                pat = r"(?:[Tt]he\s+)?" + pat
+            out.append((re.compile(r"(?<![\w/\\.@-])" + pat + r"(?![\w/\\@-]|\.\w)"), m["name"]))
+    return out
+
+
+def bare_names(text: str, roster=None) -> list:
+    """The crew members the prose of a final message names outside `<role> (<Name>)` -> their roster names, in the
+    order they first appear. The status block's header and Crew line are prose too. [] when the roster is
+    unreadable (fails open)."""
+    try:
+        pats = _name_patterns(roster)
+    except Exception:
+        return []
+    prose = _prose(text or "")
+    found = []
+    for pat, name in pats:
+        for hit in pat.finditer(prose):
+            if _ROLE_BEFORE.search(prose[:hit.start()]) and _ROLE_AFTER.match(prose, hit.end()):
+                continue
+            found.append((hit.start(), name))
+    return list(dict.fromkeys(name for _, name in sorted(found)))
+
+
+def roles_reason(names: list, roster=None) -> str:
+    """What to fix, with each name's role form from the roster ("Backend engineer (Tank)")."""
+    from . import crew
+    forms = []
+    for n in names:
+        m = crew.member(n, roster)
+        forms.append(crew.who(m) if m else f"<role> ({n})")
+    return (f"names crew members without their role: {', '.join(names)}. Write each one as <role> (<Name>), the role "
+            f"in the message's language, for example {', '.join(forms)}, or the role alone; the status block's "
+            f"header and Crew line too. Names in code spans and commands are fine.")
 
 
 STATUS_RE = re.compile(r"^[*`_\s]*" + _MARK + r"[*`\s]*[·:—-]?\s*(.*)$", re.I)

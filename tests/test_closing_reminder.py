@@ -49,6 +49,7 @@ class ClosingReminderTests(unittest.TestCase):
         self.assertIn("**[Firefly> DevKit]** api · `feat/export` · <task>", text)
         self.assertIn("Nothing above it", text)
         self.assertIn("a subagent launch", text)
+        self.assertIn("crew members as <role> (<Name>)", text)  # what the role check refuses, said before the end
 
     def test_a_session_started_outside_the_repository_uses_the_folder_of_the_call(self):
         self.sess = {"turn_started": T0}  # started in the home folder: no project, no top
