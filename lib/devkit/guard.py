@@ -13,7 +13,6 @@ Pure functions; the hook wrapper fails open on any error.
 """
 from __future__ import annotations
 
-import contextvars
 import fnmatch
 import functools
 import json
@@ -468,6 +467,38 @@ def _git_split(argv):
         else:
             return cdir, a, argv[i + 1:]
     return cdir, None, []
+
+
+def _git_where(argv, cwd) -> str:
+    """The folder whose repository a git command acts on (B2b): its -C folders in turn, then --git-dir (the folder
+    that holds a `.git` it names, else the git folder itself). UNKNOWN when -C, --git-dir or --work-tree is known only
+    at run time; a literal --work-tree alone leaves the repository git finds from the folder."""
+    i, here, gdir, tree = 1, cwd, None, None
+    while i < len(argv):
+        a = argv[i]
+        if a == "-C" and i + 1 < len(argv):
+            here, i = str(resolve(argv[i + 1], here)) if argv[i + 1] else here, i + 2
+        elif a in ("--git-dir", "--work-tree") and i + 1 < len(argv):
+            gdir, tree = (argv[i + 1], tree) if a == "--git-dir" else (gdir, argv[i + 1])
+            i += 2
+        elif a.startswith(("--git-dir=", "--work-tree=")):
+            val = a.split("=", 1)[1]
+            gdir, tree = (val, tree) if a.startswith("--git-dir=") else (gdir, val)
+            i += 1
+        elif a in ("-c", "--namespace", "--config-env") and i + 1 < len(argv):
+            i += 2
+        elif a.startswith("-"):
+            i += 1
+        else:
+            break
+    if not here or str(here) == str(UNKNOWN) or (tree is not None and resolve(tree, here) == UNKNOWN):
+        return str(UNKNOWN)
+    if gdir is None:
+        return str(here)
+    g = resolve(gdir, here)
+    if g == UNKNOWN:
+        return str(UNKNOWN)
+    return str(g.parent if g.name == ".git" else g)
 
 
 def _positionals(args, value_opts):
@@ -4369,13 +4400,35 @@ def _local_remote(cwd, remote: str) -> bool:
 # tag, --all), is the developer-only action embargo/<branch>: refused without the developer's typed
 # `grant embargo <branch>`, in every setting. A note devkit cannot read refuses every push (never "no embargo"). The
 # developer still pushes in a terminal, and `dev backup` and `dev sync` hold embargoes themselves. A push or PR whose
-# folder is only known when it runs (`git -C "$(…)" push`, `cd "$X" && dev push`) is judged by the session's own
-# folder: an embargo there, a note devkit cannot read, or a folder that is no project refuses it as the developer-only
-# action `?` (fail closed; the code reviewer's trace of 202e88d).
+# folder is only known when it runs (`git -C "$(…)" push`, `cd "$X" && dev push`, `GIT_DIR=$G git push`) may send
+# from any project on this Mac: an embargo in any of them, or an embargo list devkit cannot read, refuses it as the
+# developer-only action `?` (fail closed; the code reviewer's trace of 202e88d and the tech lead's follow-up).
 _PSEUDO_TARGETS = frozenset({"mirror", "all-branches", "prune", "all-tags", "HEAD", ""})
-# the session's own folder while irreversible_actions classifies one command: what a push from an unknown folder is
-# judged by. Unset means unknown.
-_SESSION_CWD = contextvars.ContextVar("devkit_guard_session_cwd", default=None)
+
+
+def _embargo_anywhere() -> str:
+    """Why a push from a folder the guard cannot name may send an embargoed branch: the first project on this Mac
+    whose handoff note or audit trail holds an embargo, or why the embargo list cannot be read; '' when no project
+    holds one. Any failure is a reason (B2b: never "no embargo")."""
+    try:
+        from . import audit, branches
+        if not Path(core.HANDOFF).is_dir():
+            return f"the handoff repository {core.tilde(core.HANDOFF)} is not on this Mac"
+        root = Path(core.NOTES)
+        pids = {p.relative_to(root).with_suffix("").as_posix() for p in root.rglob("*.md")} if root.is_dir() else set()
+        trails = sorted(Path(audit.AUDIT).glob("*.jsonl")) if Path(audit.AUDIT).is_dir() else []
+        team = Path(core.HANDOFF) / "audit"
+        trails += sorted(team.rglob("*.jsonl")) if team.is_dir() else []
+        pids |= {r["project"] for f in trails for r in branches._embargo_records(f) if r["project"]}
+        for pid in sorted(pids):
+            held, why = branches.read_embargoes(pid)
+            if held is None:
+                return f"devkit cannot read the embargo list of {pid} ({why})"
+            if held:
+                return f"{pid} has an embargo in place ({', '.join(sorted(held))})"
+        return ""
+    except Exception as e:
+        return f"devkit cannot read the embargo lists ({type(e).__name__}: {e})"[:300]
 
 
 def _embargo_holds(found, cwd, srcs=()) -> list:
@@ -4384,14 +4437,9 @@ def _embargo_holds(found, cwd, srcs=()) -> list:
     pushes = [f for f in found if f[0] in ("push", "push-destructive", "pr")]
     if not pushes:
         return []
-    if not cwd or str(cwd) == str(UNKNOWN):  # an unknown folder is never "no embargo": the session's own decides
-        home = _SESSION_CWD.get()
-        at = _embargo_at(home)
-        if at is False:
-            return []
-        why = "this session's folder is no project devkit knows" if at is None else \
-            "this session's project has an embargo in place, or a handoff note devkit cannot read"
-        return [("developer-only", "?", "", ("folder", why))]
+    if not cwd or str(cwd) == str(UNKNOWN):  # an unknown folder is never "no embargo": every project's decides
+        why = _embargo_anywhere()
+        return [("developer-only", "?", "", ("folder", why))] if why else []
     pid = current_project(cwd)
     if not pid:
         return []
@@ -4695,7 +4743,7 @@ def _dev_actions(dargs, cwd, depth=0) -> list:
         cdir, gsub, gargs = _git_split(["git", *rest])
         if gsub != "push":
             return []
-        gcwd, srcs = str(resolve(cdir, cwd)) if cdir else cwd, []
+        gcwd, srcs = _git_where(["git", *rest], cwd), []  # -C, --git-dir, --work-tree (B2b)
         acts = _push_actions(gargs, gcwd, srcs)
         return _embargo_holds(acts, gcwd, srcs) + acts  # developer-only first
     if _dev_skips(dargs, "-h", "--help", "--dry-run"):
@@ -5081,7 +5129,7 @@ def _segment_actions(argv, cwd, bodies, depth) -> list:
         found = _dev_actions(dev, cwd)
     elif name == "git":
         cdir, sub, args = _git_split(argv)
-        gcwd = str(resolve(cdir, cwd)) if cdir else cwd
+        gcwd = _git_where(argv, cwd)  # -C, --git-dir, --work-tree: the repository it acts on (B2b)
         alias = "" if sub and _dynamic_name(sub) else _git_alias(argv, sub, gcwd if gcwd != str(UNKNOWN) else None)
         if sub and _dynamic_name(sub):  # `git $SUB …`: the subcommand is only known when it runs (RT13)
             found = [_unknown(" ".join(argv))]
@@ -5290,7 +5338,15 @@ def _text_actions(text, cwd, depth=0, from_code=False):
             continue
         if name == "gh" and (sets or gh_repo):  # GH_REPO names the repository gh acts on
             argv = [argv[0], "-R", (sets or [gh_repo])[-1], *argv[1:]]
-        more = _argv_actions(argv, cwd, bodies, depth)
+        genv = {**shell_env, **assigns}  # GIT_DIR and GIT_WORK_TREE choose the repository git acts on (B2b)
+        gopts = [f"--{'git-dir' if k == 'GIT_DIR' else 'work-tree'}={genv[k]}" for k in ("GIT_DIR", "GIT_WORK_TREE")
+                 if k in genv]
+        here = cwd
+        if gopts and name == "git":  # as --git-dir and --work-tree
+            argv = [argv[0], *gopts, *argv[1:]]
+        elif gopts:  # dev, gh and anything else that runs git inherit them: it acts on that repository
+            here = _git_where(["git", *gopts], cwd)
+        more = _argv_actions(argv, here, bodies, depth)
         if more is None:
             return None
         out += more
@@ -5329,12 +5385,7 @@ def _text_actions(text, cwd, depth=0, from_code=False):
 def irreversible_actions(cmd: str, cwd):
     """The irreversible actions a shell command runs, at every level the shell runs it: [{action, tier, target, repo,
     words}], one per action and target; [] for none; None when the command cannot be parsed."""
-    cwd = cwd or os.getcwd()
-    token = _SESSION_CWD.set(str(cwd))  # what a push from a folder named at run time is judged by (B2b)
-    try:
-        found = _text_actions(cmd or "", cwd)
-    finally:
-        _SESSION_CWD.reset(token)
+    found = _text_actions(cmd or "", cwd or os.getcwd())
     if found is None:
         return None
     out, seen = [], set()

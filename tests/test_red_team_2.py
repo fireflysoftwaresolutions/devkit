@@ -886,12 +886,62 @@ class EmbargoedBranchesStayOffTheRemote(EmbargoCase):
                 self.assertIsNone(self.main(cmd))
         self.note.write_text("---\nstatus: active\nembargo:\n  - branch: fix/hole\n")  # a note devkit cannot read
         self.assertIn(unknown, self.targets(var[0]))
-        self.note.write_text("---\nstatus: active\n---\n# acme/widget\n")
+
+    def test_b2b_an_unknown_folder_is_refused_while_any_project_holds_an_embargo(self):
+        # The tech lead's follow-up: `cd "$X"` may lead into any project on this Mac, so an embargo anywhere, a note
+        # devkit cannot read, a handoff repository that is not here, or an embargo only the audit trail still holds
+        # refuses it; with no embargo anywhere it is an ordinary push.
+        unknown, cmd = ("developer-only", "?"), 'cd "$X" && git push origin feat/x'
+        os.environ.pop("X", None)
+        self.note.write_text("---\nstatus: active\n---\n# acme/widget\n")  # none in the session's project
+        self.assertEqual(self.targets(cmd), [("push", "feat/x")])  # baseline: no embargo anywhere
+        other = self.handoff / "projects" / "acme" / "other.md"
+        other.write_text(NOTE.replace("acme/widget", "acme/other"))  # another project holds fix/hole
+        self.assertIn(unknown, self.targets(cmd))
+        self.assertIn("acme/other", self.main(cmd) or "")
         with mock.patch.object(guard, "current_project", return_value=None):  # the session's folder is no project
-            for cmd in (subst[0], var[0], var[2]):
-                with self.subTest(cmd=cmd, project=None):
-                    self.assertIn(unknown, self.targets(cmd))
-            self.assertEqual(self.targets(f"cd {r} && git push origin feat/x"), [("push", "feat/x")])
+            self.assertIn(unknown, self.targets(cmd))
+        other.write_text("---\nstatus: active\nembargo:\n  - branch: fix/hole\n")  # it cannot be read
+        self.assertIn(unknown, self.targets(cmd))
+        other.unlink()
+        self.assertEqual(self.targets(cmd), [("push", "feat/x")])
+        audit.record("git.embargo", "fix/gone", "set: an open hole", "ok", project="acme/gone", branch="fix/gone")
+        self.assertIn(unknown, self.targets(cmd))  # its note is gone, the trail still holds it
+        with mock.patch.object(core, "HANDOFF", self.root / "nowhere"), \
+                mock.patch.object(core, "NOTES", self.root / "nowhere" / "projects"):  # no handoff repository here
+            self.assertIn(unknown, self.targets('git -C "$X" push origin feat/x'))
+
+    def test_b2b_git_dir_and_work_tree_name_the_folder_a_push_runs_in(self):
+        # The tech lead's follow-up: --git-dir, --work-tree, GIT_DIR and GIT_WORK_TREE choose the repository a push
+        # sends from. A literal path is judged as that folder; one known only at run time is an unknown folder.
+        held, unknown = ("developer-only", "embargo/fix/hole"), ("developer-only", "?")
+        here = self.root / "elsewhere"  # the session works in a folder that is no project
+        here.mkdir()
+        repo = self.repo
+
+        def project(c):
+            return self.PID if c and str(c).startswith(repo) else None
+
+        def targets(cmd):
+            return [(a["action"], a["target"]) for a in guard.irreversible_actions(cmd, str(here)) or []]
+        for k in ("GIT_DIR", "GIT_WORK_TREE", "G", "W", "X"):
+            os.environ.pop(k, None)
+        g, r = shq(Path(repo) / ".git"), shq(repo)
+        with mock.patch.object(guard, "current_project", side_effect=project):
+            self.assertEqual(targets(f"git --git-dir={g} push origin feat/x"), [("push", "feat/x")])  # baseline
+            for cmd in (f"git --git-dir={g} push origin fix/hole",
+                        f"git --git-dir {g} --work-tree {r} push origin fix/hole",
+                        f"GIT_DIR={g} git push origin fix/hole", f"env GIT_DIR={g} git push origin fix/hole",
+                        f"export GIT_DIR={g}; git push origin fix/hole", f"GIT_DIR={g} dev git push origin fix/hole",
+                        f"git -C {shq(here)} --git-dir={g} push origin fix/hole"):
+                with self.subTest(cmd=cmd):
+                    self.assertIn(held, targets(cmd))
+            for cmd in ('git --git-dir="$G" push origin feat/x', 'git --work-tree="$W" push origin feat/x',
+                        'git -C "$X" push origin feat/x', 'GIT_DIR="$G" git push origin feat/x',
+                        'GIT_WORK_TREE=$W git push origin feat/x', 'export GIT_DIR=$G; git push origin feat/x',
+                        'GIT_DIR=$G gh pr create --fill', 'GIT_DIR=$G dev push', 'dev git --git-dir="$G" push'):
+                with self.subTest(cmd=cmd):
+                    self.assertIn(unknown, targets(cmd))
 
     def test_b2b_an_unparsed_push_with_an_embargo_in_place_is_refused_in_the_audit_week(self):
         self.assertIsNotNone(self.main("git push origin fix/hole 'unclosed", setting="audit"))

@@ -47,8 +47,8 @@ devkit refuses more in this release. Each refusal says why and names the command
   or `grant backup <project>` (`grant developer-only <target>` works too). The gate's first audit week does not let
   them through, and crew members never run them.
 - **An agent's push or pull request of an embargoed branch needs your `grant embargo <branch>`.** A push or pull
-  request from a folder the guard can only learn when it runs (`cd "$X" && git push`) is refused when the session's
-  project has an embargo or is not a project; the agent writes the folder out instead.
+  request from a folder the guard can only learn when it runs (`cd "$X" && git push`, `GIT_DIR=$G git push`) is
+  refused while any project on this Mac has an embargo; the agent writes the folder out instead.
 - **A decision is yours only in your own words.** It counts when you answer the question dialog, or type a line of
   your own: `approve D3`, `approve D3: B`, or `grant push feat/invoice-export`. Without that, an answer the tech lead
   records is marked unverified, and an irreversible decision stays pending. `dev crew mode auto --approve` takes one
