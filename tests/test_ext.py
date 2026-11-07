@@ -1027,6 +1027,58 @@ class EffectiveSetTests(unittest.TestCase):
         self.assertTrue(any("grill-with-docs" in s["skills"] and not s.get("agents") for s in sources))
 
 
+class InstallSkillsLayeringTests(unittest.TestCase):
+    """The skills step itself (setup._install_skills) with an overlay: the team's sources, the overlay's, devkit's own
+    skills under agents/skills, and the impeccable engine, all in one run. Fetches are faked; links are real."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        r = Path(self.tmp.name)
+        self.devkit, self.share, self.repos = r / "devkit", r / "share" / "skills", r / "repos"
+        self.claude, self.agents, self.state = r / ".claude", r / ".agents", r / "state"
+        (self.devkit / "agents" / "skills" / "local-one").mkdir(parents=True)
+        (self.devkit / "agents" / "skills" / "local-one" / "SKILL.md").write_text("---\nname: local-one\n---\n")
+        for d in (self.share, self.state):
+            d.mkdir(parents=True)
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def fetch(self, src):
+        root = self.repos / src["repo"].replace("/", "__")
+        for rel in src["skills"].values():
+            (root / rel).mkdir(parents=True, exist_ok=True)
+            (root / rel / "SKILL.md").write_text("---\nname: x\n---\n")
+        return root
+
+    def run_step(self, overlay):
+        engine = mock.Mock(return_value={})
+        with mock.patch.dict(core.CFG, {"ext": overlay, "skills": {"groups": []}}), \
+                mock.patch.object(ext, "team", return_value=fixture_team()), \
+                mock.patch.object(setup, "DEVKIT_HOME", self.devkit), \
+                mock.patch.object(setup, "SKILLS_SHARE", self.share), \
+                mock.patch.object(setup, "CLAUDE_HOME", self.claude), \
+                mock.patch.object(setup, "AGENTS_HOME", self.agents), \
+                mock.patch.object(setup, "STATE", self.state), \
+                mock.patch.object(setup, "_fetch_source", self.fetch), \
+                mock.patch.object(setup, "install_impeccable_engine", engine, create=True):
+            setup.install_skills(quiet=True)
+        return engine
+
+    def test_an_overlay_skill_installs_beside_the_team_and_local_skills(self):
+        add = {"kind": "skill", "name": "kid-probe", "repo": "someone/skills", "ref": SHA_C, "path": "skills/probe",
+               "license": "MIT", "why": "w", "agents": ["claude"]}
+        engine = self.run_step({"add": [add]})
+        claude, codex = self.claude / "skills", self.agents / "skills"
+        self.assertTrue((claude / "kid-probe").is_symlink(), "the overlay skill is not linked for Claude")
+        self.assertEqual(Path(os.readlink(claude / "kid-probe")), self.share / "kid-probe")
+        self.assertFalse((codex / "kid-probe").exists())
+        self.assertEqual(Path(os.readlink(claude / "local-one")), self.devkit / "agents" / "skills" / "local-one")
+        self.assertEqual(Path(os.readlink(codex / "local-one")), self.devkit / "agents" / "skills" / "local-one")
+        self.assertEqual(Path(os.readlink(codex / "codebase-design")), self.share / "codebase-design")
+        engine.assert_called_once_with(self.share / "impeccable", "pbakaus/impeccable")
+
+
 class ChangeCommandTests(unittest.TestCase):
     """`dev ext add|remove|enable|disable`: the developer's overlay, written through devkit's configuration and
     applied to that one entry."""
