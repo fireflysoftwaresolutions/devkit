@@ -365,6 +365,15 @@ class EnforcementMatrixTests(unittest.TestCase):
         self.assertEqual([i for i in ids if not selfcheck.MATRIX_ID.fullmatch(f"`{i}`")], [])
         self.assertEqual(len(ids), len(set(ids)))
 
+    # M332: the rules 3fb1dbb (F5, F7, F8) and 5b7a6a3 (F6) wired are enforced, each by the check its row names; the
+    # shell scope holds for review-only and read-only members only, and the row says so (D11 checks docs/crew.md)
+    def test_the_wired_rules_are_enforced_by_their_checks(self):
+        rows = {row[0]: row for row in crew.ENFORCEMENT}
+        wired = ("E-irreversible", "E-verdict", "E-no-self-approval", "E-evidence", "E-escape", "E-shell-scope")
+        self.assertEqual([rows[i][4] for i in wired], ["enforced"] * len(wired))
+        self.assertEqual([r for r, *_, ok in crew.enforcement() if not ok], [])
+        self.assertIn("review-only and read-only", rows["E-shell-scope"][1])
+
     # dev crew rules prints each rule with its id
     def test_rules_prints_each_rules_id(self):
         with TempState():
