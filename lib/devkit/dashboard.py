@@ -1336,6 +1336,23 @@ def _initiative(i: dict, items: list = None) -> dict:
     return out
 
 
+def _roster():
+    """The crew roster for names as `<Role> (<Name>)`; None when it cannot be read (names then stay as written)."""
+    try:
+        from . import crew
+        return crew.load()
+    except Exception:
+        return None
+
+
+def _prs_at():
+    """When the PR cache was last written (its newest file): the PRs' as_of. None without a cache."""
+    try:
+        return max((int(f.stat().st_mtime) for f in (core.STATE / "prs").glob("*.json")), default=None)
+    except OSError:
+        return None
+
+
 def collect(reg: dict, handoff: Path = None, now: float = None) -> dict:
     now = now or time.time()
     handoff = Path(handoff) if handoff else core.HANDOFF
@@ -1352,6 +1369,12 @@ def collect(reg: dict, handoff: Path = None, now: float = None) -> dict:
     for x in ppl:
         x["sessions"] = [_with_status(s) for s in x["sessions"]]
     host = reg.get("host") or os.uname().nodename.split(".")[0]
+    raw = _raw_runs()
+    jobs, ci = jobs_summary(now), ci_watches()
+    from . import dashnow  # Now's areas (contract P-fyli4qqn0y7): computed from what was read above, no other read
+    now_areas = dashnow.areas(reg, raw, _runs(now, host, raw), acts, ci, jobs, items,
+                              since_yesterday(reg, cache, now, items, slog, me), team, now, host,
+                              roster=_roster(), prs_at=_prs_at())
     return {
         "v": 3,
         "version": core.VERSION,
@@ -1364,7 +1387,8 @@ def collect(reg: dict, handoff: Path = None, now: float = None) -> dict:
         "handoff": core.tilde(handoff),
         "projects": [_project(p, now) for p in reg.get("projects", [])],
         "initiatives": [_initiative(i, items) for i in reg.get("initiatives") or [] if isinstance(i, dict)],
-        "actions": acts,
+        "attention": now_areas["attention"],
+        "actions": acts,  # today's list, kept one release as an alias of attention
         "kpis": kpis(reg, items, ppl, acts, now),
         "items": items,
         "team": team,
@@ -1372,10 +1396,12 @@ def collect(reg: dict, handoff: Path = None, now: float = None) -> dict:
         "session_log": slog,
         "plans": read_plans(handoff),
         "collisions": colls,
-        "since": since_yesterday(reg, cache, now, items, slog, me),
+        "since": now_areas["since"],
+        "safety": now_areas["safety"],
+        "as_of": now_areas["as_of"],
         "who": me,
         "timing": _timing(now),
-        "runs": _runs(now, host),
+        "runs": now_areas["runs"],
         "merged": merged_prs(cache, now - 30 * 86400)[:200],
         "sessions": [_with_status(s) for s in reg.get("sessions") or []],
         "providers": reg.get("providers") or {},
@@ -1386,8 +1412,8 @@ def collect(reg: dict, handoff: Path = None, now: float = None) -> dict:
         "guard": events[-120:],
         "guard_rules": guard_rules(events),
         "drift": reg.get("drift"),
-        "jobs": jobs_summary(now),
-        "ci": ci_watches(),
+        "jobs": jobs,
+        "ci": ci,
         "crew": crew_roster(),
         "windows": _windows(events, slog),
         "files": files,

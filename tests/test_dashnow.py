@@ -5,12 +5,16 @@
 # from tests/dashfixture.py at a fixed clock, read in UTC; the suite's hermetic home.
 # Run: python3 -m unittest tests.test_dashnow
 import copy
+import gzip
+import http.client
 import json
 import os
 import shlex
+import socket
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 import unittest
 from pathlib import Path
@@ -21,7 +25,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 import dashfixture as fx  # noqa: E402
 import now_contract  # noqa: E402
-from devkit import dashboard  # noqa: E402
+from devkit import dashboard, dashserver, progress as pg  # noqa: E402
 
 try:  # `dev test prove` runs these tests on the code before dashnow.py existed: there each must fail, not vanish
     from devkit import dashnow  # noqa: E402
@@ -31,6 +35,7 @@ except ImportError:
 NOW, HOST, at = fx.NOW, fx.HOST, fx.at
 PATH = f"{fx.DEV}/acme/lending-core"
 HOSTILE = ("fix/x$(touch${IFS}pwn)", "fix/a`id`")
+TOKEN = "now-token-0123456789abcdefghijklmnopqrstuv"
 _UTC = fx.utc()
 
 
@@ -525,6 +530,73 @@ class BuildActionsQuotingTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             self.assertEqual(shell(cmd, tmp), ["wt", "rm", HOSTILE[0]])
             self.assertEqual(os.listdir(tmp), [])
+
+
+class WiringTests(unittest.TestCase):
+    # collect() reads this Mac's runs (progress files in a temporary state folder) and serves the Now areas
+    def setUp(self):
+        from test_progress import TempState
+        self.state = TempState().__enter__()
+        self.addCleanup(self.state.__exit__, None, None, None)
+        self.handoff = Path(self.state.tmp.name) / "handoff"
+        self.handoff.mkdir()
+        pg.start("Invoice export", plan=["export api", "export screen"])
+        pg.crew_decision("Include cancelled invoices?", options="A: Leave them out | B: Include them", recommend="A")
+        self.reg = {"projects": [], "generated": int(time.time()), "host": "testmac", "github_user": "ana",
+                    "team": [], "issues": [], "sessions": [], "providers": {}}
+
+    def snapshot(self):
+        snap = dashserver.Snapshot(build=lambda: self.reg, paths=lambda: [pg.RUNS], enrich=lambda reg: {},
+                                   collect=lambda reg, now=None: dashboard.collect(reg, handoff=self.handoff, now=now))
+        snap.refresh(force=True)
+        return snap
+
+    def test_collect_serves_the_five_now_areas_next_to_todays_actions(self):
+        d = dashboard.collect(self.reg, handoff=self.handoff)
+        doc = {k: d[k] for k in now_contract.AREAS}
+        self.assertEqual(now_contract.check(doc), [])
+        self.assertEqual(ids(doc), ["decision:claude-s1:D1"])
+        self.assertEqual((d["runs"][0]["waiting_on"]["kind"], d["runs"][0]["eta"]["state"]), ("decision", "after_answer"))
+        self.assertIn("line", d["since"])
+        self.assertIsInstance(d["actions"], list)
+
+    def test_answering_d1_removes_its_row_and_tells_open_pages_attention_changed(self):
+        snap = self.snapshot()
+        before = snap.version
+        self.assertEqual(ids(snap.data), ["decision:claude-s1:D1"])
+        pg.crew_decide("D1", "A")
+        self.assertTrue(snap.refresh())
+        self.assertEqual(ids(snap.data), [])
+        self.assertIn("attention", snap.changed_since(before))
+
+    def test_the_dashboard_endpoint_serves_the_now_areas_by_name_with_auth_etag_and_gzip(self):
+        snap, ready, apps = self.snapshot(), threading.Event(), []
+        sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        sock.bind(("127.0.0.1", 0))
+        sock.listen(8)
+        port = sock.getsockname()[1]
+        t = threading.Thread(target=dashserver.serve, args=(sock, TOKEN, snap), daemon=True,
+                             kwargs={"poll": 0.05, "idle_check": 0.05, "idle": 30, "handoff": self.handoff,
+                                     "ready": lambda app: (apps.append(app), ready.set())})
+        t.start()
+        self.assertTrue(ready.wait(5))
+        self.addCleanup(lambda: (apps[0].shutdown(), t.join(5)))
+
+        def get(headers):
+            c = http.client.HTTPConnection("127.0.0.1", port, timeout=5)
+            c.request("GET", "/api/v1/dashboard?only=attention,runs,safety,since,as_of",
+                      headers=dict({"Host": f"127.0.0.1:{port}"}, **headers))
+            r = c.getresponse()
+            body, hdrs = r.read(), {k.lower(): v for k, v in r.getheaders()}
+            c.close()
+            return r.status, hdrs, body
+        status, hdrs, body = get({"Authorization": f"Bearer {TOKEN}", "Accept-Encoding": "gzip"})
+        doc = json.loads(gzip.decompress(body) if hdrs.get("content-encoding") == "gzip" else body)
+        self.assertEqual(status, 200)
+        self.assertEqual(set(doc) - {"live", "snapshot"}, set(now_contract.AREAS))
+        self.assertEqual(now_contract.check(doc), [])
+        self.assertEqual(get({"Authorization": f"Bearer {TOKEN}", "If-None-Match": hdrs["etag"]})[0], 304)
+        self.assertEqual(get({})[0], 401)
 
 
 class ContractTests(unittest.TestCase):
