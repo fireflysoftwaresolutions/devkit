@@ -931,7 +931,57 @@ def check_bash(cmd: str, cwd: str, agent: str):
     segs = split_commands(cmd)
     if segs is None:
         return _attribution(cmd) if re.search(r"\b(git|gh)\b", cmd) else None
-    ecwd = cwd or os.getcwd()
+    return _check_segments(cmd, segs, cwd or os.getcwd(), agent)
+
+
+# N2: what a segment runs one level down, which the rules on destructive commands read as they read the top level: a
+# shell's -c line, eval's words, and the command find -exec and xargs run (so `find … -exec sh -c '<line>'` is read
+# too). Their own rules judge a command that takes the file names they substitute ({}), as rm, cp or mkdir do.
+_PATH_TAKERS = frozenset({"rm", "unlink", "mkdir", "touch", "cp", "mv", "rsync", "ditto"})
+
+
+def _shell_line(args):
+    """The -c line of a shell's arguments, or None (a script file or its input is not a line given here)."""
+    k = 0
+    while k < len(args):
+        a = args[k]
+        if a == "--" or not a.startswith(("-", "+")):
+            return None
+        if a.startswith("-") and not a.startswith("--") and "c" in a[1:]:
+            return _with_positionals(args[k + 1], args[k + 2:]) if k + 1 < len(args) else None
+        k += 2 if a in ("-o", "+o", "-O", "+O", "--rcfile", "--init-file") else 1
+    return None
+
+
+def _nested_lines(argv) -> list:
+    argv = _unwrap(argv)
+    if not argv:
+        return []
+    name, args = os.path.basename(argv[0]), argv[1:]
+    if name in _SHELLS:
+        line = _shell_line(args)
+        return [line] if line else []
+    if name == "eval":
+        return [" ".join(args)] if args else []
+    inners = []
+    if name == "xargs":
+        i, takes = 0, {"-I", "-n", "-P", "-L", "-d", "-E", "-s", "-a", "-J", "-R", "-S"}
+        while i < len(args) and args[i].startswith("-"):
+            i += 2 if args[i] in takes else 1
+        inners.append(args[i:])
+    elif name == "find":
+        for k, a in enumerate(args):
+            if a in ("-exec", "-execdir", "-ok", "-okdir"):
+                sub = args[k + 1:]
+                inners.append(sub[:next((j for j, x in enumerate(sub) if x in (";", "+")), len(sub))])
+    runs = [_unwrap(x) for x in inners]
+    return [shlex.join(x) for x in runs if x and os.path.basename(x[0]) not in _PATH_TAKERS]
+
+
+def _check_segments(cmd: str, segs, ecwd: str, agent: str, depth: int = 0, outer_envs=frozenset()):
+    """The rules on destructive commands for each segment of `cmd`, then for the lines it runs one level down
+    (_nested_lines, to depth 4). `outer_envs`: the variables set for the shell that runs this line, which its
+    commands inherit (an escape hatch on `sh -c` reaches the line)."""
     raw_segments = re.split(r"&&|\|\||;|\n|\|", cmd)
     pending_adds = []
     for idx, (argv0, redirs) in enumerate(segs):
@@ -941,7 +991,7 @@ def check_bash(cmd: str, cwd: str, agent: str):
         argv = _strip_prefix(argv0)
         while argv and argv[0] in _RESERVED:  # `if …; then rm -rf ~; fi` runs rm
             argv = _strip_prefix(argv[1:])
-        envs = frozenset(a.split("=", 1)[0] for a in argv0[:len(argv0) - len(argv)] if "=" in a)
+        envs = frozenset(a.split("=", 1)[0] for a in argv0[:len(argv0) - len(argv)] if "=" in a) | outer_envs
         for r in redirs:
             v = check_write_path(r, ecwd, agent)
             if v:
@@ -1037,6 +1087,11 @@ def check_bash(cmd: str, cwd: str, agent: str):
                     res = deny(f"Do not create backup copies ({dest.name}); git already keeps history.")
         if res:
             return res
+        for line in (_nested_lines(argv) if depth < 4 else []):
+            inner = split_commands(line)
+            res = _check_segments(line, inner, ecwd, agent, depth + 1, envs) if inner else None
+            if res:
+                return res
     return None
 
 
@@ -1798,55 +1853,86 @@ def _ext_refusal(args) -> bool:
     return sub in ("enable", "disable")
 
 
-# H1 (the Security engineer's re-review of dev ext): the agents' own CLIs change the same plugins, marketplaces and
-# MCP servers `dev ext` does, outside its audit trail and lock. Each group's read-only verbs stay open (and `-h`,
-# `--help`, a group without a verb); every other verb, a new one included, is the developer's (fails closed).
-_VENDOR_GROUPS = frozenset({"plugin", "plugins", "mcp"})
+# H1 and its re-reviews (the Security engineer): the agents' own CLIs change the same plugins, marketplaces and MCP
+# servers `dev ext` does, outside its audit trail and lock. Two rounds of a verb block list over a loose parse each
+# lost to a new spelling (an option's value read as the group, `--`, help where a parser takes it as a value), so the
+# rule is an allowlist that fails closed (round three): a claude or codex call whose words include a group word
+# anywhere is the developer's, unless its whole argv is one of these exact read-only forms. NAME is one argument that
+# is no option; `claude plugins` is `claude plugin`. A group alone prints its help.
+_VENDOR_WORDS = frozenset({"plugin", "plugins", "mcp", "marketplace"})
+_NAME = "<name>"
 _VENDOR_READ = {
-    ("claude", "plugin"): frozenset({"list", "details", "validate", "help", "init", "new", "tag", "test", "eval",
-                                     "configure"}),
-    ("claude", "marketplace"): frozenset({"list", "help"}),
-    ("claude", "mcp"): frozenset({"list", "get", "help", "serve", "login", "logout"}),
-    ("codex", "plugin"): frozenset({"list", "help"}),
-    ("codex", "marketplace"): frozenset({"list", "help"}),
-    ("codex", "mcp"): frozenset({"list", "get", "help", "login", "logout"}),
+    "claude": frozenset({("plugin",), ("plugin", "list"), ("plugin", "details", _NAME), ("plugin", "validate", _NAME),
+                         ("plugin", "marketplace", "list"), ("mcp",), ("mcp", "list"), ("mcp", "get", _NAME)}),
+    "codex": frozenset({("plugin",), ("plugin", "list"), ("plugin", "marketplace", "list"), ("mcp",), ("mcp", "list"),
+                        ("mcp", "get", _NAME)}),
 }
+_VENDOR_FLAGS = frozenset({"-h", "--help", "--json"})  # none takes a value, so the words around them are plain
 
 
-def _vendor_help(args) -> bool:
-    """True when `-h` or `--help` makes the vendor CLI print help instead of running the verb: only before the first
-    `--` (after it, both parsers read it as an argument), and not right after an option, which may take it as its
-    value (`claude --model -h plugin install x` installs; F1)."""
-    opts = _dev_opts(args)
-    return any(w in ("-h", "--help") and not (k and opts[k - 1].startswith("-") and "=" not in opts[k - 1])
-               for k, w in enumerate(opts))
+def _vendor_word(word: str) -> bool:
+    """A group word: the word itself, in any case, or an option's value written `--option=<word>`."""
+    w = str(word).casefold()
+    return w in _VENDOR_WORDS or (w.startswith("-") and w.partition("=")[2] in _VENDOR_WORDS)
 
 
-def vendor_ext_refusal(argv) -> bool:
-    """True when a claude or codex command (the binary, any path to it, or the npm package a runner starts) adds,
-    removes, switches or updates a plugin, a marketplace or an MCP server. Codex's parser (clap) refuses a verb after
-    `--`, so only the words before it count there; Claude Code's (commander) still runs a subcommand named after it
-    (F1), so for claude a bare `--` is skipped. The first group word and the word after it decide; what follows, an
-    MCP server's own command line included, does not."""
-    cli = agent_cli(argv[0]) if argv else ""
+def _vendor_read_only(cli: str, args) -> bool:
+    """The whole argv after the program is one of _VENDOR_READ's forms, with no option but -h, --help and --json."""
+    if not {a for a in args if a.startswith("-")} <= _VENDOR_FLAGS:
+        return False
+    words = [a for a in args if not a.startswith("-")]
+    if cli == "claude" and words[:1] == ["plugins"]:
+        words[0] = "plugin"
+    return any(len(form) == len(words) and all(f in (w, _NAME) for f, w in zip(form, words))
+               for form in _VENDOR_READ[cli])
+
+
+def vendor_ext_refusal(argv, cwd=None, names=()) -> bool:
+    """True when a claude or codex call may add, remove, switch or update a plugin, a marketplace or an MCP server:
+    its words include a group word (_vendor_word) and its argv is not an exact read-only form. The program is read as
+    the shell finds it (agent_cli: a path from the folder the command runs in, a link on the PATH, the npm package a
+    runner starts); one the shell picks at run time (a variable, or a bare name with PATH set by the command or the
+    shell before it, `names`) may be claude, so a group word with it is refused as well (N3)."""
+    args = [str(a) for a in (argv or [])[1:]]
+    if not argv or not any(_vendor_word(a) for a in args):
+        return False
+    prog = str(argv[0])
+    cli = agent_cli(prog, cwd, search=True)
     if not cli:
-        return False
-    args = list(argv[1:])
-    if _vendor_help(args):
-        return False
-    words = [w for w in args if w != "--"] if cli == "claude" else _dev_opts(args)
-    pos = [w for w in words if not w.startswith("-")]
-    at = next((i for i, w in enumerate(pos) if w in _VENDOR_GROUPS), None)
-    if at is None or at + 1 >= len(pos):
-        return False
-    group, verb = ("mcp" if pos[at] == "mcp" else "plugin"), pos[at + 1]
-    if group == "plugin" and verb == "marketplace":
-        group, verb = "marketplace", (pos[at + 2] if at + 2 < len(pos) else "")
-        if not verb:
+        cli, args = _agent_script(argv, cwd) or ("", args)
+    if not cli:
+        if "$" in prog or "`" in prog or ("PATH" in set(names) and "/" not in prog):
+            return True
+        if "/" not in prog or prog.startswith("@"):  # a bare name the PATH finds, or a scoped npm package
             return False
-    if verb == "configure" and "--values-stdin" in words:
-        return True
-    return verb not in _VENDOR_READ[(cli, group)]
+        path = os.path.expanduser(prog)
+        if not os.path.isabs(path):
+            path = os.path.join(str(cwd), path) if cwd and str(cwd) != str(UNKNOWN) else ""
+        return not (path and os.path.exists(path))  # a copy or a link the command has yet to make
+    return not _vendor_read_only(cli, args)
+
+
+_JS_RUNTIMES = frozenset({"node", "nodejs", "bun", "deno"})
+_AGENT_SCRIPTS = (("/@anthropic-ai/claude-code/", "claude"), ("/@openai/codex/", "codex"))
+
+
+def _agent_script(argv, cwd):
+    """(cli, its arguments) when a JS runtime runs Claude Code's or Codex's own script from their npm package
+    (`node …/@openai/codex/bin/codex.js mcp add …`), else None."""
+    if os.path.basename(str(argv[0])) not in _JS_RUNTIMES:
+        return None
+    rest = [str(a) for a in argv[1:]]
+    for k, a in enumerate(rest):
+        if a.startswith("-"):
+            continue
+        path = os.path.expanduser(a)
+        if not os.path.isabs(path) and cwd and str(cwd) != str(UNKNOWN):
+            path = os.path.join(str(cwd), path)
+        real = os.path.realpath(path) if os.path.isabs(path) else ""
+        cli = next((c for pkg, c in _AGENT_SCRIPTS if pkg in real), "")
+        if cli:
+            return cli, rest[k + 1:]
+    return None
 
 
 _UPDATE_CHECK = frozenset({"--check", "--quiet", "--record"})
@@ -1889,15 +1975,22 @@ def _agent_binary(path: str) -> str:
     return "claude" if (p.parent.name, p.parent.parent.name) == ("versions", "claude") and p.name else ""
 
 
-def agent_cli(word) -> str:
+def agent_cli(word, cwd=None, search=False) -> str:
     """'claude' or 'codex' when a command word runs one of them: the binary, by its name, by Claude Code's versions
-    folder, or by a path that resolves to either (a link, `..`); or the npm package a runner such as npx, bunx, pnpm
-    dlx or yarn dlx starts (`@anthropic-ai/claude-code@latest`, `claude-code`, `@openai/codex`); '' otherwise (RT8)."""
+    folder, or by a path that resolves to either (a link, `..`; a relative one from `cwd`, the folder the command runs
+    in: N3); with `search`, a bare name the PATH resolves to either (a link named otherwise); or the npm package a
+    runner such as npx, bunx, pnpm dlx or yarn dlx starts (`@anthropic-ai/claude-code@latest`, `claude-code`,
+    `@openai/codex`); '' otherwise (RT8)."""
     text = str(word or "")
     name = _agent_binary(text)
     if not name and "/" in text:
-        path = os.path.expanduser(text)
-        name = _agent_binary(os.path.realpath(path)) if os.path.isabs(path) else ""
+        path = os.path.expanduser(os.path.expandvars(text))
+        if not os.path.isabs(path) and cwd and str(cwd) != str(UNKNOWN):
+            path = os.path.join(str(cwd), path)
+        name = _agent_binary(os.path.realpath(path)) if os.path.isabs(path) and "$" not in path else ""
+    elif not name and search and text and not set(text) & set("$`"):
+        found = shutil.which(text)
+        name = _agent_binary(os.path.realpath(found)) if found else ""
     if name:
         return name
     pkg = str(word or "")
@@ -1909,9 +2002,10 @@ def agent_cli(word) -> str:
     return _AGENT_PACKAGES.get(pkg.casefold(), "")
 
 
-def guardless_session(name, argv, names=()) -> str | None:
-    """Why a nested claude or codex call would run without devkit's hooks or sandbox, or None (RT6)."""
-    name = agent_cli(argv[0]) if argv else ""
+def guardless_session(name, argv, names=(), cwd=None) -> str | None:
+    """Why a nested claude or codex call would run without devkit's hooks or sandbox, or None (RT6). A relative path
+    to the binary is read from `cwd`, the folder the command runs in (N3)."""
+    name = agent_cli(argv[0], cwd) if argv else ""
     if not name:
         return None
     home = sorted(set(names) & _AGENT_HOME_ENV)
@@ -2162,8 +2256,8 @@ class _Shell:
         python -m devkit…), a program that imports devkit, or an agent session (its hooks run devkit)."""
         if _dev_args(argv) is not None:
             return "a devkit command"
-        if agent_cli(argv[0]):
-            return f"a nested {agent_cli(argv[0])} session, whose hooks run devkit"
+        if agent_cli(argv[0], cwd):
+            return f"a nested {agent_cli(argv[0], cwd)} session, whose hooks run devkit"
         if _INTERP.match(name) and len(argv) > 1:
             if argv[1] == "-m" and len(argv) > 2 and argv[2].split(".")[0] == "devkit":
                 return "a devkit command"
@@ -2201,10 +2295,10 @@ class _Shell:
         v = self.forged_env(name, argv, cwd, names)
         if v:
             return v
-        why = guardless_session(name, argv, set(names) | self.exported)
+        why = guardless_session(name, argv, set(names) | self.exported, cwd)
         if why:
             return deny(why)
-        if vendor_ext_refusal(argv):
+        if vendor_ext_refusal(argv, cwd, set(names) | self.exported):
             return deny(EXT_REASON)
         if _INTERP.match(name) and _dev_args(argv) is None:
             why = code_session_refusal(argv, cwd, self.bodies)
@@ -2289,7 +2383,7 @@ class _Shell:
             why = guardless_session(args[0], inner, names)
             if why:
                 return deny(why)
-            if vendor_ext_refusal(inner):
+            if vendor_ext_refusal(inner, cwd, names):
                 return deny(EXT_REASON)
         if words[:2] == ["config", "set"]:
             keys = [k for a in args[2:] for k in {a.casefold(), a.casefold().split("=", 1)[-1]}]
@@ -2380,17 +2474,12 @@ class _Shell:
                 inner = args[k + 1:]
                 inner = inner[:next((j for j, x in enumerate(inner) if x in (";", "+")), len(inner))]
                 inames, inner = _env_split(inner)
-                iname = os.path.basename(inner[0]) if inner else ""
-                v = self.forged_env(iname, inner, cwd, inames) if inner else None
-                if v:
-                    return v
-                why = guardless_session(iname, inner, inames) if inner else None
-                if why:
-                    return deny(why)
-                if inner and vendor_ext_refusal(inner):  # F1: the shell form refuses it, so does find's
-                    return deny(EXT_REASON)
-                idev = _dev_args(inner) if inner else None
-                v = self.dev(idev, cwd) if idev is not None else None
+                if not inner:
+                    continue
+                iname = os.path.basename(inner[0])
+                # N2: find runs its command as the shell runs a segment, so every rule of a segment applies to it, and
+                # a shell it starts (`-exec sh -c '<line>'`) has its line read again, as `sh -c` has
+                v = self.segment(iname, inner, [], cwd, inames)
                 if v:
                     return v
                 inplace = iname in ("sed", "yq") and any(x.startswith("-i") or x.startswith("--in") for x in inner)
@@ -2626,6 +2715,23 @@ def _dev_words(args) -> list:
     return _positionals(args, _DEV_VALUES)
 
 
+_POSITIONAL = re.compile(r'"\$[@*]"|\$[@*]|\$\{(\d+)\}|\$(\d)')
+
+
+def _with_positionals(line: str, words) -> str:
+    """A shell's -c line with the words after it in place of $0, $1…, ${1} and "$@" or $* (the words after $0),
+    quoted as the shell passes them, so the guard reads what runs (`sh -c 'claude "$@"' _ plugin install x`)."""
+    if not words:
+        return line
+
+    def sub(m):
+        n = m.group(1) or m.group(2)
+        if n is None:
+            return " ".join(shlex.quote(w) for w in words[1:])
+        return shlex.quote(words[int(n)]) if int(n) < len(words) else ""
+    return _POSITIONAL.sub(sub, line)
+
+
 def _shell_inputs(args, cwd, bodies) -> list:
     """The scripts a shell runs: its -c string, a script file, or its input (the command's heredocs)."""
     i = 0
@@ -2635,7 +2741,7 @@ def _shell_inputs(args, cwd, bodies) -> list:
             i += 1
             break
         if a.startswith("-") and not a.startswith("--") and "c" in a[1:]:
-            return [args[i + 1]] if i + 1 < len(args) else []
+            return [_with_positionals(args[i + 1], args[i + 2:])] if i + 1 < len(args) else []
         if a in ("-o", "+o", "-O", "+O", "--rcfile", "--init-file"):
             i += 2
             continue
@@ -5164,8 +5270,8 @@ _CALL_LIST = re.compile(r"((?:'[^'\n]*'|\"[^\"\n]*\")\s*,\s*[\[(]\s*(?:(?:'[^'\n
 
 
 def code_session_refusal(argv, cwd, bodies, depth: int = 0) -> str | None:
-    """Why an interpreter's program starts a nested agent session without devkit's hooks or sandbox, or runs `dev
-    hook`, in a command line it hands to a process (subprocess, os.system, os.exec*, child_process, …), or None:
+    """Why an interpreter's program starts a nested agent session without devkit's hooks or sandbox, changes the
+    extensions (EXT_REASON), or runs `dev hook`, in a command line it hands to a process (subprocess, os.system, os.exec*, child_process, …), or None:
     the refusals the shell form gets, for the same commands named in code (RT12). A repository's own script is its
     code, as for the other checks."""
     if depth > 3 or _repo_script(argv, cwd):
@@ -5180,6 +5286,9 @@ def code_session_refusal(argv, cwd, bodies, depth: int = 0) -> str | None:
             if why:
                 return why
             dargs = _dev_args(inner)
+            if vendor_ext_refusal(inner, cwd) or (dargs is not None and _ext_refusal(dargs) and
+                                                  not _dev_skips(dargs[1:], "-h", "--help")):
+                return EXT_REASON
             if dargs is not None and dargs[:1] == ["hook"] and not _dev_skips(dargs[1:], "-h", "--help"):
                 return HOOK_REASON
             if icode is not None and _INTERP.match(os.path.basename(inner[0])):
