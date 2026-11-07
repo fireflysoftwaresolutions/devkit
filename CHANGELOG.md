@@ -26,7 +26,7 @@ Not released yet: the date is set when the release is tagged.
 - **`dev impeccable <verb>` runs the impeccable engine devkit installed.** It takes the engine from devkit's skills
   folder (never from the current folder, an argument, or the environment), checks its SHA-256 against the install
   record before every run, and runs it in the current folder with each word as one argument, without a shell. The
-  engine gets the skill folder, `IMPECCABLE_NO_UPDATE_CHECK=1` and `IMPECCABLE_NO_TELEMETRY=1`, and no other
+  engine gets the skill folder, `IMPECCABLE_NO_UPDATE_CHECK=1`, and `IMPECCABLE_NO_TELEMETRY=1`, but no other
   `IMPECCABLE_*` variable. A missing record, a digest mismatch, or an engine outside devkit's skills folder runs
   nothing and names the fix, `dev install --only skills`. See
   [Skills and plugins › impeccable and its engine](docs/skills-and-plugins.md#impeccable-and-its-engine).

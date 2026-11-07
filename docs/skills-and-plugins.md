@@ -170,7 +170,7 @@ at its first run, inside an agent session. devkit fetches the engine at install 
 | --- | --- | --- |
 | The skill | `pbakaus/impeccable` at the commit pinned in `config/skills.json` (tag `skill-v4.8.0`), copied to `~/.local/share/devkit/skills/impeccable` and linked as `~/.claude/skills/impeccable` | The `impeccable@openai-curated-remote` plugin (`config/codex/plugins.json`) |
 | The engine | `dev install --only skills` fetches it (below) | Comes with the plugin; `dev impeccable` runs devkit's copy, as on Claude Code |
-| Use by default | The `ui` rule requires `frontend-design` and `impeccable`; the Frontend engineer, the UX designer and the Mobile engineer run `dev impeccable context` once at the start of their work | The same rule and the same procedure |
+| Use by default | The `ui` rule requires `frontend-design` and `impeccable`; the Frontend engineer, the UX designer, and the Mobile engineer run `dev impeccable context` once at the start of their work | The same rule and the same procedure |
 
 How the skills step installs the engine:
 

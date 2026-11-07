@@ -442,7 +442,7 @@ Crew members run impeccable this way, never by the launcher's path, which the gu
 [Skills and plugins › impeccable and its engine](skills-and-plugins.md#impeccable-and-its-engine).
 
 ```bash
-dev impeccable context                  # load PRODUCT.md, DESIGN.md and the surface brief, print what to follow
+dev impeccable context                  # load PRODUCT.md, DESIGN.md, and the surface brief; print what to follow
 dev impeccable detect --json src        # scan the project's HTML and CSS
 dev impeccable doctor                   # the engine's own checks
 ```
