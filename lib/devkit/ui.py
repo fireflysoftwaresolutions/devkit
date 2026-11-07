@@ -16,7 +16,8 @@ ANSI_RE = re.compile(r"\x1b\[[0-9;]*m")
 
 
 def _c(code):
-    return (lambda s: f"\x1b[{code}m{s}\x1b[0m") if COLOR else (lambda s: str(s))
+    # COLOR is read on each call, so a test that turns it on sees the codes the terminal would get
+    return lambda s: f"\x1b[{code}m{s}\x1b[0m" if COLOR else str(s)
 
 
 bold, dim, italic = _c("1"), _c("2"), _c("3")
@@ -61,7 +62,9 @@ _PAL24 = {"a": (140, 140, 165), "w": (185, 228, 255), "e": (255, 255, 255), "b":
           "amber_deep": (163, 95, 0),
           # the quiet text on light: the brand kit's light muted (#62645B), 6.0:1 on white
           "stone_deep": (98, 100, 91)}
-_PAL256 = {"a": 245, "w": 153, "e": 231, "b": 240, "g": 154, "s": 221}
+_PAL256 = {"a": 245, "w": 153, "e": 231, "b": 240, "g": 154, "s": 221,
+           # the spark on light and unknown themes: (175, 95, 0), 4.71:1 on white, 4.46:1 on black (the wizard's marks)
+           "amber_deep": 130}
 # firefly lime -> cyan -> violet
 _STOPS = [(190, 255, 60), (0, 214, 255), (170, 90, 255)]
 _LINE256 = [154, 49, 45, 39, 63, 99]
@@ -99,6 +102,10 @@ def _fg(rgb, text, bold_=False):
     return f"\x1b[{'1;' if bold_ else ''}38;2;{rgb[0]};{rgb[1]};{rgb[2]}m{text}\x1b[0m"
 
 
+def _fg256(n, text, bold_=False):
+    return f"\x1b[{'1;' if bold_ else ''}38;5;{n}m{text}\x1b[0m"
+
+
 def _gradient(line: str, t0: float = 0.0, t1: float = 1.0) -> str:
     if not TRUECOLOR:
         return line
@@ -108,12 +115,17 @@ def _gradient(line: str, t0: float = 0.0, t1: float = 1.0) -> str:
 
 def logo_inline() -> str:
     """Compact one-line logo for narrow terminals and sub-headers (the setup wizard's header); the spark as in
-    wordmark()."""
+    wordmark(). With 256 colors on a dark terminal, bold cyan; on a light or unknown one, whose cyan can be too light
+    on white, the text bold in the terminal's own text color."""
     s = "✦ devkit"
     if TRUECOLOR:
         spark = _PAL24["amber"] if known_theme() == "dark" else _PAL24["amber_deep"]
         return _fg(spark, "✦", True) + " " + bold("devkit")
-    return bold(cyan(s)) if COLOR else s
+    if not COLOR:
+        return s
+    if known_theme() == "dark":
+        return bold(cyan(s))
+    return _fg256(_PAL256["amber_deep"], "✦", True) + " " + bold("devkit")
 
 
 ART_DIR = Path(__file__).resolve().parent / "art"
@@ -129,11 +141,6 @@ def known_theme() -> str:
     return ("light" if bg in ("7", "15") else "dark") if bg.isdigit() else ""
 
 
-def terminal_theme() -> str:
-    """dark | light — known_theme(), default dark."""
-    return known_theme() or "dark"
-
-
 # The devkit wordmark in half blocks, drawn by hand on the Manrope letterforms; ✦ (amber) is the dot of the i.
 WORDMARK = [
     "     ██                 ██       ✦  ██  ",
@@ -147,7 +154,8 @@ WORDMARK = [
 def wordmark() -> list:
     """The wordmark rows, inked for the terminal's theme: paper and the amber spark on dark, charcoal and the deep amber
     spark on light. When the theme is unknown, the terminal's own text color, which reads on its background whatever
-    it is, and the deep amber spark."""
+    it is, and the deep amber spark. With 256 colors, always the terminal's text color: the spark in its yellow on
+    dark, in the deep amber (index 130) on light and unknown."""
     theme = known_theme()
     if TRUECOLOR and not theme:
         return [r.replace("✦", _fg(_PAL24["amber_deep"], "✦", True)) for r in WORDMARK]
@@ -158,7 +166,8 @@ def wordmark() -> list:
                                                                        f"\x1b[38;2;{ink[0]};{ink[1]};{ink[2]}m")
                 for r in WORDMARK]
     if COLOR:
-        return [r.replace("✦", yellow("✦")) for r in WORDMARK]
+        spark = yellow("✦") if theme == "dark" else _fg256(_PAL256["amber_deep"], "✦", True)
+        return [r.replace("✦", spark) for r in WORDMARK]
     return list(WORDMARK)
 
 
