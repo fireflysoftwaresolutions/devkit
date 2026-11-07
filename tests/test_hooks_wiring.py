@@ -48,7 +48,12 @@ class WiringCase(HookCase):
         super().setUp()
         self.dev = self.root / "Development"
         self.repo = make_repo(self.dev / "acme" / "api")
+        # an empty handoff of the test's own: no embargo anywhere. Without one, whether the hermetic home has a
+        # handoff folder yet depended on which module ran first, and a temp repo (no project) is held while it has none
+        (self.root / "handoff" / "projects").mkdir(parents=True)
         for p in (mock.patch.object(guard, "DEV", str(self.dev)),
+                  mock.patch.object(core, "HANDOFF", self.root / "handoff"),
+                  mock.patch.object(core, "NOTES", self.root / "handoff" / "projects"),
                   mock.patch.object(core, "load_config", lambda *a, **k: ENFORCE)):
             p.start()
             self.addCleanup(p.stop)
