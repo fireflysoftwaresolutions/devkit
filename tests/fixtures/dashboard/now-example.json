@@ -1,0 +1,546 @@
+{
+ "as_of": {
+  "prs": {
+   "at": 1793977500,
+   "every_s": 900
+  },
+  "registry": {
+   "at": 1793978060,
+   "every_s": 60
+  }
+ },
+ "attention": {
+  "degraded": [],
+  "headline": {
+   "count": 2,
+   "kind": "needs_you",
+   "line": "Invoice export is paused until you answer D1. CI failed on feat/rules-engine.",
+   "text": "2 things need you"
+  },
+  "items": [
+   {
+    "asker": "Backend engineer (Tank)",
+    "blocks": {
+     "lanes": 2,
+     "run": "Invoice export"
+    },
+    "clause": "Invoice export is paused until you answer D1.",
+    "copy": null,
+    "count": 1,
+    "id": "decision:claude-7f3a:D1",
+    "irreversible": null,
+    "kind": "decision",
+    "lines": [
+     "Backend engineer (Tank) asks · pauses Invoice export, 2 crew members wait"
+    ],
+    "open": {
+     "anchor": "D1",
+     "id": "claude-7f3a",
+     "kind": "run"
+    },
+    "options": [
+     {
+      "key": "A",
+      "recommended": true,
+      "text": "Leave them out"
+     },
+     {
+      "key": "B",
+      "recommended": false,
+      "text": "Include them"
+     }
+    ],
+    "project": "acme/lending-core",
+    "rank": 1,
+    "run_id": "claude-7f3a",
+    "since": 1793977560,
+    "title": "D1 · Include cancelled invoices in the export?",
+    "tone": "you",
+    "type_to_answer": [
+     "approve D1",
+     "approve D1: B"
+    ],
+    "url": null
+   },
+   {
+    "asker": null,
+    "blocks": null,
+    "clause": "CI failed on feat/rules-engine.",
+    "copy": "dev run view 14 --failed",
+    "count": 1,
+    "id": "ci_failed:acme/lending-rules:feat/rules-engine",
+    "irreversible": null,
+    "kind": "ci_failed",
+    "lines": [
+     "test · Run tests · AssertionError: 10.01 == 10.00"
+    ],
+    "open": {
+     "anchor": null,
+     "id": "acme/lending-rules#14",
+     "kind": "ci"
+    },
+    "options": null,
+    "project": "acme/lending-rules",
+    "rank": 2,
+    "run_id": null,
+    "since": 1793977380,
+    "title": "CI failed · feat/rules-engine · lending-rules",
+    "tone": "alert",
+    "type_to_answer": null,
+    "url": "https://github.com/acme/lending-rules/actions/runs/14"
+   },
+   {
+    "asker": null,
+    "blocks": null,
+    "clause": "PR #45 has changes requested.",
+    "copy": "gh pr view 45 -R acme/lending-core --comments",
+    "count": 1,
+    "id": "pr:acme/lending-core#45",
+    "irreversible": null,
+    "kind": "pr",
+    "lines": [
+     "refactor/ledger-ports · lending-core"
+    ],
+    "open": {
+     "anchor": null,
+     "id": "acme/lending-core#45",
+     "kind": "pr"
+    },
+    "options": null,
+    "project": "acme/lending-core",
+    "rank": 5,
+    "run_id": null,
+    "since": 1793972400,
+    "title": "PR #45: changes requested",
+    "tone": "ink",
+    "type_to_answer": null,
+    "url": "https://github.com/acme/lending-core/pull/45"
+   },
+   {
+    "asker": null,
+    "blocks": null,
+    "clause": "4 housekeeping items.",
+    "copy": null,
+    "count": 4,
+    "id": "housekeeping",
+    "irreversible": null,
+    "kind": "housekeeping",
+    "lines": [
+     "2 finished worktrees, 1 expired lock, 1 note behind the code"
+    ],
+    "open": {
+     "anchor": null,
+     "id": "housekeeping",
+     "kind": "all"
+    },
+    "options": null,
+    "project": null,
+    "rank": 6,
+    "run_id": null,
+    "since": null,
+    "title": "Housekeeping",
+    "tone": "ink",
+    "type_to_answer": null,
+    "url": null
+   }
+  ],
+  "next_up": [],
+  "setup": [],
+  "total": 4
+ },
+ "runs": [
+  {
+   "active_min": 61.0,
+   "agent": "claude",
+   "agents": [
+    {
+     "label": "Tank: export API",
+     "min": 10.0,
+     "state": "running"
+    }
+   ],
+   "decisions": [
+    {
+     "from_name": "Tank",
+     "id": "D1",
+     "irreversible": "",
+     "options": [
+      "A: Leave them out",
+      "B: Include them"
+     ],
+     "question": "Include cancelled invoices in the export?",
+     "recommend": "A",
+     "ts": 1793977560
+    }
+   ],
+   "estimate": 100,
+   "estimate_cal": 100,
+   "eta": {
+    "basis": "critical_path",
+    "lands_at": null,
+    "over_estimate": null,
+    "remaining_s": {
+     "high": 3600,
+     "low": 1500
+    },
+    "state": "after_answer",
+    "text": "Lands 25–60 min after you answer D1"
+   },
+   "eta_hi": 70.0,
+   "eta_lo": 34.0,
+   "eta_min": 50,
+   "finished": null,
+   "goal": "Invoice export",
+   "headline": "3/6 · 1h01m active (1h15m wall) of ~1h40m · ETA ~35m–1h10m · 1 agent working",
+   "host": "mac",
+   "id": "claude-7f3a",
+   "last": "D1 asked: cancelled invoices",
+   "machine": null,
+   "mode": "guided",
+   "next": "",
+   "pace": 1.0,
+   "plan": [
+    {
+     "after": [],
+     "est": 15,
+     "label": "",
+     "min": 0.0,
+     "name": "contract",
+     "owner": "main",
+     "persona": "",
+     "scope": "",
+     "state": "done",
+     "title": "",
+     "waiting": ""
+    },
+    {
+     "after": [],
+     "est": 20,
+     "label": "",
+     "min": 0.0,
+     "name": "schema",
+     "owner": "main",
+     "persona": "",
+     "scope": "",
+     "state": "done",
+     "title": "",
+     "waiting": ""
+    },
+    {
+     "after": [],
+     "est": 15,
+     "label": "",
+     "min": 0.0,
+     "name": "api tests",
+     "owner": "main",
+     "persona": "",
+     "scope": "",
+     "state": "done",
+     "title": "",
+     "waiting": ""
+    },
+    {
+     "after": [],
+     "est": 30,
+     "label": "Tank: export API",
+     "min": 10.0,
+     "name": "export api",
+     "owner": "Tank: export API",
+     "persona": "Tank",
+     "scope": "",
+     "state": "blocked",
+     "title": "",
+     "waiting": "D1"
+    },
+    {
+     "after": [
+      "export api"
+     ],
+     "est": 15,
+     "label": "Trinity: export screen",
+     "min": 0.0,
+     "name": "export screen",
+     "owner": "subagent",
+     "persona": "",
+     "scope": "",
+     "state": "pending",
+     "title": "",
+     "waiting": ""
+    },
+    {
+     "after": [
+      "export screen"
+     ],
+     "est": 5,
+     "label": "",
+     "min": 0.0,
+     "name": "review",
+     "owner": "main",
+     "persona": "",
+     "scope": "",
+     "state": "pending",
+     "title": "",
+     "waiting": ""
+    }
+   ],
+   "project": "acme/lending-core",
+   "questions": [],
+   "seen": 1793977560,
+   "session": "7f3a",
+   "started": 1793973600,
+   "state": "running",
+   "step": 0,
+   "steps": 6,
+   "total_min": 111,
+   "updated": 1793977560,
+   "updates": [
+    {
+     "kind": "note",
+     "next": "",
+     "text": "D1 asked: cancelled invoices",
+     "ts": 1793977560
+    }
+   ],
+   "waiting_on": {
+    "kind": "decision",
+    "ref": "D1",
+    "since": 1793977560
+   },
+   "wall_min": 75.0,
+   "who": null
+  },
+  {
+   "active_min": 48.0,
+   "agent": "codex",
+   "agents": [
+    {
+     "label": "Neo: rate tables",
+     "min": 8.0,
+     "state": "running"
+    },
+    {
+     "label": "Mouse: parity",
+     "min": 0.0,
+     "state": "running"
+    }
+   ],
+   "branch": "feat/rules-engine",
+   "decisions": [],
+   "estimate": 90,
+   "estimate_cal": null,
+   "eta": {
+    "basis": "critical_path",
+    "lands_at": {
+     "high": 1793981400,
+     "low": 1793980500
+    },
+    "over_estimate": null,
+    "remaining_s": {
+     "high": 3300,
+     "low": 2400
+    },
+    "state": "clock",
+    "text": "Lands 15:55–16:10"
+   },
+   "eta_hi": 55,
+   "eta_lo": 42,
+   "eta_min": 48,
+   "finished": null,
+   "goal": "Rules engine migration",
+   "headline": "2/4 · 48m active of ~1h30m · ETA ~42m–55m · 2 agents working",
+   "host": "studio",
+   "id": "remote-studio-codex-e2e0",
+   "last": "migration done",
+   "machine": "studio",
+   "mode": null,
+   "next": "rate tables",
+   "pace": 1.0,
+   "plan": [
+    {
+     "est": 20,
+     "min": 18.0,
+     "name": "rules model",
+     "owner": "main",
+     "state": "done"
+    },
+    {
+     "est": 20,
+     "min": 22.0,
+     "name": "migration",
+     "owner": "main",
+     "state": "done"
+    },
+    {
+     "est": 30,
+     "min": 8.0,
+     "name": "rate tables",
+     "owner": "Neo: rate tables",
+     "state": "running"
+    },
+    {
+     "est": 20,
+     "min": 0.0,
+     "name": "parity tests",
+     "owner": "Mouse: parity",
+     "state": "running"
+    }
+   ],
+   "project": "acme/lending-rules",
+   "questions": [],
+   "seen": 1793977980,
+   "started": 1793975100,
+   "state": "running",
+   "step": 2,
+   "steps": 4,
+   "total_min": null,
+   "updated": 1793977980,
+   "updates": [],
+   "waiting_on": null,
+   "wall_min": 48.0,
+   "who": "bob@studio"
+  }
+ ],
+ "safety": {
+  "line": {
+   "oldest": 1793970900,
+   "open": {
+    "anchor": null,
+    "id": null,
+    "kind": "branches"
+   },
+   "text": "1 branch is only on this Mac: lending-core fix/rounding-error, 3 commits",
+   "tone": "caution"
+  },
+  "projects": [
+   {
+    "embargoed": 1,
+    "mapped_at": 1793978060,
+    "not_backed_up": 1,
+    "oldest": 1793970900,
+    "project": "acme/lending-core",
+    "rows": [
+     {
+      "branch": "fix/rounding-error",
+      "commits": 3,
+      "copy": "cd -- /Users/ana/Development/acme/lending-core && dev backup -- fix/rounding-error",
+      "oldest": 1793970900,
+      "reason": "3 commits only on this Mac",
+      "state": "not_backed_up"
+     },
+     {
+      "branch": "hotfix/auth-header",
+      "commits": 2,
+      "copy": null,
+      "oldest": 1793960000,
+      "reason": "embargoed until \"the advisory is published\"",
+      "state": "embargoed"
+     },
+     {
+      "branch": "feat/rate-limits",
+      "commits": 1,
+      "copy": null,
+      "oldest": 1793977000,
+      "reason": "commits younger than 30 min wait for the backup",
+      "state": "waiting"
+     }
+    ],
+    "waiting": 1
+   }
+  ],
+  "totals": {
+   "embargoed": 1,
+   "not_backed_up": 1,
+   "unknown_projects": 0,
+   "waiting": 1
+  }
+ },
+ "since": {
+  "commits": [
+   [
+    "acme/lending-core",
+    6
+   ],
+   [
+    "acme/lending-rules",
+    1
+   ]
+  ],
+  "done": [
+   {
+    "id": "T-fz4d",
+    "project": "acme/lending-core",
+    "text": "Release notes for 26.11.2",
+    "who": "ana@mac"
+   },
+   {
+    "id": "T-fz4c",
+    "project": "acme/lending-rules",
+    "text": "Rate table schema",
+    "who": "ana@mac"
+   },
+   {
+    "id": "T-fz4b",
+    "project": "acme/lending-core",
+    "text": "Fix the rounding of fees",
+    "who": "ana@mac"
+   },
+   {
+    "id": "T-fz4a",
+    "project": "acme/lending-core",
+    "text": "Export CSV header",
+    "who": "ana@mac"
+   }
+  ],
+  "from": 1793836800,
+  "line": {
+   "from": 1793836800,
+   "items": [
+    {
+     "count": 4,
+     "kind": "task_done",
+     "text": "4 tasks done"
+    },
+    {
+     "count": 2,
+     "kind": "pr_merged",
+     "text": "2 PRs merged"
+    },
+    {
+     "count": 1,
+     "kind": "run_finished",
+     "text": "1 run finished in 1 h 40 (estimate 2 h)"
+    }
+   ],
+   "text": "4 tasks done · 2 PRs merged · 1 run finished in 1 h 40 (estimate 2 h)"
+  },
+  "merged": [
+   {
+    "author": "ana",
+    "number": 44,
+    "repo": "acme/lending-core",
+    "title": "Fee rounding",
+    "ts": 1793965200,
+    "url": "https://github.com/acme/lending-core/pull/44"
+   },
+   {
+    "author": "ana",
+    "number": 43,
+    "repo": "acme/lending-core",
+    "title": "Export header",
+    "ts": 1793960400,
+    "url": "https://github.com/acme/lending-core/pull/43"
+   }
+  ],
+  "sessions": [
+   {
+    "agent": "codex",
+    "branch": "",
+    "live": false,
+    "project": "acme/lending-rules",
+    "text": "`feat/rules-engine` · migration started",
+    "ts": 1793959200,
+    "who": ""
+   }
+  ]
+ }
+}

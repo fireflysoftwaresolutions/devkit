@@ -1,0 +1,76 @@
+{
+ "as_of": {
+  "prs": {
+   "at": 1793977500,
+   "every_s": 900
+  },
+  "registry": {
+   "at": 1793978060,
+   "every_s": 60
+  }
+ },
+ "attention": {
+  "degraded": [],
+  "headline": {
+   "count": 0,
+   "kind": "welcome",
+   "line": "Nothing is tracked yet. Clone a project with dev clone <owner/repo>, or start one with dev new <name>.",
+   "text": "Welcome to devkit"
+  },
+  "items": [],
+  "next_up": [],
+  "setup": [
+   {
+    "copy": null,
+    "done": true,
+    "key": "agents",
+    "text": "An agent is signed in"
+   },
+   {
+    "copy": null,
+    "done": false,
+    "key": "project",
+    "text": "Clone a project with dev clone <owner/repo>, or start one with dev new <name>"
+   },
+   {
+    "copy": null,
+    "done": true,
+    "key": "sync",
+    "text": "The first sync ran"
+   }
+  ],
+  "total": 0
+ },
+ "runs": [],
+ "safety": {
+  "line": {
+   "oldest": null,
+   "open": {
+    "anchor": null,
+    "id": null,
+    "kind": "branches"
+   },
+   "text": "No branch map yet. dev sync makes one.",
+   "tone": "unknown"
+  },
+  "projects": [],
+  "totals": {
+   "embargoed": 0,
+   "not_backed_up": 0,
+   "unknown_projects": 0,
+   "waiting": 0
+  }
+ },
+ "since": {
+  "commits": [],
+  "done": [],
+  "from": 1793836800,
+  "line": {
+   "from": 1793836800,
+   "items": [],
+   "text": ""
+  },
+  "merged": [],
+  "sessions": []
+ }
+}

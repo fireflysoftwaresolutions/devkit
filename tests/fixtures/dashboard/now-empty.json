@@ -1,0 +1,70 @@
+{
+ "as_of": {
+  "prs": {
+   "at": 1793977500,
+   "every_s": 900
+  },
+  "registry": {
+   "at": 1793978060,
+   "every_s": 60
+  }
+ },
+ "attention": {
+  "degraded": [],
+  "headline": {
+   "count": 0,
+   "kind": "clear_idle",
+   "line": "Nothing is running. Next in lending-core: Document the export endpoint.",
+   "text": "Nothing needs you"
+  },
+  "items": [],
+  "next_up": [
+   {
+    "copy": "dev task -p acme/lending-core start T-fz1doc",
+    "project": "acme/lending-core",
+    "task_id": "T-fz1doc",
+    "title": "Document the export endpoint"
+   },
+   {
+    "copy": "dev task -p acme/lending-rules start T-fz2rate",
+    "project": "acme/lending-rules",
+    "task_id": "T-fz2rate",
+    "title": "Add the rate table"
+   }
+  ],
+  "setup": [],
+  "total": 0
+ },
+ "runs": [],
+ "safety": {
+  "line": {
+   "oldest": null,
+   "open": {
+    "anchor": null,
+    "id": null,
+    "kind": "branches"
+   },
+   "text": "Every branch is on the remote.",
+   "tone": "ok"
+  },
+  "projects": [],
+  "totals": {
+   "embargoed": 0,
+   "not_backed_up": 0,
+   "unknown_projects": 0,
+   "waiting": 0
+  }
+ },
+ "since": {
+  "commits": [],
+  "done": [],
+  "from": 1793836800,
+  "line": {
+   "from": 1793836800,
+   "items": [],
+   "text": ""
+  },
+  "merged": [],
+  "sessions": []
+ }
+}

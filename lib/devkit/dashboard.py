@@ -38,6 +38,7 @@ import calendar
 import json
 import os
 import re
+import shlex
 import socket
 import subprocess
 import time
@@ -262,8 +263,19 @@ def project_health(p: dict, now: float = None) -> dict:
     return {"level": level, "reasons": risk + warn, "known": known}
 
 
+def _sh(v) -> str:
+    """One shell word: a value in a command the page copies (branch and path names may hold shell syntax)."""
+    return shlex.quote(str(v))
+
+
+def _qpath(p: str) -> str:
+    """A path for a copied command: ~/ stays unquoted so the shell still expands it."""
+    p = str(p)
+    return "~/" + shlex.quote(p[2:]) if p.startswith("~/") and len(p) > 2 else shlex.quote(p)
+
+
 def _task_flag(scope: str) -> str:
-    return f"-i {scope[len('initiatives/'):]}" if scope.startswith("initiatives/") else f"-p {scope}"
+    return f"-i {_sh(scope[len('initiatives/'):])}" if scope.startswith("initiatives/") else f"-p {_sh(scope)}"
 
 
 def build_actions(reg: dict, now: float = None, items: list = None, colls: list = None) -> list:
@@ -276,9 +288,9 @@ def build_actions(reg: dict, now: float = None, items: list = None, colls: list 
     for it in items:
         by_title.setdefault((it["scope"], it["title"]), it)
 
-    def add(rank, sev, kind, project, title, detail, cmd, url=None, ts=0):
-        acts.append({"rank": rank, "sev": sev, "kind": kind, "project": project, "title": title, "detail": detail,
-                     "cmd": cmd, "url": url, "ts": int(ts or 0)})
+    def add(rank, sev, kind, project, title, detail, cmd, url=None, ts=0, **extra):
+        acts.append(dict({"rank": rank, "sev": sev, "kind": kind, "project": project, "title": title,
+                          "detail": detail, "cmd": cmd, "url": url, "ts": int(ts or 0)}, **extra))
 
     reclaim = []
     for p in reg.get("projects") or []:
@@ -288,35 +300,38 @@ def build_actions(reg: dict, now: float = None, items: list = None, colls: list 
         for pr in p.get("prs_open") or []:
             n, ts, mine = pr.get("number"), _iso_ts(pr.get("updated")), _mine(pr, me)
             title = pr.get("title") or ""
+            ref = {"repo": repo, "number": n, "branch": pr.get("branch") or ""}  # Now's PR rows and the CI dedupe
             if mine and pr.get("checks") == "failing":
                 add(10, "risk", "ci-failing", pid, f"PR #{n} is failing CI", title,
-                    f"gh pr checks {n} -R {repo} --watch", pr.get("url"), ts)
+                    f"gh pr checks {_sh(n)} -R {_sh(repo)} --watch", pr.get("url"), ts, **ref)
             if mine and pr.get("review") == "CHANGES_REQUESTED":
                 add(20, "risk", "changes-requested", pid, f"PR #{n}: changes requested", title,
-                    f"gh pr view {n} -R {repo} --comments", pr.get("url"), ts)
+                    f"gh pr view {_sh(n)} -R {_sh(repo)} --comments", pr.get("url"), ts, **ref)
             if mine and pr.get("mergeable") == "CONFLICTING":
                 w = wts.get(pr.get("branch"))
-                cmd = (f"cd {w['path']} && git fetch origin && git rebase origin/{default}" if w and w.get("path")
-                       else f"dcd {pid} && gh pr checkout {n} && git rebase origin/{default}")
-                add(22, "warn", "conflicts", pid, f"PR #{n} has merge conflicts", title, cmd, pr.get("url"), ts)
+                cmd = (f"cd {_sh(w['path'])} && git fetch origin && git rebase {_sh('origin/' + default)}"
+                       if w and w.get("path")
+                       else f"dcd {_sh(pid)} && gh pr checkout {_sh(n)} && git rebase {_sh('origin/' + default)}")
+                add(22, "warn", "conflicts", pid, f"PR #{n} has merge conflicts", title, cmd, pr.get("url"), ts, **ref)
             if pr.get("review") == "REVIEW_REQUIRED" and pr.get("checks") != "failing" and not pr.get("draft"):
                 if mine:
                     add(30, "warn", "review-waiting", pid, f"PR #{n} is waiting for review", title,
-                        f"gh pr view {n} -R {repo} --web", pr.get("url"), ts)
+                        f"gh pr view {_sh(n)} -R {_sh(repo)} --web", pr.get("url"), ts, **ref)
                 else:
                     add(32, "warn", "review-requested", pid, f"Review PR #{n} by @{pr.get('author')}", title,
-                        f"gh pr diff {n} -R {repo}", pr.get("url"), ts)
+                        f"gh pr diff {_sh(n)} -R {_sh(repo)}", pr.get("url"), ts, **ref)
         ns = p.get("note_summary") or {}
         if ns.get("status") == "blocked":
             state = [re.sub(r"^\s*([-*+]|\d+\.)\s*(\[[ xX~]\]\s*)?", "", ln).strip()
                      for ln in (ns.get("state") or "").splitlines() if ln.strip()]
             add(40, "risk", "blocked", pid, f"{p.get('name') or pid} is blocked", state[0][:160] if state else "",
-                f"dev handoff {pid}", None, p.get("last_activity"))
+                f"dev handoff {_sh(pid)}", None, p.get("last_activity"))
         for t in (ns.get("tasks") or {}).get("overdue") or []:
             it = by_title.get((pid, t))
             due = re.search(r"\bdue:(\d{4}-\d{2}-\d{2})", t)
             k = task_index(ns, t)
-            cmd = (f"dev task -p {pid} done {it['id']}" if it else f"dev task -p {pid} done {k}" if k else f"dev handoff {pid}")
+            cmd = (f"dev task -p {_sh(pid)} done {_sh(it['id'])}" if it else f"dev task -p {_sh(pid)} done {k}" if k
+                   else f"dev handoff {_sh(pid)}")
             add(50, "risk", "overdue", pid, "Overdue task" + (f" (due {(it or {}).get('due') or due.group(1)})" if (it and it.get("due")) or due else ""),
                 re.sub(r"\s*\bdue:\S+", "", t), cmd)
         m = p.get("main") or {}
@@ -329,10 +344,12 @@ def build_actions(reg: dict, now: float = None, items: list = None, colls: list 
             idle = _idle(co.get("last_activity"), now)
             if dirty and idle > IDLE_WORK_S:
                 add(60, "warn", "idle-work", pid, f"{dirty} uncommitted change(s) idle {int(idle // 86400)}d",
-                    f"{p.get('name') or pid} · {branch}", f"cd {path} && git status -sb", None, co.get("last_activity"))
+                    f"{p.get('name') or pid} · {branch}", f"cd {_sh(path)} && git status -sb", None,
+                    co.get("last_activity"))
             elif co.get("unpushed") and idle > 86400:
                 add(62, "warn", "idle-work", pid, f"{co['unpushed']} commit(s) not pushed",
-                    f"{p.get('name') or pid} · {branch}", f"cd {path} && git status -sb", None, co.get("last_activity"))
+                    f"{p.get('name') or pid} · {branch}", f"cd {_sh(path)} && git status -sb", None,
+                    co.get("last_activity"))
         for w in p.get("worktrees") or []:
             pr = w.get("pr") or {}
             clean = not (w.get("modified") or w.get("untracked") or w.get("unpushed"))
@@ -340,7 +357,7 @@ def build_actions(reg: dict, now: float = None, items: list = None, colls: list 
                 reclaim.append((pid, w.get("branch"), pr.get("number"), pr.get("state"), w.get("size_kb") or 0))
         if p.get("canonical_ok") is False and p.get("path") and p.get("local", True) is not False:
             add(80, "info", "layout", pid, f"{p.get('name') or pid} is outside the workspace layout",
-                f"canonical path: {core.tilde(p.get('canonical') or '')}", f"dev adopt {core.tilde(p['path'])}")
+                f"canonical path: {core.tilde(p.get('canonical') or '')}", f"dev adopt {_qpath(core.tilde(p['path']))}")
         if ns:
             last = max([_session_ts(s) for s in ns.get("sessions") or []] or [0])
             recent = sum(v for k, v in (p.get("activity") or {}).items()
@@ -349,15 +366,15 @@ def build_actions(reg: dict, now: float = None, items: list = None, colls: list 
                 add(85, "info", "stale-note", pid, "Handoff note is behind the code",
                     f"{recent} commit(s) this week, " + ("no session logged yet" if not last else
                                                          "last session " + time.strftime("%b %d", time.localtime(last))),
-                    f"dev handoff {pid}")
+                    f"dev handoff {_sh(pid)}")
     if len(reclaim) == 1:
         pid, br, n, st, kb = reclaim[0]
         add(70, "info", "reclaim", pid, f"Worktree {br} is done (PR #{n} {st.lower()})", f"{kb // 1024} MB to reclaim",
-            f"dev wt rm {br}")
+            f"dev wt rm {_sh(br)}", count=1)
     elif reclaim:
         add(70, "info", "reclaim", None, f"{len(reclaim)} finished worktrees to reclaim",
             ", ".join(f"{br} (#{n})" for _, br, n, _, _ in reclaim[:5]) +
-            f" · {sum(r[4] for r in reclaim) // 1024} MB", "dev gc --apply")
+            f" · {sum(r[4] for r in reclaim) // 1024} MB", "dev gc --apply", count=len(reclaim))
     today = time.strftime("%Y-%m-%d", time.localtime(now))
     for ini in reg.get("initiatives") or []:
         if not isinstance(ini, dict):
@@ -367,16 +384,17 @@ def build_actions(reg: dict, now: float = None, items: list = None, colls: list 
             state = [re.sub(r"^\s*([-*+]|\d+\.)\s*(\[[ xX~]\]\s*)?", "", ln).strip()
                      for ln in (ini.get("state") or ini.get("risks") or "").splitlines() if ln.strip()]
             add(41, "risk", "blocked", None, f"Initiative {title} is blocked", state[0][:160] if state else "",
-                f"dev initiative show {slug}", None, ini.get("last_activity"))
+                f"dev initiative show {_sh(slug)}", None, ini.get("last_activity"))
         if ini.get("due") and ini["due"] < today and ini.get("status") not in ("done", "archived"):
             add(45, "risk", "overdue", None, f"Initiative {title} is past its due date ({ini['due']})",
                 (f"{ini.get('progress')}% done" if ini.get("progress") is not None else "") +
-                (f" · milestone {ini['milestone']}" if ini.get("milestone") else ""), f"dev initiative show {slug}")
+                (f" · milestone {ini['milestone']}" if ini.get("milestone") else ""), f"dev initiative show {_sh(slug)}")
         for t in ((ini.get("tasks") or {}).get("overdue") or []):
             it = by_title.get((f"initiatives/{slug}", t))
             k = task_index({"tasks": ini.get("tasks")}, t)
             due = re.search(r"\bdue:(\d{4}-\d{2}-\d{2})", t)
-            cmd = (f"dev task -i {slug} done {it['id']}" if it else f"dev task -i {slug} done {k}" if k else f"dev initiative show {slug}")
+            cmd = (f"dev task -i {_sh(slug)} done {_sh(it['id'])}" if it else f"dev task -i {_sh(slug)} done {k}" if k
+                   else f"dev initiative show {_sh(slug)}")
             add(50, "risk", "overdue", None, f"Overdue in {title}" + (f" (due {due.group(1)})" if due else ""),
                 re.sub(r"\s*\bdue:\S+", "", t), cmd)
     for c in colls or []:
@@ -386,11 +404,11 @@ def build_actions(reg: dict, now: float = None, items: list = None, colls: list 
         elif c["kind"] == "expired-lock":
             add(35, "warn", "expired-lock", c["scope"] if not c["scope"].startswith("initiatives/") else None,
                 f"Expired lock still held on {c['id']}", c["text"],
-                f"dev task {_task_flag(c['scope'])} release {c['id']} --why \"lock expired\"")
+                f"dev task {_task_flag(c['scope'])} release {_sh(c['id'])} --why \"lock expired\"")
     for it in items:
         if it.get("status") == "blocked" and me and _who(it.get("claimed_by")).split("@")[0] == me.lower():
             add(42, "risk", "blocked-task", it["scope"] if not it["scope"].startswith("initiatives/") else None,
-                f"Your task {it['id']} is blocked", it["title"], f"dev task {_task_flag(it['scope'])} show {it['id']}")
+                f"Your task {it['id']} is blocked", it["title"], f"dev task {_task_flag(it['scope'])} show {_sh(it['id'])}")
     drift = reg.get("drift")
     if drift:
         add(90, "warn", "drift", None, f"Agent configuration drifted ({len(drift)} setting(s))",
@@ -398,7 +416,7 @@ def build_actions(reg: dict, now: float = None, items: list = None, colls: list 
     for key, prov in ((reg.get("providers") or {}).items()):
         if isinstance(prov, dict) and prov.get("installed") and prov.get("logged_in") is False:
             add(95, "warn", "sign-in", None, f"{prov.get('name') or key} is not signed in", "",
-                "claude" if key == "claude" else "codex login")
+                "claude" if key == "claude" else "codex login", provider=key)
     acts.sort(key=lambda a: (a["rank"], -a["ts"]))
     return acts
 
@@ -550,20 +568,41 @@ def read_items(handoff: Path, now: float = None) -> list:
     return out
 
 
+PRESENCE_CAP = 256 * 1024  # bytes of one presence file (another machine's, untrusted): larger ones are skipped
+
+
+def valid_presence(p) -> bool:
+    """A presence record in work.write_presence's shape: user and host as text; when present, updated as text,
+    sessions and locks as lists of objects, and each session's progress an object or null. Anything else is
+    skipped."""
+    if not isinstance(p, dict) or not all(isinstance(p.get(k), str) and p.get(k) for k in ("user", "host")):
+        return False
+    sessions, locks = p.get("sessions", []), p.get("locks", [])
+    if not isinstance(p.get("updated", ""), str) or not isinstance(sessions, list) or not isinstance(locks, list):
+        return False
+    if not all(isinstance(s, dict) and isinstance(s.get("progress"), (dict, type(None))) for s in sessions):
+        return False
+    return all(isinstance(lk, dict) for lk in locks)
+
+
 def read_presence(handoff: Path, reg: dict, max_age_h: float = 24, now: float = None) -> list:
-    """Team presence (reg["team"] when the registry carries it, else <handoff>/presence/*.json)."""
+    """Team presence (reg["team"] when the registry carries it, else <handoff>/presence/*.json). Records larger
+    than PRESENCE_CAP or not in the presence shape (valid_presence) are skipped."""
     from . import work
     now = now or time.time()
     if reg.get("team") is not None:
-        return [t for t in reg.get("team") or [] if isinstance(t, dict)]
+        return [t for t in reg.get("team") or [] if valid_presence(t)
+                and len(json.dumps(t, default=str)) <= PRESENCE_CAP]
     out = []
     d = Path(handoff) / "presence"
     for f in sorted(d.glob("*.json")) if d.is_dir() else []:
         try:
+            if f.stat().st_size > PRESENCE_CAP:
+                continue
             p = json.loads(f.read_text())
         except (OSError, ValueError):
             continue
-        if now - work.parse_iso(p.get("updated") or "") < max_age_h * 3600:
+        if valid_presence(p) and now - work.parse_iso(p.get("updated") or "") < max_age_h * 3600:
             out.append(p)
     return out
 
@@ -795,19 +834,26 @@ def plan_total(run: dict, now: float):
         return None
 
 
-def _runs(now: float, host: str = "") -> list:
-    """Agent runs with live progress on this machine (running, blocked, or finished in the last hour)."""
+def _raw_runs() -> list:
+    """This machine's progress runs as stored (progress.active_runs); [] when they cannot be read."""
     try:
         from . import progress
-        runs = progress.active_runs()
+        return [r for r in progress.active_runs() if isinstance(r, dict)]
     except Exception:
         return []
+
+
+def _runs(now: float, host: str = "", raw: list = None) -> list:
+    """Agent runs with live progress on this machine (running, blocked, or finished in the last hour). `raw`: the
+    runs as stored (default: read them now)."""
+    from . import progress
+    runs = _raw_runs() if raw is None else raw
     out = []
     for r in runs:
         if not isinstance(r, dict) or (r.get("state") == "done" and now - (r.get("finished") or 0) > 3600):
             continue
         try:
-            b = progress.brief(r)
+            b = progress.brief(r, now)
         except (KeyError, TypeError, ValueError):
             continue
         lanes = r.get("agents") or {}
