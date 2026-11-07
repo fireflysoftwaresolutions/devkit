@@ -405,7 +405,8 @@ def _evidence_or_attest(c, ci_passed: bool, action: str):
     return record_evidence(c, "attested", tree, note=f"dev {action} --ci-passed") if tree else None
 
 
-def no_evidence(c, action: str, rev="HEAD") -> int:
+def no_evidence(c, action: str, rev="HEAD", draft_ci: str = "") -> int:
+    """Refuse `action` for lack of local CI evidence. `draft_ci`: why opening a draft PR would start CI here."""
     sha, tree = _head(c.top, rev)
     detail = ""
     last = next(iter(_markers(c)), None)
@@ -415,9 +416,27 @@ def no_evidence(c, action: str, rev="HEAD") -> int:
             more = f" (+{len(names) - 4} more)" if len(names) > 4 else ""
             detail = (f"; the last local run ({last.get('how')}, {_age(last.get('ts'))}) verified a different tree, "
                       f"changed since: {', '.join(names[:4])}{more}")
+    if draft_ci:
+        detail += f"; a draft is no exception here: {draft_ci}"
     return refuse(f"no local CI evidence for {sha[:7] or 'HEAD'}{detail}",
                   f"run what CI runs: `dev ci --run` (or run your suite, then `dev ci --mark-passed --note "
-                  f"\"<command>: <result>\"`). If it passed in this session already: `dev {action} --ci-passed`.")
+                  f"\"<command>: <result>\"`). If it passed in this session already: `dev {action} --ci-passed`."
+                  + (" To open drafts without it, gate the jobs on drafts: `dev ci audit --fix`." if draft_ci else ""))
+
+
+def draft_ci(c, branch: str, head: str) -> str:
+    """Why opening a draft PR of `head` would start CI, or '' when the CI configuration says it starts no run: a draft
+    then needs no local CI evidence, and `dev pr ready`, which starts the one run, asks for it (spec P-fy3bwa0pshk R6).
+    The branch is already on the remote, so only the pull request's own runs count."""
+    from . import pipelines
+    try:
+        r = pipelines.push_ci(c.top, branch, head, remote_sha=head, pr={"number": "new", "draft": True})
+    except Exception as e:  # unreadable configuration: count it as a run, as the push budget does
+        return f"devkit could not read the CI configuration ({e})"
+    if r.get("starts") is False:
+        return ""
+    why = (r.get("why") or "").replace("draft PR #new", "a new draft PR")
+    return why if r.get("starts") else f"devkit cannot tell whether it starts CI ({why or 'unknown CI'})"
 
 
 def describe_evidence(ev) -> str:
@@ -1852,7 +1871,9 @@ def _pr_create(c, a) -> int:
         return 0
     ev = evidence(c) if a.dry_run else _evidence_or_attest(c, a.ci_passed, "pr create")
     if not ev and not a.dry_run:
-        return no_evidence(c, "pr create")
+        why = draft_ci(c, b, head) if draft else ""
+        if not draft or why:
+            return no_evidence(c, "pr create", draft_ci=why)
     commits = branch_commits(c, f"origin/{base}" if _ref_sha(c.top, f"refs/remotes/origin/{base}") else base)
     title = (a.title or derive_title(b, commits)).strip()
     v = message_violation(title, "PR title")
@@ -1891,7 +1912,9 @@ def _pr_create(c, a) -> int:
     url = (out.strip().splitlines() or [""])[-1]
     n = url.rstrip("/").rsplit("/", 1)[-1]
     ok(f"PR #{n} opened{' as draft' if draft else ''} · {title} · {url}" +
-       (f" · removed {removed} AI-attribution line(s)" if removed else "") + " · watch: dev pr checks --watch")
+       (f" · removed {removed} AI-attribution line(s)" if removed else "") +
+       (" · no CI runs on the draft: after `dev ci --run`, `dev pr ready` starts the one run" if draft and not ev
+        else " · watch: dev pr checks --watch"))
     return 0
 
 
@@ -2847,8 +2870,11 @@ def cmd_gh(a) -> int:
     head = args[:2]
     if c is not None and c.provider == "github":
         if head == ["pr", "create"]:
+            draft = "--draft" in args or "-d" in args
             if not (evidence(c) or ci_passed):
-                return no_evidence(c, "pr create")
+                why = draft_ci(c, c.branch, _ref_sha(c.top, "HEAD")) if draft else ""
+                if not draft or why:
+                    return no_evidence(c, "pr create", draft_ci=why)
             t = guard._opt_value(args[2:], ("--title", "-t"))
             if t and message_violation(t, "PR title"):
                 return refuse(message_violation(t, "PR title"))
@@ -2859,7 +2885,7 @@ def cmd_gh(a) -> int:
                     body = Path(cwd, bf).read_text()
                 except OSError:
                     body = None
-            if body is not None and "--draft" not in args and "-d" not in args:
+            if body is not None and not draft:
                 missing = body_problems(body, pr_template(c.top, lang_of())[0])
                 if missing:
                     return refuse(f"PR body: {' and '.join(missing)} empty", "fill them, or open it with --draft")

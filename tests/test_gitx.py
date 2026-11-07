@@ -808,7 +808,9 @@ class PrTests(unittest.TestCase):
                 self.assertEqual(rc, 2, t)
                 self.assertIn(why, err)
 
-    def test_create_needs_the_push_and_the_evidence(self):
+    def test_the_evidence_gates_a_ready_pr_and_dev_pr_ready_not_a_draft(self):
+        # no workflow runs on a draft here, so opening one costs no CI run: the evidence check moves to `dev pr ready`,
+        # which starts the one run; a PR opened ready for review still needs it
         with Sandbox() as s:
             s.branch("feat/np")
             s.commit("feat: add np")
@@ -816,9 +818,41 @@ class PrTests(unittest.TestCase):
             self.assertEqual(rc, 2)
             self.assertIn("not on origin", err)
             git(s.repo, "push", "-q", "-u", "origin", "feat/np")
+            s.gh.on(["pr", "create"], "https://github.com/acme/widget/pull/7\n")
+            rc, _, err = dev("pr", "create")
+            self.assertEqual(rc, 2)
+            self.assertIn("no local CI evidence", err)
+            self.assertEqual(s.gh.called("pr", "create"), [])
+            rc, out, err = dev("pr", "create", "--draft")
+            self.assertEqual(rc, 0, err)
+            self.assertIn("--draft", s.gh.called("pr", "create")[0])
+            self.assertIn("dev pr ready", out)
+            text, _ = gitx.pr_template(s.repo)
+            body = text.replace("## Changes", "Adds np.\n\n## Changes").replace(
+                "## Risk and rollback", "- Ran python3 -m unittest: 42 passed\n\n## Risk and rollback")
+            s.gh.on(["pr", "view"], _pr(isDraft=True, title="feat: add np", headRefName="feat/np",
+                                        headRefOid=s.head(), body=body))
+            s.gh.on(["pr", "ready"], "")
+            rc, _, err = dev("pr", "ready")
+            self.assertEqual(rc, 2)
+            self.assertIn("no local CI evidence", err)
+            self.assertEqual(s.gh.called("pr", "ready"), [])
+            dev("ci", "--mark-passed", "--note", "python3 -m unittest: 42 passed")
+            rc, out, err = dev("pr", "ready")
+            self.assertEqual(rc, 0, err)
+            self.assertEqual(len(s.gh.called("pr", "ready")), 1)
+
+    def test_a_draft_still_needs_evidence_where_ci_runs_on_drafts(self):
+        with Sandbox() as s:
+            s.branch("feat/np")
+            s.commit("ci: run the tests on pull requests", {".github/workflows/ci.yml": (
+                "on:\n  pull_request:\njobs:\n  test:\n    runs-on: ubuntu-latest\n    steps:\n      - run: make test\n")})
+            git(s.repo, "push", "-q", "-u", "origin", "feat/np")
             rc, _, err = dev("pr", "create", "--draft")
             self.assertEqual(rc, 2)
             self.assertIn("no local CI evidence", err)
+            self.assertIn("ci.yml", err)  # why a draft is not free here
+            self.assertEqual(s.gh.called("pr", "create"), [])
 
     def test_create_reports_an_open_pr(self):
         with Sandbox() as s:
@@ -1149,6 +1183,14 @@ class PassthroughTests(unittest.TestCase):
             self.assertEqual(s.execs, [])
             self.assertEqual(dev("gh", "pr", "list")[0], 0)
             self.assertEqual(s.execs[-1][0], ["gh", "pr", "list"])
+
+    def test_gh_pr_create_opens_a_draft_without_evidence_where_drafts_run_no_ci(self):
+        with Sandbox() as s:
+            s.branch("feat/invoice")
+            s.commit("feat(invoice): add csv export")
+            rc, _, err = dev("gh", "pr", "create", "--draft", "--title", "feat(invoice): add csv export", "--body", "y")
+            self.assertEqual(rc, 0, err)
+            self.assertEqual(s.execs[-1][0][:4], ["gh", "pr", "create", "--draft"])
 
     def test_dev_git_and_dev_gh_take_no_hatch_from_their_environment(self):
         # dev's environment is not the command the guard parsed: an exported DEVKIT_FLAKY=1 let every later

@@ -169,7 +169,13 @@ PR's address and `dev pr checks --watch`, or `dev pr create` when there is no PR
 
 ### Create
 
-`dev pr create` opens the PR of the pushed branch. HEAD must be what `origin` has, and it needs local CI evidence.
+`dev pr create` opens the PR of the pushed branch. HEAD must be what `origin` has, and a PR that is ready for review
+needs local CI evidence.
+
+A draft (`--draft`) opens without the evidence when no workflow runs on draft PRs, for example when the jobs have
+`if: github.event.pull_request.draft == false`, which `dev ci audit --fix` writes. Opening it costs no CI run, so
+`dev pr ready` asks for the evidence instead, before it starts the one run. Where a workflow runs on drafts, or devkit
+cannot tell, a draft needs the evidence too, and the refusal names the workflow.
 
 - **Title.** `--title`, or the first commit's header when it is a Conventional Commit, or one derived from the
   branch (`release/26.11.4` becomes `chore(release): 26.11.4`). It must be a Conventional Commit, because a squash
@@ -191,7 +197,7 @@ PR's address and `dev pr checks --watch`, or `dev pr create` when there is no PR
 dev pr create --dry-run          # title, template, evidence, which required sections are still empty, the body
 dev pr create --edit             # edit the pre-filled body in $EDITOR, then open the PR
 dev pr create --body-file body.md
-dev pr create --draft            # an early draft; empty sections are allowed
+dev pr create --draft            # an early draft; empty sections allowed, no evidence when drafts run no CI
 ```
 
 AI attribution is removed from the body. If the branch already has an open PR, its address is printed instead.
@@ -204,7 +210,7 @@ AI attribution is removed from the body. If the branch already has an open PR, i
 | `dev pr ls` | Your PRs and the ones waiting for your review. `--all` adds the others; `--all-projects` covers every project (from the registry cache) |
 | `dev pr checks [n] [--watch]` | Pass, fail, and pending counts; each failing job with the relevant lines of its log. `--watch` waits for the result and prints only that |
 | `dev pr diff [n]` | Files changed with +/−, largest first; `--patch` for the full diff, `--name-only` for the names |
-| `dev pr ready [n]` | Checks the title and the required sections, then marks a draft ready for review |
+| `dev pr ready [n]` | Checks the title, the required sections, and the local CI evidence for HEAD, then marks a draft ready for review (its one CI run) |
 | `dev pr comment [n] -m "…"` · `dev pr review [n] --approve \| --request-changes \| --comment` | Comment or review; `--request-changes` and `--comment` need a message. Attribution is removed |
 | `dev pr merge [n]` | Merges when the gate below allows it |
 
@@ -278,7 +284,7 @@ apply, then the command runs with your terminal attached.
 | `dev git push …` | The `dev push` rules for any refspec: no plain force push, nothing to the default branch, evidence for each pushed branch (`--ci-passed` accepted) |
 | `dev git commit …` | The commit-message and branch rules, then the guard's attribution and secret checks |
 | `dev git rebase -i`, `add -p`, and other interactive commands | Refused without a terminal |
-| `dev gh pr create …` | Evidence, a Conventional title, and the required sections unless `--draft` |
+| `dev gh pr create …` | Evidence (not for a draft where drafts run no CI), a Conventional title, and the required sections unless `--draft` |
 | `dev gh pr merge …` | `--admin` refused; the `dev pr merge` gate; a Conventional title for a squash |
 | `dev gh release create …` | A clean default branch and local CI evidence |
 | Anything else | The guard's rules |
