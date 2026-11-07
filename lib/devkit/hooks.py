@@ -65,7 +65,7 @@ def _patch_quietly(path: Path, before: dict, after: dict):
 def _spawn(args, logname="sync.log"):
     """Detached background `dev …` so the hook returns immediately."""
     log = open(STATE / "logs" / logname, "a")
-    subprocess.Popen([sys.executable, str(core.DEVKIT_HOME / "bin" / "dev"), *args],
+    subprocess.Popen([sys.executable, "-I", "-S", str(core.DEVKIT_HOME / "bin" / "dev"), *args],  # as its shebang
                      stdin=subprocess.DEVNULL, stdout=log, stderr=log, start_new_session=True, close_fds=True)
 
 
@@ -932,32 +932,6 @@ DEV_LANE_CMD = re.compile(r"^\s*(?:\S*/)?dev\s+(?:progress(?:\s|$)|"
                           r"crew\s+(?:ask|answer|inbox|decide|decisions|mode|delegate|decline|route)(?:\s|$))")
 
 
-def _runs_more_than_one_command(cmd: str) -> bool:
-    """True when the shell would do more than run this one program: an operator, redirect or newline outside quotes,
-    a command substitution where the shell expands it (unquoted or inside double quotes), or an unterminated quote.
-    Single quotes are literal; `;` inside any quotes is just text."""
-    i, n, q = 0, len(cmd), None
-    while i < n:
-        c = cmd[i]
-        if q == "'":
-            q = None if c == "'" else q
-        elif q == '"':
-            if c == "\\":
-                i += 1
-            elif c == '"':
-                q = None
-            elif c == "`" or cmd.startswith("$(", i):
-                return True
-        elif c == "\\":
-            i += 1
-        elif c in "'\"":
-            q = c
-        elif c in ";&|<>\n`" or cmd.startswith("$(", i):
-            return True
-        i += 1
-    return q is not None
-
-
 def _unroutable_lane_command(data: dict, agent: str = "claude"):
     """Inside a subagent, a shell command that runs a dev progress / dev crew call devkit cannot route to the
     subagent's lane would act as the main session: advance the main plan, or record the developer's decision. The
@@ -1194,7 +1168,8 @@ def _route_subagent_progress(data: dict):
     cmd = inp.get("command")
     if not aid or data.get("tool_name") not in SHELL_TOOLS or not isinstance(cmd, str) or not DEV_LANE_CMD.match(cmd):
         return None
-    if _runs_more_than_one_command(cmd):
+    from . import guard
+    if not guard.runs_one_command(cmd):  # a quoted heredoc message is data (K8)
         return None
     if not re.fullmatch(r"[A-Za-z0-9_.:-]{1,80}", str(aid)):
         return None

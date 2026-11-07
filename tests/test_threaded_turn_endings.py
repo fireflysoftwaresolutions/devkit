@@ -245,5 +245,30 @@ class AcceptanceTests(TurnCase):
         self.assertEqual(audit.records(1, "stop.block"), [])
 
 
+class CrewRequestTests(unittest.TestCase):
+    # The Security engineer (The Keymaker)'s lines in hooks.py. M362: a member's single lane call that passes its
+    # message as a quoted heredoc reaches its lane (guard.runs_one_command); unrouted, the step lands on the main plan
+    # and the end of the member's turn sends it back for an unrecorded step. M360: the background `dev` the turn's end
+    # starts (its sync) runs devkit isolated, as bin/dev's own shebang does.
+    def route(self, cmd):
+        return hooks._route_subagent_progress({"agent_id": "a-kid", "tool_name": "Bash", "tool_input": {"command": cmd}})
+
+    def test_a_lane_call_with_a_quoted_heredoc_message_reaches_the_lane(self):
+        cmd = "dev crew ask \"$(cat <<'EOF'\nuse x; then y && z\nEOF\n)\""
+        self.assertEqual(self.route(cmd)["command"], f"DEVKIT_FROM_AGENT=a-kid {cmd}")
+        self.assertIsNone(self.route(cmd + "; gh pr merge 12"))  # what runs around it still is more than one command
+        self.assertIsNone(self.route("dev crew ask \"$(cat <<EOF\nexpands $(id)\nEOF\n)\""))  # unquoted: it expands
+
+    def test_the_background_dev_runs_isolated(self):
+        calls = []
+        with tempfile.TemporaryDirectory() as d, mock.patch.object(hooks, "STATE", Path(d)), \
+                mock.patch.object(hooks.subprocess, "Popen", lambda args, **kw: calls.append(args)):
+            (Path(d) / "logs").mkdir()
+            hooks._spawn_sync(["--offline"])
+        (args,) = calls
+        self.assertEqual(args[1:3], ["-I", "-S"])
+        self.assertEqual((Path(args[3]).name, args[4:]), ("dev", ["sync", "--quiet", "--offline"]))
+
+
 if __name__ == "__main__":
     unittest.main()
