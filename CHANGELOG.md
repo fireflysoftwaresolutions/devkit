@@ -27,6 +27,18 @@ All notable changes to devkit. Versions follow CalVer `YY.MM.PATCH` (PATCH resta
   `dev update --check`. `dev crew decisions --help` no longer says to reword the questions freely: an irreversible
   decision counts only in devkit's exact call.
 
+### Security
+
+- **The text you type in commands stays out of the audit trail.** A refused call (`guard.deny`), a call that got no
+  result (`calls.unclosed`), every `dev` command, and an irreversible command's words now keep the program, the
+  subcommands, the ids, and the option names, and each free-text argument only as its length, such as
+  `[text not recorded: 22 characters]`. Until now, a `dev crew ask` message, the text of `--why`, `--check`, `-m`, or
+  `dev handoff --log`, and a heredoc's body could reach these records, which go to the handoff repository for 13
+  months and can then be removed only by a git history purge; since 26.11.3 only `dev crew` arguments were masked.
+  Records written earlier are masked when they are read. The guard decides as before, and an agent still reads the
+  whole refusal. [What a record holds](docs/audit.md#what-a-record-holds-and-what-it-never-holds) lists the fields
+  and arguments.
+
 ## [26.11.4] - 2026-11-07
 
 This release adds `dev ext` to see, update, and add the third-party plugins, skills, and MCP servers devkit installs,
