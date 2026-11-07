@@ -300,7 +300,9 @@ class LedgerTests(CallerCase):
         pg.call_opened("claude", data, now=t0)
         self.assertEqual(len(pg.open_calls("s1", now=t0 + 119)), 1)
         self.assertEqual(pg.open_calls("s1", now=t0 + 121), [])
-        self.assertEqual([r["detail"][:9] for r in audit.records(1, action="calls.unclosed")], ["sleep 900"])
+        # sleep is no program the audit masker knows: its words keep their length only (26.11.5)
+        self.assertEqual([r["detail"] for r in audit.records(1, action="calls.unclosed")],
+                         ["[text not recorded: 5 characters] [text not recorded: 3 characters] (no result within 120 s)"])
 
     def test_an_entry_keeps_the_command_without_secrets_private_to_its_owner(self):
         pg.call_opened("claude", self.payload("toolu_f", "curl -u x https://h.example password=hunter2-not-real"))

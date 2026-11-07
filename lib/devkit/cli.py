@@ -3631,7 +3631,8 @@ def main(argv=None) -> int:
                 here = core.tilde(os.getcwd())
             except OSError:  # the folder was removed while the command ran (scratch folders)
                 here = "(removed folder)"
-            audit.record("dev." + argv[0], " ".join(argv[1:])[:300], "", "ok" if rc == 0 else f"exit {rc}",
+            # the arguments as a list, one word each, so the masker reads each argument whole (Code reviewer, M3)
+            audit.record("dev." + argv[0], list(argv[1:]), "", "ok" if rc == 0 else f"exit {rc}",
                          duration=round(time.time() - start, 2), cwd=here)
             if rc == 0 and argv[0] in ("commit", "push", "pr", "release", "branch", "rebase", "wt", "adopt", "clone",
                                        "new", "delivery", "initiative", "note"):

@@ -259,24 +259,133 @@ def _decided(rec: dict) -> dict:
 
 # --------------------------------------------------------------------------- free text in a command line
 #
-# A record that keeps a command line keeps the program, the subcommands, the ids, the option names and the values
-# that name something; each free-text argument becomes its length, like a crew message. Under D6 = A the records go
-# to the handoff repository for 13 months and are never rewritten (the Compliance reviewer's retention review of
-# 2026-11-07, change 1). mask_command is the one function for it, and _command_field says which records keep a
-# command line and where. The tables follow dev's parser (cli.build_parser): tests/test_audit.py fails while an
-# option that takes a value, or a command with a free-text positional, is not classified here, so a new command
-# (dev room, 26.11.6) extends them with data only.
+# A record that keeps a command line keeps only the words known to be safe, and each other word as its length, like a
+# crew message: an allowlist fails closed (L-fz3qnrebvm5: keep the safe words, never chase the unsafe ones; the Code
+# reviewer's second review found five ways around a masker that looked for the free text). The safe words: the
+# program and its subcommands; option names; the values of NAME_OPTIONS and of dev's name positionals; ids (T-…, L-…,
+# P-…, D<n>, M<n>, R<n>) and plain numbers; shell operators, reserved words and redirections. A line whose program the
+# masker cannot find keeps its operators and each word's length. Under D6 = A the records go to the handoff repository
+# for 13 months and are never rewritten (the Compliance reviewer's retention review of 2026-11-07, change 1).
+# mask_command is the one function for it, and _command_field says which records keep a command line and where. The
+# tables follow dev's parser (cli.build_parser): tests/test_audit.py fails while a command, a positional or an option
+# that takes a value is missing from them, so a new command (dev room, 26.11.6) is added as data. Whether a class is
+# right, only the masking tests check.
 
 TEXT_MARK = "[text not recorded: {n} characters]"
-# dev's positional arguments that hold free text, by the name the parser gives them
-TEXT_ARGS = frozenset({"text", "title", "goal", "task", "spec"})
-# every dev command with a free-text positional -> its positionals in the parser's order; one past the last takes
-# the last one's name (it takes the rest). Every other command keeps its positionals: ids, names, paths, branches
+# the classes of dev's positionals: text is free text; name names something (a member, a branch, a path, a project, a
+# number) and stays; select picks an item by its id or number, or by a part of its title, so it stays only as an id or
+# a number; pair is key=value (dev note set), whose key stays and whose value is a select
+ARG_CLASSES = ("text", "name", "select", "pair")
+# every dev command, by its path in dev's parser -> its positionals in the parser's order: dest:class, then the
+# parser's nargs (? * + ..., nothing for one word). A word past the last positional takes its class when it repeats,
+# else it is a select. "..." takes the rest of the line, options included (argparse.REMAINDER)
 COMMAND_ARGS = {
-    "task add": ("text",), "plan new": ("title",), "lesson add": ("title",), "progress start": ("goal",),
-    "progress note": ("text",), "progress step": ("text",), "progress block": ("text",), "progress done": ("text",),
-    "progress add": ("spec",), "crew ask": ("text",), "crew answer": ("id", "text"), "crew decide": ("id", "text"),
-    "crew brief": ("name", "task"), "crew delegate": ("task",), "crew route": ("task",),
+    "": "",
+    "__complete": "kind:name arg:text?",
+    "adopt": "path:name",
+    "agents": "action:name? agent:name?",
+    "alias": "alias:name? project:name?",
+    "audit": "audit_cmd:name? ref:name?",
+    "backup": "branches:name*",
+    "branch": "", "branch clean": "", "branch embargo": "branch:name?", "branch ls": "", "branch new": "name:name",
+    "branch rename": "name:name",
+    "calver": "",
+    "canary": "",
+    "ci": "query:name?",
+    "claude": "query:name? args:text...",
+    "clone": "repo:name",
+    "codex": "query:name? args:text...",
+    "commit": "paths:name*",
+    "completion": "shell:name",
+    "config": "config_cmd:name? key:name? value:select?",
+    "cp": "paths:name+",
+    "crew": "", "crew answer": "id:select text:text+", "crew ask": "text:text+",
+    "crew brief": "name:name task:text+", "crew decide": "id:select text:text+", "crew decisions": "",
+    "crew decline": "step:select+", "crew delegate": "task:text+", "crew graph": "", "crew history": "",
+    "crew inbox": "", "crew mode": "mode:name?", "crew next": "", "crew raci": "work:name?",
+    "crew route": "task:text*", "crew rules": "", "crew set": "name:name field:name value:text+",
+    "crew show": "name:name+", "crew sync": "",
+    "dashboard": "action:name?",
+    "delivery": "", "delivery apply": "",
+    "desktop": "action:name",
+    "diagram": "rest:text...",
+    "diff": "args:text*",
+    "docker": "action:name",
+    "docs": "check:name paths:name*",
+    "doctor": "",
+    "du": "query:name?",
+    "ext": "", "ext ack": "", "ext add": "kind:name name:name", "ext disable": "name:name",
+    "ext enable": "name:name", "ext ls": "", "ext outdated": "name:name?", "ext remove": "name:name",
+    "ext update": "name:name",
+    "files": "path:name?",
+    "find": "pattern:text? path:name?",
+    "free": "items:name*",
+    "gc": "items:name*",
+    "gh": "args:text...",
+    "git": "args:text...",
+    "go": "query:name branch:name?",
+    "grep": "pattern:text paths:name*",
+    "guard": "check:name command:text*",
+    "handoff": "query:name?",
+    "handoff-import": "staging:name",
+    "help": "",
+    "hook": "event:name",
+    "impeccable": "args:text...",
+    "initiative": "", "initiative add": "slug:name project:name", "initiative ls": "", "initiative new": "slug:name",
+    "initiative rm": "slug:name project:name", "initiative show": "slug:name",
+    "install": "",
+    "issue": "", "issue create": "", "issue ls": "", "issue view": "number:name",
+    "jobs": "", "jobs disable": "name:name", "jobs enable": "name:name", "jobs exec": "name:name",
+    "jobs install": "", "jobs journal": "", "jobs logs": "name:name", "jobs ls": "", "jobs run": "name:name",
+    "jobs set": "name:name", "jobs show": "name:name",
+    "lesson": "", "lesson add": "title:text+", "lesson anchor": "selector:select+", "lesson ls": "",
+    "lesson prevent": "selector:select+", "lesson recur": "selector:select+", "lesson restore": "selector:select+",
+    "lesson retire": "selector:select+", "lesson review": "", "lesson scan": "", "lesson show": "selector:select+",
+    "ls": "",
+    "mcp": "",
+    "mv": "paths:name+",
+    "new": "name:name",
+    "note": "set:name pairs:pair+",
+    "open": "query:name?",
+    "overview": "",
+    "plan": "", "plan approve": "path:name", "plan ls": "", "plan new": "title:text+", "plan revise": "path:name",
+    "plan supersede": "path:name",
+    "plugin": "action:name",
+    "pr": "", "pr checks": "number:name?", "pr comment": "number:name?", "pr create": "", "pr diff": "number:name?",
+    "pr ls": "", "pr merge": "number:name?", "pr ready": "number:name?", "pr review": "number:name?",
+    "pr view": "number:name?",
+    "progress": "", "progress add": "spec:text+", "progress assign": "which:select",
+    "progress begin": "which:select", "progress block": "text:text+", "progress done": "text:text+",
+    "progress history": "", "progress note": "text:text+", "progress reopen": "which:select",
+    "progress skip": "which:select", "progress start": "goal:text+", "progress step": "text:text+",
+    "progress time": "",
+    "prompt": "action:name?",
+    "push": "",
+    "rebase": "",
+    "release": "",
+    "report": "",
+    "rm": "paths:name*",
+    "run": "", "run ls": "", "run rerun": "id:name", "run view": "id:name?",
+    "sec": "scan:name query:name?",
+    "session": "session_cmd:name transcript:name?",
+    "setup": "what:name?",
+    "sleep": "",
+    "standup": "",
+    "status": "query:name?",
+    "stubs": "paths:name*",
+    "sync": "",
+    "task": "", "task add": "text:text+", "task block": "selector:select+", "task cancel": "selector:select+",
+    "task claim": "selector:select+", "task delegate": "selector:select+", "task done": "selector:select+",
+    "task edit": "selector:select+", "task history": "selector:select+", "task link": "selector:select+",
+    "task ls": "", "task move": "selector:select+", "task release": "selector:select+",
+    "task reopen": "selector:select+", "task show": "selector:select+", "task start": "selector:select+",
+    "task unblock": "selector:select+",
+    "team": "",
+    "test": "", "test audit": "paths:name*", "test plan": "", "test prove": "tests:name*", "test run": "paths:name*",
+    "time": "",
+    "update": "",
+    "version": "",
+    "wt": "", "wt ls": "", "wt new": "branch:name", "wt rm": "target:name",
 }
 # a command's marker when it is not TEXT_MARK: the one its records held before 26.11.5, so they read back as stored
 COMMAND_MARK = {"crew ask": "[message text not recorded: {n} characters]",
@@ -301,32 +410,65 @@ NAME_OPTIONS = frozenset({
     "--step-timeout", "--steps", "--tag", "--target", "--ticket", "--timeout", "--to", "--type", "--undo",
     "--unified", "--until", "--url", "--version", "--weekly", "--worktree", "--write",
     "-C", "-d", "-e", "-g", "-i", "-n", "-o", "-p", "-t", "-U", "-w"})
-# other programs' commands whose options hold free text: git and gh messages, titles and bodies
+# NAME_OPTIONS that a command reads as a flag, or whose value it may leave out: there the next word is no value
+NAME_FLAGS = {
+    "ci": frozenset({"--runs"}), "crew decisions": frozenset({"--ask"}), "dashboard": frozenset({"--path"}),
+    "ext disable": frozenset({"--project"}), "ext enable": frozenset({"--project"}),
+    "find": frozenset({"--glob", "-g", "-p"}), "grep": frozenset({"--files", "-i", "-w"}),
+    "handoff": frozenset({"--path"}), "pr review": frozenset({"--approve"}), "rm": frozenset({"--undo"}),
+}
+# other programs' commands whose options hold free text: git and gh messages, titles and bodies. Every other value
+# of theirs that is no id or number is masked too; these are listed so a value that starts with - is still a value
 _GH_TEXT = frozenset({"--title", "-t", "--body", "-b"})
 _GH_RELEASE = frozenset({"--title", "-t", "--notes", "-n"})
 OTHER_TEXT_OPTIONS = {
     "git commit": frozenset({"-m", "--message"}), "git tag": frozenset({"-m", "--message"}),
     "git merge": frozenset({"-m", "--message"}), "git stash": frozenset({"-m", "--message"}),
-    "git notes": frozenset({"-m", "--message"}),
+    "git stash push": frozenset({"-m", "--message"}), "git notes": frozenset({"-m", "--message"}),
+    "git notes add": frozenset({"-m", "--message"}),
     "gh pr create": _GH_TEXT, "gh pr edit": _GH_TEXT, "gh pr comment": frozenset({"--body", "-b"}),
     "gh pr review": frozenset({"--body", "-b"}), "gh pr merge": frozenset({"--subject", "-t", "--body", "-b"}),
     "gh pr close": frozenset({"--comment", "-c"}), "gh issue create": _GH_TEXT, "gh issue edit": _GH_TEXT,
     "gh issue comment": frozenset({"--body", "-b"}), "gh issue close": frozenset({"--comment", "-c"}),
     "gh release create": _GH_RELEASE, "gh release edit": _GH_RELEASE,
 }
-# their options before the subcommand that take a value, and how many words name the subcommand
-_OTHER = {"git": (frozenset({"-C", "-c", "--git-dir", "--work-tree", "--namespace"}), 1),
-          "gh": (frozenset({"-R", "--repo"}), 2)}
+_GIT_WORDS = frozenset((
+    "add am apply archive bisect blame branch bundle cat-file check-ignore checkout cherry-pick clean clone commit "
+    "config describe diff fetch for-each-ref format-patch fsck gc grep help init lfs log ls-files ls-remote "
+    "maintenance merge merge-base mv name-rev notes pull push range-diff rebase reflog remote reset restore revert "
+    "rev-list rev-parse rm shortlog show show-ref sparse-checkout stash status submodule switch symbolic-ref tag "
+    "update-ref version worktree bad drop good list lock move pop prune remove repair save set-url skip start "
+    "unlock update").split())
+_GH_WORDS = frozenset((
+    "alias api attestation auth browse cache codespace completion config extension gist gpg-key issue label org pr "
+    "project release repo ruleset run search secret ssh-key status variable workflow archive cancel checkout checks "
+    "clone close comment create delete deploy-key develop diff disable download edit enable fork list lock login "
+    "logout merge pin ready refresh rename reopen rerun review set setup-git sync token transfer unarchive unlock "
+    "unpin update-branch upload view watch").split())
+# other programs: their subcommand words and how many make the path; their options before the subcommand that take a
+# value; and the options whose value names something (a folder, a repository, a branch)
+_OTHER = {"git": (_GIT_WORDS, 2, frozenset({"-C", "-c", "--git-dir", "--work-tree", "--namespace", "--config-env"}),
+                  frozenset({"-C", "--git-dir", "--work-tree"})),
+          "gh": (_GH_WORDS, 2, frozenset({"-R", "--repo"}),
+                 frozenset({"-R", "--repo", "--base", "-B", "--head", "--limit", "-L"}))}
+# what a shell line may hold before its program, and keeps: reserved words, then the programs that run another one
+_RESERVED = frozenset({"!", "{", "}", "if", "then", "elif", "else", "do", "while", "until", "fi", "done", "esac"})
+_WRAPPERS = frozenset({"env", "command", "exec", "nohup", "time", "sudo", "builtin", "timeout", "nice", "xargs", "uv"})
+_SHELLS = frozenset({"sh", "bash", "zsh", "dash", "ksh"})
+_PYTHON = re.compile(r"python(?:3(?:\.\d+)?)?")
+_SAFE = re.compile(r"[TFBSPL]-[0-9a-z]{1,24}|[DMR]\d{1,6}|\d{1,12}|-")  # an id, a plain number, standard input
+_SAFE_TARGET = re.compile(r"\d{1,3}|-|/dev/(?:null|stdout|stderr|tty)")  # a redirection's file that names nothing
+_LONG = re.compile(r"--[a-z0-9][a-z0-9-]{0,39}")  # an option's name
+_SETTING = re.compile(r"DEVKIT_[A-Z0-9_]+=")
+_SHORT_VALUE = re.compile(r"[A-Za-z0-9_.:-]{1,32}")  # the value of a DEVKIT_* setting that stays: one short token
+_PAIR = re.compile(r"[A-Za-z_][A-Za-z0-9_.-]{0,39}=")
+_ASSIGN = re.compile(r"[A-Za-z_][A-Za-z0-9_]*\+?=")
 # a marker in a command line, kept as it is: records read again, and those sealed with the crew markers
 _MARKER = re.compile(r"\[(?:[a-z]+ )?text(?: not recorded)?: \d+\+? characters\]")
 _PARTIAL = re.compile(r"\[[a-z ]*(?::(?: \d*\+?(?: [a-z]*)?)?)?\Z")  # a marker cut at the end of a field
-_OPTION = re.compile(r"--?[A-Za-z]")
-_ASSIGN = re.compile(r"[A-Za-z_][A-Za-z0-9_]*\+?=")
-_WRAPPERS = ("env", "command", "exec", "nohup", "time", "sudo", "builtin")
-_PYTHON = re.compile(r"python(?:3(?:\.\d+)?)?")
-_HEREDOC = re.compile(r"<<(-?)[ \t]*(['\"]?)([A-Za-z0-9_.-]+)\2")
+_HEREDOC = re.compile(r"<<(-?)[ \t]*\\?(['\"]?)([A-Za-z0-9_.-]+)\2")  # <<EOF, <<-'EOF', <<"EOF", <<\EOF
 _REDIR = re.compile(r"\d*(?:<<<|>>|>\||>&|<&|<>|>|<)|&>>?")
-_ARGV = re.compile(r"(?:" + _MARKER.pattern + r"|[^ \[]+|\[)+")  # a marker stays whole, alone or after --why=
+_ARGV = re.compile(r"(?:" + _MARKER.pattern + r"|[^\s\[]+|\[)+")  # a marker stays whole, alone or after --why=
 # what progress.open_calls adds after an unclosed call's command
 _UNCLOSED = re.compile(r"(?s)(.*?)( \(no result within [0-9.]+ s\))\Z")
 
@@ -495,7 +637,7 @@ def _shell_tokens(s: str) -> list:
 
 
 def _span(ws: list, mark: str, length: int, limit: int, line: str = ""):
-    """Free-text words -> (start, end, marker): their length as the command passed it, joined by spaces, with + when
+    """Masked words -> (start, end, marker): their length as the command passed them, joined by spaces, with + when
     the line was cut inside them. ctx, the callers' last arguments: (length, limit, line)."""
     start, end = ws[0][1], ws[-1][2]
     n = sum(len(w[3]) for w in ws) + len(ws) - 1
@@ -503,135 +645,296 @@ def _span(ws: list, mark: str, length: int, limit: int, line: str = ""):
     return start, end, mark.format(n=f"{n}{'+' if cut else ''}")
 
 
-def _text_value(words: list, i: int, form: str):
-    """The words a free-text option's value takes from i: one word of a shell line; in a joined argv, every word up
-    to the next option. -> (the words, the index after them)"""
-    j = i
-    while j < len(words) and words[j][0] == "word" and not _OPTION.match(words[j][3]):
-        j += 1
-        if form == "shell":
-            break
-    return words[i:j], j
+def command_slots(path: str) -> list:
+    """A dev command's positionals, from COMMAND_ARGS: [(dest, class, nargs)]; nargs is "" for one word."""
+    out = []
+    for spec in (COMMAND_ARGS.get(path) or "").split():
+        dest, _, rest = spec.partition(":")
+        cls = rest.rstrip("?*+.")
+        out.append((dest, cls, rest[len(cls):]))
+    return out
 
 
-def _text_option(words, i, form, text, names, mark, ctx, spans) -> int:
-    """The option at words[i]: its value is kept (names), replaced by its length (text) or absent. -> the index
-    after it and its value"""
-    w = words[i]
-    v = w[3]
-    raw = ctx[2][w[1]:w[2]] if w[1] >= 0 else v
+def _opt_like(v: str) -> bool:
+    """Is this word an option (-x, -xvalue, --name, --name=value)? A word with a space is a value, as argparse reads
+    it, unless it is --name=value."""
+    if len(v) < 2 or v[0] != "-":
+        return False
+    bare = _MARKER.sub("", v)  # a value masked before (-m[text not recorded: …]) keeps the option an option
+    if v[1] == "-":
+        return bool(_LONG.fullmatch(v.partition("=")[0])) and ("=" in v or not any(c.isspace() for c in bare))
+    return v[1].isalpha() and not any(c.isspace() for c in bare)
 
-    def tail(head: str, value: str):  # the value after `head` in this word; the whole word when quotes hide head
-        return (w[0], w[1] + len(head) if raw.startswith(head) else w[1], w[2], value, w[4])
+
+def _keeps(v: str, form: str) -> bool:
+    """May this value stay where a name stays? In dev's argument list a value with a space would read as two words
+    once the list is joined, so it is masked; so is an empty one."""
+    return bool(v) and not (form == "list" and any(c.isspace() for c in v))
+
+
+def _opt_acts(words: list, i: int, acts: list, form: str, text, names, mark: str) -> int:
+    """words[i] is an option. Its name stays; its value (the next word, whatever it looks like, or what follows = or
+    a short option's letter) stays when the option names something, and is masked otherwise. -> the index after the
+    option and its value"""
+    v = words[i][3]
     if v.startswith("--"):
         name, eq, val = v.partition("=")
-        if eq and name in text:
-            first = tail(name + "=", val)
-            more, j = _text_value(words, i + 1, form) if form == "argv" else ([], i + 1)
-            if val or more:
-                spans.append(_span([first] + more, mark, *ctx))
-            return j
         if eq:
+            if not (name in names and _keeps(val, form)):
+                acts[i] = ("tail", name + "=", mark)
             return i + 1
-        if name in text:
-            ws, j = _text_value(words, i + 1, form)
-            if ws:
-                spans.append(_span(ws, mark, *ctx))
-            return j
-        return i + 2 if name in names and i + 1 < len(words) and words[i + 1][0] == "word" else i + 1
-    for k, ch in enumerate(v[1:]):  # a cluster of short options (-am), or one with its value attached (-mfix)
-        rest = v[k + 2:]
-        if "-" + ch in text:
-            if rest:
-                spans.append(_span([tail(v[:k + 2], rest)], mark, *ctx))
+        if (name in text or name in names) and i + 1 < len(words):
+            keep = name in names and (words[i + 1][0] == "mark" or _keeps(words[i + 1][3], form))
+            acts[i + 1] = None if keep else ("mask", ("w", i + 1), mark)
+            return i + 2
+        return i + 1
+    for k in range(1, len(v)):  # -m, a short option with its value attached (-mfix), or a cluster of flags (-am)
+        opt, rest = "-" + v[k], v[k + 1:]
+        if opt in text or opt in names:
+            if rest:  # its value, attached: kept only for the first letter's option, as a name
+                if not (k == 1 and opt in names and _keeps(rest, form)):
+                    acts[i] = ("tail", v[:k + 1], mark)
                 return i + 1
-            ws, j = _text_value(words, i + 1, form)
-            if ws:
-                spans.append(_span(ws, mark, *ctx))
-            return j
-        if "-" + ch in names:
-            return i + 1 if rest else i + 2
+            if i + 1 < len(words):
+                keep = opt in names and (words[i + 1][0] == "mark" or _keeps(words[i + 1][3], form))
+                acts[i + 1] = None if keep else ("mask", ("w", i + 1), mark)
+                return i + 2
+            return i + 1
+        if len(v) > 4 or not v[1:].isalpha():  # a word, or the value of an option the tables do not know: only -x
+            acts[i] = ("tail", v[:2], mark) if len(v) > 2 else acts[i]
+            return i + 1
     return i + 1
 
 
-def _dev_spans(words: list, i: int, form: str, ctx) -> list:
-    """dev's arguments from words[i]: the command and subcommand, then its options and positionals."""
-    spans, path, args, pos, run = [], [], None, 0, []
+def _pos_act(w, cls: str, form: str, mark: str, group):
+    """A positional by its class: None when it stays, else how it is masked."""
+    v = w[3]
+    if w[0] == "mark" or (cls == "name" and _keeps(v, form)) or (cls in ("select", "pair") and _SAFE.fullmatch(v)):
+        return None
+    m = _PAIR.match(v) if cls == "pair" else None
+    if m:
+        return None if _SAFE.fullmatch(v[m.end():]) else ("tail", m.group(), mark)
+    return ("mask", group, mark)
 
-    def mark():
-        return COMMAND_MARK.get(" ".join(path), TEXT_MARK)
 
-    def flush():
-        if run:
-            spans.append(_span(run, mark(), *ctx))
-            run.clear()
-    while i < len(words):
+def _dev_acts(words: list, i: int, acts: list, form: str) -> None:
+    """dev's arguments from words[i]: its command path, then its options and positionals, each by its class."""
+    path, slots, pos, flat, rest, n = "", [], 0, False, False, len(words)
+    while i < n:
         w = words[i]
-        if w[0] == "mark":
-            flush()
+        v, plain = w[3], w[0] == "word" and not flat
+        mark = COMMAND_MARK.get(path, TEXT_MARK)
+        if plain and v == "--":
+            flat, acts[i] = True, None
             i += 1
-        elif _OPTION.match(w[3]):
-            flush()
-            i = _text_option(words, i, form, TEXT_OPTIONS, NAME_OPTIONS, mark(), ctx, spans)
-        elif not path:
-            if w[3] in _OTHER:  # dev git …, dev gh …: git's and gh's own arguments
-                return spans + _other_spans(w[3], words, i + 1, form, ctx)
-            path, args = [w[3]], COMMAND_ARGS.get(w[3])
-            i += 1
-        elif len(path) == 1 and args is None and f"{path[0]} {w[3]}" in COMMAND_ARGS:
-            path.append(w[3])
-            args = COMMAND_ARGS[" ".join(path)]
+        elif plain and _opt_like(v):
+            if rest:  # a REMAINDER holds another program's words: no value of theirs names something here
+                acts[i] = None
+                i = _opt_acts(words, i, acts, form, frozenset(), frozenset(), mark)
+                pos = max(pos, len(slots) - 1)  # argparse gives everything after an option to the REMAINDER
+            else:
+                acts[i] = None
+                i = _opt_acts(words, i, acts, form, TEXT_OPTIONS, NAME_OPTIONS - NAME_FLAGS.get(path, frozenset()),
+                              mark)
+        elif plain and not rest and pos == 0 and f"{path} {v}".strip() in COMMAND_ARGS:
+            acts[i] = "path"
+            if not path and v in _OTHER:  # dev git …, dev gh …: git's and gh's own arguments
+                _other_acts(v, words, i + 1, acts, form)
+                return
+            path = f"{path} {v}".strip()
+            slots = command_slots(path)
+            rest = any(nargs == "..." for _, _, nargs in slots)
             i += 1
         else:
-            if args and args[min(pos, len(args) - 1)] in TEXT_ARGS and w[3] != "--":
-                run.append(w)
-            else:
-                flush()
+            last = len(slots) - 1
+            repeats = last >= 0 and slots[last][2] in ("*", "+", "...")
+            cls = slots[pos][1] if pos <= last else (slots[last][1] if repeats else "select")
+            group = ("slot", last) if repeats and pos >= last else ("w", i)
+            acts[i] = _pos_act(w, cls, form, mark, group)
             pos += 1
             i += 1
-    flush()
-    return spans
 
 
-def _other_spans(prog: str, words: list, i: int, form: str, ctx) -> list:
-    """git's or gh's arguments from words[i]: the values of their free-text options (OTHER_TEXT_OPTIONS)."""
-    names, depth = _OTHER[prog]
-    path = []
-    while i < len(words) and len(path) < depth:
-        v = words[i][3]
-        if words[i][0] == "mark":
-            return []
-        if _OPTION.match(v):
-            i += 2 if v in names else 1
-            continue
-        path.append(v)
-        i += 1
-    text, spans = OTHER_TEXT_OPTIONS.get(" ".join([prog] + path)), []
-    while text and i < len(words):
-        if words[i][0] == "word" and _OPTION.match(words[i][3]):
-            i = _text_option(words, i, form, text, names, TEXT_MARK, ctx, spans)
+def _other_acts(prog: str, words: list, i: int, acts: list, form: str) -> None:
+    """git's or gh's arguments from words[i]: options before the subcommand, the subcommand's known words, then
+    options and positionals. A positional stays only as an id or a number."""
+    known, depth, before, names = _OTHER[prog]
+    path, n = [], len(words)
+    while i < n and len(path) < depth:
+        w = words[i]
+        if w[0] == "word" and not path and _opt_like(w[3]):
+            acts[i] = None
+            i = _opt_acts(words, i, acts, form, before - names, names, TEXT_MARK)
+        elif w[0] == "word" and w[3] in known:
+            acts[i] = "path"
+            path.append(w[3])
+            i += 1
         else:
+            break
+    text, flat = OTHER_TEXT_OPTIONS.get(" ".join([prog] + path), frozenset()), False
+    while i < n:
+        w = words[i]
+        v, plain = w[3], w[0] == "word" and not flat
+        if plain and v == "--":
+            flat, acts[i] = True, None
             i += 1
+        elif plain and _opt_like(v):
+            acts[i] = None
+            i = _opt_acts(words, i, acts, form, text, names - text, TEXT_MARK)
+        else:
+            acts[i] = None if w[0] == "mark" or _SAFE.fullmatch(v) else ("mask", ("other", prog), TEXT_MARK)
+            i += 1
+
+
+def _program(words: list):
+    """The program a simple command runs, at any position: dev, git or gh (by the file's name), python -m devkit,
+    eval, or a shell's -c text. -> (its index, its kind, the index of the -c text) or None"""
+    n = len(words)
+    for j, w in enumerate(words):
+        v = w[3]
+        base = v.rsplit("/", 1)[-1]
+        if w[0] != "word":
+            continue
+        if base in ("dev", "git", "gh"):
+            return j, base, -1
+        if v == "-m" and j + 1 < n and words[j + 1][3] == "devkit":
+            return j, "devkit", -1
+        if v == "eval":
+            return j, "eval", -1
+        if base in _SHELLS:
+            m, dash_c = j + 1, False
+            while m < n and words[m][0] == "word" and _opt_like(words[m][3]):
+                dash_c = dash_c or (not words[m][3].startswith("--") and "c" in words[m][3][1:])
+                m += 2 if words[m][3] in ("-o", "-O") else 1
+            if dash_c and m < n:
+                return j, "sh", m
+    return None
+
+
+def _nested(w, depth: int, line: str, extra: list):
+    """A nested shell's text (sh -c '…', eval '…'): masked as a shell line of its own inside the same quotes, or as
+    its length when it is not one quoted string. -> None when it stays (masked in place, in `extra`), else a mask"""
+    if w[0] == "mark":
+        return None
+    raw = line[w[1]:w[2]] if w[1] >= 0 else ""
+    if depth < 3 and not w[4] and len(raw) >= 2:
+        inner = _mask_line(w[3], "shell", depth + 1)
+        if raw[0] == raw[-1] == "'" and raw.count("'") == 2 and "'" not in inner:
+            rep = "'" + inner + "'"
+        elif raw[0] == '"' and _double(raw, 0) == (len(raw), w[3], False):
+            rep = '"' + re.sub(r'([\\"$`])', r"\\\1", inner) + '"'
+        else:
+            rep = None
+        if rep is not None:
+            if rep != raw:
+                extra.append((w[1], w[2], rep))
+            return None
+    return ("mask", ("w", w[1]), TEXT_MARK)
+
+
+def _simple_acts(words: list, form: str, depth: int, line: str, extra: list) -> list:
+    """One simple command's words -> what becomes of each: None or "path" (the program and its subcommands) stays,
+    ("mask", group, marker) is masked with the masked words next to it in the same group, ("tail", head, marker)
+    keeps `head` and masks the rest of the word. Without a program the masker knows, every word but the reserved
+    ones and an assignment's name becomes its length. `extra` gets the spans of a nested shell's text."""
+    n = len(words)
+    acts = [("mask", ("w", j), TEXT_MARK) for j in range(n)]
+    found = _program(words)
+    end, lead = found[0] if found else n, True
+    for j in range(end):  # the words before the program
+        w = words[j]
+        v = w[3]
+        lead = lead and (w[0] == "mark" or v in _RESERVED or bool(_ASSIGN.match(v)))
+        if w[0] == "mark" or (lead and v in _RESERVED):
+            acts[j] = None
+        elif _ASSIGN.match(v) and (lead or found):  # M4: its name stays; its value only as one short DEVKIT_* token
+            head = _ASSIGN.match(v).group()
+            acts[j] = None if not v[len(head):] or (_SETTING.match(v) and _SHORT_VALUE.fullmatch(v[len(head):])) \
+                else ("tail", head, TEXT_MARK)
+        elif found and (v in _WRAPPERS or (v == "run" and j and words[j - 1][3] == "uv") or _SAFE.fullmatch(v)
+                        or _PYTHON.fullmatch(v.rsplit("/", 1)[-1])):
+            acts[j] = None
+        elif found and _opt_like(v):
+            acts[j] = None
+            _opt_acts(words, j, acts, form, frozenset(), frozenset(), TEXT_MARK)
+    if not found:
+        return acts
+    j, kind, s = found
+    acts[j] = "path"
+    if kind == "devkit":
+        acts[j + 1] = "path"
+        _dev_acts(words, j + 2, acts, form)
+    elif kind == "dev":
+        _dev_acts(words, j + 1, acts, form)
+    elif kind in _OTHER:
+        _other_acts(kind, words, j + 1, acts, form)
+    elif kind == "sh":
+        for m in range(j + 1, s):
+            acts[m] = None if _opt_like(words[m][3]) else ("mask", ("w", m), TEXT_MARK)
+        acts[s] = _nested(words[s], depth, line, extra)
+    elif n - j == 2:  # eval and its text in one word
+        acts[j + 1] = _nested(words[j + 1], depth, line, extra)
+    elif n - j > 2:  # eval's words are a command line of their own
+        acts[j + 1:] = _simple_acts(words[j + 1:], form, depth + 1, line, extra)
+    return acts
+
+
+def _masks_text(words: list, acts: list) -> bool:
+    """Do these decisions mask a word of the line that is no marker yet?"""
+    for w, a in zip(words, acts):
+        if isinstance(a, tuple) and w[1] >= 0 and w[0] == "word":
+            v = w[3] if a[0] == "mask" else w[3][len(a[1]):]
+            if v and not _MARKER.fullmatch(v):
+                return True
+    return False
+
+
+def _strict(words: list, acts: list) -> list:
+    """A joined argument list that holds free text: a word cannot tell where an argument ends, so after the program
+    only its subcommands, option names, markers, ids and numbers stay."""
+    if "path" not in acts:
+        return acts
+    mark = next((a[2] for a in reversed(acts) if isinstance(a, tuple)), TEXT_MARK)
+    out, after = [], False
+    for w, a in zip(words, acts):
+        v = w[3]
+        if a == "path" or not after:
+            after = after or a == "path"
+            out.append(a)
+        elif w[0] == "mark" or _SAFE.fullmatch(v):
+            out.append(None)
+        elif _opt_like(v):  # its name stays, and a cluster of flags (-am); a value after = or a letter does not
+            head = (v.partition("=")[0] + "=" if "=" in v else v) if v.startswith("--") else \
+                v if len(v) <= 4 and v[1:].isalpha() else v[:2]
+            out.append(None if head == v else ("tail", head, mark))
+        else:
+            out.append(("mask", ("strict",), mark))
+    return out
+
+
+def _spans_of(words: list, acts: list, ctx) -> list:
+    """The spans that replace the masked words: next to each other in the same group, words make one marker."""
+    spans, run, key, mark = [], [], None, TEXT_MARK
+    for w, a in zip(words, acts):
+        masked = isinstance(a, tuple) and w[1] >= 0 and w[0] == "word"
+        if masked and a[0] == "mask" and not _MARKER.fullmatch(w[3]):
+            if run and (a[1] != key or ctx[2][run[-1][2]:w[1]].strip()):  # only spaces between: no redirection
+                spans.append(_span(run, mark, *ctx))
+                run = []
+            run.append(w)
+            key, mark = a[1], a[2]
+            continue
+        if run:
+            spans.append(_span(run, mark, *ctx))
+            run = []
+        if masked and a[0] == "tail":
+            value = w[3][len(a[1]):]
+            if value and not _MARKER.fullmatch(value):
+                at = w[1] + len(a[1]) if ctx[2][w[1]:w[2]].startswith(a[1]) else w[1]
+                spans.append(_span([(w[0], at, w[2], value, w[4])], a[2], *ctx))
+    if run:
+        spans.append(_span(run, mark, *ctx))
     return spans
-
-
-def _command_spans(words: list, form: str, ctx) -> list:
-    """One simple command's words -> the spans of its free text."""
-    i = 0
-    while i < len(words) and words[i][0] == "word" and _ASSIGN.match(words[i][3]):
-        i += 1  # NAME=value before the program
-    while i < len(words) and words[i][3] in _WRAPPERS:
-        i += 1
-        while i < len(words) and (words[i][3].startswith("-") or _ASSIGN.match(words[i][3])):
-            i += 1
-    if i >= len(words) or words[i][0] != "word":
-        return []
-    prog = words[i][3].rsplit("/", 1)[-1]
-    if _PYTHON.fullmatch(prog) and [w[3] for w in words[i + 1:i + 3]] == ["-m", "devkit"]:
-        return _dev_spans(words, i + 3, form, ctx)
-    if prog == "dev":
-        return _dev_spans(words, i + 1, form, ctx)
-    return _other_spans(prog, words, i + 1, form, ctx) if prog in _OTHER else []
 
 
 def _free_span(tok, length: int, limit: int, line: str = ""):
@@ -645,66 +948,111 @@ def _free_span(tok, length: int, limit: int, line: str = ""):
     return _span([(kind, start, end, text, cut)], TEXT_MARK, length, limit)
 
 
-def mask_command(line, form: str = "shell", prefix=(), limit: int = 0) -> str:
-    """A command line as a record may keep it: the program, the subcommands, the ids, the option names and the
-    values that name something stay; each free-text argument becomes TEXT_MARK (or its command's COMMAND_MARK) with
-    its length, and so does a heredoc body, a here-string and a comment.
-
-    form: "shell" for the text an agent ran (quotes, operators, redirections, heredocs); "argv" for dev's arguments
-    joined by spaces (cli.py), where `prefix` holds the words before them ("dev", "crew"). limit: where the caller cut
-    the line, so a text that reaches it is recorded as N+ characters. A marker already there stays as it is, so a
-    record reads back as it was stored. Never raises: a line it cannot read is kept as its length only."""
-    s = line if isinstance(line, str) else str(line if line is not None else "")
-    if not s:
-        return s
-    try:
-        ctx = (len(s), limit, s)
-        if form == "argv":
-            words = [("word", -1, -1, str(p), False) for p in prefix]
+def _mask_line(s: str, form: str, depth: int = 0, prefix=(), limit: int = 0, elems=None) -> str:
+    """mask_command's work, which may raise. elems: dev's argument list, which `s` joins by spaces."""
+    ctx, extra = (len(s), limit, s), []
+    if form == "argv":
+        words = [("word", -1, -1, str(p), False) for p in prefix]
+        if elems is None:
             words += [("mark" if _MARKER.fullmatch(m.group()) else "word", m.start(), m.end(), m.group(), False)
                       for m in _ARGV.finditer(s)]
-            spans = _command_spans(words, form, ctx)
         else:
-            spans, seg = [], []
-            for tok in _shell_tokens(s) + [("op", len(s), len(s), "", False)]:
-                if tok[0] == "op":
-                    spans += _command_spans([t for t in seg if t[0] in ("word", "mark")], form, ctx)
-                    seg = []
-                elif tok[0] in ("body", "comment"):
-                    spans += [sp for sp in [_free_span(tok, *ctx)] if sp]
-                else:
-                    seg.append(tok)
-    except Exception:
-        return TEXT_MARK.format(n=len(s))
+            at = 0
+            for e in elems:
+                words.append(("mark" if _MARKER.fullmatch(e) else "word", at, at + len(e), e, False))
+                at += len(e) + 1
+        acts = _simple_acts(words, "argv" if elems is None else "list", depth, s, extra)
+        if elems is None and _masks_text(words, acts):
+            acts = _strict(words, acts)
+        spans = _spans_of(words, acts, ctx)
+    else:
+        spans, seg = [], []
+        for tok in _shell_tokens(s) + [("op", len(s), len(s), "", False)]:
+            if tok[0] == "op":
+                words = [t for t in seg if t[0] in ("word", "mark")]
+                spans += _spans_of(words, _simple_acts(words, "shell", depth, s, extra), ctx)
+                seg = []
+            elif tok[0] in ("body", "comment"):
+                spans += [sp for sp in [_free_span(tok, *ctx)] if sp]
+            elif tok[0] == "target":
+                if not (_SAFE_TARGET.fullmatch(tok[3]) or _MARKER.fullmatch(tok[3])):
+                    spans.append(_span([tok], TEXT_MARK, *ctx))
+            else:
+                seg.append(tok)
     out, last = s, len(s) + 1
-    for start, end, marker in sorted(spans, reverse=True):
-        if 0 <= start <= end <= last and not _MARKER.fullmatch(s[start:end]):
+    for start, end, marker in sorted(spans + extra, reverse=True):
+        if not 0 <= start <= end <= last:  # spans that overlap: mask_command keeps the line's length only
+            raise ValueError(f"masked spans overlap at {start}")
+        if not _MARKER.fullmatch(s[start:end]):
             out = out[:start] + marker + out[end:]
             last = start
     return out
 
 
+def mask_command(line, form: str = "shell", prefix=(), limit: int = 0) -> str:
+    """A command line as a record may keep it: the words known to be safe stay (the program and its subcommands,
+    option names, the values that name something, ids and numbers, operators and redirections) and every other word
+    becomes TEXT_MARK (or its command's COMMAND_MARK) with its length, words of one text together; so does a heredoc
+    body, a here-string and a comment. A line whose program is not dev, git, gh, or one that runs them, keeps its
+    operators and each word's length.
+
+    form: "shell" for the text an agent ran (quotes, operators, redirections, heredocs); "argv" for dev's arguments,
+    `prefix` holding the words before them ("dev", "crew"): a list from cli.py, one argument each, or the text cli.py
+    joined by spaces before 26.11.5, where after a free text only option names, markers and ids stay. limit: where
+    the caller cut the line, so a text that reaches it is recorded as N+ characters. A marker already there stays as
+    it is, so a record reads back as it was stored. Never raises: a line it cannot read is kept as its length only."""
+    elems = [str(x) for x in line] if isinstance(line, (list, tuple)) else None
+    s = " ".join(elems) if elems is not None else line if isinstance(line, str) else str(line if line is not None else "")
+    if not s:
+        return s
+    try:
+        if elems is not None:  # a list holds whole arguments: no length in it was cut
+            return _mask_line(s, "argv", 0, prefix, 0, elems)
+        return _mask_line(s, form, 0, prefix, limit)
+    except Exception:
+        return TEXT_MARK.format(n=len(s))
+
+
 def _fit(s: str, n: int) -> str:
-    """s cut to n characters, without a marker cut in two at the end (it would not read back as one)."""
+    """s cut to n characters, without a marker or a word cut in two at the end: neither would read back as it was
+    (`git` cut to `gi` is no program the masker knows)."""
     if len(s) <= n:
         return s
-    s = s[:n]
-    i = s.rfind("[")
-    return s[:i].rstrip() if i >= 0 and _PARTIAL.match(s, i) else s
+    cut = s[:n]
+    i = cut.rfind("[")
+    if i >= 0 and _PARTIAL.match(cut, i):
+        return cut[:i].rstrip()
+    if s[n].isspace() or cut[-1].isspace():
+        return cut
+    words = list(_ARGV.finditer(cut))  # a word, a marker counting as one
+    return cut[:words[-1].start()].rstrip() if words else cut
 
 
-def _command_field(action: str, name: str):
-    """(form, prefix, limit) when the `name` field of an `action` record holds a command line, else None."""
+# guard records whose target is no command line: a branch, PR or tag; a rule's name; a tool's name
+_NOT_COMMAND = frozenset({"guard.irreversible", "guard.failopen", "guard.off"})
+# the tools whose refused call the hooks record by the file's path
+_PATH_TOOLS = frozenset({"Write", "Edit", "MultiEdit", "NotebookEdit", "Read"})
+# guard.irreversible records whose detail is the guard's own error message, not the command's words
+_GATE_ERRORS = frozenset({"gate-error", "record-error"})
+_TICKED = re.compile(r"`([^`]*)(`|\Z)")  # what a refusal quotes, the last one possibly cut
+_ITEM = re.compile(r"((?:[TFBSPL]-[0-9a-z]{1,24}|[DMR]\d{1,6}): [a-z][a-z-]{0,23})(?=\s|\Z)")  # `T-…: done`
+
+
+def _command_field(action: str, name: str, about=None):
+    """(form, prefix, limit) when the `name` field of an `action` record holds a command line, else None. about: the
+    record's tool and irreversible action class, which tell a refused file's path and an unparsed command."""
+    about = about if isinstance(about, dict) else {}
     head, _, rest = action.partition(".")
     if name == "target":
-        if head == "dev" and rest:
-            return "argv", ("dev", rest), 300  # cli.py: dev's arguments, joined and cut at 300
+        if head == "dev" and rest in COMMAND_ARGS and rest:  # dev.policy's and dev.config.set's targets are names
+            return "argv", ("dev", rest), 300  # cli.py: dev's arguments
         if head == "job":
             return "argv", ("dev",), 0  # jobs.py: the job's dev arguments
-        if head == "guard" and action != "guard.irreversible":  # whose target is a branch, a tag or a PR
+        if head == "guard" and rest and action not in _NOT_COMMAND and str(about.get("tool") or "") not in _PATH_TOOLS:
             return "shell", (), 200  # hooks.py and guard.py: the call refused, asked or let through
-    elif action == "guard.irreversible":
-        return "argv", (), 200  # guard._found: the words of the irreversible command, cut at 200
+    elif action == "guard.irreversible" and about.get("rule") not in _GATE_ERRORS:
+        # guard._found: the words of the irreversible command, cut at 200; the shell text when it cannot parse it
+        return ("shell", (), 200) if about.get("irreversible") == "unparsed" else ("argv", (), 200)
     elif action == "calls.unclosed":
         return "shell", (), 200  # progress.open_calls: the call, cut at 200, and how long it waited
     return None
@@ -715,10 +1063,27 @@ def _command(text, rx) -> str:
     return _fit(_clean(mask_command(str(text)), rx), VALUE_CUT)
 
 
-def _field(action: str, name: str, text, rx) -> str:
+def _item(s: str) -> str:
+    """A handoff commit's message as its record keeps it: the item's id and the operation (`T-…: done`), and the rest
+    only as its length; a message without them only as its length (titles and reasons are free text)."""
+    if not s or _MARKER.fullmatch(s):
+        return s
+    m = _ITEM.match(s)
+    keep, rest = (m.group(1), s[m.end():].strip()) if m else ("", s)
+    if rest and not _MARKER.fullmatch(rest):
+        rest = TEXT_MARK.format(n=len(rest))
+    return f"{keep} {rest}".strip()
+
+
+def _field(action: str, name: str, text, rx, about=None) -> str:
     """A record's target or detail as it may be stored: no message text, no approval line, no free text of a command
     line, no secret, no home folder. A text already replaced by its marker stays as it is."""
-    s = text if isinstance(text, str) else str(text if text is not None else "")
+    about = about if isinstance(about, dict) else {}
+    form = _command_field(action, name, about)
+    if isinstance(text, (list, tuple)) and form:  # cli.py: dev's arguments, one word each
+        return _fit(_clean(mask_command(list(text), *form), rx), _CUT[name])
+    s = " ".join(map(str, text)) if isinstance(text, (list, tuple)) else text if isinstance(text, str) else \
+        str(text if text is not None else "")
     if name == "detail" and action in MESSAGE_ACTIONS:
         if _UNTEXT.fullmatch(s):
             return s
@@ -729,8 +1094,15 @@ def _field(action: str, name: str, text, rx) -> str:
         if not s or _UNASKED.fullmatch(s):
             return s
         return f"[question not recorded: {len(s)}{'+' if len(s) >= 300 else ''} characters]"  # progress cuts at 300
-    form = _command_field(action, name)
-    if form:
+    if name == "detail" and action == "crew.delegate":  # what the member should do (dispatch.delegate, cut at 300)
+        return s if not s or _MARKER.fullmatch(s) else TEXT_MARK.format(n=f"{len(s)}{'+' if len(s) >= 300 else ''}")
+    if name == "detail" and action.startswith("handoff."):  # work._commit: the commit's message
+        return _clean(_item(s), rx)
+    if name == "detail" and action.partition(".")[0] == "guard" and not form:
+        # the refusal the agent reads quotes the command's words in backticks: each quoted command, masked
+        s = _TICKED.sub(lambda m: "`" + mask_command(m.group(1), "argv") + m.group(2), s)
+        return _fit(_clean(s, rx), _CUT[name])
+    if form and not (name == "target" and about.get("tool") and s == about.get("tool")):  # a tool's own name stays
         m = _UNCLOSED.match(s) if action == "calls.unclosed" else None
         s = mask_command(m.group(1), *form) + m.group(2) if m else mask_command(s, *form)
         return _fit(_clean(s, rx), _CUT[name])
@@ -1058,9 +1430,10 @@ def build(action: str, target="", detail="", outcome="ok", extra: dict = None, c
         extra["label"] = evidence_label(extra["label"], rx)
     out, code, raw = outcome_of(outcome)
     cat, sev = kind(action)
+    about = {"tool": extra.get("tool"), "irreversible": extra.get("irreversible"), "rule": extra.get("rule")}
     rec = {"v": V, "id": new_id(ts), "ts": ts, "time": iso(ts), "actor": actor(), "action": str(action)[:80],
-           "category": cat, "severity": sev, "target": _field(str(action), "target", target or "", rx)[:300],
-           "detail": _field(str(action), "detail", detail or "", rx)[:600], "outcome": out}
+           "category": cat, "severity": sev, "target": _field(str(action), "target", target or "", rx, about)[:300],
+           "detail": _field(str(action), "detail", detail or "", rx, about)[:600], "outcome": out}
     for k, v in extra.items():
         _place(rec, k, v, rx)
     if str(action) in DECISION_ACTIONS:
@@ -1350,9 +1723,11 @@ def _reclean(r: dict, rx) -> dict:
     did not get (crew message text and home folders before 26.11.3, secrets the redactor learned since). The stored
     line and its hash stay as they are, so `verify` still checks them; a view that differs is marked `cleaned`."""
     action, out = str(r.get("action") or ""), dict(r)
+    evidence, ref = (r.get(k) if isinstance(r.get(k), dict) else {} for k in ("evidence", "ref"))
+    about = {"tool": evidence.get("tool"), "irreversible": ref.get("irreversible"), "rule": evidence.get("rule")}
     for k in ("target", "detail"):
         if isinstance(r.get(k), str):
-            out[k] = _field(action, k, r[k], rx)[:_CUT[k]]
+            out[k] = _field(action, k, r[k], rx, about)[:_CUT[k]]
     for k in ("why", "project", "branch", "run", "step"):
         if isinstance(r.get(k), str):
             out[k] = _clean(r[k], rx)[:_CUT.get(k)]
@@ -1385,8 +1760,8 @@ def lift(r: dict, line: bytes = b"", extra=None) -> dict:
     rec = {"v": 1, "id": "V1" + hashlib.sha256(line or json.dumps(r, sort_keys=True).encode()).hexdigest()[:24].upper(),
            "ts": ts, "time": iso(ts), "actor": {k: str(r.get(k) or "") for k in ("user", "host", "agent", "session")},
            "action": action, "category": cat, "severity": sev,
-           "target": _field(action, "target", r.get("target") or "", rx),
-           "detail": _field(action, "detail", r.get("detail") or "", rx), "outcome": out}
+           "target": _field(action, "target", r.get("target") or "", rx, r),
+           "detail": _field(action, "detail", r.get("detail") or "", rx, r), "outcome": out}
     for k, v in r.items():
         if k not in _V1_CORE:
             _place(rec, k, v, rx)

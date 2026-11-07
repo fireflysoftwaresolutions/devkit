@@ -67,38 +67,53 @@ devkit keeps these out of every record it writes:
 - **Prompt text and message text.** A crew message is recorded by its id, sender, recipient, and length, and
   `dev crew ask` and `dev crew answer` by their naming arguments (`--to`, the message id) and the length of the text.
   Crew messages often quote the developer's requests, so their text stays in the session's own records.
-- **Free text in a command line.** Since 26.11.5, a record that keeps a command line keeps the program, the
-  subcommands, the ids (`D<n>`, `M<n>`, a task number), the option names, the values that name something (a member,
-  a step, a path, a branch, a number), and the operators and redirections. Each free-text argument becomes
-  `[text not recorded: N characters]`, where N is the length of the argument, or `N+` when the command was cut inside
-  it. `dev crew ask` and `dev crew answer` keep their marker `[message text not recorded: N characters]`, and
-  `dev crew decide` keeps `[free text: N characters]`. These fields hold a command line:
+- **Free text in a command line.** Since 26.11.5, a record that keeps a command line keeps only the words devkit
+  knows to be safe, and replaces every other word with its length, such as `[text not recorded: 22 characters]`, or
+  `N+` when the command was cut inside it. Words next to each other in one argument share one marker.
+  `dev crew ask` and `dev crew answer` keep their marker `[message text not recorded: N characters]`, and
+  `dev crew decide` keeps `[free text: N characters]`. These words stay:
+  - The program, when it is `dev`, `git`, or `gh`, and its subcommands. devkit finds the program after reserved
+    words such as `if`, `do`, `{`, and `!`, after wrappers such as `env`, `sudo`, `timeout`, `nice`, `xargs`, and
+    `uv run`, as a path (`~/bin/dev`) or `python3 -m devkit`, and inside the text of `bash -c`, `sh -c`, `zsh -c`,
+    and `eval`.
+  - Option names, such as `--why` and `-m`.
+  - The value of an option that names something, such as `--to`, `--type`, `--scope`, `--project`, or `--step`
+    in `dev`, and `-C`, `-R`, `--repo`, `--base`, and `--head` in `git` and `gh`.
+  - The arguments of `dev` that name something, such as a branch, a path, a project, or a crew member. An argument
+    that selects a task, a lesson, or a step stays only as an id or a number, since it can be part of a title.
+  - Ids (`T-…`, `L-…`, `P-…`, `D<n>`, `M<n>`, `R<n>`) and plain numbers.
+  - Shell operators, reserved words, and redirections. A redirection's file stays only when it names no file of
+    yours: `/dev/null`, `/dev/stdout`, `/dev/stderr`, `/dev/tty`, a number, or `-`.
+  - The name of a variable that the command sets (`MSG=`), and the value of a `DEVKIT_*` variable when it is one
+    short word, such as `DEVKIT_GUARD=off`.
+
+  Everything else becomes its length: free text, such as a `dev crew ask` message, the text of `--why`, `--check`,
+  or `-m`, a heredoc's body, a here-string, and a comment; and a word that only might be free text, such as a
+  filename, a branch passed to `git push`, or a value devkit does not know. A line whose program is none of these
+  keeps only its operators and each word's length: `rm -rf src` is recorded as
+  `[text not recorded: 2 characters] [text not recorded: 3 characters] [text not recorded: 3 characters]`.
+
+  These fields hold a command line:
 
   | Record | Field | What it holds |
   | --- | --- | --- |
-  | `dev.*` | `target` | The `dev` command's arguments |
-  | `guard.*`, such as `guard.deny`, `guard.ask`, and `guard.bypass` | `target` | The call the guard refused or asked about, or that an escape hatch let through |
-  | `guard.irreversible` | `detail` | The words of the irreversible command |
+  | `dev.<command>` | `target` | The `dev` command's arguments |
+  | `guard.*`, such as `guard.deny`, `guard.ask`, and `guard.bypass` | `target` | The call the guard refused or asked about, or that an escape hatch let through. A refused file edit keeps the file's path, and a refused tool call keeps the tool's name |
+  | `guard.*` | `detail` | The refusal the agent reads: each command it quotes in backticks is masked, and the rest stays |
+  | `guard.irreversible` | `detail` | The words of the irreversible command, or the shell text the guard could not parse |
   | `calls.unclosed` | `detail` | The call that got no result, and how long devkit waited for it |
   | `job.*` | `target` | The job's `dev` arguments |
   | Any record | `evidence.command` | A command line |
 
-  These arguments are free text:
-  - In `dev`: the positional text of `dev task add`, `dev plan new`, `dev lesson add`,
-    `dev progress start|note|step|block|done|add`, and `dev crew ask|answer|decide|brief|delegate|route`; and the
-    value of `--why`, `--check`, `--next`, `--title`, `--body`, `-m` or `--message`, `--log`, `--note`, `--done`,
-    `--evidence`, `--cause`, `--prevent`, `--detect`, `--fix`, `--happened`, `--error`, `--retire-when`,
-    `--verified`, `--breaking`, `--options`, `--flaky`, `--plan`, `--search`, and `--grep`, in any `dev` command,
-    also when it is written `--why=…`.
-  - In `git commit`, `git tag`, `git merge`, `git stash`, and `git notes`: the value of `-m` or `--message`. In
-    `gh pr`, `gh issue`, and `gh release` commands that write text: the value of `--title`, `--body`, `--subject`,
-    `--notes`, or `--comment`, and of their short forms.
-  - In any command: a heredoc's body, a here-string, and a comment.
-
   For example, `dev task add "Fix the Acme export" --why "Ana asked" --type bug` is recorded as
   `add [text not recorded: 19 characters] --why [text not recorded: 9 characters] --type bug`. Only the stored
-  record changes: the guard decides as before, and the agent still reads the whole refusal. Other arguments are kept,
-  so a name passed some other way, such as `git commit --author` or a filename, can still reach a record.
+  record changes: the guard decides as before, and the agent still reads the whole refusal. A value that names
+  something stays, so a name passed as one, such as a crew member, a step's name, or a path, can still reach a
+  record.
+- **Delegated work and handoff commits.** `crew.delegate` keeps who delegated to whom and the step, and what the
+  member should do only as its length. A commit to the handoff repository (`handoff.*`) keeps the item's id and the
+  operation, such as `T-…: done`, and the rest of its message, which holds the title and the reason, only as its
+  length.
 - **The developer's approval lines.** Evidence for a decision or a grant (`crew.evidence`) keeps what it covers (the
   decision id, or a grant's action and target), the channel, and the id of the developer's message in the
   transcript. Of the line itself (`approve D<n>: …`, or the question and answer from the question tool) it keeps only
@@ -138,7 +153,9 @@ format, and v2 records sealed before the fix, some of which hold crew message te
 record with the current rules whenever it reads one, so `dev audit`, `dev audit show`, and `dev audit export` do not
 show that text. A v2 record that the cleaning changed is marked `"cleaned": true`. Its `hash` still covers the stored
 line, which is what `dev audit verify` checks. Records written before 26.11.5 can also hold the free text of a
-command line, and reading masks it the same way.
+command line, and reading masks it the same way. Their `dev` arguments were joined by spaces, so a word cannot tell
+where an argument ends: once a word in them is free text, reading keeps only the command, the option names, the ids,
+and the numbers.
 
 The stored lines still hold the text, in three places:
 

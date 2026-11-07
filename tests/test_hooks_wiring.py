@@ -303,7 +303,20 @@ class CommandTextRecordTests(WiringCase):
         why = self.deny(self.hook("guard", self.bash(f'cd /tmp && dev crew ask "{self.MESSAGE}"', aid="a_tank")))
         self.assertTrue(why, "the lane's compound call is refused")
         recs = self.records("guard.deny")
-        self.assertEqual([r["target"] for r in recs], [f"cd /tmp && {self.MASKED}"])
+        # cd is no program the masker knows: its words keep only their length (26.11.5, the allowlist fails closed)
+        self.assertEqual([r["target"] for r in recs],
+                         [f"[text not recorded: 2 characters] [text not recorded: 4 characters] && {self.MASKED}"])
+        self.assertNotIn("secret plan", self.stored())
+
+    def test_a_refused_irreversible_command_reads_whole_but_is_recorded_masked(self):
+        # the Code reviewer's H1: the refusal quotes the command's words, so guard.deny's detail held the text; the
+        # agent still reads it whole, and the record (guard.deny's target and detail, guard.irreversible's words)
+        # keeps the command without it
+        # DEVKIT_RAW_GH=1 passes the "use dev pr merge" rule, so the irreversible gate refuses it with the words
+        why = self.deny(self.hook("guard", self.bash(f'DEVKIT_RAW_GH=1 gh pr merge 12 --squash --body "{self.MESSAGE}"'),
+                                  real_guard=True))
+        self.assertIn(f"--body {self.MESSAGE}`", why or "")
+        self.assertEqual(len(self.records("guard.deny")), 1)
         self.assertNotIn("secret plan", self.stored())
 
     def test_a_call_left_without_a_result_records_no_message_text(self):
