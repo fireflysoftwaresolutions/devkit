@@ -3557,6 +3557,107 @@ def _ro_dev(args) -> str | None:
     return f"`dev {' '.join(pos[:2]) or '…'}` changes devkit's records or the repository"
 
 
+# --------------------------------------------------------------------------- the impeccable launcher (spec F7, C6)
+#
+# The impeccable skill's launcher (a sh script) runs the engine binary beside it. Read as a script, its `exec "$bin"`
+# and `"$1" engine-probe` name their program at run time, which the gate counts as tier 2, so every lane was refused.
+# The launcher devkit installed is that engine: run by its path, with the content and the engine the skills step
+# recorded (setup.install_impeccable_engine, STATE/skill-engines.json, where agents may not write), it is not read as
+# a script. A command that sets or exports a variable (IMPECCABLE_BIN picks the engine; PATH and HOME change what it
+# runs), or a session with IMPECCABLE_BIN, gives it no trust (Security engineer, M486). Read-only lanes run only its
+# read verbs with their reading flags (the skill's reference: context loads PRODUCT.md and DESIGN.md, detect scans
+# local HTML and CSS, doctor without --fix reports); init, document, extract, live, generate and the rest write files
+# or start a session and stay with write lanes.
+
+# verb -> (flags that take a value, flags alone, whether local paths may follow)
+IMPECCABLE_READS = {
+    "context": (frozenset({"--target"}), frozenset(), False),
+    "detect": (frozenset({"--scope"}), frozenset({"--json", "--quiet", "--list-rules", "--no-config", "--no-advisory",
+                                                  "--no-inline-ignores", "--no-design-system", "--help"}), True),
+    "doctor": (frozenset({"--target"}), frozenset({"--json", "--help"}), False),
+}
+_ENV_SETTERS = frozenset({"export", "declare", "typeset", "readonly", "local", "set", "unset", "env", "source", ".",
+                          "eval", "alias"})
+_ENGINE_SEEN = {}  # engine path -> the (dev, inode, size, mtime, ctime) whose content matched the digest, this process
+
+
+def impeccable_verb(argv, cwd) -> str | None:
+    """The verb (its first argument, '' for none) when `argv` runs the impeccable launcher devkit installed: its path
+    resolves to the recorded launcher below devkit's skills folder, the launcher has the recorded SHA-256, the engine
+    beside it for this platform is the recorded file (the same (dev, inode, size, mtime, ctime), else the same
+    SHA-256), and the session sets no IMPECCABLE_BIN. None otherwise."""
+    if not argv or os.path.basename(str(argv[0])) != "impeccable" or "/" not in str(argv[0]) or \
+            os.environ.get("IMPECCABLE_BIN"):
+        return None
+    import hashlib
+    import stat
+    try:
+        from .setup import ENGINES_FILE, SKILLS_SHARE, engine_platform
+        rec = (json.loads((core.STATE / ENGINES_FILE).read_text()) or {}).get("impeccable") or {}
+        launcher, p = real(str(rec.get("launcher") or "")), resolve(argv[0], cwd)
+        if p == UNKNOWN or not rec.get("launcher") or str(p) != launcher or \
+                not launcher.startswith(real(str(SKILLS_SHARE)) + os.sep):
+            return None
+        if hashlib.sha256(Path(launcher).read_bytes()).hexdigest() != rec.get("launcher_sha256"):
+            return None
+        engine = os.path.join(os.path.dirname(launcher), "bin", engine_platform(), "impeccable")
+        if real(engine) != real(str(rec.get("engine") or "")):
+            return None
+        st = os.lstat(engine)
+        key = [st.st_dev, st.st_ino, st.st_size, st.st_mtime_ns, st.st_ctime_ns]
+        if not stat.S_ISREG(st.st_mode):
+            return None
+        if key != rec.get("stat") and _ENGINE_SEEN.get(engine) != key:
+            h = hashlib.sha256()
+            with open(engine, "rb") as fh:
+                for chunk in iter(lambda: fh.read(1 << 20), b""):
+                    h.update(chunk)
+            if h.hexdigest() != rec.get("sha256"):
+                return None
+            _ENGINE_SEEN[engine] = key
+    except (OSError, ValueError, TypeError, AttributeError):
+        return None
+    return str(argv[1]) if len(argv) > 1 else ""
+
+
+def _ro_impeccable(verb, args) -> str | None:
+    """Why a read-only lane may not run the installed impeccable launcher with this verb and arguments, or None."""
+    if verb not in IMPECCABLE_READS:
+        return (f"`impeccable {verb or '(no verb)'}` writes files or starts a session, so a write lane runs it; a "
+                f"read-only lane runs {', '.join(IMPECCABLE_READS)} (doctor without --fix)")
+    takes, alone, paths = IMPECCABLE_READS[verb]
+    i = 0
+    while i < len(args):
+        a = args[i]
+        if a.split("=", 1)[0] in takes:
+            i += 1 if "=" in a else 2
+            continue
+        if a not in alone and (a.startswith("-") or not paths or "://" in a):
+            return (f"`impeccable {verb} {a}` is not one of its reading flags or a local path, so a write lane runs "
+                    f"it")
+        i += 1
+    return None
+
+
+def _impeccable_overridden(cmd, cwd):
+    """The words of the installed impeccable launcher in a command that also sets or exports a variable at any level
+    (a prefix, env, export, declare, typeset, readonly, local, set, unset, source, eval): the launcher picks its engine
+    with IMPECCABLE_BIN and runs uname and dirname from PATH, so what such a run starts is only known when it runs.
+    None otherwise."""
+    if "impeccable" not in str(cmd or ""):
+        return None
+    runs, sets = None, False
+    for argv0, here, _ in _walk_segments(cmd, cwd) or []:
+        argv = _unwrap(argv0)
+        pre = argv0[:len(argv0) - len(argv)]
+        if any(_ASSIGN.match(a) or os.path.basename(a) == "env" for a in pre) or \
+                (argv and os.path.basename(argv[0]) in _ENV_SETTERS):
+            sets = True
+        if runs is None and argv and impeccable_verb(argv, here) is not None:
+            runs = argv
+    return runs if runs and sets else None
+
+
 def _own_scratch_script(argv, cwd, member) -> bool:
     """True when an interpreter runs a script file from crew member `member`'s own scratch folder (a probe it wrote
     with the Write tool), not inline code or its input."""
@@ -3597,6 +3698,9 @@ def _ro_program(argv0, cwd, member=None) -> str | None:
     dev = _dev_args(argv)
     if dev is not None:
         return _ro_dev(dev)
+    verb = impeccable_verb(argv, cwd)
+    if verb is not None:
+        return _ro_impeccable(verb, argv[2:])
     why = _check_refusal(argv)
     if why is not None:
         if not why and _INTERP.match(name) and not runner and _own_scratch_script(argv, cwd, member):
@@ -5164,7 +5268,8 @@ def _segment_actions(argv, cwd, bodies, depth) -> list:
                 more += _text_actions(text, cwd, depth + 1, from_code=True) or []
             if _dynamic_code(name, code) or _SPAWN_BUILT.search(code or ""):  # it may build what it runs (RT2)
                 found = [_unknown(" ".join(argv))]
-        if not found and "/" in argv[0] and name not in _SHELLS and not _INTERP.match(name):
+        if not found and "/" in argv[0] and name not in _SHELLS and not _INTERP.match(name) and \
+                impeccable_verb(argv, cwd) is None:  # the installed impeccable launcher is its engine, not a script
             script = _read_small(resolve(argv[0], cwd), 1 << 18)  # a shell script run by its path: what it runs
             if _SHEBANG_SH.match(script):
                 more += _text_actions(script, cwd, depth + 1) or []
@@ -5388,6 +5493,9 @@ def irreversible_actions(cmd: str, cwd):
     found = _text_actions(cmd or "", cwd or os.getcwd())
     if found is None:
         return None
+    launcher = _impeccable_overridden(cmd, cwd or os.getcwd())
+    if launcher:  # a variable may change what the trusted launcher starts
+        found = found + _found([_unknown(cmd)], launcher, cwd or os.getcwd())
     out, seen = [], set()
     for a in found:
         key = (a["action"], a["target"], a["repo"])
