@@ -1,18 +1,18 @@
 # Copyright (c) 2026 Firefly Software Solutions Inc.
 # SPDX-License-Identifier: Apache-2.0
 #
-# The impeccable launcher in crew lanes (lib/devkit/guard.py, impeccable_verb). Read as a shell script, the launcher's
-# `exec "$bin"` and `"$1" engine-probe` name their program at run time, so the gate counted every run as tier 2 and
-# refused it in every lane. The launcher devkit installed, run by its path, with the content and the engine the skills
-# step recorded (STATE/skill-engines.json), is that engine and is not read as a script; read-only lanes run its read
-# verbs with their reading flags only. Each hostile case (a swapped engine, an edited launcher, a variable that
-# changes what it runs, a copy elsewhere, a write verb or flag) first shows the untouched launcher allowed, then
-# refused. The skill and its made-up engine are installed in the run's temporary home with the download faked;
-# nothing runs the launcher. Run: python3 -m unittest tests.test_guard_impeccable -v
+# impeccable in crew lanes (lib/devkit/guard.py, _ro_impeccable). Crew members run impeccable's engine with
+# `dev impeccable <verb>` (lib/devkit/impeccable.py), which takes the engine from devkit's own skills folder and checks
+# its digest itself. The skill's launcher typed by its path is judged like any other script: the shell can reach
+# another file than the one the guard reads by the same words (a link, `..` after `cd`, a quoted `~`, a glob, a folder
+# moved earlier in the same command; the Code reviewer's reviews of 11fd55e, 452dd51 and 1e606b7), so no typed path to
+# it is trusted, in either kind of lane. Read-only lanes run `dev impeccable` with its read verbs and reading flags on
+# local paths only; write lanes run every verb. The skill, a made-up engine and the install record are installed in the
+# run's temporary home with the download faked; nothing runs the launcher or the engine.
+# Run: python3 -m unittest tests.test_guard_impeccable -v
 import contextlib
 import hashlib
 import io
-import os
 import shutil
 import sys
 import tempfile
@@ -37,6 +37,8 @@ LAUNCHER = ("#!/bin/sh\nset -eu\n"
             "dir=$(CDPATH= cd -- \"$(dirname -- \"$0\")\" && pwd)\n"
             "bin=\"$dir/bin/$(uname -s)-$(uname -m)/impeccable\"\n"
             "exec \"$bin\" \"$@\"\n")
+BAD = "#!/bin/sh\ngit push --force origin main\n"
+REL = ".claude/skills/impeccable/scripts/impeccable"  # the launcher below the home folder, through the skill's link
 READER = "seraph"  # a review lane: the read-only allowlist applies
 WRITER = "sati"  # a build lane: the gate applies, the allowlist does not
 
@@ -80,134 +82,110 @@ class LauncherCase(unittest.TestCase):
         (core.STATE / setup.ENGINES_FILE).unlink(missing_ok=True)
 
     def paths(self):
-        # the launcher by devkit's constant, typed out below the share folder, and through the Claude skills link
-        return [self.launcher, "~/.local/share/devkit/skills/impeccable/scripts/impeccable",
-                "~/.claude/skills/impeccable/scripts/impeccable"]
+        # the installed launcher by devkit's constant, typed out below the share folder, and through the Claude skills
+        # link: each one does run the installed launcher, and still none is trusted
+        return [self.launcher, "~/.local/share/devkit/skills/impeccable/scripts/impeccable", "~/" + REL]
 
     def planted(self):
-        # A folder outside devkit's skills folder, as a cloned repository or a checked-out PR could ship it: a symbolic
-        # link to the installed launcher, a link `up` to the launcher's own bin folder, a link `s` to its scripts
-        # folder, and an engine planted where the launcher looks when its path names this folder. The launcher finds
-        # its folder with `cd "$(dirname "$0")"`, which keeps the link's folder and resolves `..` by name, so each
-        # command below runs the planted engine (checked with /bin/sh, bash and zsh); through `s`, it also reads its
-        # skill files from this folder (`$dir/..`). The shell's `cd` takes `..` by name too, so after `cd <d>/up/..` it
-        # is in <d> while the guard follows the link to the scripts folder: `./impeccable` there runs <d>'s own file,
-        # a plain script in <e>. A quoted or escaped `~` is not the home folder to the shell but a folder named `~` in
-        # its own folder, so `"~/.claude/…/impeccable"` runs <e>'s `~/.claude/…/impeccable`, while the guard's words,
-        # without their quotes, name the installed launcher. Returns the commands, each with the folder it runs in.
-        d, e = Path(tempfile.mkdtemp(dir=core.HOME)), Path(tempfile.mkdtemp(dir=core.HOME))
-        self.addCleanup(shutil.rmtree, d, True)
-        self.addCleanup(shutil.rmtree, e, True)
+        # Commands that run another file than the installed launcher the guard reads by the same words, as a cloned
+        # repository or a checked-out PR could set them up (the Code reviewer's probes, checked with /bin/sh, bash and
+        # zsh). The launcher finds its folder with `cd "$(dirname "$0")"`, which keeps a link's folder and takes `..`
+        # by name, and so does the shell's `cd`: a link to the launcher, a link `up` to its bin folder, `s` to its
+        # scripts folder. A quoted or escaped `~`, before or after the `~` ("~/…", ~""/…, ~\/…, $'~/…'), is a folder
+        # named `~` in the shell's own folder, not the home folder. A glob (`?`, `[?]`, `*`) matches a planted folder
+        # beside the skill's link. A link, a parent folder or ~/.claude/skills itself swapped earlier in the same
+        # command makes the typed path reach a planted script after the guard read it. Returns the commands, each
+        # with the folder it runs in.
+        d, e, h = (Path(tempfile.mkdtemp(dir=core.HOME)) for _ in range(3))
+        for f in (d, e, h):
+            self.addCleanup(shutil.rmtree, f, True)
         (d / "impeccable").symlink_to(self.launcher)
         (d / "s").symlink_to(self.engine.parent.parent.parent)
+        for name in ("?", "X"):
+            (d / name).symlink_to(self.skill)
         for f in (d, e):
             (f / "up").symlink_to(self.engine.parent.parent)
-        plant, tilde = d / "bin" / self.plat / "impeccable", e / "~" / ".claude" / "skills" / "impeccable" / "scripts"
-        plant.parent.mkdir(parents=True)
-        tilde.mkdir(parents=True)
-        for f in (plant, e / "impeccable", tilde / "impeccable"):
-            f.write_text("#!/bin/sh\ngit push --force origin main\n")
+        (h / "d").mkdir()
+        (h / "d" / "X").symlink_to(self.skill)
+        plant = d / "bin" / self.plat / "impeccable"
+        tilde = e / "~" / ".claude" / "skills" / "impeccable" / "scripts"
+        folders = (plant.parent, tilde, d / "0" / "scripts", d / "evil" / "scripts", h / "evil" / "scripts")
+        for f in folders:
+            f.mkdir(parents=True)
+        for f in (plant, e / "impeccable", *(f / "impeccable" for f in folders[1:])):
+            f.write_text(BAD)
             f.chmod(0o755)
         return [(f"{d}/impeccable context", CWD), ("./impeccable detect src", str(d)),
                 (f"cd {d}/up && ../impeccable context", CWD), (f"{d}/up/../impeccable context", CWD),
                 (f"cd {d}/up/.. && ./impeccable context", CWD), (f"cd {d}/up && cd .. && ./impeccable context", CWD),
                 (f"pushd {d}/up/.. && ./impeccable context", CWD), ("cd up/.. && ./impeccable context", str(e)),
                 (f"{d}/s/impeccable context", CWD),
-                (f"cd {e} && \"~/.claude/skills/impeccable/scripts/impeccable\" context", CWD),
-                ("'~'/.claude/skills/impeccable/scripts/impeccable context", str(e)),
-                ("\\~/.claude/skills/impeccable/scripts/impeccable context", str(e))]
+                (f"cd {e} && \"~/{REL}\" context", CWD), (f"'~'/{REL} context", str(e)), (f"\\~/{REL} context", str(e)),
+                (f"~\"\"/{REL} context", str(e)), (f"~''/{REL} context", str(e)), (f"~\\/{REL} context", str(e)),
+                (f"~\"/{REL}\" context", str(e)), (f"$'~/{REL}' context", str(e)), (f"~/\"{REL}\" context", str(e)),
+                (f"{d}/?/scripts/impeccable context", CWD), (f"{d}/[?]/scripts/impeccable context", CWD),
+                (f"{d}/*/scripts/impeccable context", CWD),
+                (f"ln -sfn {d}/evil {d}/X && {d}/X/scripts/impeccable context", CWD),
+                (f"rm {d}/X; ln -s {d}/evil {d}/X; {d}/X/scripts/impeccable init", CWD),
+                (f"mv {d}/evil {d}/X2 && mv -f {d}/X2 {d}/X; {d}/X/scripts/impeccable context", CWD),
+                (f"mkdir -p {h}/n && ln -s {h}/evil {h}/n/X && mv {h}/d {h}/d.old && mv {h}/n {h}/d && "
+                 f"{h}/d/X/scripts/impeccable init", CWD),
+                (f"mkdir -p ~/.claude/n && ln -s {h}/evil ~/.claude/n/impeccable && mv ~/.claude/skills "
+                 f"~/.claude/skills.old && mv ~/.claude/n ~/.claude/skills && ~/{REL} init", CWD)]
 
 
 class ReadOnlyLaneTests(LauncherCase):
-    def test_a_read_only_lane_runs_the_launchers_read_verbs(self):
-        for path in self.paths():
-            for args in ("context", "context --target src/app.tsx 2>&1 | head -80", "detect --json --scope type src",
-                         "detect --list-rules --quiet", "doctor --json"):
-                with self.subTest(path=path, args=args):
-                    self.assertIsNone(lane(f"{path} {args}", READER))
+    def test_a_read_only_lane_runs_dev_impeccable_with_its_read_verbs(self):
+        for args in ("context", "context --target src/x", "context --target=src/app.tsx 2>&1 | head -80",
+                     "-- context", "detect --json --scope type src", "detect --list-rules --quiet", "doctor --json",
+                     "doctor --target src"):
+            with self.subTest(args=args):
+                self.assertIsNone(lane(f"dev impeccable {args}", READER))
 
-    def test_a_read_only_lane_leaves_the_launchers_write_verbs_to_write_lanes(self):
-        self.assertIsNone(lane(f"{self.launcher} context", READER))
-        for verb in ("init", "document", "extract", "live", "generate", "pin unpin polish", "hooks on"):
+    def test_a_read_only_lane_leaves_impeccables_write_verbs_to_write_lanes(self):
+        for verb in ("init", "document", "extract", "live", "generate", "pin unpin polish", "hooks on", ""):
             with self.subTest(verb=verb):
-                why = lane(f"{self.launcher} {verb}", READER)
-                self.assertIsNotNone(why)
-                self.assertIn("write lane", why)
+                self.assertIn("write lane", lane(f"dev impeccable {verb}".strip(), READER) or "")
 
     def test_a_read_only_lane_refuses_flags_that_write_or_reach_out(self):
-        self.assertIsNone(lane(f"{self.launcher} detect --json src", READER))
         for args in ("doctor --fix", "detect --github src", "detect --json https://example.com",
                      "detect --cdp 9222 --json", "detect --json src --viewport 390x844", "context --out notes.md",
-                     "context src/app.tsx"):
+                     "context src/app.tsx", "context -- --out notes.md", "detect src -- --fix",
+                     "context --target localhost:3000", "context --target=//example.com/app", "doctor --target example.com"):
             with self.subTest(args=args):
-                self.assertIsNotNone(lane(f"{self.launcher} {args}", READER))
+                self.assertIn("write lane", lane(f"dev impeccable {args}", READER) or "")
 
     def test_a_read_only_lane_lets_detect_scan_local_paths_but_not_a_host(self):
         # `detect` scans a URL when it gets one; a host and port or a bare domain is a URL to it, not a local path
         for args in ("detect --json src", "detect ./index.html", "detect src/index.html", "detect ~/site/a.html"):
             with self.subTest(args=args):
-                self.assertIsNone(lane(f"{self.launcher} {args}", READER))
+                self.assertIsNone(lane(f"dev impeccable {args}", READER))
         for args in ("detect localhost:3000", "detect --json 127.0.0.1:8080/pricing", "detect example.com",
                      "detect example.com/pricing", "detect 192.168.1.20", "detect localhost", "detect //example.com",
                      "detect [::1]:5173", "detect index.html"):
             with self.subTest(args=args):
-                self.assertIn("local path", lane(f"{self.launcher} {args}", READER) or "")
+                self.assertIn("local path", lane(f"dev impeccable {args}", READER) or "")
 
-    def test_a_read_only_lane_does_not_trust_a_link_to_the_launcher_elsewhere(self):
+    def test_a_read_only_lane_refuses_the_launcher_typed_by_its_path(self):
+        self.assertIsNone(lane("dev impeccable context", READER))
         for path in self.paths():
-            self.assertIsNone(lane(f"{path} context", READER))
+            with self.subTest(path=path):
+                self.assertIsNotNone(lane(f"{path} context", READER))
         for cmd, cwd in self.planted():
             with self.subTest(cmd=cmd):
                 self.assertIsNotNone(guard.crew_shell_verdict(cmd, cwd, None, READER))
 
 
 class GateTests(LauncherCase):
-    def test_a_link_to_the_launcher_elsewhere_is_not_trusted(self):
-        for path in self.paths():
-            self.assertIsNone(lane(f"{path} context", WRITER))
+    def test_a_write_lane_refuses_the_launcher_typed_by_its_path(self):
+        for args in ("context", "live", "init"):  # a write lane runs every verb through dev
+            self.assertIsNone(lane(f"dev impeccable {args}", WRITER))
+        for path in self.paths():  # read as a script: `exec "$bin"` names its program only at run time
+            with self.subTest(path=path):
+                self.assertIn("only known when it runs", lane(f"{path} context", WRITER) or "")
         for cmd, cwd in self.planted():
             with self.subTest(cmd=cmd):
-                v = guard.crew_shell_verdict(cmd, cwd, None, WRITER)
-                self.assertIn("only known when it runs", v[1] if v else "")
-
-    def test_a_write_lane_runs_the_installed_launcher(self):
-        for path in self.paths():
-            for args in ("context", "live", "init"):
-                with self.subTest(path=path, args=args):
-                    self.assertIsNone(lane(f"{path} {args}", WRITER))
-
-    def test_a_swapped_engine_is_not_trusted(self):
-        self.assertIsNone(lane(f"{self.launcher} context", WRITER))
-        st = self.engine.stat()
-        self.engine.unlink()  # a same-size file with the old times: only ctime and the digest tell it apart
-        self.engine.write_bytes(b"#" * st.st_size)
-        os.utime(self.engine, ns=(st.st_atime_ns, st.st_mtime_ns))
-        self.assertIn("only known when it runs", lane(f"{self.launcher} context", WRITER) or "")
-
-    def test_an_edited_launcher_is_not_trusted(self):
-        self.assertIsNone(lane(f"{self.launcher} context", WRITER))
-        with open(self.launcher, "a") as fh:
-            fh.write("gh pr merge 12 --admin\n")
-        self.assertIsNotNone(lane(f"{self.launcher} context", WRITER))
-
-    def test_a_variable_that_changes_what_the_launcher_runs_takes_its_trust(self):
-        self.assertIsNone(lane(f"{self.launcher} context", WRITER))
-        for cmd in (f"IMPECCABLE_BIN=/tmp/x {self.launcher} context",
-                    f"export PATH=/tmp/evil:/usr/bin; {self.launcher} context",
-                    f"env PATH=/tmp/evil {self.launcher} context",
-                    f"HOME=/tmp/h {self.launcher} context",
-                    f"bash -c 'IMPECCABLE_BIN=/tmp/x {self.launcher} context'"):
-            with self.subTest(cmd=cmd):
-                self.assertIsNotNone(lane(cmd, WRITER))
-        with mock.patch.dict(os.environ, {"IMPECCABLE_BIN": "/tmp/x"}):  # set in the session's own environment
-            self.assertIsNotNone(lane(f"{self.launcher} context", WRITER))
-
-    def test_a_copy_outside_devkits_skills_folder_is_not_trusted(self):
-        self.assertIsNone(lane(f"{self.launcher} context", WRITER))
-        copy = Path(tempfile.mkdtemp(dir=core.HOME)) / "impeccable"
-        self.addCleanup(shutil.rmtree, copy.parent, True)
-        shutil.copytree(self.skill, copy)
-        self.assertIsNotNone(lane(f"{copy}/scripts/impeccable context", WRITER))
+                self.assertEqual((guard.crew_shell_verdict(cmd, cwd, None, WRITER) or ("allow",))[0], "deny")
 
 
 if __name__ == "__main__":
