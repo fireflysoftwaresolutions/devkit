@@ -377,8 +377,8 @@ main() {
   INSTALL_URL="https://raw.githubusercontent.com/fireflysoftwaresolutions/devkit/main/install.sh"
   DEFAULT_REPO="https://github.com/fireflysoftwaresolutions/devkit.git"
   # Where Homebrew installs brew when it is not on PATH, colon-separated: /opt/homebrew on Apple silicon, /usr/local
-  # on Intel. The tests point DEVKIT_BREW_PATHS at a temporary folder, so they never reach the Homebrew of the Mac.
-  BREW_PATHS="${DEVKIT_BREW_PATHS:-/opt/homebrew/bin/brew:/usr/local/bin/brew}"
+  # on Intel. The tests point DEVKIT_TEST_BREW_PATHS at a temporary folder, so they never reach this Mac's Homebrew.
+  BREW_PATHS="${DEVKIT_TEST_BREW_PATHS:-/opt/homebrew/bin/brew:/usr/local/bin/brew}"
   SETUP_ARGS=() NO_SETUP=0 YES=0 STEP="start" BREW_PREFIX="" PY="" SETUP_RC=0 GITHUB=0
   local arg src here=""
   for arg in "$@"; do

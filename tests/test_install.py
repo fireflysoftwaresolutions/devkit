@@ -2,9 +2,10 @@
 # SPDX-License-Identifier: Apache-2.0
 """install.sh, the one-line installer, run through a pipe as `curl … | bash` runs it: against a local repository with
 release tags, with stub `brew`, `gh`, `uname`, `sysctl` and `sw_vers` first on PATH, a temporary HOME, and the folders
-where it looks for Homebrew (`DEVKIT_BREW_PATHS`) moved into the temporary folder. Nothing here touches Homebrew, the
-network, ~/.claude, ~/.codex or the shell profile. The repository's `bin/dev` is a stand-in that records how the setup
-wizard was started and, with the real devkit library, whether the wizard would ask its questions.
+where it looks for Homebrew moved into the temporary folder (`DEVKIT_TEST_BREW_PATHS`, a test hook of the installer).
+Nothing here touches Homebrew, the network, ~/.claude, ~/.codex or the shell profile. The repository's `bin/dev` is a
+stand-in that records how the setup wizard was started and, with the real devkit library, whether the wizard would ask
+its questions.
 """
 import json
 import os
@@ -132,7 +133,7 @@ class Machine:
         env = dict(GIT_ENV, HOME=str(self.home), PATH=f"{self.stubs}:/usr/bin:/bin", TERM="xterm-256color",
                    LANG="en_US.UTF-8", STUB_LOG=str(self.log), STUB_PREFIX=str(self.prefix),
                    STUB_GH_SIGNED_IN=str(self.signed_in), SETUP_LOG=str(self.setup_log), REAL_LIB=LIB,
-                   DEVKIT_REPO=f"file://{self.remote}", DEVKIT_BREW_PATHS=":".join(map(str, self.brew_paths)),
+                   DEVKIT_REPO=f"file://{self.remote}", DEVKIT_TEST_BREW_PATHS=":".join(map(str, self.brew_paths)),
                    # if a real gh or brew were ever reached (a hardcoded path), it must not prompt, update, or reach
                    # the network: every HTTP(S) request goes to a closed local port and fails at once
                    GH_PROMPT_DISABLED="1", GH_CONFIG_DIR=str(self.home / ".config" / "gh"),
