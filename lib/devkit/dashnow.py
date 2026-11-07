@@ -116,7 +116,8 @@ def _q(v) -> str:
 
 
 def _who(name, roster) -> str | None:
-    """A crew member as `<Role> (<Name>)`; anyone else as written."""
+    """A crew member as `<Role> (<Name>)`; the main session as "The tech lead" when the roster cannot be read;
+    anyone else as written."""
     name = str(name or "").strip()
     if not name:
         return None
@@ -125,8 +126,8 @@ def _who(name, roster) -> str | None:
             from . import crew
             return crew.who(name, roster)
         except Exception:  # an unreadable roster: the name as written
-            return name
-    return name
+            pass
+    return "The tech lead" if name == "main" else name
 
 
 def _forge_host(p: dict):
@@ -331,18 +332,28 @@ def landing(run: dict, now: float) -> dict:
 # --------------------------------------------------------------------------- runs
 
 BRIEF_TEXT = ("goal", "state", "headline", "last", "next", "mode", "agent", "branch", "project")
-BRIEF_NUM = ("step", "steps", "estimate", "estimate_cal", "started", "eta_min", "eta_lo", "eta_hi", "active_min",
-             "wall_min", "pace", "updated", "total_min", "finished")
+BRIEF_NUM = ("step", "steps", "estimate", "estimate_cal", "eta_min", "eta_lo", "eta_hi", "active_min", "wall_min",
+             "pace", "total_min")                  # minutes, counts and a pace
+BRIEF_EPOCH = ("started", "updated", "finished")   # instants
+MINUTES_MAX = 1_000_000                            # about 2 years: a larger duration from another Mac is not real
+EPOCH_SPAN_S = 10 * 365 * 86400                    # an instant from another Mac further than ~10 years from now
 
 
-def _num(v):
-    return v if isinstance(v, (int, float)) and not isinstance(v, bool) else None
+def _num(v, lo: float = 0, hi: float = MINUTES_MAX):
+    """A finite number in [lo, hi], or None. Another Mac's presence is untrusted: a NaN, 1e308 or an instant
+    centuries away would make its landing time raise."""
+    if isinstance(v, bool) or not isinstance(v, (int, float)) or not math.isfinite(v) or not lo <= v <= hi:
+        return None
+    return v
 
 
-def _remote_brief(b: dict) -> dict:
-    """A run brief from another machine's presence, kept to today's fields with their types (untrusted input)."""
+def _remote_brief(b: dict, now: float) -> dict:
+    """A run brief from another machine's presence, kept to today's fields with their types and sane ranges
+    (untrusted input)."""
+    span = (now - EPOCH_SPAN_S, now + EPOCH_SPAN_S)
     out = {k: _line(b.get(k), LINE) if isinstance(b.get(k), str) else None for k in BRIEF_TEXT}
     out.update({k: _num(b.get(k)) for k in BRIEF_NUM})
+    out.update({k: _num(b.get(k), *span) for k in BRIEF_EPOCH})
     out["plan"] = [{"name": _line(s.get("name"), 120), "state": _line(s.get("state"), 20), "est": _num(s.get("est")),
                     "min": _num(s.get("min")), "owner": _line(s.get("owner"), 120)}
                    for s in (b.get("plan") if isinstance(b.get("plan"), list) else [])[:200] if isinstance(s, dict)]
@@ -352,8 +363,28 @@ def _remote_brief(b: dict) -> dict:
     return out
 
 
+def _remote_run(s, h: str, user: str, updated, now: float):
+    """One session of another machine as a run, or None when it has no live progress."""
+    b = s.get("progress") if isinstance(s, dict) else None
+    if not isinstance(b, dict) or not b.get("goal") or b.get("state") not in ("running", "blocked", "done"):
+        return None
+    if b.get("state") == "done" and (not updated or now - updated > DONE_RUN_S):
+        return None
+    run = _remote_brief(b, now)
+    agent, project = _line(s.get("agent"), 40) or "agent", _line(s.get("project"), 200) or None
+    key = f"{user}@{h}|{agent}|{project}|{s.get('started')}"
+    slug = re.sub(r"[^a-z0-9]+", "-", f"{h}-{agent}".lower()).strip("-")
+    run.update(id=f"remote-{slug}-{hashlib.blake2b(key.encode(), digest_size=2).hexdigest()}", agent=agent,
+               project=project, branch=_line(s.get("branch"), 200) or None, machine=_line(h, 80),
+               who=_line(f"{user}@{h}", 120), host=_line(h, 80), seen=updated,
+               started=_int(run.get("started")) or _int(s.get("started")))
+    run["waiting_on"], run["eta"] = _remote_landing(run, updated, now)
+    return run
+
+
 def _remote_runs(team, host: str, now: float) -> list:
-    """Runs of other machines, from their presence (sessions[].progress): never a decision, never a queue row."""
+    """Runs of other machines, from their presence (sessions[].progress): never a decision, never a queue row. A
+    session that cannot be read is skipped alone; this Mac's runs and the other sessions still show."""
     from . import work
     out = []
     for person in team or []:
@@ -364,21 +395,12 @@ def _remote_runs(team, host: str, now: float) -> list:
             continue
         updated = int(work.parse_iso(person.get("updated") or "")) or None
         for s in person.get("sessions") or []:
-            b = s.get("progress") if isinstance(s, dict) else None
-            if not isinstance(b, dict) or not b.get("goal") or b.get("state") not in ("running", "blocked", "done"):
+            try:
+                run = _remote_run(s, h, user, updated, now)
+            except Exception:  # an unforeseen shape in one record from another Mac: skip that session only
                 continue
-            if b.get("state") == "done" and (not updated or now - updated > DONE_RUN_S):
-                continue
-            run = _remote_brief(b)
-            agent, project = _line(s.get("agent"), 40) or "agent", _line(s.get("project"), 200) or None
-            key = f"{user}@{h}|{agent}|{project}|{s.get('started')}"
-            slug = re.sub(r"[^a-z0-9]+", "-", f"{h}-{agent}".lower()).strip("-")
-            run.update(id=f"remote-{slug}-{hashlib.blake2b(key.encode(), digest_size=2).hexdigest()}", agent=agent,
-                       project=project, branch=_line(s.get("branch"), 200) or None, machine=_line(h, 80),
-                       who=_line(f"{user}@{h}", 120), host=_line(h, 80), seen=updated,
-                       started=_int(run.get("started")) or _int(s.get("started")))
-            run["waiting_on"], run["eta"] = _remote_landing(run, updated, now)
-            out.append(run)
+            if run:
+                out.append(run)
     out.sort(key=lambda r: -(r.get("started") or 0))
     return out[:REMOTE_RUNS_CAP]
 
@@ -455,9 +477,11 @@ def _risk_rows(p: dict, rows: list) -> list:
             state = "waiting"
         else:
             continue
+        # dev backup never pushes the default branch (backup._one skips it), so it gets no command
         out.append({"branch": _line(r.get("name"), 200), "state": state, "reason": _line(b.get("reason"), LINE),
                     "commits": _int(r.get("unpushed")), "oldest": _int(r.get("oldest_unpushed")),
-                    "copy": _backup_cmd(p.get("path"), r.get("name")) if st == "not_backed_up" else None})
+                    "copy": _backup_cmd(p.get("path"), r.get("name"))
+                    if st == "not_backed_up" and not r.get("default") else None})
     out.sort(key=lambda x: (STATE_ORDER[x["state"]], x["oldest"] is None, x["oldest"] or 0, x["branch"]))
     return out
 
@@ -748,7 +772,8 @@ def _headline(items, total_rows, runs, raw_runs, reg, next_up) -> dict:
     top = [it for it in items if it["rank"] <= 4]
     count = sum(1 for it in total_rows if it["rank"] <= 4)
     if any(it["rank"] == 1 for it in top):
-        text = "1 decision waits for you" if count == 1 else f"{count} things need you"
+        text = f"{count} things need you" if count != 1 else \
+            "1 grant waits for you" if top[0]["kind"] == "grant" else "1 decision waits for you"
         line = " ".join(it["clause"] for it in top[:2])
         return {"kind": "needs_you", "count": count, "text": text, "line": _line(line)}
     urgent = next((it for it in top if it["kind"] in URGENT), None)

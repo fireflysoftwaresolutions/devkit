@@ -194,6 +194,16 @@ class QueueTests(unittest.TestCase):
                          (2, "Fee report stopped reporting", ["Tech lead (Morpheus) sent no update since 14:30."],
                           at(14, 30)))
 
+    def test_without_a_roster_the_main_session_is_the_tech_lead(self):
+        d = fx.decision("D1", "Go?", ["A: yes", "B: no"], "A", NOW - 300, frm="main", from_name="")
+        silent = statement_run(session="5e6f", goal="Fee report", started=at(14, 0),
+                               updates=[{"ts": at(14, 30), "kind": "note", "text": "halfway", "next": ""}])
+        kw = with_runs(fx.welcome(), statement_run(decisions=[d]), silent)
+        kw["roster"] = None
+        doc = areas(kw)
+        self.assertEqual(row(doc, "decision:claude-9c1d:D1")["asker"], "The tech lead")
+        self.assertEqual(row(doc, "run_stale:claude-5e6f")["lines"], ["The tech lead sent no update since 14:30."])
+
     def test_the_queue_is_capped_at_200_rows_and_counts_them_all(self):
         decs = [fx.decision(f"D{n}", f"Question {n}?", ["A: yes", "B: no"], "A", NOW - n) for n in range(1, 211)]
         doc = areas(with_runs(fx.welcome(), statement_run(decisions=decs)))
@@ -215,6 +225,12 @@ class HeadlineTests(unittest.TestCase):
         kw["ci"] = {"watches": [], "complete": True, "total": 0, "watching": []}
         self.assertEqual(self.headline(kw), {"kind": "needs_you", "count": 1, "text": "1 decision waits for you",
                                              "line": "Invoice export is paused until you answer D1."})
+
+    def test_a_lone_grant_says_grant(self):
+        d = fx.decision("D1", "Merge PR 142 now?", ["yes", "no"], "yes", at(15, 2), irreversible="merge", target="142")
+        self.assertEqual(self.headline(with_runs(fx.welcome(), statement_run(decisions=[d]))),
+                         {"kind": "needs_you", "count": 1, "text": "1 grant waits for you",
+                          "line": "Statement import is paused until you answer D1."})
 
     def test_urgent_ci_failure_names_the_branch_and_the_first_error(self):
         kw = fx.example()
@@ -432,6 +448,16 @@ class AreaTests(unittest.TestCase):
         self.assertEqual((s["line"]["tone"], s["line"]["text"], s["totals"]["unknown_projects"]),
                          ("unknown", "No branch map yet. dev sync makes one.", 2))
 
+    def test_the_default_branch_gets_no_backup_command_since_dev_backup_never_pushes_it(self):
+        kw = fx.empty()
+        kw["reg"]["projects"][0]["branches"][0].update(
+            backup={"state": "not_backed_up", "reason": "2 commits only on this Mac"}, unpushed=2,
+            oldest_unpushed=at(9, 0))
+        doc = areas(kw)
+        safety_row, queue_row = doc["safety"]["projects"][0]["rows"][0], row(doc, "backup:acme/lending-core:main")
+        self.assertEqual((safety_row["branch"], safety_row["state"], safety_row["copy"], queue_row["copy"]),
+                         ("main", "not_backed_up", None, None))
+
     def test_since_line_lists_what_finished(self):
         self.assertEqual(fx.document("example")["since"]["line"], {
             "from": at(0, 0, 5), "text": "4 tasks done · 2 PRs merged · 1 run finished in 1 h 40 (estimate 2 h)",
@@ -490,6 +516,42 @@ class HostileInputTests(unittest.TestCase):
         kw["team"] = [p]
         doc = areas(kw)
         self.assertEqual((doc["attention"]["items"], doc["runs"][0]["machine"]), ([], "studio"))
+
+    def test_a_remote_number_that_is_no_real_time_drops_only_that_value(self):
+        # another Mac's presence, synced through the handoff repository: NaN, 1e308 and an instant 3 billion years out
+        cases = {"eta_hi 1e308": (dict(eta_lo=10, eta_hi=1e308), "none", "No estimate, so no landing time."),
+                 "eta_lo NaN": (dict(eta_lo=json.loads("NaN"), eta_hi=20), "none", "No estimate, so no landing time."),
+                 "done, updated 1e20": (dict(state="done", updated=1e20), "done", "Finished 15:13 in 48 min")}
+        for name, (change, state, text) in cases.items():
+            with self.subTest(name):
+                p = fx.remote_presence()
+                p["sessions"][0]["progress"].update(change)
+                self.assertTrue(dashboard.valid_presence(p))
+                kw = fx.example()
+                kw["team"] = [p]
+                runs = areas(kw)["runs"]
+                self.assertIsInstance(runs, list, runs)
+                self.assertEqual([r["id"] for r in runs if not r["machine"]], ["claude-7f3a"])
+                remote = next(r for r in runs if r["machine"])
+                self.assertEqual((remote["eta"]["state"], remote["eta"]["text"]), (state, text))
+                self.assertNotRegex(json.dumps(runs), r"\bNaN\b|\bInfinity\b")  # the page's JSON.parse refuses them
+
+    def test_a_remote_session_that_breaks_skips_only_itself(self):
+        p = fx.remote_presence()
+        broken = dict(p["sessions"][0]["progress"], goal="Broken")
+        p["sessions"].append(dict(p["sessions"][0], started=at(14, 30), progress=broken))
+        kw = fx.example()
+        kw["team"] = [p]
+        real = dashnow._remote_brief
+
+        def brief(b, *rest):  # an unforeseen shape in one session's record
+            if b.get("goal") == "Broken":
+                raise TypeError("unsupported operand")
+            return real(b, *rest)
+        with mock.patch.object(dashnow, "_remote_brief", side_effect=brief):
+            runs = areas(kw)["runs"]
+        self.assertIsInstance(runs, list, runs)
+        self.assertEqual([r["goal"] for r in runs], ["Invoice export", "Rules engine migration"])
 
     def test_oversize_and_malformed_presence_files_are_skipped(self):
         with tempfile.TemporaryDirectory() as tmp:
