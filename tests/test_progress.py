@@ -938,18 +938,19 @@ class EstimateRoundingTests(unittest.TestCase):
 
 class ScopeWriteTests(unittest.TestCase):
     # M292: Seraph (review-only) was flagged for docs/audit.md, which Neo, whose step scope holds it, changed during
-    # Seraph's shell call. A file a running lane's scope holds is that lane's; the reviewer is flagged for the rest
-    def test_a_file_in_a_working_members_scope_is_theirs_not_the_reviewers(self):
+    # Seraph's shell call; a98d7f5 then dropped such a file, so a write the reviewer makes inside a working member's
+    # scope went unseen (the Code reviewer's batch 5). It is flagged "possible", naming whose scope holds it
+    def test_a_file_in_a_working_members_scope_is_flagged_possible_not_dropped(self):
         with TempState():
             pg.start("Work", plan=["audit docs", "review"])
             pg.assign("audit docs", "Neo", scope="docs/audit.md", why="test")
             pg.assign("review", "Seraph")
             launch("a_neo", "devkit:neo", "Neo: audit docs")
             launch("a_seraph", "devkit:seraph", "Seraph: review")
-            self.assertIsNone(pg.scope_written("claude", "s1", "a_seraph", ["docs/audit.md"]))
-            self.assertNotIn("scope_writes", pg.load_run("claude", "s1")["agents"]["a_seraph"])
-            flagged = pg.scope_written("claude", "s1", "a_seraph", ["docs/audit.md", "lib/api.py"])
-            self.assertEqual(flagged["paths"], ["lib/api.py"])
+            flagged = pg.scope_written("claude", "s1", "a_seraph", ["docs/audit.md"]) or {}
+            self.assertEqual((flagged.get("paths"), flagged.get("certainty")), (["docs/audit.md"], "possible"))
+            told = [m["text"] for m in pg.load_run("claude", "s1").get("messages") or [] if m.get("to") == "main"]
+            self.assertTrue(any("docs/audit.md is in the scope of" in t and "Neo" in t for t in told), told)
 
 
 LANE_REPORT = ("**[Firefly> DevKit · Security engineer (The Keymaker)]** acme/api · `main` · {task}\n"

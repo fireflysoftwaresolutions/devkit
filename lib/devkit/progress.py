@@ -3647,10 +3647,11 @@ def _on_subagent(agent: str, data: dict, started: bool, now: float | None = None
 def scope_written(agent: str, sid: str, aid: str, paths: list, now: float | None = None) -> dict | None:
     """A review or read-only lane's shell call wrote these files (spec F7, write detection): the lane keeps them in
     `scope_writes`, so its report is unverified and its step cannot end done on its word; Morpheus gets a crew
-    message; and the audit trail a scope.write record. A file in the scope of another lane that works now is that
-    lane's, so it is left out (M292). "possible" when another lane that may write works in the run at the time (a
-    file outside every scope may be its), else "certain". -> the lane's scope_writes, or None without a lane or
-    without a file left to flag."""
+    message; and the audit trail a scope.write record. "possible" when the file may be another lane's: it is in the
+    scope of a lane that works now (M292; the message names that lane, and the file is never left out, since the
+    review lane may have written it itself: the Code reviewer's batch 5 on a98d7f5), or another lane that may write
+    works in the run at the time (a file outside every scope may be its); else "certain". -> the lane's
+    scope_writes, or None without a lane."""
     now = now or time.time()
     paths = sorted({str(p) for p in paths or [] if p})
     if not paths:
@@ -3663,11 +3664,10 @@ def scope_written(agent: str, sid: str, aid: str, paths: list, now: float | None
         chain = set(lane_chain(run, aid))
         running = [k for k, v in run["agents"].items() if k not in chain and v.get("state") == "running"]
         layers = {k: lane_scope(run, k) for k in running}
-        paths = [p for p in paths if not any(layers[k] and in_scope(p, layers[k]) for k in running)]
-        if not paths:
-            return None  # every file is in the scope of a lane that works now: theirs (M292)
+        held = {p: [k for k in running if layers[k] and in_scope(p, layers[k])] for p in paths}
+        holders = [k for k in running if any(k in ks for ks in held.values())]
         others = [k for k in running if lane_tools(run, k) in ("build", "all")]
-        certainty = "possible" if others else "certain"
+        certainty = "possible" if others or all(held.values()) else "certain"
         level = lane_tools(run, aid)
         had = lane.get("scope_writes") or {}
         lane["scope_writes"] = {"ts": round(now), "paths": sorted(set(had.get("paths") or []) | set(paths))[:20],
@@ -3675,8 +3675,12 @@ def scope_written(agent: str, sid: str, aid: str, paths: list, now: float | None
                                 certainty}
         who = lane.get("persona") or lane.get("label") or aid
         shown = ", ".join(paths[:5]) + (f" and {len(paths) - 5} more" if len(paths) > 5 else "")
-        maybe = f" (possibly another member's: {', '.join(_name_of(run, k) for k in others[:3])} works too)" \
-            if others else ""
+        inside = [p for p in paths if held[p]]
+        bits = [f"{', '.join(inside[:3])} {'is' if len(inside) == 1 else 'are'} in the scope of "
+                f"{', '.join(_name_of(run, k) for k in holders[:3])}, who works now"] if inside else []
+        rest = [k for k in others if k not in holders]
+        bits += [f"{', '.join(_name_of(run, k) for k in rest[:3])} works too"] if rest else []
+        maybe = f" (possibly another member's: {'; '.join(bits)})" if bits else ""
         _post(run, aid, "main", f"devkit: {who} works {'review-only' if level == 'review' else 'read-only'}, and "
               f"its shell call wrote {shown}{maybe}. Its report counts as unverified: check the change (git diff), "
               f"keep or revert it, then close its step with evidence.", now, from_name="devkit")
