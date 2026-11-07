@@ -75,6 +75,13 @@ and any command it cannot read.
   newest releases, the CHANGELOG headings in between, and whether the checkout and the pinned copy are behind. It is
   read-only, so agents may run it. A daily `update-check` job records the answer at 09:15; the first session of the
   day and `dev status` then name a pending release, without reaching the network themselves.
+- **The dashboard opens on Now, which replaces Home.** One sentence says whether anything needs you, and the line
+  under it names the cause. The **Needs you** queue below it shows up to five rows in the order devkit ranks them,
+  then **All N**; a decision shows its question, who asks, what it pauses, how long it has waited, the options with
+  the recommended one, and the words to type in the session. Each live run has a landing strip of its plan's steps
+  and a landing time that leaves out the time it waits for your answer, and two closing lines name the branches that
+  exist only on this Mac and what finished since yesterday. `g n` and `g o` open Now, and links to `#/overview` and
+  `#/actions` lead there. See [Dashboard › Now](docs/dashboard.md#now).
 
 ### Changed
 
