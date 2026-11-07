@@ -3,6 +3,33 @@
 All notable changes to devkit. Versions follow CalVer `YY.MM.PATCH` (PATCH restarts at 0 each month); tags are
 `vYY.MM.PATCH`. Sections follow [Keep a Changelog](https://keepachangelog.com/).
 
+## [26.11.4] - Unreleased
+
+Not released yet: the date is set when the release is tagged.
+
+### Added
+
+- **The impeccable engine is installed with the skill.** `dev install --only skills` fetches the engine binary for
+  this Mac from the upstream release that the pinned skill names, checks its SHA-256 against the pinned skill's own
+  `engine-checksums.txt`, and puts it beside the launcher, so `impeccable context` no longer downloads code inside an
+  agent session (0.02 s once warm). A mismatch or a failed download installs nothing, is audited, and does not stop
+  the rest of the install. See [Skills and plugins › impeccable and its engine](docs/skills-and-plugins.md#impeccable-and-its-engine).
+- **`dev doctor` checks impeccable:** the skill linked for Claude Code, its engine present with the pinned digest, and
+  the Codex plugin enabled, each with its fix.
+
+### Changed
+
+- **Frontend work starts with impeccable.** The Frontend engineer, the UX designer, and the Mobile engineer load
+  `frontend-design` and `impeccable` and run `impeccable context` once at the start of their work; `i18n` work now
+  requires `impeccable` too.
+
+### Fixed
+
+- **Crew members can run `impeccable context`.** The guard read the launcher as a script that runs a program named
+  only at run time and refused it in every crew lane. It now trusts the launcher devkit installed, while its content
+  and engine match the install record; read-only lanes run only `context`, `detect`, and `doctor` with their reading
+  flags.
+
 ## [26.11.3] - Unreleased
 
 Not released yet: the date is set when the release is tagged. This release installs devkit with one command, runs its
