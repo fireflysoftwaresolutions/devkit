@@ -144,10 +144,24 @@ Not released yet: the date is set when the release is tagged.
   made: the change stays as drift, and the refusal is audited.
   The guard now reads what `screen`, `tmux`, `expect -c`, and AppleScript's `do script` run, refuses `open` of a
   Terminal or iTerm window or a `.command` file and `xargs dev`, and skips a package manager's own options before
-  its verb (`npm --silent exec`, `pnpm -C . exec`, `uv --quiet run`, `uv run --with x`). It refuses `screen -X stuff`
-  keys that hold a control key other than tab, carriage return, or line feed (`^@`, `^A`, `^H`, `^O`, DEL, or ESC,
-  as `^X`, `\NNN`, or the character itself), because the shell edits the line with them, and a command that holds a
-  NUL character. Before, a NUL made the guard fail and let the command through.
+  its verb (`npm --silent exec`, `pnpm -C . exec`, `uv --quiet run`, `uv run --with x`). It refuses a command that
+  holds a NUL character, and a file tool's or an MCP tool's path with one. Before, a NUL made the guard or the
+  crew's scope check after it fail, and the call went through.
+- **Agents cannot type into a terminal session; you can.** `screen` expands `$VAR` and `$:cap:` in what `-X stuff`
+  types and `stuff -k` types a terminal key, so no reading of the keys held. The guard now refuses typing outright,
+  as an allowlist that fails closed. It refuses `screen -X` and `-Q` (`stuff`, `exec`, and every other command sent
+  to a session, after `-S`, `-p`, `-r`, or `-x` too) and tmux's `send-keys`, `send-prefix`, `paste-buffer`,
+  `set-buffer`, `load-buffer`, `pipe-pane`, and `command-prompt`. It refuses a tmux command or option that carries a
+  command (`run-shell`, `if-shell`, `set-hook`, `source-file`, `bind-key`, a hook, `default-command`,
+  `default-shell`, `command-alias`, a `#(…)` format), a configuration file (`screen -c`, `tmux -f`), a tmux command
+  it does not know, and a `screen` or `tmux` word the shell or a runner fills in. It does so in a `;` list, for a
+  name tmux abbreviates (`send-k`), inside `sh -c`, `env`, `timeout`, `xargs`, `find -exec`, or `parallel`, and in a
+  program's code. `screen -ls`, `screen -dm <command>`, `tmux ls`, and `tmux new -d '<command>'` stay open, and the
+  guard still reads the command they start.
+- **The guard reads a command line as bash does.** A backslash-newline joins two lines, a backslash escapes a quote,
+  a comment ends at its newline, and a quoted or escaped `;` is a word, not the end of a command. Before,
+  `dev \`, a newline, and `install` ran `dev install` unrefused, and so did a `git push --force` or an `rm -rf ~`
+  split the same way, a command after `echo \'` and a newline, and a second `find … -exec` after `\;`.
 - **Drift covers what devkit does not manage.** A plugin, MCP server, or skill folder installed outside the catalog,
   for Claude Code and Codex, is reported as `not-in-catalog`. What ships with the Codex app is listed without drift
   only when its own files vouch for it (a bundled plugin whose cached files are all byte-equal to the app bundle's)
@@ -166,9 +180,10 @@ Not released yet: the date is set when the release is tagged.
   accepts. An overlay copy of a devkit default keeps it required, and `dev ext add` refuses one, and a skill whose
   name a devkit default already uses, for either agent, or that devkit puts in the shared skills folder itself (a
   skill from its own tree, or `playwright-cli`): one name is one folder for both agents. Names are compared in any
-  case, as the macOS file system compares them, so `Playwright-CLI` is refused too. A skill name starts with a
-  letter, digit, or underscore, so `.`, `..`, and hidden names are refused, and `dev install` skips a `skills.json`
-  name that would land outside the shared skills folder, deleting nothing.
+  case, as the macOS file system compares them, so `Playwright-CLI` is refused too. A skill name is ASCII letters,
+  digits, dot, dash, and underscore, and starts with a letter, digit, or underscore, so `.`, `..`, hidden names, and
+  another Unicode spelling of a name (which macOS opens as the same folder) are refused. `dev install` skips a
+  `skills.json` name that is not one folder name in the shared skills folder (`..`, `x/../other`), deleting nothing.
 
 ### Known limits
 
@@ -181,11 +196,13 @@ Not released yet: the date is set when the release is tagged.
   backstop. [What the guard cannot see](docs/guard.md#what-the-guard-cannot-see) lists them.
 - `dev install`, `dev ext update --apply`, and `dev ext ack` take the process tree and the terminal as proof that
   you typed them, and a process an agent starts through a launcher can look the same: `screen` or `tmux`, `expect`,
-  AppleScript's `do script`, `open` of a Terminal window or a `.command` file, or `launchctl`. The guard refuses the
-  forms it can read, the octal escapes such as `\015` and the caret controls such as `^m` that `screen -X stuff`
-  types included, but not a script file or a command built at run time. `tmux send-keys` with editing keys
-  (`C-a`) or hex keys (`-H`) still gets through until 26.11.5. The notification, the session-start
-  message, and the audit trail are the backstop until a kernel-level check lands in 26.11.5. The notification shows
+  AppleScript's `do script`, `open` of a Terminal window or a `.command` file, or `launchctl`. Agents cannot type
+  into a `screen` or `tmux` session at all; the guard reads the command each launcher starts in the forms it can
+  read, but not a script file or a command built at run time. Quoting or brace expansion around the `dev`
+  command word (`$'dev'`, `$"dev"`, `dev {ext,} ack`) is not read by the guard's `dev` rules until 26.11.5; devkit's
+  own terminal check (`set_by_developer()`) still refuses those commands when an agent runs them directly. The
+  notification, the session-start message, and the audit trail are the backstop until a kernel-level check lands in
+  26.11.5. The notification shows
   only on macOS, and only while notifications are allowed for Script Editor, the app macOS lists `osascript`
   notifications under; an agent can change that setting, so the session-start message and the audit trail are the
   lasting record. See

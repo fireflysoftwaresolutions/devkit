@@ -381,10 +381,13 @@ command sets, a copy the command makes) counts as one of them. With `claude` or 
 `dev ext enable|disable --project` outside your terminal.
 
 The guard reads the command `screen`, `tmux`, and `expect -c` start, and refuses opening a Terminal or iTerm window
-or a `.command` file, whose text it cannot follow. It cannot see everything: a program name built at run time
-(`$(printf claude)`, an alias), a script piped into a shell, a command a git alias or `at` starts later, and options
-that load a plugin for one session only (`claude --mcp-config`, `--plugin-dir`) get through; [What the guard cannot
-see](guard.md#what-the-guard-cannot-see) lists them. Drift and the acceptance list are the backstop for all of these.
+or a `.command` file, whose text it cannot follow. Agents cannot type into a `screen` or `tmux` session at all; you
+can: the guard refuses `screen -X` and `-Q`, tmux's `send-keys`, `paste-buffer`, and the other commands that type
+into a pane or carry a command, in every form it reads
+([the guard's rules](guard.md#devkits-own-state-configuration-and-install) list them). It cannot see everything: a
+program name built at run time (`$(printf claude)`, an alias), a script piped into a shell, a command a git alias or
+`at` starts later, and options that load a plugin for one session only (`claude --mcp-config`, `--plugin-dir`) get
+through; [What the guard cannot see](guard.md#what-the-guard-cannot-see) lists them. Drift and the acceptance list are the backstop for all of these.
 
 Whatever changes outside devkit anyway shows as drift: at the session start, in `dev status`, `dev doctor`, and
 `dev ext ls`, with one `ext.drift` record in the audit trail per change.
@@ -441,13 +444,13 @@ typed it. devkit therefore shows every acceptance until you acknowledge it:
 **Known limits.** devkit decides that you ran `dev install`, `dev ext update --apply`, or `dev ext ack` from the
 process tree and the terminal, and a process an agent starts through a launcher can look the same: `screen` or
 `tmux`, `expect`, AppleScript's `do script`, `open` of a Terminal window or a `.command` file, or `launchctl`. The
-guard refuses the forms it can read (it decodes the octal escapes such as `\015` and the caret controls such as `^m`
-that `screen -X stuff` types), not every one: a script file or a program that builds the command at run time gets
-through. `screen -X stuff` keys that hold any other control key (`^@`, `^A`, `^H`, `^O`, DEL, or ESC, as `^X`, `\NNN`,
-or the character itself) are refused whatever they type, because the shell edits the line with them and the guard
-cannot read the result. `tmux send-keys` with editing keys (`C-a`) or hex keys (`-H`) still gets through until
-26.11.5. The desktop notification, the session-start message, and the audit trail are the backstop until a
-kernel-level check of who typed the command lands in 26.11.5.
+guard refuses typing into a `screen` or `tmux` session outright, so no key or escape can edit a typed line, and
+reads the command each launcher starts, in the forms it can read: a script file or a program that builds the
+command at run time gets through. Quoting or brace expansion around the command word (`$'dev'`, `$"dev"`,
+`dev {ext,} ack`, `$'screen'`) is not read by the guard's rules until 26.11.5; devkit's own terminal check
+(`set_by_developer()`) still refuses those `dev` commands when an agent runs them directly. The desktop
+notification, the session-start message, and the audit trail are the backstop until a kernel-level check of who
+typed the command lands in 26.11.5.
 
 The acceptance notification is a security notice: `DEVKIT_NO_NOTIFY=1` and `progress.notify: false`, which an agent
 can set, do not turn it off. It shows only on macOS, and only while notifications are allowed for Script Editor, the
