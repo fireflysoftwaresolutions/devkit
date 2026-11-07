@@ -219,8 +219,11 @@ def _user_items(item) -> list:
                            f"with a dash)")
         return [_plugin(agent, pid, meta, "user", True)]
     name = str(item.get("name") or "")
-    if not re.match(r"^[\w.][\w.\-]*$", name):  # L1: never a word that reads as an option
-        raise ExtError(f"{label}: needs a name of letters, digits, dot, dash or underscore, not starting with a dash")
+    # L1: never a word that reads as an option; and a name is a folder in the shared skills folder, so never `.`, `..`
+    # or a hidden one
+    if not re.fullmatch(r"\w[\w.\-]*", name):
+        raise ExtError(f"{label}: needs a name of letters, digits, dot, dash or underscore that starts with a letter, "
+                       f"digit or underscore (not a dot or a dash)")
     agents = item.get("agents") or list(AGENTS)
     if not set(agents) <= set(AGENTS):
         raise ExtError(f"{label}: agents must be claude and/or codex")
@@ -260,14 +263,15 @@ def catalog(t: dict, user: dict = None, groups=None) -> list:
             out.append(_mcp(agent, name, spec, meta.get(f"mcp:{name}") or {}, "team"))
     # one skill name is one folder in the shared skills directory for both agents: two sources with the same name
     # would replace each other's files (and the second would inherit what devkit trusts the first for, such as
-    # impeccable's engine), so a name belongs to one source, whatever its group or agents
-    named = {}
+    # impeccable's engine), so a name belongs to one source, whatever its group or agents; APFS ignores case, so
+    # names are compared casefolded (Playwright-CLI is the playwright-cli folder)
+    named = {}  # casefolded name -> (the name as skills.json spells it, its repository)
     for src in (t.get("skills") or {}).get("sources") or []:
         for name in src.get("skills") or {}:
-            if name in named:
-                raise ExtError(f"skills.json: the skill {name} comes from both {named[name]} and {src.get('repo')}; "
-                               f"one name is one folder, so keep one source for it")
-            named[name] = src.get("repo")
+            if name.casefold() in named:
+                raise ExtError(f"skills.json: the skill {name} comes from both {named[name.casefold()][1]} and "
+                               f"{src.get('repo')}; one name is one folder, so keep one source for it")
+            named[name.casefold()] = (name, src.get("repo"))
     for src in (t.get("skills") or {}).get("sources") or []:
         g = src.get("group")
         if g and groups is not None and g not in groups and "all" not in groups:
@@ -281,19 +285,21 @@ def catalog(t: dict, user: dict = None, groups=None) -> list:
     out = [e for e in out if e.id not in retired]
     required = {e.id for e in out if e.required}  # M1: from the team layer, before an overlay entry can replace one
     added = [e for item in user["add"] for e in _user_items(item)]
-    reserved = _devkits_skill_names() if any(e.kind == "skill" for e in added) else set()
+    reserved = {n.casefold(): n for n in _devkits_skill_names()} if any(e.kind == "skill" for e in added) else {}
     mine = {}
     for e in added:
         if e.kind != "skill":
             continue
-        if e.name in reserved:
-            raise ExtError(f"ext.add skill {e.name}: devkit puts its own skill {e.name} in that folder, and one name "
-                           f"is one folder for both agents; give yours another name")
-        if e.name in named:
-            raise ExtError(f"ext.add skill {e.name}: the team's skill {e.name} (from {named[e.name]}) has that name, "
-                           f"and one name is one folder for both agents; give yours another name, or change the team "
-                           f"entry on a branch of the devkit checkout (dev ext add --team)")
-        if mine.setdefault(e.name, e.source) != e.source or sum(1 for x in added if x.id == e.id) > 1:
+        key = e.name.casefold()
+        if key in reserved:
+            raise ExtError(f"ext.add skill {e.name}: devkit puts its own skill {reserved[key]} in that folder, and one "
+                           f"name is one folder for both agents (in any case); give yours another name")
+        if key in named:
+            raise ExtError(f"ext.add skill {e.name}: the team's skill {named[key][0]} (from {named[key][1]}) has that "
+                           f"name, and one name is one folder for both agents (in any case); give yours another name, "
+                           f"or change the team entry on a branch of the devkit checkout (dev ext add --team)")
+        if mine.setdefault(key, (e.name, e.source)) != (e.name, e.source) or \
+                sum(1 for x in added if x.id == e.id) > 1:
             raise ExtError(f"ext.add skill {e.name}: the overlay names it twice; keep one entry")
     ids = {e.id for e in added}
     # a user entry replaces a team one with the same id (`dev ext add` refuses that; a hand-written overlay may), and

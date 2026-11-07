@@ -156,12 +156,38 @@ class CatalogTests(unittest.TestCase):
         own = Path(tmp.name) / "agents" / "skills" / "devkit-own"
         own.mkdir(parents=True)
         (own / "SKILL.md").write_text("---\nname: devkit-own\n---\n")
-        for name in ("devkit-own", "playwright-cli"):
+        # APFS ignores case, so Playwright-CLI is the playwright-cli folder
+        for name in ("devkit-own", "playwright-cli", "Playwright-CLI", "DEVKIT-OWN"):
             add = {"kind": "skill", "name": name, "repo": "someone/skills", "ref": SHA_C, "path": "s/x",
                    "license": "MIT", "why": "w"}
             with self.subTest(name=name), mock.patch.object(core, "DEVKIT_HOME", Path(tmp.name)):
                 with self.assertRaisesRegex(ext.ExtError, f"ext.add skill {name}: devkit"):
                     ext.catalog(fixture_team(), {"add": [add]}, None)
+
+    def test_skill_names_that_differ_only_in_case_name_one_folder(self):
+        # APFS ignores case: a capitalized overlay name takes the team's folder, and two spellings in one layer collide
+        skill = {"kind": "skill", "repo": "someone/skills", "ref": SHA_C, "path": "s/x", "license": "MIT", "why": "w"}
+        with self.assertRaisesRegex(ext.ExtError, "Impeccable.*pbakaus/impeccable"):
+            ext.catalog(fixture_team(), {"add": [{**skill, "name": "Impeccable"}]}, None)
+        with self.assertRaisesRegex(ext.ExtError, "twice"):
+            ext.catalog(fixture_team(), {"add": [{**skill, "name": "kid-probe"},
+                                                 {**skill, "name": "Kid-Probe", "path": "s/y"}]}, None)
+        t = fixture_team()
+        t["skills"]["sources"].append({"repo": "someone/skills", "ref": SHA_C, "license": "MIT", "why": "w",
+                                       "skills": {"Codebase-Design": "skills/cd"}})
+        with self.assertRaisesRegex(ext.ExtError, "Codebase-Design.*mattpocock/skills.*someone/skills"):
+            ext.catalog(t, {}, None)
+
+    def test_a_skill_name_must_start_with_a_letter_digit_or_underscore(self):
+        # `..` would be the shared skills folder's parent, devkit's install, and `.` the folder itself
+        for name in (".", "..", ".hidden", "-x", "x\n"):
+            add = {"kind": "skill", "name": name, "repo": "someone/skills", "ref": SHA_C, "path": "s/x",
+                   "license": "MIT", "why": "w"}
+            with self.subTest(name=name), self.assertRaisesRegex(ext.ExtError, "needs a name"):
+                ext.catalog(fixture_team(), {"add": [add]}, None)
+        add = {"kind": "skill", "name": "_x.y-1", "repo": "someone/skills", "ref": SHA_C, "path": "s/x",
+               "license": "MIT", "why": "w"}
+        self.assertIn("skill:claude:_x.y-1", by_id(ext.catalog(fixture_team(), {"add": [add]}, None)))
 
     def test_each_kind_gets_its_id_source_and_pin_kind(self):
         cat = by_id(ext.catalog(fixture_team(), {}, {"postgres"}))
@@ -1384,10 +1410,10 @@ class InstallSkillsLayeringTests(unittest.TestCase):
             (root / rel / "SKILL.md").write_text("---\nname: x\n---\n")
         return root
 
-    def run_step(self, overlay):
+    def run_step(self, overlay, team=None):
         engine = mock.Mock(return_value={})
         with mock.patch.dict(core.CFG, {"ext": overlay, "skills": {"groups": []}}), \
-                mock.patch.object(ext, "team", return_value=fixture_team()), \
+                mock.patch.object(ext, "team", return_value=team or fixture_team()), \
                 mock.patch.object(setup, "DEVKIT_HOME", self.devkit), \
                 mock.patch.object(setup, "SKILLS_SHARE", self.share), \
                 mock.patch.object(setup, "CLAUDE_HOME", self.claude), \
@@ -1411,6 +1437,24 @@ class InstallSkillsLayeringTests(unittest.TestCase):
         self.assertEqual(Path(os.readlink(codex / "local-one")), self.devkit / "agents" / "skills" / "local-one")
         self.assertEqual(Path(os.readlink(codex / "codebase-design")), self.share / "codebase-design")
         engine.assert_called_once_with(self.share / "impeccable", "pbakaus/impeccable")
+
+    def test_a_skill_name_that_leaves_the_shared_folder_deletes_nothing(self):
+        # skills.json names are not checked against the overlay's rule: `..` is the folder above the shared skills
+        # folder (devkit's install, for the real one), `.` and '' the folder itself; the step skips them, deleting
+        # nothing, and links the other skills
+        keep = self.share / "kept-skill"
+        keep.mkdir()
+        (keep / "SKILL.md").write_text("---\nname: kept-skill\n---\n")
+        (self.share.parent / "install-file").write_text("devkit")
+        t = fixture_team()
+        t["skills"]["sources"].append({"repo": "someone/skills", "ref": SHA_C, "license": "MIT", "why": "w",
+                                       "skills": {"..": "skills/up", ".": "skills/here", "": "skills/empty",
+                                                  "x/../..": "skills/climb"}})
+        self.run_step({}, team=t)
+        self.assertEqual((self.share.parent / "install-file").read_text(), "devkit")
+        self.assertTrue((keep / "SKILL.md").exists(), "a skill in the shared folder was deleted")
+        self.assertFalse((self.share / "x").exists())
+        self.assertEqual(Path(os.readlink(self.claude / "skills" / "codebase-design")), self.share / "codebase-design")
 
 
 class ChangeCommandTests(unittest.TestCase):
@@ -1467,6 +1511,16 @@ class ChangeCommandTests(unittest.TestCase):
         self.assertIn("pbakaus/impeccable", out)
         self.assertEqual(self.overlay(), {})
         self.assertEqual(self.run.calls, [])
+
+    def test_add_refuses_a_skill_named_dot_dotdot_or_hidden(self):
+        # the skills step copies a skill to <shared skills folder>/<name>: `..` would replace devkit's install
+        for name in (".", "..", ".hidden"):
+            with self.subTest(name=name):
+                rc, out = self.dev("add", "skill", name, "--repo", "someone/skills", "--ref", SHA_C, "--path",
+                                   "skills/x", "--license", "MIT", "--why", "w")
+                self.assertEqual(rc, 2, out)
+                self.assertIn("needs a name", out)
+        self.assertEqual((self.overlay(), self.run.calls), ({}, []))
 
     def test_add_mcp_takes_its_command_line_and_checks_its_pin(self):
         rc, out = self.dev("add", "mcp", "pg", "--agent", "codex", "--license", "MIT", "--why", "Postgres tools",

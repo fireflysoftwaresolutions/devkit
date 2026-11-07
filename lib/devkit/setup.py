@@ -1271,6 +1271,14 @@ def _install_skills():
                 fail(f"{name}: SKILL.md missing in {src['repo']}@{src['ref'][:12]}/{rel}")
                 continue
             out = SKILLS_SHARE / name
+            try:  # the folder is deleted next: it must sit right inside the shared skills folder, links and `..`
+                inside = out.resolve().parent == SKILLS_SHARE.resolve()  # resolved (`..` is devkit's install)
+            except (OSError, ValueError, RuntimeError):  # a NUL in the name, a link loop (RuntimeError on 3.9)
+                inside = False
+            if not inside:
+                fail(f"{name!r} from {src['repo']}: not a folder name inside {tilde(SKILLS_SHARE)}, so it is skipped "
+                     f"and nothing is deleted; rename the skill in skills.json, on a branch of the devkit checkout")
+                continue
             if out.exists():
                 shutil.rmtree(out)
             shutil.copytree(s, out, symlinks=True)
