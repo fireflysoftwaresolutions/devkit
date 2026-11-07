@@ -590,6 +590,63 @@ class CrewCoordinationTests(unittest.TestCase):
                 canary.LOG = saved
 
 
+class AbsoluteScopeTests(unittest.TestCase):
+    # L-fzhtc5yr59k, L-fzi4pkv6bbh: a scope given as a worktree's absolute path never matched a file in it, since
+    # the Edit guard matches repository-relative paths; assign rewrites it when that is exact, else refuses it
+    T0 = 1_800_000_000.0
+
+    def m(self, minutes):
+        return self.T0 + minutes * 60
+
+    def repo_with_worktree(self, d):
+        # a repository and one worktree of it, built from files (dev test prove runs without .git)
+        import subprocess
+        main, wt = Path(d) / "api", Path(d) / "wt"
+        subprocess.run(["git", "init", "-q", str(main)], check=True)
+        subprocess.run(["git", "-C", str(main), "-c", "user.email=a@example.com", "-c", "user.name=a", "commit", "-q",
+                        "--allow-empty", "-m", "init"], check=True)
+        subprocess.run(["git", "-C", str(main), "worktree", "add", "-q", "-b", "fix/x", str(wt)], check=True)
+        return main, wt
+
+    def test_an_absolute_scope_inside_a_worktree_is_kept_repository_relative(self):
+        from devkit import hooks
+        with TempState(), tempfile.TemporaryDirectory() as d, tempfile.TemporaryDirectory() as scratch:
+            main, wt = self.repo_with_worktree(d)
+            pg.start("Feature", plan=["installer"], now=self.m(0))
+            with mock.patch.dict(os.environ, {"HOME": d}):  # the ~ form the tech lead wrote: ~/<worktree>/…
+                run = pg.assign("installer", "Kid", scope=f"{wt}/install.sh,~/wt/tests/**,{scratch}/kid/**",
+                                cwd=str(main), now=self.m(0))
+            self.assertEqual(run["plan"][0]["scope"], ["install.sh", "tests/**", f"{scratch}/kid/**"])  # outside: as is
+            told = [m["text"] for m in run.get("messages") or [] if m["from"] == "devkit"]
+            self.assertEqual(len(told), 1, told)
+            self.assertIn(f"{wt}/install.sh → install.sh", told[0])
+            self.assertIn("~/wt/tests/** → tests/**", told[0])
+            self.assertNotIn(scratch, told[0])
+            launch("a1", "devkit:kid", "Kid: installer", self.m(1))
+            real_temp = hooks.core.is_temp  # the fixture lives in a temp folder; real worktrees do not
+            patch = mock.patch.object(hooks.core, "is_temp", lambda p: real_temp(p) and not str(p).startswith(d))
+            patch.start()
+            self.addCleanup(patch.stop)
+            edit = lambda p: {"session_id": "s1", "agent_id": "a1", "tool_name": "Edit", "cwd": str(wt),  # noqa: E731
+                              "tool_input": {"file_path": str(p)}}
+            self.assertIsNone(hooks._scope_violation("claude", edit(wt / "tests" / "test_install.py")))
+            self.assertIsNone(hooks._scope_violation("claude", edit(wt / "install.sh")))
+            self.assertIn("outside DevEx engineer (Kid)'s scope", hooks._scope_violation("claude", edit(wt / "cli.py")))
+
+    def test_an_absolute_scope_devkit_cannot_rewrite_exactly_is_refused(self):
+        with TempState(), tempfile.TemporaryDirectory() as d:
+            main, wt = self.repo_with_worktree(d)
+            pg.start("Feature", plan=["installer"], now=self.m(0))
+            gone = core.WT_ROOT / "acme" / "api" / "fix-gone"  # a worktree of the run's project that is not there
+            for scope, why in ((f"{d}/*/install.sh", "2 checkouts"), (f"{d}/**", "2 checkouts"),
+                               (f"{gone}/lib/**", "no checkout")):
+                with self.assertRaises(pg.StepError) as e:
+                    pg.assign("installer", "Kid", scope=scope, cwd=str(main), now=self.m(0))
+                self.assertIn(why, str(e.exception))
+                self.assertIn("repository-relative", str(e.exception))
+            self.assertIsNone(pg.load_run("claude", "s1")["plan"][0].get("scope"))  # nothing was assigned
+
+
 class DeclaredActivityTests(unittest.TestCase):
     # A step's kind of work rests on language-neutral anchors (spec C13, Kid's M41 and M45): an explicit activity id
     # (--activity on assign, [id] in a plan spec), the assigned member's Responsible activity, the files in its scope.

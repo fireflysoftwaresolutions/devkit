@@ -109,7 +109,9 @@ dev crew graph                       # the session as one graph: steps, lanes, d
   delegated into a working lane closes only on that lane's own evidence: the member names it with
   `dev progress step "…" --step "<name>" --check "…"`.
 - The step's time is its member's own time, and its `--scope` is the set of files the guard lets that member edit. A
-  member that needs more asks you.
+  member that needs more asks you. Write scopes repository-relative (`lib/**`): they match in every checkout of the
+  repository. `assign` rewrites an absolute or `~` path inside one checkout to that form and tells you, and refuses
+  one that spans checkouts or names a worktree that is not there.
 - Work you discover goes into the plan when it **starts** (`dev progress add`, then `dev progress begin`), so its
   time is its own; close a step only with its evidence and only the step it is about.
 - `dev crew brief` prints the brief and the exact spawn line. Launch every parallel member **in one message**. Then

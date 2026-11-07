@@ -96,6 +96,11 @@ short version:
    dev progress assign ui --to Trinity --scope "web/src/invoices/**" --activity frontend
    ```
 
+   Write scopes relative to the repository: they match the same files in every checkout of it, the main checkout
+   and each worktree. `assign` rewrites an absolute or `~` path inside one checkout to that form and tells you. It
+   refuses a path that spans more than one checkout or names a worktree that is not there; give the files relative
+   to the repository instead.
+
 3. **Brief and launch** them, all parallel members in one message:
 
    ```bash
