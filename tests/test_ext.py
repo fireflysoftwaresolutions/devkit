@@ -1163,6 +1163,9 @@ class CodexAppTests(unittest.TestCase):
         (res / "link").symlink_to(self.root / "evil.sh")
         self.h = dataclasses.replace(make_homes(self.root), apps=(self.app,))
         self.lock = self.root / "ext-lock.json"
+        p = mock.patch.object(core, "set_by_developer", return_value=True)  # a record is the developer's (F1)
+        p.start()
+        self.addCleanup(p.stop)
         self.servers = {"node_repl": (str(self.app / NODE_REPL), {"NODE_REPL_NODE_MODULE_DIRS": f'"{res}/x"'})}
         for pid in ("browser@openai-bundled", "pdf@openai-primary-runtime"):
             self.plugin(pid)
@@ -1397,6 +1400,15 @@ class CodexAppTests(unittest.TestCase):
         self.assertIn(f"node_repl (codex app mcp): {self.app / NODE_REPL} -e PAYLOAD", out)
         self.assertIn("pdf (codex app plugin) 26.1104.22356", out)
         self.assertIn("plugin:codex:pdf@openai-primary-runtime", ext.read_lock(self.lock))
+
+    def test_the_lock_writer_itself_vouches_only_in_the_developers_terminal(self):
+        # an agent's program can call ext.record_lock directly, past dev install (ext_probe5.py): passing accept=True
+        # does not make it the developer's
+        with mock.patch.object(core, "set_by_developer", return_value=False):
+            self.write_codex_config()
+            ext.record_lock("codex", self.h, t=fixture_team(), user={}, path=self.lock, accept=True)
+        self.assertNotIn("mcp:codex:node_repl", ext.read_lock(self.lock))
+        self.assertEqual([d["kind"] for d in self.rows()["mcp:codex:node_repl"]["drift"]], ["not-in-catalog"])
 
     def test_an_install_outside_the_developers_terminal_records_no_new_app_entry_and_accepts_no_change(self):
         # F1 (re-review four): an agent can start dev install from code; its run must not make a planted server the

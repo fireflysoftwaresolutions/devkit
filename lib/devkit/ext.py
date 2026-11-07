@@ -973,13 +973,18 @@ def record_lock(agent: str, h: Homes = None, by: str = "dev install", t: dict = 
                 path: Path = None, only: set = None, accept: bool = True) -> int:
     """`dev install` and `dev ext update --apply`: record what this agent's vendor marketplace plugins, and what ships
     with its app (F2), are now (or only the ids in `only`): version, SHA and a digest of their files (M3); for an MCP
-    server, a digest of its table. A later change outside devkit then shows as drift. With `accept` False (a run that
-    is not the developer's, in a terminal: F1 of re-review four), it records neither a change made outside devkit nor
-    what ships with the app seen for the first time: both stay as drift. Compared with the lock under its state lock,
-    so nothing changes between the check and the record. -> how many were recorded."""
+    server, a digest of its table. A later change outside devkit then shows as drift. Accepting a change made outside
+    devkit, or recording what ships with the app for the first time, is the developer's (F1 of re-review four): only
+    when core.set_by_developer() holds, here in the writer too, since a program can call it past dev install; `accept`
+    False narrows it further. Otherwise both stay as drift. Compared with the lock under its state lock, so nothing
+    changes between the check and the record. -> how many were recorded."""
     now = int(time.time())
     rows = _lockable(agent, h, t, user, only)
     count = [0]
+    try:
+        accept = bool(accept) and core.set_by_developer()
+    except Exception:
+        accept = False  # a check that cannot decide vouches for nothing (fail closed)
 
     def put(doc):
         for eid, o in rows.items():
