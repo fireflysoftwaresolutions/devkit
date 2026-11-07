@@ -1568,7 +1568,8 @@ HUMAN_KEEP = 50  # evidence entries kept per session
 HUMAN_IDS_KEEP = 2000  # ids of the prompts and answers evidence came from, kept per session (B3: each counts once)
 QUESTION_TOOLS = ("AskUserQuestion",)  # Codex's request_user_input joins when its payload is known (spec F0, S3)
 GRANT_CLASSES = ("push", "pr", "push-destructive", "pr-write", "merge", "release", "publish", "deploy", "api-write",
-                 "external-message", "delete-data", "migrate-production", "spend")  # C6's classes and IRREVERSIBLE
+                 "external-message", "delete-data", "migrate-production", "spend",
+                 "unknown")  # C6's classes, IRREVERSIBLE, and a command known only when it runs (cmd-<hash>, RT1/RT2)
 HEADLESS_SURFACES = ("SDK", "claude -p", "codex exec")  # nobody at the keyboard: DEVKIT_PREAPPROVE only
 TRANSCRIPT_DAYS = 30  # Claude Code's default cleanupPeriodDays: older evidence may have lost its transcript
 _APPROVE_LINE = re.compile(r"(?i)^approve\s+(D\d+)\s*(?::\s*(\S.*?))?\s*$")

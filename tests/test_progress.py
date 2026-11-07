@@ -877,6 +877,21 @@ class EvidenceReplayTests(TranscriptCase):
         self.assertFalse(pg.confirmed({"agent": "codex", "channel": "E2", "transcript_uuid": "p-1", "covers": "D1"}))
 
 
+class UnknownCommandGrantTests(TranscriptCase):
+    # M332 (The Keymaker's RT1/RT2): a command whose program is only known when it runs is the action class unknown
+    # (tier 2), its target cmd-<hash>; the developer opens that one command with "grant unknown cmd-<hash>"
+    def test_a_grant_of_an_unknown_command_opens_that_command_once(self):
+        self.write({"type": "user", "promptId": "prompt-020", "uuid": "u-20", "isSidechain": False,
+                    "origin": {"kind": "human"}, "message": {"role": "user", "content": "grant unknown cmd-1a2b3c4d5e"}})
+        self.prompt("grant unknown cmd-1a2b3c4d5e", "prompt-020")
+
+        def grant(target):
+            return pg.use_grant("claude", "s1", action="unknown", target=target, repo="acme/api")
+        self.assertIsNone(grant("cmd-ffffffffff"))
+        self.assertEqual((grant("cmd-1a2b3c4d5e") or {}).get("source"), "E2")
+        self.assertIsNone(grant("cmd-1a2b3c4d5e"))  # one use
+
+
 class StepGrantTests(TranscriptCase):
     # M277 (Seraph's M243 follow-ups, The Keymaker): a step's --allow grant holds for what the developer's evidence
     # covers, its target and its repository, through the real run and session state
