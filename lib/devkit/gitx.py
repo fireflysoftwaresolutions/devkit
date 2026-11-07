@@ -1836,12 +1836,15 @@ def _pr_create(c, a) -> int:
     if v:
         return refuse(v.split(" Rename it:")[0], "dev branch rename <type>/<topic>, then dev push")
     base = a.base or c.default
+    draft = bool(a.draft) or (draft_by_default() and not getattr(a, "ready", False))
     remote = _ref_sha(c.top, f"refs/remotes/origin/{b}")
     head = _ref_sha(c.top, "HEAD")
     if not remote:
-        return refuse(f"`{b}` is not on origin yet", "dev push (runs the local-CI gate), then dev pr create")
+        return refuse(f"`{b}` is not on origin yet", "dev push (runs the local-CI gate), then dev pr create"
+                      + (" (or dev backup, when that push starts no CI run)" if draft else ""))
     if remote != head:
-        return refuse(f"HEAD ({head[:7]}) is not what origin/{b} has ({remote[:7]})", "dev push first")
+        return refuse(f"HEAD ({head[:7]}) is not what origin/{b} has ({remote[:7]})",
+                      "dev push first" + (" (or dev backup)" if draft else ""))
     lang = lang_of(a)
     existing, _ = gh_json(["pr", "list", "-R", c.slug, "--head", b, "--state", "open", "--json", "number,url"], c)
     if existing and not a.dry_run:
@@ -1875,19 +1878,19 @@ def _pr_create(c, a) -> int:
               (f"\nstill empty: {', '.join(missing)}" if missing else "") + "\n---", file=sys.stderr)
         print(body)
         return 0
-    if missing and not a.draft:
+    if missing and not draft:
         return refuse(f"PR body: {' and '.join(f'“{m}”' for m in missing)} {'is' if len(missing) == 1 else 'are'} empty",
                       "dev pr create --dry-run prints the pre-filled body: fill those sections, then "
                       "dev pr create --body-file <file> (or --draft for an early draft)")
     args = ["pr", "create", "-R", c.slug, "--head", b, "--base", base, "--title", title, "--body", body]
-    if a.draft:
+    if draft:
         args.append("--draft")
     done, out, err = gh_do(args, c)
     if not done:
         return fail(f"gh pr create failed: {err}")
     url = (out.strip().splitlines() or [""])[-1]
     n = url.rstrip("/").rsplit("/", 1)[-1]
-    ok(f"PR #{n} opened{' as draft' if a.draft else ''} · {title} · {url}" +
+    ok(f"PR #{n} opened{' as draft' if draft else ''} · {title} · {url}" +
        (f" · removed {removed} AI-attribution line(s)" if removed else "") + " · watch: dev pr checks --watch")
     return 0
 
@@ -2206,7 +2209,8 @@ def _after_merge(c, head: str) -> str:
 
 def _pr_ready(c, a) -> int:
     sel = _sel(c, a)
-    p, err = gh_json(["pr", "view", sel or "", "-R", c.slug, "--json", "number,title,body,isDraft,url"], c)
+    p, err = gh_json(["pr", "view", sel or "", "-R", c.slug, "--json",
+                      "number,title,body,isDraft,url,headRefName,headRefOid"], c)
     if p is None:
         return fail(f"no PR for {sel}: {err}")
     v = message_violation(p.get("title", ""), "PR title")
@@ -2220,11 +2224,23 @@ def _pr_ready(c, a) -> int:
     if not p.get("isDraft"):
         ok(f"#{p['number']} is already ready for review · {p['url']}")
         return 0
+    if p.get("headRefName") and p.get("headRefName") == c.branch:  # ready starts the one CI run (spec P-fy3bwa0pshk R6)
+        head = _ref_sha(c.top, "HEAD")
+        if p.get("headRefOid") and head != p["headRefOid"]:
+            return refuse(f"PR #{p['number']} is at {p['headRefOid'][:7]} and your HEAD at {head[:7]}: the one CI run "
+                          "would check another tree", "dev push (or dev backup) first, then dev pr ready")
+        if not _evidence_or_attest(c, getattr(a, "ci_passed", False), "pr ready"):
+            return no_evidence(c, "pr ready")
     done, _, err = gh_do(["pr", "ready", str(p["number"]), "-R", c.slug], c)
     if not done:
         return fail(f"gh pr ready failed: {err}")
-    ok(f"#{p['number']} is ready for review · {p['url']}")
+    ok(f"#{p['number']} is ready for review · {p['url']} · its CI runs now: dev pr checks --watch")
     return 0
+
+
+def draft_by_default() -> bool:
+    """`delivery.draft_pr` (default false): `dev pr create` opens a draft unless --ready (spec P-fy3bwa0pshk R6)."""
+    return (core.CFG.get("delivery") or {}).get("draft_pr", False) is True
 
 
 def _text_arg(a):
@@ -2938,7 +2954,9 @@ def register(add):
     q = sp.add_parser("create", help="open the PR of the pushed branch, body from the PR template")
     q.add_argument("--title", help="Conventional Commit title (default: the first commit, else the branch)")
     q.add_argument("--base", help="base branch (default: the repository default)")
-    q.add_argument("--draft", action="store_true", help="open as a draft (empty sections allowed)")
+    q.add_argument("--draft", action="store_true", help="open as a draft (empty sections allowed); the default "
+                   "with delivery.draft_pr")
+    q.add_argument("--ready", action="store_true", help="ready for review although delivery.draft_pr opens drafts")
     q.add_argument("--fill", action="store_true", help="fill from the commits and the template (the default)")
     q.add_argument("--body-file", help="your own body (devkit checks it); - reads stdin")
     q.add_argument("--edit", action="store_true", help="edit the pre-filled body in $EDITOR first")
@@ -2970,8 +2988,9 @@ def register(add):
     q.add_argument("--auto", action="store_true", help="let GitHub merge when the checks pass")
     q.add_argument("--keep-branch", action="store_true")
     q.add_argument("--dry-run", action="store_true")
-    q = sp.add_parser("ready", help="mark a draft ready for review (title and body checked)")
+    q = sp.add_parser("ready", help="mark a draft ready for review: the one CI run (title, body and local CI checked)")
     q.add_argument("number", nargs="?")
+    q.add_argument("--ci-passed", action="store_true", help="attest that the local suite passed on HEAD")
     _lang_arg(q)
     for name in ("comment", "review"):
         q = sp.add_parser(name, help="comment on a PR" if name == "comment" else "approve, request changes or comment")

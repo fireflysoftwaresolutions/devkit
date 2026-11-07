@@ -750,12 +750,12 @@ a fresh fetch, that `origin` has nothing you lack, no WIP or fixup commits, a fi
 
 | Command | Effect |
 | --- | --- |
-| `dev pr create [--title T] [--base B] [--draft] [--fill \| --body-file F \| --edit] [--ci-passed] [--lang L] [--dry-run]` | Opens the PR of the pushed branch with a Conventional title and the body from the PR template, pre-filled with the commits, the local CI result, and the links (`--fill`, the default). Empty "What and why" or "How to verify" sections are refused unless `--draft`. `--dry-run` prints the title, the template used, the evidence, and the body; `--body-file -` reads standard input |
+| `dev pr create [--title T] [--base B] [--draft \| --ready] [--fill \| --body-file F \| --edit] [--ci-passed] [--lang L] [--dry-run]` | Opens the PR of the pushed branch with a Conventional title and the body from the PR template, pre-filled with the commits, the local CI result, and the links (`--fill`, the default). Empty "What and why" or "How to verify" sections are refused unless `--draft`. With `delivery.draft_pr` on, the PR opens as a draft unless `--ready`. `--dry-run` prints the title, the template used, the evidence, and the body; `--body-file -` reads standard input |
 | `dev pr view [n] [--body] [--json]` | One-line state: branches, checks, review, conflicts, size, author, age, address |
 | `dev pr ls [--all] [--all-projects [--offline]] [--json]` | Your open PRs and those waiting for your review; `--all` adds the others; `--all-projects` covers every project |
 | `dev pr checks [n] [--watch [--fail-fast] [--interval S] [--timeout MIN]] [--lines N] [--json]` | Pass, fail, and pending counts; each failing job with its trimmed log (25 lines). Exits with `0` (passed), `1` (failed), or `8` (pending). `--watch` waits and prints only the result |
 | `dev pr merge [n] [--squash \| --merge \| --rebase] [--auto] [--keep-branch] [--dry-run]` | Merges when the checks passed and the reviews allow it, with the repository's method; a squash commit gets the PR title and its "What and why"; then deletes the branch and updates the default branch locally. `--auto` lets GitHub merge when the checks pass |
-| `dev pr ready [n] [--lang L]` | Marks a draft ready after checking its title and required sections |
+| `dev pr ready [n] [--ci-passed] [--lang L]` | Marks a draft ready after checking its title and required sections. Marking ready starts the one CI run, so for the current branch it also needs the PR's head to be your HEAD and local CI evidence for it (`--ci-passed` attests it) |
 | `dev pr comment [n] -m "…" \| --body-file F` | Comments on a PR |
 | `dev pr review [n] --approve \| --request-changes \| --comment [-m "…"]` | Reviews a PR; `--request-changes` and `--comment` need a message |
 | `dev pr diff [n] [--stat \| --patch \| --name-only] [--json]` | Files changed with +/−, largest first (`--stat`, the default), the full patch, or the names only |
