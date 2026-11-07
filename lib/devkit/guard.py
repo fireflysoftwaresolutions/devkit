@@ -2792,7 +2792,7 @@ def _dev_calls(argv, code) -> list:
     """The `dev progress|crew` calls of one program, as [(kind, args)]."""
     if code is not None:  # an interpreter: only a program that can start a process runs dev
         fam = re.sub(r"[0-9.]+$", "", os.path.basename(argv[0]).casefold())
-        if not (_SPAWNS.search(code) or (fam in ("perl", "ruby", "php") and _SPAWNS_QUOTED.search(code))):
+        if not _code_spawns(code, fam):
             return []
         found = [[m.group(1)] + ([m.group(2)] if m.group(2) else []) for m in _DEV_IN_CODE.finditer(code)]
         return [(_crew_kind(a), a) for a in found if _crew_kind(a)]
@@ -3841,10 +3841,44 @@ def _unknown(text) -> tuple:
 
 
 def _dynamic_code(name, code) -> bool:
-    """True when an interpreter's program can call a function whose name it builds at run time (RT2)."""
+    """True when an interpreter's program can call a function whose name it builds at run time (RT2), judged on its
+    code outside string literals: an edit script whose strings hold JavaScript with `eval(` builds nothing."""
     fam = re.sub(r"[0-9.]+$", "", os.path.basename(str(name or "")).casefold())
     fam = {"pypy": "python", "node": "js", "nodejs": "js", "deno": "js", "bun": "js"}.get(fam, fam)
-    return bool(code) and bool(_DYNAMIC_CODE.get(fam, _DYNAMIC_CODE[""]).search(code))
+    return bool(code) and bool(_DYNAMIC_CODE.get(fam, _DYNAMIC_CODE[""]).search(_outside_strings(code)))
+
+
+# a module name is a string, and naming child_process is how JavaScript reaches its spawn functions
+_SPAWN_MODULE = re.compile(r"""(?:require|import)\s*\(?\s*['"](?:node:)?child_process['"]|"""
+                           r"""\bfrom\s+['"](?:node:)?child_process['"]""")
+
+
+# a spawn whose command starts with what the program fills in at run time: execSync(`${t} pr merge 12`),
+# subprocess.run(f"{tool} …"), os.system("$G …"): the command's name is only known when it runs (M394)
+_SPAWN_BUILT = re.compile(r"""\b(?:execSync|execFileSync|execFile|exec|spawnSync|spawn|system|popen|Popen|run|call|"""
+                          r"""check_output|check_call|getoutput|getstatusoutput|shell_exec|passthru)\s*\(\s*\[?\s*"""
+                          r"""(?:[rbuRBU]?[fF][rR]?|[rR]?[fF])?(?:`\$\{|["']\{|["']\$)""")
+
+
+def _outside_strings(code) -> str:
+    """The program text with the contents of its string literals blanked (the quotes stay), so a marker that only
+    appears inside a string (JavaScript or CSS an edit script carries) is not read as the program's own code (M394)."""
+    def blank(m):
+        t = m.group(0)
+        q = 3 if t[:3] in ("'''", '"""') else 1
+        return t[:q] + re.sub(r"[^\n]", " ", t[q:-q]) + t[-q:]
+    return _STR_LIT.sub(blank, code or "")
+
+
+def _code_spawns(code, name="") -> bool:
+    """True when a program can start a process: a spawn function in its code outside string literals, a spawning
+    module it names, backticks in perl, ruby or php (where they run a command), or a function it names at run time."""
+    if not code:
+        return False
+    fam = re.sub(r"[0-9.]+$", "", os.path.basename(str(name or "")).casefold())
+    bare = _outside_strings(code)
+    return bool(_SPAWNS.search(bare) or _SPAWN_MODULE.search(code) or _BARE_LIST.search(bare) or
+                (fam in ("perl", "ruby", "php") and _SPAWNS_QUOTED.search(code)) or _dynamic_code(name, code))
 
 
 def _dynamic_name(word) -> bool:
@@ -4466,8 +4500,7 @@ def _opaque_actions(name, argv, cwd) -> list:
 def _code_texts(code, name="") -> list:
     """The command lines an interpreter's program may hand to a shell or a process: its string literals and its lists
     of string literals, when the program can start a process at all (or call a function it names at run time)."""
-    if not code or not (_SPAWNS.search(code) or _SPAWNS_QUOTED.search(code) or _dynamic_code(name, code)
-                        or _BARE_LIST.search(code)):
+    if not _code_spawns(code, name):
         return []
     texts = [next((g for g in m.groups() if g is not None), "") for m in _STR_LIT.finditer(code)]
     for m in [*_LIST_LIT.finditer(code), *_BARE_LIST.finditer(code), *_CALL_LIST.finditer(code)]:
@@ -4582,8 +4615,8 @@ def _segment_actions(argv, cwd, bodies, depth) -> list:
         if not found and _INTERP.match(name) and not _repo_script(argv, cwd):
             code = _program(argv, cwd, bodies)[0]
             for text in _code_texts(code, name):
-                more += _text_actions(text, cwd, depth + 1) or []
-            if _dynamic_code(name, code):  # it may build the name of what it runs (RT2)
+                more += _text_actions(text, cwd, depth + 1, from_code=True) or []
+            if _dynamic_code(name, code) or _SPAWN_BUILT.search(code or ""):  # it may build what it runs (RT2)
                 found = [_unknown(" ".join(argv))]
         if not found and "/" in argv[0] and name not in _SHELLS and not _INTERP.match(name):
             script = _read_small(resolve(argv[0], cwd), 1 << 18)  # a shell script run by its path: what it runs
@@ -4699,11 +4732,34 @@ def _argv_actions(argv, cwd, bodies, depth):
     return out
 
 
-def _text_actions(text, cwd, depth=0):
+# a program a variable names by its folder: `$VENV/bin/python`, `"${VIRTUAL_ENV}/bin/pytest"` (M394). Only these
+# names, and only when the command does not set the variable or IFS itself, so its value cannot split into words
+_VAR_PATH = re.compile(r"^\$(?:([A-Za-z_][A-Za-z0-9_]*)|\{([A-Za-z_][A-Za-z0-9_]*)\})((?:/[A-Za-z0-9_.+-]+)+)$")
+_VAR_PROGRAMS = re.compile(r"^(?:python[0-9.]*|pypy[0-9.]*|pip[0-9.]*|pytest|py\.test|ruff|mypy|black|isort|flake8|"
+                           r"pylint|coverage|tox|nox|uv|node|ruby|bundle|rake|rspec|php|phpunit|java|mvn|gradle|go|"
+                           r"cargo|tsc|eslint|vitest|jest)$")
+
+
+def _var_program(word, text) -> str:
+    """The program a `$VAR/…/name` command word runs when the name is one of _VAR_PROGRAMS and the command text does
+    not assign, read or loop over VAR, or set IFS; else ''."""
+    m = _VAR_PATH.match(word or "")
+    if not m or not _VAR_PROGRAMS.match(os.path.basename(m.group(3))):
+        return ""
+    var = re.escape(m.group(1) or m.group(2))
+    if re.search(rf"(?<![\w$]){var}\+?=|\$\{{{var}:?[=?]|\bIFS\+?=|\b(?:read|for|select|getopts|mapfile|readarray|"
+                 rf"unset|export|declare|typeset|local|readonly|eval|source)\b[^\n;&|]*\b{var}\b", text or ""):
+        return ""
+    return os.path.basename(m.group(3))
+
+
+def _text_actions(text, cwd, depth=0, from_code=False):
     """The actions of every segment of a command line, level by level: what each segment runs, what a shell reads
     from a pipe (`printf '…' | sh`, `cat f | bash`) or a here-string (`bash <<< '…'`), and the substitutions the
     shell expands. Quoted text a command only carries is one word here, so it is never read as a command. None when
-    a level cannot be parsed."""
+    a level cannot be parsed. `from_code`: the text is a string literal of an interpreter's program, where `${…}`,
+    `{…}`, `[…]` and `*` are the language's own (a template, an f-string, a list), so they never make a program the
+    shell names at run time; the shells and substitutions it runs are judged as usual (M394)."""
     if depth > 4 or not text or not str(text).strip():
         return []
     segs = split_commands(text, ops=True)
@@ -4716,7 +4772,8 @@ def _text_actions(text, cwd, depth=0):
         argv = _unwrap(argv0)
         # a program the shell names only when it runs (RT1): `env -S '…'` splits a string into a command, `$(…)` or
         # backticks in the command word print its name, a variable or a glob expands to it
-        if _env_runs_string(argv0) or (argv and (_dynamic_name(argv[0]) or (argv == ["$"] and op == "("))):
+        if _env_runs_string(argv0) or (argv and not from_code and (
+                (_dynamic_name(argv[0]) and not _var_program(argv[0], text)) or (argv == ["$"] and op == "("))):
             out += _found([_unknown(text)], argv0 or argv, cwd)
             continue
         pre = argv0[:argv0.index(argv[0])] if argv and argv[0] in argv0 else argv0

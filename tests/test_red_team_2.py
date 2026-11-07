@@ -288,6 +288,47 @@ class RedTeam2(unittest.TestCase):
         self.assertTrue(any(r["action"] == "guard.irreversible" and (r.get("evidence") or {}).get("rule") ==
                             "gate-error" and r["outcome"] == "blocked" for r in records), records)
 
+    # ---- M394 (false unknowns)
+    # the shapes of the commands behind 52 of the 71 unknown commands of the gate's first audit week: an edit script
+    # whose string literals hold JavaScript (template literals, `${…}`, backticks, `exec(`), a test runner by a
+    # variable folder, a probe's f-string
+    EDIT_SCRIPT = ("python3 -I - <<'EOF'\nfrom pathlib import Path\np=Path(\"views.js\"); s=p.read_text()\n"
+                   "a='''  tr(`${done} of ${rows.length} handed over`, `${v.name}`), [shownPhase.id]}\n"
+                   "  const t = setTimeout(go, 5 * 60_000); el.exec(x); eval(y)'''\n"
+                   "b=a.replace('handed over', 'handed off')\nassert s.count(a) == 1\np.write_text(s.replace(a, b))\n"
+                   "EOF")
+
+    def test_m394_text_inside_interpreter_code_is_not_a_program_name(self):
+        self.assertEqual(self.acts(self.EDIT_SCRIPT), [])
+        self.assertIsNone(self.main(self.EDIT_SCRIPT))
+        probe = "python3 -c \"import subprocess; cmd='git log'; print(f'{cmd}: [HELD] {cmd}'); subprocess.run(['ls'])\""
+        self.assertEqual(self.acts(probe), [])
+
+    def test_m394_a_known_program_in_a_variable_folder_is_that_program(self):
+        for cmd in ("$VENV/bin/python -m pytest -q", "\"$VIRTUAL_ENV/bin/python\" x.py", "${VENV}/bin/pytest -q",
+                    "$HOME/.local/bin/ruff check ."):
+            with self.subTest(cmd=cmd):
+                self.assertEqual(self.acts(cmd), [])
+                self.assertIsNone(self.main(cmd))
+        # and it is read like that program: its code still counts
+        self.assertEqual(self.acts("$VENV/bin/python -c \"import os; os.system('gh pr merge 12')\""), ["merge"])
+
+    def test_m394_names_the_program_or_shell_builds_at_run_time_stay_unknown(self):
+        for cmd in ("$X pr merge 12", "$VENV/bin/gh pr merge 12", "VENV='gh pr merge 12 #'; $VENV/bin/python x",
+                    "IFS=/; $VENV/bin/python x", "for VENV in a b; do $VENV/bin/python x; done",
+                    "${VENV:=/tmp}/bin/python x",
+                    "python3 -c \"getattr(__import__('os'),'sys'+'tem')('gh pr merge 12')\"",
+                    "python3 -c \"import os; os.system('bash -c \\\"$X pr merge 12\\\"')\"",
+                    "python3 -c \"import subprocess; subprocess.run(f'{tool} pr merge 12', shell=True)\"",
+                    "node -e \"require('child_process').execSync(`${t} pr merge 12`)\""):
+            with self.subTest(cmd=cmd):
+                self.assertIn("unknown", self.acts(cmd))
+                self.assertIsNotNone(self.main(cmd))
+                self.assertIsNotNone(self.member(cmd))
+        # a program named in a string is still classified
+        self.assertEqual(self.acts("python3 -c \"import os; os.system('gh pr merge 12')\""), ["merge"])
+        self.assertEqual(self.acts("node -e \"require('child_process').execSync('gh pr merge 12')\""), ["merge"])
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -253,7 +253,17 @@ action `unknown`, tier 2, with the target `cmd-<hash>` of that exact command tex
 - `$(printf gh) pr merge 12`, `${X:-gh} pr merge 12`, `g=gh; $g pr merge 12`, or `env -S 'gh pr merge 12'`;
 - `gh $SUB merge 12` or `gh pr $ACT 12`, where a variable names gh's command, and `git $SUB push`, where a variable
   names git's;
-- a program that builds the name of what it calls, such as `getattr(__import__('os'), 'sys' + 'tem')`.
+- a program that builds the name of what it calls, such as `getattr(__import__('os'), 'sys' + 'tem')`, or starts a
+  command that begins with what it fills in at run time, such as ``execSync(`${tool} pr merge 12`)`` or
+  `subprocess.run(f"{tool} …")`.
+
+These are not `unknown`:
+
+- a known program in a folder a variable names, such as `$VENV/bin/python` or `"$VIRTUAL_ENV/bin/pytest"`, unless
+  the same command sets that variable or `IFS`;
+- text inside an interpreter's string literals: `${…}`, `{…}`, `[…]` and `*` there belong to the language (a
+  template literal, an f-string, a list), and the guard looks for spawn calls in the program's code, not in the
+  text it carries. A program named in such a string (`os.system('gh pr merge 12')`) is still classified.
 
 A pager is a command too: `git -c core.pager=…`, `-c pager.<command>=…`, `GIT_PAGER`, and `PAGER` for git, and
 `GH_PAGER` and `PAGER` for gh, are classified as the command they name, and so are `core.editor`,
