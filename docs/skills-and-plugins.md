@@ -423,8 +423,8 @@ can: the guard refuses `screen -X` and `-Q`, tmux's `send-keys`, `paste-buffer`,
 into a pane or carry a command, a tmux command list, and what can build a `#(…)` format from pieces: `set-option -a`
 or `-F`, a format with the `E` or `T` modifier, and a `$` or a backtick in a tmux word other than the shell command
 `tmux new` or `split-window` starts ([the guard's rules](guard.md#devkits-own-state-configuration-and-install) list
-them). In a program's code, a command line the guard cannot read that names `dev`, `claude`, `codex`, `tmux`,
-`screen`, `osascript`, or `open` is refused. It cannot see everything: a
+them). In a program's code, a command line the guard cannot read that names `dev`, `devkit`, `claude`, `codex`,
+`tmux`, `screen`, `osascript`, or `open` is refused. It cannot see everything: a
 program name built at run time (`$(printf claude)`, an alias), a script piped into a shell, a command a git alias or
 `at` starts later, and options that load a plugin for one session only (`claude --mcp-config`, `--plugin-dir`) get
 through; [What the guard cannot see](guard.md#what-the-guard-cannot-see) lists them. Drift and the acceptance list are the backstop for all of these.

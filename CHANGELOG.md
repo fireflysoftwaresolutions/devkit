@@ -216,7 +216,7 @@ and any command it cannot read.
   command on the line before an unmatched quote. Once heredoc bodies are set aside, the guard now refuses such a
   line, also when the command hands it to a shell (`sh -c`, `eval`, a heredoc a shell reads); the message says to
   close the quote or drop the comment's apostrophe. In a program that starts a process, a string literal the guard
-  cannot read is refused when it names `dev`, `claude`, `codex`, `tmux`, `screen`, `osascript`, or `open` as a whole
+  cannot read is refused when it names `dev`, `devkit`, `claude`, `codex`, `tmux`, `screen`, `osascript`, or `open` as a whole
   word (`os.system("dev install # don't")`, `execSync`, a `python3 -` heredoc); any other literal, such as
   `print("don't")`, is data. A script file or a sourced file is read as before. `#` stays an ordinary character, so
   the words after one are read as more commands. A backslash outside single quotes escapes the next character, so

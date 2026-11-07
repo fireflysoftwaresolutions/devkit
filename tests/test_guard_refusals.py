@@ -525,6 +525,11 @@ class CommandLinesAreReadWithTheBaseTokenizer(unittest.TestCase):
                 self.assertEqual(self.check(cmd), guard.INSTALL_REASON)
         self.assertIn("force-push", self.check("git push --fo\\\nrce origin main") or "")
         self.assertIn("Agents may not change or delete it", self.check("rm -rf \\\n~") or "")
+        # the code reviewer's round eleven finding 1: an "ask" in the first reading (a write outside ~/Development)
+        # does not hide a refusal in another reading; approving the write would have run dev install
+        for cmd in ("echo hi > ~/x.txt; dev \\\ninstall", "dev \\\ninstall > ~/x.txt"):
+            with self.subTest(cmd=cmd):
+                self.assertEqual(self.check(cmd), guard.INSTALL_REASON)
         for cmd in ("ls -la \\\n  docs", "pytest -q \\\n  tests/  # the unit tests",
                     "dev commit -m \"fix: x\" \\\n  --why \"it is safer\" \\\n  --verified \"12 tests pass\""):
             with self.subTest(cmd=cmd):
@@ -594,7 +599,7 @@ class CommandsTheGuardCannotReadAreRefused(unittest.TestCase):
         # claude, codex, tmux, screen, osascript or open as a whole word is refused; other literals stay data
         for call in ("dev install", "dev hook prompt", "claude -p hi --dangerously-skip-permissions",
                      "tmux send-keys -t x ls Enter", "codex --yolo", "screen -S x -X stuff ls", "osascript -e x",
-                     "open -a Terminal ."):
+                     "open -a Terminal .", "python3 -m devkit install", "python3 -m devkit.cli install"):
             for cmd in (f"python3 -c \"import os; os.system(\\\"{call} # don't\\\")\"",
                         f"node -e \"require('child_process').execSync(\\\"{call} # don't\\\")\"",
                         f"python3 - <<'EOF'\nimport os\nos.system(\"{call} # don't\")\nEOF"):

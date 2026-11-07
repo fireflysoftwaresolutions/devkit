@@ -454,7 +454,8 @@ DEVKIT_LOCAL_CI_PASSED=1.
 - A command the tokenizer cannot read (a quote that is never closed, such as an apostrophe in a comment) is refused,
   also in a line the command hands to a shell (`sh -c`, `eval`, a heredoc a shell reads), because bash may still run
   the lines before it. In a program that starts a process, a string literal the guard cannot read is refused when it
-  names `dev`, `claude`, `codex`, `tmux`, `screen`, `osascript`, or `open` as a whole word
+  names `dev`, `devkit` (as in `python3 -m devkit`), `claude`, `codex`, `tmux`, `screen`, `osascript`, or `open` as
+  a whole word
   (`os.system("dev install # don't")`); any other literal, such as `print("don't")`, is data. Heredoc bodies are set
   aside first, so text with apostrophes can go in one. A script file or a sourced file the guard cannot read is
   allowed, as before.

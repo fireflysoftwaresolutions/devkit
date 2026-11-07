@@ -991,18 +991,21 @@ def _continued_readings(cmd: str) -> list:
 def check_bash(cmd: str, cwd: str, agent: str):
     """The guard's verdict on a shell command, or None. A command with a backslash-newline is checked again in each
     of its other readings (_continued_readings): the first refusal stands, and the escape hatches each reading used
-    are recorded."""
+    are recorded. An ask (a write outside ~/Development) stands only when no reading refuses: approving the write
+    must not also run what another reading refuses."""
     v = _check_bash_reading(cmd, cwd, agent)
-    if v:
+    if v and v[0] == "deny":
         return v
+    first = v
     hatches = list(_BYPASSES)
     for alt in _continued_readings(cmd or ""):
-        v = _check_bash_reading(alt, cwd, agent)
-        if v:
-            return v
+        w = _check_bash_reading(alt, cwd, agent)
+        if w and w[0] == "deny":
+            return w
+        first = first or w
         hatches += [b for b in _BYPASSES if b not in hatches]
     _BYPASSES[:] = hatches
-    return None
+    return first
 
 
 def _check_bash_reading(cmd: str, cwd: str, agent: str):
@@ -6348,7 +6351,7 @@ def _code_types(code, name="") -> bool:
 
 # the commands the rules on a program's code judge, as whole words: a string literal the tokenizer cannot read that
 # names one is refused (UNREADABLE_REASON), since the guard cannot tell what the program hands to a shell (round eleven)
-_CODE_ACTS_ON = re.compile(r"\b(?:dev|claude|codex|tmux|screen|osascript|open)\b")
+_CODE_ACTS_ON = re.compile(r"\b(?:dev|devkit|claude|codex|tmux|screen|osascript|open)\b")  # devkit: python3 -m devkit
 
 
 def code_session_refusal(argv, cwd, bodies, depth: int = 0) -> str | None:
