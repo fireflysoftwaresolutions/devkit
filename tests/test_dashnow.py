@@ -602,6 +602,15 @@ class HostileInputTests(unittest.TestCase):
         self.assertIsInstance(runs, list, runs)
         self.assertEqual([r["goal"] for r in runs], ["Invoice export", "Rules engine migration"])
 
+    def test_a_presence_file_nested_too_deep_for_json_is_skipped(self):
+        # 100,000 nested brackets: 200 KB, under the 256 KB cap; Python 3.9's json raises RecursionError on it
+        with tempfile.TemporaryDirectory() as tmp:
+            d = Path(tmp) / "presence"
+            d.mkdir()
+            (d / "bob@studio.json").write_text(json.dumps(fx.remote_presence(updated=int(time.time()) - 60)))
+            (d / "deep@nest.json").write_text("[" * 100_000 + "]" * 100_000)
+            self.assertEqual([p["user"] for p in dashboard.read_presence(Path(tmp), {})], ["bob"])
+
     def test_oversize_and_malformed_presence_files_are_skipped(self):
         with tempfile.TemporaryDirectory() as tmp:
             d = Path(tmp) / "presence"

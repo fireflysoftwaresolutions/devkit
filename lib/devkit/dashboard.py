@@ -602,7 +602,7 @@ def read_presence(handoff: Path, reg: dict, max_age_h: float = 24, now: float = 
             if f.stat().st_size > PRESENCE_CAP:
                 continue
             p = json.loads(f.read_text())
-        except (OSError, ValueError):
+        except (OSError, ValueError, RecursionError):  # RecursionError: deep nesting under the cap (Python 3.9's json)
             continue
         if valid_presence(p) and now - work.parse_iso(p.get("updated") or "") < max_age_h * 3600:
             out.append(p)
