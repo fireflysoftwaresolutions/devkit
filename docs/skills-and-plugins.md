@@ -158,6 +158,63 @@ the plugin does not: `impeccable` (pbakaus/impeccable, tag `skill-v4.8.0`, Apach
 `frontend-design` (anthropics/claude-plugins-official, Apache-2.0) for Codex. The `ui` rule requires both: frontend-design
 for the direction, impeccable for hierarchy, layout, typography, color, and the audit.
 
+### impeccable and its engine
+
+impeccable's first setup step runs its launcher, `scripts/impeccable context`, which loads the project's PRODUCT.md,
+DESIGN.md, and surface brief and prints what to follow. The launcher is a small shell script that runs a
+platform binary, the engine, placed beside it. Without one, it would download the engine at its first run, inside an
+agent session. devkit fetches the engine at install time instead:
+
+| Part | Claude Code | Codex |
+| --- | --- | --- |
+| The skill | `pbakaus/impeccable` at the commit pinned in `config/skills.json` (tag `skill-v4.8.0`), copied to `~/.local/share/devkit/skills/impeccable` and linked as `~/.claude/skills/impeccable` | The `impeccable@openai-curated-remote` plugin (`config/codex/plugins.json`) |
+| The engine | `dev install --only skills` fetches it (below) | Comes with the plugin |
+| Use by default | The `ui` rule requires `frontend-design` and `impeccable`; the Frontend engineer, the UX designer and the Mobile engineer run `impeccable context` once at the start of their work | The same rule and the same crew procedures |
+
+How the skills step installs the engine:
+
+1. It reads the engine version from the pinned skill's `scripts/VERSION` (0.1.18 today) and the SHA-256 of this
+   platform's asset, such as `impeccable-darwin-arm64`, from the same commit's `scripts/engine-checksums.txt`. It
+   never trusts a digest published beside the binary.
+2. It downloads only that asset, over HTTPS, from
+   `https://github.com/pbakaus/impeccable/releases/download/engine-v<version>/<asset>`, and checks its SHA-256.
+3. It installs the verified binary as `scripts/bin/<os>-<arch>/impeccable` (mode 0755), the file the launcher runs
+   first, and keeps a verified copy in `~/.local/share/devkit/engines/impeccable/<version>/`, so the next install
+   reuses it without a download. Older versions are removed.
+4. It records an `install.engine` row in the audit trail (`dev audit`) and writes what it installed to
+   `~/.local/state/devkit/skill-engines.json`. Agents may write neither folder.
+
+A digest mismatch or a failed download leaves nothing executable, shows a failed line in the install output, and
+records the refusal in the audit trail. The rest of the install goes on. Fix the cause (network, proxy), then run
+`dev install --only skills` again.
+
+Crew members run the launcher too. Read as a script, it would run a program named only at run time, which the
+[guard](guard.md) refuses to crew members. The guard therefore trusts the installed launcher, run by its path below
+`~/.local/share/devkit/skills/impeccable`, while its content and its engine match what the skills step recorded:
+
+- **Write lanes** run every verb.
+- **Read-only lanes** run only the verbs that read, with their reading flags: `context` (with `--target`), `detect`
+  on local files (`--json`, `--quiet`, `--scope`, `--list-rules`, and the `--no-…` filters), and `doctor` (with
+  `--json` or `--target`, never `--fix`). Other verbs such as `init`, `document`, `extract`, `live`, and `generate`
+  write files or start a session, so a write lane runs them.
+- **No trust** in four cases: the launcher or its engine changed, a copy of the launcher sits elsewhere, the command
+  sets or exports any variable (`IMPECCABLE_BIN`, `PATH`, `HOME`, and the rest change what it runs), or the session
+  sets `IMPECCABLE_BIN`. The guard then reads the launcher as a script again and refuses it to crew members.
+
+impeccable offers to write PRODUCT.md and DESIGN.md. devkit's global instructions keep agents from creating them
+unless the developer asks (see [Settings that tame the plugins](#settings-that-tame-the-plugins)).
+
+`dev doctor` checks all three parts:
+
+| Row | Passes when | Fix |
+| --- | --- | --- |
+| Agents · impeccable skill (Claude) | `~/.claude/skills/impeccable` links to devkit's copy | `dev install --only skills` |
+| Agents · impeccable engine | The engine for this platform is in place and its SHA-256 matches `engine-checksums.txt` | `dev install --only skills` |
+| Codex · impeccable plugin | `codex plugin list` shows `impeccable@openai-curated-remote` installed and enabled | `dev install --only codex` |
+
+To move to a newer impeccable, change its `ref` in `config/skills.json` after review and run
+`dev install --only skills`. The step fetches the engine version that commit pins.
+
 | Skill | Source · license | Use |
 | --- | --- | --- |
 | `grill-with-docs` | mattpocock/skills · MIT | Interview the developer to align before work starts |
