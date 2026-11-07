@@ -1766,6 +1766,10 @@ class _Shell:
         why = guardless_session(name, argv, set(names) | self.exported)
         if why:
             return deny(why)
+        if _INTERP.match(name) and _dev_args(argv) is None:
+            why = code_session_refusal(argv, cwd, self.bodies)
+            if why:
+                return deny(why)
         dev = _dev_args(argv)
         if dev is not None:
             return self.dev(dev, cwd)
@@ -4376,10 +4380,40 @@ def _code_texts(code, name="") -> list:
                         or _BARE_LIST.search(code)):
         return []
     texts = [next((g for g in m.groups() if g is not None), "") for m in _STR_LIT.finditer(code)]
-    for m in [*_LIST_LIT.finditer(code), *_BARE_LIST.finditer(code)]:
+    for m in [*_LIST_LIT.finditer(code), *_BARE_LIST.finditer(code), *_CALL_LIST.finditer(code)]:
         items = re.findall(r"'([^'\n]*)'|\"([^\"\n]*)\"", m.group(1))
         texts.append(" ".join(shlex.quote(a or b) for a, b in items))
     return [t for t in texts if t.strip()]
+
+
+# a program name and its argument list in one call: spawn('dev', ['hook', 'prompt']), execFile("gh", ["pr", …]) (RT12)
+_CALL_LIST = re.compile(r"((?:'[^'\n]*'|\"[^\"\n]*\")\s*,\s*[\[(]\s*(?:(?:'[^'\n]*'|\"[^\"\n]*\")\s*,?\s*)+)[\])]")
+
+
+def code_session_refusal(argv, cwd, bodies, depth: int = 0) -> str | None:
+    """Why an interpreter's program starts a nested agent session without devkit's hooks or sandbox, or runs `dev
+    hook`, in a command line it hands to a process (subprocess, os.system, os.exec*, child_process, …), or None:
+    the refusals the shell form gets, for the same commands named in code (RT12). A repository's own script is its
+    code, as for the other checks."""
+    if depth > 3 or _repo_script(argv, cwd):
+        return None
+    name = os.path.basename(argv[0])
+    code = _program(argv, cwd, bodies)[0]
+    homes = set(_AGENT_HOME_ENV) & set(re.findall(r"\b[A-Z_]+\b", code or ""))
+    for text in _code_texts(code, name):
+        calls = shell_calls(text, cwd, depth + 1) or []
+        for inner, icode in calls:
+            why = guardless_session(os.path.basename(inner[0]), inner, homes)
+            if why:
+                return why
+            dargs = _dev_args(inner)
+            if dargs is not None and dargs[:1] == ["hook"] and not {"-h", "--help"} & set(dargs[1:]):
+                return HOOK_REASON
+            if icode is not None and _INTERP.match(os.path.basename(inner[0])):
+                why = code_session_refusal(inner, cwd, [], depth + 1)
+                if why:
+                    return why
+    return None
 
 
 def _reads_stdin(args) -> bool:

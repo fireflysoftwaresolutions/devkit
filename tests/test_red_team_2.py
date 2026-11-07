@@ -137,6 +137,32 @@ class RedTeam2(unittest.TestCase):
             with self.subTest(cmd=cmd):
                 self.assertEqual(self.acts(cmd), [])
 
+    # ---- RT12
+    def test_rt12_interpreter_spawn_evades_session_and_hook_refusals(self):
+        # guardless_session and the dev-hook refusal judged shell argv only; the same commands handed to a process
+        # from interpreter code are judged the same way
+        self.assertIsNotNone(self.check("python3 bin/dev hook prompt"))  # baseline: the shell form is caught
+        self.assertIsNotNone(self.check("claude --bare -p hi"))
+        for cmd in ("python3 -c \"import subprocess;subprocess.run(['claude','--bare','-p','hi'])\"",
+                    "python3 -c \"import os;os.system('claude --bare -p hi')\"",
+                    "python3 -c \"import os;os.execvp('npx',['npx','claude-code','--bare'])\"",
+                    "python3 -c \"import subprocess;subprocess.run(['dev','hook','prompt'])\"",
+                    "node -e \"require('child_process').spawn('dev',['hook','prompt'])\"",
+                    "node -e \"require('child_process').execSync('bash -c \\\"claude --bare -p hi\\\"')\"",
+                    "python3 -c \"import os,subprocess;subprocess.run(['claude','-p','hi'],"
+                    "env={**os.environ,'CLAUDE_CONFIG_DIR':'/tmp/c'})\""):
+            with self.subTest(cmd=cmd):
+                self.assertIsNotNone(self.check(cmd))
+                self.assertIsNotNone(self.member(cmd))
+
+    def test_rt12_interpreter_code_that_starts_an_ordinary_session_or_names_the_flags_runs(self):
+        for cmd in ("python3 -c \"import subprocess;subprocess.run(['claude','-p','hi'])\"",
+                    "python3 -c \"print('claude --bare is refused by the guard')\"",
+                    "node -e \"require('child_process').spawn('dev',['status'])\""):
+            with self.subTest(cmd=cmd):
+                self.assertIsNone(self.check(cmd))
+                self.assertIsNone(self.member(cmd))
+
 
 if __name__ == "__main__":
     unittest.main()
