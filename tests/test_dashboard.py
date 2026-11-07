@@ -1008,12 +1008,20 @@ class BranchMapTests(unittest.TestCase):
 # --------------------------------------------------------------------------- the page itself, in a real browser
 
 def find_chrome():
-    """A Chrome or Chromium for the page's behavior tests: $DEVKIT_TEST_CHROME, Google Chrome, or a Playwright build."""
-    home = Path.home() / "Library/Caches/ms-playwright"
+    """A Chrome or Chromium for the page's behavior tests: $DEVKIT_TEST_CHROME, Google Chrome, or a Playwright build.
+    The suite runs with a temporary HOME (tests/_hermetic.py), so the Playwright builds are also looked for in the
+    account's real home: a browser binary there is not devkit state, and Chrome still gets the run's HOME."""
+    homes = [Path.home()]
+    try:
+        import pwd
+        homes.append(Path(pwd.getpwuid(os.getuid()).pw_dir))
+    except (ImportError, KeyError, OSError):
+        pass
     cands = [os.environ.get("DEVKIT_TEST_CHROME"), "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
              "/Applications/Chromium.app/Contents/MacOS/Chromium"]
-    cands += sorted(glob.glob(str(home / "chromium_headless_shell-*/chrome-headless-shell-*/chrome-headless-shell")), reverse=True)
-    cands += sorted(glob.glob(str(home / "chromium-*/chrome-mac*/*.app/Contents/MacOS/*")), reverse=True)
+    for home in (h / "Library/Caches/ms-playwright" for h in homes):
+        cands += sorted(glob.glob(str(home / "chromium_headless_shell-*/chrome-headless-shell-*/chrome-headless-shell")), reverse=True)
+        cands += sorted(glob.glob(str(home / "chromium-*/chrome-mac*/*.app/Contents/MacOS/*")), reverse=True)
     cands += [shutil.which(n) for n in ("google-chrome", "chromium", "chromium-browser")]
     return next((c for c in cands if c and os.path.isfile(c) and os.access(c, os.X_OK)), None)
 
