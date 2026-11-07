@@ -12,7 +12,7 @@ from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "lib"))
 
-from devkit import canary, continuity, core, prompt  # noqa: E402
+from devkit import canary, continuity, core, ext, prompt  # noqa: E402
 from devkit import progress as pg  # noqa: E402
 
 
@@ -30,7 +30,9 @@ def boundary(root, real_caller=False) -> list:
            mock.patch.object(pg, "TEAM_POLICY", Path(root) / "policy" / "progress.json", create=True),
            mock.patch.object(pg, "QUOTA", Path(root) / "quota"),  # the usage windows and the crew limit last seen
            mock.patch.object(continuity, "CONT", Path(root) / "continuity"),
-           mock.patch.object(prompt, "STATE", Path(root) / "prompt-state")]
+           mock.patch.object(prompt, "STATE", Path(root) / "prompt-state"),
+           # the session start marks the last `dev ext ack` shown in the acceptance list, next to the lock
+           mock.patch.object(ext, "lock_file", lambda: Path(root) / "ext-lock.json")]
     if not real_caller:
         out.append(mock.patch.object(pg, "caller", lambda *a, **k: {"caller": "main", "how": "test"}, create=True))
     return out

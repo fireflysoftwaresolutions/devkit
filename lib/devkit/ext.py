@@ -1090,6 +1090,13 @@ def _note_accepted(items: list, now: int, by: str, lock: Path = None) -> bool:
             audit.record("ext.accept", eid, f"{what}; not accepted: the acceptance list could not be written ({e}), "
                                             f"so it stays as drift; {where}", "refused")
         return False
+    try:  # the developer sees it now, on the desktop, not only at the next session start
+        from . import progress
+        more = f" (and {len(items) - 1} more)" if len(items) > 1 else ""
+        progress.notify("extension accepted", f"{_shown(items[0][1])}{more}; tty {tty or 'none'}. Not you? "
+                                              f"dev audit --action ext.accept")
+    except Exception:
+        pass
     return True
 
 
@@ -1126,6 +1133,30 @@ def accepted_line(lock: Path = None):
             f"starts can look like your terminal: if you did not run these, remove the entry and review the audit "
             f"trail (`dev audit --action ext.accept`). The developer acknowledges them with `dev ext ack`, in a "
             f"terminal.")
+
+
+def last_ack_line(lock: Path = None):
+    """The session start's line about the last `dev ext ack`, once: when and from which terminal the acceptances were
+    confirmed, so a confirmation the developer did not make shows. None when there is none or it was shown."""
+    from . import state
+    last = {}
+
+    def take(doc):
+        a = doc.get("last_ack")
+        if not isinstance(a, dict) or a.get("shown"):
+            return state.SKIP
+        last.update(a)
+        a["shown"] = True
+    try:
+        state.update(accepted_file(lock), take, create=False, indent=1)
+    except state.StateBusy:
+        return None
+    if not last:
+        return None
+    when = time.strftime("%d %b %H:%M", time.localtime(int(last.get("at") or 0)))
+    return (f"devkit · the last `dev ext ack` confirmed {int(last.get('count') or 0)} acceptance(s) on {when} from "
+            f"tty {_shown(last.get('tty'), 40) or 'none'}. If that was not you, review `dev audit --action ext` and "
+            f"the extensions it confirmed (`dev ext ls`).")
 
 
 def _lock_change(lk: dict, new: dict) -> str:
@@ -2182,17 +2213,23 @@ def cmd_ack(a) -> int:
         print("Nothing to acknowledge: no extension was accepted since the last acknowledgement.")
         return 0
     done = {(p["id"], p.get("at"), p.get("record")) for p in items}
+    tty, parents = _tty(), _parents()
+    where = f"tty {tty or 'none'}; parents: {' ← '.join(parents) or 'unknown'}"
 
     def drop(doc):
         doc["pending"] = [p for p in doc.get("pending") or [] if isinstance(p, dict) and
                           (p.get("id"), p.get("at"), p.get("record")) not in done]
+        # the next session start shows this acknowledgement once, with where it came from (an agent's terminal can
+        # pass the developer check too)
+        doc["last_ack"] = {"at": int(time.time()), "count": len(items), "tty": tty, "parents": parents,
+                           "shown": False}
     try:
         state.update(accepted_file(), drop, indent=1)
     except state.StateBusy:
         ui.err("The acceptance list is busy (another dev command writes it). Run `dev ext ack` again in a moment.")
         return 1
     for p in items:
-        audit.record("ext.ack", p["id"], f"acknowledged: {p.get('what') or p['id']}", "ok",
+        audit.record("ext.ack", p["id"], f"acknowledged: {p.get('what') or p['id']}; {where}", "ok",
                      id=p.get("record") or "")
         print(f"  ✓ {p.get('what') or p['id']}")
     print(f"{len(items)} acceptance(s) acknowledged; the audit trail keeps them (`dev audit --action ext`).")

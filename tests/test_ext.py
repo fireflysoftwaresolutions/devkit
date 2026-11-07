@@ -643,6 +643,49 @@ class DriftSessionStartTests(HookCase):
                                               "source": "startup", "cwd": str(self.tmp.name)})
         self.assertIn("accepted since your last session: superpowers (claude plugin)", out)
 
+    def session_start(self, sid: str) -> dict:
+        with mock.patch.object(ext, "homes", return_value=self.h), \
+                mock.patch.object(hooks, "context_for", lambda cwd, agent: "## devkit · workspace context"), \
+                mock.patch.object(hooks, "_spawn", lambda *a, **k: None), \
+                mock.patch("devkit.work.request_sync", lambda *a, **k: None):
+            out = self.hook("session-start", {"session_id": sid, "hook_event_name": "SessionStart",
+                                              "source": "startup", "cwd": str(self.tmp.name)})
+        return json.loads(out) if out.lstrip().startswith("{") else {"plain": out}
+
+    def test_an_acceptance_sends_a_desktop_notification(self):
+        from devkit import progress
+        with mock.patch.object(progress, "notify") as notify:
+            DriftWiringTests.install(self, developer=True)
+        ((title, text), _), = notify.call_args_list
+        self.assertIn("accepted", title)
+        self.assertIn("superpowers (claude plugin) 7.0.0 bb92a77 → 7.0.1 414603b", text)
+
+    def test_pending_acceptances_reach_claude_as_a_system_message_at_session_start(self):
+        DriftWiringTests.install(self, developer=True)
+        out = self.session_start("d")
+        self.assertIn("accepted since your last session: superpowers (claude plugin)", out.get("systemMessage", ""))
+        ctx = out["hookSpecificOutput"]["additionalContext"]
+        self.assertIn("## devkit · workspace context", ctx)
+        self.assertIn("accepted since your last session", ctx)
+
+    def test_the_next_session_start_shows_the_last_acknowledgement_once_with_its_tty(self):
+        DriftWiringTests.install(self, developer=True)
+        with mock.patch.object(ext, "_tty", return_value="/dev/ttys042"):
+            rc, _ = DriftWiringTests.ack(self, developer=True)
+        self.assertEqual(rc, 0)
+        first, second = self.session_start("e"), self.session_start("f")
+        self.assertIn("last `dev ext ack` confirmed 1 acceptance", first.get("systemMessage", ""))
+        self.assertIn("tty /dev/ttys042", first["systemMessage"])
+        self.assertNotIn("dev ext ack` confirmed", json.dumps(second))
+
+    def test_an_acknowledgement_is_audited_with_its_tty_and_parent_processes(self):
+        DriftWiringTests.install(self, developer=True)
+        with mock.patch.object(ext, "_tty", return_value="/dev/ttys042"), \
+                mock.patch.object(ext, "_parents", return_value=["-zsh", "Terminal"]):
+            DriftWiringTests.ack(self, developer=True)
+        rec = audit.records(days=1, action="ext.ack")[-1]
+        self.assertIn("tty /dev/ttys042; parents: -zsh ← Terminal", rec["detail"])
+
 
 class FakeUpstream:
     """The upstream adapter `dev ext outdated` and `update` are given: answers from a table, or fails like a network
