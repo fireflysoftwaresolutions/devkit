@@ -3234,11 +3234,14 @@ def slot_use(run: dict, sess: dict | None = None, now: float | None = None) -> l
     out = []
     for tid, rec in (sess.get("launches") or {}).items():
         aid = rec.get("agent_id")
-        cost = launch_cost(run, rec.get("type") or "", rec.get("label") or "", rec.get("parent") or "main")
         if rec.get("state") == "pending" and now - (rec.get("ts") or now) < LAUNCH_TTL:
-            out.append((tid, rec.get("label") or rec.get("type") or "a launch", cost))
+            key, name = tid, rec.get("label") or rec.get("type") or "a launch"
         elif rec.get("state") == "started" and aid not in agents and aid in subs:
-            out.append((aid, rec.get("label") or str(aid)[:8], cost))  # working in a session without a run
+            key, name = aid, rec.get("label") or str(aid)[:8]  # working in a session without a run
+        else:
+            continue  # a launch that holds no slot: no cost to work out
+        out.append((key, name, launch_cost(run, rec.get("type") or "", rec.get("label") or "",
+                                           rec.get("parent") or "main")))
     try:
         from . import crew
     except Exception:
