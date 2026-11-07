@@ -241,9 +241,13 @@ def request_sync(reason: str = "", delay: int = 15):
         out = open(log, "a")
     except OSError:
         out = subprocess.DEVNULL
-    subprocess.Popen([sys.executable, "-I", "-S", str(core.DEVKIT_HOME / "bin" / "dev"), "sync", "--quiet", "--offline",
-                      "--delay", str(delay)], stdin=subprocess.DEVNULL, stdout=out, stderr=out, start_new_session=True,
-                     close_fds=True)  # isolated, as its shebang runs it
+    try:
+        subprocess.Popen([sys.executable, "-I", "-S", str(core.DEVKIT_HOME / "bin" / "dev"), "sync", "--quiet",
+                          "--offline", "--delay", str(delay)], stdin=subprocess.DEVNULL, stdout=out, stderr=out,
+                         start_new_session=True, close_fds=True)  # isolated, as its shebang runs it
+    finally:
+        if out is not subprocess.DEVNULL:
+            out.close()  # the child holds its own copy of the log
     return True
 
 

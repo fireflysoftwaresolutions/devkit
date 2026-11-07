@@ -214,13 +214,20 @@ class SyncRequestTests(unittest.TestCase):
         saved = (work.SYNC_PENDING, subprocess.Popen, os.environ.pop("DEVKIT_NO_AUTOSYNC", None))
         with tempfile.TemporaryDirectory() as d:
             work.SYNC_PENDING = Path(d) / "sync.pending"
-            subprocess.Popen = lambda *a, **k: spawned.append(a[0])
+            (Path(d) / "logs").mkdir()
+            state = mock.patch.object(work.core, "STATE", Path(d))  # sync.log opens below it, whatever ran before
+            state.start()
+            self.addCleanup(state.stop)
+            handles = []
+            subprocess.Popen = lambda *a, **k: (spawned.append(a[0]), handles.append(k["stdout"]))
             try:
                 self.assertTrue(work.request_sync("commit abc"))
                 self.assertFalse(work.request_sync("push"))
                 self.assertFalse(work.request_sync("task done"))
                 self.assertEqual(len(spawned), 1)
                 self.assertIn("--delay", spawned[0])
+                # the child has its own copy of sync.log; this process closes its handle (no ResourceWarning)
+                self.assertTrue(handles[0].closed, "request_sync left its sync.log handle open")
                 self.assertEqual(work.SYNC_PENDING.read_text().splitlines(), ["commit abc", "push", "task done"])
             finally:
                 work.SYNC_PENDING, subprocess.Popen, env = saved
