@@ -381,7 +381,8 @@ def detect(top, repo=None) -> list:
             start = next((s for s in ("tests", "test") if any(f.startswith((d + "/" if d else "") + s + "/")
                                                              for f in mine)), ".")
             found.append({"name": "unittest", "root": rel(d), "lang": "py", "exec": [py, "-m", "unittest"],
-                          "python": py, "start": start})
+                          "python": py, "start": start,
+                          "package": start != "." and os.path.isfile(os.path.join(absd(d), start, "__init__.py"))})
 
     # Node: jest or vitest per package.json
     for d in sorted(d for d in by_dir if has(d, "package.json")):
@@ -960,15 +961,9 @@ def build_command(top, runner, files=(), ids=(), report=None, related=(), all_=F
         sdir = os.path.join(_rootdir(top, runner), start)
         env["PYTHONPATH"] = os.pathsep.join([os.path.normpath(sdir)] + [p for p in [os.environ.get("PYTHONPATH")] if p])
         if all_:
-            argv = ex + ["discover", "-v", "-s", start]
+            argv = ex + ["discover", "-v", "-s", start] + (["-t", "."] if runner.get("package") else [])
         else:
-            mods = []
-            for r in rel:
-                sub = os.path.relpath(r, start).replace("\\", "/") if start != "." else r
-                if sub.startswith("../"):
-                    sub = r
-                mods.append(re.sub(r"\.py$", "", sub).replace("/", "."))
-            argv = ex + ["-v"] + mods + [_id(i) for i in ids]
+            argv = ex + ["-v"] + [_ut_module(runner, r) for r in rel] + [_ut_name(runner, _id(i)) for i in ids]
     elif name == "jest":
         argv = ex + ["--ci", "--json"] + ([f"--outputFile={report}"] if report else [])
         if related:
@@ -1245,12 +1240,15 @@ def _ut_id(name: str, paren: str) -> str:
 
 
 def _ut_file(top, runner, id_: str) -> str:
-    base = os.path.join(_rootdir(top, runner), runner.get("start") or ".")
+    # ids are dotted from the start folder, or from the runner's root when the start folder is a package
+    start = os.path.join(_rootdir(top, runner), runner.get("start") or ".")
+    bases = [_rootdir(top, runner), start] if runner.get("package") else [start]
     parts = id_.split(".")
-    for i in range(len(parts), 0, -1):
-        cand = os.path.join(base, *parts[:i]) + ".py"
-        if os.path.exists(cand):
-            return _relto(top, cand)
+    for base in bases:
+        for i in range(len(parts), 0, -1):
+            cand = os.path.join(base, *parts[:i]) + ".py"
+            if os.path.exists(cand):
+                return _relto(top, cand)
     return ""
 
 
@@ -2002,9 +2000,20 @@ def _changed_units(top, base, f):
 
 
 def _ut_module(runner, rel) -> str:
+    """A test file's module name for unittest: from the start folder (test_x), or from the runner's root
+    (tests.test_x) when the start folder is a package, which unittest then imports with its __init__.py."""
     start = runner.get("start") or "."
-    sub = os.path.relpath(rel, start).replace("\\", "/") if start != "." else rel
+    sub = os.path.relpath(rel, start).replace("\\", "/") if start != "." and not runner.get("package") else rel
     return re.sub(r"\.py$", "", rel if sub.startswith("../") else sub).replace("/", ".")
+
+
+def _ut_name(runner, id_: str) -> str:
+    """A unittest id to run: in a package start folder, an id recorded by its bare module name (test_x.C.t, from a
+    run before the folder became a package) gets the package's dotted prefix (tests.test_x.C.t)."""
+    if not runner.get("package"):
+        return id_
+    pkg = os.path.normpath(runner.get("start") or ".").replace("\\", "/").replace("/", ".")
+    return id_ if id_ == pkg or id_.startswith(pkg + ".") else f"{pkg}.{id_}"
 
 
 def _unit_ids(top, runner, f, units):
@@ -2315,7 +2324,7 @@ _FAILFAST = {"pytest": {"-x", "--exitfirst", "--maxfail", "--sw", "--stepwise"},
              "pest": {"--stop-on-failure", "--bail"}}
 _NARROW = {"pytest": {"-k", "-m", "--lf", "--last-failed", "--ff", "--failed-first", "--deselect", "--co",
                       "--collect-only", "--sw", "--stepwise"},
-           "unittest": {"-k", "-p", "--pattern", "-t", "--top-level-directory"},
+           "unittest": {"-k", "-p", "--pattern"},
            "jest": {"-t", "--testNamePattern", "-o", "--onlyChanged", "--changedSince", "--shard",
                     "--findRelatedTests", "--listTests", "--watch", "--watchAll"},
            "vitest": {"-t", "--testNamePattern", "--changed", "--shard", "--watch", "related", "list", "bench"},
@@ -2390,21 +2399,28 @@ def recognize(command, cwd, top):
         mod, rest = "pytest", argv[1:]
     if mod == "unittest":
         args = rest[1:] if rest[:1] == ["discover"] else rest
-        if rest[:1] != ["discover"] and _positionals(rest, {"-s", "--start-directory"}):
+        valued = {"-s", "--start-directory", "-t", "--top-level-directory"}
+        if rest[:1] != ["discover"] and _positionals(rest, valued):
             return None  # named modules: not a suite run
         if _flags(args) & _NARROW["unittest"]:
             return None
-        start, pos = ".", _positionals(args, {"-s", "--start-directory"})
+        start, top_level, pos = ".", None, _positionals(args, valued)
         for i, x in enumerate(args):
             if x in ("-s", "--start-directory") and i + 1 < len(args):
                 start = args[i + 1]
             elif x.startswith("--start-directory="):
                 start = x.split("=", 1)[1]
+            elif x in ("-t", "--top-level-directory") and i + 1 < len(args):
+                top_level = args[i + 1]
+            elif x.startswith("--top-level-directory="):
+                top_level = x.split("=", 1)[1]
         start = pos[0] if pos and start == "." else start
-        if len(pos) > 1:
-            return None
+        if len(pos) > 1 or (top_level is not None and os.path.normpath(top_level) != "."):
+            return None  # a pattern, or a top level other than the step's folder: not the whole suite
+        start = os.path.normpath(start).replace("\\", "/")
+        # -t . runs the start folder as a package (tests.test_x): its __init__.py runs before the tests
         return mk("unittest", "py", prefix + [py or "python", "-m", "unittest"], args, python=py or "python",
-                  start=os.path.normpath(start).replace("\\", "/"))
+                  start=start, package=top_level is not None and start != ".")
     if mod == "pytest":
         if _flags(rest) & _NARROW["pytest"]:
             return None

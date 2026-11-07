@@ -169,6 +169,13 @@ class DetectTests(unittest.TestCase):
         self.assertEqual(list(found), [("unittest", ".")])
         self.assertEqual(found[("unittest", ".")]["start"], "tests")
 
+    # a start folder with __init__.py is a package, which unittest imports (and so sets up) only from the root
+    def test_unittest_start_folder_with_an_init_is_a_package(self):
+        found = self.detect({"tests/__init__.py": "", "tests/test_a.py": "import unittest\n", "a.py": ""})
+        self.assertTrue(found[("unittest", ".")]["package"])
+        found = self.detect({"tests/test_a.py": "import unittest\n", "a.py": ""})
+        self.assertFalse(found[("unittest", ".")]["package"])
+
     def test_jest_with_pnpm(self):
         found = self.detect({"package.json": json.dumps({"devDependencies": {"jest": "^29"}}),
                              "pnpm-lock.yaml": "", "src/a.test.ts": ""})
@@ -369,6 +376,18 @@ class CommandTests(unittest.TestCase):
         self.assertEqual(cmd["env"]["PYTHONPATH"].split(os.pathsep)[0], str(Path(top) / "tests"))
         cmd = testx.build_command(top, rn, ids=["test_calc.CalcTests.test_add"])
         self.assertEqual(cmd["argv"][-1], "test_calc.CalcTests.test_add")
+
+    # in a package start folder, modules and ids are dotted from the root, the suite runs with -t ., and an id
+    # recorded by its bare name (before the folder became a package) gets the package's prefix
+    def test_unittest_package_names_from_the_root(self):
+        top, rn = self.runner({"tests/__init__.py": "", "tests/test_calc.py": ""}, "unittest")
+        self.assertEqual(testx.build_command(top, rn, files=["tests/test_calc.py"])["argv"],
+                         [PY, "-m", "unittest", "-v", "tests.test_calc"])
+        ids = ["test_calc.CalcTests.test_add", "tests.test_calc.CalcTests.test_sub"]
+        self.assertEqual(testx.build_command(top, rn, ids=ids)["argv"][-2:],
+                         ["tests.test_calc.CalcTests.test_add", "tests.test_calc.CalcTests.test_sub"])
+        self.assertEqual(testx.build_command(top, rn, all_=True)["argv"],
+                         [PY, "-m", "unittest", "discover", "-v", "-s", "tests", "-t", "."])
 
     def test_jest_files_and_related(self):
         top, rn = self.runner({"package.json": json.dumps({"devDependencies": {"jest": "^29"}}),
@@ -603,6 +622,17 @@ class ParseTests(unittest.TestCase):
                                             "AssertionError: -1 != 3")])
         self.assertEqual(len(cases), 2)
 
+    # a package run names its tests from the root (tests.test_calc.…): each maps to its file, passed ones included
+    def test_unittest_output_of_a_package_run(self):
+        rn = {"name": "unittest", "root": ".", "start": "tests", "package": True}
+        text = UNITTEST_312.replace("ROOT", str(self.top)).replace("(test_calc.", "(tests.test_calc.")
+        cases = {c["id"]: c for c in testx.parse_unittest(text, str(self.top), rn)}
+        self.assertEqual((cases["tests.test_calc.CalcTests.test_add"]["status"],
+                          cases["tests.test_calc.CalcTests.test_add"]["line"]), ("failed", 9))
+        self.assertEqual({i: c["file"] for i, c in cases.items() if i.startswith("tests.")},
+                         {"tests.test_calc.CalcTests.test_add": "tests/test_calc.py",
+                          "tests.test_calc.CalcTests.test_sub": "tests/test_calc.py"})
+
 
 
 # --------------------------------------------------------------------------- running a real unittest project
@@ -637,6 +667,19 @@ CALC = {
     ".gitignore": "__pycache__/\n",
 }
 BROKEN_ADD = "def add(a, b):\n    return a - b\n\n\ndef sub(a, b):\n    return a - b\n"
+# CALC as a package suite: tests/__init__.py sets the run up, and a test checks that it ran first
+PKG = dict(CALC, **{
+    "tests/__init__.py": "import os\n\nos.environ['CALC_SUITE_SETUP'] = 'ran'\n",
+    "tests/test_setup.py": """
+        import os
+        import unittest
+
+
+        class SetupTests(unittest.TestCase):
+            def test_the_package_setup_ran_first(self):
+                self.assertEqual(os.environ.get("CALC_SUITE_SETUP"), "ran")
+        """,
+})
 
 
 def state(e):
@@ -769,6 +812,22 @@ class RunTests(unittest.TestCase):
             rc, out, _ = dev(r)
             self.assertEqual(rc, 0)
             self.assertIn("nothing to run", out)
+
+    # a suite whose tests/__init__.py sets the run up (as devkit's own does) runs as a package, so that setup runs
+    # for one file and for the whole suite, and its failures are recorded by their dotted names
+    def test_a_package_suite_runs_its_init_first(self):
+        with Env() as e:
+            r = e.repo(PKG)
+            rc, out, err = dev(r, "run", "tests/test_setup.py")
+            self.assertEqual(rc, 0, out + err)
+            rc, out, err = dev(r, "run", "--all")
+            self.assertEqual(rc, 0, out + err)
+            self.assertEqual(state(e)["full"]["unittest:."]["count"], 4)
+            edit(r, {"calc.py": BROKEN_ADD})
+            rc, out, err = dev(r, "run", "tests/test_calc.py", "tests/test_setup.py")
+            self.assertEqual(rc, 1, out + err)
+            self.assertIn("tests/test_calc.py:11", out + err)
+            self.assertEqual(recorded(e), ["tests.test_calc.CalcTests.test_add"])
 
 
 class EstimateTests(unittest.TestCase):
@@ -968,6 +1027,20 @@ class RecognizeTests(unittest.TestCase):
             for cmd in ("npm ci && npm test", "make test", "pytest -k slow", "echo hi", "pytest | tee log"):
                 with self.subTest(cmd=cmd):
                     self.assertIsNone(testx.recognize(cmd, top, top))
+
+    # -t . makes a CI step's unittest suite a package run (its re-run of failures too); another top level is not
+    # the whole suite
+    def test_unittest_with_the_top_level_at_the_root_is_a_package_suite_run(self):
+        with Env() as e:
+            r = e.repo({"tests/__init__.py": "", "tests/test_a.py": ""}, branch=None)
+            top = str(r)
+            for cmd in ("python -m unittest discover -s tests -t .", "python -m unittest discover -t . -s tests",
+                        "python3 -m unittest discover --top-level-directory=. -s tests"):
+                with self.subTest(cmd=cmd):
+                    rn = testx.recognize(cmd, top, top)
+                    self.assertEqual((rn["start"], rn["package"]), ("tests", True))
+            self.assertFalse(testx.recognize("python -m unittest discover -s tests", top, top)["package"])
+            self.assertIsNone(testx.recognize("python -m unittest discover -s tests -t lib", top, top))
 
     def test_failures_are_read_from_a_step_log(self):
         with Env() as e:
