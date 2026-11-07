@@ -1644,7 +1644,8 @@ def _prompt_say(msg: str):
 def setup_prompt(assume_yes: bool = False, remove: bool = False, ask=None, zshrc: Path = None,
                  starship: Path = None, env=None, say=_prompt_say) -> int:
     """`dev setup prompt`: ask the developer, then show devkit's segment in the prompt they use. `remove` takes it out
-    again. Every file it rewrites is backed up first. -> exit code."""
+    again. Every file it rewrites is backed up first. Consent is the developer's: in an agent's call (anything but
+    core.set_by_developer()), neither --yes nor a piped answer adds anything. -> exit code."""
     from . import prompt
     zshrc = zshrc or ZSHRC
     starship = starship or starship_toml()
@@ -1660,6 +1661,11 @@ def setup_prompt(assume_yes: bool = False, remove: bool = False, ask=None, zshrc
         prompt.set_mode("off")
         say(f"  {ui.OK} The prompt helper is off. Open a new terminal tab to see it. Add it again: dev setup prompt")
         return 0
+    if not core.set_by_developer():
+        say(f"  {ui.WARN} dev setup prompt changes your shell prompt, so it needs your yes, typed in your own terminal: "
+            "an agent's --yes or a piped answer is not consent. Nothing changed; run it in a terminal: dev setup "
+            "prompt")
+        return 2
     where = {"starship": f"It adds a marked block to {tilde(starship)} and puts the helper after\n  your git branch. "
                          "A copy of the file is saved first.",
              "zsh": "It turns on devkit's own zsh block (shell/devkit.zsh, which your shell\n  already loads), so "

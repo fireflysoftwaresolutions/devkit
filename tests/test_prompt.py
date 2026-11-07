@@ -169,6 +169,45 @@ class CacheAndSegment(Sandbox):
         out = self.zsh('print -r -- "${+functions[_devkit_prompt]} $precmd_functions"', pre="precmd_functions=(theme)")
         self.assertEqual(out.strip(), "1 _devkit_prompt theme")
 
+    # The cache is sourced, and its numbers go into zsh arithmetic, where an array subscript such as path[$(cmd)]
+    # runs the command. The reader takes only digits there, so a value that is not one runs nothing and counts as 0.
+    def test_the_reader_runs_nothing_from_a_value_that_is_not_digits(self):
+        main = self.checkout("devkit")
+        pwned = self.root / "pwned"
+        q, root = prompt.zsh_quote, prompt.zsh_quote(main)
+        evil = q(f"path[$(touch {pwned})]")  # the subscript of an array that exists (zsh's path) runs the command
+
+        def cache(ts, crew, ask):
+            prompt._atomic(prompt.cache_zsh(), "\n".join([
+                f"_dkp_alias=( {root} 'devkit' )", f"_dkp_ts=( {root} {ts} )", f"_dkp_crew=( {root} {crew} )",
+                f"_dkp_ask=( {root} {ask} )", f"_dkp_ck=( {root} '' )", f"_dkp_head=( {root} '' )",
+                f"_dkp_ref=( {root} '' )"]) + "\n")
+        cache(evil, q(""), q("0"))
+        self.assertEqual(self.probe((main, 120)), [("✦ devkit", UNSET)])
+        cache(q(str(int(time.time()))), evil, evil)
+        self.assertEqual(self.probe((main, 120)), [("✦ devkit", UNSET)])
+        self.assertFalse(pwned.exists())
+        cache(q(str(int(time.time()))), q(str(int(time.time()) + 600)), q("2"))
+        self.assertEqual(self.probe((main, 120)), [("✦ devkit · 1 working", "! 2 questions for you")])
+
+    # Sourcing runs the file, so the owner is not enough: a cache that another user can write, one behind a symlink,
+    # or one in a folder that another user can write is not read at all.
+    def test_the_reader_skips_a_cache_others_can_write(self):
+        main = self.checkout("devkit")
+        prompt.refresh(reg={"projects": [self.project("acme/devkit", main)]}, runs=[])
+        f, d = prompt.cache_zsh(), prompt.folder()
+        self.assertEqual(self.probe((main, 120)), [("✦ devkit", UNSET)])
+        os.chmod(f, 0o666)
+        self.assertEqual(self.probe((main, 120)), [(UNSET, UNSET)])
+        os.chmod(f, 0o600)
+        os.chmod(d, 0o777)
+        self.assertEqual(self.probe((main, 120)), [(UNSET, UNSET)])
+        os.chmod(d, 0o700)
+        real = self.root / "elsewhere.zsh"
+        os.replace(f, real)
+        os.symlink(real, f)
+        self.assertEqual(self.probe((main, 120)), [(UNSET, UNSET)])
+
     # A hook in a worktree made after the last `dev sync` finds its project through .git's commondir.
     def test_hook_refresh_finds_a_worktree_the_registry_does_not_know(self):
         main = self.checkout("devkit")
@@ -332,10 +371,31 @@ class SetupPrompt(Sandbox):
         self.toml = self.home / ".config" / "starship.toml"
         self.zshrc = self.home / ".zshrc"
         self.said = []
+        mine = mock.patch.object(core, "set_by_developer", return_value=True)  # the developer, unless a test says not
+        mine.start()
+        self.addCleanup(mine.stop)
 
     def setup_prompt(self, answer="", **kw):
         return setup.setup_prompt(ask=lambda q: answer, zshrc=self.zshrc, starship=self.toml, env={},
                                   say=self.said.append, **kw)
+
+    # Consent is the developer's: in an agent's call (or anywhere core.set_by_developer says no), neither --yes nor a
+    # piped "y" adds the helper; nothing is asked and no file changes. Taking it out needs no consent.
+    def test_an_agents_yes_or_piped_answer_is_not_consent(self):
+        self.zshrc.write_text('eval "$(starship init zsh)"\n')
+
+        def never(q):
+            raise AssertionError("an agent's call is never asked")
+        with mock.patch.object(core, "set_by_developer", return_value=False):
+            for kw in ({"assume_yes": True}, {}):
+                self.said.clear()
+                rc = setup.setup_prompt(ask=never, zshrc=self.zshrc, starship=self.toml, env={}, say=self.said.append,
+                                        **kw)
+                self.assertEqual((prompt.mode(), self.toml.exists()), ("", False))
+                self.assertEqual(rc, 2, kw)
+                self.assertIn("in your own terminal", "\n".join(self.said))
+            self.assertEqual(self.setup_prompt(remove=True), 0)
+        self.assertEqual(prompt.mode(), "off")
 
     def backups(self, name):
         return sorted((self.state / "backups").glob(f"{name}.*"))

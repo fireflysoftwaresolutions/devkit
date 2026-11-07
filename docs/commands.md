@@ -1157,7 +1157,8 @@ asks once, and then shows the helper in the prompt you use. With Starship it add
 `~/.config/starship.toml` (or `$STARSHIP_CONFIG`) after a backup, and puts the helper after your git branch. Without
 Starship, `oh-my-posh`, or Powerlevel10k it turns on devkit's own zsh block in `shell/devkit.zsh`, so `~/.zshrc` stays as
 it is. For `oh-my-posh` and Powerlevel10k it points you to the snippet for your theme. A no is remembered: `dev install`
-does not ask again.
+does not ask again. The yes must be yours, typed in your own terminal: in an agent's call, neither `-y` nor a piped
+answer adds the helper, and nothing changes (exit code `2`). `--remove` needs no answer.
 
 `dev setup commit-template` asks again whether new commit messages open with
 [devkit's commit template](git-and-github.md#the-template-in-your-editor), even after a no. A yes sets
@@ -1315,7 +1316,8 @@ copies for `--version`), and the Docker actions.
 
 Once `dev setup prompt` turned it on, it also draws the [prompt helper](getting-started.md#the-prompt-helper): before
 each prompt, `_devkit_prompt` sets `DEVKIT_PROMPT` and `DEVKIT_PROMPT_ASK` inside devkit projects and unsets them
-elsewhere.
+elsewhere. Because the shell sources the cache, it reads it only when the cache is a regular file of yours, not a
+symlink, in a folder of yours, and no one else can write either; and only digits from it reach zsh arithmetic.
 
 ### `dev prompt [refresh]`
 

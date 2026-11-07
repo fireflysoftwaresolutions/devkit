@@ -69,12 +69,15 @@ if [[ -n $_dk_pmode && $_dk_pmode != off ]] && zmodload -F zsh/stat b:zstat 2>/d
   _devkit_prompt() {
     emulate -L zsh
     setopt extended_glob
-    local f=$_dk_pdir/cache.zsh d a ck g c h t seg ask zs star run ok bad dots sep
+    local f=$_dk_pdir/cache.zsh d a ck g c h t ts seg ask zs star run ok bad dots sep
     local -i n=0 q=0 wide=0 now=$EPOCHSECONDS
-    local -A st
-    # The cache is read again only when it changed (devkit replaces it, so its inode changes), and only when it
-    # belongs to this user, because it is sourced.
-    if ! zstat -H st -- $f 2>/dev/null || (( ${st[uid]} != UID )); then
+    local -A st dst
+    # The cache is sourced, so it is read only when it is a regular file (not a symlink) of this user's that no one
+    # else can write, in a folder of this user's that no one else can write; and again only when it changed (devkit
+    # replaces it, so its inode changes).
+    if ! zstat -L -H st -- $f 2>/dev/null || ! zstat -L -H dst -- $_dk_pdir 2>/dev/null \
+        || (( st[uid] != UID || dst[uid] != UID || (st[mode] & 8#170000) != 8#100000 \
+              || (dst[mode] & 8#170000) != 8#040000 || (st[mode] | dst[mode]) & 8#022 )); then
       _dk_psig= _dk_prompt_zsh=
       unset DEVKIT_PROMPT DEVKIT_PROMPT_ASK
       return 0
@@ -101,9 +104,12 @@ if [[ -n $_dk_pmode && $_dk_pmode != off ]] && zmodload -F zsh/stat b:zstat 2>/d
     a=${_dkp_alias[$d]}
     (( ${#a} > 16 )) && a="${a[1,16]}$dots"
     seg="$star $a" zs="%F{215}$star%f %B${a//\%/%%}%b"
-    if (( now - ${_dkp_ts[$d]:-0} < 86400 )); then
+    # Only digits reach arithmetic: there, an array subscript in a value (path[$(cmd)]) would run a command.
+    ts=${_dkp_ts[$d]}
+    [[ $ts == <-> ]] || ts=0
+    if (( now - ts < 86400 )); then
       # Members whose heartbeat is newer than 15 minutes in a run still working: devkit wrote when each stops.
-      for t in ${=_dkp_crew[$d]}; do (( t > now )) && (( n++ )); done
+      for t in ${=_dkp_crew[$d]}; do [[ $t == <-> ]] && (( t > now )) && (( n++ )); done
       if (( n )); then
         if (( wide )); then seg+=" $sep $n working" zs+=" $sep %F{cyan}$n working%f"
         else seg+=" $run$n" zs+=" %F{cyan}$run$n%f"; fi
@@ -125,7 +131,7 @@ if [[ -n $_dk_pmode && $_dk_pmode != off ]] && zmodload -F zsh/stat b:zstat 2>/d
         if (( wide )); then seg+=" $sep checks $g" zs+=" $sep checks %F{$c}$g%f"
         else seg+=" $g" zs+=" %F{$c}$g%f"; fi
       fi
-      q=${_dkp_ask[$d]:-0}
+      [[ ${_dkp_ask[$d]} == <-> ]] && q=${_dkp_ask[$d]}
       if (( q > 0 )); then
         if (( wide )); then ask="! $q question"; (( q > 1 )) && ask+=s; ask+=" for you"; else ask="!$q"; fi
       fi
