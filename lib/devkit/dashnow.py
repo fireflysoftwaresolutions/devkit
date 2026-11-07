@@ -440,7 +440,7 @@ def _runs(raw_runs, briefs, now, host, team, memo) -> list:
             continue
         wo = waiting_on(raw, now)
         eta = memo.get(b["id"], landing_key(raw, wo), lambda raw=raw: landing(raw, now))
-        out.append(dict(b, machine=None, who=None, waiting_on=wo, eta=eta))
+        out.append(dict(b, machine=None, who=None, branch=None, waiting_on=wo, eta=eta))
     out += _remote_runs(team, host, now)
     return sorted(out, key=_run_order)
 
@@ -517,6 +517,8 @@ def _safety(reg) -> dict:
         m = sum(1 for p in projects if p["not_backed_up"])
         line = {"tone": "caution", "text": f"{n} branches are only on this Mac, in {_plural(m, 'project', 'projects')}",
                 "oldest": oldest}
+    elif not _projects(reg):
+        line = {"tone": "ok", "text": "No projects yet, so no branches to back up.", "oldest": None}
     elif not mapped:
         line = {"tone": "unknown", "text": "No branch map yet. dev sync makes one.", "oldest": None}
     else:
@@ -534,13 +536,13 @@ def _options(d: dict) -> list:
     for o in d.get("options") or []:
         text = RECOMMENDED_RE.sub("", str(o)).strip()
         m = OPTION_RE.match(text)
-        key, label = (m.group(1), m.group(2).strip()) if m else (text, text)
+        # an option without a letter is answered by its whole text: one line, never cut with "…" (no option would match)
+        key, label = (m.group(1), m.group(2).strip()) if m else (re.sub(r"\s+", " ", text)[:LINE].rstrip(), text)
         parsed.append((key, label, text))
     pick = next((i for i, (k, _, _) in enumerate(parsed) if rec and k.lower() == rec), None)
     if pick is None:
         pick = next((i for i, (_, _, t) in enumerate(parsed) if rec and t.lower().startswith(rec)), None)
-    return [{"key": _line(k, 80), "text": _line(lab, TITLE), "recommended": i == pick}
-            for i, (k, lab, _) in enumerate(parsed)]
+    return [{"key": k, "text": _line(lab, TITLE), "recommended": i == pick} for i, (k, lab, _) in enumerate(parsed)]
 
 
 def _type_to_answer(did: str, opts: list) -> list:
@@ -640,10 +642,13 @@ def _ci_items(reg, ci, now) -> list:
         line = " · ".join(_line(x, 200) for x in (job.get("name"), job.get("step"), err) if x)
         rid = str(f.get("id") or "")
         num = rid if rid.isdigit() else str(f.get("number") or "")
+        # dev run view reads the current folder's repository: the command first goes to the project's own folder
+        path = (p or {}).get("path") if (p or {}).get("local") is not False else None
         out.append(_item(id=f"ci_failed:{repo}:{branch}", rank=2, kind="ci_failed", tone="alert",
                          title=f"CI failed · {branch} · {_name(p, repo)}", clause=f"CI failed on {branch}.",
                          lines=[line], since=ts, project=(p or {}).get("id") or repo or None,
-                         copy=_cmd(f"dev run view {rid} --failed") if rid.isdigit() else None,
+                         copy=_cmd(f"cd -- {_q(path)} && dev run view {rid} --failed")
+                         if path and rid.isdigit() else None,
                          open=_open("ci", f"{repo}#{num}" if num.isdigit() else repo), url=_url(f.get("url"), p)))
     return out
 
@@ -757,8 +762,7 @@ def _setup(reg) -> list:
     return [{"key": "agents", "done": signed,
              "text": "An agent is signed in" if signed else "Sign in to Claude Code or Codex",
              "copy": None if signed else sign_in},
-            {"key": "project", "done": False,
-             "text": "Clone a project with dev clone <owner/repo>, or start one with dev new <name>", "copy": None},
+            {"key": "project", "done": False, "text": "Add your first project", "copy": None},
             {"key": "sync", "done": synced, "text": "The first sync ran" if synced else "Run the first sync",
              "copy": None if synced else "dev sync"}]
 
@@ -837,7 +841,11 @@ def _since(since, raw_runs) -> dict:
     since = dict(since or {})
     frm = _int(since.get("from")) or 0
     out = []
-    done, merged = len(since.get("done") or []), len(since.get("merged") or [])
+    # since_yesterday counts before it caps its lists (30 tasks, 20 PRs): the line uses the counts
+    counts = since.get("counts") if isinstance(since.get("counts"), dict) else {}
+    done = counts.get("done", len(since.get("done") or []))
+    merged = counts.get("merged", len(since.get("merged") or []))
+    since["counts"] = {"done": done, "merged": merged}
     finished = [r for r in raw_runs or [] if isinstance(r, dict) and r.get("state") == "done"
                 and (r.get("finished") or 0) >= frm]
     if done:

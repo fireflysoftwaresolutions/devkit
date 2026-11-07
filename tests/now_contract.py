@@ -6,7 +6,8 @@
 any of the five areas (attention, runs, safety, since, as_of); an area may instead be `{"error": {title, detail}}`.
 The rules: required keys present (absent values are null, never omitted), types and enums, the size caps, the queue
 order, instants as integer epoch seconds and durations as integer seconds in `_s` fields, copy commands without
-control characters, https links only, and `type_to_answer` (consent, typed by the developer) never next to a `copy`.
+control characters, https links only, `type_to_answer` (consent, typed by the developer) never next to a `copy`,
+option keys never cut with `…`, a `branch` on every run and the uncapped `counts` on `since`.
 Standard library only, Python 3.9.
 """
 from __future__ import annotations
@@ -222,9 +223,14 @@ class _Checker:
                 self.err(w + ".options", "is not a list")
             else:
                 for i, o in enumerate(it["options"]):
-                    if self.keys(f"{w}.options[{i}]", o, ("key", "text", "recommended")) and \
-                            not isinstance(o["recommended"], bool):
+                    if not self.keys(f"{w}.options[{i}]", o, ("key", "text", "recommended")):
+                        continue
+                    if not isinstance(o["recommended"], bool):
                         self.err(f"{w}.options[{i}].recommended", "is not true or false")
+                    if not _str(o["key"]) or not o["key"]:
+                        self.err(f"{w}.options[{i}].key", "is not a key")
+                    elif o["key"].endswith("…"):
+                        self.err(f"{w}.options[{i}].key", "ends with …: a cut text that no typed answer matches")
         tta = it["type_to_answer"]
         if tta is not None and not (isinstance(tta, list) and tta and all(_str(x) for x in tta)):
             self.err(w + ".type_to_answer", "is not a list of lines")
@@ -248,12 +254,12 @@ class _Checker:
             self.err(w, f"holds {len(local)} runs of this Mac and {len(runs) - len(local)} of others, over the caps")
         for i, r in enumerate(runs):
             wi = f"{w}[{i}]"
-            if not self.keys(wi, r, ("id", "goal", "project", "machine", "who", "waiting_on", "eta")):
+            if not self.keys(wi, r, ("id", "goal", "project", "machine", "who", "branch", "waiting_on", "eta")):
                 continue
             if not _str(r["id"]) or not r["id"]:
                 self.err(wi + ".id", "is not an id")
-            if not _opt_str(r["machine"]) or not _opt_str(r["who"]):
-                self.err(wi, "machine and who are strings or null")
+            if not _opt_str(r["machine"]) or not _opt_str(r["who"]) or not _opt_str(r["branch"]):
+                self.err(wi, "machine, who and branch are strings or null")
             wo = r["waiting_on"]
             if wo is not None and self.keys(wi + ".waiting_on", wo, ("kind", "ref", "since")):
                 if wo["kind"] not in WAITING_KINDS:
@@ -339,9 +345,13 @@ class _Checker:
 
     def since(self, s):
         w = "since"
-        if not isinstance(s, dict) or not self.keys(w + ".line", s.get("line"), ("from", "items", "text")):
-            if not isinstance(s, dict):
-                self.err(w, "is not an object")
+        if not isinstance(s, dict):
+            self.err(w, "is not an object")
+            return
+        if self.keys(w, s, ("counts",)) and self.keys(w + ".counts", s["counts"], ("done", "merged")):
+            if not all(_int(s["counts"][k]) and s["counts"][k] >= 0 for k in ("done", "merged")):
+                self.err(w + ".counts", "holds a value that is not a count")
+        if not self.keys(w + ".line", s.get("line"), ("from", "items", "text")):
             return
         ln = s["line"]
         if not _epoch(ln["from"], False):

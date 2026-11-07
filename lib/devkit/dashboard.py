@@ -476,8 +476,10 @@ def since_yesterday(reg: dict, cache: dict, now: float = None, items: list = Non
             m = re.search(r"✓\s*(\d{4}-\d{2}-\d{2})", t)
             if m and m.group(1) >= yday:
                 done.append({"project": p.get("id"), "text": re.sub(r"\s*✓\s*\d{4}-\d{2}-\d{2}", "", t)})
+    merged = merged_prs(cache, y0)
     return {"from": y0, "sessions": sorted(sessions, key=lambda x: -x["ts"])[:40],
-            "commits": sorted(commits, key=lambda x: -x[1]), "merged": merged_prs(cache, y0)[:20], "done": done[:30]}
+            "commits": sorted(commits, key=lambda x: -x[1]), "merged": merged[:20], "done": done[:30],
+            "counts": {"done": len(done), "merged": len(merged)}}  # before the caps: "45 tasks done", not 30
 
 
 # --------------------------------------------------------------------------- work items, presence, sessions, plans

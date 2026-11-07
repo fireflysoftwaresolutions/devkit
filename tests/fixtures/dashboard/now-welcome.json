@@ -30,7 +30,7 @@
     "copy": null,
     "done": false,
     "key": "project",
-    "text": "Clone a project with dev clone <owner/repo>, or start one with dev new <name>"
+    "text": "Add your first project"
    },
    {
     "copy": null,
@@ -50,8 +50,8 @@
     "id": null,
     "kind": "branches"
    },
-   "text": "No branch map yet. dev sync makes one.",
-   "tone": "unknown"
+   "text": "No projects yet, so no branches to back up.",
+   "tone": "ok"
   },
   "projects": [],
   "totals": {
@@ -63,6 +63,10 @@
  },
  "since": {
   "commits": [],
+  "counts": {
+   "done": 0,
+   "merged": 0
+  },
   "done": [],
   "from": 1793836800,
   "line": {

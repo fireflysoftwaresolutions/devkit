@@ -194,6 +194,25 @@ class QueueTests(unittest.TestCase):
                          (2, "Fee report stopped reporting", ["Tech lead (Morpheus) sent no update since 14:30."],
                           at(14, 30)))
 
+    def test_an_option_without_a_letter_is_typed_whole_on_one_line(self):
+        long = ("Ship the export behind a feature flag for the finance team first, then open it to everyone after the "
+                "month-end close ran")
+        d = fx.decision("D1", "How do we ship it?", [long, "Wait for\nthe audit"], "", NOW - 300)
+        it = row(areas(with_runs(fx.welcome(), statement_run(decisions=[d]))), "decision:claude-9c1d:D1")
+        self.assertEqual(len(long), 120)
+        self.assertEqual(it["type_to_answer"], [f"approve D1: {long}", "approve D1: Wait for the audit"])
+
+    def test_the_ci_copy_runs_in_the_projects_folder_and_needs_a_local_path(self):
+        rid = "ci_failed:acme/lending-rules:feat/rules-engine"
+        self.assertEqual(row(fx.document("example"), rid)["copy"],
+                         f"cd -- {fx.DEV}/acme/lending-rules && dev run view 14 --failed")
+        kw = fx.example()
+        kw["reg"]["projects"][1]["path"] = "/tmp/a b $(touch pwn)"
+        self.assertEqual(shlex.split(row(areas(kw), rid)["copy"]),
+                         ["cd", "--", "/tmp/a b $(touch pwn)", "&&", "dev", "run", "view", "14", "--failed"])
+        kw["reg"]["projects"][1]["path"] = None
+        self.assertIsNone(row(areas(kw), rid)["copy"])
+
     def test_without_a_roster_the_main_session_is_the_tech_lead(self):
         d = fx.decision("D1", "Go?", ["A: yes", "B: no"], "A", NOW - 300, frm="main", from_name="")
         silent = statement_run(session="5e6f", goal="Fee report", started=at(14, 0),
@@ -287,6 +306,12 @@ class HeadlineTests(unittest.TestCase):
                                                                         ("sync", True)])
         self.assertEqual(fx.document("example")["attention"]["setup"], [])
 
+    def test_the_welcome_setup_rows_do_not_repeat_the_headline(self):
+        setup = fx.document("welcome")["attention"]["setup"]
+        self.assertEqual([(s["key"], s["text"], s["copy"]) for s in setup],
+                         [("agents", "An agent is signed in", None), ("project", "Add your first project", None),
+                          ("sync", "The first sync ran", None)])
+
 
 class LandingTests(unittest.TestCase):
     def test_a_run_waiting_on_a_decision_lands_after_the_answer_without_the_wait(self):
@@ -371,6 +396,11 @@ class LandingTests(unittest.TestCase):
         kw["team"] = [fx.remote_presence(updated=at(15, 14))]
         self.assertEqual(len(set(first)), 2)
         self.assertIn(areas(kw)["runs"][0]["id"], first)
+
+    def test_every_run_names_its_branch_and_this_macs_runs_null(self):
+        runs = fx.document("example")["runs"]
+        self.assertEqual([(r["machine"], r.get("branch", "<missing>")) for r in runs],
+                         [(None, None), ("studio", "feat/rules-engine")])
 
     def test_this_macs_own_presence_adds_no_second_copy_of_its_run(self):
         runs = fx.document("example")["runs"]
@@ -457,6 +487,25 @@ class AreaTests(unittest.TestCase):
         safety_row, queue_row = doc["safety"]["projects"][0]["rows"][0], row(doc, "backup:acme/lending-core:main")
         self.assertEqual((safety_row["branch"], safety_row["state"], safety_row["copy"], queue_row["copy"]),
                          ("main", "not_backed_up", None, None))
+
+    def test_with_no_projects_the_safety_line_says_there_is_nothing_to_back_up(self):
+        self.assertEqual(fx.document("welcome")["safety"]["line"],
+                         {"tone": "ok", "text": "No projects yet, so no branches to back up.", "oldest": None,
+                          "open": {"kind": "branches", "id": None, "anchor": None}})
+
+    def test_since_counts_every_task_done_and_pr_merged_past_the_lists_caps(self):
+        core = "acme/lending-core"
+        done = [fx.item(f"T-fzd{n:02d}", f"Task {n}", core, status="done", updated=at(10, 0) + n) for n in range(31)]
+        cache = {core: [{"number": 100 + n, "state": "MERGED", "title": f"PR {n}", "author": fx.USER,
+                         "url": f"https://github.com/{core}/pull/{100 + n}", "updatedAt": fx.iso(at(11, 0) + n)}
+                        for n in range(21)]}
+        since = dashboard.since_yesterday(fx.registry_empty(), cache, NOW, done, [], fx.ME)
+        self.assertEqual((len(since["done"]), len(since["merged"]), since.get("counts")),
+                         (30, 20, {"done": 31, "merged": 21}))
+        kw = fx.empty()
+        kw["since"] = since
+        s = areas(kw)["since"]
+        self.assertEqual((s["counts"], s["line"]["text"]), ({"done": 31, "merged": 21}, "31 tasks done · 21 PRs merged"))
 
     def test_since_line_lists_what_finished(self):
         self.assertEqual(fx.document("example")["since"]["line"], {
@@ -680,6 +729,16 @@ class ContractTests(unittest.TestCase):
         self.assertIn("attention.items[0]: has both type_to_answer and copy", errs)
         self.assertIn("attention.items[1]: misses url", errs)
         self.assertIn("runs[0].eta.remaining_s: is not rounded to 5 minutes", errs)
+
+    def test_the_contract_check_wants_a_branch_on_runs_counts_on_since_and_whole_option_keys(self):
+        doc = fx.document("example")
+        doc["runs"][0].pop("branch", None)
+        doc["since"].pop("counts", None)
+        doc["attention"]["items"][0]["options"][1]["key"] = "Include the cancelled…"
+        errs = "\n".join(now_contract.check(doc))
+        self.assertIn("runs[0]: misses branch", errs)
+        self.assertIn("since: misses counts", errs)
+        self.assertIn("attention.items[0].options[1].key: ends with …", errs)
 
 
 if __name__ == "__main__":

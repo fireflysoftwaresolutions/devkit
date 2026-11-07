@@ -66,7 +66,7 @@
     "asker": null,
     "blocks": null,
     "clause": "CI failed on feat/rules-engine.",
-    "copy": "dev run view 14 --failed",
+    "copy": "cd -- /Users/ana/Development/acme/lending-rules && dev run view 14 --failed",
     "count": 1,
     "id": "ci_failed:acme/lending-rules:feat/rules-engine",
     "irreversible": null,
@@ -159,6 +159,7 @@
      "state": "running"
     }
    ],
+   "branch": null,
    "decisions": [
     {
      "from_name": "Tank",
@@ -465,6 +466,10 @@
     1
    ]
   ],
+  "counts": {
+   "done": 4,
+   "merged": 2
+  },
   "done": [
    {
     "id": "T-fz4d",
