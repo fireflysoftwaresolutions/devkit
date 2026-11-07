@@ -783,7 +783,7 @@ def drift(home=None, root=None) -> list:
 
 # What a listing must not draw: the control characters a terminal acts on (C0, DEL and C1: ESC sequences that set the
 # window title or colors, CSI) and the bidirectional overrides and isolates that reorder the text around them.
-_CONTROL = re.compile("[\x00-\x1f\x7f-\x9f‪-‮⁦-⁩]")
+_CONTROL = re.compile("[\x00-\x1f\x7f-\x9f\u202a-\u202e\u2066-\u2069]")
 
 
 def _one_line(s) -> str:
