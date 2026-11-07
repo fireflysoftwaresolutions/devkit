@@ -122,6 +122,21 @@ class RedTeam2(unittest.TestCase):
             with self.subTest(cmd=cmd):
                 self.assertIsNone(self.check(cmd))
 
+    # ---- RT13
+    def test_rt13_a_variable_as_the_git_subcommand_hides_the_action(self):
+        # c43b30e made `gh $SUB merge` the unknown action (tier 2); git's subcommand has the same hole
+        self.assertEqual(self.acts("git push origin main"), ["push-destructive"])  # baseline
+        self.assertIsNotNone(self.member("git push origin main"))
+        for cmd in ("git $SUB push", "git ${S} push origin main", "s=push; git $s origin main",
+                    "git -C . $(echo push) origin main"):
+            with self.subTest(cmd=cmd):
+                self.assertEqual(self.acts(cmd), ["unknown"])
+                self.assertIsNotNone(self.member(cmd))
+                self.assertIsNotNone(self.main(cmd))
+        for cmd in ("git log $REV", "git show ${SHA}", "git status"):  # a variable argument is not the subcommand
+            with self.subTest(cmd=cmd):
+                self.assertEqual(self.acts(cmd), [])
+
 
 if __name__ == "__main__":
     unittest.main()

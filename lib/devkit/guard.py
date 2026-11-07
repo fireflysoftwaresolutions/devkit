@@ -4429,8 +4429,10 @@ def _segment_actions(argv, cwd, bodies, depth) -> list:
     elif name == "git":
         cdir, sub, args = _git_split(argv)
         gcwd = str(resolve(cdir, cwd)) if cdir else cwd
-        alias = _git_alias(argv, sub, gcwd if gcwd != str(UNKNOWN) else None)
-        if sub == "push":
+        alias = "" if sub and _dynamic_name(sub) else _git_alias(argv, sub, gcwd if gcwd != str(UNKNOWN) else None)
+        if sub and _dynamic_name(sub):  # `git $SUB …`: the subcommand is only known when it runs (RT13)
+            found = [_unknown(" ".join(argv))]
+        elif sub == "push":
             found, cwd = _push_actions(args, gcwd if gcwd != str(UNKNOWN) else None), gcwd
         elif alias and depth < 4:  # an alias runs another git command, or a shell command with `!`
             rest = " ".join(shlex.quote(a) for a in args)
