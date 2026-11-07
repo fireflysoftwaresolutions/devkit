@@ -10,9 +10,10 @@ Not released yet: the date is set when the release is tagged.
 ### Added
 
 - **The tech lead asks your decisions nicely, and together.** `dev crew decisions --ask` prints the pending decisions
-  as question dialog calls ready to send: at most 4 questions per call, each opening with `D<n> ·` and one line on who
-  asks and what it blocks, with the recommended option first; `--json` prints the dialog's input. When decisions
-  piled up while you were away, your next prompt tells the tech lead once to ask them in one call.
+  as question dialog calls ready to send: at most 4 questions per call, an irreversible decision alone in its call,
+  each opening with `D<n> ·` and one line on who asks and what it blocks, with the recommended option first; `--json`
+  prints the dialog's input. When decisions piled up while you were away, your next prompt tells the tech lead once
+  to ask them together, in as few calls as that allows.
 - **The impeccable engine is installed with the skill.** `dev install --only skills` fetches the engine binary for
   this Mac from the upstream release that the pinned skill names, checks its SHA-256 against the pinned skill's own
   `engine-checksums.txt`, and puts it beside the launcher, so `impeccable context` no longer downloads code inside an
@@ -38,10 +39,13 @@ Not released yet: the date is set when the release is tagged.
   question dialog is your evidence for a reversible decision when the question opens with `D<n> ·` (or its header is
   `D<n>`) and the label picks one of its options by letter or words; the rest may carry context. Text you type
   yourself is your answer but picks no option, and a dialog call that asks one decision twice counts for neither
-  question. A decision that leads to an irreversible action counts only in devkit's own words: the question and the
-  labels exactly as `dev crew decisions --ask` prints them, no descriptions, and you click one of those labels. The
+  question. A decision that leads to an irreversible action counts only in devkit's exact call: one question, its
+  own header, labels only. The call asks that one question and nothing else (`dev crew decisions --ask` gives each
+  such decision a call of its own), the question and the labels are exactly as it prints them, the header is `D<n>`
+  or empty, no option carries a description, a preview, or another field, and you click one of those labels. The
   option that performs the action says what it runs (`A: yes (release v26.11.4)`). Anything else opens nothing and
-  is audited as `crew.evidence-refused`. See [The crew › How the tech lead asks you](docs/crew.md#how-the-tech-lead-asks-you).
+  is audited as `crew.evidence-refused`, and `dev audit verify` reports earlier evidence whose call breaks the rule.
+  See [The crew › How the tech lead asks you](docs/crew.md#how-the-tech-lead-asks-you).
 - **The audit shows how your click became an option.** `crew.evidence` keeps `match` (`exact`, `letter`, `words`, or
   `free`), `asked` (`exact` or `reworded`), and the label you clicked when the dialog offered it (redacted, at most
   120 characters), but not your own text or the question. `dev audit verify` reruns the matcher on the

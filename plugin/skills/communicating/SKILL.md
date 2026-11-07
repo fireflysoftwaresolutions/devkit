@@ -128,17 +128,20 @@ has one (AskUserQuestion in Claude Code), and ask nicely:
   blocks, and what the choice changes. No internal jargon.
 - **The recommended option first**, then the others: 2 to 4 options, each with its letter (`A: Skip the empty
   lines`). The recommended label ends in "(Recommended)" as devkit prints it.
-- **Ask decisions together**, at most 4 questions per call; when decisions piled up while the developer was
-  away, ask them together as soon as they are back.
+- **Ask decisions together**, at most 4 questions per call, and a decision that leads to an irreversible action
+  alone in its call; when decisions piled up while the developer was away, ask them together as soon as they are
+  back.
 - **For a devkit decision, keep `D<n> ·` up front** (or put `D<n>` in the header) and keep each option's letter: that
   is how devkit knows the answer is the developer's (their evidence). For a reversible decision, reword everything
   else freely. `dev crew decisions --ask` prints the call: send it as it is or reword it.
-- **Send a decision that leads to an irreversible action exactly as `dev crew decisions --ask` prints it:** its
-  question (with or without devkit's context line, nothing added), its labels word for word (the option that
-  performs the action reads like `A: yes (release v26.11.4)`), and no descriptions. A reworded question or label,
-  a missing or added option, or "(Recommended)" on another option makes the answer count for nothing, because a
-  reworded question can make a yes do what the developer meant as a no. Its question names what it acts on (the
-  tag, the branch, the PR): `dev crew ask` refuses one that does not.
+- **Send a decision that leads to an irreversible action in devkit's exact call, as `dev crew decisions --ask`
+  prints it: one question, its own header, labels only.** The call asks that one question and nothing else; the
+  question is devkit's (with or without its context line, nothing added) under the header `D<n>` or none; the
+  labels are word for word (the option that performs the action reads like `A: yes (release v26.11.4)`), with no
+  description, preview, or other field beside them. A reworded question or label, a missing or added option,
+  "(Recommended)" on another option, another header, an added field, or another question in the call makes the
+  answer count for nothing, because any of them can make a yes do what the developer meant as a no. Its question
+  names what it acts on (the tag, the branch, the PR): `dev crew ask` refuses one that does not.
 
 When there is no question tool (Codex, for now), use this template, and for a devkit decision tell the developer
 to type `approve D<n>: <letter>`:

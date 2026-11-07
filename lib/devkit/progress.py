@@ -1496,9 +1496,11 @@ def _recommended(d: dict):
 
 def ask_calls(run: dict, ids=None) -> dict:
     """The question tool calls that ask the developer decisions (`ids`, else every pending one, oldest first):
-    {"calls": [{"questions": [...]}], "typed": [ids]}. At most four questions per call, each "D<n> · <question>
-    <who asks, what it blocks>" with the header "D<n>" and devkit's labels (ask_labels): the recommended option
-    first, marked "(Recommended)", and an irreversible decision's performing option with what it runs.
+    {"calls": [{"questions": [...]}], "typed": [ids]}. Each question is "D<n> · <question> <who asks, what it
+    blocks>" with the header "D<n>" and devkit's labels (ask_labels): the recommended option first, marked
+    "(Recommended)", and an irreversible decision's performing option with what it runs. Reversible decisions go
+    together, at most four per call; an irreversible one goes in a call of its own, since another question in its
+    call could redefine its options (_not_devkits_words); the calls go in the order of their first decision.
     A decision without 2 to 4 options goes to `typed`: the developer types its approve line. Raises StepError for
     an id the run lacks or one the developer already decided."""
     if ids:
@@ -1513,17 +1515,18 @@ def ask_calls(run: dict, ids=None) -> dict:
         picked.sort(key=lambda x: int(x["id"][1:]))
     else:
         picked = pending_decisions(run)
-    questions, typed = [], []
+    together, alone, typed = [], [], []
     for d in picked:
         opts = d.get("options") or []
         if not 2 <= len(opts) <= 4:
             typed.append(d["id"])
             continue
-        questions.append({"question": f"{ask_text(d)} {_ask_context(run, d)}", "header": d["id"],
-                          "multiSelect": False,
-                          "options": [{"label": label, "description": ""} for label in ask_labels(d)]})
-    return {"calls": [{"questions": questions[i:i + ASK_PER_CALL]} for i in range(0, len(questions), ASK_PER_CALL)],
-            "typed": typed}
+        q = {"question": f"{ask_text(d)} {_ask_context(run, d)}", "header": d["id"], "multiSelect": False,
+             "options": [{"label": label, "description": ""} for label in ask_labels(d)]}
+        (alone if d.get("irreversible") else together).append(q)
+    calls = [together[i:i + ASK_PER_CALL] for i in range(0, len(together), ASK_PER_CALL)] + [[q] for q in alone]
+    calls.sort(key=lambda c: int(c[0]["header"][1:]))
+    return {"calls": [{"questions": c} for c in calls], "typed": typed}
 
 
 def crew_decision(question: str, options=None, recommend: str = "", irreversible: str = "", from_agent: str | None = None,
@@ -1675,9 +1678,10 @@ def _how_to_ask(d: dict) -> str:
     """How the tech lead gets the developer's own answer to a decision, for refusals."""
     typed = f"they type a line of its own: approve {d['id']}" + (": <option>" if d.get("options") else "")
     if d.get("irreversible") and d.get("options"):
-        return (f"Ask it with the question tool exactly as dev crew decisions --ask {d['id']} prints it: “"
-                f"{ask_text(d)}” with the labels {' | '.join(ask_labels(d))}, word for word and without descriptions "
-                f"(a reworded question or label counts for nothing), or {typed}")
+        return (f"Ask it with the question tool in devkit's exact call, as dev crew decisions --ask {d['id']} prints "
+                f"it: one question, “{ask_text(d)}”, its own header {d['id']}, and labels only, "
+                f"{' | '.join(ask_labels(d))}, word for word (a reworded question or label, a description or "
+                f"preview, or another question in the call counts for nothing), or {typed}")
     if d.get("irreversible"):
         return f"Show it in your final message: {typed}"
     return (f"Ask it with the question tool (dev crew decisions --ask {d['id']} prints “{ask_text(d)}”; reword it "
@@ -1723,11 +1727,11 @@ def decisions_context(agent: str, sid: str) -> str:
             d.pop("surfaced", None)
         _save(run, touch_session=False)
     from . import crew
-    lines = ["devkit · decisions waiting for the developer (" + mode_of(run) + " mode). Ask them in one call of "
-             "your question tool (AskUserQuestion; `dev crew decisions --ask` prints it): a plain question with its "
-             "context, “D<n> ·” up front, the option letters, the recommended option first. Reword a reversible "
-             "one freely; send an irreversible one exactly as printed, its question and labels word for word and no "
-             "descriptions, or the answer counts for nothing. Or show "
+    lines = ["devkit · decisions waiting for the developer (" + mode_of(run) + " mode). Ask them with your "
+             "question tool (AskUserQuestion) in the calls `dev crew decisions --ask` prints: a plain question with "
+             "its context, “D<n> ·” up front, the option letters, the recommended option first. Reword a reversible "
+             "one freely; send an irreversible one as devkit's exact call, word for word: one question, its own "
+             "header, labels only, or the answer counts for nothing. Or show "
              "them in your final message and let the developer type `approve D<n>[: <option>]`. Then record the "
              "answer with `dev crew decide <id> \"<answer>\"` (devkit records who decided from that evidence) and "
              "resume the member who asked (SendMessage / send_input):"]
@@ -1754,6 +1758,7 @@ def waiting_context(agent: str, sid: str, since, now: float) -> str:
     if not waiting or all(d.get("reminded") for d in waiting):
         return ""
     ids = [d["id"] for d in waiting]
+    k = max(1, len(ask_calls(run, ids)["calls"]))  # an irreversible one goes in a call of its own; all pending here
     with _tx(agent, sid):
         run = normalize(load_run(agent, sid) or {})
         for d in run.get("decisions") or []:
@@ -1762,7 +1767,9 @@ def waiting_context(agent: str, sid: str, since, now: float) -> str:
         _save(run, touch_session=False)
     n = len(ids)
     return (f"devkit · {n} decision{'s wait' if n > 1 else ' waits'} for you ({', '.join(ids)}): ask "
-            f"{'them' if n > 1 else 'it'} now in one question call; `dev crew decisions --ask` prints it.")
+            f"{'them' if n > 1 else 'it'} now in "
+            + ("one question call; `dev crew decisions --ask` prints it." if k == 1 else
+               f"{k} question calls, one after the other; `dev crew decisions --ask` prints them."))
 
 
 def messages_context(agent: str, sid: str, me: str) -> str:
@@ -1916,20 +1923,35 @@ def label_match(d: dict, label, offered) -> tuple:
     return opt, "letter" if opt else "free"
 
 
-def _not_devkits_words(run, d: dict, q: dict, label, asked: str) -> str:
-    """Why a question tool answer is no evidence for an irreversible decision, '' when it is: only devkit's own words
-    count (the Security engineer's question audit decision, rule 1). The question is devkit's (asked_how), one plain
-    choice whose labels are exactly devkit's (ask_labels: every option once, "(Recommended)" only on the recommended
-    one), no option carries a description (free text the developer reads beside the label), and the clicked label
-    is one of them word for word: no letter and no word matching, so "A", "Yes" or "A: Yes, hold it" count for
-    nothing."""
+_QUESTION_FIELDS = {"question", "header", "options", "multiSelect"}  # all a question of devkit's exact call holds
+_OPTION_FIELDS = {"label", "description"}  # all an option of it holds, the description empty
+
+
+def _not_devkits_words(run, d: dict, q: dict, label, asked: str, call) -> str:
+    """Why a question tool answer is no evidence for an irreversible decision, '' when it is: only devkit's exact
+    call counts (the Security engineer's question audit decision, rule 1, and the Code reviewer's findings 1 to 3 on
+    it), an allowlist of its form, since everything the tool shows the developer can redefine the options. The call
+    (`call`, its questions as sent) asks this one question and nothing else; the question is devkit's (asked_how)
+    and holds only question, header (empty or the decision's id), options and multiSelect false; each option holds
+    only its label and an empty description, so no description or preview says "hold" beside the label that
+    releases; the labels are exactly devkit's (ask_labels: every option once, "(Recommended)" only on the
+    recommended one); and the clicked label is one of them word for word: no letter and no word matching, so "A",
+    "Yes" or "A: Yes, hold it" count for nothing. Reasons name no text of the call."""
+    if not isinstance(call, list) or call != [q]:
+        return "the call asks other questions beside it"
     if asked != "exact":
         return "its question is not devkit's own; send it as dev crew decisions --ask prints it"
+    if set(q) - _QUESTION_FIELDS:
+        return "the question carries a field devkit does not send"
+    if q.get("header", "") not in ("", d["id"]):
+        return f"its header is neither {d['id']} nor empty"
     raw = q.get("options") if isinstance(q.get("options"), list) else []
     opts = [o for o in raw if isinstance(o, dict)]
-    if q.get("multiSelect") or len(opts) != len(raw):
+    if q.get("multiSelect", False) is not False or len(opts) != len(raw):
         return "the call does not offer one plain choice"
-    if any(str(o.get("description") or "").strip() for o in opts):
+    if any(set(o) - _OPTION_FIELDS for o in opts):
+        return "an option carries a field other than its label"
+    if any(not isinstance(o.get("description", ""), str) or o.get("description", "").strip() for o in opts):
         return "an option carries a description"
     offered = [_plain(o.get("label")) for o in opts]
     if sorted(_plain(_RECOMMENDED.sub("", x)) for x in offered) != \
@@ -2255,7 +2277,8 @@ def on_question(agent: str, data: dict, now: float | None = None) -> list:
     if data.get("tool_use_id") and str(data["tool_use_id"]) in _seen_ids(sess):  # the same answer again (B3)
         _refuse_replay(agent, sid, str(data["tool_use_id"]), "a question tool answer")
         return []
-    qs = [q for q in (data.get("tool_input") or {}).get("questions") or [] if isinstance(q, dict)]
+    call = (data.get("tool_input") or {}).get("questions")
+    qs = [q for q in call or [] if isinstance(q, dict)]
     resp = data.get("tool_response") if isinstance(data.get("tool_response"), dict) else {}
     answers = resp.get("answers") if isinstance(resp.get("answers"), dict) else {}
     pending = {d["id"] for d in pending_decisions(run)}
@@ -2274,7 +2297,7 @@ def on_question(agent: str, data: dict, now: float | None = None) -> list:
         elif not _names_target(d, qt):
             why = f"the question does not name {d['target']}"
         elif d.get("irreversible"):
-            why = _not_devkits_words(run, d, q, label, asked)
+            why = _not_devkits_words(run, d, q, label, asked, call)
         if why:
             refused.setdefault((did, why), True)
             continue
@@ -2662,7 +2685,7 @@ def _rederive(rec: dict, tp, agent: str, sid: str):
     offered = [o.get("label") for o in q.get("options") or [] if isinstance(o, dict)]
     asked = asked_how(run, d, q.get("question")) if d.get("question") else None
     if d.get("irreversible"):
-        why = _not_devkits_words(run, d, q, label, asked or "exact")
+        why = _not_devkits_words(run, d, q, label, asked or "exact", res.get("questions"))
         if why:
             return f"{head}: the transcript's answer is no evidence for an irreversible decision ({why})"
         opt, match = _devkit_option(d, label), "exact"

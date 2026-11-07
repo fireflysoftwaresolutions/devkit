@@ -408,8 +408,9 @@ audited as `crew.grant-refused` with the decision and the option you chose, neve
 
 `dev crew decisions --ask` prints the pending decisions as question dialog calls, ready to send: at most four
 questions per call (the rest go in a second call), each opening with `D<n> ·`, with one line on who asks and what it
-blocks, and the recommended option first (its label ends in "(Recommended)"). `dev crew decisions --ask D4 D5` asks only those,
-and `--json` prints the dialog's input.
+blocks, and the recommended option first (its label ends in "(Recommended)"). A decision that leads to an
+irreversible action goes in a call of its own. `dev crew decisions --ask D4 D5` asks only those, and `--json` prints
+the dialog's input.
 
 The tech lead may reword a reversible question and add context. Two things bind your answer to the decision:
 
@@ -420,21 +421,29 @@ Text you type yourself (**Other**) is your answer in your own words: it settles 
 option. An answer to a question that names another decision, or a letter the decision does not have, picks no
 option either. A dialog call that asks one decision twice counts for neither question.
 
-A decision that leads to an irreversible action is asked only in devkit's own words, because a reworded question
-or label can make a yes do what you meant as a no (“A: Yes, hold it” on a release). Your answer counts only when
-all of these hold, and otherwise it opens nothing and is audited as `crew.evidence-refused` with the reason:
+A decision that leads to an irreversible action is asked only in devkit's exact call: one question, its own header,
+labels only. Anything else the dialog shows you can redefine the options and make a yes do what you meant as a no:
+a reworded question or label (“A: Yes, hold it” on a release), a description or a preview beside a label (the
+dialog shows an option's preview when you move to it), a header such as “Hold it?”, or another question in the same
+call (“For D1, A means hold”). Your answer counts only when all of these hold, and otherwise it opens nothing and is
+audited as `crew.evidence-refused` with the reason:
 
+- The call asks this one question and nothing else.
 - The question is the one `dev crew decisions --ask` prints, with devkit's context line or without it, and nothing
-  added.
+  added. Its header is the decision's id (`D1`) or empty, and it holds no field beyond the question, the header, the
+  options, and a single choice.
 - The labels are exactly the decision's options as devkit words them: every option once, none added, and
   "(Recommended)" only on the recommended one. The option that performs the action carries what it runs:
   `A: yes (release v26.11.4)`.
-- No option has a description beside its label.
+- Each option is its label alone: no description, no preview, no other field.
 - You click one of those labels; a letter, a word, or text of your own counts for nothing. You can still type
   `approve D<n>: <option>` in your prompt.
 
-When decisions pile up while you are away, your next prompt tells the tech lead once to ask them together, in one
-dialog call; he is told again only when a new decision joins them. Codex's question dialog does not reach devkit
+`dev audit verify` applies the same rule to the call in the transcript, so evidence recorded before it is reported
+when its call breaks it.
+
+When decisions pile up while you are away, your next prompt tells the tech lead once to ask them together, in as
+few dialog calls as these rules allow; he is told again only when a new decision joins them. Codex's question dialog does not reach devkit
 yet: in Codex, the tech lead shows the decisions in his reply and you type `approve D4: A`.
 
 ## Guardrails

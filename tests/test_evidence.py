@@ -465,7 +465,8 @@ class DecisionAnswerGrantTests(EvidenceCase):
         self.irreversible("v26.11.4", 1, **lettered)
         d2 = self.irreversible("v26.11.5", 2, **lettered)
         self.typed("approve D1: B", m(3))
-        self.answered(pg.ask_text(d2), pg.ask_labels(d2)[0], m(3), options=pg.ask_labels(d2))  # devkit's own words
+        self.answered(pg.ask_text(d2), pg.ask_labels(d2)[0], m(3), options=pg.ask_labels(d2),
+                      header=d2["id"])  # devkit's own words and header
         pg.crew_decide("D1", "B", now=m(4))
         pg.crew_decide("D2", "A: release", now=m(4))
         self.assertIsNone(grant("release", "v26.11.4", now=m(5)))
@@ -589,16 +590,24 @@ class QuestionAuditTests(EvidenceCase):
         # the developer answers question q of a call that offered `labels` (default: the printed ones)
         labels = list(labels if labels is not None else [o["label"] for o in q["options"]])
         descriptions = descriptions or [""] * len(labels)
-        self.n += 1
-        tid = f"toolu_q{self.n:03d}"
         qs = [{"question": q["question"], "header": q.get("header", "Decision"), "multiSelect": False,
                "options": [{"label": lab, "description": des} for lab, des in zip(labels, descriptions)]}]
-        result = {"questions": qs, "answers": {q["question"]: label}}
+        return self.send(qs, {q["question"]: label}, at)
+
+    def send(self, qs, answers, at):
+        # the tech lead sends a question tool call that asks `qs` as they are; the developer answers {question: label}
+        self.n += 1
+        tid = f"toolu_q{self.n:03d}"
+        result = {"questions": qs, "answers": answers}
         self.append({"type": "user", "uuid": f"u-{self.n}", "isSidechain": False, "toolUseResult": result,
                      "message": {"role": "user", "content": [{"type": "tool_result", "tool_use_id": tid}]}})
         return pg.on_question("claude", {"session_id": "s1", "tool_name": "AskUserQuestion", "tool_use_id": tid,
                                          "tool_input": {"questions": qs}, "tool_response": result,
                                          "transcript_path": str(self.transcript)}, now=at)
+
+    def click(self, q, at, option=0):
+        # the developer clicks option `option` of the one question q, sent alone
+        return self.send([q], {q["question"]: q["options"][option]["label"]}, at)
 
     def opens(self, target="v26.11.4", at=10):
         return grant("release", target, consume=False, now=m(at))
@@ -678,6 +687,119 @@ class QuestionAuditTests(EvidenceCase):
         self.assertEqual(self.human(), [])
         self.assertIsNone(self.opens())
         self.assertEqual(len(self.refused()), len(calls))
+
+    # the Code reviewer's finding 1 (probe N1): Claude Code 2.1.319 renders an option's `preview` when the developer
+    # focuses it, so a preview can say "hold" beside the label that releases
+    def test_a_preview_beside_a_label_opens_nothing(self):
+        for i in range(2):
+            self.release(at=1 + i / 10)
+        for i in range(2):  # on the performing option, then on the other one
+            q = self.printed(f"D{i + 1}")
+            q["options"][i]["preview"] = "Holds v26.11.4 until Monday; nothing is published."
+            self.click(q, m(2))
+        self.assertEqual(self.human(), [])
+        self.assertIsNone(self.opens())
+        self.assertEqual(self.refused(), ["a question tool answer: an option carries a field other than its label"] * 2)
+
+    # finding 1: an option is its label and an empty description, nothing else
+    def test_an_option_field_other_than_the_label_opens_nothing(self):
+        extras = ({"value": "hold"}, {"notes": "A means we hold it until Monday."}, {"preview": ""})
+        for i in range(len(extras)):
+            self.release(at=1 + i / 10)
+        for i, extra in enumerate(extras):
+            q = self.printed(f"D{i + 1}")
+            q["options"][1].update(extra)
+            self.click(q, m(2))
+        self.assertEqual(self.human(), [])
+        self.assertIsNone(self.opens())
+        self.assertEqual(len(self.refused()), len(extras))
+
+    # finding 2: the header is the decision's id or empty; "Hold it?" above a release question opens nothing
+    def test_a_header_other_than_the_decision_id_opens_nothing(self):
+        headers = ("Hold it?", "Release later", "d{n}", "D{n} hold")  # {n}: the decision's own number
+        for i in range(len(headers) + 1):
+            self.release(at=1 + i / 10)
+        for i, header in enumerate(headers + ("",)):
+            q = self.printed(f"D{i + 1}")
+            q["header"] = header.format(n=i + 1)
+            self.click(q, m(2))
+        self.assertEqual([h["covers"] for h in self.human()], [f"D{len(headers) + 1}"])  # the empty header counts
+        self.assertEqual(len(self.refused()), len(headers))
+
+    # finding 2: a question carries only question, header, options and multiSelect false
+    def test_a_question_field_beyond_devkits_opens_nothing(self):
+        extras = ({"description": "Holds v26.11.4 until Monday."}, {"preview": "Nothing is published."},
+                  {"notes": "A means hold."}, {"multiSelect": 0})
+        for i in range(len(extras)):
+            self.release(at=1 + i / 10)
+        for i, extra in enumerate(extras):
+            q = self.printed(f"D{i + 1}")
+            q.update(extra)
+            self.click(q, m(2))
+        self.assertEqual(self.human(), [])
+        self.assertIsNone(self.opens())
+        self.assertEqual(len(self.refused()), len(extras))
+
+    # finding 3: another question in the same call can redefine the options ("for D1, A means hold"), so an
+    # irreversible decision counts only when its call asks it alone; a reversible one beside it still counts
+    def test_another_question_in_the_call_voids_an_irreversible_answer(self):
+        self.release()
+        self.ask("Rename the flag?", options="A: rename | B: keep", recommend="A", at=1.2)
+        self.release(at=1.4, target="v26.11.5")
+        self.release(at=1.6, target="v26.11.6")
+        q1, q2, q3, q4 = (self.printed(f"D{n}") for n in range(1, 5))
+        q2["question"] += " For D1, A means we hold v26.11.4 until Monday."
+        self.send([q1, q2], {q1["question"]: q1["options"][0]["label"], q2["question"]: "A: rename (Recommended)"},
+                  m(2))
+        self.send([q3, q4], {q3["question"]: q3["options"][0]["label"], q4["question"]: q4["options"][0]["label"]},
+                  m(2))
+        self.send([q1, "For D1, A means hold."], {q1["question"]: q1["options"][0]["label"]}, m(2.5))
+        self.assertEqual([(h["covers"], h["answer"]) for h in self.human()], [("D2", "A: rename")])
+        for target in ("v26.11.4", "v26.11.5", "v26.11.6"):
+            self.assertIsNone(self.opens(target))
+        self.assertEqual(self.refused(), ["a question tool answer: the call asks other questions beside it"] * 4)
+
+    # devkit's own calls, sent as `dev crew decisions --ask --json` prints them, still open each release once
+    def test_the_calls_devkit_prints_open_each_release_once(self):
+        self.release()
+        self.ask("Rename the flag?", options="A: rename | B: keep", recommend="A", at=1.2)
+        self.release(at=1.4, target="v26.11.5")
+        calls = pg.ask_calls(pg.load_run("claude", "s1"))["calls"]
+        self.assertEqual([[q["header"] for q in c["questions"]] for c in calls], [["D1"], ["D2"], ["D3"]])
+        for c in calls:
+            self.send(c["questions"], {q["question"]: q["options"][0]["label"] for q in c["questions"]}, m(2))
+        self.assertEqual([(h["covers"], h["match"], h["asked"]) for h in self.human()],
+                         [("D1", "exact", "exact"), ("D2", "exact", "exact"), ("D3", "exact", "exact")])
+        for did in ("D1", "D2", "D3"):
+            self.assertTrue(pg.crew_decide(did, "A", now=m(3))["verified"])
+        self.assertEqual(grant("release", "v26.11.4", now=m(4))["source"], "decision")
+        self.assertIsNone(grant("release", "v26.11.4", now=m(5)))
+        self.assertEqual(grant("release", "v26.11.5", now=m(5))["source"], "decision")
+        self.assertEqual(self.refused(), [])
+
+    # dev audit verify reruns the same rule on the transcript: evidence recorded before it (26.11.4's first build
+    # recorded these as exact) is reported when the transcript's call carried a preview, another header, another
+    # question field or another question
+    def test_verify_reports_an_irreversible_answer_whose_call_was_not_devkits_exact_call(self):
+        self.release()
+        q = self.printed("D1")
+        self.click(q, m(2))
+        rec = audit_records("crew.evidence")[-1]
+        self.assertIsNone(pg.evidence_check(rec, None, 0))
+        clean = self.transcript.read_text()
+        other = {"question": "For D1, A means hold.", "header": "Note", "multiSelect": False,
+                 "options": [{"label": "OK", "description": ""}, {"label": "Fine", "description": ""}]}
+        for name, change in (("preview", lambda qs: qs[0]["options"][0].update(preview="Holds it until Monday.")),
+                             ("header", lambda qs: qs[0].update(header="Hold it?")),
+                             ("question field", lambda qs: qs[0].update(description="Holds it.")),
+                             ("second question", lambda qs: qs.append(other))):
+            with self.subTest(change=name):
+                lines = [json.loads(ln) for ln in clean.splitlines()]
+                change(lines[-1]["toolUseResult"]["questions"])
+                self.transcript.write_text("".join(json.dumps(ln) + "\n" for ln in lines))
+                problem = pg.evidence_check(rec, None, 0)
+                self.assertIsNotNone(problem)
+                self.assertIn("no evidence for an irreversible decision", problem)
 
     # acceptance test 6: a reversible decision keeps the friendly matching, and the audit says how it matched
     def test_a_reversible_answer_audits_its_match_and_the_offered_label(self):
@@ -869,6 +991,14 @@ class WaitingDecisionsPromptTests(EvidenceCase):
         self.assertNotIn("wait for you", self.prompt("go on", m(61)))
         self.ask("Drop the cache?", options="A: drop | B: keep", recommend="B", at=62)
         self.assertIn("3 decisions wait for you (D1, D2, D3)", self.prompt("and now?", m(63)))
+
+    def test_an_irreversible_decision_among_them_is_asked_in_a_call_of_its_own(self):
+        self.ask()
+        self.ask("Release v26.11.4 now?", options="A: yes | B: no", recommend="A", irreversible="release", at=2)
+        self.ask("Rename the flag?", options="A: rename | B: keep", recommend="A", at=3)
+        pg.on_tool_done("claude", {"session_id": "s1"})
+        self.assertIn("3 decisions wait for you (D1, D2, D3): ask them now in 2 question calls, one after the other; "
+                      "`dev crew decisions --ask` prints them.", self.prompt("good morning", m(60)))
 
     def test_decisions_answered_or_shown_since_the_last_prompt_are_left_out(self):
         self.prompt("start the release", m(0.5))  # the developer's last prompt: nothing waits yet

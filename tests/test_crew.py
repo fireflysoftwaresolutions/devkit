@@ -629,6 +629,27 @@ class CrewSessionTests(unittest.TestCase):
             rc, out, _ = run_cli("crew", "decisions", "--ask", "D5", "d2", "--json")
             self.assertEqual([q["header"] for q in json.loads(out)["calls"][0]["questions"]], ["D2", "D5"])
 
+    def test_decisions_ask_puts_each_irreversible_decision_in_a_call_of_its_own(self):
+        # the Code reviewer's finding 3: another question in the call could redefine an irreversible one's options
+        with TempState():
+            pg.start("Parser", plan=["parse", "ship"])
+            for n in range(1, 7):
+                if n == 2:
+                    run_cli("crew", "ask", "--decision", "Release v26.11.4 now?", "--options", "A: yes | B: no",
+                            "--recommend", "A", "--irreversible", "release", "--target", "v26.11.4")
+                elif n == 6:
+                    run_cli("crew", "ask", "--decision", "Push fix/parser now?", "--irreversible", "push",
+                            "--target", "fix/parser")
+                else:
+                    run_cli("crew", "ask", "--decision", f"Keep option {n}?", "--options", "A: keep | B: drop",
+                            "--recommend", "A")
+            rc, out, _ = run_cli("crew", "decisions", "--ask", "--json")
+            self.assertEqual(rc, 0)
+            self.assertEqual([[q["header"] for q in c["questions"]] for c in json.loads(out)["calls"]],
+                             [["D1", "D3", "D4", "D5"], ["D2"], ["D6"]])
+            rc, out, _ = run_cli("crew", "decisions", "--ask")
+            self.assertIn("Ask the developer in 3 question calls, one after the other", out)
+
     def test_a_decision_without_two_to_four_lettered_options_and_a_recommendation_is_refused(self):
         with TempState():
             pg.start("Parser", plan=["parse"])

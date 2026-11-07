@@ -1529,8 +1529,9 @@ def _ask(run, ids, as_json=False) -> int:
     n = len(p["calls"])
     if n:
         print(f"Ask the developer in {'one question call' if n == 1 else f'{n} question calls, one after the other'}"
-              " (AskUserQuestion, at most 4 questions each). Reword a reversible question as you like and add "
-              "context; keep “D<n> ·” up front (or the header D<n>) and each option's letter.")
+              " (AskUserQuestion, at most 4 questions each, an irreversible decision alone in its call). Reword a "
+              "reversible question as you like and add context; keep “D<n> ·” up front (or the header D<n>) and "
+              "each option's letter.")
     for i, c in enumerate(p["calls"], 1):
         if n > 1:
             print(f"Call {i} of {n}:")
@@ -1543,9 +1544,10 @@ def _ask(run, ids, as_json=False) -> int:
     for d in decs:
         if d.get("irreversible"):
             perf = progress.performing_option(d)
-            print(ui.dim(f"  {d['id']} leads to an irreversible {d['irreversible']}: send it exactly as printed, "
-                         "its question and labels word for word and no descriptions; a reworded question or label, "
-                         "or the developer's own text, counts for nothing. "
+            print(ui.dim(f"  {d['id']} leads to an irreversible {d['irreversible']}: send devkit's exact call, "
+                         "word for word: one question, its own header, labels only (no description, no preview); "
+                         "a reworded question or label, another question in the call, or the developer's own text "
+                         "counts for nothing. "
                          + (f"Only “{perf}” opens it" if perf else "No option opens it" if d.get("options")
                             else "Only approve or yes opens it")))
     print(ui.dim("  the tool input as JSON: dev crew decisions --ask --json"))
