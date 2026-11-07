@@ -300,8 +300,8 @@ pre-approved with `dev crew mode auto --approve`.
 ### The developer's own decisions
 
 Lifting an embargo and publishing a branch make its commits public, and the backup policy decides whether devkit
-publishes a project's branches at all. An embargo keeps a branch off the remote, so pushing an embargoed branch is
-the developer's decision too. These commands are the action `developer-only`, tier 2:
+publishes a project's branches at all. An embargo holds an agent's pushes of a branch and its commits, so pushing an
+embargoed branch is the developer's decision too. These commands are the action `developer-only`, tier 2:
 
 | Command | Grant line that opens it once |
 | --- | --- |
@@ -315,6 +315,12 @@ the developer's decision too. These commands are the action `developer-only`, ti
 A push from inside a repository's git folder (`<repo>/.git`, `<repo>/.git/worktrees/<name>`), or one that
 `env -C <dir>` or `sudo -D <dir>` runs in another folder, is judged as the project of that folder, so
 `grant embargo <branch>` in that project opens it. The handoff repository's own pushes are never held.
+
+The embargo is not yet off every remote. A push is judged by the embargo list of the project in the folder it runs
+from, so the embargo holds pushes from the embargoed project, its git folders and worktrees, temporary clones, and
+folders that are no project. A copy of its commits in another project's folder (another clone or checkout that
+devkit knows as a different project) is judged by that project's list, which does not name them, so an agent's push
+from there is not held yet. devkit 26.11.4 closes this.
 
 The developer can still push an embargoed branch in a terminal. `dev backup` and `dev sync` hold embargoes
 themselves, so they need no grant for it. A crew member never runs them. In the main session they are refused without a grant in every setting of

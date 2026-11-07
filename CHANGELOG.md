@@ -224,8 +224,9 @@ devkit refuses more in this release. Each refusal says why and names the command
   for every machine and the team. Without one, a private repository is on and a public one is ask: `dev backup`
   asks you once, in your own terminal, and records the answer. `dev sync` and agents are never asked and never
   publish.
-- **Embargoes:** `dev branch embargo <branch> --why "…" [--until …]` keeps a branch, and the commits it held after a
-  merge, off every remote until you lift it (`--lift`). An embargo is kept in the handoff note's metadata, so every
+- **Embargoes:** `dev branch embargo <branch> --why "…" [--until …]` holds the pushes of a branch, and of the commits
+  it held after a merge, until you lift it (`--lift`): from its project, its git folders and worktrees, temporary
+  clones, and folders that are no project (see Known limits). An embargo is kept in the handoff note's metadata, so every
   machine sees it, and a note devkit cannot read stops every backup. On a public repository, a branch whose commits
   read as a security fix is not backed up: devkit suggests an embargo, and `dev backup --public` pushes it anyway.
 - **Draft pull requests early, CI once.** With `delivery.draft_pr` on, `dev pr create` opens a draft unless
@@ -506,6 +507,9 @@ devkit refuses more in this release. Each refusal says why and names the command
 - **Agents use your credentials.** devkit works with the GitHub account you are signed in to with `gh` and your own
   tokens and keys; there is no separate identity for agents, by design. The guard and your grants hold the
   irreversible actions.
+- **An embargo holds pushes from its own project only.** It holds pushes from the embargoed project, its git folders
+  and worktrees, temporary clones, and unknown folders; a copy of its commits in another project's folder is not
+  held yet (26.11.4).
 
 ### Removed
 

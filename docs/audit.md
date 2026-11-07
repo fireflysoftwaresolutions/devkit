@@ -246,7 +246,7 @@ recorded as `audit.verify`, with `critical` severity when it fails. The daily jo
 published copy it no longer extends; it records `audit.publish` as blocked and critical instead. It never publishes a
 month file over 45 MB either, because GitHub refuses files over 100 MB and then every handoff push: that month's copy
 stays as it was, the job records `audit.publish` as blocked with `warning` severity, and `dev audit stats` and
-`dev doctor` say so until devkit 26.11.4 publishes daily segments instead of whole months.
+`dev doctor` say so until devkit 26.11.5 publishes daily segments instead of whole months.
 
 ## Query and export
 
