@@ -535,6 +535,12 @@ def inspect_repo(main: Path, with_prs=True, refresh_prs=False, pr_max_age=900) -
         wts.append(wi)
     main_pr = pr_for_branch(pr_list, co.get("branch")) if co.get("branch") != default else None
     co["pr"] = {"number": main_pr["number"], "state": main_pr["state"], "title": main_pr.get("title")} if main_pr else None
+    try:  # the branch map (spec P-fy3bwa0pshk R7): the PR list above, else its cache; never a GitHub call here
+        from . import branches as branchmap
+        branch_rows = branchmap.map(main, prs=pr_list, offline=True, pid=pid, default=default,
+                                    checkouts=[co] + [w for w in wts if not w.get("missing")])
+    except Exception:  # one broken repository must not break the map
+        branch_rows = []
     canon = canonical_path(pid)
     activity = max([co.get("last_activity", 0)] + [w.get("last_activity", 0) for w in wts])
     return {
@@ -548,7 +554,7 @@ def inspect_repo(main: Path, with_prs=True, refresh_prs=False, pr_max_age=900) -
                       "size": p.get("size")}
                      for p in (pr_list or []) if p.get("state") == "OPEN"],
         "prs_known": pr_list is not None, "note": str(note_path(pid).relative_to(HANDOFF)),
-        "last_activity": activity,
+        "last_activity": activity, "branches": branch_rows,
     }
 
 
@@ -1048,9 +1054,23 @@ def render_auto(p: dict) -> str:
     if co:
         lines.append(f"- **Main checkout:** `{co.get('branch')}` · {_state(co)} · last commit {fmt_ts(co.get('last_commit_ts'))}"
                      f" “{(co.get('last_commit') or '')[:80]}”")
-    for w in p["worktrees"]:
-        lines.append(f"- **Worktree** `{w.get('branch')}` · {_pr(w)} · {'missing' if w.get('missing') else _state(w)} · "
-                     f"{w.get('location')} · {'active session' if w.get('active') else 'idle ' + ago(w.get('last_activity'))}")
+    rows = p.get("branches") or []
+    if rows:  # one row per branch (spec P-fy3bwa0pshk R8); absolute times, so the note changes only with a branch
+        from . import branches as branchmap
+        live = co.get("branch") if co and co.get("active") else None
+        rows = [dict(r, session=bool(r.get("session") or r["name"] == live)) for r in rows]
+        c = branchmap.counts(rows)
+        head = f"{c['total']}" + "".join(f" · {c[k]} {label}" for k, label in (
+            ("not_backed_up", "not backed up"), ("embargoed", "embargoed"), ("waiting", "waiting for the backup"))
+            if c[k])
+        lines.append(f"- **Branches:** {head} (`dev branch ls`)")
+        lines += branchmap.note_lines(rows)
+    for w in p["worktrees"]:  # without the map, or detached: the worktree lines as before
+        if rows and w.get("branch"):
+            continue
+        lines.append(f"- **Worktree** `{w.get('branch') or 'detached'}` · {_pr(w)} · "
+                     f"{'missing' if w.get('missing') else _state(w)} · {w.get('location')} · "
+                     f"{'active session' if w.get('active') else 'idle ' + ago(w.get('last_activity'))}")
     if p.get("prs_open"):
         lines.append("- **Open PRs:** " + ", ".join(f"#{x['number']} {x['title'][:60]}" for x in p["prs_open"][:8]))
     lines.append(AUTO_END)

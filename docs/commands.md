@@ -97,8 +97,20 @@ The project you are in, or `<name>`, in the order of its questions:
    of its crew reported in the last 30 minutes.
 3. **Last update:** the latest status block, whole: who and when, its title, Done, Check, and Next. It names the
    worktree or copy it came from when that is not the one shown.
-4. **Details:** the branch in words, the last commit, worktrees, the folder, the handoff note and the project's
+4. **Branches:** where each branch lives, one row each (the first eight; `dev branch ls` has them all): local only
+   or local plus its remote, ahead and behind its upstream, how far it is from the default branch, its backup, its
+   embargo, its pull request, and its linked task. A branch with commits that exist only on this Mac, older than
+   `backup.after_minutes` (30), reads `not backed up` with the reason.
+5. **Details:** the branch in words, the last commit, worktrees, the folder, the handoff note and the project's
    commands.
+
+```text
+Branches
+  release/26.11.3        local only      ↑209 · 209 ahead of main · not backed up: 209 commits only
+                                         on this Mac, oldest commit 7 h ago
+  feat/dashboard-server  local only      merged into release/26.11.3 · nothing to back up
+  main                   local + origin  ↑0 ↓0 · default branch · nothing to back up
+```
 
 Text wraps at the terminal width, or at 100 columns in a wider one, under its column; nothing is cut. Outside a
 project it shows what needs you across this Mac's projects, then the projects (the `dev ls` table).
@@ -173,7 +185,9 @@ after `dashboard.idle_minutes` (30) with no open page. A server from an older de
 
 The portfolio digest for you and your agents: every initiative (status, priority, progress bar, milestone, due date,
 member projects, task counts, Now tasks), then every project (status, priority, live sessions, purpose, the latest
-status, Now tasks, open task count, the last session line), then the items that need attention.
+status, its branches when some are not backed up or embargoed, Now tasks, open task count, the last session line),
+then the items that need attention. The heading counts the branches not backed up across the portfolio; `--json`
+gives each project's `branches` as `{total, not_backed_up, embargoed, waiting}`.
 
 | Option | Effect |
 | --- | --- |
@@ -666,8 +680,27 @@ of `dev release` need GitHub (or a host listed in `gitx.github_hosts`).
 | --- | --- |
 | `dev branch new <type>/<topic> [--ticket KEY] [--base REF]` | Fetches, then creates the branch from `origin/<default>` (or `--base`) and switches to it; uncommitted changes come along. The name is normalized: `feat/Invoice Export --ticket PROJ-142` → `feat/PROJ-142-invoice-export` |
 | `dev branch rename <type>/<topic> [--ticket KEY]` | Renames the current branch before its first push (or names a detached HEAD); refuses permanent branches and branches already on `origin` |
-| `dev branch ls [--offline] [--json]` | Local branches: upstream with ahead and behind, distance from `origin/<default>`, PR, age, worktree |
+| `dev branch ls [--offline] [--json]` | The branch map: every local branch, where it lives (local only, or local and its remote), ahead and behind its upstream and `origin/<default>`, the branch that has its commits (`merged into …`), its last backup or why it is not backed up, its embargo, worktree, PR (draft or ready, checks) and linked task. `--offline` uses the cached PR list; `--json` prints the rows (below) |
 | `dev branch clean [--apply] [--offline] [--json]` | The local branches that are merged, whose PR was merged, or that are gone upstream with every commit on the remote; deleted only with `--apply` |
+
+The same rows feed the handoff note's generated block (one line per branch, with dates instead of "4 min ago"),
+`dev status`, `dev overview`, the session-start context and the dashboard, and `registry.json` keeps them as
+`projects[].branches`. Each row of `dev branch ls --json`:
+
+| Field | Meaning |
+| --- | --- |
+| `name`, `sha`, `current`, `default`, `default_branch` | The branch, its tip, whether it is checked out here, and whether it is the default branch |
+| `upstream`, `upstream_remote`, `upstream_gone`, `ahead`, `behind` | Its upstream and how far it is from it (`0` without one) |
+| `base`, `base_ahead`, `base_behind` | How far it is from `origin/<default>` (or the local default branch) |
+| `where` | `local + origin` or `local only` |
+| `last_commit`, `unpushed`, `oldest_unpushed` | Unix times; `unpushed` counts the commits that are on no remote branch |
+| `merged_into` | The branch that has every commit of this one, or `null` |
+| `last_backup` | The newest `git.backup` audit record for the branch, or `null` |
+| `embargo` | `{why, until, who, when}` from the `embargo:` list of the handoff note's metadata, or `null` |
+| `worktree`, `worktree_missing`, `changes`, `session` | The linked worktree that has it checked out, its uncommitted files, a live session |
+| `pr` | `{number, state, draft, checks, url, title}`, or `null` |
+| `task` | The work item that links `branch:<name>`, or whose id is part of the name: `{id, title, status}`, or `null` |
+| `backup` | `{state, reason}`; `state` is `backed_up`, `on_remote`, `merged`, `waiting`, `not_backed_up`, `embargoed` or `no_remote` |
 
 ### `dev commit -m "type(scope): summary" [options] [<paths>…]`
 

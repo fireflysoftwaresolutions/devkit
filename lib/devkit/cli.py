@@ -64,7 +64,8 @@ COMMANDS = [
     ("Delivery", [
         ("ci [--commands] · audit · init",
          "What CI runs (run it locally first); `ci audit [--fix]` diagnoses pipelines on any host; `ci init` sets one up"),
-        ("branch new|rename|ls|clean", "Branches from an up-to-date main, with valid names; tidy merged ones"),
+        ("branch new|rename|ls|clean", "Branches from an up-to-date main, with valid names; where each one lives "
+                                       "(ls); tidy merged ones"),
         ("commit · push · rebase", "Conventional commits, push after local CI evidence (dev ci --run), rebase on main"),
         ("pr create|ls|checks|merge", "PRs with the template, checks with failing logs, safe merges"),
         ("release [--dry-run]", "Tag and publish by the delivery policy, with the CHANGELOG section"),
@@ -726,8 +727,10 @@ def status_view(reg: dict, p: dict, w: dict = None, runs=None, ci=None, roster=N
                "commit_ts": co.get("last_commit_ts"), "worktrees": len(wts), "worktrees_in_use": live,
                "folder": co.get("path") or p.get("path"), "notes": str(core.note_path(p["id"])),
                "commands": p.get("commands") or []}
+    from . import branches as branchmap
     return {"project": p["id"], "alias": alias, "local": local, "branch": co.get("branch"), "needs_you": needs,
-            "checks": checks, "crew": crew_now, "last_update": last, "details": details,
+            "checks": checks, "crew": crew_now, "last_update": last,
+            "branches": branchmap.ordered(p.get("branches")) if local else [], "details": details,
             "tasks": ((p.get("note_summary") or {}).get("tasks") or {}), "plans": p.get("plans") or []}
 
 
@@ -783,6 +786,9 @@ def render_status(v: dict, cols: int = None) -> list:
             out += ui.row("Check", last["check"], cols, style=style)
         if last.get("next"):
             out += ui.row("Next", last["next"], cols)
+    if v.get("branches"):  # where each branch lives (spec P-fy3bwa0pshk R8)
+        from . import branches as branchmap
+        out += branchmap.status_lines(v["branches"], cols)
     out += ["", "  " + ui.bold("Details")]
     if not v.get("local"):
         out += ui.row("Folder", "not on this Mac. Get it:", cols)
@@ -894,6 +900,15 @@ def cmd_status(a):
     print("\n".join(render_status(v)))
     print()
     return 0
+
+
+def cmd_branch(a):
+    """`dev branch ls` is the branch map (branches.py, spec P-fy3bwa0pshk R7); new, rename and clean stay in gitx."""
+    if getattr(a, "branch_cmd", None) == "ls":
+        from . import branches as branchmap
+        return branchmap.cmd_ls(a)
+    from . import gitx
+    return gitx.cmd_branch(a)
 
 
 def cmd_go(a):
@@ -2370,7 +2385,7 @@ def cmd_note(a):
 
 def overview_data(days=7):
     reg = registry.build(with_prs=True, refresh_prs=False, pr_max_age=10 ** 9)  # fresh, local, cached PR data
-    from . import canary
+    from . import branches as branchmap, canary
     import datetime as dt
     since = (dt.date.today() - dt.timedelta(days=days)).isoformat()
     out = []
@@ -2384,6 +2399,7 @@ def overview_data(days=7):
                     "last_session": (ns.get("sessions") or [None])[0], "status_line": p.get("status_line"),
                     "branch": (p.get("main") or {}).get("branch"), "open_prs": len(p.get("prs_open", [])),
                     "worktrees": len(p.get("worktrees", [])), "live_sessions": live, f"commits_{days}d": commits,
+                    "branches": branchmap.counts(p.get("branches")),
                     "last_activity": p.get("last_activity"), "path": p["path"]})
     order = {"blocked": 0, "active": 1, "paused": 2, "done": 3, "archived": 4}
     out.sort(key=lambda x: (order.get(x["status"], 9), x["priority"] != "high", -(x["last_activity"] or 0)))
@@ -2399,8 +2415,9 @@ def cmd_overview(a):
     if a.json:
         print(json.dumps(data, indent=1, ensure_ascii=False))
         return 0
+    at_risk = sum((x.get("branches") or {}).get("not_backed_up", 0) for x in data["projects"])
     print(ui.section(f"Portfolio · {len(data.get('initiatives', []))} initiatives · {len(data['projects'])} projects"
-                     f" · canary {data['canary']}"))
+                     f" · canary {data['canary']}" + (f" · {at_risk} branches not backed up" if at_risk else "")))
     for i in data.get("initiatives", []):
         pct = f"{i['progress']}%" if i["progress"] is not None else "–"
         bar = ""
@@ -2436,6 +2453,12 @@ def cmd_overview(a):
             print(f"    {ui.dim(x['purpose'])}")
         if x["status_line"]:
             print(f"    {ui.status_pills(x['status_line']['line'])}  {ui.dim(x['status_line']['agent'] + ' · ' + ago(x['status_line']['ts']))}")
+        bc = x.get("branches") or {}
+        if bc.get("not_backed_up") or bc.get("embargoed"):  # where the work lives (spec P-fy3bwa0pshk R8)
+            text = f"{bc['total']} branch{'es' if bc['total'] != 1 else ''}" + "".join(
+                f" · {bc[k]} {label}" for k, label in (("not_backed_up", "not backed up"), ("embargoed", "embargoed"))
+                if bc.get(k))
+            print(f"    {ui.amber(text) if bc.get('not_backed_up') else text}  {ui.dim('dev branch ls')}")
         for t in x["now"][:3]:
             print(f"    {ui.cyan('▸')} {t}")
         if x["open_tasks"] > len(x["now"][:3]):
@@ -3410,7 +3433,7 @@ def build_parser():
     gitx.add_ci_arguments(p)
     from . import pipelines
     pipelines.add_ci_arguments(p)
-    gitx.register(add)
+    gitx.register(lambda name, fn, help_, **kw: add(name, cmd_branch if name == "branch" else fn, help_, **kw))
     from . import testx
     testx.register(add)
     add("mcp", cmd_mcp, "Serve devkit's tools over MCP on stdio (the Claude Desktop extension runs this)")
