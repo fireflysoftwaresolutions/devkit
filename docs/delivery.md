@@ -153,12 +153,15 @@ shows it, and so do `dev status`, `dev branch ls`, the handoff note and the mess
 `dev backup --public` pushes once, whatever the policy. With `on`, embargoes still hold, and on a public repository a
 branch whose new commits read as a security fix or change a red-team test still waits for an embargo or
 `--public`. Setting the policy, `dev backup --public` and `dev branch embargo --lift` are your own decisions: type
-them in a terminal, or grant the main session once (`grant backup <project>`); crew members never run them.
+them in a terminal, or grant the main session once (`grant backup <project>`, `grant embargo <branch>`); crew
+members never run them.
 
 A branch that must stay off a public remote, such as an unreleased security fix, gets an embargo:
 `dev branch embargo fix/x --why "discloses an open hole" --until "the guard release"`. No backup pushes it, nor a
-branch that holds its commits, until `dev branch embargo --lift fix/x`. On a public repository, devkit suggests an
-embargo when a branch's commits read as a security fix.
+branch that holds its commits (also after `fix/x` is merged into a release branch and deleted: the embargo keeps
+the branch's tips), until `dev branch embargo --lift fix/x`. When devkit cannot read the project's handoff note, it
+backs up nothing. On a public repository, devkit suggests an embargo when a branch's commits read as a security
+fix.
 
 `dev ci init` writes the draft gate, and `dev ci audit --fix` adds it to an existing workflow:
 `types: [opened, synchronize, reopened, ready_for_review]` on `pull_request` and

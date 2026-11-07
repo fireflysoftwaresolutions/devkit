@@ -119,14 +119,80 @@ def backups(pid: str) -> dict:
     return out
 
 
-def embargoes(pid: str) -> dict:
-    """branch -> {why, until, who, when}, from the project's handoff note (every machine sees the same)."""
+SHA_RE = re.compile(r"[0-9a-f]{40}")
+TIPS_KEPT = 20  # the newest tips of an embargoed branch the note keeps
+
+
+def _note_meta(pid: str):
+    """The metadata of the project's handoff note -> (meta, "") or (None, why devkit cannot read it). No note in a
+    handoff repository that is there reads as no metadata; a missing repository, a file that cannot be read, a block
+    that never ends or an embargo list that does not parse is unreadable (B2: never "no embargo")."""
     f = core.note_path(pid)
     try:
         text = f.read_text()
-    except OSError:
-        return {}
-    return {e["branch"]: {k: e[k] for k in notes.EMBARGO_FIELDS} for e in notes.embargoes(text)}
+    except FileNotFoundError:
+        if not Path(core.HANDOFF).is_dir():
+            return None, f"the handoff repository {core.tilde(core.HANDOFF)} is not on this Mac"
+        return {}, ""
+    except (OSError, UnicodeDecodeError) as e:
+        return None, f"{core.tilde(f)} cannot be read ({getattr(e, 'strerror', None) or type(e).__name__})"
+    if not text.startswith("---\n"):
+        return {}, ""
+    end = text.find("\n---\n", 4)
+    if end == -1:
+        return None, f"the metadata block of {core.tilde(f)} never ends (no closing ---)"
+    meta, _ = notes.split_frontmatter(text)
+    if re.search(r"(?m)^embargo:", text[4:end]) and not isinstance(meta.get("embargo"), list):
+        return None, f"the embargo list in {core.tilde(f)} does not parse"
+    return meta, ""
+
+
+def read_embargoes(pid: str):
+    """branch -> {why, until, who, when, commits}, from the project's handoff note (every machine sees the same) ->
+    (embargoes, "") or (None, why the note cannot be read). commits: the branch's tips that devkit recorded, so its
+    commits stay held after it is merged elsewhere and deleted."""
+    meta, why = _note_meta(pid)
+    if meta is None:
+        return None, why
+    found = meta.get("embargo")
+    out = {}
+    for rec in found if isinstance(found, list) else []:
+        if isinstance(rec, dict) and rec.get("branch"):
+            out[rec["branch"]] = dict({f: rec.get(f, "") for f in notes.EMBARGO_FIELDS},
+                                      commits=SHA_RE.findall(str(rec.get("commits") or "")))
+    return out, ""
+
+
+def embargoes(pid: str) -> dict:
+    """branch -> {why, until, who, when}, for the views; a note that cannot be read shows none (a backup refuses)."""
+    held, _ = read_embargoes(pid)
+    return {b: {k: e[k] for k in notes.EMBARGO_FIELDS} for b, e in (held or {}).items()}
+
+
+def record_tips(pid: str, tips: dict) -> None:
+    """Add branch tips to the embargo records ({branch: sha}), keeping the newest TIPS_KEPT per branch."""
+    tips = {b: t for b, t in tips.items() if SHA_RE.fullmatch(t or "")}
+    if not tips:
+        return
+
+    def edit(recs):
+        for r in recs:
+            t = tips.get(r.get("branch"))
+            have = SHA_RE.findall(str(r.get("commits") or ""))
+            if t and t not in have:
+                r["commits"] = " ".join((have + [t])[-TIPS_KEPT:])
+        return recs
+    _edit_records(pid, "embargo", edit)
+
+
+def held_commits(top, branch: str, rec: dict, local, exclude=("--remotes",)) -> set:
+    """The commits an embargo holds: those its branch (when it is here) and its recorded tips reach, and no remote
+    ref (`exclude`) does."""
+    tips = ([f"refs/heads/{branch}"] if branch in local else []) + [
+        t for t in rec.get("commits") or [] if core.git(top, "cat-file", "-e", t + "^{commit}")[0] == 0]
+    if not tips:
+        return set()
+    return set(core.gitout(top, "rev-list", *tips, "--not", *exclude, timeout=60).split())
 
 
 def linked_tasks(pid: str, names) -> dict:
@@ -325,7 +391,8 @@ def map(repo, prs=None, offline=False, now=None, pid=None, default=None, current
     names = [p[0] for p in raw]
     # a few git calls for the whole repository instead of three per branch (a session start has 30 s, R8)
     vs_base = _ahead_behind(top, base_ref) if base_ref else None
-    only_here = _counts(_walk(top, names, tips, ["--remotes"] if remotes else [], with_ts=True), names)
+    walked_here = _walk(top, names, tips, ["--remotes"] if remotes else [], with_ts=True)
+    only_here = _counts(walked_here, names)
     rows = []
     for name, upstream, uremote, track, ts, sha, _ in raw:
         ref = f"refs/heads/{name}"
@@ -386,7 +453,14 @@ def map(repo, prs=None, offline=False, now=None, pid=None, default=None, current
                                            x != default, x))
             r["merged_into"] = strict[0]
     done = backups(pid)
-    held = embargoes(pid)
+    held_full = read_embargoes(pid)[0] or {}
+    held = {b: {k: e[k] for k in notes.EMBARGO_FIELDS} for b, e in held_full.items()}
+    via = {}  # branch -> the embargoed branch whose held commits it carries (B2: also after that branch is deleted)
+    for b, e in held_full.items():
+        for sha in held_commits(top, b, e, tips, ["--remotes"] if remotes else []) if walked_here else ():
+            for n in _bits((walked_here.get(sha) or (None, 0))[1], names):
+                if n != b and n not in held:
+                    via.setdefault(n, b)
     policy = backup_policy(pid)
     tasks = linked_tasks(pid, [n for n in names if n != default])
     after = after_minutes()
@@ -395,7 +469,8 @@ def map(repo, prs=None, offline=False, now=None, pid=None, default=None, current
         r["last_backup"] = rec.get("backup")
         r["embargo"] = held.get(r["name"])
         # a merged branch defers to the branch that carries its commits, and so does that branch's embargo
-        r["embargo_via"] = r["merged_into"] if not r["embargo"] and r["unpushed"] and r["merged_into"] in held else None
+        r["embargo_via"] = r["merged_into"] if not r["embargo"] and r["unpushed"] and r["merged_into"] in held else \
+            via.get(r["name"]) if not r["embargo"] and r["unpushed"] else None
         r["task"] = tasks.get(r["name"])
         r["backup_policy"] = policy
         r["pr"] = _pr_row(prs, r["name"]) if prs else None
@@ -414,6 +489,8 @@ def _backup_state(r: dict, has_remotes: bool, after: int, now: float, skipped) -
     if r["embargo"]:
         until = r["embargo"].get("until")
         return {"state": "embargoed", "reason": f'embargoed until "{until}"' if until else "embargoed"}
+    if r.get("embargo_via"):
+        return {"state": "embargoed", "reason": f"its commits are in {r['embargo_via']}, which is embargoed"}
     if r["default"]:
         return {"state": "not_backed_up",
                 "reason": f"{r['name']} is the default branch, which is never backed up; move "
@@ -791,6 +868,13 @@ def cmd_embargo(a) -> int:
                     f" · {who(v['who'])}" if v.get("who") else "") + ui.dim(f" · {v['why']}" if v.get("why") else ""))
         return 0
     if a.lift:
+        from . import backup
+        if backup.crew_member():  # the guard asks the main session for the developer's grant (grant embargo <branch>)
+            print(f"{ui.WARN} dev branch embargo --lift is the developer's own decision: lifting it lets a backup "
+                  f"publish {b}'s commits. The developer types it in a terminal, or grants the main session once "
+                  f"(grant embargo {b}). A crew member never runs it: put the exact command and why in your report.",
+                  file=sys.stderr)
+            return 2
         old = set_embargo(pid, b, lift=True)
         if not old:
             print(f"{ui.INFO} {b} has no embargo")
@@ -811,6 +895,7 @@ def cmd_embargo(a) -> int:
         return 2
     until = (a.until or "").strip()
     set_embargo(pid, b, why, until, _actor())
+    record_tips(pid, {b: core.gitout(top, "rev-parse", "--verify", "-q", f"refs/heads/{b}^{{commit}}")})
     audit.record("git.embargo", b, f"set: {why}" + (f' (until "{until}")' if until else ""), "ok", project=pid,
                  branch=b, category="security", severity="notice")
     _share(b)

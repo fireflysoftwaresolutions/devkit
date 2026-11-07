@@ -303,7 +303,7 @@ class ViewTests(Sandbox):
         self.assertIn("↑2 · 2 ahead of main · not backed up: 2 commits only on this Mac", row)
 
     def test_overview_counts_branches_not_backed_up_and_embargoed(self):
-        self.write_note(EMBARGO_NOTE.replace("release/x", "feat/inside"))
+        self.write_note(EMBARGO_NOTE.replace("release/x", "feat/pushed"))  # shares no commit with release/x
         p = self.project()
         p["branches"] = branches.map(self.repo, now=self.now, prs=[])
         reg = {"projects": [p], "issues": [], "initiatives": [], "generated": int(self.now)}
@@ -335,10 +335,10 @@ class ViewTests(Sandbox):
 
     def test_context_line_names_what_is_at_risk(self):
         self.scene()
-        self.write_note(EMBARGO_NOTE.replace("release/x", "feat/inside"))
+        self.write_note(EMBARGO_NOTE.replace("release/x", "feat/pushed"))  # shares no commit with release/x
         line = branches.context_line(branches.map(self.repo, now=self.now, prs=[]))
         self.assertIn("not backed up: `release/x` (2 commits only on this Mac)", line)
-        self.assertIn("embargoed: `feat/inside`", line)
+        self.assertIn("embargoed: `feat/pushed`", line)
         git(self.repo, "push", "-q", "-u", "origin", "release/x")
         self.write_note("# acme/widget\n")
         self.assertIn("nothing is only on this Mac", branches.context_line(branches.map(self.repo, prs=[])))
@@ -367,6 +367,7 @@ class BackupCase(Sandbox):
         super().setUp()
         self.saved_gh = gitx.GH
         gitx.GH = lambda args, cwd=None, timeout=60: (0, "[]", "")  # GitHub has no pull request for any branch
+        Path(core.HANDOFF).mkdir(parents=True, exist_ok=True)  # this Mac has its handoff repository
         # a private repository, and no developer at a terminal: no test asks a question or reads GitHub
         for patch in (mock.patch.dict(os.environ, {"DEVKIT_NO_AUTOSYNC": "1"}),
                       mock.patch.object(pipelines, "_visibility", return_value="private"),
@@ -472,6 +473,70 @@ class SyncBackupTests(BackupCase):
         self.assertEqual([r["detail"][:4] for r in self.records("git.embargo")], ["set:", "lift"])
         self.assertEqual(self.dev("backup", "feat/inside")[0], 0)
         self.assertEqual(self.on_origin("feat/inside"), first)
+
+
+@unittest.skipUnless(HAS_GITLEAKS, "the secret scan needs gitleaks")
+class EmbargoHoldsTests(BackupCase):
+    # B2 of the pipeline security review: the embargo failed open. It now holds the commits, not just the name: the
+    # note records the embargoed branch's tips, so a branch it was merged into keeps them off the remote after the
+    # embargoed branch is deleted. A handoff note devkit cannot read means no backup, never "no embargo". Lifting an
+    # embargo is the developer's own decision.
+    def embargo(self, name):
+        rc, out = self.dev("branch", "embargo", name, "--why", "discloses an open hole", "--until", "the release")
+        self.assertEqual(rc, 0, out)
+
+    def test_the_embargo_follows_its_commits_after_a_merge_and_the_branch_is_deleted(self):
+        self.ci(CI_PR_AND_MAIN)
+        first = self.branch("fix/hole", 3 * HOUR)[0]
+        self.embargo("fix/hole")
+        later = self.commit("fix: close the second path", age=2 * HOUR)  # after the embargo was set
+        self.branch("feat/other", 2 * HOUR)
+        backup.run(self.repo, ["feat/other"])  # any backup run records the embargoed branch's new tip
+        git(self.repo, "switch", "-q", "-c", "release/x", "main")
+        self.commit("chore: start the release", age=2 * HOUR)
+        git(self.repo, "merge", "-q", "--no-ff", "-m", "chore: integrate the fix", "fix/hole")
+        git(self.repo, "branch", "-q", "-D", "fix/hole")
+        self.assertEqual(self.sync(), [])  # the map holds it as embargoed: the sync does not even try
+        self.assertEqual(self.on_origin("release/x"), "")
+        self.assertEqual(set(branches.read_embargoes(PID)[0]["fix/hole"]["commits"]), {first, later})
+        res = backup.run(self.repo, ["release/x"])[0]
+        self.assertEqual(res["reason"], 'its commits are in fix/hole, which is embargoed until "the release"')
+        row = {r["name"]: r for r in branches.map(self.repo, prs=[])}["release/x"]
+        self.assertEqual((row["embargo_via"], row["backup"]["state"]), ("fix/hole", "embargoed"))
+        self.assertIn("held by the embargo on fix/hole", branches.describe(row))
+        self.assertEqual(self.dev("branch", "embargo", "--lift", "fix/hole")[0], 0)
+        self.assertEqual(backup.run(self.repo, ["release/x"])[0]["state"], "pushed")
+
+    def test_a_handoff_note_devkit_cannot_read_means_no_backup(self):
+        self.ci(CI_PR_AND_MAIN)
+        self.branch("feat/x", 2 * HOUR)
+        broken = "---\nstatus: active\nembargo:\n  - branch: feat/x\n    why: an open hole\n"  # its block never ends
+        self.write_note(broken)
+        res = backup.run(self.repo, ["feat/x"])[0]
+        self.assertEqual(res["state"], "skipped")
+        self.assertIn("devkit cannot read the handoff note", res["reason"])
+        self.assertIn("so it cannot tell which branches are embargoed", res["reason"])
+        self.write_note(EMBARGO_NOTE)
+        os.chmod(core.note_path(PID), 0)  # the temp folder's cleanup removes it at any mode
+        self.assertIn("devkit cannot read the handoff note", backup.run(self.repo, ["feat/x"])[0]["reason"])
+        os.chmod(core.note_path(PID), 0o600)
+        p = self.project()
+        core.HANDOFF = core.NOTES = self.root / "no-handoff"  # this Mac has no handoff repository
+        self.assertEqual([(r["branch"], r["state"]) for r in backup.sync({"projects": [p]})], [("feat/x", "skipped")])
+        self.assertEqual(self.on_origin("feat/x"), "")
+
+    def test_only_the_developer_lifts_an_embargo(self):
+        self.branch("fix/hole", HOUR)
+        self.embargo("fix/hole")
+        with mock.patch.object(backup, "crew_member", return_value="link"):
+            rc, out = self.dev("branch", "embargo", "--lift", "fix/hole")
+        self.assertEqual(rc, 2)
+        self.assertIn("dev branch embargo --lift is the developer's own decision", out)
+        self.assertEqual(list(branches.embargoes(PID)), ["fix/hole"])
+        self.assertEqual([r["detail"][:4] for r in self.records("git.embargo")], ["set:"])
+
+    def sync(self):
+        return [(r["branch"], r["state"]) for r in backup.sync({"projects": [self.project()]})]
 
 
 @unittest.skipUnless(HAS_GITLEAKS, "the secret scan needs gitleaks")

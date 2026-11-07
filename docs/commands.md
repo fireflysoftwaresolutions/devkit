@@ -690,8 +690,8 @@ of `dev release` need GitHub (or a host listed in `gitx.github_hosts`).
 | `dev branch rename <type>/<topic> [--ticket KEY]` | Renames the current branch before its first push (or names a detached HEAD); refuses permanent branches and branches already on `origin` |
 | `dev branch ls [--offline] [--json]` | The branch map: every local branch, where it lives (local only, or local and its remote), ahead and behind its upstream and `origin/<default>`, the branch that has its commits (`merged into …`), its last backup or why it is not backed up, its embargo, worktree, PR (draft or ready, checks) and linked task. `--offline` uses the cached PR list; `--json` prints the rows (below) |
 | `dev branch clean [--apply] [--offline] [--json]` | The local branches that are merged, whose PR was merged, or that are gone upstream with every commit on the remote; deleted only with `--apply` |
-| `dev branch embargo <branch> --why "…" [--until "<step or date>"]` | Keeps the branch off the remote: `dev backup` and `dev sync` never push it, nor a branch that holds any of its commits. Stored in the `embargo:` list of the handoff note's metadata (with who and when), so every machine sees it; audited as `git.embargo`. Every branch view shows it. Without a branch, lists the embargoes (`--json` too) |
-| `dev branch embargo --lift <branch>` | Ends the embargo; the next backup may push the branch |
+| `dev branch embargo <branch> --why "…" [--until "<step or date>"]` | Keeps the branch off the remote: `dev backup` and `dev sync` never push it, nor a branch that holds any of its commits. Stored in the `embargo:` list of the handoff note's metadata (with who and when), so every machine sees it; audited as `git.embargo`. The record also keeps the branch's tips (`commits:`, updated by every backup run), so the embargo holds its commits after the branch is merged into another and deleted. Every branch view shows it. Without a branch, lists the embargoes (`--json` too) |
+| `dev branch embargo --lift <branch>` | Ends the embargo; the next backup may push the branch and the branches that carry its commits. The developer's own decision: devkit refuses it from a crew member's lane, and the guard asks the main session for the developer's grant (`grant embargo <branch>`) |
 
 The same rows feed the handoff note's generated block (one line per branch, with dates instead of "4 min ago"),
 `dev status`, `dev overview`, the session-start context and the dashboard, and `registry.json` keeps them as
@@ -720,8 +720,10 @@ CI run. Without a branch it takes the current one; `--all` takes every local bra
 push is fast-forward only and never forced, and it happens only when every check holds, in this order:
 
 1. Not the default branch, and a name that follows the branch naming rule.
-2. No embargo on the branch, nor on a branch that holds any of the same commits (a merged branch defers to the branch
-   that carries its commits).
+2. No embargo on the branch, nor on any of the same commits: those of an embargoed branch, or of its recorded tips
+   after it was merged into another branch and deleted (a merged branch defers to the branch that carries its
+   commits). When devkit cannot read the handoff note (it is missing with its repository, unreadable, or its
+   metadata does not parse), no branch is backed up: an unreadable note never reads as no embargo.
 3. The remote branch is not ahead or diverged. A diverged branch stops with the commands to resolve it
    (`git fetch`, `git log --left-right`, `git rebase origin/<branch>`, or `dev push --force-with-lease` on your own
    branch).

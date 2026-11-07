@@ -9,9 +9,9 @@ that push costs no CI run.
   dev sync (hourly and at session end) backs up every project's branches that are not backed up (backup.auto)
 
 A branch is pushed to its remote under the same name, fast-forward only and never forced, and only when every check
-holds, in this order: not the default branch, a conforming name, no embargo (on the branch, or on a branch that
-holds any of the same commits: a merged branch defers to the branch that carries its commits), the remote branch is
-not ahead or diverged, no WIP commit, the project's backup policy, no sign of a security fix on a public repository,
+holds, in this order: not the default branch, a conforming name, no embargo (on the branch, or on any of the same
+commits: those its branch or its recorded tips reach, so they stay held after it is merged elsewhere and deleted; a
+handoff note devkit cannot read stops every backup, B2), the remote branch is not ahead or diverged, no WIP commit, the project's backup policy, no sign of a security fix on a public repository,
 the CI configuration of the commit it sends shows that the push starts no CI run (`pipelines.push_ci`), and last the
 secret scan (gitleaks) passes on exactly the commits it sends. A check that fails skips the branch with the reason
 and what to do. `dev sync` only takes commits older than `backup.after_minutes` (a younger commit may still be
@@ -204,11 +204,13 @@ def _policy_gate(c, name, remote, ctx):
 
 
 def _embargo_holder(top, name, mine: set, held: dict, local: set):
-    """The embargoed branch (this one, or one that holds any of the same commits) -> (branch, until) or None."""
+    """The embargo that holds any of `mine` (this branch's, or one whose branch or recorded tips reach the same
+    commits, also after that branch was merged elsewhere and deleted) -> (branch, until) or None."""
+    from . import branches
     if name in held:
         return name, held[name].get("until") or ""
     for other, e in held.items():
-        if other != name and other in local and mine & set(_commits(top, f"refs/heads/{other}")):
+        if other != name and mine & branches.held_commits(top, other, e, local):
             return other, e.get("until") or ""
     return None
 
@@ -394,11 +396,26 @@ def run(repo, names=None, every: bool = False, auto: bool = False, accept_ci: bo
         names = [n for n in local if n != c.default and _commits(c.top, f"refs/heads/{n}")]
     elif not names:
         names = [c.branch] if c.branch else []
+    held, unreadable = branches.read_embargoes(c.pid)
+    if held is None:  # B2: a note devkit cannot read means no backup, never "no embargo"
+        out = [_result(n, _remote_of(c, n), SKIPPED, f"devkit cannot read the handoff note ({unreadable}), so it "
+                       f"cannot tell which branches are embargoed", [
+                           f"fix the note ({core.tilde(core.note_path(c.pid))}) or the handoff repository (dev "
+                           f"doctor), then dev backup"]) for n in names]
+        for res in out if record and not dry_run else ():
+            _record(c.pid, res)
+        return out
+    moved = {b: _sha(c.top, f"refs/heads/{b}") for b in held if b in local}
+    moved = {b: t for b, t in moved.items() if t and t not in held[b]["commits"]}
+    if moved and not dry_run:  # the embargo follows the branch's new commits, so they stay held after a merge
+        branches.record_tips(c.pid, moved)
+        for b, t in moved.items():
+            held[b]["commits"].append(t)
     if prs is None:
         prs, known = _open_prs(c)
         prs_known = known if prs_known is None else prs_known
     ctx = {"auto": auto, "accept_ci": accept_ci and not auto, "dry_run": dry_run, "public_ok": public_ok and not auto,
-           "now": now or time.time(), "after": branches.after_minutes(), "held": branches.embargoes(c.pid),
+           "now": now or time.time(), "after": branches.after_minutes(), "held": held,
            "local": set(local), "prs": prs or [], "prs_known": bool(prs_known), "vis": {},
            "policy": branches.backup_policy(c.pid), "asked": False, "policy_words": ""}
     last = branches.backups(c.pid) if record and not dry_run else {}
