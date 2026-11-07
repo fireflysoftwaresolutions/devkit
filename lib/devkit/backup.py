@@ -9,14 +9,17 @@ that push costs no CI run.
   dev sync (hourly and at session end) backs up every project's branches that are not backed up (backup.auto)
 
 A branch is pushed to its remote under the same name, fast-forward only and never forced, and only when every check
-holds, in this order: not the default branch, a conforming name, no embargo (on the branch, or on any of the same
-commits: those its branch or its recorded tips reach, so they stay held after it is merged elsewhere and deleted; a
-handoff note devkit cannot read stops every backup, B2), the remote branch is not ahead or diverged, no WIP commit, the project's backup policy, no sign of a security fix on a public repository,
-the CI configuration of the commit it sends shows that the push starts no CI run (`pipelines.push_ci`), and last the
-secret scan (gitleaks) passes on exactly the commits it sends. A check that fails skips the branch with the reason
-and what to do. `dev sync` only takes commits older than `backup.after_minutes` (a younger commit may still be
-amended); `dev backup` takes them all. Each push is audited as `git.backup` (branch, remote, commit range) and each
-skip as `git.backup-skipped` (the reason, which the branch map shows).
+holds, in this order: not the default branch nor a long-lived one (LONG_LIVED), a conforming name, the remote can be
+reached (what it has, from `git ls-remote`, decides which commits the push sends: every later check looks at exactly
+those, also when another remote has them), not a branch a workflow deploys from, no embargo (on the branch, or on any
+of the same commits: those its branch or its recorded tips reach, so they stay held after it is merged elsewhere and
+deleted; a handoff note devkit cannot read stops every backup, B2), the remote branch is not ahead or diverged, no WIP
+commit, the project's backup policy, no sign of a security fix on a public repository, the CI configuration of the
+commit it sends shows that the push starts no CI run (`pipelines.push_ci`), and last the secret scan (gitleaks) passes
+on exactly the commits it sends. A check that fails skips the branch with the reason and what to do. `dev sync` only
+takes commits older than `backup.after_minutes` (a younger commit may still be amended); `dev backup` takes them all.
+Each push is audited as `git.backup` (branch, remote, commit range) and each skip as `git.backup-skipped` (the reason,
+which the branch map shows).
 
 The backup policy (the developer's decision, 2026-11-06; branches.py keeps it in the handoff note): on, off or ask
 per project, by default on for a private repository and ask for a public one (or one whose visibility devkit cannot
@@ -48,6 +51,10 @@ SECURITY_SUBJECT = re.compile(r"(?i)^\w+\((security|sec|vuln)\)!?:|\b(vulnerabil
 RED_TEAM_FILE = re.compile(r"(?i)(^|/)[^/]*(red[-_]?team|adversarial)[^/]*$")
 SKIP_RECORD_HOURS = 24  # the same skip reason is audited again only after this long
 PUSHED, WOULD, SKIPPED, NOTHING, WAITING = "pushed", "would_push", "skipped", "nothing", "waiting"
+# long-lived branches a backup never pushes, whatever the default branch is: a push there publishes or deploys
+LONG_LIVED = ("main", "master", "develop", "trunk", "gh-pages")
+# a workflow step that deploys or publishes: with an `environment:`, it makes a branch one "a workflow deploys from"
+DEPLOY_STEP = re.compile(r"(?i)deploy|gh-pages|pages-artifact|publish|release-action")
 
 
 def auto_enabled(cfg=None) -> bool:
@@ -60,10 +67,45 @@ def _sha(top, ref) -> str:
     return core.gitout(top, "rev-parse", "--verify", "-q", ref + "^{commit}")
 
 
-def _commits(top, tip, *exclude) -> list:
-    """The commits reachable from `tip` and from none of `exclude` (default: no remote ref), newest first."""
-    out = core.gitout(top, "rev-list", tip, "--not", *(exclude or ("--remotes",)), timeout=60)
+def _commits(top, tip, has=None) -> list:
+    """The commits reachable from `tip` that the push target lacks, newest first: none of `has` (the commits it has
+    that this repository knows) reaches them; has=None means no remote ref here reaches them."""
+    if has is None:
+        out = core.gitout(top, "rev-list", tip, "--not", "--remotes", timeout=60)
+        return [x for x in out.split() if x]
+    rc, out, err = core.sh(["git", "-C", str(top), "rev-list", tip, "--stdin"], input="".join(f"^{h}\n" for h in has),
+                           timeout=60)
+    if rc != 0:
+        raise RuntimeError(f"git rev-list failed: {(err or out).strip()[:120]}")
     return [x for x in out.split() if x]
+
+
+def _advertised(c, remote, ctx):
+    """What the push target has: {ref: sha} of its branches and tags (git ls-remote, once per remote), and the
+    commits among them this repository knows -> (refs, known shas, "") or (None, None, why it cannot be reached)."""
+    if remote not in ctx["adv"]:
+        rc, out, err = core.git(c.top, "ls-remote", "--heads", "--tags", remote, timeout=60)
+        if rc != 0:
+            text = (err or out).strip().splitlines()
+            ctx["adv"][remote] = (None, None, (text[-1] if text else "no answer")[:100])
+        else:
+            refs = {}
+            for ln in out.splitlines():
+                parts = ln.split()
+                if len(parts) == 2:
+                    refs[parts[1]] = parts[0]
+            ctx["adv"][remote] = (refs, _known(c.top, refs.values()), "")
+    return ctx["adv"][remote]
+
+
+def _known(top, shas) -> list:
+    """The objects among `shas` that exist in this repository (one git cat-file call)."""
+    shas = sorted(set(shas))
+    if not shas:
+        return []
+    rc, out, _ = core.sh(["git", "-C", str(top), "cat-file", "--batch-check"], input="".join(x + "\n" for x in shas),
+                         timeout=60)
+    return [ln.split()[0] for ln in out.splitlines() if ln.strip() and not ln.endswith(" missing")] if rc == 0 else []
 
 
 def _result(branch, remote, state, reason="", fix=None, **kw) -> dict:
@@ -71,13 +113,15 @@ def _result(branch, remote, state, reason="", fix=None, **kw) -> dict:
             "commit": kw.get("commit"), "range": kw.get("range"), "count": kw.get("count", 0)}
 
 
-def scan(top, tip: str) -> tuple:
-    """gitleaks on the commits only on this Mac up to `tip` -> (True, []) clean, (False, findings) or (None, why)."""
+def scan(top, tip: str, has=None) -> tuple:
+    """gitleaks on exactly the commits a push of `tip` sends (none of `has`, the commits the push target has, reaches
+    them; has=None: no remote ref here) -> (True, []) clean, (False, findings) or (None, why)."""
     import subprocess
     if not core.have("gitleaks"):
         return None, "the secret scan needs gitleaks, which is not installed (brew install gitleaks)"
+    opts = f"{tip} --not --remotes" if has is None else " ".join([tip] + ["^" + h for h in has])
     args = ["gitleaks", "git", "--no-banner", "--redact", "--exit-code", "3", "--report-format", "json",
-            "--report-path", "-", f"--log-opts={tip} --not --remotes", "."]
+            "--report-path", "-", f"--log-opts={opts}", "."]
     try:
         p = subprocess.run(args, cwd=str(top), capture_output=True, text=True, timeout=180, env=core.GIT_ENV)
     except (OSError, subprocess.TimeoutExpired) as e:
@@ -101,25 +145,89 @@ def _security_hint(top, commits: list) -> str:
         subject = core.gitout(top, "log", "-1", "--format=%s", sha)
         if SECURITY_SUBJECT.search(subject):
             return f"commit {sha[:7]} reads as a security fix: {subject[:60]}"
-    files = core.gitout(top, "log", "--format=", "--name-only", commits[0], "--not", "--remotes") if commits else ""
+    files = core.gitout(top, "log", "--format=", "--name-only", "--no-walk=unsorted", *commits[:200]) if commits else ""
     hit = next((f.strip() for f in files.splitlines() if RED_TEAM_FILE.search(f.strip())), "")
     return f"it changes a red-team test, {hit}" if hit else ""
 
 
-def _visibility(top):
-    """The repository's visibility on its host: "public", "private", "internal" or None (unknown)."""
+def _github(top, remote):
+    """`[host/]owner/repo` of the GitHub repository a remote names (its configured URL, as written), or None."""
+    from . import cistatus
+    prov = cistatus.provider_for(core.gitout(top, "config", "--get", f"remote.{remote}.url"))
+    if not prov or prov[0] != "github":
+        return None
+    return prov[2] if prov[1] == "github.com" else f"{prov[1]}/{prov[2]}"
+
+
+def _visibility(top, remote="origin"):
+    """The visibility of the repository the push goes to (the remote's, not origin's): "public", "private",
+    "internal" or None (unknown, or not on GitHub)."""
     try:
-        from . import pipelines
-        return pipelines._visibility(Path(top))
+        from . import gitx
+        slug = _github(top, remote)
+        if not slug:
+            return None
+        rc, out, _ = gitx.GH(["repo", "view", slug, "--json", "visibility", "-q", ".visibility"], cwd=str(top),
+                             timeout=15)
+        v = out.strip().lower() if rc == 0 else ""
+        return v if v in ("public", "private", "internal") else None
     except Exception:
         return None
 
 
 def _public(c, remote, ctx) -> bool:
-    """Is the repository public? Unknown counts as public: the push would publish the commits at once."""
+    """Is the repository the push goes to public? Unknown counts as public: the push would publish the commits."""
     if remote not in ctx["vis"]:
-        ctx["vis"][remote] = _visibility(c.top)
+        ctx["vis"][remote] = _visibility(c.top, remote)
     return ctx["vis"][remote] not in ("private", "internal")
+
+
+def _prs_of(c, remote, ctx):
+    """The open pull requests of the repository the push goes to -> (list, known). origin's come from the caller."""
+    slug = _github(c.top, remote)
+    if remote == "origin" or (slug and slug == c.slug):
+        return ctx["prs"], ctx["prs_known"]
+    if not slug:
+        return [], False
+    if slug not in ctx["remote_prs"]:
+        from . import gitx
+        data, _ = gitx.gh_json(["pr", "list", "-R", slug, "--state", "open", "--limit", "200", "--json",
+                                "number,isDraft,url,headRefName,state"], c, timeout=30)
+        ctx["remote_prs"][slug] = (data, True) if isinstance(data, list) else ([], False)
+    return ctx["remote_prs"][slug]
+
+
+def _deploys_from(top, name, sha) -> str:
+    """Why a GitHub Actions workflow of the commit to push deploys from `name`, or "": its push trigger names the
+    branch in `branches:`, and one of its jobs has an `environment:` or a deploy or publish step."""
+    import tempfile
+    from . import pipelines
+    files = [f for f in core.gitout(top, "ls-tree", "-r", "--name-only", sha, "--", ".github/workflows").splitlines()
+             if f.endswith((".yml", ".yaml"))]
+    if not files:
+        return ""
+    with tempfile.TemporaryDirectory(prefix="devkit-deploy-") as tmp:
+        if not pipelines._materialize(top, sha, files, Path(tmp)):
+            return f"devkit could not read the workflows of {sha[:7]}, so it cannot rule out a deploy"
+        pls = pipelines.build(tmp)
+    for pl in pls:
+        tree = pl.get("tree")
+        if pl.get("provider") != "github" or not isinstance(tree, dict):
+            continue
+        push = pipelines._gh_events(tree.get("on", tree.get(True))).get("push")
+        if not (isinstance(push, dict) and "branches" in push and pipelines._gh_filter(push["branches"], name)):
+            continue
+        for jid, job in (tree.get("jobs") or {}).items():
+            if not isinstance(job, dict):
+                continue
+            env = job.get("environment")
+            env = env.get("name") if isinstance(env, dict) else env
+            step = next((str(st["uses"]).split("@")[0] for st in job.get("steps") or []
+                         if isinstance(st, dict) and DEPLOY_STEP.search(str(st.get("uses") or ""))), "")
+            if env or step:
+                what = f"environment {env}" if env else f"step {step}"
+                return f"{Path(pl['file']).name} deploys from it (job {jid}, {what}): a push to it may deploy"
+    return ""
 
 
 def _remote_id(top, remote) -> str:
@@ -203,14 +311,16 @@ def _policy_gate(c, name, remote, ctx):
                        'dev backup policy on --why "…"   (or off: the developer\'s choice for this project)'])
 
 
-def _embargo_holder(top, name, mine: set, held: dict, local: set):
+def _embargo_holder(top, name, mine: set, held: dict, local: set, has=None):
     """The embargo that holds any of `mine` (this branch's, or one whose branch or recorded tips reach the same
-    commits, also after that branch was merged elsewhere and deleted) -> (branch, until) or None."""
+    commits, also after that branch was merged elsewhere and deleted; `has`: the commits the push target has, so a
+    commit another remote has stays held) -> (branch, until) or None."""
     from . import branches
     if name in held:
         return name, held[name].get("until") or ""
     for other, e in held.items():
-        if other != name and mine & branches.held_commits(top, other, e, local):
+        held_here = branches.held_commits(top, other, e, local, list(has) if has is not None else ("--remotes",))
+        if other != name and mine & held_here:
             return other, e.get("until") or ""
     return None
 
@@ -263,11 +373,12 @@ def _target(c, name, tip, ctx) -> str:
 def _ci_gate(c, name, target, remote_sha, ctx):
     """The CI check (R1) -> (push_ci result, skip result or None)."""
     from . import pipelines
-    top = c.top
-    pr = pipelines.open_pr(ctx["prs"], name)
-    base = f"refs/remotes/origin/{c.default}" if _sha(top, f"refs/remotes/origin/{c.default}") else c.default
-    ci = pipelines.push_ci(top, name, target, remote_sha=remote_sha or None, base=base, pr=pr,
-                           prs_known=ctx["prs_known"])
+    top, remote = c.top, _remote_of(c, name)
+    prs, known = _prs_of(c, remote, ctx)  # the pull requests of the repository the push goes to
+    pr = pipelines.open_pr(prs, name)
+    base = next((f"refs/remotes/{r}/{c.default}" for r in (remote, "origin")
+                 if _sha(top, f"refs/remotes/{r}/{c.default}")), c.default)
+    ci = pipelines.push_ci(top, name, target, remote_sha=remote_sha or None, base=base, pr=pr, prs_known=known)
     if ci["starts"] is False or ctx["accept_ci"]:
         return ci, None
     if ci["starts"]:
@@ -290,6 +401,9 @@ def _one(c, name, ctx) -> dict:
     if name == c.default:
         return _result(name, remote, SKIPPED, f"{name} is the default branch, which is never backed up",
                        ["dev branch new <type>/<topic>   (the commits come along), then dev backup"])
+    if name in LONG_LIVED:
+        return _result(name, remote, SKIPPED, f"{name} is a long-lived branch, which a backup never pushes",
+                       ["dev branch new <type>/<topic>   (the commits come along), then dev backup"])
     if guard.branch_violation(name):
         return _result(name, remote, SKIPPED, "its name breaks the branch naming rule",
                        [f"git switch {name} && dev branch rename <type>/<topic>"])
@@ -299,37 +413,39 @@ def _one(c, name, ctx) -> dict:
     if merge and merge != f"refs/heads/{name}":
         return _result(name, remote, SKIPPED, f"its upstream is {remote}/{merge.replace('refs/heads/', '')}, not "
                        f"{name}", ["dev push   (pushes to the upstream it has)"])
+    # what the push target has (its own refs, not every remote's): the commits it lacks are exactly what the push
+    # sends, so the embargo, WIP, security and secret checks look at those
+    refs, has, why = _advertised(c, remote, ctx)
+    if refs is None:
+        return _result(name, remote, SKIPPED, f"{remote} cannot be reached ({why})",
+                       [f"git ls-remote {remote}   (check the network and the credentials), then dev backup {name}"])
+    remote_sha = refs.get(f"refs/heads/{name}", "")
+    if remote_sha and not _sha(top, remote_sha):
+        core.git(top, "fetch", "--no-tags", "-q", remote, f"+refs/heads/{name}:refs/remotes/{remote}/{name}",
+                 timeout=120)
+        if not _sha(top, remote_sha):  # without its commits devkit cannot tell ahead from diverged
+            return _result(name, remote, SKIPPED, f"devkit could not fetch {remote}/{name}",
+                           [f"git fetch {remote} {name}, then dev backup {name}"])
+        has = sorted(set(has) | {remote_sha})
     target = _target(c, name, tip, ctx)
-    mine = _commits(top, target) if target else []
+    mine = _commits(top, target, has) if target else []
     if not mine:
-        if _commits(top, tip):
+        if _commits(top, tip, has):
             return _result(name, remote, WAITING, f"commits younger than {ctx['after']} min wait for the backup")
-        return _result(name, remote, NOTHING, f"its commits are on {remote} already")
-    held = _embargo_holder(top, name, set(mine), ctx["held"], ctx["local"])
+        return _result(name, remote, NOTHING, f"{remote} has every commit already" if remote_sha else
+                       f"its commits are on {remote} already")
+    deploy = _deploys_from(top, name, target)
+    if deploy:  # never, not even with --accept-ci or --public
+        return _result(name, remote, SKIPPED, deploy, [f"dev push   (with local CI evidence: a push to {name} is a "
+                                                       f"release step, not a backup)"])
+    held = _embargo_holder(top, name, set(mine), ctx["held"], ctx["local"], has)
     if held:
         why = ("embargoed" if held[0] == name else f"its commits are in {held[0]}, which is embargoed") + (
             f' until "{held[1]}"' if held[1] else "")
         return _result(name, remote, SKIPPED, why, [f"dev branch embargo --lift {held[0]}   (when it may be public)"])
-    rc, out, err = core.git(top, "ls-remote", "--heads", remote, f"refs/heads/{name}", timeout=60)
-    if rc != 0:
-        text = (err or out).strip().splitlines()
-        why = (text[-1] if text else "no answer")[:100]
-        return _result(name, remote, SKIPPED, f"{remote} cannot be reached ({why})",
-                       [f"git ls-remote {remote}   (check the network and the credentials), then dev backup {name}"])
-    remote_sha = (out.split() or [""])[0]
-    if remote_sha:
-        if not _sha(top, remote_sha):
-            core.git(top, "fetch", "--no-tags", "-q", remote, f"+refs/heads/{name}:refs/remotes/{remote}/{name}",
-                     timeout=120)
-        if not _sha(top, remote_sha):  # without its commits devkit cannot tell ahead from diverged
-            return _result(name, remote, SKIPPED, f"devkit could not fetch {remote}/{name}",
-                           [f"git fetch {remote} {name}, then dev backup {name}"])
-        if remote_sha == target or core.git(top, "merge-base", "--is-ancestor", target, remote_sha)[0] == 0:
-            return _result(name, remote, NOTHING, f"{remote}/{name} has every commit already")
-        if core.git(top, "merge-base", "--is-ancestor", remote_sha, target)[0] != 0:
-            return _result(name, remote, SKIPPED, f"{remote}/{name} has diverged from {name} (commits on both sides)",
-                           _diverged_fix(name, remote))
-        mine = _commits(top, target, remote_sha, "--remotes")
+    if remote_sha and core.git(top, "merge-base", "--is-ancestor", remote_sha, target)[0] != 0:
+        return _result(name, remote, SKIPPED, f"{remote}/{name} has diverged from {name} (commits on both sides)",
+                       _diverged_fix(name, remote))
     wip = [s for s in mine if WIP_RE.match(core.gitout(top, "log", "-1", "--format=%s", s))]
     if wip:
         return _result(name, remote, SKIPPED, f"WIP commit {wip[-1][:7]} never reaches the remote",
@@ -347,10 +463,11 @@ def _one(c, name, ctx) -> dict:
     ci, skip = _ci_gate(c, name, target, remote_sha, ctx)
     if skip:
         return skip
-    clean, found = scan(top, target)  # last before the push: on exactly the commits it sends
+    clean, found = scan(top, target, has)  # last before the push: on exactly the commits it sends
     if clean is None:
-        return _result(name, remote, SKIPPED, found, ["brew install gitleaks" if "not installed" in found else
-                                                      f"gitleaks git --log-opts='{target[:12]} --not --remotes' ."])
+        return _result(name, remote, SKIPPED, found, [
+            "brew install gitleaks" if "not installed" in found else
+            f"gitleaks git --log-opts='{target[:12]} --not --remotes={remote}' ."])
     if not clean:
         return _result(name, remote, SKIPPED, f"the secret scan found {len(found)} finding(s): {'; '.join(found[:3])}",
                        [f"remove the secret from those commits and rotate it, then dev backup {name}",
@@ -417,7 +534,7 @@ def run(repo, names=None, every: bool = False, auto: bool = False, accept_ci: bo
     ctx = {"auto": auto, "accept_ci": accept_ci and not auto, "dry_run": dry_run, "public_ok": public_ok and not auto,
            "now": now or time.time(), "after": branches.after_minutes(), "held": held,
            "local": set(local), "prs": prs or [], "prs_known": bool(prs_known), "vis": {},
-           "policy": branches.backup_policy(c.pid), "asked": False, "policy_words": ""}
+           "policy": branches.backup_policy(c.pid), "asked": False, "policy_words": "", "adv": {}, "remote_prs": {}}
     last = branches.backups(c.pid) if record and not dry_run else {}
     out = []
     for name in names:
@@ -498,7 +615,8 @@ def cmd_policy(a) -> int:
         print("  " + ui.dim(f'set it: dev backup policy on|off|ask{"" if here else " -p " + pid} --why "…"'))
         return 0
     if len(args) != 1 or args[0] not in branches.POLICIES:
-        return _refuse(f"the backup policy is one of {', '.join(branches.POLICIES)}: dev backup policy on --why \"…\"")
+        return _refuse(f"the backup policy is one of {', '.join(branches.POLICIES)}: "
+                       'dev backup policy on --why "…"')
     if crew_member():
         return _refuse(OWN_ACTION.format(what=f"dev backup policy {args[0]}"))
     why = (getattr(a, "why", None) or "").strip()

@@ -186,8 +186,8 @@ def record_tips(pid: str, tips: dict) -> None:
 
 
 def held_commits(top, branch: str, rec: dict, local, exclude=("--remotes",)) -> set:
-    """The commits an embargo holds: those its branch (when it is here) and its recorded tips reach, and no remote
-    ref (`exclude`) does."""
+    """The commits an embargo holds: those its branch (when it is here) and its recorded tips reach, and none of
+    `exclude` (rev-list arguments after --not: --remotes, or the commits a push target has) does."""
     tips = ([f"refs/heads/{branch}"] if branch in local else []) + [
         t for t in rec.get("commits") or [] if core.git(top, "cat-file", "-e", t + "^{commit}")[0] == 0]
     if not tips:

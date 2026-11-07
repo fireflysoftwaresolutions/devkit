@@ -360,6 +360,7 @@ jobs:
 CI_EVERY_PUSH = CI_PR_AND_MAIN.replace("  pull_request:\n  push:\n    branches: [main]\n", "  push:\n")
 CI_DRAFT_GATED = CI_PR_AND_MAIN.replace("    runs-on:", "    if: github.event.pull_request.draft == false\n    runs-on:")
 HAS_GITLEAKS = core.have("gitleaks")
+REAL_VISIBILITY = backup._visibility  # BackupCase replaces it: no test reads GitHub unless it says so
 
 
 class BackupCase(Sandbox):
@@ -370,7 +371,7 @@ class BackupCase(Sandbox):
         Path(core.HANDOFF).mkdir(parents=True, exist_ok=True)  # this Mac has its handoff repository
         # a private repository, and no developer at a terminal: no test asks a question or reads GitHub
         for patch in (mock.patch.dict(os.environ, {"DEVKIT_NO_AUTOSYNC": "1"}),
-                      mock.patch.object(pipelines, "_visibility", return_value="private"),
+                      mock.patch.object(backup, "_visibility", return_value="private"),
                       mock.patch.object(core, "set_by_developer", return_value=False)):
             patch.start()
             self.addCleanup(patch.stop)
@@ -611,7 +612,7 @@ class BackupCommandTests(BackupCase):
         git(self.repo, "switch", "-q", "-c", "fix/hole", "main")
         tip = self.commit("fix(security): close the path traversal in the upload handler")
         branches.set_backup_policy(PID, "on", "open source", "ana")  # this public repository's branches: backed up
-        with mock.patch.object(pipelines, "_visibility", return_value="public"):
+        with mock.patch.object(backup, "_visibility", return_value="public"):
             rc, out = self.dev("backup")
             self.assertEqual(rc, 1)
             self.assertIn("it may carry a security fix", out)
@@ -630,7 +631,7 @@ class PolicyTests(BackupCase):
     # developer's own actions.
     def setUp(self):
         super().setUp()
-        patch = mock.patch.object(pipelines, "_visibility", return_value="public")
+        patch = mock.patch.object(backup, "_visibility", return_value="public")
         patch.start()
         self.addCleanup(patch.stop)
         self.ci(CI_PR_AND_MAIN)
@@ -737,6 +738,111 @@ class PolicyTests(BackupCase):
         rc, out = self.backup("--public")
         self.assertEqual((rc, self.on_origin("feat/x")), (0, tip), out)
         self.assertEqual(branches.backup_policy(PID)["policy"], "off")  # once: the policy stays
+
+
+DEPLOY_ON_RELEASE = """name: deploy
+on:
+  push:
+    branches: ['release/**']
+jobs:
+  deploy:
+    runs-on: ubuntu-24.04
+    environment: production
+    steps:
+      - run: echo deploy
+"""
+
+
+@unittest.skipUnless(HAS_GITLEAKS, "the secret scan needs gitleaks")
+class PushTargetTests(BackupCase):
+    # Follow-ups of the pipeline security review: a backup never pushes a long-lived or deploying branch, it checks
+    # exactly the commits the push target lacks (a commit on another remote is still sent), and it reads visibility
+    # and pull requests on the remote the push goes to, not on origin.
+    def remote(self, name, url):
+        bare = self.root / f"{name}.git"
+        git(self.root, "init", "-q", "--bare", "-b", "main", str(bare))
+        git(self.repo, "remote", "add", name, url)
+        git(self.repo, "config", f"url.{bare}.insteadOf", url)
+        return bare
+
+    def test_long_lived_and_deploying_branches_are_never_backed_up(self):
+        self.ci(CI_PR_AND_MAIN)
+        for name in ("gh-pages", "develop", "master"):
+            git(self.repo, "branch", name, "main")
+        git(self.repo, "switch", "-q", "-c", "chore/deploy", "main")
+        (self.repo / ".github" / "workflows" / "deploy.yml").write_text(DEPLOY_ON_RELEASE)
+        git(self.repo, "add", "-A")
+        git(self.repo, "commit", "-q", "-m", "ci: deploy release branches")
+        git(self.repo, "switch", "-q", "-c", "release/x")
+        self.commit("feat: the release part")
+        got = {r["branch"]: r for r in backup.run(self.repo, ["gh-pages", "develop", "master", "release/x"],
+                                                  accept_ci=True, public_ok=True)}
+        for name in ("gh-pages", "develop", "master"):
+            self.assertEqual((got[name]["state"], got[name]["reason"]),
+                             ("skipped", f"{name} is a long-lived branch, which a backup never pushes"))
+        self.assertEqual((got["release/x"]["state"], got["release/x"]["reason"]),
+                         ("skipped", "deploy.yml deploys from it (job deploy, environment production): a push to it "
+                                     "may deploy"))
+        self.assertEqual([self.on_origin(n) for n in got], ["", "", "", ""])
+
+    def test_commits_on_another_remote_are_still_scanned_and_checked(self):
+        self.ci(CI_PR_AND_MAIN)
+        self.remote("mirror", "https://github.com/acme/widget-mirror.git")
+        git(self.repo, "switch", "-q", "-c", "feat/key", "main")
+        token = "ghp_" + "".join(secrets.choice(string.ascii_letters + string.digits) for _ in range(36))
+        (self.repo / "settings.py").write_text(f'GITHUB_TOKEN = "{token}"\n')
+        git(self.repo, "add", "-A")
+        git(self.repo, "commit", "-q", "-m", "feat: read the settings")
+        git(self.repo, "push", "-q", "mirror", "feat/key")  # on the mirror, not on origin, where the backup goes
+        res = backup.run(self.repo, ["feat/key"])[0]
+        self.assertEqual(res["state"], "skipped")
+        self.assertIn("the secret scan found 1 finding(s)", res["reason"])
+        self.assertNotIn(token, json.dumps(res))
+        git(self.repo, "switch", "-q", "-c", "feat/wip", "main")
+        self.commit("wip: half of it")
+        git(self.repo, "push", "-q", "mirror", "feat/wip")
+        self.assertIn("WIP commit", backup.run(self.repo, ["feat/wip"])[0]["reason"])
+        self.assertEqual((self.on_origin("feat/key"), self.on_origin("feat/wip")), ("", ""))
+
+    def test_an_embargo_holds_commits_that_only_another_remote_has(self):
+        self.ci(CI_PR_AND_MAIN)
+        self.remote("mirror", "https://github.com/acme/widget-mirror.git")
+        self.branch("fix/hole", 2 * HOUR)
+        self.assertEqual(self.dev("branch", "embargo", "fix/hole", "--why", "an open hole", "--until", "the fix")[0], 0)
+        git(self.repo, "push", "-q", "mirror", "fix/hole")  # a private mirror has it; origin, where backups go, not
+        git(self.repo, "switch", "-q", "-c", "release/x", "fix/hole")
+        self.commit("chore: prepare the release", age=HOUR)
+        res = backup.run(self.repo, ["release/x"])[0]
+        self.assertEqual((res["state"], res["reason"]),
+                         ("skipped", 'its commits are in fix/hole, which is embargoed until "the fix"'))
+        self.assertEqual(self.on_origin("release/x"), "")
+
+    def test_visibility_and_pull_requests_come_from_the_remote_the_push_goes_to(self):
+        self.ci(CI_PR_AND_MAIN)
+        fork = self.remote("fork", "https://github.com/ana/widget.git")
+        self.branch("feat/x", HOUR)
+        git(self.repo, "config", "branch.feat/x.remote", "fork")
+        git(self.repo, "config", "branch.feat/x.merge", "refs/heads/feat/x")
+        asked = []
+
+        def gh(args, cwd=None, timeout=60):
+            asked.append(args)
+            if args[:2] == ["repo", "view"]:
+                return 0, {"acme/widget": "PRIVATE", "ana/widget": "PUBLIC"}.get(args[2], ""), ""
+            if args[:2] == ["pr", "list"] and "ana/widget" in args:
+                return 0, json.dumps([{"headRefName": "feat/x", "number": 3, "isDraft": False, "state": "OPEN"}]), ""
+            return 0, "[]", ""
+        gitx.GH = gh
+        with mock.patch.object(backup, "_visibility", REAL_VISIBILITY):
+            res = backup.run(self.repo, ["feat/x"])[0]
+            self.assertEqual((res["remote"], res["state"]), ("fork", "skipped"))
+            self.assertIn("is ask, the default for a public repository", res["reason"])
+            branches.set_backup_policy(PID, "on", "the fork is public on purpose", "ana")
+            res = backup.run(self.repo, ["feat/x"])[0]
+        self.assertEqual(res["reason"], "a push to this branch starts CI (ci.yml runs on PR #3)")
+        self.assertIn(["repo", "view", "ana/widget", "--json", "visibility", "-q", ".visibility"], asked)
+        rc, out, _ = core.sh(["git", "-C", str(fork), "rev-parse", "--verify", "-q", "refs/heads/feat/x"])
+        self.assertNotEqual(rc, 0)
 
 
 class BackupWithoutScannerTests(BackupCase):

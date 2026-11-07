@@ -717,22 +717,28 @@ The same rows feed the handoff note's generated block (one line per branch, with
 
 Copies the commits that exist only on this Mac to the remote, under the same branch name, when that push starts no
 CI run. Without a branch it takes the current one; `--all` takes every local branch with commits on no remote. The
-push is fast-forward only and never forced, and it happens only when every check holds, in this order:
+push is fast-forward only and never forced, and it happens only when every check holds, in this order. The checks
+look at exactly the commits the push sends: those that the push target lacks (the branch's remote; `git ls-remote`
+lists what it has), also when another remote has them.
 
-1. Not the default branch, and a name that follows the branch naming rule.
+1. Not the default branch, nor a long-lived one (`main`, `master`, `develop`, `trunk`, `gh-pages`), and a name that
+   follows the branch naming rule. Not a branch a GitHub Actions workflow of the commit deploys from (its push
+   `branches:` names it, and a job has an `environment:` or a deploy or publish step), not even with `--accept-ci`
+   or `--public`: a push there is a release step, made with `dev push`.
 2. No embargo on the branch, nor on any of the same commits: those of an embargoed branch, or of its recorded tips
    after it was merged into another branch and deleted (a merged branch defers to the branch that carries its
-   commits). When devkit cannot read the handoff note (it is missing with its repository, unreadable, or its
+   commits), unless the push target has them already. When devkit cannot read the handoff note (it is missing with its repository, unreadable, or its
    metadata does not parse), no branch is backed up: an unreadable note never reads as no embargo.
 3. The remote branch is not ahead or diverged. A diverged branch stops with the commands to resolve it
    (`git fetch`, `git log --left-right`, `git rebase origin/<branch>`, or `dev push --force-with-lease` on your own
    branch).
 4. No WIP commit, and the project's backup policy allows it (below). Then, on a public repository, no commit that
    reads as a security fix (a `security` scope, a CVE, a red-team test): devkit suggests `dev branch embargo` first,
-   and `--public` pushes it anyway.
+   and `--public` pushes it anyway. Public or private is the visibility of the repository the push goes to, not
+   origin's.
 5. The CI configuration of the commit it sends shows that the push starts no CI run. It reads the GitHub Actions
    `push` branches, `branches-ignore`, tags and paths filters, the pull request of the branch (a draft whose jobs
-   skip drafts starts none), and the jobs' `if:`; GitLab rules, Bitbucket `default` and `branches`, Azure `trigger` and `pr`. CI that
+   skip drafts starts none, looked up on the repository the push goes to), and the jobs' `if:`; GitLab rules, Bitbucket `default` and `branches`, Azure `trigger` and `pr`. CI that
    devkit cannot read (Jenkins, CircleCI, Netlify and others) means it cannot tell, and it does not push.
    `--accept-ci` pushes anyway, and that push counts against the push budget.
 6. Last, the secret scan (gitleaks) passes on exactly the commits it sends; without gitleaks nothing is pushed.

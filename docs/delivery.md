@@ -136,8 +136,10 @@ dev pr ready             # the one CI run: marking it ready starts it, with loca
 `dev backup` reads the CI configuration of the commit it would send and pushes only when it shows that the push
 starts no run: in this repository, `ci.yml` runs on pull requests and pushes to `main`, so a branch push is free.
 When the push would start CI, or devkit cannot tell, it does not push and says why and what to do
-(`dev backup --accept-ci`, or a `branches-ignore` entry). It never pushes the default branch, never forces, stops at
-a diverged remote branch with the commands to resolve it, and runs the secret scan on the commits it sends.
+(`dev backup --accept-ci`, or a `branches-ignore` entry). It never pushes the default branch, a long-lived branch
+(`main`, `master`, `develop`, `gh-pages`) or a branch a workflow deploys from, never forces, stops at a diverged
+remote branch with the commands to resolve it, and runs the secret scan on exactly the commits it sends: those the
+remote it pushes to does not have, even when another remote has them.
 `dev sync` does the same every hour and at the end of a session, for commits older than `backup.after_minutes`
 (30 by default; `backup.auto: false` turns it off). The branch map (`dev branch ls`, `dev status`, the handoff note)
 shows each branch's last backup, or why it is not backed up.
