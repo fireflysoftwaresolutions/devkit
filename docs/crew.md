@@ -507,7 +507,7 @@ dashboard and the handoff read, and devkit's audit trail (`dev audit`), publishe
 | `stop.block`, `canary.crew-roles` | a final message sent back, with the rule (`roles` for names without their role), or a member's report that names crew members without their role |
 
 ```bash
-dev audit --action crew        # the crew's coordination
+dev audit --action crew        # how the crew coordinated
 dev audit --action plan        # every step change
 ```
 
@@ -519,7 +519,7 @@ devkit ships the roster and the RACI in `config/crew.json`. A team changes them 
 ```bash
 dev crew set Tank skills "backend; java-springboot" --why "the services are Spring"
 dev crew raci compliance --set "R=persephone A=keymaker C=… I=…" --why "nobody approves their own work"
-dev crew history                 # the team's changes, newest first
+dev crew history                 # the changes the team made, newest first
 ```
 
 To change what devkit ships for everyone, edit `config/crew.json` in the devkit repository: a member's role, summary,

@@ -171,7 +171,7 @@ The run's mode says who takes the decisions that are the developer's (scope, beh
 dev progress start "…" --plan "…" --mode auto          # or: dev crew mode auto --approve "push, pr"
 dev crew ask --decision "Skip empty lines or reject the file?" --options "A: skip | B: reject" --recommend A
 dev crew decisions                                      # pending and decided, with who decided
-dev crew decide D1 "B: reject"                          # the tech lead records the developer's answer
+dev crew decide D1 "B: reject"                          # the tech lead records the answer of the developer
 ```
 
 - **A member at a decision point** runs `dev crew ask --decision` with options and a recommendation, and

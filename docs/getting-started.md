@@ -448,7 +448,7 @@ dev docker up                    # if you use containers or Testcontainers
 dev overview                     # initiatives and projects at a glance
 dev team                         # who is working on what, if you share a handoff repository
 dev delivery                     # in each project: its release policy and gaps (dev delivery apply records one)
-dcd <repo> && claude             # or codex: the session starts with the project's context
+dcd <repo> && claude             # or codex: the session starts with the context of the project
 ```
 
 Ask the agent for a quick task in a repository and check that its final message starts with the status block, a bold

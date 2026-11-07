@@ -467,8 +467,8 @@ Crew members run impeccable this way, never by the launcher's path, which the gu
 
 ```bash
 dev impeccable context                  # load PRODUCT.md, DESIGN.md, and the surface brief; print what to follow
-dev impeccable detect --json src        # scan the project's HTML and CSS
-dev impeccable doctor                   # the engine's own checks
+dev impeccable detect --json src        # scan the HTML and CSS in src
+dev impeccable doctor                   # check the engine itself
 ```
 
 ### `dev handoff [<query>] [--edit | --path | --log "…" [--agent AGENT]]`
@@ -1400,7 +1400,7 @@ a PR, which the Security engineer reviews.
 
 ```bash
 dev branch new chore/bump-impeccable
-dev ext update impeccable --why "the audit command fixes"            # to the default branch's commit
+dev ext update impeccable --why "the audit command fixes"            # to the newest commit of the default branch
 dev ext update chrome-devtools --to 1.13.2 --why "the network panel fix"
 ```
 

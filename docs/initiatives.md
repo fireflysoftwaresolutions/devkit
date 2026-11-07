@@ -69,7 +69,7 @@ source: []              # set by dev handoff-import
 ```bash
 dev initiative                                # every initiative: status, priority, progress, milestone, due, members, open tasks
 dev initiative show payments                  # progress and its source, goal, members with status and progress, Now tasks
-dev task -i payments                          # the initiative's work items
+dev task -i payments                          # the work items of the initiative
 dev task add "Agree on the refund event schema" --type feature --now -i payments
 dev task link 3 --to payments --why "…"      # a project task that counts toward the initiative
 dev plan new "Refund events" --kind spec -i payments

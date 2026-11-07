@@ -54,7 +54,7 @@ event (see [Teams and machines › Near-real-time sync](teams.md#near-real-time-
 dev jobs                  # every job: state, schedule, last run, next run
 dev jobs show sync        # one job with its command, timeout, log, and recent runs
 dev jobs run sleep        # run a job now, in the foreground, with the same log, journal, and audit record
-dev jobs logs gc -n 100   # the end of a job's log
+dev jobs logs gc -n 100   # the end of the log of one job
 dev jobs journal --days 7 # past runs of every job: start, result, duration, last line
 ```
 

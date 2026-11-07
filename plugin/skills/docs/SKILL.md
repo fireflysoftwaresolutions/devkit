@@ -55,7 +55,7 @@ follow the project's scheme, otherwise CalVer `YY.MM.PATCH` (`dev calver`). Rele
 
 ```bash
 dev docs check            # markdownlint (structure), lychee (links + anchors), Vale (prose), SVG diagrams
-dev docs check --fix      # apply markdownlint's safe fixes first
+dev docs check --fix      # apply the safe markdownlint fixes first
 dev docs check --online   # also verify external links (before a release)
 ```
 

@@ -29,7 +29,7 @@ with `dev doctor`: every failed check prints the command that fixes it.
 
 ```bash
 dev jobs                                                  # every scheduled job: loaded, last run, next run
-dev jobs show sync                                        # one job's recent runs
+dev jobs show sync                                        # the recent runs of one job
 launchctl print gui/$UID/com.devkit.job.sync | head -30  # what launchd knows about it
 tail -50 ~/.local/state/devkit/logs/sync.log
 dev sync                                                  # run a sync in the foreground
@@ -138,7 +138,7 @@ contains devkit's hooks (`dev doctor`, Claude section), that Codex trusts them (
 the hook's definition.
 
 ```bash
-dev install --only codex      # trusts devkit's hooks again through Codex's API
+dev install --only codex      # trusts the devkit hooks again through the Codex API
 ```
 
 Or review them in Codex with `/hooks` (CLI) or Settings → Hooks (app). Restart open Codex sessions.
