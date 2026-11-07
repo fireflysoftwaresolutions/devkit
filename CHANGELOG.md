@@ -3,9 +3,14 @@
 All notable changes to devkit. Versions follow CalVer `YY.MM.PATCH` (PATCH restarts at 0 each month); tags are
 `vYY.MM.PATCH`. Sections follow [Keep a Changelog](https://keepachangelog.com/).
 
-## [26.11.4] - Unreleased
+## [26.11.4] - 2026-11-07
 
-Not released yet: the date is set when the release is tagged.
+This release adds `dev ext` to see, update, and add the third-party plugins, skills, and MCP servers devkit installs,
+and `dev update --check` to see whether a newer devkit is out. It brings Tab completion for zsh and bash, opens the
+dashboard on a new Now screen that answers whether anything needs you, and runs the impeccable design engine through
+`dev impeccable` for frontend work. Your answers to irreversible decisions count only when given in devkit's own
+question, and your latest answer is the one that counts. The guard refuses what agents type into terminal sessions
+and any command it cannot read.
 
 ### Added
 
