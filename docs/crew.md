@@ -438,6 +438,8 @@ audited as `crew.evidence-refused` with the reason:
 - Each option is its label alone: no description, no preview, no other field.
 - You click one of those labels; a letter, a word, or text of your own counts for nothing. You can still type
   `approve D<n>: <option>` in your prompt.
+- You add no note to your answer. A note can qualify the click (“only after Monday”), so a release answer with a
+  note does not count: answer again without one.
 
 `dev audit verify` applies the same rule to the call in the transcript, so evidence recorded before it is reported
 when its call breaks it.

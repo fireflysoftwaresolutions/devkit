@@ -1927,7 +1927,19 @@ _QUESTION_FIELDS = {"question", "header", "options", "multiSelect"}  # all a que
 _OPTION_FIELDS = {"label", "description"}  # all an option of it holds, the description empty
 
 
-def _not_devkits_words(run, d: dict, q: dict, label, asked: str, call) -> str:
+def _blank(value) -> bool:
+    """No text in `value`: None, a blank string, or a list or dict of blanks. Anything else (a number, a flag) is
+    not blank, so an unknown shape fails closed."""
+    if value is None:
+        return True
+    if isinstance(value, str):
+        return not value.strip()
+    if isinstance(value, (list, dict)):
+        return all(_blank(v) for v in (value.values() if isinstance(value, dict) else value))
+    return False
+
+
+def _not_devkits_words(run, d: dict, q: dict, label, asked: str, call, notes=None) -> str:
     """Why a question tool answer is no evidence for an irreversible decision, '' when it is: only devkit's exact
     call counts (the Security engineer's question audit decision, rule 1, and the Code reviewer's findings 1 to 3 on
     it), an allowlist of its form, since everything the tool shows the developer can redefine the options. The call
@@ -1935,8 +1947,10 @@ def _not_devkits_words(run, d: dict, q: dict, label, asked: str, call) -> str:
     and holds only question, header (empty or the decision's id), options and multiSelect false; each option holds
     only its label and an empty description, so no description or preview says "hold" beside the label that
     releases; the labels are exactly devkit's (ask_labels: every option once, "(Recommended)" only on the
-    recommended one); and the clicked label is one of them word for word: no letter and no word matching, so "A",
-    "Yes" or "A: Yes, hold it" count for nothing. Reasons name no text of the call."""
+    recommended one); the answer carries no note of the developer's (`notes`, the result's annotations: the call
+    asks one question, so any text there qualifies this click, "only after Monday"); and the clicked label is one of
+    them word for word: no letter and no word matching, so "A", "Yes" or "A: Yes, hold it" count for nothing.
+    Reasons name no text of the call."""
     if not isinstance(call, list) or call != [q]:
         return "the call asks other questions beside it"
     if asked != "exact":
@@ -1953,6 +1967,8 @@ def _not_devkits_words(run, d: dict, q: dict, label, asked: str, call) -> str:
         return "an option carries a field other than its label"
     if any(not isinstance(o.get("description", ""), str) or o.get("description", "").strip() for o in opts):
         return "an option carries a description"
+    if not _blank(notes):
+        return "the developer added a note to the answer"
     offered = [_plain(o.get("label")) for o in opts]
     if sorted(_plain(_RECOMMENDED.sub("", x)) for x in offered) != \
             sorted(_plain(_RECOMMENDED.sub("", x)) for x in ask_labels(d)):
@@ -2297,7 +2313,7 @@ def on_question(agent: str, data: dict, now: float | None = None) -> list:
         elif not _names_target(d, qt):
             why = f"the question does not name {d['target']}"
         elif d.get("irreversible"):
-            why = _not_devkits_words(run, d, q, label, asked, call)
+            why = _not_devkits_words(run, d, q, label, asked, call, resp.get("annotations"))
         if why:
             refused.setdefault((did, why), True)
             continue
@@ -2685,7 +2701,7 @@ def _rederive(rec: dict, tp, agent: str, sid: str):
     offered = [o.get("label") for o in q.get("options") or [] if isinstance(o, dict)]
     asked = asked_how(run, d, q.get("question")) if d.get("question") else None
     if d.get("irreversible"):
-        why = _not_devkits_words(run, d, q, label, asked or "exact", res.get("questions"))
+        why = _not_devkits_words(run, d, q, label, asked or "exact", res.get("questions"), res.get("annotations"))
         if why:
             return f"{head}: the transcript's answer is no evidence for an irreversible decision ({why})"
         opt, match = _devkit_option(d, label), "exact"

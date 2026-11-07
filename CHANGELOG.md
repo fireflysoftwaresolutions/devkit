@@ -42,7 +42,8 @@ Not released yet: the date is set when the release is tagged.
   question. A decision that leads to an irreversible action counts only in devkit's exact call: one question, its
   own header, labels only. The call asks that one question and nothing else (`dev crew decisions --ask` gives each
   such decision a call of its own), the question and the labels are exactly as it prints them, the header is `D<n>`
-  or empty, no option carries a description, a preview, or another field, and you click one of those labels. The
+  or empty, no option carries a description, a preview, or another field, and you click one of those labels
+  without adding a note (a note can qualify the click, so answer again without one). The
   option that performs the action says what it runs (`A: yes (release v26.11.4)`). Anything else opens nothing and
   is audited as `crew.evidence-refused`, and `dev audit verify` reports earlier evidence whose call breaks the rule.
   See [The crew › How the tech lead asks you](docs/crew.md#how-the-tech-lead-asks-you).

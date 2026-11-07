@@ -140,8 +140,9 @@ has one (AskUserQuestion in Claude Code), and ask nicely:
   labels are word for word (the option that performs the action reads like `A: yes (release v26.11.4)`), with no
   description, preview, or other field beside them. A reworded question or label, a missing or added option,
   "(Recommended)" on another option, another header, an added field, or another question in the call makes the
-  answer count for nothing, because any of them can make a yes do what the developer meant as a no. Its question
-  names what it acts on (the tag, the branch, the PR): `dev crew ask` refuses one that does not.
+  answer count for nothing, because any of them can make a yes do what the developer meant as a no. A note the
+  developer adds to the answer voids it too: ask again and let them answer without one. Its question names what it
+  acts on (the tag, the branch, the PR): `dev crew ask` refuses one that does not.
 
 When there is no question tool (Codex, for now), use this template, and for a devkit decision tell the developer
 to type `approve D<n>: <letter>`:

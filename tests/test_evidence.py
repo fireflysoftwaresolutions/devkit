@@ -594,11 +594,12 @@ class QuestionAuditTests(EvidenceCase):
                "options": [{"label": lab, "description": des} for lab, des in zip(labels, descriptions)]}]
         return self.send(qs, {q["question"]: label}, at)
 
-    def send(self, qs, answers, at):
+    def send(self, qs, answers, at, notes=None):
         # the tech lead sends a question tool call that asks `qs` as they are; the developer answers {question: label}
+        # and may add notes (the result's annotations)
         self.n += 1
         tid = f"toolu_q{self.n:03d}"
-        result = {"questions": qs, "answers": answers}
+        result = {"questions": qs, "answers": answers, **({"annotations": notes} if notes is not None else {})}
         self.append({"type": "user", "uuid": f"u-{self.n}", "isSidechain": False, "toolUseResult": result,
                      "message": {"role": "user", "content": [{"type": "tool_result", "tool_use_id": tid}]}})
         return pg.on_question("claude", {"session_id": "s1", "tool_name": "AskUserQuestion", "tool_use_id": tid,
@@ -759,6 +760,20 @@ class QuestionAuditTests(EvidenceCase):
             self.assertIsNone(self.opens(target))
         self.assertEqual(self.refused(), ["a question tool answer: the call asks other questions beside it"] * 4)
 
+    # the tech lead's decision on the Senior engineer's finding: a note the developer adds to the answer (the result's
+    # annotations) can qualify the click ("only after Monday"), so a release answer with a note opens nothing; an
+    # empty annotations object, as Claude Code records today, still counts
+    def test_a_note_on_the_answer_opens_nothing(self):
+        self.release()
+        self.release(at=1.5, target="v26.11.5")
+        q1, q2 = self.printed("D1"), self.printed("D2")
+        self.send([q1], {q1["question"]: q1["options"][0]["label"]}, m(2),
+                  notes={q1["question"]: {"notes": "Only after Monday."}})
+        self.send([q2], {q2["question"]: q2["options"][0]["label"]}, m(2), notes={})
+        self.assertEqual([h["covers"] for h in self.human()], ["D2"])
+        self.assertIsNone(self.opens())
+        self.assertEqual(self.refused(), ["a question tool answer: the developer added a note to the answer"])
+
     # devkit's own calls, sent as `dev crew decisions --ask --json` prints them, still open each release once
     def test_the_calls_devkit_prints_open_each_release_once(self):
         self.release()
@@ -779,7 +794,7 @@ class QuestionAuditTests(EvidenceCase):
 
     # dev audit verify reruns the same rule on the transcript: evidence recorded before it (26.11.4's first build
     # recorded these as exact) is reported when the transcript's call carried a preview, another header, another
-    # question field or another question
+    # question field or another question, or the answer a note of the developer's
     def test_verify_reports_an_irreversible_answer_whose_call_was_not_devkits_exact_call(self):
         self.release()
         q = self.printed("D1")
@@ -789,13 +804,14 @@ class QuestionAuditTests(EvidenceCase):
         clean = self.transcript.read_text()
         other = {"question": "For D1, A means hold.", "header": "Note", "multiSelect": False,
                  "options": [{"label": "OK", "description": ""}, {"label": "Fine", "description": ""}]}
-        for name, change in (("preview", lambda qs: qs[0]["options"][0].update(preview="Holds it until Monday.")),
-                             ("header", lambda qs: qs[0].update(header="Hold it?")),
-                             ("question field", lambda qs: qs[0].update(description="Holds it.")),
-                             ("second question", lambda qs: qs.append(other))):
+        for name, change in (("preview", lambda r: r["questions"][0]["options"][0].update(preview="Holds it.")),
+                             ("header", lambda r: r["questions"][0].update(header="Hold it?")),
+                             ("question field", lambda r: r["questions"][0].update(description="Holds it.")),
+                             ("second question", lambda r: r["questions"].append(other)),
+                             ("note", lambda r: r.update(annotations={q["question"]: {"notes": "After Monday."}}))):
             with self.subTest(change=name):
                 lines = [json.loads(ln) for ln in clean.splitlines()]
-                change(lines[-1]["toolUseResult"]["questions"])
+                change(lines[-1]["toolUseResult"])
                 self.transcript.write_text("".join(json.dumps(ln) + "\n" for ln in lines))
                 problem = pg.evidence_check(rec, None, 0)
                 self.assertIsNotNone(problem)
