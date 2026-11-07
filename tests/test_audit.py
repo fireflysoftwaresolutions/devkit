@@ -712,7 +712,7 @@ class CommandTextTests(AuditCase):
             ("crew", ["set", "tank", "mission", "SECRET mission", "--why", "x"],
              f"set tank mission {self.t(14)} --why {self.t(1)}"),
             ("crew", ["ask", "--to", "The Keymaker", "SECRET"], f"ask --to {self.m(12)} {self.m(6)}"),
-            ("note", ["set", "milestone=SECRET launch", "status=blocked"], f"set milestone={self.t(13)} status={self.t(7)}"),
+            ("note", ["set", "milestone=SECRET launch", "status=blocked"], f"set milestone={self.t(13)} status=blocked"),
             ("progress", ["step", "done", "--check", "SECRET", "-p", "x"], f"step {self.t(4)} --check {self.t(6)} -p x"),
         ]
         for cmd, argv, kept in cases:
@@ -737,10 +737,20 @@ class CommandTextTests(AuditCase):
                  ("task", "add -e SECRET plan"): f"add -e {self.t(11)}",
                  ("task", "done SECRET Acme export --why x"): f"done {self.t(18)} --why {self.t(1)}",
                  ("crew", "ask --to Persephone [message text not recorded: 44 characters]"):
-                     "ask --to Persephone [message text not recorded: 44 characters]"}  # a marker: read as stored
+                     "ask --to Persephone [message text not recorded: 44 characters]",  # a marker: read as stored
+                 # L2 of the third review: there only the option names dev's parser knows stay, and numbers of up to
+                 # six digits (a phone number is no task number)
+                 ("task", "done 3 --why called Ana at 6505551234 about --acme-merger --json"):
+                     f"done 3 --why {self.t(44)} --json",
+                 ("task", "done 1234567"): f"done {self.t(7)}"}
         for (cmd, joined), kept in cases.items():
             with self.subTest(joined=joined[:16]):
                 self.assertEqual(audit.mask_command(joined, "argv", ("dev", cmd), 300), kept)
+        # free text starts after the last subcommand: an option before it keeps its name, so the subcommand reads the
+        # same when the record is read again
+        once = audit.mask_command("-u note set milestone=x --why a --acme-merger", "argv", ("dev",), 300)
+        self.assertEqual(once, f"-u note {self.t(15)} --why {self.t(15)}")
+        self.assertEqual(audit.mask_command(once, "argv", ("dev",), 300), once)
 
     def test_a_selector_stays_only_when_it_is_an_id_or_a_number(self):
         # M2: dev task done "Acme export" selects a task by a part of its title
@@ -749,11 +759,46 @@ class CommandTextTests(AuditCase):
                  ("lesson", ["recur", "L-fz3qnrebvm5", "--evidence", "SECRET"], f"recur L-fz3qnrebvm5 --evidence {self.t(6)}"),
                  ("crew", ["answer", "M12", "yes"], f"answer M12 {self.m(3)}"),
                  ("crew", ["decline", "SECRET step", "--why", "x"], f"decline {self.t(11)} --why {self.t(1)}"),
-                 ("progress", ["assign", "2", "--to", "Tank", "--scope", "lib/**"], "assign 2 --to Tank --scope lib/**")]
+                 ("progress", ["assign", "2", "--to", "Tank", "--scope", "lib/**"], "assign 2 --to Tank --scope lib/**"),
+                 ("task", ["done", "6505551234"], f"done {self.t(10)}")]  # L2: a number of more than six digits
         for cmd, argv, kept in cases:
             with self.subTest(argv=argv[:2]):
                 audit.record("dev." + cmd, argv, "", "ok")
                 self.assertEqual(audit.query(action="dev." + cmd)[-1]["target"], kept)
+        self.assertEqual(self.denied("dev task done 3 --why called 6505551234", tool="Bash"),
+                         f"dev task done 3 --why {self.t(6)} {self.t(10)}")
+        self.assertNotIn("SECRET", self.stored())
+        self.assertNotIn("6505551234", self.stored())
+
+    def test_crew_raci_keeps_a_kind_of_work_or_a_crew_id_and_masks_anything_else(self):
+        # L1 of the third review: dev crew raci also classifies a task given in words. Its argument stays only as a
+        # kind of work or a crew id of devkit's roster, and its --set value only as R/A/C/I pairs of crew ids
+        t = self.t
+        cases = [(["raci", "backend"], "raci backend"), (["raci", "tank"], "raci tank"), (["raci", "Scout"], "raci Scout"),
+                 (["raci", "SECRET-merger"], f"raci {t(13)}"),
+                 (["raci", "classify the Acme SECRET merger work"], f"raci {t(36)}"),
+                 (["raci", "review", "--set", "R=seraph,neo A=morpheus", "--why", "x"],
+                  f"raci review --set R=seraph,neo A=morpheus --why {t(1)}"),
+                 (["raci", "review", "--set", "R=seraph A=SECRET", "--why", "x"], f"raci review --set {t(17)} --why {t(1)}")]
+        for argv, kept in cases:
+            with self.subTest(argv=argv[1]):
+                audit.record("dev.crew", argv, "", "ok")
+                self.assertEqual(audit.query(action="dev.crew")[-1]["target"], kept)
+        self.assertEqual(self.denied('dev crew raci "classify the Acme SECRET merger work"', tool="Bash"),
+                         f"dev crew raci {t(36)}")
+        self.assertEqual(self.denied("dev crew raci review --set 'R=seraph A=SECRET'", tool="Bash"),
+                         f"dev crew raci review --set {t(17)}")
+        self.assertNotIn("SECRET", self.stored())
+        self.unmarked()
+
+    def test_dev_note_set_keeps_a_value_only_from_a_keys_fixed_set(self):
+        # L3 of the third review: status and priority take a value from a fixed set; a milestone, a due date or tags
+        # are the developer's words
+        t = self.t
+        audit.record("dev.note", ["set", "status=blocked", "priority=high", "milestone=3", "due=2026-12-01",
+                                  "status=SECRET", "tags=acme"], "", "ok")
+        self.assertEqual(audit.query(action="dev.note")[-1]["target"],
+                         f"set status=blocked priority=high milestone={t(1)} due={t(10)} status={t(6)} tags={t(4)}")
         self.assertNotIn("SECRET", self.stored())
 
     def test_a_shell_command_keeps_its_options_and_ids_but_not_its_free_text(self):
@@ -764,7 +809,7 @@ class CommandTextTests(AuditCase):
             'dev progress step "Acme parser done" --check="12 tests pass" --next "review"':
                 f"dev progress step {self.t(16)} --check={self.t(13)} --next {self.t(6)}",
             'cd ~/x && dev handoff --log "shipped; next: Acme rooms" > /dev/null 2>&1':
-                f"{self.t(2)} {self.t(3)} && dev handoff --log {self.t(25)} > /dev/null 2>&1",
+                f"cd {self.t(3)} && dev handoff --log {self.t(25)} > /dev/null 2>&1",
             "git commit -am \"fix: keep Acme's totals\" && git push": f"git commit -am {self.t(23)} && git push",
             "gh pr create --title \"Acme export\" --body \"Ana's notes\" --base main":
                 f"gh pr create --title {self.t(11)} --body {self.t(11)} --base main",
@@ -784,16 +829,20 @@ class CommandTextTests(AuditCase):
 
     def test_a_shell_line_finds_its_program_behind_reserved_words_wrappers_and_nested_shells(self):
         # H2: the Code reviewer's forms; the program is found and its free text masked, and the words around it that
-        # are not known to be safe become their length
+        # are not known to be safe become their length. The program is the word at command position (H1 of the third
+        # review): a wrapper's options and their values come before it
         t, m = self.t, self.m
         cases = {
             '{ dev crew ask "SECRET plan"; }': f"{{ dev crew ask {m(11)}; }}",
-            'if true; then dev crew ask "SECRET plan"; fi': f"if {t(4)}; then dev crew ask {m(11)}; fi",
+            'if true; then dev crew ask "SECRET plan"; fi': f"if true; then dev crew ask {m(11)}; fi",
             'for x in a; do dev task add "SECRET plan"; done':
-                f"{t(3)} {t(1)} {t(2)} {t(1)}; do dev task add {t(11)}; done",
+                f"for {t(1)} {t(2)} {t(1)}; do dev task add {t(11)}; done",
             '! dev crew ask "SECRET plan"': f"! dev crew ask {m(11)}",
             'timeout 60 dev crew ask "SECRET plan"': f"timeout 60 dev crew ask {m(11)}",
-            'echo 1 | xargs dev crew ask "SECRET plan"': f"{t(4)} {t(1)} | xargs dev crew ask {m(11)}",
+            'timeout -s KILL 5 dev crew ask "SECRET"': f"timeout -s {t(4)} 5 dev crew ask {m(6)}",
+            'env -i -u HOME PATH=/x dev crew ask "SECRET"': f"env -i -u {t(4)} PATH={t(2)} dev crew ask {m(6)}",
+            'uv run --with rich dev crew ask "SECRET"': f"uv run --with {t(4)} dev crew ask {m(6)}",
+            'echo 1 | xargs -n 1 dev crew ask "SECRET plan"': f"echo {t(1)} | xargs -n 1 dev crew ask {m(11)}",
             'bash -c \'dev crew ask "SECRET plan"\'': f"bash -c 'dev crew ask {m(11)}'",
             "eval 'dev crew ask SECRET'": f"eval 'dev crew ask {m(6)}'",
             'zsh -lc "git commit -m \\"SECRET fix\\" && git push"': f'zsh -lc "git commit -m {t(10)} && git push"',
@@ -812,21 +861,53 @@ class CommandTextTests(AuditCase):
         self.assertNotIn("SECRET", self.stored())
         self.unmarked()
 
-    def test_a_line_without_a_known_program_keeps_only_its_operators_and_each_words_length(self):
+    def test_a_line_without_a_known_program_keeps_its_operators_its_programs_name_and_each_words_length(self):
+        # M2 of the third review: the program's name stays, its arguments become their length; a program run by its
+        # path keeps only its base name, and a word that names no program (a variable, a quoted text) is masked
         t = self.t
         cases = {
-            "ls -la /tmp # SECRET notes": f"{t(2)} {t(3)} {t(4)} # {t(12)}",
+            "ls -la /tmp # SECRET notes": f"ls {t(3)} {t(4)} # {t(12)}",
             "rm -rf src && python3 -m unittest tests.test_audit > out.log 2>&1":
-                f"{t(2)} {t(3)} {t(3)} && {t(7)} {t(2)} {t(8)} {t(16)} > {t(7)} 2>&1",
-            "cat > notes.md <<'EOF'\nAna's salary review\nEOF": f"{t(3)} > {t(8)} <<'EOF'\n{t(19)}\nEOF",
-            "cat <<\\EOF\nSECRET line\nEOF": f"{t(3)} <<\\EOF\n{t(11)}\nEOF",  # L3: a heredoc whose delimiter is escaped
-            "echo SECRET | tee -a notes.md >/dev/null": f"{t(4)} {t(6)} | {t(3)} {t(2)} {t(8)} >/dev/null",
+                f"rm {t(3)} {t(3)} && python3 {t(2)} {t(8)} {t(16)} > {t(7)} 2>&1",
+            "cat > notes.md <<'EOF'\nAna's salary review\nEOF": f"cat > {t(8)} <<'EOF'\n{t(19)}\nEOF",
+            "cat <<\\EOF\nSECRET line\nEOF": f"cat <<\\EOF\n{t(11)}\nEOF",  # L3: a heredoc whose delimiter is escaped
+            "echo SECRET | tee -a notes.md >/dev/null": f"echo {t(6)} | tee {t(2)} {t(8)} >/dev/null",
+            "sleep 900": f"sleep {t(3)}",
+            "/opt/homebrew/bin/python3 ~/acme/run.py": f"{t(17)}/python3 {t(13)}",
+            "./gradlew build": f"{t(1)}/gradlew {t(5)}",
+            '"$RUN" SECRET': f"{t(4)} {t(6)}",
+            "'Ana notes' x": f"{t(9)} {t(1)}",
         }
         for cmd, kept in cases.items():
             with self.subTest(cmd=cmd[:24]):
                 self.assertEqual(self.denied(cmd, tool="Bash"), kept)
-        for words in ("SECRET", "Ana", "unittest", "notes.md"):
+        for words in ("SECRET", "Ana", "unittest", "notes.md", "homebrew", "acme"):
             self.assertNotIn(words, self.stored())
+        self.unmarked()
+
+    def test_dev_is_a_program_only_at_command_position(self):
+        # H1 of the third review: `dev` as another program's argument (a context, a container, a script, a host, an
+        # echoed word, a file) is no program, so the words after it are masked like that program's other arguments
+        t = self.t
+        cases = {
+            "kubectl --context dev -n globex-payroll get pods": f"kubectl {t(9)} {t(3)} {t(2)} {t(14)} {t(3)} {t(4)}",
+            "docker run --name dev -e CLIENT=globex-payroll nginx":
+                f"docker {t(3)} {t(6)} {t(3)} {t(2)} {t(21)} {t(5)}",
+            "cd ~/w && pnpm dev --open --to globex-payroll": f"cd {t(3)} && pnpm {t(3)} {t(6)} {t(4)} {t(14)}",
+            "ssh dev -t tmux attach -t globex-payroll": f"ssh {t(3)} {t(2)} {t(4)} {t(6)} {t(2)} {t(14)}",
+            "echo dev crew show globex-payroll": f"echo {t(3)} {t(4)} {t(4)} {t(14)}",
+            "cat notes/dev": f"cat {t(9)}",
+            "sudo -u dev kubectl get ns globex-payroll": f"sudo -u {t(3)} kubectl {t(3)} {t(2)} {t(14)}",
+            "grep -rn git log globex-payroll": f"grep {t(3)} {t(3)} {t(3)} {t(14)}",
+            "npm run gh -- --repo globex-payroll": f"npm {t(3)} {t(2)} {t(2)} {t(6)} {t(14)}",
+        }
+        for cmd, kept in cases.items():
+            with self.subTest(cmd=cmd[:24]):
+                self.assertEqual(self.denied(cmd, tool="Bash"), kept)
+        audit.record("guard.irreversible", "?", "kubectl --context dev delete ns globex-payroll", "deny", tier=2)
+        self.assertEqual(audit.query(action="guard.irreversible")[-1]["detail"],
+                         f"kubectl {t(9)} {t(3)} {t(6)} {t(2)} {t(14)}")
+        self.assertNotIn("globex", self.stored())
         self.unmarked()
 
     def test_an_assignment_keeps_its_name_and_only_a_short_devkit_setting_keeps_its_value(self):
@@ -857,13 +938,37 @@ class CommandTextTests(AuditCase):
         audit.record("guard.irreversible", "?", "cat <<'EOF' | gh pr merge 12 --body-file -\nSECRET notes\nEOF", "deny",
                      irreversible="unparsed", tier=2)
         self.assertEqual(audit.query(action="guard.irreversible")[-1]["detail"],
-                         f"{self.t(3)} <<'EOF' | gh pr merge 12 --body-file -\n{self.t(12)}\nEOF")
+                         f"cat <<'EOF' | gh pr merge 12 --body-file -\n{self.t(12)}\nEOF")
         # a record that does not say what it holds is masked as words; only the gate's own errors are kept as they are
         audit.record("guard.irreversible", "#12", "gh pr merge 12 --body SECRET notes", "deny")
         audit.record("guard.irreversible", "", "RuntimeError: state busy", "deny", rule="gate-error")
         self.assertEqual([r["detail"] for r in audit.query(action="guard.irreversible")[-2:]],
                          [f"gh pr merge 12 --body {self.t(12)}", "RuntimeError: state busy"])
         for text in ("SECRET", "Acme"):
+            self.assertNotIn(text, self.stored())
+        self.unmarked()
+
+    def test_a_guard_detail_keeps_devkits_own_wording(self):
+        # M1 of the third review: a refusal also quotes devkit's own words. A quoted span is read as a shell line, so
+        # its operators stay, and `…` stays; a one-word span that names a command or a project stays. A quoted
+        # command holds the words joined by spaces, so once one is free text only known option names stay after it.
+        # The rule reads only the detail, so the stored detail reads back as it was stored
+        t, m = self.t, self.m
+        kept = ["Run `dev progress …` and `dev crew …` as a command of its own (no `&&`, `;`, pipes, `$(…)`, "
+                "`<(…)`, `bash -c`, `env` or `timeout` around it); quote it: `dev crew ask \"…\"`.",
+                "read-only lane: `cat` is not on the read-only allowlist.",
+                "This session works on `signature-organization/devkit`; it must not change "
+                "`fireflysoftwaresolutions/devkit`'s handoff note."]
+        masked = {"`cd ~/x && dev crew ask \"SECRET plan\"` is refused": f"`cd {t(3)} && dev crew ask {m(11)}` is refused",
+                  "`gh pr merge 12 --squash --body SECRET notes --head acme-x --acme-merger` merges PR #12":
+                      f"`gh pr merge 12 --squash --body {t(12)} --head {t(20)}` merges PR #12",
+                  "`Ana Smith` is no crew member; `SECRET-plan` is unknown":
+                      f"`{t(3)} {t(5)}` is no crew member; `{t(11)}` is unknown"}
+        for detail in kept + list(masked):
+            audit.record("guard.deny", "Bash", detail, "deny", tool="Bash")
+        details = [r["detail"] for r in audit.query(action="guard.deny")]
+        self.assertEqual(details, kept + list(masked.values()))
+        for text in ("SECRET", "Ana", "acme"):
             self.assertNotIn(text, self.stored())
         self.unmarked()
 
@@ -941,7 +1046,7 @@ class CommandTextTests(AuditCase):
         self.assertEqual([r.get("cleaned") for r in sealed], [True] * 4)
         self.assertEqual([(r["target"], r["detail"]) for r in sealed],
                          [("DEVKIT_X=1 dev crew ask [message text not recorded: 22 characters]", "refused"),
-                          (f"{self.t(2)} {self.t(3)} {self.t(3)}", "refused"),
+                          (f"rm {self.t(3)} {self.t(3)}", "refused"),
                           ("main", "dev crew ask [message text not recorded: 22 characters] (no result within 120 s)"),
                           (f"add {self.t(22)} --why {self.t(9)}", "")])
         self.assertEqual([(r["target"], r["detail"]) for r in new], [(r["target"], r["detail"]) for r in sealed])
@@ -955,10 +1060,11 @@ class CommandTextTests(AuditCase):
         # with its nargs and a class (text, name, select or pair); every option that takes a value is free text or
         # names something; and a NAME option a command reads as a flag is listed for that command. A new command,
         # positional or valued option fails here until it is classified. Whether a class is right is not checked
-        # here: the masking tests above check the classes that hold text
+        # here: the masking tests above check the classes that hold text. FLAG_OPTIONS lists the options that take
+        # no value, the rest of the names dev's parser knows (L2 of the third review)
         import argparse
         from devkit import cli
-        valued, commands, flags = set(), {}, {}
+        valued, bare, commands, flags = set(), set(), {}, {}
 
         def walk(p, path):
             here = []
@@ -968,9 +1074,10 @@ class CommandTextTests(AuditCase):
                         walk(sub, path + [name])
                 elif not act.option_strings:
                     here.append((act.dest, {None: "", argparse.REMAINDER: "..."}.get(act.nargs, act.nargs)))
-                elif not isinstance(act, argparse._HelpAction):
-                    if act.nargs != 0:
-                        valued.update(act.option_strings)
+                elif isinstance(act, argparse._HelpAction):
+                    bare.update(act.option_strings)
+                else:
+                    (valued if act.nargs != 0 else bare).update(act.option_strings)
                     if act.nargs in (0, "?", "*"):
                         flags.setdefault(" ".join(path), set()).update(o for o in act.option_strings
                                                                        if o in audit.NAME_OPTIONS)
@@ -978,6 +1085,7 @@ class CommandTextTests(AuditCase):
         walk(cli.build_parser(), [])
         self.assertEqual(sorted(valued - audit.TEXT_OPTIONS - audit.NAME_OPTIONS), [])
         self.assertEqual(sorted(audit.TEXT_OPTIONS & audit.NAME_OPTIONS), [])
+        self.assertEqual(sorted(audit.FLAG_OPTIONS), sorted(bare - audit.TEXT_OPTIONS - audit.NAME_OPTIONS))
         self.assertEqual(sorted(set(commands) ^ set(audit.COMMAND_ARGS)), [])
         for path, positionals in commands.items():
             with self.subTest(command=path):

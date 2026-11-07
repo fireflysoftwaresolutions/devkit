@@ -303,9 +303,8 @@ class CommandTextRecordTests(WiringCase):
         why = self.deny(self.hook("guard", self.bash(f'cd /tmp && dev crew ask "{self.MESSAGE}"', aid="a_tank")))
         self.assertTrue(why, "the lane's compound call is refused")
         recs = self.records("guard.deny")
-        # cd is no program the masker knows: its words keep only their length (26.11.5, the allowlist fails closed)
-        self.assertEqual([r["target"] for r in recs],
-                         [f"[text not recorded: 2 characters] [text not recorded: 4 characters] && {self.MASKED}"])
+        # cd is no program the masker knows: its name stays and its argument keeps only its length (26.11.5)
+        self.assertEqual([r["target"] for r in recs], [f"cd [text not recorded: 4 characters] && {self.MASKED}"])
         self.assertNotIn("secret plan", self.stored())
 
     def test_a_refused_irreversible_command_reads_whole_but_is_recorded_masked(self):

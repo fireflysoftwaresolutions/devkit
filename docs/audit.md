@@ -72,16 +72,27 @@ devkit keeps these out of every record it writes:
   `N+` when the command was cut inside it. Words next to each other in one argument share one marker.
   `dev crew ask` and `dev crew answer` keep their marker `[message text not recorded: N characters]`, and
   `dev crew decide` keeps `[free text: N characters]`. These words stay:
-  - The program, when it is `dev`, `git`, or `gh`, and its subcommands. devkit finds the program after reserved
-    words such as `if`, `do`, `{`, and `!`, after wrappers such as `env`, `sudo`, `timeout`, `nice`, `xargs`, and
-    `uv run`, as a path (`~/bin/dev`) or `python3 -m devkit`, and inside the text of `bash -c`, `sh -c`, `zsh -c`,
-    and `eval`.
+  - The program, when it is `dev`, `git`, or `gh`, and its subcommands. The program is the word at command
+    position: devkit skips reserved words such as `if`, `do`, `{`, and `!`, variable assignments, and wrappers such
+    as `env`, `sudo`, `timeout`, `nice`, `xargs`, and `uv run` with their options and values. It also finds the
+    program as a path (`~/bin/dev`) or `python3 -m devkit`, and inside the text of `bash -c`, `sh -c`, `zsh -c`,
+    and `eval`. Anywhere else, such as in `kubectl --context dev` or `echo dev crew show`, `dev` is a word like
+    any other.
+  - The name of any other program at command position, such as `kubectl` or `sleep`. A program run by its path
+    keeps only the last part of the path: `/opt/homebrew/bin/python3` is recorded as
+    `[text not recorded: 17 characters]/python3`.
   - Option names, such as `--why` and `-m`.
   - The value of an option that names something, such as `--to`, `--type`, `--scope`, `--project`, or `--step`
     in `dev`, and `-C`, `-R`, `--repo`, `--base`, and `--head` in `git` and `gh`.
   - The arguments of `dev` that name something, such as a branch, a path, a project, or a crew member. An argument
     that selects a task, a lesson, or a step stays only as an id or a number, since it can be part of a title.
-  - Ids (`T-…`, `L-…`, `P-…`, `D<n>`, `M<n>`, `R<n>`) and plain numbers.
+    `dev crew raci` also classifies a task given in words, so its argument stays only as a kind of work or a crew
+    member of devkit's roster, such as `backend` or `tank`, and its `--set` value only as `R`, `A`, `C`, and `I`
+    with crew members.
+  - The value of `status` and `priority` in `dev note set`, which is one of a fixed set, such as `status=blocked`.
+    The value of any other key becomes its length.
+  - Ids (`T-…`, `L-…`, `P-…`, `D<n>`, `M<n>`, `R<n>`) and numbers of up to six digits. A longer number, such as a
+    phone number, becomes its length.
   - Shell operators, reserved words, and redirections. A redirection's file stays only when it names no file of
     yours: `/dev/null`, `/dev/stdout`, `/dev/stderr`, `/dev/tty`, a number, or `-`.
   - The name of a variable that the command sets (`MSG=`), and the value of a `DEVKIT_*` variable when it is one
@@ -90,8 +101,8 @@ devkit keeps these out of every record it writes:
   Everything else becomes its length: free text, such as a `dev crew ask` message, the text of `--why`, `--check`,
   or `-m`, a heredoc's body, a here-string, and a comment; and a word that only might be free text, such as a
   filename, a branch passed to `git push`, or a value devkit does not know. A line whose program is none of these
-  keeps only its operators and each word's length: `rm -rf src` is recorded as
-  `[text not recorded: 2 characters] [text not recorded: 3 characters] [text not recorded: 3 characters]`.
+  keeps its operators, the program's name, and each other word's length: `rm -rf src` is recorded as
+  `rm [text not recorded: 3 characters] [text not recorded: 3 characters]`.
 
   These fields hold a command line:
 
@@ -99,7 +110,7 @@ devkit keeps these out of every record it writes:
   | --- | --- | --- |
   | `dev.<command>` | `target` | The `dev` command's arguments |
   | `guard.*`, such as `guard.deny`, `guard.ask`, and `guard.bypass` | `target` | The call the guard refused or asked about, or that an escape hatch let through. A refused file edit keeps the file's path, and a refused tool call keeps the tool's name |
-  | `guard.*` | `detail` | The refusal the agent reads: each command it quotes in backticks is masked, and the rest stays |
+  | `guard.*` | `detail` | The refusal the agent reads. What it quotes in backticks is masked as a command line, so its operators stay; devkit's `…` and a quote of one word that names a command or a project, such as `cat` or `acme/app`, stay as written. The rest of the refusal stays |
   | `guard.irreversible` | `detail` | The words of the irreversible command, or the shell text the guard could not parse |
   | `calls.unclosed` | `detail` | The call that got no result, and how long devkit waited for it |
   | `job.*` | `target` | The job's `dev` arguments |
@@ -154,8 +165,9 @@ record with the current rules whenever it reads one, so `dev audit`, `dev audit 
 show that text. A v2 record that the cleaning changed is marked `"cleaned": true`. Its `hash` still covers the stored
 line, which is what `dev audit verify` checks. Records written before 26.11.5 can also hold the free text of a
 command line, and reading masks it the same way. Their `dev` arguments were joined by spaces, so a word cannot tell
-where an argument ends: once a word in them is free text, reading keeps only the command, the option names, the ids,
-and the numbers.
+where an argument ends: once a word in them is free text, reading keeps the command and its subcommands, and after
+them only the option names that `dev`'s parser knows, the ids, and numbers of up to six digits. A command that a
+guard refusal quotes holds its words joined the same way and is masked by the same rule.
 
 The stored lines still hold the text, in three places:
 
