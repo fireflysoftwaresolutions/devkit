@@ -206,13 +206,12 @@ class AliasTests(Sandbox):
         self.assertEqual(rc, 2)
         self.assertIn("dev clone fireflyframework/flyquery", err)
 
+    # `dev __complete aliases` (what older shell files ask for) gives alias:project lines; the zsh and bash scripts
+    # themselves are tested in tests/test_cli_completion.py
     def test_completion_offers_aliases(self):
         (self.handoff / "registry.json").write_text(json.dumps(self.mac()))
         rc, out, _ = run_cli(cli.cmd_complete, argparse.Namespace(kind="aliases"))
         self.assertIn("devkit:fireflysoftwaresolutions/devkit", out.splitlines())
-        comp = (Path(__file__).resolve().parents[1] / "shell" / "completions" / "_dev").read_text()
-        self.assertIn("__complete aliases", comp)
-        self.assertIn("'alias:", comp)
 
 
 # --------------------------------------------------------------------------- R3: dev status

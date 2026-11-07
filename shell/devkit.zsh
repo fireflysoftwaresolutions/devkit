@@ -29,10 +29,20 @@ export SUPERPOWERS_DISABLE_TELEMETRY=1
 export TRIVY_DISABLE_TELEMETRY=true TRIVY_SKIP_VERSION_CHECK=true SEMGREP_SEND_METRICS=off
 export SYFT_CHECK_FOR_APP_UPDATE=false GRYPE_CHECK_FOR_APP_UPDATE=false CLAUDE_SECURITY_SCAN_TIP=off
 
-# dcd <name>: cd into a project by its alias, id or part of its name (several matches: dev lists them).
+# The zsh helpers that change how the shell behaves (fzf pickers and their keys) are on once the developer said yes
+# to `dev setup shell`, which writes this file (lib/devkit/completion.py, helpers_file).
+typeset -g _dk_helpers=
+[[ -r $HOME/.local/state/devkit/shell/helpers ]] && IFS= read -r _dk_helpers < $HOME/.local/state/devkit/shell/helpers
+
+# dcd <project> [branch]: cd into a project by its alias, id or part of its name, or into its managed worktree for
+# branch (several matches: dev lists them). With the zsh helpers on, `dcd` alone picks a project or worktree with fzf.
 dcd() {
   local p
-  p="$(dev go "$@")" || return
+  if (( ! $# )) && (( $+functions[_devkit_pick] )); then
+    p="$(_devkit_pick places 'go to' --with-nth=2,1)" && [[ -n $p ]] || return
+  else
+    p="$(dev go "$@")" || return
+  fi
   cd "$p" || return
 }
 
@@ -43,16 +53,74 @@ dwt() {
   cd "$p" || return
 }
 
-# Completion
+# Completion: shell/completions/_dev is generated from dev's own parser (`dev completion zsh`); dcd and dwt borrow
+# its live values (projects, worktrees, branches), loading it first when no `dev` Tab has yet.
 fpath=("$DEVKIT_HOME/shell/completions" $fpath)
-if (( $+functions[compdef] )); then
-  autoload -Uz _dev && compdef _dev dev
-  compdef '_dev_projects' dcd 2>/dev/null
-else
-  autoload -Uz compinit && compinit -C
-  autoload -Uz _dev && compdef _dev dev
+(( $+functions[compdef] )) || { autoload -Uz compinit && compinit -C }
+autoload -Uz _dev && compdef _dev dev
+_dcd() {
+  (( $+functions[_dev_live] )) || source "$DEVKIT_HOME/shell/completions/_dev"
+  local -a _dev_words
+  _dev_words=("${words[@]}")
+  _arguments ':project: _dev_live projects -' ':worktree: _dev_live worktrees @1'
+}
+_dwt() {
+  (( $+functions[_dev__wt__new] )) || source "$DEVKIT_HOME/shell/completions/_dev"
+  local -a _dev_words
+  _dev_words=("${words[@]}")
+  _dev__wt__new
+}
+compdef _dcd dcd
+compdef _dwt dwt
+
+# The fzf pickers, with the zsh helpers on and fzf installed: Ctrl-X i inserts a work item's id, Ctrl-X p a project
+# and Ctrl-X b a branch (compinit already takes Ctrl-X t; keys you bound yourself keep your binding); `dpick <kind>`
+# prints one; `dcd` alone picks a place.
+if [[ $_dk_helpers == on ]] && (( $+commands[fzf] )); then
+  # _devkit_pick KIND PROMPT [FZF OPTION…]: pick one of devkit's live values of KIND with fzf; prints the value.
+  _devkit_pick() {
+    local kind=$1 prompt=$2 sel
+    shift 2
+    sel=$(command dev __complete $kind --tab 2>/dev/null \
+      | fzf --height=40% --reverse --select-1 --exit-0 --delimiter=$'\t' --prompt="$prompt> " "$@") || return
+    print -r -- "${sel%%$'\t'*}"
+  }
+
+  # dpick [task|project|branch|worktree|step|plan|member]: print one, picked with fzf: git switch "$(dpick branch)".
+  dpick() {
+    local -A kinds=(task tasks project projects branch branches worktree worktrees step steps plan plans
+                    member crew)
+    local k=${kinds[${1:-task}]}
+    if [[ -z $k ]]; then
+      print -u2 "dpick: one of ${(j:, :)${(ko)kinds}}"
+      return 2
+    fi
+    _devkit_pick $k ${1:-task}
+  }
+
+  _devkit_insert() {
+    local v
+    v=$(_devkit_pick "$@" </dev/tty)
+    zle reset-prompt
+    [[ -n $v ]] && LBUFFER+="${(q)v} "
+  }
+  devkit-pick-task() { _devkit_insert tasks task }
+  devkit-pick-project() { _devkit_insert projects project }
+  devkit-pick-branch() { _devkit_insert branches branch }
+  zle -N devkit-pick-task
+  zle -N devkit-pick-project
+  zle -N devkit-pick-branch
+  () {
+    local km key bound
+    local -A widget=(i devkit-pick-task p devkit-pick-project b devkit-pick-branch)
+    for km in emacs viins; do
+      bound=$(bindkey -M $km)
+      for key in i p b; do
+        [[ $bound == *\"^X$key\"* ]] || bindkey -M $km "^X$key" $widget[$key]
+      done
+    done
+  }
 fi
-_dev_projects() { local -a p; p=(${(f)"$(dev __complete aliases 2>/dev/null)"}); _describe 'project' p; }
 
 # The devkit segment in the prompt (spec P-fxs316lh3nw R9), on once `dev setup prompt` recorded how it reaches the
 # prompt (the mode file below). Each prompt, _devkit_prompt reads the cache that devkit's hooks and commands write

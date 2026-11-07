@@ -88,6 +88,11 @@ class RepositoryDrift(unittest.TestCase):
         self.assertIn("dev crew raci api --set", found[0].fix)
         self.assertEqual(selfcheck.d7_team_raci(base=base, team=base), [])
 
+    # D13: the checked-in zsh and bash completion is what the parser generates, and every completion rule names an
+    # argument the parser has
+    def test_d13_completion_matches_the_parser(self):
+        self.assert_known("D13", selfcheck.d13_completion())
+
     # D9: each phase's proof and the commands its gate names are in the phase's devkit list
     def test_d9_phase_proofs_are_listed(self):
         self.assert_known("D9", selfcheck.d9_phase_proofs())
@@ -114,10 +119,10 @@ class RepositoryDrift(unittest.TestCase):
     def test_d12_the_suite_runs_hermetic(self):
         self.assert_known("D12", selfcheck.d12_hermetic_tests())
 
-    # run() covers D1 to D12, so a check added to the module is also one `dev doctor` and CI run
+    # run() covers D1 to D13, so a check added to the module is also one `dev doctor` and CI run
     def test_run_covers_every_check(self):
         ids = {cid for cid, _ in selfcheck.REPO_CHECKS + selfcheck.MACHINE_CHECKS}
-        self.assertEqual(ids, {f"D{i}" for i in range(1, 13)})
+        self.assertEqual(ids, {f"D{i}" for i in range(1, 14)})
 
 
 class CommandResolution(unittest.TestCase):

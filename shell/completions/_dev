@@ -1,204 +1,2334 @@
 #compdef dev
-# zsh completion for devkit's `dev` command.
+# zsh completion for devkit's `dev` command. Generated from dev's own parser (lib/devkit/cli.py, build_parser) by
+# `dev completion zsh`: do not edit it by hand. After changing a command, run
+#   bin/dev completion zsh > shell/completions/_dev
+# CI fails while this file differs from the parser (selfcheck D13).
 
-_dev() {
-  local -a cmds projects sub
-  cmds=(
-    'ls:The projects on this Mac'
-    'go:Print a project path'
-    'status:Project status'
-    'alias:Short project names shared by the team'
-    'clone:Clone into ~/Development/<owner>/<repo>'
-    'new:Start a new project'
-    'adopt:Move a repo into the canonical layout'
-    'open:Open a project in your editor'
-    'claude:Start Claude Code in a project'
-    'codex:Start Codex in a project'
-    'handoff:Show or edit a handoff note'
-    'dashboard:Open the live dashboard'
-    'overview:Portfolio digest'
-    'standup:Recent work'
-    'initiative:Cross-project initiatives'
-    'task:Project or initiative tasks'
-    'note:Project metadata'
-    'plan:Versioned plans and specs'
-    'team:Who is working on what'
-    'progress:Live progress of agent work'
-    'crew:The crew of specialist agents'
-    'time:How long things take'
-    'report:Status report'
-    'lesson:Lessons learned'
-    'jobs:Scheduled jobs'
-    'audit:The audit trail'
-    'sleep:Consolidate and forget lessons and old records'
-    'delivery:Delivery policy'
-    'files:Compact tree'
-    'find:Find files'
-    'grep:Search code'
-    'diff:Token-light git diff'
-    'rm:Move to the Trash, with undo'
-    'mv:Move safely'
-    'cp:Copy safely'
-    'stubs:Unfinished work'
-    'wt:Manage worktrees'
-    'branch:Branches from an up-to-date main'
-    'commit:Conventional Commit'
-    'rebase:Rebase on main'
-    'push:Push with local CI evidence'
-    'pr:Pull requests'
-    'run:CI runs'
-    'release:Tag and publish by the policy'
-    'issue:Issues'
-    'ci:What CI runs, CI status, audit and init'
-    'test:Failed tests first, then the blast radius'
-    'calver:CalVer version'
-    'sec:Security scan'
-    'docs:Check documentation'
-    'diagram:Branded SVG diagrams'
-    'canary:Instruction-compliance report'
-    'sync:Refresh map and notes, push handoff repo'
-    'gc:Reclaim disk safely'
-    'du:Disk usage report'
-    'setup:Setup wizard'
-    'prompt:What devkit'"'"'s prompt helper shows here'
-    'doctor:Verify the setup'
-    'agents:Claude Code and Codex status, self-tests and rules'
-    'config:Agent settings policy'
-    'guard:Simulate a guard decision'
-    'plugin:Validate the devkit plugin'
-    'desktop:Claude Desktop extension'
-    'install:Pin devkit and apply its configuration'
-    'update:Update devkit to the newest release'
-    'docker:Docker on Colima'
-    'version:Show version'
-    'help:Show help'
-  )
-  if (( CURRENT == 2 )); then
-    _describe 'command' cmds
-    return
+# _dev_live KINDS ARG [WORD…] [--files|--dirs]: offer the fixed WORDs, then devkit's live values of each kind in KINDS
+# (comma-separated; ARG narrows them: - for none, @N for the Nth argument typed after the command), then files or
+# folders.
+_dev_live() {
+  local kinds=$1 arg=$2 kind files= ret=1
+  local -i i seen=0
+  shift 2
+  local -a fixed vals
+  if [[ $arg == @<-> ]]; then
+    for (( i = 2; i < CURRENT; i++ )); do
+      [[ $words[i] == -* ]] && continue
+      (( ++seen == ${arg#@} )) && { arg=${(Q)words[i]}; break }
+    done
+    [[ $arg == @<-> ]] && arg=-
   fi
-  case "${words[2]}" in
-    go|status|open|handoff|claude|codex|ci|clone)
-      projects=(${(f)"$(dev __complete aliases 2>/dev/null)"})
-      _describe 'project' projects ;;
-    alias)
-      if (( CURRENT == 3 )); then
-        sub=('rm:Remove an alias'); _describe 'alias command' sub
-      else
-        projects=(${(f)"$(dev __complete aliases 2>/dev/null)"}); _describe 'project' projects
-        _arguments '--move[take the alias from the project that has it]'
-      fi ;;
-    ls)
-      _arguments '--all[also the portfolio projects not on this Mac]' '--offline[cached data only]' '--json[the rows as JSON]' ;;
-    wt)
-      if (( CURRENT == 3 )); then
-        sub=('new:Create a managed worktree' 'ls:List worktrees' 'rm:Remove a worktree safely')
-        _describe 'worktree command' sub
-      elif [[ "${words[3]}" == rm ]]; then
-        local -a br; br=(${(f)"$(dev __complete branches 2>/dev/null)"}); _describe 'branch' br
-      elif [[ "${words[CURRENT-1]}" == --repo ]]; then
-        projects=(${(f)"$(dev __complete aliases 2>/dev/null)"}); _describe 'project' projects
-      fi ;;
-    config)
-      if (( CURRENT == 3 )); then
-        sub=('repair:Put devkit'"'"'s settings back' 'show:The effective configuration' 'edit:Edit your devkit config'
-             'validate:Check your devkit config' 'set:Set one key (the developer only)'
-             'lock:Lock the settings (asks for your password)' 'unlock:Remove the lock'
-             'status:The lock and recent events')
-        _describe 'config command' sub
-      fi
-      _arguments '--check[one line and exit 1 when a setting differs]' ;;
-    task)
-      if (( CURRENT == 3 )); then
-        sub=('add:Create a work item' 'start:Claim and start' 'claim:Claim and start' 'release:Give the lock back'
-             'done:Mark done' 'reopen:Back to todo after done or cancel' 'block:Mark blocked' 'unblock:Back to work'
-             'cancel:Cancel' 'move:Move between Now, Next and Later' 'edit:Change title, description, priority or due date'
-             'delegate:Assign to a teammate' 'link:Count toward an initiative' 'show:Fields, description and history'
-             'history:The changelog' 'ls:Open items')
-        _describe 'task verb' sub
-      else
-        _arguments '*--why[the reason, recorded in the changelog]:reason:' '*-p[project]:project:' '*-i[initiative]:initiative:'
-      fi ;;
-    progress)
-      if (( CURRENT == 3 )); then
-        sub=('start:Start a run' 'step:Close a finished step' 'note:Update while a step runs' 'add:Add a step'
-             'assign:Hand a step to a crew member' 'begin:Start a step in parallel' 'reopen:Undo a wrong close'
-             'skip:Skip a step on purpose' 'block:The run is blocked' 'done:The run is finished'
-             'history:Every step change' 'time:How long things take')
-        _describe 'progress command' sub
-      else
-        case "${words[3]}" in
-          assign) _arguments '--to[the crew member]:member:' '--scope[the files it owns]:globs:' '--why[assign a member the RACI does not make Responsible]:reason:' ;;
-          done) _arguments '--next[what comes next]:next:' '--check[the evidence]:evidence:' '--step[which step]:step:' '--force[skip the safety checks]' '--why[end without an Accountable approval]:reason:' ;;
-          step) _arguments '--next[what comes next]:next:' '--check[the evidence]:evidence:' '--step[which step]:step:' '--force[skip the safety checks]' '--no-check[nothing to verify]' '--approves[the finished steps this Check approves]:steps:' ;;
-          block) _arguments '--next[what comes next]:next:' '--check[the evidence]:evidence:' '--step[which step]:step:' '--force[skip the safety checks]' ;;
-          start) _arguments '--plan[steps with estimates]:plan:' '--estimate[total estimate]:estimate:' '--steps[number of steps]:steps:' '--mode[who takes decisions]:mode:(guided auto)' ;;
-          reopen|skip|add) _arguments '--why[the reason]:reason:' ;;
-        esac
-      fi ;;
-    crew)
-      if (( CURRENT == 3 )); then
-        sub=('graph:The live session as one graph' 'raci:Who does, approves, is consulted and informed'
-             'rules:Every crew rule and its check' 'show:One member' 'brief:A ready brief for a member'
-             'route:Who should do a task' 'delegate:A step for another member' 'decline:Hand a step back'
-             'next:Who to launch now' 'ask:A question or a decision' 'answer:Answer a message' 'inbox:Messages for you'
-             'mode:Guided or auto' 'decide:Record the developer'"'"'s answer' 'decisions:This run'"'"'s decisions'
-             'set:Change a member for the whole team' 'history:The team'"'"'s changes to the crew'
-             'sync:Regenerate the Claude agents')
-        _describe 'crew command' sub
-      else
-        case "${words[3]}" in
-          graph) _arguments '--latest[the newest running run on this Mac]' '(--json)--mermaid[a Mermaid flowchart]' '(--mermaid)--json[nodes and edges]' ;;
-          raci) _arguments '--set[change a row: "R=… A=… C=… I=…"]:assignments:' '--why[the reason]:reason:' '--markdown[the matrix as a Markdown table]' ;;
-          set)
-            if (( CURRENT == 5 )); then
-              sub=(name title role summary personality goal returns use_when not_for skills procedure devkit done_when keywords tools tier)
-              _describe 'field' sub
-            else
-              _arguments '--why[the reason, kept in the crew history]:reason:'
-            fi ;;
-          mode) (( CURRENT == 4 )) && { sub=(guided auto); _describe 'mode' sub; } ;;
-          sync) _arguments '--check[report differences only]' ;;
-        esac
-      fi ;;
-    agents)
-      if (( CURRENT == 3 )); then
-        sub=('status:Installed, signed in, plan, quota' 'test:A live self-test' 'rules:devkit'"'"'s global rules for agents')
-        _describe 'agents command' sub
-      elif [[ "${words[3]}" == rules ]]; then
-        _arguments '--section[one section, by number or title words]:section:'
-      elif (( CURRENT == 4 )); then
-        sub=(claude codex all); _describe 'agent' sub
-      fi ;;
-    dashboard)
-      _arguments '--no-open[print the one-time link]' '--status[is a server running?]' '--stop[stop the server]' \
-        '--export[write a static copy to a file]:file:_files' '--path[write the static copy and print its path]' ;;
-    desktop)
-      (( CURRENT == 3 )) && { sub=('pack:Build the extension bundle' 'status:What Claude Desktop has installed'); _describe 'desktop command' sub; } ;;
-    docker)
-      local -a act; act=(up down status prune autostart-on autostart-off); _describe 'action' act ;;
-    install)
-      _arguments \
-        '(--version --unverified --why)--only[re-apply steps from the installed copy]:steps:_values -s , step config tools cli git handoff instructions skills claude codex desktop docker docs launchd' \
-        '(--only --unverified --why)--version[switch to a pinned copy kept from an earlier install]:version:_files -W $HOME/.local/share/devkit/releases -/' \
-        '(--only --version)--unverified[pin a commit that is neither a release nor tested]' \
-        '(--only --version)--why[the reason for --unverified]:reason:' ;;
-    setup)
-      if (( CURRENT == 3 )); then
-        sub=('prompt:Only the prompt helper'); _describe 'setup command' sub
-      fi
-      if [[ "${words[3]}" == prompt ]]; then
-        _arguments '--remove[take the prompt helper out again]' '(-y --yes)'{-y,--yes}'[accept every default]'
-      else
-        _arguments '(-y --yes)'{-y,--yes}'[accept every default]' '--skip-packages[do not install Homebrew or npm packages]'
-      fi ;;
-    prompt)
-      (( CURRENT == 3 )) && { sub=('refresh:Write it for this Mac'); _describe 'prompt command' sub; } ;;
-    gc)
-      _arguments '--apply[reclaim]' '-y[no prompt]' '-v[list kept items]' ;;
-    adopt)
-      _files -/ ;;
-  esac
+  while (( $# )); do
+    case $1 in
+      (--files|--dirs) files=$1 ;;
+      (*) fixed+=("$1") ;;
+    esac
+    shift
+  done
+  (( $#fixed )) && _describe -t commands 'subcommand' fixed && ret=0
+  for kind in ${(s:,:)kinds}; do
+    [[ $kind == - ]] && continue
+    _dev_values $kind $arg
+    vals=("${reply[@]}")
+    (( $#vals )) && _describe -V -t $kind "${_dev_label[$kind]:-$kind}" vals && ret=0
+  done
+  [[ $files == --files ]] && _files && ret=0
+  [[ $files == --dirs ]] && _files -/ && ret=0
+  return ret
 }
 
-_dev "$@"
+# _dev_values KIND [ARG]: $reply = the lines of `dev __complete KIND [ARG]`, as value:description, for the project or
+# initiative the command line names (-p, -i). They are kept in this shell for $_dev_ttl seconds (10). A Tab waits at
+# most $_dev_wait seconds (0.1) for the command; past it, it offers the last values it had, and the command finishes in
+# the background for a later Tab.
+_dev_values() {
+  emulate -L zsh
+  setopt extended_glob
+  zmodload zsh/datetime 2>/dev/null
+  zmodload -F zsh/files b:zf_rm b:zf_mkdir b:zf_mv 2>/dev/null
+  local kind=$1 arg=${2:#-} key f out dir=${XDG_CACHE_HOME:-$HOME/.cache}/devkit/complete
+  local -a cmd line old
+  local -i i fd ok=0
+  local -F now=$EPOCHREALTIME ttl=${_dev_ttl:-10} wait=${_dev_wait:-0.1}
+  reply=()
+  cmd=(dev __complete $kind)
+  line=("${(@Q)_dev_words}")
+  for (( i = 1; i < $#line; i++ )); do
+    case $line[i] in
+      (-p|--project) cmd+=(--project "$line[i+1]") ;;
+      (--project=*) cmd+=(--project "${line[i]#--project=}") ;;
+      (-i|--initiative) cmd+=(--initiative "$line[i+1]") ;;
+      (--initiative=*) cmd+=(--initiative "${line[i]#--initiative=}") ;;
+    esac
+  done
+  [[ -n $arg ]] && cmd+=("$arg")
+  key="${(j: :)${(@q)cmd[3,-1]}}"
+  (( ${_dev_here[(Ie)$kind]} )) && key+=" @$PWD"
+  if (( ${+_dev_cache[$key]} && now - _dev_cache_at[$key] < ttl )); then
+    reply=("${(@f)_dev_cache[$key]}")
+    reply=(${reply:#})
+    return 0
+  fi
+  f=$_dev_pending[$key]
+  if [[ -z $f ]]; then
+    if [[ ! -d $dir ]]; then
+      zf_mkdir -p -m 700 -- $dir 2>/dev/null || return 1
+    fi
+    if (( ! _dev_swept )); then
+      _dev_swept=1
+      old=($dir/*(N.mh+24))
+      (( $#old )) && zf_rm -f -- $old
+    fi
+    f=$dir/$$.$(( ++_dev_seq ))
+    exec {fd}< <(command "${cmd[@]}" >|$f.part 2>/dev/null; zf_mv -f -- $f.part $f 2>/dev/null; print)
+    read -t $wait -u $fd out && ok=1
+    exec {fd}<&-
+    (( ok )) || _dev_pending[$key]=$f
+  fi
+  if [[ -e $f ]]; then
+    out=$(<$f)
+    zf_rm -f -- $f
+    unset "_dev_pending[$key]"
+    _dev_cache[$key]=$out
+    _dev_cache_at[$key]=$now
+  fi
+  reply=("${(@f)_dev_cache[$key]}")
+  reply=(${reply:#})
+  return 0
+}
+
+# _dev_exec COMMAND: complete the rest of the line as COMMAND's own (dev git …, dev gh …).
+_dev_exec() {
+  words=($1 "${words[@]}")
+  (( CURRENT++ ))
+  _normal
+}
+
+typeset -gA _dev_cache _dev_cache_at _dev_pending
+typeset -gi _dev_seq _dev_swept
+typeset -gA _dev_label=(projects 'project' initiatives 'initiative' tasks 'task' steps 'plan step' crew 'crew member' activities 'kind of work' plans 'plan' branches 'branch' worktrees 'worktree' versions 'pinned copy' places 'place')
+typeset -ga _dev_here=(tasks steps plans branches worktrees)
+
+_dev() {
+  local curcontext=$curcontext state state_descr line ret=1
+  typeset -A opt_args
+  local -a _dev_words
+  _dev_words=("${words[@]}")
+  _arguments -C -s -S : \
+    '(--help -h)'{-h,--help}'[show the help of dev, or of the command after it]' \
+    '1: :->cmds' \
+    '*:: :->args' && ret=0
+  case $state in
+    (cmds)
+      local -a cmds
+      cmds=(
+        'help:Show help'
+        'ls:The projects on this Mac'
+        'go:Print a project'\''s path, or the path of one of its worktrees'
+        'alias:Short names for projects, shared by the team'
+        'status:Project status'
+        'clone:Clone into the canonical layout'
+        'new:Start a new project'
+        'adopt:Move a repo into the canonical layout'
+        'open:Open a project in your editor'
+        'claude:Start claude in a project'
+        'codex:Start codex in a project'
+        'handoff-import:Adopt an old handoff repository'
+        'handoff:Show or edit a handoff note'
+        'session:A session'\''s continuity'
+        'task:Work items of a project'
+        'note:Project metadata in the handoff note'
+        'plan:Versioned plans and specs'
+        'progress:Live progress of agent work'
+        'time:How long things take'
+        'delivery:Versioning, release, test and deploy policy'
+        'lesson:Learn from mistakes'
+        'sleep:Consolidate and forget'
+        'jobs:Scheduled jobs'
+        'audit:The audit trail'
+        'report:Status report'
+        'rm:Safe delete to the Trash'
+        'mv:Move or rename without clobbering'
+        'cp:Copy without clobbering'
+        'files:Compact gitignore-aware tree'
+        'find:Find files by name'
+        'grep:Search contents with ripgrep'
+        'diff:Token-light git diff'
+        'stubs:Unfinished work'
+        'team:Who is working on what, across machines and developers'
+        'initiative:Cross-project initiatives'
+        'overview:Portfolio digest'
+        'standup:Recent work and what is in progress'
+        'dashboard:Open the live dashboard'
+        'config:The agent settings devkit manages'
+        'agents:Claude Code and Codex'
+        'calver:Current and next CalVer version'
+        'plugin:Validate the devkit plugin for Claude Code and Codex'
+        'guard:Simulate the guard'
+        'wt:Manage worktrees'
+        'backup:Copy branches whose commits exist only on this Mac to the remote, when…'
+        'sync:Refresh map + notes, commit and push'
+        'du:What fills your disk, why, and the plan to free it safely'
+        'free:Free items of the dev du plan by number, or every safe one'
+        'gc:Reclaim disk'
+        'canary:Instruction-compliance canary report'
+        'ci:What CI runs'
+        'branch:Branches: new'
+        'commit:Conventional Commit of the staged changes, -a'
+        'rebase:Fetch and rebase the current branch on origin/<default>'
+        'push:Push the current branch once'
+        'pr:Pull requests'
+        'run:CI runs: ls (any host)'
+        'release:Tag and publish a release from a verified default branch'
+        'issue:Issues (GitHub)'
+        'git:git with devkit'\''s policy checks'
+        'gh:gh with devkit'\''s policy checks'
+        'test:Tests: last failures first, then what your changes can affect'
+        'mcp:Serve devkit'\''s tools over MCP on stdio'
+        'desktop:Claude Desktop extension'
+        'crew:devkit'\''s crew of specialist agents'
+        'doctor:Verify the setup'
+        'install:Pin devkit for the hooks, then apply the configuration'
+        'docs:Check documentation'
+        'sec:Security scan'
+        'diagram:Branded SVG diagrams from JSON specs'
+        'setup:Installation and configuration wizard'
+        'prompt:What devkit'\''s prompt helper shows here'
+        'update:Update devkit'
+        'docker:Docker on Colima'
+        'version:Show version'
+        'completion:Tab completion for dev, generated from its own parser'
+      )
+      _describe -t commands 'dev command' cmds && ret=0 ;;
+    (args)
+      curcontext=${curcontext%:*:*}:dev-$words[1]:
+      case $words[1] in
+        (help) _dev__help && ret=0 ;;
+        (ls) _dev__ls && ret=0 ;;
+        (go) _dev__go && ret=0 ;;
+        (alias) _dev__alias && ret=0 ;;
+        (status) _dev__status && ret=0 ;;
+        (clone) _dev__clone && ret=0 ;;
+        (new) _dev__new && ret=0 ;;
+        (adopt) _dev__adopt && ret=0 ;;
+        (open) _dev__open && ret=0 ;;
+        (claude) _dev__claude && ret=0 ;;
+        (codex) _dev__codex && ret=0 ;;
+        (handoff-import) _dev__handoff_import && ret=0 ;;
+        (handoff) _dev__handoff && ret=0 ;;
+        (session) _dev__session && ret=0 ;;
+        (task) _dev__task && ret=0 ;;
+        (note) _dev__note && ret=0 ;;
+        (plan) _dev__plan && ret=0 ;;
+        (progress) _dev__progress && ret=0 ;;
+        (time) _dev__time && ret=0 ;;
+        (delivery) _dev__delivery && ret=0 ;;
+        (lesson) _dev__lesson && ret=0 ;;
+        (sleep) _dev__sleep && ret=0 ;;
+        (jobs) _dev__jobs && ret=0 ;;
+        (audit) _dev__audit && ret=0 ;;
+        (report) _dev__report && ret=0 ;;
+        (rm) _dev__rm && ret=0 ;;
+        (mv) _dev__mv && ret=0 ;;
+        (cp) _dev__cp && ret=0 ;;
+        (files) _dev__files && ret=0 ;;
+        (find) _dev__find && ret=0 ;;
+        (grep) _dev__grep && ret=0 ;;
+        (diff) _dev__diff && ret=0 ;;
+        (stubs) _dev__stubs && ret=0 ;;
+        (team) _dev__team && ret=0 ;;
+        (initiative) _dev__initiative && ret=0 ;;
+        (overview) _dev__overview && ret=0 ;;
+        (standup) _dev__standup && ret=0 ;;
+        (dashboard) _dev__dashboard && ret=0 ;;
+        (config) _dev__config && ret=0 ;;
+        (agents) _dev__agents && ret=0 ;;
+        (calver) _dev__calver && ret=0 ;;
+        (plugin) _dev__plugin && ret=0 ;;
+        (guard) _dev__guard && ret=0 ;;
+        (wt) _dev__wt && ret=0 ;;
+        (backup) _dev__backup && ret=0 ;;
+        (sync) _dev__sync && ret=0 ;;
+        (du) _dev__du && ret=0 ;;
+        (free) _dev__free && ret=0 ;;
+        (gc) _dev__gc && ret=0 ;;
+        (canary) _dev__canary && ret=0 ;;
+        (ci) _dev__ci && ret=0 ;;
+        (branch) _dev__branch && ret=0 ;;
+        (commit) _dev__commit && ret=0 ;;
+        (rebase) _dev__rebase && ret=0 ;;
+        (push) _dev__push && ret=0 ;;
+        (pr) _dev__pr && ret=0 ;;
+        (run) _dev__run && ret=0 ;;
+        (release) _dev__release && ret=0 ;;
+        (issue) _dev__issue && ret=0 ;;
+        (git) _dev__git && ret=0 ;;
+        (gh) _dev__gh && ret=0 ;;
+        (test) _dev__test && ret=0 ;;
+        (mcp) _dev__mcp && ret=0 ;;
+        (desktop) _dev__desktop && ret=0 ;;
+        (crew) _dev__crew && ret=0 ;;
+        (doctor) _dev__doctor && ret=0 ;;
+        (install) _dev__install && ret=0 ;;
+        (docs) _dev__docs && ret=0 ;;
+        (sec) _dev__sec && ret=0 ;;
+        (diagram) _dev__diagram && ret=0 ;;
+        (setup) _dev__setup && ret=0 ;;
+        (prompt) _dev__prompt && ret=0 ;;
+        (update) _dev__update && ret=0 ;;
+        (docker) _dev__docker && ret=0 ;;
+        (version) _dev__version && ret=0 ;;
+        (completion) _dev__completion && ret=0 ;;
+      esac ;;
+  esac
+  return ret
+}
+
+_dev__help() {
+  _arguments -s -S : \
+    '(- *)'{-h,--help}'[show this help message and exit]'
+}
+
+_dev__ls() {
+  _arguments -s -S : \
+    '(- *)'{-h,--help}'[show this help message and exit]' \
+    '--offline[use cached PR data only, no checks]' \
+    '--names[print project ids only]' \
+    '--all[also the portfolio projects that are not on this Mac]' \
+    '--json[the rows as JSON]'
+}
+
+_dev__go() {
+  _arguments -s -S : \
+    '(- *)'{-h,--help}'[show this help message and exit]' \
+    ':project: _dev_live projects -' \
+    '::worktree: _dev_live worktrees @1'
+}
+
+_dev__alias() {
+  _arguments -s -S : \
+    '(- *)'{-h,--help}'[show this help message and exit]' \
+    '--move[take the alias from the project that has it]' \
+    '::alias:(rm)' \
+    '::project: _dev_live projects -'
+}
+
+_dev__status() {
+  _arguments -s -S : \
+    '(- *)'{-h,--help}'[show this help message and exit]' \
+    '--json[the same data as JSON]' \
+    '--all[also the project'\''s tasks and plans]' \
+    '::project: _dev_live projects -'
+}
+
+_dev__clone() {
+  _arguments -s -S : \
+    '(- *)'{-h,--help}'[show this help message and exit]' \
+    ':project: _dev_live projects ids'
+}
+
+_dev__new() {
+  _arguments -s -S : \
+    '(- *)'{-h,--help}'[show this help message and exit]' \
+    '--github[create the repo on GitHub and clone it]' \
+    '--owner=[GitHub owner]:owner: ' \
+    '--public[public repo (default private)]' \
+    '--no-git[plain folder, no git init]' \
+    ':name: '
+}
+
+_dev__adopt() {
+  _arguments -s -S : \
+    '(- *)'{-h,--help}'[show this help message and exit]' \
+    ':path:_files -/'
+}
+
+_dev__open() {
+  _arguments -s -S : \
+    '(- *)'{-h,--help}'[show this help message and exit]' \
+    '::project: _dev_live projects -'
+}
+
+_dev__claude() {
+  _arguments -s -S : \
+    '(- *)'{-h,--help}'[show this help message and exit]' \
+    '(--worktree -w)'{-w+,--worktree=}'[run in a managed worktree for BRANCH]:worktree: _dev_live worktrees @1' \
+    '::project: _dev_live projects -' \
+    '*::args: '
+}
+
+_dev__codex() {
+  _arguments -s -S : \
+    '(- *)'{-h,--help}'[show this help message and exit]' \
+    '(--worktree -w)'{-w+,--worktree=}'[run in a managed worktree for BRANCH]:worktree: _dev_live worktrees @1' \
+    '::project: _dev_live projects -' \
+    '*::args: '
+}
+
+_dev__handoff_import() {
+  _arguments -s -S : \
+    '(- *)'{-h,--help}'[show this help message and exit]' \
+    '--slug=[slug]:slug: ' \
+    '--dry-run[dry run]' \
+    ':staging:_files -/'
+}
+
+_dev__handoff() {
+  _arguments -s -S : \
+    '(- *)'{-h,--help}'[show this help message and exit]' \
+    '--edit[edit]' \
+    '--path[path]' \
+    '--log=[append a line to the session log]:text: ' \
+    '--agent=[who is logging]:agent: ' \
+    '::project: _dev_live projects -'
+}
+
+_dev__session() {
+  _arguments -s -S : \
+    '(- *)'{-h,--help}'[show this help message and exit]' \
+    '--session=[<agent>:<session id>]:session: ' \
+    '--latest[brief: the project'\''s newest session with an open run or requests]' \
+    '(--project -p)'{-p+,--project=}'[brief --latest]:project: _dev_live projects ids' \
+    '--for-chat[brief: for a chat surface]' \
+    '--provider=[brief: who will read it]:provider: ' \
+    '--from=[carry: the cleared session]:from sid: ' \
+    '--members[compactions: the members'\'' transcripts too]' \
+    '--all[forget: every continuity record and clear link here]' \
+    ':session cmd:(brief carry compactions forget)' \
+    '::transcript:_files'
+}
+
+_dev__task() {
+  local curcontext=$curcontext state state_descr line ret=1
+  typeset -A opt_args
+  _arguments -C -s -S : \
+    '(- *)'{-h,--help}'[show this help message and exit]' \
+    '(--project -p)'{-p+,--project=}'[project (default: the one you are in)]:project: _dev_live projects -' \
+    '(--initiative -i)'{-i+,--initiative=}'[an initiative instead of a project]:initiative: _dev_live initiatives -' \
+    '--all[show every done item]' \
+    '1: :->cmds' \
+    '*:: :->args' && ret=0
+  case $state in
+    (cmds)
+      local -a cmds
+      cmds=(
+        'add:add a task, feature, bug or spike'
+        'start:claim the lock and move to Now'
+        'claim:same as start'
+        'release:give the lock back'
+        'done:mark done and release'
+        'block:mark blocked'
+        'unblock:back to work'
+        'cancel:cancel (needs --why)'
+        'reopen:back to todo after done or cancel'
+        'show:an item with its history'
+        'history:an item'\''s changelog'
+        'link:count a project task toward an initiative'
+        'delegate:hand a task to a teammate'
+        'move:move between Now / Next / Later'
+        'edit:change title, description, priority or due date'
+        'ls:list open items'
+      )
+      _describe -t commands 'dev task command' cmds && ret=0 ;;
+    (args)
+      curcontext=${curcontext%:*:*}:dev-task-$words[1]:
+      case $words[1] in
+        (add) _dev__task__add && ret=0 ;;
+        (start) _dev__task__start && ret=0 ;;
+        (claim) _dev__task__claim && ret=0 ;;
+        (release) _dev__task__release && ret=0 ;;
+        (done) _dev__task__done && ret=0 ;;
+        (block) _dev__task__block && ret=0 ;;
+        (unblock) _dev__task__unblock && ret=0 ;;
+        (cancel) _dev__task__cancel && ret=0 ;;
+        (reopen) _dev__task__reopen && ret=0 ;;
+        (show) _dev__task__show && ret=0 ;;
+        (history) _dev__task__history && ret=0 ;;
+        (link) _dev__task__link && ret=0 ;;
+        (delegate) _dev__task__delegate && ret=0 ;;
+        (move) _dev__task__move && ret=0 ;;
+        (edit) _dev__task__edit && ret=0 ;;
+        (ls) _dev__task__ls && ret=0 ;;
+      esac ;;
+  esac
+  return ret
+}
+
+_dev__task__add() {
+  _arguments -s -S : \
+    '(- *)'{-h,--help}'[show this help message and exit]' \
+    '--now[add to Now]' \
+    '--next[add to Next (default)]' \
+    '--later[add to Later]' \
+    '--type=[type]:type:(task feature bug spike)' \
+    '--priority=[priority]:priority:(high normal low)' \
+    '--due=[YYYY-MM-DD]:due: ' \
+    '--body=[description / acceptance criteria]:body: ' \
+    '--why=[why this work exists]:why: ' \
+    '--claim[claim it right away]' \
+    '*--done=[acceptance criterion]:criterion: ' \
+    '--no-template[no structured description]' \
+    '(--project -p)'{-p+,--project=}'[project (default: the one you are in)]:project: _dev_live projects -' \
+    '(--initiative -i)'{-i+,--initiative=}'[an initiative instead of a project]:initiative: _dev_live initiatives -' \
+    '*:text: '
+}
+
+_dev__task__start() {
+  _arguments -s -S : \
+    '(- *)'{-h,--help}'[show this help message and exit]' \
+    '--why=[the reason (recorded in the changelog and the commit)]:why: ' \
+    '(--project -p)'{-p+,--project=}'[project (default: the one you are in)]:project: _dev_live projects -' \
+    '(--initiative -i)'{-i+,--initiative=}'[an initiative instead of a project]:initiative: _dev_live initiatives -' \
+    '*:task: _dev_live tasks -'
+}
+
+_dev__task__claim() {
+  _arguments -s -S : \
+    '(- *)'{-h,--help}'[show this help message and exit]' \
+    '--why=[the reason (recorded in the changelog and the commit)]:why: ' \
+    '(--project -p)'{-p+,--project=}'[project (default: the one you are in)]:project: _dev_live projects -' \
+    '(--initiative -i)'{-i+,--initiative=}'[an initiative instead of a project]:initiative: _dev_live initiatives -' \
+    '*:task: _dev_live tasks -'
+}
+
+_dev__task__release() {
+  _arguments -s -S : \
+    '(- *)'{-h,--help}'[show this help message and exit]' \
+    '--why=[the reason (recorded in the changelog and the commit)]:why: ' \
+    '(--project -p)'{-p+,--project=}'[project (default: the one you are in)]:project: _dev_live projects -' \
+    '(--initiative -i)'{-i+,--initiative=}'[an initiative instead of a project]:initiative: _dev_live initiatives -' \
+    '*:task: _dev_live tasks -'
+}
+
+_dev__task__done() {
+  _arguments -s -S : \
+    '(- *)'{-h,--help}'[show this help message and exit]' \
+    '--why=[the reason (recorded in the changelog and the commit)]:why: ' \
+    '(--project -p)'{-p+,--project=}'[project (default: the one you are in)]:project: _dev_live projects -' \
+    '(--initiative -i)'{-i+,--initiative=}'[an initiative instead of a project]:initiative: _dev_live initiatives -' \
+    '*:task: _dev_live tasks -'
+}
+
+_dev__task__block() {
+  _arguments -s -S : \
+    '(- *)'{-h,--help}'[show this help message and exit]' \
+    '--why=[the reason (recorded in the changelog and the commit)]:why: ' \
+    '(--project -p)'{-p+,--project=}'[project (default: the one you are in)]:project: _dev_live projects -' \
+    '(--initiative -i)'{-i+,--initiative=}'[an initiative instead of a project]:initiative: _dev_live initiatives -' \
+    '*:task: _dev_live tasks -'
+}
+
+_dev__task__unblock() {
+  _arguments -s -S : \
+    '(- *)'{-h,--help}'[show this help message and exit]' \
+    '--why=[the reason (recorded in the changelog and the commit)]:why: ' \
+    '(--project -p)'{-p+,--project=}'[project (default: the one you are in)]:project: _dev_live projects -' \
+    '(--initiative -i)'{-i+,--initiative=}'[an initiative instead of a project]:initiative: _dev_live initiatives -' \
+    '*:task: _dev_live tasks -'
+}
+
+_dev__task__cancel() {
+  _arguments -s -S : \
+    '(- *)'{-h,--help}'[show this help message and exit]' \
+    '--why=[the reason (recorded in the changelog and the commit)]:why: ' \
+    '(--project -p)'{-p+,--project=}'[project (default: the one you are in)]:project: _dev_live projects -' \
+    '(--initiative -i)'{-i+,--initiative=}'[an initiative instead of a project]:initiative: _dev_live initiatives -' \
+    '*:task: _dev_live tasks -'
+}
+
+_dev__task__reopen() {
+  _arguments -s -S : \
+    '(- *)'{-h,--help}'[show this help message and exit]' \
+    '--why=[the reason (recorded in the changelog and the commit)]:why: ' \
+    '(--project -p)'{-p+,--project=}'[project (default: the one you are in)]:project: _dev_live projects -' \
+    '(--initiative -i)'{-i+,--initiative=}'[an initiative instead of a project]:initiative: _dev_live initiatives -' \
+    '*:task: _dev_live tasks all'
+}
+
+_dev__task__show() {
+  _arguments -s -S : \
+    '(- *)'{-h,--help}'[show this help message and exit]' \
+    '--why=[the reason (recorded in the changelog and the commit)]:why: ' \
+    '(--project -p)'{-p+,--project=}'[project (default: the one you are in)]:project: _dev_live projects -' \
+    '(--initiative -i)'{-i+,--initiative=}'[an initiative instead of a project]:initiative: _dev_live initiatives -' \
+    '*:task: _dev_live tasks all'
+}
+
+_dev__task__history() {
+  _arguments -s -S : \
+    '(- *)'{-h,--help}'[show this help message and exit]' \
+    '--why=[the reason (recorded in the changelog and the commit)]:why: ' \
+    '(--project -p)'{-p+,--project=}'[project (default: the one you are in)]:project: _dev_live projects -' \
+    '(--initiative -i)'{-i+,--initiative=}'[an initiative instead of a project]:initiative: _dev_live initiatives -' \
+    '*:task: _dev_live tasks all'
+}
+
+_dev__task__link() {
+  _arguments -s -S : \
+    '(- *)'{-h,--help}'[show this help message and exit]' \
+    '--to=[to]:initiative: _dev_live initiatives -' \
+    '--why=[why]:why: ' \
+    '(--project -p)'{-p+,--project=}'[project (default: the one you are in)]:project: _dev_live projects -' \
+    '(--initiative -i)'{-i+,--initiative=}'[an initiative instead of a project]:initiative: _dev_live initiatives -' \
+    '*:task: _dev_live tasks -'
+}
+
+_dev__task__delegate() {
+  _arguments -s -S : \
+    '(- *)'{-h,--help}'[show this help message and exit]' \
+    '--to=[the teammate'\''s GitHub login]:to: ' \
+    '--why=[why it matters]:why: ' \
+    '--due=[YYYY-MM-DD]:due: ' \
+    '--no-copy[do not copy the message to the clipboard]' \
+    '(--project -p)'{-p+,--project=}'[project (default: the one you are in)]:project: _dev_live projects -' \
+    '(--initiative -i)'{-i+,--initiative=}'[an initiative instead of a project]:initiative: _dev_live initiatives -' \
+    '*:task: _dev_live tasks -'
+}
+
+_dev__task__move() {
+  _arguments -s -S : \
+    '(- *)'{-h,--help}'[show this help message and exit]' \
+    '--to=[to]:to:(now next later)' \
+    '--why=[why]:why: ' \
+    '(--project -p)'{-p+,--project=}'[project (default: the one you are in)]:project: _dev_live projects -' \
+    '(--initiative -i)'{-i+,--initiative=}'[an initiative instead of a project]:initiative: _dev_live initiatives -' \
+    '*:task: _dev_live tasks -'
+}
+
+_dev__task__edit() {
+  _arguments -s -S : \
+    '(- *)'{-h,--help}'[show this help message and exit]' \
+    '--title=[title]:title: ' \
+    '--body-file=[file with the new description]:body file:_files' \
+    '--priority=[priority set]:priority set:(high normal low)' \
+    '--due=[due]:due: ' \
+    '--why=[why]:why: ' \
+    '(--project -p)'{-p+,--project=}'[project (default: the one you are in)]:project: _dev_live projects -' \
+    '(--initiative -i)'{-i+,--initiative=}'[an initiative instead of a project]:initiative: _dev_live initiatives -' \
+    '*:task: _dev_live tasks -'
+}
+
+_dev__task__ls() {
+  _arguments -s -S : \
+    '(- *)'{-h,--help}'[show this help message and exit]' \
+    '(--project -p)'{-p+,--project=}'[project (default: the one you are in)]:project: _dev_live projects -' \
+    '(--initiative -i)'{-i+,--initiative=}'[an initiative instead of a project]:initiative: _dev_live initiatives -'
+}
+
+_dev__note() {
+  _arguments -s -S : \
+    '(- *)'{-h,--help}'[show this help message and exit]' \
+    '(--project -p)'{-p+,--project=}'[project]:project: _dev_live projects -' \
+    '(--initiative -i)'{-i+,--initiative=}'[initiative]:initiative: _dev_live initiatives -' \
+    ':set:(set)' \
+    '*:pairs: '
+}
+
+_dev__plan() {
+  local curcontext=$curcontext state state_descr line ret=1
+  typeset -A opt_args
+  _arguments -C -s -S : \
+    '(- *)'{-h,--help}'[show this help message and exit]' \
+    '(--project -p)'{-p+,--project=}'[project]:project: _dev_live projects -' \
+    '(--initiative -i)'{-i+,--initiative=}'[initiative]:initiative: _dev_live initiatives -' \
+    '1: :->cmds' \
+    '*:: :->args' && ret=0
+  case $state in
+    (cmds)
+      local -a cmds
+      cmds=(
+        'new:create a plan, spec, spike, bugfix or ADR from its template'
+        'revise:revise a plan'
+        'approve:approve a plan'
+        'supersede:supersede a plan'
+        'ls:list plans'
+      )
+      _describe -t commands 'dev plan command' cmds && ret=0 ;;
+    (args)
+      curcontext=${curcontext%:*:*}:dev-plan-$words[1]:
+      case $words[1] in
+        (new) _dev__plan__new && ret=0 ;;
+        (revise) _dev__plan__revise && ret=0 ;;
+        (approve) _dev__plan__approve && ret=0 ;;
+        (supersede) _dev__plan__supersede && ret=0 ;;
+        (ls) _dev__plan__ls && ret=0 ;;
+      esac ;;
+  esac
+  return ret
+}
+
+_dev__plan__new() {
+  _arguments -s -S : \
+    '(- *)'{-h,--help}'[show this help message and exit]' \
+    '--kind=[kind]:kind:(plan spec spike bugfix adr)' \
+    '(--project -p)'{-p+,--project=}'[project]:project: _dev_live projects -' \
+    '(--initiative -i)'{-i+,--initiative=}'[initiative]:initiative: _dev_live initiatives -' \
+    '*:title: '
+}
+
+_dev__plan__revise() {
+  _arguments -s -S : \
+    '(- *)'{-h,--help}'[show this help message and exit]' \
+    '--why=[the reason for the change]:why: ' \
+    '(--project -p)'{-p+,--project=}'[project]:project: _dev_live projects -' \
+    '(--initiative -i)'{-i+,--initiative=}'[initiative]:initiative: _dev_live initiatives -' \
+    ':plan: _dev_live plans -'
+}
+
+_dev__plan__approve() {
+  _arguments -s -S : \
+    '(- *)'{-h,--help}'[show this help message and exit]' \
+    '--why=[the reason for the change]:why: ' \
+    '(--project -p)'{-p+,--project=}'[project]:project: _dev_live projects -' \
+    '(--initiative -i)'{-i+,--initiative=}'[initiative]:initiative: _dev_live initiatives -' \
+    ':plan: _dev_live plans -'
+}
+
+_dev__plan__supersede() {
+  _arguments -s -S : \
+    '(- *)'{-h,--help}'[show this help message and exit]' \
+    '--why=[the reason for the change]:why: ' \
+    '(--project -p)'{-p+,--project=}'[project]:project: _dev_live projects -' \
+    '(--initiative -i)'{-i+,--initiative=}'[initiative]:initiative: _dev_live initiatives -' \
+    ':plan: _dev_live plans -'
+}
+
+_dev__plan__ls() {
+  _arguments -s -S : \
+    '(- *)'{-h,--help}'[show this help message and exit]' \
+    '(--project -p)'{-p+,--project=}'[project]:project: _dev_live projects -' \
+    '(--initiative -i)'{-i+,--initiative=}'[initiative]:initiative: _dev_live initiatives -'
+}
+
+_dev__progress() {
+  local curcontext=$curcontext state state_descr line ret=1
+  typeset -A opt_args
+  _arguments -C -s -S : \
+    '(- *)'{-h,--help}'[show this help message and exit]' \
+    '1: :->cmds' \
+    '*:: :->args' && ret=0
+  case $state in
+    (cmds)
+      local -a cmds
+      cmds=(
+        'start:start a run: goal, steps, estimate'
+        'note:an update while a step is still running'
+        'step:a step finished'
+        'block:blocked: why and what is needed'
+        'done:finished: the outcome'
+        'assign:hand a plan step to a subagent'
+        'begin:mark a plan step as started'
+        'add:add a step found during the work'
+        'reopen:undo a wrong close'
+        'skip:skip a step on purpose'
+        'history:every step change'
+        'time:how long things take'
+      )
+      _describe -t commands 'dev progress command' cmds && ret=0 ;;
+    (args)
+      curcontext=${curcontext%:*:*}:dev-progress-$words[1]:
+      case $words[1] in
+        (start) _dev__progress__start && ret=0 ;;
+        (note) _dev__progress__note && ret=0 ;;
+        (step) _dev__progress__step && ret=0 ;;
+        (block) _dev__progress__block && ret=0 ;;
+        (done) _dev__progress__done && ret=0 ;;
+        (assign) _dev__progress__assign && ret=0 ;;
+        (begin) _dev__progress__begin && ret=0 ;;
+        (add) _dev__progress__add && ret=0 ;;
+        (reopen) _dev__progress__reopen && ret=0 ;;
+        (skip) _dev__progress__skip && ret=0 ;;
+        (history) _dev__progress__history && ret=0 ;;
+        (time) _dev__progress__time && ret=0 ;;
+      esac ;;
+  esac
+  return ret
+}
+
+_dev__progress__start() {
+  _arguments -s -S : \
+    '(- *)'{-h,--help}'[show this help message and exit]' \
+    '--steps=[steps]:steps: ' \
+    '--estimate=[e.g. 30m, 1h30m]:estimate: ' \
+    '--mode=[guided: the developer'\''s decisions wait for the developer]:mode:(guided auto)' \
+    '--plan=[the steps, separated by '\'';'\'', each with an optional estimate]:plan: ' \
+    '--replace[replace this session'\''s live run]' \
+    '--why=[why the live run is replaced]:why: ' \
+    '*:goal: '
+}
+
+_dev__progress__note() {
+  _arguments -s -S : \
+    '(- *)'{-h,--help}'[show this help message and exit]' \
+    '--next=[what comes next]:next: ' \
+    '*:text: '
+}
+
+_dev__progress__step() {
+  _arguments -s -S : \
+    '(- *)'{-h,--help}'[show this help message and exit]' \
+    '--next=[what comes next]:next: ' \
+    '--check=[the evidence for this step]:check: ' \
+    '--step=[which plan step]:plan step: _dev_live steps -' \
+    '--force[skip the safety checks]' \
+    '--no-check[nothing to verify for this step]' \
+    '--approves=[the finished steps this Check approves]:plan step: _dev_live steps -' \
+    '*:text: '
+}
+
+_dev__progress__block() {
+  _arguments -s -S : \
+    '(- *)'{-h,--help}'[show this help message and exit]' \
+    '--next=[what comes next]:next: ' \
+    '--check=[the evidence for this step]:check: ' \
+    '--step=[which plan step]:plan step: _dev_live steps -' \
+    '--force[skip the safety checks]' \
+    '*:text: '
+}
+
+_dev__progress__done() {
+  _arguments -s -S : \
+    '(- *)'{-h,--help}'[show this help message and exit]' \
+    '--next=[what comes next]:next: ' \
+    '--check=[the evidence for this step]:check: ' \
+    '--step=[which plan step]:plan step: _dev_live steps -' \
+    '--force[skip the safety checks]' \
+    '--why=[end the run although an Accountable member has not approved]:why: ' \
+    '*:text: '
+}
+
+_dev__progress__assign() {
+  _arguments -s -S : \
+    '(- *)'{-h,--help}'[show this help message and exit]' \
+    '--to=[the subagent'\''s description or name, e.g. Neo]:crew member: _dev_live crew -' \
+    '--scope=[the files it owns, comma-separated globs]:scope: ' \
+    '--why=[assign a member the crew'\''s RACI does not make Responsible]:why: ' \
+    '--activity=[the step'\''s kind of work, an id from dev crew raci]:kind of work: _dev_live activities -' \
+    '--allow=[the irreversible actions this member may take in the step]:allow: ' \
+    ':plan step: _dev_live steps -'
+}
+
+_dev__progress__begin() {
+  _arguments -s -S : \
+    '(- *)'{-h,--help}'[show this help message and exit]' \
+    ':plan step: _dev_live steps -'
+}
+
+_dev__progress__add() {
+  _arguments -s -S : \
+    '(- *)'{-h,--help}'[show this help message and exit]' \
+    '--why=[why it was not in the plan]:why: ' \
+    '*:spec: '
+}
+
+_dev__progress__reopen() {
+  _arguments -s -S : \
+    '(- *)'{-h,--help}'[show this help message and exit]' \
+    '--why=[the reason (kept in the run'\''s history)]:why: ' \
+    ':plan step: _dev_live steps -'
+}
+
+_dev__progress__skip() {
+  _arguments -s -S : \
+    '(- *)'{-h,--help}'[show this help message and exit]' \
+    '--why=[the reason (kept in the run'\''s history)]:why: ' \
+    ':plan step: _dev_live steps -'
+}
+
+_dev__progress__history() {
+  _arguments -s -S : \
+    '(- *)'{-h,--help}'[show this help message and exit]'
+}
+
+_dev__progress__time() {
+  _arguments -s -S : \
+    '(- *)'{-h,--help}'[show this help message and exit]' \
+    '--days=[days]:days: ' \
+    '(--project -p)'{-p+,--project=}'[project]:project: _dev_live projects -'
+}
+
+_dev__time() {
+  _arguments -s -S : \
+    '(- *)'{-h,--help}'[show this help message and exit]' \
+    '--days=[days]:days: ' \
+    '(--project -p)'{-p+,--project=}'[project]:project: _dev_live projects -'
+}
+
+_dev__delivery() {
+  local curcontext=$curcontext state state_descr line ret=1
+  typeset -A opt_args
+  _arguments -C -s -S : \
+    '(- *)'{-h,--help}'[show this help message and exit]' \
+    '(--project -p)'{-p+,--project=}'[project]:project: _dev_live projects -' \
+    '(--initiative -i)'{-i+,--initiative=}'[initiative]:initiative: _dev_live initiatives -' \
+    '--json[json]' \
+    '1: :->cmds' \
+    '*:: :->args' && ret=0
+  case $state in
+    (cmds)
+      local -a cmds
+      cmds=(
+        'apply:record the policy'
+      )
+      _describe -t commands 'dev delivery command' cmds && ret=0 ;;
+    (args)
+      curcontext=${curcontext%:*:*}:dev-delivery-$words[1]:
+      case $words[1] in
+        (apply) _dev__delivery__apply && ret=0 ;;
+      esac ;;
+  esac
+  return ret
+}
+
+_dev__delivery__apply() {
+  _arguments -s -S : \
+    '(- *)'{-h,--help}'[show this help message and exit]' \
+    '*--set=[e.g. versioning=semver, test_gate="a]:key=value: ' \
+    '--why=[the reason (recorded in the policy changelog and the commit)]:why: ' \
+    '--tasks[create a work item for every gap]' \
+    '(--project -p)'{-p+,--project=}'[project]:project: _dev_live projects -' \
+    '(--initiative -i)'{-i+,--initiative=}'[initiative]:initiative: _dev_live initiatives -'
+}
+
+_dev__lesson() {
+  local curcontext=$curcontext state state_descr line ret=1
+  typeset -A opt_args
+  _arguments -C -s -S : \
+    '(- *)'{-h,--help}'[show this help message and exit]' \
+    '(--project -p)'{-p+,--project=}'[project]:project: _dev_live projects -' \
+    '(--initiative -i)'{-i+,--initiative=}'[initiative]:initiative: _dev_live initiatives -' \
+    '--global[a lesson for every project]' \
+    '--all[every scope, including retired lessons]' \
+    '--search=[search]:search: ' \
+    '1: :->cmds' \
+    '*:: :->args' && ret=0
+  case $state in
+    (cmds)
+      local -a cmds
+      cmds=(
+        'add:record a lesson'
+        'anchor:add where a lesson applies'
+        'show:a lesson with its history'
+        'recur:it happened again'
+        'retire:no longer applies'
+        'restore:bring back a forgotten lesson'
+        'prevent:automation now prevents it'
+        'scan:signals worth a lesson'
+        'review:recurring lessons to automate, stale ones to retire'
+        'ls:lessons for this project, its initiatives and global ones'
+      )
+      _describe -t commands 'dev lesson command' cmds && ret=0 ;;
+    (args)
+      curcontext=${curcontext%:*:*}:dev-lesson-$words[1]:
+      case $words[1] in
+        (add) _dev__lesson__add && ret=0 ;;
+        (anchor) _dev__lesson__anchor && ret=0 ;;
+        (show) _dev__lesson__show && ret=0 ;;
+        (recur) _dev__lesson__recur && ret=0 ;;
+        (retire) _dev__lesson__retire && ret=0 ;;
+        (restore) _dev__lesson__restore && ret=0 ;;
+        (prevent) _dev__lesson__prevent && ret=0 ;;
+        (scan) _dev__lesson__scan && ret=0 ;;
+        (review) _dev__lesson__review && ret=0 ;;
+        (ls) _dev__lesson__ls && ret=0 ;;
+      esac ;;
+  esac
+  return ret
+}
+
+_dev__lesson__add() {
+  _arguments -s -S : \
+    '(- *)'{-h,--help}'[show this help message and exit]' \
+    '--kind=[kind]:kind:(bug mistake process tooling security performance design)' \
+    '--severity=[severity]:severity:(low medium high)' \
+    '--happened=[happened]:happened: ' \
+    '--cause=[the root cause]:cause: ' \
+    '--fix=[fix]:fix: ' \
+    '--prevent=[the rule that stops it happening again]:prevent: ' \
+    '--detect=[how to notice it early]:detect: ' \
+    '*--evidence=[commit, PR, CI run, task]:evidence: ' \
+    '*--tag=[tag]:tag: ' \
+    '--retire-when=[the outside condition that makes it obsolete]:retire when: ' \
+    '--why=[why]:why: ' \
+    '*--file=[a file or glob it applies to]:file: ' \
+    '*--command=[the command words it applies to, e.g. "git push --force"]:command: ' \
+    '*--activity=[the kind of work it applies to]:kind of work: _dev_live activities -' \
+    '*--error=[an error signature]:error: ' \
+    '*--stack=[the stack it applies to]:stack: ' \
+    '(--project -p)'{-p+,--project=}'[project]:project: _dev_live projects -' \
+    '(--initiative -i)'{-i+,--initiative=}'[initiative]:initiative: _dev_live initiatives -' \
+    '--global[global]' \
+    '*:title: '
+}
+
+_dev__lesson__anchor() {
+  _arguments -s -S : \
+    '(- *)'{-h,--help}'[show this help message and exit]' \
+    '--why=[why (kept in the lesson'\''s history)]:why: ' \
+    '*--file=[a file or glob it applies to]:file: ' \
+    '*--command=[the command words it applies to, e.g. "git push --force"]:command: ' \
+    '*--activity=[the kind of work it applies to]:kind of work: _dev_live activities -' \
+    '*--error=[an error signature]:error: ' \
+    '*--stack=[the stack it applies to]:stack: ' \
+    '(--project -p)'{-p+,--project=}'[project]:project: _dev_live projects -' \
+    '(--initiative -i)'{-i+,--initiative=}'[initiative]:initiative: _dev_live initiatives -' \
+    '--global[global]' \
+    '*:selector: '
+}
+
+_dev__lesson__show() {
+  _arguments -s -S : \
+    '(- *)'{-h,--help}'[show this help message and exit]' \
+    '--evidence=[evidence]:evidence: ' \
+    '--why=[why]:why: ' \
+    '(--project -p)'{-p+,--project=}'[project]:project: _dev_live projects -' \
+    '(--initiative -i)'{-i+,--initiative=}'[initiative]:initiative: _dev_live initiatives -' \
+    '--global[global]' \
+    '*:selector: '
+}
+
+_dev__lesson__recur() {
+  _arguments -s -S : \
+    '(- *)'{-h,--help}'[show this help message and exit]' \
+    '--evidence=[evidence]:evidence: ' \
+    '--why=[why]:why: ' \
+    '(--project -p)'{-p+,--project=}'[project]:project: _dev_live projects -' \
+    '(--initiative -i)'{-i+,--initiative=}'[initiative]:initiative: _dev_live initiatives -' \
+    '--global[global]' \
+    '*:selector: '
+}
+
+_dev__lesson__retire() {
+  _arguments -s -S : \
+    '(- *)'{-h,--help}'[show this help message and exit]' \
+    '--evidence=[evidence]:evidence: ' \
+    '--why=[why]:why: ' \
+    '(--project -p)'{-p+,--project=}'[project]:project: _dev_live projects -' \
+    '(--initiative -i)'{-i+,--initiative=}'[initiative]:initiative: _dev_live initiatives -' \
+    '--global[global]' \
+    '*:selector: '
+}
+
+_dev__lesson__restore() {
+  _arguments -s -S : \
+    '(- *)'{-h,--help}'[show this help message and exit]' \
+    '--evidence=[evidence]:evidence: ' \
+    '--why=[why]:why: ' \
+    '(--project -p)'{-p+,--project=}'[project]:project: _dev_live projects -' \
+    '(--initiative -i)'{-i+,--initiative=}'[initiative]:initiative: _dev_live initiatives -' \
+    '--global[global]' \
+    '*:selector: '
+}
+
+_dev__lesson__prevent() {
+  _arguments -s -S : \
+    '(- *)'{-h,--help}'[show this help message and exit]' \
+    '--by=[by]:by:(test lint type guard skill ci rule doc)' \
+    '--ref=[the test, rule or file that prevents it]:ref: ' \
+    '--why=[why]:why: ' \
+    '(--project -p)'{-p+,--project=}'[project]:project: _dev_live projects -' \
+    '(--initiative -i)'{-i+,--initiative=}'[initiative]:initiative: _dev_live initiatives -' \
+    '--global[global]' \
+    '*:selector: '
+}
+
+_dev__lesson__scan() {
+  _arguments -s -S : \
+    '(- *)'{-h,--help}'[show this help message and exit]' \
+    '--days=[days]:days: ' \
+    '(--project -p)'{-p+,--project=}'[project]:project: _dev_live projects -' \
+    '(--initiative -i)'{-i+,--initiative=}'[initiative]:initiative: _dev_live initiatives -' \
+    '--global[global]'
+}
+
+_dev__lesson__review() {
+  _arguments -s -S : \
+    '(- *)'{-h,--help}'[show this help message and exit]' \
+    '(--project -p)'{-p+,--project=}'[project]:project: _dev_live projects -' \
+    '(--initiative -i)'{-i+,--initiative=}'[initiative]:initiative: _dev_live initiatives -' \
+    '--global[global]'
+}
+
+_dev__lesson__ls() {
+  _arguments -s -S : \
+    '(- *)'{-h,--help}'[show this help message and exit]' \
+    '(--project -p)'{-p+,--project=}'[project]:project: _dev_live projects -' \
+    '(--initiative -i)'{-i+,--initiative=}'[initiative]:initiative: _dev_live initiatives -' \
+    '--global[global]'
+}
+
+_dev__sleep() {
+  _arguments -s -S : \
+    '(- *)'{-h,--help}'[show this help message and exit]' \
+    '--dry-run[show what would change]' \
+    '--quiet[quiet]'
+}
+
+_dev__jobs() {
+  local curcontext=$curcontext state state_descr line ret=1
+  typeset -A opt_args
+  _arguments -C -s -S : \
+    '(- *)'{-h,--help}'[show this help message and exit]' \
+    '1: :->cmds' \
+    '*:: :->args' && ret=0
+  case $state in
+    (cmds)
+      local -a cmds
+      cmds=(
+        'ls:every job with its schedule, last run and next run'
+        'install:write and load the launchd jobs from the config'
+        'show:a job with its recent runs'
+        'run:run a job now'
+        'enable:turn a job on'
+        'disable:turn a job off'
+        'logs:a job'\''s log'
+        'set:change a schedule'
+        'journal:past runs of every job'
+      )
+      _describe -t commands 'dev jobs command' cmds && ret=0 ;;
+    (args)
+      curcontext=${curcontext%:*:*}:dev-jobs-$words[1]:
+      case $words[1] in
+        (ls) _dev__jobs__ls && ret=0 ;;
+        (install) _dev__jobs__install && ret=0 ;;
+        (show) _dev__jobs__show && ret=0 ;;
+        (run) _dev__jobs__run && ret=0 ;;
+        (enable) _dev__jobs__enable && ret=0 ;;
+        (disable) _dev__jobs__disable && ret=0 ;;
+        (logs) _dev__jobs__logs && ret=0 ;;
+        (set) _dev__jobs__set && ret=0 ;;
+        (journal) _dev__jobs__journal && ret=0 ;;
+      esac ;;
+  esac
+  return ret
+}
+
+_dev__jobs__ls() {
+  _arguments -s -S : \
+    '(- *)'{-h,--help}'[show this help message and exit]'
+}
+
+_dev__jobs__install() {
+  _arguments -s -S : \
+    '(- *)'{-h,--help}'[show this help message and exit]'
+}
+
+_dev__jobs__show() {
+  _arguments -s -S : \
+    '(- *)'{-h,--help}'[show this help message and exit]' \
+    '--why=[why]:why: ' \
+    '(--lines -n)'{-n+,--lines=}'[lines]:lines: ' \
+    ':name: '
+}
+
+_dev__jobs__run() {
+  _arguments -s -S : \
+    '(- *)'{-h,--help}'[show this help message and exit]' \
+    '--why=[why]:why: ' \
+    '(--lines -n)'{-n+,--lines=}'[lines]:lines: ' \
+    ':name: '
+}
+
+_dev__jobs__enable() {
+  _arguments -s -S : \
+    '(- *)'{-h,--help}'[show this help message and exit]' \
+    '--why=[why]:why: ' \
+    '(--lines -n)'{-n+,--lines=}'[lines]:lines: ' \
+    ':name: '
+}
+
+_dev__jobs__disable() {
+  _arguments -s -S : \
+    '(- *)'{-h,--help}'[show this help message and exit]' \
+    '--why=[why]:why: ' \
+    '(--lines -n)'{-n+,--lines=}'[lines]:lines: ' \
+    ':name: '
+}
+
+_dev__jobs__logs() {
+  _arguments -s -S : \
+    '(- *)'{-h,--help}'[show this help message and exit]' \
+    '--why=[why]:why: ' \
+    '(--lines -n)'{-n+,--lines=}'[lines]:lines: ' \
+    ':name: '
+}
+
+_dev__jobs__set() {
+  _arguments -s -S : \
+    '(- *)'{-h,--help}'[show this help message and exit]' \
+    '--every=[every]:every: ' \
+    '--at=[at]:at: ' \
+    '--weekly=[weekly]:weekly: ' \
+    '--why=[why]:why: ' \
+    ':name: '
+}
+
+_dev__jobs__journal() {
+  _arguments -s -S : \
+    '(- *)'{-h,--help}'[show this help message and exit]' \
+    '--days=[days]:days: ' \
+    '(--lines -n)'{-n+,--lines=}'[lines]:lines: '
+}
+
+_dev__audit() {
+  _arguments -s -S : \
+    '(- *)'{-h,--help}'[show this help message and exit]' \
+    '--days=[the last N days]:days: ' \
+    '--since=[from this date]:since: ' \
+    '--until=[up to this date, included]:until: ' \
+    '--action=[only actions starting with this, e.g. guard, job, task, rm]:action: ' \
+    '--actor=[user@host or agent]:actor: ' \
+    '(--project -p)'{-p+,--project=}'[a project id, e.g. owner/repo]:project: _dev_live projects ids' \
+    '--member=[a crew member, e.g. Tank]:crew member: _dev_live crew -' \
+    '--category=[category]:category:(change decision refusal security lifecycle job release data config)' \
+    '--severity=[this severity and above]:severity:(info notice warning critical)' \
+    '--outcome=[outcome]:outcome:(ok blocked failed recorded)' \
+    '--grep=[a regular expression over the action, target, detail and why]:grep: ' \
+    '--team[every machine]' \
+    '--format=[table, json or csv]:format: ' \
+    '--json[the same as --format json]' \
+    '(--out -o)'{-o+,--out=}'[export: write to this file]:out:_files' \
+    '(--lines -n)'{-n+,--lines=}'[lines]:lines: ' \
+    '--quiet[quiet]' \
+    '::audit cmd:(verify export show stats config)' \
+    '::ref: '
+}
+
+_dev__report() {
+  _arguments -s -S : \
+    '(- *)'{-h,--help}'[show this help message and exit]' \
+    '--days=[days]:days: ' \
+    '(--initiative -i)'{-i+,--initiative=}'[initiative]:initiative: _dev_live initiatives -' \
+    '(--project -p)'{-p+,--project=}'[project]:project: _dev_live projects -' \
+    '(--out -o)'{-o+,--out=}'[write to a file instead of stdout]:out:_files'
+}
+
+_dev__rm() {
+  _arguments -s -S : \
+    '(- *)'{-h,--help}'[show this help message and exit]' \
+    '(--recursive -R -r)'{-r,-R,--recursive}'[allow directories]' \
+    '-f[ignore paths that do not exist]' \
+    '--tracked[allow git-tracked paths]' \
+    '--discard[allow losing uncommitted, untracked or gitignored local work]' \
+    '--force-in-use[allow paths a running process has open]' \
+    '--outside[allow paths outside ~/Development and temp roots]' \
+    '--dry-run[show the plan, change nothing]' \
+    '--why=[reason recorded in the manifest]:why: ' \
+    '--undo=[restore the last N dev rm runs]::n: ' \
+    '--list[recent deletions]' \
+    '*:paths:_files'
+}
+
+_dev__mv() {
+  _arguments -s -S : \
+    '(- *)'{-h,--help}'[show this help message and exit]' \
+    '(--force -f)'{-f,--force}'[replace what exists]' \
+    '--dry-run[show the plan, change nothing]' \
+    '--cross[allow moving across repositories or out of the workspace]' \
+    '*:src… dest:_files'
+}
+
+_dev__cp() {
+  _arguments -s -S : \
+    '(- *)'{-h,--help}'[show this help message and exit]' \
+    '(--force -f)'{-f,--force}'[replace what exists]' \
+    '--dry-run[show the plan, change nothing]' \
+    '(--recursive -R -r)'{-r,-R,--recursive}'[copy directories]' \
+    '--skip-heavy[copy without .git, node_modules and .venv]' \
+    '--include-heavy[copy .git, node_modules and .venv too]' \
+    '*:src… dest:_files'
+}
+
+_dev__files() {
+  _arguments -s -S : \
+    '(- *)'{-h,--help}'[show this help message and exit]' \
+    '(--depth -d)'{-d+,--depth=}'[levels to expand]:depth: ' \
+    '--all[include gitignored files and build output]' \
+    '--max=[line cap (default 80, 0 = none)]:max: ' \
+    '--json[json]' \
+    '::path:_files -/'
+}
+
+_dev__find() {
+  _arguments -s -S : \
+    '(- *)'{-h,--help}'[show this help message and exit]' \
+    '*'{-e+,--ext=}'[extension, repeatable]:ext: ' \
+    '(--type -t)'{-t+,--type=}'[files or directories only]:type:(f d)' \
+    '(--glob -g)'{-g,--glob}'[treat the pattern as a glob]' \
+    '--regex[treat the pattern as a regex]' \
+    '(--full-path -p)'{-p,--full-path}'[match the path, not only the name]' \
+    '--changed[only paths git reports as changed or untracked]' \
+    '--since=[changed within 30m, 2h, 2d, 1w or since YYYY-MM-DD]:since: ' \
+    '--size=[+1M (at least) or -100k]:size: ' \
+    '--all[include gitignored files]' \
+    '--max=[result cap (default 60, 0 = none)]:max: ' \
+    '--json[json]' \
+    '::pattern: ' \
+    '::path:_files -/'
+}
+
+_dev__grep() {
+  _arguments -s -S : \
+    '(- *)'{-h,--help}'[show this help message and exit]' \
+    '(--ignore-case -i)'{-i,--ignore-case}'[ignore case]' \
+    '(--case-sensitive -s)'{-s,--case-sensitive}'[default: smart case]' \
+    '(--fixed -F)'{-F,--fixed}'[literal string, not a regex]' \
+    '(--word -w)'{-w,--word}'[whole words]' \
+    '*'{-g+,--glob=}'[include/exclude files]:glob: ' \
+    '*'{-t+,--type=}'[ripgrep file type]:type: ' \
+    '(--files -l)'{-l,--files}'[matching files only]' \
+    '(--context -C)'{-C+,--context=}'[context lines]:n: ' \
+    '--count[matching lines per file]' \
+    '--max=[line cap (default 60, 0 = none)]:max: ' \
+    '--max-per-file=[default 5]:max per file: ' \
+    '--all[include gitignored files]' \
+    '--ast[structural search with ast-grep]' \
+    '--lang=[language for --ast]:lang: ' \
+    '--json[json]' \
+    ':pattern: ' \
+    '*:paths:_files'
+}
+
+_dev__diff() {
+  _arguments -s -S : \
+    '(- *)'{-h,--help}'[show this help message and exit]' \
+    '(--cached --staged)'{--staged,--cached}'[staged changes]' \
+    '--word[word diff]' \
+    '--names[changed paths only]' \
+    '--syntax[structural diff with difftastic]' \
+    '(--unified -U)'{-U+,--unified=}'[context lines]:n: ' \
+    '--max=[total line cap]:max: ' \
+    '--fold=[fold files with more changed lines]:fold: ' \
+    '--no-index[compare two paths directly, outside git]' \
+    '*:branch: _dev_live branches - --files'
+}
+
+_dev__stubs() {
+  _arguments -s -S : \
+    '(- *)'{-h,--help}'[show this help message and exit]' \
+    '--staged[only what is staged for the next commit]' \
+    '--since=[changes since this ref]:branch: _dev_live branches -' \
+    '--all[every tracked file, not only the changes]' \
+    '--json[json]' \
+    '(--project -p)'{-p+,--project=}'[another project]:project: _dev_live projects -' \
+    '*:paths:_files'
+}
+
+_dev__team() {
+  _arguments -s -S : \
+    '(- *)'{-h,--help}'[show this help message and exit]' \
+    '--hours=[hours]:hours: '
+}
+
+_dev__initiative() {
+  local curcontext=$curcontext state state_descr line ret=1
+  typeset -A opt_args
+  _arguments -C -s -S : \
+    '(- *)'{-h,--help}'[show this help message and exit]' \
+    '1: :->cmds' \
+    '*:: :->args' && ret=0
+  case $state in
+    (cmds)
+      local -a cmds
+      cmds=(
+        'new:create an initiative'
+        'add:add a member project'
+        'rm:rm a member project'
+        'ls:list initiatives'
+        'show:an initiative with its member projects'
+      )
+      _describe -t commands 'dev initiative command' cmds && ret=0 ;;
+    (args)
+      curcontext=${curcontext%:*:*}:dev-initiative-$words[1]:
+      case $words[1] in
+        (new) _dev__initiative__new && ret=0 ;;
+        (add) _dev__initiative__add && ret=0 ;;
+        (rm) _dev__initiative__rm && ret=0 ;;
+        (ls) _dev__initiative__ls && ret=0 ;;
+        (show) _dev__initiative__show && ret=0 ;;
+      esac ;;
+  esac
+  return ret
+}
+
+_dev__initiative__new() {
+  _arguments -s -S : \
+    '(- *)'{-h,--help}'[show this help message and exit]' \
+    '--title=[title]:title: ' \
+    '--projects=[comma-separated project ids]:project: _dev_live projects ids' \
+    ':slug: '
+}
+
+_dev__initiative__add() {
+  _arguments -s -S : \
+    '(- *)'{-h,--help}'[show this help message and exit]' \
+    ':initiative: _dev_live initiatives -' \
+    ':project: _dev_live projects -'
+}
+
+_dev__initiative__rm() {
+  _arguments -s -S : \
+    '(- *)'{-h,--help}'[show this help message and exit]' \
+    ':initiative: _dev_live initiatives -' \
+    ':project: _dev_live projects -'
+}
+
+_dev__initiative__ls() {
+  _arguments -s -S : \
+    '(- *)'{-h,--help}'[show this help message and exit]'
+}
+
+_dev__initiative__show() {
+  _arguments -s -S : \
+    '(- *)'{-h,--help}'[show this help message and exit]' \
+    ':initiative: _dev_live initiatives -'
+}
+
+_dev__overview() {
+  _arguments -s -S : \
+    '(- *)'{-h,--help}'[show this help message and exit]' \
+    '--json[json]' \
+    '--days=[days]:days: ' \
+    '--all[include archived projects]'
+}
+
+_dev__standup() {
+  _arguments -s -S : \
+    '(- *)'{-h,--help}'[show this help message and exit]' \
+    '--days=[days]:days: '
+}
+
+_dev__dashboard() {
+  _arguments -s -S : \
+    '(- *)'{-h,--help}'[show this help message and exit]' \
+    '--no-open[print the one-time link instead of opening the browser]' \
+    '--status[is a server running?]' \
+    '--stop[stop the running server]' \
+    '--export=[write the static, self-contained page to FILE]:file:_files' \
+    '--path[write the static page devkit keeps and print its path]'
+}
+
+_dev__config() {
+  _arguments -s -S : \
+    '(- *)'{-h,--help}'[show this help message and exit]' \
+    '--quiet[quiet]' \
+    '--check[one line and exit 1 when a setting differs]' \
+    '::config cmd:(diff repair show edit validate lock unlock status set)' \
+    '::key: ' \
+    '::value: '
+}
+
+_dev__agents() {
+  _arguments -s -S : \
+    '(- *)'{-h,--help}'[show this help message and exit]' \
+    '--section=[rules: one section, by number]:section: ' \
+    '--json[json]' \
+    '--model=[model for the self-test session]:model: ' \
+    '(--verbose -v)'{-v,--verbose}'[show the agent'\''s reply]' \
+    '::action:(status test rules)' \
+    '::agent:(claude codex all)'
+}
+
+_dev__calver() {
+  _arguments -s -S : \
+    '(- *)'{-h,--help}'[show this help message and exit]' \
+    '--next[print only the next version]'
+}
+
+_dev__plugin() {
+  _arguments -s -S : \
+    '(- *)'{-h,--help}'[show this help message and exit]' \
+    ':action:(validate)'
+}
+
+_dev__guard() {
+  _arguments -s -S : \
+    '(- *)'{-h,--help}'[show this help message and exit]' \
+    '--write=[evaluate a file write instead]:path:_files' \
+    '--agent=[agent]:agent:(claude codex)' \
+    '--cwd=[cwd]:cwd:_files -/' \
+    ':check:(check)' \
+    '*:command: '
+}
+
+_dev__wt() {
+  local curcontext=$curcontext state state_descr line ret=1
+  typeset -A opt_args
+  _arguments -C -s -S : \
+    '(- *)'{-h,--help}'[show this help message and exit]' \
+    '1: :->cmds' \
+    '*:: :->args' && ret=0
+  case $state in
+    (cmds)
+      local -a cmds
+      cmds=(
+        'new:create a managed worktree'
+        'ls:list worktrees'
+        'rm:remove a worktree safely'
+      )
+      _describe -t commands 'dev wt command' cmds && ret=0 ;;
+    (args)
+      curcontext=${curcontext%:*:*}:dev-wt-$words[1]:
+      case $words[1] in
+        (new) _dev__wt__new && ret=0 ;;
+        (ls) _dev__wt__ls && ret=0 ;;
+        (rm) _dev__wt__rm && ret=0 ;;
+      esac ;;
+  esac
+  return ret
+}
+
+_dev__wt__new() {
+  _arguments -s -S : \
+    '(- *)'{-h,--help}'[show this help message and exit]' \
+    '--base=[start point for a new branch]:branch: _dev_live branches -' \
+    '--repo=[project (default: the one you are in)]:project: _dev_live projects -' \
+    '--no-deps[do not clone node_modules]' \
+    ':branch: '
+}
+
+_dev__wt__ls() {
+  _arguments -s -S : \
+    '(- *)'{-h,--help}'[show this help message and exit]' \
+    '--all[all]'
+}
+
+_dev__wt__rm() {
+  _arguments -s -S : \
+    '(- *)'{-h,--help}'[show this help message and exit]' \
+    ':worktree: _dev_live worktrees -'
+}
+
+_dev__backup() {
+  _arguments -s -S : \
+    '(- *)'{-h,--help}'[show this help message and exit]' \
+    '--all[every local branch with commits only on this Mac]' \
+    '--accept-ci[push although the push starts]' \
+    '--public[the developer'\''s own action]' \
+    '--dry-run[every check, no push]' \
+    '(--project -p)'{-p+,--project=}'[with policy: the project]:project: _dev_live projects -' \
+    '--why=[with policy: why the project chooses it]:why: ' \
+    '--json[json]' \
+    '*:branch: _dev_live branches - policy'
+}
+
+_dev__sync() {
+  _arguments -s -S : \
+    '(- *)'{-h,--help}'[show this help message and exit]' \
+    '--offline[no network (cached PR data)]' \
+    '--scheduled[background mode]' \
+    '--no-push[no push]' \
+    '--quiet[quiet]'
+}
+
+_dev__du() {
+  _arguments -s -S : \
+    '(- *)'{-h,--help}'[show this help message and exit]' \
+    '--refresh[measure again now instead of reading the cache]' \
+    '--plan[only the plan to free space]' \
+    '--json[the measurement and the plan as JSON]' \
+    '::project: _dev_live projects -'
+}
+
+_dev__free() {
+  _arguments -s -S : \
+    '(- *)'{-h,--help}'[show this help message and exit]' \
+    '--safe[every item of the plan marked safe]' \
+    '(--yes -y)'{-y,--yes}'[do not ask first]' \
+    '*:n: '
+}
+
+_dev__gc() {
+  _arguments -s -S : \
+    '(- *)'{-h,--help}'[show this help message and exit]' \
+    '--safe[every item of the plan marked safe]' \
+    '(--yes -y)'{-y,--yes}'[do not ask first]' \
+    '--apply[the unattended cleanup]' \
+    '--auto-only[only what is safe without a person]' \
+    '(--verbose -v)'{-v,--verbose}'[with --apply'\''s plan, also what is kept and why]' \
+    '*:n: '
+}
+
+_dev__canary() {
+  _arguments -s -S : \
+    '(- *)'{-h,--help}'[show this help message and exit]' \
+    '--days=[days]:days: ' \
+    '--limit=[limit]:limit: '
+}
+
+_dev__ci() {
+  _arguments -s -S : \
+    '(- *)'{-h,--help}'[show this help message and exit]' \
+    '(--project -p)'{-p+,--project=}'[the project (id or a unique part of its name) for status, audit, init…]:project: _dev_live projects -' \
+    '--sha=[watch: the commit whose runs to follow]:sha: ' \
+    '--timeout=[watch: minutes before giving up]:timeout: ' \
+    '--quiet[watch: no progress lines, only the result]' \
+    '--commands[print only the run commands]' \
+    '--runs[also list recent CI runs]' \
+    '--status[live runs with job and step progress and an ETA]' \
+    '--branch=[runs of this branch]:branch: _dev_live branches -' \
+    '--all-branches[all branches]' \
+    '--watch[refresh every 15 s until no run is in progress]' \
+    '--limit=[limit]:limit: ' \
+    '--all-jobs[list every running job]' \
+    '--json[json]' \
+    '--run[run the workflow `run:` steps locally, in order, and record the…]' \
+    '--mark-passed[record that you ran the full local suite on the current tree]' \
+    '--note=[with --mark-passed]:note: ' \
+    '--evidence[show whether HEAD has local CI evidence]' \
+    '--dry-run[with --run: show the plan without running it]' \
+    '--keep-going[with --run: do not stop at the first failure]' \
+    '--step-timeout=[with --run: minutes per step]:min: ' \
+    '--resume[with --run: re-run failed and never-run steps, and passed steps the…]' \
+    '--provider=[audit or init]:provider:(github gitlab bitbucket azure)' \
+    '--fix[audit: apply the safe GitHub Actions fixes in the working tree]' \
+    '--strict[audit: exit 1 on medium findings too]' \
+    '--stack=[init: the stack]:stack:(auto python node java-maven java-gradle go php docker)' \
+    '--force[init: overwrite an existing pipeline file]' \
+    '::project: _dev_live projects - status audit init watch'
+}
+
+_dev__branch() {
+  local curcontext=$curcontext state state_descr line ret=1
+  typeset -A opt_args
+  _arguments -C -s -S : \
+    '(- *)'{-h,--help}'[show this help message and exit]' \
+    '1: :->cmds' \
+    '*:: :->args' && ret=0
+  case $state in
+    (cmds)
+      local -a cmds
+      cmds=(
+        'new:create <type>/<topic> from an up-to-date origin/<default> and switch to…'
+        'rename:rename the current branch'
+        'ls:local branches'
+        'clean:delete local branches that are merged or gone upstream'
+        'embargo:keep a branch off the remote'
+      )
+      _describe -t commands 'dev branch command' cmds && ret=0 ;;
+    (args)
+      curcontext=${curcontext%:*:*}:dev-branch-$words[1]:
+      case $words[1] in
+        (new) _dev__branch__new && ret=0 ;;
+        (rename) _dev__branch__rename && ret=0 ;;
+        (ls) _dev__branch__ls && ret=0 ;;
+        (clean) _dev__branch__clean && ret=0 ;;
+        (embargo) _dev__branch__embargo && ret=0 ;;
+      esac ;;
+  esac
+  return ret
+}
+
+_dev__branch__new() {
+  _arguments -s -S : \
+    '(- *)'{-h,--help}'[show this help message and exit]' \
+    '--ticket=[ticket key or issue number to put in front of the topic]:ticket: ' \
+    '--base=[start point (default origin/<default>)]:branch: _dev_live branches -' \
+    ':name: '
+}
+
+_dev__branch__rename() {
+  _arguments -s -S : \
+    '(- *)'{-h,--help}'[show this help message and exit]' \
+    '--ticket=[ticket]:ticket: ' \
+    ':name: '
+}
+
+_dev__branch__ls() {
+  _arguments -s -S : \
+    '(- *)'{-h,--help}'[show this help message and exit]' \
+    '--offline[no fetch and no GitHub lookups]' \
+    '--json[json]'
+}
+
+_dev__branch__clean() {
+  _arguments -s -S : \
+    '(- *)'{-h,--help}'[show this help message and exit]' \
+    '--offline[no fetch and no GitHub lookups]' \
+    '--json[json]' \
+    '--apply[delete them]'
+}
+
+_dev__branch__embargo() {
+  _arguments -s -S : \
+    '(- *)'{-h,--help}'[show this help message and exit]' \
+    '--why=[why it stays off the remote]:why: ' \
+    '--until=[the step or date after which it may be public]:until: ' \
+    '--lift[end the embargo of the branch]' \
+    '--json[json]' \
+    '::branch: _dev_live branches -'
+}
+
+_dev__commit() {
+  _arguments -s -S : \
+    '(- *)'{-h,--help}'[show this help message and exit]' \
+    '*'{-m+,--message=}'[header `type(scope)]:message: ' \
+    '--why=[first paragraph of the body]:why: ' \
+    '*--body=[a body paragraph]:body: ' \
+    '--verified=[last paragraph of the body]:verified: ' \
+    '*--refs=[trailer `Refs:`, an issue]:refs: ' \
+    '--breaking=[trailer `BREAKING CHANGE:`]:breaking: ' \
+    '(--all -a)'{-a,--all}'[stage every tracked change first]' \
+    '--amend[amend HEAD (keeps its message without -m)]' \
+    '--wip[save everything as a WIP commit]' \
+    '--unwip[undo the WIP commit at HEAD, keeping its changes]' \
+    '*:paths:_files'
+}
+
+_dev__rebase() {
+  _arguments -s -S : \
+    '(- *)'{-h,--help}'[show this help message and exit]' \
+    '--base=[rebase onto this ref instead of origin/<default>]:branch: _dev_live branches -' \
+    '--continue[cont]' \
+    '--abort[abort]' \
+    '--skip[skip]'
+}
+
+_dev__push() {
+  _arguments -s -S : \
+    '(- *)'{-h,--help}'[show this help message and exit]' \
+    '--force-with-lease[after a rebase or amend, on your own branch]' \
+    '--ci-passed[attest that the full local suite passed on this tree]' \
+    '--allow-behind[first push although origin/<default> moved on]' \
+    '--dry-run[dry run]'
+}
+
+_dev__pr() {
+  local curcontext=$curcontext state state_descr line ret=1
+  typeset -A opt_args
+  _arguments -C -s -S : \
+    '(- *)'{-h,--help}'[show this help message and exit]' \
+    '1: :->cmds' \
+    '*:: :->args' && ret=0
+  case $state in
+    (cmds)
+      local -a cmds
+      cmds=(
+        'create:open the PR of the pushed branch, body from the PR template'
+        'view:one-line state of a PR'
+        'ls:your PRs and PRs waiting for your review'
+        'checks:check summary and failing jobs with trimmed logs'
+        'merge:merge with the repository'\''s method when checks pass and reviews allow'
+        'ready:mark a draft ready for review'
+        'comment:comment on a PR'
+        'review:approve, request changes or comment'
+        'diff:files changed with +/−'
+      )
+      _describe -t commands 'dev pr command' cmds && ret=0 ;;
+    (args)
+      curcontext=${curcontext%:*:*}:dev-pr-$words[1]:
+      case $words[1] in
+        (create) _dev__pr__create && ret=0 ;;
+        (view) _dev__pr__view && ret=0 ;;
+        (ls) _dev__pr__ls && ret=0 ;;
+        (checks) _dev__pr__checks && ret=0 ;;
+        (merge) _dev__pr__merge && ret=0 ;;
+        (ready) _dev__pr__ready && ret=0 ;;
+        (comment) _dev__pr__comment && ret=0 ;;
+        (review) _dev__pr__review && ret=0 ;;
+        (diff) _dev__pr__diff && ret=0 ;;
+      esac ;;
+  esac
+  return ret
+}
+
+_dev__pr__create() {
+  _arguments -s -S : \
+    '(- *)'{-h,--help}'[show this help message and exit]' \
+    '--title=[Conventional Commit title]:title: ' \
+    '--base=[base branch (default]:branch: _dev_live branches -' \
+    '--draft[open as a draft]' \
+    '--ready[ready for review although delivery.draft_pr opens drafts]' \
+    '--fill[fill from the commits and the template]' \
+    '--body-file=[your own body]:body file:_files' \
+    '--edit[edit the pre-filled body in $EDITOR first]' \
+    '--ci-passed[attest that the local suite passed on HEAD]' \
+    '--dry-run[print the title and the pre-filled body]' \
+    '--lang=[language of generated text]:lang: '
+}
+
+_dev__pr__view() {
+  _arguments -s -S : \
+    '(- *)'{-h,--help}'[show this help message and exit]' \
+    '--body[body]' \
+    '--json[json]' \
+    '::number: '
+}
+
+_dev__pr__ls() {
+  _arguments -s -S : \
+    '(- *)'{-h,--help}'[show this help message and exit]' \
+    '--all[also the other open PRs]' \
+    '--all-projects[across projects]' \
+    '--offline[with --all-projects]' \
+    '--json[json]'
+}
+
+_dev__pr__checks() {
+  _arguments -s -S : \
+    '(- *)'{-h,--help}'[show this help message and exit]' \
+    '--watch[gh pr checks --watch]' \
+    '--fail-fast[with --watch]' \
+    '--interval=[with --watch]:interval: ' \
+    '--timeout=[with --watch]:timeout: ' \
+    '--lines=[log lines per failing job]:lines: ' \
+    '--json[json]' \
+    '::number: '
+}
+
+_dev__pr__merge() {
+  _arguments -s -S : \
+    '(- *)'{-h,--help}'[show this help message and exit]' \
+    '--squash[method]' \
+    '--merge[method]' \
+    '--rebase[method]' \
+    '--auto[let GitHub merge when the checks pass]' \
+    '--keep-branch[keep branch]' \
+    '--dry-run[dry run]' \
+    '::number: '
+}
+
+_dev__pr__ready() {
+  _arguments -s -S : \
+    '(- *)'{-h,--help}'[show this help message and exit]' \
+    '--ci-passed[attest that the local suite passed on HEAD]' \
+    '--lang=[language of generated text]:lang: ' \
+    '::number: '
+}
+
+_dev__pr__comment() {
+  _arguments -s -S : \
+    '(- *)'{-h,--help}'[show this help message and exit]' \
+    '(--message -m)'{-m+,--message=}'[text]:message: ' \
+    '--body-file=[body file]:body file:_files' \
+    '::number: '
+}
+
+_dev__pr__review() {
+  _arguments -s -S : \
+    '(- *)'{-h,--help}'[show this help message and exit]' \
+    '(--message -m)'{-m+,--message=}'[text]:message: ' \
+    '--body-file=[body file]:body file:_files' \
+    '(--approve --comment --request-changes)--approve[verdict]' \
+    '(--approve --comment --request-changes)--request-changes[verdict]' \
+    '(--approve --comment --request-changes)--comment[verdict]' \
+    '::number: '
+}
+
+_dev__pr__diff() {
+  _arguments -s -S : \
+    '(- *)'{-h,--help}'[show this help message and exit]' \
+    '--stat[per-file +/−]' \
+    '--patch[patch]' \
+    '--name-only[name only]' \
+    '--json[json]' \
+    '::number: '
+}
+
+_dev__run() {
+  local curcontext=$curcontext state state_descr line ret=1
+  typeset -A opt_args
+  _arguments -C -s -S : \
+    '(- *)'{-h,--help}'[show this help message and exit]' \
+    '1: :->cmds' \
+    '*:: :->args' && ret=0
+  case $state in
+    (cmds)
+      local -a cmds
+      cmds=(
+        'ls:recent runs of this branch'
+        'view:a run'\''s failing jobs'
+        'rerun:re-run failed jobs of a run, only for a proven flaky test'
+      )
+      _describe -t commands 'dev run command' cmds && ret=0 ;;
+    (args)
+      curcontext=${curcontext%:*:*}:dev-run-$words[1]:
+      case $words[1] in
+        (ls) _dev__run__ls && ret=0 ;;
+        (view) _dev__run__view && ret=0 ;;
+        (rerun) _dev__run__rerun && ret=0 ;;
+      esac ;;
+  esac
+  return ret
+}
+
+_dev__run__ls() {
+  _arguments -s -S : \
+    '(- *)'{-h,--help}'[show this help message and exit]' \
+    '--branch=[branch]:branch: _dev_live branches -' \
+    '--all-branches[all branches]' \
+    '--limit=[limit]:limit: ' \
+    '--json[json]'
+}
+
+_dev__run__view() {
+  _arguments -s -S : \
+    '(- *)'{-h,--help}'[show this help message and exit]' \
+    '--failed[failed]' \
+    '--lines=[lines]:lines: ' \
+    '--json[json]' \
+    '::id: '
+}
+
+_dev__run__rerun() {
+  _arguments -s -S : \
+    '(- *)'{-h,--help}'[show this help message and exit]' \
+    '--flaky=[the flaky test and the evidence]:reason: ' \
+    '--all-jobs[all jobs]' \
+    ':id: '
+}
+
+_dev__release() {
+  _arguments -s -S : \
+    '(- *)'{-h,--help}'[show this help message and exit]' \
+    '--version=[YY.MM.PATCH (default]:version: ' \
+    '--notes-file=[release notes]:notes file:_files' \
+    '--ci-passed[attest that the local suite passed on HEAD]' \
+    '--sign[signed tag (default: git config tag.gpgSign)]' \
+    '--draft[draft]' \
+    '--prerelease[prerelease]' \
+    '--dry-run[dry run]'
+}
+
+_dev__issue() {
+  local curcontext=$curcontext state state_descr line ret=1
+  typeset -A opt_args
+  _arguments -C -s -S : \
+    '(- *)'{-h,--help}'[show this help message and exit]' \
+    '1: :->cmds' \
+    '*:: :->args' && ret=0
+  case $state in
+    (cmds)
+      local -a cmds
+      cmds=(
+        'ls:'
+        'view:'
+        'create:'
+      )
+      _describe -t commands 'dev issue command' cmds && ret=0 ;;
+    (args)
+      curcontext=${curcontext%:*:*}:dev-issue-$words[1]:
+      case $words[1] in
+        (ls) _dev__issue__ls && ret=0 ;;
+        (view) _dev__issue__view && ret=0 ;;
+        (create) _dev__issue__create && ret=0 ;;
+      esac ;;
+  esac
+  return ret
+}
+
+_dev__issue__ls() {
+  _arguments -s -S : \
+    '(- *)'{-h,--help}'[show this help message and exit]' \
+    '--mine[assigned to you]' \
+    '*--label=[label]:label: ' \
+    '--state=[state]:state:(open closed all)' \
+    '--limit=[limit]:limit: ' \
+    '--json[json]'
+}
+
+_dev__issue__view() {
+  _arguments -s -S : \
+    '(- *)'{-h,--help}'[show this help message and exit]' \
+    '--comments[comments]' \
+    '--json[json]' \
+    ':number: '
+}
+
+_dev__issue__create() {
+  _arguments -s -S : \
+    '(- *)'{-h,--help}'[show this help message and exit]' \
+    '--title=[title]:title: ' \
+    '--body=[body]:body: ' \
+    '--body-file=[body file]:body file:_files' \
+    '*--label=[label]:label: ' \
+    '--assignee=[assignee]:assignee: '
+}
+
+_dev__git() {
+  _arguments -s -S : \
+    '(- *)'{-h,--help}'[show this help message and exit]' \
+    '-C+[run in DIR]:dir:_files -/' \
+    '*::args: _dev_exec git'
+}
+
+_dev__gh() {
+  _arguments -s -S : \
+    '(- *)'{-h,--help}'[show this help message and exit]' \
+    '*::args: _dev_exec gh'
+}
+
+_dev__test() {
+  local curcontext=$curcontext state state_descr line ret=1
+  typeset -A opt_args
+  _arguments -C -s -S : \
+    '(- *)'{-h,--help}'[show this help message and exit]' \
+    '--failed[only the tests that failed last time]' \
+    '--affected[only the tests your changes can affect]' \
+    '--all[the full suite]' \
+    '--since=[compare with REF instead of the merge-base with origin/<default>]:branch: _dev_live branches -' \
+    '--runner=[only this runner]:name: ' \
+    '--json[json]' \
+    '(--verbose -v)'{-v,--verbose}'[stream the runner'\''s full output]' \
+    '(--project -p)'{-p+,--project=}'[another project]:project: _dev_live projects -' \
+    '1: :->cmds' \
+    '*:: :->args' && ret=0
+  case $state in
+    (cmds)
+      local -a cmds
+      cmds=(
+        'run:run tests: paths, --failed, --affected or --all'
+        'plan:what would run and why'
+        'prove:each new or changed test passes N times with the change and fails…'
+        'audit:tests that cannot fail'
+      )
+      _describe -t commands 'dev test command' cmds && ret=0 ;;
+    (args)
+      curcontext=${curcontext%:*:*}:dev-test-$words[1]:
+      case $words[1] in
+        (run) _dev__test__run && ret=0 ;;
+        (plan) _dev__test__plan && ret=0 ;;
+        (prove) _dev__test__prove && ret=0 ;;
+        (audit) _dev__test__audit && ret=0 ;;
+      esac ;;
+  esac
+  return ret
+}
+
+_dev__test__run() {
+  _arguments -s -S : \
+    '(- *)'{-h,--help}'[show this help message and exit]' \
+    '--failed[only the tests that failed last time]' \
+    '--affected[only the tests your changes can affect]' \
+    '--all[the full suite]' \
+    '--since=[compare with REF instead of the merge-base with origin/<default>]:branch: _dev_live branches -' \
+    '--runner=[only this runner]:name: ' \
+    '--json[json]' \
+    '(--verbose -v)'{-v,--verbose}'[stream the runner'\''s full output]' \
+    '*:paths:_files'
+}
+
+_dev__test__plan() {
+  _arguments -s -S : \
+    '(- *)'{-h,--help}'[show this help message and exit]' \
+    '--all[the whole suite]' \
+    '--since=[since]:branch: _dev_live branches -' \
+    '--runner=[runner]:name: ' \
+    '--json[json]'
+}
+
+_dev__test__prove() {
+  _arguments -s -S : \
+    '(- *)'{-h,--help}'[show this help message and exit]' \
+    '--since=[the base without your change]:branch: _dev_live branches -' \
+    '--runs=[green runs required with the change]:n: ' \
+    '--runner=[runner]:name: ' \
+    '--json[json]' \
+    '*:tests:_files'
+}
+
+_dev__test__audit() {
+  _arguments -s -S : \
+    '(- *)'{-h,--help}'[show this help message and exit]' \
+    '--changed[only test files changed on this branch, staged, unstaged or untracked]' \
+    '--since=[changed against REF instead of the default branch]:branch: _dev_live branches -' \
+    '--json[machine-readable output]' \
+    '--min-severity=[hide findings below this severity]:min severity:(low medium high)' \
+    '*--rule=[only this rule]:rule:(debug-output duplicate-test empty-test mock-only no-assertion no-production-reference skipped-without-reason sleep-in-test smoke-only snapshot-only swallowed-failure trivial-assertion vague-name)' \
+    '*:paths:_files'
+}
+
+_dev__mcp() {
+  _arguments -s -S : \
+    '(- *)'{-h,--help}'[show this help message and exit]'
+}
+
+_dev__desktop() {
+  _arguments -s -S : \
+    '(- *)'{-h,--help}'[show this help message and exit]' \
+    '--no-validate[pack without the mcpb CLI]' \
+    '--json[json]' \
+    ':action:(pack status)'
+}
+
+_dev__crew() {
+  local curcontext=$curcontext state state_descr line ret=1
+  typeset -A opt_args
+  _arguments -C -s -S : \
+    '(- *)'{-h,--help}'[show this help message and exit]' \
+    '--json[the roster and the live crew state as JSON]' \
+    '--latest[the most recent running progress run on this Mac instead of this…]' \
+    '1: :->cmds' \
+    '*:: :->args' && ret=0
+  case $state in
+    (cmds)
+      local -a cmds
+      cmds=(
+        'raci:who does, approves, is consulted on and informed about each kind of work'
+        'set:change a member'\''s definition for the whole team'
+        'history:the team'\''s changes to the crew, with who and why'
+        'rules:every crew rule, the devkit check that enforces it, and its state'
+        'graph:the live session as one graph'
+        'show:everything about one member'
+        'brief:a ready-to-paste brief for a member, with the spawn line'
+        'sync:write plugin/agents/<id>.md from config/crew.json'
+        'ask:a question to the tech lead'
+        'answer:answer a crew message by its id'
+        'inbox:messages for you not delivered yet'
+        'mode:guided (the developer decides) or auto'
+        'decide:record the developer'\''s answer to a decision'
+        'decisions:this run'\''s decisions'
+        'route:who should do a task, ranked with the reasons'
+        'delegate:add a step for another crew member'
+        'decline:hand a delegated step back to the tech lead, with the reason'
+        'next:the dispatcher'
+      )
+      _describe -t commands 'dev crew command' cmds && ret=0 ;;
+    (args)
+      curcontext=${curcontext%:*:*}:dev-crew-$words[1]:
+      case $words[1] in
+        (raci) _dev__crew__raci && ret=0 ;;
+        (set) _dev__crew__set && ret=0 ;;
+        (history) _dev__crew__history && ret=0 ;;
+        (rules) _dev__crew__rules && ret=0 ;;
+        (graph) _dev__crew__graph && ret=0 ;;
+        (show) _dev__crew__show && ret=0 ;;
+        (brief) _dev__crew__brief && ret=0 ;;
+        (sync) _dev__crew__sync && ret=0 ;;
+        (ask) _dev__crew__ask && ret=0 ;;
+        (answer) _dev__crew__answer && ret=0 ;;
+        (inbox) _dev__crew__inbox && ret=0 ;;
+        (mode) _dev__crew__mode && ret=0 ;;
+        (decide) _dev__crew__decide && ret=0 ;;
+        (decisions) _dev__crew__decisions && ret=0 ;;
+        (route) _dev__crew__route && ret=0 ;;
+        (delegate) _dev__crew__delegate && ret=0 ;;
+        (decline) _dev__crew__decline && ret=0 ;;
+        (next) _dev__crew__next && ret=0 ;;
+      esac ;;
+  esac
+  return ret
+}
+
+_dev__crew__raci() {
+  _arguments -s -S : \
+    '(- *)'{-h,--help}'[show this help message and exit]' \
+    '--set=[change it for the whole team]:set: ' \
+    '--why=[the reason (required with --set)]:why: ' \
+    '--markdown[the whole matrix as a Markdown table]' \
+    '::kind of work: _dev_live activities,crew -'
+}
+
+_dev__crew__set() {
+  _arguments -s -S : \
+    '(- *)'{-h,--help}'[show this help message and exit]' \
+    '--why=[the reason, kept in the crew'\''s history]:why: ' \
+    ':crew member: _dev_live crew -' \
+    ':field: ' \
+    '*:value: '
+}
+
+_dev__crew__history() {
+  _arguments -s -S : \
+    '(- *)'{-h,--help}'[show this help message and exit]'
+}
+
+_dev__crew__rules() {
+  _arguments -s -S : \
+    '(- *)'{-h,--help}'[show this help message and exit]'
+}
+
+_dev__crew__graph() {
+  _arguments -s -S : \
+    '(- *)'{-h,--help}'[show this help message and exit]' \
+    '--latest[the most recent running progress run on this Mac instead of this…]' \
+    '--mermaid[a Mermaid flowchart]' \
+    '--json[the graph as nodes and edges, for the dashboard and tools]'
+}
+
+_dev__crew__show() {
+  _arguments -s -S : \
+    '(- *)'{-h,--help}'[show this help message and exit]' \
+    '*:crew member: _dev_live crew -'
+}
+
+_dev__crew__brief() {
+  _arguments -s -S : \
+    '(- *)'{-h,--help}'[show this help message and exit]' \
+    '--scope=[the files the member owns, comma-separated globs]:scope: ' \
+    '--step=[the plan step it does]:plan step: _dev_live steps -' \
+    '--activity=[the kind of work, an id from the crew'\''s RACI]:kind of work: _dev_live activities -' \
+    ':crew member: _dev_live crew -' \
+    '*:task: '
+}
+
+_dev__crew__sync() {
+  _arguments -s -S : \
+    '(- *)'{-h,--help}'[show this help message and exit]' \
+    '--check[only report the files that differ]'
+}
+
+_dev__crew__ask() {
+  _arguments -s -S : \
+    '(- *)'{-h,--help}'[show this help message and exit]' \
+    '--to=[the tech lead]:crew member: _dev_live crew -' \
+    '--decision[a decision point]' \
+    '--options=[the options, separated by |]:options: ' \
+    '--recommend=[the option you recommend, e.g. A]:recommend: ' \
+    '--irreversible=[the irreversible action it leads to]:irreversible: ' \
+    '--target=[what that action acts on]:target: ' \
+    '--approves=[with --decision]:plan step: _dev_live steps -' \
+    '*:text: '
+}
+
+_dev__crew__answer() {
+  _arguments -s -S : \
+    '(- *)'{-h,--help}'[show this help message and exit]' \
+    ':id: ' \
+    '*:text: '
+}
+
+_dev__crew__inbox() {
+  _arguments -s -S : \
+    '(- *)'{-h,--help}'[show this help message and exit]'
+}
+
+_dev__crew__mode() {
+  _arguments -s -S : \
+    '(- *)'{-h,--help}'[show this help message and exit]' \
+    '--approve=[irreversible actions auto mode may take, each with its target…]:approve: ' \
+    '::mode:(guided auto)'
+}
+
+_dev__crew__decide() {
+  _arguments -s -S : \
+    '(- *)'{-h,--help}'[show this help message and exit]' \
+    ':id: ' \
+    '*:text: '
+}
+
+_dev__crew__decisions() {
+  _arguments -s -S : \
+    '(- *)'{-h,--help}'[show this help message and exit]' \
+    '--pending[only those waiting for the developer]' \
+    '--ask=[the exact question and options to ask the developer with the question…]:id: '
+}
+
+_dev__crew__route() {
+  _arguments -s -S : \
+    '(- *)'{-h,--help}'[show this help message and exit]' \
+    '--files=[the files it touches, comma-separated]:files: ' \
+    '--plan[propose a member for every plan step nobody owns]' \
+    '--apply[with --plan: assign them]' \
+    '*:task: '
+}
+
+_dev__crew__delegate() {
+  _arguments -s -S : \
+    '(- *)'{-h,--help}'[show this help message and exit]' \
+    '--to=[a crew name or id, or auto]:crew member: _dev_live crew -' \
+    '--scope=[the files they own, comma-separated globs]:scope: ' \
+    '--after=[the step it waits for]:plan step: _dev_live steps -' \
+    '--estimate=[e.g. 30m, 1h]:estimate: ' \
+    '--files=[the files it touches, comma-separated]:files: ' \
+    '*:task: '
+}
+
+_dev__crew__decline() {
+  _arguments -s -S : \
+    '(- *)'{-h,--help}'[show this help message and exit]' \
+    '--why=[why you cannot take it]:why: ' \
+    '*:plan step: _dev_live steps -'
+}
+
+_dev__crew__next() {
+  _arguments -s -S : \
+    '(- *)'{-h,--help}'[show this help message and exit]' \
+    '--first=[the tech lead]:plan step: _dev_live steps -' \
+    '--why=[why that step goes ahead of the order]:why: '
+}
+
+_dev__doctor() {
+  _arguments -s -S : \
+    '(- *)'{-h,--help}'[show this help message and exit]'
+}
+
+_dev__install() {
+  _arguments -s -S : \
+    '(- *)'{-h,--help}'[show this help message and exit]' \
+    '--only=[comma list:…]:only:_values -s , only config tools cli git handoff instructions skills claude codex desktop docker docs launchd prompt shell' \
+    '--version=[switch to a pinned copy kept from an earlier install]:pinned copy: _dev_live versions -' \
+    '--unverified[pin HEAD although it is neither a release nor tested]' \
+    '--why=[the reason for --unverified, recorded in the audit]:why: ' \
+    '--commit-template=[dev setup'\''s answer for the commit template]:commit template:(yes no)'
+}
+
+_dev__docs() {
+  _arguments -s -S : \
+    '(- *)'{-h,--help}'[show this help message and exit]' \
+    '--online[also check external links]' \
+    '--fix[apply markdownlint'\''s automatic fixes]' \
+    '--no-prose[skip Vale]' \
+    ':check:(check)' \
+    '*:paths:_files'
+}
+
+_dev__sec() {
+  _arguments -s -S : \
+    '(- *)'{-h,--help}'[show this help message and exit]' \
+    '--history[also scan the git history for secrets]' \
+    '--config=[Semgrep rule set]:config: ' \
+    '(--verbose -v)'{-v,--verbose}'[verbose]' \
+    ':scan:(scan)' \
+    '::project: _dev_live projects -'
+}
+
+_dev__diagram() {
+  _arguments -s -S : \
+    '(- *)'{-h,--help}'[show this help message and exit]' \
+    '*::rest: _dev_live - - render check new --files'
+}
+
+_dev__setup() {
+  _arguments -s -S : \
+    '(- *)'{-h,--help}'[show this help message and exit]' \
+    '--remove[with prompt, commit-template or shell]' \
+    '(--yes -y)'{-y,--yes}'[accept every default]' \
+    '--skip-packages[do not install Homebrew/npm packages]' \
+    '::what:(prompt commit-template shell)'
+}
+
+_dev__prompt() {
+  _arguments -s -S : \
+    '(- *)'{-h,--help}'[show this help message and exit]' \
+    '::action:(refresh)'
+}
+
+_dev__update() {
+  _arguments -s -S : \
+    '(- *)'{-h,--help}'[show this help message and exit]'
+}
+
+_dev__docker() {
+  _arguments -s -S : \
+    '(- *)'{-h,--help}'[show this help message and exit]' \
+    ':action:(up down status trim prune autostart-on autostart-off)'
+}
+
+_dev__version() {
+  _arguments -s -S : \
+    '(- *)'{-h,--help}'[show this help message and exit]'
+}
+
+_dev__completion() {
+  _arguments -s -S : \
+    '(- *)'{-h,--help}'[show this help message and exit]' \
+    ':shell:(zsh bash)'
+}
+
+if [[ $funcstack[1] == _dev ]]; then
+  _dev "$@"
+elif (( $+functions[compdef] )); then
+  compdef _dev dev
+fi

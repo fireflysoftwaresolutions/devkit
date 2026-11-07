@@ -3,6 +3,27 @@
 All notable changes to devkit. Versions follow CalVer `YY.MM.PATCH` (PATCH restarts at 0 each month); tags are
 `vYY.MM.PATCH`. Sections follow [Keep a Changelog](https://keepachangelog.com/).
 
+## [Unreleased]
+
+### Added
+
+- **Tab completion generated from `dev` itself.** `dev completion zsh|bash` prints it, and `shell/completions/_dev`
+  (zsh) and `shell/completions/dev.bash` (bash) are generated from the parser: every command, subcommand, option and
+  choice, with its help as the description, so a new command or flag is offered as soon as `dev` has it. The
+  hand-written file it replaces offered 68 of 75 commands (it missed `backup`, `free`, `gh`, `git`, `handoff-import`,
+  `mcp`, and `session`) and 37 options; the generated one offers all of them and 252 options. `dev hook`, which only
+  the agents' harness runs, stays out. A consistency check (D13) fails CI while the checked-in scripts
+  differ from the parser.
+- **Live values with descriptions:** project aliases, a project's worktrees, the work items of the project you are in,
+  the plan steps of its live run, crew members by id with their role, kinds of work, plans, branches, initiatives, and
+  pinned copies, wherever an argument takes one. A Tab waits at most 0.1 s for them and a second Tab within 10 s
+  costs under a millisecond.
+- **`dcd <project> <branch>` and `dev go <project> <branch>`** go to a project's worktree; `dcd` and `dwt` complete
+  like `dev go` and `dev wt new`.
+- **zsh helpers, with your yes (`dev setup shell`):** fzf pickers on <kbd>Ctrl</kbd>+<kbd>X</kbd> <kbd>i</kbd> (a work
+  item), <kbd>p</kbd> (a project) and <kbd>b</kbd> (a branch), `dpick`, and `dcd` without a project. An agent's
+  `--yes` is not consent, and keys you bound yourself keep your binding. `dev install` asks once.
+
 ## [26.11.3] - Unreleased
 
 Not released yet: the date is set when the release is tagged. This release installs devkit with one command, runs its

@@ -1737,6 +1737,58 @@ def install_prompt(starship: Path = None):
         note("not set up yet: dev setup prompt adds it to your prompt")
 
 
+# --------------------------------------------------------------------------- the zsh helpers
+# shell/devkit.zsh always loads Tab completion, `dcd` and `dwt`. The helpers that change how the shell behaves (fzf
+# pickers on Ctrl-X i, p and b, `dpick`, and `dcd` without a project picking one) stay off until the developer says
+# yes here; the answer is a file shell/devkit.zsh reads (completion.helpers_file), so ~/.zshrc is never edited for it.
+
+def setup_shell(assume_yes: bool = False, remove: bool = False, ask=None, say=_prompt_say) -> int:
+    """`dev setup shell`: ask the developer, then turn the zsh helpers on. `remove` turns them off. Consent is the
+    developer's: in an agent's call (anything but core.set_by_developer()), neither --yes nor a piped answer turns
+    anything on. -> exit code."""
+    from . import completion
+    if remove:
+        completion.set_helpers_mode("off")
+        say(f"  {ui.OK} The zsh helpers are off. Open a new terminal tab for it to take effect. Turn them on again: "
+            "dev setup shell")
+        return 0
+    if not core.set_by_developer():
+        say(f"  {ui.WARN} dev setup shell changes your shell's keys, so it needs your yes, typed in your own terminal: "
+            "an agent's --yes or a piped answer is not consent. Nothing changed; run it in a terminal: dev setup shell")
+        return 2
+    fzf = "fzf is installed" if shutil.which("fzf") else "fzf is not installed yet (brew install fzf); until then " \
+                                                          "the keys stay free"
+    say(f"\n  {ui.bold('zsh helpers')}\n  devkit can add fzf pickers to your shell ({fzf}):\n"
+        "    Ctrl-X i  a work item    Ctrl-X p  a project      Ctrl-X b  a branch\n"
+        "    dcd       with no project, pick a project or worktree to go to\n"
+        "    dpick     print a picked task, project, branch or worktree\n"
+        "  Keys you already bound keep your binding. Tab completion, dcd <alias> and dwt work either way.")
+    if not assume_yes:
+        answer = (ask or input)("  Turn them on? [Y/n] ")
+        if (answer or "").strip().lower() not in ("", "y", "yes"):
+            completion.set_helpers_mode("off")
+            say(f"  {ui.dim('Nothing changed. Turn them on later: dev setup shell')}")
+            return 0
+    completion.set_helpers_mode("on")
+    say(f"  {ui.OK} On. Open a new terminal tab to use them.\n    Turn them off: dev setup shell --remove")
+    return 0
+
+
+def install_shell():
+    """`dev install`'s step: keep the developer's answer; ask once, in their terminal, when there is none yet."""
+    from . import completion
+    step("zsh helpers")
+    m = completion.helpers_mode()
+    if m == "on":
+        done("on (fzf pickers on Ctrl-X i, p and b); turn them off: dev setup shell --remove")
+    elif m == "off":
+        done("off; turn them on: dev setup shell")
+    elif sys.stdin.isatty() and not _QUIET[0] and not os.environ.get("DEVKIT_JOB"):
+        setup_shell()
+    else:
+        note("not set up yet: dev setup shell turns on the fzf pickers")
+
+
 def run_install(only=None, unverified_why=None, version=None, as_pinned=False, commit_template=None) -> int:
     """`dev install`. From a checkout it pins the checkout (or switches to `version`), then starts itself again from
     that pinned copy (`--as-pinned`), which runs the steps, so every path they write names the copy; `only` re-applies
@@ -1759,7 +1811,7 @@ def run_install(only=None, unverified_why=None, version=None, as_pinned=False, c
     steps = [("config", ensure_config), ("tools", setup_tools), ("cli", install_cli), ("git", lambda: setup_git(commit_template=commit_template)), ("handoff", setup_handoff),
              ("instructions", write_agent_instructions), ("skills", install_skills), ("claude", setup_claude),
              ("codex", setup_codex), ("desktop", setup_desktop), ("docker", setup_docker), ("docs", setup_docs_tools),
-             ("launchd", setup_launchd), ("prompt", install_prompt)]
+             ("launchd", setup_launchd), ("prompt", install_prompt), ("shell", install_shell)]
     for name, fn in steps:
         if only and name not in only:
             continue
