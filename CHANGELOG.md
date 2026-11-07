@@ -365,6 +365,9 @@ devkit refuses more in this release. Each refusal says why and names the command
 
 ### Fixed
 
+- The audit trail's copy in the handoff repository never grows past 45 MB in one file: a month that would pass it is
+  held, with a warning in the trail and in `dev doctor`, instead of growing toward GitHub's 100 MB limit and stopping
+  every handoff push. Daily, compressed audit files replace the monthly ones in 26.11.4.
 - `install.sh` works on Intel Macs: it finds Homebrew in `/usr/local` as well as `/opt/homebrew`, and runs the wizard
   with Homebrew's Python from `brew --prefix` instead of a fixed `/opt/homebrew/bin/python3`. On Apple Silicon, it adds
   Homebrew to `~/.zprofile` when Homebrew was not on the `PATH`, so new terminals find `brew`, `gh`, and the toolchain.
@@ -416,6 +419,10 @@ devkit refuses more in this release. Each refusal says why and names the command
 
 ### Security
 
+- devkit trusts only its own Codex hooks. Before, it told Codex to trust every new hook in `~/.codex/hooks.json` at
+  each session start and every 6 hours, so a hook an agent wrote there would later run outside the guard. Now a hook
+  counts as devkit's only when it matches exactly what devkit renders (event, matcher, command, timeout); any other
+  hook stays untrusted, and `dev doctor` lists it among the hooks devkit did not write.
 - The guard sees what a command really runs: through wrapper flags that take a value (`nice -n 5`, `env -u X`,
   `sudo -u me`, `exec -a x`), interpreter flags (`python3 -u bin/dev`), arithmetic shifts that looked like heredocs,
   git and gh aliases, shell scripts run by their path, and `git push --repo=<url>`. `env -S` is refused, because the
