@@ -462,8 +462,8 @@ Conversations opened at the old path do not resume there. Start new ones from th
 ### An LSP plugin does nothing
 
 The Claude Code LSP plugins need their language servers: `typescript-language-server` and `typescript`, `pyright`,
-`jdtls` (which needs a Java 25 runtime) and `intelephense`. `dev doctor` checks that they are installed, and
-`dev setup` installs them for your stacks.
+`jdtls` (which needs a Java 25 runtime) and `intelephense`. `dev doctor` checks the ones for the stacks you chose
+(config `stacks`), and `dev setup` installs them.
 
 TypeScript 7 (the native port) ships no `tsserver.js`; `typescript-language-server` then falls back to another
 TypeScript install, so diagnostics may not match a TypeScript 7 project.
