@@ -303,6 +303,7 @@ Live progress of long agent work, with active time, a critical-path ETA and a pl
 | --- | --- |
 | `dev progress start "<goal>" [--plan "a=30m; b=1h after a [backend]; c"] [--estimate 2h] [--steps N] [--mode guided\|auto] [--replace --why "…"]` | Starts a run for the current session. While the session's run is live, a second start is refused: finish it with `dev progress done`, or replace it with `--replace --why "…"`, which keeps the reason in the new run. Each plan step can carry an estimate, the steps it waits for, and its kind of work in brackets: an id from `dev crew raci`, which decides the RACI check and the approver ([The crew › Kinds of work](crew.md#kinds-of-work-and-the-raci)); an unknown id is refused. Steps without an estimate share what `--estimate` leaves. `--mode` sets who takes the developer's decisions ([The crew](crew.md#guided-or-automatic)). Prints how long similar runs took here |
 | `dev progress step "<what finished>" --check "<evidence>" [--step <n or name>] [--next "…"] [--force]` | Closes the running step (or the one named) with its evidence, and prints the update, which is the status block with the plan under it, then the exact change made. Refused when the description does not match the step, a crew member still owns it, or its dependencies are open; `--no-check` when there is nothing to verify |
+| `dev progress step "<what finished>" --check "<evidence>" --approves "api, screens"` | The step's Check is also its verdict on the finished steps it names: `✓` approves them, `✗` or `⚠` sends them back. Refused, whole, when a named step is not done, has no kind of work, was done by the same member, or is approved by someone else in the RACI |
 | `dev progress note "<what is happening>" [--next "…"]` | An update while a step is still running: recorded and printed as the status block (Check `–` the step is still running), and no step changes state. From a crew member, it stays in its lane |
 | `dev progress add "<name>=<estimate> [after …] [<id>]" [--why "…"]` | Adds a step found during the work; add it when it starts. `[<id>]` declares its kind of work, as in a plan. From a crew member, the step goes to its own lane |
 | `dev progress assign <step> --to <member> [--scope "<globs>"] [--activity ID] [--allow push,pr] [--why "…"]` | Hands a step to a crew member; its time is that member's, and the guard keeps its edits inside the scope. `--activity` declares the step's kind of work (an id from `dev crew raci`, such as `backend` or `ux`), so the RACI check and the approver do not depend on the language of the step's name. `--allow` gives the member push and PR create in that step, each only with the developer's grant (`grant push <branch>`) or a verified decision. Refused when the crew's RACI does not make that member Responsible for the step's kind of work, unless `--why` gives the reason, which is recorded |
@@ -364,8 +365,9 @@ devkit's specialist agents. See [The crew](crew.md).
 | `dev crew delegate "<task>" [--to <name>\|auto] [--scope …] [--after <step>] [--estimate 30m] [--files a,b]` | A step for another member, with who asked; joins a working member's lane, or waits for Morpheus to launch it |
 | `dev crew decline "<step>" --why "…"` | Hands a delegated step back to Morpheus |
 | `dev crew next` | Ready to launch (with the commands), queued until a slot frees, waiting and why, and who is busy |
+| `dev crew next --first <step> --why "…"` | Morpheus launches that step ahead of the order; the reason is recorded and audited. Both options are required |
 | `dev crew ask "<text>" [--to <name>]` · `dev crew answer <id> "<text>"` · `dev crew inbox` | Messages between members; delivered with the recipient's next action |
-| `dev crew ask --decision "<question>" [--options "A \| B"] [--recommend A] [--irreversible push] [--target v26.11.4]` | A decision point: decided at once in auto mode, waits for the developer in guided mode or for irreversible actions. `--target` is what the irreversible action acts on; the developer's answer opens that action on that target once |
+| `dev crew ask --decision "<question>" [--options "A \| B"] [--recommend A] [--irreversible push] [--target v26.11.4] [--approves "api, screens"]` | A decision point: decided at once in auto mode, waits for the developer in guided mode or for irreversible actions. `--target` is what the irreversible action acts on; the developer's answer opens that action on that target once. `--approves` names the finished steps the developer's answer approves, checked against the plan |
 | `dev crew mode [guided\|auto] [--approve "push feat/*, release v26.11.4"]` · `dev crew decide <id> "<answer>"` · `dev crew decisions [--pending] [--ask <id>]` | The mode (`--approve` names each action with its target; publish and deploy never), the developer's answers (recorded by Morpheus only), and every decision with who took it. `--ask <id>` prints the exact question and options to ask with the question tool; only an answer to it, or a typed `approve <id>[: <option>]`, makes the decision the developer's |
 | `dev crew sync [--check]` | Regenerates the Claude Code agents from `config/crew.json` |
 
@@ -1123,7 +1125,7 @@ Serves devkit's tools over MCP (the Model Context Protocol) on standard input an
 extension's launcher runs it; you do not run it yourself. Each tool runs a `dev` command without a shell and with a
 timeout.
 
-### `dev config [diff | repair | show | edit | validate | lock | unlock | status] [--check] [--quiet]`
+### `dev config [diff | repair | show | edit | validate | set | lock | unlock | status] [--check] [--quiet]`
 
 Previews and enforces the agent settings that devkit manages. See [Agents](agents.md).
 
@@ -1135,6 +1137,7 @@ Previews and enforces the agent settings that devkit manages. See [Agents](agent
 | `dev config show` | The location of the config file and of devkit, and the effective configuration as JSON |
 | `dev config edit` | Opens `~/.config/devkit/config.json` in your editor, then validates it |
 | `dev config validate` | Checks the config file and devkit's own configuration files |
+| `dev config set <key> <value>` | Sets one key, such as `dev config set progress.max_parallel 6`. The value is read as JSON when it parses (`6`, `true`, `{"70": 0.5}`), otherwise as text. Only the developer runs it, in a terminal; an agent, a hook, or a job is refused. The value is checked against [Configuration](configuration.md), written atomically, and audited as `dev.config.set` |
 | `dev config lock` · `unlock` | Installs or removes a Claude Code managed-settings file (asks for your administrator password) that user settings cannot override |
 | `dev config status` | The lock state and the most recent configuration events |
 
