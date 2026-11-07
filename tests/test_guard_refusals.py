@@ -344,7 +344,7 @@ class TerminalLaunchersRunTheirCommand(unittest.TestCase):
                     "tmux new-session -d -s x 'dev install --only codex'", "tmux new-session -d -s x dev install",
                     "tmux -L sock new -d 'dev install'", "tmux new-window 'dev install'",
                     "tmux split-window -h 'dev install'", "tmux new-w 'dev install'", "tmux split 'dev install'",
-                    "tmux -2u new -d 'dev install'", "tmux kill-server \\; new -d 'dev install'",
+                    "tmux -2u new -d 'dev install'",
                     "expect -c 'spawn dev install; expect eof'", "expect -c 'spawn -noecho dev install'",
                     "expect -c 'exec dev install'",
                     "osascript -e 'tell application \"Terminal\" to do script \"dev install\"'",
@@ -432,7 +432,7 @@ class TerminalLaunchersRunTheirCommand(unittest.TestCase):
         # the commands that list, attach, read, or start a command (read by the launcher rule) stay open
         for cmd in ("tmux ls", "tmux new -d -s x", "tmux has -t x", "tmux kill-session -t x",
                     "tmux ls -F '#{session_name}'", "tmux capture-pane -p -t x", "tmux set -g mouse on",
-                    "tmux run -d 1", "tmux new -d -s x \\; split-window 'pytest -q'", "tmux new -d 'echo $HOME'"):
+                    "tmux run -d 1", "tmux new -d 'echo $HOME'"):
             with self.subTest(cmd=cmd):
                 self.assertIsNone(self.check(cmd))
 
@@ -504,36 +504,149 @@ class NulCharactersFailClosed(unittest.TestCase):
                                       "claude"))  # a NUL in the content is data
 
 
-class CommandLinesAreReadAsBashReadsThem(unittest.TestCase):
-    # Round nine: a backslash outside single quotes escapes the next character and a backslash-newline is a line
-    # continuation bash removes; a comment ends at its newline; a quoted or escaped `;` is a word bash passes on
-    # (tmux's command lists, find -exec … \;), while an operator `;` ends a command
+MARK = "\ue01b"  # the private-use character round nine's tokenizer used as a marker (the code reviewer's round nine)
+
+
+class CommandLinesAreReadWithTheBaseTokenizer(unittest.TestCase):
+    # Round ten, the tech lead's decision (lesson L-fz3qnrebvm5: refuse instead of emulating bash's grammar): `#` is an
+    # ordinary character, so the words after one are read as more commands; a quoted or escaped `;` ends a segment as
+    # an operator does; a backslash outside single quotes still escapes the next character, so `\'` opens no quote
 
     setUp = HookEventsAreTheHarnesss.setUp
     check = HookEventsAreTheHarnesss.check
 
-    def test_a_line_continuation_joins_the_words_bash_joins(self):
-        for cmd in ("dev \\\ninstall", "dev inst\\\nall", 'dev "inst\\\nall"'):
-            with self.subTest(cmd=cmd):
-                self.assertEqual(self.check(cmd), guard.INSTALL_REASON)
-        self.assertIn("force-push", self.check("git push --fo\\\nrce origin main") or "")
-        self.assertIn("Agents may not change or delete it", self.check("rm -rf \\\n~") or "")
-
-    def test_a_newline_after_an_escaped_quote_or_a_comment_ends_the_command(self):
-        for cmd in ("echo \\'\ndev install", 'echo \\"\ndev install', "ls # it's here\ndev install",
-                    "ls # a comment ends at its newline \\\ndev install",
-                    "echo a\\ #; dev install", "echo a#; dev install", "echo ${#x}; dev install"):
+    def test_a_newline_after_an_escaped_quote_ends_the_command(self):
+        for cmd in ("echo \\'\ndev install", 'echo \\"\ndev install', "echo a\\ #; dev install", "echo a#; dev install",
+                    "echo ${#x}; dev install"):
             with self.subTest(cmd=cmd):
                 self.assertEqual(self.check(cmd), guard.INSTALL_REASON)
 
-    def test_a_quoted_or_escaped_semicolon_is_a_word(self):
+    def test_a_hash_after_a_substitution_starts_no_comment(self):
+        # the code reviewer's round nine: bash and zsh run what follows `$(…)#`, `${x:- #}`, a backtick, `$((…))#`,
+        # `<(…)#` and `>(…)#`, and round nine's comment reading dropped it
+        for sub in ("echo $(true)#; ", "echo ${x:- #}; ", "echo `echo #`; ", "echo $((1+2))#; ", "echo <(true)#; ",
+                    "echo >(true)#; ", "echo $(true)#\n"):
+            with self.subTest(form=sub + "dev install"):
+                self.assertEqual(self.check(sub + "dev install"), guard.INSTALL_REASON)
+            with self.subTest(form=sub + "git push --force origin main"):
+                self.assertIn("force-push", self.check(sub + "git push --force origin main") or "")
+            with self.subTest(form=sub + "rm -rf ~"):
+                self.assertIn("Agents may not change or delete it", self.check(sub + "rm -rf ~") or "")
+
+    def test_a_semicolon_the_shell_passes_on_ends_a_segment(self):
+        # the base split: tmux's `\;` and find's `\;` end a segment, and the rules below read what follows
         self.assertEqual(guard.split_commands("tmux new -d \\; send-keys x"),
-                         [(["tmux", "new", "-d", ";", "send-keys", "x"], [])])
-        self.assertEqual(guard.split_commands("echo ';' \";\" 'a;b' x\\;; pwd"),
-                         [(["echo", ";", ";", "a;b", "x;"], []), (["pwd"], [])])
-        self.assertEqual(guard.split_commands("ls;pwd # x; y"), [(["ls"], []), (["pwd"], [])])
-        # so find's second -exec is read too
-        self.assertEqual(self.check("find . -name x -exec echo {} \\; -exec dev install \\;"), guard.INSTALL_REASON)
+                         [(["tmux", "new", "-d"], []), (["send-keys", "x"], [])])
+        self.assertEqual(guard.split_commands(f"echo '{MARK}'; tmux new -d ';' send-keys x"),
+                         [(["echo", MARK], []), (["tmux", "new", "-d"], []), (["send-keys", "x"], [])])
+
+
+class CommandsTheGuardCannotReadAreRefused(unittest.TestCase):
+    # Round ten, the tech lead's decision D10 (option C): once heredoc bodies are set aside, a command line the
+    # tokenizer cannot read is refused, at the top level and in the shell lines it runs (sh -c, eval, a heredoc a shell
+    # reads, xargs and find -exec). Before, it was allowed: `dev install # don't` ran, as did a command before a line
+    # with an unmatched quote. A script file or a sourced file is read as before
+
+    setUp = HookEventsAreTheHarnesss.setUp
+    check = HookEventsAreTheHarnesss.check
+
+    def test_an_unmatched_quote_is_refused_wherever_the_shell_runs_the_line(self):
+        for cmd in ("dev install # don't", "ls # it's here\ndev install",
+                    "dev install\necho \"x", "git push --force origin main # it's", "echo 'open",
+                    "sh -c \"dev install # don't\"", "bash -c \"ls # it's\ndev install\"", "eval \"echo it's\"",
+                    "echo x | xargs sh -c \"echo it's\"", "find . -exec sh -c \"echo it's\" \\;",
+                    "bash <<'EOF'\n# don't\ndev install\nEOF", "sudo sh -c 'echo \"x'"):
+            with self.subTest(cmd=cmd):
+                self.assertIn("cannot read this command", self.check(cmd) or "")
+
+    def test_heredoc_bodies_quoted_messages_and_script_files_stay_open(self):
+        # a heredoc body no shell reads is data; the guard reads a script file or a sourced file as before
+        Path(self.cwd, "x.sh").write_text("# don't run this by hand\necho hi\n")
+        for cmd in ("cat <<'EOF' > notes.md\n# it's a heredoc\nEOF", "git commit -m \"it's done\"",
+                    "dev commit -m \"fix(guard): don't read comments\" --why \"it's safer\" --verified \"tests pass\"",
+                    "git commit -m \"$(cat <<'EOF'\nfix: x\n\nIt's the body.\nEOF\n)\"",
+                    "python3 - <<'EOF'\n# it's python\nprint('x')\nEOF", "bash x.sh", "source x.sh",
+                    "ls # list\npwd", "echo \"it's\" 'a \"b\"'"):
+            with self.subTest(cmd=cmd):
+                self.assertIsNone(self.check(cmd))
+
+
+class FindReadsEveryCommandItRuns(unittest.TestCase):
+    # Round ten: with the base split, find's `\;`, `\(` and `\)` end a segment, so the rest of its expression arrives
+    # as a segment of its own; a segment that starts with a find primary or operator is read as find's, so each
+    # -exec, -execdir, -ok and -okdir command is read, also after `\;` and inside `\( … \)`
+
+    setUp = HookEventsAreTheHarnesss.setUp
+    check = HookEventsAreTheHarnesss.check
+
+    def test_each_command_find_runs_is_read(self):
+        for cmd in ("find . -exec echo {} \\; -exec dev install \\;", "find . -exec echo {} ';' -exec dev install ';'",
+                    "find . -exec echo {} \\; -name x -exec dev install \\;",
+                    "find . -exec echo {} \\; ! -name x -exec dev install \\;",
+                    "find . -exec echo {} \\; -execdir dev install \\;", "find . -exec echo {} \\; -ok dev install \\;",
+                    "find . -exec echo {} \\; -okdir dev install \\;", "find . \\( -name x \\) -exec dev install \\;",
+                    "find . \\( -exec dev install \\; \\)", "find . -name a -o \\( -exec dev install {} + \\)",
+                    f"echo '{MARK}'; find . -exec echo {{}} \\; -exec dev install \\;",
+                    "sh -c 'find . -exec echo {} \\; -exec dev install \\;'"):
+            with self.subTest(cmd=cmd):
+                self.assertEqual(self.check(cmd), guard.INSTALL_REASON)
+        self.assertIn("force-push", self.check("find . -exec echo {} \\; -exec git push --force origin main \\;") or "")
+        self.assertIn("Agents may not change or delete it",
+                      self.check("find . -exec echo {} \\; \\( -exec rm -rf ~ \\; \\)") or "")
+        for cmd in ("find . -type f -exec grep -l foo {} \\;", "find . -name x -exec echo {} \\; -print",
+                    "find . \\( -name '*.pyc' -o -name '*.pyo' \\) -print"):
+            with self.subTest(cmd=cmd):
+                self.assertIsNone(self.check(cmd))
+
+
+class TmuxListsAndBuiltFormatsAreRefused(unittest.TestCase):
+    # Round ten, the code reviewer's round nine findings 2 and 3. Agents have no need for tmux command lists: with the
+    # base split, a list's `\;`, `';'` or `";"` ends a segment, so a segment right after a tmux call across `;` that
+    # starts with a tmux command (by name, alias or prefix) or a word the shell fills in is refused as a list, and so
+    # is a tmux word that is or ends in `;`. A `#(…)` format can be built without the literal `#(`: by appending
+    # (`set -a`), by expanding formats into an option (`set -F`), or by expanding a value again (`#{E:…}`, `#{T:…}`)
+
+    setUp = HookEventsAreTheHarnesss.setUp
+    check = HookEventsAreTheHarnesss.check
+
+    def test_a_tmux_command_list_is_refused_however_the_semicolon_is_written(self):
+        for cmd in ("tmux new -d \\; send-keys -t x 'dev install' Enter", "tmux new -d ';' send-keys x Enter",
+                    "tmux new -d \";\" send-keys x Enter", "tmux new -d ';;' send-keys x Enter",
+                    "tmux new -d x\\; send-keys x", "tmux new -d 'sh;' send-keys x C-m", "tmux new -d \\; kill-server",
+                    "tmux kill-server \\; new -d 'dev install'", "tmux new -d -s x \\; split-window 'pytest -q'",
+                    "tmux ls \\; if true 'run ls'", "tmux new -d \\; set -g default-command 'dev install' \\; neww",
+                    "tmux new -d \\; send x", "tmux new -d \\; $C x", "sudo tmux new -d \\; send-keys x",
+                    "sh -c \"tmux new -d \\\\; send-keys x\"",
+                    f"echo '{MARK}'; tmux new -d \\; send-keys -t x 'dev install' Enter",
+                    f"tmux new -d \\; send-keys -t x 'dev install' Enter \\; display '{MARK}'",
+                    f"echo '{MARK}'; tmux new -d ';' send-keys x Enter",
+                    "python3 -c \"import os; os.system('tmux new -d \\\\\\\\; kill-server')\"",
+                    # a newline after a tmux call reads as a `;`: the guard cannot tell them apart, so it fails closed
+                    "tmux new -d -s x\nls"):
+            with self.subTest(cmd=cmd):
+                self.assertEqual(self.check(cmd), guard.TERMINAL_TYPING_REASON)
+        for cmd in ("tmux new -d -s x; tmux ls", "tmux new -d -s x && ls -la", "tmux new -d -s x; sleep 1",
+                    "tmux kill-server; echo done", "tmux ls\ngit status"):
+            with self.subTest(cmd=cmd):
+                self.assertIsNone(self.check(cmd))
+
+    def test_a_format_built_from_pieces_is_refused(self):
+        # the code reviewer's round nine: `set -g @x '#'`, then `set -ga @x '(dev install)'`, then `display -p
+        # '#{E:@x}'` runs it; so do `set -gF` and `#{T:…}`
+        for cmd in ("tmux set -ga @x '(dev install)'", "tmux set -a @x '(dev install)'", "tmux set-option -ag @x x",
+                    "tmux setw -ga @x x", "tmux set-window-option -a @x x", "tmux set -gF status-left '#{@x}'",
+                    "tmux set -F @y '#{@x}'", "tmux set-o -gF @y x", "tmux display -p '#{E:@x}'",
+                    "tmux display -p '#{T:@x}'", "tmux display -p '#{E;=10:@x}'", "tmux display -p '#{T;p10:@x}'",
+                    "tmux display -p '#{p10;E:@x}'", "tmux display -p -t x '#{E:pane_title}'",
+                    "tmux ls -F '#{E:@x}'", "tmux new -d -n '#{T:@x}'",
+                    "tmux set -g @x '#'; tmux set -ga @x '(dev install)'; tmux display -p '#{E:@x}'"):
+            with self.subTest(cmd=cmd):
+                self.assertEqual(self.check(cmd), guard.TERMINAL_TYPING_REASON)
+        for cmd in ("tmux set -g @x '#'", "tmux display -p '#{session_name}'", "tmux ls -F '#{=10:session_name}'",
+                    "tmux display -p '#{t:session_created}'", "tmux set -g status-left '#{session_name} '",
+                    "tmux setw -g mode-keys vi", "tmux set -p @x y"):
+            with self.subTest(cmd=cmd):
+                self.assertIsNone(self.check(cmd))
 
 
 class InstallFromCodeIsTheDevelopers(unittest.TestCase):

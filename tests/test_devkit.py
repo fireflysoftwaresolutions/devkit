@@ -197,8 +197,10 @@ class GuardBashTests(unittest.TestCase):
         self.assertEqual(self.bash("python3 - <<EOF\nprint('git push --force')\nEOF"), "allow")
         self.assertEqual(self.bash("cat <<EOF > ~/Desktop/x.txt\nhi\nEOF", agent="codex"), "deny")
 
-    def test_unparseable_is_allowed(self):
-        self.assertEqual(self.bash("echo 'unterminated"), "allow")
+    def test_unparseable_is_refused(self):
+        # D10 (round ten): a line the tokenizer cannot read is refused; bash may still run the lines before it
+        self.assertEqual(self.bash("echo 'unterminated"), "deny")
+        self.assertEqual(self.bash("dev status\necho 'unterminated"), "deny")
 
 
 class BranchPolicyTests(unittest.TestCase):

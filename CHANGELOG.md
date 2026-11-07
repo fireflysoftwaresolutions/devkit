@@ -153,15 +153,21 @@ Not released yet: the date is set when the release is tagged.
   to a session, after `-S`, `-p`, `-r`, or `-x` too) and tmux's `send-keys`, `send-prefix`, `paste-buffer`,
   `set-buffer`, `load-buffer`, `pipe-pane`, and `command-prompt`. It refuses a tmux command or option that carries a
   command (`run-shell`, `if-shell`, `set-hook`, `source-file`, `bind-key`, a hook, `default-command`,
-  `default-shell`, `command-alias`, a `#(…)` format), a configuration file (`screen -c`, `tmux -f`), a tmux command
-  it does not know, and a `screen` or `tmux` word the shell or a runner fills in. It does so in a `;` list, for a
-  name tmux abbreviates (`send-k`), inside `sh -c`, `env`, `timeout`, `xargs`, `find -exec`, or `parallel`, and in a
-  program's code. `screen -ls`, `screen -dm <command>`, `tmux ls`, and `tmux new -d '<command>'` stay open, and the
-  guard still reads the command they start.
-- **The guard reads a command line as bash does.** A backslash-newline joins two lines, a backslash escapes a quote,
-  a comment ends at its newline, and a quoted or escaped `;` is a word, not the end of a command. Before,
-  `dev \`, a newline, and `install` ran `dev install` unrefused, and so did a `git push --force` or an `rm -rf ~`
-  split the same way, a command after `echo \'` and a newline, and a second `find … -exec` after `\;`.
+  `default-shell`, `command-alias`, a `#(…)` format), and what can build a `#(…)` from pieces: `set-option` or
+  `setw` with `-a` or `-F`, and a format with the `E` or `T` modifier (`#{E:@x}`). It refuses a tmux command list
+  (`\;`, `';'`): with `&&`, one tmux command per call works. It refuses a configuration file (`screen -c`,
+  `tmux -f`), a tmux command it does not know, and a `screen` or `tmux` word the shell or a runner fills in. It does
+  so for a name tmux abbreviates (`send-k`), inside `sh -c`, `env`, `timeout`, `xargs`, `find -exec`, or
+  `parallel`, and in a program's code. `screen -ls`, `screen -dm <command>`, `tmux ls`, and
+  `tmux new -d '<command>'` stay open, and the guard still reads the command they start.
+- **The guard refuses a command it cannot read.** A command line with a quote that is never closed was allowed
+  unread, so `dev install # don't` ran `dev install` (bash ignores the apostrophe in the comment), and so did a
+  command on the line before an unmatched quote. Once heredoc bodies are set aside, the guard now refuses such a
+  line, also when the command hands it to a shell (`sh -c`, `eval`, a heredoc a shell reads); the message says to
+  close the quote or drop the comment's apostrophe. A script file or a sourced file is read as before. `#` stays an
+  ordinary character, so the words after one are read as more commands. A backslash outside single quotes escapes
+  the next character, so `echo \'` opens no quote that hides the next line, and the guard reads each `-exec`,
+  `-execdir`, `-ok`, and `-okdir` command of a `find`, also after `\;` and inside `\( … \)`.
 - **Drift covers what devkit does not manage.** A plugin, MCP server, or skill folder installed outside the catalog,
   for Claude Code and Codex, is reported as `not-in-catalog`. What ships with the Codex app is listed without drift
   only when its own files vouch for it (a bundled plugin whose cached files are all byte-equal to the app bundle's)
