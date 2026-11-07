@@ -78,8 +78,14 @@ devkit keeps these out of every record it writes:
     program as a path (`~/bin/dev`) or `python3 -m devkit`, and inside the text of `bash -c`, `sh -c`, `zsh -c`,
     and `eval`. Anywhere else, such as in `kubectl --context dev` or `echo dev crew show`, `dev` is a word like
     any other.
-  - The name of any other program at command position, such as `kubectl` or `sleep`. A program run by its path
-    keeps only the last part of the path: `/opt/homebrew/bin/python3` is recorded as
+  - The name of another program at command position when devkit's list of known programs has it, such as `kubectl`
+    or `sleep`. The list is fixed and the same on every machine, with no lookup in your `PATH`: devkit's own
+    programs, the programs the guard's read-only allowlist runs with its checks, package runners, and wrappers, and
+    common developer tools, such as `python3`, `npm`, `make`, `docker`, and `curl` (`PROGRAMS` in
+    `lib/devkit/audit.py`). Any other program becomes its length, since a word there can be a client's name, a file,
+    or a password. A name written with quotes or an escape, such as `"cat"`, also becomes its length.
+  - The last part of a path, when the path runs a program on that list. A program or a wrapper run by its path,
+    `dev`, `git`, and `gh` included, keeps only that last part: `/opt/homebrew/bin/python3` is recorded as
     `[text not recorded: 17 characters]/python3`.
   - Option names, such as `--why` and `-m`.
   - The value of an option that names something, such as `--to`, `--type`, `--scope`, `--project`, or `--step`
@@ -101,8 +107,9 @@ devkit keeps these out of every record it writes:
   Everything else becomes its length: free text, such as a `dev crew ask` message, the text of `--why`, `--check`,
   or `-m`, a heredoc's body, a here-string, and a comment; and a word that only might be free text, such as a
   filename, a branch passed to `git push`, or a value devkit does not know. A line whose program is none of these
-  keeps its operators, the program's name, and each other word's length: `rm -rf src` is recorded as
-  `rm [text not recorded: 3 characters] [text not recorded: 3 characters]`.
+  keeps its operators, the program's name when the list has it, and each other word's length: `rm -rf src` is
+  recorded as `rm [text not recorded: 3 characters] [text not recorded: 3 characters]`, and `globex-sync --all` as
+  `[text not recorded: 11 characters] [text not recorded: 5 characters]`.
 
   These fields hold a command line:
 
@@ -110,7 +117,7 @@ devkit keeps these out of every record it writes:
   | --- | --- | --- |
   | `dev.<command>` | `target` | The `dev` command's arguments |
   | `guard.*`, such as `guard.deny`, `guard.ask`, and `guard.bypass` | `target` | The call the guard refused or asked about, or that an escape hatch let through. A refused file edit keeps the file's path, and a refused tool call keeps the tool's name |
-  | `guard.*` | `detail` | The refusal the agent reads. What it quotes in backticks is masked as a command line, so its operators stay; devkit's `…` and a quote of one word that names a command or a project, such as `cat` or `acme/app`, stay as written. The rest of the refusal stays |
+  | `guard.*` | `detail` | The refusal the agent reads. What it quotes in backticks is masked as a command line, so its operators stay, and devkit's `…` stays. A quote whose first word is not a program on devkit's list is free text and becomes its length, so a quote of one word stays only as such a program, such as `cat`. The guard quotes each value as one Markdown code span, with a longer fence when the value holds a backtick, so the value cannot end the quote early. The rest of the refusal stays |
   | `guard.irreversible` | `detail` | The words of the irreversible command, or the shell text the guard could not parse |
   | `calls.unclosed` | `detail` | The call that got no result, and how long devkit waited for it |
   | `job.*` | `target` | The job's `dev` arguments |

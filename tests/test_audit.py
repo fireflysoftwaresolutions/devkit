@@ -17,6 +17,7 @@ import tempfile
 import time
 import unittest
 from pathlib import Path
+from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "lib"))
 
@@ -850,7 +851,7 @@ class CommandTextTests(AuditCase):
             'nice -n 5 dev crew ask "SECRET"': f"nice -n 5 dev crew ask {m(6)}",
             'uv run dev crew ask "SECRET"': f"uv run dev crew ask {m(6)}",
             'python3 -I -m devkit crew ask "SECRET"': f"python3 -I -m devkit crew ask {m(6)}",
-            '~/Development/x/bin/dev crew ask "SECRET"': f"~/Development/x/bin/dev crew ask {m(6)}",
+            '~/Development/x/bin/dev crew ask "SECRET"': f"{t(19)}/dev crew ask {m(6)}",  # L4 of the fourth review
             'dev crew ask <<< "SECRET"': f"dev crew ask <<< {t(6)}",
             'time -p dev --json crew ask "SECRET"': f"time -p dev --json crew ask {m(6)}",
         }
@@ -950,26 +951,155 @@ class CommandTextTests(AuditCase):
 
     def test_a_guard_detail_keeps_devkits_own_wording(self):
         # M1 of the third review: a refusal also quotes devkit's own words. A quoted span is read as a shell line, so
-        # its operators stay, and `…` stays; a one-word span that names a command or a project stays. A quoted
-        # command holds the words joined by spaces, so once one is free text only known option names stay after it.
-        # The rule reads only the detail, so the stored detail reads back as it was stored
+        # its operators stay, and `…` stays; a one-word span stays only as a program on devkit's list (2b of the
+        # fourth review: a project id is the developer's name too). A quoted command holds the words joined by
+        # spaces, so once one is free text only known option names stay after it. The rule reads only the detail,
+        # so the stored detail reads back as it was stored
         t, m = self.t, self.m
         kept = ["Run `dev progress …` and `dev crew …` as a command of its own (no `&&`, `;`, pipes, `$(…)`, "
                 "`<(…)`, `bash -c`, `env` or `timeout` around it); quote it: `dev crew ask \"…\"`.",
-                "read-only lane: `cat` is not on the read-only allowlist.",
-                "This session works on `signature-organization/devkit`; it must not change "
-                "`fireflysoftwaresolutions/devkit`'s handoff note."]
+                "read-only lane: `cat` is not on the read-only allowlist."]
         masked = {"`cd ~/x && dev crew ask \"SECRET plan\"` is refused": f"`cd {t(3)} && dev crew ask {m(11)}` is refused",
                   "`gh pr merge 12 --squash --body SECRET notes --head acme-x --acme-merger` merges PR #12":
                       f"`gh pr merge 12 --squash --body {t(12)} --head {t(20)}` merges PR #12",
                   "`Ana Smith` is no crew member; `SECRET-plan` is unknown":
-                      f"`{t(3)} {t(5)}` is no crew member; `{t(11)}` is unknown"}
+                      f"`{t(9)}` is no crew member; `{t(11)}` is unknown",
+                  "This session works on `signature-organization/devkit`; it must not change "
+                  "`fireflysoftwaresolutions/devkit`'s handoff note.":
+                      # a path keeps its base name only when devkit's list has it
+                      f"This session works on `{t(22)}/devkit`; it must not change `{t(24)}/devkit`'s handoff note."}
         for detail in kept + list(masked):
             audit.record("guard.deny", "Bash", detail, "deny", tool="Bash")
         details = [r["detail"] for r in audit.query(action="guard.deny")]
         self.assertEqual(details, kept + list(masked.values()))
         for text in ("SECRET", "Ana", "acme"):
             self.assertNotIn(text, self.stored())
+        self.unmarked()
+
+    def test_a_program_keeps_its_name_only_when_devkits_list_has_it(self):
+        # 2b of the fourth review, the tech lead's decision: a lowercase word at command position can be a client's
+        # name, a file or a password, so a program's name stays only from devkit's fixed list (audit.PROGRAMS), and
+        # a program run by its path keeps its base name only when the list has it. 2a: a name written with quotes
+        # or an escape stays in neither case
+        t = self.t
+        cases = {
+            "globex-payroll.acme-merger-q3 --x": f"{t(29)} {t(3)}",
+            "john.smith --x": f"{t(10)} {t(3)}",
+            "hunter2 --x": f"{t(7)} {t(3)}",
+            "sudo globex-payroll": f"sudo {t(14)}",
+            "timeout 5 globex-payroll": f"timeout 5 {t(14)}",
+            "acme-layoffs-list-2026.csv": t(26),
+            "CLIENT=globex globex-payroll": f"CLIENT={t(6)} {t(14)}",
+            "cat x | acme-merger-tool": f"cat {t(1)} | {t(16)}",
+            "./clients/globex/run.sh x": f"{t(23)} {t(1)}",
+            "/opt/globex-payroll/bin/python3 x.py": f"{t(23)}/python3 {t(4)}",
+            '"globex-payroll" --flag': f"{t(14)} {t(6)}",
+            '"cat" notes': f"{t(3)} {t(5)}",
+            "kubectl get pods": f"kubectl {t(3)} {t(4)}",
+        }
+        for cmd, kept in cases.items():
+            with self.subTest(cmd=cmd[:24]):
+                self.assertEqual(self.denied(cmd, tool="Bash"), kept)
+        for words in ("globex", "acme", "john", "hunter2", "payroll", "layoffs", "clients"):
+            self.assertNotIn(words, self.stored())
+        self.unmarked()
+
+    def test_the_program_list_is_the_same_on_every_machine(self):
+        # 2b: the list is fixed, so a program on this machine's PATH changes nothing; it holds the guard's read-only
+        # allowlist, its checks, runners and wrappers, and the programs the masker reads
+        from devkit import guard
+        with tempfile.TemporaryDirectory() as d:
+            tool = Path(d) / "globex-payroll"
+            tool.write_text("#!/bin/sh\n")
+            tool.chmod(0o755)
+            with mock.patch.dict(os.environ, {"PATH": d}):
+                self.assertEqual(audit.mask_command("globex-payroll x"), f"{self.t(14)} {self.t(1)}")
+        known = (guard._READERS | guard._RO_READERS | guard._RO_RUNNERS | guard._PACKAGE_MANAGERS | guard._WRAPPERS
+                 | guard._SHELLS | guard._CREATORS | guard._CHANGERS | guard._COPIERS | guard._MOVERS
+                 | {p for p, _, _ in guard._RO_CHECKS} | {k.split()[0] for k in audit._WRAPPERS}
+                 | set(audit._OTHER) | {"dev", "devkit", "eval"})
+        self.assertEqual(sorted(known - audit.PROGRAMS), [])
+
+    def test_a_program_run_by_its_path_keeps_only_its_base_name(self):
+        # L4 of the fourth review: dev, git, gh, a wrapper, a shell or python run by its path kept the folder, which
+        # can name a client; the folder becomes its length. A program run by a quoted path is no program devkit
+        # knows, so the line is masked like another program's
+        t, m = self.t, self.m
+        cases = {
+            '/opt/globex-payroll/bin/dev crew ask "SECRET plan"': f"{t(23)}/dev crew ask {m(11)}",
+            '/srv/acme-merger/bin/git commit -m "SECRET plan"': f"{t(20)}/git commit -m {t(11)}",
+            "/opt/acme/bin/gh pr merge 12 --squash": f"{t(13)}/gh pr merge 12 --squash",
+            "/opt/globex/bin/sudo -u root dev sync": f"{t(15)}/sudo -u {t(4)} dev sync",
+            "/opt/globex/bin/python3 -m devkit sync": f"{t(15)}/python3 -m devkit sync",
+            '/opt/globex/bin/bash -c "dev sync"': f'{t(15)}/bash -c "dev sync"',
+            '"/opt/globex payroll/bin/dev" crew ask x': f"{t(27)} {t(4)} {t(3)} {t(1)}",
+        }
+        for cmd, kept in cases.items():
+            with self.subTest(cmd=cmd[:24]):
+                self.assertEqual(self.denied(cmd, tool="Bash"), kept)
+        for words in ("globex", "acme", "SECRET"):
+            self.assertNotIn(words, self.stored())
+        self.unmarked()
+
+    def test_an_option_before_the_program_keeps_its_name_and_only_a_value_that_names_nothing(self):
+        # nits of the fourth review: nice's -10 and xargs' {} name nothing and stay; a value attached to an option of
+        # python or a shell before the program (a path) is masked
+        t = self.t
+        cases = {
+            'nice -10 dev crew ask "SECRET"': f"nice -10 dev crew ask {self.m(6)}",
+            'xargs -I{} dev crew ask "SECRET {}"': f"xargs -I{{}} dev crew ask {self.m(9)}",
+            "xargs -I {} dev sync": "xargs -I {} dev sync",
+            "python3 -X/opt/globex -m devkit sync": f"python3 -X{t(11)} -m devkit sync",
+            "bash --rcfile=/opt/globex/rc -c 'dev sync'": f"bash --rcfile={t(14)} -c 'dev sync'",
+        }
+        for cmd, kept in cases.items():
+            with self.subTest(cmd=cmd[:24]):
+                self.assertEqual(self.denied(cmd, tool="Bash"), kept)
+        # a shell's option before its -c keeps its decision in a quote, so the record reads back as it was stored
+        audit.record("guard.deny", "Bash", "Run `xargs eval bash -I{} -c sudo _local/x` now", "deny", tool="Bash")
+        for words in ("globex", "SECRET", "_local/x"):
+            self.assertNotIn(words, self.stored())
+        self.unmarked()
+
+    def test_a_quote_keeps_a_word_only_when_devkits_list_has_it(self):
+        # 2b: a refusal's one-word quote stays only as a program on the list; a quote whose first word is not on it
+        # is free text, recorded as its length; a path keeps its base name only when the list has it
+        t = self.t
+        cases = {"`john` takes only a, b": f"`{t(4)}` takes only a, b",
+                 "Crew members never run `globex-payroll`: it runs a program": f"Crew members never run `{t(14)}`: it "
+                                                                                "runs a program",
+                 "Crew members never run `acme payroll cuts`: it runs a program": f"Crew members never run `{t(17)}`: "
+                                                                                   "it runs a program",
+                 "the sed command `s/john.smith/x/w out` can write": f"the sed command `{t(20)}` can write",
+                 "the sed command `s/globex payroll/acme/w out` can write": f"the sed command `{t(27)}` can write",
+                 "Branch `feat/globex-payroll-q3` does not follow": f"Branch `{t(22)}` does not follow",
+                 "`clients/globex/payroll/q3/salaries` names a path outside": f"`{t(34)}` names a path outside",
+                 "`sed` and `dev` and `/usr/bin/git` run": f"`sed` and `dev` and `{t(8)}/git` run"}
+        for detail in cases:
+            audit.record("guard.deny", "Bash", detail, "deny", tool="Bash")
+        self.assertEqual([r["detail"] for r in audit.query(action="guard.deny")], list(cases.values()))
+        for words in ("john", "globex", "acme", "payroll", "clients"):
+            self.assertNotIn(words, self.stored())
+        self.unmarked()
+
+    def test_a_value_with_a_backtick_of_its_own_cannot_end_the_quote_early(self):
+        # 1 of the fourth review: a refusal quoted a value in single backticks, so a backtick inside it ended the
+        # quote and the rest stayed as prose. The guard now fences the value so it reads as one quote, and a record
+        # written before (prose that touches a quote on both sides, as in `a`b`c`) masks that prose too
+        from devkit import guard
+        values = [("path", "--out reports/`cat globex-payroll-q3.txt`/x", "reports/`cat globex-payroll-q3.txt`/x"),
+                  ("url", "--url http://localhost/`echo acme merger secret`", "http://localhost/`echo acme merger secret`")]
+        for kind, shown, value in values:
+            msg = guard._impeccable_value(kind, shown, value)
+            self.assertIn(shown, msg)  # the agent still reads the value whole
+            audit.record("guard.deny", "Bash", msg, "deny", tool="Bash")
+            audit.record("guard.deny", "Bash", f"`{shown}` has a character the shell expands", "deny", tool="Bash")
+        audit.record("guard.deny", "Bash", "`--name a`b`c globex` has a character the shell expands", "deny", tool="Bash")
+        details = [r["detail"] for r in audit.query(action="guard.deny")]
+        self.assertTrue(details[0].startswith(f"``{self.t(43)}`` has a character the shell expands"), details[0])
+        self.assertEqual(details[-1], f"`{self.t(8)}`{self.t(1)}`{self.t(8)}` has a character the shell expands")
+        for words in ("globex", "payroll", "cat ", "echo", "acme", "merger", "secret", "reports", "localhost"):
+            self.assertNotIn(words, self.stored())
         self.unmarked()
 
     def test_a_delegated_task_and_a_handoff_commit_keep_no_text(self):

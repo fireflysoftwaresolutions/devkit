@@ -54,9 +54,15 @@ All notable changes to devkit. Versions follow CalVer `YY.MM.PATCH` (PATCH resta
   its subcommands, the option names, the values that name something (a crew member, a branch, a path), the ids, and
   numbers of up to six digits. Every other word is recorded only as its length, such as
   `[text not recorded: 22 characters]`, and a line with another program keeps its operators, the program's name, and
-  each other word's length. A refusal keeps devkit's own wording around the commands it quotes, such as `…` and
-  `&&`. A delegated step (`crew.delegate`) keeps what the member should do only as its length, and a commit to the
-  handoff repository (`handoff.*`) keeps only the item's id and the operation. Until now, a `dev crew ask` message, the text of `--why`, `--check`, `-m`, or `dev handoff --log`, a
+  each other word's length. A program's name stays only when devkit's fixed list of known programs has it: devkit's
+  own, the guard's read-only allowlist with its checks, runners, and wrappers, and common developer tools such as
+  `python3`, `npm`, `make`, and `docker`, the same on every machine. Any other name, and a refusal's quote that
+  starts with one, is recorded as its length, since it can be a client's name, a file, or a password; a program run
+  by its path keeps only its last part, and only when the list has it. A refusal keeps devkit's own wording around
+  the commands it quotes, such as `…` and `&&`, and the guard quotes each value as one Markdown code span, so a value
+  with a backtick of its own cannot end the quote early. A delegated step (`crew.delegate`) keeps what the member
+  should do only as its length, and a commit to the handoff repository (`handoff.*`) keeps only the item's id and the
+  operation. Until now, a `dev crew ask` message, the text of `--why`, `--check`, `-m`, or `dev handoff --log`, a
   heredoc's body, and a task's title could reach these records, which go to the handoff repository for 13 months and
   can then be removed only by a git history purge; since 26.11.3 only `dev crew` arguments were masked. A name given
   as a value that names something, such as a step's name, still reaches a record. Records written earlier are masked
