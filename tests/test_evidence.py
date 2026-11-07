@@ -11,6 +11,7 @@ import contextlib
 import io
 import json
 import os
+import re
 import subprocess
 import sys
 import unittest
@@ -170,16 +171,6 @@ class DecisionEvidenceTests(EvidenceCase):
         with self.assertRaises(pg.StepError) as e:  # the developer chose C, which is not option A
             pg.crew_decide("D1", "A", now=m(3))
         self.assertIn("C: Ask the sender", str(e.exception))
-
-    def test_an_irreversible_decision_counts_only_when_the_question_names_its_target(self):
-        pg.crew_decision("Release now?", options="A: yes | B: no", recommend="A", irreversible="release",
-                         target="v26.11.4", now=m(1))
-        self.answered("D1 · Ship it?", "A: Yes", m(2), options=("A: Yes", "B: Not yet"))
-        with self.assertRaises(pg.StepError):  # what the developer approved must name what it acts on
-            pg.crew_decide("D1", "A", now=m(3))
-        self.answered("D1 · Release v26.11.4 now? It tags and publishes.", "A: Yes, release it", m(4),
-                      options=("A: Yes, release it", "B: Not yet"))
-        self.assertTrue(pg.crew_decide("D1", "A", now=m(5))["verified"])
 
     def test_the_recorded_answer_must_be_the_developers(self):
         self.ask()
@@ -474,7 +465,7 @@ class DecisionAnswerGrantTests(EvidenceCase):
         self.irreversible("v26.11.4", 1, **lettered)
         d2 = self.irreversible("v26.11.5", 2, **lettered)
         self.typed("approve D1: B", m(3))
-        self.answered(pg.ask_text(d2), "A: release (Recommended)", m(3), options=("A: release", "B: wait"))
+        self.answered(pg.ask_text(d2), pg.ask_labels(d2)[0], m(3), options=pg.ask_labels(d2))  # devkit's own words
         pg.crew_decide("D1", "B", now=m(4))
         pg.crew_decide("D2", "A: release", now=m(4))
         self.assertIsNone(grant("release", "v26.11.4", now=m(5)))
@@ -521,19 +512,24 @@ class DecisionAnswerGrantTests(EvidenceCase):
                    {"options": "A: release | B: wait", "recommend": ""},
                    {"options": "A: release | B: wait", "recommend": "A", "performs": "C"},
                    {"options": "", "recommend": "yes", "performs": "yes"},
-                   # an explicit --performs that names an option reading as not doing it (Seraph's probe: then
-                   # "approve D1: no" opened the release)
+                   # an explicit --performs that names an option reading as not doing it (the Code reviewer's
+                   # probe: then "approve D1: no" opened the release)
                    {"options": "A: release | B: no", "recommend": "A", "performs": "B"},
                    {"options": "A: release | B: wait", "recommend": "A", "performs": "wait"},
-                   # punctuation after the refusing word (Seraph's second probe: "B: No." opened the release)
+                   # punctuation after the refusing word (the Code reviewer's second probe: "B: No." opened the
+                   # release)
                    {"options": "A: release | B: No.", "recommend": "A", "performs": "B"},
                    {"options": "A: release | B: no, wait", "recommend": "A", "performs": "B"},
                    {"options": "A: release | B: (no)", "recommend": "A", "performs": "B"},
                    {"options": "A: release | B: nope", "recommend": "A", "performs": "B"},
-                   # quotes around the refusing word (Seraph's third probe), and a refusing word added after it
+                   # quotes around the refusing word (the Code reviewer's third probe), and refusing words added
+                   # after it (pause; then pass, stay and leave, the Code reviewer's final check)
                    {"options": "A: release | B: 'no'", "recommend": "A", "performs": "B"},
                    {"options": "A: release | B: \u2018no\u2019", "recommend": "A", "performs": "B"},
                    {"options": "A: release | B: pause", "recommend": "A", "performs": "B"},
+                   {"options": "A: release | B: pass", "recommend": "A", "performs": "B"},
+                   {"options": "A: release | B: stay on v26.11.3", "recommend": "A", "performs": "B"},
+                   {"options": "A: release | B: leave it for now", "recommend": "A", "performs": "B"},
                    # the default path: a recommended option that reads as waiting never performs the release
                    {"options": "A: release | B: Wait.", "recommend": "B"},
                    {"options": "A: release | B: 'wait'", "recommend": "B"}):
@@ -546,7 +542,7 @@ class DecisionAnswerGrantTests(EvidenceCase):
 
     def test_the_question_names_the_option_that_runs_the_action_and_its_target(self):
         # the developer sees which choice runs what, on what, in the question itself: the tech lead's hint never
-        # reaches them (Seraph, 26.11.3)
+        # reaches them (the Code reviewer, 26.11.3)
         self.irreversible("v26.11.4", 1, options="A: release | B: wait", recommend="A")
         self.irreversible("", 2, options="A: wait | B: release", recommend="A", performs="B")
         self.irreversible("v26.11.5", 3, options="", recommend="")
@@ -565,6 +561,233 @@ class DecisionAnswerGrantTests(EvidenceCase):
         self.assertEqual(pg.load_run("claude", "s1")["preapprovals"], [])
         pg.assign("build", "Tank", allow="push", now=m(5))
         self.assertEqual(pg.load_run("claude", "s1")["plan"][0]["allow"], [])
+
+
+def audit_records(action):
+    out = []
+    for f in sorted(audit.AUDIT.glob("*.jsonl")):
+        out += [r for r in map(json.loads, f.read_text().splitlines()) if r.get("action") == action]
+    return out
+
+
+class QuestionAuditTests(EvidenceCase):
+    # the Security engineer's question audit decision (26.11.4, review of the reworded questions): an irreversible
+    # decision counts only on devkit's own words, its question and its labels as `dev crew decisions --ask` prints
+    # them, and the audit keeps how a click became an option (match, asked, the offered label) without the question
+
+    def release(self, at=1, target="v26.11.4", question=None, **kw):
+        kw.setdefault("options", "A: yes | B: no")
+        kw.setdefault("recommend", "A")
+        return pg.crew_decision(question or f"Release {target} now?", irreversible="release", target=target,
+                                now=m(at), **kw)
+
+    def printed(self, did):
+        # the question tool call `dev crew decisions --ask` prints for one decision
+        return pg.ask_calls(pg.load_run("claude", "s1"), [did])["calls"][0]["questions"][0]
+
+    def answer(self, q, label, at, labels=None, descriptions=None):
+        # the developer answers question q of a call that offered `labels` (default: the printed ones)
+        labels = list(labels if labels is not None else [o["label"] for o in q["options"]])
+        descriptions = descriptions or [""] * len(labels)
+        self.n += 1
+        tid = f"toolu_q{self.n:03d}"
+        qs = [{"question": q["question"], "header": q.get("header", "Decision"), "multiSelect": False,
+               "options": [{"label": lab, "description": des} for lab, des in zip(labels, descriptions)]}]
+        result = {"questions": qs, "answers": {q["question"]: label}}
+        self.append({"type": "user", "uuid": f"u-{self.n}", "isSidechain": False, "toolUseResult": result,
+                     "message": {"role": "user", "content": [{"type": "tool_result", "tool_use_id": tid}]}})
+        return pg.on_question("claude", {"session_id": "s1", "tool_name": "AskUserQuestion", "tool_use_id": tid,
+                                         "tool_input": {"questions": qs}, "tool_response": result,
+                                         "transcript_path": str(self.transcript)}, now=at)
+
+    def opens(self, target="v26.11.4", at=10):
+        return grant("release", target, consume=False, now=m(at))
+
+    def refused(self):
+        return [r["detail"] for r in audit_records("crew.evidence-refused")]
+
+    # acceptance test 1: the Code reviewer's probes 1 and 2, questions that say "hold" while the letter A or the word
+    # "Yes" would perform the release
+    def test_a_hold_question_answered_with_the_performing_letter_opens_nothing(self):
+        self.release()
+        self.answered("D1 · Hold v26.11.4 until Monday instead of releasing it?", "A: Yes, hold it", m(2),
+                      options=("A: Yes, hold it", "B: No, release now"))
+        self.answered("D1 · Should we hold v26.11.4 until Monday?", "Yes", m(2.5), options=("Yes", "No"))
+        self.assertEqual(self.human(), [])
+        with self.assertRaises(pg.StepError):
+            pg.crew_decide("D1", "A", now=m(3))
+        self.assertIsNone(self.opens())
+        self.assertEqual(len(self.refused()), 2)
+
+    # acceptance test 2: devkit's own question, but a label that is not devkit's word for word
+    def test_a_letter_or_a_word_on_devkits_question_opens_nothing(self):
+        self.release()
+        q = self.printed("D1")
+        for i, label in enumerate(("A", "Yes", "A: Yes, hold it")):
+            with self.subTest(label=label):
+                self.answer(q, label, m(2 + i))  # typed under Other, beside the printed labels
+                self.answer(q, label, m(2.5 + i), labels=[label, "B: no"])  # offered by the tech lead
+        self.assertEqual(self.human(), [])
+        self.assertIsNone(self.opens())
+        self.assertEqual(len(self.refused()), 6)
+
+    # acceptance test 3: context after devkit's question can redefine the options ("A means hold")
+    def test_foreign_context_after_the_question_counts_only_for_a_reversible_decision(self):
+        self.release()
+        self.ask(at=1.5)
+        for did in ("D1", "D2"):
+            q = dict(self.printed(did))
+            q["question"] = pg.ask_text(self.decision(did)) + " Note: A means we hold it until Monday."
+            self.answer(q, q["options"][0]["label"], m(2))
+        self.assertEqual([(h["covers"], h["asked"], h["match"]) for h in self.human()], [("D2", "reworded", "exact")])
+        self.assertIsNone(self.opens())
+        self.assertEqual(len(self.refused()), 1)
+
+    # acceptance test 4: the performing option's label says what it runs; clicking it opens the release once
+    def test_the_canonical_performing_label_opens_the_release_once(self):
+        self.release()
+        self.release(at=1.5, target="v26.11.5")
+        self.release(at=1.6, target="v26.11.6")
+        q1, q2, q3 = self.printed("D1"), self.printed("D2"), self.printed("D3")
+        self.assertEqual([o["label"] for o in q1["options"]], ["A: yes (release v26.11.4) (Recommended)", "B: no"])
+        self.answer(q1, "A: yes (release v26.11.4) (Recommended)", m(2))
+        self.answer(q2, "A: yes (release v26.11.5)", m(2), labels=["A: yes (release v26.11.5)", "B: no"])
+        self.answer(q3, "B: no", m(2))
+        self.assertEqual([(h["covers"], h["answer"], h["match"], h["asked"]) for h in self.human()],
+                         [("D1", "A: yes", "exact", "exact"), ("D2", "A: yes", "exact", "exact"),
+                          ("D3", "B: no", "exact", "exact")])
+        for did, said in (("D1", "A"), ("D2", "A: yes"), ("D3", "B")):
+            self.assertTrue(pg.crew_decide(did, said, now=m(3))["verified"])
+        self.assertEqual(grant("release", "v26.11.4", now=m(4))["source"], "decision")
+        self.assertIsNone(grant("release", "v26.11.4", now=m(5)))  # once
+        self.assertEqual(grant("release", "v26.11.5", now=m(5))["source"], "decision")
+        self.assertIsNone(grant("release", "v26.11.6", now=m(5)))
+        self.assertEqual([r["ref"]["id"] for r in audit_records("crew.grant-refused")], ["D3"])
+
+    # acceptance test 5: the offered labels are exactly devkit's, with no description beside them
+    def test_offered_labels_that_are_not_exactly_devkits_open_nothing(self):
+        yes, no = "A: yes (release v26.11.4)", "B: no"
+        calls = ([yes], [yes, no, "C: wait for Monday"], [yes, "B: no (Recommended)"], [yes, no, no],
+                 [yes + " (Recommended)", "B: no"])
+        for i, labels in enumerate(calls):
+            self.release(at=1 + i / 10)
+        for i, labels in enumerate(calls):
+            q = self.printed(f"D{i + 1}")
+            descriptions = ["", "Holds it until Monday"] if i == 4 else None
+            self.answer(q, labels[0], m(2), labels=labels, descriptions=descriptions)
+        self.assertEqual(self.human(), [])
+        self.assertIsNone(self.opens())
+        self.assertEqual(len(self.refused()), len(calls))
+
+    # acceptance test 6: a reversible decision keeps the friendly matching, and the audit says how it matched
+    def test_a_reversible_answer_audits_its_match_and_the_offered_label(self):
+        self.ask()
+        self.ask("Rename the flag?", options="A: rename | B: keep", recommend="A", at=1.5)
+        self.answered("D1 · Empty lines in an import: skip them or reject the file?", "A: Skip them", m(2),
+                      options=("A: Skip them (Recommended)", "B: Reject the file"))
+        self.answered(pg.ask_text(self.decision("D2")), "keep the old name, it is in the docs", m(2),
+                      options=("A: rename (Recommended)", "B: keep"))  # typed under Other
+        self.ask("Drop the cache?", options="A: drop | B: keep", recommend="A", at=1.6)
+        self.answered(pg.ask_text(self.decision("D3")), "B", m(2), options=("A: drop", "B: keep"))  # Other again
+        ev = audit_records("crew.evidence")
+        self.assertEqual([(r["target"], r["ref"]["answer"], r["evidence"]["match"], r["evidence"]["asked"],
+                           r["ref"].get("label")) for r in ev],
+                         [("D1", "A: skip", "letter", "reworded", "A: Skip them"),
+                          ("D2", "[free text: 36 characters]", "free", "exact", None),
+                          ("D3", "[free text: 1 characters]", "free", "exact", None)])
+
+    # acceptance test 7: the stored line keeps no question text and no hash; an offered label is redacted
+    def test_the_stored_evidence_line_has_no_question_and_a_redacted_label(self):
+        self.ask()
+        token = "ghp_" + "a1B2c3D4e5" * 4
+        label = f"A: Skip them, as {core.HOME}/notes/import.md says ({token})" + ", and log each one" * 6
+        self.answered("D1 · Skip the empty lines Jane Roe found in the March import?", label, m(2),
+                      options=(label, "B: Reject the file"))
+        lines = [ln for f in sorted(audit.AUDIT.glob("*.jsonl")) for ln in f.read_text().splitlines()
+                 if '"crew.evidence"' in ln]
+        self.assertEqual(len(lines), 1)
+        rec = json.loads(lines[0])
+        chain = {k: rec.pop(k) for k in ("hash", "prev")}
+        text = json.dumps(rec)
+        self.assertNotIn("Jane Roe", text)
+        self.assertNotIn("March import", text)
+        self.assertIsNone(re.search(r"[0-9a-f]{64}", text))
+        self.assertTrue(chain["hash"])
+        self.assertNotIn(token, text)
+        self.assertNotIn(str(core.HOME), text)
+        self.assertTrue(rec["ref"]["label"].startswith("A: Skip them, as ~/notes/import.md says"))
+        self.assertLessEqual(len(rec["ref"]["label"]), 120)
+
+    # acceptance test 8: dev audit verify reruns the matcher on the transcript and reports a difference
+    def test_verify_reports_a_label_or_answer_the_transcript_does_not_show(self):
+        self.ask()
+        self.answered("D1 · Empty lines: skip them or reject the file?", "A: Skip them", m(2),
+                      options=("A: Skip them (Recommended)", "B: Reject the file"))
+        rec = audit_records("crew.evidence")[-1]
+        self.assertIsNone(pg.evidence_check(rec, None, 0))
+        for change in ({"ref": {**rec["ref"], "label": "B: Reject the file"}},
+                       {"ref": {**rec["ref"], "answer": "B: reject"}},
+                       {"evidence": {**rec["evidence"], "match": "exact"}},
+                       {"evidence": {**rec["evidence"], "asked": "exact"}}):
+            with self.subTest(change=change):
+                problem = pg.evidence_check({**rec, **change}, None, 0)
+                self.assertIsNotNone(problem)
+                self.assertIn("D1", problem)
+
+    # devkit's context line names the step the decision blocks; deciding unblocks it, and verify still reads the
+    # question as devkit's own
+    def test_verify_reads_devkits_question_as_exact_after_the_decision_unblocks_its_step(self):
+        pg.assign("build", "Tank")
+        launch("a_tank", "general-purpose", "Tank: build")
+        self.release(from_agent="a_tank")
+        q = self.printed("D1")
+        self.assertIn("it blocks “build”", q["question"])
+        self.answer(q, q["options"][0]["label"], m(2))
+        self.assertTrue(pg.crew_decide("D1", "A", now=m(3))["verified"])
+        rec = audit_records("crew.evidence")[-1]
+        self.assertEqual((rec["evidence"]["asked"], rec["evidence"]["match"]), ("exact", "exact"))
+        self.assertIsNone(pg.evidence_check(rec, None, 0))
+
+    # acceptance test 9 and the Code reviewer's finding 3: a target is named only as a whole word
+    def test_a_target_is_named_only_as_a_whole_word(self):
+        named = {("v26.11.4", "D1 · Release v26.11.4 now?"): True, ("v26.11.4", "Release 26.11.4."): True,
+                 ("v26.11.4", "Release V26.11.4?"): True, ("26.11.4", "Release v26.11.4"): True,
+                 ("v26.11.4", "Release v26.11.40 now?"): False, ("v26.11.4", "Release xv26.11.4"): False,
+                 ("v26.11.4", "Release v26.11.4-rc1"): False, ("1", "D1 · Merge PR 12?"): False,
+                 ("1", "D1 · Merge it?"): False, ("1", "D1 · Merge PR 1?"): True, ("1", "Merge #1"): True,
+                 ("feat/x", "Push feat/x now?"): True, ("feat/x", "Push feat/xy now?"): False}
+        for (target, text), want in named.items():
+            with self.subTest(target=target, text=text):
+                self.assertEqual(pg._names_target({"target": target}, text), want)
+
+    def test_dev_crew_ask_refuses_an_irreversible_question_that_does_not_name_its_target(self):
+        for question in ("Release now?", "Release v26.11.40 now?"):
+            with self.subTest(question=question):
+                with self.assertRaises(pg.StepError) as e:
+                    pg.decision_shape(question, "A: yes | B: no", "A", "release", "v26.11.4")
+                self.assertIn("v26.11.4", str(e.exception))
+        self.assertEqual(pg.decision_shape("Release v26.11.4 now?", "A: yes | B: no", "A", "release", "v26.11.4"),
+                         (["A: yes", "B: no"], "A"))
+
+    # the Code reviewer's finding 5: one call that asks a decision twice records nothing for it
+    def test_a_call_that_asks_one_decision_twice_records_nothing_for_it(self):
+        self.ask()
+        self.ask("Rename the flag?", options="A: rename | B: keep", recommend="A", at=1.5)
+        q1, q2 = "D1 · Skip empty lines?", "D1 · Or reject the file?"
+        qs = [{"question": q, "header": "D1", "multiSelect": False,
+               "options": [{"label": "A: skip", "description": ""}, {"label": "B: reject", "description": ""}]}
+              for q in (q1, q2)] + [{"question": pg.ask_text(self.decision("D2")), "header": "D2",
+                                     "multiSelect": False, "options": [{"label": "A: rename", "description": ""},
+                                                                       {"label": "B: keep", "description": ""}]}]
+        result = {"questions": qs, "answers": {q1: "A: skip", q2: "B: reject", qs[2]["question"]: "B: keep"}}
+        self.append({"type": "user", "uuid": "u-dup", "isSidechain": False, "toolUseResult": result,
+                     "message": {"role": "user", "content": [{"type": "tool_result", "tool_use_id": "toolu_dup"}]}})
+        got = pg.on_question("claude", {"session_id": "s1", "tool_name": "AskUserQuestion",
+                                        "tool_use_id": "toolu_dup", "tool_input": {"questions": qs},
+                                        "tool_response": result, "transcript_path": str(self.transcript)}, now=m(2))
+        self.assertEqual([(e["covers"], e["answer"]) for e in got], [("D2", "B: keep")])
+        self.assertFalse(pg.crew_decide("D1", "A: skip", now=m(3))["verified"])
+        self.assertEqual([r["target"] for r in audit_records("crew.evidence-refused")], ["D1"])
 
 
 class HookWiringTests(EvidenceCase):

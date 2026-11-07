@@ -648,7 +648,11 @@ class CrewSessionTests(unittest.TestCase):
     def test_an_irreversible_approval_without_options_is_asked_as_yes_or_no(self):
         with TempState():
             pg.start("Parser", plan=["parse"])
-            rc, _, _ = run_cli("crew", "ask", "--decision", "Push the fix branch?", "--irreversible", "push",
+            rc, _, err = run_cli("crew", "ask", "--decision", "Push the fix branch?", "--irreversible", "push",
+                                 "--target", "fix/parser")  # the question must name what the push acts on
+            self.assertEqual(rc, 2)
+            self.assertIn('--decision "Push the fix branch? (fix/parser)"', err)
+            rc, _, _ = run_cli("crew", "ask", "--decision", "Push fix/parser now?", "--irreversible", "push",
                                "--target", "fix/parser")  # what the guard tells an agent to run
             self.assertEqual(rc, 0)
             d = pg.load_run("claude", "s1")["decisions"][0]

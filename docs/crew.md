@@ -396,9 +396,11 @@ A decision that leads to an irreversible action (`--irreversible release --targe
 on that target, and only when your own answer chooses the option that performs it. That option is the one named
 with `--performs`, else the one option that reads yes or approve, else the recommended one. `dev crew ask` refuses
 an irreversible decision when no option performs the action for certain, for example when the recommended option
-reads as not doing it, such as `B: wait`, and refuses a `--performs` that names such an option. The question you
-are asked says which choice runs which action on which target, on one line: `D1 · Release now? (choosing “A:
-release” runs release v26.11.4)`. Without options, only `approve D<n>`, or an answer that reads approve or yes, opens
+reads as not doing it, such as `B: wait`, and refuses a `--performs` that names such an option. It also refuses a
+question that does not name the target as a word of its own: `Release v26.11.40?` does not name `v26.11.4`. The
+question you are asked says which choice runs which action on which target, on one line: `D1 · Release v26.11.4
+now? (choosing “A: release” runs release v26.11.4)`, and the option that performs it says so in its label:
+`A: release (release v26.11.4)`. Without options, only `approve D<n>`, or an answer that reads approve or yes, opens
 it. Any other answer (`no`, another option, free text) records your decision and opens nothing; the refusal is
 audited as `crew.grant-refused` with the decision and the option you chose, never the text you typed.
 
@@ -409,15 +411,27 @@ questions per call (the rest go in a second call), each opening with `D<n> ·`, 
 blocks, and the recommended option first (its label ends in "(Recommended)"). `dev crew decisions --ask D4 D5` asks only those,
 and `--json` prints the dialog's input.
 
-The tech lead may reword a question and add context. Three things bind your answer to the decision:
+The tech lead may reword a reversible question and add context. Two things bind your answer to the decision:
 
 - The decision's id up front (`D4 · …` or `D4: …`), or the dialog's header `D4`.
 - The option you pick: its letter (`A: Skip them and go on`, or `B`) or its words as the member wrote them.
-- For an irreversible action, the question names what the action acts on: the tag, the branch, or the PR.
 
 Text you type yourself (**Other**) is your answer in your own words: it settles a reversible question and picks no
 option. An answer to a question that names another decision, or a letter the decision does not have, picks no
-option either, and only one of its options, or your `approve D<n>` line, counts for an irreversible action.
+option either. A dialog call that asks one decision twice counts for neither question.
+
+A decision that leads to an irreversible action is asked only in devkit's own words, because a reworded question
+or label can make a yes do what you meant as a no (“A: Yes, hold it” on a release). Your answer counts only when
+all of these hold, and otherwise it opens nothing and is audited as `crew.evidence-refused` with the reason:
+
+- The question is the one `dev crew decisions --ask` prints, with devkit's context line or without it, and nothing
+  added.
+- The labels are exactly the decision's options as devkit words them: every option once, none added, and
+  "(Recommended)" only on the recommended one. The option that performs the action carries what it runs:
+  `A: yes (release v26.11.4)`.
+- No option has a description beside its label.
+- You click one of those labels; a letter, a word, or text of your own counts for nothing. You can still type
+  `approve D<n>: <option>` in your prompt.
 
 When decisions pile up while you are away, your next prompt tells the tech lead once to ask them together, in one
 dialog call; he is told again only when a new decision joins them. Codex's question dialog does not reach devkit

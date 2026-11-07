@@ -131,10 +131,14 @@ has one (AskUserQuestion in Claude Code), and ask nicely:
 - **Ask decisions together**, at most 4 questions per call; when decisions piled up while the developer was
   away, ask them together as soon as they are back.
 - **For a devkit decision, keep `D<n> ·` up front** (or put `D<n>` in the header) and keep each option's letter: that
-  is how devkit knows the answer is the developer's (their evidence). Reword everything else freely.
-  `dev crew decisions --ask` prints the call: send it as it is or reword it.
-- **A decision that leads to an irreversible action names what it acts on** (the tag, the branch, the PR) in the
-  question.
+  is how devkit knows the answer is the developer's (their evidence). For a reversible decision, reword everything
+  else freely. `dev crew decisions --ask` prints the call: send it as it is or reword it.
+- **Send a decision that leads to an irreversible action exactly as `dev crew decisions --ask` prints it:** its
+  question (with or without devkit's context line, nothing added), its labels word for word (the option that
+  performs the action reads like `A: yes (release v26.11.4)`), and no descriptions. A reworded question or label,
+  a missing or added option, or "(Recommended)" on another option makes the answer count for nothing, because a
+  reworded question can make a yes do what the developer meant as a no. Its question names what it acts on (the
+  tag, the branch, the PR): `dev crew ask` refuses one that does not.
 
 When there is no question tool (Codex, for now), use this template, and for a devkit decision tell the developer
 to type `approve D<n>: <letter>`:

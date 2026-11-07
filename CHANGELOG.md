@@ -34,13 +34,25 @@ Not released yet: the date is set when the release is tagged.
 
 ### Changed
 
-- **Your answer counts even when the question is reworded.** An answer to the question dialog is your evidence for a
-  decision when the question opens with `D<n> ·` (or its header is `D<n>`) and the label picks one of its options by
-  letter or words; the rest may carry context. Text you type yourself is your answer but picks no option, and a
-  question about an irreversible action must name its target.
+- **Your answer counts even when the question is reworded, except for an irreversible action.** An answer to the
+  question dialog is your evidence for a reversible decision when the question opens with `D<n> ·` (or its header is
+  `D<n>`) and the label picks one of its options by letter or words; the rest may carry context. Text you type
+  yourself is your answer but picks no option, and a dialog call that asks one decision twice counts for neither
+  question. A decision that leads to an irreversible action counts only in devkit's own words: the question and the
+  labels exactly as `dev crew decisions --ask` prints them, no descriptions, and you click one of those labels. The
+  option that performs the action says what it runs (`A: yes (release v26.11.4)`). Anything else opens nothing and
+  is audited as `crew.evidence-refused`. See [The crew › How the tech lead asks you](docs/crew.md#how-the-tech-lead-asks-you).
+- **The audit shows how your click became an option.** `crew.evidence` keeps `match` (`exact`, `letter`, `words`, or
+  `free`), `asked` (`exact` or `reworded`), and the label you clicked when the dialog offered it (redacted, at most
+  120 characters), but not your own text or the question. `dev audit verify` reruns the matcher on the
+  question and label in the transcript and reports a record that says otherwise. See
+  [The audit trail › What a record holds](docs/audit.md#what-a-record-holds-and-what-it-never-holds).
 - **`dev crew ask --decision` takes 2 to 4 lettered options and a recommendation,** with a question under 300
   characters, and prints the corrected command otherwise. An irreversible action asked without options is
-  `A: yes | B: no`.
+  `A: yes | B: no`, and its question names its target as a word of its own: `v26.11.40` does not name `v26.11.4`,
+  and `D1` does not name PR `1`.
+- **More words read as not doing it:** an option that starts with pass, stay, or leave never performs an
+  irreversible action, so `--performs` refuses it.
 - **Frontend work starts with impeccable.** The Frontend engineer, the UX designer, and the Mobile engineer load
   `frontend-design` and `impeccable` and run `dev impeccable context` once at the start of their work, on Claude Code
   and on Codex; `i18n` work now requires `impeccable` too.
