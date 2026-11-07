@@ -175,14 +175,18 @@ class RedTeam(unittest.TestCase):
                 self.assertFalse(hit.exists(), f"planted code ran under {py}")
 
     # ------------------------------------------------------------------ RT5 (high): dev config lock/unlock
-    @unittest.expectedFailure  # RT5
     def test_rt5_dev_config_unlock_and_lock_are_not_refused_to_agents(self):
         # `dev config unlock` runs `sudo rm` of the managed-settings drop-in that keeps user settings from overriding
         # devkit's hooks; it is a safeguards change, which only the developer makes in a terminal (C11), as
         # `dev config edit` and `dev config set safeguards.*` already are
-        for cmd in ("dev config unlock", "dev config lock"):
+        for cmd in ("dev config unlock", "dev config lock", "sudo bin/dev config unlock",
+                    "bash -c 'dev config unlock'", "python3 bin/dev config lock"):
             with self.subTest(cmd=cmd):
-                self.assertIsNotNone(self.check(cmd))
+                self.assertIn("managed-settings", self.check(cmd) or "")
+        # reading the lock's state and the help stay open
+        for cmd in ("dev config show", "dev config unlock --help"):
+            with self.subTest(cmd=cmd):
+                self.assertIsNone(self.check(cmd))
 
     # ------------------------------------------------------------------ RT6 (critical): guardless nested session
     @unittest.expectedFailure  # RT6

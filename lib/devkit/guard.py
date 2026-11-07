@@ -1413,6 +1413,12 @@ INSTALL_REASON = ("`dev install` and `dev update` change what every hook, the gu
                   f"installed now. {_TAIL}")
 
 
+LOCK_REASON = ("`dev config {sub}` adds or removes the managed-settings drop-in that keeps user and project settings "
+               "from turning off devkit's hooks (`sudo`, outside the agent's reach for a reason). It is a safeguards "
+               "change, which only the developer makes, in a terminal (RT5, spec C11). Ask them to run it, and say "
+               f"why. {_TAIL}")
+
+
 def _env_split(argv0):
     """-> (names, argv): the variables a segment sets for the command it runs (VAR=…, env VAR=…, sudo VAR=…, also
     after timeout or uv run), and that command."""
@@ -1703,6 +1709,8 @@ class _Shell:
                 return deny(AUDIT_REASON)
         if args[:2] == ["config", "edit"]:
             return deny(protected_reason(Path(real(core.CONFIG_FILE)), "edit"))
+        if args[:2] in (["config", "lock"], ["config", "unlock"]) and not {"-h", "--help"} & set(args[2:]):
+            return deny(LOCK_REASON.format(sub=args[1]))
         if args[:1] in (["rm"], ["mv"], ["cp"]):
             return self.segment(args[0], args, [], cwd)
         if args[:1] and (args[0] in _DEV_READ or args[0] in _DEV_TEXT):
