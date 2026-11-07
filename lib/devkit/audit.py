@@ -518,9 +518,9 @@ PROGRAMS = frozenset((
     # devkit, git and the forges
     "dev devkit git gh glab hub git-lfs "
     # shells, their builtins and reserved words that the guard reads as programs
-    "sh bash zsh dash ksh fish source . alias cd pushd popd dirs pwd echo printf read set unset export local declare "
-    "typeset readonly wait sleep true false test [ [[ type which command builtin hash history exit return break "
-    "continue shift trap ulimit umask getopts let eval exec for select case in esac function coproc "
+    "sh bash zsh dash ksh fish csh tcsh source . alias cd pushd popd dirs pwd echo printf read set unset export local "
+    "declare typeset readonly wait sleep true false test [ [[ type which command builtin hash history exit return "
+    "break continue shift trap ulimit umask getopts let eval exec for select case in esac function coproc "
     # the programs that run another one
     "env sudo doas timeout nice nohup xargs time caffeinate script watch parallel sem arch flock unbuffer chronic "
     # readers and text tools

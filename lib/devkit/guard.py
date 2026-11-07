@@ -1286,7 +1286,10 @@ def _check_segments(cmd: str, segs, ecwd: str, agent: str, depth: int = 0, outer
                     res = deny(f"Do not create backup copies ({dest.name}); git already keeps history.")
         if res:
             return res
-        for line in (_nested_lines(argv) if depth < 4 else []):
+        lines = _nested_lines(argv)
+        if lines and depth >= 4:  # too deep to read is no "nothing found": refused
+            return deny(NESTED_REASON)
+        for line in lines:
             inner = split_commands(line)
             res = _check_segments(line, inner, ecwd, agent, depth + 1, envs) if inner else None
             if res:
@@ -1321,10 +1324,37 @@ def _dev_cross_violation(args, cwd):
     return None
 
 
+def _patch_lines(patch: str) -> list:
+    """An apply_patch envelope's lines as Codex's parser reads them: split on `\n` only, with one `\r` before it
+    dropped. str.splitlines() also splits on `\r`, `\x0b`, `\x0c`, `\x1c`-`\x1e`, `\x85`, U+2028 and U+2029, which
+    cut a header path that Codex reads whole (Red team round 3). A final `\n` ends the last line, as for splitlines."""
+    lines = [ln[:-1] if ln.endswith("\r") else ln for ln in str(patch).split("\n")]
+    return lines[:-1] if lines and lines[-1] == "" else lines
+
+
+_PATCH_HEADER = re.compile(r"^\*\*\* (?:(?:Add|Update|Delete) File|Move to): ")
+# a C0 or C1 control character or a Unicode line or paragraph separator (tab included: no path needs one)
+_PATH_CONTROL = re.compile("[\x00-\x1f\x7f-\x9f\u2028\u2029]")
+PATCH_HEADER_REASON = (
+    "This patch names a file whose path holds a control character or a line separator (such as `\\r`, `\\x0b`, "
+    "`\\x1c`, `\\x85` or U+2028), which tools split in different places, so the guard cannot be sure which file it "
+    "writes. Name the file without it.")
+
+
+def patch_header_refusal(patch: str):
+    """("deny", why) when an Add, Update, Delete or Move header of an apply_patch envelope holds a control character
+    or a line separator in its path (_PATH_CONTROL); None otherwise."""
+    for ln in _patch_lines(patch):
+        t = ln.strip(" \t")
+        if _PATCH_HEADER.match(t) and _PATH_CONTROL.search(t):
+            return deny(PATCH_HEADER_REASON)
+    return None
+
+
 def parse_patch_paths(patch: str):
-    """apply_patch envelope -> [(op, path)] for Add/Update/Delete/Move."""
+    """apply_patch envelope -> [(op, path)] for Add/Update/Delete/Move, its lines read as Codex reads them."""
     out = []
-    for ln in patch.splitlines():
+    for ln in _patch_lines(patch):
         m = re.match(r"^\*\*\* (Add|Update|Delete) File: (.+)$", ln.strip())
         if m:
             out.append((m.group(1).lower(), m.group(2).strip()))
@@ -1815,9 +1845,9 @@ def note_keys_violation(p, tool_input: dict):
 
 
 def _patch_files(patch: str) -> list:
-    """apply_patch envelope -> [{op, path, move, lines}], one per file section."""
+    """apply_patch envelope -> [{op, path, move, lines}], one per file section, its lines read as Codex reads them."""
     out = []
-    for ln in patch.splitlines():
+    for ln in _patch_lines(patch):
         m = re.match(r"^\*\*\* (Add|Update|Delete) File: (.+)$", ln.strip())
         if m:
             out.append({"op": m.group(1).lower(), "path": m.group(2).strip(), "move": "", "lines": []})
@@ -1953,10 +1983,10 @@ _ANY_WRITE = re.compile(r"""['"][rbtU]*[wax+][rbt+]*['"]\s*\)|\bmode\s*=|\.write
 def protected_patch(patch: str, cwd):
     """apply_patch: Add, Update, Delete and Move all count, and an added DEVKIT_* line in a settings or shell startup
     file."""
-    v = patch_note_violation(patch, cwd)
+    v = patch_header_refusal(patch) or patch_note_violation(patch, cwd)
     if v:
         return v
-    added = _unescape("\n".join(ln[1:] for ln in patch.splitlines() if ln.startswith("+")))
+    added = _unescape("\n".join(ln[1:] for ln in _patch_lines(patch) if ln.startswith("+")))
     for op, path in parse_patch_paths(patch):
         lp = _lexical(path, cwd)
         if is_dev_command(lp):
@@ -2032,7 +2062,7 @@ def dev_command_reason(p, verb="replace") -> str:
 SAFEGUARDS_REASON = ("`dev config set safeguards.…` changes devkit's safeguards, and only the developer changes them, "
                      "in a terminal (spec C11). Ask them: name the setting, the value and why. `dev config show` "
                      "prints the current values.")
-_SHELLS = {"bash", "sh", "zsh", "dash", "ksh", "fish"}
+_SHELLS = {"bash", "sh", "zsh", "dash", "ksh", "fish", "csh", "tcsh"}
 # git commands that rewrite tracked files (B2a: in the handoff repository they can bring back an older note)
 _GIT_TREE_WRITES = frozenset("checkout switch reset restore revert merge pull rebase cherry-pick stash apply am mv rm "
                              "clean read-tree checkout-index update-index filter-branch filter-repo".split())
@@ -2128,6 +2158,10 @@ UNREADABLE_REASON = (
     "so text with apostrophes can go in one (`cat <<'EOF' > file`). The same holds for a line the command hands to a "
     "shell (`sh -c`, `eval`, a heredoc a shell reads), and for a command line in a program's code (`os.system`, "
     f"`execSync`) that names dev, claude, codex, tmux, screen, osascript or open. {_TAIL}")
+NESTED_REASON = (
+    "This command nests shells, `eval` or wrappers deeper than the guard reads (`sh -c` inside `sh -c`, four levels "
+    "and more), so the guard cannot judge what the innermost command does, and it refuses what it cannot judge. Run "
+    f"the inner command directly, or with fewer levels around it. {_TAIL}")
 INPUT_COMMAND_REASON = (
     "This runs a command its input names, which the guard cannot see before it runs, so none of its rules could judge "
     "it: `xargs` with only a wrapper after it (`xargs env`, `xargs nohup`, `xargs sudo`, `xargs timeout 5`: xargs "
@@ -2687,8 +2721,10 @@ class _Shell:
         return inner
 
     def nested(self, text, cwd, same_shell=False, names=(), typed=True):
-        if not text or self.depth >= 4:
+        if not text:
             return None
+        if self.depth >= 4:  # too deep to read is no "nothing found": refused
+            return deny(NESTED_REASON)
         inner = self.child(text, cwd, names)
         inner.typed = typed
         v = inner.run()
@@ -2767,7 +2803,7 @@ class _Shell:
         if installer and _devkit_installer(resolve(installer, cwd)):
             return deny(INSTALL_REASON)
         if name in _SHELLS:
-            for text, typed in _shell_sources(args, cwd, self.bodies):
+            for text, typed, _ in _shell_sources(args, cwd, self.bodies):
                 v = self.nested(text, cwd, names=names, typed=typed)
                 if v:
                     return v
@@ -3679,8 +3715,8 @@ def _input_runs(words, depth: int = 0) -> bool:
         return True
     if _program_source(run) in ("filled", "none"):  # `xargs sh`, `xargs python3 -c`, `xargs -I{} node`
         return True
-    if depth >= 4:
-        return False
+    if depth >= 4:  # too deep to read: it may run what its input names (fails closed)
+        return True
     name = os.path.basename(run[0])
     line = _shell_line(run[1:]) if name in _SHELLS else " ".join(run[1:]) if name == "eval" else None
     if not line:
@@ -3815,12 +3851,12 @@ def _with_positionals(line: str, words) -> str:
 def _shell_inputs(args, cwd, bodies) -> list:
     """The scripts a shell runs: its -c string, a script file, or its input (the command's heredocs). With -s it reads
     its input even when words follow, and they are its $1, $2 … (`bash -s plugin install x <<< 'claude "$@"'`)."""
-    return [text for text, _ in _shell_sources(args, cwd, bodies)]
+    return [text for text, _, _ in _shell_sources(args, cwd, bodies)]
 
 
 def _shell_sources(args, cwd, bodies) -> list:
-    """_shell_inputs as (text, typed): typed when the command holds the text (a -c line, a heredoc), False for a
-    script file read from disk."""
+    """_shell_inputs as (text, typed, path): typed when the command holds the text (a -c line, a heredoc), False for a
+    script file read from disk, whose resolved path is the third item (None for the others)."""
     i, stdin = 0, False
     while i < len(args):
         a = args[i]
@@ -3828,7 +3864,7 @@ def _shell_sources(args, cwd, bodies) -> list:
             i += 1
             break
         if a.startswith("-") and not a.startswith("--") and "c" in a[1:]:
-            return [(_with_positionals(args[i + 1], args[i + 2:]), True)] if i + 1 < len(args) else []
+            return [(_with_positionals(args[i + 1], args[i + 2:]), True, None)] if i + 1 < len(args) else []
         if a in ("-o", "+o", "-O", "+O", "--rcfile", "--init-file"):
             i += 2
             continue
@@ -3838,10 +3874,11 @@ def _shell_sources(args, cwd, bodies) -> list:
             continue
         break
     if stdin:
-        return [(_with_positionals(b, ["sh", *args[i:]]), True) for b in bodies]
+        return [(_with_positionals(b, ["sh", *args[i:]]), True, None) for b in bodies]
     if i < len(args):
-        return [(_read_small(resolve(args[i], cwd)), False)]
-    return [(b, True) for b in bodies]
+        path = resolve(args[i], cwd)
+        return [(_read_small(path), False, path)]
+    return [(b, True, None) for b in bodies]
 
 
 def _program(argv, cwd, bodies):
@@ -3957,6 +3994,7 @@ def _devkit_module(name) -> bool:
 
 
 DECODED = "code it decodes at run time"
+NESTED = "code nested deeper than the guard reads"  # _forged_calls and evidence_reached at their depth cap
 DECODED_REASON = ("This program runs code it decodes at run time (exec of base64, hex, zlib or marshal data), which the "
                   "guard cannot read, so it cannot tell whether it forges the developer's approval or writes devkit's "
                   "records (spec C5, C11). Write the code out in the command or a script file.")
@@ -4066,8 +4104,10 @@ def evidence_reached(code, cwd=None, depth: int = 0) -> str:
     are judged too, three levels deep; code it decodes and runs is DECODED. Code that is not Python is judged by its
     text."""
     import ast
-    if not code or not str(code).strip() or depth > 3:
+    if not code or not str(code).strip():
         return ""
+    if depth > 3:  # too deep to read: refused when it loads devkit, as a program the parser cannot read
+        return NESTED if _DEVKIT_LOAD_TEXT.search(code) else ""
     try:
         tree = ast.parse(code)
     except (SyntaxError, ValueError):
@@ -4153,8 +4193,10 @@ def evidence_reached(code, cwd=None, depth: int = 0) -> str:
 def _forged_calls(text, cwd, depth=0) -> str:
     """The first evidence function an agent's program reaches in a command line, level by level, or ''. A line the
     guard cannot parse is judged by its text."""
-    if depth > 4 or not text or not str(text).strip():
+    if not text or not str(text).strip():
         return ""
+    if depth > 4:  # too deep to read: refused when it loads devkit, as a line the parser cannot read
+        return NESTED if _DEVKIT_LOAD_TEXT.search(text) else ""
     segs = split_commands(text, ops=True)
     if segs is None:
         return evidence_reached(text) if _DEVKIT_LOAD_TEXT.search(text) else ""
@@ -4218,7 +4260,10 @@ def _forged_argv(argv, cwd, bodies, here, prev, depth) -> str:
         if fn:
             return fn
     for inner in inners:
-        fn = _forged_argv(inner, cwd, bodies, [], [], depth + 1) if inner and depth < 4 else ""
+        if inner and depth >= 4:  # too deep to read
+            fn = NESTED if _DEVKIT_LOAD_TEXT.search(" ".join(inner)) else ""
+        else:
+            fn = _forged_argv(inner, cwd, bodies, [], [], depth + 1) if inner else ""
         if fn:
             return fn
     return ""
@@ -4232,6 +4277,8 @@ def evidence_forgery(cmd: str, cwd):
     fn = _forged_calls(cmd, cwd or os.getcwd())
     if fn == DECODED:
         return deny(DECODED_REASON)
+    if fn == NESTED:
+        return deny(NESTED_REASON)
     return deny(FORGERY_REASON.format(fn=_code(fn))) if fn else None
 
 
@@ -4392,9 +4439,10 @@ def shell_calls(cmd: str, cwd, depth: int = 0, where: bool = False):
     program it runs (inline, its input, or a script outside the workspace; None for a repository's own script).
     Text the command only carries is not a call. None when the command cannot be parsed. With `where`, each call is
     (argv, code, the folder it runs in): after the `cd` and `pushd` before it and its prefix's `env -C` or `sudo -D`,
-    UNKNOWN when only the run knows it (a variable, `find -execdir`)."""
+    UNKNOWN when only the run knows it (a variable, `find -execdir`). A level deeper than it reads is None too:
+    the callers judge the words, as for a command they cannot parse."""
     if depth > 4:
-        return []
+        return None if str(cmd or "").strip() else []
     segs = split_commands(cmd)
     if segs is None:
         return None
@@ -4449,7 +4497,10 @@ def _program_calls(argv, cwd, bodies, depth, where=False):
         out += more
     for inner, at in inners:
         if inner:
-            out += _program_calls(inner, at, bodies, depth + 1, where) or []
+            more = _program_calls(inner, at, bodies, depth + 1, where)
+            if more is None:
+                return None
+            out += more
     return out
 
 
@@ -5646,9 +5697,9 @@ _COMMIT_VALUE_OPTS = frozenset({"-m", "-F", "-C", "-c", "-t", "--author", "--dat
 def _walk_segments(cmd: str, cwd, depth: int = 0):
     """Every segment a shell command runs, at every level, as (words with their prefixes, cwd, the level's heredoc
     bodies): nested shells, eval, source, xargs, find -exec and the substitutions the shell expands. None when a
-    level cannot be parsed."""
+    level cannot be parsed, or is deeper than it reads."""
     if depth > 4:
-        return []
+        return None if str(cmd or "").strip() else []
     segs = split_commands(cmd)
     if segs is None:
         return None
@@ -5694,8 +5745,13 @@ def _walk_argv(argv0, cwd, bodies, depth):
             return None
         out += more
     for inner in inners:
-        if inner and depth < 4:
-            out += _walk_argv(list(inner), cwd, bodies, depth + 1) or []
+        if inner and depth >= 4:  # too deep to read
+            return None
+        if inner:
+            more = _walk_argv(list(inner), cwd, bodies, depth + 1)
+            if more is None:
+                return None
+            out += more
     return out
 
 
@@ -6333,7 +6389,7 @@ _GIT_BUILTIN = frozenset(
     "version whatchanged worktree write-tree lfs".split())
 
 
-_SHEBANG_SH = re.compile(r"^#!\s*\S*/(?:env\s+(?:-\S+\s+)*)?(?:ba|z|da|k)?sh\b")
+_SHEBANG_SH = re.compile(r"^#!\s*\S*/(?:env\s+(?:-\S+\s+)*)?(?:ba|z|da|k|tc|c)?sh\b")
 _GH_BUILTIN = frozenset(
     "alias api attestation auth browse cache codespace completion config copilot extension gist gpg-key help issue "
     "label org pr preview project release repo ruleset run search secret ssh-key status variable workflow "
@@ -6862,10 +6918,12 @@ def code_session_refusal(argv, cwd, bodies, depth: int = 0) -> str | None:
     the refusals the shell form gets, for the same commands named in code (RT12). A command line the tokenizer cannot
     read that names one of the commands these rules judge is refused as unreadable (_CODE_ACTS_ON, round eleven). A
     repository's own script is its code, as for the other checks."""
-    if depth > 3 or _repo_script(argv, cwd):
+    if _repo_script(argv, cwd):
         return None
     name = os.path.basename(argv[0])
     code = _program(argv, cwd, bodies)[0]
+    if depth > 3:  # too deep to read: refused when it names a command these rules judge, as an unreadable line
+        return NESTED_REASON if code and _CODE_ACTS_ON.search(code) else None
     homes = set(_AGENT_HOME_ENV) & set(re.findall(r"\b[A-Z_]+\b", code or ""))
     if _code_types(code, name):
         return TERMINAL_TYPING_REASON
@@ -6936,8 +6994,9 @@ def _reads_stdin(args) -> bool:
 def _fed_program(argv, segs, k, files, cwd) -> tuple:
     """What a shell or interpreter that reads its program from its input is fed (`cat f | sh`, `sh < f`, `0< f sh`,
     `python3 < f`, `node - < f`, `python3 /dev/stdin < f`), and the process substitution it runs as its script
-    (`sh <(cat f)`, read as `sh -` fed what cat writes) -> (argv, [texts], [paths left unread]). A program given in
-    the words (`sh -c …`, `python3 x.py`) is fed nothing here."""
+    (`sh <(cat f)`, read as `sh -` fed what cat writes) -> (argv, [(text, path)], [paths left unread]), where path is
+    the file a text was read from (a redirect, `cat f`), or None for words the command holds (echo, printf). A
+    program given in the words (`sh -c …`, `python3 x.py`) is fed nothing here."""
     name = os.path.basename(argv[0]) if argv else ""
     if not argv or (name not in _SHELLS and not _INTERP.match(name)):
         return argv, [], []
@@ -6946,20 +7005,35 @@ def _fed_program(argv, segs, k, files, cwd) -> tuple:
         if "<(" in argv[1:]:  # `sh <(cat f)`: the tokenizer leaves the substitution's words in the segment
             j = argv.index("<(")
             if all(str(a).startswith("-") for a in argv[1:j]):
-                texts.append(_produced(_unwrap(argv[j + 1:]), cwd) if argv[j + 1:] else "")
+                sub = _unwrap(argv[j + 1:])
+                texts.append((_produced(sub, cwd), _cat_path(sub, cwd)) if sub else ("", None))
                 argv = [*argv[:j], "-"]
         stdin = (_reads_stdin(argv[1:]) if name in _SHELLS else _program_source(argv, whole=True) == "none") or \
             any(a in ("/dev/stdin", "/dev/fd/0") for a in argv[1:])
         if stdin:
             prev = _unwrap(segs[k - 1][0]) if k else []
             if prev and segs[k - 1][2] in ("|", "|&"):
-                texts.append(_produced(prev, cwd))
+                texts.append((_produced(prev, cwd), _cat_path(prev, cwd)))
             for f in files:
                 try:
-                    texts.append(_read_small(resolve(f, cwd)))
+                    texts.append((_read_small(resolve(f, cwd)), resolve(f, cwd)))
                 except ValueError:  # a name the system cannot encode (a lone surrogate): unread, so tier 2
                     _note_unread(f)
-    return argv, [t for t in texts if t], list(unread)
+    return argv, [(t, path) for t, path in texts if t], list(unread)
+
+
+def _cat_path(argv, cwd):
+    """The file whose text _produced returns for `cat f`, resolved; None for any other command."""
+    if argv and os.path.basename(argv[0]) == "cat" and len(argv) == 2 and not argv[1].startswith("-"):
+        return resolve(argv[1], cwd)
+    return None
+
+
+def _unparsed_script(path, words, argv, cwd) -> list:
+    """The actions of a script file whose lines the gate cannot parse, however it runs (`./y.sh`, `sh y.sh`,
+    `. y.sh`, `sh < y.sh`): none for the repository's own script inside the workspace, else an unknown action named
+    by `words`, as it may do anything (M701)."""
+    return [] if _workspace_file(path) else _found([_unknown(words)], argv, cwd)
 
 
 def _produced(argv, cwd) -> str:
@@ -7019,7 +7093,9 @@ def _segment_actions(argv, cwd, bodies, depth) -> list:
             gc, srcs = gcwd if gcwd != str(UNKNOWN) else None, []
             found, cwd = _push_actions(args, gc, srcs), gcwd
             found = _embargo_holds(found, gc, srcs) + found  # the developer-only action first
-        elif alias and depth < 4:  # an alias runs another git command, or a shell command with `!`
+        elif alias and depth >= 4:  # too deep to read: unknown
+            found = [_unknown(" ".join(argv))]
+        elif alias:  # an alias runs another git command, or a shell command with `!`
             rest = " ".join(shlex.quote(a) for a in args)
             if alias.startswith("!"):
                 more = _text_actions(alias[1:] + " " + rest, gcwd, depth + 1) or []
@@ -7029,7 +7105,9 @@ def _segment_actions(argv, cwd, bodies, depth) -> list:
                                      depth + 1) or []
     elif name == "gh":
         alias = _gh_alias(argv[1] if len(argv) > 1 else "")
-        if alias and depth < 4:  # `gh alias set m 'pr merge'`, then `gh m 12`
+        if alias and depth >= 4:  # too deep to read: unknown
+            found = [_unknown(" ".join(argv))]
+        elif alias:  # `gh alias set m 'pr merge'`, then `gh m 12`
             rest = " ".join(shlex.quote(a) for a in argv[2:])
             more = _text_actions((alias[1:] if alias.startswith("!") else "gh " + alias) + " " + rest, cwd,
                                  depth + 1) or []
@@ -7061,7 +7139,7 @@ def _path_run_actions(argv, cwd, bodies, depth) -> tuple:
     """A program run by its path (`./x`, `bin/release`), read as the system runs it (_run_by_path) -> (found, more):
     with an interpreter's shebang, what that interpreter runs with the file as its script (`./big.py` is
     `python3 ./big.py`, with the same read cap); a shell script, or a text file with no shebang, what its lines run,
-    read up to 256 KB. A script the gate cannot read is an unknown action, except inside the workspace (a
+    read up to 256 KB. A script the gate cannot read or parse is an unknown action, except inside the workspace (a
     repository's own `./configure`), as for a script an interpreter runs (_repo_script); a binary is classified by its
     name."""
     path = resolve(argv[0], cwd)
@@ -7069,7 +7147,9 @@ def _path_run_actions(argv, cwd, bodies, depth) -> tuple:
     if kind == "sh" and not os.access(str(path), os.X_OK) and "chmod" not in (_GATE_TEXT.get() or ""):
         return [], []  # a text file no one can run (`./notes.txt`), unless the command makes it runnable first
     if kind == "interp":
-        return [], _segment_actions([interp, argv[0], *argv[1:]], cwd, bodies, depth + 1) if depth < 4 else []
+        if depth >= 4:  # too deep to read: unknown
+            return [_unknown(" ".join(argv))], []
+        return [], _segment_actions([interp, argv[0], *argv[1:]], cwd, bodies, depth + 1)
     if kind not in ("shell", "sh"):
         return [], []
     with _skipped_reads() as unread:
@@ -7077,8 +7157,8 @@ def _path_run_actions(argv, cwd, bodies, depth) -> tuple:
     if unread:
         return ([] if _workspace_file(path) else [_unread_action(argv, unread[0])]), []
     more = _text_actions(script, cwd, depth + 1)
-    if more is None:  # a script whose lines the gate cannot parse may do anything
-        return [_unknown(" ".join(argv))], []
+    if more is None:  # a script whose lines the gate cannot parse may do anything, unless it is the repository's own
+        return ([] if _workspace_file(path) else [_unknown(" ".join(argv))]), []
     return [], more
 
 
@@ -7158,16 +7238,16 @@ def _argv_actions(argv, cwd, bodies, depth):
         return None
     out = _segment_actions(argv, cwd, bodies, depth)
     name, args = os.path.basename(argv[0]), argv[1:]
-    texts, inners = [], []
+    texts, inners = [], []  # texts: (script, the path of a script file or None for a line the command holds)
     with _skipped_reads() as unread:
         if name in _SHELLS:
-            texts = _shell_inputs(args, cwd, bodies)
+            texts = [(text, path) for text, _, path in _shell_sources(args, cwd, bodies)]
         elif name in ("source", ".") and args:
-            texts = [_read_small(resolve(args[0], cwd))]
+            texts = [(_read_small(resolve(args[0], cwd)), resolve(args[0], cwd))]
     if unread:  # `sh big.sh`, `source big.sh`: a script too large or unreadable may do anything
         out += _found([_unread_action(argv, unread[0])], argv, cwd)
     if name == "eval":
-        texts = [" ".join(args)]
+        texts = [(" ".join(args), None)]
     elif name == "xargs":
         inner = _unwrap(_xargs_command(args))
         placed = _xargs_parts(args)[1] is not None
@@ -7177,18 +7257,28 @@ def _argv_actions(argv, cwd, bodies, depth):
             if a in ("-exec", "-execdir", "-ok", "-okdir"):
                 sub = args[k + 1:]
                 inners.append(_unwrap(sub[:next((j for j, x in enumerate(sub) if x in (";", "+")), len(sub))]))
-    for text in texts:
+    for text, path in texts:
         more = _text_actions(text, cwd, depth + 1)
+        if more is None and path is not None:  # `sh y.sh`, `. y.sh`: as `./y.sh` (_unparsed_script)
+            more = _unparsed_script(path, " ".join(argv), argv, cwd)
         if more is None:
             return None
         out += more
     for inner in inners:
-        if inner and depth < 4:
+        if inner and depth >= 4:  # too deep to read: unknown
+            out += _nested_action(" ".join(inner), cwd)
+        elif inner:
             more = _argv_actions(inner, cwd, bodies, depth + 1)
             if more is None:
                 return None
             out += more
     return out
+
+
+def _nested_action(text, cwd) -> list:
+    """The gate's record for a command nested deeper than it reads (`sh -c` five levels deep): an unknown, tier-2
+    action named by the text left unread, as it may do anything (Red team round 3)."""
+    return _found([_unknown(text)], [str(text)], cwd)
 
 
 # a program a variable names by its folder: `$VENV/bin/python`, `"${VIRTUAL_ENV}/bin/pytest"` (M394). Only these
@@ -7219,8 +7309,10 @@ def _text_actions(text, cwd, depth=0, from_code=False):
     a level cannot be parsed. `from_code`: the text is a string literal of an interpreter's program, where `${…}`,
     `{…}`, `[…]` and `*` are the language's own (a template, an f-string, a list), so they never make a program the
     shell names at run time; the shells and substitutions it runs are judged as usual (M394)."""
-    if depth > 4 or not text or not str(text).strip():
+    if not text or not str(text).strip():
         return []
+    if depth > 4:  # a level deeper than the gate reads may run anything: unknown, never "nothing found"
+        return _nested_action(text, cwd)
     ins = []
     segs = split_commands(text, ops=True, inputs=ins)
     if segs is None:
@@ -7263,7 +7355,7 @@ def _text_actions(text, cwd, depth=0, from_code=False):
         argv, fed, unread = _fed_program(argv, segs, k, ins[k] if k < len(ins) else [], cwd)
         if unread:  # `sh < big.sh`, `cat big.py | python3`: a program too large or unreadable may do anything
             out += _found([_unread_action(argv, unread[0])], argv0, cwd)
-        more = _argv_actions(argv, here, bodies + fed if _INTERP.match(name) else bodies, depth)
+        more = _argv_actions(argv, here, bodies + [t for t, _ in fed] if _INTERP.match(name) else bodies, depth)
         if more is None:
             return None
         out += more
@@ -7285,8 +7377,10 @@ def _text_actions(text, cwd, depth=0, from_code=False):
                     return None
                 out += more
         if name in _SHELLS and (fed or _reads_stdin(argv[1:])):
-            for script in [*(herestrs if _reads_stdin(argv[1:]) else []), *fed]:
+            for script, path in [*((h, None) for h in (herestrs if _reads_stdin(argv[1:]) else [])), *fed]:
                 more = _text_actions(script, cwd, depth + 1)
+                if more is None and path is not None:  # `sh < y.sh`, `cat y.sh | sh`: as `./y.sh`
+                    more = _unparsed_script(path, text, argv0, cwd)
                 if more is None:
                     return None
                 out += more
@@ -7779,7 +7873,7 @@ def check(tool: str, tool_input: dict, cwd: str, agent: str):
     tool_input = tool_input or {}
     _BYPASSES.clear()
     if tool in SHELL_TOOLS:
-        return check_bash(_tool_command(tool_input), cwd, agent)
+        return _check_shell(tool_input, cwd, agent)
     if any(_NUL in p for p in _named_paths(tool, tool_input)):  # as check_bash refuses one in a command: a rule after
         return deny(PATH_NUL_REASON)  # the guard (the crew's scopes) would raise on it and fail open
     if tool == "WebFetch":
@@ -7792,17 +7886,34 @@ def check(tool: str, tool_input: dict, cwd: str, agent: str):
         if not isinstance(judged, _Judged):  # a branch that returned nothing it means: refuse, never allow
             raise TypeError(f"_file_tool_verdict returned {type(judged).__name__}")
         if judged is _SHELL:
-            return check_bash(_tool_command(tool_input), cwd, agent)
+            return _check_shell(tool_input, cwd, agent)
         verdicts.append(judged.verdict)
     return next((v for v in verdicts if v and v[0] == "deny"), None) or next((v for v in verdicts if v), None)
 
 
+def tool_commands(tool_input) -> list:
+    """The shell commands a tool input carries (Bash, Monitor, Codex's exec_command), each once: its `command`, then
+    its `cmd`, which Codex's exec_command may send instead; a list is quoted word by word. [] for none."""
+    out = []
+    for key in ("command", "cmd"):
+        cmd = tool_input.get(key) if isinstance(tool_input, dict) else None
+        if isinstance(cmd, list):
+            cmd = " ".join(shlex.quote(str(c)) for c in cmd)
+        if isinstance(cmd, str) and cmd and cmd not in out:
+            out.append(cmd)
+    return out
+
+
 def _tool_command(tool_input) -> str:
-    """The shell command a tool input carries (Bash, Monitor, Codex's exec_command: a list is quoted), '' for none."""
-    cmd = tool_input.get("command") if isinstance(tool_input, dict) else None
-    if isinstance(cmd, list):
-        cmd = " ".join(shlex.quote(str(c)) for c in cmd)
-    return cmd if isinstance(cmd, str) else ""
+    """The first of tool_commands, '' for none."""
+    return next(iter(tool_commands(tool_input)), "")
+
+
+def _check_shell(tool_input, cwd, agent):
+    """check_bash for each command a tool input carries (tool_commands): the first refusal, else the first other
+    verdict, else None. A call with no command is judged as the empty command, as before."""
+    verdicts = [check_bash(c, cwd, agent) for c in tool_commands(tool_input) or [""]]
+    return next((v for v in verdicts if v and v[0] == "deny"), None) or next((v for v in verdicts if v), None)
 
 
 def _patch_bodies(tool_input) -> list:

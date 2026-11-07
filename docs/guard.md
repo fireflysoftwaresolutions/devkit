@@ -10,15 +10,22 @@ It inspects:
 - **Claude Code:** `Bash` (`command`), `Write`, `Edit`, `MultiEdit` (`file_path`) and `NotebookEdit` (`notebook_path`).
   The hook also sees the `Agent` and `Task` tools, to time them and to add required skills to subagent briefs (see
   [Skills and plugins › Required skills](skills-and-plugins.md#required-skills)); no guard rule applies to them.
-- **Codex:** `Bash` (`command`) and `apply_patch` (the patch's `Add File`, `Update File`, and `Move to` paths).
+- **Codex:** `Bash` and `exec_command` (`command`, and `cmd`, which `exec_command` may send instead: a list is read
+  word by word, and when both keys are present and differ, each is judged and the call is refused if either is) and
+  `apply_patch` (the patch's `Add File`, `Update File`, and `Move to` paths).
 
 Shell commands are tokenized: chains (`&&`, `||`, `;`, `|`, new lines) are checked one by one, `cd` and `pushd` change
 the directory used to resolve later paths, leading `VAR=value`, `sudo`, `env`, `command`, `nohup`, `time`, `exec`,
 `builtin`, `nice`, and `caffeinate` prefixes are skipped, heredoc bodies are treated as data, and output redirections
 (`>`, `>>`) are checked as writes. The guard also reads what the shell runs inside a command: `$(…)` and backtick
 substitutions, `sh -c` and `eval` strings (with the words after a `sh -c` line in place of its `$0`, `$1`, and
-`"$@"`), `xargs` and `find -exec` commands, and a pager that git or gh starts. Every rule applies at each of these
-levels, so `find . -exec sh -c 'git push --force origin main' \;` is denied as the plain command is. Quoted
+`"$@"`), `xargs` and `find -exec` commands, and a pager that git or gh starts. The shells it reads this way are
+`sh`, `bash`, `zsh`, `dash`, `ksh`, `fish`, `csh`, and `tcsh`, run by name, by path, or by a script's shebang. It
+reads every one of them with POSIX shell quoting, which `csh` and `tcsh` do not follow in every case (a backslash
+before a closing double quote). Every rule applies at each of these
+levels, so `find . -exec sh -c 'git push --force origin main' \;` is denied as the plain command is. The guard
+reads four levels of nesting; a command nested deeper (`sh -c` inside `sh -c` five times) is refused whatever it
+runs, and the irreversible-action gate counts it as `unknown`, because the guard cannot judge what it cannot read. Quoted
 text a command only carries, such as a `dev crew ask` message, is data and never read as a command. A heredoc body
 ends at its tag line, and also at a line that starts with the tag and `)`: macOS `/bin/bash` 3.2 ends a heredoc there
 inside `$(…)` and runs what follows, while zsh reads on, so the guard reads it the way that shows what bash runs.
@@ -74,7 +81,10 @@ and an MCP server may write `<folder>/~/…` instead, so the guard judges their 
 when either reading is refused. A path with a link followed by `..` (`link/../x`) is judged both as the system reads
 it (the link's target, then `..`) and as a program that cleans the path first reads it (`x` beside the link): a write
 that either reading puts in devkit's state, configuration, or install is refused. `apply_patch` is judged by its patch
-under any key Codex sends it in (`input`, `patch`, or `command`), and a `Bash` or `Monitor` command is always judged
+under any key Codex sends it in (`input`, `patch`, or `command`), with its lines split as Codex splits them (on a
+line feed only, with a carriage return before it dropped). A patch whose `Add File`, `Update File`, `Delete File`, or
+`Move to` path holds a control character or a line separator (`\r`, `\x0b`, `\x1c`, `\x85`, U+2028) is refused, so
+the guard and Codex always read the same path. A `Bash` or `Monitor` command is always judged
 as a shell command, even one that starts like a patch. The rules on the handoff repository compare paths without case, as macOS folders do:
 `~/development/.HANDOFF/projects/other/repo.MD` is another project's note.
 
@@ -366,8 +376,10 @@ action `unknown`, tier 2, with the target `cmd-<hash>` of that exact command tex
   shell runs it as (also one that is not executable yet when the command runs `chmod`). A shell or interpreter reads its program from a redirect or a pipe the same way: `sh < f`, `< f sh`, `sh 0< f`,
   `sh <(cat f)`, `python3 < f`, `python3 /dev/stdin < f`, and `cat f | python3` are read like `sh f` and
   `python3 f`. A path the system cannot encode (a lone surrogate) counts as unreadable. A binary is classified by its
-  name, as before. A script inside the workspace is the repository's own and is not counted as unknown when it is
-  large (autotools' `./configure`), as for `python3 tools/x.py`;
+  name, as before. A shell script the gate reads but cannot parse (a comment with an apostrophe, such as
+  `# it's a test`) is unknown in the same way, however it runs: `./y.sh`, `sh y.sh`, `bash y.sh`, `. y.sh`,
+  `source y.sh`, `sh < y.sh`, or `cat y.sh | bash`. A script inside the workspace is the repository's own and is not
+  counted as unknown when it is large (autotools' `./configure`) or cannot be parsed, as for `python3 tools/x.py`;
 - a subcommand that `xargs`, `parallel`, or `find -exec` fills in for a program whose subcommand the gate reads (npm,
   pnpm, yarn, cargo, docker, twine, terraform, gem, make, and the other publish and deploy tools): `echo publish |
   xargs npm`, `xargs -I{} npm {}`, `parallel npm ::: publish`. The guard counts a filled word up to the second word
