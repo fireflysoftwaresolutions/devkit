@@ -1313,6 +1313,10 @@ skill or MCP server that is not at its pin, a required extension that is off, a 
 plugin that a repository's `.claude/settings.json` enables outside the catalog. To accept a vendor change, run
 `dev install`, or `dev ext update <name> --apply --why "…"`, in a terminal.
 
+**Acceptances.** Each change `dev install` accepts, and each entry that ships with the Codex app that it records for
+the first time, writes one `ext.accept` audit record with the terminal and the parent processes, and stays listed
+at the session start and in `dev status` until you run [`dev ext ack`](#dev-ext-ack).
+
 ### `dev ext outdated [<name>] [--agent claude|codex] [--json]`
 
 For each extension, shows what upstream has now against its pin, and the compare or release link. It uses your own
@@ -1349,6 +1353,20 @@ dev ext update chrome-devtools --to 1.13.2 --why "the network panel fix"
 newest upstream is used. `--apply` updates a vendor marketplace plugin on this Mac instead (`claude plugin update`, or
 `codex plugin add`), after the same review, and records the new version as accepted, so it no longer shows as drift.
 Only you run `--apply`, in a terminal.
+
+### `dev ext ack`
+
+Confirms that the extensions accepted since your last acknowledgement were yours: it prints each one, clears the
+list the session start and `dev status` show, and writes one `ext.ack` audit record per entry. A terminal an agent
+opens can look like yours, so devkit lists every acceptance until you run this.
+
+```bash
+dev ext ack
+```
+
+Run it in your own terminal. From an agent, or from a process devkit cannot place in your terminal, it is refused
+and the refusal is audited. If the list names something you did not accept, do not acknowledge it: remove the
+entry and read `dev audit --action ext.accept`, which names the terminal and the processes that accepted it.
 
 ### `dev ext add | remove | enable | disable`
 

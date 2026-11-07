@@ -277,10 +277,11 @@ command sets, a copy the command makes) counts as one of them. With `claude` or 
 `claude -p "$PROMPT"` is refused too. devkit itself also refuses `dev ext update --apply` and
 `dev ext enable|disable --project` outside your terminal.
 
-The guard cannot see everything. A program name built at run time (`$(printf claude)`, an alias), a script piped
-into a shell, a command `tmux`, `screen`, `expect`, or a git alias starts later, and options that load a plugin for
-one session only (`claude --mcp-config`, `--plugin-dir`) get through; [What the guard cannot
-see](guard.md#what-the-guard-cannot-see) lists them. Drift is the backstop for all of these.
+The guard reads the command `screen`, `tmux`, and `expect -c` start, and refuses opening a Terminal or iTerm window
+or a `.command` file, whose text it cannot follow. It cannot see everything: a program name built at run time
+(`$(printf claude)`, an alias), a script piped into a shell, a command a git alias or `at` starts later, and options
+that load a plugin for one session only (`claude --mcp-config`, `--plugin-dir`) get through; [What the guard cannot
+see](guard.md#what-the-guard-cannot-see) lists them. Drift and the acceptance list are the backstop for all of these.
 
 Whatever changes outside devkit anyway shows as drift: at the session start, in `dev status`, `dev doctor`, and
 `dev ext ls`, with one `ext.drift` record in the audit trail per change.
@@ -310,9 +311,22 @@ for it, because agents can write Codex's plugin cache and `config.toml`:
 
 `dev install` names each of them the first time it records it, so you see what it accepts: a plugin with its
 version, an MCP server with the command and arguments it runs. It keeps a plugin's version and file digest, and an
-MCP server's raw text in `config.toml`; a change after that shows as `changed`. Only a `dev install` that runs in
-your terminal records them for the first time or accepts a change. One started anywhere else, such as from an
-agent's program, only names them, and they stay as drift.
+MCP server's raw text in `config.toml`; a change after that shows as `changed`. Only a `dev install` that devkit
+takes for your terminal records them for the first time or accepts a change. One started anywhere else, such as
+from an agent's program, only names them, and they stay as drift.
+
+A terminal an agent opens can look like yours: a command it starts in `screen`, `tmux`, or a Terminal window has no
+agent marker, a terminal of its own, and launchd as its parent, and no check inside a process can prove that you
+typed it. devkit therefore shows every acceptance until you acknowledge it:
+
+1. Each first record and each accepted change writes one `ext.accept` record to the audit trail, with the entry,
+   the terminal (`tty`), and the parent processes it ran from.
+2. The next session start and `dev status` list them: `extensions accepted since your last session: …`.
+3. If you ran that `dev install`, run `dev ext ack` in your terminal. It clears the list and writes one `ext.ack`
+   record per entry. Agents cannot run it: the guard refuses it in every form, and `dev ext ack` itself checks that
+   it runs in your terminal.
+4. If you did not, do not acknowledge it. Remove what it accepted (for a Codex MCP server, `codex mcp remove <name>`
+   in your terminal), and read `dev audit --action ext.accept` to see which process accepted it.
 
 devkit reads Codex's MCP servers only in the form `codex mcp add` writes: a `[mcp_servers.<name>]` table and its
 sub-tables, one `key = value` per line, with a string, number, `true` or `false`, or a one-line array. A server

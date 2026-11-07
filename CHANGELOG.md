@@ -59,6 +59,13 @@ All notable changes to devkit. Versions follow CalVer `YY.MM.PATCH` (PATCH resta
   typed command is. A `dev install` that runs outside your terminal anyway neither accepts a change made outside
   devkit nor records what ships with the Codex app for the first time: it names them, and they stay as drift. The
   first record names each MCP server with the command and arguments it runs.
+- **Every acceptance shows until you acknowledge it.** A process an agent starts in `screen`, `tmux`, or a Terminal
+  window can look like your terminal, so each change `dev install` accepts and each Codex app entry it records for
+  the first time writes an `ext.accept` audit record (the entry, the terminal, the parent processes) and stays
+  listed at the session start and in `dev status` until you run the new `dev ext ack`, which only you can run.
+  The guard now reads what `screen`, `tmux`, `expect -c`, and AppleScript's `do script` run, refuses `open` of a
+  Terminal or iTerm window or a `.command` file and `xargs dev`, and skips a package manager's own options before
+  its verb (`npm --silent exec`, `pnpm -C . exec`, `uv --quiet run`, `uv run --with x`).
 - **Drift covers what devkit does not manage.** A plugin, MCP server, or skill folder installed outside the catalog,
   for Claude Code and Codex, is reported as `not-in-catalog`. What ships with the Codex app is listed without drift
   only when its own files vouch for it (a bundled plugin whose cached files are all byte-equal to the app bundle's)
