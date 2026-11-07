@@ -482,12 +482,13 @@ class BackgroundWorkTests(GateCase):
         sess = {}
         roster = {"members": [KID]}
         self.assertEqual(gates.check("Kid", self.data(), sess, "owner/repo", roster=roster)["decision"], "block")
-        self.assertIsNone(gates.check("Kid", self.data(stop_hook_active=True), sess, "owner/repo", roster=roster))
+        self.assertIsNone(gates.check("Kid", self.data(stop_hook_active=True), sess, "owner/repo", roster=roster,
+                                      lead_name="a helper of DevEx engineer (Kid)"))
         recs = audit.records(1, action="crew.gate")
         self.assertEqual([(r["outcome"], (r.get("ref") or {}).get("result")) for r in recs],
                          [("blocked", None), ("recorded", "let through")])
         self.assertIn("b7k2m9x1q", recs[1]["detail"])
-        self.assertEqual(sess["crew_background"]["a1"]["who"], "DevEx engineer (Kid)")
+        self.assertEqual(sess["crew_background"]["a1"]["who"], "a helper of DevEx engineer (Kid)")
         self.assertEqual(sess["crew_background"]["a1"]["tasks"], [{"id": "b7k2m9x1q", "command": "bin/dev test"}])
 
     def test_with_enforce_off_a_member_with_background_work_is_recorded_for_the_tech_lead(self):
@@ -495,8 +496,20 @@ class BackgroundWorkTests(GateCase):
         self.complete()
         self.tx.background("bin/dev test", "b7k2m9x1q")
         sess = {}
-        self.assertIsNone(gates.check("Kid", self.data("a2"), sess, "owner/repo", roster={"members": [KID]}))
+        self.assertIsNone(gates.check("Kid", self.data("a2"), sess, "owner/repo", roster={"members": [KID]},
+                                      lead_name="DevEx engineer (Kid)"))
         self.assertEqual([t["id"] for t in sess["crew_background"]["a2"]["tasks"]], ["b7k2m9x1q"])
+
+    def test_without_a_name_from_devkits_records_nothing_is_kept_for_the_tech_lead(self):
+        # the hook passes the name its launch records give the agent; with none, the work is audited but no line
+        # reaches the tech lead, since the member's own name may come from a description another member wrote
+        core.CFG["crew"] = {**(self._crew_cfg or {}), "gates": {"enforce": False}}
+        self.complete()
+        self.tx.background("bin/dev test", "b7k2m9x1q")
+        sess = {}
+        self.assertIsNone(gates.check("Kid", self.data("a3"), sess, "owner/repo", roster={"members": [KID]}))
+        self.assertNotIn("crew_background", sess)
+        self.assertIn("background: bin/dev test", audit.records(1, action="crew.gate")[0]["detail"])
 
 
 if __name__ == "__main__":

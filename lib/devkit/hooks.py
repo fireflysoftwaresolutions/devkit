@@ -2047,10 +2047,23 @@ def closing_reminder(data: dict, sess: dict, now: float, agent: str = "claude") 
     return "\n\n".join(x for x in (block, todo) if x)
 
 
+NOTICE_COMMAND_MAX = 80  # characters of a member's command the tech lead's context shows
+
+
+def _inline(text, limit: int = NOTICE_COMMAND_MAX) -> str:
+    """Text a member wrote, as one inert code span of the tech lead's context: backticks dropped (it cannot close
+    its span), every run of whitespace, newlines and carriage returns included, one space, at most `limit`
+    characters with "…" at the cut. Then no part of it can start a line that reads as devkit's own."""
+    s = " ".join(str(text or "").replace("`", "").split())
+    return s if len(s) <= limit else s[:limit - 1] + "…"
+
+
 def crew_background_notice(sess: dict) -> str:
     """Main session: the members whose lane closed at SubagentStop while their background work still ran (kept by
-    the crew gates, `gates._keep_for_lead`), each told once: Claude Code lists such a member until that work ends.
-    Removes what it tells from `sess`, one member at a time, so a member kept meanwhile is not lost."""
+    the crew gates, `gates._keep_for_lead`, under the name devkit's launch records give them), each told once:
+    Claude Code lists such a member until that work ends. Each command renders as one inert span (`_inline`),
+    whatever wrote the record. Removes what it tells from `sess`, one member at a time, so a member kept meanwhile is
+    not lost."""
     kept = sess.get("crew_background") or {}
     parts = []
     for aid in list(kept):
@@ -2059,7 +2072,7 @@ def crew_background_notice(sess: dict) -> str:
         if not tasks:
             continue
         ids = ", ".join("`" + str(t["id"]) + "`" for t in tasks)
-        cmds = "; ".join("`" + str(t.get("command") or "") + "`" for t in tasks[:2]) + (" …" if len(tasks) > 2 else "")
+        cmds = "; ".join("`" + _inline(t.get("command")) + "`" for t in tasks[:2]) + (" …" if len(tasks) > 2 else "")
         parts.append(f"{rec.get('who') or 'a crew member'} task{'s' if len(tasks) > 1 else ''} {ids} ({cmds}); stop "
                      f"it with TaskStop `{aid}` only if you no longer need it")
     if not parts:
@@ -2200,6 +2213,17 @@ def _launch_meta(data: dict) -> dict:
     return meta if isinstance(meta, dict) and (meta.get("toolUseId") or meta.get("description")) else {}
 
 
+def _launch_record(sess: dict, meta: dict, aid: str):
+    """The launch record devkit wrote for this subagent: the one its meta file names, else the one already bound to
+    it; None when there is none or another agent holds it."""
+    ls = (sess or {}).get("launches") or {}
+    tid = str((meta or {}).get("toolUseId") or "")
+    rec = ls.get(tid) if tid else None
+    if not isinstance(rec, dict):
+        rec = next((v for v in ls.values() if isinstance(v, dict) and v.get("agent_id") == aid), None)
+    return rec if isinstance(rec, dict) and rec.get("agent_id") in (None, "", aid) else None
+
+
 def _launched_by_main(sess: dict, lane, meta: dict, aid: str) -> bool:
     """Do devkit's own records show that the main session launched this subagent? Its lane's parent, which binding
     copies from the launch record; else the launch record the agent's meta file names, or the one already bound to
@@ -2207,12 +2231,28 @@ def _launched_by_main(sess: dict, lane, meta: dict, aid: str) -> bool:
     descriptions. With no record, False (fail closed)."""
     if lane and lane.get("parent"):
         return lane["parent"] == "main"
-    ls = (sess or {}).get("launches") or {}
-    tid = str((meta or {}).get("toolUseId") or "")
-    rec = ls.get(tid) if tid else None
-    if not isinstance(rec, dict):
-        rec = next((v for v in ls.values() if isinstance(v, dict) and v.get("agent_id") == aid), None)
-    return isinstance(rec, dict) and rec.get("parent") == "main" and rec.get("agent_id") in (None, "", aid)
+    return (_launch_record(sess, meta, aid) or {}).get("parent") == "main"
+
+
+def _lead_name(sess: dict, run, lane, meta: dict, aid: str, name: str, by_main: bool) -> str:
+    """How the tech lead's context names this subagent, from devkit's records only: `name` as a member, when the
+    main session launched it (`by_main`, from _launched_by_main); "a helper of <member>" when a member the main
+    session launched launched it, that member named from the main session's own launch; "" when the records show
+    neither. Never the helper's own type or description: its member chose both."""
+    if by_main:
+        return _who(name)
+    parent = str((lane or {}).get("parent") or (_launch_record(sess, meta, aid) or {}).get("parent") or "")
+    if not parent or parent == "main":
+        return ""
+    plane = ((run or {}).get("agents") or {}).get(parent)
+    if not _launched_by_main(sess, plane, {}, parent):
+        return ""
+    from . import progress
+    rec = _launch_record(sess, {}, parent) or {}
+    label = (plane or {}).get("label") or rec.get("label") or ""
+    boss = (plane or {}).get("persona") or progress.persona(rec.get("type") or "", label) or \
+        label.split(":")[0].strip()
+    return f"a helper of {_who(boss)}" if boss else ""
 
 
 def _who(name: str) -> str:
@@ -2318,7 +2358,8 @@ def subagent_stop(agent: str):
             if out is None and (lane or meta):  # the crew gates: proofs, skills, stubs, tests, lessons; once
                 from . import gates
                 ref = copy.deepcopy(sess)
-                out = gates.check(name, data, sess, pid)
+                out = gates.check(name, data, sess, pid,
+                                  lead_name=_lead_name(sess, run, lane, meta, aid, name, by_main))
                 if out is None and agent == "claude" and aid and by_main and \
                         aid not in (sess.get("crew_background") or {}):
                     # it finished: the tech lead hears it once, with the id Claude Code's TaskStop takes

@@ -478,17 +478,22 @@ def send_back_reason(findings, who) -> str:
 
 def _keep_for_lead(sess: dict, key: str, who: str, tasks: list):
     """The lane closes while this member's background work runs: keep it for the tech lead's next context, once
-    (`hooks.crew_background_notice`). `key` is the agent id devkit records for the lane, which TaskStop takes."""
+    (`hooks.crew_background_notice`). `key` is the agent id devkit records for the lane, which TaskStop takes.
+    `who` is the name devkit's launch records give the agent; without one nothing is kept (the audit has it)."""
+    if not who:
+        return
     sess.setdefault("crew_background", {})[key] = {"who": who, "tasks": [{"id": t["id"], "command": t["command"]}
                                                                          for t in tasks]}
 
 
-def check(name, data: dict, sess: dict, pid: str = "", roster=None):
+def check(name, data: dict, sess: dict, pid: str = "", roster=None, lead_name: str = ""):
     """The SubagentStop entry point. -> the hook's {"decision": "block", "reason": …} the first time a member stops
     with something missing, else None. Records each finding set as `crew.gate` in the audit trail ("blocked", or
     "recorded" when `crew.gates.enforce` is false) and marks the member in `sess["crew_gated"]`, so it is sent back
     only once. A member let through with background work still running (sent back once already, or not enforced) is
-    audited and kept for the tech lead (`_keep_for_lead`). Fails open."""
+    audited and kept for the tech lead as `lead_name` (`_keep_for_lead`): the name devkit's launch records give it
+    (`hooks._lead_name`), never `name`, which may come from a description a member wrote for its helper. Without
+    one, nothing is kept. Fails open."""
     try:
         key = data.get("agent_id") or str(name or "")
         transcript = data.get("agent_transcript_path")
@@ -502,7 +507,7 @@ def check(name, data: dict, sess: dict, pid: str = "", roster=None):
                 audit.record("crew.gate", pid or "", f"{who}: background: " + "; ".join(
                     f"{t['command']} (task {t['id']})" for t in tasks) + "; sent back once already",
                              "let through", member=who, rules=["background"])
-                _keep_for_lead(sess, key, who, tasks)
+                _keep_for_lead(sess, key, lead_name, tasks)
             return None
         m = _member(name, roster)
         findings = crew_gates(m or name, transcript, data.get("cwd") or "", roster)
@@ -517,7 +522,7 @@ def check(name, data: dict, sess: dict, pid: str = "", roster=None):
             return {"decision": "block", "reason": send_back_reason(findings, who)}
         running = [{"id": f["task"], "command": f["item"]} for f in findings if f["rule"] == "background"]
         if running:
-            _keep_for_lead(sess, key, who, running)
+            _keep_for_lead(sess, key, lead_name, running)
         return None
     except Exception:
         return None
