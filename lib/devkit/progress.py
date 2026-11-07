@@ -459,18 +459,12 @@ def _by_name(plan) -> dict:
 
 
 def is_review_step(s) -> bool:
-    """A review step, told the way F6 tells it: its kind of work is review (approvals.from_review), or the member it
-    is assigned to works review-only (crew.json `tools`, as launch_cost reads it). A RACI that cannot be read makes
-    no step a review step, so the step keeps waiting."""
-    try:
-        from . import raci
-        act = raci.step_activity(s)
-    except Exception:
-        return False
-    if act and act.get("id") == "review":
-        return True
-    m = _member_named("", f"{s['label']}: {s.get('name') or ''}") if s.get("label") else None
-    return bool(m and m.get("tools") == "review")
+    """A review step, by the one rule approvals.is_review keeps (spec F6): its kind of work is review, or the member
+    it is assigned to works review-only. The same rule decides whether its ✓ verifies the work it follows
+    (_verified_by_review) and approves it (approvals.from_review). A RACI that cannot be read makes no step a review
+    step, so the step keeps waiting."""
+    from . import approvals
+    return approvals.is_review(s)
 
 
 def deps_open(run, s) -> list:
@@ -3695,13 +3689,13 @@ def scope_written(agent: str, sid: str, aid: str, paths: list, now: float | None
 
 
 def _verified_by_review(run: dict, st: dict, check: str, now: float, agent: str, sid: str, aid: str) -> list:
-    """A review step (kind of work review, as approvals.from_review reads it) that ended done with Check ✓: the
-    unverified steps it comes after whose approver is its member (approvals.approver, never their own work) end done,
-    the review being their evidence, so from_review records the approval on them. Any other unverified step stays so,
-    for Morpheus to close with evidence (and its own approver to approve). -> the names of the steps it closed."""
+    """A review step (approvals.is_review, the rule deps_open and from_review use too) that ended done with Check ✓:
+    the unverified steps it comes after whose approver is its member (approvals.approver, never their own work) end
+    done, the review being their evidence, so from_review records the approval on them. Any other unverified step
+    stays so, for Morpheus to close with evidence (and its own approver to approve). -> the names of the steps it
+    closed."""
     from . import approvals, raci
-    act = raci.step_activity(st)
-    if not act or act.get("id") != "review":
+    if not approvals.is_review(st):
         return []
     try:
         if approvals.verdict_of(check) != "approved":

@@ -71,6 +71,24 @@ class ReviewReadinessTests(HookCase):
         pg.assign("deploy", "Link", activity="cicd")
         self.assertEqual([s["name"] for s in pg.ready(self.run_())], ["attack"])
 
+    def test_a_review_only_members_check_approves_the_unverified_work_it_follows(self):
+        # the Code reviewer's batch 5: is_review_step offered the Product owner's step after unverified work (his tool
+        # level is review-only), but _verified_by_review and from_review read only the kind of work, so his ✓ left
+        # the work he approves unverified and recorded no approval. One rule (approvals.is_review) for all three
+        pg.start("Work", plan="requirements=10m; scope=10m after requirements")
+        self.unverified("requirements", "The Oracle", "devkit:oracle", "a_oracle", activity="requirements")
+        pg.assign("scope", "Hamann", activity="scope")
+        self.assertEqual([s["name"] for s in pg.ready(self.run_())], ["scope"])
+        launch("a_hamann", "devkit:hamann", "Hamann: scope")
+        plan = self.stop("a_hamann", "devkit:hamann", REPORT.format(who="Product owner (Councillor Hamann)",
+                                                                    task="scope", check="✓ the three must-haves hold"),
+                         later=60)
+        self.assertEqual((plan["requirements"]["state"], plan["scope"]["state"]), ("done", "done"))
+        run = self.run_()
+        self.assertEqual([(a["by"], a["steps"], a["verdict"]) for a in run.get("approvals") or []],
+                         [("hamann", ["requirements"], "approved")])
+        self.assertNotIn("requirements", [n for _, names in pg.approvals_owed(run) for n in names])
+
     def test_the_reviews_check_ends_the_work_it_approves_done(self):
         self.builder_plan()
         launch("a_seraph", "devkit:seraph", "Seraph: review")

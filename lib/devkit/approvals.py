@@ -278,12 +278,27 @@ def record(run: dict, by: str, steps, verdict: str, now: float, via: str = "step
     return entry
 
 
+def is_review(s: dict, roster=None) -> bool:
+    """The one rule for a review step (spec F6; the Code reviewer's batch 5): its kind of work is review, or the
+    member it is assigned to works review-only (crew.json `tools`). Such a step starts on the unverified work it
+    follows (progress.deps_open), and its Check is its member's verdict on that work (from_review,
+    progress._verified_by_review). A RACI or roster that cannot be read makes no step a review step."""
+    from . import crew, raci
+    try:
+        act = raci.step_activity(s, roster)
+        if act and act.get("id") == "review":
+            return True
+        m = crew._for_label(s.get("label") or "", roster) if s.get("label") else None
+    except Exception:
+        return False
+    return bool(m and m.get("tools") == "review")
+
+
 def from_review(run: dict, s: dict, check: str, now: float, doer_of=None, roster=None):
-    """A review step (kind of work `review`) ended with this Check: its doer's verdict on the steps it comes after
-    that they approve -> the entry, or None when it is not a review, has no verdict, or follows none of theirs."""
+    """A review step (is_review) ended with this Check: its doer's verdict on the steps it comes after that they
+    approve -> the entry, or None when it is not a review, has no verdict, or follows none of theirs."""
     from . import raci
-    act = raci.step_activity(s, roster)
-    if not act or act.get("id") != "review":
+    if not is_review(s, roster):
         return None
     doer_of = doer_of or (lambda x: doer(run, x, roster))
     who = doer_of(s)
