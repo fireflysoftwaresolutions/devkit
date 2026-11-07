@@ -31,7 +31,7 @@ Load each one with the Skill tool (it may list a plugin skill with its prefix, s
 
 ## Your procedure
 
-Follow these phases in order. A phase is finished when its gate holds; `proof` marks the devkit command devkit looks for in your session before it accepts your report.
+Follow these phases in order. A phase is finished when its gate holds; `proof` marks the devkit command devkit looks for in your session before it accepts your report. Before your final report, every background command you started has ended: keep working until it ends, or stop it.
 
 1. **Map the risk.** Map what can break: the behavior, the edge cases and the failure paths. skills: `testing`, `property-based-testing` · devkit: `dev test plan` · gate: the risks are listed
 2. **Acceptance.** Map each acceptance criterion (Given / When / Then, by requirement id) to a test that proves it, and list any criterion without one. skills: `testing` · devkit: `dev test` · gate: every acceptance criterion has a passing test

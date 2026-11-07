@@ -1812,9 +1812,11 @@ def prompt(agent: str):
         extra = _with_catalog(context_for(cwd, agent), agent)
         _log(f"prompt {agent}: session {sid[:12]} had no SessionStart; devkit context injected")
     raw = (data.get("prompt") or "").lstrip()
+    background = _background_told(agent, data)  # a member's completion notice is often this very prompt
     if raw.startswith(("<task-notification", "[SYSTEM NOTIFICATION", "<system-reminder", "<agent-message")) or \
             "<task-notification>" in raw[:400]:
-        _context_out("UserPromptSubmit", extra)  # background events are not the developer's request
+        # background events are not the developer's request
+        _context_out("UserPromptSubmit", "\n\n".join(x for x in (extra, background) if x))
         return
     # the prompt waits as pending in the checkpoint until Stop classes the turn; then what waits for the main session
     # (a late compaction's brief, "Not in the summary"), first in the context
@@ -1846,7 +1848,8 @@ def prompt(agent: str):
         hatches = bypass_context(agent, sid)
     except Exception:
         _log(f"prompt hatches {agent}: {traceback.format_exc()[-300:]}")
-    _context_out("UserPromptSubmit", "\n\n".join(x for x in (carried, extra, granted, hatches, route, text) if x))
+    _context_out("UserPromptSubmit", "\n\n".join(x for x in (carried, extra, granted, background, hatches, route, text)
+                                                 if x))
 
 
 DELIVERY = re.compile(r"\bgit\s+(?:-C\s+\S+\s+)?(commit|push|merge|tag|rebase|cherry-pick|revert)\b|"
@@ -1977,10 +1980,53 @@ def closing_reminder(data: dict, sess: dict, now: float, agent: str = "claude") 
     return "\n\n".join(x for x in (block, todo) if x)
 
 
+def crew_background_notice(sess: dict) -> str:
+    """Main session: the members whose lane closed at SubagentStop while their background work still ran (kept by
+    the crew gates, `gates._keep_for_lead`), each told once: Claude Code lists such a member until that work ends.
+    Removes what it tells from `sess`, one member at a time, so a member kept meanwhile is not lost."""
+    kept = sess.get("crew_background") or {}
+    parts = []
+    for aid in list(kept):
+        rec = kept.pop(aid) or {}
+        tasks = [t for t in rec.get("tasks") or [] if isinstance(t, dict) and t.get("id")]
+        if not tasks:
+            continue
+        ids = ", ".join("`" + str(t["id"]) + "`" for t in tasks)
+        cmds = "; ".join("`" + str(t.get("command") or "") + "`" for t in tasks[:2]) + (" …" if len(tasks) > 2 else "")
+        parts.append(f"{rec.get('who') or 'a crew member'} task{'s' if len(tasks) > 1 else ''} {ids} ({cmds}); stop "
+                     f"it with TaskStop `{aid}` only if you no longer need it")
+    if not parts:
+        return ""
+    return ("devkit · Stopped with background work still running (it may still be working, and may resume when that "
+            "work ends): " + ". ".join(parts) + ". Claude Code lists a "
+            "member until its background work ends.")
+
+
+def _background_told(agent: str, data: dict) -> str:
+    """crew_background_notice for a hook that has not read the session record (UserPromptSubmit)."""
+    if data.get("agent_id"):
+        return ""
+    try:
+        sf = _session_file(agent, data.get("session_id") or "-")
+        if not sf.exists():
+            return ""
+        sess = state.read(sf) or {}
+        if not sess.get("crew_background"):
+            return ""
+        before = copy.deepcopy(sess)
+        text = crew_background_notice(sess)
+        _patch_quietly(sf, before, sess)
+        return text
+    except Exception:
+        _log(f"background notice {agent}: {traceback.format_exc()[-300:]}")
+        return ""
+
+
 def post_tool(agent: str):
     """PostToolUse: time slow calls; remind the agent to update the developer after a long silence; sync the
     handoff repository right after a delivery event (commit, push, merge, tag, PR, release); at a call that usually
-    ends the turn, show the status block the final message opens with."""
+    ends the turn, show the status block the final message opens with; in the main session, name the members that
+    finished with background work still running (crew_background_notice)."""
     from . import progress
     data = _stdin_json()
     _check_writes(agent, data)
@@ -2019,18 +2065,19 @@ def post_tool(agent: str):
                 ciwatch.start_background(top, session=f"{agent}:{data.get('session_id') or ''}")
     except Exception:
         pass
-    closing = ""
+    closing = background = ""
     try:
         sf = _session_file(agent, data.get("session_id") or "-")
         if sf.exists():  # only sessions that started with devkit active
             sess = state.read(sf) or {}
             before = copy.deepcopy(sess)
             closing = closing_reminder(data, sess, time.time(), agent=agent)
+            background = "" if data.get("agent_id") else crew_background_notice(sess)
             if note_milestone(data, sess, time.time()) or sess != before:  # only what changed, on the fresh record:
                 _patch_quietly(sf, before, sess)  # a background launch's SubagentStart claims its entry meanwhile
     except Exception:
         _log(f"post-tool closing {agent}: {traceback.format_exc()[-300:]}")
-    _context_out("PostToolUse", "\n\n".join(x for x in (carried, answered, _output_pitfalls(agent, data),
+    _context_out("PostToolUse", "\n\n".join(x for x in (carried, answered, background, _output_pitfalls(agent, data),
                                                         _bulk_rewrite_note(data), closing,
                                                         progress.on_tool_done(agent, data)) if x))
 

@@ -32,7 +32,7 @@ Load each one with the Skill tool (it may list a plugin skill with its prefix, s
 
 ## Your procedure
 
-Follow these phases in order. A phase is finished when its gate holds; `proof` marks the devkit command devkit looks for in your session before it accepts your report.
+Follow these phases in order. A phase is finished when its gate holds; `proof` marks the devkit command devkit looks for in your session before it accepts your report. Before your final report, every background command you started has ended: keep working until it ends, or stop it.
 
 1. **Choose attacks.** Read the threat model and pick the attacks with the most impact. skills: `devsecops` · gate: the attack list is ranked
 2. **Attack.** Attack the running system in a safe environment: injection, bypasses, escalation, abuse of limits. skills: `variant-analysis` · gate: each attack ran

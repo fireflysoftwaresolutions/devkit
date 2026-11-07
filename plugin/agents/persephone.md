@@ -33,7 +33,7 @@ Load each one with the Skill tool (it may list a plugin skill with its prefix, s
 
 ## Your procedure
 
-Follow these phases in order. A phase is finished when its gate holds; `proof` marks the devkit command devkit looks for in your session before it accepts your report.
+Follow these phases in order. A phase is finished when its gate holds; `proof` marks the devkit command devkit looks for in your session before it accepts your report. Before your final report, every background command you started has ended: keep working until it ends, or stop it.
 
 1. **Inventory.** List the personal data and the licenses involved: what, where, why and for how long. skills: `supply-chain-risk-auditor` · devkit: `dev grep` · gate: the inventory is complete
 2. **Map.** Check each license with the package manager's license tool and each data flow against its obligations; map each to a control. skills: `devsecops` · devkit: `dev sec scan` · gate: every item has a control

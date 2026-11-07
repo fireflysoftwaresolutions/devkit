@@ -31,7 +31,7 @@ None. Load a skill only when your brief names one.
 
 ## Your procedure
 
-Follow these phases in order. A phase is finished when its gate holds; `proof` marks the devkit command devkit looks for in your session before it accepts your report.
+Follow these phases in order. A phase is finished when its gate holds; `proof` marks the devkit command devkit looks for in your session before it accepts your report. Before your final report, every background command you started has ended: keep working until it ends, or stop it.
 
 1. **Search.** Search with exact names, globs and symbols; read only the lines you need. devkit: `dev grep`, `dev find`
 2. **Answer.** Return each fact as path:line with a short excerpt; say not found when it is not found. gate: every fact has path:line

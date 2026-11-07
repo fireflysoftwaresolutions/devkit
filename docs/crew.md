@@ -306,11 +306,14 @@ each check that fails, naming every missing item and the command that fixes it:
    | Unfinished work | No stubs, placeholders, or untracked TODOs in the files it changed |
    | Tests | No test that cannot fail in the test files it changed |
    | Lessons | Two or more guard refusals answered with `dev lesson add` or `dev lesson recur` |
+   | Background work | Every command it put in the background has ended (its task notification arrived, `TaskStop` stopped it, or a read of its output showed it exited), because Claude Code keeps a member in its agent list while one runs; Codex transcripts have no such launch, so this gate finds nothing there |
 
 Members with read-only tools have no shell, so they skip the proofs and lessons gates. The unfinished-work and test
 gates count only what the member wrote itself: another member's uncommitted lines in a shared file are not its
 findings. Every gate finding goes to the audit trail as `crew.gate`. With `crew.gates.enforce` set to `false`, the
-gates only record; with `canary.enforce` set to `false`, the first two checks do not send the member back.
+gates only record; with `canary.enforce` set to `false`, the first two checks do not send the member back. A member
+let through with background work still running (sent back once already, or with the gates not enforced) is named once
+in the tech lead's next context, with the agent id to stop it: `TaskStop <agent id>`.
 
 When the member stops for good, its step ends on evidence: done with a Check ✓ in its report or its own
 `dev progress step --check`, otherwise unverified, for the tech lead to close with evidence or reopen. A review-only or
@@ -480,7 +483,7 @@ Each guardrail cites the rule of `dev crew rules` that enforces it. A rule marke
 | Steps change only with evidence | closing a step needs `--check`, and a member's step ends done only on its evidence, otherwise unverified (`E-evidence`); a step whose dependencies are open is refused, except a review step after unverified work (`E-deps`); keeping a step open while gate findings remain and rechecking the dependents of a reopened step are planned (`E-gate-findings`, `E-recheck`) |
 | Mistakes are fixable and visible | `dev progress reopen` or `dev progress skip` with `--why`, and `dev progress add`; every change is in `dev progress history` (`E-fixable`) |
 | A member that never reports back | after `progress.stale_agent_hours` (6) its lane is closed as lost and its step goes back to the main session (`E-lost-lane`) |
-| Every report is checked | the status block, the step's record, and the crew gates at SubagentStop (`E-status-block`, `E-step-records`, `E-proofs`, `E-skills`, `E-stubs`, `E-tests-fail`, `E-lessons`) |
+| Every report is checked | the status block, the step's record, and the crew gates at SubagentStop (`E-status-block`, `E-step-records`, `E-proofs`, `E-skills`, `E-stubs`, `E-tests-fail`, `E-lessons`, `E-background`) |
 | Only the tech lead plans, assigns, and decides | from a lane, `assign`, `begin`, `reopen`, `skip`, `done`, `decide`, and `mode` are refused, and in the main session they must be typed as commands, not run by a script (`E-main-only`, `E-caller`) |
 | Decisions that are yours | guided mode waits for you (`E-decisions`), and the irreversible-action gate holds merges, releases, force pushes, and the other irreversible actions for your typed grant or decision (`E-irreversible`) |
 | No escape hatches for members | members are refused devkit's escape hatches (`DEVKIT_*` variables, `--ci-passed`, `--no-verify`, `dev config set`), and each refusal is audited (`E-escape`) |

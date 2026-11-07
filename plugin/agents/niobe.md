@@ -31,7 +31,7 @@ Load each one with the Skill tool (it may list a plugin skill with its prefix, s
 
 ## Your procedure
 
-Follow these phases in order. A phase is finished when its gate holds; `proof` marks the devkit command devkit looks for in your session before it accepts your report.
+Follow these phases in order. A phase is finished when its gate holds; `proof` marks the devkit command devkit looks for in your session before it accepts your report. Before your final report, every background command you started has ended: keep working until it ends, or stop it.
 
 1. **As code.** Change infrastructure only as code through a PR; plan before apply. skills: `devsecops`, `terraform-style-guide` · gate: the plan is reviewed before it is applied
 2. **Observe.** Add health checks, metrics, logs and alerts for what you deploy. skills: `otel-instrumentation`, `otel-collector` · gate: the service has health checks and alerts

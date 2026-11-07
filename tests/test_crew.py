@@ -444,6 +444,26 @@ class BriefTests(unittest.TestCase):
         a = cli.build_parser().parse_args(argv)  # the printed command is one the progress CLI accepts
         self.assertEqual((a.progress_cmd, a.which, a.to, a.scope), ("assign", "2", ["Neo"], "lib/parser/**,tests/test_parser.py"))
 
+    def test_every_brief_and_agent_file_has_the_member_end_its_background_work_before_it_reports(self):
+        # Claude Code kept members listed for hours after their report while a background command they started ran
+        rule = ("Before your final report, every background command you started has ended: keep working until it ends, "
+                "or stop it.")
+        r = crew.load()
+        with tempfile.TemporaryDirectory() as d:
+            for m in crew.members(r, include_main=False):
+                with self.subTest(member=m["id"]):
+                    text = ui.ANSI_RE.sub("", crew.brief_text(m, "Fix it.", "lib/**", cwd=d))
+                    self.assertIn(rule, text.split("## Procedure", 1)[1].split("\n## ", 1)[0])
+                    self.assertIn(rule, crew.body(m, r).split("## Your procedure", 1)[1].split("\n## ", 1)[0])
+
+    def test_a_member_that_approves_several_kinds_of_work_reads_how_to_review_them_once(self):
+        r = crew.load()
+        body = crew.body(crew.member("seraph"), r)
+        approves = [ln for ln in body.splitlines() if ln.startswith("- **You approve** ")]
+        self.assertGreater(len(approves), 5)
+        self.assertIn("- **You approve** developer tooling and experience done by DevEx engineer (Kid).", approves)
+        self.assertEqual(body.count("approve it or send it back with the fixes"), 1)
+
     def test_brief_through_the_cli(self):
         rc, out, _ = run_cli("crew", "brief", "The Oracle", "Write", "acceptance", "criteria", "--step", "design")
         self.assertEqual(rc, 0)

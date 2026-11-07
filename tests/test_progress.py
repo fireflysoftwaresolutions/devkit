@@ -505,6 +505,69 @@ class CrewCoordinationTests(unittest.TestCase):
             finally:
                 canary.LOG, hooks._session_file = saved, saved_sf
 
+    def test_a_member_let_through_with_background_work_is_named_once_to_the_tech_lead(self):
+        # Claude Code kept such members in its agent list for hours after their report; the tech lead hears of each
+        # once, with the agent id TaskStop takes
+        import contextlib
+        import io
+        from unittest import mock
+        from devkit import hooks
+        with TempState() as st, tempfile.TemporaryDirectory() as d:
+            saved = canary.LOG
+            canary.LOG = Path(d) / "canary.jsonl"
+            state_dir = mock.patch.object(hooks, "STATE", Path(st.tmp.name))  # its sessions/ is TempState's
+            state_dir.start()
+            self.addCleanup(state_dir.stop)
+
+            def run(handler, payload):
+                out = io.StringIO()
+                with mock.patch("sys.stdin", io.StringIO(json.dumps(payload))), contextlib.redirect_stdout(out):
+                    getattr(hooks, handler)("claude")
+                return out.getvalue()
+
+            def member(aid, kind, label, task_id):
+                # its own transcript: it recorded its step, then left the tests running in the background
+                tr = Path(d) / f"agent-{aid}.jsonl"
+                tr.write_text("\n".join(json.dumps(r) for r in (
+                    {"type": "assistant", "isSidechain": True, "message": {"role": "assistant", "content": [
+                        {"type": "tool_use", "id": "toolu_0001", "name": "Bash",
+                         "input": {"command": 'dev progress step "built it" --check "3 tests pass"'}}]}},
+                    {"type": "user", "isSidechain": True, "message": {"role": "user", "content": [
+                        {"type": "tool_result", "tool_use_id": "toolu_0001", "content": "ok"}]}},
+                    {"type": "assistant", "isSidechain": True, "message": {"role": "assistant", "content": [
+                        {"type": "tool_use", "id": "toolu_0002", "name": "Bash",
+                         "input": {"command": "bin/dev test", "run_in_background": True}}]}},
+                    {"type": "user", "isSidechain": True, "message": {"role": "user", "content": [
+                        {"type": "tool_result", "tool_use_id": "toolu_0002", "content":
+                            f"Command running in background with ID: {task_id}. Output is being written to: "
+                            f"/private/tmp/claude-501/tasks/{task_id}.output"}]}},
+                )) + "\n")
+                (Path(d) / f"agent-{aid}.meta.json").write_text(json.dumps({"toolUseId": f"toolu_{aid}",
+                                                                           "description": label}))
+                return {"session_id": "s1", "agent_id": aid, "agent_type": kind, "cwd": d,
+                        "agent_transcript_path": str(tr), "last_assistant_message":
+                            f"**[Firefly> DevKit · {label.split(':')[0]}]** api · `main` · x\n- **Done:** x\n"
+                            "- **Check:** ✓ 3 tests\n- **Next:** review"}
+            try:
+                kid = member("k1", "devkit:kid", "DevEx engineer (Kid): installer", "b7k2m9x1q")
+                self.assertIn("b7k2m9x1q", json.loads(run("subagent_stop", kid))["reason"])  # sent back once
+                self.assertEqual(run("subagent_stop", dict(kid, stop_hook_active=True)), "")  # then let through
+                lead = {"session_id": "s1", "prompt": "how is it going?", "cwd": d}
+                told = json.loads(run("prompt", lead))["hookSpecificOutput"]["additionalContext"]
+                self.assertIn("may resume when that work ends): DevEx engineer (Kid) task `b7k2m9x1q`", told)
+                self.assertIn("stop it with TaskStop `k1` only if you no longer need it", told)
+                tool = {"session_id": "s1", "tool_name": "Bash", "tool_input": {"command": "git status"}, "cwd": d}
+                self.assertNotIn("b7k2m9x1q", run("post_tool", tool))  # once
+                seraph = member("r1", "devkit:seraph", "Code reviewer (Seraph): review", "c3p0r2d2x")
+                run("subagent_stop", seraph)
+                run("subagent_stop", dict(seraph, stop_hook_active=True))
+                self.assertNotIn("c3p0r2d2x", run("post_tool", dict(tool, agent_id="r9")))  # a member's call: no
+                told = json.loads(run("post_tool", tool))["hookSpecificOutput"]["additionalContext"]
+                self.assertIn("Code reviewer (Seraph) task `c3p0r2d2x`", told)
+                self.assertIn("TaskStop `r1`", told)
+            finally:
+                canary.LOG = saved
+
     def test_crew_reports_are_checked_like_the_main_canary(self):
         with TempState(), tempfile.TemporaryDirectory() as d:
             saved = canary.LOG

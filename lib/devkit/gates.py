@@ -17,10 +17,16 @@ own transcript (`agent_transcript_path` in the SubagentStop input), never the ma
 The files it changed are those of its Write and Edit calls and, for what it wrote through its shell, the checkout's
 worktree diff since its lane started; only its own lines are blamed on it (`_mine`).
   lessons  two or more guard refusals are answered with `dev lesson add` or `dev lesson recur`
+  background  every command it put in the background has ended: Claude Code keeps a member in its agent list while
+           one still runs, after its report. Ended means its task notification arrived, a TaskStop (or KillShell)
+           call stopped it, or a TaskOutput (or BashOutput) read showed it exited (`background_work`). Codex
+           transcripts have no such launch, so there it finds nothing
 
 Read-only members (`tools: read`) have no shell, so they skip the proofs and lessons gates. `check` is the hook's
 entry point: it sends a member back once with every missing item, or only records it when `crew.gates.enforce` is
-false. Either way the audit trail gets a `crew.gate` record. Everything fails open.
+false. Either way the audit trail gets a `crew.gate` record. A member whose lane closes with background work still
+running is kept in `sess["crew_background"]` for the tech lead's next context (`hooks.crew_background_notice`).
+Everything fails open.
 """
 from __future__ import annotations
 
@@ -31,9 +37,10 @@ from pathlib import Path
 
 from . import core, skillguard
 
-RULES = ("proofs", "skills", "stubs", "tests", "lessons")
+RULES = ("proofs", "skills", "stubs", "tests", "lessons", "background")
 LABELS = {"proofs": "proof not run", "skills": "skill not loaded", "stubs": "unfinished work in",
-          "tests": "tests that cannot fail in", "lessons": "no lesson after repeated refusals:"}
+          "tests": "tests that cannot fail in", "lessons": "no lesson after repeated refusals:",
+          "background": "still running in the background:"}
 MAX_BYTES = 8_000_000  # the end of a very long member transcript is enough
 SHELL_TOOLS = {"Bash", "exec_command", "shell", "local_shell", "unified_exec"}
 # A hook's denial as Claude Code writes it into the tool result: "PreToolUse:Bash hook error: <the guard's reason>".
@@ -99,6 +106,86 @@ def _activity(path) -> tuple:
                 if DENIAL_RE.match(text):
                     refusals.append(text)
     return commands, refusals
+
+
+# Claude Code's answer when a shell command goes to the background: `run_in_background`, the developer's ctrl+b, or
+# moved aside so a message could be handled. Only an answer that starts with it is a launch (not output quoting it).
+BG_LAUNCH_RE = re.compile(r"^\s*Command (?:running in background with ID|was manually backgrounded by user with ID|"
+                          r"was moved to the background \(ID): ?([A-Za-z0-9_-]+)")
+NOTIFICATION_RE = re.compile(r"<task-notification>(.*?)</task-notification>", re.S)
+ENDED = {"completed", "failed", "killed", "stopped"}  # a task's status once it no longer runs
+STOP_TOOLS = {"TaskStop", "KillShell", "KillBash"}  # KillShell and KillBash: TaskStop's older names
+READ_TOOLS = {"TaskOutput", "BashOutput"}  # removed in Claude Code 2.1; older transcripts still hold them
+
+
+def _tag(text: str, name: str) -> str:
+    m = re.search(rf"<{name}>\s*([^<]*?)\s*</{name}>", text or "")
+    return m.group(1) if m else ""
+
+
+def _task_of(inp: dict) -> str:
+    return str(inp.get("task_id") or inp.get("shell_id") or inp.get("bash_id") or "")
+
+
+def _notifications(rec: dict) -> list:
+    """The <task-notification> texts of one record: a queued_command attachment, or a user message (some Claude Code
+    versions write it there); a task_status attachment as the same shape."""
+    if rec.get("type") == "attachment":
+        att = rec.get("attachment") or {}
+        if att.get("type") == "task_status" and att.get("taskId"):
+            return [f"<task-id>{att['taskId']}</task-id><status>{att.get('status') or ''}</status>"]
+        return NOTIFICATION_RE.findall(str(att.get("prompt") or att.get("content") or ""))
+    if rec.get("type") == "user":
+        return NOTIFICATION_RE.findall(_text((rec.get("message") or {}).get("content")))
+    return []
+
+
+def background_work(path) -> list:
+    """The shell commands this member put in the background that have not ended, in launch order:
+    [{"id": task id, "command": the command}]. Ended: its task notification arrived with a final status, a stop call
+    on its id was not refused by a hook, or a read of its output shows a final status or an exit code."""
+    shells, stops, reads = {}, {}, {}  # tool_use id -> command | task id
+    launched, ended, ended_calls = [], set(), set()
+    for rec in _records(path):
+        for note in _notifications(rec):
+            if _tag(note, "status").lower() in ENDED:
+                ended.add(_tag(note, "task-id"))
+                ended_calls.add(_tag(note, "tool-use-id"))
+        content = (rec.get("message") or {}).get("content")
+        if not isinstance(content, list):
+            continue
+        for c in content:
+            if not isinstance(c, dict):
+                continue
+            if rec.get("type") == "assistant" and c.get("type") == "tool_use":
+                inp, name = c.get("input") or {}, c.get("name")
+                if name in SHELL_TOOLS:
+                    cmd = inp.get("command") or inp.get("cmd") or ""
+                    shells[c.get("id")] = " ".join(map(str, cmd)) if isinstance(cmd, list) else str(cmd)
+                elif name in STOP_TOOLS and _task_of(inp):
+                    stops[c.get("id")] = _task_of(inp)
+                elif name in READ_TOOLS and _task_of(inp):
+                    reads[c.get("id")] = _task_of(inp)
+            elif rec.get("type") == "user" and c.get("type") == "tool_result":
+                use, text = c.get("tool_use_id"), _text(c.get("content"))
+                result = rec.get("toolUseResult") if isinstance(rec.get("toolUseResult"), dict) else {}
+                if use in shells:
+                    m = BG_LAUNCH_RE.match(text)
+                    tid = m.group(1) if m else str(result.get("backgroundTaskId") or "")
+                    if tid:
+                        launched.append((tid, use, shells[use]))
+                elif use in stops and not (c.get("is_error") and DENIAL_RE.match(text)):
+                    ended.add(stops[use])  # stopped, or "not running" / "no task found": it no longer runs
+                elif use in reads:
+                    status = (_tag(text, "status") or str(result.get("status") or "")).lower()
+                    if status in ENDED or re.search(r"<exit_code>\s*-?\d+\s*</exit_code>", text):
+                        ended.add(reads[use])
+    out = []
+    for tid, use, cmd in launched:
+        if tid not in ended and use not in ended_calls and all(tid != o["id"] for o in out):
+            line = (" ".join(cmd.split()) or "a command").replace("`", "'")
+            out.append({"id": tid, "command": line if len(line) <= 120 else line[:119] + "…"})
+    return out
 
 
 def _invocations(commands) -> list:
@@ -366,6 +453,12 @@ def crew_gates(member, transcript_path, cwd, roster=None) -> list:
                               'run `dev lesson add "<what the guard refused>" --cause "<why it happened>" --prevent '
                               '"<the rule for next time>"`, or `dev lesson recur <id> --evidence "<what happened>"` '
                               'for a known pitfall'))
+    for t in background_work(transcript_path):
+        found.append(dict(_finding("background", t["command"], "you started it, and nothing in your transcript shows "
+                                   "that it ended (no task notification, TaskStop or exit)",
+                                   f"do not end your turn to wait (that ends your report): keep working until it ends, or re-run "
+                                   f"it in the foreground with a longer timeout; or stop it with TaskStop `{t['id']}`; then "
+                                   f"report again"), task=t["id"]))
     return found
 
 
@@ -376,31 +469,55 @@ def send_back_reason(findings, who) -> str:
     lines = [f"devkit · {who}, the crew gates found {len(findings)} thing{'s' if len(findings) != 1 else ''} "
              f"missing before you stop:"]
     for i, f in enumerate(findings, 1):
-        lines.append(f"{i}. {LABELS.get(f['rule'], f['rule'])} `{f['item']}`: {f['evidence']}. Fix: {f['fix']}.")
+        task = f" (task `{f['task']}`)" if f.get("task") else ""
+        lines.append(f"{i}. {LABELS.get(f['rule'], f['rule'])} `{f['item']}`{task}: {f['evidence']}. "
+                     f"Fix: {f['fix']}.")
     lines.append("Fix each one, then end with the same report, status block first. devkit sends you back only once.")
     return "\n".join(lines)
+
+
+def _keep_for_lead(sess: dict, key: str, who: str, tasks: list):
+    """The lane closes while this member's background work runs: keep it for the tech lead's next context, once
+    (`hooks.crew_background_notice`). `key` is the agent id devkit records for the lane, which TaskStop takes."""
+    sess.setdefault("crew_background", {})[key] = {"who": who, "tasks": [{"id": t["id"], "command": t["command"]}
+                                                                         for t in tasks]}
 
 
 def check(name, data: dict, sess: dict, pid: str = "", roster=None):
     """The SubagentStop entry point. -> the hook's {"decision": "block", "reason": …} the first time a member stops
     with something missing, else None. Records each finding set as `crew.gate` in the audit trail ("blocked", or
     "recorded" when `crew.gates.enforce` is false) and marks the member in `sess["crew_gated"]`, so it is sent back
-    only once. Fails open."""
+    only once. A member let through with background work still running (sent back once already, or not enforced) is
+    audited and kept for the tech lead (`_keep_for_lead`). Fails open."""
     try:
         key = data.get("agent_id") or str(name or "")
         transcript = data.get("agent_transcript_path")
-        if not transcript or key in (sess.get("crew_gated") or {}):
+        if not transcript:
+            return None
+        from . import audit, crew
+        if key in (sess.get("crew_gated") or {}):  # sent back once: let through, but not silently
+            tasks = background_work(transcript)
+            if tasks:
+                who = sess["crew_gated"][key]
+                audit.record("crew.gate", pid or "", f"{who}: background: " + "; ".join(
+                    f"{t['command']} (task {t['id']})" for t in tasks) + "; sent back once already",
+                             "let through", member=who, rules=["background"])
+                _keep_for_lead(sess, key, who, tasks)
             return None
         m = _member(name, roster)
         findings = crew_gates(m or name, transcript, data.get("cwd") or "", roster)
         if not findings:
             return None
-        from . import audit, crew
         who = crew.who(m) if m else str(name or "Agent")
         sess.setdefault("crew_gated", {})[key] = who
         enforce = enforced()
         audit.record("crew.gate", pid or "", f"{who}: " + "; ".join(f"{f['rule']}: {f['item']}" for f in findings),
                      "blocked" if enforce else "recorded", member=who, rules=sorted({f["rule"] for f in findings}))
-        return {"decision": "block", "reason": send_back_reason(findings, who)} if enforce else None
+        if enforce:
+            return {"decision": "block", "reason": send_back_reason(findings, who)}
+        running = [{"id": f["task"], "command": f["item"]} for f in findings if f["rule"] == "background"]
+        if running:
+            _keep_for_lead(sess, key, who, running)
+        return None
     except Exception:
         return None

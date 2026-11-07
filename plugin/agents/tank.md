@@ -31,7 +31,7 @@ Load each one with the Skill tool (it may list a plugin skill with its prefix, s
 
 ## Your procedure
 
-Follow these phases in order. A phase is finished when its gate holds; `proof` marks the devkit command devkit looks for in your session before it accepts your report.
+Follow these phases in order. A phase is finished when its gate holds; `proof` marks the devkit command devkit looks for in your session before it accepts your report. Before your final report, every background command you started has ended: keep working until it ends, or stop it.
 
 1. **Contract.** Write or update the contract first (OpenAPI, schema, events); keep it backward compatible; consult the Software architect (The Architect) on changes and the Security engineer (The Keymaker) when it touches auth, data or outside input. skills: `backend` · devkit: `dev plan revise`, `dev crew ask` · gate: the contract is written before the code
 2. **Tests first.** Write the contract and domain tests that fail without the change. skills: `superpowers:test-driven-development`, `testing` · devkit: `dev test` · gate: the new tests fail for the right reason
