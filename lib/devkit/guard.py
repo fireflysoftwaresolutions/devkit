@@ -1774,24 +1774,67 @@ INSTALL_REASON = ("`dev install` and `dev update` change what every hook, the gu
                   f"installed now. {_TAIL}")
 
 
-EXT_REASON = ("This `dev ext` command changes the plugins, skills or MCP servers that run in every session on this Mac "
-              "(spec P-fym583l7sg1, K1): only the developer does that, in a terminal. Ask them, with the command and "
-              "why. Agents may run `dev ext ls`, `dev ext outdated`, and `dev ext update <name> --to <ref> --why "
-              f"\"…\"` (a team pin, on a branch of the devkit checkout). {_TAIL}")
+EXT_REASON = ("This command changes the plugins, skills or MCP servers that run in every session on this Mac: "
+              "`dev ext add|remove|enable|disable`, `dev ext update --apply`, or a `claude plugin|mcp` or `codex "
+              "plugin|mcp` verb that adds, removes, switches or updates one (spec P-fym583l7sg1, K1). Only the "
+              "developer does that, in a terminal, with `dev ext`, which audits it and records it in the lock. Ask "
+              "them, with the command and why. Agents may run `dev ext ls`, `dev ext outdated`, `dev ext update "
+              "<name> --to <ref> --why \"…\"` (a team pin, on a branch of the devkit checkout) and the vendor CLIs' "
+              f"read-only verbs (`list`, `get`, `details`). {_TAIL}")
 
 
 def _ext_refusal(args) -> bool:
     """What changes the extensions that run on this Mac is the developer's: `dev ext update … --apply`, and
     `dev ext add|remove|enable|disable` unless it is a team edit (`add|remove --team`, no `--project`) in the devkit
-    checkout. The parser takes no abbreviated options, so the exact words are enough."""
+    checkout. The parser takes no abbreviated options, so the exact words are enough; `--team` counts only before
+    the `--` that ends the options (after it, it is the entry's name: L1)."""
     if args[:1] != ["ext"]:
         return False
     sub, words = (args[1:2] or [""])[0], args[2:]  # an MCP server's own command line is one quoted word
     if sub == "update":
         return "--apply" in words
     if sub in ("add", "remove"):
-        return "--team" not in words or "--project" in words
+        return "--team" not in _dev_opts(words) or "--project" in words
     return sub in ("enable", "disable")
+
+
+# H1 (the Security engineer's re-review of dev ext): the agents' own CLIs change the same plugins, marketplaces and
+# MCP servers `dev ext` does, outside its audit trail and lock. Each group's read-only verbs stay open (and `-h`,
+# `--help`, a group without a verb); every other verb, a new one included, is the developer's (fails closed).
+_VENDOR_GROUPS = frozenset({"plugin", "plugins", "mcp"})
+_VENDOR_READ = {
+    ("claude", "plugin"): frozenset({"list", "details", "validate", "help", "init", "new", "tag", "test", "eval",
+                                     "configure"}),
+    ("claude", "marketplace"): frozenset({"list", "help"}),
+    ("claude", "mcp"): frozenset({"list", "get", "help", "serve", "login", "logout"}),
+    ("codex", "plugin"): frozenset({"list", "help"}),
+    ("codex", "marketplace"): frozenset({"list", "help"}),
+    ("codex", "mcp"): frozenset({"list", "get", "help", "login", "logout"}),
+}
+
+
+def vendor_ext_refusal(argv) -> bool:
+    """True when a claude or codex command (the binary, any path to it, or the npm package a runner starts) adds,
+    removes, switches or updates a plugin, a marketplace or an MCP server. Only the words before `--` count: after
+    it come an MCP server's own command line."""
+    cli = agent_cli(argv[0]) if argv else ""
+    if not cli:
+        return False
+    words = _dev_opts(list(argv[1:]))
+    if "-h" in words or "--help" in words:
+        return False
+    pos = [w for w in words if not w.startswith("-")]
+    at = next((i for i, w in enumerate(pos) if w in _VENDOR_GROUPS), None)
+    if at is None or at + 1 >= len(pos):
+        return False
+    group, verb = ("mcp" if pos[at] == "mcp" else "plugin"), pos[at + 1]
+    if group == "plugin" and verb == "marketplace":
+        group, verb = "marketplace", (pos[at + 2] if at + 2 < len(pos) else "")
+        if not verb:
+            return False
+    if verb == "configure" and "--values-stdin" in words:
+        return True
+    return verb not in _VENDOR_READ[(cli, group)]
 
 
 _UPDATE_CHECK = frozenset({"--check", "--quiet", "--record"})
@@ -2136,6 +2179,8 @@ class _Shell:
         why = guardless_session(name, argv, set(names) | self.exported)
         if why:
             return deny(why)
+        if vendor_ext_refusal(argv):
+            return deny(EXT_REASON)
         if _INTERP.match(name) and _dev_args(argv) is None:
             why = code_session_refusal(argv, cwd, self.bodies)
             if why:
@@ -2215,9 +2260,12 @@ class _Shell:
         if _ext_refusal(args) and not helps:
             return deny(EXT_REASON)
         if args[:1] in (["claude"], ["codex"]):  # dev claude|codex execs the agent with the words after the query
-            why = guardless_session(args[0], [args[0], *[a for a in args[1:] if a != "--"]], names)
+            inner = [args[0], *[a for a in args[1:] if a != "--"]]
+            why = guardless_session(args[0], inner, names)
             if why:
                 return deny(why)
+            if vendor_ext_refusal(inner):
+                return deny(EXT_REASON)
         if words[:2] == ["config", "set"]:
             keys = [k for a in args[2:] for k in {a.casefold(), a.casefold().split("=", 1)[-1]}]
             if any(k.startswith("safeguards") for k in keys):

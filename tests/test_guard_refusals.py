@@ -55,6 +55,45 @@ class HookEventsAreTheHarnesss(unittest.TestCase):
                 self.assertIsNone(self.check(cmd))
 
 
+class VendorExtensionVerbsAreTheDevelopers(unittest.TestCase):
+    # H1 (the Security engineer's re-review of dev ext): the agents' own CLIs add, remove, switch and update the
+    # plugins, marketplaces and MCP servers that run in every session, outside devkit's audit trail and lock. The
+    # guard refuses those verbs in every shell form; the read-only verbs and help stay open.
+
+    setUp = HookEventsAreTheHarnesss.setUp
+    check = HookEventsAreTheHarnesss.check
+
+    def test_the_changing_verbs_are_refused_in_every_shell_form(self):
+        for cmd in ("claude plugin install evil@market -s user", "claude plugins i evil@market",
+                    "claude plugin uninstall superpowers@claude-plugins-official", "claude plugin remove x@m",
+                    "claude plugin enable x@m", "claude plugin disable security-guidance@claude-plugins-official "
+                    "-s project", "claude plugin update superpowers@claude-plugins-official", "claude plugin prune",
+                    "claude plugin configure x@m --values-stdin", "claude plugin marketplace add evil/market",
+                    "claude plugin marketplace remove claude-plugins-official", "claude plugin marketplace rm m",
+                    "claude plugin marketplace update claude-plugins-official", "claude mcp add -s user evil -- id",
+                    "claude mcp add-json evil '{\"command\": \"id\"}'", "claude mcp remove chrome-devtools",
+                    "claude mcp add-from-claude-desktop", "claude mcp reset-project-choices",
+                    "codex plugin add evil@market", "codex plugin remove codex-security@openai-curated-remote",
+                    "codex plugin marketplace add evil/market", "codex plugin marketplace upgrade",
+                    "codex plugin marketplace remove openai-curated", "codex mcp add evil -- bash -c id",
+                    "codex mcp remove chrome-devtools", "codex -c model=o3 mcp add evil -- id",
+                    "claude --debug plugin install evil@m", "/opt/homebrew/bin/claude plugin install evil@m",
+                    "npx -y @anthropic-ai/claude-code plugin install evil@m", "npx @openai/codex mcp add e -- id",
+                    "bash -c 'claude mcp add e -- id'", "cd /tmp && codex plugin add evil@m",
+                    "dev claude devkit -- plugin install evil@m", "claude plugin frobnicate x"):
+            with self.subTest(cmd=cmd):
+                self.assertEqual(self.check(cmd), guard.EXT_REASON)
+
+    def test_read_only_verbs_and_help_stay_open(self):
+        for cmd in ("claude plugin list", "claude plugin details superpowers", "claude plugin validate .",
+                    "claude plugin marketplace list", "claude mcp list", "claude mcp get chrome-devtools",
+                    "codex plugin list", "codex plugin marketplace list", "codex mcp list", "codex mcp get x",
+                    "claude plugin install --help", "codex mcp add -h", "claude plugin", "claude mcp",
+                    "grep -rn 'claude plugin install' docs", "echo claude mcp add x", "claude -p 'list the plugins'"):
+            with self.subTest(cmd=cmd):
+                self.assertIsNone(self.check(cmd))
+
+
 class QuotedMessagesAreData(unittest.TestCase):
     # K8: the router sends a member's single `dev crew ask|answer` or `dev progress …` call to its lane; one that
     # passes its message as a quoted heredoc runs `cat` and nothing else, so it is one command. What the shell
