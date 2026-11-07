@@ -856,6 +856,43 @@ class EmbargoedBranchesStayOffTheRemote(EmbargoCase):
                 mock.patch.object(core, "NOTES", self.root / "nowhere" / "projects"):  # no handoff repository here
             self.assertIn(("developer-only", "embargo/feat/x"), self.targets("dev push"))
 
+    def test_b2b_a_push_or_pr_from_a_folder_named_at_run_time_fails_closed(self):
+        # The code reviewer's trace of 202e88d: a folder the guard cannot resolve ($(…), a variable) passed no folder
+        # to the embargo check, which read it as "no embargo". Now the session's own folder decides: an embargo there,
+        # an unreadable note, or a folder that is no project refuses it as the developer-only action `?`.
+        unknown = ("developer-only", "?")
+        os.environ.pop("X", None)
+        r = shq(self.repo)
+        for cmd in (f"git -C {r} push origin feat/x", f"cd {r} && git push origin feat/x"):  # baseline: written out
+            with self.subTest(cmd=cmd):
+                self.assertEqual(self.targets(cmd), [("push", "feat/x")])
+        subst = ('git -C "$(git rev-parse --show-toplevel)" push origin fix/hole',
+                 'cd "$(git rev-parse --show-toplevel)" && gh pr create --head fix/hole --title t --body b')
+        var = ('cd "$X" && git push origin fix/hole', 'X=/elsewhere; cd "$X" && dev push', 'cd "$X" && dev pr create',
+               'cd "$X" && gh pr create --fill', 'dev git -C "$X" push origin fix/hole',
+               'cd "$X" && bash -c "git push origin fix/hole"')
+        for cmd in subst + var:
+            with self.subTest(cmd=cmd):
+                self.assertIn(unknown, self.targets(cmd))
+                reason = self.main(cmd) or ""
+                self.assertIn("folder", reason)
+                self.assertNotIn("grant embargo", reason)  # `?`: no grant covers it; the folder written out does
+                self.assertIn("Crew members never run", self.member(cmd) or "")
+        self.assertIsNotNone(self.main(subst[0], setting="audit"))  # developer-only: the audit week holds it too
+        self.note.write_text("---\nstatus: active\n---\n# acme/widget\n")  # no embargo in the session's project
+        for cmd in (subst[0], var[0]):
+            with self.subTest(cmd=cmd, embargo=False):
+                self.assertNotIn(unknown, self.targets(cmd))
+                self.assertIsNone(self.main(cmd))
+        self.note.write_text("---\nstatus: active\nembargo:\n  - branch: fix/hole\n")  # a note devkit cannot read
+        self.assertIn(unknown, self.targets(var[0]))
+        self.note.write_text("---\nstatus: active\n---\n# acme/widget\n")
+        with mock.patch.object(guard, "current_project", return_value=None):  # the session's folder is no project
+            for cmd in (subst[0], var[0], var[2]):
+                with self.subTest(cmd=cmd, project=None):
+                    self.assertIn(unknown, self.targets(cmd))
+            self.assertEqual(self.targets(f"cd {r} && git push origin feat/x"), [("push", "feat/x")])
+
     def test_b2b_an_unparsed_push_with_an_embargo_in_place_is_refused_in_the_audit_week(self):
         self.assertIsNotNone(self.main("git push origin fix/hole 'unclosed", setting="audit"))
         self.note.write_text("---\nstatus: active\n---\n# acme/widget\n")  # no embargo left
