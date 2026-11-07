@@ -151,6 +151,16 @@ class RefusedAccess(unittest.TestCase):
         self.assertEqual(0, subprocess.run(["/usr/bin/true", os.path.join(own, "x"), self.real["state"] + "-other"],
                                            cwd=own).returncode)
 
+    # a security notice ignores DEVKIT_NO_NOTIFY, so the run itself refuses osascript: a test never shows the
+    # developer a desktop notification, by any spelling of the program
+    def test_a_desktop_notification_is_refused(self):
+        script = ["-e", "on run argv", "-e", "return item 1 of argv", "-e", "end run", "--", "x"]
+        for name, argv in {"absolute": ["/usr/bin/osascript", *script], "bare": ["osascript", *script]}.items():
+            with self.subTest(name):
+                self.assert_refused(lambda: subprocess.run(argv, capture_output=True), "osascript")
+        # another program still starts
+        self.assertEqual(0, subprocess.run(["/usr/bin/true"]).returncode)
+
     def real_tmp(self):
         d = tempfile.mkdtemp()
         self.addCleanup(shutil.rmtree, d, True)

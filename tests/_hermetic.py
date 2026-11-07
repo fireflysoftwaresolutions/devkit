@@ -15,8 +15,9 @@ for a run of one of them alone). It:
    HOME (the run's, or the one a test makes for itself; exporting them pinned to the run's home would override a
    test's own, and devkit refuses a DEV_ROOT or DEVKIT_CONFIG that does not match its HOME); the agents' markers and
    session ids, their socket, token and env file (CLAUDE_ENV_FILE); and devkit's own DEVKIT_* switches. A run under
-   an agent then behaves like a run in CI, which has none of them. DEVKIT_NO_NOTIFY=1 is set, as CI sets it: a test
-   never shows the developer a notification;
+   an agent then behaves like a run in CI, which has none of them. DEVKIT_NO_NOTIFY=1 is set, as CI sets it, and
+   the audit hook refuses osascript (a security notice ignores that switch): a test never shows the developer a
+   notification;
 4. snapshots the real state, configuration and handoff roots (for test_zz_real_state_untouched);
 5. installs an audit hook that refuses, and records, any file access of this process below the real roots, and any
    process started with the real home, with no HOME (Path.home() then falls back to the real one), with a variable
@@ -290,9 +291,22 @@ def _child(argv, env, cwd) -> str:
     return ""
 
 
+def _program(argv) -> str:
+    """The name of the program a process start runs: the first word of `argv` (a list or a shell string)."""
+    if isinstance(argv, (str, bytes)):
+        first = os.fsdecode(argv).split(None, 1)[:1]
+    else:
+        first = [os.fsdecode(argv[0])] if argv else []
+    return os.path.basename(first[0]) if first else ""
+
+
 def _hook(event, args):
     if _S["allow"] or not _S["active"]:
         return
+    if event in ("subprocess.Popen", "os.posix_spawn", "os.exec") and \
+            _program(args[1] if event == "subprocess.Popen" else args[1] or [args[0]]) == "osascript":
+        # a security notice ignores DEVKIT_NO_NOTIFY (devkit's acceptance notice), so the run refuses the program
+        _refuse("process", "osascript", "a test never shows the developer a desktop notification")
     if event == "open":
         p = _protected(_path(args[0]))
         if p:
