@@ -96,7 +96,11 @@ def wrap(text: str, width: int) -> list:
 
 
 class _Style:
-    """Colors for the toolkit: amber for focus and the primary action, dim for help, green and red for states."""
+    """Colors for the toolkit: amber for focus and the primary action, dim for help, green and red for states.
+
+    When the terminal does not say its theme (ui.known_theme(); macOS Terminal sets no COLORFGBG), the marks (pointer,
+    bar, spinner) take the deep amber, 5.0:1 on white and 4.2:1 on black (index 130: 4.7:1 and 4.46:1), and the
+    focused text and the chosen action stay bold in the terminal's own text color, which reads on its background."""
 
     def __init__(self):
         self.set()
@@ -104,13 +108,16 @@ class _Style:
     def set(self, color=None, truecolor=None, light=None):
         self.color = ui.COLOR if color is None else bool(color)
         self.true = (ui.TRUECOLOR if truecolor is None else bool(truecolor)) and self.color
-        self.light = (ui.terminal_theme() == "light") if light is None else bool(light)
+        theme = ui.known_theme() if light is None else ("light" if light else "dark")
+        self.light = theme == "light"
+        deep = self.light or not theme
         if not self.color:
             self.amber = ""
         elif self.true:
-            self.amber = "38;2;163;95;0" if self.light else "38;2;255;179;74"
+            self.amber = "38;2;163;95;0" if deep else "38;2;255;179;74"
         else:
-            self.amber = "38;5;130" if self.light else "38;5;215"
+            self.amber = "38;5;130" if deep else "38;5;215"
+        self.amber_text = self.amber if theme else ""
 
     def _c(self, code, s):
         return f"\x1b[{code}m{s}\x1b[0m" if self.color and code else str(s)
@@ -129,7 +136,7 @@ def accent(s):
 
 
 def accent_bold(s):
-    return STYLE._c("1;" + STYLE.amber if STYLE.amber else "1", s)
+    return STYLE._c("1;" + STYLE.amber_text if STYLE.amber_text else "1", s)
 
 
 def bold(s):
