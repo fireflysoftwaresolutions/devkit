@@ -1606,6 +1606,9 @@ def cmd_ci_watch(a, top):
 
 def cmd_canary(a):
     from . import canary
+    print(ui.section(f"Stop hook — last {a.days} days (aim: no turn sent back)"))
+    for line in canary.stop_block_lines(a.days):
+        print(line)
     rs = canary.records(a.days)
     print(ui.section(f"Instruction canary {canary.MARKER} — last {a.days} days"))
     if not rs:
