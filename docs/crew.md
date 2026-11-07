@@ -534,6 +534,38 @@ dev install --only claude,codex  # reinstall the plugin and write the Codex role
 `dev crew sync --check` reports generated files that are out of date; `dev doctor` runs it too. Never edit
 `plugin/agents/*.md` by hand: the next sync overwrites them.
 
+## Rooms (planned for 26.11.6)
+
+Rooms are not available yet. This section describes what is planned, so you know what is coming; no command or
+setting for rooms exists today.
+
+Today the crew talks one to one: a member asks the tech lead or one other member with `dev crew ask`, and when three
+members need each other's views, the tech lead relays them by hand. A **room** is a short, moderated working session
+that puts 2 to 4 crew members on one question that gains from more than one angle: a review panel on one change, a
+choice between designs, or a bug with competing explanations.
+
+- **A charter first.** The tech lead opens the room with the question, what it must produce (a decision, a ranked
+  list, a verdict, or a root cause), the exit criteria, and a budget of minutes, tokens, and rounds.
+- **Independent answers, then challenges.** Each member answers alone, without seeing the others, so the first answer
+  does not anchor the rest. Then the members may challenge each other, for at most two rounds.
+- **A shared board, with evidence.** Members talk only through short posts. devkit stamps each post with its author
+  and chains it to the one before, so no post can be changed or removed. A claim cites its evidence, such as a file
+  and line or a command the member ran, or is marked as an opinion.
+- **Bounded by devkit.** devkit, not a model, moves the room from phase to phase and closes it when its budget runs
+  out, so a room never runs on.
+- **One outcome, dissent kept.** The decider closes the room with one outcome, and any disagreement stays in the
+  record. The outcome becomes the evidence for a plan step, a revised spec, or a decision put to you.
+
+What a room gives you: two to four independent views on a hard question, disagreement kept instead of smoothed over,
+and a cost you can see and cap. What does not change: a post is never your consent, an approval, or a grant, because
+your decisions still come only from your own answers (see [How the tech lead asks you](#how-the-tech-lead-asks-you)).
+A room never widens a member's tools or files: members stay read-only unless the room names one writer, and parallel
+edits to shared files never go to a room.
+
+Rooms start as a trial, for review panels only. On real changes, a three-member review room is compared with a single
+reviewer: the real problems each finds, the false alarms, and the time and tokens spent. After the trial, you decide
+whether rooms become a regular route.
+
 ## Keeping the rules true
 
 `dev crew rules` lists every rule the crew is given, the devkit check that enforces it, and its state: enforced,
