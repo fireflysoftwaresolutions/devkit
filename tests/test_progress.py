@@ -811,9 +811,10 @@ class TranscriptCase(unittest.TestCase):
         return pg.use_grant("claude", "s1", action="push", target="feat/x", repo="acme/api", consume=consume)
 
     def answer(self, d, label, tid):
-        # the developer answers decision d with the question tool: its result in the transcript, then the hook
+        # the developer answers decision d with the question tool, asked in devkit's own words (ask_text and its
+        # labels): its result in the transcript, then the hook
         q = pg.ask_text(d)
-        result = {"questions": [{"question": q, "options": [{"label": o} for o in d["options"]]}],
+        result = {"questions": [{"question": q, "options": [{"label": o} for o in pg.ask_labels(d)]}],
                   "answers": {q: label}}
         self.write({"type": "user", "uuid": f"u-{tid}", "isSidechain": False, "toolUseResult": result,
                     "message": {"role": "user", "content": [{"type": "tool_result", "tool_use_id": tid,
@@ -916,7 +917,7 @@ class StepGrantTests(TranscriptCase):
 
     def test_a_verified_decision_without_a_target_backs_no_step_grant(self):
         d = pg.crew_decision("Push the parser branch?", options="yes | no", recommend="yes", irreversible="push")
-        self.answer(d, "yes", "toolu_q9")
+        self.answer(d, pg.ask_labels(d)[0], "toolu_q9")  # "yes (push) (Recommended)"
         self.assertTrue(pg.crew_decide(d["id"], "yes")["verified"])
         pg.assign("build", "Tank", allow="push")
         self.assertEqual(pg.load_run("claude", "s1")["plan"][0].get("allow"), [])

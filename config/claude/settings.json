@@ -23,7 +23,9 @@
     "TRIVY_SKIP_VERSION_CHECK": "true",
     "SEMGREP_SEND_METRICS": "off",
     "SYFT_CHECK_FOR_APP_UPDATE": "false",
-    "GRYPE_CHECK_FOR_APP_UPDATE": "false"
+    "GRYPE_CHECK_FOR_APP_UPDATE": "false",
+    "IMPECCABLE_NO_UPDATE_CHECK": "1",
+    "IMPECCABLE_NO_TELEMETRY": "1"
   },
   "hooks": {
     "SessionStart": [

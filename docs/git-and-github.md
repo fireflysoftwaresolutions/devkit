@@ -75,7 +75,7 @@ linked task. Each row ends with whether its work is safe off this Mac, or why no
 handoff note's generated block show the same rows, the dashboard shows them in each project's Branches tab, and the
 session-start context names the branches that exist only on this Mac and the embargoed ones.
 `dev backup` copies a branch that is not backed up to the remote when that push starts no CI run, and
-`dev branch embargo` keeps one off every remote; see
+`dev branch embargo` keeps one off the remote (agents' pushes from another project's copy are held from 26.11.4); see
 [Delivery › Back up early, CI once](delivery.md#back-up-early-ci-once).
 
 `dev branch clean` lists the local branches that can go: merged into the default branch, whose PR was merged at the

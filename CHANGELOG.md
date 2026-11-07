@@ -3,9 +3,81 @@
 All notable changes to devkit. Versions follow CalVer `YY.MM.PATCH` (PATCH restarts at 0 each month); tags are
 `vYY.MM.PATCH`. Sections follow [Keep a Changelog](https://keepachangelog.com/).
 
-## [26.11.3] - Unreleased
+## [26.11.4] - Unreleased
 
-Not released yet: the date is set when the release is tagged. This release installs devkit with one command, runs its
+Not released yet: the date is set when the release is tagged.
+
+### Added
+
+- **The tech lead asks your decisions nicely, and together.** `dev crew decisions --ask` prints the pending decisions
+  as question dialog calls ready to send: at most 4 questions per call, an irreversible decision alone in its call,
+  each opening with `D<n> ·` and one line on who asks and what it blocks, with the recommended option first; `--json`
+  prints the dialog's input. When decisions piled up while you were away, your next prompt tells the tech lead once
+  to ask them together, in as few calls as that allows.
+- **The impeccable engine is installed with the skill.** `dev install --only skills` fetches the engine binary for
+  this Mac from the upstream release that the pinned skill names, checks its SHA-256 against the pinned skill's own
+  `engine-checksums.txt`, and puts it beside the launcher, so `impeccable context` no longer downloads code inside an
+  agent session (0.02 s once warm). A mismatch, a failed download, or a file error (a folder it cannot write)
+  installs nothing, is audited, and does not stop the rest of the install: the other skills are still linked. Claude
+  Code sessions set `IMPECCABLE_NO_UPDATE_CHECK=1` and `IMPECCABLE_NO_TELEMETRY=1`, so the engine neither checks the
+  network for a newer version nor sends telemetry.
+  See [Skills and plugins › impeccable and its engine](docs/skills-and-plugins.md#impeccable-and-its-engine).
+- **`dev doctor` checks impeccable:** the skill linked for Claude Code, its engine present with the pinned digest, and
+  the Codex plugin enabled, each with its fix.
+- **`dev impeccable <verb>` runs the impeccable engine devkit installed.** It takes the engine from devkit's skills
+  folder (never from the current folder, an argument, or the environment), checks its SHA-256 against the install
+  record before every run, and runs it in the current folder with each word as one argument, without a shell. The
+  engine gets the skill folder, `IMPECCABLE_NO_UPDATE_CHECK=1`, and `IMPECCABLE_NO_TELEMETRY=1`, but no other
+  `IMPECCABLE_*` variable. A missing record, a digest mismatch, or an engine outside devkit's skills folder runs
+  nothing and names the fix, `dev install --only skills`. The verbs that write the agents' settings, hooks, or skill
+  folders (`hooks`, `install`, `link`, `update`, `pin`, `unpin`, and `doctor --fix`) run only in your terminal. See
+  [Skills and plugins › impeccable and its engine](docs/skills-and-plugins.md#impeccable-and-its-engine).
+
+### Changed
+
+- **Your answer counts even when the question is reworded, except for an irreversible action.** An answer to the
+  question dialog is your evidence for a reversible decision when the question opens with `D<n> ·` (or its header is
+  `D<n>`) and the label picks one of its options by letter or words; the rest may carry context. Text you type
+  yourself is your answer but picks no option, and a dialog call that asks one decision twice counts for neither
+  question. A decision that leads to an irreversible action counts only in devkit's exact call: one question, its
+  own header, labels only. The call asks that one question and nothing else (`dev crew decisions --ask` gives each
+  such decision a call of its own), the question and the labels are exactly as it prints them, the header is `D<n>`
+  or empty, no option carries a description, a preview, or another field, and you click one of those labels
+  without adding a note (a note can qualify the click, so answer again without one). The
+  option that performs the action says what it runs (`A: yes (release v26.11.4)`). Anything else opens nothing and
+  is audited as `crew.evidence-refused`, and `dev audit verify` reports earlier evidence whose call breaks the rule.
+  See [The crew › How the tech lead asks you](docs/crew.md#how-the-tech-lead-asks-you).
+- **The audit shows how your click became an option.** `crew.evidence` keeps `match` (`exact`, `letter`, `words`, or
+  `free`), `asked` (`exact` or `reworded`), and the label you clicked when the dialog offered it (redacted, at most
+  120 characters), but not your own text or the question. `dev audit verify` reruns the matcher on the
+  question and label in the transcript and reports a record that says otherwise. See
+  [The audit trail › What a record holds](docs/audit.md#what-a-record-holds-and-what-it-never-holds).
+- **`dev crew ask --decision` takes 2 to 4 lettered options and a recommendation,** with a question under 300
+  characters, and prints the corrected command otherwise. An irreversible action asked without options is
+  `A: yes | B: no`, and its question names its target as a word of its own: `v26.11.40` does not name `v26.11.4`,
+  and `D1` does not name PR `1`.
+- **More words read as not doing it:** an option that starts with pass, stay, or leave never performs an
+  irreversible action, so `--performs` refuses it.
+- **Frontend work starts with impeccable.** The Frontend engineer, the UX designer, and the Mobile engineer load
+  `frontend-design` and `impeccable` and run `dev impeccable context` once at the start of their work, on Claude Code
+  and on Codex; `i18n` work now requires `impeccable` too.
+
+### Fixed
+
+- **Crew members can run impeccable, with `dev impeccable`.** The guard reads the skill's launcher as a script that
+  runs a program named only at run time, and refuses it in every crew lane. It still does: the shell can reach another
+  file than the one the guard reads by the same typed path (a symbolic link, `..` after `cd`, a quoted `~`, a glob, or
+  a folder moved earlier in the same command), so no typed launcher path is trusted. Crew lanes run
+  `dev impeccable <verb>` instead, from an allowlist: every lane runs `context`, `detect`, and `doctor` without
+  `--fix`, and write lanes and the main session also run `live`, `generate`, `document`, `extract`, and `init`.
+  Read-only lanes keep to the reading flags and give `detect` only local path shapes (no URL, host, domain, address,
+  `user@`, query, or fragment). Every other verb, including the engine's hidden ones and any a newer engine adds, is
+  the developer's: the guard refuses it to every agent, the main session's included, and `dev impeccable` runs it
+  only in your terminal.
+
+## [26.11.3] - 2026-11-06
+
+This release installs devkit with one command, runs its
 hooks from a pinned copy, gives you a live dashboard, puts the crew under one enforced RACI (who is Responsible,
 Accountable, Consulted, and Informed for each kind of work), holds irreversible actions until you grant them, protects
 devkit's own state from agents, carries a session's work through compaction, backs up branches that exist only on
@@ -224,8 +296,9 @@ devkit refuses more in this release. Each refusal says why and names the command
   for every machine and the team. Without one, a private repository is on and a public one is ask: `dev backup`
   asks you once, in your own terminal, and records the answer. `dev sync` and agents are never asked and never
   publish.
-- **Embargoes:** `dev branch embargo <branch> --why "…" [--until …]` keeps a branch, and the commits it held after a
-  merge, off every remote until you lift it (`--lift`). An embargo is kept in the handoff note's metadata, so every
+- **Embargoes:** `dev branch embargo <branch> --why "…" [--until …]` holds the pushes of a branch, and of the commits
+  it held after a merge, until you lift it (`--lift`): from its project, its git folders and worktrees, temporary
+  clones, and folders that are no project (see Known limits). An embargo is kept in the handoff note's metadata, so every
   machine sees it, and a note devkit cannot read stops every backup. On a public repository, a branch whose commits
   read as a security fix is not backed up: devkit suggests an embargo, and `dev backup --public` pushes it anyway.
 - **Draft pull requests early, CI once.** With `delivery.draft_pr` on, `dev pr create` opens a draft unless
@@ -367,7 +440,9 @@ devkit refuses more in this release. Each refusal says why and names the command
 
 - The audit trail's copy in the handoff repository never grows past 45 MB in one file: a month that would pass it is
   held, with a warning in the trail and in `dev doctor`, instead of growing toward GitHub's 100 MB limit and stopping
-  every handoff push. Daily, compressed audit files replace the monthly ones in 26.11.4.
+  every handoff push. Daily, compressed audit files replace the monthly ones in 26.11.5.
+- `dev install` no longer stops at the skills step on a fresh clone or a release archive: git keeps no empty folder, so
+  devkit's own `agents/skills` folder is missing there, and the step now links the third-party skills without it.
 - `install.sh` works on Intel Macs: it finds Homebrew in `/usr/local` as well as `/opt/homebrew`, and runs the wizard
   with Homebrew's Python from `brew --prefix` instead of a fixed `/opt/homebrew/bin/python3`. On Apple Silicon, it adds
   Homebrew to `~/.zprofile` when Homebrew was not on the `PATH`, so new terminals find `brew`, `gh`, and the toolchain.
@@ -437,6 +512,13 @@ devkit refuses more in this release. Each refusal says why and names the command
   functions or devkit's state is refused, also when it loads them through the agent's own files (three levels deep)
   or through code decoded at run time. On Codex, devkit reads no transcript yet, so a grant or an answer you type
   there opens nothing: run irreversible actions on Codex yourself, in a terminal.
+- **A "no" never opens an irreversible action.** A decision that leads to a release, merge, push, or deploy opens it
+  only when your answer chooses the option that performs it (`--performs`, else the one option that reads yes or
+  approve, else the recommended one); before, any verified answer opened it, `approve D1: no` included. Any other
+  answer opens nothing and is audited as `crew.grant-refused`, with the decision and the option, never your text.
+  `dev crew ask` refuses a `--performs` that names an option reading as not doing it (`B: no`), and the question
+  you are asked names the choice that runs the action and its target: `D1 · Release now? (choosing “A: release”
+  runs release v26.11.4)`.
 - The irreversible-action gate sees more: the repository that `gh -R`, `--repo`, or `GH_REPO` names (so a grant for
   one repository never covers another), commands run through `script`, `watch`, GNU `parallel`, `sem`, `arch`,
   `flock`, `unbuffer`, `chronic`, or `yarn workspace`, targets that `xargs` appends, `curl` methods inside short-flag
@@ -494,7 +576,12 @@ devkit refuses more in this release. Each refusal says why and names the command
   [Guard rules › What the guard is and is not](docs/guard.md#what-the-guard-is-and-is-not).
 - **Developer grants on Codex are not confirmed yet.** devkit reads no Codex transcript, so a grant or an answer you
   type in Codex opens nothing: run irreversible actions there yourself, in a terminal.
-- **Credential separation comes in 26.11.4.** Until then, agents use the same tokens and keys as you.
+- **Agents use your credentials.** devkit works with the GitHub account you are signed in to with `gh` and your own
+  tokens and keys; there is no separate identity for agents, by design. The guard and your grants hold the
+  irreversible actions.
+- **An embargo holds pushes from its own project only.** It holds pushes from the embargoed project, its git folders
+  and worktrees, temporary clones, and unknown folders; a copy of its commits in another project's folder is not
+  held yet (26.11.4).
 
 ### Removed
 

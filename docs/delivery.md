@@ -165,7 +165,8 @@ the branch's tips), until `dev branch embargo --lift fix/x`. When devkit cannot 
 backs up nothing. On a public repository, devkit suggests an embargo when a branch's commits read as a security
 fix.
 
-An embargo keeps the branch off the remote for agents too. When an agent's `git push`, `dev push`, `dev pr create` or
+An embargo holds agents' pushes too, from the embargoed project, its git folders and worktrees, temporary clones and
+unknown folders (a copy in another project's folder is held from 26.11.4). When an agent's `git push`, `dev push`, `dev pr create` or
 `gh pr create` would send an embargoed branch or the commits its embargo holds (under another name, from a branch
 made from it, by commit id, with `--all`), the guard refuses it unless you type `grant embargo <branch>`, which opens
 that one push. When devkit cannot read the handoff note, the guard refuses every agent push the same way. You can

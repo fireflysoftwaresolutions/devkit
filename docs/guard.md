@@ -31,9 +31,10 @@ It is not a sandbox. A determined program can still find a form the guard does n
 it assembles at run time from pieces the guard cannot read, or a file it unpacks and git later runs. Each such form
 the red team finds becomes a rule here and a test, but the list can never be complete.
 
-The lasting boundary is credentials: what an agent's tools can reach is limited by the tokens and keys they hold.
-Separating the agents' credentials from yours is planned for devkit 26.11.4. Until then, treat the guard as the net
-under your own review, not as a replacement for it.
+Agents work with your own credentials: devkit uses the GitHub account you are signed in to with `gh`, and the tokens
+and keys on your Mac, with no separate identity for agents: what an agent's tools can reach is what you can reach.
+The guard, the grants you type, and the actions only you may run hold the irreversible steps for you; treat them as
+the net under your own review, not as a replacement for it.
 
 ## Decisions
 
@@ -223,6 +224,7 @@ three folders readable and writable by your account only (`0700`) every time it 
 | `PYTHONPATH`, `PYTHONSTARTUP`, `PYTHONHOME`, `PYTHONUSERBASE`, `PYTHONPLATLIBDIR`, `PYTHONEXECUTABLE`, or `PYTHONBREAKPOINT` set for the same commands | deny: they load other code into devkit's own process. `bin/dev` runs `python3 -I -S`, which ignores them, the current folder, and the user and site-packages folders (and their `.pth` files); the rule also covers `python3 bin/dev`. A repository's own tests may still set `PYTHONPATH` |
 | `dev install`, `dev update`, or `install.sh` | deny: they change what every hook and the guard run, so the developer runs them, in a terminal |
 | `dev config lock` or `dev config unlock` | deny: they add or remove the [settings lock](agents.md#the-settings-lock) that keeps settings files from turning off devkit's hooks |
+| `dev impeccable` with a verb off its allowlist, in any shell form. Agents run only `context`, `detect`, and `doctor` (with `--json` or `--target`, never `--fix`), and in write lanes and the main session also `live`, `generate`, `document`, `extract`, and `init`: the first word, spelled as listed, never after `skills` or a second `--` | deny, in the main session and both lane kinds: every other verb is the developer's, in a terminal. `hooks`, `install`, `link`, `update`, `pin`, `unpin`, and `doctor --fix` write the agents' settings, hooks, or skill folders, which change what runs in every later session; the engine also has hidden verbs, and an update can add more. `dev impeccable` itself refuses them outside the developer's terminal |
 | `dev hook <event>`, in any shell form (a pipe, `sudo`, `bash -c`, `eval`, `find -exec`, `python3 bin/dev`) | deny, for every session: only the harness runs a hook, when its event fires. A hook event typed through a shell could forge your prompt or answer |
 | A write, move, or delete of a Claude Code transcript (`~/.claude/projects/**/*.jsonl`, a subagent's too) or a Codex session file (`~/.codex/sessions`, `archived_sessions`), with a file tool, a patch, or the shell | deny: devkit reads your approvals from them. Claude Code's memory files stay writable |
 | A program an agent runs (inline, from its input or a pipe, or a script outside the workspace) that loads a devkit module and reaches a function that records or uses your prompts, answers, and grants, or `devkit.state`'s writers | deny, for every session. The guard also reads the agent's own files the program loads (`sys.path` plus `import`, `python -m`, `runpy`, `exec(open(…).read())`, `SourceFileLoader`), three levels deep, and refuses code the program decodes and runs at run time. A repository's own scripts and tests are not judged by this rule |
@@ -299,8 +301,8 @@ pre-approved with `dev crew mode auto --approve`.
 ### The developer's own decisions
 
 Lifting an embargo and publishing a branch make its commits public, and the backup policy decides whether devkit
-publishes a project's branches at all. An embargo keeps a branch off the remote, so pushing an embargoed branch is
-the developer's decision too. These commands are the action `developer-only`, tier 2:
+publishes a project's branches at all. An embargo holds an agent's pushes of a branch and its commits, so pushing an
+embargoed branch is the developer's decision too. These commands are the action `developer-only`, tier 2:
 
 | Command | Grant line that opens it once |
 | --- | --- |
@@ -314,6 +316,12 @@ the developer's decision too. These commands are the action `developer-only`, ti
 A push from inside a repository's git folder (`<repo>/.git`, `<repo>/.git/worktrees/<name>`), or one that
 `env -C <dir>` or `sudo -D <dir>` runs in another folder, is judged as the project of that folder, so
 `grant embargo <branch>` in that project opens it. The handoff repository's own pushes are never held.
+
+The embargo is not yet off every remote. A push is judged by the embargo list of the project in the folder it runs
+from, so the embargo holds pushes from the embargoed project, its git folders and worktrees, temporary clones, and
+folders that are no project. A copy of its commits in another project's folder (another clone or checkout that
+devkit knows as a different project) is judged by that project's list, which does not name them, so an agent's push
+from there is not held yet. devkit 26.11.4 closes this.
 
 The developer can still push an embargoed branch in a terminal. `dev backup` and `dev sync` hold embargoes
 themselves, so they need no grant for it. A crew member never runs them. In the main session they are refused without a grant in every setting of
