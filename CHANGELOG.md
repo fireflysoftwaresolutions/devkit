@@ -73,10 +73,14 @@ Not released yet: the date is set when the release is tagged.
   a folder moved earlier in the same command), so no typed launcher path is trusted. Crew lanes run
   `dev impeccable <verb>` instead, from an allowlist: every lane runs `context`, `detect`, and `doctor` without
   `--fix`, and write lanes and the main session also run `live`, `generate`, `document`, `extract`, and `init`.
-  Read-only lanes keep to the reading flags and give `detect` only local path shapes (no URL, host, domain, address,
-  `user@`, query, or fragment). Every other verb, including the engine's hidden ones and any a newer engine adds, is
-  the developer's: the guard refuses it to every agent, the main session's included, and `dev impeccable` runs it
-  only in your terminal.
+  Agents also run the skill's helpers in the forms it uses that stay inside the project or talk to the live server on
+  `127.0.0.1` (the `live-…` helpers, `surface-brief`, `critique-storage`, `comp-spec`, and `build-phase`; read-only
+  lanes only `surface-brief read` and `critique-storage slug` and `trend`), with `--target` and `--file` inside the
+  project and `detect` URLs only on `localhost` or `127.0.0.1`. Read-only lanes keep to the reading flags and give
+  `detect` only local path shapes (no URL, host, domain, address, `user@`, query, or fragment). Every other verb,
+  including `concept-seed`, `generate-image`, the forms that skip the skill's gates, the engine's hidden ones, and any
+  a newer engine adds, is the developer's: the guard refuses it to every agent, the main session's included, and
+  `dev impeccable` runs it only in your terminal.
 
 ## [26.11.3] - 2026-11-06
 

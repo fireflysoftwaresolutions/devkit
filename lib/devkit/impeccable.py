@@ -19,9 +19,11 @@ from devkit's own paths instead:
    variable is dropped: IMPECCABLE_BIN picks another engine, and the others move its downloads, caches and plugins.
 
 Anything else is refused with the fix, `dev install --only skills`. Outside the developer's terminal
-(core.set_by_developer) the command runs only the verbs on the agents' allowlist, spelled exactly and first
-(guard.impeccable_developer_verb): context, detect, doctor with --json or --target, live, generate, document, extract
-and init. Which of them a crew lane may run is the guard's decision (guard.IMPECCABLE_READS for read-only lanes)."""
+(core.set_by_developer) the command runs only the forms on the agents' allowlist, spelled exactly
+(guard.impeccable_developer_call): context, detect on local paths and URLs on this Mac, doctor with --json or
+--target, live, generate, document, extract, init, and the skill's helpers in the forms that stay inside the project
+or talk to the live server (guard.IMPECCABLE_FORMS). Which of them a crew lane may run is the guard's decision
+(guard.IMPECCABLE_READS and IMPECCABLE_READ_HELPERS for read-only lanes)."""
 from __future__ import annotations
 
 import argparse
@@ -113,34 +115,29 @@ def _wait(proc) -> int:
     return rc if rc >= 0 else 128 - rc
 
 
-def _developers(verb: str, args) -> bool:
+def _developers(call: str, refusal: str, args) -> bool:
     """True in the developer's terminal (core.set_by_developer). A call off the agents' allowlist
-    (guard.impeccable_developer_verb) may write the agents' settings, hooks or skill folders, which changes what runs
-    in every later session, or run a verb a newer engine added, so anyone else gets the refusal, printed and audited,
-    and False."""
+    (guard.impeccable_developer_call) may write the agents' settings, hooks or skill folders, which changes what runs
+    in every later session, reach the internet, write outside the project, skip one of the skill's gates, or run a
+    verb a newer engine added, so anyone else gets `refusal`, printed and audited, and False."""
     from . import audit
-    from .guard import IMPECCABLE_READS, IMPECCABLE_WRITES
     try:
         ok = core.set_by_developer()
     except Exception:
         ok = False  # a check that cannot decide refuses (fail closed)
     if not ok:
-        audit.record("dev.impeccable", " ".join(args)[:200], f"{verb}: not the developer's terminal", "refused")
-        ui.err(f"dev impeccable {verb} is not on the agents' allowlist ({', '.join(IMPECCABLE_READS)} with --json or "
-               f"--target, {', '.join(IMPECCABLE_WRITES)}), spelled exactly and first. Other verbs can write the "
-               f"agents' settings, hooks or skill folders, which change what runs in every later session on this "
-               f"Mac, and an engine update can add more, so only the developer runs them, in a terminal. Ask them, "
-               f"with the command and why.")
+        audit.record("dev.impeccable", " ".join(args)[:200], f"{call}: not the developer's terminal", "refused")
+        ui.err(refusal)
     return ok
 
 
 def run(args, cwd=None) -> int:
     """Run the verified engine with the words `args` in `cwd` (default: the current folder) -> its exit code, or 1
     when it is refused (the reason and the fix on stderr)."""
-    from .guard import impeccable_developer_verb
+    from .guard import impeccable_developer_call, impeccable_refusal
     args = [str(a) for a in args]
-    verb = impeccable_developer_verb(args)  # the words the engine gets: dev's parser already dropped a first `--`
-    if verb and not _developers(verb, args):
+    call, _ = impeccable_developer_call(args)  # the words the engine gets: dev's parser already dropped a first `--`
+    if call and not _developers(call, impeccable_refusal(args), args):
         return 1
     try:
         engine, skill, identity = verified_engine()

@@ -44,16 +44,25 @@ FIX = "dev install --only skills"
 # `skills` namespace, once or more, a first `--`, and doctor's --fix
 HARNESS = (["hooks", "on"], ["install", "--user"], ["skills", "update"], ["pin", "audit"], ["doctor", "--fix"],
            ["--", "hooks", "off"], ["skills", "skills", "hooks", "on"])
-# the words the engine gets for the verbs agents run (the allowlist)
+# the words the engine gets for the verbs agents run (the allowlist), the skill's helpers in the forms it uses included
 AGENT_VERBS = (["context"], ["detect", "src"], ["doctor", "--json"], ["doctor", "--target", "src"], ["live"],
-               ["generate"], ["document"], ["extract"], ["init"])
+               ["generate"], ["document"], ["extract"], ["init"], ["live", "--target", "src/app"],
+               ["detect", "http://localhost:5173/"], ["live-poll", "--reply", "e1", "done", "--file", "src/index.html"],
+               ["live-wrap", "--id", "e1", "--count", "3", "--tag", "h1", "--file", "src/index.html"],
+               ["surface-brief", "read", "src/index.html"], ["critique-storage", "latest", "src/index.html", "--json"],
+               ["comp-spec", "--comp", "comp.png", "--grid"], ["build-phase", "advance"])
 # words the engine may run but no agent may: hidden verbs of the 0.1.18 engine, its other visible ones, a design
-# command that is not an engine verb, a verb a newer engine could add, no verb, and the allowlist's verbs spelled
-# otherwise (another case, after `skills` or `--`, doctor with another word)
-DEVELOPER_ONLY = (["hook-admin"], ["hook"], ["hook-before-edit"], ["build-phase", "advance"], ["capture-server"],
-                  ["ignore", "x"], ["ignores", "add", "x"], ["telemetry", "on"], ["check"], ["help"], ["polish"],
-                  ["live-poll"], ["a-verb-a-newer-engine-adds"], [], ["Context"], ["skills", "context"],
-                  ["--", "context"], ["doctor", "--FIX"], ["doctor", "--target", "src", "--fix"], ["doctor", "-f"])
+# command that is not an engine verb, a verb a newer engine could add, no verb, the allowlist's verbs spelled
+# otherwise (another case, after `skills` or `--`, doctor with another word), helpers that reach the internet, and
+# helper forms that skip the skill's gates or write outside the project
+DEVELOPER_ONLY = (["hook-admin"], ["hook"], ["hook-before-edit"], ["capture-server"], ["ignore", "x"],
+                  ["ignores", "add", "x"], ["telemetry", "on"], ["check"], ["help"], ["polish"],
+                  ["a-verb-a-newer-engine-adds"], [], ["Context"], ["skills", "context"], ["--", "context"],
+                  ["doctor", "--FIX"], ["doctor", "--target", "src", "--fix"], ["doctor", "-f"], ["concept-seed"],
+                  ["generate-image", "--prompt-file", "p.txt"], ["build-phase", "advance", "--force", "--reason", "x"],
+                  ["build-phase", "start", "--comp", "comp.png"], ["live-complete", "--id", "e1", "--force"],
+                  ["live", "--target", "../app"], ["live-wrap", "--id", "e1", "--file", "../x.html"],
+                  ["comp-spec", "--crop", "art", "--out", "../x.png"], ["detect", "https://example.com"])
 
 
 class WrapperCase(unittest.TestCase):
@@ -199,7 +208,7 @@ class DeveloperOnlyTests(WrapperCase):
             with self.subTest(refused=args):
                 rc, err, argv = self.run_as(args, developer=False)
                 self.assertEqual((rc, argv), (1, None), err)
-                self.assertIn("only the developer", err)
+                self.assertIn("change what runs in every later session", err)
         rc, err, argv = self.run_as(["polish"], developer=True)  # the developer runs any verb
         self.assertEqual((rc, argv), (0, ["polish"]), err)
         # through bin/dev: its parser drops one first `--`, so a second one reaches the engine and is refused
@@ -214,7 +223,7 @@ class DeveloperOnlyTests(WrapperCase):
             with self.subTest(args=args):
                 rc, err, got = self.dev(*args, env={"CLAUDECODE": "1"})
                 self.assertEqual((rc, got), (1, None), err)
-                self.assertIn("only the developer", err)
+                self.assertIn("change what runs in every later session", err)
         with mock.patch.object(core, "set_by_developer", lambda *a, **k: True), \
                 mock.patch.dict(os.environ, {"FAKE_ENGINE_OUT": str(self.out)}), \
                 contextlib.redirect_stderr(io.StringIO()) as err:

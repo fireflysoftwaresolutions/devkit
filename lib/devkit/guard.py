@@ -2240,10 +2240,10 @@ class _Shell:
             return deny(LOCK_REASON.format(sub=words[1]))
         if args[:1] == ["hook"] and not helps:
             return deny(HOOK_REASON)
-        if args[:1] == ["impeccable"]:  # its words reach the engine: agents run only the allowlist's verbs
-            verb = impeccable_developer_verb(impeccable_engine_words(args[1:]))
-            if verb:
-                return deny(IMPECCABLE_REASON.format(verb=verb))
+        if args[:1] == ["impeccable"]:  # its words reach the engine: agents run only the allowlist's forms
+            refusal = impeccable_refusal(impeccable_engine_words(args[1:]))
+            if refusal:
+                return deny(refusal)
         if args[:1] in (["rm"], ["mv"], ["cp"]):
             return self.segment(args[0], args, [], cwd)
         if args[:1] and (args[0] in _DEV_READ or args[0] in _DEV_TEXT):
@@ -3616,19 +3616,46 @@ def _ro_dev(args) -> str | None:
 # Agents get an allowlist of verbs, not a block list (the tech lead's decision on the Code reviewer's review of
 # e498c41..7a1f31b: the engine has verbs its help does not show, such as hook-admin, hook-before-edit, build-phase and
 # capture-server, and an update can add more). The 0.1.18 engine's help shows detect, ignores, help, install, link,
-# update, check and telemetry (and the legacy `skills` namespace); the skill also runs context, doctor and live.
+# update, check and telemetry (and the legacy `skills` namespace); the skill also runs context, doctor, live and the
+# helpers its reference files name.
 # - Every lane and the main session: `context` (loads PRODUCT.md, DESIGN.md and the surface brief), `detect` (scans
-#   HTML and CSS) and `doctor` with only --json and --target (reports drift; --fix moves hook entries).
+#   HTML and CSS), `doctor` with only --json and --target (reports drift; --fix moves hook entries), and the helper
+#   forms that write nothing: `surface-brief read`, `critique-storage slug` and `trend`.
 # - Write lanes and the main session, also: `live` (starts the live server and injects its script into the page),
-#   and `generate`, `document`, `extract` and `init`, the design commands that write project files. 0.1.18 runs them in
-#   the agent's chat, not as engine verbs (init: "not a CLI command"; the others: "Unknown command"), so here they
-#   reach the engine only when a newer one adds them.
+#   `generate`, `document`, `extract` and `init`, the design commands that write project files (0.1.18 runs them in
+#   the agent's chat, not as engine verbs: init "not a CLI command", the others "Unknown command"), and the skill's
+#   helpers in the forms of IMPECCABLE_FORMS.
 # - Everything else is the developer's, in a terminal: the verbs that write the agents' settings, hooks or skill
-#   folders (hooks, install, link, update, pin, unpin, doctor --fix), the hidden helpers (hook, hook-admin,
-#   hook-before-edit, build-phase, capture-server, live-poll, …), ignore and ignores, telemetry, check, help, no verb,
-#   and the allowlist's verbs spelled any other way (another case, after `skills` or a second `--`): it fails closed.
-# Read-only lanes run the read verbs with their reading flags, on local path shapes only: detect scans a URL when it
-# gets one, so no value or path may name a URL or anything that could pass for a host.
+#   folders (hooks, install, link, update, pin, unpin, doctor --fix), the other hidden helpers (hook, hook-admin,
+#   hook-before-edit, capture-server, live-inject, …), ignore and ignores, telemetry, check, help, no verb, the
+#   helpers' other sub-verbs and flags, and the allowlist's words spelled any other way (another case, after `skills`
+#   or a second `--`): it fails closed.
+#
+# The helpers (the tech lead's decision on the helper verbs: an exact verb only when it reads or writes inside the
+# project or talks to the live server `live` started). Each was run from the verified 0.1.18 engine (SHA-256
+# 543ee2f7…a8e1, the skill's engine-checksums.txt) in a scratch project with a scratch HOME, under sandbox-exec with
+# the network closed but for loopback and a logging proxy in HTTPS_PROXY, next to its help and the skill's reference
+# files (live.md, new-work.md, polish.md, region-map.md, critique.md):
+# - live-poll, live-accept, live-status, live-resume, live-complete, live-wrap, live-insert and live-server talk to the
+#   live server, which listens on 127.0.0.1 only, and write .impeccable/live and the page they wrap. `--file` and
+#   live's `--target` pick where they write, so they take a path in the project: `live --target
+#   ../other-app/index.html` injected its script into that file, and `live-wrap --file ../x.html` wrapped an element
+#   there. `live-complete --force` completes a session whose source still has live-mode leftovers, past its gate.
+# - surface-brief and critique-storage write .impeccable/surfaces and .impeccable/critique; a URL target is only a
+#   key, never fetched. `read`, `slug` and `trend` wrote nothing; `latest` closes the snapshot it reads once the
+#   target file changed, so it is a write lane's.
+# - comp-spec writes .impeccable/build; `--out`, `--out-dir` and `--spec` write where they point, outside the project
+#   too, and the skill never passes them.
+# - build-phase writes .impeccable/build and checks a gate at each step. `advance --force` passes a phase over its
+#   failed check, `start --comp` records any image as the approved comp and marks the comps phase skipped, and
+#   `start --reset` throws the open gates away; the skill's `start --direction` (with --decision-comp) keeps the comps
+#   gate open.
+# - concept-seed GETs https://impeccable.style/api/roll and writes ~/.impeccable/seed-salt; generate-image sends its
+#   prompt and images to the OpenAI API with the developer's key: the developer's.
+# `detect` loads a URL in Chrome, so agents give it local paths and URLs on localhost or 127.0.0.1 only (the tech
+# lead's decision): in 0.1.18 a word without a scheme is a path to it, and --cdp takes a port or such a URL.
+# Read-only lanes run the read verbs with their reading flags, on local path shapes only: no value or path may name a
+# URL or anything that could pass for a host.
 
 # verb -> (flags that take a value: the kind of value, flags alone, whether local paths may follow)
 IMPECCABLE_READS = {
@@ -3638,20 +3665,91 @@ IMPECCABLE_READS = {
     "doctor": ({"--target": "path"}, frozenset({"--json", "--help"}), False),
 }
 IMPECCABLE_WRITES = ("live", "generate", "document", "extract", "init")
-IMPECCABLE_AGENTS = frozenset(IMPECCABLE_READS) | frozenset(IMPECCABLE_WRITES)
+# the helper forms that write nothing, which read-only lanes run too: verb -> its sub-verbs
+IMPECCABLE_READ_HELPERS = {"surface-brief": ("read",), "critique-storage": ("slug", "trend")}
+# What agents may give the verbs whose words are checked in write lanes and the main session, from the 0.1.18 engine's
+# help and the skill's reference files: verb -> {sub-verb ('' for none; more than one word is matched whole) ->
+# (flags that take a value: its kind, flags alone, (fewest, most or None for any, kind) other words)}. Kinds: "word"
+# any word that does not start with -, "path" a path in the project, "url" a local path or a URL on this Mac, "port" a
+# DevTools port or a URL on this Mac, or a tuple of the only words it takes.
+_W = "word"
+_PICK = {"--id": _W, "--count": _W, "--element-id": _W, "--classes": _W, "--tag": _W, "--query": _W, "--text": _W,
+         "--page-url": _W, "--file": "path"}
+_NONE = (0, 0, _W)
+IMPECCABLE_FORMS = {
+    "live": {"": ({"--target": "path"}, frozenset({"--help"}), _NONE)},
+    "detect": {"": ({"--scope": _W, "--viewport": _W, "--cdp": "port", "--target": _W},
+                    frozenset({"--json", "--quiet", "--github", "--list-rules", "--no-config", "--no-inline-ignores",
+                               "--no-design-system", "--no-advisory", "--no-consent-hiding", "--no-overlay-hiding",
+                               "--help"}), (0, None, "url"))},
+    "live-poll": {"": ({"--reply": _W, "--file": "path", "--data": _W, "--timeout": _W, "--types": _W,
+                        "--ack-timeout": _W}, frozenset({"--stream", "--then-poll", "--help"}), (0, 2, _W))},
+    "live-accept": {"": ({"--id": _W, "--variant": _W, "--page-url": _W},
+                         frozenset({"--discard", "--bake", "--no-bake", "--help"}), _NONE)},
+    "live-status": {"": ({}, frozenset(), _NONE)},
+    "live-resume": {"": ({"--id": _W}, frozenset(), _NONE)},
+    "live-complete": {"": ({"--id": _W, "--error": _W}, frozenset({"--discarded", "--help"}), _NONE)},
+    "live-wrap": {"": (_PICK, frozenset({"--help"}), _NONE)},
+    "live-insert": {"": ({**_PICK, "--position": ("before", "after")}, frozenset({"--help"}), _NONE)},
+    "live-server": {"": ({"--port": _W}, frozenset({"--background", "--help"}), _NONE),
+                    "stop": ({}, frozenset({"--keep-inject"}), _NONE)},
+    "surface-brief": {"read": ({}, frozenset(), (1, 1, _W)), "write": ({}, frozenset(), (2, None, _W))},
+    "critique-storage": {"slug": ({}, frozenset(), (1, 1, _W)), "latest": ({}, frozenset({"--json"}), (1, 1, _W)),
+                         "trend": ({}, frozenset(), (1, 2, _W)), "write": ({}, frozenset(), (2, 2, _W)),
+                         "close": ({}, frozenset(), (2, 2, _W))},
+    "comp-spec": {"": ({"--comp": _W, "--regions": _W, "--crop": _W, "--scale": _W, "--plate-prompt": _W,
+                        "--background": ("transparent", "opaque", "auto")},
+                       frozenset({"--grid", "--inspect-map", "--json", "--auto", "--print", "--schema", "--help"}),
+                       _NONE)},
+    "build-phase": {"start": ({"--direction": _W, "--decision-comp": _W, "--breakpoint": _W, "--artifact": _W,
+                               "--session-id": _W}, frozenset(), _NONE),
+                    "advance": ({}, frozenset(), _NONE), "scaffold": ({}, frozenset(), _NONE),
+                    "record hero": ({"--build": _W}, frozenset(), _NONE),
+                    "finish": ({"--disposition": ("ship", "fix", "rebuild", "recapture")}, frozenset(), _NONE)},
+}
+IMPECCABLE_AGENTS = frozenset(IMPECCABLE_READS) | frozenset(IMPECCABLE_WRITES) | frozenset(IMPECCABLE_FORMS)
+# why a verb or a flag is the developer's, named in the refusal
+_IMPECCABLE_VERB_WHY = {
+    "concept-seed": "it GETs https://impeccable.style/api/roll and writes ~/.impeccable/seed-salt, outside the project",
+    "generate-image": "it sends its prompt and images to the OpenAI API with the developer's key, which leaves this "
+                      "Mac and costs money",
+}
+_GATE = "skips a gate of the skill"
+_OUT = "writes where its path points, outside the project too"
+_IMPECCABLE_FLAG_WHY = {
+    ("build-phase", "--force"): f"`--force` {_GATE}: it advances the build over a phase whose check failed",
+    ("build-phase", "--reason"): f"`--reason` goes with `--force`, which {_GATE}",
+    ("build-phase", "--comp"): f"`--comp` {_GATE}: it records any image as the approved comp and marks the comps phase "
+                               f"skipped",
+    ("build-phase", "--reset"): f"`--reset` {_GATE}: it throws away the build's open gates",
+    ("live-complete", "--force"): f"`--force` {_GATE}: it completes a session whose source still has live-mode "
+                                  f"leftovers",
+    ("comp-spec", "--out"): f"`--out` {_OUT}", ("comp-spec", "--out-dir"): f"`--out-dir` {_OUT}",
+    ("comp-spec", "--spec"): f"`--spec` {_OUT}",
+}
 # a path a read-only lane may give the engine: one that starts ./, ../, / (never //) or ~/, `.` or `..`, or one whose
 # first part has only ASCII letters, digits, _ and - and is not a host on its own (localhost, or a number such as
 # 2130706433 or 0x7f000001); never with a colon (a scheme, a port, an IPv6 address)
 _LOCAL_PATH = re.compile(r"(?:\.\.?/|/(?!/)|~/|\.\.?\Z"
                          r"|(?!(?:localhost|[0-9]+|0x[0-9a-f]+)(?:/|\Z))[A-Za-z0-9_-]+(?:/|\Z))", re.I)
 _NAMES = re.compile(r"[a-z]+(?:,[a-z]+)*\Z")  # --scope: the detector's design domains, comma-separated
-IMPECCABLE_REASON = ("`dev impeccable {verb}` is the developer's. Agents run `dev impeccable` only with the verbs on "
-                     "its allowlist, spelled exactly and first: `context`, `detect`, and `doctor` (with `--json` or "
-                     "`--target`, never `--fix`) in every lane, and also `live`, `generate`, `document`, `extract`, "
-                     "and `init` in write lanes and the main session. Every other verb the developer runs, in a "
-                     "terminal: some write the agents' settings, hooks or skill folders (`hooks`, `install`, `link`, "
-                     "`update`, `pin`, `unpin`, `doctor --fix`), which change what runs in every later session on this "
-                     "Mac, and an engine update can add more. Ask them, with the command and why. " + _TAIL)
+# a URL on this Mac: http, https, ws or wss (any case) to localhost or 127.0.0.1 as typed (lowercase, no user, no
+# other spelling of the address), an optional port, then nothing or a path, query or fragment without spaces or `\`
+_HERE_URL = re.compile(r"(?i:https?|wss?)://(?:localhost|127\.0\.0\.1)(?::[0-9]{1,5})?(?:[/?#][^\s\\]*)?\Z")
+IMPECCABLE_REASON = ("`dev impeccable {verb}` is the developer's{why}. Agents run `dev impeccable` only with the forms "
+                     "on its allowlist, spelled exactly: in every lane `context`, `detect` (local paths, and URLs on "
+                     "localhost or 127.0.0.1), `doctor` (with `--json` or `--target`, never `--fix`), `surface-brief "
+                     "read`, and `critique-storage slug` and `trend`; in write lanes and the main session also `live`, "
+                     "`generate`, `document`, `extract`, `init`, the live helpers (`live-poll`, `live-accept`, "
+                     "`live-status`, `live-resume`, `live-wrap`, `live-insert`, `live-server`, and `live-complete` "
+                     "without `--force`), `surface-brief write`, `critique-storage latest`, `write`, and `close`, "
+                     "`comp-spec` without `--out`, `--out-dir`, or `--spec`, and `build-phase start --direction`, "
+                     "`advance` without `--force`, `record hero`, `scaffold`, and `finish`, where `--target` and "
+                     "`--file` name a path in the project. The developer runs everything else, in a terminal: some "
+                     "verbs write the agents' settings, hooks or skill folders (`hooks`, `install`, `link`, `update`, "
+                     "`pin`, `unpin`, `doctor --fix`), which change what runs in every later session on this Mac; "
+                     "some reach the internet or cost money (`concept-seed`, `generate-image`); some skip the skill's "
+                     "own gates; and an engine update can add more. Ask them, with the command and why. " + _TAIL)
 
 
 def impeccable_engine_words(args) -> list:
@@ -3678,20 +3776,91 @@ def _doctor_extra(rest) -> str:
     return ""
 
 
-def impeccable_developer_verb(words) -> str:
-    """'' when an agent may run the engine with `words`, the words it gets (impeccable_engine_words), else the call
-    to name in the refusal: the first word is the verb and must be on the allowlist as it is spelled there
-    (IMPECCABLE_AGENTS), and doctor takes only --json, --help and --target. Anything else is the developer's (fails
-    closed); the name reads through `--` and the legacy `skills` namespace, however often, to the verb the engine would
-    run."""
+def _project_path(value) -> bool:
+    """True for a path inside the folder the engine runs in, by its words: not empty, no first -, / or ~, no colon or
+    control character, and no `..` part."""
+    return bool(value) and value[0] not in "-/~" and ":" not in value and value.isprintable() and \
+        ".." not in re.split(r"[/\\]", value)
+
+
+def _impeccable_value(kind, shown, value) -> str:
+    """Why `value` (typed as `shown`) does not fit `kind` (IMPECCABLE_FORMS), or ''."""
+    if isinstance(kind, tuple):
+        return "" if value in kind else f"`{shown}` takes only {', '.join(kind)}"
+    if kind == "path":
+        return "" if _project_path(value) else (f"`{shown}` names a path outside the project: give one inside it, "
+                                                f"with no first /, ~ or -, no `..` part and no colon")
+    if kind == "port":
+        return "" if re.fullmatch(r"[0-9]{1,5}", value) or _HERE_URL.match(value) else \
+            (f"`{shown}` is not a port or a URL on localhost or 127.0.0.1, and a DevTools address anywhere else "
+             f"leaves this Mac")
+    if kind == "url" and (value.startswith("//") or (":" in value and not _HERE_URL.match(value))):
+        return (f"`{shown}` is not a local path or a URL on localhost or 127.0.0.1: detect loads a URL in Chrome, "
+                f"and one anywhere else leaves this Mac")
+    return f"`{shown}` gives a value that starts with -, which the engine could read as a flag" \
+        if value.startswith("-") else ""
+
+
+def _impeccable_form(verb, forms, rest) -> tuple:
+    """('', '') when `rest`, the words after `verb`, fit one of its `forms` (IMPECCABLE_FORMS), else (the call to name
+    in the refusal, why it is the developer's or ''): the first word that fits no form names it."""
+    for key in sorted(forms, key=lambda k: -len(k.split())):
+        sub = key.split()
+        if rest[:len(sub)] == sub:
+            break
+    else:
+        return " ".join([verb, *rest[:1]])[:80], ""
+    takes, alone, (fewest, most, kind) = forms[key]
+    call, rest = " ".join([verb, *sub]), rest[len(sub):]
+    count = i = 0
+    while i < len(rest):
+        a = rest[i]
+        flag, eq, value = a.partition("=")
+        if a.startswith("-") and flag in takes:
+            if not eq and i + 1 == len(rest):
+                return f"{call} {a}"[:80], f"`{a}` needs a value"
+            value = value if eq else rest[i + 1]
+            shown = a if eq else f"{a} {value}"
+            i += 1 if eq else 2
+            why = _impeccable_value(takes[flag], shown, value)
+            if why:
+                return f"{call} {shown}"[:80], why
+        elif a in alone:
+            i += 1
+        elif a.startswith("-") or (most is not None and count == most):
+            return f"{call} {a}"[:80], _IMPECCABLE_FLAG_WHY.get((verb, flag), "")
+        else:
+            why = _impeccable_value(kind, a, a)
+            if why:
+                return f"{call} {a}"[:80], why
+            count, i = count + 1, i + 1
+    return (call[:80], f"it takes {fewest} or more words after `{call}`") if count < fewest else ("", "")
+
+
+def impeccable_developer_call(words) -> tuple:
+    """('', '') when an agent may run the engine with `words`, the words it gets (impeccable_engine_words); else (the
+    call to name in the refusal, why it is the developer's or ''). The first word is the verb and must be on the
+    allowlist as it is spelled there (IMPECCABLE_AGENTS); doctor takes only --json, --help and --target, and the verbs
+    of IMPECCABLE_FORMS only their forms. Anything else is the developer's (fails closed); the name reads through `--`
+    and the legacy `skills` namespace, however often, to the verb the engine would run."""
     words = [str(w) for w in words]
-    if words[:1] and words[0] in IMPECCABLE_AGENTS:
-        extra = _doctor_extra(words[1:]) if words[0] == "doctor" else ""
-        return f"doctor {extra}" if extra else ""
+    verb = words[0] if words else ""
+    if verb in IMPECCABLE_FORMS:
+        return _impeccable_form(verb, IMPECCABLE_FORMS[verb], words[1:])
+    if verb in IMPECCABLE_AGENTS:
+        extra = _doctor_extra(words[1:]) if verb == "doctor" else ""
+        return (f"doctor {extra}", "") if extra else ("", "")
     k = 0
     while k < len(words) and (words[k] == "--" or words[k].casefold() == "skills"):
         k += 1
-    return " ".join(words[:k + 1])[:80] or "(no verb)"
+    return " ".join(words[:k + 1])[:80] or "(no verb)", _IMPECCABLE_VERB_WHY.get(words[k] if k < len(words) else "", "")
+
+
+def impeccable_refusal(words) -> str:
+    """The refusal of `dev impeccable` with `words`, the words the engine gets, to anyone but the developer, or ''
+    when an agent may run it (impeccable_developer_call)."""
+    name, why = impeccable_developer_call(words)
+    return IMPECCABLE_REASON.format(verb=name, why=f": {why}" if why else "") if name else ""
 
 
 def _ro_impeccable(args) -> str | None:
@@ -3699,13 +3868,17 @@ def _ro_impeccable(args) -> str | None:
     a first `--` and passes the rest to the engine as they are, so a later `--` is a word the engine reads, never a
     reading flag."""
     args = impeccable_engine_words(args)
-    verb = impeccable_developer_verb(args)
-    if verb:
-        return IMPECCABLE_REASON.format(verb=verb)
+    refusal = impeccable_refusal(args)
+    if refusal:
+        return refusal
     verb, rest = args[0], args[1:]
+    if rest[:1] and rest[0] in IMPECCABLE_READ_HELPERS.get(verb, ()):
+        return None  # its form was checked above: no flags, only its targets
     if verb not in IMPECCABLE_READS:
-        return (f"`dev impeccable {verb}` writes files or starts a session, so a write lane runs it; a read-only lane "
-                f"runs {', '.join(IMPECCABLE_READS)} (doctor without --fix)")
+        call = " ".join([verb, *rest[:1]]) if verb in IMPECCABLE_READ_HELPERS else verb
+        return (f"`dev impeccable {call}` writes files or starts a session, so a write lane runs it; a read-only lane "
+                f"runs {', '.join(IMPECCABLE_READS)} (doctor without --fix), surface-brief read, and critique-storage "
+                f"slug and trend")
     takes, alone, paths = IMPECCABLE_READS[verb]
     i = 0
     while i < len(rest):
@@ -3956,9 +4129,9 @@ def crew_shell_verdict(cmd: str, cwd, scope=None, member=None, level=None, base=
         all(argv == ["cat"] for argv, code in calls[1:])
     for argv, code in calls:
         dev = _dev_args(argv) if code is None else None
-        imp = impeccable_developer_verb(impeccable_engine_words(dev[1:])) if dev and dev[:1] == ["impeccable"] else ""
+        imp = impeccable_refusal(impeccable_engine_words(dev[1:])) if dev and dev[:1] == ["impeccable"] else ""
         if imp:  # off the allowlist: the developer's, in every lane
-            return deny(IMPECCABLE_REASON.format(verb=imp))
+            return deny(imp)
         for kind, args in _dev_calls(argv, code):
             if kind == "lane" and not one_routed:
                 return deny(LANE_REASON)

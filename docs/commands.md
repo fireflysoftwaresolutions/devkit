@@ -437,10 +437,22 @@ between. Before every run, the command checks the engine's SHA-256 against the i
 skills folder. A refusal runs nothing and names the fix, `dev install --only skills`. Otherwise the command exits
 with the engine's exit code.
 
-The verbs that write the agents' settings, hooks, or skill folders (`hooks`, `install`, `link`, `update`, `pin`,
-`unpin`, and `doctor --fix`) are the developer's: the command runs them only in your terminal, and the guard refuses
-them to every agent. Crew members run impeccable this way, never by the launcher's path, which the guard refuses.
-Read-only lanes run only `context`, `detect` on local paths, and `doctor` without `--fix`. See
+Agents run the command only with the forms on its allowlist, and the guard holds every agent to the same list:
+
+- **Every lane:** `context`, `detect` on local paths, `doctor` without `--fix`, `surface-brief read`, and
+  `critique-storage slug` and `trend`.
+- **Write lanes and the main session, also:** `live`, `generate`, `document`, `extract`, and `init`; `detect` on
+  URLs on `localhost` or `127.0.0.1`; and the skill's helpers in the forms it uses: `live-poll`, `live-accept`,
+  `live-status`, `live-resume`, `live-wrap`, `live-insert`, `live-server`, `live-complete` without `--force`,
+  `surface-brief write`, `critique-storage latest`, `write`, and `close`, `comp-spec` without `--out`, `--out-dir`, or
+  `--spec`, and `build-phase start --direction`, `advance`, `record hero`, `scaffold`, and `finish`. `--target` and
+  `--file` name a path inside the project.
+- **Yours only, in your terminal:** everything else. That covers the verbs that write the agents' settings, hooks, or
+  skill folders (`hooks`, `install`, `link`, `update`, `pin`, `unpin`, and `doctor --fix`), `concept-seed` and
+  `generate-image`, which reach the internet, and the forms that skip one of the skill's gates
+  (`build-phase advance --force`, `build-phase start --comp` or `--reset`, and `live-complete --force`).
+
+Crew members run impeccable this way, never by the launcher's path, which the guard refuses. See
 [Skills and plugins › impeccable and its engine](skills-and-plugins.md#impeccable-and-its-engine).
 
 ```bash
