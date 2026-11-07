@@ -52,6 +52,16 @@ class DetectTests(unittest.TestCase):
         self.assertEqual(rules("a.py", "self.stub = grpc_stub(channel)\n"), [])  # code, not a comment
         self.assertEqual(rules("a.py", "# devkit: allow-stub-words\nx = 1  # TODO\n"), [])  # file pragma
 
+    # a comment's stub word and its time word in separate clauses say two things, not "a stub for now": the line of
+    # tests/test_cli_wiring.py says nothing is stubbed. In one clause (a dot inside a name is no boundary) it is found
+    def test_a_stub_word_and_a_time_word_in_separate_clauses_are_not_a_stub(self):
+        self.assertEqual(rules("t.py", "# (spec F6). Each test drives cli.main as a terminal would, in a temporary "
+                                       "state; nothing below the CLI is stubbed\n"), [])
+        self.assertEqual(rules("t.py", "# the HTTP client is a fake one; the implementation under test is real\n"), [])
+        self.assertEqual(rules("t.py", "# for now cli.main returns a stub\n"), [(1, "placeholder")])
+        self.assertEqual(rules("t.py", "x = load()  # stubbed for now, replaced by the client in v2\n"),
+                         [(1, "placeholder")])
+
 
 def git(cwd, *args):
     subprocess.run(["git", "-C", cwd, *args], check=True, capture_output=True)

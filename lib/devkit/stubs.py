@@ -11,6 +11,7 @@ names its task (T-xxxxxxxxxx, from `dev task add`), its issue (#123 or an issue 
   not-implemented   raise NotImplementedError, NotImplementedException, throw new Error("not implemented"),
                     UnsupportedOperationException("not implemented"), todo!(), unimplemented!(), panic("todo")
   placeholder       TBD, "to be implemented", "coming soon", lorem ipsum, and "placeholder" or "stub" in a comment
+                    (first, or in one clause with "for now", "until", "temporary" and the like)
   empty-body        a Python function whose body is only `...` (abstract methods, Protocols, @overload and .pyi
                     files are fine)
 
@@ -32,6 +33,10 @@ CODE_EXT = {".py", ".pyi", ".js", ".jsx", ".ts", ".tsx", ".mjs", ".cjs", ".java"
 SKIP_DIRS = ("node_modules/", "vendor/", "dist/", "build/", ".git/", "__pycache__/", ".venv/", "venv/", "target/",
              ".next/", "coverage/")
 COMMENT = r"(?:(?:^|\s)(?:#|//|/\*|<!--|--)|^\s*\*)\s*"  # a real comment marker, not ** or ;
+# up to 40 characters inside one clause: a stub word and its time word ("for now", "until") belong to the same
+# statement; across a `;`, `!`, `?` or a period that ends a sentence they say two things ("in a temporary state;
+# nothing is stubbed"). A dot inside a name (cli.main, 1.2) is no boundary. Punctuation, so no words of a language
+CLAUSE = r"(?:[^.;!?]|\.(?=\S)){0,40}"
 RULES = [
     ("todo", re.compile(r"\b(TODO|FIXME)\b|\b(XXX|HACK)\b(?=\s*[:(\-]|\s*$)")),
     ("not-implemented", re.compile(
@@ -42,9 +47,9 @@ RULES = [
     ("placeholder", re.compile(
         r"\bTBD\b|\bto\s+be\s+implemented\b|\bcoming\s+soon\b|\blorem\s+ipsum\b|"
         + COMMENT + r"(?:placeholder|stub(?:bed)?)\b|"  # the comment says what it is: "# placeholder", "// stub: …"
-        + COMMENT + r".*\b(?:placeholder|stub(?:bed)?|dummy|fake)\b.{0,40}\b(?:for\s+now|until|later|temporar\w*|"
-        r"implementation|replace\s+(?:this|with|me))\b|"
-        + COMMENT + r".*\b(?:for\s+now|temporar\w*)\b.{0,40}\b(?:placeholder|stub(?:bed)?)\b", re.I)),
+        + COMMENT + r".*\b(?:placeholder|stub(?:bed)?|dummy|fake)\b" + CLAUSE + r"\b(?:for\s+now|until|later|"
+        r"temporar\w*|implementation|replace\s+(?:this|with|me))\b|"
+        + COMMENT + r".*\b(?:for\s+now|temporar\w*)\b" + CLAUSE + r"\b(?:placeholder|stub(?:bed)?)\b", re.I)),
 ]
 ALLOW = re.compile(r"\bT-[0-9a-z]{6,}\b|(?<![\w&])#\d{1,7}\b|/issues/\d+|devkit:\s*allow-stub\b\s*\S+", re.I)
 FILE_PRAGMA = "devkit: allow-stub-words"
