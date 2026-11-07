@@ -4,8 +4,10 @@
 
 The server ranks, words and times everything (dashnow.py); these tests check that the page draws the contract's documents
 as the spec says: the headline, the Needs you queue, the runs with their landing line, the safety and since lines, every
-state, the redirects, and an answered decision leaving the page in place. The documents are the contract's example and
-its empty and new-install states, at the contract's clock (2026-11-06 15:15 UTC), with neutral names only."""
+state, the redirects, and an answered decision leaving the page in place. The documents are the server's goldens
+(tests/fixtures/dashboard/now-*.json: the example, empty and new-install states, at the contract's clock, 2026-11-06 15:15
+UTC, with neutral names only), and every document a test renders keeps the contract (tests/now_contract.py). The last
+class serves the page from a real `collect()` snapshot and answers D1 through progress (AC-15, both halves)."""
 import contextlib
 import json
 import os
@@ -14,103 +16,22 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from urllib.parse import parse_qs, urlsplit
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "lib"))
 
+import now_contract  # noqa: E402  (the contract check the server's tests share)
 import test_dashboard as T  # noqa: E402  (the browser harness, the fixture and the stand-in server)
-from devkit import dashboard  # noqa: E402
+from devkit import dashboard, dashserver, progress as pg  # noqa: E402
 
 CLOCK = 1793978100   # 2026-11-06 15:15 UTC, the contract's example clock
 MIN = 60
-# runs as the server sends them: today's fields, plus machine, who, waiting_on and eta (the contract's example)
-STEP = lambda name, state, est, mins, owner="main", waiting="": {  # noqa: E731
-    "name": name, "state": state, "est": est, "min": mins, "owner": owner, "label": "", "persona": "", "after": [], "scope": "", "waiting": waiting}
-RUN_PAUSED = {
-    "id": "claude-7f3a", "agent": "claude", "session": "7f3a", "project": "acme/lending-core", "goal": "Invoice export", "state": "running",
-    "mode": "guided", "branch": "feat/invoice-export", "host": "laptop", "step": 3, "steps": 6, "estimate": 150, "started": CLOCK - 5400,
-    "finished": None, "updated": CLOCK - 540, "active_min": 84, "wall_min": 90, "pace": 1.2, "last": "", "next": "",
-    "plan": [STEP("design", "done", 15, 12), STEP("contract", "done", 15, 14), STEP("csv writer", "done", 30, 31, "Tank: csv writer"),
-             STEP("export endpoint", "blocked", 30, 18, "Tank: export endpoint", "D1"), STEP("docs", "pending", 20, 0, "Ghost: docs"),
-             STEP("review", "pending", 20, 0, "Seraph: review")],
-    "agents": [], "questions": [], "updates": [],
-    "decisions": [{"id": "D1", "ts": 1793977560, "question": "Include cancelled invoices in the export?", "options": ["Leave them out", "Include them"],
-                   "recommend": "Leave them out", "irreversible": "", "from_name": "Tank"}],
-    "machine": None, "who": None, "waiting_on": {"kind": "decision", "ref": "D1", "since": 1793977560},
-    "eta": {"state": "after_answer", "basis": "critical_path", "remaining_s": {"low": 1500, "high": 2400}, "lands_at": None, "over_estimate": None,
-            "text": "Lands 25–40 min after you answer D1"}}
-RUN_REMOTE = {
-    "id": "remote-studio-codex-41c2", "agent": "codex", "session": "41c2", "project": "acme/lending-rules", "goal": "Rules engine migration",
-    "state": "running", "mode": "auto", "branch": "feat/rules-engine", "host": "studio", "step": 2, "steps": 5, "estimate": 90, "started": CLOCK - 3600,
-    "finished": None, "updated": 1793977980, "active_min": 48, "wall_min": 60, "pace": 1.0, "last": "", "next": "",
-    "plan": [STEP("schema", "done", 15, 14), STEP("rules port", "done", 20, 22), STEP("rate tables", "running", 20, 8),
-             STEP("parity tests", "running", 20, 4), STEP("cutover", "pending", 15, 0)],
-    "agents": [], "questions": [], "updates": [], "decisions": [],
-    "machine": "studio", "who": "bob@studio", "seen": 1793977980, "waiting_on": None,
-    "eta": {"state": "clock", "basis": "critical_path", "remaining_s": {"low": 2400, "high": 3300}, "lands_at": {"low": 1793980500, "high": 1793981400},
-            "over_estimate": None, "text": "Lands 15:55–16:10"}}
+GOLDEN = Path(__file__).resolve().parent / "fixtures" / "dashboard"
+DOCS = {n: json.loads((GOLDEN / f"now-{n}.json").read_text(encoding="utf-8")) for n in ("example", "empty", "welcome")}
+# a queue row as the server sends it: every key present, absent values null (the contract)
 ITEM = lambda **kw: dict({"id": "", "rank": 5, "kind": "work", "tone": "ink", "count": 1, "title": "", "clause": "", "lines": [], "since": None,  # noqa: E731
                           "project": None, "run_id": None, "asker": None, "blocks": None, "options": None, "irreversible": None,
                           "type_to_answer": None, "copy": None, "open": None, "url": None}, **kw)
-EXAMPLE = {
-    "attention": {
-        "total": 4, "next_up": [], "setup": [], "degraded": [],
-        "headline": {"kind": "needs_you", "count": 2, "text": "2 things need you",
-                     "line": "Invoice export is paused until you answer D1. CI failed on feat/rules-engine."},
-        "items": [
-            ITEM(id="decision:claude-7f3a:D1", rank=1, kind="decision", tone="you", title="D1 · Include cancelled invoices in the export?",
-                 clause="Invoice export is paused until you answer D1.", lines=["Backend engineer (Tank) asks · pauses Invoice export, 2 crew members wait"],
-                 since=1793977560, project="acme/lending-core", run_id="claude-7f3a", asker="Backend engineer (Tank)",
-                 blocks={"run": "Invoice export", "lanes": 2},
-                 options=[{"key": "A", "text": "Leave them out", "recommended": True}, {"key": "B", "text": "Include them", "recommended": False}],
-                 type_to_answer=["approve D1", "approve D1: B"], open={"kind": "run", "id": "claude-7f3a", "anchor": "D1"}),
-            ITEM(id="ci_failed:acme/lending-rules:feat/rules-engine", rank=2, kind="ci_failed", tone="alert", title="CI failed · feat/rules-engine · lending-rules",
-                 clause="CI failed on feat/rules-engine.", lines=["test · Run tests · AssertionError: 10.01 == 10.00"], since=1793977380,
-                 project="acme/lending-rules", copy="dev run view 14 --failed", open={"kind": "ci", "id": "acme/lending-rules#14", "anchor": None},
-                 url="https://github.com/acme/lending-rules/actions/runs/14"),
-            ITEM(id="pr:acme/lending-core#45", rank=5, kind="pr", tone="ink", title="PR #45: changes requested", clause="PR #45 has changes requested.",
-                 lines=["refactor/ledger-ports · lending-core"], since=1793972400, project="acme/lending-core",
-                 copy="gh pr view 45 -R acme/lending-core --comments", open={"kind": "pr", "id": "acme/lending-core#45", "anchor": None},
-                 url="https://github.com/acme/lending-core/pull/45"),
-            ITEM(id="housekeeping", rank=6, kind="housekeeping", tone="ink", count=4, title="Housekeeping", clause="4 housekeeping items.",
-                 lines=["2 finished worktrees, 1 expired lock, 1 note behind the code"], open={"kind": "all", "id": "housekeeping", "anchor": None})]},
-    "runs": [RUN_PAUSED, RUN_REMOTE],
-    "safety": {"totals": {"not_backed_up": 1, "embargoed": 1, "waiting": 1, "unknown_projects": 0},
-               "line": {"tone": "caution", "text": "1 branch is only on this Mac: lending-core fix/rounding-error, 3 commits", "oldest": 1793970900,
-                        "open": {"kind": "branches", "id": None, "anchor": None}},
-               "projects": [{"project": "acme/lending-core", "not_backed_up": 1, "embargoed": 1, "waiting": 1, "oldest": 1793970900, "mapped_at": 1793978060,
-                             "rows": [{"branch": "fix/rounding-error", "state": "not_backed_up", "reason": "3 commits only on this Mac", "commits": 3,
-                                       "oldest": 1793970900, "copy": "cd -- /Users/ana/Development/acme/lending-core && dev backup -- fix/rounding-error"}]}]},
-    "since": {"line": {"from": 1793836800, "text": "4 tasks done · 2 PRs merged · 1 run finished in 1 h 40 (estimate 2 h)",
-                       "items": [{"kind": "task_done", "count": 4, "text": "4 tasks done"}, {"kind": "pr_merged", "count": 2, "text": "2 PRs merged"},
-                                 {"kind": "run_finished", "count": 1, "text": "1 run finished in 1 h 40 (estimate 2 h)"}]}},
-    "as_of": {"registry": {"at": 1793978060, "every_s": 60}, "prs": {"at": 1793977500, "every_s": 900}}}
-NEXT_UP = [{"project": "acme/lending-core", "task_id": "T-fx01", "title": "Document the export endpoint", "copy": "dev task -p acme/lending-core start T-fx01"},
-           {"project": "acme/lending-rules", "task_id": "T-fx02", "title": "Port the rate tables", "copy": "dev task -p acme/lending-rules start T-fx02"},
-           {"project": "acme/ledger", "task_id": "T-fx03", "title": "Split the posting service", "copy": "dev task -p acme/ledger start T-fx03"}]
-EMPTY = {
-    "attention": {"total": 0, "items": [], "next_up": NEXT_UP, "setup": [], "degraded": [],
-                  "headline": {"kind": "clear_idle", "count": 0, "text": "Nothing needs you",
-                               "line": "Nothing is running. Next in lending-core: Document the export endpoint."}},
-    "runs": [],
-    "safety": {"totals": {"not_backed_up": 0, "embargoed": 0, "waiting": 0, "unknown_projects": 0},
-               "line": {"tone": "ok", "text": "Every branch is on the remote.", "oldest": None, "open": {"kind": "branches", "id": None, "anchor": None}},
-               "projects": []},
-    "since": {"line": {"from": 1793836800, "items": [], "text": ""}},
-    "as_of": {"registry": {"at": 1793978060, "every_s": 60}, "prs": {"at": 1793977500, "every_s": 900}}}
-WELCOME = {
-    "attention": {"total": 0, "items": [], "next_up": [], "degraded": [],
-                  "setup": [{"key": "agents", "done": True, "text": "An agent is signed in", "copy": None},
-                            {"key": "project", "done": False, "text": "No project is tracked yet", "copy": None},
-                            {"key": "sync", "done": False, "text": "devkit has not synced yet", "copy": "dev sync"}],
-                  "headline": {"kind": "welcome", "count": 0, "text": "Welcome to devkit",
-                               "line": "Nothing is tracked yet. Clone a project with dev clone <owner/repo>, or start one with dev new <name>."}},
-    "runs": [],
-    "safety": {"totals": {"not_backed_up": 0, "embargoed": 0, "waiting": 0, "unknown_projects": 0},
-               "line": {"tone": "unknown", "text": "No branch map yet. dev sync makes one.", "oldest": None,
-                        "open": {"kind": "branches", "id": None, "anchor": None}}, "projects": []},
-    "since": {"line": {"from": 1793836800, "items": [], "text": ""}},
-    "as_of": {"registry": {"at": 1793978060, "every_s": 60}, "prs": {"at": 1793977500, "every_s": 900}}}
-DOCS = {"example": EXAMPLE, "empty": EMPTY, "welcome": WELCOME}
 
 # the page's clock is the document's: every `new Date()` and `Date.now()` reads it (relative ages, the date line)
 FREEZE = ('<script>(() => { const T = %d * 1000, R = Date; class F extends R { constructor(...a) { super(...(a.length ? a : [T])); } '
@@ -118,8 +39,13 @@ FREEZE = ('<script>(() => { const T = %d * 1000, R = Date; class F extends R { c
 
 
 def doc(name: str) -> dict:
-    """A copy of one of the contract's documents (Now's five areas)."""
+    """A copy of one of the server's goldens (Now's five areas)."""
     return json.loads(json.dumps(DOCS[name]))
+
+
+def areas(data: dict) -> dict:
+    """The Now areas the page's data holds: what `now_contract.check` reads."""
+    return {k: data[k] for k in now_contract.AREAS if k in data}
 
 
 def with_doc(data: dict, name: str) -> dict:
@@ -163,6 +89,7 @@ class NowScreenTests(unittest.TestCase):
         d = with_doc(self.base, name)
         if change:
             change(d)
+        self.assertEqual(now_contract.check(areas(d)), [])                     # a document the server could send
         return frozen(dashboard.page(d))
 
     def probe(self, steps, name="example", width=1440, hash_="#/now", change=None):
@@ -198,9 +125,9 @@ class NowScreenTests(unittest.TestCase):
                                lines=["Code reviewer (Seraph) owes 2, Product owner (Councillor Hamann) owes 1.", "Ask the tech lead to start the reviews."],
                                open={"kind": "run", "id": "claude-7f3a", "anchor": "approvals"}),
                           ITEM(id="job_failed:doctor", rank=4, kind="job_failed", tone="alert", title="The doctor job failed at 06:00",
-                               lines=["2 checks failed"], copy="dev jobs show doctor", open={"kind": "job", "id": "doctor", "anchor": None}),
-                          ITEM(id="backup:acme/lending-core:fix/rounding-error", rank=4, kind="backup", tone="caution",
-                               title="fix/rounding-error is only on this Mac · lending-core", lines=["3 commits, the oldest 5 h ago"],
+                               lines=["2 checks failed"], since=CLOCK - 555 * MIN, copy="dev jobs show doctor", open={"kind": "job", "id": "doctor", "anchor": None}),
+                          ITEM(id="backup:acme/lending-core:fix/rounding-error", rank=4, kind="backup", tone="caution", since=1793970900,
+                               title="fix/rounding-error is only on this Mac · lending-core", lines=["3 commits, the oldest 2 h ago"],
                                copy="cd -- /Users/ana/Development/acme/lending-core && dev backup -- fix/rounding-error",
                                open={"kind": "branches", "id": "acme/lending-core", "anchor": None})]
             d["attention"]["total"] = len(items)
@@ -230,19 +157,18 @@ class NowScreenTests(unittest.TestCase):
         self.assertIn("The runs could not be read", out["runs"])
         self.assertIn("progress: the run file of claude-7f3a is not JSON", out["runs"])
 
-    # AC-2: the sentence, its line, and the top three Now tasks with the command to start each.
-    def test_nothing_needs_you_and_nothing_runs_offers_the_next_three_tasks(self):
+    # AC-2: the sentence, its line, and the top Now tasks (the server sends at most three) with the command to start each.
+    def test_nothing_needs_you_and_nothing_runs_offers_the_next_tasks(self):
         out = self.probe("""out.h1 = text($("main h1")); out.line = text($(".now-line")); out.cols = [!!$(".now-queue"), !!$(".now-runs")];
             out.next = $$(".now-next li").map(text); out.copies = $$(".now-next button").map(b => b.getAttribute("aria-label"));
             out.safety = text($(".now-safety")); out.since = text($(".now-since"));""", name="empty")
         self.assertEqual(out["h1"], "Nothing needs you")
         self.assertTrue(out["line"].startswith("Nothing is running. Next in lending-core: Document the export endpoint."), out["line"])
         self.assertEqual(out["cols"], [False, False])                                          # the two columns become one block
-        self.assertEqual(len(out["next"]), 3)
+        self.assertEqual(len(out["next"]), 2)
         self.assertIn("Document the export endpoint", out["next"][0])
-        self.assertIn("lending-core", out["next"][0])
-        self.assertEqual(out["copies"], ["Copy: dev task -p acme/lending-core start T-fx01", "Copy: dev task -p acme/lending-rules start T-fx02",
-                                         "Copy: dev task -p acme/ledger start T-fx03"])
+        self.assertIn("lending-core · T-fz1doc", out["next"][0])
+        self.assertEqual(out["copies"], ["Copy: dev task -p acme/lending-core start T-fz1doc", "Copy: dev task -p acme/lending-rules start T-fz2rate"])
         self.assertEqual(out["safety"], "Every branch is on the remote.")
         self.assertEqual(out["since"], "Since yesterday: nothing finished.")
 
@@ -255,19 +181,20 @@ class NowScreenTests(unittest.TestCase):
         self.assertEqual(out["blocks"], 2)
         out = self.probe("""out.h1 = text($("main h1")); out.setup = $$(".now-setup li").map(text); out.safety = text($(".now-safety"));""", name="welcome")
         self.assertEqual(out["h1"], "Welcome to devkit")
-        self.assertEqual(out["setup"][0], "Done An agent is signed in")
-        self.assertEqual(out["setup"][1], "To do No project is tracked yet")
-        self.assertTrue(out["setup"][2].startswith("To do devkit has not synced yet"), out["setup"][2])
+        self.assertEqual(out["setup"], ["Done An agent is signed in", "To do Clone a project with dev clone <owner/repo>, or start one with dev new <name>",
+                                        "Done The first sync ran"])
         self.assertEqual(out["safety"], "No branch map yet. dev sync makes one.")
 
     # AC-4 (landing line on Now): the server's words, the page's age prefixes, and the bracket's range.
     def test_each_landing_state_has_its_line_and_its_bracket(self):
+        paused, remote = doc("example")["runs"]
+
         def run(rid, goal, eta, **kw):
-            return dict(json.loads(json.dumps(RUN_REMOTE)), id=rid, goal=goal, machine=None, who=None, eta=dict({"basis": None, "remaining_s": None,
+            return dict(json.loads(json.dumps(remote)), id=rid, goal=goal, machine=None, who=None, eta=dict({"basis": None, "remaining_s": None,
                         "lands_at": None, "over_estimate": None}, **eta), **kw)
 
         def five(d):
-            d["runs"] = [json.loads(json.dumps(RUN_PAUSED)),
+            d["runs"] = [paused,
                          run("r-blocked", "Ledger ports", {"state": "blocked", "text": "Blocked: the export endpoint fails its contract test. No landing time until it moves."},
                              waiting_on={"kind": "blocked", "ref": None, "since": CLOCK - 600}),
                          run("r-stale", "Fee rules", {"state": "unknown", "text": "The landing time is unknown."}, waiting_on={"kind": "stale", "ref": None, "since": CLOCK - 18 * MIN}),
@@ -283,11 +210,11 @@ class NowScreenTests(unittest.TestCase):
         steps = """out.lands = $$(".now-run").map(b => text($(".now-lands", b))); out.brackets = $$(".now-run").map(b => text($(".now-bracket", b)) || "");
             out.more = text($(".now-more")); out.done = $$(".now-done").map(text); out.labels = $$(".now-run .now-strip").map(s => s.getAttribute("aria-label"));"""
         out = self.probe(steps, change=five)
-        self.assertEqual(out["lands"], ["Lands 25–40 min after you answer D1", "Blocked: the export endpoint fails its contract test. No landing time until it moves.",
+        self.assertEqual(out["lands"], ["Lands 25–60 min after you answer D1", "Blocked: the export endpoint fails its contract test. No landing time until it moves.",
                                         "No update for 18 min. The landing time is unknown.", "Lands 15:55–16:10"])
-        self.assertEqual(out["brackets"], ["+25–40 min", "", "", "15:55–16:10"])
+        self.assertEqual(out["brackets"], ["+25–60 min", "", "", "15:55–16:10"])
         self.assertEqual(out["more"], "1 more run")                                            # at most four blocks
-        self.assertEqual(out["labels"][0], "3 of 6 steps done; waiting for your answer to D1. Lands 25–40 min after you answer D1")
+        self.assertEqual(out["labels"][0], "3 of 6 steps done; waiting for your answer to D1. Lands 25–60 min after you answer D1")
         out = self.probe(steps, change=two)
         self.assertEqual(out["lands"], ["Lands 16:20–16:45, later than planned (estimate 2 h, now about 3 h)."])
         self.assertEqual(out["done"], ["Docs refresh · finished 14:20 in 35 min"])              # done in the last hour: one line
@@ -297,20 +224,26 @@ class NowScreenTests(unittest.TestCase):
 
     def test_the_strip_draws_at_most_eight_steps_and_counts_the_rest(self):
         def long(d):
-            plan = [STEP(f"step {i}", "done", 10, 10) for i in range(90)] + [STEP("wire", "running", 10, 2)] + [STEP(f"open {i}", "pending", 10, 0) for i in range(30)]
+            step = lambda name, state, mins: {"name": name, "state": state, "est": 10, "min": mins, "owner": "main"}  # noqa: E731  (a remote run's plan step)
+            plan = [step(f"step {i}", "done", 10) for i in range(90)] + [step("wire", "running", 2)] + [step(f"open {i}", "pending", 0) for i in range(30)]
             d["runs"] = [dict(d["runs"][1], plan=plan, step=90, steps=121)]
         out = self.probe("""const s = $(".now-run .now-strip"); out.glyphs = $$(".now-step", s).map(g => g.getAttribute("data-state")); out.rest = text($(".now-rest", s));""", change=long)
         self.assertEqual(out["glyphs"], ["done", "running", "pending", "pending", "pending", "pending", "pending", "pending"])
         self.assertEqual(out["rest"], "+89 done")
 
     def test_runs_name_where_they_run_and_open_todays_run_drawer(self):
-        out = self.probe("""out.blocks = $$(".now-run").map(text); out.team = text($(".now-team"));
-            $(".now-run a").click(); await tick(200); out.open = $("#modal").open; out.title = text($("#modal-title")); out.hash = location.hash;""")
+        def here(d):   # a run file has no branch: this Mac's presence names the session's (the golden's run carries none)
+            me = next(x for x in d["people"] if x["host"] == d["host"])
+            me["sessions"].append({"agent": "claude", "session": "7f3a", "branch": "feat/invoice-export", "project": "acme/lending-core"})
+        steps = """out.blocks = $$(".now-run").map(text); out.team = text($(".now-team"));
+            $(".now-run a").click(); await tick(200); out.open = $("#modal").open; out.title = text($("#modal-title")); out.hash = location.hash;"""
+        self.assertIn("Invoice export · lending-core guided · Claude Code", self.probe(steps)["blocks"][0])   # no session known: no branch
+        out = self.probe(steps, change=here)
         self.assertIn("Invoice export · lending-core", out["blocks"][0])
         self.assertIn("feat/invoice-export · guided · Claude Code", out["blocks"][0])
         self.assertIn("3 of 6 steps · paused on you 9 min", out["blocks"][0])
-        self.assertIn("feat/rules-engine · auto · Codex · on studio · last update 2 min ago", out["blocks"][1])
-        self.assertIn("2 of 5 steps · 48 min of about 1 h 30", out["blocks"][1])
+        self.assertIn("feat/rules-engine · Codex · on studio · last update 2 min ago", out["blocks"][1])   # no mode from another machine
+        self.assertIn("2 of 4 steps · 48 min of about 1 h 30", out["blocks"][1])
         self.assertEqual(out["team"], "bob@studio works on widget")
         self.assertEqual((out["open"], out["title"]), (True, "Invoice export"))                 # today's drawer until the run page ships
         self.assertEqual(out["hash"], "#/now?modal=run%3Aclaude-7f3a")
@@ -349,6 +282,12 @@ class NowScreenTests(unittest.TestCase):
         self.assertIn("Since yesterday: 4 tasks done · 2 PRs merged · 1 run finished in 1 h 40 (estimate 2 h)", out["since"])
         self.assertEqual(out["date"], "Friday, Nov 6 · 15:15")
 
+    # on a phone the options line wraps between options, never between an option's key and its words
+    def test_on_a_phone_an_option_keeps_its_key_and_its_words_together(self):
+        out = self.probe("""out.opts = $$(".now-opts > span").map(o => { const r = document.createRange(); r.selectNodeContents(o);
+            return [text(o), new Set(Array.from(r.getClientRects()).map(x => Math.round(x.top))).size]; });""", width=390)   # the lines its words sit on
+        self.assertEqual(out["opts"], [["A Leave them out (recommended)", 1], ["B Include them", 1]])
+
     def test_on_a_phone_the_queue_comes_first_and_nothing_scrolls_sideways(self):
         out = self.probe("""out.page = [document.documentElement.scrollWidth, document.documentElement.clientWidth];
             out.order = [$(".now-queue").getBoundingClientRect().top, $(".now-runs").getBoundingClientRect().top];""", width=390)
@@ -383,8 +322,10 @@ class NowLiveTests(unittest.TestCase):
                                                      "line": "test · Run tests · AssertionError: 10.01 == 10.00"})
         run = after["runs"][0]
         run.update(waiting_on=None, decisions=[dict(run["decisions"][0], state="answered")], eta={"state": "clock", "basis": "critical_path",
-                   "remaining_s": {"low": 1500, "high": 2400}, "lands_at": {"low": CLOCK + 1500, "high": CLOCK + 2400}, "over_estimate": None, "text": "Lands 15:40–15:55"})
-        run["plan"][3]["state"] = "running"
+                   "remaining_s": {"low": 1500, "high": 3600}, "lands_at": {"low": CLOCK + 1500, "high": CLOCK + 3600}, "over_estimate": None, "text": "Lands 15:40–16:15"})
+        run["plan"][3].update(state="running", waiting="")
+        self.assertEqual(now_contract.check(areas(self.data)), [])                  # before and after: documents the server could send
+        self.assertEqual(now_contract.check(after), [])
         streams = []
 
         def routes(path):
@@ -417,7 +358,7 @@ class NowLiveTests(unittest.TestCase):
         self.assertEqual(out["h1"], "CI failed on feat/rules-engine")
         self.assertEqual(out["y"], 240)
         self.assertEqual(out["focus"], "Copy: dev run view 14 --failed")
-        self.assertEqual(out["lands"], "Lands 15:40–15:55")
+        self.assertEqual(out["lands"], "Lands 15:40–16:15")
 
     def test_an_answered_decision_keeps_an_open_drawer(self):
         out = self.answered("""out.before = [$("#modal").open, $$(".now-item").map(r => r.getAttribute("data-key"))]; await tick(8000);
@@ -426,6 +367,101 @@ class NowLiveTests(unittest.TestCase):
         self.assertEqual(out["before"], [True, ["decision:claude-7f3a:D1", "ci_failed:acme/lending-rules:feat/rules-engine", "pr:acme/lending-core#45", "housekeeping"]])
         self.assertEqual((out["open"], out["title"]), (True, "Tasks completed since yesterday"))
         self.assertEqual(out["keys"], ["ci_failed:acme/lending-rules:feat/rules-engine", "pr:acme/lending-core#45", "housekeeping"])
+
+
+@unittest.skipUnless(T.CHROME, T.NO_CHROME)
+class NowSnapshotTests(unittest.TestCase):
+    """AC-15, both halves: the page is served from a real `collect()` snapshot over a progress run that waits on D1; while it
+    is open, D1 is answered through progress, the snapshot refreshes, and the event names the areas that changed. The
+    transport is the stand-in server's (a headless Chrome dump cannot hold a live event stream open); the endpoint's own
+    auth, ETag and gzip are tested in tests/test_dashnow.py."""
+    serve = T.LivePageTests.serve
+    D1 = "decision:claude-s1:D1"
+
+    def setUp(self):
+        from test_progress import TempState   # this test's own runs, sessions and audit folders, and the session claude:s1
+        self.state = TempState().__enter__()
+        self.addCleanup(self.state.__exit__, None, None, None)
+        handoff = Path(self.state.tmp.name) / "handoff"
+        T.make_handoff(handoff)
+        pg.start("Invoice export", plan=["export api", "export screen", "review"])
+        pg.crew_decision("Include cancelled invoices in the export?", options="A: Leave them out | B: Include them", recommend="A")
+        reg = T.registry()
+        self.snap = dashserver.Snapshot(build=lambda: reg, paths=lambda: [pg.RUNS], enrich=lambda r: {},
+                                        collect=lambda r, now=None: dashboard.collect(r, handoff=handoff, now=now))
+        self.assertTrue(self.snap.refresh(force=True))
+        self.assertEqual(now_contract.check(areas(self.snap.view())), [])
+
+    def answered(self, steps, hash_, width, height=900):
+        streams, after = [], []
+
+        def routes(path):
+            url = urlsplit(path)
+            q = {k: v[0] for k, v in parse_qs(url.query).items()}
+            if url.path == "/":
+                return 200, "text/html", dashboard.page(self.snap.view(omit=("files",))).replace("</body>", T.PROBE % steps + "</body>").encode()
+            if url.path == "/api/v1/events":         # the first stream is quiet; by the reconnect, the developer has answered D1
+                streams.append(q.get("since"))
+                if len(streams) == 1:
+                    return 200, "text/event-stream", b"retry: 1000\n\n"
+                if not after:
+                    pg.crew_decide("D1", "A")
+                    after.append(self.snap.refresh())
+                    after.append(now_contract.check(areas(self.snap.view())))
+                seen = int(q.get("since") or 0)
+                msg = json.dumps({"version": self.snap.version, "changed": self.snap.changed_since(seen)})
+                return 200, "text/event-stream", f"retry: 60000\n\nid: {self.snap.version}\nevent: snapshot\ndata: {msg}\n\n".encode()
+            if url.path == "/api/v1/dashboard":       # what dashserver serves: the snapshot's areas by name
+                only = q["only"].split(",") if "only" in q else None
+                return 200, "application/json", json.dumps(self.snap.view(omit=tuple(q.get("omit", "").split(",")), only=only)).encode()
+            if url.path.startswith("/api/v1/runs/"):
+                d = dashboard.run_detail(url.path[len("/api/v1/runs/"):])
+                return (200, "application/json", json.dumps(d).encode()) if d else (404, "application/problem+json", b'{"title": "Not found"}')
+            if url.path == "/api/v1/files":
+                return 200, "application/json", b'{"files": [], "meta": {}}'
+            if url.path == "/api/v1/health":
+                return 200, "application/json", json.dumps({"ok": True, "version": self.snap.view(only=("version",))["version"]}).encode()
+            return 404, "application/problem+json", b'{"title": "Not found"}'
+        out = T.chrome(self.serve(routes) + "/" + hash_, width, height=height, budget=20000)
+        self.assertIsNone(out.get("probeError"), out.get("probeError"))
+        self.assertIsNone(out.get("pageError"), out.get("pageError"))
+        self.assertEqual(after, [True, []])                    # the answer made a new snapshot, and it keeps the contract
+        self.assertEqual(streams[:2], ["1", "1"])               # the page asked from the version it was served
+        return out
+
+    def test_answering_d1_through_progress_removes_its_row_and_keeps_scroll_and_focus(self):
+        out = self.answered("""out.trace = []; const mark = w => out.trace.push([w, Math.round(performance.now()), scrollY, document.documentElement.scrollHeight]);
+            addEventListener("scroll", () => mark("scroll")); new MutationObserver(() => mark("redraw")).observe($("#view"), {childList: true});
+            const a = $('[data-key="run:claude-s1"] .now-rt a'); a.focus(); window.scrollTo(0, 200);
+            out.before = [$$(".now-item").map(r => r.getAttribute("data-key")), window.scrollY, text($('[data-key="run:claude-s1"] .now-lands'))];
+            for (let i = 0; i < 80 && $('[data-key="${D1}"]'); i++) await tick(100); await tick(300);
+            out.keys = $$(".now-item").map(r => r.getAttribute("data-key")); out.y = window.scrollY; out.focus = document.activeElement.id;
+            out.lands = text($('[data-key="run:claude-s1"] .now-lands')); out.status = text($('[data-key="run:claude-s1"] .now-status'));""".replace("${D1}", self.D1),
+                            "#/now", 390, height=600)
+        keys, y, lands = out["before"]
+        self.assertEqual(keys[0], self.D1)
+        self.assertTrue(lands.endswith("after you answer D1"), lands)
+        self.assertEqual(y, 200)
+        self.assertNotIn(self.D1, out["keys"])
+        self.assertEqual(out["keys"][:len(keys) - 1], keys[1:])  # the other rows move up, in the server's order
+        # the place is kept: a lost place moves hundreds of pixels; Chrome's scroll anchoring may move it a few to hold the
+        # content still when a line above settles after the redraw (seen as 197 in 2 of about 80 runs, with live-clock text)
+        self.assertLessEqual(abs(out["y"] - 200), 8, out["trace"])
+        self.assertEqual(out["focus"], "now-r-claude-s1")      # the run block was redrawn around the focused link
+        self.assertNotIn("answer D1", out["lands"])
+        self.assertNotIn("paused on you", out["status"])
+
+    # the drawer stays open, keeps the reader's focus inside it, and shows the run as it is now
+    def test_answering_d1_through_progress_keeps_the_open_run_drawer_and_the_focus_in_it(self):
+        out = self.answered("""const m = $("#modal"), at = () => [m.contains(document.activeElement), text(document.activeElement)];
+            $('[aria-label="Show steps"] button', m).focus(); out.before = [m.open,text($("#modal-title")), $$(".now-item").map(r => r.getAttribute("data-key"))[0], at()];
+            for (let i = 0; i < 80 && $('[data-key="${D1}"]'); i++) await tick(100); await tick(500);
+            out.open = m.open; out.title = text($("#modal-title")); out.hash = location.hash; out.d1 = !!$('[data-key="${D1}"]'); out.focus = at();""".replace("${D1}", self.D1),
+                            "#/now?modal=run%3Aclaude-s1", 1440)
+        self.assertEqual(out["before"], [True, "Invoice export", self.D1, [True, "All3"]])
+        self.assertFalse(out["d1"])
+        self.assertEqual((out["open"], out["title"], out["hash"]), (True, "Invoice export", "#/now?modal=run%3Aclaude-s1"))
+        self.assertEqual(out["focus"], [True, "All3"])                   # the same control, though controls above it left
 
 
 class NowSectionTests(unittest.TestCase):

@@ -43,6 +43,7 @@
 .now-age{flex:none;font-size:var(--fs-meta);color:var(--ink-2)}
 .now-l{margin:var(--s1) 0 0;max-width:80ch;font-size:var(--fs-body);line-height:1.5;color:var(--ink-2);overflow-wrap:anywhere}
 .now-opts,.now-type{margin:var(--s2) 0 0;max-width:80ch;font-size:var(--fs-body);line-height:1.7;color:var(--ink)}
+.now-opts>span{display:inline-block;max-width:100%}   /* the line breaks between options, never inside a short one */
 .now-type{color:var(--ink-2)}
 .now-key{font-weight:600;color:var(--ink-strong)}
 .now-rec{color:var(--ink-2)}
