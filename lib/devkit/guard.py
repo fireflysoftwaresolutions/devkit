@@ -954,9 +954,12 @@ def _shell_line(args):
 
 
 def _nested_lines(argv) -> list:
-    argv = _unwrap(argv)
-    if not argv:
+    run = _unwrap(argv)
+    if not run:
         return []
+    if run != list(argv):  # a runner (uv run, npx, npm exec, timeout, a wrapper): its command is read as a line (F3)
+        return [shlex.join(run)]
+    argv = run
     name, args = os.path.basename(argv[0]), argv[1:]
     if name in _SHELLS:
         line = _shell_line(args)
@@ -1876,6 +1879,27 @@ def _vendor_word(word: str) -> bool:
     return w in _VENDOR_WORDS or (w.startswith("-") and w.partition("=")[2] in _VENDOR_WORDS)
 
 
+_SHELL_GLOB = frozenset("{*?[")
+_XARGS_VALUES = frozenset({"-I", "-n", "-P", "-L", "-d", "-E", "-s", "-a", "-J", "-R", "-S"})
+
+
+def _shell_made(word) -> bool:
+    """F2 (re-review four): a word the shell may turn into other words before claude or codex reads it: one that holds
+    `$` or a backtick (a variable, "$@", a substitution, ANSI-C quoting `$'…'`), or one without whitespace that holds
+    `{`, `*`, `?` or `[` (brace expansion, a glob). The guard reads words with their quotes removed, so a quoted `*`
+    counts too; a word with whitespace was quoted, and in quotes the shell expands only `$` and backticks."""
+    w = str(word)
+    return "$" in w or "`" in w or (not any(c.isspace() for c in w) and bool(_SHELL_GLOB & set(w)))
+
+
+def _xargs_command(args) -> list:
+    """The command xargs runs, as its arguments give it (before the words it adds from its input)."""
+    i = 0
+    while i < len(args) and args[i].startswith("-"):
+        i += 2 if args[i] in _XARGS_VALUES else 1
+    return list(args[i:])
+
+
 def _vendor_read_only(cli: str, args) -> bool:
     """The whole argv after the program is one of _VENDOR_READ's forms, with no option but -h, --help and --json."""
     if not {a for a in args if a.startswith("-")} <= _VENDOR_FLAGS:
@@ -1887,20 +1911,29 @@ def _vendor_read_only(cli: str, args) -> bool:
                for form in _VENDOR_READ[cli])
 
 
-def vendor_ext_refusal(argv, cwd=None, names=()) -> bool:
+def vendor_ext_refusal(argv, cwd=None, names=(), more=False) -> bool:
     """True when a claude or codex call may add, remove, switch or update a plugin, a marketplace or an MCP server:
     its words include a group word (_vendor_word) and its argv is not an exact read-only form. The program is read as
     the shell finds it (agent_cli: a path from the folder the command runs in, a link on the PATH, the npm package a
     runner starts); one the shell picks at run time (a variable, or a bare name with PATH set by the command or the
-    shell before it, `names`) may be claude, so a group word with it is refused as well (N3)."""
-    args = [str(a) for a in (argv or [])[1:]]
-    if not argv or not any(_vendor_word(a) for a in args):
+    shell before it, `names`) may be claude, so a group word with it is refused as well (N3). With claude or codex, a
+    word the shell expands (_shell_made) may be a group word, and xargs adds words the guard cannot see (`more`), so
+    such a call is no read-only form either (F2 of re-review four)."""
+    if not argv:
         return False
-    prog = str(argv[0])
+    prog, args = str(argv[0]), [str(a) for a in argv[1:]]
+    if os.path.basename(prog) == "xargs":
+        inner = _unwrap(_xargs_command(args))
+        return bool(inner) and vendor_ext_refusal(inner, cwd, names, more=True)
+    named = any(_vendor_word(a) for a in args)
+    if not (named or more or any(_shell_made(a) for a in args)):
+        return False
     cli = agent_cli(prog, cwd, search=True)
     if not cli:
         cli, args = _agent_script(argv, cwd) or ("", args)
     if not cli:
+        if not named:
+            return False
         if "$" in prog or "`" in prog or ("PATH" in set(names) and "/" not in prog):
             return True
         if "/" not in prog or prog.startswith("@"):  # a bare name the PATH finds, or a scoped npm package
@@ -1909,7 +1942,7 @@ def vendor_ext_refusal(argv, cwd=None, names=()) -> bool:
         if not os.path.isabs(path):
             path = os.path.join(str(cwd), path) if cwd and str(cwd) != str(UNKNOWN) else ""
         return not (path and os.path.exists(path))  # a copy or a link the command has yet to make
-    return not _vendor_read_only(cli, args)
+    return more or any(_shell_made(a) for a in args) or not _vendor_read_only(cli, args)
 
 
 _JS_RUNTIMES = frozenset({"node", "nodejs", "bun", "deno"})
@@ -2543,7 +2576,8 @@ class _Shell:
 
 def _unwrap(argv):
     """The command a segment really runs: without env/sudo/nohup prefixes, shell keywords (`then`, `do`, `{`, `!`),
-    `timeout N`, `uv run`, `npx`."""
+    `timeout N`, `uv run`, the package runners (npx, npm exec|x, bun x, yarn exec, `pnpm|yarn <claude|codex>`: F3 of
+    re-review four) and the wrappers."""
     while True:
         argv = _strip_prefix(argv)
         if not argv:
@@ -2557,14 +2591,19 @@ def _unwrap(argv):
                 rest = rest[1:]
             argv = rest[1:]
         elif (n in ("uv", "poetry", "pipenv", "pdm", "hatch", "rye") and argv[1:2] == ["run"]) or \
-                (n == "pnpm" and argv[1:2] in (["exec"], ["dlx"])) or (n == "yarn" and argv[1:2] == ["dlx"]):
+                (n == "pnpm" and argv[1:2] in (["exec"], ["dlx"])) or (n == "yarn" and argv[1:2] in (["dlx"], ["exec"])):
             argv = argv[2:]
             while argv and argv[0].startswith("-"):
                 argv = argv[1:]
-        elif n in ("npx", "bunx", "uvx", "pnpx"):
+        elif n in ("npx", "pnpx", "bunx") or (n == "npm" and argv[1:2] in (["exec"], ["x"])) or \
+                (n == "bun" and argv[1:2] == ["x"]):
+            argv = _runner_command(argv[1 if n in ("npx", "pnpx", "bunx") else 2:], calls=n in ("npx", "npm"))
+        elif n == "uvx":
             argv = argv[1:]
             while argv and argv[0].startswith("-"):
                 argv = argv[1:]
+        elif n in ("pnpm", "yarn") and agent_cli((_runner_command(argv[1:]) or [""])[0]):
+            argv = _runner_command(argv[1:])  # `pnpm claude …` runs the package's bin, or the PATH's
         elif n in _WRAPPERS:
             argv = _wrapped(n, argv[1:])
         elif n == "yarn" and argv[1:3] == ["workspaces", "foreach"]:  # runs `yarn <command>` in each workspace
@@ -2576,6 +2615,31 @@ def _unwrap(argv):
             return [argv[0], *argv[3:]]
         else:
             return argv
+
+
+# options of the package runners that take a value (`npx -p <pkg>`, `npm exec --package <pkg>`, pnpm's `--filter`),
+# so the word after one is no command; a runner's `-c '<line>'` (npx, npm exec) hands the line to a shell
+_RUNNER_VALUES = frozenset({"-p", "--package", "-w", "--workspace", "--prefix", "--registry", "--cache", "--userconfig",
+                            "--loglevel", "--script-shell", "--filter", "-F", "-C", "--dir", "--cwd"})
+
+
+def _runner_command(args, calls=False) -> list:
+    """The command a package runner runs, from its arguments: the first word that is no option (or the words after
+    `--`), past the values of _RUNNER_VALUES; with `calls`, a `-c|--call '<line>'` comes back as `sh -c <line>`.
+    [] when it names none."""
+    i = 0
+    while i < len(args):
+        a = args[i]
+        if a == "--":
+            return list(args[i + 1:])
+        if calls and (a in ("-c", "--call") or a.startswith("--call=")):
+            line = a.split("=", 1)[1] if "=" in a else (args[i + 1] if i + 1 < len(args) else "")
+            return ["sh", "-c", line] if line else []
+        if a.startswith("-"):
+            i += 2 if a in _RUNNER_VALUES else 1
+            continue
+        return list(args[i:])
+    return []
 
 
 # programs that run the command they are given (Seraph, M243): `script -q /dev/null cmd`, `watch -n 600 cmd`, GNU
@@ -2733,8 +2797,9 @@ def _with_positionals(line: str, words) -> str:
 
 
 def _shell_inputs(args, cwd, bodies) -> list:
-    """The scripts a shell runs: its -c string, a script file, or its input (the command's heredocs)."""
-    i = 0
+    """The scripts a shell runs: its -c string, a script file, or its input (the command's heredocs). With -s it reads
+    its input even when words follow, and they are its $1, $2 … (`bash -s plugin install x <<< 'claude "$@"'`)."""
+    i, stdin = 0, False
     while i < len(args):
         a = args[i]
         if a == "--":
@@ -2746,9 +2811,12 @@ def _shell_inputs(args, cwd, bodies) -> list:
             i += 2
             continue
         if a.startswith(("-", "+")):
+            stdin = stdin or (a.startswith("-") and not a.startswith("--") and "s" in a[1:])
             i += 1
             continue
         break
+    if stdin:
+        return [_with_positionals(b, ["sh", *args[i:]]) for b in bodies]
     if i < len(args):
         return [_read_small(resolve(args[i], cwd))]
     return list(bodies)
@@ -5271,7 +5339,8 @@ _CALL_LIST = re.compile(r"((?:'[^'\n]*'|\"[^\"\n]*\")\s*,\s*[\[(]\s*(?:(?:'[^'\n
 
 def code_session_refusal(argv, cwd, bodies, depth: int = 0) -> str | None:
     """Why an interpreter's program starts a nested agent session without devkit's hooks or sandbox, changes the
-    extensions (EXT_REASON), or runs `dev hook`, in a command line it hands to a process (subprocess, os.system, os.exec*, child_process, …), or None:
+    extensions (EXT_REASON), runs `dev install|update` (INSTALL_REASON) or runs `dev hook`, in a command line it
+    hands to a process (subprocess, os.system, os.exec*, child_process, AppleScript's do shell script, …), or None:
     the refusals the shell form gets, for the same commands named in code (RT12). A repository's own script is its
     code, as for the other checks."""
     if depth > 3 or _repo_script(argv, cwd):
@@ -5286,9 +5355,12 @@ def code_session_refusal(argv, cwd, bodies, depth: int = 0) -> str | None:
             if why:
                 return why
             dargs = _dev_args(inner)
-            if vendor_ext_refusal(inner, cwd) or (dargs is not None and _ext_refusal(dargs) and
-                                                  not _dev_skips(dargs[1:], "-h", "--help")):
+            helps = dargs is not None and _dev_skips(dargs[1:], "-h", "--help")
+            if vendor_ext_refusal(inner, cwd) or (dargs is not None and _ext_refusal(dargs) and not helps):
                 return EXT_REASON
+            if dargs is not None and dargs[:1] in (["install"], ["update"]) and not helps and \
+                    not _update_check(dargs):  # F1 (re-review four): as the shell form is (_Shell.dev)
+                return INSTALL_REASON
             if dargs is not None and dargs[:1] == ["hook"] and not _dev_skips(dargs[1:], "-h", "--help"):
                 return HOOK_REASON
             if icode is not None and _INTERP.match(os.path.basename(inner[0])):

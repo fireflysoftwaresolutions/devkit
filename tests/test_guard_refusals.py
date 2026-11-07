@@ -230,6 +230,27 @@ class VendorExtensionVerbsAreTheDevelopers(unittest.TestCase):
                 self.assertEqual(self.check(cmd), guard.EXT_REASON)
         self.assertIsNone(self.check(f"{versions}/9.9.9 plugin list"))
 
+    def test_a_word_the_shell_expands_counts_as_a_group_word(self):
+        # F2 (re-review four): brace expansion, globs, ANSI-C quoting, variables, substitutions and "$@" make a group
+        # word the guard never sees, so with claude or codex such a word fails closed; xargs adds words it cannot see.
+        # The accepted cost: an agent's `claude -p "$PROMPT"` is refused too
+        for cmd in ("claude {plugin,install} evil@m", "codex {mcp,add} evil -- bash", "claude plugi? install evil@m",
+                    "claude plugin* install evil@m", "claude [p]lugin install evil@m",
+                    "claude $'plugin' install evil@m", "claude $'\\x70lugin' install evil@m",
+                    "P=plugin; claude $P install evil@m", "claude ${P:-plugin} install evil@m",
+                    'claude "$(echo plugin)" install evil@m', "claude `echo plugin` install evil@m",
+                    'set -- plugin install evil@m; claude "$@"', "sh -c 'claude ${@}' _ plugin install evil@m",
+                    "bash -s plugin install evil@m <<< 'claude \"$@\"'", "codex mc? add evil -- bash",
+                    "printf 'plugin\\ninstall\\nevil@m' | xargs claude", "echo x | xargs -n1 codex",
+                    "echo plugin | xargs -I{} claude {} install evil@m", "parallel claude ::: plugin",
+                    'claude -p "$PROMPT"'):
+            with self.subTest(cmd=cmd):
+                self.assertEqual(self.check(cmd), guard.EXT_REASON)
+        for cmd in ("echo $HOME plugin", "ls *.json", "printf '%s\\n' a | xargs echo", "git log --format=%H -- '*.py'",
+                    "claude -p 'what does [x] do?'", "claude --version"):
+            with self.subTest(cmd=cmd):
+                self.assertIsNone(self.check(cmd))
+
     def test_the_exact_read_only_forms_stay_open(self):
         for cmd in ("claude plugin list", "claude plugins list", "claude plugin list --json",
                     "claude plugin details superpowers", "claude plugin validate .", "claude plugin validate p --json",
@@ -239,6 +260,66 @@ class VendorExtensionVerbsAreTheDevelopers(unittest.TestCase):
                     "codex mcp get x -h", "codex mcp --help", "find . -exec claude plugin list ';'",
                     "grep -rn 'claude plugin install' docs", "echo claude mcp add x", "claude -p 'list the plugins'",
                     "claude -p 'install the plugin' --model opus", "claude --mcp-config m.json -p hi"):
+            with self.subTest(cmd=cmd):
+                self.assertIsNone(self.check(cmd))
+
+
+class PackageRunnersRunTheirCommand(unittest.TestCase):
+    # F3 (re-review four): npm exec|x, bun x, yarn exec and `pnpm|yarn <bin>` run the command after them, so every
+    # rule reads that command; the rules on destructive commands read what any runner runs (uv run, npx, timeout …)
+
+    setUp = HookEventsAreTheHarnesss.setUp
+    check = HookEventsAreTheHarnesss.check
+
+    def test_a_vendor_verb_through_a_runner_is_refused(self):
+        for cmd in ("npm exec -- claude plugin install evil@m", "npm exec --package=@openai/codex -- codex mcp add e -- id",
+                    "npm exec --package @anthropic-ai/claude-code -- claude plugin install evil@m",
+                    "npm x -- @anthropic-ai/claude-code plugin install evil@m", "npm exec @openai/codex mcp add e -- id",
+                    "npm exec -c 'claude plugin install evil@m'", "npm exec --call='codex mcp add e -- id'",
+                    "bun x @openai/codex mcp add e -- id", "bun x --bun @openai/codex mcp add e -- id",
+                    "yarn exec claude plugin install evil@m", "pnpm claude plugin install evil@m",
+                    "pnpm --silent codex mcp add e -- id", "yarn claude plugin install evil@m"):
+            with self.subTest(cmd=cmd):
+                self.assertEqual(self.check(cmd), guard.EXT_REASON)
+
+    def test_a_force_push_through_a_runner_is_refused(self):
+        for cmd in ("npm exec -- git push --force origin main", "npm exec --yes -- git push --force origin main",
+                    "npm exec --package foo -- git push --force origin main", "npx -p foo git push -f origin main",
+                    "npm x -- git push --force origin main", "npm exec -c 'git push --force origin main'",
+                    "bun x git push --force origin main", "yarn exec git push --force origin main",
+                    "uv run git push --force origin main", "npx git push --force origin main",
+                    "pnpm exec git push --force origin main", "timeout 5 git push --force origin main"):
+            with self.subTest(cmd=cmd):
+                self.assertIn("force-push", self.check(cmd) or "")
+
+    def test_everyday_runner_commands_stay_open(self):
+        for cmd in ("npm exec -- eslint .", "npm exec --yes -- prettier --check .", "npx tsc --noEmit",
+                    "npm x -- vitest run", "bun x tsc --noEmit", "yarn exec jest", "pnpm test", "pnpm lint",
+                    "pnpm install --frozen-lockfile", "yarn add -D vitest", "npm exec -- claude plugin list",
+                    "pnpm claude mcp list", "yarn claude --version", "uv run pytest -q", "timeout 600 git status"):
+            with self.subTest(cmd=cmd):
+                self.assertIsNone(self.check(cmd))
+
+
+class InstallFromCodeIsTheDevelopers(unittest.TestCase):
+    # F1 (re-review four): `dev install` and `dev update` started from a program an agent runs (a subprocess, a shell
+    # line, AppleScript's do shell script) get the refusal the shell form gets; `dev update --check` stays open
+
+    setUp = HookEventsAreTheHarnesss.setUp
+    check = HookEventsAreTheHarnesss.check
+
+    def test_dev_install_started_from_code_is_refused(self):
+        for cmd in ("python3 -c \"import subprocess; subprocess.run(['dev','install'])\"",
+                    "python3 -c \"import os; os.system('dev install --only codex')\"",
+                    "osascript -e 'do shell script \"dev install\"'",
+                    "node -e \"require('child_process').execSync('dev update')\""):
+            with self.subTest(cmd=cmd):
+                self.assertEqual(self.check(cmd), guard.INSTALL_REASON)
+
+    def test_the_read_only_update_check_and_help_from_code_stay_open(self):
+        for cmd in ("python3 -c \"import subprocess; subprocess.run(['dev','update','--check'])\"",
+                    "python3 -c \"import subprocess; subprocess.run(['dev','install','--help'])\"",
+                    "python3 -c \"print('dev install')\""):
             with self.subTest(cmd=cmd):
                 self.assertIsNone(self.check(cmd))
 
