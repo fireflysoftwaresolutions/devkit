@@ -335,6 +335,20 @@ class RedTeam2(unittest.TestCase):
 
     # ---- M379: the role check sends back a member's report that names Morpheus alone, and members echo the
     # guard's refusals, so every text the guard shows names the role
+    # ---- the security engineer's finding during B2a (High): an open() whose path is built by two nested calls ended
+    # before _CODE_WRITES saw its mode, so a program could write devkit's state (the grant ledger included); a path from
+    # a call counts like a literal (L-fy1334af1q0)
+    def test_a_state_path_built_by_nested_calls_is_still_a_write_to_state(self):
+        built = "os.path.join(os.path.expanduser('~'), '.local', 'state', 'devkit', 'runs', 'x.json')"
+        for code in (f"import os; open({built}, 'w').write('')", f"import os; open({built}, mode='a')",
+                     f"import os, pathlib; f = open({built}, 'w+'); f.write('x')"):
+            with self.subTest(code=code):
+                self.assertIn("devkit's state", self.check(f'python3 -c "{code}"') or "")
+        for code in (f"import os; print(open({built}).read())",  # reading it is fine
+                     "import os; open(os.path.join(os.path.expanduser('~'), 'notes', 'x.md'), 'w').write('')"):
+            with self.subTest(code=code):
+                self.assertIsNone(self.check(f'python3 -c "{code}"'))
+
     def test_m379_no_guard_text_names_the_tech_lead_by_persona_alone(self):
         import ast
         tree = ast.parse((ROOT / "lib" / "devkit" / "guard.py").read_text())

@@ -2297,7 +2297,7 @@ class _Shell:
                         f"in the handoff repository, and the guard cannot see what it changes (B2a: the note's embargo "
                         f"list and backup policy decide what devkit pushes). Edit a note with the Edit or Write tool; "
                         f"use the dev command that owns a record.")
-        if not code or not _CODE_WRITES.search(code):
+        if not code or not (_CODE_WRITES.search(code) or _ANY_WRITE.search(code)):  # a path from nested calls too
             return None
         if not cwd or str(cwd) == str(UNKNOWN):  # its relative paths land in a folder the guard cannot see
             self.unresolved.append(f"a path relative to the folder {name} runs in")
