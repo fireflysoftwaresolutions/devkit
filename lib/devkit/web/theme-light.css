@@ -1,0 +1,12 @@
+
+  color-scheme: light;
+  --page:#f3f1eb; --raised:#fbfaf7; --wash:#e9e6de; --hover:#ebe8e0; --select:rgba(255,179,74,.35);
+  --line:#d8d4ca; --line-soft:#e3dfd6; --text:#272820; --strong:#10110f; --text-2:#62645b;
+  --mark:#474a42; --track:#dedad0; --grid:#e3dfd6; --axis:#c9c4b8; --deemph:#bfb8ab;
+  --accent:#ffb34a; --accent-hover:#ffbe63; --accent-ink:#10110f; --focus:#855414;
+  --good:#0ca30c; --warn:#fab219; --bad:#d03b3b; --warning:#fab219; --critical:#d03b3b;
+  --s-ok:#0ca30c; --s-warn:#fab219; --s-risk:#d03b3b; --s-done:#8f8a7e; --s-none:#dedad0;
+  --h0:#e6e2d9; --h1:#aaa394; --h2:#857f71; --h3:#56584f; --h4:#272820; --card:#fbfaf7; --card-hover:#fffefa;
+  --good-text:#1d6b2f; --warn-text:#7a5200; --bad-text:#a52a2a; --hl:rgba(255,179,74,.45);
+  --overlay:rgba(16,17,15,.32); --shadow:0 2px 6px rgba(16,17,15,.06),0 16px 32px rgba(16,17,15,.10); --elev-border:0 solid transparent;
+  --logo-dark:none; --logo-light:block;

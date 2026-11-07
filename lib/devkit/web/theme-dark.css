@@ -1,0 +1,12 @@
+
+  color-scheme: dark;
+  --page:#10110f; --raised:#191a17; --wash:#22231f; --hover:#1c1d19; --select:rgba(255,179,74,.30);
+  --line:#474a42; --line-soft:#2b2d28; --text:#f3f1eb; --strong:#ffffff; --text-2:#bfb8ab;
+  --mark:#bfb8ab; --track:#30322c; --grid:#2b2d28; --axis:#474a42; --deemph:#62645b;
+  --accent:#ffb34a; --accent-hover:#ffc06b; --accent-ink:#10110f; --focus:#ffb34a;
+  --good:#0ca30c; --warn:#fab219; --bad:#d03b3b; --warning:#fab219; --critical:#d03b3b;
+  --s-ok:#0ca30c; --s-warn:#fab219; --s-risk:#d03b3b; --s-done:#77796f; --s-none:#30322c;
+  --h0:#22231f; --h1:#5f6158; --h2:#8d8a7f; --h3:#bfb8ab; --h4:#f3f1eb; --card:#181915; --card-hover:#1e1f1b;
+  --good-text:#6fd08a; --warn-text:#fab219; --bad-text:#f29b95; --hl:rgba(255,179,74,.32);
+  --overlay:rgba(0,0,0,.6); --shadow:none; --elev-border:1px solid #474a42;
+  --logo-dark:block; --logo-light:none;
