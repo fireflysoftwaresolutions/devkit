@@ -256,6 +256,10 @@ problem it prints the file, the line, and the record's id, and exits `1`:
 | differs from the published copy | Records were changed or removed after they were published |
 | unreadable | The month file could not be read |
 
+Some checks cannot run on every record. When a `crew.decision` record kept its options or labels only up to the
+300-character limit, verify cannot rebuild that decision: it prints a note marked `!` and still exits `0`, because a
+check it cannot run is no evidence of a change.
+
 Records written since the last publish are counted as _not yet published, so not yet anchored_. Every run is itself
 recorded as `audit.verify`, with `critical` severity when it fails. The daily job never publishes a local file over a
 published copy it no longer extends; it records `audit.publish` as blocked and critical instead. It never publishes a
