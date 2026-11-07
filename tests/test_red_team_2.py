@@ -182,6 +182,29 @@ class RedTeam2(unittest.TestCase):
                 self.assertIsNone(self.check(cmd))
                 self.assertIsNone(self.member(cmd))
 
+    # ---- RT10
+    def test_rt10_git_config_global_points_git_at_an_attacker_config(self):
+        # GIT_CONFIG_GLOBAL / GIT_CONFIG_SYSTEM replace a whole config file and GIT_CONFIG_PARAMETERS / _COUNT add
+        # -c pairs, any of which can set a pager or fsmonitor: the git call is unknown for the main session (tier 2)
+        # and a crew member may not set them. (The part-2 probe asserted guard.check for the main session; the
+        # irreversible gate is the main session's check for a command a pager runs, as for -c below.)
+        ev = Path(self.tmp.name) / "gc"
+        ev.write_text("[core]\n\tpager = gh pr merge 12\n")
+        self.assertIsNotNone(self.main("git -c core.pager='gh pr merge 12' -p log"))  # baseline: -c is caught
+        for cmd in (f"GIT_CONFIG_GLOBAL={ev} git -p log", f"GIT_CONFIG_SYSTEM={ev} git -p log",
+                    f"export GIT_CONFIG_GLOBAL={ev}; git status", "GIT_CONFIG_PARAMETERS=\"'core.fsmonitor'='x'\" "
+                    "git status", "GIT_CONFIG_COUNT=1 git status", "git -c core.hooksPath=/tmp/h commit -m x"):
+            with self.subTest(cmd=cmd):
+                self.assertIn("unknown", self.acts(cmd))
+                self.assertIsNotNone(self.main(cmd))
+                self.assertIsNotNone(self.member(cmd))
+        self.assertEqual(self.acts("git -c core.sshCommand='gh pr merge 12' fetch"), ["merge"])
+        self.assertIsNotNone(self.member(f"GIT_CONFIG_GLOBAL={ev} make"))  # a member sets them for no command
+        for cmd in ("GIT_CONFIG_GLOBAL=/dev/null git status", "git -c color.ui=always log", "git status"):
+            with self.subTest(cmd=cmd):
+                self.assertEqual(self.acts(cmd), [])
+                self.assertIsNone(self.member(cmd))
+
 
 if __name__ == "__main__":
     unittest.main()

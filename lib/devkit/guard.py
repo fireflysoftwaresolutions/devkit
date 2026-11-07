@@ -3556,6 +3556,12 @@ def _hatch_use(argv0, cwd, bodies) -> str | None:
         if any(f in ("-", "-i", "--ignore-environment") or f.startswith(("-u", "--unset")) or
                (f.startswith("-") and not f.startswith("--") and set(f[1:]) & {"i", "u"}) for f in own):
             return "`env -i` and `env -u` clear or unset devkit's variables for the command"
+    sets = dict(a.split("=", 1) for a in pre if _ASSIGN.match(a))
+    if argv and os.path.basename(argv[0]) in _EXPORTERS:
+        sets.update(a.split("=", 1) if "=" in a else (a, "") for a in argv[1:] if not a.startswith(("-", "+")))
+    git_env = git_config_env(sets)
+    if git_env:
+        return f"it sets {git_env[0]}, which points git at configuration the guard cannot read (RT10)"
     if not argv:
         return None
     name, args = os.path.basename(argv[0]), argv[1:]
@@ -4531,21 +4537,44 @@ _ARRAY_OPEN = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*\+?=$")
 _PAGER_KEY = re.compile(r"^(?:core\.pager|pager\.[^=]+)$", re.I)
 
 
+# git reads more configuration from these variables: a whole config file (GIT_CONFIG_GLOBAL, GIT_CONFIG_SYSTEM) or
+# -c pairs (GIT_CONFIG_PARAMETERS, GIT_CONFIG_COUNT with GIT_CONFIG_KEY_<n>), any of which can set a pager or another
+# command-running key the guard cannot read (RT10). /dev/null as the file adds nothing.
+GIT_CONFIG_ENV = frozenset({"GIT_CONFIG_GLOBAL", "GIT_CONFIG_SYSTEM", "GIT_CONFIG_PARAMETERS", "GIT_CONFIG_COUNT"})
+_RUN_KEY = re.compile(r"^(?:core\.(?:pager|editor|fsmonitor|sshcommand)|pager\..+|sequence\.editor)$", re.I)
+
+
+def git_config_env(env) -> list:
+    """The GIT_CONFIG_ENV variables `env` sets that may add configuration (all but a file of /dev/null)."""
+    return sorted(n for n in GIT_CONFIG_ENV if n in env and not
+                  (n in ("GIT_CONFIG_GLOBAL", "GIT_CONFIG_SYSTEM") and str(env[n]) == os.devnull))
+
+
 def _git_pagers(argv, env) -> tuple:
-    """The pager command lines a git call may run through the shell (RT3): `-c core.pager=…`, `-c pager.<cmd>=…`, the
-    GIT_CONFIG_KEY_<n>/GIT_CONFIG_VALUE_<n> pairs, GIT_PAGER and PAGER -> (texts, unknown), where unknown is True when
-    a pager comes from a place the guard cannot read (--config-env, GIT_CONFIG_PARAMETERS)."""
+    """The command lines a git call may run through the shell from its configuration (RT3, RT9): a pager, editor,
+    fsmonitor or ssh command set with `-c key=…` or a visible GIT_CONFIG_KEY_<n>/GIT_CONFIG_VALUE_<n> pair, GIT_PAGER
+    and PAGER -> (texts, unknown), where unknown is True when such a key comes from a place the guard cannot read
+    (--config-env, a hooks folder or an include file, GIT_CONFIG_GLOBAL, GIT_CONFIG_SYSTEM, GIT_CONFIG_PARAMETERS, a
+    GIT_CONFIG_COUNT whose pairs are not all on the command; RT10)."""
     texts, unknown, i = [], False, 1
+
+    def config(key, val):
+        nonlocal unknown
+        if _RUN_KEY.match(key):
+            texts.append(val)
+        elif _EXEC_CONFIG_KEY.match(key) or _dynamic_name(key):
+            unknown = True
+
     while i < len(argv):
         a, nxt = argv[i], argv[i + 1] if i + 1 < len(argv) else ""
         if a == "-c":
             key, _, val = nxt.partition("=")
-            if _PAGER_KEY.match(key):
-                texts.append(val)
+            config(key, val)
             i += 2
         elif a == "--config-env" or a.startswith("--config-env="):  # the value is in a variable the guard cannot see
             spec = a.partition("=")[2] if "=" in a else nxt
-            unknown = unknown or bool(_PAGER_KEY.match(spec.partition("=")[0]))
+            key = spec.partition("=")[0]
+            unknown = unknown or bool(_RUN_KEY.match(key) or _EXEC_CONFIG_KEY.match(key) or _dynamic_name(key))
             i += 1 if "=" in a else 2
         elif a in ("-C", "--git-dir", "--work-tree", "--namespace"):
             i += 2
@@ -4553,11 +4582,14 @@ def _git_pagers(argv, env) -> tuple:
             i += 1
         else:
             break  # the subcommand: what follows is its own arguments
-    for name, val in env.items():
-        m = re.match(r"^GIT_CONFIG_KEY_(\d+)$", name)
-        if m and _PAGER_KEY.match(val):
-            texts.append(env.get(f"GIT_CONFIG_VALUE_{m.group(1)}", ""))
-    unknown = unknown or "pager" in env.get("GIT_CONFIG_PARAMETERS", "").lower()
+    count = str(env.get("GIT_CONFIG_COUNT", "0") or "0")
+    n = int(count) if count.isdigit() else -1
+    if n < 0 or any(f"GIT_CONFIG_KEY_{k}" not in env for k in range(min(n, 64))) or n > 64:
+        unknown = True  # a count the guard cannot read, or pairs that come from outside the command
+    for k in range(min(max(n, 0), 64)):
+        if f"GIT_CONFIG_KEY_{k}" in env:
+            config(str(env[f"GIT_CONFIG_KEY_{k}"]), str(env.get(f"GIT_CONFIG_VALUE_{k}", "")))
+    unknown = unknown or bool(set(git_config_env(env)) - {"GIT_CONFIG_COUNT"})
     texts += [env[n] for n in ("GIT_PAGER", "PAGER") if env.get(n)]
     return [t for t in texts if t.strip()], unknown
 
