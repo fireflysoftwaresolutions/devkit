@@ -33,9 +33,10 @@ It is not a sandbox. A determined program can still find a form the guard does n
 it assembles at run time from pieces the guard cannot read, or a file it unpacks and git later runs. Each such form
 the red team finds becomes a rule here and a test, but the list can never be complete.
 
-The lasting boundary is credentials: what an agent's tools can reach is limited by the tokens and keys they hold.
-Separating the agents' credentials from yours is planned for devkit 26.11.4. Until then, treat the guard as the net
-under your own review, not as a replacement for it.
+Agents work with your own credentials: devkit uses the GitHub account you are signed in to with `gh`, and the tokens
+and keys on your Mac, with no separate identity for agents: what an agent's tools can reach is what you can reach.
+The guard, the grants you type, and the actions only you may run hold the irreversible steps for you; treat them as
+the net under your own review, not as a replacement for it.
 
 ## Decisions
 
@@ -230,6 +231,7 @@ three folders readable and writable by your account only (`0700`) every time it 
 | `dev ext update <name> --apply`, `dev ext add`, `remove`, `enable`, `disable` (also with `--project`), `dev ext ack`, and any other `dev ext` verb | deny: they change the plugins, skills, or MCP servers that run in every session on this Mac, or confirm that what was accepted was the developer's, so the developer runs them, in a terminal. The rule is an allowlist that fails closed: `dev ext ls`, `dev ext outdated`, a team pin bump (`dev ext update <name> --to <ref> --why "…"`), and `dev ext add\|remove --team` (a change to devkit's defaults in the checkout, which goes through a PR) are allowed; `--team` counts only before a `--`, after which it is the entry's name |
 | A `claude` or `codex` call whose words include `plugin`, `plugins`, `mcp`, or `marketplace` anywhere (an option's value and any case included), in the forms the guard reads: a path or link that resolves to the binary (a relative one from the folder the command runs in), Claude Code's `~/.local/share/claude/versions/<version>`, a link on the `PATH`, a package runner (`npx`, `bunx`, `bun x`, `npm exec`, `npm x`, `pnpm dlx`, `yarn dlx`, `yarn exec`, `pnpm claude`, `yarn codex`), `node …/@openai/codex/bin/codex.js`, `bash -c`, `bash -s` with its input, `xargs`, `find -exec`, `dev claude … --`, or a program's code (`subprocess.run([...])`) | deny, unless the whole command is one of the read-only forms: `claude plugin list`, `claude plugin details <name>`, `claude plugin validate <path>`, `claude plugin marketplace list`, `claude mcp list`, `claude mcp get <name>`, `codex plugin list`, `codex plugin marketplace list`, `codex mcp list`, `codex mcp get <name>`, or a group alone (`claude mcp`, which prints its help). `claude plugins` is `claude plugin`, and only `-h`, `--help`, and `--json` may come with these forms. Anything else is denied even when it only reads (`claude -- plugin list`, `claude --debug plugin list`): the rule is an allowlist that fails closed, because each block list of verbs lost to a new spelling. With `claude` or `codex`, a word the shell expands counts as one of those words: one with `$` or a backtick (`$P`, `"$@"`, `$'…'`, `$(…)`), or one without spaces with `{`, `*`, `?`, or `[` (`{plugin,install}`, `plugi?`), and a word `xargs` adds counts too. This denies `claude -p "$PROMPT"` too: put the prompt in the command. A program the shell picks at run time (`$c plugin …`, a `PATH` the command sets, a path the command has yet to create) with one of those words is denied too. See [What the guard cannot see](#what-the-guard-cannot-see) and [Skills and plugins](skills-and-plugins.md#who-changes-extensions-and-how-drift-shows) |
 | `dev config lock` or `dev config unlock` | deny: they add or remove the [settings lock](agents.md#the-settings-lock) that keeps settings files from turning off devkit's hooks |
+| `dev impeccable` with a verb off its allowlist, in any shell form. Agents run only `context`, `detect`, and `doctor` (with `--json` or `--target`, never `--fix`), and in write lanes and the main session also `live`, `generate`, `document`, `extract`, and `init`: the first word, spelled as listed, never after `skills` or a second `--` | deny, in the main session and both lane kinds: every other verb is the developer's, in a terminal. `hooks`, `install`, `link`, `update`, `pin`, `unpin`, and `doctor --fix` write the agents' settings, hooks, or skill folders, which change what runs in every later session; the engine also has hidden verbs, and an update can add more. `dev impeccable` itself refuses them outside the developer's terminal |
 | `dev hook <event>`, in any shell form (a pipe, `sudo`, `bash -c`, `eval`, `find -exec`, `python3 bin/dev`) | deny, for every session: only the harness runs a hook, when its event fires. A hook event typed through a shell could forge your prompt or answer |
 | A write, move, or delete of a Claude Code transcript (`~/.claude/projects/**/*.jsonl`, a subagent's too) or a Codex session file (`~/.codex/sessions`, `archived_sessions`), with a file tool, a patch, or the shell | deny: devkit reads your approvals from them. Claude Code's memory files stay writable |
 | A program an agent runs (inline, from its input or a pipe, or a script outside the workspace) that loads a devkit module and reaches a function that records or uses your prompts, answers, and grants, or `devkit.state`'s writers | deny, for every session. The guard also reads the agent's own files the program loads (`sys.path` plus `import`, `python -m`, `runpy`, `exec(open(…).read())`, `SourceFileLoader`), three levels deep, and refuses code the program decodes and runs at run time. A repository's own scripts and tests are not judged by this rule |
@@ -330,16 +332,27 @@ pre-approved with `dev crew mode auto --approve`.
 ### The developer's own decisions
 
 Lifting an embargo and publishing a branch make its commits public, and the backup policy decides whether devkit
-publishes a project's branches at all. An embargo keeps a branch off the remote, so pushing an embargoed branch is
-the developer's decision too. These commands are the action `developer-only`, tier 2:
+publishes a project's branches at all. An embargo holds an agent's pushes of a branch and its commits, so pushing an
+embargoed branch is the developer's decision too. These commands are the action `developer-only`, tier 2:
 
 | Command | Grant line that opens it once |
 | --- | --- |
 | `dev branch embargo --lift <branch>` | `grant embargo <branch>` |
 | `git push`, `dev push`, `dev pr create` or `gh pr create` that sends an embargoed branch, or commits its embargo holds (under another name, a commit id, a branch made from it, a tag, `--all`) | `grant embargo <branch>` |
 | `git push`, `dev push`, `dev pr create` or `gh pr create` of any branch while devkit cannot read the project's handoff note | `grant embargo <branch>` |
+| `git push`, `dev push`, `dev pr create` or `gh pr create` from a folder known only when it runs (`cd "$X"`, `git -C "$(…)"`, `GIT_DIR=$G`, anything after `source` or `.`) or from a folder that is no project (a temporary clone, a folder that does not exist yet), while any project on this Mac has an embargo or devkit cannot read an embargo list | none: the target is `?`; the agent writes out the path of the project's checkout instead |
 | `dev backup --public` | `grant backup <project>` |
 | `dev backup policy on\|off\|ask` | `grant backup <project>` |
+
+A push from inside a repository's git folder (`<repo>/.git`, `<repo>/.git/worktrees/<name>`), or one that
+`env -C <dir>` or `sudo -D <dir>` runs in another folder, is judged as the project of that folder, so
+`grant embargo <branch>` in that project opens it. The handoff repository's own pushes are never held.
+
+The embargo is not yet off every remote. A push is judged by the embargo list of the project in the folder it runs
+from, so the embargo holds pushes from the embargoed project, its git folders and worktrees, temporary clones, and
+folders that are no project. A copy of its commits in another project's folder (another clone or checkout that
+devkit knows as a different project) is judged by that project's list, which does not name them, so an agent's push
+from there is not held yet. devkit 26.11.4 closes this.
 
 The developer can still push an embargoed branch in a terminal. `dev backup` and `dev sync` hold embargoes
 themselves, so they need no grant for it. A crew member never runs them. In the main session they are refused without a grant in every setting of

@@ -1066,7 +1066,7 @@ class CommandTests(AuditCase):
 
 class PublishLimitTests(AuditCase):
     # the 26.11.3 stopgap: GitHub refuses a file over 100 MB, and then every handoff push, so the audit job never
-    # publishes a month file over 45 MB (26.11.4 replaces whole months with daily gzipped segments)
+    # publishes a month file over 45 MB (26.11.5 replaces whole months with daily gzipped segments)
     MB = 1024 * 1024
 
     def month(self) -> Path:

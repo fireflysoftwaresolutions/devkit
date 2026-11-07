@@ -167,8 +167,13 @@ MESSAGE_ACTIONS = {"crew.message"}
 # the developer's evidence for a decision or a grant (compliance review 2, section 3): its detail is the line they
 # typed or the question tool's question and label, so only its length is recorded (a hash of a short option is
 # guessable: The Keymaker, M287); `answer` stays only when it is one of the decision's options. `covers`, the
-# channel, the transcript uuid (which verify checks) and the chain say the rest
+# channel, the transcript uuid (which verify checks) and the chain say the rest. A question tool answer also keeps
+# how the click became an option (evidence.match: exact, letter, words or free), whether the question was devkit's
+# own (evidence.asked: exact or reworded), and the clicked label when the call offered it (ref.label, the tech
+# lead's text like the options, redacted and cut to LABEL_CUT): never the developer's own text, never the question
+# (the Security engineer's question audit decision, 26.11.4)
 EVIDENCE_ACTIONS = {"crew.evidence"}
+LABEL_CUT = 120
 # the decision records, by the same rule (M285): crew.decision keeps the decision id, who asked, the option labels
 # (ref.options, redacted as usual) and the question's length; crew.decided keeps the answer, and the answer it
 # overrides, only when it names one of those options. Both keep the labels, so a record read again checks its
@@ -225,6 +230,12 @@ def _option(answer, options) -> str:
         if said and (said == _norm(o) or (":" in o and said == _norm(o.split(":", 1)[0]))):
             return o
     return f"[free text: {len(s)} characters]"
+
+
+def evidence_label(label, rx=None) -> str:
+    """An offered label as crew.evidence keeps it: redacted, home folders as ~, at most LABEL_CUT characters."""
+    rx = _extra_rules(settings()["redact"]["extra"]) if rx is None else rx
+    return _clean(" ".join(str(label).split()), rx)[:LABEL_CUT]
 
 
 def _labels(options, rx) -> str:
@@ -388,6 +399,7 @@ EXTRAS = {
     "exit": "evidence.exit", "duration": "evidence.duration", "cwd": "evidence.cwd", "tool": "evidence.tool",
     "rule": "evidence.rule", "rules": "evidence.rule", "count": "evidence.count", "file": "evidence.file",
     "channel": "evidence.channel", "transcript_uuid": "evidence.transcript_uuid", "verified": "evidence.check",
+    "match": "evidence.match", "asked": "evidence.asked", "label": "ref.label", "labels": "ref.labels",
     "flag": "evidence.flag", "paths": "evidence.file", "certainty": "evidence.check",
     "id": "ref.id", "by": "ref.by", "was": "ref.was", "type": "ref.type", "result": "ref.result",
     "answer": "ref.answer", "asked_by": "ref.asked_by", "irreversible": "ref.irreversible", "mode": "ref.mode",
@@ -609,6 +621,8 @@ def build(action: str, target="", detail="", outcome="ok", extra: dict = None, c
     options = extra.pop("options", None)
     if str(action) in EVIDENCE_ACTIONS and extra.get("answer") not in (None, ""):
         extra["answer"] = _option(extra["answer"], options)
+    if str(action) in EVIDENCE_ACTIONS and extra.get("label") not in (None, ""):
+        extra["label"] = evidence_label(extra["label"], rx)
     out, code, raw = outcome_of(outcome)
     cat, sev = kind(action)
     rec = {"v": V, "id": new_id(ts), "ts": ts, "time": iso(ts), "actor": actor(), "action": str(action)[:80],
@@ -1172,10 +1186,10 @@ def verify(team: bool = True) -> dict:
 # --------------------------------------------------------------------------- publish and prune (R2 anchor, R3)
 
 # GitHub refuses a pushed file over 100 MB, and from then on every handoff push, so no month copy is published past
-# this. A stopgap for 26.11.3: 26.11.4 publishes daily gzipped segments instead of whole months.
+# this. A stopgap for 26.11.3: 26.11.5 publishes daily gzipped segments instead of whole months.
 PUBLISH_LIMIT = 45 * 1024 * 1024
 HELD_FIX = ("nothing is lost: every record stays in this machine's trail and dev audit verify checks it; devkit "
-            "26.11.4 publishes daily segments instead of whole months, so run dev update once it is released")
+            "26.11.5 publishes daily segments instead of whole months, so run dev update once it is released")
 
 
 def _mb(n: int) -> str:
