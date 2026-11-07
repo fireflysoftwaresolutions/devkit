@@ -9,6 +9,10 @@ Not released yet: the date is set when the release is tagged.
 
 ### Added
 
+- **The tech lead asks your decisions nicely, and together.** `dev crew decisions --ask` prints the pending decisions
+  as question dialog calls ready to send: at most 4 questions per call, each opening with `D<n> ·` and one line on who
+  asks and what it blocks, with the recommended option first; `--json` prints the dialog's input. When decisions
+  piled up while you were away, your next prompt tells the tech lead once to ask them in one call.
 - **The impeccable engine is installed with the skill.** `dev install --only skills` fetches the engine binary for
   this Mac from the upstream release that the pinned skill names, checks its SHA-256 against the pinned skill's own
   `engine-checksums.txt`, and puts it beside the launcher, so `impeccable context` no longer downloads code inside an
@@ -19,6 +23,13 @@ Not released yet: the date is set when the release is tagged.
 
 ### Changed
 
+- **Your answer counts even when the question is reworded.** An answer to the question dialog is your evidence for a
+  decision when the question opens with `D<n> ·` (or its header is `D<n>`) and the label picks one of its options by
+  letter or words; the rest may carry context. Text you type yourself is your answer but picks no option, and a
+  question about an irreversible action must name its target.
+- **`dev crew ask --decision` takes 2 to 4 lettered options and a recommendation,** with a question under 300
+  characters, and prints the corrected command otherwise. An irreversible action asked without options is
+  `A: yes | B: no`.
 - **Frontend work starts with impeccable.** The Frontend engineer, the UX designer, and the Mobile engineer load
   `frontend-design` and `impeccable` and run `impeccable context` once at the start of their work; `i18n` work now
   requires `impeccable` too.
