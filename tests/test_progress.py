@@ -778,9 +778,8 @@ class CrewSafetyTests(unittest.TestCase):
         self.assertIn("'add \"export\" for $USER; rm -rf /'", line)
 
 
-class EvidenceReplayTests(unittest.TestCase):
-    # B3 (B-fy1q867o3pp, Seraph's batch 4): an agent pipes the developer's original prompt or question tool answer into
-    # `dev hook prompt` again. The transcript still holds the real record, so only the id it carries can tell a replay
+class TranscriptCase(unittest.TestCase):
+    # a session whose own transcript (harness_transcript) the tests write: the developer's prompts and answers
     def setUp(self):
         self.state = TempState().__enter__()
         self.addCleanup(self.state.__exit__, None, None, None)
@@ -804,6 +803,22 @@ class EvidenceReplayTests(unittest.TestCase):
     def grant(self, consume=True):
         return pg.use_grant("claude", "s1", action="push", target="feat/x", repo="acme/api", consume=consume)
 
+    def answer(self, d, label, tid):
+        # the developer answers decision d with the question tool: its result in the transcript, then the hook
+        q = pg.ask_text(d)
+        result = {"questions": [{"question": q, "options": [{"label": o} for o in d["options"]]}],
+                  "answers": {q: label}}
+        self.write({"type": "user", "uuid": f"u-{tid}", "isSidechain": False, "toolUseResult": result,
+                    "message": {"role": "user", "content": [{"type": "tool_result", "tool_use_id": tid,
+                                                             "content": "answered"}]}})
+        return pg.on_question("claude", {"session_id": "s1", "tool_name": "AskUserQuestion", "tool_use_id": tid,
+                                         "tool_input": {"questions": result["questions"]}, "tool_response": result,
+                                         "transcript_path": str(self.transcript)})
+
+
+class EvidenceReplayTests(TranscriptCase):
+    # B3 (B-fy1q867o3pp, Seraph's batch 4): an agent pipes the developer's original prompt or question tool answer into
+    # `dev hook prompt` again. The transcript still holds the real record, so only the id it carries can tell a replay
     def test_a_replayed_prompt_grants_nothing_after_its_grant_was_used(self):
         self.write({"type": "user", "promptId": "prompt-001", "uuid": "u-1", "isSidechain": False,
                     "origin": {"kind": "human"}, "message": {"role": "user", "content": "grant push feat/x"}})
@@ -857,6 +872,32 @@ class EvidenceReplayTests(unittest.TestCase):
     def test_a_codex_entry_is_never_confirmed_by_the_hook_alone(self):
         # The Keymaker: devkit reads no Codex transcript yet, so a Codex entry has nothing behind it but the hook event
         self.assertFalse(pg.confirmed({"agent": "codex", "channel": "E2", "transcript_uuid": "p-1", "covers": "D1"}))
+
+
+class StepGrantTests(TranscriptCase):
+    # M277 (Seraph's M243 follow-ups, The Keymaker): a step's --allow grant holds for what the developer's evidence
+    # covers, its target and its repository, through the real run and session state
+
+    def test_a_step_grant_opens_its_own_target_in_its_own_repository_only(self):
+        self.write({"type": "user", "promptId": "prompt-009", "uuid": "u-9", "isSidechain": False,
+                    "origin": {"kind": "human"}, "message": {"role": "user", "content": "grant push feat/parser"}})
+        self.prompt("grant push feat/parser", "prompt-009")
+        pg.assign("build", "Tank", allow="push")
+        launch("a_tank", "devkit:tank", "Tank: build")
+
+        def lane_push(target, repo="acme/api"):
+            return pg.use_grant("claude", "s1", action="push", target=target, repo=repo, lane="a_tank", consume=False)
+        self.assertEqual(lane_push("feat/parser")["source"], "step")
+        self.assertIsNone(lane_push("feat/other"))
+        self.assertIsNone(lane_push("main"))
+        self.assertIsNone(lane_push("feat/parser", repo="acme/web"))
+
+    def test_a_verified_decision_without_a_target_backs_no_step_grant(self):
+        d = pg.crew_decision("Push the parser branch?", options="yes | no", recommend="yes", irreversible="push")
+        self.answer(d, "yes", "toolu_q9")
+        self.assertTrue(pg.crew_decide(d["id"], "yes")["verified"])
+        pg.assign("build", "Tank", allow="push")
+        self.assertEqual(pg.load_run("claude", "s1")["plan"][0].get("allow"), [])
 
 
 class ReconcileTranscriptTests(unittest.TestCase):

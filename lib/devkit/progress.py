@@ -1277,8 +1277,9 @@ def approved_actions(run, now: float | None = None) -> list:
 
 def _action_evidence(agent: str, sid: str, run: dict, action: str, target: str, now: float, any_target=False):
     """Use the developer's evidence for one action (a pre-approval's or a step grant's): their live grant of that
-    action and target (any target with `any_target`), else a verified, unused decision naming the action. -> the
-    evidence to keep with it, or None."""
+    action and target (any target with `any_target`), else a verified, unused decision naming the action and a
+    target (that target unless `any_target`; a decision without one backs nothing, M277). -> the evidence to keep
+    with it, with the `target` pattern and the `repo` it covers (a step grant opens only those), or None."""
     def granted(x):
         return x.get("channel") == "E2" and bool(x.get("expires"))
     got = None
@@ -1291,14 +1292,16 @@ def _action_evidence(agent: str, sid: str, run: dict, action: str, target: str, 
             if got:
                 break
     if got:
-        return {k: got.get(k) for k in ("channel", "ts", "covers", "transcript_uuid", "excerpt")}
+        return {**{k: got.get(k) for k in ("channel", "ts", "covers", "transcript_uuid", "excerpt")},
+                "target": str(got.get("covers") or "").partition(" ")[2], "repo": got.get("repo") or ""}
     d = next((x for x in run.get("decisions") or [] if x.get("verified") and x.get("by") == "developer"
-              and x.get("irreversible") == action and not x.get("used")
-              and (any_target or not x.get("target") or _norm(x["target"]) == _norm(target))), None)
+              and x.get("irreversible") == action and not x.get("used") and x.get("target")
+              and (any_target or _norm(x["target"]) == _norm(target))), None)
     if d:
         d["used"] = now  # the caller saves the run
         return {"channel": "decision", "ts": d.get("decided"), "covers": d["id"],
-                **{k: (d.get("evidence") or {}).get(k) for k in ("transcript_uuid", "excerpt")}}
+                **{k: (d.get("evidence") or {}).get(k) for k in ("transcript_uuid", "excerpt")},
+                "target": d["target"], "repo": run.get("project") or ""}
     return None
 
 
@@ -1963,7 +1966,11 @@ def use_grant(agent: str, sid: str, *, action: str, target: str, repo: str = "",
             return None
         s = next((x for x in live.get("plan") or [] if x.get("owner") == lane and x.get("state") == "running"
                   and action in (x.get("allow") or [])), None)
-        return _opened(f"step:{s['name']}", "step", None, None) if s else None
+        ev = ((s or {}).get("allow_evidence") or {}).get(action) or {}
+        if not (s and ev.get("target") and _same_repo(ev.get("repo"), repo)
+                and _target_covers(action, ev["target"], target)):
+            return None  # the grant covers its evidence's target in its repository only (M277)
+        return _opened(f"step:{s['name']}", "step", None, None)
     if headless(sess):
         return _opened("DEVKIT_PREAPPROVE", "preapproval", None, None) if preapproved(action, target) else None
 
