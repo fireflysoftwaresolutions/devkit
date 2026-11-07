@@ -12,20 +12,23 @@ from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "lib"))
 
-from devkit import canary, core  # noqa: E402
+from devkit import canary, continuity, core, prompt  # noqa: E402
 from devkit import progress as pg  # noqa: E402
 
 
 def boundary(root, real_caller=False) -> list:
     # what every progress test fakes, as patchers to start and stop: devkit's configuration (its defaults, never the
     # developer's ~/.config/devkit), this test process's real parents (they never name a session), the call ledger
-    # (in the test's folder), the team's crew policy (in the test's folder, never the handoff repository's) and who
-    # calls: Morpheus, from a call of his. real_caller: the tests of caller identity (tests/test_caller_identity.py)
-    # use devkit's own ledger and session lookup instead.
+    # (in the test's folder), the team's crew policy (in the test's folder, never the handoff repository's), the
+    # continuity records and the prompt helper's cache the hooks write (in the test's folder) and who calls: Morpheus,
+    # from a call of his. real_caller: the tests of caller identity (tests/test_caller_identity.py) use devkit's own
+    # ledger and session lookup instead.
     out = [mock.patch.dict(core.CFG, {"progress": {}, "work": {}}),
            mock.patch.object(pg, "_ancestor_pids", lambda: [], create=True),
            mock.patch.object(pg, "CALLS", Path(root) / "calls", create=True),
-           mock.patch.object(pg, "TEAM_POLICY", Path(root) / "policy" / "progress.json", create=True)]
+           mock.patch.object(pg, "TEAM_POLICY", Path(root) / "policy" / "progress.json", create=True),
+           mock.patch.object(continuity, "CONT", Path(root) / "continuity"),
+           mock.patch.object(prompt, "STATE", Path(root) / "prompt-state")]
     if not real_caller:
         out.append(mock.patch.object(pg, "caller", lambda *a, **k: {"caller": "main", "how": "test"}, create=True))
     return out
@@ -898,6 +901,18 @@ class StepGrantTests(TranscriptCase):
         self.assertTrue(pg.crew_decide(d["id"], "yes")["verified"])
         pg.assign("build", "Tank", allow="push")
         self.assertEqual(pg.load_run("claude", "s1")["plan"][0].get("allow"), [])
+
+
+class BoundaryTests(unittest.TestCase):
+    # e6de8a9, L-fy1j7q5mw2i (Kid, M322, M349): what devkit writes while a test runs (runs, sessions, quota, call
+    # ledger, the team's crew policy, the continuity records and the prompt helper's cache) lands in the test's folder
+    def test_every_state_a_test_can_write_is_in_the_tests_folder(self):
+        from devkit import continuity, prompt
+        with TempState() as st:
+            root = Path(st.tmp.name)
+            outside = [str(p) for p in (pg.RUNS, pg.SESSIONS, pg.QUOTA, pg.CALLS, pg.TEAM_POLICY, continuity.CONT,
+                                        prompt.STATE) if not Path(p).is_relative_to(root)]
+            self.assertEqual(outside, [])
 
 
 class ReconcileTranscriptTests(unittest.TestCase):
