@@ -3580,8 +3580,10 @@ def _on_subagent(agent: str, data: dict, started: bool, now: float | None = None
 def scope_written(agent: str, sid: str, aid: str, paths: list, now: float | None = None) -> dict | None:
     """A review or read-only lane's shell call wrote these files (spec F7, write detection): the lane keeps them in
     `scope_writes`, so its report is unverified and its step cannot end done on its word; Morpheus gets a crew
-    message; and the audit trail a scope.write record. "possible" when another lane that may write works in the run
-    at the time (the file may be its), else "certain". -> the lane's scope_writes, or None without a lane."""
+    message; and the audit trail a scope.write record. A file in the scope of another lane that works now is that
+    lane's, so it is left out (M292). "possible" when another lane that may write works in the run at the time (a
+    file outside every scope may be its), else "certain". -> the lane's scope_writes, or None without a lane or
+    without a file left to flag."""
     now = now or time.time()
     paths = sorted({str(p) for p in paths or [] if p})
     if not paths:
@@ -3592,8 +3594,12 @@ def scope_written(agent: str, sid: str, aid: str, paths: list, now: float | None
         if not lane:
             return None
         chain = set(lane_chain(run, aid))
-        others = [k for k, v in run["agents"].items() if k not in chain and v.get("state") == "running"
-                  and lane_tools(run, k) in ("build", "all")]
+        running = [k for k, v in run["agents"].items() if k not in chain and v.get("state") == "running"]
+        layers = {k: lane_scope(run, k) for k in running}
+        paths = [p for p in paths if not any(layers[k] and in_scope(p, layers[k]) for k in running)]
+        if not paths:
+            return None  # every file is in the scope of a lane that works now: theirs (M292)
+        others = [k for k in running if lane_tools(run, k) in ("build", "all")]
         certainty = "possible" if others else "certain"
         level = lane_tools(run, aid)
         had = lane.get("scope_writes") or {}

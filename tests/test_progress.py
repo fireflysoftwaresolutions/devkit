@@ -903,6 +903,22 @@ class StepGrantTests(TranscriptCase):
         self.assertEqual(pg.load_run("claude", "s1")["plan"][0].get("allow"), [])
 
 
+class ScopeWriteTests(unittest.TestCase):
+    # M292: Seraph (review-only) was flagged for docs/audit.md, which Neo, whose step scope holds it, changed during
+    # Seraph's shell call. A file a running lane's scope holds is that lane's; the reviewer is flagged for the rest
+    def test_a_file_in_a_working_members_scope_is_theirs_not_the_reviewers(self):
+        with TempState():
+            pg.start("Work", plan=["audit docs", "review"])
+            pg.assign("audit docs", "Neo", scope="docs/audit.md", why="test")
+            pg.assign("review", "Seraph")
+            launch("a_neo", "devkit:neo", "Neo: audit docs")
+            launch("a_seraph", "devkit:seraph", "Seraph: review")
+            self.assertIsNone(pg.scope_written("claude", "s1", "a_seraph", ["docs/audit.md"]))
+            self.assertNotIn("scope_writes", pg.load_run("claude", "s1")["agents"]["a_seraph"])
+            flagged = pg.scope_written("claude", "s1", "a_seraph", ["docs/audit.md", "lib/api.py"])
+            self.assertEqual(flagged["paths"], ["lib/api.py"])
+
+
 class BoundaryTests(unittest.TestCase):
     # e6de8a9, L-fy1j7q5mw2i (Kid, M322, M349): what devkit writes while a test runs (runs, sessions, quota, call
     # ledger, the team's crew policy, the continuity records and the prompt helper's cache) lands in the test's folder
