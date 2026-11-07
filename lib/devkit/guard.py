@@ -3672,7 +3672,9 @@ def _ro_dev(args) -> str | None:
 #   there. `live-complete --force` completes a session whose source still has live-mode leftovers, past its gate.
 # - surface-brief and critique-storage write .impeccable/surfaces and .impeccable/critique; a URL target is only a
 #   key, never fetched. `read`, `slug` and `trend` wrote nothing; `latest` closes the snapshot it reads once the
-#   target file changed, so it is a write lane's.
+#   target file changed, so it is a write lane's. `write` and `latest` fingerprint a local target file, so agents
+#   give every target as a path in the project (the tech lead's decision on the free words that name a file), and a
+#   URL or `route:` key is the developer's.
 # - comp-spec writes .impeccable/build; `--out`, `--out-dir` and `--spec` write where they point, outside the project
 #   too, and the skill never passes them.
 # - build-phase writes .impeccable/build and checks a gate at each step. `advance --force` passes a phase over its
@@ -3701,7 +3703,9 @@ IMPECCABLE_READ_HELPERS = {"surface-brief": ("read",), "critique-storage": ("slu
 # (flags that take a value: its kind, flags alone, (fewest, most or None for any, kind) other words[, flags it
 # needs])}. The other words' kind is one for all, or a list with one per place (the last one for every later word).
 # Kinds: "word" any word that does not start with -; "name" letters, digits, `.`, `_` and `-`, never `.` or `..`
-# alone (the engine may name a file after it); "path" a path in the project; "url" a local path or a URL on this Mac;
+# alone (the engine may name a file after it); "path" a path in the project, for every word that names a file of the
+# project, one the engine writes, reads or names its own files after (impeccable_paths: `dev impeccable` checks each
+# through its links); "url" a local path or a URL on this Mac;
 # "port" a port number; "cdp" a DevTools port or a URL on this Mac; or a tuple of the only words it takes. A path, url,
 # port or cdp value never has a character the shell expands (_EXPANDS).
 _W = "word"
@@ -3729,20 +3733,33 @@ IMPECCABLE_FORMS = {
     "live-insert": {"": ({**_PICK, "--position": ("before", "after")}, frozenset({"--help"}), _NONE)},
     "live-server": {"": ({"--port": "port"}, frozenset({"--background", "--help"}), _NONE),
                     "stop": ({}, frozenset({"--keep-inject"}), _NONE)},
-    # write <primary target> <body file> [related targets…]: the engine may build the brief's file from the target
-    "surface-brief": {"read": ({}, frozenset(), (1, 1, _W)), "write": ({}, frozenset(), (2, None, ["path", _W]))},
-    # close <target> <snapshot file that latest returned>
-    "critique-storage": {"slug": ({}, frozenset(), (1, 1, _W)), "latest": ({}, frozenset({"--json"}), (1, 1, _W)),
-                         "trend": ({}, frozenset(), (1, 2, _W)), "write": ({}, frozenset(), (2, 2, _W)),
-                         "close": ({}, frozenset(), (2, 2, [_W, "path"]))},
-    "comp-spec": {"": ({"--comp": _W, "--regions": _W, "--crop": "name", "--scale": _W, "--plate-prompt": _W,
+    # A target of surface-brief and critique-storage, related targets included, is a file of the project (or a slug)
+    # that the engine fingerprints or names its own files in .impeccable after, so it is a path in the project: a URL
+    # or a `route:` key is the developer's (the tech lead's decision). The body file is read only, and the skill
+    # writes it to a temp file (critique.md), so it stays a word, as does trend's count.
+    # read <target> | write <primary target> <body file> [related targets…]
+    "surface-brief": {"read": ({}, frozenset(), (1, 1, "path")),
+                      "write": ({}, frozenset(), (2, None, ["path", _W, "path"]))},
+    # slug|latest <target> | trend <target> [count] | write <target> <body file> | close <target> <snapshot file that
+    # latest returned, whose front matter close rewrites>
+    "critique-storage": {"slug": ({}, frozenset(), (1, 1, "path")),
+                         "latest": ({}, frozenset({"--json"}), (1, 1, "path")),
+                         "trend": ({}, frozenset(), (1, 2, ["path", _W])),
+                         "write": ({}, frozenset(), (2, 2, ["path", _W])),
+                         "close": ({}, frozenset(), (2, 2, "path"))},
+    # --comp the approved comp image (in .impeccable/mocks) and --regions the regions file the skill writes in the
+    # project; --crop and --plate-prompt a region's id
+    "comp-spec": {"": ({"--comp": "path", "--regions": "path", "--crop": "name", "--scale": _W, "--plate-prompt": _W,
                         "--background": ("transparent", "opaque", "auto")},
                        frozenset({"--grid", "--inspect-map", "--json", "--auto", "--print", "--schema", "--help"}),
                        _NONE)},
-    "build-phase": {"start": ({"--direction": _W, "--decision-comp": _W, "--breakpoint": _W, "--artifact": _W,
+    # start: --direction a seed reference or `none`, --decision-comp the chosen card's comp (in
+    # .impeccable/mocks/decision), --artifact the entry file whose SHA-256 the gates record; record hero: --build the
+    # capture it scores
+    "build-phase": {"start": ({"--direction": _W, "--decision-comp": "path", "--breakpoint": _W, "--artifact": "path",
                                "--session-id": "name"}, frozenset(), _NONE, ("--direction",)),
                     "advance": ({}, frozenset(), _NONE), "scaffold": ({}, frozenset(), _NONE),
-                    "record hero": ({"--build": _W}, frozenset(), _NONE),
+                    "record hero": ({"--build": "path"}, frozenset(), _NONE),
                     "finish": ({"--disposition": ("ship", "fix", "rebuild", "recapture")}, frozenset(), _NONE)},
 }
 IMPECCABLE_AGENTS = frozenset(IMPECCABLE_READS) | frozenset(IMPECCABLE_WRITES) | frozenset(IMPECCABLE_FORMS)
@@ -3788,8 +3805,10 @@ IMPECCABLE_REASON = ("`dev impeccable {verb}` is the developer's{why}. Agents ru
                      "`live-complete` without `--force`), `surface-brief write`, `critique-storage latest`, `write`, "
                      "and `close`, `comp-spec` without `--out`, `--out-dir`, or `--spec`, and `build-phase start "
                      "--direction`, `advance` without `--force`, `record hero`, `scaffold`, and `finish`, where "
-                     "`--target` and `--file` name a path in the project, from a folder in it, and no path, URL or port "
-                     "has a character the shell expands. The developer runs everything else, in a terminal: some "
+                     "`--target`, `--file`, `--artifact`, `--build`, `--decision-comp`, `--comp`, `--regions`, and "
+                     "the targets and snapshot file of `surface-brief` and `critique-storage` name a path in the "
+                     "project (not a URL or a route), from a folder in it, and no path, URL or port has a character "
+                     "the shell expands. The developer runs everything else, in a terminal: some "
                      "verbs write the agents' settings, hooks or skill folders (`hooks`, `install`, `link`, `update`, "
                      "`pin`, `unpin`, `doctor --fix`), which change what runs in every later session on this Mac; "
                      "some reach the internet or cost money (`concept-seed`, `generate-image`); some skip the skill's "
@@ -3855,9 +3874,11 @@ def _impeccable_value(kind, shown, value) -> str:
         if value.startswith("-") else ""
 
 
-def _impeccable_form(verb, forms, rest) -> tuple:
+def _impeccable_form(verb, forms, rest, found=None) -> tuple:
     """('', '') when `rest`, the words after `verb`, fit one of its `forms` (IMPECCABLE_FORMS), else (the call to name
-    in the refusal, why it is the developer's or ''): the first word that fits no form names it."""
+    in the refusal, why it is the developer's or ''): the first word that fits no form names it. Each value that fits
+    goes into the list `found`, when given, as (its flag, or '' for a word after the sub-verb; its kind; the value)."""
+    found = [] if found is None else found
     for key in sorted(forms, key=lambda k: -len(k.split())):
         sub = key.split()
         if rest[:len(sub)] == sub:
@@ -3880,6 +3901,7 @@ def _impeccable_form(verb, forms, rest) -> tuple:
             why = _impeccable_value(takes[flag], shown, value)
             if why:
                 return f"{call} {shown}"[:80], why
+            found.append((flag, takes[flag], value))
             given.add(flag)
         elif a in alone:
             i += 1
@@ -3890,6 +3912,7 @@ def _impeccable_form(verb, forms, rest) -> tuple:
             why = _impeccable_value(kind, a, a)
             if why:
                 return f"{call} {a}"[:80], why
+            found.append(("", kind, a))
             count, i = count + 1, i + 1
     if count < fewest:
         return call[:80], f"it takes {fewest} or more words after `{call}`"
@@ -3924,12 +3947,22 @@ def impeccable_refusal(words) -> str:
 
 
 def impeccable_paths(words, writes=False) -> list:
-    """The values of --target and --file (`--flag value` or `--flag=value`) in `words`, the words the engine gets:
-    paths it counts from the folder it runs in. `live` and the live helpers write there; `context` and `doctor` read
-    there, and `writes` leaves them out. detect's --target names a page by part of its URL or title, not a path."""
+    """The values of the path kind in `words`, the words the engine gets, which it counts from the folder it runs in:
+    for a verb of IMPECCABLE_FORMS, those of the form the words fit (up to the first word that fits none, which the
+    refusal names), such as --target, --file, --artifact and the helpers' targets; for another verb, such as doctor,
+    each --target and --file (`--flag value` or `--flag=value`). `dev impeccable` checks them all through their links
+    (impeccable.outside_project). `writes` keeps the ones the guard judges as writes: live's --target and the live
+    helpers' --file, the page and the source the engine writes. The others are files it reads, keys it names its own
+    files in .impeccable after, and the snapshot in .impeccable/critique that `critique-storage close` marks closed;
+    `context` and `doctor` only read. detect's --target names a page by part of its URL or title, not a path."""
     words = [str(w) for w in words]
     verb = words[0] if words else ""
-    if verb == "detect" or (writes and verb in IMPECCABLE_READS):
+    if verb in IMPECCABLE_FORMS:
+        found = []
+        _impeccable_form(verb, IMPECCABLE_FORMS[verb], words[1:], found)
+        return [v for flag, kind, v in found if kind == "path" and
+                (not writes or (flag in ("--target", "--file") and verb not in IMPECCABLE_READS))]
+    if writes and verb in IMPECCABLE_READS:
         return []
     out, i = [], 1
     while i < len(words):

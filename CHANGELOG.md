@@ -96,15 +96,17 @@ Not released yet: the date is set when the release is tagged.
   `extract`, and `init` with no other words. Agents also run the skill's helpers in the forms it uses that stay inside
   the project or talk to the live server on `127.0.0.1` (the `live-…` helpers, `surface-brief`, `critique-storage`,
   `comp-spec`, and `build-phase start --direction`; read-only lanes only `surface-brief read` and
-  `critique-storage slug` and `trend`), with `--target` and `--file` inside the project, a name as an ID, a port
-  number as the live server's port, and `detect` URLs only on `localhost` or `127.0.0.1`. No path, URL, or port may
-  hold a character the shell expands (`$`, a backtick, `{`, `*`, `?`, or `[`). Read-only lanes keep to the reading
-  flags and give `detect` only local path shapes (no URL, host, domain, address, `user@`, query, or fragment). The
-  guard follows `cd`, `pushd`, and `env -C` and judges `--target` and `--file` as writes: a write lane may not point
-  them outside the workspace or its step's scope, and the main session asks first, as for any write outside the
-  workspace. `dev impeccable` checks again when it runs: an agent's call runs only from a git checkout below
-  `~/Development` (not the handoff repository), with each `--target` and `--file`, through its symbolic links, inside
-  that checkout. Every other verb, including `concept-seed`, `generate-image`, the forms that skip the skill's gates,
+  `critique-storage slug` and `trend`), with every word that names a file of the project inside it (`--target`,
+  `--file`, `--artifact`, `--build`, `--decision-comp`, `--comp`, `--regions`, and the helpers' targets and snapshot
+  file, so a URL or a route as a target is yours), a name as an ID, a port number as the live server's port, and
+  `detect` URLs only on `localhost` or `127.0.0.1`. No path, URL, or port may hold a character the shell expands
+  (`$`, a backtick, `{`, `*`, `?`, or `[`). Read-only lanes keep to the reading flags and give `detect` only local
+  path shapes (no URL, host, domain, address, `user@`, query, or fragment). The guard follows `cd`, `pushd`, and
+  `env -C` and judges `--target` and `--file` as writes: a write lane may not point them outside the workspace or its
+  step's scope, and the main session asks first, as for any write outside the workspace. `dev impeccable` checks
+  again when it runs: an agent's call, a read verb's included, runs only from a git checkout below `~/Development`
+  (not the handoff repository), with each of those paths, through its symbolic links, inside that checkout. Every
+  other verb, including `concept-seed`, `generate-image`, the forms that skip the skill's gates,
   the engine's hidden ones, and any a newer engine adds, is the developer's: the guard refuses it to every agent, the
   main session's included, and `dev impeccable` runs it only in your terminal.
 

@@ -81,8 +81,8 @@ HELPERS = ("live-poll", "live-poll --timeout=600000", "live-poll --reply e1 done
            "build-phase advance", "build-phase scaffold", "build-phase record hero",
            "build-phase finish --disposition ship")
 # the helper forms that write nothing (each run left the scratch project unchanged): read-only lanes run them too
-READ_HELPERS = ("surface-brief read src/index.html", "surface-brief read https://example.com/pricing",
-                "critique-storage slug src/index.html", "critique-storage trend src/index.html 5")
+READ_HELPERS = ("surface-brief read src/index.html", "critique-storage slug src/index.html",
+                "critique-storage trend src/index.html 5")
 # what the engine may run but no agent may: its hidden verbs (the Code reviewer's read of the 0.1.18 engine), its
 # other visible ones, the design commands that are not engine verbs, a verb a newer engine could add, no verb, the
 # allowlist's verbs spelled otherwise (another case, after `skills` or a second `--`, doctor with another word), and
@@ -423,6 +423,43 @@ class DeveloperOnlyTests(LauncherCase):
                      "surface-brief write ../../../x /tmp/b.md", "surface-brief write /etc/x b.md",
                      "surface-brief write https://example.com/pricing brief.md"):
             self.refused_everywhere(args, "outside the project")
+
+    def test_free_words_that_name_a_file_are_project_paths(self):
+        # The engine's usage and the skill's reference files name a file with these words: the entry file
+        # build-phase start hashes (--artifact), the capture record hero reads (--build), the decision comp in
+        # .impeccable/mocks/decision (--decision-comp), the comp image and regions file comp-spec measures (--comp,
+        # --regions), and the target every surface-brief and critique-storage form takes, the related targets too,
+        # which the engine fingerprints or names its own files after. Each takes a path in the project, so a URL or a
+        # route as the key is the developer's (the tech lead's decision). The body file of a write and trend's count
+        # stay free words: the skill writes the body to a temp file, which the engine only reads.
+        for args in ("build-phase start --direction k1 --artifact src/index.html",
+                     "build-phase start --direction k1 --decision-comp .impeccable/mocks/decision/a.webp",
+                     "build-phase record hero --build .impeccable/review/hero-repro.png",
+                     "comp-spec --comp .impeccable/mocks/c.png --regions regions.json",
+                     "critique-storage write src/x.html /tmp/body.md", "critique-storage latest src/x.html --json",
+                     "critique-storage close src/x.html snap.md",
+                     "surface-brief write src/x.html /tmp/b.md src/y.html"):
+            with self.subTest(allowed=args):
+                self.assertIsNone(lane(f"dev impeccable {args}", WRITER))
+                self.assertIsNone(main(f"dev impeccable {args}"))
+        for args in ("surface-brief read src/x.html", "critique-storage slug src/x.html",
+                     "critique-storage trend src/x.html 5"):
+            with self.subTest(read_only=args):
+                self.assertIsNone(lane(f"dev impeccable {args}", READER))
+        for args in ("build-phase start --direction k1 --artifact ../other-app/index.html",
+                     "build-phase start --direction=k1 --artifact=/tmp/x.html",
+                     "build-phase record hero --build /tmp/hero.png", "build-phase record hero --build=~/hero.png",
+                     "critique-storage write ../x.html /tmp/body.md", "critique-storage write /etc/x body.md",
+                     "surface-brief read ../../x.html", "surface-brief read https://example.com/pricing",
+                     "surface-brief read route:/pricing", "critique-storage trend /etc/x 5",
+                     "critique-storage trend http://localhost:5173/ 5", "critique-storage slug ~/x.html",
+                     "critique-storage latest ../x.html --json", "critique-storage close ../x.html snap.md",
+                     "surface-brief write src/x.html /tmp/b.md ../y.html",
+                     "surface-brief write src/x.html b.md src/y.html /etc/z",
+                     "build-phase start --direction k1 --decision-comp ~/a.webp",
+                     "comp-spec --comp /tmp/c.png --grid", "comp-spec --comp c.png --regions ../r.json"):
+            self.refused_everywhere(args, "outside the project")
+        self.refused_everywhere("build-phase start --direction k1 --artifact 'src/*.html'", "the shell expands")
 
     def test_values_the_shell_expands_are_the_developers(self):
         # the guard reads the words before the shell expands them and `dev impeccable` checks them after, so a path, a

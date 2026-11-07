@@ -449,12 +449,14 @@ Agents run the command only with the forms on its allowlist, and the guard holds
   `live-poll`, `live-accept`, `live-status`, `live-resume`, `live-wrap`, `live-insert`, `live-server`,
   `live-complete` without `--force`,
   `surface-brief write`, `critique-storage latest`, `write`, and `close`, `comp-spec` without `--out`, `--out-dir`, or
-  `--spec`, and `build-phase start --direction`, `advance`, `record hero`, `scaffold`, and `finish`. `--target` and
-  `--file` name a path inside the project, `--id`, `--session-id`, and `--crop` a name, and no path, URL, or port
-  holds a character the shell expands (`$`, a backtick, `{`, `*`, `?`, or `[`).
+  `--spec`, and `build-phase start --direction`, `advance`, `record hero`, `scaffold`, and `finish`. `--target`, `--file`,
+  `--artifact`, `--build`, `--decision-comp`, `--comp`, `--regions`, and the targets and snapshot file of
+  `surface-brief` and `critique-storage` name a path inside the project (never a URL or a route), `--id`,
+  `--session-id`, and `--crop` a name, and no path, URL, or port holds a character the shell expands (`$`, a
+  backtick, `{`, `*`, `?`, or `[`).
 - **Only in a project checkout:** an agent's call runs only when the current folder is in a git checkout below
-  `~/Development` (not the handoff repository), and each `--target` and `--file`, resolved through its symbolic
-  links, stays in that checkout.
+  `~/Development` (not the handoff repository), the read verbs included, and each of those path values,
+  resolved through its symbolic links, stays in that checkout. Run it from a project folder.
 - **Yours only, in your terminal:** everything else. That covers the verbs that write the agents' settings, hooks, or
   skill folders (`hooks`, `install`, `link`, `update`, `pin`, `unpin`, and `doctor --fix`), `concept-seed` and
   `generate-image`, which reach the internet, and the forms that skip one of the skill's gates

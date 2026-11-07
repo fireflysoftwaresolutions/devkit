@@ -23,7 +23,8 @@ Anything else is refused with the fix, `dev install --only skills`. Outside the 
 (guard.impeccable_developer_call): context with --target only, detect on local paths and URLs on this Mac, doctor
 with --json or --target, live, generate, document, extract and init with no other words, and the skill's helpers in
 the forms that stay inside the project or talk to the live server (guard.IMPECCABLE_FORMS); and only in a project
-checkout of the workspace, with each --target and --file inside it through its links (outside_project). Which of them
+checkout of the workspace, with each path they name (guard.impeccable_paths) inside it through its links
+(outside_project). Which of them
 a crew lane may run is the guard's decision (guard.IMPECCABLE_READS and IMPECCABLE_READ_HELPERS for read-only
 lanes)."""
 from __future__ import annotations
@@ -152,22 +153,24 @@ def _inside(path, root) -> bool:
 
 
 def outside_project(args, here) -> tuple:
-    """('', '') when the engine, run with the words `args` in the folder `here`, writes only in a project checkout;
-    else (what to name in the audit, why, for stderr). The real path of `here` is in a checkout whose top folder is
-    below the workspace (core.DEV, never the workspace itself) and outside the handoff repository; each --target and
-    --file (guard.impeccable_paths), resolved from that folder through its links (os.path.realpath), stays in that top
-    folder. This sees the folder and the words as the engine gets them, after the shell's `cd` and expansions, which
-    the guard can only read as typed (the tech lead's decision on the Code reviewer's finding: `cd ~/.claude && dev
-    impeccable live --target settings.json` passed the guard)."""
+    """('', '') when the engine, run with the words `args` in the folder `here`, reads and writes only in a project
+    checkout; else (what to name in the audit, why, for stderr). The real path of `here` is in a checkout whose top
+    folder is below the workspace (core.DEV, never the workspace itself) and outside the handoff repository; each
+    value of the path kind (guard.impeccable_paths: --target, --file, --artifact, --build, --decision-comp, --comp,
+    --regions, and the helpers' targets and snapshot file), resolved from that folder through its links
+    (os.path.realpath), stays in that top folder. This sees the folder and the words as the engine gets them, after
+    the shell's `cd` and expansions, which the guard can only read as typed (the tech lead's decisions on the Code
+    reviewer's finding, `cd ~/.claude && dev impeccable live --target settings.json` passed the guard, and on the
+    free words that name a file)."""
     from .guard import impeccable_paths
     real = os.path.realpath(here)
     top = _checkout_top(real)
     dev, handoff = os.path.realpath(core.DEV), os.path.realpath(core.HANDOFF)
     if not top or top == dev or not _inside(top, dev) or _inside(top, handoff):
         return "folder", (f"dev impeccable: {core.tilde(real)} is not in a project checkout of the workspace "
-                          f"({core.tilde(core.DEV)}/<owner>/<repo>, never the handoff repository), and the engine writes "
-                          f"in the folder it runs in. Run it from your project's folder; the developer runs it anywhere, "
-                          f"in a terminal.")
+                          f"({core.tilde(core.DEV)}/<owner>/<repo>, never the handoff repository), and the engine "
+                          f"reads and writes from the folder it runs in, the read-only verbs included. Run it from a "
+                          f"project folder; the developer runs it anywhere, in a terminal.")
     for value in impeccable_paths(args):
         p = os.path.realpath(os.path.join(real, value))
         if not _inside(p, top):

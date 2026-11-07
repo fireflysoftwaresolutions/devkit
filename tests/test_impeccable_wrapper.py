@@ -248,12 +248,13 @@ class DeveloperOnlyTests(WrapperCase):
 
 
 class ProjectBoundaryTests(WrapperCase):
-    # The engine writes in the folder it runs in and where --target and --file point, so an agent's call runs only in
-    # a project checkout of the workspace (its git top folder below ~/Development, the handoff repository excepted),
-    # and each --target and --file, resolved from that folder through its links, stays inside that checkout (the
-    # tech lead's decision on the Code reviewer's finding: `cd ~/.claude && dev impeccable live --target
-    # settings.json` passed). This is the check that sees the folder and the words as the engine gets them; the guard
-    # checks the typed command before it.
+    # The engine reads and writes in the folder it runs in and where its path values point (--target, --file,
+    # --artifact, the helpers' targets, …), so an agent's call runs only in a project checkout of the workspace (its
+    # git top folder below ~/Development, the handoff repository excepted), and each path value, resolved from that
+    # folder through its links, stays inside that checkout (the tech lead's decisions on the Code reviewer's finding,
+    # `cd ~/.claude && dev impeccable live --target settings.json` passed, and on the free words that name a file).
+    # This is the check that sees the folder and the words as the engine gets them; the guard checks the typed
+    # command before it.
     def handoff(self):
         # the run's handoff repository as a git checkout, for this test only
         h = core.HANDOFF
@@ -270,11 +271,13 @@ class ProjectBoundaryTests(WrapperCase):
         claude = core.HOME / ".claude"
         claude.mkdir(exist_ok=True)
         for here in (claude, core.HOME, plain, self.handoff(), self.box):
-            for args in (["live"], ["context"], ["live", "--target", "index.html"]):
+            for args in (["live"], ["context"], ["detect", "src"], ["live", "--target", "index.html"]):
                 with self.subTest(here=str(here), args=args):
                     rc, err, argv = self.run_as(args, developer=False, cwd=here)
                     self.assertEqual((rc, argv), (1, None), err)
                     self.assertIn("not in a project checkout", err)
+                    # the read verbs need a checkout too: the refusal says where to run them from
+                    self.assertIn("Run it from a project folder", err)
         sub = self.project / "src"
         sub.mkdir()
         rc, err, argv = self.run_as(["live", "--target", "index.html"], developer=False, cwd=sub)
@@ -302,6 +305,47 @@ class ProjectBoundaryTests(WrapperCase):
                 self.assertEqual(self.run_as(args, developer=False)[::2], (0, args))
         rc, err, argv = self.run_as(["live", "--target", "src/out/index.html"], developer=True)
         self.assertEqual((rc, argv), (0, ["live", "--target", "src/out/index.html"]), err)
+
+    def test_files_named_by_a_free_word_stay_in_the_checkout(self):
+        # The entry file of build-phase start, the capture of record hero, and the targets of critique-storage and
+        # surface-brief name files the engine reads or names its own files after: an agent gives a path in the
+        # checkout, and the developer any path.
+        outside = Path(tempfile.mkdtemp(dir=core.HOME))
+        self.addCleanup(shutil.rmtree, outside, True)
+        away = os.path.relpath(outside / "x.html", self.project)  # ../../…/x.html, out of the checkout
+        for args in (["build-phase", "start", "--direction", "k1", "--artifact", away],
+                     ["build-phase", "record", "hero", "--build", away],
+                     ["critique-storage", "write", away, "body.md"], ["surface-brief", "read", away],
+                     ["critique-storage", "trend", away, "5"]):
+            with self.subTest(refused=args):
+                rc, err, argv = self.run_as(args, developer=False)
+                self.assertEqual((rc, argv), (1, None), err)
+                self.assertIn("outside the project", err)
+            with self.subTest(developer=args):
+                rc, err, argv = self.run_as(args, developer=True)
+                self.assertEqual((rc, argv), (0, args), err)
+        # a link in the project that leads out of it passes the words, so the run checks every path value through
+        # its links: these values, the related targets and the closed snapshot's file included
+        (self.project / "src").mkdir()
+        (self.project / "src" / "out").symlink_to(outside)
+        for args in (["surface-brief", "read", "src/out/x.html"],
+                     ["build-phase", "start", "--direction", "k1", "--artifact", "src/out/index.html"],
+                     ["build-phase", "start", "--direction", "k1", "--decision-comp=src/out/a.webp"],
+                     ["build-phase", "record", "hero", "--build", "src/out/hero.png"],
+                     ["critique-storage", "write", "src/out/x.html", "body.md"],
+                     ["critique-storage", "trend", "src/out/x.html", "5"],
+                     ["critique-storage", "close", "src/x.html", "src/out/snap.md"],
+                     ["surface-brief", "write", "src/x.html", "b.md", "src/y.html", "src/out/z.html"],
+                     ["comp-spec", "--comp", "src/out/c.png", "--grid"]):
+            with self.subTest(link=args):
+                rc, err, argv = self.run_as(args, developer=False)
+                self.assertEqual((rc, argv), (1, None), err)
+                self.assertIn("outside the project checkout", err)
+        # the body file is read only, and the skill writes it to a temp file: it may be anywhere
+        for args in (["critique-storage", "write", "src/x.html", str(outside / "body.md")],
+                     ["surface-brief", "write", "src/x.html", "src/out/b.md"]):
+            with self.subTest(body=args):
+                self.assertEqual(self.run_as(args, developer=False)[::2], (0, args))
 
 
 if __name__ == "__main__":

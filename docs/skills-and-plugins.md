@@ -230,29 +230,33 @@ settings or hooks is the developer's.
 | `live` | no | yes, with `--target` inside the project | Starts the live server on `127.0.0.1` and adds its script to the page |
 | `live-poll`, `live-accept`, `live-status`, `live-resume`, `live-wrap`, `live-insert`, `live-server` | no | yes, with `--file` inside the project, a name as `--id`, and a port number as `live-server --port` | Talk to the live server and write `.impeccable/live` and the page they wrap |
 | `live-complete` | no | yes, never `--force` | Records the end of a live session; `--force` skips its check for live-mode leftovers in the source |
-| `surface-brief` | `read` | `read`, `write` with its target inside the project | Reads or writes the surface brief in `.impeccable/surfaces` |
-| `critique-storage` | `slug`, `trend` | `slug`, `latest`, `trend`, `write`, `close` with its snapshot file inside the project | Keeps critique snapshots in `.impeccable/critique`; `latest` closes a snapshot whose file changed |
-| `comp-spec` | no | yes, with a name as `--crop`, never `--out`, `--out-dir`, or `--spec` | Measures a comp image into `.impeccable/build`; those three flags write where they point |
-| `build-phase` | no | `start` with `--direction` (required) and a name as `--session-id`, `advance`, `record hero`, `scaffold`, `finish` | Runs the gates of a comp-led build in `.impeccable/build`; never `advance --force`, `start --comp`, or `start --reset`, which skip a gate |
+| `surface-brief` | `read` | `read`, `write`, with each target inside the project | Reads or writes the surface brief in `.impeccable/surfaces` |
+| `critique-storage` | `slug`, `trend` | `slug`, `latest`, `trend`, `write`, `close`, with the target and the snapshot file inside the project | Keeps critique snapshots in `.impeccable/critique`; `latest` closes a snapshot whose file changed |
+| `comp-spec` | no | yes, with `--comp` and `--regions` inside the project and a name as `--crop`, never `--out`, `--out-dir`, or `--spec` | Measures a comp image into `.impeccable/build`; those three flags write where they point |
+| `build-phase` | no | `start` with `--direction` (required), `--artifact` and `--decision-comp` inside the project, and a name as `--session-id`; `advance`; `record hero` with `--build` inside the project; `scaffold`; `finish` | Runs the gates of a comp-led build in `.impeccable/build`; never `advance --force`, `start --comp`, or `start --reset`, which skip a gate |
 | `generate`, `document`, `extract`, `init` | no | yes, with no other words | The design commands that write project files. Engine 0.1.18 runs them in the agent's chat, not as engine verbs, so `dev impeccable` reaches them only if a newer engine adds them |
 
 - **Each verb counts only as listed:** the first word, spelled as in the table. A verb after `skills` (the engine's
   legacy namespace) or after a second `--`, or in another case, such as `Context`, is not on the list. A helper takes
   only the sub-verbs and flags the skill uses, so `surface-brief path`, `build-phase status`, or
   `live-server --host` is not on it either.
-- **Paths where the engine writes stay in the project.** `--target` and `--file`, the target of
-  `surface-brief write`, and the snapshot file of `critique-storage close` take a path with no first `/`, `~`, or
-  `-`, no `..` part, and no colon: in a scratch run, `live --target ../other-app/index.html` injected the live
-  script into that file, and `live-wrap --file ../outside.html` wrapped an element there. Files the engine only
-  reads, such as a comp image or the body of a brief, may be anywhere. `--id`, `--session-id`, and `--crop` take a
-  name (letters, digits, `.`, `_`, and `-`, never `.` or `..` alone), since the engine may name a file after it.
-- **The engine runs in a project checkout.** It counts `--target` and `--file` from the folder it runs in, so a
-  `cd` first could move them anywhere. The guard follows `cd`, `pushd`, and `env -C` and judges both values as
-  writes: a write lane may not point them outside the workspace, into the handoff repository, or outside its
-  step's scope, and the main session asks you first, as for any write outside the workspace. When it runs,
-  `dev impeccable` checks again what the guard can only read as typed: for an agent, the real path of the current
-  folder must be in a git checkout below `~/Development` (not the handoff repository), and each `--target` and
-  `--file`, resolved through its symbolic links, must stay in that checkout.
+- **Files the engine names stay in the project.** Every word that names a file of the project takes a path with no
+  first `/`, `~`, or `-`, no `..` part, and no colon: `--target` and `--file`, `build-phase start --artifact` and
+  `--decision-comp`, `build-phase record hero --build`, `comp-spec --comp` and `--regions`, and each target and
+  snapshot file of `surface-brief` and `critique-storage`. In a scratch run, `live --target
+  ../other-app/index.html` injected the live script into that file, and `live-wrap --file ../outside.html` wrapped
+  an element there. A target is a key the engine fingerprints or names its own files after, so a URL or a `route:`
+  key is yours. The body file of `surface-brief write` and `critique-storage write` may be anywhere: the engine only
+  reads it, and the skill writes it to a temp file. `--id`, `--session-id`, and `--crop` take a name (letters,
+  digits, `.`, `_`, and `-`, never `.` or `..` alone), since the engine may name a file after it.
+- **The engine runs in a project checkout.** It counts those paths from the folder it runs in, so a `cd` first
+  could move them anywhere. The guard follows `cd`, `pushd`, and `env -C` and judges `--target` and `--file`, where
+  the engine writes the page and its source, as writes: a write lane may not point them outside the workspace, into
+  the handoff repository, or outside its step's scope, and the main session asks you first, as for any write
+  outside the workspace. When it runs, `dev impeccable` checks again what the guard can only read as typed: for an
+  agent, the real path of the current folder must be in a git checkout below `~/Development` (not the handoff
+  repository), for the read verbs too, and each of those paths, resolved through its symbolic links, must stay in
+  that checkout. Run it from a project folder.
 - **No value the shell expands.** A path, URL, or port with `$`, a backtick, `{`, `*`, `?`, or `[` is yours: the
   guard reads the words before the shell expands them, so the engine could get another value. Write the value
   out in full. This also leaves a `detect` URL with a query (`?`) to you.
