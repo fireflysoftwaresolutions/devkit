@@ -92,8 +92,8 @@ install.sh · Brewfile   bootstrap and toolchain
 
 ```bash
 cd ~/Development/fireflysoftwaresolutions/devkit
-python3 -m unittest discover -s tests -v
-/usr/bin/python3 -m unittest discover -s tests -v     # Python 3.9 compatibility
+python3 -m unittest discover -s tests -t . -v
+/usr/bin/python3 -m unittest discover -s tests -t . -v     # Python 3.9 compatibility
 python3 -m py_compile lib/devkit/*.py && /usr/bin/python3 -m py_compile lib/devkit/*.py
 ```
 
@@ -125,6 +125,7 @@ file reads and imports only, in about a second:
 | D9 | A procedure phase's proof, or a command its gate names, is not in the phase's `devkit` list |
 | D10 | A kind of work has no file anchor and does not say why, or an open lesson has no anchors (this Mac's state) |
 | D11 | A row of the guardrail table in [The crew](crew.md#guardrails) cites no rule id, or states a planned rule as fact |
+| D12 | `tests/__init__.py` does not activate `tests/_hermetic.py` (the run's temporary home), or a documented `unittest discover -s tests` lacks `-t .`, which unittest needs to import `tests/__init__.py` |
 
 `tests/test_consistency.py` runs the checks that read only the repository, and tests the others on small fixtures.
 Drift that exists today is listed in its `KNOWN` allowlist, each item with its review finding, owner, and the task

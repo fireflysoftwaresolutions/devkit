@@ -18,6 +18,8 @@ as devkit grows (D1-D11 of the crew gap review 2).
   D10 every kind of work can be reached from files (its own `files` globs or `dispatch.FILE_HINTS`) or says it has
       none (`no_files`); every open lesson has anchors (machine state)
   D11 every row of the guardrail table in docs/crew.md cites a matrix id (`E-…`), and never a `planned` row as fact
+  D12 the test suite is hermetic: tests/__init__.py activates tests/_hermetic.py, and every documented command that
+      discovers tests/ runs it as a package (`-t .`), the only way unittest imports tests/__init__.py
 
 Each check returns findings: (check, item, evidence, fix). `item` is stable across runs (no line numbers), so a known
 finding can be listed by it. The checks read files and import devkit's modules only: no network and no subprocess.
@@ -812,11 +814,48 @@ def d11_guardrails(home=None, rows=None) -> list:
     return out
 
 
+SUITE_RUN = re.compile(r"(?:\S*python3?|\bpython3?)\s+-m\s+unittest\s+discover\b[^`\n|&;]*")
+SUITE_DOCS = (".github/workflows/*.yml", ".github/workflows/*.yaml", "*.md", "docs/*.md", "docs/**/*.md")
+
+
+def d12_hermetic_tests(home=None) -> list:
+    """D12: the test suite keeps the developer's real devkit out of reach. tests/__init__.py activates
+    tests/_hermetic.py, and every documented command that discovers tests/ runs it as a package (`-t .`): with
+    tests/ as the top level, unittest never imports tests/__init__.py and the run uses the real home."""
+    home = _home(home)
+    out = []
+    init = _read(home / "tests" / "__init__.py")
+    if "_hermetic.activate()" not in init or not (home / "tests" / "_hermetic.py").exists():
+        out.append(Finding("D12", "tests/__init__.py: does not activate tests/_hermetic.py",
+                           "the suite runs with the developer's home and devkit's real state",
+                           "keep tests/_hermetic.py and call _hermetic.activate() in tests/__init__.py"))
+    seen = set()
+    for pattern in SUITE_DOCS:
+        for path in sorted(home.glob(pattern)):
+            rel = _rel(path, home)
+            if rel in seen or not path.is_file():
+                continue
+            seen.add(rel)
+            for m in SUITE_RUN.finditer(_read(path)):
+                cmd = " ".join(m.group(0).split())
+                words = cmd.split()
+                if not any(w in ("-s", "--start-directory") and i + 1 < len(words) and
+                           words[i + 1].rstrip("/") in ("tests", "./tests") for i, w in enumerate(words)):
+                    continue
+                if any(w in ("-t", "--top-level-directory") or w.startswith("--top-level-directory=")
+                       for w in words):
+                    continue
+                out.append(Finding("D12", f"{rel}: {cmd}", "runs tests/ as the top level, so tests/__init__.py "
+                                   "and the suite's isolation never run",
+                                   "add -t . (python3 -m unittest discover -s tests -t .)"))
+    return out
+
+
 # --------------------------------------------------------------------------- all of them
 
 REPO_CHECKS = (("D1", d1_enforced_rows), ("D3", d3_unwired), ("D4", d4_commands), ("D5", d5_hook_events),
                ("D6", d6_config_keys), ("D7", d7_raci_hygiene), ("D9", d9_phase_proofs), ("D10", d10_file_anchors),
-               ("D11", d11_guardrails))
+               ("D11", d11_guardrails), ("D12", d12_hermetic_tests))
 MACHINE_CHECKS = (("D2", d2_planned_rows), ("D7", d7_team_raci),
                   ("D8", lambda: d8_uninstalled_skills("claude") + d8_uninstalled_skills("codex")),
                   ("D10", d10_lesson_anchors))

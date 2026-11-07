@@ -213,7 +213,7 @@ The ideas behind it are in [docs/concepts.md](docs/concepts.md).
 | `shell/` | zsh integration (`dcd`, `dwt`, completion, Docker environment) |
 | `tools/brand/` | Renders devkit's icon and banners from the Firefly brand elements |
 | `docs/` | The guides, diagram specs, and images |
-| `tests/` | Unit tests (`python3 -m unittest discover -s tests`) |
+| `tests/` | Unit tests (`python3 -m unittest discover -s tests -t .`) |
 
 ## Documentation
 

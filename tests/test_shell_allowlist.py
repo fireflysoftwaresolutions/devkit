@@ -6,6 +6,7 @@
 # a member of another session's live run owns. The guard reads command text and paths: no command here runs.
 # Run: python3 -m unittest tests.test_shell_allowlist -v
 import os
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -14,6 +15,10 @@ from pathlib import Path
 from unittest import mock
 
 ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ROOT / "tests"))
+import _hermetic  # noqa: E402
+
+_hermetic.activate()  # run alone, this module gets the suite's temporary home too (tests/_hermetic.py)
 sys.path.insert(0, str(ROOT / "lib"))
 
 from devkit import core, guard  # noqa: E402
@@ -27,7 +32,12 @@ def lane(cmd, member=REVIEWER, cwd=CWD, **kw):
     return v[1] if v else None
 
 
-def main_session(cmd, cwd=CWD):
+# the main session works in a project of the dev root (the run's, below its temporary home), where the guard allows
+# its writes, whatever folder this checkout lives in (~/Development on the developer's Mac, a runner folder in CI)
+MAIN_CWD = str(core.DEV / "fireflysoftwaresolutions" / "devkit")
+
+
+def main_session(cmd, cwd=MAIN_CWD):
     v = guard.check("Bash", {"command": cmd}, cwd, "claude")
     return v[0] if v else "allow"
 
@@ -68,6 +78,12 @@ MAIN_REFUSES = ["find . -name '*.pyc' -delete", "git clean -fd", "git tag v9.9.9
 
 
 class AllowlistTests(unittest.TestCase):
+    def setUp(self):
+        # the main session's project exists, as a real checkout does (its owner folder is what the guard looks for)
+        owner = Path(MAIN_CWD).parent
+        if not owner.exists():
+            self.addCleanup(shutil.rmtree, owner, True)
+        Path(MAIN_CWD).mkdir(parents=True, exist_ok=True)
 
     def test_every_writer_form_is_refused_in_a_review_lane_and_allowed_in_the_main_session(self):
         for cmd in WRITERS:

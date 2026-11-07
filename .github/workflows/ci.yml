@@ -1,5 +1,6 @@
 # devkit CI: the confirmation of a local run, not the test runner (AGENTS.md §7).
-# Run the same thing locally first: python3 -m unittest discover -s tests && /usr/bin/python3 -m unittest discover -s tests
+# Run the same thing locally first: python3 -m unittest discover -s tests -t . && /usr/bin/python3 -m unittest discover -s tests -t .
+# (-t . runs tests/ as a package, so tests/__init__.py gives the run a temporary home: tests/_hermetic.py)
 # A draft pull request runs no job: the one run starts when it is marked ready for review (ready_for_review), and
 # every push after that runs again. On a push to main, github.event.pull_request is null, which equals false.
 name: ci
@@ -37,7 +38,7 @@ jobs:
       - name: Compile
         run: python -m compileall -q lib bin
       - name: Unit tests
-        run: python -m unittest discover -s tests
+        run: python -m unittest discover -s tests -t .
         env:
           DEVKIT_NO_NOTIFY: "1"
 

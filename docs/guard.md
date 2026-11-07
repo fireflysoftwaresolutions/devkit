@@ -387,8 +387,8 @@ The rules are pure functions covered by `tests/test_devkit.py`, and the bypasses
 
 ```bash
 cd ~/Development/fireflysoftwaresolutions/devkit
-python3 -m unittest discover -s tests -v
-/usr/bin/python3 -m unittest discover -s tests -v     # the macOS system Python (3.9)
+python3 -m unittest discover -s tests -t . -v
+/usr/bin/python3 -m unittest discover -s tests -t . -v     # the macOS system Python (3.9)
 ```
 
 See also [Delivery](delivery.md), [Teams and machines](teams.md) and [Agents › Hooks](agents.md#hooks).

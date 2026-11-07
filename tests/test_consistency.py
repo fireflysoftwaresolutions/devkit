@@ -109,10 +109,15 @@ class RepositoryDrift(unittest.TestCase):
     def test_d11_guardrails_cite_the_matrix(self):
         self.assert_known("D11", selfcheck.d11_guardrails())
 
-    # run() covers D1 to D11, so a check added to the module is also one `dev doctor` and CI run
+    # D12: the suite is hermetic: tests/__init__.py activates tests/_hermetic.py, and every documented command that
+    # discovers tests/ runs it as a package (-t .)
+    def test_d12_the_suite_runs_hermetic(self):
+        self.assert_known("D12", selfcheck.d12_hermetic_tests())
+
+    # run() covers D1 to D12, so a check added to the module is also one `dev doctor` and CI run
     def test_run_covers_every_check(self):
         ids = {cid for cid, _ in selfcheck.REPO_CHECKS + selfcheck.MACHINE_CHECKS}
-        self.assertEqual(ids, {f"D{i}" for i in range(1, 12)})
+        self.assertEqual(ids, {f"D{i}" for i in range(1, 13)})
 
 
 class CommandResolution(unittest.TestCase):

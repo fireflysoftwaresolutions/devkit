@@ -9,6 +9,7 @@
 # Run: python3 -m unittest tests.test_escape_hatches -v
 import contextlib
 import io
+import json
 import os
 import subprocess
 import sys
@@ -20,7 +21,7 @@ from unittest import mock
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "lib"))
 
-from devkit import core, gitx, guard  # noqa: E402
+from devkit import core, delivery, gitx, guard  # noqa: E402
 
 CWD = str(ROOT)
 BUILDER = "tank"  # a build member: the read-only allowlist does not apply, so only the hatch rules can refuse
@@ -186,6 +187,11 @@ class BypassRecordTests(unittest.TestCase):
         self.assertTrue(guard.last_bypasses()[0]["denial"].startswith("Use `dev pr merge`"))
         self.assertEqual(self.uses("DEVKIT_FLAKY=1 gh run rerun 5"), [("DEVKIT_FLAKY", "gh-rerun")])
         self.assertEqual(self.uses("DEVKIT_RAW_FS=1 rm notes.md"), [("DEVKIT_RAW_FS", "rm")])
+        # the tag rule follows the project's recorded delivery policy (CalVer, as devkit's own), in the run's handoff
+        policy = delivery.policy_path(guard.current_project(CWD))
+        policy.parent.mkdir(parents=True, exist_ok=True)
+        policy.write_text(json.dumps({"versioning": "calver", "tag_format": "vYY.MM.PATCH"}))
+        self.addCleanup(policy.unlink)
         self.assertEqual(self.uses("DEVKIT_TAG_ANY=1 git tag v9.9.9"), [("DEVKIT_TAG_ANY", "tag-format")])
         self.assertEqual(self.uses("DEVKIT_CROSS_PROJECT=1 dev task add x -p acme/other"),
                          [("DEVKIT_CROSS_PROJECT", "cross-project")])
