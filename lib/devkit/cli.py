@@ -1042,7 +1042,7 @@ def cmd_adopt(a):
     if core.real(old_main) == core.real(core.source_home()):
         import subprocess  # devkit moved itself: its paths are embedded in hooks, links and launchd — re-apply them
         print(f"  {ui.ARROW} devkit moved itself; re-applying its configuration from {tilde(dest)}")
-        return subprocess.call([sys.executable, str(dest / "bin" / "dev"), "install"])
+        return subprocess.call([sys.executable, "-I", "-S", str(dest / "bin" / "dev"), "install"])  # as its shebang
     return cmd_sync(argparse.Namespace(session=None, finish=False, offline=True, scheduled=False, no_push=False,
                                        quiet=True))
 
@@ -1473,7 +1473,7 @@ def cmd_update(a):
     print(f"  {ui.OK if rc == 0 else ui.FAIL} {message}")
     if rc != 0 or not install:
         return rc
-    os.execv(sys.executable, [sys.executable, str(home / "bin" / "dev"), "install"])  # pins the new release
+    os.execv(sys.executable, [sys.executable, "-I", "-S", str(home / "bin" / "dev"), "install"])  # pins the release
 
 
 def cmd_docker(a):
