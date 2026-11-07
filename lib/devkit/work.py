@@ -332,8 +332,10 @@ def update(it: dict, op: str, why: str = "", a=None, **changes) -> dict:
     return it
 
 
-def claim(it: dict, a=None, hours: float = None, why: str = "") -> dict:
-    """Take the lock (pull first, push immediately so other machines see it)."""
+def claim(it: dict, a=None, hours: float = None, why: str = "", branch: str = "") -> dict:
+    """Take the lock (pull first, push immediately so other machines see it). `branch`: the branch the work happens
+    on, kept as `branch:<name>` in the item's links (the private handoff), so task ids never go into branch names
+    and the branch map still finds the task (spec P-fy3bwa0pshk R7)."""
     a = a or actor()
     hours = hours or float(core.CFG.get("work", {}).get("lock_hours", 8))
     pull()
@@ -348,7 +350,10 @@ def claim(it: dict, a=None, hours: float = None, why: str = "") -> dict:
     if m.get("status") == "todo":
         m["status"], m["bucket"] = "doing", "now"
     m["assignee"] = m.get("assignee") or a["user"]
-    _touch(it, a, "claim", why, f"lock until {m['lock_expires']}")
+    links = [x for x in (m.get("links") or []) if x]
+    if branch and f"branch:{branch}" not in links:
+        m["links"] = links + [f"branch:{branch}"]
+    _touch(it, a, "claim", why, f"lock until {m['lock_expires']}" + (f", on {branch}" if branch else ""))
     it["path"].write_text(render(it))
     ok = _commit([it["path"]], f"{m['id']}: claim by {actor_str(a)}", wait=True)
     if not ok:

@@ -3,15 +3,22 @@
 #
 # The branch map (spec P-fy3bwa0pshk, R7, R8 and R11): one row per local branch, and the views that show it (the
 # handoff note's generated block, `dev status`, `dev overview`, `dev branch ls` and the session-start context line).
+# Branch backups (R1 to R4): `dev backup`, `dev branch embargo` and the automatic backup of `dev sync`. A branch
+# reaches the remote only when the push starts no CI run, fast-forward, off the default branch, without an embargo
+# and after the secret scan; anything else leaves it here with the reason and the fix. (The backup tests live here:
+# the guard reads a file named test_backup.py as a backup copy.)
 #
-# Offline: temporary repositories with a local bare "origin" (the GitHub URL is rewritten to it with insteadOf).
-# devkit's state, handoff repository, audit trail and work items live in a temp folder; nothing reaches a real
-# remote, GitHub or devkit's real state. Run: python3 -m unittest tests.test_branches -v
+# Offline: temporary repositories with a local bare "origin" (the GitHub URL is rewritten to it with insteadOf), and
+# for the backups gh replaced by a runner that answers "no pull request". devkit's state, handoff repository, audit
+# trail and work items live in a temp folder; the audit is the real audit.record. Nothing reaches a real remote,
+# GitHub or devkit's real state. Run: python3 -m unittest tests.test_branches -v
 import argparse
 import contextlib
 import io
 import json
 import os
+import secrets
+import string
 import sys
 import tempfile
 import time
@@ -21,7 +28,7 @@ from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "lib"))
 
-from devkit import audit, branches, canary, cli, core, crew, notes, progress, registry, work  # noqa: E402
+from devkit import audit, backup, branches, canary, cli, core, crew, gitx, notes, pipelines, progress, registry, work  # noqa: E402,E501
 
 GITHUB_URL = "https://github.com/acme/widget.git"
 PID = "acme/widget"
@@ -335,6 +342,237 @@ class ViewTests(Sandbox):
         git(self.repo, "push", "-q", "-u", "origin", "release/x")
         self.write_note("# acme/widget\n")
         self.assertIn("nothing is only on this Mac", branches.context_line(branches.map(self.repo, prs=[])))
+
+
+# --------------------------------------------------------------------------- branch backups (R1 to R4)
+
+CI_PR_AND_MAIN = """name: ci
+on:
+  pull_request:
+  push:
+    branches: [main]
+jobs:
+  test:
+    runs-on: ubuntu-24.04
+    steps:
+      - run: echo test
+"""
+CI_EVERY_PUSH = CI_PR_AND_MAIN.replace("  pull_request:\n  push:\n    branches: [main]\n", "  push:\n")
+CI_DRAFT_GATED = CI_PR_AND_MAIN.replace("    runs-on:", "    if: github.event.pull_request.draft == false\n    runs-on:")
+HAS_GITLEAKS = core.have("gitleaks")
+
+
+class BackupCase(Sandbox):
+    def setUp(self):
+        super().setUp()
+        self.saved_gh = gitx.GH
+        gitx.GH = lambda args, cwd=None, timeout=60: (0, "[]", "")  # GitHub has no pull request for any branch
+        env = mock.patch.dict(os.environ, {"DEVKIT_NO_AUTOSYNC": "1"})
+        env.start()
+        self.addCleanup(env.stop)
+
+    def tearDown(self):
+        gitx.GH = self.saved_gh
+        super().tearDown()
+
+    def ci(self, text):
+        wf = self.repo / ".github" / "workflows"
+        wf.mkdir(parents=True, exist_ok=True)
+        (wf / "ci.yml").write_text(text)
+        git(self.repo, "add", "-A")
+        when = f"@{int(self.now - 47 * HOUR)} +0000"
+        git(self.repo, "commit", "-q", "-m", "ci: add the workflow",
+            env=dict(core.GIT_ENV, GIT_AUTHOR_DATE=when, GIT_COMMITTER_DATE=when))
+        git(self.repo, "push", "-q", "origin", "main")
+
+    def branch(self, name, *ages):
+        git(self.repo, "switch", "-q", "-c", name, "main")
+        return [self.commit(f"feat: add part {k} of {name}", age=age) for k, age in enumerate(ages)]
+
+    def on_origin(self, name):
+        rc, out, _ = core.sh(["git", "-C", str(self.origin), "rev-parse", "--verify", "-q", f"refs/heads/{name}"])
+        return out if rc == 0 else ""
+
+    def dev(self, *argv):
+        os.chdir(self.repo)
+        a = cli.build_parser().parse_args(list(argv))
+        out, err = io.StringIO(), io.StringIO()
+        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+            rc = a.fn(a)
+        return rc, " ".join((out.getvalue() + err.getvalue()).split())
+
+    def project(self):
+        p = registry.inspect_repo(self.repo, with_prs=False)
+        p.update(prs_known=True, prs_open=[])  # as the registry has them when gh answers
+        return p
+
+    def records(self, action):
+        out = []
+        for f in sorted(Path(audit.AUDIT).glob("*.jsonl")):
+            out += [r for r in map(json.loads, f.read_text().splitlines()) if r.get("action") == action]
+        return out
+
+
+@unittest.skipUnless(HAS_GITLEAKS, "the secret scan needs gitleaks")
+class SyncBackupTests(BackupCase):
+    def test_sync_backs_up_a_branch_older_than_after_minutes_and_audits_it(self):
+        self.ci(CI_PR_AND_MAIN)
+        tip = self.branch("feat/report", 2 * HOUR, HOUR)[-1]
+        p = self.project()
+        self.assertEqual({r["name"]: r["backup"]["state"] for r in p["branches"]}["feat/report"], "not_backed_up")
+        done = backup.sync({"projects": [p]})
+        self.assertEqual([(r["branch"], r["state"]) for r in done], [("feat/report", "pushed")])
+        self.assertEqual(self.on_origin("feat/report"), tip)
+        self.assertEqual(git(self.repo, "rev-parse", "--abbrev-ref", "feat/report@{u}"), "origin/feat/report")
+        rec = self.records("git.backup")[-1]
+        self.assertEqual((rec["project"], rec["branch"], rec["target"], rec["outcome"]),
+                         (PID, "feat/report", "origin/feat/report", "ok"))
+        self.assertIn(f"..{tip[:12]} (2 commits)", rec["detail"])
+        self.assertEqual({r["name"]: r["backup"]["state"] for r in p["branches"]}["feat/report"], "backed_up")
+
+    def test_sync_pushes_only_the_commits_older_than_after_minutes(self):
+        self.ci(CI_PR_AND_MAIN)
+        old, _ = self.branch("feat/fresh", 2 * HOUR, 5 * 60)
+        backup.sync({"projects": [self.project()]})
+        self.assertEqual(self.on_origin("feat/fresh"), old)
+        row = {r["name"]: r for r in branches.map(self.repo, prs=[])}["feat/fresh"]
+        self.assertEqual((row["unpushed"], row["backup"]["state"]), (1, "waiting"))
+
+    def test_backup_auto_false_turns_the_sync_backup_off(self):
+        self.ci(CI_PR_AND_MAIN)
+        self.branch("feat/report", 2 * HOUR)
+        core.CFG["backup"] = {"auto": False}
+        self.assertEqual(backup.sync({"projects": [self.project()]}), [])
+        self.assertEqual(self.on_origin("feat/report"), "")
+
+    def test_an_embargo_keeps_the_branch_and_the_branches_inside_it_off_the_remote(self):
+        self.ci(CI_PR_AND_MAIN)
+        first = self.branch("release/x", 3 * HOUR, 2 * HOUR)[0]
+        git(self.repo, "branch", "feat/inside", first)
+        rc, out = self.dev("branch", "embargo", "release/x", "--why", "keeps the guard fix off the public remote",
+                           "--until", "guard refusal rules")
+        self.assertEqual(rc, 0, out)
+        rec = notes.embargoes(core.note_path(PID).read_text())[0]
+        self.assertEqual((rec["branch"], rec["why"], rec["until"]),
+                         ("release/x", "keeps the guard fix off the public remote", "guard refusal rules"))
+        self.assertEqual(backup.sync({"projects": [self.project()]}), [])  # the map says why: no backup takes it
+        self.assertEqual(self.on_origin("release/x"), "")
+        rows = {r["name"]: r for r in branches.map(self.repo, prs=[])}
+        self.assertIn('not backed up: embargoed until "guard refusal rules"', branches.describe(rows["release/x"]))
+        self.assertIn("held by the embargo on release/x", branches.describe(rows["feat/inside"]))
+        rc, out = self.dev("backup", "feat/inside")
+        self.assertEqual(rc, 1)
+        self.assertIn('its commits are in release/x, which is embargoed until "guard refusal rules"', out)
+        self.assertEqual(self.on_origin("feat/inside"), "")
+        rc, out = self.dev("branch", "embargo", "--lift", "release/x")
+        self.assertEqual((rc, branches.embargoes(PID)), (0, {}))
+        self.assertEqual([r["detail"][:4] for r in self.records("git.embargo")], ["set:", "lift"])
+        self.assertEqual(self.dev("backup", "feat/inside")[0], 0)
+        self.assertEqual(self.on_origin("feat/inside"), first)
+
+
+@unittest.skipUnless(HAS_GITLEAKS, "the secret scan needs gitleaks")
+class BackupCommandTests(BackupCase):
+    def test_a_push_that_starts_ci_is_not_made_and_the_message_says_both_ways_forward(self):
+        self.ci(CI_EVERY_PUSH)
+        tip = self.branch("feat/x", HOUR)[-1]
+        rc, out = self.dev("backup")
+        self.assertEqual(rc, 1)
+        self.assertIn("feat/x not backed up: a push to this branch starts CI (ci.yml runs on every push)", out)
+        self.assertIn("dev backup --accept-ci feat/x", out)
+        self.assertIn("branches-ignore", out)
+        self.assertEqual(self.on_origin("feat/x"), "")
+        skipped = self.records("git.backup-skipped")[-1]
+        self.assertEqual((skipped["branch"], skipped["outcome"]), ("feat/x", "recorded"))
+        rc, out = self.dev("backup", "--accept-ci")
+        self.assertEqual(rc, 0, out)
+        self.assertEqual(self.on_origin("feat/x"), tip)
+        budget = json.loads((core.STATE / "ci-pushes.json").read_text())
+        self.assertEqual([len(v) for k, v in budget.items() if k.endswith("|feat/x")], [1])
+
+    def test_a_diverged_remote_stops_the_backup_with_the_commands(self):
+        self.ci(CI_PR_AND_MAIN)
+        self.branch("feat/x", 2 * HOUR)
+        git(self.repo, "push", "-q", "-u", "origin", "feat/x")
+        other = self.root / "other"
+        git(self.root, "clone", "-q", "-b", "feat/x", str(self.origin), str(other))
+        theirs = self.commit("feat: add their part", repo=other)
+        git(other, "push", "-q", "origin", "feat/x")
+        self.commit("feat: add my part", age=HOUR)
+        rc, out = self.dev("backup")
+        self.assertEqual(rc, 1)
+        self.assertIn("origin/feat/x has diverged from feat/x", out)
+        self.assertIn("git rebase origin/feat/x", out)
+        self.assertIn("dev push --force-with-lease", out)
+        self.assertEqual(self.on_origin("feat/x"), theirs)
+
+    def test_the_default_branch_and_commits_with_a_secret_stay_here(self):
+        self.ci(CI_PR_AND_MAIN)
+        self.commit("fix: commit straight on main")
+        rc, out = self.dev("backup", "main")
+        self.assertEqual(rc, 1)
+        self.assertIn("main is the default branch, which is never backed up", out)
+        git(self.repo, "switch", "-q", "-c", "feat/key", "main")
+        token = "ghp_" + "".join(secrets.choice(string.ascii_letters + string.digits) for _ in range(36))
+        (self.repo / "settings.py").write_text(f'GITHUB_TOKEN = "{token}"\n')
+        git(self.repo, "add", "-A")
+        git(self.repo, "commit", "-q", "-m", "feat: read the settings")
+        rc, out = self.dev("backup")
+        self.assertEqual(rc, 1)
+        self.assertIn("feat/key not backed up: the secret scan found 1 finding(s)", out)
+        self.assertNotIn(token, out)
+        self.assertEqual(self.on_origin("feat/key"), "")
+
+    def test_a_draft_pull_request_takes_a_backup_only_when_its_jobs_skip_drafts(self):
+        draft = [{"headRefName": "feat/d", "number": 7, "isDraft": True, "state": "OPEN"}]
+        self.ci(CI_PR_AND_MAIN)
+        self.branch("feat/d", HOUR)
+        res = backup.run(self.repo, ["feat/d"], prs=draft, prs_known=True)[0]
+        self.assertEqual((res["state"], res["reason"]),
+                         ("skipped", "a push to this branch starts CI (ci.yml runs on draft PR #7)"))
+        git(self.repo, "switch", "-q", "main")
+        self.ci(CI_DRAFT_GATED)
+        git(self.repo, "switch", "-q", "feat/d")
+        git(self.repo, "rebase", "-q", "main")
+        res = backup.run(self.repo, ["feat/d"], prs=draft, prs_known=True)[0]
+        self.assertEqual((res["state"], res["reason"]), ("pushed", "ci.yml skips every job on draft PR #7"))
+        self.assertEqual(backup.run(self.repo, ["feat/d"], prs=[], prs_known=False)[0]["state"], "nothing")
+
+    def test_a_security_fix_on_a_public_repository_waits_for_an_embargo_or_public(self):
+        self.ci(CI_PR_AND_MAIN)
+        git(self.repo, "switch", "-q", "-c", "fix/hole", "main")
+        tip = self.commit("fix(security): close the path traversal in the upload handler")
+        with mock.patch.object(pipelines, "_visibility", return_value="public"):
+            rc, out = self.dev("backup")
+            self.assertEqual(rc, 1)
+            self.assertIn("it may carry a security fix", out)
+            self.assertIn("dev branch embargo fix/hole", out)
+            self.assertEqual(self.on_origin("fix/hole"), "")
+            self.assertEqual(self.dev("backup", "--public")[0], 0)
+        self.assertEqual(self.on_origin("fix/hole"), tip)
+
+
+class BackupWithoutScannerTests(BackupCase):
+    def test_no_gitleaks_means_no_push(self):
+        self.ci(CI_PR_AND_MAIN)
+        self.branch("feat/x", HOUR)
+        with mock.patch.object(core, "have", side_effect=lambda tool: tool != "gitleaks"):
+            res = backup.run(self.repo, ["feat/x"], prs=[], prs_known=True)[0]
+        self.assertEqual(res["state"], "skipped")
+        self.assertIn("needs gitleaks", res["reason"])
+        self.assertEqual(self.on_origin("feat/x"), "")
+
+
+class TaskBranchTests(BackupCase):
+    def test_task_start_links_the_branch_it_runs_on(self):
+        self.branch("feat/report", HOUR)
+        it = work.create(PID, "Ship the report", why="the developer asked")
+        os.chdir(self.repo)  # `dev task start` claims with the branch of the checkout it runs in
+        self.assertEqual((cli._task_branch(PID), cli._task_branch("acme/other")), ("feat/report", ""))
+        work.claim(it, branch=cli._task_branch(PID))
+        self.assertIn("branch:feat/report", work.load(it["path"])["meta"]["links"])
+        rows = {r["name"]: r for r in branches.map(self.repo, prs=[])}
+        self.assertEqual(rows["feat/report"]["task"]["id"], it["meta"]["id"])
 
 
 if __name__ == "__main__":

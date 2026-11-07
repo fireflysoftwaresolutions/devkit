@@ -85,6 +85,7 @@ COMMANDS = [
     ("Tracking and disk", [
         ("canary", "How often Claude/Codex replies carried the “[Firefly> DevKit]” instruction marker"),
         ("sync", "Refresh the projects map and handoff notes, commit and push the handoff repo"),
+        ("backup [<branch>…] [--all]", "Copy branches with commits only on this Mac to the remote (no CI run)"),
         ("du [<name>] [--plan|--refresh]", "What fills your disk, why, and the plan to free it safely"),
         ("free [<n>…|--safe]", "Free items of the dev du plan: asks first, refuses work not committed or pushed"),
     ]),
@@ -904,9 +905,9 @@ def cmd_status(a):
 
 def cmd_branch(a):
     """`dev branch ls` is the branch map (branches.py, spec P-fy3bwa0pshk R7); new, rename and clean stay in gitx."""
-    if getattr(a, "branch_cmd", None) == "ls":
+    if getattr(a, "branch_cmd", None) in ("ls", "embargo"):
         from . import branches as branchmap
-        return branchmap.cmd_ls(a)
+        return branchmap.cmd_ls(a) if a.branch_cmd == "ls" else branchmap.cmd_embargo(a)
     from . import gitx
     return gitx.cmd_branch(a)
 
@@ -1261,6 +1262,13 @@ def cmd_sync(a):
         except Exception as e:
             if not a.quiet:
                 ui.warn(f"sleep: {e}")
+        if (a.scheduled or a.finish) and not a.offline and not a.no_push:
+            try:  # back up the branches whose commits exist only on this Mac (spec P-fy3bwa0pshk R4)
+                from . import backup
+                backup.sync(reg, quiet=a.quiet)
+            except Exception as e:  # never let a backup break the sync
+                if not a.quiet:
+                    ui.warn(f"backup: {e}")
         try:
             from . import work
             if a.renew:
@@ -1787,6 +1795,18 @@ def delegate_message(it: dict, who: str, why: str, label: str) -> str:
     return "\n".join(lines)
 
 
+def _task_branch(scope: str) -> str:
+    """The branch checked out here when it belongs to the task's project and is not a permanent one: `dev task start`
+    links it (`branch:<name>`), so the branch map finds the task without its id in the branch name."""
+    top = core.gitout(os.getcwd(), "rev-parse", "--show-toplevel")
+    branch = core.gitout(top, "branch", "--show-current") if top else ""
+    if not branch or branch in ("main", "master", "develop", "trunk", "gh-pages"):
+        return ""
+    main = registry.main_of(Path(top)) or Path(top)
+    pid = core.project_identity(main, core.gitout(top, "config", "--get", "remote.origin.url"))[0]
+    return branch if pid == scope and branch != registry.default_branch(main) else ""
+
+
 def cmd_task(a):
     from . import work
     scope, label = _scope(a)
@@ -1801,10 +1821,10 @@ def cmd_task(a):
             if "_" in body and not a.body:
                 print(ui.dim(f"  fill in the description: dev task edit {it['meta']['id']} --body-file <file> --why \"…\""))
             if a.claim:
-                work.claim(it, why=a.why or "")
+                work.claim(it, why=a.why or "", branch=_task_branch(scope))
                 print(f"{ui.OK} claimed by you")
         elif act in ("start", "claim"):
-            it = work.claim(work.find(" ".join(a.selector), scope), why=a.why or "")
+            it = work.claim(work.find(" ".join(a.selector), scope), why=a.why or "", branch=_task_branch(scope))
             print(f"{ui.OK} {it['meta']['id']} claimed until {it['meta']['lock_expires']} — others see it as yours")
         elif act == "release":
             it = work.release(work.find(" ".join(a.selector), scope), why=a.why or "", status="todo")
@@ -3391,6 +3411,15 @@ def build_parser():
     w.add_argument("--all", action="store_true")
     w = wsp.add_parser("rm", help="remove a worktree safely")
     w.add_argument("target", help="branch name or path")
+    from . import backup
+    p = add("backup", backup.cmd_backup, "Copy branches whose commits exist only on this Mac to the remote, when the "
+            "push starts no CI run")
+    p.add_argument("branches", nargs="*", help="the branches (default: the current one)")
+    p.add_argument("--all", action="store_true", help="every local branch with commits only on this Mac")
+    p.add_argument("--accept-ci", action="store_true", help="push although the push starts (or may start) CI")
+    p.add_argument("--public", action="store_true", help="push a branch that looks like a security fix anyway")
+    p.add_argument("--dry-run", action="store_true", help="every check, no push")
+    p.add_argument("--json", action="store_true")
     p = add("sync", cmd_sync, "Refresh map + notes, commit and push")
     p.add_argument("--session", help=argparse.SUPPRESS)
     p.add_argument("--finish", action="store_true", help=argparse.SUPPRESS)

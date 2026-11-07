@@ -235,7 +235,7 @@ of the title. See [Teams and machines](teams.md) for locks, versions, and the ch
 | Verb | Effect |
 | --- | --- |
 | `add <title> [options]` | Creates a work item (see the next table) |
-| `start <selector> [--why]` | Claims the lock (8 hours by default), pushes it at once, and moves a todo item to Now as doing |
+| `start <selector> [--why]` | Claims the lock (8 hours by default), pushes it at once, and moves a todo item to Now as doing. Run in the project's checkout on a work branch, it links the branch (`branch:<name>` in the item's links, in the private handoff), so the branch map shows the task without its id in the branch name |
 | `claim <selector> [--why]` | Same as `start` |
 | `release <selector> [--why]` | Gives the lock back; the item returns to todo |
 | `done <selector> [--why]` | Marks the item done and releases the lock |
@@ -682,7 +682,7 @@ command prints one line or a short table, and a refusal exits with `2` with the 
 [Git and GitHub](git-and-github.md). `dev pr`, `dev run view`, `dev run rerun`, `dev issue`, and the release page
 of `dev release` need GitHub (or a host listed in `gitx.github_hosts`).
 
-### `dev branch new | rename | ls | clean`
+### `dev branch new | rename | ls | clean | embargo`
 
 | Command | Effect |
 | --- | --- |
@@ -690,6 +690,8 @@ of `dev release` need GitHub (or a host listed in `gitx.github_hosts`).
 | `dev branch rename <type>/<topic> [--ticket KEY]` | Renames the current branch before its first push (or names a detached HEAD); refuses permanent branches and branches already on `origin` |
 | `dev branch ls [--offline] [--json]` | The branch map: every local branch, where it lives (local only, or local and its remote), ahead and behind its upstream and `origin/<default>`, the branch that has its commits (`merged into …`), its last backup or why it is not backed up, its embargo, worktree, PR (draft or ready, checks) and linked task. `--offline` uses the cached PR list; `--json` prints the rows (below) |
 | `dev branch clean [--apply] [--offline] [--json]` | The local branches that are merged, whose PR was merged, or that are gone upstream with every commit on the remote; deleted only with `--apply` |
+| `dev branch embargo <branch> --why "…" [--until "<step or date>"]` | Keeps the branch off the remote: `dev backup` and `dev sync` never push it, nor a branch that holds any of its commits. Stored in the `embargo:` list of the handoff note's metadata (with who and when), so every machine sees it; audited as `git.embargo`. Every branch view shows it. Without a branch, lists the embargoes (`--json` too) |
+| `dev branch embargo --lift <branch>` | Ends the embargo; the next backup may push the branch |
 
 The same rows feed the handoff note's generated block (one line per branch, with dates instead of "4 min ago"),
 `dev status`, `dev overview`, the session-start context and the dashboard, and `registry.json` keeps them as
@@ -705,10 +707,46 @@ The same rows feed the handoff note's generated block (one line per branch, with
 | `merged_into` | The branch that has every commit of this one, or `null` |
 | `last_backup` | The newest `git.backup` audit record for the branch, or `null` |
 | `embargo` | `{why, until, who, when}` from the `embargo:` list of the handoff note's metadata, or `null` |
+| `embargo_via` | The embargoed branch that carries this branch's commits (it is merged into it), or `null` |
 | `worktree`, `worktree_missing`, `changes`, `session` | The linked worktree that has it checked out, its uncommitted files, a live session |
 | `pr` | `{number, state, draft, checks, url, title}`, or `null` |
 | `task` | The work item that links `branch:<name>`, or whose id is part of the name: `{id, title, status}`, or `null` |
 | `backup` | `{state, reason}`; `state` is `backed_up`, `on_remote`, `merged`, `waiting`, `not_backed_up`, `embargoed` or `no_remote` |
+
+### `dev backup [<branch>…] [--all] [--accept-ci] [--public] [--dry-run] [--json]`
+
+Copies the commits that exist only on this Mac to the remote, under the same branch name, when that push starts no
+CI run. Without a branch it takes the current one; `--all` takes every local branch with commits on no remote. The
+push is fast-forward only and never forced, and it happens only when every check holds, in this order:
+
+1. Not the default branch, and a name that follows the branch naming rule.
+2. No embargo on the branch, nor on a branch that holds any of the same commits (a merged branch defers to the branch
+   that carries its commits).
+3. The remote branch is not ahead or diverged. A diverged branch stops with the commands to resolve it
+   (`git fetch`, `git log --left-right`, `git rebase origin/<branch>`, or `dev push --force-with-lease` on your own
+   branch).
+4. No WIP commit, and on a public repository no commit that reads as a security fix (a `security` scope, a CVE, a
+   red-team test): devkit suggests `dev branch embargo` first, and `--public` pushes it anyway.
+5. The CI configuration of the commit it sends shows that the push starts no CI run. It reads the GitHub Actions
+   `push` branches, `branches-ignore`, tags and paths filters, the pull request of the branch (a draft whose jobs
+   skip drafts starts none), and the jobs' `if:`; GitLab rules, Bitbucket `default` and `branches`, Azure `trigger` and `pr`. CI that
+   devkit cannot read (Jenkins, CircleCI, Netlify and others) means it cannot tell, and it does not push.
+   `--accept-ci` pushes anyway, and that push counts against the push budget.
+6. Last, the secret scan (gitleaks) passes on exactly the commits it sends; without gitleaks nothing is pushed.
+
+Each push is audited as `git.backup` (branch, remote, commit range) and each skip as `git.backup-skipped` with its
+reason, which the branch map shows as the reason a branch is not backed up. `dev sync` runs the same backup
+by itself (below), but only for commits older than `backup.after_minutes`.
+
+```text
+✓ feat/report → origin: 2 commits (5f0c1d2e3a4b..9a8b7c6d5e4f) · ci.yml runs on pull requests and pushes to main
+! feat/x not backed up: a push to this branch starts CI (ci.yml runs on every push)
+    dev backup --accept-ci feat/x   (push anyway: one CI run)
+    add feat/x (or a pattern for it) to `branches-ignore` in ci.yml
+```
+
+Exit codes: `1` when a branch was not backed up because a check failed, `0` otherwise (pushed, or nothing to back
+up).
 
 ### `dev commit -m "type(scope): summary" [options] [<paths>…]`
 
@@ -993,8 +1031,11 @@ surface (terminal, Claude Desktop, ChatGPT app) when sessions ran on more than o
 
 Rebuilds the projects map (`PROJECTS.md`, `TASKS.md`, `ACTIVITY.md`, `registry.json`), the generated blocks of the
 handoff notes, this machine's presence file and the dashboard, then commits and pushes the handoff repository when
-something changed. A push that is rejected because another machine pushed first is rebased and tried once more; a
-push that still fails is recorded in the audit trail and shown in "Needs attention" until a push succeeds.
+something changed. Hourly (`--scheduled`) and at the end of a session, it first backs up every project's branches
+that the branch map shows as not backed up, with the checks of `dev backup` and only the commits older than
+`backup.after_minutes` (default 30: a younger commit may still be amended); `backup.auto: false` turns that off, and
+`--offline` or `--no-push` skip it. A push that is rejected because another machine pushed first is rebased and
+tried once more; a push that still fails is recorded in the audit trail and shown in "Needs attention" until a push succeeds.
 
 You rarely need to run it: devkit queues a background sync within seconds of every commit, push, merge, tag, PR,
 release, and handoff change (see [Teams and machines › Near-real-time sync](teams.md#near-real-time-sync)), and the

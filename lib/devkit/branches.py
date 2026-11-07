@@ -19,6 +19,7 @@ A row (`dev branch ls --json` prints the list; `registry.json` keeps it as `proj
     merged_into                                             a branch that has every commit of this one, or null
     last_backup                                             unix time of the newest git.backup record, or null
     embargo                                                 {why, until, who, when} or null
+    embargo_via                                             the embargoed branch that carries its commits, or null
     worktree, worktree_missing                              the linked worktree that has it checked out
     changes, session                                        {modified, untracked} and a live session, when known
     pr                                                      {number, state, draft, checks, url, title} or null
@@ -391,6 +392,8 @@ def map(repo, prs=None, offline=False, now=None, pid=None, default=None, current
         rec = done.get(r["name"]) or {}
         r["last_backup"] = rec.get("backup")
         r["embargo"] = held.get(r["name"])
+        # a merged branch defers to the branch that carries its commits, and so does that branch's embargo
+        r["embargo_via"] = r["merged_into"] if not r["embargo"] and r["unpushed"] and r["merged_into"] in held else None
         r["task"] = tasks.get(r["name"])
         r["pr"] = _pr_row(prs, r["name"]) if prs else None
         r["backup"] = _backup_state(r, bool(remotes), after, now, rec.get("skipped"))
@@ -489,6 +492,8 @@ def describe(r: dict, now=None, absolute=False) -> str:
     emb = r.get("embargo")
     if emb and st != "embargoed":
         parts.append(f'embargoed until "{emb["until"]}"' if emb.get("until") else "embargoed")
+    if r.get("embargo_via"):
+        parts.append(f"held by the embargo on {r['embargo_via']}")
     pr = r.get("pr")
     if pr:
         state = "draft" if pr.get("state") == "open" and pr.get("draft") else pr.get("state")
@@ -636,3 +641,114 @@ def cmd_ls(a) -> int:
     print("\n".join(ls_lines(rows, title=head)))
     print("  " + ui.dim(f"Backups wait for commits older than {after_minutes()} min (backup.after_minutes)."))
     return 0
+
+
+# --------------------------------------------------------------------------- dev branch embargo (R3)
+
+
+def set_embargo(pid: str, branch: str, why: str = "", until: str = "", who: str = "", lift: bool = False):
+    """Write a branch's embargo into the project's handoff note metadata (`embargo:`), or lift it -> the record set,
+    or with `lift` the one removed (None when there was none). Every machine reads the same note."""
+    f = core.note_path(pid)
+    with core.Lock("notes", wait=30):
+        text = f.read_text() if f.exists() else notes.new_note(pid)
+        meta, body = notes.split_frontmatter(text)
+        recs = [r for r in (meta.get("embargo") or []) if isinstance(r, dict) and r.get("branch")]
+        old = next((r for r in recs if r["branch"] == branch), None)
+        recs = [r for r in recs if r["branch"] != branch]
+        rec = None
+        if not lift:
+            rec = {"branch": branch, "why": why}
+            if until:
+                rec["until"] = until
+            rec.update(who=who, when=time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()))
+            recs.append(rec)
+        if recs:
+            meta["embargo"] = recs
+        else:
+            meta.pop("embargo", None)
+        f.parent.mkdir(parents=True, exist_ok=True)
+        core.write_if_changed(f, notes.set_meta(notes.render_frontmatter(meta) + body.lstrip("\n")))
+    return old if lift else rec
+
+
+def _actor() -> str:
+    """Who sets an embargo: the crew member whose lane runs the command, else the developer."""
+    try:
+        from . import audit
+        member = ((audit.context() or {}).get("crew") or {}).get("member")
+        if member:
+            return member
+    except Exception:
+        pass
+    from . import work
+    return work.actor()["user"]
+
+
+def cmd_embargo(a) -> int:
+    """`dev branch embargo [<branch> --why "…" [--until "…"]] | --lift <branch>`: no branch lists the embargoes."""
+    top = core.gitout(os.getcwd(), "rev-parse", "--show-toplevel")
+    if not top:
+        print(f"{ui.WARN} not inside a git repository", file=sys.stderr)
+        return 2
+    from . import audit, registry
+    main = registry.main_of(Path(top)) or Path(top)
+    pid = core.project_identity(main, core.gitout(top, "config", "--get", "remote.origin.url"))[0]
+    held = embargoes(pid)
+    b = (a.branch or "").strip()
+    if not b:
+        if a.lift:
+            print(f'{ui.WARN} name the branch: dev branch embargo --lift <branch>', file=sys.stderr)
+            return 2
+        if getattr(a, "json", False):
+            print(json.dumps([{"branch": k, **v} for k, v in held.items()], indent=2, ensure_ascii=False))
+        elif not held:
+            print(f"{ui.INFO} {pid}: no embargoed branch")
+        else:
+            for k, v in held.items():
+                print(f"  {k}" + (f' until "{v["until"]}"' if v.get("until") else "") + ui.dim(
+                    f" · {who(v['who'])}" if v.get("who") else "") + ui.dim(f" · {v['why']}" if v.get("why") else ""))
+        return 0
+    if a.lift:
+        old = set_embargo(pid, b, lift=True)
+        if not old:
+            print(f"{ui.INFO} {b} has no embargo")
+            return 0
+        audit.record("git.embargo", b, "lifted" + (f" (it was: {old.get('why')})" if old.get("why") else ""), "ok",
+                     project=pid, branch=b, category="security", severity="notice")
+        _share(b)
+        print(f"{ui.OK} {b}: embargo lifted · the next backup may push it (dev backup {b})")
+        return 0
+    why = (a.why or "").strip()
+    if not why:
+        print(f'{ui.WARN} an embargo needs its reason: dev branch embargo {b} --why "…" [--until "<step or date>"]',
+              file=sys.stderr)
+        return 2
+    default = registry.default_branch(main) if core.gitout(top, "remote") else ""
+    if b == default:
+        print(f"{ui.WARN} {b} is the default branch, which a backup never pushes", file=sys.stderr)
+        return 2
+    until = (a.until or "").strip()
+    set_embargo(pid, b, why, until, _actor())
+    audit.record("git.embargo", b, f"set: {why}" + (f' (until "{until}")' if until else ""), "ok", project=pid,
+                 branch=b, category="security", severity="notice")
+    _share(b)
+    on_remote = [x for x in core.gitout(top, "for-each-ref", "--format=%(refname:short)",
+                                        f"refs/remotes/*/{b}").splitlines() if x]
+    print(f"{ui.OK} {b} is embargoed" + (f' until "{until}"' if until else "") + ": dev backup and dev sync never "
+          f"push it · lift it: dev branch embargo --lift {b}")
+    if not core.gitout(top, "rev-parse", "--verify", "-q", f"refs/heads/{b}"):
+        print(f"  {ui.dim('there is no local branch ' + b + ' yet: the embargo waits for it')}")
+    if on_remote:
+        print(f"  {ui.WARN} {on_remote[0]} exists already: the embargo keeps new commits off it, what is there is "
+              f"public")
+    return 0
+
+
+def _share(branch: str) -> None:
+    """Commit and push the handoff note soon, so every machine sees the embargo before its next backup."""
+    try:
+        from . import work
+        work.request_sync(f"embargo {branch}")
+    except Exception:
+        pass

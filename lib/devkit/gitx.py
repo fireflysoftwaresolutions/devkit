@@ -2892,6 +2892,7 @@ def cmd_gh(a) -> int:
 COMMAND_NAMES = ("branch", "commit", "rebase", "push", "pr", "run", "release", "issue", "git", "gh")
 HELP = ("Git and GitHub", [
     ("branch new|rename|ls|clean", "Branches from an up-to-date origin/<default>, named by the standard"),
+    ("branch embargo <branch> --why …", "Keep a branch off the remote; dev backup and dev sync never push it"),
     ("commit -m \"type(scope): …\"", "Conventional Commit (-a, paths, --amend); --wip/--unwip instead of a stash"),
     ("rebase [--continue|--abort]", "Fetch and rebase on origin/<default>, with a conflict report"),
     ("push [--force-with-lease]", "One push: local-CI evidence, budget, no default branch, URL of the PR"),
@@ -2909,8 +2910,8 @@ def _lang_arg(p):
 
 def register(add):
     """Add the git/GitHub commands. `add(name, fn, help)` returns an argparse subparser; handlers return exit codes."""
-    p = add("branch", cmd_branch, "Branches: new (from an up-to-date origin/<default>) · rename · ls · clean")
-    sp = p.add_subparsers(dest="branch_cmd", metavar="new|rename|ls|clean")
+    p = add("branch", cmd_branch, "Branches: new (from an up-to-date origin/<default>) · rename · ls · clean · embargo")
+    sp = p.add_subparsers(dest="branch_cmd", metavar="new|rename|ls|clean|embargo")
     sp.required = True
     q = sp.add_parser("new", help="create <type>/<topic> from an up-to-date origin/<default> and switch to it")
     q.add_argument("name", help="<type>/<topic>, e.g. feat/invoice-export")
@@ -2926,6 +2927,12 @@ def register(add):
         q.add_argument("--json", action="store_true")
         if name == "clean":
             q.add_argument("--apply", action="store_true", help="delete them")
+    q = sp.add_parser("embargo", help="keep a branch off the remote: a backup never pushes it (no branch: the list)")
+    q.add_argument("branch", nargs="?", help="the branch (default with --lift: none; without a branch: list them)")
+    q.add_argument("--why", help="why it stays off the remote (required to set one)")
+    q.add_argument("--until", help="the step or date after which it may be public")
+    q.add_argument("--lift", action="store_true", help="end the embargo of the branch")
+    q.add_argument("--json", action="store_true")
 
     p = add("commit", cmd_commit, "Conventional Commit of the staged changes, -a (tracked) or the given paths")
     p.add_argument("-m", "--message", action="append", help="header `type(scope): summary`; more -m add paragraphs")

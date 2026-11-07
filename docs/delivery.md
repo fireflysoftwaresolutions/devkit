@@ -122,6 +122,36 @@ description](templates.md#pull-request-description): what and why, changes, how 
 risk and rollback, links. `dev pr create` fills the changes, the local CI result, and the links, and refuses a PR
 whose "What and why" or "How to verify" is still empty. The title is a Conventional Commit.
 
+### Back up early, CI once
+
+"Push once" protects CI time, not your work: a commit that exists only on this Mac is lost with the disk. Back up
+as you go whenever that costs no CI run, open the PR early as a draft, and mark it ready once:
+
+```bash
+dev backup               # the branch to origin, only when the push starts no CI run (fast-forward, scanned)
+dev pr create --draft    # visible early; a draft runs no job when ci.yml has the draft gate
+dev pr ready             # the one CI run: marking it ready starts it, with local CI evidence for HEAD
+```
+
+`dev backup` reads the CI configuration of the commit it would send and pushes only when it shows that the push
+starts no run: in this repository, `ci.yml` runs on pull requests and pushes to `main`, so a branch push is free.
+When the push would start CI, or devkit cannot tell, it does not push and says why and what to do
+(`dev backup --accept-ci`, or a `branches-ignore` entry). It never pushes the default branch, never forces, stops at
+a diverged remote branch with the commands to resolve it, and runs the secret scan on the commits it sends.
+`dev sync` does the same every hour and at the end of a session, for commits older than `backup.after_minutes`
+(30 by default; `backup.auto: false` turns it off). The branch map (`dev branch ls`, `dev status`, the handoff note)
+shows each branch's last backup, or why it is not backed up.
+
+A branch that must stay off a public remote, such as an unreleased security fix, gets an embargo:
+`dev branch embargo fix/x --why "discloses an open hole" --until "the guard release"`. No backup pushes it, nor a
+branch that holds its commits, until `dev branch embargo --lift fix/x`. On a public repository, devkit suggests an
+embargo when a branch's commits read as a security fix.
+
+`dev ci init` writes the draft gate, and `dev ci audit --fix` adds it to an existing workflow:
+`types: [opened, synchronize, reopened, ready_for_review]` on `pull_request` and
+`if: github.event.pull_request.draft == false` on the jobs. With `delivery.draft_pr` on, `dev pr create` opens
+drafts by default (`--ready` for a PR that is ready now).
+
 ## 3. Branches or PRs that land together
 
 ```bash
