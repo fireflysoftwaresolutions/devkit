@@ -875,6 +875,8 @@ class ChangeCommandTests(unittest.TestCase):
         rec = audit.records(days=1, action="ext.disable")[-1]
         self.assertEqual((rec["target"], rec.get("why")), ("plugin:claude:commit-commands@claude-plugins-official",
                                                            "I commit with dev commit"))
+        # a change to what runs is a security event, kept at every audit level, with the layer it changed
+        self.assertEqual((rec["category"], (rec.get("ref") or {}).get("layer")), ("security", "user"))
 
     def test_a_required_extension_cannot_be_disabled_or_removed(self):
         for verb in ("disable", "remove"):

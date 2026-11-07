@@ -367,6 +367,8 @@ ACTIONS = {
     "handoff": ("data", "info"),
     "job": ("job", "info"), "jobs": ("config", "notice"), "ci.watch": ("job", "info"), "ops": ("job", "info"),
     "state": ("lifecycle", "warning"), "install": ("lifecycle", "notice"),
+    # dev ext: a change to the plugins, skills and MCP servers that run (supply chain), and drift found
+    "ext": ("security", "notice"), "ext.drift": ("security", "warning"),
     "caller": ("security", "warning"), "caller.unverified": ("security", "notice"),
     "calls": ("lifecycle", "notice"), "progress": ("decision", "notice"), "session": ("lifecycle", "info"),
     "run": ("lifecycle", "notice"),  # a run orphaned by its ended session, or taken back by its resumed one
@@ -394,6 +396,7 @@ EXTRAS = {
     # the decision's options, read by build to keep an answer that names one; crew.decision and crew.decided keep
     # them as ref.options, crew.evidence never stores them
     "options": "",
+    "layer": "ref.layer",  # dev ext: the layer a change or drift is in (team, user, project, retired)
 }
 RAISE = {"tampered": "critical"}  # a caller's outcome word that makes the record more severe
 EVIDENCE_KEYS = {p.split(".", 1)[1] for p in EXTRAS.values() if p.startswith("evidence.")}
