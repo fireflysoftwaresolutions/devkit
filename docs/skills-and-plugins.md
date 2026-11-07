@@ -190,7 +190,8 @@ linked. Fix the cause that the line names, then run `dev install --only skills` 
 fix that path's owner or permissions, or move away a folder that sits where the engine goes.
 
 Claude Code sessions set `IMPECCABLE_NO_UPDATE_CHECK=1`, so the engine does not check the network for a newer
-version; devkit moves impeccable by its pinned commit instead (below).
+version (devkit moves impeccable by its pinned commit instead, below), and `IMPECCABLE_NO_TELEMETRY=1`, so it sends
+no telemetry.
 
 Crew members on Claude Code run the launcher too. Read as a script, it would run a program named only at run time,
 which the [guard](guard.md) refuses to crew members. The guard therefore trusts only an absolute or `~/` path to the

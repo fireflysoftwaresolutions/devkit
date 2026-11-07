@@ -18,7 +18,8 @@ Not released yet: the date is set when the release is tagged.
   `engine-checksums.txt`, and puts it beside the launcher, so `impeccable context` no longer downloads code inside an
   agent session (0.02 s once warm). A mismatch, a failed download, or a file error (a folder it cannot write)
   installs nothing, is audited, and does not stop the rest of the install: the other skills are still linked. Claude
-  Code sessions set `IMPECCABLE_NO_UPDATE_CHECK=1`, so the engine does not check the network for a newer version.
+  Code sessions set `IMPECCABLE_NO_UPDATE_CHECK=1` and `IMPECCABLE_NO_TELEMETRY=1`, so the engine neither checks the
+  network for a newer version nor sends telemetry.
   See [Skills and plugins › impeccable and its engine](docs/skills-and-plugins.md#impeccable-and-its-engine).
 - **`dev doctor` checks impeccable:** the skill linked for Claude Code, its engine present with the pinned digest, and
   the Codex plugin enabled, each with its fix.

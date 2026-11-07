@@ -288,7 +288,8 @@ The shell integration and the agents' environments also set `DOCKER_HOST`, `TEST
 environment also turns off the telemetry and version checks of the security scanners (`TRIVY_DISABLE_TELEMETRY`,
 `TRIVY_SKIP_VERSION_CHECK`, `SEMGREP_SEND_METRICS=off`, `SYFT_CHECK_FOR_APP_UPDATE`, `GRYPE_CHECK_FOR_APP_UPDATE`),
 the review prompts of the security plugins (`ENABLE_STOP_REVIEW=0`, `ENABLE_COMMIT_REVIEW=0`,
-`CLAUDE_SECURITY_SCAN_TIP=off`), and impeccable's update check (`IMPECCABLE_NO_UPDATE_CHECK=1`).
+`CLAUDE_SECURITY_SCAN_TIP=off`), and impeccable's update check and telemetry (`IMPECCABLE_NO_UPDATE_CHECK=1`,
+`IMPECCABLE_NO_TELEMETRY=1`).
 
 ## What everyone gets: the devkit repository
 
