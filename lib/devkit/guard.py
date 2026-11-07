@@ -3497,10 +3497,11 @@ def webfetch_verdict(tool_input):
 # every level the shell runs (the segments _walk_segments yields, a pipe or a here-string into a shell, the program of
 # an interpreter that starts a process) and never trusts a decision's own `--irreversible` flag (K4). Crew members never
 # run tier 2 and run tier 1 only with a step grant; the main session runs tier 1 and needs a live grant for tier 2 when
-# `safeguards.irreversible_main` enforces. progress.use_grant keeps the grants (C5): a lookup that fails denies a
-# member and lets the main session go on with a guard.failopen record (P4). A name built at run time, a script not
-# named for what it does, or a tool the tables below do not know is not seen: the real lock is branch protection, tag
-# rules, required reviews and publishing from CI (P5).
+# `safeguards.irreversible_main` enforces. progress.use_grant keeps the grants (C5): a lookup or a classifier that
+# fails denies a member, and denies the main session in enforce when the command names an irreversible action (in
+# audit, or when it names none, it goes on with a guard.failopen record, P4). A program whose name is built at run time
+# is the action `unknown`, tier 2 (RT1, RT2). A script not named for what it does, or a tool the tables below do not
+# know, is not seen: the real lock is branch protection, tag rules, required reviews and publishing from CI (P5).
 
 TIERS = {"push": 1, "pr": 1, "push-destructive": 2, "pr-write": 2, "merge": 2, "release": 2, "publish": 2,
          "deploy": 2, "api-write": 2, "external-message": 2, "unknown": 2}
@@ -4545,6 +4546,34 @@ def _main_reason(a) -> str:
             f"{a['target']} \"…\"`) and ask it with the question tool.")
 
 
+GATE_ERROR_REASON = ("devkit could not check the irreversible action this command names ({err}), so it does not run "
+                     "while the gate enforces (spec C6). Retry once; if it fails again, run `dev doctor` and tell the "
+                     "developer what it says.")
+
+
+def _gate_failed(where, e, setting, session, text=None):
+    """A gate or classifier that raised: in enforce, a deny with a guard.irreversible gate-error record when the
+    command names an irreversible action (found tier 2, `text` None, or `text` matching _IRREV_TEXT); otherwise the
+    call runs with a guard.failopen record (P4). Seraph, batch 4 follow-up 2."""
+    names = text is None or bool(_IRREV_TEXT.search(_unescape(str(text or ""))))
+    if setting != "enforce" or not names:
+        failopen(where, e)
+        return None
+    try:
+        _record("guard.irreversible", "", f"{type(e).__name__}: {e}"[:300], "deny", session=session or "",
+                setting=setting, rule="gate-error")
+    except Exception:
+        pass  # the deny stands without its record
+    return deny(GATE_ERROR_REASON.format(err=type(e).__name__))
+
+
+def _safe_setting(now) -> str:
+    try:
+        return irreversible_setting("main", now)
+    except Exception:
+        return "enforce"
+
+
 def _main_gate(acts, agent, session, grant, now):
     setting = irreversible_setting("main", now)
     look = grant or _grant_lookup(agent, session, None, now)
@@ -4567,8 +4596,8 @@ def _main_gate(acts, agent, session, grant, now):
                 _gate_record(a, "deny", "main", setting, session=session)
                 return deny(_main_reason(a))
             _gate_record(a, "granted" if used else "audit", "main", setting, session=session, g=used)
-    except Exception as e:
-        failopen("irreversible", e)
+    except Exception as e:  # a tier-2 action is already named: enforce denies it
+        return _gate_failed("irreversible", e, setting, session)
     return None
 
 
@@ -4576,7 +4605,8 @@ def irreversible_verdict(cmd: str, cwd, *, agent: str = "claude", session: str =
     """The irreversible-action gate for a shell command of the main session (spec C6): ("deny", why) for a tier-2
     action no live grant covers while safeguards.irreversible_main enforces; None otherwise. Every action is recorded
     (guard.irreversible), and the grant that allows one is used. `grant(action, target, repo, consume)` replaces
-    progress.use_grant in tests. A failure inside the gate lets the command run with a guard.failopen record (P4)."""
+    progress.use_grant in tests. A failure inside the gate denies in enforce when the command names an irreversible
+    action, as an unparsed one does; otherwise it runs with a guard.failopen record (P4)."""
     try:
         acts = irreversible_actions(cmd, cwd or os.getcwd())
         if acts is None:
@@ -4588,8 +4618,7 @@ def irreversible_verdict(cmd: str, cwd, *, agent: str = "claude", session: str =
             return deny(UNPARSED_REASON) if setting == "enforce" else None
         return _main_gate(acts, agent, session, grant, now) if acts else None
     except Exception as e:
-        failopen("irreversible", e)
-        return None
+        return _gate_failed("irreversible", e, _safe_setting(now), session, cmd or "")
 
 
 def mcp_external(tool: str, member: bool = False) -> str:
@@ -4620,8 +4649,7 @@ def irreversible_tool_verdict(tool: str, tool_input, cwd, *, agent: str = "claud
         a = {"action": act, "tier": 2, "target": str(tool), "repo": _repo_of(cwd), "words": str(tool)}
         return _main_gate([a], agent, session, grant, now)
     except Exception as e:
-        failopen("irreversible", e)
-        return None
+        return _gate_failed("irreversible", e, _safe_setting(now), session, str(tool or ""))
 
 
 def _member_gate(cmd, cwd, member, lane, agent, session, grant, now) -> str | None:

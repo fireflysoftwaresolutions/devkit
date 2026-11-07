@@ -417,12 +417,31 @@ class MemberTests(GateCase):
         self.assertIn("step grant", self.member("git push origin feat/y", grant=store) or "")
         self.assertEqual(store.left, {"push feat/x": 5})
 
-    def test_gate_error_denies_member_and_audits_main(self):
+    def test_gate_error_denies_member_and_main_in_enforce_and_lets_main_run_in_audit(self):
+        # Seraph, batch 4 follow-up 2: the main gate failed open in enforce, so a broken grant store let a release run
         why = self.member("git push origin feat/x", grant=Broken())
         self.assertIn("could not verify", why or "")
         self.assertEqual(self.records("guard.failopen"), [])
-        self.assertIsNone(self.main("dev release --version 26.11.5", grant=Broken(), setting="enforce"))
+        self.assertIn("could not check", self.main("dev release --version 26.11.5", grant=Broken(), setting="enforce")
+                      or "")
+        self.assertEqual(self.records("guard.failopen"), [])
+        errors = [r for r in self.records("guard.irreversible") if (r.get("evidence") or {}).get("rule") == "gate-error"]
+        self.assertEqual([((r.get("crew") or {}).get("member") or "main", r["detail"]) for r in errors],
+                         [("tank", "RuntimeError: state busy"), ("main", "RuntimeError: state busy")])
+        self.assertIsNone(self.main("dev release --version 26.11.5", grant=Broken(), setting="audit"))
         self.assertEqual([r["detail"] for r in self.records("guard.failopen")], ["RuntimeError: state busy"])
+
+    def test_a_classifier_that_raises_denies_main_in_enforce_only_when_the_text_names_an_action(self):
+        with mock.patch.object(guard, "irreversible_actions", side_effect=RuntimeError("parser bug")):
+            self.assertIn("could not check", self.main("gh pr merge 12", setting="enforce") or "")
+            self.assertIsNone(self.main("gh pr merge 12", setting="audit"))
+            self.assertIsNone(self.main("ls -la", setting="enforce"))
+        self.assertEqual([r["detail"] for r in self.records("guard.failopen")], ["RuntimeError: parser bug"] * 2)
+
+    def test_a_tool_gate_error_denies_an_external_mcp_call_in_enforce(self):
+        with settings(main="enforce"):
+            v = guard.irreversible_tool_verdict("mcp__slack__post_message", {}, self.repo, session="s1", grant=Broken())
+        self.assertIn("could not check", v[1] if v else "")
 
     def test_a_member_command_the_guard_cannot_parse_that_names_an_action_is_denied(self):
         self.assertIsNotNone(self.member("gh pr merge 12 'unclosed"))
