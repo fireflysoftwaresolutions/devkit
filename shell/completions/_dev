@@ -60,6 +60,7 @@ _dev() {
     'gc:Reclaim disk safely'
     'du:Disk usage report'
     'setup:Setup wizard'
+    'prompt:What devkit'"'"'s prompt helper shows here'
     'doctor:Verify the setup'
     'agents:Claude Code and Codex status, self-tests and rules'
     'config:Agent settings policy'
@@ -101,7 +102,8 @@ _dev() {
     config)
       if (( CURRENT == 3 )); then
         sub=('repair:Put devkit'"'"'s settings back' 'show:The effective configuration' 'edit:Edit your devkit config'
-             'validate:Check your devkit config' 'lock:Lock the settings (asks for your password)' 'unlock:Remove the lock'
+             'validate:Check your devkit config' 'set:Set one key (the developer only)'
+             'lock:Lock the settings (asks for your password)' 'unlock:Remove the lock'
              'status:The lock and recent events')
         _describe 'config command' sub
       fi
@@ -128,7 +130,8 @@ _dev() {
         case "${words[3]}" in
           assign) _arguments '--to[the crew member]:member:' '--scope[the files it owns]:globs:' '--why[assign a member the RACI does not make Responsible]:reason:' ;;
           done) _arguments '--next[what comes next]:next:' '--check[the evidence]:evidence:' '--step[which step]:step:' '--force[skip the safety checks]' '--why[end without an Accountable approval]:reason:' ;;
-          step|block) _arguments '--next[what comes next]:next:' '--check[the evidence]:evidence:' '--step[which step]:step:' '--force[skip the safety checks]' ;;
+          step) _arguments '--next[what comes next]:next:' '--check[the evidence]:evidence:' '--step[which step]:step:' '--force[skip the safety checks]' '--no-check[nothing to verify]' '--approves[the finished steps this Check approves]:steps:' ;;
+          block) _arguments '--next[what comes next]:next:' '--check[the evidence]:evidence:' '--step[which step]:step:' '--force[skip the safety checks]' ;;
           start) _arguments '--plan[steps with estimates]:plan:' '--estimate[total estimate]:estimate:' '--steps[number of steps]:steps:' '--mode[who takes decisions]:mode:(guided auto)' ;;
           reopen|skip|add) _arguments '--why[the reason]:reason:' ;;
         esac
@@ -180,6 +183,17 @@ _dev() {
         '(--only --unverified --why)--version[switch to a pinned copy kept from an earlier install]:version:_files -W $HOME/.local/share/devkit/releases -/' \
         '(--only --version)--unverified[pin a commit that is neither a release nor tested]' \
         '(--only --version)--why[the reason for --unverified]:reason:' ;;
+    setup)
+      if (( CURRENT == 3 )); then
+        sub=('prompt:Only the prompt helper'); _describe 'setup command' sub
+      fi
+      if [[ "${words[3]}" == prompt ]]; then
+        _arguments '--remove[take the prompt helper out again]' '(-y --yes)'{-y,--yes}'[accept every default]'
+      else
+        _arguments '(-y --yes)'{-y,--yes}'[accept every default]' '--skip-packages[do not install Homebrew or npm packages]'
+      fi ;;
+    prompt)
+      (( CURRENT == 3 )) && { sub=('refresh:Write it for this Mac'); _describe 'prompt command' sub; } ;;
     gc)
       _arguments '--apply[reclaim]' '-y[no prompt]' '-v[list kept items]' ;;
     adopt)
