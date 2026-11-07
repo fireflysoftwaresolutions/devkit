@@ -20,6 +20,7 @@ A row (`dev branch ls --json` prints the list; `registry.json` keeps it as `proj
     last_backup                                             unix time of the newest git.backup record, or null
     embargo                                                 {why, until, who, when} or null
     embargo_via                                             the embargoed branch that carries its commits, or null
+    backup_policy                                           the project's recorded {policy, why, who, when}, or null
     worktree, worktree_missing                              the linked worktree that has it checked out
     changes, session                                        {modified, untracked} and a live session, when known
     pr                                                      {number, state, draft, checks, url, title} or null
@@ -386,6 +387,7 @@ def map(repo, prs=None, offline=False, now=None, pid=None, default=None, current
             r["merged_into"] = strict[0]
     done = backups(pid)
     held = embargoes(pid)
+    policy = backup_policy(pid)
     tasks = linked_tasks(pid, [n for n in names if n != default])
     after = after_minutes()
     for r in rows:
@@ -395,6 +397,7 @@ def map(repo, prs=None, offline=False, now=None, pid=None, default=None, current
         # a merged branch defers to the branch that carries its commits, and so does that branch's embargo
         r["embargo_via"] = r["merged_into"] if not r["embargo"] and r["unpushed"] and r["merged_into"] in held else None
         r["task"] = tasks.get(r["name"])
+        r["backup_policy"] = policy
         r["pr"] = _pr_row(prs, r["name"]) if prs else None
         r["backup"] = _backup_state(r, bool(remotes), after, now, rec.get("skipped"))
     return rows
@@ -415,6 +418,8 @@ def _backup_state(r: dict, has_remotes: bool, after: int, now: float, skipped) -
         return {"state": "not_backed_up",
                 "reason": f"{r['name']} is the default branch, which is never backed up; move "
                           f"{'this commit' if n == 1 else 'these commits'} to a branch (dev branch new <type>/<topic>)"}
+    if (r.get("backup_policy") or {}).get("policy") == "off":
+        return {"state": "not_backed_up", "reason": "the project's backup policy is off (dev backup policy)"}
     if r["oldest_unpushed"] and now - r["oldest_unpushed"] < after * 60:
         return {"state": "waiting", "reason": f"commits younger than {after} min wait for the backup"}
     if skipped and (not r["last_backup"] or skipped[0] > r["last_backup"]):
@@ -529,6 +534,8 @@ def note_lines(rows) -> list:
         out.append(line)
     if len(rows) > NOTE_ROWS:
         out.append(f"  - and {len(rows) - NOTE_ROWS} more branches (`dev branch ls`)")
+    if rows:
+        out.append(f"  - backup policy: {policy_words(rows[0].get('backup_policy'))}")
     return out
 
 
@@ -556,6 +563,8 @@ def status_lines(rows, cols=None, now=None, limit=8) -> list:
         out += [" " * lead + w for w in words[1:]]
     if len(rows) > len(shown):
         out.append("  " + ui.dim(f"and {len(rows) - len(shown)} more (dev branch ls)"))
+    out += ["  " + ui.dim(w) for w in ui.wrap("Backup policy: " + policy_words(rows[0].get("backup_policy")),
+                                             ui.text_width(cols) - 3)]
     return out
 
 
@@ -639,6 +648,7 @@ def cmd_ls(a) -> int:
     if c["embargoed"]:
         head += f" · {c['embargoed']} embargoed"
     print("\n".join(ls_lines(rows, title=head)))
+    print("  " + ui.dim(f"Backup policy: {policy_words(backup_policy(pid))} (dev backup policy)."))
     print("  " + ui.dim(f"Backups wait for commits older than {after_minutes()} min (backup.after_minutes)."))
     return 0
 
@@ -646,30 +656,101 @@ def cmd_ls(a) -> int:
 # --------------------------------------------------------------------------- dev branch embargo (R3)
 
 
-def set_embargo(pid: str, branch: str, why: str = "", until: str = "", who: str = "", lift: bool = False):
-    """Write a branch's embargo into the project's handoff note metadata (`embargo:`), or lift it -> the record set,
-    or with `lift` the one removed (None when there was none). Every machine reads the same note."""
+def _edit_records(pid: str, key: str, edit) -> None:
+    """Rewrite the `key:` record list of the project's handoff note metadata under the notes lock: edit(records) ->
+    the new records (an empty list drops the key)."""
     f = core.note_path(pid)
     with core.Lock("notes", wait=30):
         text = f.read_text() if f.exists() else notes.new_note(pid)
         meta, body = notes.split_frontmatter(text)
-        recs = [r for r in (meta.get("embargo") or []) if isinstance(r, dict) and r.get("branch")]
-        old = next((r for r in recs if r["branch"] == branch), None)
+        found = meta.get(key)
+        recs = edit([r for r in found if isinstance(r, dict)] if isinstance(found, list) else [])
+        if recs:
+            meta[key] = recs
+        else:
+            meta.pop(key, None)
+        f.parent.mkdir(parents=True, exist_ok=True)
+        core.write_if_changed(f, notes.set_meta(notes.render_frontmatter(meta) + body.lstrip("\n")))
+
+
+def _now_iso() -> str:
+    return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+
+
+def set_embargo(pid: str, branch: str, why: str = "", until: str = "", who: str = "", lift: bool = False):
+    """Write a branch's embargo into the project's handoff note metadata (`embargo:`), or lift it -> the record set,
+    or with `lift` the one removed (None when there was none). Every machine reads the same note."""
+    box = {"old": None, "rec": None}
+
+    def edit(recs):
+        recs = [r for r in recs if r.get("branch")]
+        box["old"] = next((r for r in recs if r["branch"] == branch), None)
         recs = [r for r in recs if r["branch"] != branch]
-        rec = None
         if not lift:
             rec = {"branch": branch, "why": why}
             if until:
                 rec["until"] = until
-            rec.update(who=who, when=time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()))
+            rec.update(who=who, when=_now_iso())
+            box["rec"] = rec
             recs.append(rec)
-        if recs:
-            meta["embargo"] = recs
-        else:
-            meta.pop("embargo", None)
-        f.parent.mkdir(parents=True, exist_ok=True)
-        core.write_if_changed(f, notes.set_meta(notes.render_frontmatter(meta) + body.lstrip("\n")))
-    return old if lift else rec
+        return recs
+
+    _edit_records(pid, "embargo", edit)
+    return box["old"] if lift else box["rec"]
+
+
+# --------------------------------------------------------------------------- the backup policy (decided 2026-11-06)
+# Each project chooses whether its branches are backed up: on (dev backup and the hourly dev sync push them, with
+# every check), off (never), or ask (dev backup asks the developer once, in a terminal, and records the answer as on
+# or off; dev sync waits for it). Without a choice, private repositories are on and public ones ask (a repository
+# whose visibility devkit cannot read counts as public), because a backup of a public repository publishes the
+# branch at once. The choice stays in the handoff note (`backup_policy:` with why, who and when), so every machine
+# and the team follow it. Setting it is the developer's action, like the one-time `dev backup --public`.
+
+POLICY_KEY = "backup_policy"
+POLICIES = ("on", "off", "ask")
+
+
+def backup_policy(pid: str):
+    """The project's recorded choice {policy, why, who, when}, or None: the default by visibility applies."""
+    try:
+        text = core.note_path(pid).read_text()
+    except OSError:
+        return None
+    meta, _ = notes.split_frontmatter(text)
+    found = meta.get(POLICY_KEY)
+    for rec in reversed(found if isinstance(found, list) else []):
+        if isinstance(rec, dict) and rec.get("policy") in POLICIES:
+            return {"policy": rec["policy"], "why": rec.get("why") or "", "who": rec.get("who") or "",
+                    "when": rec.get("when") or ""}
+    return None
+
+
+def set_backup_policy(pid: str, policy: str, why: str, who: str) -> dict:
+    """Record the project's choice (it replaces the one before) -> the record."""
+    if policy not in POLICIES:
+        raise ValueError(f"the backup policy is one of {', '.join(POLICIES)}, not {policy!r}")
+    rec = {"policy": policy, "why": why, "who": who, "when": _now_iso()}
+    _edit_records(pid, POLICY_KEY, lambda recs: [rec])
+    return rec
+
+
+def default_policy(visibility) -> str:
+    """The policy without a recorded choice: on for a private (or internal) repository, else ask."""
+    return "on" if visibility in ("private", "internal") else "ask"
+
+
+def policy_words(rec, visibility="?") -> str:
+    """The policy in words: `on, set by Ana on 2026-11-06: <why>`, or `ask, the default for a public repository`.
+    visibility "?" means devkit did not look (the views read no network)."""
+    if rec:
+        return (f"{rec['policy']}, set by {who(rec['who']) if rec.get('who') else 'the developer'}"
+                f"{' on ' + rec['when'][:10] if rec.get('when') else ''}" + (f": {rec['why']}" if rec.get("why") else ""))
+    if visibility == "?":
+        return "the default: on for a private repository, ask for a public one"
+    kind = "private" if visibility in ("private", "internal") else "public" if visibility == "public" else \
+        "repository whose visibility devkit cannot read, counted as public"
+    return f"{default_policy(visibility)}, the default for a {kind}" + ("" if " " in kind else " repository")
 
 
 def _actor() -> str:
@@ -745,10 +826,11 @@ def cmd_embargo(a) -> int:
     return 0
 
 
-def _share(branch: str) -> None:
-    """Commit and push the handoff note soon, so every machine sees the embargo before its next backup."""
+def _share(branch: str, what: str = "embargo") -> None:
+    """Commit and push the handoff note soon, so every machine sees the embargo (or the answer) before its next
+    backup."""
     try:
         from . import work
-        work.request_sync(f"embargo {branch}")
+        work.request_sync(f"{what} {branch}")
     except Exception:
         pass

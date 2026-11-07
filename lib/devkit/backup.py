@@ -4,18 +4,28 @@
 that push costs no CI run.
 
   dev backup [<branch>…] [--all]      the current branch, the named ones, or every branch with commits only here
+  dev backup policy [on|off|ask] [-p <project>] --why …   the project's backup policy (shown, or set)
   dev branch embargo <branch> --why … [--until …] · dev branch embargo --lift <branch>
   dev sync (hourly and at session end) backs up every project's branches that are not backed up (backup.auto)
 
 A branch is pushed to its remote under the same name, fast-forward only and never forced, and only when every check
 holds, in this order: not the default branch, a conforming name, no embargo (on the branch, or on a branch that
 holds any of the same commits: a merged branch defers to the branch that carries its commits), the remote branch is
-not ahead or diverged, no WIP commit, no sign of a security fix on a public repository, the CI configuration of the
-commit it sends shows that the push starts no CI run (`pipelines.push_ci`), and last the secret scan (gitleaks)
-passes on exactly the commits it sends. A check that fails
-skips the branch with the reason and what to do. `dev sync` only takes commits older than `backup.after_minutes`
-(a younger commit may still be amended); `dev backup` takes them all. Each push is audited as `git.backup` (branch,
-remote, commit range) and each skip as `git.backup-skipped` (the reason, which the branch map shows).
+not ahead or diverged, no WIP commit, the project's backup policy, no sign of a security fix on a public repository,
+the CI configuration of the commit it sends shows that the push starts no CI run (`pipelines.push_ci`), and last the
+secret scan (gitleaks) passes on exactly the commits it sends. A check that fails skips the branch with the reason
+and what to do. `dev sync` only takes commits older than `backup.after_minutes` (a younger commit may still be
+amended); `dev backup` takes them all. Each push is audited as `git.backup` (branch, remote, commit range) and each
+skip as `git.backup-skipped` (the reason, which the branch map shows).
+
+The backup policy (the developer's decision, 2026-11-06; branches.py keeps it in the handoff note): on, off or ask
+per project, by default on for a private repository and ask for a public one (or one whose visibility devkit cannot
+read), because a backup of a public repository publishes the branch at once. With ask, `dev backup` asks the
+developer once, in their own terminal and never in an agent's call, and records the answer as on or off; `dev sync`
+never asks and never publishes a branch the policy does not allow. `dev backup --public` pushes once whatever the
+policy (and a branch that reads as a security fix). Setting the policy and `--public` are the developer's own
+actions: devkit refuses them from a crew member's lane, and the guard asks the main session for the developer's
+grant. The policy is audited as `dev.policy` (target backup/<project>).
 
 `run()` returns one result per branch: {branch, remote, state, reason, fix, commit, range, count}, where state is
 pushed, would_push (dry run), skipped (a check failed), nothing (no commit only here) or waiting (commits too young).
@@ -96,14 +106,101 @@ def _security_hint(top, commits: list) -> str:
     return f"it changes a red-team test, {hit}" if hit else ""
 
 
-def _public(top) -> bool:
-    """Is the repository public? Unknown counts as public: the push would publish the commits at once."""
+def _visibility(top):
+    """The repository's visibility on its host: "public", "private", "internal" or None (unknown)."""
     try:
         from . import pipelines
-        vis = pipelines._visibility(Path(top))
+        return pipelines._visibility(Path(top))
     except Exception:
-        vis = None
-    return vis not in ("private", "internal")
+        return None
+
+
+def _public(c, remote, ctx) -> bool:
+    """Is the repository public? Unknown counts as public: the push would publish the commits at once."""
+    if remote not in ctx["vis"]:
+        ctx["vis"][remote] = _visibility(c.top)
+    return ctx["vis"][remote] not in ("private", "internal")
+
+
+def _remote_id(top, remote) -> str:
+    """The repository a remote names, as host/owner/repo (its URL when devkit cannot read it as one)."""
+    url = core.gitout(top, "config", "--get", f"remote.{remote}.url")
+    parsed = core.parse_remote(url) if url else None
+    return "/".join(str(x) for x in parsed).lower() if parsed else url
+
+
+def developer_here() -> bool:
+    """True when the developer runs this command in their own terminal and types the answer: stdin is a terminal and
+    no agent runs it (core.set_by_developer). Piped input and an agent's call never count."""
+    try:
+        tty = bool(sys.stdin) and sys.stdin.isatty()
+    except (AttributeError, ValueError):
+        tty = False
+    return tty and core.set_by_developer()
+
+
+def crew_member() -> str:
+    """The crew member whose lane runs this command, or "" (the developer, or the main session)."""
+    try:
+        from . import audit
+        return str(((audit.context() or {}).get("crew") or {}).get("member") or "")
+    except Exception:
+        return ""
+
+
+def set_policy(pid, policy, why, branch="") -> dict:
+    """Record the project's backup policy in its handoff note, audit it (`dev.policy`, target backup/<project>) and
+    share it soon."""
+    from . import audit, branches, work
+    rec = branches.set_backup_policy(pid, policy, why, work.actor()["user"])
+    audit.record("dev.policy", f"backup/{pid}", f"{policy}: {why}", "ok", project=pid, branch=branch or None)
+    branches._share(pid, "backup policy of")
+    return rec
+
+
+def _ask_policy(pid, rid, vis):
+    """Ask the developer whether this project's branches may be backed up -> True, False, or None (no answer)."""
+    what = "public" if vis == "public" else "not known to be private"
+    print(f"{ui.WARN} {rid} is {what}: a backup publishes each branch there at once, for anyone to read.",
+          file=sys.stderr)
+    try:
+        ans = input(f"  Back up {pid}'s branches there, now and with the hourly dev sync? A no keeps them on this "
+                    f"Mac. [y/N] ")
+    except (EOFError, KeyboardInterrupt):
+        return None
+    return ans.strip().lower() in ("y", "yes")
+
+
+def _policy_gate(c, name, remote, ctx):
+    """The project's backup policy (decided 2026-11-06): on pushes, off never does, ask waits for the developer, whom
+    `dev backup` asks once, in a terminal, recording the answer as on or off; `dev sync` and agents are never asked.
+    `dev backup --public` (the developer's own action) pushes this once, whatever the policy. -> a skip, or None."""
+    from . import branches
+    _public(c, remote, ctx)
+    vis, rec = ctx["vis"][remote], ctx["policy"]
+    policy = rec["policy"] if rec else branches.default_policy(vis)
+    ctx["policy_words"] = branches.policy_words(rec, vis)
+    if policy == "on" or ctx["public_ok"]:
+        return None
+    if policy == "ask" and not ctx["auto"] and not ctx["dry_run"] and not ctx["asked"] and developer_here():
+        ctx["asked"] = True
+        yes = _ask_policy(c.pid, _remote_id(c.top, remote), vis)
+        if yes is not None:
+            rec = ctx["policy"] = set_policy(c.pid, "on" if yes else "off", "the developer's answer to dev backup",
+                                             name)
+            ctx["policy_words"] = branches.policy_words(rec, vis)
+            if yes:
+                return None
+            policy = "off"
+    if policy == "off":
+        return _result(name, remote, SKIPPED, f"the backup policy of {c.pid} is {ctx['policy_words']}", [
+            'dev backup policy on --why "…"   (the developer: back up this project\'s branches)',
+            f"dev backup --public {name}   (the developer: this once)"])
+    return _result(name, remote, SKIPPED, f"the backup policy of {c.pid} is {ctx['policy_words']}, and the developer "
+                   f"has not answered", [
+                       "dev backup, run by the developer in a terminal, asks once (agents are never asked, dev sync "
+                       "waits for the answer)",
+                       'dev backup policy on --why "…"   (or off: the developer\'s choice for this project)'])
 
 
 def _embargo_holder(top, name, mine: set, held: dict, local: set):
@@ -237,8 +334,11 @@ def _one(c, name, ctx) -> dict:
                        ["dev commit --unwip, then commit properly; the next backup takes it"])
     start = remote_sha or core.gitout(top, "rev-parse", "--verify", "-q", mine[-1] + "^") or "root"
     rng = f"{start[:12]}..{target[:12]}"
+    skip = _policy_gate(c, name, remote, ctx)
+    if skip:
+        return skip
     hint = _security_hint(top, mine)
-    if hint and not ctx["public_ok"] and _public(top):
+    if hint and not ctx["public_ok"] and _public(c, remote, ctx):
         return _result(name, remote, SKIPPED, f"it may carry a security fix ({hint}), and a push publishes it", [
             f'dev branch embargo {name} --why "<the open issue>" --until "<the step or date it may be public>"',
             f"dev backup {name} --public   (it is not a security fix, or it may be public now)"])
@@ -299,7 +399,8 @@ def run(repo, names=None, every: bool = False, auto: bool = False, accept_ci: bo
         prs_known = known if prs_known is None else prs_known
     ctx = {"auto": auto, "accept_ci": accept_ci and not auto, "dry_run": dry_run, "public_ok": public_ok and not auto,
            "now": now or time.time(), "after": branches.after_minutes(), "held": branches.embargoes(c.pid),
-           "local": set(local), "prs": prs or [], "prs_known": bool(prs_known)}
+           "local": set(local), "prs": prs or [], "prs_known": bool(prs_known), "vis": {},
+           "policy": branches.backup_policy(c.pid), "asked": False, "policy_words": ""}
     last = branches.backups(c.pid) if record and not dry_run else {}
     out = []
     for name in names:
@@ -309,6 +410,7 @@ def run(repo, names=None, every: bool = False, auto: bool = False, accept_ci: bo
             res = _result(name, "", SKIPPED, f"devkit failed on it ({type(e).__name__}: {e})"[:200])
         if record and not dry_run:
             _record(c.pid, res, (last.get(name) or {}).get("skipped"))
+        res["policy"] = ctx["policy_words"]
         out.append(res)
     return out
 
@@ -332,9 +434,76 @@ def lines(results, verbose: bool = True) -> list:
     return out
 
 
+def register(p) -> None:
+    """The arguments of `dev backup` on its argparse subparser (cli.py's build_parser calls this)."""
+    p.add_argument("branches", nargs="*", help="the branches (default: the current one), or: policy [on|off|ask]")
+    p.add_argument("--all", action="store_true", help="every local branch with commits only on this Mac")
+    p.add_argument("--accept-ci", action="store_true", help="push although the push starts (or may start) CI")
+    p.add_argument("--public", action="store_true", help="the developer's own action: push this once, whatever "
+                   "the backup policy, and a branch that looks like a security fix")
+    p.add_argument("--dry-run", action="store_true", help="every check, no push (with policy: nothing is written)")
+    p.add_argument("-p", "--project", help="with policy: the project (default: the repository you are in)")
+    p.add_argument("--why", help="with policy: why the project chooses it (needed to set one)")
+    p.add_argument("--json", action="store_true")
+
+
+def _refuse(text) -> int:
+    print(f"{ui.WARN} {text}", file=sys.stderr)
+    return 2
+
+
+OWN_ACTION = ("{what} is the developer's own decision: they type it in a terminal, or grant the main session once "
+              "(grant backup <project>). A crew member never runs it: put the exact command and why in your report.")
+
+
+def cmd_policy(a) -> int:
+    """`dev backup policy [on|off|ask] [-p <project>] --why "…" [--dry-run] [--json]`: show or set the policy."""
+    from . import branches, gitx
+    args = list(a.branches or [])[1:]
+    c = gitx.ctx()
+    pid = (getattr(a, "project", None) or "").strip().strip("/") or (c.pid if c else "")
+    if not pid:
+        return _refuse("name the project: dev backup policy [on|off|ask] -p <owner/repo>, or run it in the repository")
+    here = c is not None and c.pid == pid
+    if not here and not core.note_path(pid).exists():
+        return _refuse(f"{pid} has no handoff note: check the project id (dev overview lists them)")
+    if not args:
+        rec = branches.backup_policy(pid)
+        vis = _visibility(c.top) if here else "?"
+        if getattr(a, "json", False):
+            print(json.dumps({"project": pid, "policy": rec["policy"] if rec else
+                              (branches.default_policy(vis) if vis != "?" else None), "recorded": rec,
+                              "visibility": None if vis == "?" else vis}, indent=2, ensure_ascii=False))
+            return 0
+        print(f"{ui.INFO} {pid}: backup policy {branches.policy_words(rec, vis)}")
+        print("  " + ui.dim("on: dev backup and the hourly dev sync push its branches · off: never · ask: dev backup "
+                            "asks you once"))
+        print("  " + ui.dim(f'set it: dev backup policy on|off|ask{"" if here else " -p " + pid} --why "…"'))
+        return 0
+    if len(args) != 1 or args[0] not in branches.POLICIES:
+        return _refuse(f"the backup policy is one of {', '.join(branches.POLICIES)}: dev backup policy on --why \"…\"")
+    if crew_member():
+        return _refuse(OWN_ACTION.format(what=f"dev backup policy {args[0]}"))
+    why = (getattr(a, "why", None) or "").strip()
+    if not why:
+        return _refuse(f'say why: dev backup policy {args[0]} --why "…" (the team sees it)')
+    if a.dry_run:
+        print(f"{ui.INFO} dry run: {pid}'s backup policy would be {args[0]} ({why})")
+        return 0
+    rec = set_policy(pid, args[0], why)
+    print(f"{ui.OK} {pid}: backup policy {branches.policy_words(rec)}")
+    return 0
+
+
 def cmd_backup(a) -> int:
-    """`dev backup [<branch>…] [--all] [--accept-ci] [--public] [--dry-run] [--json]`."""
+    """`dev backup [<branch>…] [--all] [--accept-ci] [--public] [--dry-run] [--json]`, or `dev backup policy …`."""
     from . import gitx
+    if list(a.branches or [])[:1] == ["policy"]:  # never a branch: names follow <type>/<topic>
+        return cmd_policy(a)
+    if getattr(a, "project", None) or getattr(a, "why", None):
+        return _refuse("-p and --why go with dev backup policy")
+    if a.public and crew_member():
+        return _refuse(OWN_ACTION.format(what="dev backup --public"))
     c = gitx.ctx()
     if c is None:
         print(f"{ui.WARN} not inside a git repository", file=sys.stderr)
@@ -343,8 +512,11 @@ def cmd_backup(a) -> int:
               dry_run=bool(a.dry_run), public_ok=bool(a.public))
     if getattr(a, "json", False):
         print(json.dumps(res, indent=2, ensure_ascii=False))
-    else:
-        print("\n".join(lines(res) or [f"{ui.INFO} no branch to back up"]))
+        return 1 if any(r["state"] == SKIPPED for r in res) else 0
+    print("\n".join(lines(res) or [f"{ui.INFO} no branch to back up"]))
+    words = next((r["policy"] for r in res if r.get("policy")), "")
+    if words:
+        print("  " + ui.dim(f"Backup policy of {c.pid}: {words} (dev backup policy)."))
     return 1 if any(r["state"] == SKIPPED for r in res) else 0
 
 

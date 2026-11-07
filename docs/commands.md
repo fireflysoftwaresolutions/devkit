@@ -725,14 +725,19 @@ push is fast-forward only and never forced, and it happens only when every check
 3. The remote branch is not ahead or diverged. A diverged branch stops with the commands to resolve it
    (`git fetch`, `git log --left-right`, `git rebase origin/<branch>`, or `dev push --force-with-lease` on your own
    branch).
-4. No WIP commit, and on a public repository no commit that reads as a security fix (a `security` scope, a CVE, a
-   red-team test): devkit suggests `dev branch embargo` first, and `--public` pushes it anyway.
+4. No WIP commit, and the project's backup policy allows it (below). Then, on a public repository, no commit that
+   reads as a security fix (a `security` scope, a CVE, a red-team test): devkit suggests `dev branch embargo` first,
+   and `--public` pushes it anyway.
 5. The CI configuration of the commit it sends shows that the push starts no CI run. It reads the GitHub Actions
    `push` branches, `branches-ignore`, tags and paths filters, the pull request of the branch (a draft whose jobs
    skip drafts starts none), and the jobs' `if:`; GitLab rules, Bitbucket `default` and `branches`, Azure `trigger` and `pr`. CI that
    devkit cannot read (Jenkins, CircleCI, Netlify and others) means it cannot tell, and it does not push.
    `--accept-ci` pushes anyway, and that push counts against the push budget.
 6. Last, the secret scan (gitleaks) passes on exactly the commits it sends; without gitleaks nothing is pushed.
+
+`--public` is the developer's own action: it pushes this once whatever the backup policy, and a branch that reads as
+a security fix. devkit refuses it from a crew member's lane, and the guard asks the main session for the developer's
+grant (`grant backup <project>`).
 
 Each push is audited as `git.backup` (branch, remote, commit range) and each skip as `git.backup-skipped` with its
 reason, which the branch map shows as the reason a branch is not backed up. `dev sync` runs the same backup
@@ -747,6 +752,23 @@ by itself (below), but only for commits older than `backup.after_minutes`.
 
 Exit codes: `1` when a branch was not backed up because a check failed, `0` otherwise (pushed, or nothing to back
 up).
+
+### `dev backup policy [on|off|ask] [-p <project>] --why "…" [--dry-run] [--json]`
+
+Shows or sets the project's backup policy (the repository you are in, or `-p <owner/repo>`). It is kept in the
+`backup_policy:` record of the project's handoff note (policy, why, who, when), so every machine and the team follow
+it, and audited as `dev.policy` (target `backup/<project>`). `dev status`, `dev branch ls`, the handoff note's branch block and the
+messages of `dev backup` show it.
+
+| Policy | What happens |
+| --- | --- |
+| `on` | `dev backup` and the hourly `dev sync` push the project's branches, with every check of `dev backup`. The default for a private repository |
+| `off` | No backup pushes them; `dev backup --public` still can, once |
+| `ask` | `dev backup`, run by the developer in their own terminal (stdin a terminal, no agent among its parents), asks once and records the answer as `on` or `off`. `dev sync` and an agent's call are never asked and push nothing. The default for a public repository, and for one whose visibility devkit cannot read |
+
+Setting it needs `--why` and is the developer's own action, like `--public`: devkit refuses it from a crew member's
+lane, and the guard asks the main session for the developer's grant. Without a value it only shows the policy
+(`--json` too); `--dry-run` writes nothing.
 
 ### `dev commit -m "type(scope): summary" [options] [<paths>…]`
 
@@ -1038,7 +1060,8 @@ handoff notes, this machine's presence file and the dashboard, then commits and 
 something changed. Hourly (`--scheduled`) and at the end of a session, it first backs up every project's branches
 that the branch map shows as not backed up, with the checks of `dev backup` and only the commits older than
 `backup.after_minutes` (default 30: a younger commit may still be amended); `backup.auto: false` turns that off, and
-`--offline` or `--no-push` skip it. A push that is rejected because another machine pushed first is rebased and
+`--offline` or `--no-push` skip it. It backs up only the projects whose backup policy is `on` (by default a
+private repository; a public one asks first, through `dev backup`), and it never asks. A push that is rejected because another machine pushed first is rebased and
 tried once more; a push that still fails is recorded in the audit trail and shown in "Needs attention" until a push succeeds.
 
 You rarely need to run it: devkit queues a background sync within seconds of every commit, push, merge, tag, PR,

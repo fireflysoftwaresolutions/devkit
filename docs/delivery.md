@@ -142,6 +142,19 @@ a diverged remote branch with the commands to resolve it, and runs the secret sc
 (30 by default; `backup.auto: false` turns it off). The branch map (`dev branch ls`, `dev status`, the handoff note)
 shows each branch's last backup, or why it is not backed up.
 
+Each project has a backup policy, kept in its handoff note so that every machine and the team follow it: `on`
+(`dev backup` and the hourly `dev sync` push its branches), `off` (never), or `ask`. Without a choice, a private
+repository is `on` and a public one is `ask` (so is one whose visibility devkit cannot read), because a backup of a
+public repository publishes the branch at once. With `ask`, the first `dev backup` you run in your terminal asks
+whether the project's branches may be backed up and records your answer as `on` or `off`; `dev sync` never asks and
+never pushes such a branch, and an agent's call is never asked. Choose it yourself with
+`dev backup policy on --why "open source: the code is public anyway"` (or `off`, or `ask`); `dev backup policy`
+shows it, and so do `dev status`, `dev branch ls`, the handoff note and the messages of `dev backup`.
+`dev backup --public` pushes once, whatever the policy. With `on`, embargoes still hold, and on a public repository a
+branch whose new commits read as a security fix or change a red-team test still waits for an embargo or
+`--public`. Setting the policy, `dev backup --public` and `dev branch embargo --lift` are your own decisions: type
+them in a terminal, or grant the main session once (`grant backup <project>`); crew members never run them.
+
 A branch that must stay off a public remote, such as an unreleased security fix, gets an embargo:
 `dev branch embargo fix/x --why "discloses an open hole" --until "the guard release"`. No backup pushes it, nor a
 branch that holds its commits, until `dev branch embargo --lift fix/x`. On a public repository, devkit suggests an

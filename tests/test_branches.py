@@ -367,9 +367,12 @@ class BackupCase(Sandbox):
         super().setUp()
         self.saved_gh = gitx.GH
         gitx.GH = lambda args, cwd=None, timeout=60: (0, "[]", "")  # GitHub has no pull request for any branch
-        env = mock.patch.dict(os.environ, {"DEVKIT_NO_AUTOSYNC": "1"})
-        env.start()
-        self.addCleanup(env.stop)
+        # a private repository, and no developer at a terminal: no test asks a question or reads GitHub
+        for patch in (mock.patch.dict(os.environ, {"DEVKIT_NO_AUTOSYNC": "1"}),
+                      mock.patch.object(pipelines, "_visibility", return_value="private"),
+                      mock.patch.object(core, "set_by_developer", return_value=False)):
+            patch.start()
+            self.addCleanup(patch.stop)
 
     def tearDown(self):
         gitx.GH = self.saved_gh
@@ -542,6 +545,7 @@ class BackupCommandTests(BackupCase):
         self.ci(CI_PR_AND_MAIN)
         git(self.repo, "switch", "-q", "-c", "fix/hole", "main")
         tip = self.commit("fix(security): close the path traversal in the upload handler")
+        branches.set_backup_policy(PID, "on", "open source", "ana")  # this public repository's branches: backed up
         with mock.patch.object(pipelines, "_visibility", return_value="public"):
             rc, out = self.dev("backup")
             self.assertEqual(rc, 1)
@@ -550,6 +554,133 @@ class BackupCommandTests(BackupCase):
             self.assertEqual(self.on_origin("fix/hole"), "")
             self.assertEqual(self.dev("backup", "--public")[0], 0)
         self.assertEqual(self.on_origin("fix/hole"), tip)
+
+
+@unittest.skipUnless(HAS_GITLEAKS, "the secret scan needs gitleaks")
+class PolicyTests(BackupCase):
+    # The developer's decision (2026-11-06, refined): each project has a backup policy, on, off or ask, kept in its
+    # handoff note. Without one, private repositories are on and public ones ask. With ask, dev backup asks the
+    # developer once, in a terminal, and records the answer as on or off; dev sync and agents are never asked and
+    # never publish. dev backup --public pushes once whatever the policy; it and setting the policy are the
+    # developer's own actions.
+    def setUp(self):
+        super().setUp()
+        patch = mock.patch.object(pipelines, "_visibility", return_value="public")
+        patch.start()
+        self.addCleanup(patch.stop)
+        self.ci(CI_PR_AND_MAIN)
+
+    def backup(self, *argv):
+        # `dev backup …` with the arguments backup.register gives the command
+        os.chdir(self.repo)
+        ap = argparse.ArgumentParser(prog="dev")
+        q = ap.add_subparsers(dest="cmd").add_parser("backup")
+        backup.register(q)
+        q.set_defaults(fn=backup.cmd_backup)
+        a = ap.parse_args(["backup", *argv])
+        out, err = io.StringIO(), io.StringIO()
+        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+            rc = a.fn(a)
+        return rc, " ".join((out.getvalue() + err.getvalue()).split())
+
+    @contextlib.contextmanager
+    def terminal(self, answer):
+        # the developer at their own terminal, typing `answer`
+        with mock.patch.object(core, "set_by_developer", return_value=True), \
+                mock.patch.object(sys, "stdin", mock.Mock(isatty=lambda: True)), \
+                mock.patch("builtins.input", return_value=answer) as asked:
+            yield asked
+
+    def never_asked(self):
+        return mock.patch("builtins.input", side_effect=AssertionError("nobody may be asked here"))
+
+    def sync(self):
+        with self.never_asked():
+            return [(r["branch"], r["state"]) for r in backup.sync({"projects": [self.project()]})]
+
+    def test_sync_never_publishes_a_public_repository_whose_policy_asks(self):
+        self.branch("feat/report", 2 * HOUR)
+        with self.never_asked():
+            done = backup.sync({"projects": [self.project()]})
+        self.assertEqual([(r["branch"], r["state"]) for r in done], [("feat/report", "skipped")])
+        self.assertEqual(done[0]["reason"], "the backup policy of acme/widget is ask, the default for a public "
+                                            "repository, and the developer has not answered")
+        self.assertIn("dev backup, run by the developer in a terminal, asks once", done[0]["fix"][0])
+        self.assertEqual((self.on_origin("feat/report"), branches.backup_policy(PID)), ("", None))
+
+    def test_an_agent_or_piped_input_is_never_asked_and_pushes_nothing(self):
+        self.branch("feat/x", HOUR)
+        with self.never_asked():
+            rc, out = self.backup()
+        self.assertEqual(rc, 1)
+        self.assertIn("feat/x not backed up: the backup policy of acme/widget is ask", out)
+        with mock.patch.object(core, "set_by_developer", return_value=True), self.never_asked():
+            self.assertFalse(backup.developer_here())  # stdin is not a terminal: an answer could be piped in
+            self.assertEqual(self.backup()[0], 1)
+        self.assertEqual((self.on_origin("feat/x"), branches.backup_policy(PID)), ("", None))
+
+    def test_the_developers_yes_records_on_and_dev_sync_follows_it(self):
+        tip = self.branch("feat/x", HOUR)[-1]
+        with self.terminal("y") as asked:
+            rc, out = self.backup()
+        self.assertEqual((rc, asked.call_count, self.on_origin("feat/x")), (0, 1, tip), out)
+        self.assertIn("github.com/acme/widget is public: a backup publishes each branch there", out)
+        self.assertEqual(branches.backup_policy(PID)["policy"], "on")
+        self.assertIn("backup_policy:", core.note_path(PID).read_text())  # in the handoff note: every Mac, the team
+        rec = self.records("dev.policy")[-1]
+        self.assertEqual((rec["target"], rec["detail"]), (f"backup/{PID}", "on: the developer's answer to dev backup"))
+        self.assertIn("Backup policy of acme/widget: on, set by", out)
+        other = self.branch("feat/y", 2 * HOUR)[-1]
+        self.assertEqual(self.sync(), [("feat/y", "pushed")])
+        self.assertEqual(self.on_origin("feat/y"), other)
+
+    def test_a_no_records_off_once_and_keeps_every_branch_here(self):
+        self.branch("feat/x", 2 * HOUR)
+        with self.terminal("n"):
+            rc, out = self.backup()
+        self.assertEqual(rc, 1)
+        self.assertIn("feat/x not backed up: the backup policy of acme/widget is off, set by", out)
+        with self.terminal("y") as asked:  # answered once: no second question
+            self.assertEqual(self.backup()[0], 1)
+        self.assertEqual((asked.call_count, branches.backup_policy(PID)["policy"]), (0, "off"))
+        self.assertEqual(self.sync(), [("feat/x", "skipped")])
+        row = {r["name"]: r for r in branches.map(self.repo, prs=[])}["feat/x"]
+        self.assertEqual(row["backup"]["reason"], "the project's backup policy is off (dev backup policy)")
+        self.assertEqual(self.on_origin("feat/x"), "")
+
+    def test_the_policy_command_shows_and_sets_it_and_on_backs_up_a_public_repository_hourly(self):
+        tip = self.branch("feat/oss", 2 * HOUR)[-1]
+        rc, out = self.backup("policy")
+        self.assertEqual(rc, 0)
+        self.assertIn("acme/widget: backup policy ask, the default for a public repository", out)
+        self.assertEqual(self.backup("policy", "on")[0], 2)  # no reason, no change
+        self.assertEqual(self.backup("policy", "sometimes", "--why", "x")[0], 2)
+        self.assertEqual(self.backup("policy", "on", "-p", "acme/nothing", "--why", "x")[0], 2)
+        self.assertEqual(branches.backup_policy(PID), None)
+        rc, out = self.backup("policy", "on", "--why", "open source: the code is public anyway")
+        self.assertEqual(rc, 0, out)
+        self.assertEqual(branches.backup_policy(PID)["why"], "open source: the code is public anyway")
+        self.assertEqual(self.sync(), [("feat/oss", "pushed")])
+        self.assertEqual(self.on_origin("feat/oss"), tip)
+        rows = branches.map(self.repo, prs=[])
+        self.assertIn("Backup policy: on, set by", " ".join(branches.status_lines(rows, cols=200)))
+        self.assertIn("backup policy: on, set by", "\n".join(branches.note_lines(rows)))
+        self.assertEqual(self.backup("policy", "off", "-p", PID, "--why", "a client asked")[0], 0)
+        self.branch("feat/later", 2 * HOUR)
+        self.assertEqual(self.sync(), [("feat/later", "skipped")])
+
+    def test_public_pushes_once_whatever_the_policy_and_a_crew_member_cannot_use_it(self):
+        tip = self.branch("feat/x", HOUR)[-1]
+        self.assertEqual(self.backup("policy", "off", "--why", "a client's fork")[0], 0)
+        with mock.patch.object(backup, "crew_member", return_value="link"):
+            rc, out = self.backup("--public")
+            self.assertEqual(rc, 2)
+            self.assertIn("dev backup --public is the developer's own decision", out)
+            self.assertEqual(self.backup("policy", "on", "--why", "x")[0], 2)
+        self.assertEqual((self.on_origin("feat/x"), branches.backup_policy(PID)["policy"]), ("", "off"))
+        rc, out = self.backup("--public")
+        self.assertEqual((rc, self.on_origin("feat/x")), (0, tip), out)
+        self.assertEqual(branches.backup_policy(PID)["policy"], "off")  # once: the policy stays
 
 
 class BackupWithoutScannerTests(BackupCase):
