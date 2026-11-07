@@ -1190,10 +1190,52 @@ def impeccable_checks() -> list:
     return rows
 
 
+def claude_plugin_check(listed: str) -> tuple:
+    """The `dev doctor` row for Claude Code's plugins: each plugin of the effective set (the team's, then the dev ext
+    overlay) enabled in `claude plugin list`."""
+    from . import ext
+    want = ext.effective_plugin_ids("claude")
+    blocks = {b.split("\n")[0].strip().strip("❯ ").strip(): b for b in re.split(r"\n\s*(?=❯ )", listed or "")}
+    bad = [p for p in want if p not in blocks or "enabled" not in blocks[p] or "disabled" in blocks[p]]
+    return ("Claude", "plugins", not bad, f"{len(want) - len(bad)}/{len(want)} enabled"
+            + (f"; missing: {', '.join(bad)}" if bad else ""), "dev install --only claude")
+
+
+def claude_mcp_check(mcp_out: str) -> tuple:
+    """The `dev doctor` row for Claude Code's MCP servers: each server of the effective set in `claude mcp list`."""
+    from . import ext
+    want = ext.effective_mcp("claude")
+    miss = [n for n in want if not re.search(rf"^{re.escape(n)}:", mcp_out or "", re.M)]
+    return ("Claude", "MCP servers", not miss, ", ".join(want) + (f"; missing {miss}" if miss else ""),
+            "dev install --only claude")
+
+
+def codex_plugin_check(listed: str) -> tuple:
+    """The `dev doctor` row for Codex's plugins: each plugin of the effective set enabled in `codex plugin list`."""
+    from . import ext
+    want = ext.effective_plugin_ids("codex")
+    lines = (listed or "").splitlines()
+    bad = [p for p in want if not any(ln.startswith(p + " ") and "installed, enabled" in ln for ln in lines)]
+    return ("Codex", "plugins", not bad, f"{len(want) - len(bad)}/{len(want)} enabled"
+            + (f"; missing: {', '.join(bad)}" if bad else ""), "dev install --only codex")
+
+
+def codex_mcp_check(configured: set) -> tuple:
+    """The `dev doctor` row for Codex's MCP servers: each server of the effective set in Codex's configuration."""
+    from . import ext
+    want = set(ext.effective_mcp("codex"))
+    return ("Codex", "MCP servers", want <= configured, ", ".join(sorted(want & configured)) +
+            (f"; missing {sorted(want - configured)}" if want - configured else ""), "dev install --only codex")
+
+
 def impeccable_codex_check(listed: str) -> tuple:
-    """The `dev doctor` row for impeccable on Codex, which gets it from its plugin: enabled in `codex plugin list`."""
-    plugin = next((p for p in load_conf("codex/plugins.json").get("plugins", []) if p.split("@")[0] == "impeccable"),
-                  "impeccable@openai-curated-remote")
+    """The `dev doctor` row for impeccable on Codex, which gets it from its plugin: enabled in `codex plugin list`,
+    when the effective set (the team's, then the dev ext overlay) has it."""
+    from . import ext
+    plugin = next((p for p in ext.effective_plugin_ids("codex") if p.split("@")[0] == "impeccable"), None)
+    if plugin is None:
+        return ("Codex", "impeccable plugin", True, "not in your set: removed or disabled with dev ext",
+                "dev ext ls impeccable")
     ok = any(ln.startswith(plugin + " ") and "installed, enabled" in ln for ln in (listed or "").splitlines())
     return ("Codex", "impeccable plugin", ok, f"{plugin} enabled" if ok else f"{plugin} not enabled in `codex plugin "
             f"list`", "dev install --only codex")
@@ -2221,16 +2263,10 @@ def doctor() -> int:
     check("Claude", "devkit hooks", {"SessionStart", "SessionEnd", "PreToolUse", "Stop", "UserPromptSubmit",
                                      "PostToolUse"} <= events, ", ".join(sorted(events)),
           "dev install --only claude")
-    want = load_conf("claude/plugins.json")
     _, listed, _ = sh(["claude", "plugin", "list"], timeout=60) if core.have("claude") else (1, "", "")
-    blocks = {b.split("\n")[0].strip("❯ ").strip(): b for b in re.split(r"\n\s*(?=❯ )", listed)}
-    bad = [p for p in want["plugins"] if p not in blocks or "enabled" not in blocks[p] or "disabled" in blocks[p]]
-    check("Claude", "plugins", not bad, f"{len(want['plugins']) - len(bad)}/{len(want['plugins'])} enabled"
-          + (f"; missing: {', '.join(bad)}" if bad else ""), "dev install --only claude")
+    check(*claude_plugin_check(listed))
     _, mcp_out, _ = sh(["claude", "mcp", "list"], timeout=90) if core.have("claude") else (1, "", "")
-    miss = [n for n in want.get("mcp", {}) if not re.search(rf"^{re.escape(n)}:", mcp_out, re.M)]
-    check("Claude", "MCP servers", not miss, ", ".join(want.get("mcp", {})) + (f"; missing {miss}" if miss else ""),
-          "dev install --only claude")
+    check(*claude_mcp_check(mcp_out))
 
     if core.have("codex"):
         from .codexrpc import CodexError, CodexRPC
@@ -2259,19 +2295,14 @@ def doctor() -> int:
                           "set codex.profiles in ~/.config/devkit/config.json to models from `codex debug models`")
                 except Exception:
                     pass
-                mcps = set((cfg.get("mcp_servers") or {}).keys())
-                wantm = set(load_conf("codex/plugins.json").get("mcp", {}))
-                check("Codex", "MCP servers", wantm <= mcps, ", ".join(sorted(wantm & mcps)) +
-                      (f"; missing {sorted(wantm - mcps)}" if wantm - mcps else ""), "dev install --only codex")
+                check(*codex_mcp_check(set((cfg.get("mcp_servers") or {}).keys())))
         except CodexError as e:
             check("Codex", "app-server", False, str(e), "codex doctor")
         _, listed, _ = sh(["codex", "plugin", "list"], timeout=120)
-        wantp = load_conf("codex/plugins.json")["plugins"]
-        bad = [p for p in wantp if not any(ln.startswith(p + " ") and "installed, enabled" in ln for ln in listed.splitlines())]
-        check("Codex", "plugins", not bad, f"{len(wantp) - len(bad)}/{len(wantp)} enabled" +
-              (f"; missing: {', '.join(bad)}" if bad else ""), "dev install --only codex")
+        check(*codex_plugin_check(listed))
         check(*impeccable_codex_check(listed))
-        for group, name, ok, detail, fix in app_checks(wantp):
+        from . import ext
+        for group, name, ok, detail, fix in app_checks(ext.effective_plugin_ids("codex")):
             check(group, name, ok, detail, fix)
 
     from . import providers

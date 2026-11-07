@@ -1111,6 +1111,57 @@ class EffectiveSetTests(unittest.TestCase):
         self.assertTrue(any("grill-with-docs" in s["skills"] and not s.get("agents") for s in sources))
 
 
+class DoctorEffectiveSetTests(unittest.TestCase):
+    """`dev doctor` checks the effective set (the team's, then the dev ext overlay), not the team list: a plugin the
+    developer disabled is no failure, and an overlay plugin or server that is missing is one."""
+
+    def overlay(self, ext_cfg):
+        return mock.patch.dict(core.CFG, {"ext": ext_cfg})
+
+    @staticmethod
+    def claude_listing(ids, skip=()):
+        return "Installed plugins:\n\n" + "\n".join(f"  ❯ {p}\n    Version: 1.0.0\n    Status: ✔ enabled\n"
+                                                    for p in ids if p not in skip)
+
+    @staticmethod
+    def codex_listing(ids, skip=()):
+        return "".join(f"{p}  installed, enabled\n" for p in ids if p not in skip)
+
+    def test_a_plugin_the_developer_disabled_is_green(self):
+        team = setup.load_conf("claude/plugins.json")["plugins"]
+        cc = "commit-commands@claude-plugins-official"
+        with self.overlay({"disable": [f"plugin:claude:{cc}"]}):
+            _, _, ok, detail, _ = setup.claude_plugin_check(self.claude_listing(team, skip={cc}))
+        self.assertTrue(ok, detail)
+
+    def test_an_overlay_plugin_that_is_missing_is_red(self):
+        team = setup.load_conf("claude/plugins.json")["plugins"]
+        add = {"kind": "plugin", "agent": "claude", "id": "kid-extra@someone", "license": "MIT", "why": "w"}
+        with self.overlay({"add": [add]}):
+            _, _, ok, detail, _ = setup.claude_plugin_check(self.claude_listing(team))
+        self.assertFalse(ok)
+        self.assertIn("missing: kid-extra@someone", detail)
+
+    def test_codex_plugins_and_mcp_servers_follow_the_overlay(self):
+        team = setup.load_conf("codex/plugins.json")["plugins"]
+        sec = "superpowers@openai-curated-remote"
+        add = {"kind": "mcp", "name": "kid-docs", "url": "https://docs.example.com/mcp", "license": "MIT", "why": "w",
+               "agents": ["codex"]}
+        with self.overlay({"remove": [f"plugin:codex:{sec}", "mcp:codex:angular-cli"], "add": [add]}):
+            _, _, pok, pdetail, _ = setup.codex_plugin_check(self.codex_listing(team, skip={sec}))
+            _, _, mok, mdetail, _ = setup.codex_mcp_check({"chrome-devtools"})
+        self.assertTrue(pok, pdetail)
+        self.assertFalse(mok)
+        self.assertIn("missing ['kid-docs']", mdetail)
+
+    def test_the_impeccable_row_follows_the_effective_codex_plugins(self):
+        imp = "impeccable@openai-curated-remote"
+        with self.overlay({"remove": [f"plugin:codex:{imp}"]}):
+            _, _, ok, detail, _ = setup.impeccable_codex_check("")
+        self.assertTrue(ok, detail)
+        self.assertIn("dev ext", detail)
+
+
 class InstallSkillsLayeringTests(unittest.TestCase):
     """The skills step itself (setup._install_skills) with an overlay: the team's sources, the overlay's, devkit's own
     skills under agents/skills, and the impeccable engine, all in one run. Fetches are faked; links are real."""
