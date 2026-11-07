@@ -1445,17 +1445,31 @@ def setup_codex():
 def _extensions(agent: str):
     """Uninstall the agent's extensions retired from devkit's defaults (`retired` in its plugins.json), each audited
     as ext.retire (a user overlay that adds one back keeps it), then record what its vendor marketplace plugins are
-    now (~/.local/state/devkit/ext-lock.json), so a later change outside devkit shows as drift (dev ext)."""
+    now (~/.local/state/devkit/ext-lock.json), so a later change outside devkit shows as drift (dev ext). Accepting a
+    change made outside devkit, and vouching for what ships with the app the first time, is the developer's, in a
+    terminal (core.set_by_developer, F1 of re-review four): from anyone else's run both stay as drift."""
     from . import ext
     try:
         for ok, msg in ext.retire(agent, lambda argv, timeout=300: sh(argv, timeout=timeout)):
             done(msg) if ok else fail(msg)
-        for line in ext.lock_changes(agent):  # L3: name what is accepted before it is recorded
-            note(f"accepting a change made outside devkit: {line}")
-        new = ext.new_app_entries(agent)  # F2: from now on this record vouches for them
-        if new:
-            note(f"recording what ships with the {agent} app for the first time: {', '.join(new)}")
-        n = ext.record_lock(agent)
+        try:
+            developer = core.set_by_developer()
+        except Exception:
+            developer = False  # a check that cannot decide vouches for nothing (fail closed)
+        changes, new = ext.lock_changes(agent), ext.new_app_lines(agent)  # L3, F2: name them before the record
+        if developer:
+            for line in changes:
+                note(f"accepting a change made outside devkit: {line}")
+            for line in new:
+                note(f"recording what ships with the {agent} app for the first time: {line}")
+        else:
+            for line in changes:
+                note(f"not accepted, a change made outside devkit: {line}")
+            for line in new:
+                note(f"not recorded, seen with the {agent} app for the first time: {line}")
+            if changes or new:
+                note("these stay as drift until the developer runs dev install in a terminal")
+        n = ext.record_lock(agent, accept=developer)
         if n:
             done(f"{n} vendor plugin version(s) recorded: a change outside devkit now shows as drift (dev ext ls)")
     except ext.ExtError as e:

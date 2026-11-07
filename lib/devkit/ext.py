@@ -542,6 +542,7 @@ def observe(h: Homes = None) -> dict:
         cmd = tbl.get("command") if isinstance(tbl.get("command"), str) else ""
         url = tbl.get("url") if isinstance(tbl.get("url"), str) else ""
         o = {"installed": True, "version": _args_version(args), "url": url, "command": cmd,
+             "args": [str(a) for a in args],
              "spec": "sha256:" + hashlib.sha256("\n".join(entry["raw"]).encode()).hexdigest()}
         env = tbl.get("env") if isinstance(tbl.get("env"), dict) else {}
         passed = tbl.get("env_vars") if isinstance(tbl.get("env_vars"), list) else []  # taken from Codex's own
@@ -969,21 +970,46 @@ def drift_seen_file() -> Path:
 
 
 def record_lock(agent: str, h: Homes = None, by: str = "dev install", t: dict = None, user: dict = None,
-                path: Path = None, only: set = None) -> int:
+                path: Path = None, only: set = None, accept: bool = True) -> int:
     """`dev install` and `dev ext update --apply`: record what this agent's vendor marketplace plugins, and what ships
     with its app (F2), are now (or only the ids in `only`): version, SHA and a digest of their files (M3); for an MCP
-    server, a digest of its table. A later change outside devkit then shows as drift. -> how many were recorded."""
+    server, a digest of its table. A later change outside devkit then shows as drift. With `accept` False (a run that
+    is not the developer's, in a terminal: F1 of re-review four), it records neither a change made outside devkit nor
+    what ships with the app seen for the first time: both stay as drift. Compared with the lock under its state lock,
+    so nothing changes between the check and the record. -> how many were recorded."""
     now = int(time.time())
     rows = _lockable(agent, h, t, user, only)
+    count = [0]
 
     def put(doc):
         for eid, o in rows.items():
-            doc[eid] = {"pin": "observed", "version": o.get("version", ""), "sha": o.get("sha", ""),
-                        "digest": content_digest(o["path"]) if o.get("path") else "", "at": now, "by": by}
+            new = {"pin": "observed", "version": o.get("version", ""), "sha": o.get("sha", ""),
+                   "digest": content_digest(o["path"]) if o.get("path") else "", "at": now, "by": by}
             if "spec" in o:
-                doc[eid]["spec"] = o["spec"]
+                new["spec"] = o["spec"]
+            lk = doc.get(eid)
+            if not accept and ((o.get("app") and not lk) or (lk and _lock_change(lk, new))):
+                continue
+            doc[eid] = new
+            count[0] += 1
     _edit_lock(put, path)
-    return len(rows)
+    return count[0]
+
+
+def _lock_change(lk: dict, new: dict) -> str:
+    """How an entry's record differs from what it is now (`new`, as record_lock() writes it), or ''."""
+    if "spec" in new:
+        return "its command, arguments or environment changed" if lk.get("spec") != new["spec"] else ""
+    if (lk.get("version"), lk.get("sha")) != (new.get("version", ""), new.get("sha", "")):
+        return f"{_vs(lk)} → {_vs(new)}"
+    if lk.get("digest") and new.get("digest") and new["digest"] != lk["digest"]:
+        return f"{_vs(new)}: its files changed (same version and SHA)"
+    return ""
+
+
+def _what(agent: str, eid: str, o: dict) -> str:
+    kind, _, rest = eid.split(":", 2)
+    return f"{rest.partition('@')[0]} ({agent}{' app' if o.get('app') else ''} {kind})"
 
 
 def _lockable(agent: str, h: Homes = None, t: dict = None, user: dict = None, only: set = None) -> dict:
@@ -1008,24 +1034,33 @@ def lock_changes(agent: str, h: Homes = None, t: dict = None, user: dict = None,
         lk = lock.get(eid)
         if not lk:
             continue
-        kind, _, rest = eid.split(":", 2)
-        what = f"{rest.partition('@')[0]} ({agent}{' app' if o.get('app') else ''} {kind})"
-        if "spec" in o:
-            if lk.get("spec") != o["spec"]:
-                out.append(f"{what}: its command, arguments or environment changed")
-        elif (lk.get("version"), lk.get("sha")) != (o.get("version", ""), o.get("sha", "")):
-            out.append(f"{what} {_vs(lk)} → {_vs(o)}")
-        elif lk.get("digest") and o.get("path") and content_digest(o["path"]) != lk["digest"]:
-            out.append(f"{what} {_vs(o)}: its files changed (same version and SHA)")
+        new = {"version": o.get("version", ""), "sha": o.get("sha", ""), **({"spec": o["spec"]} if "spec" in o else {}),
+               "digest": content_digest(o["path"]) if o.get("path") and lk.get("digest") else ""}
+        change = _lock_change(lk, new)
+        if change:
+            out.append(f"{_what(agent, eid, o)}{':' if 'spec' in o else ''} {change}")
     return out
 
 
-def new_app_entries(agent: str, h: Homes = None, t: dict = None, user: dict = None, path: Path = None) -> list:
-    """F2: the names of what ships with the agent's app that record_lock() would record for the first time, so
-    `dev install` names them: from then on its record is what vouches for the runtime marketplace's plugins."""
+def _new_app(agent: str, h: Homes = None, t: dict = None, user: dict = None, path: Path = None) -> dict:
     lock = read_lock(path)
-    return sorted(rid.split(":", 2)[2].partition("@")[0] for rid, o in _lockable(agent, h, t, user).items()
-                  if o.get("app") and rid not in lock)
+    return {rid: o for rid, o in sorted(_lockable(agent, h, t, user).items()) if o.get("app") and rid not in lock}
+
+
+def new_app_entries(agent: str, h: Homes = None, t: dict = None, user: dict = None, path: Path = None) -> list:
+    """F2: the names of what ships with the agent's app that record_lock() would record for the first time: from then
+    on its record is what vouches for the runtime marketplace's plugins and the app's MCP servers."""
+    return sorted(rid.split(":", 2)[2].partition("@")[0] for rid in _new_app(agent, h, t, user, path))
+
+
+def new_app_lines(agent: str, h: Homes = None, t: dict = None, user: dict = None, path: Path = None) -> list:
+    """new_app_entries() as `dev install` names them, one line each: a plugin with its version, an MCP server with
+    the command and arguments it runs (F1 of re-review four: the developer sees what the record will vouch for)."""
+    out = []
+    for rid, o in _new_app(agent, h, t, user, path).items():
+        run = shlex.join([o["command"], *o.get("args", [])]) if o.get("command") else o.get("url", "")
+        out.append(f"{_what(agent, rid, o)}: {run}" if "spec" in o else f"{_what(agent, rid, o)} {_vs(o)}")
+    return out
 
 
 def report_drift(rows: list, audit=None, seen: Path = None) -> list:

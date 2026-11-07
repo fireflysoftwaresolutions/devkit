@@ -435,13 +435,26 @@ class DriftWiringTests(unittest.TestCase):
             needs = cli.devkit_needs(str(self.tmp.name))
         self.assertEqual([n["command"] for n in needs if "superpowers" in n["text"]], ["dev ext ls"])
 
-    def test_dev_install_records_the_lock_after_installing(self):
+    def install(self, developer: bool) -> str:
+        out = io.StringIO()  # setup's progress lines stay out of the test log
         with mock.patch.object(ext, "homes", return_value=self.h), mock.patch.object(setup, "sh",
                                                                                       lambda *a, **k: (0, "", "")), \
-                contextlib.redirect_stdout(io.StringIO()):  # setup's progress lines stay out of the test log
+                mock.patch.object(core, "set_by_developer", return_value=developer), contextlib.redirect_stdout(out):
             setup._extensions("claude")
+        return plain(out.getvalue())
+
+    def test_dev_install_records_the_lock_after_installing(self):
+        self.install(developer=True)
         lk = ext.read_lock()["plugin:claude:superpowers@claude-plugins-official"]
         self.assertEqual((lk["version"], lk["sha"]), ("7.0.1", SHA_A))
+
+    def test_an_install_outside_the_developers_terminal_accepts_no_change(self):
+        # F1 (re-review four): the change stays as drift until the developer runs dev install in a terminal
+        out = self.install(developer=False)
+        lk = ext.read_lock()["plugin:claude:superpowers@claude-plugins-official"]
+        self.assertEqual((lk["version"], lk["sha"]), ("7.0.0", SHA_B))
+        self.assertIn("superpowers (claude plugin) 7.0.0 bb92a77 → 7.0.1 414603b", out)
+        self.assertIn("until the developer runs dev install in a terminal", out)
 
     def test_doctor_fails_the_lock_check_and_names_the_plugin(self):
         with mock.patch.object(ext, "homes", return_value=self.h):
@@ -1368,15 +1381,45 @@ class CodexAppTests(unittest.TestCase):
         self.record()
         self.assertEqual((self.rows()[rid]["layer"], self.rows()[rid]["drift"]), ("agent", []))
 
-    def test_dev_install_says_which_app_entries_it_records_the_first_time(self):
+    def install(self, developer: bool) -> str:
+        # setup._extensions as `dev install` runs it: in the developer's terminal, or from anyone else's process
         self.write_codex_config()
         out = io.StringIO()
         with mock.patch.object(ext, "homes", return_value=self.h), mock.patch.object(ext, "lock_file",
                                                                                       return_value=self.lock), \
+                mock.patch.object(core, "set_by_developer", return_value=developer), \
                 mock.patch.object(setup, "sh", lambda *a, **k: (0, "", "")), contextlib.redirect_stdout(out):
             setup._extensions("codex")
-        self.assertIn("browser, node_repl, pdf", plain(out.getvalue()))
+        return plain(out.getvalue())
+
+    def test_dev_install_names_each_app_entry_it_records_the_first_time_with_its_command(self):
+        out = self.install(developer=True)
+        self.assertIn(f"node_repl (codex app mcp): {self.app / NODE_REPL} -e PAYLOAD", out)
+        self.assertIn("pdf (codex app plugin) 26.1104.22356", out)
         self.assertIn("plugin:codex:pdf@openai-primary-runtime", ext.read_lock(self.lock))
+
+    def test_an_install_outside_the_developers_terminal_records_no_new_app_entry_and_accepts_no_change(self):
+        # F1 (re-review four): an agent can start dev install from code; its run must not make a planted server the
+        # app's, or accept a change, so both stay as drift until the developer runs dev install in a terminal
+        res = self.app / "Contents" / "Resources"
+        (res / "rg").write_text("")
+        self.install(developer=True)
+        before = ext.read_lock(self.lock)
+        self.servers["rg_pre"] = (str(res / "rg"), {})
+        self.servers["node_repl"] = (self.servers["node_repl"][0], {"NODE_REPL_NODE_MODULE_DIRS": '"/tmp/evil"'})
+        self.plugin("late@openai-primary-runtime")
+        out = self.install(developer=False)
+        lock = ext.read_lock(self.lock)
+        self.assertNotIn("mcp:codex:rg_pre", lock)
+        self.assertNotIn("plugin:codex:late@openai-primary-runtime", lock)
+        self.assertEqual(lock["mcp:codex:node_repl"]["spec"], before["mcp:codex:node_repl"]["spec"])
+        by = self.rows()
+        self.assertEqual([d["kind"] for d in by["mcp:codex:rg_pre"]["drift"]], ["not-in-catalog"])
+        self.assertEqual([d["kind"] for d in by["mcp:codex:node_repl"]["drift"]], ["changed"])
+        self.assertIn(f"rg_pre (codex app mcp): {res / 'rg'} -e PAYLOAD", out)
+        self.assertIn("until the developer runs dev install in a terminal", out)
+        self.install(developer=True)
+        self.assertIn("mcp:codex:rg_pre", ext.read_lock(self.lock))
 
 
 class ProjectSettingsTests(unittest.TestCase):
@@ -1457,12 +1500,9 @@ class InstallAcceptsTests(unittest.TestCase):
 
     def test_dev_install_prints_each_change_before_it_records_it(self):
         DriftWiringTests.setUp(self)
-        out = io.StringIO()
-        with mock.patch.object(ext, "homes", return_value=self.h), mock.patch.object(setup, "sh",
-                                                                                      lambda *a, **k: (0, "", "")), \
-                contextlib.redirect_stdout(out):
-            setup._extensions("claude")
-        self.assertIn("superpowers (claude plugin) 7.0.0 bb92a77 → 7.0.1 414603b", plain(out.getvalue()))
+        out = DriftWiringTests.install(self, developer=True)
+        self.assertIn("accepting a change made outside devkit: superpowers (claude plugin) 7.0.0 bb92a77 → 7.0.1 "
+                      "414603b", out)
 
 
 class UnmanagedSkillTests(unittest.TestCase):
