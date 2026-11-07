@@ -48,15 +48,19 @@ All notable changes to devkit. Versions follow CalVer `YY.MM.PATCH` (PATCH resta
 
 ### Security
 
-- **The text you type in commands stays out of the audit trail.** A refused call (`guard.deny`), a call that got no
-  result (`calls.unclosed`), every `dev` command, and an irreversible command's words now keep the program, the
-  subcommands, the ids, and the option names, and each free-text argument only as its length, such as
-  `[text not recorded: 22 characters]`. Until now, a `dev crew ask` message, the text of `--why`, `--check`, `-m`, or
-  `dev handoff --log`, and a heredoc's body could reach these records, which go to the handoff repository for 13
-  months and can then be removed only by a git history purge; since 26.11.3 only `dev crew` arguments were masked.
-  Records written earlier are masked when they are read. The guard decides as before, and an agent still reads the
-  whole refusal. [What a record holds](docs/audit.md#what-a-record-holds-and-what-it-never-holds) lists the fields
-  and arguments.
+- **Audit records keep only the words of a command line that devkit knows to be safe.** A refused call
+  (`guard.deny`, and the commands its refusal quotes), a call that got no result (`calls.unclosed`), every `dev`
+  command, and an irreversible command's words now keep the program (`dev`, `git`, or `gh`) and its subcommands, the
+  option names, the values that name something (a crew member, a branch, a path), the ids, and the numbers. Every
+  other word is recorded only as its length, such as `[text not recorded: 22 characters]`, and a line with another
+  program keeps only its operators and each word's length. A delegated step (`crew.delegate`) keeps what the member
+  should do only as its length, and a commit to the handoff repository (`handoff.*`) keeps only the item's id and the
+  operation. Until now, a `dev crew ask` message, the text of `--why`, `--check`, `-m`, or `dev handoff --log`, a
+  heredoc's body, and a task's title could reach these records, which go to the handoff repository for 13 months and
+  can then be removed only by a git history purge; since 26.11.3 only `dev crew` arguments were masked. A name given
+  as a value that names something, such as a step's name, still reaches a record. Records written earlier are masked
+  when they are read. The guard decides as before, and an agent still reads the whole refusal.
+  [What a record holds](docs/audit.md#what-a-record-holds-and-what-it-never-holds) lists what stays.
 
 ## [26.11.4] - 2026-11-07
 
