@@ -291,20 +291,37 @@ def _child(argv, env, cwd) -> str:
     return ""
 
 
-def _program(argv) -> str:
-    """The name of the program a process start runs: the first word of `argv` (a list or a shell string)."""
-    if isinstance(argv, (str, bytes)):
-        first = os.fsdecode(argv).split(None, 1)[:1]
-    else:
-        first = [os.fsdecode(argv[0])] if argv else []
-    return os.path.basename(first[0]) if first else ""
+_SHELLS = frozenset({"sh", "bash", "zsh", "dash", "ksh", "fish", "csh", "tcsh"})
+# osascript as the program of a shell line: where a command starts (the line's start, or after ; & | ( ) { } ` or a
+# new line), past variable assignments and the launchers that run the next word, by any path, quoted or not
+_OSASCRIPT_LINE = re.compile(
+    r"(?:^|[;&|(){}`\n])\s*"
+    r"(?:(?:[A-Za-z_]\w*=\S*|(?:\S*/)?(?:env|exec|command|nohup|sudo|xcrun|time|nice|timeout)(?:\s+(?:-\S+|\d\S*))*)"
+    r"\s+)*[\"']?(?:\S*/)?osascript[\"']?(?=\s|$|[;&|)}`])")
+
+
+def _runs_osascript(event, args) -> bool:
+    """Whether a process start runs osascript: its program (Popen's executable, the path posix_spawn and exec run) or
+    its argv[0] is osascript, a shell runs it in its line (`sh -c`, shell=True, os.system), or a launcher at the start
+    of its argv runs it (`env X=1 osascript`)."""
+    if event == "os.system":  # (command,)
+        return bool(_OSASCRIPT_LINE.search(os.fsdecode(args[0] or "")))
+    program, argv = args[0], args[1]  # Popen: (executable, args, cwd, env); posix_spawn and exec: (path, argv, env)
+    words = [argv] if isinstance(argv, (str, bytes, os.PathLike)) else list(argv or ())
+    words = [os.fsdecode(w) for w in words if isinstance(w, (str, bytes, os.PathLike))]
+    starts = ([os.fsdecode(program)] if isinstance(program, (str, bytes, os.PathLike)) else []) + words[:1]
+    names = {os.path.basename(w) for w in starts} | {os.path.basename(w.split(None, 1)[0]) for w in starts if w.split()}
+    if "osascript" in names:
+        return True
+    if names & _SHELLS:
+        return any(_OSASCRIPT_LINE.search(w) for w in words[1:])
+    return bool(words and _OSASCRIPT_LINE.match(" ".join(words)))
 
 
 def _hook(event, args):
     if _S["allow"] or not _S["active"]:
         return
-    if event in ("subprocess.Popen", "os.posix_spawn", "os.exec") and \
-            _program(args[1] if event == "subprocess.Popen" else args[1] or [args[0]]) == "osascript":
+    if event in ("subprocess.Popen", "os.posix_spawn", "os.exec", "os.system") and _runs_osascript(event, args):
         # a security notice ignores DEVKIT_NO_NOTIFY (devkit's acceptance notice), so the run refuses the program
         _refuse("process", "osascript", "a test never shows the developer a desktop notification")
     if event == "open":
