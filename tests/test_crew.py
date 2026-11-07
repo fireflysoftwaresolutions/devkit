@@ -562,6 +562,19 @@ class CrewSessionTests(unittest.TestCase):
             self.assertIn("B: patch it (was A)", listed)
             self.assertIn("morpheus · unverified", listed)
 
+    def test_a_decision_names_the_steps_the_developers_answer_approves(self):
+        # M280 (F6, D4): dev crew ask --decision --approves "<steps>" keeps them on the decision, checked against the plan
+        with TempState():
+            pg.start("Parser", plan=["parse", "review"])
+            rc, _, _ = run_cli("crew", "ask", "--decision", "Ship the parser as it is?", "--options", "yes | no",
+                               "--recommend", "yes", "--approves", "parse")
+            self.assertEqual(rc, 0)
+            self.assertEqual(pg.load_run("claude", "s1")["decisions"][0]["approves"], ["parse"])
+            rc, _, err = run_cli("crew", "ask", "--decision", "And the docs?", "--options", "yes | no",
+                                 "--approves", "nosuch")
+            self.assertEqual(rc, 2)
+            self.assertIn("nosuch", err)
+
     def test_decisions_ask_prints_the_exact_question_for_the_question_tool(self):
         with TempState():
             pg.start("Parser", plan=["parse"])

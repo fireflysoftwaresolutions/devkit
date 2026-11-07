@@ -1439,7 +1439,8 @@ def _ask_decision(a, me) -> int:
         ui.err("a decision goes to the developer through Morpheus: drop --to")
         return 2
     d = progress.crew_decision(" ".join(a.text), options=a.options or "", recommend=a.recommend or "",
-                               irreversible=a.irreversible or "", from_agent=me, target=a.target or "")
+                               irreversible=a.irreversible or "", from_agent=me, target=a.target or "",
+                               approves=getattr(a, "approves", "") or "")
     if d["state"] == "decided":
         print(f"{ui.OK} auto mode: go ahead with {_option(d, d['answer'])} ({d['id']}, recorded; the developer can "
               "revisit it with dev crew decisions)")
@@ -1994,6 +1995,8 @@ def register(add):
     x.add_argument("--irreversible", help="the irreversible action it leads to: " + ", ".join(_irreversible()))
     x.add_argument("--target", help="what that action acts on (a branch, a tag, a PR number): the developer's "
                                     "answer opens that action on that target once")
+    x.add_argument("--approves", help="with --decision: the finished steps the developer's answer approves, "
+                                      "\"api, screens\" (checked against the plan)")
     x = sp.add_parser("answer", help="answer a crew message by its id")
     x.add_argument("id", help="the message id, e.g. M3")
     x.add_argument("text", nargs="+")
