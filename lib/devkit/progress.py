@@ -1690,7 +1690,7 @@ def option_of(d: dict, text):
 _APPROVE_WORDS = frozenset({"approve", "approved", "yes"})
 # an option whose words start like this reads as not doing it, so it is never the default performing option
 _REFUSE_WORDS = frozenset({"no", "not", "don't", "dont", "never", "reject", "wait", "hold", "cancel", "abort", "stop",
-                           "skip", "keep", "later", "changes", "decline", "deny", "postpone"})
+                           "skip", "keep", "later", "changes", "decline", "deny", "postpone", "nope", "nah"})
 
 
 def _option_text(o) -> str:
@@ -1714,8 +1714,9 @@ def _named_option(opts, text, prefix: bool = False):
 
 
 def _refuses(option) -> bool:
-    t = _option_text(option)
-    return t.split(" ", 1)[0] in _REFUSE_WORDS or t.startswith("do not")
+    # the first word, whatever punctuation surrounds it: "No.", "no, wait", "(no)" and "Wait," all read as not doing it
+    words = re.findall(r"[a-z']+", _option_text(option).replace("\u2019", "'"))
+    return bool(words) and (words[0] in _REFUSE_WORDS or words[:2] == ["do", "not"])
 
 
 def _default_performs(opts, recommend):

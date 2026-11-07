@@ -463,11 +463,18 @@ class DecisionAnswerGrantTests(EvidenceCase):
                    # an explicit --performs that names an option reading as not doing it (Seraph's probe: then
                    # "approve D1: no" opened the release)
                    {"options": "A: release | B: no", "recommend": "A", "performs": "B"},
-                   {"options": "A: release | B: wait", "recommend": "A", "performs": "wait"}):
+                   {"options": "A: release | B: wait", "recommend": "A", "performs": "wait"},
+                   # punctuation after the refusing word (Seraph's second probe: "B: No." opened the release)
+                   {"options": "A: release | B: No.", "recommend": "A", "performs": "B"},
+                   {"options": "A: release | B: no, wait", "recommend": "A", "performs": "B"},
+                   {"options": "A: release | B: (no)", "recommend": "A", "performs": "B"},
+                   {"options": "A: release | B: nope", "recommend": "A", "performs": "B"},
+                   # the default path: a recommended option that reads as waiting never performs the release
+                   {"options": "A: release | B: Wait.", "recommend": "B"}):
             with self.subTest(**kw):
                 with self.assertRaises(pg.StepError) as e:
                     pg.crew_decision("Release now?", irreversible="release", target="v26.11.4", now=m(1), **kw)
-                if kw.get("performs") in ("B", "wait"):
+                if kw.get("performs") in ("B", "wait"):  # an explicit --performs that reads as not doing it
                     self.assertIn("reads as not doing it", str(e.exception))
         self.assertEqual(pg.load_run("claude", "s1").get("decisions") or [], [])
 
