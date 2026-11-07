@@ -56,9 +56,9 @@ Not released yet: the date is set when the release is tagged.
   their reading flags. The guard refuses the verbs that write the agents' settings, hooks, or skill folders to every
   agent, the main session's included.
 
-## [26.11.3] - Unreleased
+## [26.11.3] - 2026-11-06
 
-Not released yet: the date is set when the release is tagged. This release installs devkit with one command, runs its
+This release installs devkit with one command, runs its
 hooks from a pinned copy, gives you a live dashboard, puts the crew under one enforced RACI (who is Responsible,
 Accountable, Consulted, and Informed for each kind of work), holds irreversible actions until you grant them, protects
 devkit's own state from agents, carries a session's work through compaction, backs up branches that exist only on
@@ -277,8 +277,9 @@ devkit refuses more in this release. Each refusal says why and names the command
   for every machine and the team. Without one, a private repository is on and a public one is ask: `dev backup`
   asks you once, in your own terminal, and records the answer. `dev sync` and agents are never asked and never
   publish.
-- **Embargoes:** `dev branch embargo <branch> --why "…" [--until …]` keeps a branch, and the commits it held after a
-  merge, off every remote until you lift it (`--lift`). An embargo is kept in the handoff note's metadata, so every
+- **Embargoes:** `dev branch embargo <branch> --why "…" [--until …]` holds the pushes of a branch, and of the commits
+  it held after a merge, until you lift it (`--lift`): from its project, its git folders and worktrees, temporary
+  clones, and folders that are no project (see Known limits). An embargo is kept in the handoff note's metadata, so every
   machine sees it, and a note devkit cannot read stops every backup. On a public repository, a branch whose commits
   read as a security fix is not backed up: devkit suggests an embargo, and `dev backup --public` pushes it anyway.
 - **Draft pull requests early, CI once.** With `delivery.draft_pr` on, `dev pr create` opens a draft unless
@@ -420,7 +421,9 @@ devkit refuses more in this release. Each refusal says why and names the command
 
 - The audit trail's copy in the handoff repository never grows past 45 MB in one file: a month that would pass it is
   held, with a warning in the trail and in `dev doctor`, instead of growing toward GitHub's 100 MB limit and stopping
-  every handoff push. Daily, compressed audit files replace the monthly ones in 26.11.4.
+  every handoff push. Daily, compressed audit files replace the monthly ones in 26.11.5.
+- `dev install` no longer stops at the skills step on a fresh clone or a release archive: git keeps no empty folder, so
+  devkit's own `agents/skills` folder is missing there, and the step now links the third-party skills without it.
 - `install.sh` works on Intel Macs: it finds Homebrew in `/usr/local` as well as `/opt/homebrew`, and runs the wizard
   with Homebrew's Python from `brew --prefix` instead of a fixed `/opt/homebrew/bin/python3`. On Apple Silicon, it adds
   Homebrew to `~/.zprofile` when Homebrew was not on the `PATH`, so new terminals find `brew`, `gh`, and the toolchain.
@@ -490,6 +493,13 @@ devkit refuses more in this release. Each refusal says why and names the command
   functions or devkit's state is refused, also when it loads them through the agent's own files (three levels deep)
   or through code decoded at run time. On Codex, devkit reads no transcript yet, so a grant or an answer you type
   there opens nothing: run irreversible actions on Codex yourself, in a terminal.
+- **A "no" never opens an irreversible action.** A decision that leads to a release, merge, push, or deploy opens it
+  only when your answer chooses the option that performs it (`--performs`, else the one option that reads yes or
+  approve, else the recommended one); before, any verified answer opened it, `approve D1: no` included. Any other
+  answer opens nothing and is audited as `crew.grant-refused`, with the decision and the option, never your text.
+  `dev crew ask` refuses a `--performs` that names an option reading as not doing it (`B: no`), and the question
+  you are asked names the choice that runs the action and its target: `D1 · Release now? (choosing “A: release”
+  runs release v26.11.4)`.
 - The irreversible-action gate sees more: the repository that `gh -R`, `--repo`, or `GH_REPO` names (so a grant for
   one repository never covers another), commands run through `script`, `watch`, GNU `parallel`, `sem`, `arch`,
   `flock`, `unbuffer`, `chronic`, or `yarn workspace`, targets that `xargs` appends, `curl` methods inside short-flag
@@ -536,6 +546,9 @@ devkit refuses more in this release. Each refusal says why and names the command
 - A grant a step uses for a push or a pull request covers only its own target pattern in its own repository.
 - The dashboard server reads a project's branch map at most every 5 seconds and two at once, answering more with
   429, so a client cannot start unbounded git reads.
+- An agent's push from a folder that is no project (a temporary clone, a folder made in the same command, one a
+  sourced file picks) is refused while any project has an embargo, and a push from inside a git folder, or through
+  `env -C` or `sudo -D`, is judged as that folder's project, so its embargo holds.
 
 ### Known limits
 
@@ -544,7 +557,12 @@ devkit refuses more in this release. Each refusal says why and names the command
   [Guard rules › What the guard is and is not](docs/guard.md#what-the-guard-is-and-is-not).
 - **Developer grants on Codex are not confirmed yet.** devkit reads no Codex transcript, so a grant or an answer you
   type in Codex opens nothing: run irreversible actions there yourself, in a terminal.
-- **Credential separation comes in 26.11.4.** Until then, agents use the same tokens and keys as you.
+- **Agents use your credentials.** devkit works with the GitHub account you are signed in to with `gh` and your own
+  tokens and keys; there is no separate identity for agents, by design. The guard and your grants hold the
+  irreversible actions.
+- **An embargo holds pushes from its own project only.** It holds pushes from the embargoed project, its git folders
+  and worktrees, temporary clones, and unknown folders; a copy of its commits in another project's folder is not
+  held yet (26.11.4).
 
 ### Removed
 

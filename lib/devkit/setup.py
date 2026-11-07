@@ -1199,14 +1199,20 @@ def impeccable_codex_check(listed: str) -> tuple:
             f"list`", "dev install --only codex")
 
 
+def local_skills(home: Path) -> dict:
+    """devkit's own shared skills under <home>/agents/skills -> {name: directory}. The folder may be missing: git keeps
+    no empty folder, so a fresh clone or a release archive has none until a skill is added there."""
+    root = home / "agents" / "skills"
+    if not root.is_dir():
+        return {}
+    return {d.name: d for d in sorted(root.iterdir()) if (d / "SKILL.md").exists()}
+
+
 def _install_skills():
     step("Skills (shared by Claude Code and Codex)")
     manifest = load_conf("skills.json")
-    wanted = {}  # name -> directory to link
+    wanted = local_skills(DEVKIT_HOME)  # name -> directory to link
     only = {}  # name -> the agents that get it (default: both)
-    for d in sorted((DEVKIT_HOME / "agents" / "skills").iterdir()):
-        if (d / "SKILL.md").exists():
-            wanted[d.name] = d
     groups = set((core.CFG.get("skills") or {}).get("groups") or [])
     for src in manifest["sources"]:
         if src.get("group") and src["group"] not in groups and "all" not in groups:

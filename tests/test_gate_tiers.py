@@ -89,7 +89,12 @@ class GateCase(unittest.TestCase):
         # the gate records through the real audit.record, into an audit folder of the test's own: a stub recorder
         # hid a keyword collision that broke every gate record (L-fxzc02legsi). No team policy, no forwarding.
         root = Path(self.tmp.name)
+        # an empty handoff of the test's own: no embargo anywhere. Without one, whether the hermetic home has a
+        # handoff folder yet depended on which module ran first, and a temp repo (no project) is held while it has none
+        (root / "handoff" / "projects").mkdir(parents=True)
         for p in (mock.patch.object(audit, "AUDIT", root / "audit"),
+                  mock.patch.object(core, "HANDOFF", root / "handoff"),
+                  mock.patch.object(core, "NOTES", root / "handoff" / "projects"),
                   mock.patch.object(audit, "policy_file", lambda: root / "no-policy.json"),
                   mock.patch.dict(core.CFG, {"audit": json.loads(json.dumps(core.DEFAULTS.get("audit") or {}))}),
                   mock.patch.dict(os.environ)):

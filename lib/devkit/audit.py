@@ -1167,10 +1167,10 @@ def verify(team: bool = True) -> dict:
 # --------------------------------------------------------------------------- publish and prune (R2 anchor, R3)
 
 # GitHub refuses a pushed file over 100 MB, and from then on every handoff push, so no month copy is published past
-# this. A stopgap for 26.11.3: 26.11.4 publishes daily gzipped segments instead of whole months.
+# this. A stopgap for 26.11.3: 26.11.5 publishes daily gzipped segments instead of whole months.
 PUBLISH_LIMIT = 45 * 1024 * 1024
 HELD_FIX = ("nothing is lost: every record stays in this machine's trail and dev audit verify checks it; devkit "
-            "26.11.4 publishes daily segments instead of whole months, so run dev update once it is released")
+            "26.11.5 publishes daily segments instead of whole months, so run dev update once it is released")
 
 
 def _mb(n: int) -> str:

@@ -31,9 +31,10 @@ It is not a sandbox. A determined program can still find a form the guard does n
 it assembles at run time from pieces the guard cannot read, or a file it unpacks and git later runs. Each such form
 the red team finds becomes a rule here and a test, but the list can never be complete.
 
-The lasting boundary is credentials: what an agent's tools can reach is limited by the tokens and keys they hold.
-Separating the agents' credentials from yours is planned for devkit 26.11.4. Until then, treat the guard as the net
-under your own review, not as a replacement for it.
+Agents work with your own credentials: devkit uses the GitHub account you are signed in to with `gh`, and the tokens
+and keys on your Mac, with no separate identity for agents: what an agent's tools can reach is what you can reach.
+The guard, the grants you type, and the actions only you may run hold the irreversible steps for you; treat them as
+the net under your own review, not as a replacement for it.
 
 ## Decisions
 
@@ -300,16 +301,27 @@ pre-approved with `dev crew mode auto --approve`.
 ### The developer's own decisions
 
 Lifting an embargo and publishing a branch make its commits public, and the backup policy decides whether devkit
-publishes a project's branches at all. An embargo keeps a branch off the remote, so pushing an embargoed branch is
-the developer's decision too. These commands are the action `developer-only`, tier 2:
+publishes a project's branches at all. An embargo holds an agent's pushes of a branch and its commits, so pushing an
+embargoed branch is the developer's decision too. These commands are the action `developer-only`, tier 2:
 
 | Command | Grant line that opens it once |
 | --- | --- |
 | `dev branch embargo --lift <branch>` | `grant embargo <branch>` |
 | `git push`, `dev push`, `dev pr create` or `gh pr create` that sends an embargoed branch, or commits its embargo holds (under another name, a commit id, a branch made from it, a tag, `--all`) | `grant embargo <branch>` |
 | `git push`, `dev push`, `dev pr create` or `gh pr create` of any branch while devkit cannot read the project's handoff note | `grant embargo <branch>` |
+| `git push`, `dev push`, `dev pr create` or `gh pr create` from a folder known only when it runs (`cd "$X"`, `git -C "$(…)"`, `GIT_DIR=$G`, anything after `source` or `.`) or from a folder that is no project (a temporary clone, a folder that does not exist yet), while any project on this Mac has an embargo or devkit cannot read an embargo list | none: the target is `?`; the agent writes out the path of the project's checkout instead |
 | `dev backup --public` | `grant backup <project>` |
 | `dev backup policy on\|off\|ask` | `grant backup <project>` |
+
+A push from inside a repository's git folder (`<repo>/.git`, `<repo>/.git/worktrees/<name>`), or one that
+`env -C <dir>` or `sudo -D <dir>` runs in another folder, is judged as the project of that folder, so
+`grant embargo <branch>` in that project opens it. The handoff repository's own pushes are never held.
+
+The embargo is not yet off every remote. A push is judged by the embargo list of the project in the folder it runs
+from, so the embargo holds pushes from the embargoed project, its git folders and worktrees, temporary clones, and
+folders that are no project. A copy of its commits in another project's folder (another clone or checkout that
+devkit knows as a different project) is judged by that project's list, which does not name them, so an agent's push
+from there is not held yet. devkit 26.11.4 closes this.
 
 The developer can still push an embargoed branch in a terminal. `dev backup` and `dev sync` hold embargoes
 themselves, so they need no grant for it. A crew member never runs them. In the main session they are refused without a grant in every setting of

@@ -129,21 +129,21 @@ class DecisionEvidenceTests(EvidenceCase):
         self.answered(q, "A: Skip them and go on (Recommended)", m(2),
                       options=("A: Skip them and go on (Recommended)", "B: Reject the file"))
         d = pg.crew_decide("D1", "A", now=m(3))
-        self.assertEqual((d["by"], d["verified"], d.get("option")), ("developer", True, "A: skip"))
+        self.assertEqual((d["by"], d["verified"], d.get("chosen")), ("developer", True, "A: skip"))
 
     def test_a_label_without_its_letter_that_equals_an_option_verifies(self):
         self.ask()
         self.answered("D1: empty lines in an import, skip them or reject the file?", "reject", m(2),
                       options=("skip (Recommended)", "reject"))
         d = pg.crew_decide("D1", "B", now=m(3))
-        self.assertEqual((d["by"], d["verified"], d.get("option")), ("developer", True, "B: reject"))
+        self.assertEqual((d["by"], d["verified"], d.get("chosen")), ("developer", True, "B: reject"))
 
     def test_the_header_can_name_the_decision(self):
         self.ask()
         self.answered("Empty lines in an import: skip them or reject the file?", "B: Reject the file", m(2),
                       options=("A: Skip them (Recommended)", "B: Reject the file"), header="D1")
         d = pg.crew_decide("D1", "B: reject", now=m(3))
-        self.assertEqual((d["by"], d["verified"], d.get("option")), ("developer", True, "B: reject"))
+        self.assertEqual((d["by"], d["verified"], d.get("chosen")), ("developer", True, "B: reject"))
 
     def test_an_answer_covers_only_the_decision_its_question_names(self):
         self.ask()
@@ -159,8 +159,9 @@ class DecisionEvidenceTests(EvidenceCase):
         self.answered("D1 · Empty lines in an import: skip them or reject the file?", "Skip them, but log each one",
                       m(2))  # typed under "Other": no label the call offered
         d = pg.crew_decide("D1", "Skip them, but log each one", now=m(3))
-        self.assertEqual((d["by"], d["verified"], d["answer"], d.get("option")),
-                         ("developer", True, "Skip them, but log each one", None))
+        self.assertEqual((d["by"], d["verified"], d["answer"], d.get("chosen")),
+                         ("developer", True, "Skip them, but log each one", "Skip them, but log each one"))
+        self.assertIsNone(pg.option_of(d, d["chosen"]))
 
     def test_a_letter_the_decision_lacks_is_free_text_not_an_option(self):
         self.ask()
@@ -421,6 +422,149 @@ class GateContractTests(EvidenceCase):
         self.assertIsNone(grant("merge", "12", lane="a_tank", now=m(4)))  # tier 2: never a member's
         self.assertIsNone(grant("push", "feat/parser", lane="a_other", now=m(4)))
         self.assertIsNone(grant("push", "feat/parser", now=m(4)))  # the step's grant is the lane's, not main's
+
+
+class DecisionAnswerGrantTests(EvidenceCase):
+    # 26.11.3 consent bug (the Senior engineer's probe): an irreversible decision opens its action only when the
+    # developer's answer chooses the option that performs it; "no", another option, free text or an answer to another
+    # decision opens nothing, and the refusal is audited without the answer's free text
+
+    def irreversible(self, target, at, options="yes | no", recommend="yes", action="release",
+                     question="Release now?", **more):
+        d = pg.crew_decision(question, options=options, recommend=recommend, irreversible=action, target=target,
+                             now=m(at), **more)
+        self.shown(f"{d['id']} waits for you.", m(at) + 1)
+        return d
+
+    def refusals(self):
+        out = []
+        for f in sorted(audit.AUDIT.glob("*.jsonl")):
+            out += [r for r in map(json.loads, f.read_text().splitlines()) if r.get("action") == "crew.grant-refused"]
+        return out
+
+    def test_a_no_opens_nothing_and_the_refusal_names_the_decision_and_option(self):
+        self.irreversible("v26.11.4", 1)
+        self.irreversible("v26.11.5", 2)
+        self.typed("approve D1: no", m(3))
+        self.typed("approve D2", m(3))  # an answer to another decision, for another target
+        self.assertTrue(pg.crew_decide("D1", "no", now=m(4))["verified"])
+        self.assertTrue(pg.crew_decide("D2", "yes", now=m(4))["verified"])
+        self.assertIsNone(grant("release", "v26.11.4", consume=False, now=m(5)))
+        self.assertEqual([(r["target"], r["ref"]["id"], r["ref"]["answer"]) for r in self.refusals()],
+                         [("release v26.11.4", "D1", "no")])
+        self.assertIsNone(grant("release", "v26.11.4", now=m(5)))
+
+    def test_one_refused_release_through_the_gate_writes_one_refusal(self):
+        # the gate checks without using (consume=False) and uses only a grant it found, so its check is where a
+        # refusal is audited: once per refused command, through the real use_grant and audit.record (L-fxzc02legsi)
+        from devkit import guard
+        self.irreversible("v26.11.4", 1, options="A: release | B: no", recommend="A", performs="A")
+        self.typed("approve D1: no", m(2))
+        pg.crew_decide("D1", "no", now=m(3))
+        with mock.patch.object(guard, "_repo_of", lambda cwd: "acme/api"), \
+                mock.patch.object(core, "load_config", return_value={"safeguards": {"irreversible_main": "enforce"}}):
+            verdict = guard.irreversible_verdict("gh release create v26.11.4", str(self.root), agent="claude",
+                                                 session="s1", now=m(4))
+        self.assertEqual(verdict[0], "deny")
+        self.assertEqual([(r["target"], r["ref"]["id"], r["ref"]["answer"]) for r in self.refusals()],
+                         [("release v26.11.4", "D1", "B: no")])
+
+    def test_only_the_option_that_performs_it_opens_it_once(self):
+        lettered = {"options": "A: release | B: wait", "recommend": "A"}
+        self.irreversible("v26.11.4", 1, **lettered)
+        d2 = self.irreversible("v26.11.5", 2, **lettered)
+        self.typed("approve D1: B", m(3))
+        self.answered(pg.ask_text(d2), "A: release (Recommended)", m(3), options=("A: release", "B: wait"))
+        pg.crew_decide("D1", "B", now=m(4))
+        pg.crew_decide("D2", "A: release", now=m(4))
+        self.assertIsNone(grant("release", "v26.11.4", now=m(5)))
+        self.assertEqual(grant("release", "v26.11.5", now=m(5))["source"], "decision")
+        self.assertIsNone(grant("release", "v26.11.5", now=m(6)))  # used once
+
+    def test_free_text_opens_nothing_and_stays_out_of_the_audit(self):
+        self.irreversible("v26.11.4", 1, options="", recommend="")
+        self.irreversible("v26.11.5", 2, options="", recommend="")
+        said = "only after the demo with Jane Roe"
+        self.typed(f"approve D1: {said}", m(3))
+        self.typed("approve D2", m(3))  # no options: the approve line itself approves
+        pg.crew_decide("D1", said, now=m(4))
+        pg.crew_decide("D2", "approve", now=m(4))
+        self.assertIsNone(grant("release", "v26.11.4", now=m(5)))
+        self.assertEqual(grant("release", "v26.11.5", now=m(5))["source"], "decision")
+        refused = self.refusals()
+        self.assertEqual([r["ref"]["answer"] for r in refused], [f"[free text: {len(said)} characters]"])
+        self.assertNotIn("Jane", json.dumps(refused))
+
+    def test_the_recommended_option_performs_it_unless_one_option_approves(self):
+        self.irreversible("old-tags", 1, action="push", recommend="no", question="Delete the old tags?")
+        self.irreversible("v26.11.5", 2, options="A: release | B: wait", recommend="A")
+        self.typed("approve D1", m(3))  # the recommended "no": "yes" performs the push, so it opens nothing
+        self.typed("approve D2", m(3))  # the recommended A performs the release
+        pg.crew_decide("D1", "no", now=m(4))
+        pg.crew_decide("D2", "A", now=m(4))
+        self.assertIsNone(grant("push", "old-tags", now=m(5)))
+        self.assertEqual(grant("release", "v26.11.5", now=m(5))["source"], "decision")
+
+    def test_an_explicit_performing_option_wins_over_the_recommendation(self):
+        explicit = {"options": "A: wait | B: release", "recommend": "A", "performs": "B"}
+        self.irreversible("v26.11.4", 1, **explicit)
+        self.irreversible("v26.11.5", 2, **explicit)
+        self.typed("approve D1", m(3))  # the recommended A: wait
+        self.typed("approve D2: B", m(3))
+        pg.crew_decide("D1", "A", now=m(4))
+        pg.crew_decide("D2", "B", now=m(4))
+        self.assertIsNone(grant("release", "v26.11.4", now=m(5)))
+        self.assertEqual(grant("release", "v26.11.5", now=m(5))["source"], "decision")
+
+    def test_ask_refuses_an_irreversible_decision_no_option_clearly_performs(self):
+        for kw in ({"options": "A: release | B: wait", "recommend": "B"},  # the default would be "wait"
+                   {"options": "A: release | B: wait", "recommend": ""},
+                   {"options": "A: release | B: wait", "recommend": "A", "performs": "C"},
+                   {"options": "", "recommend": "yes", "performs": "yes"},
+                   # an explicit --performs that names an option reading as not doing it (Seraph's probe: then
+                   # "approve D1: no" opened the release)
+                   {"options": "A: release | B: no", "recommend": "A", "performs": "B"},
+                   {"options": "A: release | B: wait", "recommend": "A", "performs": "wait"},
+                   # punctuation after the refusing word (Seraph's second probe: "B: No." opened the release)
+                   {"options": "A: release | B: No.", "recommend": "A", "performs": "B"},
+                   {"options": "A: release | B: no, wait", "recommend": "A", "performs": "B"},
+                   {"options": "A: release | B: (no)", "recommend": "A", "performs": "B"},
+                   {"options": "A: release | B: nope", "recommend": "A", "performs": "B"},
+                   # quotes around the refusing word (Seraph's third probe), and a refusing word added after it
+                   {"options": "A: release | B: 'no'", "recommend": "A", "performs": "B"},
+                   {"options": "A: release | B: \u2018no\u2019", "recommend": "A", "performs": "B"},
+                   {"options": "A: release | B: pause", "recommend": "A", "performs": "B"},
+                   # the default path: a recommended option that reads as waiting never performs the release
+                   {"options": "A: release | B: Wait.", "recommend": "B"},
+                   {"options": "A: release | B: 'wait'", "recommend": "B"}):
+            with self.subTest(**kw):
+                with self.assertRaises(pg.StepError) as e:
+                    pg.crew_decision("Release now?", irreversible="release", target="v26.11.4", now=m(1), **kw)
+                if kw.get("performs") in ("B", "wait"):  # an explicit --performs that reads as not doing it
+                    self.assertIn("reads as not doing it", str(e.exception))
+        self.assertEqual(pg.load_run("claude", "s1").get("decisions") or [], [])
+
+    def test_the_question_names_the_option_that_runs_the_action_and_its_target(self):
+        # the developer sees which choice runs what, on what, in the question itself: the tech lead's hint never
+        # reaches them (Seraph, 26.11.3)
+        self.irreversible("v26.11.4", 1, options="A: release | B: wait", recommend="A")
+        self.irreversible("", 2, options="A: wait | B: release", recommend="A", performs="B")
+        self.irreversible("v26.11.5", 3, options="", recommend="")
+        self.ask("Skip empty lines?", at=4)
+        self.assertEqual([pg.ask_text(self.decision(f"D{n}")) for n in range(1, 5)],
+                         ["D1 · Release now? (choosing “A: release” runs release v26.11.4)",
+                          "D2 · Release now? (choosing “B: release” runs release)",
+                          "D3 · Release now? (answering “yes” runs release v26.11.5)",
+                          "D4 · Skip empty lines?"])
+
+    def test_a_no_backs_no_preapproval_and_no_step_grant(self):
+        self.irreversible("fix/parser", 1, action="push", question="Push the fix?")
+        self.typed("approve D1: no", m(2))
+        pg.crew_decide("D1", "no", now=m(3))
+        pg.set_mode("auto", approve="push fix/parser", now=m(4))
+        self.assertEqual(pg.load_run("claude", "s1")["preapprovals"], [])
+        pg.assign("build", "Tank", allow="push", now=m(5))
+        self.assertEqual(pg.load_run("claude", "s1")["plan"][0]["allow"], [])
 
 
 class HookWiringTests(EvidenceCase):

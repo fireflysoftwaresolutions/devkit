@@ -31,6 +31,7 @@ import json
 import os
 import re
 import shlex
+import unicodedata
 import statistics
 import subprocess
 import sys
@@ -1321,7 +1322,8 @@ def approved_actions(run, now: float | None = None) -> list:
 def _action_evidence(agent: str, sid: str, run: dict, action: str, target: str, now: float, any_target=False):
     """Use the developer's evidence for one action (a pre-approval's or a step grant's): their live grant of that
     action and target (any target with `any_target`), else a verified, unused decision naming the action and a
-    target (that target unless `any_target`; a decision without one backs nothing, M277). -> the evidence to keep
+    target (that target unless `any_target`; a decision without one backs nothing, M277) whose answer approves
+    the action (approves_action). -> the evidence to keep
     with it, with the `target` pattern and the `repo` it covers (a step grant opens only those), or None."""
     def granted(x):
         return x.get("channel") == "E2" and bool(x.get("expires"))
@@ -1337,9 +1339,11 @@ def _action_evidence(agent: str, sid: str, run: dict, action: str, target: str, 
     if got:
         return {**{k: got.get(k) for k in ("channel", "ts", "covers", "transcript_uuid", "excerpt")},
                 "target": str(got.get("covers") or "").partition(" ")[2], "repo": got.get("repo") or ""}
-    d = next((x for x in run.get("decisions") or [] if x.get("verified") and x.get("by") == "developer"
-              and x.get("irreversible") == action and not x.get("used") and x.get("target")
-              and (any_target or _norm(x["target"]) == _norm(target))), None)
+    def covers(x):
+        return any_target or _norm(x["target"]) == _norm(target)
+    d = next((x for x in _decision_candidates(run, action, covers) if approves_action(x)), None)
+    if not d:
+        _audit_refused(run, action, target, covers, f"{agent}:{sid}")
     if d:
         d["used"] = now  # the caller saves the run
         return {"channel": "decision", "ts": d.get("decided"), "covers": d["id"],
@@ -1419,7 +1423,7 @@ def _cli_quote(text) -> str:
 
 
 def decision_shape(question: str, options="", recommend: str = "", irreversible: str = "", target: str = "",
-                   approves: str = "") -> tuple:
+                   approves: str = "", performs: str = "") -> tuple:
     """`dev crew ask --decision` in the shape the developer can be asked nicely: a question under 300 characters,
     2 to 4 options, each "<letter>: <what it means>", and a recommendation that is one of them. An irreversible
     approval asked without options (what the guard tells an agent to run) is a yes-or-no question, "A: yes | B: no",
@@ -1457,6 +1461,7 @@ def decision_shape(question: str, options="", recommend: str = "", irreversible:
     cmd = (f"dev crew ask --decision {_cli_quote(q if len(q) <= DECISION_QUESTION_MAX else '<the question>')} "
            f"--options {_cli_quote(' | '.join(shown))} --recommend {letter or 'A'}"
            + (f" --irreversible {irreversible}" if irreversible else "") + (f" --target {target}" if target else "")
+           + (f" --performs {_cli_quote(performs)}" if performs else "")
            + (f" --approves {_cli_quote(approves)}" if approves else ""))
     raise StepError("; ".join(problems) + f". Ask it like this (the developer sees the recommended option first): "
                     f"{cmd}")
@@ -1480,9 +1485,7 @@ def _ask_context(run: dict, d: dict) -> str:
 
 
 def _recommended(d: dict):
-    rec = d.get("recommend") or ""
-    return option_of(d, rec) or next((o for o in d.get("options") or [] if rec and o.lower().startswith(
-        rec.lower())), None)
+    return _named_option(d.get("options"), d.get("recommend"), prefix=True)
 
 
 def ask_calls(run: dict, ids=None) -> dict:
@@ -1520,12 +1523,14 @@ def ask_calls(run: dict, ids=None) -> dict:
 
 
 def crew_decision(question: str, options=None, recommend: str = "", irreversible: str = "", from_agent: str | None = None,
-                  cwd: str | None = None, now: float | None = None, target: str = "", approves: str = "") -> dict:
+                  cwd: str | None = None, now: float | None = None, target: str = "", approves: str = "",
+                  performs: str = "") -> dict:
     """A decision point. -> the decision record. In auto mode a reversible decision is taken at once with the
     recommendation; in guided mode, or for an irreversible action not pre-approved, it waits for the developer: the
     asking member's lane waits and its step is blocked until Morpheus records the answer (crew_decide). `target`:
     what the irreversible action acts on (a branch, a tag, a PR number): a verified decision opens that action on
-    that target once (spec C6)."""
+    that target once (spec C6), and only when the developer chose the option that performs it: `performs`, else the
+    one option that reads yes or approve, else the recommended one (approves_action)."""
     now = now or time.time()
     from_agent = _as_lane(from_agent, cwd)
     agent, sid = current_session(cwd)
@@ -1544,10 +1549,29 @@ def crew_decision(question: str, options=None, recommend: str = "", irreversible
         target = (target or "").strip()
         if target and (not act or len(target.split()) != 1):
             raise StepError("--target goes with --irreversible and names one thing: a branch, a tag, a PR number")
+        performs = (performs or "").strip()
+        if performs and not (act and opts):
+            raise StepError("--performs goes with --irreversible and --options: it names the option that performs "
+                            "the action")
+        perf = ""
+        if act and opts:
+            perf = _named_option(opts, performs, prefix=True) if performs else _default_performs(opts, rec)
+            if perf and performs and _refuses(perf):  # an explicit "B: no" would let a "no" open the action
+                raise StepError(f"--performs “{performs}” names “{perf}”, which reads as not doing it: "
+                                f"{' | '.join(opts)}. Name the option that performs {act} with --performs; only the "
+                                f"developer's choice of it opens {act}")
+            if not perf:
+                raise StepError((f"--performs “{performs}” is not one of the options" if performs else
+                                 f"no option clearly performs {act}: none reads yes or approve, and the recommended "
+                                 f"one is missing or reads as not doing it")
+                                + f": {' | '.join(opts)}. Name the option that performs {act} with --performs; only "
+                                  f"the developer's choice of it opens {act}")
         decs = run.setdefault("decisions", [])
         d = {"id": _next_id(decs, "D"), "ts": round(now), "question": question.strip()[:800], "options": opts,
              "recommend": rec, "irreversible": act, "target": target, "from": from_agent or "main",
              "from_name": _name_of(run, from_agent or "main"), "state": "pending", "answer": "", "by": ""}
+        if perf:
+            d["performs"] = perf  # the option whose choice opens the action (approves_action)
         if approves:  # the developer's answer approves these steps (approvals.verdicts), verified by C5 evidence
             from . import approvals
             try:
@@ -1613,11 +1637,12 @@ def crew_decide(decision_id: str, answer: str, cwd: str | None = None, now: floa
                             f"{_how_to_ask(d)}. Then run this again.")
         prev = d.get("answer")
         d.update(state="decided", answer=answer, by="developer" if ev else "morpheus", verified=bool(ev),
-                 decided=round(now), option=None if (ev or {}).get("free") else option_of(d, answer))
+                 decided=round(now))
         d.pop("proposed", None)
         d.pop("proposed_ts", None)
         if ev:
             d["evidence"] = {k: ev.get(k) for k in ("channel", "ts", "covers", "transcript_uuid", "excerpt")}
+            d["chosen"] = _chosen(d, ev)  # the developer's own choice; it alone opens an action (approves_action)
         if prev and prev != d["answer"]:
             d["overrides"] = prev  # the developer changed an automatic decision
         for s in run.get("plan") or []:
@@ -1696,7 +1721,8 @@ def decisions_context(agent: str, sid: str) -> str:
         opts = (" Options: " + " | ".join(d["options"])) if d["options"] else ""
         lines.append(f"- {d['id']} from {crew.who(d['from_name'])}: “{ask_text(d)}”{opts}"
                      + (f" Recommended: {d['recommend']}." if d.get("recommend") else "")
-                     + (f" Irreversible: {d['irreversible']}." if d.get("irreversible") else ""))
+                     + (f" Irreversible: {d['irreversible']}." if d.get("irreversible") else "")
+                     + (f" Only “{performing_option(d)}” opens it." if performing_option(d) else ""))
     return "\n".join(lines)
 
 
@@ -1777,8 +1803,18 @@ def _norm(text) -> str:
 
 def ask_text(d: dict) -> str:
     """The decision as devkit words it for the developer: "D<n> · <question>". The tech lead may reword it and add
-    context; the "D<n> ·" up front (or the header D<n>) binds the answer to it (asked_decision)."""
-    return f"{d['id']} · {d['question']}"
+    context; the "D<n> ·" up front (or the header D<n>) binds the answer to it (asked_decision). An irreversible
+    decision's question says, on its one line, which answer runs which action on which target: "D1 · Release now?
+    (choosing “A: release” runs release v26.11.4)"; without options, "(answering “yes” runs …)"."""
+    text = f"{d['id']} · {d['question']}"
+    act = d.get("irreversible")
+    if not act:
+        return text
+    runs = " ".join(f"{act} {d.get('target') or ''}".split())
+    if d.get("options"):
+        perf = performing_option(d)
+        return f"{text} (choosing “{perf}” runs {runs})" if perf else text
+    return f"{text} (answering “yes” runs {runs})"
 
 
 def _letter(option: str) -> str:
@@ -1789,13 +1825,8 @@ def _letter(option: str) -> str:
 
 def option_of(d: dict, text):
     """The decision's option an answer names: the option, with or without the question tool's "(Recommended)", its
-    letter ("B" for "B: reject") or its words without the letter ("reject"), else None."""
-    t = _norm(_RECOMMENDED.sub("", str(text or "")))
-    if not t:
-        return None
-    opts = d.get("options") or []
-    return next((o for o in opts if t == _norm(o) or (":" in o and t == _norm(o.split(":", 1)[0]))), None) or \
-        next((o for o in opts if ":" in o and t == _norm(o.split(":", 1)[1])), None)
+    letter ("B" for "B: reject") or its words without the letter ("reject"); None when none or several do."""
+    return _named_option(d.get("options"), text)
 
 
 def asked_decision(q: dict):
@@ -1828,6 +1859,120 @@ def _names_target(d: dict, question: str) -> bool:
     """An irreversible decision's question names what the action acts on (its target, a tag with or without v)."""
     t = _norm(d.get("target"))
     return not t or t in _norm(question) or re.sub(r"^v(?=\d)", "", t) in _norm(question)
+
+
+# An irreversible decision opens its action only when the developer's answer chooses the option that performs it
+# (26.11.3, the Senior engineer's probe: "approve D1: no" opened the release). Without options, only an answer that
+# reads approve, approved or yes (or the bare `approve D<n>` line) does. Everything else opens nothing.
+_APPROVE_WORDS = frozenset({"approve", "approved", "yes"})
+# an option whose words start like this reads as not doing it, so it is never the default performing option
+_REFUSE_WORDS = frozenset({"no", "not", "don't", "dont", "never", "reject", "wait", "hold", "cancel", "abort", "stop",
+                           "skip", "keep", "later", "changes", "decline", "deny", "postpone", "nope", "nah",
+                           "pause", "defer", "delay", "halt", "block", "refuse", "veto", "nay", "none", "negative",
+                           "abstain", "n"})
+
+
+def _option_text(o) -> str:
+    """An option's words without its letter: "A: approve" -> "approve"; an option without a letter as it is."""
+    return _norm(str(o).split(":", 1)[1] if ":" in str(o) else o)
+
+
+def _named_option(opts, text, prefix: bool = False):
+    """The one option `text` names: its label, its letter, its words without the letter ("approve" for "A:
+    approve"), and with `prefix` the start of its label (as --recommend is read). None when none or several do."""
+    t = _norm(_RECOMMENDED.sub("", str(text or "")))
+    if not t:
+        return None
+    tests = [lambda o: t == _norm(o), lambda o: ":" in o and t == _norm(o.split(":", 1)[0]),
+             lambda o: t == _option_text(o)] + ([lambda o: _norm(o).startswith(t)] if prefix else [])
+    for match in tests:
+        hits = [o for o in opts or [] if match(o)]
+        if hits:
+            return hits[0] if len(hits) == 1 else None
+    return None
+
+
+def _refuses(option) -> bool:
+    # the first word, whatever punctuation or quotes surround it: "No.", "no, wait", "(no)", "'no'", "‘no’" and
+    # "Wait," all read as not doing it; an apostrophe counts only inside a word ("don't"); NFKC folds fullwidth letters
+    t = unicodedata.normalize("NFKC", _option_text(option)).lower().translate({0x2018: "'", 0x2019: "'", 0x02BC: "'"})
+    words = re.findall(r"[a-z]+(?:'[a-z]+)*", t)
+    return bool(words) and (words[0] in _REFUSE_WORDS or words[:2] == ["do", "not"])
+
+
+def _default_performs(opts, recommend):
+    """The option that performs an irreversible decision's action when --performs names none: the one option that
+    reads yes or approve, else the recommended one unless it reads as not doing it; None otherwise."""
+    yes = [o for o in opts or [] if _option_text(o) in _APPROVE_WORDS]
+    if yes:
+        return yes[0] if len(yes) == 1 else None
+    rec = _named_option(opts, recommend, prefix=True)
+    return rec if rec and not _refuses(rec) else None
+
+
+def performing_option(d: dict):
+    """The option of an irreversible decision whose choice opens its action, or None (no options, or none performs
+    it). Recorded when it was asked (`performs`); a decision recorded before that gets the same default now."""
+    opts = d.get("options") or []
+    if not d.get("irreversible") or not opts:
+        return None
+    if "performs" in d:
+        return d["performs"] if d["performs"] in opts else None
+    return _default_performs(opts, d.get("recommend"))
+
+
+def _said(d: dict, e: dict) -> str:
+    """What one evidence entry of the developer answered: its answer, or for a bare `approve D<n>` of a decision
+    with options, the recommended option."""
+    return e.get("answer") or (d.get("recommend") if e.get("channel") == "E2" and d.get("options") else "")
+
+
+def _chosen(d: dict, e: dict) -> str:
+    """The developer's choice on a decision, from their own evidence entry, never from the answer the tech lead
+    types: the option it names, else its text (their own text, typed under Other, names no option); a bare
+    `approve D<n>` without options is "approve"."""
+    said = _said(d, e)
+    if said:
+        return said if e.get("free") else (option_of(d, said) or said)
+    return "approve" if e.get("channel") == "E2" else ""
+
+
+def approves_action(d: dict) -> bool:
+    """Does the developer's verified answer to this irreversible decision approve its action? With options: its
+    choice is the performing option. Without: it reads approve, approved or yes. Anything else, and a decision not
+    decided by the developer with evidence, approves nothing. A decision recorded before `chosen` is judged by its
+    recorded answer, which crew_decide already held to the developer's own."""
+    if not (d.get("irreversible") and d.get("state") == "decided" and d.get("by") == "developer"
+            and d.get("verified") is True):
+        return False
+    chose = d.get("chosen") if "chosen" in d else d.get("answer")
+    if d.get("options"):
+        want = performing_option(d)
+        return bool(want) and _named_option(d["options"], chose) == want
+    return _norm(chose).rstrip(".!").strip() in _APPROVE_WORDS
+
+
+def _answer_label(d: dict) -> str:
+    """The developer's answer as an audit record may keep it: the option it names, else its length only."""
+    chose = str(d.get("chosen") if "chosen" in d else d.get("answer") or "")
+    return _named_option(d.get("options") or [], chose) or f"[free text: {len(chose)} characters]"
+
+
+def _decision_candidates(run, action: str, covers) -> list:
+    """The developer's verified, unused decisions that name `action` and a target `covers(d)` accepts."""
+    return [d for d in (run or {}).get("decisions") or [] if d.get("state") == "decided" and d.get("verified") is True
+            and d.get("by") == "developer" and d.get("irreversible") == action and d.get("target")
+            and not d.get("used") and covers(d)]
+
+
+def _audit_refused(run, action: str, target: str, covers, session: str):
+    """Audit each decision that names this action and target but whose answer does not approve it: the decision's
+    id and the option the developer chose, never the free text of the answer."""
+    for d in _decision_candidates(run, action, covers):
+        if not approves_action(d):
+            _audit("crew.grant-refused", f"{action} {target}".strip(),
+                   f"decision {d['id']}: the developer's answer is not the option that performs {action}", "refused",
+                   project=(run or {}).get("project") or "", session=session, id=d["id"], answer=_answer_label(d))
 
 
 def headless(sess: dict) -> bool:
@@ -2188,7 +2333,8 @@ def use_grant(agent: str, sid: str, *, action: str, target: str, repo: str = "",
               consume: bool = True, now: float | None = None):
     """What opens one irreversible action (spec C6, The Keymaker's gate) -> {id, source, uses_left, expires}, or
     None. `lane` None is the main session: a live E2 grant of that action and target, a verified decision naming
-    them, or in auto mode a pre-approval with uses left (never for publish or deploy); a headless session only by
+    them whose answer approves the action (approves_action; one that does not is audited as crew.grant-refused),
+    or in auto mode a pre-approval with uses left (never for publish or deploy); a headless session only by
     DEVKIT_PREAPPROVE in the hook environment. A member's lane: only a grant of the running step it owns, for push
     and PR create. `consume` False peeks, so the gate checks every action of a command before it uses any; True
     takes one use under the session's lock. state.StateBusy and every other error reach the caller: the gate
@@ -2227,10 +2373,11 @@ def use_grant(agent: str, sid: str, *, action: str, target: str, repo: str = "",
     if not live or not _same_repo(live.get("project"), repo):
         return None
 
+    def covers(d):
+        return _target_covers(action, d["target"], target)
+
     def decision(r):
-        return next((d for d in r.get("decisions") or [] if d.get("state") == "decided" and d.get("verified")
-                     and d.get("by") == "developer" and d.get("irreversible") == action and d.get("target")
-                     and not d.get("used") and _target_covers(action, d["target"], target)), None)
+        return next((d for d in _decision_candidates(r, action, covers) if approves_action(d)), None)
 
     def preapproval(r):
         if action in NEVER_PREAPPROVED:
@@ -2256,6 +2403,7 @@ def use_grant(agent: str, sid: str, *, action: str, target: str, repo: str = "",
         _audit("crew.grant-used", f"{action} {target}", f"{source} {hit['id']}", project=r.get("project") or "",
                session=f"{agent}:{sid}")
         return _opened(hit["id"], source, hit.get("uses_left", 0), hit.get("expires"))
+    _audit_refused(live, action, target, covers, f"{agent}:{sid}")
     return None
 
 
@@ -2294,7 +2442,7 @@ def _decision_evidence(agent: str, sid: str, run: dict, d: dict, answer: str, no
     if not found:
         return None
     e = found[-1]  # the developer's latest word on it
-    said = e.get("answer") or (d.get("recommend") if e["channel"] == "E2" and d.get("options") else "")
+    said = _said(d, e)
     if said:
         want = said if e.get("free") else (option_of(d, said) or said)  # their own text names no option
         if not (option_of(d, answer) == want or _norm(answer) == _norm(want)):

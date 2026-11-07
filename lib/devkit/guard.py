@@ -422,6 +422,33 @@ def split_commands(cmd: str, ops: bool = False):
     return segs
 
 
+def _prefix_opts(name, argv, i):
+    """The options of prefix command `name` from argv[i] on -> ([(flag, value or None)], index of the first word after
+    them). A short cluster ends at a flag that takes a value: `env -iC dir`, `sudo -iu root` (the value is the rest of
+    the word or the next word)."""
+    takes, opts = _PREFIX_VALUE_FLAGS.get(name, ()), []
+    while i < len(argv) and argv[i].startswith("-"):
+        f = argv[i]
+        i += 1
+        if f == "--":
+            break
+        if f.startswith("--"):
+            key, eq, val = f.partition("=")
+            if not eq and key in takes and i < len(argv):
+                val, i = argv[i], i + 1
+            opts.append((key, val if eq or key in takes else None))
+            continue
+        for j in range(1, len(f)):
+            if "-" + f[j] in takes:
+                val = f[j + 1:]
+                if not val and i < len(argv):
+                    val, i = argv[i], i + 1
+                opts.append(("-" + f[j], val))
+                break
+            opts.append(("-" + f[j], None))
+    return opts, i
+
+
 def _strip_prefix(argv):
     i = 0
     while i < len(argv):
@@ -429,16 +456,30 @@ def _strip_prefix(argv):
         if re.match(r"^[A-Za-z_][A-Za-z0-9_]*=", a):
             i += 1
         elif os.path.basename(a) in PREFIX_CMDS:
-            takes = _PREFIX_VALUE_FLAGS.get(os.path.basename(a), ())
-            i += 1
-            while i < len(argv) and argv[i].startswith("-"):
-                f = argv[i]
-                i += 2 if f in takes else 1
-                if f == "--":
-                    break
+            i = _prefix_opts(os.path.basename(a), argv, i + 1)[1]
         else:
             break
     return argv[i:]
+
+
+# the prefix flags that run the command in another folder: `env -C dir`, `env --chdir=dir`, `sudo -D dir`
+_CHDIR_OPTS = {"env": ("-C", "--chdir"), "sudo": ("-D", "--chdir")}
+
+
+def _prefix_chdir(pre, cwd):
+    """The folder a segment's command runs in after its prefix words `pre` (the code reviewer's finding on cc259b7:
+    `env -C <repo> git push` pushes from <repo>); UNKNOWN when the folder is known only at run time."""
+    i = 0
+    while i < len(pre):
+        name = os.path.basename(pre[i])
+        if name not in PREFIX_CMDS:
+            i += 1
+            continue
+        opts, i = _prefix_opts(name, pre, i + 1)
+        for flag, val in opts:
+            if flag in _CHDIR_OPTS.get(name, ()) and val is not None:
+                cwd = str(resolve(val, cwd)) if val else cwd
+    return cwd
 
 
 def _env_runs_string(argv0) -> bool:
@@ -4442,11 +4483,28 @@ _MCP_EXTERNAL = frozenset({"create", "delete", "remove", "upload", "share", "pos
                            "approve"})
 
 
+def _work_folder(cwd):
+    """The folder whose project a command at `cwd` acts on: `cwd`, or inside a git folder (`<repo>/.git`, a worktree's
+    `.git/worktrees/<name>`), where git pushes too but has no work tree, the main checkout of its repository (git's
+    --git-common-dir; the code reviewer's finding on cc259b7)."""
+    if not cwd or str(cwd) == str(UNKNOWN) or core.gitout(cwd, "rev-parse", "--show-toplevel"):
+        return cwd
+    from .registry import main_of
+    main = main_of(Path(cwd))
+    return str(main) if main else cwd
+
+
+def _is_handoff(cwd) -> bool:
+    top = core.gitout(cwd, "rev-parse", "--show-toplevel") if cwd and str(cwd) != str(UNKNOWN) else ""
+    return bool(top) and real(top) == real(core.HANDOFF)
+
+
 @functools.lru_cache(maxsize=64)
 def _repo_of(cwd) -> str:
     """The repository an action at `cwd` acts on: its project id, else its top folder."""
     if not cwd:
         return ""
+    cwd = _work_folder(cwd)
     return current_project(cwd) or core.gitout(cwd, "rev-parse", "--show-toplevel") or ""
 
 
@@ -4498,7 +4556,10 @@ def _local_remote(cwd, remote: str) -> bool:
 # developer still pushes in a terminal, and `dev backup` and `dev sync` hold embargoes themselves. A push or PR whose
 # folder is only known when it runs (`git -C "$(…)" push`, `cd "$X" && dev push`, `GIT_DIR=$G git push`) may send
 # from any project on this Mac: an embargo in any of them, or an embargo list devkit cannot read, refuses it as the
-# developer-only action `?` (fail closed; the code reviewer's trace of 202e88d and the tech lead's follow-up).
+# developer-only action `?` (fail closed; the code reviewer's trace of 202e88d and the tech lead's follow-up). So does
+# a push from a folder devkit maps to no project (a temporary clone, a folder that does not exist yet), the handoff
+# repository's own pushes excepted; a push from inside a git folder is judged as its repository's project (the code
+# reviewer's findings on cc259b7).
 _PSEUDO_TARGETS = frozenset({"mirror", "all-branches", "prune", "all-tags", "HEAD", ""})
 
 
@@ -4509,7 +4570,8 @@ def _embargo_anywhere() -> str:
     try:
         from . import audit, branches
         if not Path(core.HANDOFF).is_dir():
-            return f"the handoff repository {core.tilde(core.HANDOFF)} is not on this Mac"
+            return (f"the handoff repository {core.tilde(core.HANDOFF)} is not on this Mac (`dev setup` creates it; "
+                    f"run `dev doctor` to repair the setup)")
         root = Path(core.NOTES)
         pids = {p.relative_to(root).with_suffix("").as_posix() for p in root.rglob("*.md")} if root.is_dir() else set()
         trails = sorted(Path(audit.AUDIT).glob("*.jsonl")) if Path(audit.AUDIT).is_dir() else []
@@ -4536,9 +4598,11 @@ def _embargo_holds(found, cwd, srcs=()) -> list:
     if not cwd or str(cwd) == str(UNKNOWN):  # an unknown folder is never "no embargo": every project's decides
         why = _embargo_anywhere()
         return [("developer-only", "?", "", ("folder", why))] if why else []
+    cwd = _work_folder(cwd)
     pid = current_project(cwd)
-    if not pid:
-        return []
+    if not pid:  # nor is a folder that is no project, but for the handoff repository's own pushes
+        why = "" if _is_handoff(cwd) else _embargo_anywhere()
+        return [("developer-only", "?", "", ("noproject", why))] if why else []
     names = {str(f[1]).rsplit(":", 1)[-1] for f in pushes} | {s for s in srcs if not s.startswith("-")}
     names = {re.sub(r"^refs/heads/", "", n) for n in names}
     try:
@@ -4569,13 +4633,15 @@ def _embargo_holds(found, cwd, srcs=()) -> list:
 
 def _embargo_at(cwd):
     """Whether the project at `cwd` holds an embargo: True for one, or for a note devkit cannot read; False for none;
-    None when `cwd` is unknown or no project. Any failure is True (B2b: never "no embargo")."""
+    None when `cwd` is unknown. A folder that is no project holds one while any project does, the handoff repository
+    excepted. Any failure is True (B2b: never "no embargo")."""
     if not cwd or str(cwd) == str(UNKNOWN):
         return None
     try:
+        cwd = _work_folder(cwd)
         pid = current_project(cwd)
         if not pid:
-            return None
+            return None if _is_handoff(cwd) else bool(_embargo_anywhere())
         from . import branches
         held, _ = branches.read_embargoes(pid)
         return held is None or bool(held)
@@ -5437,15 +5503,18 @@ def _text_actions(text, cwd, depth=0, from_code=False):
         genv = {**shell_env, **assigns}  # GIT_DIR and GIT_WORK_TREE choose the repository git acts on (B2b)
         gopts = [f"--{'git-dir' if k == 'GIT_DIR' else 'work-tree'}={genv[k]}" for k in ("GIT_DIR", "GIT_WORK_TREE")
                  if k in genv]
-        here = cwd
+        here = _prefix_chdir(pre, cwd)  # `env -C dir`, `sudo -D dir`: the command runs there
         if gopts and name == "git":  # as --git-dir and --work-tree
             argv = [argv[0], *gopts, *argv[1:]]
         elif gopts:  # dev, gh and anything else that runs git inherit them: it acts on that repository
-            here = _git_where(["git", *gopts], cwd)
+            here = _git_where(["git", *gopts], here)
         more = _argv_actions(argv, here, bodies, depth)
         if more is None:
             return None
         out += more
+        if name in ("source", "."):  # the file may cd or export GIT_DIR, now or once it changes: both are unknown
+            cwd, shell_env["GIT_DIR"] = str(UNKNOWN), "$(source)"
+            continue
         pagers, unknown = [], False
         if name == "git":  # the pager it runs through the shell is a command like any other (RT3)
             pagers, unknown = _git_pagers(argv, {**shell_env, **assigns})
@@ -5651,6 +5720,9 @@ def _main_reason(a) -> str:
                 f"its folder is only known when it runs, so the guard cannot tell which project it pushes from or "
                 f"whether that project has an embargo, and {why}. Write the folder out as a plain path (`git -C "
                 f"<path> push …`, `cd <path> && dev push`) so the guard checks that project's embargo" if kind == "folder"
+                else f"its folder is no project devkit knows (a temporary clone, a folder that does not exist yet), so "
+                f"the guard cannot tell whether it sends an embargoed branch, and {why}. Push from the project's own "
+                f"checkout (`git -C <checkout> push …`) so the guard checks that project's embargo" if kind == "noproject"
                 else f"it sends {t}, or commits its embargo holds, and {t} is embargoed" + (f" ({why})" if why else ""))
         return (f"`{a['words']}`: {head}. An embargo keeps a branch and its commits off the remote, so pushing it or "
                 f"opening a pull request from it is the developer's own decision (B2b). The developer pushes it in a "
