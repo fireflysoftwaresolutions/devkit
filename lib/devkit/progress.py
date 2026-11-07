@@ -160,7 +160,7 @@ def _write_private(path: Path, doc: dict):
     """An atomic write, 0600 in 0700 folders, without a lock: each entry has one writer."""
     for d in (path.parent.parent, path.parent):  # the ledger, and the session's folder in it
         d.mkdir(parents=True, exist_ok=True, mode=0o700)
-        os.chmod(d, 0o700)
+        os.chmod(d, 0o700)  # nosemgrep: python.lang.security.audit.insecure-file-permissions.insecure-file-permissions (0700 is owner-only: this tightens the folder)
     fd, tmp = tempfile.mkstemp(prefix=f".{path.name}.", suffix=".tmp", dir=str(path.parent))
     try:
         with os.fdopen(fd, "w") as fh:

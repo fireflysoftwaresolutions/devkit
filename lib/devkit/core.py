@@ -499,7 +499,7 @@ def ensure_roots(home=None):
         try:
             root.mkdir(parents=True, exist_ok=True)
             if stat.S_IMODE(root.stat().st_mode) != 0o700:
-                os.chmod(root, 0o700)
+                os.chmod(root, 0o700)  # nosemgrep: python.lang.security.audit.insecure-file-permissions.insecure-file-permissions (0700 is owner-only: this tightens the root)
         except OSError:
             pass
 

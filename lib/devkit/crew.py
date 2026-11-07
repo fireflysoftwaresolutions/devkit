@@ -569,7 +569,7 @@ def enforcement(plan_steps=None) -> list:
         if state == "enforced":
             mod, _, fn = ref.rpartition(".")
             try:
-                ok = callable(getattr(importlib.import_module(mod), fn, None))
+                ok = callable(getattr(importlib.import_module(mod), fn, None))  # nosemgrep: python.lang.security.audit.non-literal-import.non-literal-import (the name comes from ENFORCEMENT, a constant in devkit source)
             except ImportError:
                 ok = False
         elif state == "planned" and plan_steps is not None:
