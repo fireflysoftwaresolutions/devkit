@@ -3,6 +3,22 @@
 All notable changes to devkit. Versions follow CalVer `YY.MM.PATCH` (PATCH restarts at 0 each month); tags are
 `vYY.MM.PATCH`. Sections follow [Keep a Changelog](https://keepachangelog.com/).
 
+## [26.11.5] - Unreleased
+
+### Fixed
+
+- **Crew members no longer stay in Claude Code's agent list after they report.** Claude Code keeps a member alive
+  while a command it put in the background still runs, so finished members stayed listed for hours (one for 16
+  hours), the main session got "waiting on its own background work" notices, and the tech lead had to stop them by
+  hand, while devkit had already closed their lanes. A new crew gate reads the member's transcript at SubagentStop:
+  a background command counts as ended when its task notification arrived, `TaskStop` stopped it, or a read of its
+  output showed it exited. A member with one still running is sent back once, naming each command and its task id,
+  to wait for it or stop it. A member let through with work still running is audited as `crew.gate` and named once
+  in the tech lead's next context, with the agent id `TaskStop` takes. Every brief and agent file now tells members
+  to end their background work before they report, and a reviewer's agent file says how to approve once instead of
+  on every line, which keeps every agent file under 8,000 characters. Codex transcripts have no such launch, so the
+  gate finds nothing there.
+
 ## [26.11.4] - 2026-11-07
 
 This release adds `dev ext` to see, update, and add the third-party plugins, skills, and MCP servers devkit installs,
