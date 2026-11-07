@@ -18,6 +18,10 @@ from pathlib import Path
 from unittest import mock
 
 ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ROOT / "tests"))
+import _hermetic  # noqa: E402
+
+_hermetic.activate()  # run alone, this module gets the suite's temporary home too (tests/_hermetic.py)
 sys.path.insert(0, str(ROOT / "lib"))
 
 from devkit import audit, cli, core, ext, hooks, setup, ui  # noqa: E402
@@ -378,7 +382,10 @@ class LockAndDriftTests(unittest.TestCase):
         ext.record_lock("claude", self.h, t=self.team, user={}, path=self.lock)
         install_claude_plugin(self.h, "superpowers@claude-plugins-official", "7.0.1", SHA_A)
         ext.report_drift(self.rows(), seen=self.seen)
-        ext.record_lock("claude", self.h, t=self.team, user={}, path=self.lock)  # accepted
+        with mock.patch.object(core, "set_by_developer", return_value=True):  # accepted, in the developer's terminal
+            ext.record_lock("claude", self.h, t=self.team, user={}, path=self.lock)
+        self.assertEqual(ext.read_lock(self.lock)["plugin:claude:superpowers@claude-plugins-official"]["version"],
+                         "7.0.1")
         self.assertEqual(ext.report_drift(self.rows(), seen=self.seen), [])
         install_claude_plugin(self.h, "superpowers@claude-plugins-official", "7.0.2", SHA_B)
         self.assertEqual(len(ext.report_drift(self.rows(), seen=self.seen)), 1)
@@ -396,6 +403,57 @@ class LockAndDriftTests(unittest.TestCase):
         self.assertIn("superpowers (claude plugin) 7.0.0 bb92a77 → 7.0.1 414603b; accepted by dev install",
                       recs[0]["detail"])
         self.assertEqual([p["id"] for p in ext.pending_acceptances(self.lock)], [rid])
+
+    def accept_beside(self, list_text: str = None, held: bool = False) -> int:
+        """Record 7.0.0, install 7.0.1 outside devkit, then accept it as the developer while the acceptance list
+        does not parse (`list_text`) or another process holds its lock (`held`)."""
+        from devkit import state
+        import fcntl
+        ext.record_lock("claude", self.h, t=self.team, user={}, path=self.lock)
+        install_claude_plugin(self.h, "superpowers@claude-plugins-official", "7.0.1", SHA_A)
+        if list_text is not None:
+            ext.accepted_file(self.lock).write_text(list_text)
+        fd = None
+        if held:
+            lock = state.lock_file(ext.accepted_file(self.lock))
+            lock.parent.mkdir(parents=True, exist_ok=True)
+            fd = os.open(str(lock), os.O_RDWR | os.O_CREAT, 0o600)
+            fcntl.flock(fd, fcntl.LOCK_EX)
+        try:
+            with mock.patch.object(core, "set_by_developer", return_value=True), \
+                    mock.patch.object(state, "WAIT", 0.2):
+                return ext.record_lock("claude", self.h, t=self.team, user={}, path=self.lock)
+        finally:
+            if fd is not None:
+                fcntl.flock(fd, fcntl.LOCK_UN)
+                os.close(fd)
+
+    def assert_still_drift(self, n: int):
+        self.assertEqual(n, 0)
+        lk = ext.read_lock(self.lock)["plugin:claude:superpowers@claude-plugins-official"]
+        self.assertEqual((lk["version"], lk["sha"]), ("7.0.0", SHA_B))
+        (row,) = self.rows()
+        self.assertEqual([(d["kind"], d["to"]) for d in row["drift"]], [("changed", "7.0.1 414603b")])
+
+    def test_an_acceptance_the_list_cannot_take_because_it_does_not_parse_stays_drift(self):
+        self.assert_still_drift(self.accept_beside(list_text="{not json"))
+
+    def test_an_acceptance_the_list_cannot_take_because_it_is_busy_stays_drift(self):
+        self.assert_still_drift(self.accept_beside(held=True))
+        self.assertEqual(ext.pending_acceptances(self.lock), [])
+
+    def test_the_acceptance_list_is_never_trimmed(self):
+        first = {"id": "plugin:claude:first@x", "what": "the first one", "at": 1, "by": "dev install"}
+        ext.accepted_file(self.lock).write_text(json.dumps(
+            {"pending": [first] + [{"id": f"plugin:claude:p{i}@x", "what": "w", "at": 2} for i in range(249)]}))
+        with mock.patch.object(core, "set_by_developer", return_value=True):
+            ext.record_lock("claude", self.h, t=self.team, user={}, path=self.lock)
+            install_claude_plugin(self.h, "superpowers@claude-plugins-official", "7.0.1", SHA_A)
+            ext.record_lock("claude", self.h, t=self.team, user={}, path=self.lock)
+        pending = ext.pending_acceptances(self.lock)
+        self.assertEqual(len(pending), 251)
+        self.assertEqual(pending[0]["what"], "the first one")
+        self.assertEqual(pending[-1]["id"], "plugin:claude:superpowers@claude-plugins-official")
 
     def test_the_drift_text_names_the_plugin_and_the_change(self):
         ext.record_lock("claude", self.h, t=self.team, user={}, path=self.lock)
@@ -432,12 +490,12 @@ class DriftWiringTests(unittest.TestCase):
         self.addCleanup(self.tmp.cleanup)
         self.h = make_homes(Path(self.tmp.name))
         install_claude_plugin(self.h, "superpowers@claude-plugins-official", "7.0.0", SHA_B)
-        lk = core.STATE / "ext-lock.json"
-        lk.parent.mkdir(parents=True, exist_ok=True)
-        self.addCleanup(lambda: lk.unlink(missing_ok=True))
-        self.addCleanup(lambda: (core.STATE / "ext-drift.json").unlink(missing_ok=True))
-        (core.STATE / "ext-accepted.json").unlink(missing_ok=True)  # another test's acceptances
-        self.addCleanup(lambda: (core.STATE / "ext-accepted.json").unlink(missing_ok=True))
+        # a temporary lock, drift list and acceptance list: never the state of the home the run uses
+        root = Path(self.tmp.name)
+        for name, value in (("lock_file", root / "ext-lock.json"), ("drift_seen_file", root / "ext-drift.json")):
+            p = mock.patch.object(ext, name, return_value=value)
+            p.start()
+            self.addCleanup(p.stop)
         ext.record_lock("claude", self.h)
         install_claude_plugin(self.h, "superpowers@claude-plugins-official", "7.0.1", SHA_A)
 
@@ -825,6 +883,16 @@ class ApplyTests(unittest.TestCase):
         self.assertEqual((rec["target"], rec.get("why")), ("plugin:claude:superpowers@claude-plugins-official",
                                                            "reviewed 7.0.1"))
 
+    def test_apply_says_nothing_was_accepted_when_the_acceptance_list_does_not_parse(self):
+        ext.record_lock("claude", self.h, path=self.lock)  # 7.0.0, as devkit installed it
+        ext.accepted_file(self.lock).write_text("{not json")
+        rc, out = self.run_cli("superpowers", "--agent", "claude", "--apply", "--why", "reviewed 7.0.1")
+        self.assertEqual(rc, 1, out)
+        self.assertNotIn(", recorded as accepted", out)
+        self.assertIn("not recorded as accepted", out)
+        self.assertEqual(ext.read_lock(self.lock)["plugin:claude:superpowers@claude-plugins-official"]["version"],
+                         "7.0.0")
+
     def test_apply_refuses_an_entry_devkit_pins(self):
         rc, out = self.run_cli("codebase-design", "--apply", "--why", "x")  # a skill: pinned by commit
         self.assertEqual(rc, 2)
@@ -1061,7 +1129,8 @@ class InstallSkillsLayeringTests(unittest.TestCase):
                 mock.patch.object(setup, "AGENTS_HOME", self.agents), \
                 mock.patch.object(setup, "STATE", self.state), \
                 mock.patch.object(setup, "_fetch_source", self.fetch), \
-                mock.patch.object(setup, "install_impeccable_engine", engine, create=True):
+                mock.patch.object(setup, "install_impeccable_engine", engine, create=True), \
+                contextlib.redirect_stdout(io.StringIO()):  # the step's list of skills stays out of the test log
             setup.install_skills(quiet=True)
         return engine
 

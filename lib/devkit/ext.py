@@ -950,13 +950,15 @@ def retired_plugin_keys(agent: str = "claude", t: dict = None, user: dict = None
     return {r.split(":", 2)[2] for r in retired_ids(t) - keep if r.startswith(f"plugin:{agent}:")}
 
 
-def _edit_lock(fn, path: Path = None):
-    """Change the lock under devkit's state lock; `fn` edits the document in place."""
+def _edit_lock(fn, path: Path = None) -> bool:
+    """Change the lock under devkit's state lock; `fn` edits the document in place. -> False when the lock is busy or
+    does not parse, so nothing was written."""
     from . import state
     try:
         state.update(path or lock_file(), fn, indent=2)
     except state.StateBusy:
-        pass
+        return False
+    return True
 
 
 
@@ -991,6 +993,7 @@ def record_lock(agent: str, h: Homes = None, by: str = "dev install", t: dict = 
         accept = False  # a check that cannot decide vouches for nothing (fail closed)
 
     def put(doc):
+        writes = []  # (eid, new record, the acceptance's text or "")
         for eid, o in rows.items():
             new = {"pin": "observed", "version": o.get("version", ""), "sha": o.get("sha", ""),
                    "digest": content_digest(o["path"]) if o.get("path") else "", "at": now, "by": by}
@@ -1001,15 +1004,20 @@ def record_lock(agent: str, h: Homes = None, by: str = "dev install", t: dict = 
             first_app = bool(o.get("app") and not lk)
             if not accept and (first_app or change):
                 continue
+            what = f"{_app_line(agent, eid, o)}; first record by {by}" if first_app else \
+                f"{_what(agent, eid, o)}{':' if 'spec' in o else ''} {change}; accepted by {by}" if change else ""
+            writes.append((eid, new, what))
+        accepted[:] = [(eid, what) for eid, _, what in writes if what]
+        # the acceptance list first, while the lock is held: an acceptance it cannot list is no acceptance (fail
+        # closed), so the change stays as drift
+        listed = _note_accepted(accepted, now, by, path) if accepted else True
+        for eid, new, what in writes:
+            if what and not listed:
+                continue
             doc[eid] = new
             count[0] += 1
-            if first_app:
-                accepted.append((eid, f"{_app_line(agent, eid, o)}; first record by {by}"))
-            elif change:
-                accepted.append((eid, f"{_what(agent, eid, o)}{':' if 'spec' in o else ''} {change}; accepted by {by}"))
-    _edit_lock(put, path)
-    if accepted:
-        _note_accepted(accepted, now, by, path)
+    if not _edit_lock(put, path):
+        return 0
     return count[0]
 
 
@@ -1036,27 +1044,33 @@ def _parents(limit: int = 8) -> list:
     return [c if len(c) <= 80 else c[:79] + "…" for c in chain[:limit]]
 
 
-def _note_accepted(items: list, now: int, by: str, lock: Path = None):
-    """Write one `ext.accept` audit record per accepted entry, with the terminal and the parent processes it was
-    accepted from, and add it to the acceptance list (F1-R4 part 1)."""
+def _note_accepted(items: list, now: int, by: str, lock: Path = None) -> bool:
+    """Add each accepted entry to the acceptance list and write one `ext.accept` audit record for it, with the
+    terminal and the parent processes it was accepted from (F1-R4 part 1). The audit records are written only once
+    the list has been read under its lock. -> False when the list is busy or does not parse: then nothing is
+    accepted, and the refusal is audited."""
     from . import audit, state
     tty, parents = _tty(), _parents()
     where = f"tty {tty or 'none'}; parents: {' ← '.join(parents) or 'unknown'}"
     if lock and Path(lock) != lock_file():
         where += f"; lock {lock}"
-    out = []
-    for eid, what in items:
-        rec = audit.record("ext.accept", eid, f"{what}; {where}", "accepted")
-        out.append({"id": eid, "what": what, "at": now, "by": by, "tty": tty, "parents": parents,
-                    "record": (rec or {}).get("id", "")})
 
     def add(doc):
+        out = []
+        for eid, what in items:
+            rec = audit.record("ext.accept", eid, f"{what}; {where}", "accepted")
+            out.append({"id": eid, "what": what, "at": now, "by": by, "tty": tty, "parents": parents,
+                        "record": (rec or {}).get("id", "")})
         # never trimmed: a flood of acceptances must not push an earlier one out of the developer's sight
         doc["pending"] = list(doc.get("pending") or []) + out
     try:
         state.update(accepted_file(lock), add, indent=1)
-    except state.StateBusy:
-        pass
+    except state.StateBusy as e:
+        for eid, what in items:
+            audit.record("ext.accept", eid, f"{what}; not accepted: the acceptance list could not be written ({e}), "
+                                            f"so it stays as drift; {where}", "refused")
+        return False
+    return True
 
 
 def pending_acceptances(lock: Path = None) -> list:
@@ -1732,7 +1746,12 @@ def _apply_update(a) -> int:
                    f"as drift. Check it with dev ext outdated {e.name}; dev install accepts it")
             rc = 1
             continue
-        record_lock(e.agent, by="dev ext update --apply", only={e.id})
+        if not record_lock(e.agent, by="dev ext update --apply", only={e.id}):
+            ui.err(f"updated {e.name} ({e.agent}): now {_vs(now)}, but not recorded as accepted: the lock or the "
+                   f"acceptance list is busy or does not parse ({core.tilde(accepted_file())}), so it shows as drift. "
+                   f"Run dev install in a terminal to accept it")
+            rc = 1
+            continue
         print(f"updated {e.name} ({e.agent}): now {_vs(now)}, recorded as accepted"
               + (" · restart the agent to load it" if e.agent == "claude" else ""))
     return rc

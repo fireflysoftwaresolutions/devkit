@@ -16,6 +16,10 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "tests"))
+import _hermetic  # noqa: E402
+
+_hermetic.activate()  # run alone, this module gets the suite's temporary home too (tests/_hermetic.py)
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "lib"))
 
 from devkit import cli, core, guard, hooks, jobs, updatecheck  # noqa: E402
