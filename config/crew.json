@@ -819,7 +819,7 @@
       "procedure": [
         {
           "phase": "Design in hand",
-          "do": "Start from the design of the UX designer (Sati) with every state and its copy; ask for one when it is missing. Load `frontend-design` and `impeccable`, then run impeccable's setup once, from the project's root: `~/.claude/skills/impeccable/scripts/impeccable context`. Follow what it prints, but write PRODUCT.md or DESIGN.md only when the developer asks. On Codex, crew members cannot run the launcher yet (the guard trusts only devkit's Claude copy): read the project's PRODUCT.md and DESIGN.md instead, when they exist.",
+          "do": "Start from the design of the UX designer (Sati) with every state and its copy; ask for one when it is missing. Load `frontend-design` and `impeccable`, then run impeccable's setup once, from the project's root: `dev impeccable context`. Run any other impeccable command the skill names the same way, `dev impeccable <verb>`, never by the launcher's path, which the guard refuses. Follow what it prints, but write PRODUCT.md or DESIGN.md only when the developer asks.",
           "skills": [
             "frontend-design",
             "impeccable"
@@ -1208,7 +1208,7 @@
       "procedure": [
         {
           "phase": "Design in hand",
-          "do": "Start from the design of the UX designer (Sati) and the platform's guidelines. Load `frontend-design` and `impeccable`, then run impeccable's setup once, from the project's root: `~/.claude/skills/impeccable/scripts/impeccable context`. Follow what it prints, but write PRODUCT.md or DESIGN.md only when the developer asks. On Codex, crew members cannot run the launcher yet (the guard trusts only devkit's Claude copy): read the project's PRODUCT.md and DESIGN.md instead, when they exist.",
+          "do": "Start from the design of the UX designer (Sati) and the platform's guidelines. Load `frontend-design` and `impeccable`, then run impeccable's setup once, from the project's root: `dev impeccable context`. Run any other impeccable command the skill names the same way, `dev impeccable <verb>`, never by the launcher's path, which the guard refuses. Follow what it prints, but write PRODUCT.md or DESIGN.md only when the developer asks.",
           "skills": [
             "frontend-design",
             "impeccable"
@@ -1574,7 +1574,7 @@
       "procedure": [
         {
           "phase": "Task and content",
-          "do": "Start from the user's task and the real content, not from components. Load `frontend-design` and `impeccable`, then run impeccable's setup once, from the project's root: `~/.claude/skills/impeccable/scripts/impeccable context`. Follow what it prints, but write PRODUCT.md or DESIGN.md only when the developer asks. On Codex, crew members cannot run the launcher yet (the guard trusts only devkit's Claude copy): read the project's PRODUCT.md and DESIGN.md instead, when they exist.",
+          "do": "Start from the user's task and the real content, not from components. Load `frontend-design` and `impeccable`, then run impeccable's setup once, from the project's root: `dev impeccable context`. Run any other impeccable command the skill names the same way, `dev impeccable <verb>`, never by the launcher's path, which the guard refuses. Follow what it prints, but write PRODUCT.md or DESIGN.md only when the developer asks.",
           "skills": [
             "frontend-design",
             "impeccable"
