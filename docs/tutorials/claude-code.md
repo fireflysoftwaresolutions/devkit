@@ -167,7 +167,8 @@ check again. A decision waiting for you shows under **Decisions waiting for the 
 ### The dashboard
 
 Run `dev dashboard`. Your browser opens devkit's dashboard, a page on your Mac that updates by itself while it is
-open. Open **Background** (or press `g` then `b`): your run is there with every step, who owns it, how long it took,
+open. It opens on **Now**, which says in one sentence whether anything needs you and when your run lands. Open
+**Background** (or press `g` then `b`): your run is there with every step, who owns it, how long it took,
 and anything waiting for you. **Team**, then **Crew** (`g c`), lists the crew members working now.
 
 <picture>

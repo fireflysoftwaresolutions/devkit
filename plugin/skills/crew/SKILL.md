@@ -178,10 +178,13 @@ dev crew decide D1 "B: reject"                          # the tech lead records 
   `--approves "<steps>"` when the answer approves finished work. In auto mode it gets the answer at once and goes on.
   In guided mode its step is blocked and it **stops**: it ends its report (Check: `– waiting for D1`), so no tokens
   burn while it waits.
-- **You** see each pending decision with your next action. Ask the developer with your question tool
-  (AskUserQuestion in Claude Code, `request_user_input` in Codex) using the decision template (`communicating`),
-  record the answer with `dev crew decide`, then **resume the member** that asked (Claude `SendMessage`, Codex
-  `send_input`) with the answer. It keeps its context.
+- **You** see each pending decision with your next action. Run `dev crew decisions --ask` and send the call it prints
+  with your question tool (AskUserQuestion in Claude Code): at most 4 questions per call, `D<n> ·` up front. You may
+  reword a reversible question; send a decision that leads to an irreversible action exactly as printed, in a call
+  of its own, or the developer's answer counts for nothing (`communicating`, section 5, has the rules). In Codex,
+  whose question tool does not reach devkit yet, show the decisions in your reply and ask the developer to type
+  `approve D<n>: <letter>`. Record the answer with `dev crew decide`, then **resume the member** that asked (Claude
+  `SendMessage`, Codex `send_input`) with the answer. It keeps its context.
 - Change modes when the developer says so: "go ahead on your own" → `dev crew mode auto`; a request to be asked first →
   `dev crew mode guided`. Pre-approve only the irreversible actions the developer named; developer-only actions
   (an embargo lift, a public backup, a backup policy) and commands the guard cannot name are never pre-approved.

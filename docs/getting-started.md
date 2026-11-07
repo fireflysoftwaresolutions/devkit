@@ -458,8 +458,14 @@ Ask the agent for a quick task in a repository and check that its final message 
 ## Updating
 
 ```bash
+dev update --check  # read-only: is a newer release out, and what changes in it
 dev update          # the newest release (or a pull of the branch), then dev install, which pins it
 ```
+
+`dev update --check` changes nothing: it shows the installed and the newest release, the CHANGELOG headings in
+between, and whether the checkout and the pinned copy are behind. Agents may run it. A daily job runs it at 09:15, and
+the first session of the day and `dev status` then name a pending release (see
+[Commands › `dev update`](commands.md#dev-update---check---quiet---record)).
 
 The installer leaves devkit at a release tag, so `dev update` follows releases: it fetches the tags and checks out the
 newest release when it is newer, then runs `dev install`, which pins that release; when devkit is at the newest

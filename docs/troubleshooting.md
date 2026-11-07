@@ -396,6 +396,30 @@ devkit does not know.
 
 ## Workspace
 
+### The guard says it cannot read a command
+
+The refusal starts with _The guard cannot read this command: it holds a quote that is never closed_. The usual cause
+is an apostrophe in a `#` comment, such as `dev ci watch  # follow the branch's runs`. bash ignores the comment, but
+the guard reads the apostrophe as an opening quote, so it cannot tell which commands run, and it refuses the whole
+command. Remove the comment or the apostrophe (`# follow the runs of the branch`), or close the quote. Text with
+apostrophes can go in a heredoc body, which the guard does not read (`cat <<'EOF' > notes.txt`). See
+[Guard rules › Fail-open design](guard.md#fail-open-design).
+
+### The guard refuses `tmux send-keys` or `screen -X`
+
+Agents cannot type into a terminal session; you can. A command typed into a `screen` or `tmux` session looks like
+your own terminal to devkit, and the guard cannot read it, so it refuses every way of typing or sending a command to
+a session (`send-keys`, `screen -X stuff`, and the rest). Have the agent run the command through its shell tool, or
+start it in a session of its own, where the guard reads the command:
+
+```bash
+tmux new -d -s work 'npm test'
+screen -dmS work npm test
+```
+
+The full list is in
+[Guard rules › devkit's own state, configuration, and install](guard.md#devkits-own-state-configuration-and-install).
+
 ### The guard blocked something legitimate
 
 Read the reason in the agent's output or in `hooks.log`. Most denials describe the intended way (`dev wt new`,

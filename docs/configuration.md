@@ -64,6 +64,7 @@ Apply agent changes with `dev install --only claude` or `dev install --only code
 | Key | Default | Meaning |
 | --- | --- | --- |
 | `skills.groups` | `["security-deep", "postgres", "observability"]` | Optional skill groups to install in addition to the core set: `security-deep`, `codeql`, `postgres`, `observability`, `iac`, `load-testing`, `contract-testing`, `skill-review`, or `all`. See [Skills and plugins › Optional groups](skills-and-plugins.md#optional-groups) |
+| `skills.optional` | `{"iac": ["terraform"]}` | Skill groups the setup wizard offers, but never installs by default, each with the tools that bring the offer: when you pick Terraform, the wizard offers `iac` and adds it to `skills.groups` unless you say no |
 | `skills.enforce` | `true` | Enforce the skills each kind of work requires (see [Skills and plugins › Required skills](skills-and-plugins.md#required-skills)) |
 | `skills.rules` | `[]` | Your own skill rules. A rule with the same `id` as a devkit rule changes the fields you give; a new `id` adds a rule |
 

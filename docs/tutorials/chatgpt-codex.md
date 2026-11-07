@@ -136,7 +136,8 @@ the symbols.
 ### The dashboard
 
 Run `dev dashboard` in Terminal. Your browser opens devkit's dashboard, a page on your Mac that updates by itself
-while it is open. Open **Background** (or press `g` then `b`): your run is there with every step, who owns it, and
+while it is open. It opens on **Now**, which says in one sentence whether anything needs you and when your run
+lands. Open **Background** (or press `g` then `b`): your run is there with every step, who owns it, and
 anything waiting for you. The [Dashboard](../dashboard.md) guide describes every view.
 
 ## Step 6: finish

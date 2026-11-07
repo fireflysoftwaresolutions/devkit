@@ -301,7 +301,9 @@ failure as `guard.failopen` in the audit trail. Some checks fail closed instead:
 - **The lane check.** A crew member's shell command that devkit cannot check against its lane is refused instead of
   run unchecked.
 - **Commands the guard cannot read safely,** such as a heredoc that macOS's bash ends earlier than zsh, count as more
-  than the one command they look like.
+  than the one command they look like. A command the guard cannot read at all, such as one with a quote that is never
+  closed (an apostrophe in a `#` comment counts), is refused (see
+  [Guard rules › Fail-open design](guard.md#fail-open-design)).
 
 Background work is detached, so hooks return in milliseconds.
 

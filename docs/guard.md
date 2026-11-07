@@ -281,14 +281,14 @@ extension rule, these are not refused:
   (`osascript x.scpt`), or an `expect` script file;
 - options that load a plugin or MCP server for one session only: `claude --mcp-config`, `--plugin-dir`.
 
-Quoting or brace expansion around a command word is not read by the guard's rules until 26.11.5: `$'dev' ext ack`,
+The guard's rules do not read quoting or brace expansion around a command word yet; a fix is planned. `$'dev' ext ack`,
 `$"dev" install`, `dev {ext,} ack`, and `$'screen' -X …` reach the shell as `dev` and `screen`, but the guard does not
 take them for those commands. devkit's own terminal check (`set_by_developer()`) still refuses those `dev` commands
-when an agent runs them directly. One line form is not read as bash runs it until 26.11.5 either: lines between
-two comments that each hold an apostrophe (`ls # it's` and `dev install # don't` on the next line), because the pair
-reads as one quoted word. A command split by a backslash-newline is read as typed, with every backslash-newline
-removed (`dev \` with `install` on the next line is `dev install`), and with the backslash at the end of a comment
-dropped (bash ends a comment at its newline); a refusal in any of the three readings stands.
+when an agent runs them directly. One line form is not read as bash runs it yet either, and a fix is planned too:
+lines between two comments that each hold an apostrophe (`ls # it's` and `dev install # don't` on the next line),
+because the pair reads as one quoted word. A command split by a backslash-newline is read as typed, with every
+backslash-newline removed (`dev \` with `install` on the next line is `dev install`), and with the backslash at the end
+of a comment dropped (bash ends a comment at its newline); a refusal in any of the three readings stands.
 
 Typing into a terminal session is refused outright: agents cannot type into a `screen` or `tmux` session at all. The
 guard refuses each command that types or carries a command, by its name, an alias, or a prefix tmux accepts; a `#(…)`
