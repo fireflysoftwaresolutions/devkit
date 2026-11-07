@@ -446,5 +446,22 @@ class ReconcilerHookTests(WiringCase):
         self.assertEqual(pg.load_run("claude", "s1")["state"], "running")
 
 
+class SpawnLogTests(HookCase):
+    # A background `dev` run gets the log as its stdout and stderr; the hook's own handle must close once the child
+    # holds it. Left open, Python warns at exit with the log's path, which leaks the home folder into the output
+    # (the release engineer's finding under `dev ci --run`, lesson L-fyg0m4g1wwm).
+    def test_the_hook_closes_its_copy_of_the_log(self):
+        import warnings
+        import gc
+        (hooks.STATE / "logs").mkdir(parents=True, exist_ok=True)
+        with mock.patch.object(hooks.subprocess, "Popen") as popen, warnings.catch_warnings(record=True) as seen:
+            warnings.simplefilter("always", ResourceWarning)
+            hooks._spawn(["sync", "--quiet"])
+            gc.collect()
+        log = popen.call_args.kwargs["stdout"]
+        self.assertTrue(log.closed)
+        self.assertEqual([w for w in seen if issubclass(w.category, ResourceWarning)], [])
+
+
 if __name__ == "__main__":
     unittest.main()

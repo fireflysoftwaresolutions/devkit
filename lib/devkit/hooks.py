@@ -64,9 +64,10 @@ def _patch_quietly(path: Path, before: dict, after: dict):
 
 def _spawn(args, logname="sync.log"):
     """Detached background `dev …` so the hook returns immediately."""
-    log = open(STATE / "logs" / logname, "a")
-    subprocess.Popen([sys.executable, "-I", "-S", str(core.DEVKIT_HOME / "bin" / "dev"), *args],  # as its shebang
-                     stdin=subprocess.DEVNULL, stdout=log, stderr=log, start_new_session=True, close_fds=True)
+    # The child gets its own copy of the log's descriptor; ours closes once it is started (an open one warns at exit).
+    with open(STATE / "logs" / logname, "a") as log:
+        subprocess.Popen([sys.executable, "-I", "-S", str(core.DEVKIT_HOME / "bin" / "dev"), *args],  # as its shebang
+                         stdin=subprocess.DEVNULL, stdout=log, stderr=log, start_new_session=True, close_fds=True)
 
 
 def _spawn_sync(args):
