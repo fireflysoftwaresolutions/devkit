@@ -2683,9 +2683,8 @@ def _unwrap(argv):
             while rest and rest[0].startswith("-"):
                 rest = rest[1:]
             argv = rest[1:]
-        elif n in _PACKAGE_MANAGERS and _pm_runs(n, *_pm_verb(argv[1:])):
-            verb, rest = _pm_verb(argv[1:])
-            argv = _runner_command(rest, calls=n == "npm")
+        elif n in _PACKAGE_MANAGERS and _pm_runs(n, (pm := _pm_verb(argv[1:]))[0]):
+            argv = _runner_command(pm[1], calls=n == "npm")
         elif n in ("npx", "pnpx", "bunx", "uvx"):
             argv = _runner_command(argv[1:], calls=n == "npx")
         elif n in ("pnpm", "yarn") and agent_cli((_runner_command(argv[1:]) or [""])[0]):
@@ -2733,7 +2732,7 @@ def _pm_verb(args) -> tuple:
     return (args[i] if i < len(args) else ""), list(args[i + 1:])
 
 
-def _pm_runs(n: str, verb: str, rest) -> bool:
+def _pm_runs(n: str, verb: str) -> bool:
     """True when this package manager's verb runs the command after it (npm exec|x, pnpm exec|dlx, yarn exec|dlx,
     bun x, uv|poetry|pipenv|pdm|hatch|rye run)."""
     return verb in {"npm": ("exec", "x"), "pnpm": ("exec", "dlx"), "yarn": ("exec", "dlx"), "bun": ("x",)}.get(
@@ -2832,13 +2831,12 @@ def _screen_command(args) -> list:
 
 _TMUX_GLOBAL_VALUES = frozenset({"-f", "-L", "-S", "-T"})
 _TMUX_RUNS = {  # a tmux command that runs a shell command or types keys -> its options that take a value
-    "new-session": {"-c", "-e", "-F", "-f", "-n", "-s", "-t", "-x", "-y"}, "new": None,
-    "new-window": {"-c", "-e", "-F", "-n", "-t"}, "neww": None,
-    "split-window": {"-c", "-e", "-F", "-l", "-p", "-t"}, "splitw": None,
-    "respawn-pane": {"-c", "-e", "-t"}, "respawnp": None, "respawn-window": {"-c", "-e", "-t"}, "respawnw": None,
-    "run-shell": {"-c", "-d", "-t"}, "run": None, "send-keys": {"-N", "-t"}, "send": None,
-    "pipe-pane": {"-t"}, "pipep": None, "display-popup": {"-c", "-d", "-e", "-h", "-s", "-S", "-t", "-T", "-w", "-x",
-                                                          "-y", "-b"}, "popup": None,
+    "new-session": {"-c", "-e", "-F", "-f", "-n", "-s", "-t", "-x", "-y"},
+    "new-window": {"-c", "-e", "-F", "-n", "-t"},
+    "split-window": {"-c", "-e", "-F", "-l", "-p", "-t"},
+    "respawn-pane": {"-c", "-e", "-t"}, "respawn-window": {"-c", "-e", "-t"},
+    "run-shell": {"-c", "-d", "-t"}, "send-keys": {"-N", "-t"},
+    "pipe-pane": {"-t"}, "display-popup": {"-c", "-d", "-e", "-h", "-s", "-S", "-t", "-T", "-w", "-x", "-y", "-b"},
 }
 for _short, _long in (("new", "new-session"), ("neww", "new-window"), ("splitw", "split-window"),
                       ("respawnp", "respawn-pane"), ("respawnw", "respawn-window"), ("run", "run-shell"),
