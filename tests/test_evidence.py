@@ -1151,6 +1151,30 @@ class QuestionAuditTests(EvidenceCase):
         self.addCleanup(folder.chmod, 0o755)
         self.assert_still_closed()
 
+    # the Code reviewer's final check, finding 1: a member's no that the scan reads torn (Claude Code still writing the
+    # line) or damaged (a crash, a full disk) is no proof the developer said nothing; it ends the yes
+    def test_a_members_no_read_torn_still_ends_the_yes(self):
+        self.lose_the_no(lambda q: self.member_answers(q, q["options"][1]["label"], m(2.5)))
+        own = self.member_transcript()
+        lines = own.read_bytes().rstrip(b"\n").split(b"\n")
+        own.write_bytes(b"\n".join(lines[:-1] + [lines[-1][:len(lines[-1]) // 2]]))
+        self.assert_still_closed()
+
+    # finding 2: a member file that is not a regular file (a named pipe with no writer would block the read) ends the
+    # yes at once instead of hanging dev crew decide
+    def test_a_member_file_that_is_not_a_regular_file_ends_the_yes_without_hanging(self):
+        self.release()
+        q = self.printed("D1")
+        self.click(q, m(2))
+        own = self.member_transcript()
+        own.parent.mkdir(parents=True, exist_ok=True)
+        os.mkfifo(own)
+        done = []
+        t = threading.Thread(target=lambda: done.append(self.assert_still_closed()), daemon=True)
+        t.start()
+        t.join(10)
+        self.assertEqual(done, [None], "dev crew decide hung on a named pipe")
+
     # the Code reviewer's H6: two answers' hooks can run out of order. The no's hook runs first, so the session record
     # ends on the yes, while the transcript holds the yes, then the no: the transcript has the last word
     def test_a_no_whose_hook_runs_before_the_yes_hook_still_ends_the_yes(self):

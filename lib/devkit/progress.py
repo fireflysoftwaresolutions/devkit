@@ -2536,20 +2536,24 @@ def _member_results(path, since: str):
     Each file is read whole: its records are not in time order (Claude Code writes a message queued for a member when
     the member takes it, with the time it was queued, minutes back), so no record's time says where to stop. A result
     in the same millisecond as `since`, a result without a time, and every result without `since` count (fail
-    closed). Raises OSError when the members' folder is there but cannot be listed, or a file cannot be read: then
-    nothing tells what a member was answered."""
+    closed). Raises OSError when the members' folder is there but cannot be listed, a member file is not a regular
+    file or cannot be read, or holds a result that is not JSON (torn or damaged): then nothing tells what a member
+    was answered."""
     folder = Path(path).with_suffix("") / "subagents"
     try:
         with os.scandir(folder) as it:
-            names = sorted(f.name for f in it if f.name.startswith("agent-") and f.name.endswith(".jsonl"))
+            files = sorted((f.name, f.is_file()) for f in it if f.name.startswith("agent-") and f.name.endswith(".jsonl"))
     except FileNotFoundError:
         return  # no member has run in this session
-    for name in names:
+    for name, regular in files:
+        if not regular:  # a named pipe would block the read; anything but a file tells nothing
+            raise OSError(f"{name} is not a regular file")
         for ln in _lines_back(folder / name, b"toolUseResult"):
             try:
                 r = json.loads(ln)
             except (ValueError, RecursionError):
-                continue
+                # torn (still being written) or damaged: it may be the developer's answer
+                raise OSError(f"{name} holds a result that cannot be read") from None
             if not isinstance(r, dict) or r.get("type") != "user" or "toolUseResult" not in r:
                 continue
             ts = r.get("timestamp")
@@ -2572,6 +2576,8 @@ def _said_later(path, e: dict, d: dict) -> bool:
             try:
                 r = json.loads(ln)
             except (ValueError, RecursionError):
+                if b"toolUseResult" in ln:  # a result after e's record that cannot be read may be the answer
+                    return True
                 continue
             if not isinstance(r, dict) or r.get("type") != "user":
                 continue
