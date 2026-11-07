@@ -231,13 +231,13 @@ class RenderTests(unittest.TestCase):
         self.assertEqual(body.splitlines()[0], crew.MARK)
         self.assertTrue(body.splitlines()[1].startswith("You are Pat, the crew's test engineer. Curious and exact."))
         heads = [ln for ln in body.splitlines() if ln.startswith("## ")]
-        self.assertEqual(heads, ["## Mission", "## Goal", "## When Morpheus sends work to you", "## Skills to load first",
+        self.assertEqual(heads, ["## Mission", "## Goal", "## When the tech lead sends work to you", "## Skills to load first",
                                  "## Your procedure", "## Your place in the crew's RACI", "## Your devkit commands",
                                  "## How you work with the crew", "## Your report", "## Language"])
         self.assertIn("**[Firefly> DevKit · Test engineer (Pat)]** <project> · `<branch>` · <task>\n- **Done:**", body)
         self.assertIn("- **Check:** <✓ | ⚠ | ✗>", body)
         self.assertIn("Then deliver: the tests and their results.", body)
-        self.assertIn('`Needs from Morpheus:`', body)
+        self.assertIn('`Needs from the tech lead:`', body)
         self.assertIn("Not yours: design.", body)
         self.assertIn("\n`testing`\n", body)  # the skills on one line
         self.assertIn('dev crew ask "<question>"', body)
@@ -433,7 +433,7 @@ class BriefTests(unittest.TestCase):
         for needle in ("subagent_type: devkit:neo", "agent type: neo", 'description: "Neo: ',
                        "You own only these files: `lib/parser/**`, `tests/test_parser.py`", "## Task\n\nBuild the CSV parser.",
                        "**[Firefly> DevKit · Senior engineer (Neo)]** <project> · `<branch>` · <the task, in a few words>",
-                       "- **Check:** <✓ | ⚠ | ✗>", '`Needs from Morpheus:`', _sentence(neo["returns"]),
+                       "- **Check:** <✓ | ⚠ | ✗>", '`Needs from the tech lead:`', _sentence(neo["returns"]),
                        'dev progress step "<what finished>" --check "<evidence>"', 'dev crew ask "'):
             self.assertIn(needle, text)
         for s in neo["skills"]:
@@ -460,7 +460,7 @@ class BriefTests(unittest.TestCase):
     def test_show(self):
         rc, out, _ = run_cli("crew", "show", "The", "Keymaker")
         self.assertEqual(rc, 0)
-        for needle in ("The Keymaker · Security engineer", "devkit:keymaker", "~/.codex/agents/keymaker.toml",
+        for needle in ("Security engineer (The Keymaker)", "devkit:keymaker", "~/.codex/agents/keymaker.toml",
                        "github-actions-hardening", "build: read, write and run commands (no web)", "keywords"):
             self.assertIn(needle, out)
         self.assertIn("not a subagent", run_cli("crew", "show", "morpheus")[1])
@@ -479,15 +479,16 @@ class CrewSessionTests(unittest.TestCase):
             t.launch()
             rc, out, _ = run_cli("crew", "ask", "Should the parser accept empty lines?", from_agent="a1")
             self.assertEqual(rc, 0)
-            self.assertIn("M1 to Morpheus: Should the parser accept empty lines?", out)
+            self.assertIn("M1 to Tech lead (Morpheus): Should the parser accept empty lines?", out)
             rc, out, _ = run_cli("crew", "inbox")
-            self.assertIn("M1 from Neo: Should the parser accept empty lines?", out)
+            self.assertIn("M1 from Senior engineer (Neo): Should the parser accept empty lines?", out)
             self.assertIn("no new messages", run_cli("crew", "inbox")[1])  # delivered once
             rc, out, _ = run_cli("crew", "answer", "M1", "Yes,", "skip", "them")
             self.assertEqual(rc, 0)
-            self.assertIn("M2 to Neo (answer to M1): Yes, skip them", out)
+            self.assertIn("M2 to Senior engineer (Neo), the answer to M1: Yes, skip them", out)
             self.assertIn("no new messages", run_cli("crew", "inbox")[1])  # the answer is Neo's, not Morpheus's
-            self.assertIn("M2 from Morpheus: Yes, skip them (answer to M1)", run_cli("crew", "inbox", from_agent="a1")[1])
+            self.assertIn("M2 from Tech lead (Morpheus): Yes, skip them (answer to M1)",
+                          run_cli("crew", "inbox", from_agent="a1")[1])
             rc, _, err = run_cli("crew", "answer", "M9", "x")
             self.assertEqual(rc, 2)
             self.assertIn("no message M9", err)
@@ -507,9 +508,10 @@ class CrewSessionTests(unittest.TestCase):
             pg.crew_ask("Empty lines?", from_agent="a1")
             rc, out, _ = run_cli("crew")
             self.assertEqual(rc, 0)
-            for needle in ("Crew · 26 members · Parser", "Working now", "Neo: build the parser", "Assigned steps",
-                           "2. review → Seraph · pending · waiting for its agent · scope lib/**", "Open messages",
-                           "M1 Neo → Morpheus · not delivered: Empty lines?", "Mode guided"):
+            for needle in ("Crew · 26 members · Parser", "Working now", "build the parser", "Assigned steps",
+                           "2. review → Code reviewer (Seraph) · pending · waiting for its agent · scope lib/**",
+                           "Open messages", "M1 Senior engineer (Neo) → Tech lead (Morpheus) · not delivered: Empty lines?",
+                           "Mode guided"):
                 self.assertIn(needle, out)
             self.assertIn("● Senior engineer", out)  # the roster marks who is working
             for argv in (("crew", "--json"), ("crew", "--json", "--latest")):
@@ -547,7 +549,7 @@ class CrewSessionTests(unittest.TestCase):
             self.assertIn("unknown action", err)
             rc, _, err = run_cli("crew", "mode", "guided", from_agent="a1")
             self.assertEqual(rc, 2)  # a crew member never changes the mode
-            self.assertIn("only Morpheus", err)
+            self.assertIn("only the tech lead", err)
             self.assertEqual(pg.mode_of(pg.load_run("claude", "s1")), "auto")
             self.assertEqual(run_cli("crew", "mode", "--approve", "push")[0], 2)
 
@@ -565,7 +567,7 @@ class CrewSessionTests(unittest.TestCase):
             self.assertIn("no pending decisions", run_cli("crew", "decisions", "--pending")[1])
             rc, out, _ = run_cli("crew", "decide", "D1", "B")
             self.assertEqual(rc, 0)  # no answer of the developer to D1 reached devkit: Morpheus's, unverified
-            self.assertIn("D1 recorded by Morpheus, not verified by the developer: B: patch it (overrides the "
+            self.assertIn("D1 recorded by the tech lead, not verified by the developer: B: patch it (overrides the "
                           "automatic choice A)", out)
             listed = run_cli("crew", "decisions")[1]
             self.assertIn("B: patch it (was A)", listed)
@@ -620,21 +622,22 @@ class CrewSessionTests(unittest.TestCase):
                                  "--recommend", "B", from_agent="a1")
             self.assertEqual(rc, 0)
             self.assertIn("waiting for the developer's decision D2: stop here and end your report with your status "
-                          "block (Check: – waiting for D2; Needs from Morpheus: D2). Morpheus resumes you with the "
-                          "answer", out)
+                          "block (Check: – waiting for D2; Needs from the tech lead: D2). The tech lead resumes you "
+                          "with the answer", out)
             run = pg.load_run("claude", "s1")
             self.assertEqual(run["agents"]["a1"].get("waiting"), "D2")
             view = run_cli("crew")[1]
             self.assertIn("Decisions waiting for the developer", view)
-            self.assertIn("D2 Neo: Drop the legacy column? · options A: drop | B: keep · recommends B", view)
+            self.assertIn("D2 Senior engineer (Neo): Drop the legacy column? · options A: drop | B: keep · recommends B",
+                          view)
             self.assertEqual([d["id"] for d in json.loads(run_cli("crew", "--json")[1])["run"]["decisions"]],
                              ["D1", "D2"])
             rc, _, err = run_cli("crew", "decide", "D2", "B", from_agent="a1")
             self.assertEqual(rc, 2)  # only Morpheus records the developer's answers
-            self.assertIn("only Morpheus", err)
+            self.assertIn("only the tech lead", err)
             rc, out, _ = run_cli("crew", "decide", "D2", "B")
             self.assertEqual(rc, 0)
-            self.assertIn("resume Neo with SendMessage / send_input and the answer", out)
+            self.assertIn("resume Senior engineer (Neo) with SendMessage / send_input and the answer", out)
             self.assertNotIn("waiting", pg.load_run("claude", "s1")["agents"]["a1"])
             self.assertIn("Drop the legacy column? → B", run_cli("crew", "inbox", from_agent="a1")[1])
             self.assertEqual(run_cli("crew", "decide", "D2", "A")[0], 2)  # the developer's answer stands
@@ -696,13 +699,14 @@ class DispatchCliTests(unittest.TestCase):
             rc, out, _ = run_cli("crew", "delegate", "add a nullable column for the export date", "--to", "Dozer",
                                  "--scope", "db/**", from_agent="a1")
             self.assertEqual(rc, 0)
-            self.assertIn("step “add a nullable column for the export date” for Dozer · scope db/**", out)
-            self.assertIn("in Dozer's lane now (they got a message)", out)
+            self.assertIn("step “add a nullable column for the export date” for Database engineer (Dozer) · scope db/**",
+                          out)
+            self.assertIn("in the Database engineer (Dozer)'s lane now (they got a message)", out)
             self.assertIn("Neo delegates", run_cli("crew", "inbox", from_agent="a2")[1])
             rc, out, _ = run_cli("crew", "delegate", "review the parser before merge", from_agent="a1")
             self.assertEqual(rc, 0)
-            self.assertIn("for Seraph (routed: ", out)
-            self.assertIn("Morpheus launches Seraph when it is ready: dev crew next", out)
+            self.assertIn("for Code reviewer (Seraph) (routed: ", out)
+            self.assertIn("The tech lead launches Code reviewer (Seraph) when it is ready: dev crew next", out)
             self.assertIn("crew.delegate", t.audit_actions())  # recorded, in the test's own audit trail
             for argv, needle in ((("--to", "Nobody"), "no crew member"), (("--after", "no-such-step"), "no step")):
                 with self.subTest(argv=argv):
@@ -725,10 +729,12 @@ class DispatchCliTests(unittest.TestCase):
             rc, out, _ = run_cli("crew", "decline", "add the export column", "--why", "it needs a migration plan first",
                                  from_agent="a2")
             self.assertEqual(rc, 0)
-            self.assertIn("handed “add the export column” back to Morpheus: it needs a migration plan first", out)
+            self.assertIn("handed “add the export column” back to the tech lead: it needs a migration plan first", out)
             step = pg.load_run("claude", "s1")["plan"][-1]
             self.assertEqual((step["state"], step["owner"], step["label"]), ("pending", "main", ""))
-            self.assertIn("from Dozer: Dozer declined “add the export column”", run_cli("crew", "inbox")[1])
+            inbox = run_cli("crew", "inbox")[1]
+            self.assertIn("from Database engineer (Dozer): ", inbox)
+            self.assertIn(" declined “add the export column”", inbox)
             self.assertIn("crew.decline", t.audit_actions())
 
     def test_next_shows_ready_queued_waiting_busy_and_the_mode(self):
@@ -756,7 +762,7 @@ class DispatchCliTests(unittest.TestCase):
             self.assertIn("Queued until a slot frees", out)
             self.assertIn("  Technical writer (Ghost): docs · ~10m", out)
             self.assertIn("Busy", out)
-            self.assertIn("QA engineer (Mouse) · Mouse: other work", out)
+            self.assertIn("QA engineer (Mouse) · other work", out)
             self.assertNotIn("Ready to launch", out)
             self.assertNotIn("launch all ready members", out)
             ready = json.loads(run_cli("crew", "--json")[1])["run"]["ready"]

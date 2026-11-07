@@ -106,12 +106,13 @@ def _prose(text: str) -> str:
 
 
 def _name_patterns(roster=None) -> list:
-    """[(compiled pattern, member name)] for every crew member but the main one (Morpheus is the session itself,
-    and the report contract's "Needs from Morpheus:" names him): the name and each alias as written, a leading
-    "The " optional or lowercase. A name inside a path, a file name or a longer word is not one."""
+    """[(compiled pattern, member name)] for every crew member, the main one too (the developer's decision: the
+    tech lead is "Tech lead (Morpheus)" or the role alone, and reports end with "Needs from the tech lead:"): the
+    name and each alias as written, a leading "The " optional or lowercase. A name inside a path, a file name or a
+    longer word is not one."""
     from . import crew
     out = []
-    for m in crew.members(roster, include_main=False):
+    for m in crew.members(roster):
         for n in [m.get("name")] + list(crew.aliases(m)):
             if not isinstance(n, str) or not n.strip():
                 continue
@@ -129,10 +130,14 @@ def bare_names(text: str, roster=None) -> list:
     order they first appear. The status block's header and Crew line are prose too. [] when the roster is
     unreadable (fails open)."""
     try:
+        from . import crew
         pats = _name_patterns(roster)
+        forms = [crew.who(m) for m in crew.members(roster) if m.get("title")]
     except Exception:
         return []
     prose = _prose(text or "")
+    for form in forms:  # a title may hold a name the member answers to: "Lookup scout (Sparks)", alias scout
+        prose = prose.replace(form, " " * len(form))
     found = []
     for pat, name in pats:
         for hit in pat.finditer(prose):

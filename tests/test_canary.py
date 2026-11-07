@@ -4,8 +4,8 @@
 # The instruction canary's role check (the developer, M346; lesson L-fy2lfvacp64): a final message names crew members
 # as `<role> (<Name>)`, the role in any language, never the Matrix name alone. The check reads the structure (the
 # roster's name inside parentheses right after other words), never a list of role words. The status block's header
-# and Crew line are prose too; code spans, code blocks and links are not. Morpheus is the session itself and the
-# report contract's "Needs from Morpheus:" line names him, so the main member is not checked.
+# and Crew line are prose too; code spans, code blocks and links are not. The main member is checked like every
+# other (the developer's decision): "Tech lead (Morpheus)", and reports end with "Needs from the tech lead:".
 # Tests carry comments, not docstrings (`dev test prove` leaves out tests with one).
 # Run: python3 -m unittest tests.test_canary
 import sys
@@ -54,8 +54,9 @@ class RoleFormTests(unittest.TestCase):
                 "See https://example.com/Tank and /tmp/kid-approvals/Tank.md or tests/test_link.py.")
         self.assertEqual(bare(text), [])
 
-    def test_an_alias_counts_and_the_main_member_is_not_checked(self):
-        self.assertEqual(bare("the scout found it; Needs from Morpheus: nothing"), ["Sparks"])
+    def test_an_alias_counts_and_so_does_the_main_member(self):
+        self.assertEqual(bare("the scout found it; Needs from Morpheus: nothing"), ["Sparks", "Morpheus"])
+        self.assertEqual(bare("the scout found it; Needs from the tech lead: nothing"), ["Sparks"])
 
     def test_a_word_that_only_contains_a_name_is_not_one(self):
         self.assertEqual(bare("Tanks, Linked, Kidney, Neon and Sparkle are not crew names."), [])

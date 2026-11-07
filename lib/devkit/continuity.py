@@ -407,6 +407,23 @@ def _member(name):
         return None
 
 
+def _who(name, role: str = "") -> str:
+    """A crew member as developers read it, role first ("Backend engineer (Tank)"); from a checkpoint's role when
+    the roster is unreadable. Fails open to the name."""
+    name = str(name or "")
+    try:
+        from . import crew
+        form = crew.who(name)
+    except Exception:
+        form = name
+    return f"{role} ({name})" if form == name and role and name else form
+
+
+def _on_step(x: dict) -> str:
+    """A running lane for the carried text: "Backend engineer (Tank) on step api"."""
+    return f"{_who(x.get('persona') or x.get('label') or 'a member', x.get('role'))} on step {x.get('step') or '-'}"
+
+
 def _owner_name(run: dict, owner) -> str:
     if (owner or "main") == "main":
         return "main"
@@ -747,8 +764,7 @@ def _items(rec: dict, run) -> list:
     for x in lanes:
         m = _member(x.get("persona")) or {}
         ids = [x.get("persona"), m.get("name"), m.get("id"), re.sub(r"^The ", "", m.get("name") or "")]
-        items.append({"label": f"{x.get('persona') or 'a member'} (step {x.get('step') or '-'})",
-                      "ids": [i for i in ids if i]})
+        items.append({"label": _on_step(x), "ids": [i for i in ids if i]})
     for p in cp.get("prompts") or []:
         items.append({"label": f"request of {time.strftime('%H:%M', time.localtime(p.get('ts') or 0))}",
                       "text": p.get("text") or "", "prompt_id": p.get("prompt_id") or "", "ts": p.get("ts")})
@@ -898,14 +914,13 @@ def brief(agent: str, sid: str, reason: str = "manual", chat: bool = False, now=
         if lanes:
             out.append("Crew working now:")
             for x in lanes:
-                role = f" ({x['role']})" if x.get("role") else ""
-                out.append(f"- {x.get('persona') or x.get('label') or 'a member'}{role} · step {x.get('step') or '-'}"
-                           f" · {x['minutes']} min")
+                out.append(f"- {_who(x.get('persona') or x.get('label') or 'a member', x.get('role'))} · step "
+                           f"{x.get('step') or '-'} · {x['minutes']} min")
             out.append(f"Their results arrive as notifications: do not relaunch them; {relaunch} continues one.")
         if decs:
             parts = []
             for d in decs[-IDS:]:
-                s = f"decision {d['id']} from {d.get('from_name') or '?'}"
+                s = f"decision {d['id']} from {_who(d.get('from_name')) or '?'}"
                 if o["texts"]:
                     opts = " | ".join(d.get("options") or [])
                     s += f" {_quote(d.get('question'), 200)}" + (f" ({opts}" + (
@@ -913,8 +928,8 @@ def brief(agent: str, sid: str, reason: str = "manual", chat: bool = False, now=
                 parts.append(s)
             out.append("Waiting for the developer: " + "; ".join(parts) + ".")
         if msgs:
-            parts = [f"{m['id']} from {m.get('from_name') or '?'}" + (f" {_quote(m.get('text'), 160)}" if o["texts"]
-                                                                       else "") for m in msgs[-IDS:]]
+            parts = [f"{m['id']} from {_who(m.get('from_name')) or '?'}"
+                     + (f" {_quote(m.get('text'), 160)}" if o["texts"] else "") for m in msgs[-IDS:]]
             more = f" (+{len(msgs) - IDS} older)" if len(msgs) > IDS else ""
             out.append("Crew messages waiting: " + "; ".join(parts) + more + ".")
         if status and o["status"]:
@@ -948,7 +963,7 @@ def _notice(agent: str, old_sid: str, now: float) -> str:
     if not run or run.get("state") not in ("running", "blocked"):
         return ""
     plan = run.get("plan") or []
-    lanes = ", ".join(f"{x.get('persona') or 'a member'} ({x.get('step') or '-'})" for x in _lanes(run))
+    lanes = ", ".join(_on_step(x) for x in _lanes(run))
     out = [f"devkit · you cleared the conversation. The previous session ({agent}:{old_sid[:12]}) has an open run "
            f"«{_excerpt(run.get('goal'), 100)}», current step {_current(plan) or '-'}."]
     if lanes:
@@ -1000,15 +1015,15 @@ def _reminder(agent: str, sid: str, aid: str, path: str) -> str:
     except Exception:
         header = ""
     header = header or "**[Firefly> DevKit · <role> (<name>)]** <project> · `<branch>` · <task>"
-    lines = [f"devkit · your own context was compacted. You are {name}" + (f", the crew's {title}" if title else "")
-             + ", working for Morpheus. devkit's record of your lane:"]
+    lines = ["devkit · your own context was compacted. You are " + (f"the crew's {title} ({name})" if title else name)
+             + ", working for the tech lead. devkit's record of your lane:"]
     if step or scope:
         lines.append(f"- step {step or '-'}" + (f" · scope {', '.join(scope)}" if scope else ""))
     if phases or last:
         lines.append(("- your procedure: " + " → ".join(phases) if phases else "- your procedure: -")
                      + (f"; where you were: {_quote(last, 200)}" if last else ""))
     tail = (f"- your report starts with {header}, then - **Done:**, - **Check:**, - **Next:**, and ends with "
-            "Needs from Morpheus: <what you need, or nothing>.")
+            "Needs from the tech lead: <what you need, or nothing>.")
     head = _brief_head(path)
     if head:
         room = REMINDER_MAX - _bytes("\n".join(lines + [tail])) - 40
@@ -1029,8 +1044,7 @@ def _instructions(run, git: dict) -> str:
                      + (f"; next: {', '.join(nxt)}" if nxt else "") + ";")
         lanes = _lanes(run)
         if lanes:
-            lines.append("- the crew working now: " + ", ".join(f"{x.get('persona') or 'a member'} (step "
-                                                                f"{x.get('step') or '-'})" for x in lanes)
+            lines.append("- the crew working now: " + ", ".join(_on_step(x) for x in lanes)
                          + ". They are still running: their results arrive as notifications;")
         decs = [d["id"] for d in progress.pending_decisions(run)][-IDS:]
         msgs = [m.get("id") for m in _open_messages(run)][-IDS:]

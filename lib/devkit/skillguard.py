@@ -247,11 +247,16 @@ def on_agent_brief(agent: str, tool_input: dict, project: str = ""):
                       "that could repeat gets `dev lesson add \"…\" --cause \"…\" --prevent \"…\"`.\n"
                       + "\n".join(lessons.pitfall_lines(picked)))
     if "Firefly> DevKit" not in brief:  # every crew member reports the same way (the SubagentStop hook checks it)
-        name = (tool_input.get("description") or "").split(":")[0].strip() or "Agent"
+        name = (tool_input.get("description") or "").split(":")[0].strip()[:30] or "Agent"
+        try:  # the member's role first, as the developer reads every member ("Frontend engineer (Trinity)")
+            from . import crew
+            name = crew.who(name)
+        except Exception:
+            pass
         extra += (f"\n\n## devkit · your report\nStart your final report with your status block: **[Firefly> DevKit · "
-                  f"{name[:30]}]** <project> · `<branch>` · <task>, then - **Done:**, - **Check:** (✓/⚠/✗ + "
+                  f"{name}]** <project> · `<branch>` · <task>, then - **Done:**, - **Check:** (✓/⚠/✗ + "
                   f"evidence) and - **Next:**. Record progress with `dev progress step \"…\"` (it goes to your own "
-                  f"lane) and ask Morpheus with `dev crew ask \"…\"` when you need a decision.")
+                  f"lane) and ask the tech lead with `dev crew ask \"…\"` when you need a decision.")
     if not extra:
         return None
     return {**tool_input, "prompt": brief + extra}

@@ -335,7 +335,7 @@ def post_compact(agent: str):
     _continuity("on_post_compact", agent, _stdin_json())
 
 
-CATALOG_MAX = 7000  # characters of the catalog in the session's context (it is about 6,000 today)
+CATALOG_MAX = 8000  # characters of the catalog in the session's context (about 7,200 with the members' roles)
 
 
 def catalog_context(agent: str) -> str:
@@ -967,7 +967,7 @@ def _unroutable_lane_command(data: dict, agent: str = "claude"):
     except Exception as e:  # unchecked is not allowed: the member's command fails closed (the Keymaker's review)
         _log(f"crew-lane {agent} {aid}: {traceback.format_exc()[-300:]}")
         return (f"devkit could not check this command against your lane ({type(e).__name__}), so it is refused "
-                f"rather than run unchecked. Run it once more; if it is refused again, ask Morpheus with "
+                f"rather than run unchecked. Run it once more; if it is refused again, ask the tech lead with "
                 f"`dev crew ask \"…\"` and name the command.")
     return v[1] if v else None
 
@@ -1397,9 +1397,12 @@ def _crew_limits(agent: str, data: dict):
             rel = guard.scope_rel(path, cwd, top)
             k, lane = progress.scope_owner(run, rel)
             if lane:
-                who = lane.get("persona") or lane.get("label") or "a crew member"
+                from . import crew
+                m = crew._for_lane(lane)
+                who = crew.who(m) if m else (lane.get("persona") or lane.get("label") or "a crew member")
+                to = m["id"] if m else f"\"{lane.get('label') or who}\""
                 return ("deny", f"{rel} belongs to {who} while they work (scope {', '.join(lane['scope'])}). Ask "
-                                f"them (dev crew ask --to \"{who}\" \"…\") or wait until they finish; "
+                                f"them (dev crew ask --to {to} \"…\") or wait until they finish; "
                                 f"DEVKIT_SCOPE_OVERRIDE=1 only for an emergency.")
     except Exception as e:
         guard.failopen("crew-limits", e)
@@ -1453,22 +1456,22 @@ def _scope_violation(agent: str, data: dict):
             return None
         if lane.get("binding") == "conflict":  # a launch binds once: a second agent claiming it edits nothing
             return ("this agent claims a launch that another agent is bound to, so devkit lets it read but not edit. "
-                    "Report what you need to change, and Morpheus checks the launch (dev crew graph).")
+                    "Report what you need to change, and the tech lead checks the launch (dev crew graph).")
         if lane.get("binding") == "pending":  # no launch named it yet: it reads until it binds (spec C3)
             return ("devkit has not matched this agent to the launch that started it yet, so it may read but not "
                     "edit. It binds at its next tool call when its launch is known; if this stays, report what you "
-                    "need to change, and Morpheus assigns you your step (dev progress assign).")
+                    "need to change, and the tech lead assigns you your step (dev progress assign).")
         if lane.get("binding") == "unbound":  # its launch record was lost: restricted until Morpheus assigns it
             return ("devkit has no record of the launch that started this agent, so it may read but not edit. Report "
-                    "what you need to change; Morpheus can assign you your step (dev progress assign \"<step>\" "
+                    "what you need to change; the tech lead can assign you your step (dev progress assign \"<step>\" "
                     "--to \"<you>\"), which lifts this.")
         chain = [run["agents"][k] for k in progress.lane_chain(run, aid)]
         paths = [inp.get("file_path") or inp.get("notebook_path") or ""]
         if tool == "apply_patch" or not paths[0]:
             body = inp.get("input") or inp.get("patch") or inp.get("command") or ""
             paths = re.findall(r"\*\*\* (?:Add|Update|Delete) File: (\S+)", str(body)) or paths
-        name = lane.get("persona") or lane.get("label") or "this crew member"
-        head = chain[-1].get("persona") or chain[-1].get("label") or "its crew member"
+        name = _who(lane.get("persona") or lane.get("label") or "this crew member")
+        head = _who(chain[-1].get("persona") or chain[-1].get("label") or "its crew member")
         if len(chain) > 1:  # a helper: the limits it inherits are its member's
             name = f"this helper of {head}"
         for p_ in [x for x in paths if x]:  # each member keeps to its own folder of the session scratchpad
@@ -1482,7 +1485,7 @@ def _scope_violation(agent: str, data: dict):
         if level in ("review", "read"):
             return (f"{name} is {'review-only' if level == 'review' else 'read-only'}"
                     f"{f', like {head}' if len(chain) > 1 else ''}: report the change with file:line and the fix, "
-                    f"and Morpheus assigns it. It may write its scratch folder, and this project's plans in the "
+                    f"and the tech lead assigns it. It may write its scratch folder, and this project's plans in the "
                     f"handoff repository when its step's scope names them.")
         if not layers:
             return None
@@ -1496,7 +1499,7 @@ def _scope_violation(agent: str, data: dict):
             if not progress.in_scope(rel, layers):
                 return (f"{rel} is outside {name}'s scope ({' and '.join(', '.join(g) for g in layers)}): another "
                         f"crew member may own it. "
-                        f"Ask Morpheus to widen it: dev crew ask \"may I change {rel}? why: …\"")
+                        f"Ask the tech lead to widen it: dev crew ask \"may I change {rel}? why: …\"")
     except Exception as e:
         guard.failopen("crew-scope", e)
         return None
@@ -1739,9 +1742,10 @@ def morpheus_hint(text: str, roster=None) -> str:
     except Exception:
         return ""
     mentioned = [x for x in every if x[1] >= 2]
-    if len(mentioned) >= 4:  # it names many kinds of work (often as examples): Morpheus decides, no single route
+    you = f"devkit · you are the {_lead(roster)}"
+    if len(mentioned) >= 4:  # it names many kinds of work (often as examples): the tech lead decides, no single route
         names_ = ", ".join(raci._lower(a["name"]) for a, _, _ in mentioned[:6])
-        return (f"devkit · you are Morpheus: this request mentions {len(mentioned)} kinds of work ({names_}). Decide "
+        return (f"{you}: this request mentions {len(mentioned)} kinds of work ({names_}). Decide "
                 "whether it is one change to how devkit or the crew works, or several pieces of work; plan one step "
                 "per kind of work and route each by the RACI (`dev crew raci`).")
     if not ranked:
@@ -1755,9 +1759,9 @@ def morpheus_hint(text: str, roster=None) -> str:
             line += f", consult {raci.names(act['C'], roster)}"
         parts.append(line)
     if len(parts) == 1:
-        head = f"devkit · you are Morpheus: this request is {parts[0]} (the crew's RACI)."
+        head = f"{you}: this request is {parts[0]} (the crew's RACI)."
     else:
-        head = ("devkit · you are Morpheus: this request spans " + str(len(parts)) + " kinds of work (the crew's "
+        head = (f"{you}: this request spans " + str(len(parts)) + " kinds of work (the crew's "
                 "RACI): " + "; ".join(parts) + ". Plan one step per kind of work and assign each to its member.")
     return (head + " One kind of work under ten minutes: do it yourself. Otherwise plan it (`dev progress start "
             "--plan`), assign the steps (`dev progress assign <step> --to <member>`) and brief the members "
@@ -2036,10 +2040,19 @@ def _who(name: str) -> str:
     """A crew member as developers see it, role first ("Backend engineer (Tank)"); the name alone otherwise."""
     try:
         from . import crew
-        m = crew._for_label(name)
-        return crew.who(m) if m else name
+        return crew.who(name)
     except Exception:
         return name
+
+
+def _lead(roster=None) -> str:
+    """The main session as developers read it: "Tech lead (Morpheus)"; "tech lead" when the roster is unreadable."""
+    try:
+        from . import crew
+        lead = crew.who("main", roster)
+        return lead if lead != "main" else "tech lead"
+    except Exception:
+        return "tech lead"
 
 
 def subagent_stop(agent: str):
@@ -2102,8 +2115,8 @@ def subagent_stop(agent: str):
                 out = {"decision": "block", "reason":
                        f"devkit · end your report with your status block first, exactly: **[Firefly> DevKit · {_who(name)}]** "
                        f"<project> · `<branch>` · <task>, then - **Done:**, - **Check:** (✓/⚠/✗ + evidence) and "
-                       f"- **Next:**; then what you deliver and \"Needs from Morpheus:\" (or nothing). Nothing above "
-                       f"the block.{also}"}
+                       f"- **Next:**; then what you deliver and \"Needs from the tech lead:\" (or nothing). Nothing "
+                       f"above the block.{also}"}
             elif run and lane and aid not in sess.setdefault("crew_comms", {}) and \
                     progress.lane_unreported(run, aid) and core.CFG.get("canary", {}).get("enforce", True):
                 from . import audit  # the crew talks through devkit: the step's evidence goes in the run, live
@@ -2112,7 +2125,7 @@ def subagent_stop(agent: str):
                 _patch_quietly(sf, before, sess)
                 out = {"decision": "block", "reason":
                        f"devkit · {_who(name)}, record your work through devkit before you stop: `dev progress step "
-                       f"\"<what finished>\" --check \"<evidence>\"` (it goes to your lane, and Morpheus and the "
+                       f"\"<what finished>\" --check \"<evidence>\"` (it goes to your lane, and the tech lead and the "
                        f"developer see it live). Questions and decisions go through `dev crew ask`, not only in the "
                        f"report. Then end with the same report.{also}"}
             elif roles:

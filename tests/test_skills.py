@@ -44,7 +44,8 @@ class SkillRuleTests(unittest.TestCase):
         named = sg.on_agent_brief("claude", {"prompt": "Use frontend-design and impeccable to rework the layout",
                                              "description": "Trinity: rework the layout"})
         self.assertNotIn("required skills", named["prompt"])  # the skills are named already
-        self.assertIn("**[Firefly> DevKit · Trinity]**", named["prompt"])  # every crew member reports the same way
+        # every crew member reports the same way, its role first
+        self.assertIn("**[Firefly> DevKit · Frontend engineer (Trinity)]**", named["prompt"])
         self.assertIsNone(sg.on_agent_brief("claude", {"prompt": "Use frontend-design and impeccable to rework the "
                                                                  "layout. End with **[Firefly> DevKit · Trinity]**"}))
         self.assertIsNone(sg.on_agent_brief("codex", {"prompt": "Rework the dashboard layout"}))

@@ -405,7 +405,7 @@
         "a change across two or more components"
       ],
       "not_for": [
-        "implementation details inside one module (Neo and the specialists)"
+        "implementation details inside one module (the senior engineer and the specialists)"
       ],
       "skills": [
         "system-design",
@@ -819,7 +819,7 @@
       "procedure": [
         {
           "phase": "Design in hand",
-          "do": "Start from the UX designer's (Sati's) design with every state and its copy; ask for one when it is missing.",
+          "do": "Start from the design of the UX designer (Sati) with every state and its copy; ask for one when it is missing.",
           "skills": [
             "frontend-design"
           ],
@@ -1207,7 +1207,7 @@
       "procedure": [
         {
           "phase": "Design in hand",
-          "do": "Start from the UX designer's (Sati's) design and the platform's guidelines.",
+          "do": "Start from the design of the UX designer (Sati) and the platform's guidelines.",
           "skills": [
             "frontend-design"
           ],
@@ -1600,7 +1600,7 @@
           "gate": "the critique is ranked with fixes"
         },
         {
-          "phase": "Hand to Trinity",
+          "phase": "Hand to the frontend engineer",
           "do": "Hand the design to the Frontend engineer (Trinity) with the states and copy written out.",
           "skills": [
             "communicating"
@@ -1609,7 +1609,7 @@
             "dev plan revise",
             "dev progress step"
           ],
-          "gate": "Trinity has everything to build it"
+          "gate": "the frontend engineer has everything to build it"
         }
       ]
     },
@@ -1753,7 +1753,7 @@
         "a second opinion on a risky change"
       ],
       "not_for": [
-        "writing the fix: report it, and Morpheus assigns it"
+        "writing the fix: report it, and the tech lead assigns it"
       ],
       "skills": [
         "superpowers:requesting-code-review",
@@ -1978,7 +1978,7 @@
         "hardening an exposed API"
       ],
       "not_for": [
-        "fixing what the attack finds: report it, and Morpheus assigns the fix"
+        "fixing what the attack finds: report it, and the tech lead assigns the fix"
       ],
       "skills": [
         "devsecops",
@@ -2556,7 +2556,7 @@
       ],
       "not_for": [
         "running the platform and its alerts (Niobe)",
-        "fixing the cause found (Morpheus assigns it)"
+        "fixing the cause found (the tech lead assigns it)"
       ],
       "goal": "The crew knows why something is slow or failing, with the measurement that proves it.",
       "devkit": [
@@ -2589,7 +2589,7 @@
         },
         {
           "phase": "Recommend",
-          "do": "Recommend the fix with its expected gain; the Tech lead (Morpheus) assigns it.",
+          "do": "Recommend the fix with its expected gain; the tech lead assigns it.",
           "skills": [
             "communicating"
           ],

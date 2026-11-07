@@ -335,9 +335,27 @@ def description(m: dict, alias=None) -> str:
     return d
 
 
-def who(m: dict) -> str:
-    """How developers see a member: the role first, then the name ("Backend engineer (Tank)")."""
+def who(m, roster=None) -> str:
+    """How developers see a member: the role first, then the name ("Backend engineer (Tank)"). `m` is a member or
+    any name one answers to: its name, id, alias, agent type, a lane label ("Kid: curl installer") or "main" (the
+    main session, "Tech lead (Morpheus)"). Anything else ("devkit", "CI watch", "the developer") stays as written."""
+    if not isinstance(m, dict):
+        name = str(m or "").strip()
+        if not name:
+            return ""
+        found = next((x for x in members(roster) if x.get("main")), None) if name == "main" else \
+            _for_label(name, roster)
+        if not found:
+            return name
+        m = found
     return f"{m['title']} ({m['name']})" if m.get("title") else m["name"]
+
+
+def task_of(label, roster=None) -> str:
+    """A lane or step label without the member's name in front: "Kid: curl installer" -> "curl installer"."""
+    label = str(label or "").strip()
+    head, sep, rest = label.partition(":")
+    return rest.strip() if sep and rest.strip() and member(head, roster) else label
 
 
 def status_header(m: dict, project="<project>", branch="<branch>", task="<task>") -> str:
@@ -359,10 +377,10 @@ def body(m: dict, roster=None, alias=None) -> str:
            "shape your judgment and tone, always professionally: no role-play and no film quotes.", "",
            "## Mission", "", _sentence(m["summary"]), "",
            "## Goal", "", _sentence(m["goal"]), "",
-           "## When Morpheus sends work to you", ""]
+           "## When the tech lead sends work to you", ""]
     out += [f"- {x}" for x in m["use_when"]] + [""]
     out += [("Not yours: " + "; ".join(m["not_for"]) if m.get("not_for") else "Not yours: anything outside your brief")
-            + ". Say so in your report and leave it to Morpheus.", "", "## Skills to load first", ""]
+            + ". Say so in your report and leave it to the tech lead.", "", "## Skills to load first", ""]
     if m["skills"]:
         out += ["Load each one with the Skill tool (it may list a plugin skill with its prefix, such as "
                 "`devkit:testing`). Without the Skill tool, or when it does not list one, read the skill's SKILL.md.",
@@ -388,11 +406,11 @@ def body(m: dict, roster=None, alias=None) -> str:
     out += _raci_section(m, roster)
     out += ["## Your devkit commands", "",
             "devkit is how the crew works and talks: use these instead of ad-hoc scripts, files or messages."
-            + ("" if shell else " You have no shell: name the command in your report and Morpheus runs it."), ""]
+            + ("" if shell else " You have no shell: name the command in your report and the tech lead runs it."), ""]
     out += [", ".join(f"`{c}`" for c in m["devkit"]), ""]
     out += ["## How you work with the crew", ""]
     if shell:
-        out += ["- Stay inside the files and the scope your brief names. Before you go beyond them, ask Morpheus: "
+        out += ["- Stay inside the files and the scope your brief names. Before you go beyond them, ask the tech lead: "
                 '`dev crew ask "<question>"`. Any crew member may ask anything; reply to a message with '
                 '`dev crew answer <id> "<text>"`.',
                 '- Record each finished step: `dev progress step "<what finished>" --check "<evidence>"`. devkit '
@@ -403,7 +421,7 @@ def body(m: dict, roster=None, alias=None) -> str:
     else:
         out += ["- Stay inside the files and the scope your brief names. You have no shell, so `dev progress` and "
                 "`dev crew ask` are not available to you: put your progress in your report and your questions under "
-                '`Needs from Morpheus:`.']
+                '`Needs from the tech lead:`.']
     if tools == "review":
         out.append("- You are review-only: you read and run commands such as tests and scans, but you never edit, "
                    "create or delete files, not even to fix what you find.")
@@ -417,16 +435,17 @@ def body(m: dict, roster=None, alias=None) -> str:
             "--error \"<text the output shows>\"`. A known one: `dev lesson recur <id> --evidence \"…\"`; one "
             "without anchors: `dev lesson anchor <id> --file … --why \"…\"`." if shell else
             "- Learn from mistakes: follow the prevention of the known pitfalls your brief lists, and name in your "
-            "report any mistake that could repeat, with the files, commands or error text it applies to, so Morpheus "
-            "records it as a lesson with its anchors.",
+            "report any mistake that could repeat, with the files, commands or error text it applies to, so the tech "
+            "lead records it as a lesson with its anchors.",
             "- Launch a helper agent only for a narrow lookup or a slice of your own files: it gets your tool level "
             "and scope, never more, takes one of the crew slots, and cannot go deeper than progress.max_depth (2). "
-            "When you need another specialist, say so in your report or ask Morpheus.", "",
+            "When you need another specialist, say so in your report or ask the tech lead.", "",
             "## Your report", "",
             "Your final message starts with your own status block; nothing comes before it:", ""]
     out += ["```markdown"] + report_block(m) + ["```", "", f"Then deliver: {_sentence(m['returns'])}", "",
             "You are done when:", ""] + [f"- {x}" for x in m["done_when"]] + ["",
-                              'End with `Needs from Morpheus:` and the decisions or questions for Morpheus, or `nothing`.',
+                              'End with `Needs from the tech lead:` and the decisions or questions for the tech lead, '
+                              'or `nothing`.',
                               "", "## Language", "", _sentence(roster["language_rule"])]
     return "\n".join(out)
 
@@ -467,8 +486,9 @@ ENFORCEMENT = (
      "SessionStart, PreToolUse and PostToolUse", "devkit.hooks.catalog_context", "enforced"),
     ("E-approvals", "A run ends only after each Accountable member approved", "dev progress done",
      "devkit.progress.approvals_owed", "enforced"),
-    ("E-no-self-approval", "Nobody approves their own kind of work: Seraph approves code and configuration, "
-     "Morpheus the rest (R2-3)", "dev progress step --approves, a review step's end and dev progress done",
+    ("E-no-self-approval", "Nobody approves their own kind of work: the Code reviewer (Seraph) approves code and "
+     "configuration, the Tech lead (Morpheus) the rest (R2-3)",
+     "dev progress step --approves, a review step's end and dev progress done",
      "devkit.approvals.record", "enforced"),
     ("E-verdict", "An approval is an explicit verdict after the work", "dev progress done",
      "devkit.approvals.end_check", "enforced"),
@@ -490,9 +510,9 @@ ENFORCEMENT = (
      "at every depth", "devkit.progress.launch_verdict", "enforced"),
     ("E-lost-lane", "A member that never reports back loses its step after progress.stale_agent_hours",
      "every hook event on the run and every launch check", "devkit.progress.expire_stale", "enforced"),
-    ("E-main-only", "Only Morpheus plans, assigns, decides and changes the mode",
+    ("E-main-only", "Only the tech lead plans, assigns, decides and changes the mode",
      "dev progress and dev crew from a lane", "devkit.progress._main_only", "enforced"),
-    ("E-caller", "Morpheus-only commands cannot be reached through bash -c or scripts",
+    ("E-caller", "The tech lead's own commands cannot be reached through bash -c or scripts",
      "the call ledger (Claude Code; Codex calls are audited until S3)", "devkit.progress.caller", "enforced"),
     ("E-decisions", "A decision that is the developer's waits for the developer in guided mode",
      "dev crew ask --decision", "devkit.progress.crew_decision", "enforced"),
@@ -536,7 +556,7 @@ def catalog(roster=None, agent: str = "claude") -> str:
     roster = roster or load()
 
     def short_names(ids):
-        return ", ".join((member(i, roster) or {}).get("name") or i for i in ids or [])
+        return ", ".join(who(member(i, roster) or i, roster) for i in ids or [])
     lines = ["devkit catalog · declare these ids, whatever language the developer writes in; devkit enforces on them "
              "and never on words.",
              "Kinds of work: one per step (`[id]` in a plan spec, as in `api=1h after design [backend]`, or "
@@ -590,7 +610,8 @@ def _raci_section(m: dict, roster) -> list:
     for a in r["R"]:
         line = f"- **You do** {raci._lower(a['name'])}."
         if a.get("A") and a["A"] != m["id"]:
-            line += f" {raci.names([a['A']], roster)} approves it: say so in your report, so Morpheus schedules the review."
+            line += (f" {raci.names([a['A']], roster)} approves it: say so in your report, so the tech lead schedules "
+                     "the review.")
         if a.get("C"):
             line += (f" Consult {raci.names([x for x in a['C'] if x != m['id']], roster)} before decisions that affect "
                      "them (`dev crew ask --to <name>`).")
@@ -769,9 +790,8 @@ def run_view(run: dict, roster=None, now=None):
 
 
 def _who_label(label, roster=None) -> str:
-    """A step or lane label as developers read it: "Tank" → "Backend engineer (Tank)"."""
-    m = _for_label(label or "", roster)
-    return who(m) if m else (label or "")
+    """crew.who for a label; dispatch.py still calls it by this name."""
+    return who(label or "", roster)
 
 
 def ready_view(run: dict, roster=None) -> dict:
@@ -835,9 +855,8 @@ def roster_text(active=None, roster=None) -> str:
     rows = []
     for m in members(roster):
         when = ("main session: " if m.get("main") else "") + "; ".join(m["use_when"])
-        rows.append([(ui.ACTIVE + " " if m["id"] in busy else "  ") + m.get("title", m["role"]), m["name"], m["id"],
-                     when, m["tier"], m["tools"]])
-    out = [ui.table(rows, ["  ROLE", "NAME", "ID", "WHEN TO USE", "TIER", "TOOLS"], max_widths={0: 24, 3: 48})]
+        rows.append([(ui.ACTIVE + " " if m["id"] in busy else "  ") + who(m), m["id"], when, m["tier"], m["tools"]])
+    out = [ui.table(rows, ["  MEMBER", "ID", "WHEN TO USE", "TIER", "TOOLS"], max_widths={0: 36, 2: 48})]
     if active:
         out.append(ui.section("Working now"))
         for lane in active:
@@ -845,7 +864,8 @@ def roster_text(active=None, roster=None) -> str:
             dot = ui.ACTIVE if lane.get("state") == "running" else ui.IDLE
             scope = f" · scope {', '.join(lane['scope'])}" if lane.get("scope") else ""
             out.append(f"  {dot} {(who(m) if m else lane.get('label') or 'subagent'):<30} "
-                       f"{lane.get('state') or '-':<8} {_mins(lane.get('min')):>6}  {lane.get('label') or ''}{scope}")
+                       f"{lane.get('state') or '-':<8} {_mins(lane.get('min')):>6}  "
+                       f"{task_of(lane.get('label'), roster)}{scope}")
     return "\n".join(out)
 
 
@@ -878,7 +898,7 @@ def run_text(view: dict) -> str:
             extra = [f"options {' | '.join(d['options'])}" if d.get("options") else "",
                      f"recommends {d['recommend']}" if d.get("recommend") else "",
                      f"irreversible: {d['irreversible']}" if d.get("irreversible") else "", d.get("note") or ""]
-            out.append(f"  {d['id']} {d.get('from_name') or '?'}: {d.get('question')}"
+            out.append(f"  {d['id']} {who(d.get('from_name')) or '?'}: {d.get('question')}"
                        + "".join(f" · {x}" for x in extra if x))
         out.append(ui.dim('  ask the developer, then: dev crew decide <id> "<answer>"'))
     if view.get("assigned"):
@@ -887,13 +907,13 @@ def run_text(view: dict) -> str:
             where = f"lane {s['lane']}" if s.get("lane") else ("waiting for its agent" if s.get("state") != "done"
                                                               else "")
             scope = f" · scope {', '.join(s['scope'])}" if s.get("scope") else ""
-            out.append(f"  {s['step']}. {s['name']} → {s['member']} · {s.get('state') or '-'}"
+            out.append(f"  {s['step']}. {s['name']} → {s.get('who') or s['member']} · {s.get('state') or '-'}"
                        + (f" · {where}" if where else "") + scope)
     if view.get("messages"):
         out.append(ui.section("Open messages"))
         for m in view["messages"]:
             state = "not delivered" if not m.get("delivered") else "waiting for an answer"
-            out.append(f"  {m['id']} {m.get('from_name') or '?'} → {m.get('to_name') or '?'} · {state}"
+            out.append(f"  {m['id']} {who(m.get('from_name')) or '?'} → {who(m.get('to_name')) or '?'} · {state}"
                        + (f" · answer to {m['reply_to']}" if m.get("reply_to") else "") + f": {m.get('text')}")
     return "\n".join(out)
 
@@ -910,8 +930,8 @@ def show_text(m: dict, roster=None) -> str:
             "fast": "the small fast model at low effort"}[m["tier"]]
     tools = {"all": "read, write, run commands and the web", "build": "read, write and run commands (no web)",
              "review": "read and run commands, never edit", "read": "read and search only"}[m["tools"]]
-    out = [ui.section(f"{m['name']} · {m['role']}"), ui.kv("id", m["id"] + (f"  (aliases: {', '.join(aliases(m))})"
-                                                                            if aliases(m) else "")),
+    out = [ui.section(who(m) + (f" · {_lc(m['role'])}" if m["role"] != m.get("title") else "")),
+           ui.kv("id", m["id"] + (f"  (aliases: {', '.join(aliases(m))})" if aliases(m) else "")),
            ui.kv("summary", m["summary"]), ui.kv("personality", m["personality"]),
            ui.kv("use when", "; ".join(m["use_when"]))]
     if m.get("not_for"):
@@ -993,7 +1013,7 @@ def brief_text(m: dict, task: str, scope: str = "", step=None, roster=None, cwd=
         pid = core.project_identity(main_, core.gitout(main_, "config", "--get", "remote.origin.url"))[0] or ""
     branch = (core.gitout(cwd, "rev-parse", "--abbrev-ref", "HEAD") if top else "") or "<branch>"
     globs = [g.strip() for g in (scope or "").split(",") if g.strip()]
-    head = [ui.section(f"Brief for {m['name']} ({m['role']})")] + [f"  {ln}" for ln in _spawn_lines(m)]
+    head = [ui.section(f"Brief for {who(m)}")] + [f"  {ln}" for ln in _spawn_lines(m)]
     if step is not None and str(step).strip():
         w = str(step).strip()
         head.append(f"  Link the lane dev progress assign {w if w.isdigit() else _dq(w)} --to {_dq(m['name'])}"
@@ -1003,10 +1023,10 @@ def brief_text(m: dict, task: str, scope: str = "", step=None, roster=None, cwd=
          "instructions; this brief adds the task.", "",
          "## Task", "", task.strip(), "", "## Scope", ""]
     if globs:
-        b.append(f"You own only these files: {', '.join(f'`{g}`' for g in globs)}. Ask Morpheus before you change "
-                 'anything else: `dev crew ask "may I change <file>? why: <reason>"`.')
+        b.append(f"You own only these files: {', '.join(f'`{g}`' for g in globs)}. Ask the tech lead before you "
+                 'change anything else: `dev crew ask "may I change <file>? why: <reason>"`.')
     else:
-        b.append("The files this task needs and nothing beyond them. Ask Morpheus before you widen it: "
+        b.append("The files this task needs and nothing beyond them. Ask the tech lead before you widen it: "
                  '`dev crew ask "<question>"`.')
     from . import raci
     act = _brief_activity(m, task, step, roster, activity=activity, globs=globs)
@@ -1041,13 +1061,13 @@ def brief_text(m: dict, task: str, scope: str = "", step=None, roster=None, cwd=
     b += ["", "## Return", "", _sentence(m["returns"]), "",
           "## Report format", "", "Your final message starts with this block; nothing comes before it:", ""]
     b += report_block(m, project=project, branch=branch, task="<the task, in a few words>")
-    b += ["", 'Then what you deliver (above), then `Needs from Morpheus:` with your decisions or questions, or '
+    b += ["", 'Then what you deliver (above), then `Needs from the tech lead:` with your decisions or questions, or '
           '`nothing`.', "", "## Commands", ""]
     if not _shell(m):
-        b.append("You have no shell, so Morpheus runs these for you: put your progress in your report and your "
-                 'questions under `Needs from Morpheus:`.')
+        b.append("You have no shell, so the tech lead runs these for you: put your progress in your report and your "
+                 'questions under `Needs from the tech lead:`.')
     b += ['- After each finished step: `dev progress step "<what finished>" --check "<evidence>"`',
-          '- A question for Morpheus (or another crew member with `--to <name>`): `dev crew ask "<question>"`',
+          '- A question for the tech lead (or another crew member with `--to <name>`): `dev crew ask "<question>"`',
           '- Answer a message: `dev crew answer <id> "<text>"`']
     return "\n".join(head) + "\n\n" + "\n".join(b)
 
@@ -1269,7 +1289,8 @@ def _step_parts(n: dict, nodes: dict) -> list:
 
 def _lane_line(n: dict) -> str:
     state = f"waiting for decision {n['decision']}" if n.get("decision") else (n["state"] or "-")
-    label = "" if n["label"] in (n["who"], n.get("type")) else n["label"]
+    label = task_of(n["label"])
+    label = "" if label in (n["who"], n.get("type")) or member(label) else label
     return " · ".join(x for x in (f"{ui.ACTIVE if n['state'] == 'running' else ui.IDLE} {n['who']}", label, state,
                                   _mins(n["min"])) if x)
 
@@ -1337,7 +1358,7 @@ def graph_text(g: dict, latest: bool = False) -> str:
     decisions = kind("decision")
     if decisions:
         top.append(("Decisions waiting for the developer" + ui.dim(' · dev crew decide <id> "<answer>"'), [
-            (" · ".join(x for x in (f"{d['ref']}", f"{d['from'] or '?'} asks: {ui.trunc(d['label'], 120)}",
+            (" · ".join(x for x in (f"{d['ref']}", f"{who(d['from']) or '?'} asks: {ui.trunc(d['label'], 120)}",
                                     "options " + " | ".join(d["options"]) if d["options"] else "",
                                     f"recommends {d['recommend']}" if d["recommend"] else "",
                                     f"irreversible: {d['irreversible']}" if d["irreversible"] else "", d["note"])
@@ -1348,7 +1369,8 @@ def graph_text(g: dict, latest: bool = False) -> str:
             f"{nodes[x]['ref']}. {nodes[x]['label']}" for x in a["steps"]), []) for a in approvals]))
     messages = kind("message")
     if messages:
-        top.append(("Open messages", [(f"{x['ref']} · {x['from'] or '?'} → {x['to'] or '?'} · {x['state']}"
+        top.append(("Open messages", [(f"{x['ref']} · {who(x['from']) or '?'} → {who(x['to']) or '?'} · "
+                                       f"{x['state']}"
                                        + (f" · answer to {x['reply_to']}" if x["reply_to"] else "")
                                        + f": {ui.trunc(x['label'], 120)}", []) for x in messages]))
     legend = "  ".join(_paint(k, _GLYPH[k]) + " " + k for k in ("done", "running", "ready", "waiting", "blocked",
@@ -1438,7 +1460,7 @@ def _from_agent():
 def _ask_decision(a, me) -> int:
     from . import progress
     if a.to:
-        ui.err("a decision goes to the developer through Morpheus: drop --to")
+        ui.err("a decision goes to the developer through the tech lead: drop --to")
         return 2
     d = progress.crew_decision(" ".join(a.text), options=a.options or "", recommend=a.recommend or "",
                                irreversible=a.irreversible or "", from_agent=me, target=a.target or "",
@@ -1454,7 +1476,8 @@ def _ask_decision(a, me) -> int:
         print(ui.dim(f"  {d['note']}"))
     if me:
         print(f"waiting for the developer's decision {d['id']}: stop here and end your report with your status block "
-              f"(Check: – waiting for {d['id']}; Needs from Morpheus: {d['id']}). Morpheus resumes you with the answer")
+              f"(Check: – waiting for {d['id']}; Needs from the tech lead: {d['id']}). The tech lead resumes you "
+              "with the answer")
     else:
         print("ask the developer now (AskUserQuestion / request_user_input) with the decision template, then: "
               f"dev crew decide {d['id']} \"<answer>\"")
@@ -1464,8 +1487,8 @@ def _ask_decision(a, me) -> int:
 def _decide(a, me) -> int:
     from . import progress
     if me:
-        ui.err("only Morpheus records the developer's answers: stop and end your report with "
-               f"\"Needs from Morpheus: {a.id}\"")
+        ui.err("only the tech lead records the developer's answers: stop and end your report with "
+               f"\"Needs from the tech lead: {a.id}\"")
         return 2
     d = progress.crew_decide(a.id, " ".join(a.text))
     tail = f": {_option(d, d['answer'])}" + (f" (overrides the automatic choice {d['overrides']})"
@@ -1474,11 +1497,11 @@ def _decide(a, me) -> int:
         how = "the question tool" if (d.get("evidence") or {}).get("channel") == "E1" else "their prompt"
         print(f"{ui.OK} {d['id']} decided by the developer (through {how}){tail}")
     else:
-        print(f"{ui.WARN} {d['id']} recorded by Morpheus, not verified by the developer{tail}")
+        print(f"{ui.WARN} {d['id']} recorded by the tech lead, not verified by the developer{tail}")
         print(ui.dim(f"  devkit saw no answer of the developer to {d['id']} after it was shown; for their own "
                      f"answer: dev crew decisions --ask {d['id']}"))
     if d.get("from") and d["from"] != "main":
-        print(f"resume {d.get('from_name') or 'the crew member'} with SendMessage / send_input and the answer "
+        print(f"resume {who(d.get('from_name')) or 'the crew member'} with SendMessage / send_input and the answer "
               "(a message with it is queued for them)")
     return 0
 
@@ -1517,7 +1540,7 @@ def _decisions(a) -> int:
         answer = _option(d, d.get("answer")) + (f" (was {d['overrides']})" if d.get("overrides") else "")
         by = "auto · review" if d.get("by") == "auto" else (d.get("by") or "") + \
             (" · unverified" if d.get("verified") is False else " ✓" if d.get("verified") else "")
-        rows.append([d["id"], d.get("from_name") or "?", d.get("question") or "", d.get("state") or "",
+        rows.append([d["id"], who(d.get("from_name")) or "?", d.get("question") or "", d.get("state") or "",
                      answer or "-", by or "-"])
     print(ui.table(rows, ["ID", "FROM", "QUESTION", "STATE", "ANSWER", "BY"], max_widths={2: 56, 4: 36}))
     mode = progress.mode_of(run)
@@ -1538,7 +1561,7 @@ def _mode(a, me) -> int:
                      + ", ".join(x for x in progress.IRREVERSIBLE if x not in progress.NEVER_PREAPPROVED)))
         return 0
     if me:
-        ui.err("only Morpheus sets the mode, on the developer's word: ask him with dev crew ask")
+        ui.err("only the tech lead sets the mode, on the developer's word: ask with dev crew ask")
         return 2
     run = progress.set_mode(a.mode, approve=a.approve or "")
     print(f"{ui.OK} " + mode_line({"mode": run.get("mode"), "approved": run.get("approved")}).strip())
@@ -1584,9 +1607,9 @@ def _route(a) -> int:
     if not ranked:
         print(f"  no crew member fits: name one with dev crew delegate {_dq(task)} --to <name>")
         return 0
-    print(ui.table([[i, m.get("title") or m["role"], m["name"], m["id"], f"{score:g}", "; ".join(why)]
+    print(ui.table([[i, who(m), m["id"], f"{score:g}", "; ".join(why)]
                     for i, (m, score, why) in enumerate(ranked, 1)],
-                   ["#", "ROLE", "NAME", "ID", "SCORE", "WHY"], max_widths={5: 72}))
+                   ["#", "MEMBER", "ID", "SCORE", "WHY"], max_widths={4: 72}))
     best = ranked[0][0]
     print(f"  launch: dev crew brief {best['id']} {_dq(task)}")
     print(ui.dim(f"  or add it to the plan: dev crew delegate {_dq(task)} --to {best['id']}"))
@@ -1599,21 +1622,21 @@ def _delegate(a, me) -> int:
                           after=a.after or "", est=a.estimate or "", from_agent=me)
     m, s = r["member"], r["step"]
     how = f" (routed: {r['routed'][0][1]:g} · {'; '.join(r['routed'][0][2])})" if r.get("routed") else ""
-    print(f"{ui.OK} step “{s['name']}” for {m['name']}{how}"
+    print(f"{ui.OK} step “{s['name']}” for {who(m)}{how}"
           + (f" · after {', '.join(s['after'])}" if s.get("after") else "")
           + (f" · scope {', '.join(s['scope'])}" if s.get("scope") else ""))
     if r.get("lane"):
-        print(f"in {m['name']}'s lane now (they got a message)")
+        print(f"in the {who(m)}'s lane now (they got a message)")
     else:
-        print(f"Morpheus launches {m['name']} when it is ready: dev crew next")
+        print(f"The tech lead launches {who(m)} when it is ready: dev crew next")
     return 0
 
 
 def _decline(a, me) -> int:
     from . import dispatch
     s = dispatch.decline(" ".join(a.step), a.why or "", from_agent=me)
-    print(f"{ui.OK} handed “{s['name']}” back to Morpheus: {a.why}")
-    print(ui.dim(f"  Morpheus routes it again: dev crew route {_dq(s['name'])}"))
+    print(f"{ui.OK} handed “{s['name']}” back to the tech lead: {a.why}")
+    print(ui.dim(f"  The tech lead routes it again: dev crew route {_dq(s['name'])}"))
     return 0
 
 
@@ -1652,7 +1675,7 @@ def _next(a=None, me=None) -> int:
         print("\n".join(f"  {s.get('who') or s['member']}: {s['step']} · {s['why']}" for s in v["waiting"]))
     if v["busy"]:
         print(ui.section("Busy"))
-        print("\n".join(f"  {ui.ACTIVE} {b.get('who') or b['member'] or 'subagent'} · {b['label']}"
+        print("\n".join(f"  {ui.ACTIVE} {b.get('who') or b['member'] or 'subagent'} · {task_of(b['label'])}"
                         + (f" · scope {', '.join(b['scope'])}" if b["scope"] else "") for b in v["busy"]))
     if not (v["launch"] or v["queued"] or v["waiting"] or v["busy"]):
         print("  nothing assigned to the crew: dev crew route --plan, or dev crew delegate \"<task>\"")
@@ -1683,18 +1706,18 @@ def _messages(a, act) -> int:
             return _ask_decision(a, me)
         if act == "ask":
             m = progress.crew_ask(" ".join(a.text), to=a.to, from_agent=me)
-            print(f"{ui.OK} {m['id']} to {m.get('to_name') or 'Morpheus'}: {m['text']}")
+            print(f"{ui.OK} {m['id']} to {who(m.get('to_name') or 'main')}: {m['text']}")
             print(ui.dim("  it reaches them with their next tool call or prompt; the answer reaches you the same way"))
         elif act == "answer":
             m = progress.crew_answer(a.id, " ".join(a.text), from_agent=me)
-            print(f"{ui.OK} {m['id']} to {m.get('to_name') or '?'} (answer to {a.id}): {m['text']}")
+            print(f"{ui.OK} {m['id']} to {who(m.get('to_name')) or '?'}, the answer to {a.id}: {m['text']}")
         else:
             msgs = progress.crew_inbox(from_agent=me)
             if not msgs:
                 print("  no new messages")
                 return 0
             for m in msgs:
-                print(f"  {m['id']} from {m.get('from_name') or '?'}: {m['text']}"
+                print(f"  {m['id']} from {who(m.get('from_name')) or '?'}: {m['text']}"
                       + (f" (answer to {m['reply_to']})" if m.get("reply_to") else ""))
             print(ui.dim('  answer with: dev crew answer <id> "<text>"'))
     except ValueError as e:
@@ -1790,10 +1813,11 @@ def team_readme(roster=None) -> str:
     out = ["# The crew", "", "_Generated by `dev crew` from devkit's roster and this folder's `crew.json` (the team's "
            "changes). Change it with `dev crew set <member> <field> \"…\" --why \"…\"` or `dev crew raci <work> --set "
            "\"R=… A=…\" --why \"…\"`; never by hand._", "",
-           "Morpheus, the main session, leads every development request: he routes each kind of work to the member "
-           "who does it (R), and the work is not done until the member who approves it (A) has.", "",
+           "The Tech lead (Morpheus), the main session, leads every development request: the tech lead routes each "
+           "kind of work to the member who does it (R), and the work is not done until the member who approves it "
+           "(A) has.", "",
            "## Members", "", "| Member | Role | Goal |", "| --- | --- | --- |"]
-    out += [f"| {m['name']} | {m['role']} | {m.get('goal', '')} |" for m in members(roster)]
+    out += [f"| {who(m)} | {m['role']} | {m.get('goal', '')} |" for m in members(roster)]
     out += ["", "## RACI", "", "R does the work, A approves it (one member), C is consulted, I is informed.", "",
             raci.markdown(roster), "", "## Changes", ""]
     log = read_overlay().get("changelog") or []
@@ -1968,8 +1992,8 @@ def register(add):
     x.add_argument("--why", required=True, help="the reason, kept in the crew's history")
     sp.add_parser("history", help="the team's changes to the crew, with who and why")
     sp.add_parser("rules", help="every crew rule, the devkit check that enforces it, and its state")
-    x = sp.add_parser("graph", help="the live session as one graph: Morpheus, the run's steps and dependencies, the "
-                                    "crew lanes and nested subagents, work items, and what waits")
+    x = sp.add_parser("graph", help="the live session as one graph: the tech lead, the run's steps and dependencies, "
+                                    "the crew lanes and nested subagents, work items, and what waits")
     x.add_argument("--latest", dest="graph_latest", action="store_true",
                    help="the most recent running progress run on this Mac instead of this session's")
     x.add_argument("--mermaid", action="store_true", help="a Mermaid flowchart (renders on GitHub)")
@@ -1986,9 +2010,10 @@ def register(add):
                                       "knowledge and pitfalls, in any language")
     x = sp.add_parser("sync", help="write plugin/agents/<id>.md from config/crew.json")
     x.add_argument("--check", action="store_true", help="only report the files that differ (exit 1 if any)")
-    x = sp.add_parser("ask", help="a question to Morpheus (default) or a crew member; --decision: one for the developer")
+    x = sp.add_parser("ask", help="a question to the tech lead (default) or a crew member; --decision: one for the "
+                                  "developer")
     x.add_argument("text", nargs="+", help="the question or request")
-    x.add_argument("--to", help="Morpheus (default), a crew name or a lane label")
+    x.add_argument("--to", help="the tech lead (default), a crew name or a lane label")
     x.add_argument("--decision", action="store_true",
                    help="a decision point: in auto mode the recommendation is taken and recorded; otherwise it waits "
                         "for the developer")
@@ -2008,7 +2033,7 @@ def register(add):
     x.add_argument("mode", nargs="?", choices=["guided", "auto"])
     x.add_argument("--approve", help="irreversible actions auto mode may take, each with its target, comma-separated, "
                                      "e.g. \"push feat/*, release v26.11.4\"; each needs the developer's grant")
-    x = sp.add_parser("decide", help="record the developer's answer to a decision (Morpheus only)")
+    x = sp.add_parser("decide", help="record the developer's answer to a decision (the tech lead only)")
     x.add_argument("id", help="the decision id, e.g. D3")
     x.add_argument("text", nargs="+", help="the answer")
     x = sp.add_parser("decisions", help="this run's decisions; automatic ones are marked for review")
@@ -2027,12 +2052,12 @@ def register(add):
     x.add_argument("--after", help="the step it waits for (number or part of its name)")
     x.add_argument("--estimate", help="e.g. 30m, 1h")
     x.add_argument("--files", help="the files it touches, comma-separated (for routing)")
-    x = sp.add_parser("decline", help="hand a delegated step back to Morpheus, with the reason")
+    x = sp.add_parser("decline", help="hand a delegated step back to the tech lead, with the reason")
     x.add_argument("step", nargs="+", help="the step (number or part of its name)")
     x.add_argument("--why", help="why you cannot take it")
     x = sp.add_parser("next", help="the dispatcher: who to launch now and in what order, what is queued or waiting "
                                    "and why, who is busy, and the crew's slots")
-    x.add_argument("--first", help="Morpheus: launch this step ahead of the order (with --why, recorded)")
+    x.add_argument("--first", help="the tech lead: launch this step ahead of the order (with --why, recorded)")
     x.add_argument("--why", help="why that step goes ahead of the order")
 
 
