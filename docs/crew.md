@@ -318,7 +318,9 @@ gates count only what the member wrote itself: another member's uncommitted line
 findings. Every gate finding goes to the audit trail as `crew.gate`. With `crew.gates.enforce` set to `false`, the
 gates only record; with `canary.enforce` set to `false`, the first two checks do not send the member back. A member
 let through with background work still running (sent back once already, or with the gates not enforced) is named once
-in the tech lead's next context, with the agent id to stop it: `TaskStop <agent id>`.
+in the tech lead's next context, with the agent id to stop it: `TaskStop <agent id>`. Every other launched member that
+finishes is named once too, in one line with its agent id, because Claude Code can still list a finished member as
+running: `TaskStop <agent id>` ends it.
 
 When the member stops for good, its step ends on evidence: done with a Check ✓ in its report or its own
 `dev progress step --check`, otherwise unverified, for the tech lead to close with evidence or reopen. A review-only or

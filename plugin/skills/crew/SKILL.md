@@ -208,7 +208,8 @@ dev crew decide D1 "B: reject"                          # the tech lead records 
 
    `dev canary` counts the crew apart (`crew 12/13`), and `dev audit --action crew.gate` lists the gate findings. A
    member let through with background work still running is named once in your next context: stop it with
-   `TaskStop <agent id>` if you no longer need it.
+   `TaskStop <agent id>` if you no longer need it. Every other member that finishes is named once too, in one line
+   with its agent id: if Claude Code still lists it as running, `TaskStop <agent id>` ends it.
 2. **The step ends on evidence.** It ends done only with a Check ✓ in the report or the member's own
    `dev progress step --check`; otherwise it shows as unverified, for you to close with evidence or reopen
    (`dev progress reopen <step> --why "…"`). A review or read-only member whose shell call wrote files ends

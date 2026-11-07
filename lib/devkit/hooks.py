@@ -2069,8 +2069,28 @@ def crew_background_notice(sess: dict) -> str:
             "member until its background work ends.")
 
 
+def crew_finished_notice(sess: dict) -> str:
+    """Main session: the launched members that finished (kept by subagent_stop in `sess["crew_finished"]`), one line
+    each, told once. Claude Code has listed a finished member as running long after its report arrived, and only
+    TaskStop on its agent id removed it (L-fzh8oq4aby8). A member that stopped with background work still running is
+    named by crew_background_notice instead. Removes what it tells, one member at a time, like that notice."""
+    done = sess.get("crew_finished") or {}
+    lines = []
+    for aid in list(done):
+        who = done.pop(aid) or "A crew member"
+        lines.append(f"devkit · {who} finished (agent `{aid}`). If Claude Code still lists it as running, TaskStop "
+                     f"`{aid}` ends it.")
+    return "\n".join(lines)
+
+
+def crew_notices(sess: dict) -> str:
+    """What the main session hears about its members' lifecycle at its next tool call or prompt: the members that
+    finished, and those that stopped with background work still running."""
+    return "\n\n".join(x for x in (crew_finished_notice(sess), crew_background_notice(sess)) if x)
+
+
 def _background_told(agent: str, data: dict) -> str:
-    """crew_background_notice for a hook that has not read the session record (UserPromptSubmit)."""
+    """crew_notices for a hook that has not read the session record (UserPromptSubmit)."""
     if data.get("agent_id"):
         return ""
     try:
@@ -2078,10 +2098,10 @@ def _background_told(agent: str, data: dict) -> str:
         if not sf.exists():
             return ""
         sess = state.read(sf) or {}
-        if not sess.get("crew_background"):
+        if not (sess.get("crew_background") or sess.get("crew_finished")):
             return ""
         before = copy.deepcopy(sess)
-        text = crew_background_notice(sess)
+        text = crew_notices(sess)
         _patch_quietly(sf, before, sess)
         return text
     except Exception:
@@ -2093,7 +2113,7 @@ def post_tool(agent: str):
     """PostToolUse: time slow calls; remind the agent to update the developer after a long silence; sync the
     handoff repository right after a delivery event (commit, push, merge, tag, PR, release); at a call that usually
     ends the turn, show the status block the final message opens with; in the main session, name the members that
-    finished with background work still running (crew_background_notice)."""
+    finished, and those that finished with background work still running (crew_notices)."""
     from . import progress
     data = _stdin_json()
     _check_writes(agent, data)
@@ -2139,7 +2159,7 @@ def post_tool(agent: str):
             sess = state.read(sf) or {}
             before = copy.deepcopy(sess)
             closing = closing_reminder(data, sess, time.time(), agent=agent)
-            background = "" if data.get("agent_id") else crew_background_notice(sess)
+            background = "" if data.get("agent_id") else crew_notices(sess)
             if note_milestone(data, sess, time.time()) or sess != before:  # only what changed, on the fresh record:
                 _patch_quietly(sf, before, sess)  # a background launch's SubagentStart claims its entry meanwhile
     except Exception:
@@ -2282,7 +2302,11 @@ def subagent_stop(agent: str):
                 from . import gates
                 ref = copy.deepcopy(sess)
                 out = gates.check(name, data, sess, pid)
-                if sess != ref:  # only the gates' own mark, on the fresh record
+                if out is None and agent == "claude" and aid and aid not in (sess.get("crew_background") or {}):
+                    # it finished: the tech lead hears it once, with the id Claude Code's TaskStop takes
+                    # (crew_finished_notice); Codex has no TaskStop and no such agent list
+                    sess.setdefault("crew_finished", {})[aid] = _who(name)
+                if sess != ref:  # only the gates' own mark and this one, on the fresh record
                     _patch_quietly(sf, ref, sess)
     except Exception:
         _log(f"subagent-stop {agent}: {traceback.format_exc()[-300:]}")

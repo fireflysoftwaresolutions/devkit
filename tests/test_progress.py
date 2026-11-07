@@ -647,6 +647,94 @@ class AbsoluteScopeTests(unittest.TestCase):
             self.assertIsNone(pg.load_run("claude", "s1")["plan"][0].get("scope"))  # nothing was assigned
 
 
+class FinishedMemberNoticeTests(unittest.TestCase):
+    # Claude Code listed a finished Code reviewer as running for 26 minutes after its report arrived, and only TaskStop
+    # on its agent id removed it (L-fzh8oq4aby8): the tech lead hears once, in one line, that each launched member
+    # finished, with the agent id TaskStop takes
+    REPORT = "**[Firefly> DevKit · {who}]** api · `main` · x\n- **Done:** x\n- **Check:** ✓ 3 tests\n- **Next:** review"
+
+    def setUp(self):
+        from devkit import hooks
+        self.hooks = hooks
+        st = TempState()
+        st.__enter__()
+        self.addCleanup(st.__exit__, None, None, None)
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        self.d = Path(tmp.name)
+        saved = canary.LOG
+        canary.LOG = self.d / "canary.jsonl"
+        self.addCleanup(setattr, canary, "LOG", saved)
+        state_dir = mock.patch.object(hooks, "STATE", Path(st.tmp.name))  # its sessions/ is TempState's
+        state_dir.start()
+        self.addCleanup(state_dir.stop)
+        self.tool = {"session_id": "s1", "tool_name": "Bash", "tool_input": {"command": "git status"}, "cwd": str(self.d)}
+
+    def hook(self, handler, payload) -> str:
+        import contextlib
+        import io
+        out = io.StringIO()
+        with mock.patch("sys.stdin", io.StringIO(json.dumps(payload))), contextlib.redirect_stdout(out):
+            getattr(self.hooks, handler)("claude")
+        return out.getvalue()
+
+    def context(self, handler, payload) -> str:
+        out = self.hook(handler, payload)
+        return json.loads(out)["hookSpecificOutput"]["additionalContext"] if out else ""
+
+    def member(self, aid, kind, label, report=None, background=""):
+        # its own transcript: it loaded the hand-off skill and recorded its step; `background` leaves a task running
+        rows = [("Skill", {"skill": "devkit:communicating"}, "ok"),
+                ("Bash", {"command": 'dev progress step "did it" --check "3 tests pass"'}, "ok")]
+        if background:
+            rows.append(("Bash", {"command": "bin/dev test", "run_in_background": True},
+                         f"Command running in background with ID: {background}. Output is being written to: "
+                         f"/private/tmp/claude-501/tasks/{background}.output"))
+        tr = self.d / f"agent-{aid}.jsonl"
+        with tr.open("w") as fh:
+            for i, (name, inp, result) in enumerate(rows):
+                fh.write(json.dumps({"type": "assistant", "isSidechain": True, "message": {"role": "assistant", "content": [
+                    {"type": "tool_use", "id": f"toolu_{i:04d}", "name": name, "input": inp}]}}) + "\n")
+                fh.write(json.dumps({"type": "user", "isSidechain": True, "message": {"role": "user", "content": [
+                    {"type": "tool_result", "tool_use_id": f"toolu_{i:04d}", "content": result}]}}) + "\n")
+        (self.d / f"agent-{aid}.meta.json").write_text(json.dumps({"toolUseId": f"toolu_{aid}", "description": label}))
+        who = label.split(":")[0]
+        return {"session_id": "s1", "agent_id": aid, "agent_type": kind, "cwd": str(self.d),
+                "agent_transcript_path": str(tr),
+                "last_assistant_message": self.REPORT.format(who=who) if report is None else report}
+
+    def test_a_finished_member_is_named_once_with_the_taskstop_that_ends_it(self):
+        seraph = self.member("r1", "devkit:seraph", "Code reviewer (Seraph): review the release")
+        self.assertEqual(self.hook("subagent_stop", seraph), "")  # it owes nothing: it finished
+        summarizer = {"session_id": "s1", "agent_id": "c1", "agent_type": "", "last_assistant_message": "<analysis>"}
+        self.assertEqual(self.hook("subagent_stop", summarizer), "")  # the compaction summarizer is no crew member
+        kid = self.member("k1", "devkit:kid", "DevEx engineer (Kid): installer", background="b7k2m9x1q")
+        self.hook("subagent_stop", kid)  # sent back once for its background work, then let through with it running
+        self.hook("subagent_stop", dict(kid, stop_hook_active=True))
+        self.assertNotIn("`r1`", self.hook("post_tool", dict(self.tool, agent_id="n9")))  # a member's own call: no
+        told = self.context("post_tool", self.tool)
+        line = [ln for ln in told.splitlines() if "`r1`" in ln]
+        self.assertEqual(len(line), 1, told)
+        self.assertIn("Code reviewer (Seraph) finished", line[0])
+        self.assertIn("If Claude Code still lists it as running, TaskStop `r1` ends it", line[0])
+        self.assertNotIn("`c1`", told)
+        self.assertEqual(len([ln for ln in told.splitlines() if "`k1`" in ln]), 1, told)  # its background line only
+        self.assertNotIn("`r1`", self.hook("post_tool", self.tool))  # once
+
+    def test_a_member_sent_back_is_named_only_once_it_finishes(self):
+        neo = self.member("n1", "devkit:neo", "Senior engineer (Neo): parser", report="Done. The parser works.")
+        self.assertEqual(json.loads(self.hook("subagent_stop", neo))["decision"], "block")  # no status block
+        lead = {"session_id": "s1", "prompt": "how is it going?", "cwd": str(self.d)}
+        self.assertNotIn("`n1`", self.hook("prompt", lead))  # it is still working on its report
+        fixed = dict(neo, stop_hook_active=True, last_assistant_message=self.REPORT.format(who="Senior engineer (Neo)"))
+        self.assertEqual(self.hook("subagent_stop", fixed), "")
+        # its completion notice reaches the tech lead as a prompt of its own, and the line comes with it
+        notice = dict(lead, prompt="<task-notification><task-id>n1</task-id><status>completed</status>")
+        told = self.context("prompt", notice)
+        self.assertIn("Senior engineer (Neo) finished (agent `n1`)", told)
+        self.assertIn("TaskStop `n1` ends it", told)
+
+
 class DeclaredActivityTests(unittest.TestCase):
     # A step's kind of work rests on language-neutral anchors (spec C13, Kid's M41 and M45): an explicit activity id
     # (--activity on assign, [id] in a plan spec), the assigned member's Responsible activity, the files in its scope.
