@@ -1,7 +1,9 @@
-#!/usr/bin/env python3
+#!/usr/bin/env -S python3 -I -S
 # Copyright (c) 2026 Firefly Software Solutions Inc.
 # SPDX-License-Identifier: Apache-2.0
 """devkit command-line entry point. See `dev help` and docs/."""
+# -I -S: devkit's own process (the guard included) loads only the standard library and lib/ below: no PYTHON*
+# variable, current folder, user or site-packages folder or .pth file can put code into it (RT4).
 import os
 import sys
 

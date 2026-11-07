@@ -1451,6 +1451,21 @@ def forged_env_reason(names, what) -> str:
             f"{_TAIL}")
 
 
+# The variables that make Python load other code, or another interpreter, into the process it starts (RT4): a module
+# that shadows the stdlib (PYTHONPATH, PYTHONHOME, PYTHONUSERBASE, PYTHONPLATLIBDIR), a startup or breakpoint hook,
+# and on macOS the sys.executable devkit starts its own child commands with. bin/dev runs `python3 -I -S`, which
+# ignores them; the rule also covers `python3 bin/dev` and a nested agent session, whose hooks run devkit.
+_PY_LOAD = frozenset({"PYTHONPATH", "PYTHONSTARTUP", "PYTHONHOME", "PYTHONUSERBASE", "PYTHONPLATLIBDIR",
+                      "PYTHONEXECUTABLE", "PYTHONBREAKPOINT"})
+
+
+def python_env_reason(names, what) -> str:
+    return (f"This sets {', '.join(names[:4])} for {what}. That makes Python load other code, or another "
+            f"interpreter, into devkit's own process, which runs the guard and writes devkit's records (RT4, K2). "
+            f"devkit runs isolated (`python3 -I -S`) and needs none of them. Run the command without it; to try "
+            f"devkit's code, run its tests. {_TAIL}")
+
+
 def _repo_script(argv, cwd) -> bool:
     """True when an interpreter runs a script file inside the workspace (a repository's own code, such as a test)
     rather than inline code, its input or a file elsewhere."""
@@ -1614,6 +1629,9 @@ class _Shell:
             bad = _forged(set(names) | self.exported)
             if bad:
                 return deny(forged_env_reason(bad, what))
+            py = sorted((set(names) | self.exported) & _PY_LOAD)
+            if py:
+                return deny(python_env_reason(py, what))
         if _INTERP.match(name) and not _repo_script(argv, cwd):
             code = _program(argv, cwd, self.bodies)[0]
             if code and _DEV_RUN_CODE.search(code):

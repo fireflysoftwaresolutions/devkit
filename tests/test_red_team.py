@@ -132,13 +132,47 @@ class RedTeam(unittest.TestCase):
                 self.assertIsNotNone(self.member(cmd))
 
     # ------------------------------------------------------------------ RT4 (critical): PYTHONPATH code injection
-    @unittest.expectedFailure  # RT4
     def test_rt4_python_env_on_a_dev_call_injects_code_into_devkits_process(self):
-        # bin/dev is `#!/usr/bin/env python3` (no -E/-I) and PYTHONPATH is searched before the stdlib, so a planted
-        # /tmp/x/json.py runs inside the dev/guard process. The forged-env rule covers HOME/DEV_ROOT/DEVKIT_* only, not
+        # bin/dev was `#!/usr/bin/env python3` (no -E/-I) and PYTHONPATH is searched before the stdlib, so a planted
+        # /tmp/x/json.py ran inside the dev/guard process. The forged-env rule covered HOME/DEV_ROOT/DEVKIT_* only, not
         # PYTHONPATH or PYTHONSTARTUP, which also change what the dev process executes.
-        self.assertIsNotNone(self.check("PYTHONPATH=/tmp/x dev progress start g --steps 1"))
-        self.assertIsNotNone(self.check("PYTHONSTARTUP=/tmp/x.py dev status"))
+        for cmd in ("PYTHONPATH=/tmp/x dev progress start g --steps 1", "PYTHONSTARTUP=/tmp/x.py dev status",
+                    "export PYTHONHOME=/tmp/h; bin/dev status", "PYTHONEXECUTABLE=/tmp/p python3 bin/dev status",
+                    "PYTHONPATH=/tmp/x claude -p hi"):
+            with self.subTest(cmd=cmd):
+                self.assertIsNotNone(self.check(cmd))
+        # a repository's own tests may still set PYTHONPATH, and harmless variables pass on a dev call
+        for cmd in ("PYTHONPATH=lib python3 -m unittest tests.test_guard", "PYTHONDONTWRITEBYTECODE=1 dev status"):
+            with self.subTest(cmd=cmd):
+                self.assertIsNone(self.check(cmd))
+
+    def test_rt4_bin_dev_loads_no_planted_module_on_either_python(self):
+        # the real process: bin/dev started through its shebang, with a planted json.py on PYTHONPATH, a
+        # sitecustomize, a .pth in a user site folder and a PYTHONSTARTUP, under each python3 found here
+        plant = Path(self.tmp.name) / "plant"
+        hit = Path(self.tmp.name) / "hit"
+        for d in (plant, plant / "user" / "lib" / "python" / "site-packages"):
+            d.mkdir(parents=True, exist_ok=True)
+        code = f"open({str(hit)!r}, 'a').write('x')\n"
+        (plant / "json.py").write_text(code)
+        (plant / "sitecustomize.py").write_text(code)
+        (plant / "start.py").write_text(code)
+        (plant / "user" / "lib" / "python" / "site-packages" / "evil.pth").write_text("import os; " + code)
+        pythons = sorted({p for p in (sys.executable, "/usr/bin/python3", "/opt/homebrew/bin/python3")
+                          if os.path.exists(p)})
+        for py in pythons:
+            with self.subTest(python=py):
+                shim = Path(self.tmp.name) / ("shim-" + str(abs(hash(py))))
+                shim.mkdir(exist_ok=True)
+                (shim / "python3").unlink(missing_ok=True)
+                (shim / "python3").symlink_to(py)
+                env = {**os.environ, "PATH": f"{shim}:/usr/bin:/bin", "PYTHONPATH": str(plant),
+                       "PYTHONSTARTUP": str(plant / "start.py"), "PYTHONUSERBASE": str(plant / "user")}
+                r = subprocess.run([str(ROOT / "bin" / "dev"), "version"], env=env, capture_output=True, text=True,
+                                   timeout=60, cwd=str(plant))
+                self.assertEqual(r.returncode, 0, r.stderr)
+                self.assertIn("devkit", r.stdout)
+                self.assertFalse(hit.exists(), f"planted code ran under {py}")
 
     # ------------------------------------------------------------------ RT5 (high): dev config lock/unlock
     @unittest.expectedFailure  # RT5
