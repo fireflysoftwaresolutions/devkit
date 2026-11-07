@@ -84,6 +84,11 @@ def git(cwd, *args, env=None):
     return out
 
 
+# A workflow that runs on every push: the push budget counts only pushes that start CI
+CI_ON_PUSH = {".github/workflows/ci.yml": "on: [push]\njobs:\n  t:\n    runs-on: ubuntu-latest\n    steps:\n"
+                                          "      - run: echo hi\n"}
+
+
 class Sandbox:
     """A repository `widget` whose origin is a bare repo, devkit state in a temp dir, gh faked."""
 
@@ -392,7 +397,7 @@ class PushTests(unittest.TestCase):
     def test_needs_evidence_then_pushes_once_with_upstream(self):
         with Sandbox() as s:
             s.branch("feat/x")
-            s.commit("feat: add x")
+            s.commit("feat: add x", CI_ON_PUSH)
             rc, _, err = dev("push")
             self.assertEqual(rc, 2)
             self.assertIn("no local CI evidence", err)
@@ -485,6 +490,7 @@ class PushTests(unittest.TestCase):
     def test_push_budget_applies_and_a_real_local_run_lifts_it(self):
         with Sandbox() as s:
             s.branch("feat/loop")
+            s.commit("ci: run on push", CI_ON_PUSH)
             for i in range(2):
                 s.commit(f"fix: attempt {i}")
                 self.assertEqual(dev("push", "--ci-passed")[0], 0)

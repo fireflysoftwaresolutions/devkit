@@ -796,8 +796,19 @@ def check_git(argv, cwd, full_segment, envs=frozenset(), pending=None):
 PUSH_WINDOW_S, PUSH_LIMIT = 3600, 2
 
 
+def _push_starts_ci(top, branch, src, remote) -> bool:
+    """pipelines.push_starts_ci for the budget: False only when the pushed commit's CI configuration shows the push
+    starts no run. Any doubt, a failed import or a raise counts the push."""
+    try:
+        from .pipelines import push_starts_ci
+        return push_starts_ci(top, branch, src=src, remote=remote) is not False
+    except Exception:
+        return True
+
+
 def check_push_budget(cwd, args, envs):
-    """Block CI loops: the 3rd push of the same branch within an hour needs a local green run first."""
+    """Block CI loops: the 3rd push of the same branch within an hour that starts CI needs a local green run first.
+    A push that starts no CI run (a draft, a branch no workflow runs on) is not counted."""
     import json
     import time
     top = core.gitout(cwd, "rev-parse", "--show-toplevel")
@@ -807,6 +818,9 @@ def check_push_budget(cwd, args, envs):
     branch = (pos[1].split(":")[-1] if len(pos) > 1 else core.gitout(cwd, "branch", "--show-current")) or "HEAD"
     main = core.gitout(cwd, "rev-parse", "--path-format=absolute", "--git-common-dir") or top
     key = f"{main}|{branch}"
+    src = pos[1].split(":")[0].lstrip("+") if len(pos) > 1 and ":" in pos[1] else None
+    if src != "" and not _push_starts_ci(top, branch, src, pos[0] if pos else "origin"):
+        return None  # a push that starts no CI run costs no CI: the budget does not count it (spec P-fy3bwa0pshk R5)
     f = core.STATE / "ci-pushes.json"
     try:
         data = json.loads(f.read_text()) if f.exists() else {}
@@ -4211,7 +4225,25 @@ def _next_release(cwd) -> str:
         return "?"
 
 
-def _dev_actions(dargs, cwd) -> list:
+def _job_actions(name, cwd, depth) -> list:
+    """What `dev jobs run|exec <name>` does: the actions of the job's own dev command. A job devkit cannot look up
+    is the action `unknown` (tier 2): the gate fails closed rather than let a job push or release unseen."""
+    if not name:
+        return []
+    try:
+        from . import jobs
+        job = jobs.jobs().get(name)
+    except Exception:
+        return [_unknown(f"dev jobs run {name}")]
+    cmd = [str(x) for x in (job or {}).get("cmd") or []]
+    if not cmd:
+        return []  # no such job: `dev jobs` runs nothing
+    if depth >= 4:
+        return [_unknown(f"dev jobs run {name}")]
+    return _dev_actions(cmd, cwd, depth + 1)
+
+
+def _dev_actions(dargs, cwd, depth=0) -> list:
     """What a `dev` command (its arguments after `dev`) does: [(action, target[, repo])]."""
     pos = _positionals(dargs, _DEV_VALUES)
     if not pos or "--help" in dargs or "-h" in dargs:
@@ -4226,6 +4258,13 @@ def _dev_actions(dargs, cwd) -> list:
         return _push_actions(gargs, str(resolve(cdir, cwd)) if cdir else cwd) if gsub == "push" else []
     if "--dry-run" in dargs:
         return []
+    if cmd == "backup":  # pushes branches whose commits exist only here (spec P-fy3bwa0pshk R5): tier 1, per branch
+        targets = list(pos[1:]) + (["all-branches"] if "--all" in dargs else [])
+        return [("push", t) for t in targets or [_branch(cwd)]]
+    if cmd == "sync" and {"--scheduled", "--finish"} & set(dargs) and not {"--offline", "--no-push"} & set(dargs):
+        return [("push", "the branches of every project")]  # these runs back up branches (cmd_sync): no grant names it
+    if cmd == "jobs" and sub in ("run", "exec"):  # a job runs a dev command (the scheduled sync, a custom job)
+        return _job_actions(pos[2] if len(pos) > 2 else "", cwd, depth)
     if cmd == "push":
         cur = _branch(cwd)
         lease = "--force-with-lease" in dargs or _protected_branch(cur, _default_branch(cwd))

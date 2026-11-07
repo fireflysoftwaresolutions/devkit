@@ -346,6 +346,78 @@ class RedTeam2(unittest.TestCase):
         self.assertIn("Ask the tech lead", self.member("dev push") or "")
         self.assertIn('"Needs from the tech lead"', self.member("gh pr merge 12") or "")
 
+    # ---- M381: dev backup and a sync that backs up branches push them, so a member needs a step grant (tier 1);
+    # the main session runs them, and the scheduled sync runs from launchd, outside the guard
+    def targets(self, cmd):
+        return [(a["action"], a["target"]) for a in guard.irreversible_actions(cmd, self.repo) or []]
+
+    def assert_tier_1(self, cmd):
+        self.assertIn("step grant", self.member(cmd) or "", cmd)
+        self.assertIsNone(self.main(cmd), cmd)
+
+    def test_m381_dev_backup_is_a_tier_1_push_per_branch(self):
+        self.assertEqual(self.targets("dev backup"), [("push", "feat/x")])  # the current branch
+        self.assertEqual(self.targets("dev backup feat/a feat/b"), [("push", "feat/a"), ("push", "feat/b")])
+        self.assertEqual(self.targets("bin/dev backup --all --accept-ci"), [("push", "all-branches")])
+        for cmd in ("dev backup", "dev backup feat/a", "dev backup --all", "python3 bin/dev backup --public feat/a"):
+            with self.subTest(cmd=cmd):
+                self.assert_tier_1(cmd)
+        self.assertEqual(self.acts("dev backup --dry-run --all"), [])
+        self.assertIsNone(self.member("dev backup --dry-run"))
+
+    def test_m381_a_sync_that_backs_up_branches_is_a_tier_1_push(self):
+        for cmd in ("dev sync --scheduled --quiet", "dev sync --session claude:s1 --finish"):
+            with self.subTest(cmd=cmd):
+                self.assertEqual(self.acts(cmd), ["push"])
+                self.assert_tier_1(cmd)
+        for cmd in ("dev sync --scheduled --offline", "dev sync --finish --no-push", "dev sync --quiet --offline"):
+            with self.subTest(cmd=cmd):  # no backup runs: cmd_sync backs up only scheduled or finishing, online
+                self.assertEqual(self.acts(cmd), [])
+
+    def test_m381_a_job_is_graded_by_its_own_dev_command(self):
+        from devkit import jobs
+        for cmd in ("dev jobs run sync", "dev jobs exec sync"):  # the scheduled sync, typed by hand
+            with self.subTest(cmd=cmd):
+                self.assertEqual(self.acts(cmd), ["push"])
+                self.assert_tier_1(cmd)
+        self.assertEqual(self.acts("dev jobs run doctor"), [])
+        self.assertEqual(self.acts("dev jobs run no-such-job"), [])
+        custom = {"ship": {"cmd": ["release", "--version", "26.11.9"]}, "loop": {"cmd": ["jobs", "run", "loop"]}}
+        with mock.patch.object(jobs, "jobs", return_value=custom):
+            self.assertEqual(self.targets("dev jobs run ship"), [("release", "v26.11.9")])
+            self.assertIn("Crew members never run", self.member("dev jobs run ship") or "")
+            self.assertEqual(self.acts("dev jobs run loop"), ["unknown"])
+        with mock.patch.object(jobs, "jobs", side_effect=OSError("config unreadable")):
+            self.assertEqual(self.acts("dev jobs run sync"), ["unknown"])  # fails closed
+
+    def budget(self, n):
+        return [guard.check_push_budget(self.repo, ["origin", "feat/x"], frozenset()) for _ in range(n)]
+
+    def test_m381_the_push_budget_counts_only_pushes_that_start_ci(self):
+        from devkit import registry
+        state = Path(self.tmp.name) / "state"
+        for p in (mock.patch.object(core, "STATE", state), mock.patch.object(registry, "STATE", state)):
+            p.start()
+            self.addCleanup(p.stop)
+        self.assertEqual(self.budget(4), [None] * 4)  # no CI configuration: no run, no count
+        self.assertFalse((state / "ci-pushes.json").exists())
+        wf = Path(self.repo) / ".github" / "workflows"
+        wf.mkdir(parents=True)
+        (wf / "ci.yml").write_text("on: [push]\njobs:\n  t:\n    runs-on: ubuntu-latest\n    steps:\n"
+                                   "      - run: echo hi\n")
+        _git(self.repo, "add", "-A")
+        _git(self.repo, "commit", "-q", "-m", "ci")
+        first, second, third = self.budget(3)
+        self.assertEqual((first, second), (None, None))
+        self.assertIn("push #3", (third or ("", ""))[1])
+
+    def test_m381_a_push_devkit_cannot_judge_counts(self):
+        from devkit import pipelines
+        state = Path(self.tmp.name) / "state"
+        with mock.patch.object(core, "STATE", state), \
+                mock.patch.object(pipelines, "push_starts_ci", side_effect=RuntimeError("broken")):
+            self.assertIn("push #3", (self.budget(3)[2] or ("", ""))[1])
+
 
 if __name__ == "__main__":
     unittest.main()
