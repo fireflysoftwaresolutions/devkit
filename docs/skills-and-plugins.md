@@ -256,14 +256,23 @@ Plugins, skills, and MCP servers run in every session, so only you change them, 
 plugin in its lock (`~/.local/state/devkit/ext-lock.json`): the version, the commit, and a digest of the plugin's
 files.
 
-The guard refuses the same changes from an agent, through `dev ext` or through the agents' own CLIs:
-`claude plugin install|uninstall|enable|disable|update|prune`, `claude plugin marketplace add|remove|update`,
-`claude mcp add|add-json|add-from-claude-desktop|remove|reset-project-choices`, `codex plugin add|remove`,
-`codex plugin marketplace add|upgrade|remove`, and `codex mcp add|remove`. Read-only verbs (`list`, `get`, `details`,
-`validate`) and `--help` stay open, and a verb the guard does not know is refused. For `claude`, a verb after `--`
-still counts (`claude -- plugin install x` installs), and `--help` after `--` is an argument, not help. devkit
-itself also refuses
-`dev ext update --apply` and `dev ext enable|disable --project` outside your terminal.
+The guard refuses the same changes from an agent, through `dev ext` or through the agents' own CLIs. A `claude`
+or `codex` call whose words include `plugin`, `plugins`, `mcp`, or `marketplace` anywhere is refused unless the
+whole command is one of these read-only forms, optionally with `-h`, `--help`, or `--json`:
+
+- `claude plugin list`, `claude plugin details <name>`, `claude plugin validate <path>`, and
+  `claude plugin marketplace list` (`claude plugins` is the same command)
+- `claude mcp list` and `claude mcp get <name>`
+- `codex plugin list`, `codex plugin marketplace list`, `codex mcp list`, and `codex mcp get <name>`
+- a group alone, such as `claude mcp`, which prints its help
+
+Any other form is refused even when it only reads, such as `claude -- plugin list` or `claude --debug plugin list`.
+The rule is an allowlist that fails closed: two earlier block lists of verbs each lost to a spelling nobody listed,
+such as an option's value read as the group (`claude --model mcp … plugin install x`). The guard finds the program
+the way the shell does: a relative path from the folder the command runs in, a link with another name on your
+`PATH`, the npm package a runner starts, or the CLI's own script a JS runtime runs. A program it cannot know before
+the command runs (a variable, a `PATH` the command sets, a copy the command makes) counts as one of them. devkit
+itself also refuses `dev ext update --apply` and `dev ext enable|disable --project` outside your terminal.
 
 Whatever changes outside devkit anyway shows as drift: at the session start, in `dev status`, `dev doctor`, and
 `dev ext ls`, with one `ext.drift` record in the audit trail per change.
@@ -277,19 +286,30 @@ Whatever changes outside devkit anyway shows as drift: at the session start, in 
 | `not-in-catalog` | A plugin, MCP server, or skill folder is installed outside devkit's catalog, or a project enables a plugin devkit does not manage | `dev ext add` it, or remove it |
 | `retired` | An entry devkit dropped is still installed | `dev install` removes it |
 
-What ships with the Codex app itself is listed with the layer `agent`, without drift, only when the app vouches for
-it, because agents can write Codex's plugin cache and `config.toml`:
+What ships with the Codex app itself is listed with the layer `agent`, without drift, only when something vouches
+for it, because agents can write Codex's plugin cache and `config.toml`:
 
-- **An `openai-bundled` plugin** counts when the app bundle holds it
-  (`ChatGPT.app/Contents/Resources/plugins/openai-bundled/plugins/<name>`).
-- **An MCP server** counts when its command, with links and `..` resolved, is a file in the app bundle's
-  `Contents/Resources`, is no interpreter, agent, or package runner (`node`, `python`, `sh`, `codex`, `npx`, …),
-  and its environment loads no other code. Claude Code's MCP servers never count.
-- **An `openai-primary-runtime` plugin** is downloaded by the app, so nothing on disk vouches for it: it counts
-  once `dev install` has recorded it, and `dev install` names what it records for the first time.
+- **An `openai-bundled` plugin** counts on its own when every file in its cache folder is byte-equal to the app
+  bundle's file at the same path (`ChatGPT.app/Contents/Resources/plugins/openai-bundled/plugins/<name>`), with no
+  link. The app copies a subset of the bundle, and for some plugins it rewrites a file such as `.mcp.json`: those
+  count only once `dev install` has recorded them.
+- **An MCP server** that runs from the app bundle's `Contents/Resources` (links and `..` resolved), is no
+  interpreter, agent, or package runner (`node`, `python`, `sh`, `codex`, `npx`, …), and whose environment loads
+  no other code counts only once `dev install` has recorded it. A program in the bundle can still run what its
+  arguments name (`rg --pre`, `tectonic -Z shell-escape`), so its place proves nothing. Claude Code's MCP servers
+  never count.
+- **An `openai-primary-runtime` plugin** is downloaded by the app, so it counts once `dev install` has recorded it.
 
-`dev install` records all of them in the lock: a plugin's version and file digest, an MCP server's whole table.
-A change after that shows as `changed`; anything else is `not-in-catalog`.
+`dev install` names each of them the first time it records it, so you see what it accepts. It keeps a plugin's
+version and file digest, and an MCP server's raw text in `config.toml`; a change after that shows as `changed`.
+
+devkit reads Codex's MCP servers only in the form `codex mcp add` writes: a `[mcp_servers.<name>]` table and its
+sub-tables, one `key = value` per line, with a string, number, `true` or `false`, or a one-line array. A server
+written another way (a dotted key such as `env.NODE_OPTIONS`, a quoted key, an inline table, a key at the root or
+under `[mcp_servers]`, a quoted name) is never the app's and shows as `not-in-catalog`, naming the line. A line
+devkit cannot give to any server (a multi-line string it cannot follow, a header it cannot parse) makes none of
+them the app's, and shows as the `(config.toml)` row. With Python 3.11 or later, devkit also reads the file as
+TOML, and a server it reads differently counts the same way.
 
 The pins have rules of their own:
 

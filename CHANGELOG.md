@@ -35,17 +35,27 @@ All notable changes to devkit. Versions follow CalVer `YY.MM.PATCH` (PATCH resta
   `dev ext ls` name the change, and the audit trail gets one `ext.drift` record for it. A skill or MCP server off its
   pin, a required security plugin that is off, and a plugin a repository enables outside devkit's catalog are
   reported the same way.
-- **Agents cannot change your extensions through the vendor CLIs either.** The guard refuses the `claude plugin`,
-  `claude plugin marketplace`, `claude mcp`, `codex plugin`, `codex plugin marketplace`, and `codex mcp` verbs that
-  add, remove, switch, or update a plugin, marketplace, or MCP server, in any shell form, `find -exec` and Claude
-  Code's versioned binary included; for `claude`, a verb after `--` counts too, because Claude Code still runs it.
-  `list`, `get`, `details`, and `--help` stay open; `--help` after `--`, or taken as an option's value, is not help. `dev ext update --apply` and `dev ext enable|disable --project` also check that you run
-  them in a terminal, and `--team` after a `--` no longer passes the guard as a team edit.
+- **Agents cannot change your extensions through the vendor CLIs either.** A `claude` or `codex` call whose words
+  include `plugin`, `plugins`, `mcp`, or `marketplace` anywhere, an option's value included, is refused unless the
+  whole command is one of a few read-only forms (`claude plugin list|details <name>|validate <path>`,
+  `claude plugin marketplace list`, `claude mcp list|get <name>`, `codex plugin list`,
+  `codex plugin marketplace list`, `codex mcp list|get <name>`, or a group alone), with `-h`, `--help`, or `--json`
+  at most. This allowlist fails closed: any other spelling, `--` or another option included, is refused even when
+  it only reads. The guard finds the program as the shell does (a relative path from the command's folder, a link
+  on the `PATH`, an npm runner, the CLI's script under `node`), refuses one it cannot know before it runs (a
+  variable, a `PATH` the command sets, a copy the command makes), reads a `sh -c` line with the words after it, and
+  applies the rule to a program's code too. `dev ext update --apply` and `dev ext enable|disable --project` also
+  check that you run them in a terminal, and `--team` after a `--` no longer passes the guard as a team edit.
+- **The guard reads every level of a command for its git, gh, and file rules.** A `sh -c` or `eval` line, and the
+  command `find -exec` or `xargs` runs, get the same rules as the command itself, so
+  `find . -exec sh -c 'git push --force origin main' \;` is refused as `git push --force origin main` is.
 - **Drift covers what devkit does not manage.** A plugin, MCP server, or skill folder installed outside the catalog,
   for Claude Code and Codex, is reported as `not-in-catalog`. What ships with the Codex app is listed without drift
-  only when the app vouches for it (a bundled plugin the app bundle holds, an MCP server that runs from the bundle
-  and is no interpreter) or `dev install` recorded it (the runtime plugins), and a later change shows as `changed`;
-  a plugin folder named like the app's marketplace or a command path that only starts with the app proves nothing. A required plugin that is not installed, or that a project turns off in `.claude/settings.json` or
+  only when its own files vouch for it (a bundled plugin whose cached files are all byte-equal to the app bundle's)
+  or `dev install` recorded it (an MCP server that runs from the bundle, a runtime plugin, a bundled plugin the app
+  rewrote), and `dev install` names each one the first time; a later change shows as `changed`. A server in
+  `~/.codex/config.toml` written in a form devkit does not read (a dotted or quoted key, an inline table, a key at
+  the root, a quoted name) is never the app's, and a line no server owns makes none of them the app's. A required plugin that is not installed, or that a project turns off in `.claude/settings.json` or
   `.claude/settings.local.json`, is reported as `required-off` with the file, and `dev doctor` points to
   `dev config lock`. The lock now keeps a digest of each vendor plugin's files, so a rewritten version or commit
   number no longer hides changed files, and a devkit skill whose folder is not devkit's copy shows as `changed`.
