@@ -1997,8 +1997,8 @@ def crew_background_notice(sess: dict) -> str:
                      f"it with TaskStop `{aid}` only if you no longer need it")
     if not parts:
         return ""
-    return ("devkit · Stopped with background work still running (it may still be working, and resumes when that work "
-            "ends): " + ". ".join(parts) + ". Claude Code lists a "
+    return ("devkit · Stopped with background work still running (it may still be working, and may resume when that "
+            "work ends): " + ". ".join(parts) + ". Claude Code lists a "
             "member until its background work ends.")
 
 
