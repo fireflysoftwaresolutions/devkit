@@ -18,6 +18,7 @@ devkit records what got installed), `url` (a remote MCP server: nothing local to
 """
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import re
@@ -115,8 +116,19 @@ def retired_ids(t: dict) -> set:
     return {_team_ref(agent, r) for agent in AGENTS for r in ((t.get(agent) or {}).get("retired") or [])}
 
 
+# M2: a local MCP server runs through npx or uvx, and the pin binds the package they run: the first word after the
+# runner's options (uvx: or its --from). Only options that cannot add or swap a package come before it.
+MCP_RUNNERS = {"npx": ("npm", NPM_EXACT, frozenset({"-y", "--yes", "-q", "--quiet"})),
+               "uvx": ("pypi", PYPI_EXACT, frozenset({"-q", "--quiet"}))}
+# variables that make node, python or the dynamic loader run other code, or npm and uv fetch from another registry
+CODE_ENV = re.compile(r"^(?:NODE_OPTIONS|NODE_PATH|PYTHONPATH|PYTHONSTARTUP|PYTHONHOME|PYTHONUSERBASE|DYLD_\w*|LD_\w*"
+                      r"|NPM_CONFIG_\w*|UV_INDEX\w*|UV_DEFAULT_INDEX|UV_EXTRA_INDEX_URL|PIP_INDEX_URL|"
+                      r"PIP_EXTRA_INDEX_URL)$", re.I)
+
+
 def mcp_pin(eid: str, spec: dict) -> tuple:
-    """(pin kind, pin, source, upstream) of an MCP server; ExtError unless it has an exact version or an https URL."""
+    """(pin kind, pin, source, upstream) of an MCP server; ExtError unless it is an https URL, or npx or uvx running a
+    package at an exact version with no variable that loads other code."""
     if not isinstance(spec, dict):
         raise ExtError(f"{eid}: an MCP server is an object with command and args, or a url")
     url = spec.get("url")
@@ -125,15 +137,37 @@ def mcp_pin(eid: str, spec: dict) -> tuple:
         if u.scheme != "https" or not u.hostname:
             raise ExtError(f"{eid}: a remote MCP server needs an https URL, not {url}")
         return "url", str(url), u.hostname, ""
-    for a in spec.get("args") or []:
-        m = NPM_EXACT.match(str(a))
-        if m:
-            return "version", m.group(2), f"npm {m.group(1)}", f"npm:{m.group(1)}"
-        m = PYPI_EXACT.match(str(a))
-        if m:
-            return "version", m.group(2), f"pypi {m.group(1)}", f"pypi:{m.group(1)}"
-    raise ExtError(f"{eid}: an MCP server needs an exact version in its args (pkg@1.2.3 or pkg==1.2.3) or an https "
-                   f"url; got {' '.join(map(str, [spec.get('command', '')] + list(spec.get('args') or [])))}")
+    cmd, args = str(spec.get("command") or ""), [str(a) for a in spec.get("args") or []]
+    if cmd not in MCP_RUNNERS:
+        raise ExtError(f"{eid}: a local MCP server runs through npx or uvx, so the pinned package is what runs; got "
+                       f"{cmd or 'no command'}")
+    env = spec.get("env") or {}
+    bad = sorted(k for k in (env if isinstance(env, dict) else {}) if CODE_ENV.match(str(k)))
+    if bad:
+        raise ExtError(f"{eid}: env {', '.join(bad)} makes the runtime load other code or another registry, so the "
+                       f"pinned package would not be all that runs")
+    registry, exact, flags = MCP_RUNNERS[cmd]
+    i, pkg = 0, ""
+    while i < len(args) and args[i].startswith("-"):
+        a = args[i]
+        if cmd == "uvx" and a == "--from" and i + 1 < len(args):
+            pkg, i = args[i + 1], i + 2
+            break
+        if cmd == "uvx" and a.startswith("--from="):
+            pkg, i = a.split("=", 1)[1], i + 1
+            break
+        if a not in flags:
+            raise ExtError(f"{eid}: `{cmd} {a}` may run another package than the pinned one; only "
+                           f"{', '.join(sorted(flags))} may come before it")
+        i += 1
+    if not pkg:
+        pkg = args[i] if i < len(args) else ""
+    m = exact.match(pkg)
+    if not m:
+        form = "pkg@1.2.3" if cmd == "npx" else "pkg==1.2.3, or --from pkg==1.2.3 <command>"
+        raise ExtError(f"{eid}: an MCP server needs an exact version on the package {cmd} runs ({form}) or an https "
+                       f"url; got {' '.join([cmd] + args)}")
+    return "version", m.group(2), f"{registry} {m.group(1)}", f"{registry}:{m.group(1)}"
 
 
 def _plugin(agent, pid, meta, layer, enabled) -> Ext:
@@ -178,12 +212,13 @@ def _user_items(item) -> list:
     meta = {"license": item["license"], "why": item["why"]}
     if kind == "plugin":
         agent, pid = item.get("agent"), str(item.get("id") or "")
-        if agent not in AGENTS or not re.match(r"^[\w.\-]+@[\w.\-]+$", pid):
-            raise ExtError(f"{label}: a plugin needs agent (claude or codex) and id name@marketplace")
+        if agent not in AGENTS or not re.match(r"^[\w.][\w.\-]*@[\w.][\w.\-]*$", pid):
+            raise ExtError(f"{label}: a plugin needs agent (claude or codex) and id name@marketplace (not starting "
+                           f"with a dash)")
         return [_plugin(agent, pid, meta, "user", True)]
     name = str(item.get("name") or "")
-    if not re.match(r"^[\w.\-]+$", name):
-        raise ExtError(f"{label}: needs a name of letters, digits, dot, dash or underscore")
+    if not re.match(r"^[\w.][\w.\-]*$", name):  # L1: never a word that reads as an option
+        raise ExtError(f"{label}: needs a name of letters, digits, dot, dash or underscore, not starting with a dash")
     agents = item.get("agents") or list(AGENTS)
     if not set(agents) <= set(AGENTS):
         raise ExtError(f"{label}: agents must be claude and/or codex")
@@ -225,10 +260,13 @@ def catalog(t: dict, user: dict = None, groups=None) -> list:
                 out.append(_skill(agent, name, src, rel, "team"))
     retired = retired_ids(t)
     out = [e for e in out if e.id not in retired]
+    required = {e.id for e in out if e.required}  # M1: from the team layer, before an overlay entry can replace one
     added = [e for item in user["add"] for e in _user_items(item)]
     ids = {e.id for e in added}
-    out = [e for e in out if e.id not in ids] + added  # a user entry replaces a team one with the same id
-    required = {e.id for e in out if e.required}
+    # a user entry replaces a team one with the same id (`dev ext add` refuses that; a hand-written overlay may), and
+    # a required team entry stays required
+    out = [e for e in out if e.id not in ids] + [Ext(**{**asdict(e), "required": True}) if e.id in required else e
+                                                 for e in added]
     removed = set(user["remove"]) - required
     off, on = set(user["disable"]) - required, set(user["enable"])
     result = []
@@ -280,8 +318,9 @@ def _args_version(args) -> str:
 
 
 def observe(h: Homes = None) -> dict:
-    """What is installed now, by catalog id: {"installed", "version", "sha", "enabled", "ref"}. Reads only the agents'
-    files, so it is fast and safe in a hook."""
+    """What is installed now, by catalog id: {"installed", "version", "sha", "enabled", "ref", "path"}; a skill folder
+    devkit did not put in an agent's skills folder has "unmanaged", and a managed skill whose folder is not devkit's
+    copy has "foreign". Reads only the agents' files, so it is fast and safe in a hook."""
     h = h or homes()
     out = {}
     inst = (_read_json(h.claude / "plugins" / "installed_plugins.json") or {}).get("plugins") or {}
@@ -290,13 +329,16 @@ def observe(h: Homes = None) -> dict:
         rows = [e for e in (entries if isinstance(entries, list) else []) if isinstance(e, dict)]
         e = next((x for x in rows if x.get("scope") == "user"), rows[0] if rows else None)
         if e:
-            out[plugin_id("claude", pid)] = {"installed": True, "version": str(e.get("version") or ""),
-                                             "sha": str(e.get("gitCommitSha") or ""),
+            name, _, market = str(pid).partition("@")
+            version = str(e.get("version") or "")
+            path = str(e.get("installPath") or h.claude / "plugins" / "cache" / market / name / version)
+            out[plugin_id("claude", pid)] = {"installed": True, "version": version,
+                                             "sha": str(e.get("gitCommitSha") or ""), "path": path,
                                              "enabled": enabled.get(pid) if pid in enabled else None}
     for name, spec in ((_read_json(h.claude_json) or {}).get("mcpServers") or {}).items():
         spec = spec if isinstance(spec, dict) else {}
         out[f"mcp:claude:{name}"] = {"installed": True, "version": _args_version(spec.get("args")),
-                                     "url": spec.get("url") or ""}
+                                     "url": spec.get("url") or "", "command": str(spec.get("command") or "")}
     try:
         toml = _toml_sections((h.codex / "config.toml").read_text())
     except OSError:
@@ -311,6 +353,7 @@ def observe(h: Homes = None) -> dict:
                 pid = f"{plug.name}@{market.name}"
                 flag = (toml.get(f'plugins."{pid}"') or {}).get("enabled")
                 out[plugin_id("codex", pid)] = {"installed": True, "version": versions[-1], "sha": "",
+                                                "path": str(plug / versions[-1]),
                                                 "enabled": None if flag is None else flag == "true"}
     for sec, kv in toml.items():
         if sec.startswith("mcp_servers.") and sec.count(".") == 1:
@@ -319,7 +362,9 @@ def observe(h: Homes = None) -> dict:
             except ValueError:
                 args = []
             out[f"mcp:codex:{sec.split('.', 1)[1]}"] = {"installed": True, "version": _args_version(args),
-                                                       "url": kv.get("url", "").strip('"')}
+                                                       "url": kv.get("url", "").strip('"'),
+                                                       "command": kv.get("command", "").strip('"')}
+    skill_homes = (("claude", h.claude / "skills"), ("codex", h.agents_skills))
     if h.skills_share.is_dir():
         for d in sorted(p for p in h.skills_share.iterdir() if p.is_dir()):
             try:
@@ -327,10 +372,63 @@ def observe(h: Homes = None) -> dict:
             except OSError:
                 continue
             repo, _, ref = first[0].rpartition("@") if first else ("", "", "")
-            for agent, home in (("claude", h.claude / "skills"), ("codex", h.agents_skills)):
+            for agent, home in skill_homes:
                 linked = (home / d.name / "SKILL.md").exists()
-                out[f"skill:{agent}:{d.name}"] = {"installed": linked, "ref": ref, "repo": repo}
+                o = {"installed": linked, "ref": ref, "repo": repo}
+                if linked and os.path.realpath(home / d.name) != os.path.realpath(d):
+                    o["foreign"] = True  # L4: the agent loads another folder under devkit's skill name
+                out[f"skill:{agent}:{d.name}"] = o
+    share = os.path.realpath(h.skills_share) + os.sep
+    for agent, home in skill_homes:  # L4: skill folders devkit did not put there
+        try:
+            entries = sorted(home.iterdir()) if home.is_dir() else []
+        except OSError:
+            entries = []
+        for p in entries:
+            sid = f"skill:{agent}:{p.name}"
+            if sid in out or not (p / "SKILL.md").exists():
+                continue
+            if (os.path.realpath(p) + os.sep).startswith(share):
+                continue  # devkit's own folder, such as playwright-cli from the packages step
+            out[sid] = {"installed": True, "unmanaged": True, "path": str(p)}
     return out
+
+
+# What the agents write into a plugin's folder while they run: left out of its digest. A runtime file outside these
+# names is a change.
+RUNTIME_FILES = frozenset({".in_use", ".orphaned_at", "__pycache__", ".DS_Store"})
+
+
+def content_digest(path) -> str:
+    """M3: sha256 of a plugin's install folder (every file's relative path and bytes, every link's target, in a fixed
+    order; RUNTIME_FILES left out), so the lock does not rest on version and SHA fields an agent can rewrite. '' when
+    the folder is missing."""
+    root = Path(path)
+    if not root.is_dir():
+        return ""
+    h = hashlib.sha256()
+    for dp, dns, fns in os.walk(root):
+        keep = []
+        for name in sorted(dns):
+            p = Path(dp, name)
+            if name in RUNTIME_FILES:
+                continue
+            if p.is_symlink():  # os.walk does not enter it: its target is the content
+                h.update(f"{p.relative_to(root).as_posix()} L {os.readlink(p)}\n".encode())
+            else:
+                keep.append(name)
+        dns[:] = keep
+        for name in sorted(fns):
+            if name in RUNTIME_FILES:
+                continue
+            p = Path(dp, name)
+            rel = p.relative_to(root).as_posix()
+            try:
+                body = f"L {os.readlink(p)}" if p.is_symlink() else f"F {hashlib.sha256(p.read_bytes()).hexdigest()}"
+            except OSError as e:
+                body = f"E {type(e).__name__}"
+            h.update(f"{rel} {body}\n".encode())
+    return "sha256:" + h.hexdigest()
 
 
 def read_lock(path: Path = None) -> dict:
@@ -347,11 +445,45 @@ def _row(e: Ext, layer: str = None) -> dict:
     return r
 
 
-def status(cat: list, observed: dict, lock: dict = None, project: dict = None, retired=()) -> list:
-    """One row per catalog entry, plus retired entries still installed and project-enabled plugins outside the
-    catalog. Each row has `state`, `enabled` (after the project layer), `version`, `sha` and `drift` (kinds:
-    missing, pin, changed, enabled, required-off, retired, not-in-catalog)."""
-    lock, project = lock or {}, project or {}
+# What ships with the agent's own app (H1): Codex's bundled and runtime marketplaces, and MCP servers the app runs
+# from its own bundle. They are listed (layer `agent`) but are not devkit's to manage, so they are never drift.
+AGENT_MARKETPLACES = {"codex": frozenset({"openai-bundled", "openai-primary-runtime"})}
+AGENT_APP_DIRS = ("/Applications/ChatGPT.app/", "/Applications/Codex.app/")
+OUTSIDE_DETAIL = {"plugin": "installed, but not in devkit's catalog: dev ext add it, or remove it",
+                  "mcp": "an MCP server devkit does not manage: dev ext add it, or remove it",
+                  "skill": "a skill folder devkit did not put there: dev ext add it, or remove the folder"}
+
+
+def _agent_builtin(kind: str, agent: str, name: str, o: dict) -> bool:
+    if kind == "plugin":
+        return name.partition("@")[2] in AGENT_MARKETPLACES.get(agent, ())
+    return kind == "mcp" and str(o.get("command") or "").startswith(AGENT_APP_DIRS)
+
+
+def _project_value(v) -> tuple:
+    """(on, file) of one project setting: project_plugins() gives {"on", "file"}; a plain bool is the shared file."""
+    if isinstance(v, dict):
+        return bool(v.get("on")), str(v.get("file") or ".claude/settings.json")
+    return bool(v), ".claude/settings.json"
+
+
+def _extra_row(rid: str, layer: str, why: str, state: str, o: dict, enabled: bool, drift: list) -> dict:
+    """A row for an entry outside the catalog: retired, installed outside devkit, or enabled by a project."""
+    kind, agent, name = rid.split(":", 2)
+    return {"id": rid, "kind": kind, "agent": agent, "name": name.partition("@")[0], "source": name.partition("@")[2],
+            "pin": "", "pin_kind": "", "license": "", "why": why, "layer": layer, "required": False,
+            "enabled": enabled, "group": "", "upstream": "", "state": state, "version": str(o.get("version") or ""),
+            "sha": str(o.get("sha") or ""), "locked": None, "drift": drift}
+
+
+def status(cat: list, observed: dict, lock: dict = None, project: dict = None, retired=(),
+           managed: dict = None) -> list:
+    """One row per catalog entry, plus retired entries still installed, entries installed outside the catalog (both
+    agents: plugins, MCP servers and skill folders), what ships with the agent's app, and project-enabled plugins
+    outside the catalog. Each row has `state`, `enabled` (after the managed and project layers), `version`, `sha` and
+    `drift` (kinds: missing, pin, changed, enabled, required-off, retired, not-in-catalog). `project`:
+    project_plugins(); `managed`: the managed-settings lock's enabledPlugins, which a project cannot override."""
+    lock, project, managed = lock or {}, project or {}, managed or {}
     rows = []
     for e in cat:
         o = observed.get(e.id) or {}
@@ -366,45 +498,68 @@ def status(cat: list, observed: dict, lock: dict = None, project: dict = None, r
             drift.append({"kind": "missing", "detail": f"not {STATE_WORD[e.kind]}"})
         if installed and e.kind == "skill" and o.get("ref") and o["ref"] != e.pin:
             drift.append({"kind": "pin", "detail": f"{o['ref'][:8]} installed, {e.pin[:8]} pinned"})
+        if installed and e.kind == "skill" and o.get("foreign"):
+            drift.append({"kind": "changed", "detail": "the agent's folder for it is not devkit's copy: dev install "
+                                                       "links it again"})
         if installed and e.kind == "mcp" and e.pin_kind == "version" and o.get("version") and o["version"] != e.pin:
             drift.append({"kind": "pin", "detail": f"{o['version']} installed, {e.pin} pinned"})
-        if installed and e.pin_kind == "observed" and lk and \
-                (lk.get("version"), lk.get("sha") or r["sha"]) != (r["version"], r["sha"]):
-            drift.append({"kind": "changed", "detail": f"{_vs(lk)} → {_vs(r)} outside devkit",
-                          "from": _vs(lk), "to": _vs(r)})
+        if installed and e.pin_kind == "observed" and lk:
+            if (lk.get("version"), lk.get("sha") or r["sha"]) != (r["version"], r["sha"]):
+                drift.append({"kind": "changed", "detail": f"{_vs(lk)} → {_vs(r)} outside devkit",
+                              "from": _vs(lk), "to": _vs(r)})
+            elif lk.get("digest") and "path" in o and content_digest(o["path"]) != lk["digest"]:  # M3
+                drift.append({"kind": "changed", "detail": f"the files of {_vs(r)} changed outside devkit (same "
+                                                           f"version and SHA)", "from": _vs(lk), "to": _vs(r)})
         if installed and e.kind == "plugin" and o.get("enabled") is not None and bool(o["enabled"]) != e.enabled:
             drift.append({"kind": "enabled", "detail": f"{'on' if o['enabled'] else 'off'} in the agent's settings, "
                                                        f"{'on' if e.enabled else 'off'} in devkit's"})
-        on = e.enabled
-        if e.agent == "claude" and e.kind == "plugin" and e.spec.get("id") in project:
-            on = bool(project[e.spec["id"]]) or e.required
+        on, where = e.enabled, ""
+        pid = e.spec.get("id") if e.agent == "claude" and e.kind == "plugin" else None
+        if pid in managed:
+            on, r["layer_on"] = bool(managed[pid]), "managed"
+        elif pid in project:  # H2: the project's own value, from the file that sets it
+            on, where = _project_value(project[pid])
             r["layer_on"] = "project"
-        if e.required and (not on or o.get("enabled") is False):
-            drift.append({"kind": "required-off", "detail": "required, but off"})
+        if e.required and not installed:
+            drift.append({"kind": "required-off", "detail": "required, but not installed"})
+        elif e.required and not on:
+            drift.append({"kind": "required-off", "detail": f"required, but off in this project's {where}" if where
+                          else "required, but off"})
+        elif e.required and o.get("enabled") is False:
+            drift.append({"kind": "required-off", "detail": "required, but off in the agent's settings"})
         r["enabled"] = on
         r["drift"] = drift
         rows.append(r)
-    have = {e.id for e in cat}
-    for rid in sorted(set(retired) - have):
+    listed = {e.id for e in cat}
+    for rid in sorted(set(retired) - listed):
         o = observed.get(rid) or {}
         if o.get("installed"):
-            kind, agent, name = rid.split(":", 2)
-            rows.append({"id": rid, "kind": kind, "agent": agent, "name": name.partition("@")[0],
-                         "source": name.partition("@")[2], "pin": "", "pin_kind": "", "license": "", "why":
-                         "retired from devkit's defaults", "layer": "retired", "required": False, "enabled": False,
-                         "group": "", "upstream": "", "state": STATE_WORD.get(kind, "installed"),
-                         "version": str(o.get("version") or ""), "sha": str(o.get("sha") or ""), "locked": None,
-                         "drift": [{"kind": "retired", "detail": "still installed: dev install removes it"}]})
-    for pid, on in sorted(project.items()):
+            rows.append(_extra_row(rid, "retired", "retired from devkit's defaults",
+                                   STATE_WORD.get(rid.split(":")[0], "installed"), o, False,
+                                   [{"kind": "retired", "detail": "still installed: dev install removes it"}]))
+            listed.add(rid)
+    for rid in sorted(observed):  # H1, L4: what is installed outside the catalog
+        o = observed[rid]
+        if rid in listed or not o.get("installed") or rid.count(":") < 2:
+            continue
+        kind, agent, name = rid.split(":", 2)
+        if kind not in OUTSIDE_DETAIL or (kind == "skill" and not o.get("unmanaged")):
+            continue  # a managed skill of a group this Mac does not install: the skills step's business
+        if _agent_builtin(kind, agent, name, o):
+            rows.append(_extra_row(rid, "agent", f"ships with the {agent} app", STATE_WORD[kind], o,
+                                   o.get("enabled") is not False, []))
+        else:
+            rows.append(_extra_row(rid, "outside", "installed outside devkit", STATE_WORD[kind], o,
+                                   o.get("enabled") is not False,
+                                   [{"kind": "not-in-catalog", "detail": OUTSIDE_DETAIL[kind]}]))
+        listed.add(rid)
+    for pid, v in sorted(project.items()):
         rid = plugin_id("claude", pid)
-        if on and rid not in have:
-            rows.append({"id": rid, "kind": "plugin", "agent": "claude", "name": pid.partition("@")[0],
-                         "source": pid.partition("@")[2], "pin": "", "pin_kind": "", "license": "", "why":
-                         "enabled by this project's .claude/settings.json", "layer": "project", "required": False,
-                         "enabled": True, "group": "", "upstream": "", "state": "project", "version": "", "sha": "",
-                         "locked": None, "drift": [{"kind": "not-in-catalog",
-                                                    "detail": "a project setting enables a plugin devkit does not "
-                                                              "manage"}]})
+        on, where = _project_value(v)
+        if on and rid not in listed:
+            rows.append(_extra_row(rid, "project", f"enabled by this project's {where}", "project", {}, True,
+                                   [{"kind": "not-in-catalog", "detail": f"this project's {where} enables a plugin "
+                                                                         f"devkit does not manage"}]))
     return rows
 
 
@@ -431,16 +586,35 @@ def pin_text(r: dict) -> str:
     return "-"
 
 
+PROJECT_SETTINGS = (".claude/settings.json", ".claude/settings.local.json")  # the later one wins, as in Claude Code
+
+
 def project_plugins(cwd: str = None) -> dict:
-    """`enabledPlugins` of the project's own Claude settings (the repository's .claude/settings.json)."""
+    """`enabledPlugins` of the project's own Claude settings (H2: the shared .claude/settings.json and the personal
+    .claude/settings.local.json, which wins) -> {name@marketplace: {"on", "file"}}."""
     try:
         top = core.gitout(cwd or os.getcwd(), "rev-parse", "--show-toplevel")
     except OSError:  # the folder was removed
         top = ""
     if not top:
         return {}
-    ep = (_read_json(Path(top) / ".claude" / "settings.json") or {}).get("enabledPlugins") or {}
-    return {k: bool(v) for k, v in ep.items() if isinstance(k, str)}
+    out = {}
+    for rel in PROJECT_SETTINGS:
+        doc = _read_json(Path(top) / rel)
+        ep = doc.get("enabledPlugins") if isinstance(doc, dict) else None
+        for k, v in (ep.items() if isinstance(ep, dict) else ()):
+            if isinstance(k, str):
+                out[k] = {"on": bool(v), "file": rel}
+    return out
+
+
+def managed_plugins() -> dict:
+    """`enabledPlugins` of devkit's managed-settings drop-in (`dev config lock`, root-owned): what no project or user
+    setting overrides. {} when the lock is off."""
+    from . import policy
+    doc = _read_json(policy.MANAGED_FILE)
+    ep = doc.get("enabledPlugins") if isinstance(doc, dict) else None
+    return {k: bool(v) for k, v in ep.items() if isinstance(k, str)} if isinstance(ep, dict) else {}
 
 
 # --------------------------------------------------------------------------- plan and apply
@@ -533,20 +707,42 @@ def drift_seen_file() -> Path:
 def record_lock(agent: str, h: Homes = None, by: str = "dev install", t: dict = None, user: dict = None,
                 path: Path = None, only: set = None) -> int:
     """`dev install` and `dev ext update --apply`: record what this agent's vendor marketplace plugins are now (or
-    only the ids in `only`), so a later change outside devkit shows as drift. -> how many entries were recorded."""
-    t = team() if t is None else t
-    obs = observe(h)
+    only the ids in `only`): version, SHA and a digest of their files (M3), so a later change outside devkit shows as
+    drift. -> how many entries were recorded."""
     now = int(time.time())
-    rows = {e.id: obs[e.id] for e in catalog(t, user_layer() if user is None else user, None)
-            if e.agent == agent and e.pin_kind == "observed" and (obs.get(e.id) or {}).get("installed")
-            and (only is None or e.id in only)}
+    rows = _lockable(agent, h, t, user, only)
 
     def put(doc):
         for eid, o in rows.items():
-            doc[eid] = {"pin": "observed", "version": o.get("version", ""), "sha": o.get("sha", ""), "at": now,
-                        "by": by}
+            doc[eid] = {"pin": "observed", "version": o.get("version", ""), "sha": o.get("sha", ""),
+                        "digest": content_digest(o["path"]) if o.get("path") else "", "at": now, "by": by}
     _edit_lock(put, path)
     return len(rows)
+
+
+def _lockable(agent: str, h: Homes = None, t: dict = None, user: dict = None, only: set = None) -> dict:
+    """{id: observed} of this agent's installed vendor marketplace plugins (or only the ids in `only`)."""
+    t = team() if t is None else t
+    obs = observe(h)
+    return {e.id: obs[e.id] for e in catalog(t, user_layer() if user is None else user, None)
+            if e.agent == agent and e.pin_kind == "observed" and (obs.get(e.id) or {}).get("installed")
+            and (only is None or e.id in only)}
+
+
+def lock_changes(agent: str, h: Homes = None, t: dict = None, user: dict = None, path: Path = None) -> list:
+    """L3: what record_lock() would accept for this agent, one line per changed entry ("superpowers (claude plugin)
+    7.0.0 bb92a77 → 7.0.1 414603b"), so `dev install` names it before it records it."""
+    lock, out = read_lock(path), []
+    for eid, o in sorted(_lockable(agent, h, t, user).items()):
+        lk = lock.get(eid)
+        if not lk:
+            continue
+        name = eid.split(":", 2)[2].partition("@")[0]
+        if (lk.get("version"), lk.get("sha")) != (o.get("version", ""), o.get("sha", "")):
+            out.append(f"{name} ({agent} plugin) {_vs(lk)} → {_vs(o)}")
+        elif lk.get("digest") and o.get("path") and content_digest(o["path"]) != lk["digest"]:
+            out.append(f"{name} ({agent} plugin) {_vs(o)}: its files changed (same version and SHA)")
+    return out
 
 
 def report_drift(rows: list, audit=None, seen: Path = None) -> list:
@@ -579,7 +775,7 @@ def report_drift(rows: list, audit=None, seen: Path = None) -> list:
 def current_rows(cwd: str = None, h: Homes = None) -> list:
     t = team()
     return status(catalog(t, user_layer(), skill_groups()), observe(h), read_lock(), project_plugins(cwd),
-                  retired_ids(t))
+                  retired_ids(t), managed_plugins())
 
 
 def drift_text(rows: list, limit: int = 4) -> str:
@@ -639,14 +835,17 @@ def doctor_checks(cwd: str = None) -> list:
     unpinned = sum(1 for r in rows if r.get("pin_kind") in UNPINNED)
     out = [(g, "catalog", True, f"{n} extensions, {unpinned} unpinned (observed or url)", "")]
     for kind, name, fix in (
-            ("required-off", "required extensions on", "dev ext enable <name>, then dev install"),
+            ("required-off", "required extensions on", "dev install puts a missing one back; dev config lock keeps "
+                                                        "required plugins on whatever a project's .claude/settings "
+                                                        "say (the developer, in a terminal)"),
             ("changed", "vendor plugins match the lock", "review with dev ext outdated <name>; accept with dev install "
                                                          "or dev ext update <name> --apply"),
             ("pin", "installed at their pins", "dev install --only skills,claude,codex"),
             ("enabled", "enabled as devkit says", "dev config repair"),
             ("retired", "retired extensions removed", "dev install --only claude,codex"),
-            ("not-in-catalog", "project plugins in the catalog", "remove it from the project's .claude/settings.json, "
-                                                                 "or dev ext add it")):
+            ("not-in-catalog", "installed extensions in the catalog", "dev ext add it, or remove it (the developer, "
+                                                                      "in a terminal; a project plugin: from the "
+                                                                      "project's .claude/settings files)")):
         items = of(kind)
         out.append((g, name, not items, names(items) if items else "none", fix))
     return out
@@ -721,6 +920,15 @@ class Upstream:
             raise UpstreamError(f"remote server at {e.source}: nothing local to pin")
         raise UpstreamError("devkit's own: dev update --check")
 
+    def on_default_branch(self, e: Ext, sha: str) -> str:
+        """M4: GitHub's compare status of the default branch against `sha`: behind or identical when the default
+        branch contains the commit; ahead or diverged for one it does not, such as a fork's commit GitHub serves
+        under the parent repository's name."""
+        branch = str(self._json(["gh", "api", f"repos/{e.source}"]).get("default_branch") or "")
+        if not branch:
+            raise UpstreamError(f"gh api repos/{e.source}: no default branch in the answer")
+        return str(self._json(["gh", "api", f"repos/{e.source}/compare/{branch}...{sha}"]).get("status") or "")
+
     def compare(self, e: Ext, old: str, new: str, full: bool = False) -> dict:
         """Commits, changed files (and their paths) between two refs of a sha-pinned entry; with `full`, also the
         repository's license now."""
@@ -772,7 +980,7 @@ def outdated(cat: list, upstream, name: str = None, agent: str = None, observed:
             rows.append(r)
             continue
         latest = up["ref"]
-        r.update(latest=latest, label=up.get("label", ""), link=up.get("link", ""))
+        r.update(latest=latest, latest_sha=up.get("sha", ""), label=up.get("label", ""), link=up.get("link", ""))
         if e.pin_kind == "observed":
             same = latest in (o.get("version"), o.get("sha")) or (up.get("sha") and up["sha"] == o.get("sha"))
             r["status"] = "current" if same else "outdated"
@@ -1019,8 +1227,28 @@ def cmd_update(a) -> int:
         if new == e.pin:
             print(f"{e.name} ({e.agent} {e.kind}) is already at {_short(new)}")
             continue
+        if e.pin_kind == "sha":  # M4: only a commit of the default branch, never a fork's served under this name
+            try:
+                where = up.on_default_branch(e, new)
+            except UpstreamError as err:
+                ui.err(f"{e.id}: could not check that {new[:12]} is on {e.source}'s default branch ({err}); nothing "
+                       f"changed")
+                rc = 1
+                continue
+            if where not in ("behind", "identical"):
+                seen = where or "no status"
+                ui.err(f"{e.id}: {new[:12]} is not on {e.source}'s default branch (GitHub compare: {seen}). GitHub "
+                       f"serves a fork's commits under the parent's name; pin a commit of the default branch. Nothing "
+                       f"changed")
+                rc = 1
+                continue
         r = _review(e, new, up, info.get("label", ""), info.get("link", ""))
         print("\n".join(detail_lines(r)))
+        if (r.get("detail") or {}).get("error"):  # M4: no review, no change
+            ui.err(f"{e.id}: the review above could not be read, so nothing changed; try again, or check the compare "
+                   f"link yourself and name the commit with --to")
+            rc = 1
+            continue
         f.write_text(bump(f.read_text(), e, new))
         audit.record("ext.update", e.id, f"{e.pin} → {new} in {f.relative_to(home)}", "ok", why=a.why.strip(),
                      layer="team")
@@ -1030,8 +1258,27 @@ def cmd_update(a) -> int:
     return rc
 
 
+def _developer_only(verb: str, a) -> bool:
+    """L2: what changes the extensions on this Mac outside devkit's configuration (the vendor CLIs, the project's
+    settings) is the developer's, in a terminal (core.set_by_developer), as an overlay change is through
+    core.config_set. False, after the refusal is printed and audited, for anyone else."""
+    from . import audit, ui
+    try:
+        ok = core.set_by_developer()
+    except Exception:
+        ok = False  # a check that cannot decide refuses (fail closed)
+    if not ok:
+        audit.record(f"ext.{verb}", str(a.name or ""), "not the developer's terminal", "refused",
+                     why=str(a.why or "").strip())
+        ui.err(f"dev ext {verb} changes what runs in every session on this Mac, which only the developer does, in a "
+               f"terminal (spec P-fym583l7sg1, K1). Ask them, with the command and why.")
+    return ok
+
+
 def _apply_update(a) -> int:
     from . import audit, ui
+    if not _developer_only("apply", a):
+        return 1
     try:
         cat = catalog(team(), user_layer(), skill_groups())
         seen = [e for e in cat if e.pin_kind == "observed"]
@@ -1045,8 +1292,9 @@ def _apply_update(a) -> int:
         ui.err(f"{a.name} is pinned in devkit's config ({hits[0].pin_kind}): bump the pin with dev ext update "
                f"{a.name} --to <ref> --why \"…\" on a branch of the devkit checkout, then dev install")
         return 2
-    up, run, rc = upstream(), runner(), 0
+    up, run, rc, reviewed = upstream(), runner(), 0, {}
     for row in outdated(obs, up, observed=observe()):
+        reviewed[row["id"]] = row
         print("\n".join(detail_lines(row)) if row["status"] == "outdated" else
               f"{row['name']} ({row['agent']}): {row['status']}" + (f" ({row['reason']})" if row["reason"] else ""))
     for e in obs:
@@ -1058,8 +1306,18 @@ def _apply_update(a) -> int:
             ui.err(msg)
             rc = 1
             continue
-        record_lock(e.agent, by="dev ext update --apply", only={e.id})
         now = observe().get(e.id) or {}
+        row = reviewed.get(e.id) or {}
+        want = set()
+        if row.get("status") in ("outdated", "current"):
+            want = {row.get("latest"), row.get("latest_sha")} - {"", None}
+        if not want & {now.get("version"), now.get("sha")}:  # L3: accept only what the review above showed
+            ui.err(f"{e.name} ({e.agent}) is now {_vs(now)}, which is not what was reviewed above "
+                   f"({' '.join(sorted(want)) or 'nothing could be reviewed'}): not recorded as accepted, so it shows "
+                   f"as drift. Check it with dev ext outdated {e.name}; dev install accepts it")
+            rc = 1
+            continue
+        record_lock(e.agent, by="dev ext update --apply", only={e.id})
         print(f"updated {e.name} ({e.agent}): now {_vs(now)}, recorded as accepted"
               + (" · restart the agent to load it" if e.agent == "claude" else ""))
     return rc
@@ -1236,6 +1494,11 @@ def cmd_change(a) -> int:
         if verb == "add":
             item = _item_from_args(a)
             ids = [e.id for e in _user_items(item)]
+            ours = sorted(set(ids) & {e.id for e in catalog(t, {}, None)})
+            if ours:
+                ui.err(f"{', '.join(ours)} is in devkit's defaults already: dev ext enable or disable it, or change "
+                       f"the team entry on a branch of the devkit checkout (dev ext add --team)")
+                return 2
             new = overlay_change(user, "add", ids, item)
         else:
             hits = select(catalog(t, user, None), a.name, a.agent)
@@ -1281,6 +1544,8 @@ def _project_change(a) -> int:
     if a.ext_cmd not in ("enable", "disable"):
         ui.err("--project changes only enable and disable, for Claude Code plugins in devkit's catalog")
         return 2
+    if not _developer_only(a.ext_cmd, a):
+        return 1
     try:
         hits = [e for e in select(catalog(team(), user_layer(), None), a.name, "claude", kinds=("plugin",))]
     except ExtError as e:
@@ -1410,7 +1675,7 @@ def _columns(rows: list, cols: list) -> list:
 def rows_for(agent: str = None, all_groups: bool = False, cwd: str = None) -> list:
     t = team()
     cat = catalog(t, user_layer(), None if all_groups else skill_groups())
-    rows = status(cat, observe(), read_lock(), project_plugins(cwd), retired_ids(t))
+    rows = status(cat, observe(), read_lock(), project_plugins(cwd), retired_ids(t), managed_plugins())
     return [r for r in rows if not agent or r["agent"] == agent]
 
 

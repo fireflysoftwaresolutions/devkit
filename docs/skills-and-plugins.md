@@ -249,6 +249,47 @@ you want it (the devkit `workspace` skill knows these commands):
 
 Review the files they write (AGENTS.md, `.mcp.json`, `.codex/config.toml`) before you commit them.
 
+## Who changes extensions, and how drift shows
+
+Plugins, skills, and MCP servers run in every session, so only you change them, in a terminal, with `dev ext add`,
+`remove`, `enable`, `disable`, or `dev ext update <name> --apply`. devkit audits each change and records each vendor
+plugin in its lock (`~/.local/state/devkit/ext-lock.json`): the version, the commit, and a digest of the plugin's
+files.
+
+The guard refuses the same changes from an agent, through `dev ext` or through the agents' own CLIs:
+`claude plugin install|uninstall|enable|disable|update|prune`, `claude plugin marketplace add|remove|update`,
+`claude mcp add|add-json|add-from-claude-desktop|remove|reset-project-choices`, `codex plugin add|remove`,
+`codex plugin marketplace add|upgrade|remove`, and `codex mcp add|remove`. Read-only verbs (`list`, `get`, `details`,
+`validate`) and `--help` stay open, and a verb the guard does not know is refused. devkit itself also refuses
+`dev ext update --apply` and `dev ext enable|disable --project` outside your terminal.
+
+Whatever changes outside devkit anyway shows as drift: at the session start, in `dev status`, `dev doctor`, and
+`dev ext ls`, with one `ext.drift` record in the audit trail per change.
+
+| Drift | What it means | What to do |
+| --- | --- | --- |
+| `changed` | A vendor plugin's version, commit, or files differ from the lock, or an agent's folder for a devkit skill is not devkit's copy | Review it with `dev ext outdated <name>`; accept it with `dev install`, or `dev ext update <name> --apply` |
+| `pin` | A skill or MCP server is installed at another commit or version than its pin | `dev install --only skills,claude,codex` |
+| `enabled` | A plugin is on or off in the agent's settings against devkit's | `dev config repair` |
+| `required-off` | devkit or a security plugin is not installed, or is off in the agent or in a project's `.claude/settings.json` or `.claude/settings.local.json` (the row names the file) | `dev install` puts a missing one back; `dev config lock` keeps required plugins on whatever a project says |
+| `not-in-catalog` | A plugin, MCP server, or skill folder is installed outside devkit's catalog, or a project enables a plugin devkit does not manage | `dev ext add` it, or remove it |
+| `retired` | An entry devkit dropped is still installed | `dev install` removes it |
+
+What ships with the Codex app itself (the `openai-bundled` and `openai-primary-runtime` plugins, and MCP servers it
+runs from its own app bundle) is listed with the layer `agent` and is never drift.
+
+The pins have rules of their own:
+
+- **An MCP server** runs through `npx` or `uvx`, and the first package they run carries the exact version
+  (`npx -y pkg@1.2.3`, `uvx pkg==1.2.3`, or `uvx --from pkg==1.2.3 <command>`); a runner option that can add or
+  swap a package, and variables that load other code or point at another registry (`NODE_OPTIONS`, `PYTHONPATH`,
+  `PYTHONSTARTUP`, `DYLD_*`, `LD_*`, `NPM_CONFIG_*`, `UV_INDEX*`), are refused. Otherwise use an `https` URL.
+- **A skill pin** moves only to a commit on its repository's default branch, because GitHub serves a fork's commits
+  under the parent's name. `dev ext update` checks it, and changes nothing when the review cannot be read.
+- **`dev ext update --apply`** accepts only the version it reviewed; anything else stays drift until you check it.
+- **`dev install`** names each change it accepts before it records the lock.
+- **Your overlay** cannot add a copy of a devkit default, and a required default stays required.
+
 ## Left out on purpose
 
 | Item | Reason |

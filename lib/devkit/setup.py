@@ -1450,6 +1450,8 @@ def _extensions(agent: str):
     try:
         for ok, msg in ext.retire(agent, lambda argv, timeout=300: sh(argv, timeout=timeout)):
             done(msg) if ok else fail(msg)
+        for line in ext.lock_changes(agent):  # L3: name what is accepted before it is recorded
+            note(f"accepting a change made outside devkit: {line}")
         n = ext.record_lock(agent)
         if n:
             done(f"{n} vendor plugin version(s) recorded: a change outside devkit now shows as drift (dev ext ls)")

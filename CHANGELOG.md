@@ -35,6 +35,23 @@ All notable changes to devkit. Versions follow CalVer `YY.MM.PATCH` (PATCH resta
   `dev ext ls` name the change, and the audit trail gets one `ext.drift` record for it. A skill or MCP server off its
   pin, a required security plugin that is off, and a plugin a repository enables outside devkit's catalog are
   reported the same way.
+- **Agents cannot change your extensions through the vendor CLIs either.** The guard refuses the `claude plugin`,
+  `claude plugin marketplace`, `claude mcp`, `codex plugin`, `codex plugin marketplace`, and `codex mcp` verbs that
+  add, remove, switch, or update a plugin, marketplace, or MCP server, in any shell form; `list`, `get`, `details`,
+  and `--help` stay open. `dev ext update --apply` and `dev ext enable|disable --project` also check that you run
+  them in a terminal, and `--team` after a `--` no longer passes the guard as a team edit.
+- **Drift covers what devkit does not manage.** A plugin, MCP server, or skill folder installed outside the catalog,
+  for Claude Code and Codex, is reported as `not-in-catalog`; what ships with the Codex app is listed but is not
+  drift. A required plugin that is not installed, or that a project turns off in `.claude/settings.json` or
+  `.claude/settings.local.json`, is reported as `required-off` with the file, and `dev doctor` points to
+  `dev config lock`. The lock now keeps a digest of each vendor plugin's files, so a rewritten version or commit
+  number no longer hides changed files, and a devkit skill whose folder is not devkit's copy shows as `changed`.
+- **Pins bind what runs.** An MCP server runs only through `npx` or `uvx`, the first package they run carries the
+  exact version, and variables that load other code or another registry (`NODE_OPTIONS`, `PYTHONPATH`, `DYLD_*`,
+  `LD_*`, `NPM_CONFIG_*`, …) are refused. `dev ext update` moves a skill pin only to a commit on the repository's
+  default branch, never to a fork's commit served under the same name, and changes nothing when the review cannot
+  be read. `dev ext update --apply` accepts only the version it reviewed, and `dev install` names each change it
+  accepts. An overlay copy of a devkit default keeps it required, and `dev ext add` refuses one.
 
 ### Known limits
 
