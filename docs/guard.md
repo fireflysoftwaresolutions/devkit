@@ -459,11 +459,21 @@ DEVKIT_LOCAL_CI_PASSED=1.
   (`os.system("dev install # don't")`); any other literal, such as `print("don't")`, is data. Heredoc bodies are set
   aside first, so text with apostrophes can go in one. A script file or a sourced file the guard cannot read is
   allowed, as before.
-- Most exceptions in the guard are logged to `~/.local/state/devkit/logs/hooks.log` and the call is allowed. These
-  checks fail closed instead, because letting the call through would defeat them: a crew member's shell command that
-  the lane check cannot read or judge; an irreversible action, in enforce, when the gate itself fails and the text
-  looks irreversible; the MCP gate; and the developer-only actions (lifting an embargo, `dev backup --public`,
-  `dev backup policy`).
+- When the guard itself fails while it judges a call that acts (a shell command, a `Write`, `Edit`, `MultiEdit`,
+  `NotebookEdit`, or `apply_patch`, or an MCP tool), the call is refused with the reason "devkit's guard could not
+  judge this call." A crash would otherwise skip every rule for that call, and an agent shapes the command text, so it could choose
+  one that crashes the guard. The refusal is logged to `~/.local/state/devkit/logs/hooks.log` with its traceback and
+  recorded as `guard.deny` with rule `guard-error` (`dev audit --action guard.deny`). A refusal the guard had already
+  reached also stands when a later part of the hook fails. The agent rewrites the command more simply or stops and
+  tells the developer, who can run it in their own terminal (hooks run only in agent sessions) or start the session
+  with `DEVKIT_GUARD=off`, which the hook reads before any rule runs.
+- Other exceptions in the guard are logged there and the call is allowed, with a `guard.failopen` record: a call that
+  only reads or launches (`Read`, `Grep`, `Glob`, `WebFetch`, `WebSearch`, and `Agent`, whose subagent's calls each pass
+  the guard again), and a call every rule has already allowed when only the context the hook adds to it fails. A
+  guard bug never blinds the session that has to diagnose it, and the other hooks (session start, prompt, stop) still
+  fail open. These checks fail closed too: a crew member's shell command that the lane check cannot read or judge;
+  an irreversible action, in enforce, when the gate itself fails and the text looks irreversible; the MCP gate; and
+  the developer-only actions (lifting an embargo, `dev backup --public`, `dev backup policy`).
 - Every deny and ask is logged there too, and written to the audit trail (`dev audit --action guard`), so you can
   review what was blocked.
 

@@ -171,6 +171,65 @@ class FailClosedTests(WiringCase):
         self.assertIsNone(self.deny(self.hook("guard", self.bash("ls", aid="a_tank"))))  # checked, it runs
 
 
+class GuardCrashTests(WiringCase):
+    # 26.11.4 crashed on an xargs with no command in a program's code, and the hook let the call run unjudged (three
+    # guard.failopen records in a real session): a call that acts now fails closed (D10 = C)
+    def in_repo(self, payload):
+        payload["cwd"] = str(self.repo)
+        return payload
+
+    def test_the_commands_after_an_xargs_with_no_command_in_code_are_refused_through_the_hook(self):
+        crash = "python3 -c \"import os; os.system('echo a | xargs')\""
+        for cmd in ("git push --force origin main", f"{crash}; git push --force origin main", f"{crash}; dev install"):
+            with self.subTest(cmd=cmd):
+                self.assertIsNotNone(self.deny(self.hook("guard", self.in_repo(self.bash(cmd)), real_guard=True)))
+        self.assertEqual(self.records("guard.failopen"), [])
+
+    def test_a_crash_inside_check_bash_refuses_the_command_and_records_it(self):
+        with mock.patch.object(guard, "check_bash", mock.Mock(side_effect=RuntimeError("boom"))):
+            why = self.deny(self.hook("guard", self.bash("ls"), real_guard=True))
+            self.assertIn("could not judge this call (an internal error, RuntimeError", why or "")
+            self.assertIn("their own terminal", why)  # the way on: the developer's terminal is not guarded
+            recs = self.records("guard.deny")
+            self.assertEqual([(r["evidence"].get("rule"), r["evidence"].get("tool")) for r in recs],
+                             [("guard-error", "Bash")])
+            self.assertEqual(self.records("guard.failopen"), [])
+            with mock.patch.dict(os.environ, {"DEVKIT_GUARD": "off"}):  # the developer's switch still lets it run
+                self.assertIsNone(self.deny(self.hook("guard", self.bash("ls"), real_guard=True)))
+        self.assertIsNone(self.deny(self.hook("guard", self.bash("ls"), real_guard=True)))  # judged, it runs
+
+    def test_a_crash_refuses_a_write_or_mcp_call_and_lets_a_read_a_launch_or_a_judged_call_run(self):
+        # a read or a subagent launch (each of its calls passes the guard again) runs with a guard.failopen record,
+        # so a guard bug never blinds the session that has to diagnose it; so does a call every rule has allowed
+        # when only its context (the pitfalls) fails
+        path = str(self.repo / "a.py")
+        acting = [self.tool("Write", {"file_path": path, "content": "x"}),
+                  self.tool("Edit", {"file_path": path, "old_string": "a", "new_string": "b"}),
+                  self.tool("mcp__mail__send", {"to": "a@example.com"})]
+        running = [self.tool("Read", {"file_path": path}),
+                   self.tool("Agent", {"description": "Neo: parser", "prompt": "fix it"})]
+        with mock.patch.object(guard, "check", mock.Mock(side_effect=RuntimeError("boom"))):
+            for payload in acting:
+                with self.subTest(tool=payload["tool_name"]):
+                    self.assertIn("could not judge this call", self.deny(self.hook("guard", payload, True)) or "")
+            for payload in running:
+                with self.subTest(tool=payload["tool_name"]):
+                    self.assertIsNone(self.deny(self.hook("guard", payload, True)))
+        with mock.patch.object(hooks, "_call_pitfalls", mock.Mock(side_effect=RuntimeError("boom"))):
+            self.assertIsNone(self.deny(self.hook("guard", self.bash("ls"), real_guard=True)))
+        self.assertEqual([r["evidence"].get("rule") for r in self.records("guard.deny")], ["guard-error"] * 3)
+        self.assertEqual([r["evidence"].get("rule") for r in self.records("guard.failopen")], ["guard-hook"] * 3)
+
+    def test_a_refusal_the_guard_reached_stands_when_the_hook_fails_after_it(self):
+        # the pitfalls a refusal carries come from the lessons: a failure there lost the deny, and the push ran
+        push = self.in_repo(self.bash("git push --force origin main"))
+        expected = guard.check("Bash", push["tool_input"], push["cwd"], "claude")
+        self.assertEqual((expected or ("",))[0], "deny")
+        with mock.patch.object(hooks, "_call_pitfalls", mock.Mock(side_effect=RuntimeError("boom"))):
+            self.assertEqual(self.deny(self.hook("guard", push, real_guard=True)), expected[1])
+        self.assertEqual([r["evidence"].get("rule") for r in self.records("guard.deny")], ["guard-error"])
+
+
 class MemberToolTests(WiringCase):
     def test_a_member_never_sends_through_an_mcp_tool(self):
         pg.start("Work", plan=["parser"])

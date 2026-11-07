@@ -3221,7 +3221,10 @@ _PY_FLAGS = frozenset("uIBEsSOqbdvxRP")  # python's own flags without a value; -
 
 def _dev_args(argv):
     """The arguments of a `dev` call (dev, bin/dev, python3 bin/dev, python3 -m devkit.cli, also after the
-    interpreter's own flags: python3 -u -I -B …), else None."""
+    interpreter's own flags: python3 -u -I -B …), else None. An empty argv (an `xargs` with no command, which runs
+    echo, after _xargs_command and _unwrap) is no dev call."""
+    if not argv:
+        return None
     n = os.path.basename(argv[0])
     if n == "dev":
         return _dev_command(argv[1:])
@@ -3244,8 +3247,9 @@ def _dev_args(argv):
 
 def _xargs_dev_refusal(inner) -> str | None:
     """F1-R4 part 2: xargs adds the words it reads from its input, so `xargs dev` (or `xargs dev ext`) may run
-    `dev install` or `dev ext ack`; like `xargs claude`, a dev call whose command comes from the input is refused."""
-    dargs = _dev_args(list(inner))
+    `dev install` or `dev ext ack`; like `xargs claude`, a dev call whose command comes from the input is refused.
+    An xargs with no command (`inner` empty) runs echo: None, as the shell form judges it (_Shell.xargs)."""
+    dargs = _dev_args(list(inner or ()))
     if dargs is None:
         return None
     if not dargs:
@@ -6406,6 +6410,8 @@ def code_session_refusal(argv, cwd, bodies, depth: int = 0) -> str | None:
                 return UNREADABLE_REASON  # these rules judge; any other literal (print("don't")) stays data
             continue
         for inner, icode in calls:
+            if not inner:  # nothing runs (an empty argv reads as no command, as in shell_calls)
+                continue
             why = guardless_session(os.path.basename(inner[0]), inner, homes)
             if why:
                 return why

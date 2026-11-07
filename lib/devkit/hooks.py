@@ -1645,6 +1645,17 @@ def guard(agent: str):
             _log(f"guard off {agent}: {traceback.format_exc()[-300:]}")
         return
     data = _stdin_json()
+    held = {}
+    try:
+        _guard(agent, data, held)
+    except Exception as e:
+        if not _guard_failed(agent, data, held, e):
+            raise  # run() logs it and records guard.failopen: the call runs
+
+
+def _guard(agent: str, data: dict, held: dict):
+    """The guard hook's judgment of one call. `held` keeps what it has decided so far for _guard_failed: the verdict
+    (`verdict`) and whether every rule has run on an allowed call (`done`)."""
     headless = _headless()  # devkit's own headless call: judged, never recorded
     try:
         from . import progress
@@ -1671,6 +1682,7 @@ def guard(agent: str):
     if not verdict:
         verdict = _identity_verdict(data) or _crew_limits(agent, data) or _stub_commit_gate(data) or \
             _irreversible_main(agent, data)
+    held["verdict"] = verdict
     if verdict and (verdict[0] == "deny" or agent == "codex"):  # Codex turns ask into deny below
         _close_call(data)  # a refused call never runs: it leaves no open entry
     if not verdict:
@@ -1682,6 +1694,7 @@ def guard(agent: str):
                 pass
         why = _scope_violation(agent, data)
         if why:
+            held["verdict"] = ("deny", why)
             _log(f"guard {agent} deny: {why[:160]}")
             _close_call(data)
             from . import audit
@@ -1698,6 +1711,7 @@ def guard(agent: str):
             return
         why = _unroutable_lane_command(data, agent)
         if why:
+            held["verdict"] = ("deny", why)
             _close_call(data)
             from . import audit
             audit.record("guard.deny", (data.get("tool_input") or {}).get("command", "")[:200], why, "deny",
@@ -1705,6 +1719,7 @@ def guard(agent: str):
             print(json.dumps({"hookSpecificOutput": {"hookEventName": "PreToolUse", "permissionDecision": "deny",
                                                      "permissionDecisionReason": _with_pitfalls(agent, data, why)}}))
             return
+        held["done"] = True  # every rule has run and allowed the call: a later failure only loses context
         if data.get("tool_name") in ("Agent", "Task"):  # subagent briefs get the skills their work requires
             try:
                 from . import skillguard
@@ -1737,6 +1752,58 @@ def guard(agent: str):
                  reason[:400], decision, tool=data.get("tool_name") or "", agent_id=data.get("agent_id") or "")
     print(json.dumps({"hookSpecificOutput": {"hookEventName": "PreToolUse", "permissionDecision": decision,
                                              "permissionDecisionReason": reason}}))
+
+
+# The guard fails closed for a call that acts (D10 = C, docs/guard.md › Fail-open design): a crash while judging a
+# shell command, a file write or patch, or an MCP tool would otherwise skip every rule for that call, and the command
+# text is the agent's to shape (26.11.4 failed open on an xargs with no command in a program's code). A call that only
+# reads or launches (Read, Grep, Glob, WebFetch, WebSearch, Agent: each subagent call passes the guard again) still
+# fails open, so a guard bug never blinds the session that has to diagnose it. Kept here, not in guard.py, so it holds
+# when guard.py itself cannot load.
+_ACTING_TOOLS = frozenset({"Write", "Edit", "MultiEdit", "NotebookEdit", "apply_patch"})
+GUARD_ERROR_REASON = ("devkit's guard could not judge this call (an internal error, {err}, recorded in the audit trail "
+                      "as rule guard-error), so it is refused rather than run unchecked. Rewrite it more simply (one "
+                      "command per call, or a script file) and try once more; if it is refused again, stop and tell "
+                      "the developer: they can run it in their own terminal, where the guard does not apply, and "
+                      "`dev doctor` and the hooks log show the error.")
+
+
+def _acts(data: dict) -> bool:
+    """True for a call the guard must judge before it runs: a shell command (any tool input with a command, which
+    guard.check reads as one), a file write or patch, an MCP tool."""
+    tool, inp = str(data.get("tool_name") or ""), data.get("tool_input")
+    return tool in SHELL_TOOLS or tool in _ACTING_TOOLS or tool.startswith("mcp__") or \
+        (isinstance(inp, dict) and isinstance(inp.get("command"), (str, list)))
+
+
+def _guard_failed(agent: str, data: dict, held: dict, exc: BaseException) -> bool:
+    """The guard hook raised while it handled a call. A deny or ask it had already reached still stands; a call that
+    acts and was not yet judged in full is refused (GUARD_ERROR_REASON) and recorded as guard.deny, rule guard-error.
+    -> False when the call may run (judged and allowed, or one that only reads): run() records guard.failopen."""
+    verdict = held.get("verdict")
+    if verdict and verdict[0] in ("deny", "ask"):
+        decision, reason = ("deny" if agent == "codex" else verdict[0]), str(verdict[1])
+    elif held.get("done") or not _acts(data):
+        return False
+    else:
+        decision, reason = "deny", GUARD_ERROR_REASON.format(err=type(exc).__name__)
+    _log(f"guard {agent} {decision} (guard-error):\n{traceback.format_exc()}")
+    try:
+        _close_call(data)  # a refused call never runs: it leaves no open entry
+    except Exception:
+        pass
+    try:
+        from . import audit
+        tin = data.get("tool_input") if isinstance(data.get("tool_input"), dict) else {}
+        audit.record(f"guard.{decision}", str(tin.get("command") or tin.get("file_path") or data.get("tool_name") or
+                                              "")[:400],
+                     f"{reason[:300]} ({type(exc).__name__}: {exc})"[:400], decision,
+                     tool=data.get("tool_name") or "", rule="guard-error", agent_id=data.get("agent_id") or "")
+    except Exception:
+        pass  # the refusal stands without its record
+    print(json.dumps({"hookSpecificOutput": {"hookEventName": "PreToolUse", "permissionDecision": decision,
+                                             "permissionDecisionReason": reason}}))
+    return True
 
 
 def _with_pitfalls(agent: str, data: dict, reason: str) -> str:
@@ -2380,8 +2447,8 @@ def run(event: str, agent: str) -> int:
         fn(agent)
     except SystemExit:
         raise
-    except Exception as e:  # fail open: never break the agent session
-        _log(f"{event} {agent} error:\n{traceback.format_exc()}")
+    except Exception as e:  # fail open: never break the agent session (guard() already refused, in _guard_failed,
+        _log(f"{event} {agent} error:\n{traceback.format_exc()}")  # a call that acts and was not judged in full)
         if event == "guard":  # the guard failed open: recorded, so a rule that never runs is seen (spec G12)
             from . import guard as g
             g.failopen("guard-hook", e)

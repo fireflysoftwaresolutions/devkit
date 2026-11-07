@@ -571,6 +571,24 @@ class RedTeam2(unittest.TestCase):
                 self.assertIsNotNone(guard.irreversible_verdict("dev branch embargo --lift feat/y", self.repo,
                                                                 agent="claude", session="s1", grant=grant))
 
+    def test_an_xargs_with_no_command_in_a_programs_code_runs_echo_and_the_rest_of_the_line_is_judged(self):
+        # 26.11.4 read argv[0] of an empty list (_dev_args) when a program's code piped into an xargs with no command,
+        # and the hook let the whole call run unjudged. Such an xargs runs echo; what follows it is judged as alone
+        alone = guard.check_bash("git push --force origin main", self.repo, "claude")
+        self.assertEqual((alone or ("",))[0], "deny")
+        install = guard.deny(guard.INSTALL_REASON)
+        for xargs in ("xargs", "xargs -0", "xargs -n 1", "xargs --", "xargs env", "xargs nohup", "xargs timeout 5"):
+            for code in (f"python3 -c \"import os; os.system('echo a | {xargs}')\"",
+                         f"node -e \"require('child_process').execSync('echo a | {xargs}')\"",
+                         f"perl -e 'system(\"echo a | {xargs}\")'"):
+                with self.subTest(code=code):
+                    self.assertIsNone(guard.check_bash(code, self.repo, "claude"))
+                    self.assertEqual(guard.check_bash(f"{code}; git push --force origin main", self.repo, "claude"),
+                                     alone)
+                    self.assertEqual(guard.check_bash(f"{code}; dev install", self.repo, "claude"), install)
+        dev = "python3 -c \"import os; os.system('echo install | xargs dev')\""  # an xargs with a command is read
+        self.assertEqual(guard.check_bash(dev, self.repo, "claude"), install)
+
 
 class DeveloperOnlyGrants(tp.TranscriptCase):
     # B2 follow-up (the tech lead's decisions): the developer opens one developer-only action with a line that reads
