@@ -1388,12 +1388,218 @@ def protected_write(path, cwd, tool_input=None):
     v = git_internal_write(path, cwd)
     if v:
         return v
+    v = note_keys_violation(p, tool_input or {})
+    if v:
+        return v
     return settings_env_violation(p if p != UNKNOWN else path, tool_input or {}, lp, path)
+
+
+# ---- the embargo list and the backup policy in a project's handoff note (B2a)
+#
+# They decide what devkit pushes: an embargo keeps a branch off the remote, the backup policy whether devkit publishes
+# a project's branches at all. So agents keep every other part of the note, but may not write or remove these two
+# keys: `dev branch embargo` (and the developer's `--lift`) and the developer's `dev backup policy` change them, in
+# their own process. The file tools are judged by the note's text after the edit; a shell write to a note (and to the
+# other folders the team's records live in) is refused, since the guard cannot see what it changes.
+
+NOTE_KEYS = ("embargo", "backup_policy")
+HANDOFF_RECORDS = ("policies", "crew", "lessons", "audit")  # the team's records, written only by their dev commands
+NOTE_KEYS_REASON = ("{what} is a project's handoff note, and its embargo list and the backup policy decide what devkit "
+                    "pushes, so agents may not write or remove them (B2a). Edit the other sections and leave those "
+                    "keys as they are. An embargo is set with `dev branch embargo <branch> --why \"…\"`; lifting it "
+                    "(`dev branch embargo --lift <branch>`) and the backup policy (`dev backup policy on|off|ask`) are "
+                    "the developer's, in a terminal.")
+
+
+def note_file(p) -> bool:
+    """True for a project's handoff note (projects/**/*.md in the handoff repository), by its resolved path."""
+    if not p or p == UNKNOWN:
+        return False
+    s, root = str(p), real(core.HANDOFF / "projects")
+    return _under_ci(s, root) and s.casefold() != root.casefold() and s.casefold().endswith(".md")
+
+
+def note_keys(text) -> tuple:
+    """The two keys of a note's metadata as devkit reads them (a block that never ends reads as none), and their
+    lines as written, so a second copy of a key that the parser would drop still counts as writing it."""
+    from . import notes
+    text = text or ""
+    meta, _ = notes.split_frontmatter(text)
+    end = text.find("\n---\n", 4) if text.startswith("---\n") else -1
+    raw, cur = [], None
+    for ln in (text[4:end] if end != -1 else text).splitlines():
+        if ln[:1].isspace() and cur is not None:
+            cur.append(ln.rstrip())
+            continue
+        k = ln.split(":", 1)[0].strip() if ":" in ln else ""
+        cur = [ln.rstrip()] if k in NOTE_KEYS else None
+        if cur is not None:
+            raw.append(cur)
+    return {k: meta[k] for k in NOTE_KEYS if k in meta}, raw
+
+
+def _note_change(p, after) -> str | None:
+    """Why `after` (the note's text after an edit, None when the guard cannot tell) changes the two keys, or None."""
+    what = f"`{tilde(p)}`"
+    if after is None:
+        return (f"devkit cannot tell whether this edit keeps the embargo list and the backup policy of {tilde(p)} (it "
+                f"does not apply to the note as it is). " + NOTE_KEYS_REASON.format(what=what))
+    before = _read_small(p, 1 << 20) if Path(str(p)).exists() else ""
+    return NOTE_KEYS_REASON.format(what=what) if note_keys(before) != note_keys(after) else None
+
+
+def note_keys_violation(p, tool_input: dict):
+    """A Write, Edit or MultiEdit (or a tool whose content the guard cannot see) that writes or removes the embargo
+    list or the backup policy of a project's handoff note."""
+    if not note_file(p):
+        return None
+    after = _settings_after(_read_small(p, 1 << 20) if Path(str(p)).exists() else "", tool_input or {})
+    why = _note_change(p, after)
+    return deny(why) if why else None
+
+
+def _patch_files(patch: str) -> list:
+    """apply_patch envelope -> [{op, path, move, lines}], one per file section."""
+    out = []
+    for ln in patch.splitlines():
+        m = re.match(r"^\*\*\* (Add|Update|Delete) File: (.+)$", ln.strip())
+        if m:
+            out.append({"op": m.group(1).lower(), "path": m.group(2).strip(), "move": "", "lines": []})
+            continue
+        m = re.match(r"^\*\*\* Move to: (.+)$", ln.strip())
+        if m and out:
+            out[-1]["move"] = m.group(1).strip()
+        elif out and not ln.startswith(("*** End Patch", "*** Begin Patch")):
+            out[-1]["lines"].append(ln)
+    return out
+
+
+def _seek(lines, old, pos):
+    for norm in (lambda s: s, str.rstrip, str.strip):
+        want = [norm(x) for x in old]
+        for i in range(pos, len(lines) - len(old) + 1):
+            if [norm(x) for x in lines[i:i + len(old)]] == want:
+                return i
+    return None
+
+
+def patched(before: str, lines) -> str | None:
+    """The text after an Update File section's hunks, or None when one does not apply (or only adds, where the guard
+    cannot tell where it lands)."""
+    chunks, cur = [], None
+    for ln in lines:
+        if ln.startswith("@@"):
+            cur = {"anchor": ln[2:].strip(), "old": [], "new": []}
+            chunks.append(cur)
+            continue
+        if ln.strip() == "*** End of File":
+            continue
+        if cur is None:
+            cur = {"anchor": "", "old": [], "new": []}
+            chunks.append(cur)
+        tag, body = (ln[:1], ln[1:]) if ln else (" ", "")
+        if tag not in " -+":
+            return None
+        if tag != "+":
+            cur["old"].append(body)
+        if tag != "-":
+            cur["new"].append(body)
+    text, pos = before.split("\n"), 0
+    for c in chunks:
+        if c["anchor"]:
+            k = next((i for i in range(pos, len(text)) if text[i].strip() == c["anchor"]), None)
+            if k is None:
+                return None
+            pos = k + 1
+        if not c["old"]:
+            if c["new"]:
+                return None
+            continue
+        i = _seek(text, c["old"], pos)
+        if i is None:
+            return None
+        text[i:i + len(c["old"])] = c["new"]
+        pos = i + len(c["new"])
+    return "\n".join(text)
+
+
+def patch_note_violation(patch: str, cwd):
+    """apply_patch on a project's handoff note: judged by the note after the patch (a delete or a move away leaves
+    none; a move onto a note brings the source's text)."""
+    for f in _patch_files(patch):
+        src = resolve(f["path"], cwd)
+        dst = resolve(f["move"], cwd) if f["move"] else src
+        if not (note_file(src) or note_file(dst)):
+            continue
+        before = _read_small(src, 1 << 20) if src != UNKNOWN and Path(str(src)).exists() else ""
+        if f["op"] == "delete":
+            after = ""
+        elif f["op"] == "add":
+            after = "\n".join(ln[1:] for ln in f["lines"] if ln.startswith("+"))
+        else:
+            after = patched(before, f["lines"])
+        if dst != src and note_file(src):
+            why = _note_change(src, "")
+            if why:
+                return deny(why)
+        if note_file(dst):
+            why = _note_change(dst, after)
+            if why:
+                return deny(why)
+    return None
+
+
+def handoff_record(p) -> bool:
+    """True for a file the guard keeps from shell writes in the handoff repository: a project's note, or anything in
+    the team's records (policies, crew, lessons, the published audit trails)."""
+    if not p or p == UNKNOWN:
+        return False
+    if note_file(p):
+        return True
+    return any(_under_ci(str(p), real(core.HANDOFF / d)) for d in HANDOFF_RECORDS)
+
+
+def holds_handoff_record(p) -> bool:
+    """True for a folder whose move or delete takes notes or the team's records along."""
+    if not p or p == UNKNOWN:
+        return False
+    s = str(p)
+    return any(_under_ci(real(core.HANDOFF / d), s) for d in ("projects", *HANDOFF_RECORDS)) or \
+        _under_ci(s, real(core.HANDOFF / "projects"))
+
+
+def handoff_record_reason(p, verb="write") -> str:
+    rel = os.path.relpath(real(p), real(core.HANDOFF)) if _under_ci(real(p), real(core.HANDOFF)) else tilde(p)
+    if note_file(p) or holds_handoff_record(p) and not handoff_record(p):
+        return (f"A shell command may not {verb} `{rel}` in the handoff repository: a project's note holds its "
+                f"embargo list and backup policy, which decide what devkit pushes, and the guard cannot see what a "
+                f"shell write changes (B2a). Edit the note with the Edit or Write tool (it keeps those two keys "
+                f"as they are), or use `dev note set`, `dev handoff --log` and `dev task`.")
+    return (f"A shell command may not {verb} `{rel}`: the team's records in the handoff repository (policies, crew, "
+            f"lessons, the audit trails) are written by their own dev commands (`dev delivery apply`, `dev crew set`, "
+            f"`dev lesson`, the audit job), with who and why (B2a). Read them with `cat` or `dev audit`.")
+
+
+# a program's text that names the handoff repository's notes or records, or devkit's writers of the two keys
+_HANDOFF_WORDS = r"(?:projects|policies|crew|lessons|audit)(?![\w-])"
+
+
+def _note_text():
+    return re.compile(r"\.handoff\W{1,8}" + _HANDOFF_WORDS + "|" + re.escape(real(core.HANDOFF)) + r"\W{1,8}" +
+                      _HANDOFF_WORDS + r"|\bcore\s*\.\s*(?:HANDOFF|NOTES|note_path)\b|\bnote_path\s*\(", re.I)
+
+
+_NOTE_CALLS = re.compile(r"\b(?:set_embargo|set_backup_policy|_edit_records|record_tips|cmd_embargo)\b")
+# a write _CODE_WRITES can miss: an open() whose path argument nests calls, ending in a write mode, or a write method
+_ANY_WRITE = re.compile(r"""['"][rbtU]*[wax+][rbt+]*['"]\s*\)|\bmode\s*=|\.write(?:lines)?\s*\(""")
 
 
 def protected_patch(patch: str, cwd):
     """apply_patch: Add, Update, Delete and Move all count, and an added DEVKIT_* line in a settings or shell startup
     file."""
+    v = patch_note_violation(patch, cwd)
+    if v:
+        return v
     added = _unescape("\n".join(ln[1:] for ln in patch.splitlines() if ln.startswith("+")))
     for op, path in parse_patch_paths(patch):
         lp = _lexical(path, cwd)
@@ -1470,6 +1676,9 @@ SAFEGUARDS_REASON = ("`dev config set safeguards.…` changes devkit's safeguard
                      "in a terminal (spec C11). Ask them: name the setting, the value and why. `dev config show` "
                      "prints the current values.")
 _SHELLS = {"bash", "sh", "zsh", "dash", "ksh", "fish"}
+# git commands that rewrite tracked files (B2a: in the handoff repository they can bring back an older note)
+_GIT_TREE_WRITES = frozenset("checkout switch reset restore revert merge pull rebase cherry-pick stash apply am mv rm "
+                             "clean read-tree checkout-index update-index filter-branch filter-repo".split())
 _INTERP = re.compile(r"^(?:python[0-9.]*|pypy[0-9.]*|node|nodejs|deno|bun|perl[0-9.]*|ruby|php|osascript|lua|tclsh|"
                      r"Rscript|swift|awk|gawk|mawk|nawk)$")
 _READERS = {"cat", "head", "tail", "less", "more", "bat", "ls", "stat", "file", "wc", "grep", "egrep", "fgrep", "rg",
@@ -1716,6 +1925,7 @@ class _Shell:
     def __init__(self, cmd: str, cwd, outer_mentions=False, depth=0, exported=()):
         self.cmd, self.cwd, self.depth = cmd, cwd, depth
         self.mentions = outer_mentions or bool(_mark().search(cmd))
+        self.note_mentions = bool(_note_text().search(cmd))  # B2a: it names a note or the team's records
         self.keys = sorted(set(_KEY_TEXT.findall(_unescape(cmd))))
         self.bodies = heredoc_bodies(cmd)
         self.unresolved = []
@@ -1732,6 +1942,8 @@ class _Shell:
             return None
         if is_protected(p) or (holds and holds_protected(p)):
             return deny(protected_reason(p, verb))
+        if handoff_record(p) or (holds and holds_handoff_record(p)):  # B2a
+            return deny(handoff_record_reason(p, verb))
         if verb in ("write", "change or delete"):  # a redirect, cp or ln into .git (RT11); rm -rf .git runs nothing
             v = git_internal_write(t, cwd, itself=verb == "write")
             if v:
@@ -1756,6 +1968,9 @@ class _Shell:
                 return deny("This command names devkit's state, configuration or install, writes files, and the guard "
                             "cannot parse it to see where (spec C11: agents may not write them). Split it into "
                             f"simple commands. {_TAIL}")
+            if self.note_mentions and re.search(r">|\b(tee|cp|mv|rm|ln|sed|perl|python|ruby|node|dd|git)\b", self.cmd):
+                return deny("This command names a project's handoff note or the team's records, may write files, "
+                            "and the guard cannot parse it to see where (B2a). Split it into simple commands.")
             return None
         cwd = self.cwd
         for argv0, redirs in segs:
@@ -1790,10 +2005,17 @@ class _Shell:
                         f"guard cannot see, and it names devkit's state, configuration or install (spec C11: agents "
                         f"may not write them). Write the path out in full if it is not devkit's; otherwise use the "
                         f"`dev` command that owns the record. {_TAIL}")
+        if self.unresolved and self.note_mentions:
+            return deny(f"This command writes to `{self.unresolved[0]}`, which depends on a variable or a subshell the "
+                        f"guard cannot see, and it names a project's handoff note or the team's records in the handoff "
+                        f"repository (B2a: shell commands may not write them). Write the path out in full if it is "
+                        f"neither; edit a note with the Edit or Write tool.")
         return None
 
     def child(self, text, cwd, names=()):
-        return _Shell(text, cwd, self.mentions, self.depth + 1, self.exported | set(names))
+        inner = _Shell(text, cwd, self.mentions, self.depth + 1, self.exported | set(names))
+        inner.note_mentions = inner.note_mentions or self.note_mentions
+        return inner
 
     def nested(self, text, cwd, same_shell=False, names=()):
         if not text or self.depth >= 4:
@@ -1901,9 +2123,27 @@ class _Shell:
             return self.target(pos[1], cwd) if len(pos) > 1 else None
         if name in _READERS:
             return None
+        if name == "git":
+            v = self.git_handoff(argv, cwd)
+            if v:
+                return v
         # anything else (editors, sqlite3, git, curl, tar, …) may write the paths it is given
         inside = is_protected(Path(cwd)) if cwd and str(cwd) != str(UNKNOWN) else False
         return self.targets([c for c in _candidates(args) if inside or _pathlike(c)], cwd)
+
+    def git_handoff(self, argv, cwd):
+        """B2a: a git command that rewrites files in the handoff repository (a checkout, reset or merge can bring back
+        an older note, without its embargo), and the paths a `git -C <dir>` command names, read from that folder."""
+        cdir, sub, gargs = _git_split(argv)
+        gcwd = str(resolve(cdir, cwd)) if cdir else cwd
+        if not gcwd or gcwd == str(UNKNOWN):
+            return None
+        if sub in _GIT_TREE_WRITES and _under_ci(real(gcwd), real(core.HANDOFF)):
+            return deny(f"`git {sub}` rewrites files in the handoff repository, where a project's note holds its "
+                        f"embargo list and backup policy (B2a). `dev sync` commits, pulls and pushes the handoff "
+                        f"repository; agents change notes with the Edit or Write tool and the dev commands. If its "
+                        f"history needs repair, ask the developer.")
+        return self.targets([c for c in _candidates(gargs) if _pathlike(c)], gcwd) if cdir else None
 
     def dev(self, args, cwd, names=()):
         helps = _dev_skips(args[1:], "-h", "--help")
@@ -2040,11 +2280,26 @@ class _Shell:
             code = _read_small(p) if p else code
         if code:  # what the agent's own modules it loads write counts too (B1: a transcript written from one)
             code = "\n".join([code] + loaded_texts(code, seen))
+        if code and _NOTE_CALLS.search(code):  # devkit's writers of the two keys, past the commands that own them
+            return deny(f"This {name} program calls devkit's code that writes a project's embargo list or backup "
+                        f"policy (B2a), past the commands that own them and their rules. Use `dev branch embargo "
+                        f"<branch> --why \"…\"`; lifting an embargo and the backup policy are the developer's.")
+        named = [c for c in _candidates(rest) + assigns if _pathlike(c)]
+        # started in the handoff repository's notes or records (or the repository itself; not ~ or ~/Development,
+        # which hold everything), its relative paths can land in them
+        in_handoff = bool(here) and _under_ci(real(here), real(core.HANDOFF)) and \
+            (handoff_record(here) or holds_handoff_record(here))
+        if code and (_CODE_WRITES.search(code) or _ANY_WRITE.search(code)) and (
+                in_handoff or _note_text().search(code) or
+                any(handoff_record(resolve(c, cwd)) for c in named)):  # B2a: a path built by calls counts too
+            return deny(f"This {name} program writes files and names a project's handoff note or the team's records "
+                        f"in the handoff repository, and the guard cannot see what it changes (B2a: the note's embargo "
+                        f"list and backup policy decide what devkit pushes). Edit a note with the Edit or Write tool; "
+                        f"use the dev command that owns a record.")
         if not code or not _CODE_WRITES.search(code):
             return None
         if not cwd or str(cwd) == str(UNKNOWN):  # its relative paths land in a folder the guard cannot see
             self.unresolved.append(f"a path relative to the folder {name} runs in")
-        named = [c for c in _candidates(rest) + assigns if _pathlike(c)]
         hit = inside or _mark().search(code) or any(is_protected(resolve(c, cwd)) for c in named) or \
             (self.mentions and _CODE_INPUTS.search(code)) or ("DEVKIT_" in _unescape(code) and _SETTINGS_NAME.search(code)) \
             or _DEV_LINK_TEXT.search(code) or _dev_command_text().search(code)

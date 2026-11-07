@@ -21,6 +21,7 @@ sys.path.insert(0, str(ROOT / "tests"))
 
 from devkit import audit, core, guard  # noqa: E402
 import test_progress as tp  # noqa: E402  the real session and transcript (TranscriptCase)
+import test_branches as tb  # noqa: E402  the backup sandbox: a bare origin and the real audit trail
 
 
 def _git(repo, *args):
@@ -643,6 +644,158 @@ class DeveloperOnlyGrants(tp.TranscriptCase):
         files = sorted((Path(self.state.tmp.name) / "audit").glob("*.jsonl"))
         return [r for f in files for r in map(json.loads, f.read_text().splitlines())
                 if r["action"] == "guard.irreversible"]
+
+
+# ---- B2a and B2b (the security engineer's backup review, release-blocking). B2a: the embargo list and the backup
+# policy in a project's handoff note decide what devkit pushes, so no agent writes or removes them: the file tools are
+# judged by the note's text after the edit, and a shell write (sed -i, a redirect, cp, mv, any program) may not write
+# a note at all, since the guard cannot see what it changes. Only `dev branch embargo` and `dev backup policy` change
+# them. An embargo that leaves the note without its `git.embargo` lift record keeps holding. B2b (the tech lead's
+# decision): an agent's push of an embargoed branch, or of the commits it holds, is the developer-only action
+# embargo/<branch>, refused without the developer's typed `grant embargo <branch>`, and refused when the note cannot
+# be read.
+
+NOTE = """---
+status: active
+priority: normal
+embargo:
+  - branch: fix/hole
+    why: "discloses an open hole"
+    who: keymaker
+    when: 2026-11-06T10:00:00Z
+backup_policy:
+  - policy: off
+    why: "a public repository"
+    who: ana
+    when: 2026-11-06T10:00:00Z
+---
+# acme/widget
+
+## Current state
+Old text.
+"""
+
+
+def shq(p) -> str:
+    import shlex
+    return shlex.quote(str(p))
+
+
+class EmbargoCase(unittest.TestCase):
+    PID = "acme/widget"
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.root = Path(self.tmp.name).resolve()
+        self.repo = make_repo(self.root)
+        self.handoff = self.root / "Development" / ".handoff"
+        self.note = self.handoff / "projects" / "acme" / "widget.md"
+        self.note.parent.mkdir(parents=True)
+        self.note.write_text(NOTE)
+        cfg_audit = dict(json.loads(json.dumps(core.DEFAULTS.get("audit") or {})), level="all")
+        for p in (mock.patch.object(core, "HANDOFF", self.handoff),
+                  mock.patch.object(core, "NOTES", self.handoff / "projects"),
+                  mock.patch.object(guard, "current_project", return_value=self.PID),
+                  mock.patch.object(audit, "AUDIT", self.root / "audit"),
+                  mock.patch.object(audit, "policy_file", lambda: self.root / "no-policy.json"),
+                  mock.patch.dict(core.CFG, {"audit": cfg_audit}), mock.patch.dict(os.environ)):
+            p.start()
+            self.addCleanup(p.stop)
+        for k in ("DEVKIT_FROM_AGENT", "DEVKIT_SESSION", "DEVKIT_AGENT"):
+            os.environ.pop(k, None)
+
+    def check(self, tool, payload, cwd=None):
+        with settings():
+            v = guard.check(tool, payload, cwd or self.repo, "claude")
+        return v[1] if v else None
+
+    def sh(self, cmd, cwd=None):
+        return self.check("Bash", {"command": cmd}, cwd)
+
+
+class NoteKeysAreDevkits(EmbargoCase):
+    # B2a: the file tools keep every other change to the note; they may not write or remove the two keys
+    def edit(self, old, new, path=None):
+        return self.check("Edit", {"file_path": str(path or self.note), "old_string": old, "new_string": new})
+
+    def test_b2a_file_tools_may_not_write_or_remove_the_embargo_or_the_backup_policy(self):
+        self.assertIsNone(self.edit("Old text.", "New text."))  # baseline: the agent's own sections stay open
+        self.assertIsNone(self.check("Write", {"file_path": str(self.note), "content": NOTE.replace("Old", "New")}))
+        for old, new in (("  - branch: fix/hole\n", ""), ("embargo:", "embargoes:"), ("policy: off", "policy: on"),
+                         ("---\nstatus", "status"), ("backup_policy:\n", "backup_policy: []\n"),
+                         ("priority: normal\n", "priority: normal\nembargo:\n  - branch: x\n")):
+            with self.subTest(old=old):
+                self.assertIn("embargo list and the backup policy", self.edit(old, new) or "")
+        gone = NOTE.split("embargo:")[0] + "---\n# acme/widget\n"
+        self.assertIsNotNone(self.check("Write", {"file_path": str(self.note), "content": gone}))
+        edits = [{"old_string": "Old text.", "new_string": "New."},
+                 {"old_string": "policy: off", "new_string": "policy: on"}]
+        self.assertIsNotNone(self.check("MultiEdit", {"file_path": str(self.note), "edits": edits}))
+        fresh = self.handoff / "projects" / "acme" / "other.md"  # a new note may not arrive with them either
+        self.assertIsNotNone(self.check("Write", {"file_path": str(fresh), "content": NOTE}))
+        self.assertIsNotNone(self.check("Write", {"file_path": str(self.note)}))  # dev guard check --write: unknown
+        plan = self.handoff / "plans" / "acme" / "widget" / "p.md"
+        self.assertIsNone(self.check("Write", {"file_path": str(plan), "content": NOTE}))  # not a note
+
+    def test_b2a_apply_patch_is_judged_by_the_note_after_the_patch(self):
+        def patch(body):
+            return self.check("apply_patch", {"command": f"*** Begin Patch\n{body}\n*** End Patch"})
+        self.assertIsNone(patch(f"*** Update File: {self.note}\n@@\n ## Current state\n-Old text.\n+New text."))
+        self.assertIsNotNone(patch(f"*** Update File: {self.note}\n@@\n embargo:\n-  - branch: fix/hole\n"
+                                   f"+  - branch: fix/other"))
+        self.assertIsNotNone(patch(f"*** Update File: {self.note}\n@@\n-  - policy: off\n+  - policy: on"))
+        self.assertIsNotNone(patch(f"*** Delete File: {self.note}"))
+        self.assertIsNotNone(patch(f"*** Update File: {self.note}\n*** Move to: {self.root}/elsewhere.md\n@@\n"
+                                   f"-Old text.\n+New text."))
+        self.assertIsNotNone(patch(f"*** Update File: {self.note}\n@@\n-no such line\n+x"))  # does not apply: refused
+
+    def test_b2a_shell_writes_to_a_note_are_refused_whatever_writes_it(self):
+        n, h = shq(self.note), shq(self.handoff)
+        other = self.root / "other.md"
+        other.write_text("x")
+        for cmd in (f"sed -i '' '/^embargo:/,/^backup_policy:/d' {n}", f"echo x >> {n}", f"printf x > {n}",
+                    f"cp {shq(other)} {n}", f"mv {n} {shq(other)}", f"tee {n} < /dev/null",
+                    f"perl -pi -e 's/policy: off/policy: on/' {n}", f"cd {h} && sed -i '' 1d projects/acme/widget.md",
+                    f"f={n}; sed -i '' 1d \"$f\"", f"git -C {h} checkout -- projects/acme/widget.md",
+                    f"dev rm {n}", f"mv {h}/projects {shq(other)}.d",
+                    "python3 -c \"import os; open(os.path.join(os.path.expanduser('~'), 'Development', '.handoff', "
+                    "'projects', 'acme', 'widget.md'), 'w').write('')\"",
+                    "python3 -c \"from devkit import branches; branches.set_embargo('acme/widget', 'fix/hole', "
+                    "lift=True)\"", f"cd {h} && python3 -c \"open('projects/acme/widget.md', 'w')\"",
+                    f"cp {shq(other)} {h}/audit/ana@mac/2026-11.jsonl"):  # the lift records the backup reads
+            with self.subTest(cmd=cmd):
+                self.assertIsNotNone(self.sh(cmd))
+        for cmd in (f"cat {n}", f"grep -n embargo {n}", f"sed -n 1,12p {n}", "dev note set status=blocked",
+                    "dev handoff --log 'done; next: the release'", f"echo x > {h}/plans/acme/widget/p.md",
+                    f"cd {shq(self.handoff.parent)} && python3 -c \"open('notes.md', 'w')\""):  # holds it, not in it
+            with self.subTest(cmd=cmd):
+                self.assertIsNone(self.sh(cmd))
+
+
+@unittest.skipUnless(tb.HAS_GITLEAKS, "the backup's secret scan needs gitleaks")
+class TheBackupRemembersItsEmbargoes(tb.BackupCase):
+    # B2a: an embargo that left the note without `dev branch embargo --lift` (a hand edit, a bad merge, a checkout of
+    # an older note) keeps holding in the backup and the branch map until the developer lifts it
+    def test_b2a_an_embargo_gone_from_the_note_without_its_lift_record_keeps_holding(self):
+        self.ci(tb.CI_PR_AND_MAIN)
+        self.branch("fix/hole", 2 * tb.HOUR)
+        rc, out = self.dev("branch", "embargo", "fix/hole", "--why", "discloses an open hole")
+        self.assertEqual(rc, 0, out)
+        self.write_note("---\nstatus: active\n---\n# acme/widget\n")  # the record is gone, the lift never happened
+        held, why = tb.branches.read_embargoes(tb.PID)
+        self.assertEqual((sorted(held or {}), why), (["fix/hole"], ""))
+        self.assertIn("left the handoff note without", held["fix/hole"]["why"])
+        res = tb.backup.run(self.repo, ["fix/hole"])[0]
+        self.assertEqual((res["state"], res["reason"]), ("skipped", "embargoed"))
+        self.assertEqual(self.on_origin("fix/hole"), "")
+        row = {r["name"]: r for r in tb.branches.map(self.repo, prs=[])}["fix/hole"]
+        self.assertEqual(row["backup"]["state"], "embargoed")
+        rc, out = self.dev("branch", "embargo", "--lift", "fix/hole")  # the developer's lift releases it
+        self.assertEqual(rc, 0, out)
+        self.assertEqual(tb.branches.read_embargoes(tb.PID), ({}, ""))
+        self.assertEqual([r["detail"][:4] for r in self.records("git.embargo")], ["set:", "lift"])
+        self.assertEqual(tb.backup.run(self.repo, ["fix/hole"])[0]["state"], "pushed")
 
 
 if __name__ == "__main__":
