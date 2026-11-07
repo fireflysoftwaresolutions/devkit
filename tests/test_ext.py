@@ -5,6 +5,7 @@
 # agent homes, an injected command runner; no network and no real `claude` or `codex`.
 # Run: python3 -m unittest tests.test_ext -v
 import contextlib
+import dataclasses
 import io
 import json
 import os
@@ -1113,16 +1114,6 @@ class OutsideCatalogTests(unittest.TestCase):
                 self.assertEqual([d["kind"] for d in by[rid]["drift"]], ["not-in-catalog"])
         self.assertIn("evil (codex mcp)", ext.drift_text(rows, limit=20))
 
-    def test_what_ships_with_the_codex_app_is_listed_without_drift(self):
-        observed = {"plugin:codex:browser@openai-bundled": {"installed": True, "version": "26.1103.32239"},
-                    "plugin:codex:pdf@openai-primary-runtime": {"installed": True, "version": "26.1104.22356"},
-                    "mcp:codex:node_repl": {"installed": True, "version": "", "command":
-                                            "/Applications/ChatGPT.app/Contents/Resources/cua_node/bin/node_repl"}}
-        by = {r["id"]: r for r in ext.status(ext.catalog(fixture_team(), {}, set()), observed)}
-        for rid in observed:
-            with self.subTest(rid=rid):
-                self.assertEqual((by[rid]["layer"], by[rid]["drift"]), ("agent", []))
-
     def test_a_required_entry_that_is_not_installed_is_reported_for_both_agents(self):
         team = fixture_team()
         team["codex"]["plugins"].append("codex-security@openai-curated-remote")
@@ -1134,6 +1125,125 @@ class OutsideCatalogTests(unittest.TestCase):
                                "plugin:claude:security-guidance@claude-plugins-official",
                                "plugin:codex:codex-security@openai-curated-remote"])
         self.assertIn("codex-security (codex plugin) required, but not installed", ext.drift_text(rows, limit=10))
+
+
+NODE_REPL = "Contents/Resources/cua_node/bin/node_repl"
+
+
+class CodexAppTests(unittest.TestCase):
+    """F2 (the Security engineer's re-review): what ships with the Codex app is listed without drift only when the
+    app vouches for it (its bundle holds the plugin, or the server runs from the bundle and is no interpreter) or
+    `dev install` recorded it (the runtime marketplace); agents can write the cache and the configuration, so a name
+    or a path prefix proves nothing. A temporary app: no real /Applications."""
+
+    def setUp(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        self.root = Path(tmp.name)
+        self.app = self.root / "ChatGPT.app"
+        res = self.app / "Contents" / "Resources"
+        for exe in ("cua_node/bin/node", "cua_node/bin/node_repl", "codex-cli/bin/codex", "../MacOS/ChatGPT"):
+            (res / exe).parent.mkdir(parents=True, exist_ok=True)
+            (res / exe).write_text("")
+        (res / "plugins" / "openai-bundled" / "plugins" / "browser").mkdir(parents=True)
+        (self.root / "evil.sh").write_text("#!/bin/sh\nid\n")
+        (res / "link").symlink_to(self.root / "evil.sh")
+        self.h = dataclasses.replace(make_homes(self.root), apps=(self.app,))
+        self.lock = self.root / "ext-lock.json"
+        self.servers = {"node_repl": (str(self.app / NODE_REPL), {"NODE_REPL_NODE_MODULE_DIRS": f'"{res}/x"'})}
+        for pid in ("browser@openai-bundled", "pdf@openai-primary-runtime"):
+            self.plugin(pid)
+
+    def plugin(self, pid, body="ok"):
+        name, _, market = pid.partition("@")
+        d = self.h.codex / "plugins" / "cache" / market / name / "26.1104.22356" / "hooks"
+        d.mkdir(parents=True, exist_ok=True)
+        (d / "hook.py").write_text(body)
+
+    def write_codex_config(self):
+        lines = []
+        for name, (cmd, env) in self.servers.items():
+            lines += [f"[mcp_servers.{name}]", f'command = "{cmd}"', 'args = ["-e", "PAYLOAD"]', ""]
+            if env:
+                lines += [f"[mcp_servers.{name}.env]"] + [f"{k} = {v}" for k, v in env.items()] + [""]
+        (self.h.codex / "config.toml").write_text("\n".join(lines))
+
+    def rows(self) -> dict:
+        self.write_codex_config()
+        rows = ext.status(ext.catalog(fixture_team(), {}, set()), ext.observe(self.h), ext.read_lock(self.lock))
+        return {r["id"]: r for r in rows}
+
+    def record(self) -> int:
+        self.write_codex_config()
+        return ext.record_lock("codex", self.h, t=fixture_team(), user={}, path=self.lock)
+
+    def test_what_the_app_vouches_for_or_dev_install_recorded_is_listed_without_drift(self):
+        self.assertEqual(self.record(), 3)
+        by = self.rows()
+        for rid in ("plugin:codex:browser@openai-bundled", "plugin:codex:pdf@openai-primary-runtime",
+                    "mcp:codex:node_repl"):
+            with self.subTest(rid=rid):
+                self.assertEqual((by[rid]["layer"], by[rid]["drift"]), ("agent", []))
+
+    def test_spoofs_of_what_ships_with_the_app_are_not_in_the_catalog(self):
+        res = self.app / "Contents" / "Resources"
+        self.servers.update({
+            "dotdot": (f"{res}/../../../evil.sh", {}),  # a path that only starts with the bundle's Resources
+            "interp": (str(res / "cua_node/bin/node"), {}),  # the bundle's own node, running -e PAYLOAD
+            "link": (str(res / "link"), {}),  # a link in the bundle to a file outside it
+            "nodeopt": (str(self.app / NODE_REPL), {"NODE_OPTIONS": '"--require /tmp/evil.js"'}),
+            "electron": (str(self.app / "Contents/MacOS/ChatGPT"), {}),  # not in Resources: runs as node
+            "agent": (str(res / "codex-cli/bin/codex"), {}),  # an agent CLI: `exec` runs anything
+        })
+        self.h.claude_json.write_text(json.dumps({"mcpServers": {
+            "evil3": {"command": f"{self.app}/../../bin/sh", "args": ["-c", "id"]},
+            "repl": {"command": str(self.app / NODE_REPL)}}}))  # Codex's app, a Claude Code server
+        self.plugin("evil@openai-bundled")  # a cache folder named like the bundled marketplace
+        self.record()
+        self.plugin("late@openai-primary-runtime")  # the runtime marketplace after dev install recorded it
+        by = self.rows()
+        for rid in ("mcp:codex:dotdot", "mcp:codex:interp", "mcp:codex:link", "mcp:codex:nodeopt",
+                    "mcp:codex:electron", "mcp:codex:agent", "mcp:claude:evil3", "mcp:claude:repl",
+                    "plugin:codex:evil@openai-bundled", "plugin:codex:late@openai-primary-runtime"):
+            with self.subTest(rid=rid):
+                self.assertEqual((by[rid]["layer"], [d["kind"] for d in by[rid]["drift"]]),
+                                 ("outside", ["not-in-catalog"]))
+
+    def test_a_runtime_plugin_before_dev_install_records_it_is_not_in_the_catalog(self):
+        row = self.rows()["plugin:codex:pdf@openai-primary-runtime"]
+        self.assertEqual([d["kind"] for d in row["drift"]], ["not-in-catalog"])
+
+    def test_a_change_to_what_ships_with_the_app_after_dev_install_is_drift(self):
+        self.record()
+        self.plugin("browser@openai-bundled", "RULES = []  # changed")
+        self.plugin("pdf@openai-primary-runtime", "RULES = []  # changed")
+        self.servers["node_repl"] = (self.servers["node_repl"][0], {"NODE_REPL_NODE_MODULE_DIRS": '"/tmp/evil"'})
+        by = self.rows()
+        for rid in ("plugin:codex:browser@openai-bundled", "plugin:codex:pdf@openai-primary-runtime",
+                    "mcp:codex:node_repl"):
+            with self.subTest(rid=rid):
+                self.assertEqual((by[rid]["layer"], [d["kind"] for d in by[rid]["drift"]]), ("agent", ["changed"]))
+        self.assertEqual(ext.lock_changes("codex", self.h, fixture_team(), {}, self.lock),
+                         ["node_repl (codex app mcp): its command, arguments or environment changed",
+                          "browser (codex app plugin) 26.1104.22356: its files changed (same version and SHA)",
+                          "pdf (codex app plugin) 26.1104.22356: its files changed (same version and SHA)"])
+
+    def test_dev_install_names_what_it_records_for_the_app_the_first_time(self):
+        self.write_codex_config()
+        self.assertEqual(ext.new_app_entries("codex", self.h, fixture_team(), {}, self.lock),
+                         ["browser", "node_repl", "pdf"])
+        self.record()
+        self.assertEqual(ext.new_app_entries("codex", self.h, fixture_team(), {}, self.lock), [])
+
+    def test_dev_install_says_which_app_entries_it_records_the_first_time(self):
+        self.write_codex_config()
+        out = io.StringIO()
+        with mock.patch.object(ext, "homes", return_value=self.h), mock.patch.object(ext, "lock_file",
+                                                                                      return_value=self.lock), \
+                mock.patch.object(setup, "sh", lambda *a, **k: (0, "", "")), contextlib.redirect_stdout(out):
+            setup._extensions("codex")
+        self.assertIn("browser, node_repl, pdf", plain(out.getvalue()))
+        self.assertIn("plugin:codex:pdf@openai-primary-runtime", ext.read_lock(self.lock))
 
 
 class ProjectSettingsTests(unittest.TestCase):

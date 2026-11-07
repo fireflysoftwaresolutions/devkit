@@ -71,6 +71,7 @@ class Homes:
     agents_skills: Path
     skills_share: Path
     claude_json: Path
+    apps: tuple = (Path("/Applications/ChatGPT.app"), Path("/Applications/Codex.app"))  # the Codex app (F2)
 
 
 def homes() -> Homes:
@@ -352,18 +353,24 @@ def observe(h: Homes = None) -> dict:
                     continue
                 pid = f"{plug.name}@{market.name}"
                 flag = (toml.get(f'plugins."{pid}"') or {}).get("enabled")
-                out[plugin_id("codex", pid)] = {"installed": True, "version": versions[-1], "sha": "",
-                                                "path": str(plug / versions[-1]),
-                                                "enabled": None if flag is None else flag == "true"}
+                o = {"installed": True, "version": versions[-1], "sha": "", "path": str(plug / versions[-1]),
+                     "enabled": None if flag is None else flag == "true"}
+                if market.name == RUNTIME or (market.name == BUNDLED and _bundled(h.apps, plug.name)):
+                    o["app"] = "runtime" if market.name == RUNTIME else "bundle"  # F2
+                out[plugin_id("codex", pid)] = o
     for sec, kv in toml.items():
         if sec.startswith("mcp_servers.") and sec.count(".") == 1:
             try:
                 args = json.loads(kv.get("args", "[]"))
             except ValueError:
                 args = []
-            out[f"mcp:codex:{sec.split('.', 1)[1]}"] = {"installed": True, "version": _args_version(args),
-                                                       "url": kv.get("url", "").strip('"'),
-                                                       "command": kv.get("command", "").strip('"')}
+            cmd = kv.get("command", "").strip('"')
+            o = {"installed": True, "version": _args_version(args), "url": kv.get("url", "").strip('"'),
+                 "command": cmd, "spec": _toml_table_digest(toml, sec)}
+            env = set(toml.get(f"{sec}.env") or {}) | set(re.findall(r"([A-Za-z_]\w*)\s*=", kv.get("env", "")))
+            if _app_server(cmd, env, h.apps):
+                o["app"] = "bundle"  # F2
+            out[f"mcp:codex:{sec.split('.', 1)[1]}"] = o
     skill_homes = (("claude", h.claude / "skills"), ("codex", h.agents_skills))
     if h.skills_share.is_dir():
         for d in sorted(p for p in h.skills_share.iterdir() if p.is_dir()):
@@ -445,19 +452,61 @@ def _row(e: Ext, layer: str = None) -> dict:
     return r
 
 
-# What ships with the agent's own app (H1): Codex's bundled and runtime marketplaces, and MCP servers the app runs
-# from its own bundle. They are listed (layer `agent`) but are not devkit's to manage, so they are never drift.
-AGENT_MARKETPLACES = {"codex": frozenset({"openai-bundled", "openai-primary-runtime"})}
-AGENT_APP_DIRS = ("/Applications/ChatGPT.app/", "/Applications/Codex.app/")
+# What ships with the Codex app (H1, F2), listed with layer `agent`. Agents can write Codex's plugin cache and its
+# config.toml, so a folder name or a path prefix proves nothing; observe() marks an entry `app` only when the app
+# vouches for it: `bundle` for a plugin of its bundled marketplace that the app bundle holds, and for an MCP server
+# that runs from the bundle's Resources and is no interpreter; `runtime` for a plugin of its runtime marketplace, which
+# the app downloads, so only `dev install`'s record of it vouches for it. `dev install` records all of them (version,
+# file digest; an MCP server's whole table), so a change after it is drift. Claude Code ships none.
+BUNDLED, RUNTIME = "openai-bundled", "openai-primary-runtime"
+# programs that run whatever code their arguments, input or environment name: never the app's own server
+APP_INTERPRETERS = re.compile(r"^(?:node(?:js)?[\d.]*|bun|deno|python[\d.]*w?|ruby|perl[\d.]*|php|lua|osascript|env|"
+                              r"corepack|npx|npm|pnpm|yarn|uvx?|codex|claude|(?:ba|z|da|k|c|tc|fi)?sh)$", re.I)
 OUTSIDE_DETAIL = {"plugin": "installed, but not in devkit's catalog: dev ext add it, or remove it",
                   "mcp": "an MCP server devkit does not manage: dev ext add it, or remove it",
                   "skill": "a skill folder devkit did not put there: dev ext add it, or remove the folder"}
 
 
-def _agent_builtin(kind: str, agent: str, name: str, o: dict) -> bool:
-    if kind == "plugin":
-        return name.partition("@")[2] in AGENT_MARKETPLACES.get(agent, ())
-    return kind == "mcp" and str(o.get("command") or "").startswith(AGENT_APP_DIRS)
+def _bundled(apps, name: str) -> bool:
+    """The app bundle itself holds the bundled marketplace's plugin `name` (F2)."""
+    return name not in ("", ".", "..") and "/" not in name and any(
+        (Path(app) / "Contents" / "Resources" / "plugins" / BUNDLED / "plugins" / name).is_dir() for app in apps)
+
+
+def _app_server(cmd: str, env_keys, apps) -> bool:
+    """An MCP server the app runs from its own bundle (F2): the command, resolved (links, `..`), is a file in the
+    bundle's Resources (Contents/MacOS holds the Electron binary, which runs as node); it is no interpreter, agent or
+    package runner, whose arguments say what runs; and its environment loads no other code."""
+    if not os.path.isabs(cmd):
+        return False
+    real = os.path.realpath(cmd)
+    if any(APP_INTERPRETERS.match(os.path.basename(p)) for p in (cmd, real)):
+        return False
+    if any(CODE_ENV.match(k) or k.upper() == "ELECTRON_RUN_AS_NODE" for k in env_keys):
+        return False
+    return os.path.isfile(real) and any(
+        real.startswith(os.path.realpath(Path(app) / "Contents" / "Resources") + os.sep) for app in apps)
+
+
+def _toml_table_digest(toml: dict, sec: str) -> str:
+    """sha256 of a TOML table and its sub-tables (an MCP server: command, args, env, tools…), raw values."""
+    parts = sorted((s, sorted(kv.items())) for s, kv in toml.items() if s == sec or s.startswith(sec + "."))
+    return "sha256:" + hashlib.sha256(json.dumps(parts).encode()).hexdigest()
+
+
+def _app_drift(o: dict, lk: dict) -> list:
+    """What changed in an entry that ships with the app since `dev install` recorded it (none before it did)."""
+    if not lk:
+        return []
+    if "spec" in o:
+        return [] if lk.get("spec") == o["spec"] else [
+            {"kind": "changed", "detail": "its command, arguments or environment changed outside devkit"}]
+    if lk.get("version") != o.get("version"):
+        return [{"kind": "changed", "detail": f"{_vs(lk)} → {_vs(o)} outside devkit", "from": _vs(lk), "to": _vs(o)}]
+    if o.get("path") and content_digest(o["path"]) != lk.get("digest"):
+        return [{"kind": "changed", "detail": f"the files of {_vs(o)} changed outside devkit (same version)",
+                 "from": _vs(lk), "to": _vs(o)}]
+    return []
 
 
 def _project_value(v) -> tuple:
@@ -545,9 +594,10 @@ def status(cat: list, observed: dict, lock: dict = None, project: dict = None, r
         kind, agent, name = rid.split(":", 2)
         if kind not in OUTSIDE_DETAIL or (kind == "skill" and not o.get("unmanaged")):
             continue  # a managed skill of a group this Mac does not install: the skills step's business
-        if _agent_builtin(kind, agent, name, o):
+        app, lk = (o.get("app") if agent == "codex" else ""), lock.get(rid)
+        if app == "bundle" or (app == "runtime" and lk):  # F2: what the app or dev install's record vouches for
             rows.append(_extra_row(rid, "agent", f"ships with the {agent} app", STATE_WORD[kind], o,
-                                   o.get("enabled") is not False, []))
+                                   o.get("enabled") is not False, _app_drift(o, lk)))
         else:
             rows.append(_extra_row(rid, "outside", "installed outside devkit", STATE_WORD[kind], o,
                                    o.get("enabled") is not False,
@@ -706,9 +756,9 @@ def drift_seen_file() -> Path:
 
 def record_lock(agent: str, h: Homes = None, by: str = "dev install", t: dict = None, user: dict = None,
                 path: Path = None, only: set = None) -> int:
-    """`dev install` and `dev ext update --apply`: record what this agent's vendor marketplace plugins are now (or
-    only the ids in `only`): version, SHA and a digest of their files (M3), so a later change outside devkit shows as
-    drift. -> how many entries were recorded."""
+    """`dev install` and `dev ext update --apply`: record what this agent's vendor marketplace plugins, and what ships
+    with its app (F2), are now (or only the ids in `only`): version, SHA and a digest of their files (M3); for an MCP
+    server, a digest of its table. A later change outside devkit then shows as drift. -> how many were recorded."""
     now = int(time.time())
     rows = _lockable(agent, h, t, user, only)
 
@@ -716,17 +766,24 @@ def record_lock(agent: str, h: Homes = None, by: str = "dev install", t: dict = 
         for eid, o in rows.items():
             doc[eid] = {"pin": "observed", "version": o.get("version", ""), "sha": o.get("sha", ""),
                         "digest": content_digest(o["path"]) if o.get("path") else "", "at": now, "by": by}
+            if "spec" in o:
+                doc[eid]["spec"] = o["spec"]
     _edit_lock(put, path)
     return len(rows)
 
 
 def _lockable(agent: str, h: Homes = None, t: dict = None, user: dict = None, only: set = None) -> dict:
-    """{id: observed} of this agent's installed vendor marketplace plugins (or only the ids in `only`)."""
+    """{id: observed} of this agent's installed vendor marketplace plugins and of what ships with its app (observe()
+    marks it `app`), outside the catalog (or only the ids in `only`)."""
     t = team() if t is None else t
     obs = observe(h)
-    return {e.id: obs[e.id] for e in catalog(t, user_layer() if user is None else user, None)
-            if e.agent == agent and e.pin_kind == "observed" and (obs.get(e.id) or {}).get("installed")
-            and (only is None or e.id in only)}
+    cat = catalog(t, user_layer() if user is None else user, None)
+    out = {e.id: obs[e.id] for e in cat if e.agent == agent and e.pin_kind == "observed"
+           and (obs.get(e.id) or {}).get("installed")}
+    listed = {e.id for e in cat}
+    out.update({rid: o for rid, o in obs.items() if o.get("app") and o.get("installed") and rid not in listed
+                and rid.split(":")[1:2] == [agent]})
+    return {k: v for k, v in out.items() if only is None or k in only}
 
 
 def lock_changes(agent: str, h: Homes = None, t: dict = None, user: dict = None, path: Path = None) -> list:
@@ -737,12 +794,24 @@ def lock_changes(agent: str, h: Homes = None, t: dict = None, user: dict = None,
         lk = lock.get(eid)
         if not lk:
             continue
-        name = eid.split(":", 2)[2].partition("@")[0]
-        if (lk.get("version"), lk.get("sha")) != (o.get("version", ""), o.get("sha", "")):
-            out.append(f"{name} ({agent} plugin) {_vs(lk)} → {_vs(o)}")
+        kind, _, rest = eid.split(":", 2)
+        what = f"{rest.partition('@')[0]} ({agent}{' app' if o.get('app') else ''} {kind})"
+        if "spec" in o:
+            if lk.get("spec") != o["spec"]:
+                out.append(f"{what}: its command, arguments or environment changed")
+        elif (lk.get("version"), lk.get("sha")) != (o.get("version", ""), o.get("sha", "")):
+            out.append(f"{what} {_vs(lk)} → {_vs(o)}")
         elif lk.get("digest") and o.get("path") and content_digest(o["path"]) != lk["digest"]:
-            out.append(f"{name} ({agent} plugin) {_vs(o)}: its files changed (same version and SHA)")
+            out.append(f"{what} {_vs(o)}: its files changed (same version and SHA)")
     return out
+
+
+def new_app_entries(agent: str, h: Homes = None, t: dict = None, user: dict = None, path: Path = None) -> list:
+    """F2: the names of what ships with the agent's app that record_lock() would record for the first time, so
+    `dev install` names them: from then on its record is what vouches for the runtime marketplace's plugins."""
+    lock = read_lock(path)
+    return sorted(rid.split(":", 2)[2].partition("@")[0] for rid, o in _lockable(agent, h, t, user).items()
+                  if o.get("app") and rid not in lock)
 
 
 def report_drift(rows: list, audit=None, seen: Path = None) -> list:

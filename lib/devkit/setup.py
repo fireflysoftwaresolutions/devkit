@@ -1452,6 +1452,9 @@ def _extensions(agent: str):
             done(msg) if ok else fail(msg)
         for line in ext.lock_changes(agent):  # L3: name what is accepted before it is recorded
             note(f"accepting a change made outside devkit: {line}")
+        new = ext.new_app_entries(agent)  # F2: from now on this record vouches for them
+        if new:
+            note(f"recording what ships with the {agent} app for the first time: {', '.join(new)}")
         n = ext.record_lock(agent)
         if n:
             done(f"{n} vendor plugin version(s) recorded: a change outside devkit now shows as drift (dev ext ls)")
