@@ -15,13 +15,15 @@ import os
 import re
 import subprocess
 import sys
+import threading
+import time
 import unittest
 from pathlib import Path
 from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "lib"))
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from devkit import audit, core, hooks, progress as pg  # noqa: E402
+from devkit import audit, core, hooks, progress as pg, state  # noqa: E402
 from test_progress import TempState, launch  # noqa: E402
 
 SETTINGS = Path(__file__).resolve().parents[1] / "config" / "claude" / "settings.json"
@@ -30,6 +32,11 @@ T0 = 1_800_000_000.0
 
 def m(minutes):
     return T0 + minutes * 60
+
+
+def iso(at):
+    # a transcript record's time as Claude Code writes it: UTC, milliseconds, "Z"
+    return time.strftime("%Y-%m-%dT%H:%M:%S", time.gmtime(at)) + f".{round(at * 1000) % 1000:03d}Z"
 
 
 class EvidenceCase(unittest.TestCase):
@@ -614,10 +621,29 @@ class QuestionAuditTests(EvidenceCase):
         tid = f"toolu_q{self.n:03d}"
         result = {"questions": qs, "answers": answers, **({"annotations": notes} if notes is not None else {})}
         self.append({"type": "user", "uuid": f"u-{self.n}", "isSidechain": False, "toolUseResult": result,
+                     "timestamp": iso(at),
                      "message": {"role": "user", "content": [{"type": "tool_result", "tool_use_id": tid}]}})
         return pg.on_question("claude", {"session_id": "s1", "tool_name": "AskUserQuestion", "tool_use_id": tid,
                                          "tool_input": {"questions": qs, **(inputs or {})}, "tool_response": result,
                                          "transcript_path": str(self.transcript)}, now=at)
+
+    def member_answers(self, q, label, at, aid="agent-x"):
+        # a crew member asks q with the question tool and the developer answers: Claude Code keeps the result in the
+        # member's own transcript (<main transcript without .jsonl>/subagents/agent-<id>.jsonl), and its hook event
+        # names the member (agent_id) and the main session's transcript
+        self.n += 1
+        tid = f"toolu_m{self.n:03d}"
+        result = {"questions": [q], "answers": {q["question"]: label}}
+        own = self.transcript.with_suffix("") / "subagents" / f"agent-{aid}.jsonl"
+        own.parent.mkdir(parents=True, exist_ok=True)
+        with own.open("a") as fh:
+            fh.write(json.dumps({"type": "user", "uuid": f"u-{self.n}", "isSidechain": True, "agentId": aid,
+                                 "toolUseResult": result, "timestamp": iso(at),
+                                 "message": {"role": "user", "content": [{"type": "tool_result",
+                                                                          "tool_use_id": tid}]}}) + "\n")
+        return pg.on_question("claude", {"session_id": "s1", "agent_id": aid, "tool_name": "AskUserQuestion",
+                                         "tool_use_id": tid, "tool_input": {"questions": [q]},
+                                         "tool_response": result, "transcript_path": str(self.transcript)}, now=at)
 
     def click(self, q, at, option=0):
         # the developer clicks option `option` of the one question q, sent alone
@@ -687,39 +713,43 @@ class QuestionAuditTests(EvidenceCase):
         self.assertIsNone(grant("release", "v26.11.6", now=m(5)))
         self.assertEqual([r["ref"]["id"] for r in audit_records("crew.grant-refused")], ["D3"])
 
+    # several release decisions, each on its own tag (v26.11.4, v26.11.5, …): an answer that names another one's
+    # target voids that one too (P16), and these tests count one refusal per form
+    def releases(self, n):
+        for i in range(n):
+            self.release(at=1 + i / 10, target=f"v26.11.{4 + i}")
+
     # acceptance test 5: the offered labels are exactly devkit's, with no description beside them
     def test_offered_labels_that_are_not_exactly_devkits_open_nothing(self):
-        yes, no = "A: yes (release v26.11.4)", "B: no"
-        calls = ([yes], [yes, no, "C: wait for Monday"], [yes, "B: no (Recommended)"], [yes, no, no],
-                 [yes + " (Recommended)", "B: no"])
-        for i, labels in enumerate(calls):
-            self.release(at=1 + i / 10)
-        for i, labels in enumerate(calls):
-            q = self.printed(f"D{i + 1}")
+        def calls(yes, no="B: no"):
+            return ([yes], [yes, no, "C: wait for Monday"], [yes, "B: no (Recommended)"], [yes, no, no],
+                    [yes + " (Recommended)", no])
+        n = len(calls(""))
+        self.releases(n)
+        for i in range(n):
+            q, labels = self.printed(f"D{i + 1}"), calls(f"A: yes (release v26.11.{4 + i})")[i]
             descriptions = ["", "Holds it until Monday"] if i == 4 else None
             self.answer(q, labels[0], m(2), labels=labels, descriptions=descriptions)
         self.assertEqual(self.human(), [])
-        self.assertIsNone(self.opens())
-        self.assertEqual(len(self.refused()), len(calls))
+        self.assertEqual([self.opens(f"v26.11.{4 + i}") for i in range(n)], [None] * n)
+        self.assertEqual(len(self.refused()), n)
 
     # the Code reviewer's finding 1 (probe N1): Claude Code 2.1.319 renders an option's `preview` when the developer
     # focuses it, so a preview can say "hold" beside the label that releases
     def test_a_preview_beside_a_label_opens_nothing(self):
-        for i in range(2):
-            self.release(at=1 + i / 10)
+        self.releases(2)
         for i in range(2):  # on the performing option, then on the other one
             q = self.printed(f"D{i + 1}")
-            q["options"][i]["preview"] = "Holds v26.11.4 until Monday; nothing is published."
+            q["options"][i]["preview"] = "Holds the tag until Monday; nothing is published."
             self.click(q, m(2))
         self.assertEqual(self.human(), [])
-        self.assertIsNone(self.opens())
+        self.assertEqual([self.opens("v26.11.4"), self.opens("v26.11.5")], [None, None])
         self.assertEqual(self.refused(), ["a question tool answer: an option carries a field other than its label"] * 2)
 
     # finding 1: an option is its label and an empty description, nothing else
     def test_an_option_field_other_than_the_label_opens_nothing(self):
         extras = ({"value": "hold"}, {"notes": "A means we hold it until Monday."}, {"preview": ""})
-        for i in range(len(extras)):
-            self.release(at=1 + i / 10)
+        self.releases(len(extras))
         for i, extra in enumerate(extras):
             q = self.printed(f"D{i + 1}")
             q["options"][1].update(extra)
@@ -731,8 +761,7 @@ class QuestionAuditTests(EvidenceCase):
     # finding 2: the header is the decision's id or empty; "Hold it?" above a release question opens nothing
     def test_a_header_other_than_the_decision_id_opens_nothing(self):
         headers = ("Hold it?", "Release later", "d{n}", "D{n} hold")  # {n}: the decision's own number
-        for i in range(len(headers) + 1):
-            self.release(at=1 + i / 10)
+        self.releases(len(headers) + 1)
         for i, header in enumerate(headers + ("",)):
             q = self.printed(f"D{i + 1}")
             q["header"] = header.format(n=i + 1)
@@ -744,8 +773,7 @@ class QuestionAuditTests(EvidenceCase):
     def test_a_question_field_beyond_devkits_opens_nothing(self):
         extras = ({"description": "Holds v26.11.4 until Monday."}, {"preview": "Nothing is published."},
                   {"notes": "A means hold."}, {"multiSelect": 0})
-        for i in range(len(extras)):
-            self.release(at=1 + i / 10)
+        self.releases(len(extras))
         for i, extra in enumerate(extras):
             q = self.printed(f"D{i + 1}")
             q.update(extra)
@@ -945,13 +973,13 @@ class QuestionAuditTests(EvidenceCase):
     # the Code reviewer's finding 1 on the exact call (P10, P11, P13): the developer clicked devkit's "yes" for the
     # release, then said no in a form devkit refuses for an irreversible decision. The tech lead's decision: their
     # latest answer counts, so the refused one voids the yes, and recording "A" opens nothing until they answer again
-    def assert_asked_again(self):
+    def assert_asked_again(self, voids=("D1",)):
         with self.assertRaises(pg.StepError) as e:
             pg.crew_decide("D1", "A", now=m(3))
         self.assertIn("stays pending", str(e.exception))
         self.assertIs(self.decision("D1")["verified"], False)
         self.assertIsNone(self.opens())
-        self.assertEqual(self.voids(), ["D1"])
+        self.assertEqual(self.voids(), list(voids))
 
     def test_a_reworded_no_after_devkits_yes_voids_the_yes(self):
         self.release()
@@ -998,6 +1026,92 @@ class QuestionAuditTests(EvidenceCase):
         self.send([q], {q["question"]: "No, wait until Monday"}, m(4))
         self.assertIn("1 decision waits for you (D1)",
                       pg.on_prompt("claude", {"session_id": "s1", "prompt": "so?"}, now=m(60)) or "")
+
+    # the Code reviewer's P16, decided fail closed: a "no" to a question that names the release but not D1 (no
+    # "D1 ·", no header) still ends the yes, and the void is kept
+    def test_a_no_to_a_question_naming_the_target_without_its_id_ends_the_yes(self):
+        self.release()
+        q = self.printed("D1")
+        self.click(q, m(2))
+        self.answer(dict(q, question="Do we still release v26.11.4 today?", header="Release"), "No", m(2.5),
+                    labels=["Yes", "No"])
+        self.assert_asked_again()
+
+    # P17: the same rule for an answer in a crew member's call, which is never evidence itself. Only a member's answer
+    # after the yes ends it, and devkit's exact yes after both counts again
+    def test_a_no_in_a_members_call_ends_only_the_yes_before_it(self):
+        self.release()
+        q = self.printed("D1")
+        self.member_answers(q, q["options"][1]["label"], m(1.5))
+        self.click(q, m(2))
+        self.member_answers(q, q["options"][1]["label"], m(2.5))
+        self.assert_asked_again(voids=["D1", "D1"])
+        self.click(q, m(3.2))
+        self.assertTrue(pg.crew_decide("D1", "A", now=m(3.5))["verified"])
+        self.assertEqual(self.opens()["source"], "decision")
+
+    # the Code reviewer's H2: the hook writes the void under the session's lock and drops the event when the lock
+    # stays busy (state.HOOK_WAIT, hooks.py), so the void is lost. The tech lead's decision: the transcript is the
+    # authority on the latest word, so the later answer there still ends the yes. `deliver` sends the "no" while
+    # another thread holds the session's real lock, and the hook drops what the lock refuses
+    def lose_the_no(self, deliver):
+        self.release()
+        q = self.printed("D1")
+        self.click(q, m(2))
+        held, free = threading.Event(), threading.Event()
+
+        def holder():
+            with state.hold(pg.session_path("claude", "s1")):
+                held.set()
+                free.wait(10)
+        t = threading.Thread(target=holder)
+        t.start()
+        self.assertTrue(held.wait(10))
+        try:
+            with mock.patch.object(state, "WAIT", 0.2):
+                try:
+                    deliver(q)
+                except state.StateBusy:
+                    pass  # what the hook does with it: log and drop
+        finally:
+            free.set()
+            t.join()
+        self.assertEqual(self.voids(), [])  # nothing of the "no" reached the session record
+        return q
+
+    def assert_still_closed(self):
+        with self.assertRaises(pg.StepError) as e:
+            pg.crew_decide("D1", "A", now=m(3))
+        self.assertIn("stays pending", str(e.exception))
+        self.assertIs(self.decision("D1")["verified"], False)
+        self.assertIsNone(self.opens())
+
+    def test_a_no_lost_to_a_busy_session_lock_still_ends_the_yes(self):
+        self.lose_the_no(lambda q: self.send([q], {q["question"]: "No, wait until Monday"}, m(2.5)))
+        self.assert_still_closed()
+
+    def test_a_no_naming_the_target_lost_to_a_busy_lock_still_ends_the_yes(self):
+        self.lose_the_no(lambda q: self.answer(dict(q, question="Do we still release v26.11.4 today?",
+                                                    header="Release"), "No", m(2.5), labels=["Yes", "No"]))
+        self.assert_still_closed()
+
+    def test_a_members_no_lost_to_a_busy_lock_still_ends_the_yes(self):
+        self.lose_the_no(lambda q: self.member_answers(q, q["options"][1]["label"], m(2.5)))
+        self.assert_still_closed()
+
+    # the same for a typed `approve D1: …` line: their prompt is their latest word on D1 too
+    def test_an_approve_line_lost_to_a_busy_lock_still_ends_the_yes(self):
+        self.lose_the_no(lambda q: self.typed("approve D1: B: no", m(2.5)))
+        self.assert_still_closed()
+
+    def test_devkits_yes_after_a_no_lost_to_a_busy_lock_counts_again(self):
+        q = self.lose_the_no(lambda q: self.send([q], {q["question"]: "No, wait until Monday"}, m(2.5)))
+        self.assert_still_closed()
+        self.click(q, m(3.2))
+        d = pg.crew_decide("D1", "A", now=m(3.5))
+        self.assertTrue(d["verified"])
+        self.assertEqual(d["evidence"]["ts"], m(3.2))
+        self.assertEqual(self.opens()["source"], "decision")
 
     # the Code reviewer's finding 2: an audit record keeps a decision's labels in 300 characters, so dev crew ask
     # refuses options devkit could not keep whole, and says how long each may be

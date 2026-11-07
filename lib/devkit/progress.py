@@ -2308,12 +2308,15 @@ def on_question(agent: str, data: dict, now: float | None = None) -> list:
     developer's own text. An irreversible one counts only on devkit's own words (_not_devkits_words), and its
     question names its target; an answer to it that is refused, in any form, is kept as a void entry (`void`, no
     text of the answer), the developer's latest word on it, so it ends their earlier answers (_decision_evidence).
+    So is an answer to any other question of the call that asks it or names its target (_speaks_of, the Code
+    reviewer's P16), and to a crew member's call (`agent_id`, P17), which is never evidence and shows nothing.
     Each entry keeps how it matched (`match`) and whether the question was devkit's (`asked`). A call that asks one
     decision twice counts for neither question. Each refusal is audited as crew.evidence-refused, with its reason and
     never the text. -> the entries recorded."""
     now = now or time.time()
     sid = data.get("session_id") or ""
-    if data.get("agent_id") or data.get("tool_name") not in QUESTION_TOOLS or not sid:
+    member = bool(data.get("agent_id"))
+    if data.get("tool_name") not in QUESTION_TOOLS or not sid:
         return []
     sess = state.read(session_path(agent, sid))
     run = load_run(agent, sid)
@@ -2333,7 +2336,7 @@ def on_question(agent: str, data: dict, now: float | None = None) -> list:
     pending = {d["id"] for d in pending_decisions(run)}
     ids = [asked_decision(q) for q in qs]
     shown, new, refused, voided = set(), [], {}, set()
-    for q, did in zip(qs, ids):
+    for q, did in ([] if member else zip(qs, ids)):
         qt = str(q.get("question") or "")
         shown.update(x for x in [f"D{n}" for n in _DECISION_REF.findall(qt)] + [did] if x in pending)
         d, label = _decision(run, did) if did else None, answers.get(qt)
@@ -2359,6 +2362,18 @@ def on_question(agent: str, data: dict, now: float | None = None) -> list:
                           harness_transcript(agent, sid), run, now, answer=(opt or label.strip())[:300],
                           free=opt is None, match=match, asked=asked, offered=_offered(label, offered),
                           question=qt[:800], label=label[:300], session=sid))
+    taken = {e["covers"] for e in new if not e.get("void")}
+    notes = resp.get("annotations") if isinstance(resp.get("annotations"), dict) else {}
+    for d in pending_decisions(run):  # P16, P17: the developer's latest word on it too, fail closed
+        if not d.get("irreversible") or d["id"] in voided | taken or \
+                not any(_speaks_of(d, q, answers, notes) for q in qs):
+            continue
+        what = f"asks {d['id']} or names {d.get('target') or 'its target'}"
+        why = f"a crew member's question {what}" if member else f"a question {what} outside devkit's exact call"
+        refused.setdefault((d["id"], why), True)
+        voided.add(d["id"])
+        new.append(_entry(agent, "E1", d["id"], f"[refused: {why}]", data.get("tool_use_id"),
+                          harness_transcript(agent, sid), run, now, void=True, session=sid))
     if shown:
         _mark_shown(agent, sid, shown, now)
     for did, why in refused:
@@ -2424,12 +2439,34 @@ def _text_of(msg) -> str:
     return "\n".join(b.get("text") or "" for b in c or [] if isinstance(b, dict) and b.get("type") == "text")
 
 
+def _own_record(r, e: dict) -> bool:
+    """Is transcript record `r` evidence entry `e`'s own, the developer's act, outside any subagent? E2: a prompt
+    record with its prompt id, origin human, holding the line. E1: the question tool's result for its tool_use_id
+    with that answer, from a call that offered its label when it names an option."""
+    if not isinstance(r, dict) or r.get("type") != "user" or r.get("isSidechain"):
+        return False
+    uuid = str(e.get("transcript_uuid") or "")
+    if e.get("channel") == "E2":
+        return r.get("promptId") == uuid and (r.get("origin") or {}).get("kind") == "human" and \
+            (not e.get("excerpt") or _norm(e["excerpt"]) in _norm(_text_of(r.get("message"))))
+    if e.get("channel") != "E1":
+        return False
+    blocks = (r.get("message") or {}).get("content")
+    res = r.get("toolUseResult") if isinstance(r.get("toolUseResult"), dict) else {}
+    asked = next((q for q in res.get("questions") or [] if isinstance(q, dict)
+                  and q.get("question") == e.get("question")), {})
+    offered = [o.get("label") for o in asked.get("options") or [] if isinstance(o, dict)]
+    return any(isinstance(b, dict) and b.get("type") == "tool_result" and b.get("tool_use_id") == uuid
+               for b in blocks or []) and \
+        (not e.get("question") or (res.get("answers") or {}).get(e["question"]) == e.get("label")) \
+        and (e.get("free") is not False or _offered(e.get("label"), offered))
+
+
 def confirmed(e: dict, sid: str = "") -> bool:
     """Does the session's own transcript (harness_transcript, from the session id: `sid` or the entry's) show this
-    entry as the developer's own act? E2: a prompt record with its prompt id, origin human, outside any subagent,
-    holding the line. E1: the question tool's result for its tool_use_id with that answer. An entry that carries
-    another transcript's path is refused (B1). Codex transcripts are not read yet (spec F0, S3), so a Codex entry has
-    nothing but its hook event behind it and is never confirmed (The Keymaker): it opens nothing."""
+    entry as the developer's own act (_own_record)? An entry that carries another transcript's path is refused (B1).
+    Codex transcripts are not read yet (spec F0, S3), so a Codex entry has nothing but its hook event behind it and
+    is never confirmed (The Keymaker): it opens nothing."""
     if e.get("agent") == "codex":
         return False
     uuid, path = str(e.get("transcript_uuid") or ""), harness_transcript("claude", sid or e.get("session") or "")
@@ -2443,26 +2480,101 @@ def confirmed(e: dict, sid: str = "") -> bool:
                 r = json.loads(ln)
             except ValueError:
                 continue
-            if not isinstance(r, dict) or r.get("type") != "user" or r.get("isSidechain"):
-                continue
-            if e.get("channel") == "E2":
-                if r.get("promptId") == uuid and (r.get("origin") or {}).get("kind") == "human" and \
-                        (not e.get("excerpt") or _norm(e["excerpt"]) in _norm(_text_of(r.get("message")))):
-                    return True
-            elif e.get("channel") == "E1":
-                blocks = (r.get("message") or {}).get("content")
-                res = r.get("toolUseResult") if isinstance(r.get("toolUseResult"), dict) else {}
-                asked = next((q for q in res.get("questions") or [] if isinstance(q, dict)
-                              and q.get("question") == e.get("question")), {})
-                offered = [o.get("label") for o in asked.get("options") or [] if isinstance(o, dict)]
-                if any(isinstance(b, dict) and b.get("type") == "tool_result" and b.get("tool_use_id") == uuid
-                       for b in blocks or []) and \
-                        (not e.get("question") or (res.get("answers") or {}).get(e["question"]) == e.get("label")) \
-                        and (e.get("free") is not False or _offered(e.get("label"), offered)):
-                    return True  # an option counts when the call the developer answered offered its label
+            if _own_record(r, e):
+                return True
     except OSError:
         return False
     return False
+
+
+def _texts(*values) -> list:
+    """Every string in `values`, through nested lists and dicts (without recursion)."""
+    out, todo = [], list(values)
+    while todo:
+        v = todo.pop()
+        if isinstance(v, str):
+            out.append(v)
+        elif isinstance(v, dict):
+            todo.extend(v.values())
+        elif isinstance(v, list):
+            todo.extend(v)
+    return out
+
+
+def _speaks_of(d: dict, q: dict, answers: dict, notes: dict) -> bool:
+    """Does question `q` of a question tool call speak of irreversible decision `d`? It asks it (asked_decision), or
+    its text, header or options, or the answer and note given to it (`answers`, `notes`: the call's, by question),
+    name its target. The tech lead's decision on the Code reviewer's P16, fail closed: an answer to such a question
+    is the developer's latest word on `d` too, and a wrong void only means devkit asks again."""
+    if asked_decision(q) == d["id"]:
+        return True
+    target = str(d.get("target") or "").strip()
+    qt = q.get("question") if isinstance(q.get("question"), str) else None
+    return bool(target) and any(_target_named(target, t) for t in _texts(q, answers.get(qt), notes.get(qt)))
+
+
+def _word_on(d: dict, r: dict) -> bool:
+    """Is transcript record `r` a word of the developer on irreversible decision `d`: a question tool result, the main
+    session's or a crew member's, with a question that speaks of it (_speaks_of), or a prompt they typed with an
+    `approve D<n>` line for it?"""
+    res = r.get("toolUseResult")
+    if isinstance(res, dict) and isinstance(res.get("questions"), list):
+        answers = res.get("answers") if isinstance(res.get("answers"), dict) else {}
+        notes = res.get("annotations") if isinstance(res.get("annotations"), dict) else {}
+        if any(isinstance(q, dict) and _speaks_of(d, q, answers, notes) for q in res["questions"]):
+            return True
+    if r.get("isSidechain") or (r.get("origin") if isinstance(r.get("origin"), dict) else {}).get("kind") != "human":
+        return False
+    msg = r.get("message") if isinstance(r.get("message"), dict) else {}
+    return any(mt and mt.group(1).upper() == d["id"].upper()
+               for mt in map(_APPROVE_LINE.match, _own_lines(_text_of(msg))))
+
+
+def _member_results(path, since: str):
+    """The question tool results in the session's crew member transcripts (Claude Code keeps a member's at <main
+    transcript without .jsonl>/subagents/agent-<id>.jsonl) written after `since`, the ISO time of a main transcript
+    record: each file read from its end back to its first record at or before that time. Without `since`, or for a
+    record without a time, every one counts (fail closed)."""
+    for f in sorted((Path(path).with_suffix("") / "subagents").glob("agent-*.jsonl")):
+        for ln in _lines_back(f, b"", block=1 << 16):
+            try:
+                r = json.loads(ln)
+            except (ValueError, RecursionError):
+                continue
+            if not isinstance(r, dict):
+                continue
+            ts = r.get("timestamp")
+            if since and isinstance(ts, str) and ts <= since:
+                break
+            if r.get("type") == "user" and "toolUseResult" in r:
+                yield r
+
+
+def _said_later(path, e: dict, d: dict) -> bool:
+    """Has the developer said more on irreversible decision `d` after evidence entry `e`? The transcript, not the
+    session record, is the authority on their latest word (the tech lead's decision on the Code reviewer's H2: a hook
+    drops the void it cannot write while the session's lock is busy). A word on it (_word_on) after e's own record
+    (_own_record) in the main transcript, or after that record's time in a crew member's. True too when e's record
+    is not there or the transcript cannot be read: then nothing tells what came after it."""
+    key = json.dumps(str(e.get("transcript_uuid") or "")).encode()
+    try:
+        for ln in _lines_back(path, b""):
+            if key not in ln and b"toolUseResult" not in ln and b'"origin"' not in ln:
+                continue
+            try:
+                r = json.loads(ln)
+            except (ValueError, RecursionError):
+                continue
+            if not isinstance(r, dict) or r.get("type") != "user":
+                continue
+            if key in ln and _own_record(r, e):
+                since = r.get("timestamp") if isinstance(r.get("timestamp"), str) else ""
+                return any(_word_on(d, x) for x in _member_results(path, since))
+            if _word_on(d, r):
+                return True
+    except OSError:
+        return True
+    return True
 
 
 def _live(e: dict, now: float, run=None) -> bool:
@@ -2632,7 +2744,9 @@ def _decision_evidence(agent: str, sid: str, run: dict, d: dict, answer: str, no
     decision only the developer's latest word on it counts, over all its entries (the tech lead's decision on the
     Code reviewer's finding 1 on the exact call): a void (an answer refused in any form), their own text, a question
     tool answer outside devkit's exact call (one recorded before it was required) or an entry the transcript does not
-    confirm makes it None, even after an earlier "yes", until they answer again."""
+    confirm makes it None, even after an earlier "yes", until they answer again. The transcript has the last word
+    (_said_later, the Code reviewer's H2): any later question that asks it or names its target, the main session's
+    or a member's, and any later `approve D<n>` line for it make it None too, with or without its void entry."""
     def ours(e):
         return _norm(e.get("covers")) == _norm(d["id"]) and d.get("shown") is not None and e["ts"] >= d["shown"]
     if d.get("irreversible"):
@@ -2641,7 +2755,8 @@ def _decision_evidence(agent: str, sid: str, run: dict, d: dict, answer: str, no
         e = mine[-1] if mine else {}
         if not e or e.get("void") or e.get("plain") or e.get("free") or (
                 e.get("channel") == "E1" and (e.get("match"), e.get("asked")) != ("exact", "exact")) \
-                or not confirmed(e, sid):
+                or not confirmed(e, sid) or _said_later(harness_transcript("claude", sid or e.get("session") or ""),
+                                                        e, d):
             return None
     else:
         found = evidence(agent, sid, ours, now, run)

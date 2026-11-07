@@ -143,9 +143,11 @@ has one (AskUserQuestion in Claude Code), and ask nicely:
   makes the answer count for nothing, because any of them can make a yes do what the developer meant as a no. A note
   the developer adds to the answer voids it too, and so do an option left selected when the dialog times out, chat
   text sent instead of an answer, and a request for follow-up questions: ask again and let them answer without one.
-  Their latest answer counts: one that counts for nothing, or their own text, also ends an earlier yes, so ask
-  again before you record it. Its question names what it acts on (the tag, the branch, the PR): `dev crew ask`
-  refuses one that does not.
+  Their latest answer counts, and devkit reads it from the transcript when you record it: one that counts for
+  nothing, their own text, an `approve D<n>` line, or an answer to any later question, yours or a member's, that
+  asks the decision or names its target (with or without `D<n>`) ends an earlier yes. Record a yes with
+  `dev crew decide` before you ask anything else that names its target, and ask again after a no. Its question
+  names what it acts on (the tag, the branch, the PR): `dev crew ask` refuses one that does not.
 
 When there is no question tool (Codex, for now), use this template, and for a devkit decision tell the developer
 to type `approve D<n>: <letter>`:

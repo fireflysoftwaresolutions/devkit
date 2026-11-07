@@ -444,10 +444,17 @@ audited as `crew.evidence-refused` with the reason:
 - You add no note to your answer. A note can qualify the click (“only after Monday”), so a release answer with a
   note does not count: answer again without one.
 
-Your latest answer to the decision is the one that counts. An answer that counts for nothing, in any of these
-forms, or text of your own, also ends an earlier yes to it: “No, wait until Monday” typed under **Other** after you
-clicked the release keeps it closed. The decision waits until you answer again in devkit's exact call or type
-`approve D<n>: <option>`.
+Your latest answer to the decision is the one that counts. devkit reads it from the session's transcript when the
+tech lead records the decision, so an answer or an `approve D<n>` line that the hooks could not record still ends an
+earlier yes. These end it too:
+
+- An answer that counts for nothing, in any of the preceding forms, or text of your own: “No, wait until Monday”
+  typed under **Other** after you clicked the release keeps it closed.
+- An answer to any other question, the tech lead's or a crew member's, that asks the decision or names its target
+  in its text, its options, or your answer or note: “Do we still release v26.11.4 today?” answered “No” ends it
+  without naming `D1`. A question that only mentions the target ends the yes too, and devkit asks you again.
+
+The decision waits until you answer again in devkit's exact call or type `approve D<n>: <option>`.
 
 `dev audit verify` applies the same rule to the call in the transcript, so evidence recorded before it is reported
 when its call breaks it.

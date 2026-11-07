@@ -43,9 +43,12 @@ Not released yet: the date is set when the release is tagged.
   own header, labels only. The call asks that one question and nothing else (`dev crew decisions --ask` gives each
   such decision a call of its own), the question and the labels are exactly as it prints them, the header is `D<n>`
   or empty, no option carries a description, a preview, or another field, and you click one of those labels
-  without adding a note (a note can qualify the click, so answer again without one). Your latest answer counts: one
-  that counts for nothing (an idle timeout, chat text, a follow-up request, or a title or metadata on the call among
-  them) or text of your own ends an earlier yes, and `dev crew ask` refuses options too long for the audit to keep
+  without adding a note (a note can qualify the click, so answer again without one). Your latest answer counts, and
+  devkit reads it from the session's transcript when the decision is recorded, so one the hooks could not record
+  counts too: one that counts for nothing (an idle timeout, chat text, a follow-up request, or a title or metadata on
+  the call among them), text of your own, an `approve D<n>` line, or an answer to any other question, the tech
+  lead's or a crew member's, that asks the decision or names its target (with or without `D<n>`) ends an earlier
+  yes, and `dev crew ask` refuses options too long for the audit to keep
   whole, where `dev audit verify` notes a decision it cannot rebuild instead of failing. The
   option that performs the action says what it runs (`A: yes (release v26.11.4)`). Anything else opens nothing and
   is audited as `crew.evidence-refused`, and `dev audit verify` reports earlier evidence whose call breaks the rule.
