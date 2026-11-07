@@ -530,6 +530,11 @@ class CommandLinesAreReadWithTheBaseTokenizer(unittest.TestCase):
         for cmd in ("echo hi > ~/x.txt; dev \\\ninstall", "dev \\\ninstall > ~/x.txt"):
             with self.subTest(cmd=cmd):
                 self.assertEqual(self.check(cmd), guard.INSTALL_REASON)
+        # and an ask that only a later reading finds still asks: as typed, the write goes to /tmp; joined, it goes to
+        # /Users/x.txt (the code reviewer's final check, minor 1)
+        for cmd in ("echo hi > /tmp/\\\n../Users/x.txt", "ls \\\n-la > ~/x.txt"):
+            with self.subTest(cmd=cmd):
+                self.assertIn("Writes outside", self.check(cmd) or "")
         for cmd in ("ls -la \\\n  docs", "pytest -q \\\n  tests/  # the unit tests",
                     "dev commit -m \"fix: x\" \\\n  --why \"it is safer\" \\\n  --verified \"12 tests pass\""):
             with self.subTest(cmd=cmd):
