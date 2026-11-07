@@ -773,6 +773,71 @@ class NoteKeysAreDevkits(EmbargoCase):
                 self.assertIsNone(self.sh(cmd))
 
 
+class EmbargoedBranchesStayOffTheRemote(EmbargoCase):
+    # B2b: every way an agent sends an embargoed branch, or the commits it holds, to the remote
+    def setUp(self):
+        super().setUp()
+        _git(self.repo, "checkout", "-q", "-b", "fix/hole", "main")
+        (Path(self.repo) / "hole.txt").write_text("the fix\n")
+        _git(self.repo, "add", "-A")
+        _git(self.repo, "commit", "-q", "-m", "fix: close the hole")
+        self.tip = subprocess.run(["git", "-C", self.repo, "rev-parse", "HEAD"], capture_output=True,
+                                  text=True).stdout.strip()
+        _git(self.repo, "branch", "leak", "fix/hole")  # a new name for the same commits
+        _git(self.repo, "checkout", "-q", "feat/x")
+
+    def targets(self, cmd):
+        return [(a["action"], a["target"]) for a in guard.irreversible_actions(cmd, self.repo) or []]
+
+    def main(self, cmd, grant=None, setting="enforce"):
+        with settings(main=setting):
+            v = guard.irreversible_verdict(cmd, self.repo, agent="claude", session="s1", grant=grant or DenyAll())
+        return v[1] if v else None
+
+    def member(self, cmd):
+        with settings():
+            v = guard.crew_shell_verdict(cmd, self.repo, None, "redteamprobe", level="all", lane="a1", session="s1",
+                                         grant=lambda *a, **k: {"id": "step", "uses_left": 1})
+        return v[1] if v else None
+
+    def test_b2b_a_push_or_pr_of_an_embargoed_branch_is_the_developers(self):
+        held = ("developer-only", "embargo/fix/hole")
+        self.assertEqual(self.targets("git push origin feat/x"), [("push", "feat/x")])  # baseline
+        self.assertIsNone(self.main("git push origin feat/x"))
+        for cmd in ("git push origin fix/hole", "git push -u origin fix/hole:refs/heads/innocent",
+                    f"git push origin {self.tip}:refs/heads/innocent", "git push origin leak", "git push --all origin",
+                    "dev git push origin fix/hole", "gh pr create --head fix/hole --title t --body b",
+                    "git -c alias.p=push p origin fix/hole"):
+            with self.subTest(cmd=cmd):
+                self.assertIn(held, self.targets(cmd))
+                self.assertIn("`grant embargo fix/hole`", self.main(cmd) or "")
+                self.assertIn("Crew members never run", self.member(cmd) or "")
+        _git(self.repo, "checkout", "-q", "fix/hole")
+        for cmd in ("git push", "git push -u origin HEAD", "dev push", "dev pr create", "gh pr create --fill"):
+            with self.subTest(cmd=cmd):
+                self.assertIn(held, self.targets(cmd))
+                self.assertIn("embargoed", self.main(cmd) or "")
+        self.assertEqual(self.targets("dev backup fix/hole"), [("push", "fix/hole")])  # a backup holds it itself
+
+        def grant(action, target, repo, consume):  # the developer typed `grant embargo fix/hole`
+            hit = (action, target) == ("embargo", "fix/hole")
+            return {"id": "E2:t", "source": "E2", "uses_left": 1, "expires": 0} if hit else None
+        self.assertIsNone(self.main("git push -u origin fix/hole", grant=grant))
+
+    def test_b2b_a_note_devkit_cannot_read_refuses_every_push(self):
+        self.note.write_text("---\nstatus: active\nembargo:\n  - branch: fix/hole\n")  # its block never ends
+        self.assertIn(("developer-only", "embargo/feat/x"), self.targets("git push origin feat/x"))
+        self.assertIn("cannot read", self.main("git push origin feat/x") or "")
+        with mock.patch.object(core, "HANDOFF", self.root / "nowhere"), \
+                mock.patch.object(core, "NOTES", self.root / "nowhere" / "projects"):  # no handoff repository here
+            self.assertIn(("developer-only", "embargo/feat/x"), self.targets("dev push"))
+
+    def test_b2b_an_unparsed_push_with_an_embargo_in_place_is_refused_in_the_audit_week(self):
+        self.assertIsNotNone(self.main("git push origin fix/hole 'unclosed", setting="audit"))
+        self.note.write_text("---\nstatus: active\n---\n# acme/widget\n")  # no embargo left
+        self.assertIsNone(self.main("git push origin feat/x 'unclosed", setting="audit"))
+
+
 @unittest.skipUnless(tb.HAS_GITLEAKS, "the backup's secret scan needs gitleaks")
 class TheBackupRemembersItsEmbargoes(tb.BackupCase):
     # B2a: an embargo that left the note without `dev branch embargo --lift` (a hand edit, a bad merge, a checkout of
