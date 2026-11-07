@@ -741,8 +741,9 @@ def offer_commit_template(repos=None, ask=None, say=None, interactive=None, answ
 
 def setup_commit_template(assume_yes: bool = False, remove: bool = False, ask=None, say=print, repos=None) -> int:
     """`dev setup commit-template`: ask again, even after a no, and on a yes set the template in every repository
-    without one, those the developer cleaned included. `remove` unsets devkit's everywhere and records a no.
-    -> exit code."""
+    without one, those the developer cleaned included. `remove` unsets devkit's everywhere and records a no. Consent is
+    the developer's: in an agent's call (anything but core.set_by_developer()), neither --yes nor a piped answer sets
+    anything. -> exit code."""
     if remove:
         ours, _, _ = _commit_template_rows(repos)
         gone = [r for r in ours if core.git(r, "config", "--local", "--unset", "commit.template")[0] == 0]
@@ -750,6 +751,11 @@ def setup_commit_template(assume_yes: bool = False, remove: bool = False, ask=No
         say(f"  {ui.OK} devkit's commit template is off; taken out of {len(gone)} repositories"
             + (f": {_names(gone)}" if gone else "") + ". Turn it on again: dev setup commit-template")
         return 0
+    if not core.set_by_developer():
+        say(f"  {ui.WARN} dev setup commit-template sets commit.template in every repository without one, so it needs "
+            "your yes, typed in your own terminal: an agent's --yes or a piped answer is not consent. Nothing "
+            "changed; run it in a terminal: dev setup commit-template")
+        return 2
     if not assume_yes:
         _, _, free = _commit_template_rows(repos, reset=True)
         say(f"\n  {ui.bold('Commit template')}\n  git can open each new commit message with devkit's template "

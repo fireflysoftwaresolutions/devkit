@@ -244,6 +244,12 @@ class TaskRefsTests(Case):
 
 
 class SetupOfferTests(Case):
+    def setUp(self):
+        super().setUp()
+        mine = mock.patch.object(core, "set_by_developer", return_value=True)  # the developer, unless a test says not
+        mine.start()
+        self.addCleanup(mine.stop)
+
     def local_template(self, repo):
         return core.sh(["git", "-C", str(repo), "config", "--local", "--get", "commit.template"])[1]
 
@@ -307,6 +313,36 @@ class SetupOfferTests(Case):
         self.assertIn("bare", said[-1])
         res, asked, _ = self.offer([bare], [])  # after --remove, the install neither asks nor sets it
         self.assertEqual((asked, self.local_template(bare)), ([], ""))
+
+    def setup_command(self, repos, *argv):
+        a = cli.build_parser().parse_args(["setup", "commit-template", *argv])
+        with mock.patch.object(registry, "discover", lambda: (repos, [], [])), \
+                contextlib.redirect_stdout(io.StringIO()) as out:
+            return a.fn(a), out.getvalue()
+
+    # Consent is the developer's (core.set_by_developer, as for `dev setup prompt`): in an agent's call, neither
+    # `--yes` nor a piped "y" sets the template: exit code 2, nothing asked, no repository and no devkit state
+    # written. The same `--yes` in the developer's terminal sets it. Taking devkit's template out needs no consent.
+    def test_only_the_developer_opts_in_an_agents_yes_or_piped_answer_is_refused(self):
+        bare = self.repository("bare")
+        asked, said = [], []
+
+        def piped(q):
+            asked.append(q)
+            return "y"
+        with mock.patch.object(core, "set_by_developer", return_value=False):
+            rc, out = self.setup_command([bare], "--yes")
+            self.assertEqual(rc, 2)
+            self.assertIn("in your own terminal", out)
+            self.assertEqual(setup.setup_commit_template(repos=[bare], ask=piped, say=said.append), 2)
+            self.assertIn("in your own terminal", "\n".join(said))
+            self.assertEqual((asked, self.local_template(bare)), ([], ""))
+            self.assertFalse((self.root / "state" / "git").exists())  # neither the answer nor the template copy
+        self.assertEqual(self.setup_command([bare], "--yes")[0], 0)
+        self.assertEqual(self.local_template(bare), str(setup.commit_template_copy()))
+        with mock.patch.object(core, "set_by_developer", return_value=False):
+            self.assertEqual(self.setup_command([bare], "--remove")[0], 0)
+        self.assertEqual((self.local_template(bare), setup.commit_template_answer()), ("", "no"))
 
     def test_the_command_line_reaches_it(self):
         bare = self.repository("bare")
