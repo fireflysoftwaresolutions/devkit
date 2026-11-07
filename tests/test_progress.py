@@ -19,7 +19,8 @@ from devkit import progress as pg  # noqa: E402
 def boundary(root, real_caller=False) -> list:
     # what every progress test fakes, as patchers to start and stop: devkit's configuration (its defaults, never the
     # developer's ~/.config/devkit), this test process's real parents (they never name a session), the call ledger
-    # (in the test's folder), the team's crew policy (in the test's folder, never the handoff repository's), the
+    # (in the test's folder), the plan's usage windows and the crew limit last seen (in the test's folder, never the
+    # developer's quota), the team's crew policy (in the test's folder, never the handoff repository's), the
     # continuity records and the prompt helper's cache the hooks write (in the test's folder) and who calls: Morpheus,
     # from a call of his. real_caller: the tests of caller identity (tests/test_caller_identity.py) use devkit's own
     # ledger and session lookup instead.
@@ -27,6 +28,7 @@ def boundary(root, real_caller=False) -> list:
            mock.patch.object(pg, "_ancestor_pids", lambda: [], create=True),
            mock.patch.object(pg, "CALLS", Path(root) / "calls", create=True),
            mock.patch.object(pg, "TEAM_POLICY", Path(root) / "policy" / "progress.json", create=True),
+           mock.patch.object(pg, "QUOTA", Path(root) / "quota"),  # the usage windows and the crew limit last seen
            mock.patch.object(continuity, "CONT", Path(root) / "continuity"),
            mock.patch.object(prompt, "STATE", Path(root) / "prompt-state")]
     if not real_caller:
@@ -958,6 +960,20 @@ class BoundaryTests(unittest.TestCase):
             outside = [str(p) for p in (pg.RUNS, pg.SESSIONS, pg.QUOTA, pg.CALLS, pg.TEAM_POLICY, continuity.CONT,
                                         prompt.STATE) if not Path(p).is_relative_to(root)]
             self.assertEqual(outside, [])
+
+    def test_the_boundary_alone_keeps_the_quota_and_the_crew_limit_in_the_tests_folder(self):
+        # test_continuity, test_plan_dag, test_state and test_raci use boundary() without TempState: with devkit's
+        # default max_parallel and the real quota they wrote the developer's crew limit, and the live hooks then
+        # audited a change back every few minutes (crew.limit 3 → 4)
+        with tempfile.TemporaryDirectory() as tmp:
+            patches = boundary(tmp)
+            for p in patches:
+                p.start()
+            try:
+                self.assertTrue(Path(pg.QUOTA).is_relative_to(tmp), pg.QUOTA)
+            finally:
+                for p in reversed(patches):
+                    p.stop()
 
 
 class ReconcileTranscriptTests(unittest.TestCase):
