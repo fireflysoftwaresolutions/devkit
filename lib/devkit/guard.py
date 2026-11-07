@@ -1419,6 +1419,52 @@ LOCK_REASON = ("`dev config {sub}` adds or removes the managed-settings drop-in 
                f"why. {_TAIL}")
 
 
+# A nested agent session that does not load devkit's hooks, or runs without its sandbox, has no guard (RT6): claude's
+# --settings and --setting-sources pick other settings, --bare skips every hook, --dangerously-* and bypassPermissions
+# drop the permission checks; codex's -c/--config can rewrite hooks, sandbox or approvals, and its own flags turn the
+# sandbox off. CLAUDE_CONFIG_DIR and CODEX_HOME point the session at another settings folder.
+_CLAUDE_VALUE_FLAGS = ("--settings", "--setting-sources")
+_CODEX_KEY = re.compile(r"hook|sandbox|approval|^features(?:\.|$)|[$`]", re.I)
+_AGENT_HOME_ENV = frozenset({"CLAUDE_CONFIG_DIR", "CODEX_HOME"})
+GUARDLESS_REASON = ("This starts a nested {cli} session with {what}, so its tool calls would run without devkit's "
+                    "guard and hooks, or without its sandbox (RT6, spec C11). A nested session runs with the "
+                    "developer's own settings: run it without that flag. If the work needs another configuration, "
+                    f"ask the developer to start it in a terminal. {_TAIL}")
+
+
+def guardless_session(name, argv, names=()) -> str | None:
+    """Why a nested claude or codex call would run without devkit's hooks or sandbox, or None (RT6)."""
+    if name not in _AGENT_CLIS:
+        return None
+    home = sorted(set(names) & _AGENT_HOME_ENV)
+    if home:
+        return GUARDLESS_REASON.format(cli=name, what=f"{home[0]} pointing at another settings folder")
+    args = list(argv[1:])
+    for k, a in enumerate(args):
+        if a == "--":
+            break
+        flag, eq, val = a.partition("=") if a.startswith("--") else (a, "", "")
+        nxt = val if eq else (args[k + 1] if k + 1 < len(args) else "")
+        if flag.startswith(("--dangerously", "--allow-dangerously")) or flag == "--yolo":
+            return GUARDLESS_REASON.format(cli=name, what=f"`{flag}`")
+        if name == "claude":
+            if flag in _CLAUDE_VALUE_FLAGS or flag == "--bare":
+                return GUARDLESS_REASON.format(cli=name, what=f"`{flag}`")
+            if flag == "--permission-mode" and nxt.casefold() == "bypasspermissions":
+                return GUARDLESS_REASON.format(cli=name, what="`--permission-mode bypassPermissions`")
+            continue
+        if flag in ("-c", "--config") or (flag.startswith("-c") and not flag.startswith("--") and len(flag) > 2):
+            spec = flag[2:] if flag.startswith("-c") and len(flag) > 2 else nxt
+            key = spec.partition("=")[0].strip().strip("'\"")
+            if not key or _CODEX_KEY.search(key):
+                return GUARDLESS_REASON.format(cli=name, what=f"`{flag} {spec}`".replace("  ", " "))
+        if flag in ("-s", "--sandbox") and nxt == "danger-full-access":
+            return GUARDLESS_REASON.format(cli=name, what=f"`{flag} danger-full-access`")
+        if flag == "--disable":
+            return GUARDLESS_REASON.format(cli=name, what=f"`--disable {nxt}`")
+    return None
+
+
 def _env_split(argv0):
     """-> (names, argv): the variables a segment sets for the command it runs (VAR=…, env VAR=…, sudo VAR=…, also
     after timeout or uv run), and that command."""
@@ -1651,6 +1697,9 @@ class _Shell:
         v = self.forged_env(name, argv, cwd, names)
         if v:
             return v
+        why = guardless_session(name, argv, set(names) | self.exported)
+        if why:
+            return deny(why)
         dev = _dev_args(argv)
         if dev is not None:
             return self.dev(dev, cwd)
