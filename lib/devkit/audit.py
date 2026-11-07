@@ -1226,10 +1226,11 @@ def publish() -> list:
     dest, changed = team_dir(), []
     for f in _to_publish():
         target = dest / f.name
-        data = f.read_bytes()
-        if len(data) > PUBLISH_LIMIT:
-            record("audit.publish", core.tilde(f), _held(f, len(data))["text"], "blocked", severity="warning")
+        size = f.stat().st_size  # measured before reading, so a held file is never loaded on the daily run
+        if size > PUBLISH_LIMIT:
+            record("audit.publish", core.tilde(f), _held(f, size)["text"], "blocked", severity="warning")
             continue
+        data = f.read_bytes()
         old = target.read_bytes() if target.exists() else b""
         if old == data:
             continue
