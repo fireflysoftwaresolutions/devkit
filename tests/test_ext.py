@@ -436,7 +436,8 @@ class DriftWiringTests(unittest.TestCase):
 
     def test_dev_install_records_the_lock_after_installing(self):
         with mock.patch.object(ext, "homes", return_value=self.h), mock.patch.object(setup, "sh",
-                                                                                      lambda *a, **k: (0, "", "")):
+                                                                                      lambda *a, **k: (0, "", "")), \
+                contextlib.redirect_stdout(io.StringIO()):  # setup's progress lines stay out of the test log
             setup._extensions("claude")
         lk = ext.read_lock()["plugin:claude:superpowers@claude-plugins-official"]
         self.assertEqual((lk["version"], lk["sha"]), ("7.0.1", SHA_A))
