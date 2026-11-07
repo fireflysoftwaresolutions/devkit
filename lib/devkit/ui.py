@@ -57,8 +57,10 @@ _PAL24 = {"a": (140, 140, 165), "w": (185, 228, 255), "e": (255, 255, 255), "b":
           "g": (205, 255, 70), "s": (255, 214, 90),
           # Firefly brand: amber is the light (the spark), paper and charcoal the ink, stone the quiet text
           "amber": (255, 179, 74), "paper": (243, 241, 235), "charcoal": (16, 17, 15), "stone": (191, 184, 171),
-          # the spark when the theme is unknown: 5.0:1 on white, 4.2:1 on black (the setup wizard's amber on light)
-          "amber_deep": (163, 95, 0)}
+          # the spark on light and unknown themes: 5.0:1 on white, 4.2:1 on black (the setup wizard's amber on light)
+          "amber_deep": (163, 95, 0),
+          # the quiet text on light: the brand kit's light muted (#62645B), 6.0:1 on white
+          "stone_deep": (98, 100, 91)}
 _PAL256 = {"a": 245, "w": 153, "e": 231, "b": 240, "g": 154, "s": 221}
 # firefly lime -> cyan -> violet
 _STOPS = [(190, 255, 60), (0, 214, 255), (170, 90, 255)]
@@ -105,10 +107,12 @@ def _gradient(line: str, t0: float = 0.0, t1: float = 1.0) -> str:
 
 
 def logo_inline() -> str:
-    """Compact one-line logo for narrow terminals and sub-headers."""
+    """Compact one-line logo for narrow terminals and sub-headers (the setup wizard's header); the spark as in
+    wordmark()."""
     s = "✦ devkit"
     if TRUECOLOR:
-        return _fg(_PAL24["amber"], "✦", True) + " " + bold("devkit")
+        spark = _PAL24["amber"] if known_theme() == "dark" else _PAL24["amber_deep"]
+        return _fg(spark, "✦", True) + " " + bold("devkit")
     return bold(cyan(s)) if COLOR else s
 
 
@@ -141,14 +145,16 @@ WORDMARK = [
 
 
 def wordmark() -> list:
-    """The wordmark rows, inked for the terminal's theme (paper on dark, charcoal on light). When the theme is unknown,
-    the terminal's own text color, which reads on its background whatever it is, and the deep amber spark."""
+    """The wordmark rows, inked for the terminal's theme: paper and the amber spark on dark, charcoal and the deep amber
+    spark on light. When the theme is unknown, the terminal's own text color, which reads on its background whatever
+    it is, and the deep amber spark."""
     theme = known_theme()
     if TRUECOLOR and not theme:
         return [r.replace("✦", _fg(_PAL24["amber_deep"], "✦", True)) for r in WORDMARK]
     if TRUECOLOR:
-        ink = _PAL24["paper"] if theme == "dark" else _PAL24["charcoal"]
-        return [_fg(ink, r.replace("✦", "\x00"), False).replace("\x00", _fg(_PAL24["amber"], "✦", True) +
+        dark = theme == "dark"
+        ink, spark = (_PAL24["paper"], _PAL24["amber"]) if dark else (_PAL24["charcoal"], _PAL24["amber_deep"])
+        return [_fg(ink, r.replace("✦", "\x00"), False).replace("\x00", _fg(spark, "✦", True) +
                                                                        f"\x1b[38;2;{ink[0]};{ink[1]};{ink[2]}m")
                 for r in WORDMARK]
     if COLOR:
@@ -163,7 +169,9 @@ def banner(context: str = "", framed: bool = True) -> str:
     if width() < len(WORDMARK[0]) + 6:
         return f"\n  {logo_inline()}  {dim(meta)}\n"
     out = [""] + ["  " + r for r in wordmark()] + [""]
-    out.append("  " + (_fg(_PAL24["stone"], TAGLINE, False) if TRUECOLOR and known_theme() else TAGLINE))
+    theme = known_theme()
+    quiet = _PAL24["stone"] if theme == "dark" else _PAL24["stone_deep"]
+    out.append("  " + (_fg(quiet, TAGLINE, False) if TRUECOLOR and theme else TAGLINE))
     out.append("  " + dim(f"{meta}  ·  {COPYRIGHT}"))
     return "\n".join(out) + "\n"
 
