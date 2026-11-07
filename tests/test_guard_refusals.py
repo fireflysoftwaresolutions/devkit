@@ -84,6 +84,45 @@ class VendorExtensionVerbsAreTheDevelopers(unittest.TestCase):
             with self.subTest(cmd=cmd):
                 self.assertEqual(self.check(cmd), guard.EXT_REASON)
 
+    def test_a_verb_after_the_end_of_options_still_runs_in_claude(self):
+        # F1: Claude Code's parser (commander) still runs a subcommand named after `--`; and there a `-h` or `--help`
+        # is an argument, as is one an option takes as its value, so the verb runs (seen with `list`)
+        for cmd in ("claude -- plugin install evil@m", "claude plugin -- install evil@m",
+                    "claude mcp -- add evil -- bash", "claude plugin marketplace -- add o/r",
+                    "claude -- mcp add evil -- bash -c id", "claude --verbose -- plugin uninstall x@m",
+                    "claude plugin marketplace -- remove claude-plugins-official", "claude -- plugin -- install x@m",
+                    "claude mcp add x -- npx -h", "claude -- plugin install evil@m --help",
+                    "claude --model -h plugin install evil@m", "claude plugin install --scope -h evil@m"):
+            with self.subTest(cmd=cmd):
+                self.assertEqual(self.check(cmd), guard.EXT_REASON)
+        for cmd in ("claude -- plugin list", "claude plugin -- list", "claude -- mcp list",  # the verb decides
+                    "claude plugin marketplace -- list", "claude plugin install -h", "claude mcp add x --help"):
+            with self.subTest(cmd=cmd):
+                self.assertIsNone(self.check(cmd))
+
+    def test_a_verb_after_the_end_of_options_is_refused_in_every_shell_form(self):
+        for cmd in ('sh -c "claude -- plugin install evil@m"', "{ claude -- plugin install evil@m; }",
+                    "true && claude plugin -- install evil@m", "find . -exec claude plugin install evil@m ';'",
+                    "find . -maxdepth 0 -execdir claude mcp add evil -- bash ';'",
+                    "find . -exec claude -- plugin install evil@m +", "find . -ok codex mcp add e -- id ';'"):
+            with self.subTest(cmd=cmd):
+                self.assertEqual(self.check(cmd), guard.EXT_REASON)
+        for cmd in ("find . -exec claude plugin list ';'", "find . -name x -exec grep -l 'plugin install' {} +"):
+            with self.subTest(cmd=cmd):
+                self.assertIsNone(self.check(cmd))
+
+    def test_the_versioned_binary_the_launcher_links_to_is_claude(self):
+        # F1: ~/.local/bin/claude links to ~/.local/share/claude/versions/<version>, a file not named claude
+        versions = Path(self.cwd) / "share" / "claude" / "versions"
+        versions.mkdir(parents=True)
+        (versions / "9.9.9").write_text("")
+        (Path(self.cwd) / "cc").symlink_to(versions / "9.9.9")
+        for cmd in (f"{versions}/2.1.319 plugin install evil@m", f"{versions}/9.9.9 mcp add evil -- bash",
+                    f"{self.cwd}/cc plugin install evil@m", f"find . -exec {versions}/9.9.9 plugin i x@m ';'"):
+            with self.subTest(cmd=cmd):
+                self.assertEqual(self.check(cmd), guard.EXT_REASON)
+        self.assertIsNone(self.check(f"{versions}/9.9.9 plugin list"))
+
     def test_read_only_verbs_and_help_stay_open(self):
         for cmd in ("claude plugin list", "claude plugin details superpowers", "claude plugin validate .",
                     "claude plugin marketplace list", "claude mcp list", "claude mcp get chrome-devtools",

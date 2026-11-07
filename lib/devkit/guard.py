@@ -1813,16 +1813,28 @@ _VENDOR_READ = {
 }
 
 
+def _vendor_help(args) -> bool:
+    """True when `-h` or `--help` makes the vendor CLI print help instead of running the verb: only before the first
+    `--` (after it, both parsers read it as an argument), and not right after an option, which may take it as its
+    value (`claude --model -h plugin install x` installs; F1)."""
+    opts = _dev_opts(args)
+    return any(w in ("-h", "--help") and not (k and opts[k - 1].startswith("-") and "=" not in opts[k - 1])
+               for k, w in enumerate(opts))
+
+
 def vendor_ext_refusal(argv) -> bool:
     """True when a claude or codex command (the binary, any path to it, or the npm package a runner starts) adds,
-    removes, switches or updates a plugin, a marketplace or an MCP server. Only the words before `--` count: after
-    it come an MCP server's own command line."""
+    removes, switches or updates a plugin, a marketplace or an MCP server. Codex's parser (clap) refuses a verb after
+    `--`, so only the words before it count there; Claude Code's (commander) still runs a subcommand named after it
+    (F1), so for claude a bare `--` is skipped. The first group word and the word after it decide; what follows, an
+    MCP server's own command line included, does not."""
     cli = agent_cli(argv[0]) if argv else ""
     if not cli:
         return False
-    words = _dev_opts(list(argv[1:]))
-    if "-h" in words or "--help" in words:
+    args = list(argv[1:])
+    if _vendor_help(args):
         return False
+    words = [w for w in args if w != "--"] if cli == "claude" else _dev_opts(args)
     pos = [w for w in words if not w.startswith("-")]
     at = next((i for i, w in enumerate(pos) if w in _VENDOR_GROUPS), None)
     if at is None or at + 1 >= len(pos):
@@ -1868,12 +1880,25 @@ GUARDLESS_REASON = ("This starts a nested {cli} session with {what}, so its tool
 _AGENT_PACKAGES = {"claude-code": "claude", "codex": "codex"}  # npm packages whose binary is claude or codex (RT8)
 
 
+def _agent_binary(path: str) -> str:
+    """'claude' or 'codex' when a path names one of their binaries: a file named so, or a file in Claude Code's
+    versions folder (`~/.local/bin/claude` links to `~/.local/share/claude/versions/<version>`; F1)."""
+    p = Path(path)
+    if p.name in _AGENT_CLIS:
+        return p.name
+    return "claude" if (p.parent.name, p.parent.parent.name) == ("versions", "claude") and p.name else ""
+
+
 def agent_cli(word) -> str:
-    """'claude' or 'codex' when a command word runs one of them: the binary, or the npm package a runner such as
-    npx, bunx, pnpm dlx or yarn dlx starts (`@anthropic-ai/claude-code@latest`, `claude-code`, `@openai/codex`), and
-    '' otherwise (RT8)."""
-    name = os.path.basename(str(word or ""))
-    if name in _AGENT_CLIS:
+    """'claude' or 'codex' when a command word runs one of them: the binary, by its name, by Claude Code's versions
+    folder, or by a path that resolves to either (a link, `..`); or the npm package a runner such as npx, bunx, pnpm
+    dlx or yarn dlx starts (`@anthropic-ai/claude-code@latest`, `claude-code`, `@openai/codex`); '' otherwise (RT8)."""
+    text = str(word or "")
+    name = _agent_binary(text)
+    if not name and "/" in text:
+        path = os.path.expanduser(text)
+        name = _agent_binary(os.path.realpath(path)) if os.path.isabs(path) else ""
+    if name:
         return name
     pkg = str(word or "")
     if pkg.startswith("@"):  # @scope/name@version
@@ -2362,6 +2387,8 @@ class _Shell:
                 why = guardless_session(iname, inner, inames) if inner else None
                 if why:
                     return deny(why)
+                if inner and vendor_ext_refusal(inner):  # F1: the shell form refuses it, so does find's
+                    return deny(EXT_REASON)
                 idev = _dev_args(inner) if inner else None
                 v = self.dev(idev, cwd) if idev is not None else None
                 if v:
