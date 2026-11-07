@@ -2548,6 +2548,8 @@ def _member_results(path, since: str):
     for name, regular in files:
         if not regular:  # a named pipe would block the read; anything but a file tells nothing
             raise OSError(f"{name} is not a regular file")
+        if _torn(folder / name):  # its last record is still being written, maybe before its toolUseResult key
+            raise OSError(f"{name} ends in a line still being written")
         for ln in _lines_back(folder / name, b"toolUseResult"):
             try:
                 r = json.loads(ln)
@@ -2562,6 +2564,16 @@ def _member_results(path, since: str):
             yield r
 
 
+def _torn(path) -> bool:
+    """Does the file end in a line with no newline, one Claude Code is still writing?"""
+    with open(path, "rb") as fh:
+        fh.seek(0, 2)
+        if not fh.tell():
+            return False
+        fh.seek(-1, 2)
+        return fh.read(1) != b"\n"
+
+
 def _said_later(path, e: dict, d: dict) -> bool:
     """Has the developer said more on irreversible decision `d` after evidence entry `e`? The transcript, not the
     session record, is the authority on their latest word (the tech lead's decision on the Code reviewer's H2: a hook
@@ -2570,6 +2582,9 @@ def _said_later(path, e: dict, d: dict) -> bool:
     is not there or the transcript cannot be read: then nothing tells what came after it."""
     key = json.dumps(str(e.get("transcript_uuid") or "")).encode()
     try:
+        last = next(_lines_back(path, b""), b"")  # b"" when the file ends with a newline
+        if last and (b'"type":"user"' in last or b'"type": "user"' in last):
+            return True  # a record still being written may be the answer: Claude Code writes its result key late
         for ln in _lines_back(path, b""):
             if key not in ln and b"toolUseResult" not in ln and b'"origin"' not in ln:
                 continue

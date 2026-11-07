@@ -624,9 +624,10 @@ class QuestionAuditTests(EvidenceCase):
         self.n += 1
         tid = f"toolu_q{self.n:03d}"
         result = {"questions": qs, "answers": answers, **({"annotations": notes} if notes is not None else {})}
-        self.append({"type": "user", "uuid": f"u-{self.n}", "isSidechain": False, "toolUseResult": result,
-                     "timestamp": iso(at),
-                     "message": {"role": "user", "content": [{"type": "tool_result", "tool_use_id": tid}]}})
+        # in Claude Code's key order: the message comes before toolUseResult (a line read torn may lack the key)
+        self.append({"type": "user", "uuid": f"u-{self.n}", "isSidechain": False,
+                     "message": {"role": "user", "content": [{"type": "tool_result", "tool_use_id": tid}]},
+                     "toolUseResult": result, "timestamp": iso(at)})
         return lambda now: pg.on_question("claude", {"session_id": "s1", "tool_name": "AskUserQuestion",
                                                      "tool_use_id": tid,
                                                      "tool_input": {"questions": qs, **(inputs or {})},
@@ -651,9 +652,8 @@ class QuestionAuditTests(EvidenceCase):
         tid = f"toolu_m{self.n:03d}"
         result = {"questions": [q], "answers": {q["question"]: label}}
         self.member_record({"type": "user", "uuid": f"u-{self.n}", "isSidechain": True, "agentId": aid,
-                            "toolUseResult": result, "timestamp": iso(at),
-                            "message": {"role": "user", "content": [{"type": "tool_result", "tool_use_id": tid}]}},
-                           aid)
+                            "message": {"role": "user", "content": [{"type": "tool_result", "tool_use_id": tid}]},
+                            "toolUseResult": result, "timestamp": iso(at)}, aid)
         return pg.on_question("claude", {"session_id": "s1", "agent_id": aid, "tool_name": "AskUserQuestion",
                                          "tool_use_id": tid, "tool_input": {"questions": [q]},
                                          "tool_response": result, "transcript_path": str(self.transcript)}, now=at)
@@ -1155,10 +1155,28 @@ class QuestionAuditTests(EvidenceCase):
     # line) or damaged (a crash, a full disk) is no proof the developer said nothing; it ends the yes
     def test_a_members_no_read_torn_still_ends_the_yes(self):
         self.lose_the_no(lambda q: self.member_answers(q, q["options"][1]["label"], m(2.5)))
-        own = self.member_transcript()
-        lines = own.read_bytes().rstrip(b"\n").split(b"\n")
-        own.write_bytes(b"\n".join(lines[:-1] + [lines[-1][:len(lines[-1]) // 2]]))
+        self.tear(self.member_transcript())
         self.assert_still_closed()
+
+    # the Code reviewer's torn-line check: Claude Code writes toolUseResult after the message, so a no cut before that
+    # key has no key to find; a last line with no newline is still being written, in the main transcript too
+    def test_a_members_no_cut_before_its_result_key_still_ends_the_yes(self):
+        self.lose_the_no(lambda q: self.member_answers(q, q["options"][1]["label"], m(2.5)))
+        self.tear(self.member_transcript(), b'"toolUseResult"')
+        self.assert_still_closed()
+
+    def test_a_no_in_the_main_transcript_cut_before_its_result_key_still_ends_the_yes(self):
+        self.lose_the_no(lambda q: self.send([q], {q["question"]: q["options"][1]["label"]}, m(2.5)))
+        self.tear(self.transcript, b'"toolUseResult"')
+        self.assert_still_closed()
+
+    def tear(self, f, before=None):
+        # the file's last line as a reader sees it while Claude Code still writes it: cut, with no newline; `before`:
+        # cut just before those bytes, else in the middle
+        lines = f.read_bytes().rstrip(b"\n").split(b"\n")
+        cut = lines[-1].index(before) if before else len(lines[-1]) // 2
+        self.assertGreater(cut, 0)
+        f.write_bytes(b"\n".join(lines[:-1] + [lines[-1][:cut]]))
 
     # finding 2: a member file that is not a regular file (a named pipe with no writer would block the read) ends the
     # yes at once instead of hanging dev crew decide
