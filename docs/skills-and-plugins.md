@@ -218,7 +218,11 @@ symbolic link, `..` after `cd`, a quoted `~`, a glob, or a folder moved earlier 
 names the program it runs only at run time, so the guard refuses a crew lane that types the launcher's path, as it
 refuses any such script. With `dev impeccable`:
 
-- **Write lanes** run every verb.
+- **The developer's verbs:** `hooks`, `install`, `link`, `update`, `pin`, `unpin`, and `doctor --fix`, also after
+  the engine's legacy `skills` namespace. They write the agents' settings, hooks, or skill folders, which change what
+  runs in every later session, so only the developer runs them, in a terminal. The guard refuses them to every agent,
+  in the main session and in every lane, and `dev impeccable` itself refuses them outside the developer's terminal.
+- **Write lanes** run every other verb.
 - **Read-only lanes** run only the verbs that read the project, with their reading flags: `context` (with
   `--target`), `detect` on local paths (`--json`, `--quiet`, `--scope`, `--list-rules`, and the `--no-…` filters),
   and `doctor` (with `--json` or `--target`, never `--fix`). These verbs do not change your sources, but the engine

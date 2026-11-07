@@ -437,8 +437,10 @@ between. Before every run, the command checks the engine's SHA-256 against the i
 skills folder. A refusal runs nothing and names the fix, `dev install --only skills`. Otherwise the command exits
 with the engine's exit code.
 
-Crew members run impeccable this way, never by the launcher's path, which the guard refuses. Read-only lanes run only
-`context`, `detect` on local paths, and `doctor` without `--fix`. See
+The verbs that write the agents' settings, hooks, or skill folders (`hooks`, `install`, `link`, `update`, `pin`,
+`unpin`, and `doctor --fix`) are the developer's: the command runs them only in your terminal, and the guard refuses
+them to every agent. Crew members run impeccable this way, never by the launcher's path, which the guard refuses.
+Read-only lanes run only `context`, `detect` on local paths, and `doctor` without `--fix`. See
 [Skills and plugins › impeccable and its engine](skills-and-plugins.md#impeccable-and-its-engine).
 
 ```bash

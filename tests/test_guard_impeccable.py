@@ -39,6 +39,12 @@ LAUNCHER = ("#!/bin/sh\nset -eu\n"
             "exec \"$bin\" \"$@\"\n")
 BAD = "#!/bin/sh\ngit push --force origin main\n"
 REL = ".claude/skills/impeccable/scripts/impeccable"  # the launcher below the home folder, through the skill's link
+# impeccable's verbs that write the agents' settings, hooks or skill folders (the engine's help and its doctor's
+# hints), in the forms dev passes on: the legacy `skills` namespace, a first `--`, and doctor's --fix
+HARNESS = ("hooks on", "hooks off", "install", "install --user", "link ../impeccable", "update", "update --user",
+           "pin audit", "unpin audit", "doctor --fix", "doctor --json --fix", "skills install", "skills update",
+           "-- hooks on")
+DEVELOPERS = "change what runs in every later session"  # the refusal's reason, in every path
 READER = "seraph"  # a review lane: the read-only allowlist applies
 WRITER = "sati"  # a build lane: the gate applies, the allowlist does not
 
@@ -143,12 +149,12 @@ class ReadOnlyLaneTests(LauncherCase):
                 self.assertIsNone(lane(f"dev impeccable {args}", READER))
 
     def test_a_read_only_lane_leaves_impeccables_write_verbs_to_write_lanes(self):
-        for verb in ("init", "document", "extract", "live", "generate", "pin unpin polish", "hooks on", ""):
+        for verb in ("init", "document", "extract", "live", "generate", "polish", "ignores add x", ""):
             with self.subTest(verb=verb):
                 self.assertIn("write lane", lane(f"dev impeccable {verb}".strip(), READER) or "")
 
     def test_a_read_only_lane_refuses_flags_that_write_or_reach_out(self):
-        for args in ("doctor --fix", "detect --github src", "detect --json https://example.com",
+        for args in ("detect --github src", "detect --json https://example.com",
                      "detect --cdp 9222 --json", "detect --json src --viewport 390x844", "context --out notes.md",
                      "context src/app.tsx", "context -- --out notes.md", "detect src -- --fix",
                      "context --target localhost:3000", "context --target=//example.com/app", "doctor --target example.com"):
@@ -186,6 +192,30 @@ class GateTests(LauncherCase):
         for cmd, cwd in self.planted():
             with self.subTest(cmd=cmd):
                 self.assertEqual((guard.crew_shell_verdict(cmd, cwd, None, WRITER) or ("allow",))[0], "deny")
+
+
+class DeveloperOnlyTests(LauncherCase):
+    # what writes the agents' settings, hooks or skill folders changes every later session, so it is the developer's,
+    # as `dev ext add` is: refused to the main session's agent and to both lane kinds, nested forms included
+    def test_the_main_session_leaves_impeccables_harness_verbs_to_the_developer(self):
+        self.assertIsNone(guard.check("Bash", {"command": "dev impeccable doctor --json"}, CWD, "claude"))
+        for args in HARNESS:
+            for cmd in (f"dev impeccable {args}", f"bash -c 'dev impeccable {args}'"):
+                with self.subTest(cmd=cmd):
+                    v = guard.check("Bash", {"command": cmd}, CWD, "claude")
+                    self.assertIn(DEVELOPERS, v[1] if v else "")
+
+    def test_a_read_only_lane_leaves_impeccables_harness_verbs_to_the_developer(self):
+        self.assertIsNone(lane("dev impeccable doctor --json", READER))
+        for args in HARNESS:
+            with self.subTest(args=args):
+                self.assertIn(DEVELOPERS, lane(f"dev impeccable {args}", READER) or "")
+
+    def test_a_write_lane_leaves_impeccables_harness_verbs_to_the_developer(self):
+        self.assertIsNone(lane("dev impeccable live", WRITER))
+        for args in HARNESS:
+            with self.subTest(args=args):
+                self.assertIn(DEVELOPERS, lane(f"dev impeccable {args}", WRITER) or "")
 
 
 if __name__ == "__main__":

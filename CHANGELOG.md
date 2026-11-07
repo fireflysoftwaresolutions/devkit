@@ -28,7 +28,8 @@ Not released yet: the date is set when the release is tagged.
   record before every run, and runs it in the current folder with each word as one argument, without a shell. The
   engine gets the skill folder, `IMPECCABLE_NO_UPDATE_CHECK=1`, and `IMPECCABLE_NO_TELEMETRY=1`, but no other
   `IMPECCABLE_*` variable. A missing record, a digest mismatch, or an engine outside devkit's skills folder runs
-  nothing and names the fix, `dev install --only skills`. See
+  nothing and names the fix, `dev install --only skills`. The verbs that write the agents' settings, hooks, or skill
+  folders (`hooks`, `install`, `link`, `update`, `pin`, `unpin`, and `doctor --fix`) run only in your terminal. See
   [Skills and plugins › impeccable and its engine](docs/skills-and-plugins.md#impeccable-and-its-engine).
 
 ### Changed
@@ -50,8 +51,10 @@ Not released yet: the date is set when the release is tagged.
   runs a program named only at run time, and refuses it in every crew lane. It still does: the shell can reach another
   file than the one the guard reads by the same typed path (a symbolic link, `..` after `cd`, a quoted `~`, a glob, or
   a folder moved earlier in the same command), so no typed launcher path is trusted. Crew lanes run
-  `dev impeccable <verb>` instead: write lanes run every verb, and read-only lanes run only `context`, `detect` on
-  local paths (not a URL, a host and port, or a domain), and `doctor` without `--fix`, with their reading flags.
+  `dev impeccable <verb>` instead: write lanes run every verb but the developer's, and read-only lanes run only
+  `context`, `detect` on local paths (not a URL, a host and port, or a domain), and `doctor` without `--fix`, with
+  their reading flags. The guard refuses the verbs that write the agents' settings, hooks, or skill folders to every
+  agent, the main session's included.
 
 ## [26.11.3] - Unreleased
 

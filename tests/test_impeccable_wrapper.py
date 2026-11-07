@@ -29,7 +29,7 @@ import _hermetic  # noqa: E402
 _hermetic.activate()  # run alone, this module gets the suite's temporary home too (tests/_hermetic.py)
 sys.path.insert(0, str(ROOT / "lib"))
 
-from devkit import core, setup  # noqa: E402
+from devkit import core, impeccable, setup  # noqa: E402
 
 # The made-up engine: writes its arguments, folder and IMPECCABLE_* variables to $FAKE_ENGINE_OUT, then exits with
 # $FAKE_ENGINE_RC. Run by the interpreter running the tests, isolated (-I).
@@ -157,6 +157,25 @@ class RefusalTests(WrapperCase):
         rc, err, got = self.dev("context")
         self.assertEqual((rc != 0, got), (True, None), err)
         self.assertIn(FIX, err)
+
+
+class DeveloperOnlyTests(WrapperCase):
+    # The verbs that write the agents' settings, hooks or skill folders change every later session, so the command
+    # runs them only in the developer's terminal (core.set_by_developer): an agent's call (here, one with Claude
+    # Code's marker) runs nothing, and the developer's runs the engine.
+    def test_harness_verbs_run_only_in_the_developers_terminal(self):
+        for args in (["hooks", "on"], ["install", "--user"], ["skills", "update"], ["pin", "audit"],
+                     ["doctor", "--fix"], ["--", "hooks", "off"]):
+            with self.subTest(args=args):
+                rc, err, got = self.dev(*args, env={"CLAUDECODE": "1"})
+                self.assertEqual((rc, got), (1, None), err)
+                self.assertIn("only the developer", err)
+        with mock.patch.object(core, "set_by_developer", lambda *a, **k: True), \
+                mock.patch.dict(os.environ, {"FAKE_ENGINE_OUT": str(self.out)}), \
+                contextlib.redirect_stderr(io.StringIO()) as err:
+            rc = impeccable.run(["hooks", "on"], cwd=str(self.project))
+        got = json.loads(self.out.read_text()) if self.out.exists() else {}
+        self.assertEqual((rc, got.get("argv")), (0, ["hooks", "on"]), err.getvalue())
 
 
 if __name__ == "__main__":

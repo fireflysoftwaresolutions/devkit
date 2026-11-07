@@ -111,9 +111,31 @@ def _wait(proc) -> int:
     return rc if rc >= 0 else 128 - rc
 
 
+def _developers(verb: str, args) -> bool:
+    """True in the developer's terminal (core.set_by_developer). A verb that writes the agents' settings, hooks or
+    skill folders (guard.impeccable_harness_verb) changes what runs in every later session, so anyone else gets the
+    refusal, printed and audited, and False."""
+    from . import audit
+    try:
+        ok = core.set_by_developer()
+    except Exception:
+        ok = False  # a check that cannot decide refuses (fail closed)
+    if not ok:
+        audit.record("dev.impeccable", " ".join(args)[:200], f"{verb}: not the developer's terminal", "refused")
+        ui.err(f"dev impeccable {verb} writes the agents' settings, hooks or skill folders, which change what runs in "
+               f"every later session on this Mac; only the developer does that, in a terminal. Ask them, with the "
+               f"command and why.")
+    return ok
+
+
 def run(args, cwd=None) -> int:
     """Run the verified engine with the words `args` in `cwd` (default: the current folder) -> its exit code, or 1
     when it is refused (the reason and the fix on stderr)."""
+    from .guard import impeccable_harness_verb
+    args = [str(a) for a in args]
+    verb = impeccable_harness_verb(args)
+    if verb and not _developers(verb, args):
+        return 1
     try:
         engine, skill, identity = verified_engine()
         if _identity(os.stat(engine, follow_symlinks=False)) != identity:
@@ -127,7 +149,7 @@ def run(args, cwd=None) -> int:
         ui.err(f"dev impeccable: the current folder cannot be read ({e.strerror or e}); run it from your project")
         return 1
     try:
-        proc = subprocess.Popen([engine, *map(str, args)], cwd=here, env=engine_env(skill))
+        proc = subprocess.Popen([engine, *args], cwd=here, env=engine_env(skill))
     except OSError as e:
         ui.err(f"dev impeccable: {core.tilde(engine)} did not start ({e.strerror or e}). Reinstall the engine with "
                f"`{FIX}`.")

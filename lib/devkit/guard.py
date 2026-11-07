@@ -2199,6 +2199,8 @@ class _Shell:
             return deny(LOCK_REASON.format(sub=words[1]))
         if args[:1] == ["hook"] and not helps:
             return deny(HOOK_REASON)
+        if args[:1] == ["impeccable"] and impeccable_harness_verb(args[1:]):  # its words reach the engine, help too
+            return deny(IMPECCABLE_REASON)
         if args[:1] in (["rm"], ["mv"], ["cp"]):
             return self.segment(args[0], args, [], cwd)
         if args[:1] and (args[0] in _DEV_READ or args[0] in _DEV_TEXT):
@@ -3581,12 +3583,45 @@ IMPECCABLE_READS = {
 }
 # a first path part detect could take for a host: localhost, or dotted names and addresses (example.com, 10.0.0.2)
 _HOSTLIKE = re.compile(r"(?:localhost|[A-Za-z0-9_-]+(?:\.[A-Za-z0-9_-]+)+)(?:/|$)", re.I)
+# impeccable's verbs that write the agents' own settings, hooks or skill folders, by the engine's help and its
+# doctor's hints: `hooks on|off` writes the hook manifests (.claude/settings.json, .codex/hooks.json, …); `install`,
+# `link`, `pin` and `unpin` put skills in the harnesses' folders; `update` rewrites them and, with --user, the
+# user-level hook manifest; `doctor --fix` moves hook entries. They change what runs in every later session, so they
+# are the developer's, as `dev ext add` is (the tech lead's decision on the wrapper's review): refused to every agent
+# here and by `dev impeccable` itself outside the developer's terminal (impeccable.run).
+IMPECCABLE_HARNESS = frozenset({"hooks", "install", "link", "update", "pin", "unpin"})
+IMPECCABLE_REASON = ("This command writes the agents' settings, hooks or skill folders: `dev impeccable hooks`, "
+                     "`install`, `link`, `update`, `pin`, `unpin` or `doctor --fix` (also after `skills`), which "
+                     "change what runs in every later session on this Mac. Only the developer does that, in a "
+                     "terminal. Ask them, with the command and why. Agents may run `dev impeccable context`, `detect`, "
+                     f"`doctor` without `--fix`, and the design verbs. {_TAIL}")
+
+
+def impeccable_harness_verb(args) -> str:
+    """The verb of a `dev impeccable` call that writes the agents' settings, hooks or skill folders, or ''. `args`:
+    the words after `impeccable`. dev drops one first `--`; any further `--` before the verb, and the engine's legacy
+    `skills <verb>` namespace, are read through (fails closed). doctor counts with any word that starts with --fix."""
+    words = [str(w) for w in args]
+    while words[:1] == ["--"]:
+        words = words[1:]
+    if words[:1] and words[0].lower() == "skills":
+        words = words[1:]
+        while words[:1] == ["--"]:
+            words = words[1:]
+    verb = words[0].lower() if words else ""
+    if verb in IMPECCABLE_HARNESS:
+        return verb
+    return "doctor --fix" if verb == "doctor" and any(w.startswith("--fix") for w in words[1:]) else ""
 
 
 def _ro_impeccable(args) -> str | None:
     """Why a read-only lane may not run `dev impeccable` with `args`, the words after it, or None. dev drops a first
     `--` and passes the rest to the engine as they are, so a later `--` is a word the engine reads, never a reading
     flag."""
+    harness = impeccable_harness_verb(args)
+    if harness:
+        return (f"`dev impeccable {harness}` writes the agents' settings, hooks or skill folders, which change what "
+                f"runs in every later session: only the developer runs it, in a terminal")
     args = args[1:] if args[:1] == ["--"] else list(args)
     verb, rest = (args[0], args[1:]) if args else ("", [])
     if verb not in IMPECCABLE_READS:
@@ -3832,6 +3867,9 @@ def crew_shell_verdict(cmd: str, cwd, scope=None, member=None, level=None, base=
     one_routed = routed and lanes == [1] and [k for k, _ in _dev_calls(*calls[0])] == ["lane"] and \
         all(argv == ["cat"] for argv, code in calls[1:])
     for argv, code in calls:
+        dev = _dev_args(argv) if code is None else None
+        if dev and dev[:1] == ["impeccable"] and impeccable_harness_verb(dev[1:]):  # the developer's, in every lane
+            return deny(IMPECCABLE_REASON)
         for kind, args in _dev_calls(argv, code):
             if kind == "lane" and not one_routed:
                 return deny(LANE_REASON)
