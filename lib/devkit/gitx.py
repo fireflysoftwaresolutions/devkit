@@ -1134,10 +1134,16 @@ def plan_workflow(text: str, fname: str, root: str) -> list:
     return jobs
 
 
+_DRAFT_GATE = re.compile(r"\s*(&&\s*)?(github\.event\.pull_request\.draft\s*==\s*false|!\s*github\.event\.pull_request"
+                         r"\.draft)\b(\s*&&)?\s*")
+
+
 def _condition(cond: str) -> str:
     """'run' | 'never' (only on other events, or only after a failure) | 'unknown'."""
     c = cond.replace("${{", "").replace("}}", "").strip()
-    if re.fullmatch(r"(always|success)\(\)", c):
+    # the draft gate (`dev ci init`, spec P-fy3bwa0pshk R6) holds for a ready PR and a push: judge what is left
+    c = re.sub(r"^\((.*)\)$", r"\1", _DRAFT_GATE.sub("", c).strip()).strip()
+    if not c or re.fullmatch(r"(always|success)\(\)", c):
         return "run"
     if re.fullmatch(r"(failure|cancelled)\(\)", c):
         return "never"

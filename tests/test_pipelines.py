@@ -811,5 +811,208 @@ class CliTests(unittest.TestCase):
         self.assertFalse(audit_trail.audited(["ci"]))
 
 
+# --------------------------------------------------------------------------- draft pull requests (spec P-fy3bwa0pshk R6)
+
+DRAFTY = """name: ci
+on:
+  pull_request: # every PR event
+  push:
+    branches: [main]
+permissions:
+  contents: read
+jobs:
+  lint:
+    name: Lint
+    runs-on: ubuntu-24.04
+    steps:
+      - run: make lint
+  test:
+    needs: lint
+    runs-on: ubuntu-24.04
+    steps:
+      - run: make test
+  notify:
+    if: ${{ always() }}
+    needs: test
+    runs-on: ubuntu-24.04
+    steps:
+      - run: echo done
+"""
+DEVKIT_CI = Path(__file__).resolve().parents[1] / ".github" / "workflows" / "ci.yml"
+PUSH_MAIN = {"github.event_name": "push", "github.ref": "refs/heads/main", "github.ref_name": "main",
+             "github.event.pull_request.": None}  # a push to main: the pull_request object is null
+READY = {"github.event_name": "pull_request", "github.event.action": "ready_for_review",
+         "github.event.pull_request.draft": False}
+
+
+class DraftGateTests(unittest.TestCase):
+    def test_audit_flags_full_ci_on_drafts_and_the_fix_gates_it_once(self):
+        r = repo({".github/workflows/ci.yml": DRAFTY})
+        rep = run_audit(r)
+        hit = [f for f in rep["findings"] if f["id"] == "full-ci-on-draft"]
+        self.assertEqual([(f["severity"], f["line"], f["autofix"]) for f in hit], [("low", 3, True)])
+        res = P.apply_fixes(r, rep, api=fake_api)
+        self.assertEqual(res["changed"], [".github/workflows/ci.yml"])
+        text = (r / ".github/workflows/ci.yml").read_text()
+        self.assertIn("  pull_request: # every PR event\n    types: [opened, synchronize, reopened, ready_for_review]\n",
+                      text)
+        self.assertIn("    name: Lint\n    if: github.event.pull_request.draft == false", text)
+        self.assertIn("if: ${{ (always()) && github.event.pull_request.draft == false }}", text)
+        self.assertEqual(text.count("draft == false"), 2)  # test needs lint: it skips with it
+        tree = P.load_yaml(text)
+        self.assertEqual(P.job_results(tree, P._DRAFT_CTX), {"lint": False, "test": False, "notify": False})
+        self.assertEqual(P.job_results(tree, PUSH_MAIN), {"lint": True, "test": True, "notify": True})
+        self.assertEqual(P.job_results(tree, READY), {"lint": True, "test": True, "notify": True})
+        after = run_audit(r)
+        self.assertFalse({"full-ci-on-draft", "draft-gate-no-ready"} & ids(after))
+        self.assertEqual(P.apply_fixes(r, after, api=fake_api)["changed"], [])
+
+    def test_a_gate_without_ready_for_review_starts_nothing_when_a_draft_is_marked_ready(self):
+        gated = DRAFTY.replace("    name: Lint\n", "    name: Lint\n    if: ${{ !github.event.pull_request.draft }}\n")
+        r = repo({".github/workflows/ci.yml": gated})
+        hit = [f for f in run_audit(r)["findings"] if f["id"] in ("full-ci-on-draft", "draft-gate-no-ready")]
+        self.assertEqual([(f["id"], f["severity"]) for f in hit], [("draft-gate-no-ready", "medium")])
+        P.apply_fixes(r, run_audit(r), api=fake_api)
+        text = (r / ".github/workflows/ci.yml").read_text()
+        self.assertIn("types: [opened, synchronize, reopened, ready_for_review]", text)
+        self.assertNotIn("draft == false", text)  # the jobs keep the gate they have
+        listed = DRAFTY.replace("  pull_request: # every PR event\n",
+                                "  pull_request:\n    types:\n      - opened\n      - synchronize\n")
+        new, applied, _ = P.draft_gate(listed, jobs=False)
+        self.assertIn("      - synchronize\n      - ready_for_review\n", new)
+        self.assertEqual(applied, ["`ready_for_review` in on.pull_request.types"])
+
+    def test_init_writes_the_gate_and_devkit_own_ci_has_it(self):
+        gen, _ = P.generate(repo(PY_PROJECT), "github")
+        text = gen[".github/workflows/ci.yml"]
+        self.assertIn("types: [opened, synchronize, reopened, ready_for_review]", text)
+        tree = P.load_yaml(text)
+        self.assertEqual(set(P.job_results(tree, P._DRAFT_CTX).values()), {False})
+        self.assertEqual(set(P.job_results(tree, PUSH_MAIN).values()), {True})
+        own = P.load_yaml(DEVKIT_CI.read_text())
+        self.assertIn("ready_for_review", own["on"]["pull_request"]["types"])
+        self.assertEqual(P.job_results(own, P._DRAFT_CTX), {"test": False, "security": False})
+        self.assertEqual(P.job_results(own, PUSH_MAIN), {"test": True, "security": True})
+        self.assertEqual(P.job_results(own, READY), {"test": True, "security": True})
+
+    def test_expressions_follow_github_loose_equality_and_unknowns_stay_unknown(self):
+        cases = [("github.event.pull_request.draft == false", PUSH_MAIN, True),  # null equals false
+                 ("${{ !github.event.pull_request.draft }}", P._DRAFT_CTX, False),
+                 ("github.event_name != 'pull_request' || github.event.pull_request.draft == false", P._DRAFT_CTX, False),
+                 ("github.ref == 'refs/heads/MAIN'", PUSH_MAIN, True),  # strings ignore case
+                 ("startsWith(github.ref, 'refs/tags/')", PUSH_MAIN, False),
+                 ("matrix.os == 'linux'", PUSH_MAIN, None),
+                 ("matrix.os == 'linux' && github.event_name == 'pull_request'", PUSH_MAIN, False),
+                 ("matrix.os == 'linux' || github.event_name == 'push'", PUSH_MAIN, True),
+                 ("${{ github.event_name == 'pull_request' }} && false", PUSH_MAIN, True),  # text around: a string
+                 ("github.event.labels[0] == 'x'", PUSH_MAIN, None)]
+        for cond, ctx, want in cases:
+            with self.subTest(cond=cond):
+                self.assertIs(P.eval_if(cond, ctx), want)
+
+
+# --------------------------------------------------------------------------- does a push start CI (R1, R5)
+
+GIT_ENV = {"GIT_CONFIG_GLOBAL": "/dev/null", "GIT_CONFIG_NOSYSTEM": "1", "GIT_AUTHOR_NAME": "Ana Dev",
+           "GIT_AUTHOR_EMAIL": "ana@example.com", "GIT_COMMITTER_NAME": "Ana Dev", "GIT_COMMITTER_EMAIL": "ana@example.com"}
+
+
+class PushCiTests(unittest.TestCase):
+    def setUp(self):
+        self.dir = Path(tempfile.mkdtemp(prefix="devkit-pushci-"))
+        self.env = mock.patch.dict(P.core.GIT_ENV, GIT_ENV)
+        self.env.start()
+        self.addCleanup(self.env.stop)
+        self.git("init", "-q", "-b", "main")
+
+    def git(self, *args):
+        rc, out, err = P.core.git(self.dir, *args)
+        self.assertEqual(rc, 0, err)
+        return out
+
+    def commit(self, files: dict, branch="feat/x"):
+        if self.git("branch", "--show-current") != branch:
+            self.git("switch", "-q", "-C", branch)
+        self.n = getattr(self, "n", 0) + 1
+        for name, text in dict(files, **{"commits.txt": f"{self.n}\n"}).items():
+            p = self.dir / name
+            p.parent.mkdir(parents=True, exist_ok=True)
+            p.write_text(text)
+        self.git("add", "-A")
+        self.git("commit", "-q", "-m", "chore: change things")
+        return self.git("rev-parse", "HEAD")
+
+    def verdict(self, branch="feat/x", **kw):
+        kw.setdefault("prs_known", True)
+        return P.push_ci(self.dir, branch, **kw)
+
+    def wf(self, on: str) -> dict:
+        return {".github/workflows/ci.yml": f"on:\n{on}jobs:\n  t:\n    runs-on: ubuntu-24.04\n    steps:\n"
+                                            "      - run: make test\n"}
+
+    def test_github_triggers_decide_for_the_pushed_branch(self):
+        self.commit(self.wf("  pull_request:\n  push:\n    branches: [main]\n"))
+        self.assertEqual(self.verdict(), {"starts": False, "why": "ci.yml runs on pull requests and pushes to main",
+                                          "fix": "", "files": [".github/workflows/ci.yml"]})
+        self.commit(self.wf("  push:\n    branches-ignore: ['feat/**']\n"))
+        self.assertIs(self.verdict()["starts"], False)
+        self.commit(self.wf("  push:\n    branches-ignore: ['feat/**']\n"), branch="fix/y")
+        self.assertEqual(self.verdict("fix/y")["why"], "ci.yml runs on every push outside its branches-ignore list")
+        self.commit(self.wf("  push:\n    tags: ['v*']\n"))
+        self.assertIs(self.verdict()["starts"], False)
+        self.commit(self.wf("  push:\n    branches: ['**', '!feat/**']\n"))
+        self.assertIs(self.verdict()["starts"], False)
+
+    def test_paths_filters_read_the_files_the_push_changes(self):
+        base = self.commit(self.wf("  push:\n    paths: ['src/**']\n"), branch="main")
+        self.commit({"docs/a.md": "x\n"})
+        self.assertIs(self.verdict(remote_sha=base)["starts"], False)
+        self.commit({"src/a.py": "x\n"})
+        self.assertEqual(self.verdict(remote_sha=base)["why"], "ci.yml runs on every push that changes its paths")
+
+    def test_open_pull_requests_and_drafts(self):
+        sha = self.commit(self.wf("  pull_request:\n"))
+        self.assertIs(self.verdict(pr=None)["starts"], False)
+        self.assertEqual(self.verdict(pr={"number": 3, "draft": False})["why"], "ci.yml runs on PR #3")
+        self.assertIsNone(self.verdict(prs_known=False)["starts"])
+        gated = self.wf("  pull_request:\n")[".github/workflows/ci.yml"].replace(
+            "    runs-on:", "    if: github.event.pull_request.draft == false\n    runs-on:")
+        self.commit({".github/workflows/ci.yml": gated})
+        self.assertIs(self.verdict(pr={"number": 3, "draft": True})["starts"], False)
+        self.assertIs(self.verdict(pr={"number": 3, "draft": False})["starts"], True)
+        self.assertNotEqual(sha, self.git("rev-parse", "HEAD"))
+
+    def test_it_reads_the_commit_not_the_working_tree(self):
+        sha = self.commit(self.wf("  pull_request:\n"))
+        (self.dir / ".github/workflows/ci.yml").write_text("on: push\njobs:\n  t:\n    runs-on: x\n    steps: []\n")
+        self.assertIs(self.verdict(sha=sha)["starts"], False)
+
+    def test_other_hosts_and_ci_devkit_cannot_read(self):
+        self.commit({".gitlab-ci.yml": "test:\n  script: [make test]\n"})
+        self.assertEqual(self.verdict()["why"], ".gitlab-ci.yml runs a branch pipeline on every push")
+        mr_only = "test:\n  script: [make test]\n  rules:\n    - if: $CI_PIPELINE_SOURCE == 'merge_request_event'\n"
+        self.commit({".gitlab-ci.yml": mr_only})
+        self.assertIsNone(self.verdict(prs_known=False)["starts"])
+        self.assertIs(self.verdict(prs_known=True, pr=None)["starts"], False)
+        self.git("rm", "-q", ".gitlab-ci.yml")
+        self.commit({"bitbucket-pipelines.yml": "pipelines:\n  default:\n    - step:\n        script: [make test]\n"})
+        self.assertIs(self.verdict()["starts"], True)
+        self.git("rm", "-q", "bitbucket-pipelines.yml")
+        self.commit({"azure-pipelines.yml": "pool:\n  vmImage: ubuntu-24.04\nsteps:\n  - script: make test\n"})
+        self.assertEqual(self.verdict()["why"], "azure-pipelines.yml runs on every push (no `trigger:` means every "
+                                                "branch)")
+        self.commit({"azure-pipelines.yml": "trigger: none\npr: none\npool:\n  vmImage: x\nsteps:\n  - script: t\n"})
+        self.assertIs(self.verdict()["starts"], False)
+        self.commit({"Jenkinsfile": "pipeline {}\n"})
+        self.assertEqual(self.verdict()["why"], "Jenkinsfile configures Jenkins, which devkit cannot read")
+
+    def test_the_guard_counts_a_push_unless_devkit_can_tell_it_starts_no_ci(self):
+        self.commit(self.wf("  push:\n    branches: [main]\n"))
+        self.assertFalse(P.push_starts_ci(self.dir, "feat/x"))
+        self.commit(self.wf("  pull_request:\n"))
+        self.assertTrue(P.push_starts_ci(self.dir, "feat/x"))  # no fresh pull request list: it may have one open
+        self.assertTrue(P.push_starts_ci(self.dir, "feat/none"))
+
+
 if __name__ == "__main__":
     unittest.main()

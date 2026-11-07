@@ -1,9 +1,12 @@
 # devkit CI: the confirmation of a local run, not the test runner (AGENTS.md §7).
 # Run the same thing locally first: python3 -m unittest discover -s tests && /usr/bin/python3 -m unittest discover -s tests
+# A draft pull request runs no job: the one run starts when it is marked ready for review (ready_for_review), and
+# every push after that runs again. On a push to main, github.event.pull_request is null, which equals false.
 name: ci
 
 on:
   pull_request:
+    types: [opened, synchronize, reopened, ready_for_review]
   push:
     branches: [main]
 
@@ -17,6 +20,7 @@ concurrency:
 jobs:
   test:
     name: tests (Python ${{ matrix.python }})
+    if: github.event.pull_request.draft == false # drafts wait for ready_for_review
     runs-on: macos-latest
     timeout-minutes: 15
     strategy:
@@ -39,6 +43,7 @@ jobs:
 
   security:
     name: Security scans
+    if: github.event.pull_request.draft == false # drafts wait for ready_for_review
     runs-on: ubuntu-24.04
     timeout-minutes: 20
     steps:

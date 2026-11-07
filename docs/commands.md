@@ -571,12 +571,19 @@ installed. The findings catalog is in [CI/CD pipelines](ci-cd.md#findings-catalo
 
 | Option | Effect |
 | --- | --- |
-| `--fix` | Applies the safe GitHub Actions fixes in the working tree (least-privilege `permissions`, `concurrency`, job timeouts, actions pinned by SHA) and never commits; for the other hosts, prints the snippet under each finding |
+| `--fix` | Applies the safe GitHub Actions fixes in the working tree (least-privilege `permissions`, `concurrency`, job timeouts, actions pinned by SHA, the draft gate) and never commits; for the other hosts, prints the snippet under each finding |
 | `--strict` | Exit `1` on medium findings too (default: high and critical) |
 | `--provider github\|gitlab\|bitbucket\|azure` | Only one host |
 | `--json` | The report as JSON |
 
 Exit codes: `1` when a high or critical finding remains (with `--strict`, a medium one too), `0` otherwise.
+
+Draft pull requests: `full-ci-on-draft` (low) flags a pull request workflow that runs every job on a draft, so each
+push to a draft runs the whole CI. `draft-gate-no-ready` (medium) flags a workflow whose jobs skip drafts but whose
+`types` leave out `ready_for_review`, so marking a draft ready starts no run until the next push. `--fix` writes the
+gate: `types: [opened, synchronize, reopened, ready_for_review]` on `pull_request`, and
+`if: github.event.pull_request.draft == false` on every job that needs no other job (the jobs that need it skip with
+it; on a push the field is null, which equals false, so pushes still run).
 
 ### `dev ci init [--provider HOST] [--stack STACK] [--dry-run] [--force] [-p PROJECT]`
 
@@ -585,7 +592,8 @@ stack from the lockfiles (`--stack auto|python|node|java-maven|java-gradle|go|ph
 `.github/workflows/ci.yml`, `.github/workflows/release.yml` and, without Dependabot or Renovate, `.github/dependabot.yml`;
 on the other hosts, their single pipeline file. Every action is pinned by SHA and every image by digest; the pipeline
 has lint, tests with a JUnit report, a security job, and on release tags an SBOM, signing or attestation, and a check
-of what was published. It audits the result, and on GitHub runs `actionlint` on it.
+of what was published. On GitHub, `ci.yml` skips draft pull requests and runs once when one is marked ready for
+review (the draft gate under `dev ci audit`). It audits the result, and on GitHub runs `actionlint` on it.
 
 | Option | Effect |
 | --- | --- |

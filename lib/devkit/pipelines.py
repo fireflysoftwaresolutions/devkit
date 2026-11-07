@@ -1685,6 +1685,8 @@ CATALOG = {
     "parse-error": ("reliability", "high", "a pipeline file cannot be read"),
     "no-dependency-cache": ("speed", "medium", "dependencies are downloaded again on every run"),
     "no-auto-cancel": ("speed", "medium", "superseded runs keep running after a newer push"),
+    "full-ci-on-draft": ("speed", "low", "every job runs on draft pull requests"),
+    "draft-gate-no-ready": ("reliability", "medium", "jobs skip drafts, but marking a draft ready starts no run"),
     "auto-cancel-unavailable": ("speed", "info", "the host cannot cancel superseded runs"),
     "no-path-filters": ("speed", "low", "every part of a monorepo is built for every change"),
     "no-test-sharding": ("speed", "low", "a long test job runs on one machine"),
@@ -1727,7 +1729,8 @@ CATALOG = {
     "release-without-tests": ("delivery", "medium", "a release publishes without running the test gate"),
     "publish-unverified": ("delivery", "low", "nothing checks the published artifact"),
 }
-AUTOFIX_IDS = ("permissions-missing", "no-job-timeout", "no-auto-cancel", "action-not-pinned")
+AUTOFIX_IDS = ("permissions-missing", "no-job-timeout", "no-auto-cancel", "action-not-pinned", "full-ci-on-draft",
+               "draft-gate-no-ready")
 
 
 def finding(where: dict, id_: str, message: str, fix: str, line=None, severity=None, autofix=False, snippet=None,
@@ -2105,6 +2108,7 @@ def check_github(pl: dict, ctx: Ctx) -> list:
         out.append(finding(pl, "runner-latest", f"runs on {', '.join(labs)}: the image moves to a new OS version "
                            "without a change in this repository", "fine for most projects; pin the "
                            "version (ubuntu-24.04, macos-15) when builds must be reproducible", line=latest[0][1]))
+    out += _gh_draft_checks(pl)
     out += _yaml_float_versions(pl)
     return out
 
@@ -3357,6 +3361,10 @@ def fix_workflow_text(text: str, findings: list, timeout: int = 30, api=None, ca
     new = "".join(lines)
     if not text.endswith(("\n", "\r")):
         new = new.rstrip("\r\n")
+    if ids & {"full-ci-on-draft", "draft-gate-no-ready"}:  # on the edited text: the lines above have moved
+        new, more, left = draft_gate(new, jobs="full-ci-on-draft" in ids)  # else only the types
+        applied += more
+        skipped += left
     return new, applied, skipped
 
 
@@ -3380,6 +3388,743 @@ def apply_fixes(root, rep: dict, policy=None, api=None) -> dict:
             p.write_text(new)
             res["changed"].append(rel)
     return res
+
+
+# =========================================================================== draft pull requests and branch pushes
+#
+# Spec P-fy3bwa0pshk. R6: a pull request workflow skips its jobs while the PR is a draft and runs them once when the
+# PR is marked ready (`ready_for_review`): `dev ci audit` flags the workflows that run everything on drafts, and
+# `dev ci init` and `--fix` write the gate. R1 and R5: `push_ci` reads the CI configuration of the commit a push
+# sends, as the hosts do, and says whether that push starts a CI run (True), starts none (False) or devkit cannot
+# tell (None). `dev backup` pushes only on False; the guard's push budget counts only the pushes that start CI
+# (`push_starts_ci`).
+
+DRAFT_GATE = "github.event.pull_request.draft == false"  # null on a push, and null equals false: pushes still run
+PR_TYPES = ["opened", "synchronize", "reopened"]  # GitHub's default activity types for pull_request
+READY_TYPES = PR_TYPES + ["ready_for_review"]
+_STATUS_FN = re.compile(r"\b(always|success|failure|cancelled)\s*\(")
+_DRAFT_CTX = {"github.event_name": "pull_request", "github.event.action": "synchronize",
+              "github.event.pull_request.draft": True}
+
+
+class _Unknown:
+    def __repr__(self):
+        return "UNKNOWN"
+
+
+UNKNOWN = _Unknown()  # a value devkit does not know: expressions over it are unknown too (three-valued logic)
+_TOKEN = re.compile(r"\s*(?:(?P<str>'(?:[^']|'')*')|(?P<num>\d+(?:\.\d+)?)|(?P<op>==|!=|<=|>=|&&|\|\||[!<>(),])|"
+                    r"(?P<id>[A-Za-z_][\w.-]*))")
+
+
+def _tokens(expr: str):
+    out, k = [], 0
+    while expr[k:].strip():
+        m = _TOKEN.match(expr, k)
+        if not m or m.end() == k:
+            return None
+        k = m.end()
+        out.append((m.lastgroup, m.group(m.lastgroup)))
+    return out
+
+
+def _truthy(v):
+    if v is UNKNOWN:
+        return UNKNOWN
+    return not (v is None or v is False or v == "" or (isinstance(v, float) and (v == 0 or v != v)))
+
+
+def _num(v) -> float:
+    if v is None or v is False:
+        return 0.0
+    if v is True:
+        return 1.0
+    if isinstance(v, float):
+        return v
+    s = str(v).strip()
+    try:
+        return float(s) if s else 0.0
+    except ValueError:
+        return float("nan")
+
+
+def _eq(a, b):
+    """GitHub's loose equality: strings ignore case, other types meet as numbers (null and false are both 0)."""
+    if a is UNKNOWN or b is UNKNOWN:
+        return UNKNOWN
+    if isinstance(a, str) and isinstance(b, str):
+        return a.lower() == b.lower()
+    if type(a) is type(b):
+        return a == b
+    return _num(a) == _num(b)
+
+
+def _and(a, b):
+    ta, tb = _truthy(a), _truthy(b)
+    if ta is False or tb is False:
+        return False
+    return UNKNOWN if UNKNOWN in (ta, tb) else b
+
+
+def _or(a, b):
+    ta, tb = _truthy(a), _truthy(b)
+    if ta is True or tb is True:
+        return a if ta is True else b
+    return UNKNOWN if UNKNOWN in (ta, tb) else b
+
+
+def _lookup(ctx: dict, name: str):
+    if name in ctx:
+        return ctx[name]
+    for k, v in ctx.items():  # "github.event.pull_request.": None, the whole object is null on this event
+        if k.endswith(".") and (name.startswith(k) or name + "." == k):
+            return v
+    return UNKNOWN
+
+
+class _Expr:
+    """GitHub's expression syntax (literals, context names, !, comparisons, &&, ||, parentheses and a few functions)
+    over the values devkit knows."""
+
+    def __init__(self, toks, ctx, funcs):
+        self.t, self.k, self.ctx, self.funcs = toks, 0, ctx, funcs
+
+    def peek(self):
+        return self.t[self.k] if self.k < len(self.t) else (None, None)
+
+    def take(self, op=None):
+        tok = self.peek()
+        if tok == (None, None) or op is not None and tok != ("op", op):
+            raise ValueError(op or "end")
+        self.k += 1
+        return tok
+
+    def parse(self):
+        v = self.or_()
+        if self.k != len(self.t):
+            raise ValueError("trailing tokens")
+        return v
+
+    def or_(self):
+        v = self.and_()
+        while self.peek() == ("op", "||"):
+            self.take()
+            v = _or(v, self.and_())
+        return v
+
+    def and_(self):
+        v = self.cmp()
+        while self.peek() == ("op", "&&"):
+            self.take()
+            v = _and(v, self.cmp())
+        return v
+
+    def cmp(self):
+        v = self.unary()
+        kind, op = self.peek()
+        if kind == "op" and op in ("==", "!=", "<", ">", "<=", ">="):
+            self.take()
+            w = self.unary()
+            if op not in ("==", "!="):
+                return UNKNOWN
+            eq = _eq(v, w)
+            return eq if eq is UNKNOWN or op == "==" else not eq
+        return v
+
+    def unary(self):
+        if self.peek() == ("op", "!"):
+            self.take()
+            v = _truthy(self.unary())
+            return v if v is UNKNOWN else not v
+        return self.primary()
+
+    def primary(self):
+        kind, val = self.take()
+        if (kind, val) == ("op", "("):
+            v = self.or_()
+            self.take(")")
+            return v
+        if kind == "str":
+            return val[1:-1].replace("''", "'")
+        if kind == "num":
+            return float(val)
+        if kind != "id":
+            raise ValueError(val)
+        if self.peek() == ("op", "("):
+            self.take()
+            args = []
+            if self.peek() != ("op", ")"):
+                args.append(self.or_())
+                while self.peek() == ("op", ","):
+                    self.take()
+                    args.append(self.or_())
+            self.take(")")
+            return self.call(val.lower(), args)
+        low = val.lower()
+        if low in ("true", "false"):
+            return low == "true"
+        return None if low == "null" else _lookup(self.ctx, val)
+
+    def call(self, name, args):
+        if name in self.funcs:
+            return self.funcs[name]
+        if name in ("startswith", "endswith", "contains") and len(args) == 2 and all(isinstance(x, str) for x in args):
+            a, b = args[0].lower(), args[1].lower()
+            return a.startswith(b) if name == "startswith" else a.endswith(b) if name == "endswith" else b in a
+        return UNKNOWN
+
+
+def eval_if(cond, ctx: dict, funcs: dict = None):
+    """A job's `if:` under the context values devkit knows -> True, False, or None when the answer depends on a value
+    it does not know. `${{ }}` around the whole is optional; text around an expression makes a non-empty string, which
+    is always true (zizmor's unsound-condition)."""
+    if isinstance(cond, bool):
+        return cond
+    if cond is None:
+        return True
+    text = str(cond).strip()
+    if not text:
+        return True
+    m = re.fullmatch(r"\$\{\{(.*)\}\}", text, re.S)
+    if m and "${{" not in m.group(1):
+        text = m.group(1).strip()
+    elif "${{" in text:
+        return True
+    toks = _tokens(text)
+    if not toks:
+        return None
+    try:
+        t = _truthy(_Expr(toks, ctx, dict(funcs or {})).parse())
+    except (ValueError, IndexError):
+        return None
+    return None if t is UNKNOWN else t
+
+
+def job_results(tree, ctx: dict) -> dict:
+    """job id -> True (runs), False (skipped) or None (cannot tell) for one event, whose context values are `ctx`. A
+    job whose `if:` calls no status function skips when a job it needs skipped, as on GitHub."""
+    jobs = tree.get("jobs") if isinstance(tree, dict) and isinstance(tree.get("jobs"), dict) else {}
+    res: dict = {}
+
+    def visit(jid, path):
+        if jid in res:
+            return res[jid]
+        j = jobs.get(jid)
+        if not isinstance(j, dict) or jid in path:
+            return None
+        needs = [visit(str(n), path | {jid}) for n in _as_list(j.get("needs")) if str(n) in jobs]
+        skipped, unsure = any(r is False for r in needs), any(r is None for r in needs)
+        ran = [r for r in needs if r is not False]
+        cond = j.get("if")
+        if not _STATUS_FN.search(str(cond if cond is not None else "")):
+            v = False if skipped else eval_if(cond, ctx)
+            r = None if v is True and unsure else v
+        else:
+            r = eval_if(cond, ctx, {"always": True, "success": UNKNOWN if unsure else not skipped,
+                                    "failure": UNKNOWN if ran else False, "cancelled": UNKNOWN if ran else False})
+        res[jid] = r
+        return r
+
+    for jid in jobs:
+        visit(str(jid), frozenset())
+    return res
+
+
+def _verdict(results):
+    """Several jobs' results -> True (one runs), False (none runs) or None."""
+    vals = list(results.values()) if isinstance(results, dict) else list(results)
+    if any(v is True for v in vals):
+        return True
+    return False if all(v is False for v in vals) else None
+
+
+def _gh_events(on) -> dict:
+    if isinstance(on, str):
+        return {on: None}
+    if isinstance(on, list):
+        return {str(e): None for e in on}
+    return dict(on) if isinstance(on, dict) else {}
+
+
+def _pr_types(cfg) -> list:
+    return [str(x) for x in _as_list(cfg.get("types"))] if isinstance(cfg, dict) else []
+
+
+def _gh_draft_checks(pl: dict) -> list:
+    """`dev ci audit`: a pull request workflow that runs every job on drafts, or that skips drafts but starts nothing
+    when a draft is marked ready (R6)."""
+    tree = pl.get("tree")
+    on = tree.get("on", tree.get(True)) if isinstance(tree, dict) else None
+    events = _gh_events(on)
+    if "pull_request" not in events:
+        return []
+    types = _pr_types(events["pull_request"])
+    if types and not any(t in PR_TYPES for t in types):
+        return []  # it never runs on a draft's pushes
+    res = job_results(tree, _DRAFT_CTX)
+    if not res:
+        return []
+    line = _kl(on, "pull_request", _kl(tree, "on", 1)) if isinstance(on, dict) else _kl(tree, "on", 1)
+    snippet = "pull_request:\n  types: [" + ", ".join(READY_TYPES) + "]"
+    if any(v is False for v in res.values()):
+        if "ready_for_review" in types:
+            return []
+        return [finding(pl, "draft-gate-no-ready", "jobs skip draft pull requests, but `ready_for_review` is not "
+                        "in `on.pull_request.types`: marking a draft ready starts no run until the next push",
+                        "add `types: [opened, synchronize, reopened, ready_for_review]` to `pull_request:`",
+                        line=line, autofix=True, snippet=snippet)]
+    return [finding(pl, "full-ci-on-draft", f"every job runs on draft pull requests: each push to a draft runs "
+                    f"all {len(res)} job(s) of {Path(pl['file']).name}",
+                    f"gate the jobs with `if: {DRAFT_GATE}` and add `ready_for_review` to `types`, so the one run "
+                    "starts when the PR is marked ready (dev ci audit --fix writes both)", line=line, autofix=True,
+                    snippet=snippet + f"\n...\n    if: {DRAFT_GATE}")]
+
+
+def _job_if_at(lines, j, ind):
+    """Where a new `if:` goes in job mapping `j`: after a one-line `name:` that comes first, else before the first
+    key -> (line index, indentation)."""
+    keys = sorted(j, key=lambda k: _kl(j, k, 0))
+    first = _kl(j, keys[0], 0) - 1
+    if keys[0] == "name" and isinstance(j.get("name"), str) and (len(keys) == 1 or _kl(j, keys[1], 0) - 1 == first + 1):
+        return first + 1, ind(first)
+    return first, ind(first)
+
+
+def draft_gate(text: str, jobs: bool = True):
+    """Gate a GitHub workflow on draft pull requests -> (new text, applied, skipped). `on.pull_request.types` gains
+    `ready_for_review`, so marking a draft ready starts the one run; with `jobs`, every job that would run on a draft
+    and needs no other job gets `if: github.event.pull_request.draft == false` (the jobs that need it skip with it).
+    Comments and layout stay; nothing changes when the workflow has no pull request trigger."""
+    applied, skipped = [], []
+    try:
+        tree = load_yaml(text)
+    except YamlError as e:
+        return text, applied, [f"cannot read the workflow: {e}"]
+    if not isinstance(tree, dict):
+        return text, applied, skipped
+    on = tree.get("on", tree.get(True))
+    if not isinstance(on, dict) or "pull_request" not in on:
+        if "pull_request" in _gh_events(on):
+            skipped.append("`on:` is not a mapping: write it as one (`on:`, then `pull_request:`) for the draft gate")
+        return text, applied, skipped
+    cfg = on.get("pull_request")
+    types = _pr_types(cfg)
+    if types and not any(t in PR_TYPES for t in types):
+        return text, applied, skipped
+    nl = "\r\n" if "\r\n" in text else "\n"
+    lines = text.splitlines(keepends=True)
+    if lines and not lines[-1].endswith(("\n", "\r")):
+        lines[-1] += nl
+
+    def ind(k):
+        return len(lines[k]) - len(lines[k].lstrip(" "))
+
+    edits = []  # (index, kind, payload): insert before index, or replace the line at index
+    pk = _kl(on, "pull_request", 0) - 1
+    if "ready_for_review" not in types and pk >= 0:
+        unit = max(1, ind(pk) - ind(_kl(tree, "on", 1) - 1))
+        flow = "types: [" + ", ".join(types + [t for t in READY_TYPES if t not in types]) + "]"
+        if not isinstance(cfg, dict) or not cfg:
+            m = re.match(r"^(?P<pre>\s*pull_request:)\s*(?:\{\s*\}|~|null)?\s*(?P<post>#[^\r\n]*)?\r?\n$", lines[pk])
+            if m:
+                edits.append((pk, "replace", m.group("pre") + (" " + m.group("post") if m.group("post") else "") + nl))
+                edits.append((pk + 1, "insert", [" " * (ind(pk) + unit) + flow + nl]))
+            else:
+                skipped.append(f"line {pk + 1}: `pull_request:` is not a plain key; add `{flow}` by hand")
+        elif "types" not in cfg:
+            first = min(_kl(cfg, k, 0) for k in cfg) - 1
+            edits.append((first, "insert", [" " * ind(first) + flow + nl]))
+        else:
+            tk = _kl(cfg, "types", 0) - 1
+            seq = cfg.get("types")
+            m = re.match(r"^(?P<pre>\s*types:\s*)\[(?P<items>[^\]#]*)\](?P<post>[^\r\n]*)\r?\n$", lines[tk])
+            if m:
+                items = m.group("items").strip().rstrip(",")
+                edits.append((tk, "replace", f"{m.group('pre')}[{items}, ready_for_review]{m.group('post')}{nl}"))
+            elif isinstance(seq, YSeq) and seq.ilines:
+                last = seq.ilines[-1] - 1
+                dash = re.match(r"^(\s*-\s*)", lines[last])
+                edits.append((last + 1, "insert", [(dash.group(1) if dash else " " * ind(last) + "- ")
+                                                   + "ready_for_review" + nl]))
+            else:
+                skipped.append(f"line {tk + 1}: add `ready_for_review` to `types` by hand")
+        if not skipped:
+            applied.append("`ready_for_review` in on.pull_request.types")
+    if jobs:
+        res = job_results(tree, _DRAFT_CTX)
+        all_jobs = tree.get("jobs") if isinstance(tree.get("jobs"), dict) else {}
+        for jid, j in all_jobs.items():
+            if not isinstance(j, dict) or not j or res.get(str(jid)) is False:
+                continue
+            cond = j.get("if")
+            if j.get("needs") and not _STATUS_FN.search(str(cond or "")):
+                continue  # it skips with the job it needs
+            if cond is None:
+                at, sp = _job_if_at(lines, j, ind)
+                edits.append((at, "insert", [" " * sp + f"if: {DRAFT_GATE} # drafts wait for ready_for_review" + nl]))
+            else:
+                ck = _kl(j, "if", 0) - 1
+                expr = str(cond).strip()
+                m = re.fullmatch(r"\$\{\{(.*)\}\}", expr, re.S)
+                expr = m.group(1).strip() if m and "${{" not in m.group(1) else expr
+                raw = lines[ck].split("if:", 1)[1].strip() if "if:" in lines[ck] else ""
+                if not raw or raw[:1] in "|>" or "${{" in expr or ": " in expr or " #" in expr or "\n" in expr:
+                    skipped.append(f"job `{jid}`: add `&& {DRAFT_GATE}` to its `if:` by hand")
+                    continue
+                edits.append((ck, "replace", " " * ind(ck) + f"if: ${{{{ ({expr}) && {DRAFT_GATE} }}}}{nl}"))
+            applied.append(f"`if: {DRAFT_GATE}` on job `{jid}`")
+    for at, kind, payload in sorted(edits, key=lambda e: (e[0], e[1] == "insert"), reverse=True):
+        if kind == "replace":
+            lines[at] = payload
+        else:
+            lines[at:at] = payload
+    new = "".join(lines)
+    if not text.endswith(("\n", "\r")):
+        new = new.rstrip("\r\n")
+    return new, applied, skipped
+
+
+# --------------------------------------------------------------------------- does a push start CI (R1, R5)
+
+UNREAD_CI = (  # CI configuration devkit cannot read: a push may start it, so devkit cannot tell (R1 does not push)
+    (".circleci/", "CircleCI"), (".travis.yml", "Travis CI"), ("Jenkinsfile", "Jenkins"), (".drone.yml", "Drone"),
+    ("appveyor.yml", "AppVeyor"), (".appveyor.yml", "AppVeyor"), (".buildkite/", "Buildkite"),
+    (".woodpecker.yml", "Woodpecker"), (".woodpecker/", "Woodpecker"), (".gitea/workflows/", "Gitea Actions"),
+    (".forgejo/workflows/", "Forgejo Actions"), (".semaphore/", "Semaphore"), ("cloudbuild.yaml", "Cloud Build"),
+    ("cloudbuild.yml", "Cloud Build"), ("buildspec.yml", "AWS CodeBuild"), ("bitrise.yml", "Bitrise"),
+    ("codemagic.yaml", "Codemagic"), ("netlify.toml", "Netlify"), ("vercel.json", "Vercel"))
+MAX_PATHS = 300  # GitHub reads the first 300 changed files of a push for its paths filters
+_YAML_EXT = (".yml", ".yaml")
+
+
+def _ci_files(names: list) -> list:
+    """The files of a commit that hold its CI configuration (every YAML file too when a GitLab or Azure pipeline may
+    include or extend one), as relative paths."""
+    out = [n for n in names if n.startswith(".github/workflows/") and n.count("/") == 2 and n.endswith(_YAML_EXT)]
+    out += [n for n in names if n in (".gitlab-ci.yml", "bitbucket-pipelines.yml", "bitbucket-pipelines.yaml")]
+    azure = [n for n in names if re.fullmatch(r"([^/]*\.)?azure-pipelines\.ya?ml", n) or n.startswith(
+        ".azure-pipelines/") and n.endswith(_YAML_EXT)]
+    out += azure
+    if ".gitlab-ci.yml" in names or azure:
+        out += [n for n in names if n.endswith(_YAML_EXT) and n not in out and not any(
+            part in SKIP_DIRS for part in n.split("/")[:-1])][:2000]
+    return out
+
+
+def _materialize(top: str, sha: str, files: list, dest: Path) -> bool:
+    """Write `files` as they are in commit `sha` under `dest` (git archive; nothing lands outside `dest`)."""
+    import io
+    import subprocess
+    import tarfile
+    if not files:
+        return True
+    try:
+        p = subprocess.run(["git", "-C", top, "archive", "--format=tar", sha, "--", *files], capture_output=True,
+                           timeout=60, env=core.GIT_ENV)
+    except (OSError, subprocess.TimeoutExpired):
+        return False
+    if p.returncode != 0:
+        return False
+    try:
+        with tarfile.open(fileobj=io.BytesIO(p.stdout)) as tf:
+            for m in tf.getmembers():
+                parts = Path(m.name).parts
+                if not m.isfile() or m.name.startswith("/") or ".." in parts or m.size > 2_000_000:
+                    continue
+                target = dest.joinpath(*parts)
+                target.parent.mkdir(parents=True, exist_ok=True)
+                fh = tf.extractfile(m)
+                target.write_bytes(fh.read() if fh else b"")
+    except (tarfile.TarError, OSError):
+        return False
+    return True
+
+
+def _changed_files(top: str, sha: str, remote_sha, base):
+    """A function that lists the files a push of `sha` changes, as a paths filter sees them (None: unknown). A new
+    branch gets every file its commits change, against the base branch and against the remote: more files make a run
+    more likely, which is the safe side for a backup."""
+    cache = {}
+
+    def get():
+        if "v" in cache:
+            return cache["v"]
+        if remote_sha:
+            rc, out, _ = core.git(top, "diff", "--name-only", "-z", remote_sha, sha, timeout=60)
+            cache["v"] = sorted(x for x in out.split("\0") if x) if rc == 0 else None
+            return cache["v"]
+        files = set()
+        steps = [["log", "--format=", "--name-only", "-z", sha, "--not", "--remotes"],
+                 ["diff-tree", "--no-commit-id", "--name-only", "-r", "-z", "--root", sha]]
+        mb = core.gitout(top, "merge-base", base, sha) if base else ""
+        if mb:
+            steps.append(["diff", "--name-only", "-z", mb, sha])
+        for args in steps:
+            rc, out, _ = core.git(top, *args, timeout=60)
+            if rc != 0:
+                cache["v"] = None
+                return None
+            files |= {x.strip("\n") for x in out.split("\0") if x.strip("\n")}
+        cache["v"] = sorted(files)
+        return cache["v"]
+
+    return get
+
+
+def _gh_filter(patterns, value: str) -> bool:
+    """GitHub's ordered filter list: the last pattern that matches decides, and `!` excludes."""
+    hit = False
+    for p in [str(x) for x in _as_list(patterns)]:
+        if p.startswith("!"):
+            if gh_glob(p[1:], value):
+                hit = False
+        elif gh_glob(p, value):
+            hit = True
+    return hit
+
+
+def _gh_push(cfg, branch: str, changed):
+    """Does a push of `branch` match this workflow's `push` trigger? -> (True | False | None, why)."""
+    cfg = cfg if isinstance(cfg, dict) else {}
+    if "branches" in cfg:
+        if not _gh_filter(cfg.get("branches"), branch):
+            return False, ""
+        why = "runs on pushes to " + ", ".join(str(x) for x in _as_list(cfg.get("branches")))
+    elif "branches-ignore" in cfg:
+        if _gh_filter(cfg.get("branches-ignore"), branch):
+            return False, ""
+        why = "runs on every push outside its branches-ignore list"
+    elif "tags" in cfg or "tags-ignore" in cfg:
+        return False, ""  # a tag filter alone: only tag pushes run it
+    else:
+        why = "runs on every push"
+    if "paths" in cfg or "paths-ignore" in cfg:
+        files = changed()
+        if files is None:
+            return None, "filters on paths, and devkit could not list the files the push changes"
+        if len(files) > MAX_PATHS:
+            return None, f"filters on paths, and the push changes more than {MAX_PATHS} files"
+        hit = any(_gh_filter(cfg["paths"], f) for f in files) if "paths" in cfg else \
+            any(not _gh_filter(cfg["paths-ignore"], f) for f in files)
+        if not hit:
+            return False, ""
+        why += " that changes its paths"
+    return True, why
+
+
+def _gh_words(events: dict) -> str:
+    """What a workflow runs on, in words: "pull requests and pushes to main"."""
+    words = []
+    for ev, cfg in events.items():
+        cfg = cfg if isinstance(cfg, dict) else {}
+        if ev == "push":
+            if "branches" in cfg:
+                words.append("pushes to " + ", ".join(str(x) for x in _as_list(cfg.get("branches"))))
+            elif "branches-ignore" in cfg:
+                words.append("pushes outside branches-ignore")
+            else:
+                words.append("tags" if "tags" in cfg or "tags-ignore" in cfg else "pushes")
+        elif ev in ("pull_request", "pull_request_target"):
+            words.append("pull requests")
+        else:
+            words.append({"schedule": "a schedule", "workflow_dispatch": "manual runs", "workflow_call": "calls",
+                          "release": "releases", "merge_group": "the merge queue"}.get(ev, ev.replace("_", " ")))
+    words = list(dict.fromkeys(words))
+    return " and ".join([", ".join(words[:-1]), words[-1]] if len(words) > 1 else words) or "nothing"
+
+
+def _push_ctx(branch: str) -> dict:
+    return {"github.event_name": "push", "github.ref": f"refs/heads/{branch}", "github.ref_name": branch,
+            "github.ref_type": "branch", "github.head_ref": "", "github.base_ref": "", "github.event.pull_request.": None}
+
+
+def _pr_ctx(event: str, branch: str, pr: dict) -> dict:
+    return {"github.event_name": event, "github.event.action": "synchronize", "github.head_ref": branch,
+            "github.event.pull_request.draft": bool(pr.get("draft"))}
+
+
+def _gh_push_ci(name, tree, branch, changed, pr, prs_known, starts, unsure, quiet):
+    events = _gh_events(tree.get("on", tree.get(True)))
+    seen = len(starts) + len(unsure) + len(quiet)
+    if "push" in events:
+        runs, why = _gh_push(events["push"], branch, changed)
+        if runs is None:
+            unsure.append(f"{name} {why}")
+        elif runs:
+            jobs = _verdict(job_results(tree, _push_ctx(branch)))
+            if jobs is False:
+                quiet.append(f"{name} skips every job on a push to {branch}")
+            elif jobs is None:
+                unsure.append(f"{name} {why}, and devkit cannot evaluate its jobs' `if:`")
+            else:
+                starts.append((f"{name} {why}", f"add {branch} (or a pattern for it) to `branches-ignore` in {name}"))
+    prs = [ev for ev in ("pull_request", "pull_request_target")
+           if ev in events and "synchronize" in (_pr_types(events[ev]) or PR_TYPES)]
+    if prs and not prs_known:
+        unsure.append(f"{name} runs on pull requests, and devkit could not check whether {branch} has one open")
+    elif prs and pr:
+        label = f"{'draft ' if pr.get('draft') else ''}PR #{pr.get('number')}"
+        for ev in prs:
+            jobs = _verdict(job_results(tree, _pr_ctx(ev, branch, pr)))
+            if jobs is False:
+                quiet.append(f"{name} skips every job on {label}")
+            elif jobs is None:
+                unsure.append(f"{name} runs on {label}, and devkit cannot evaluate its jobs' `if:`")
+            else:
+                starts.append((f"{name} runs on {label}", "gate its jobs on drafts (dev ci audit --fix) and keep the "
+                               "PR a draft until it is ready" if pr.get("draft") else
+                               "every push to a PR that is ready for review runs its CI"))
+    if len(starts) + len(unsure) + len(quiet) == seen:
+        quiet.append(f"{name} runs on {_gh_words(events)}")
+
+
+def _azure_push_ci(name, tree, branch, pr, prs_known, starts, unsure, quiet):
+    def strip(p):
+        p = str(p)
+        return p[len("refs/heads/"):] if p.startswith("refs/heads/") else p
+
+    t = tree.get("trigger", "__absent__")
+    runs, why = False, ""
+    if t == "__absent__":
+        runs, why = True, "runs on every push (no `trigger:` means every branch)"
+    elif isinstance(t, (list, str)) and t != "none":
+        runs = any(fnmatch.fnmatchcase(branch, strip(p)) for p in _as_list(t))
+        why = "runs on pushes to " + ", ".join(str(x) for x in _as_list(t))
+    elif isinstance(t, dict):
+        br = t.get("branches")
+        inc = _as_list(br.get("include") if isinstance(br, dict) else br) or ["*"]
+        exc = _as_list(br.get("exclude")) if isinstance(br, dict) else []
+        runs = any(fnmatch.fnmatchcase(branch, strip(p)) for p in inc) and not any(_bb_glob(strip(p), branch)
+                                                                                    for p in exc)
+        why = "runs on pushes to " + ", ".join(str(x) for x in inc)
+        if runs and t.get("paths"):
+            unsure.append(f"{name} filters on paths, which devkit does not evaluate for Azure Pipelines")
+            return
+    if runs:
+        starts.append((f"{name} {why}", "set `trigger: branches: exclude:` for the branch"))
+    elif tree.get("pr", "__absent__") not in ("none", None) and not (prs_known and not pr):
+        unsure.append(f"{name} may run pull request builds, and devkit cannot check for an open pull request on "
+                      f"{branch}")
+    else:
+        quiet.append(f"{name} runs no pipeline for a push to {branch}")
+
+
+def push_ci(top, branch: str, sha: str = None, remote_sha: str = None, base: str = None, pr=None,
+            prs_known: bool = True) -> dict:
+    """Would pushing commit `sha` (default: the local branch) to `branch` on the remote start a CI run? It reads the
+    CI configuration of that commit, as the hosts do.
+
+    -> {"starts": True | False | None, "why": words, "fix": what to change so it does not, "files": [...]}. None: devkit
+    cannot tell (a CI it cannot read, a paths filter it cannot evaluate, a pull request it could not look up).
+    remote_sha: the remote branch's commit, None for a new branch (for paths filters). base: the default branch ref.
+    pr: the branch's open pull request {"number", "draft"} or None; prs_known: False when devkit could not look."""
+    top = str(top)
+    sha = sha or core.gitout(top, "rev-parse", "--verify", "-q", f"refs/heads/{branch}^{{commit}}")
+    if not sha:
+        return {"starts": None, "why": f"{branch} has no commit to read the CI configuration from", "fix": "",
+                "files": []}
+    rc, out, _ = core.git(top, "ls-tree", "-r", "-z", "--name-only", sha, timeout=60)
+    if rc != 0:
+        return {"starts": None, "why": f"devkit could not list the files of {sha[:7]}", "fix": "", "files": []}
+    names = [n for n in out.split("\0") if n]
+    for n in names:
+        for entry, host in UNREAD_CI:
+            if n == entry or entry.endswith("/") and n.startswith(entry):
+                return {"starts": None, "why": f"{n} configures {host}, which devkit cannot read", "fix": "",
+                        "files": [n]}
+    import tempfile
+    with tempfile.TemporaryDirectory(prefix="devkit-ci-") as tmp:
+        if not _materialize(top, sha, _ci_files(names), Path(tmp)):
+            return {"starts": None, "why": f"devkit could not read the CI files of {sha[:7]}", "fix": "", "files": []}
+        pls = build(tmp)
+    files = [pl["file"] for pl in pls]
+    if not pls:
+        return {"starts": False, "why": "the commit has no CI configuration", "fix": "", "files": []}
+    changed = _changed_files(top, sha, remote_sha, base)
+    starts, unsure, quiet = [], [], []
+    for pl in pls:
+        tree = pl.get("tree")
+        name = Path(pl["file"]).name if pl["provider"] == "github" else pl["file"]
+        if pl.get("parse_error") is not None or not isinstance(tree, dict):
+            unsure.append(f"devkit cannot read {pl['file']}")
+        elif pl["provider"] == "github":
+            _gh_push_ci(name, tree, branch, changed, pr, prs_known, starts, unsure, quiet)
+        elif pl["provider"] == "gitlab":
+            kinds = set()
+            for j in pl["jobs"]:
+                eff = j.get("map") or {}
+                kinds |= _gl_rule_kinds(eff.get("rules"), eff.get("only"), eff.get("except")) & set(
+                    pl.get("workflow_kinds") or ())
+            if "branch" in kinds:
+                starts.append((f"{name} runs a branch pipeline on every push", "add a `workflow: rules:` entry with "
+                               "`when: never` for branch pipelines outside the default branch"))
+            elif "mr" in kinds and not (prs_known and not pr):
+                unsure.append(f"{name} runs merge request pipelines, and devkit cannot check for an open merge request "
+                              f"on {branch}")
+            else:
+                quiet.append(f"{name} runs no pipeline for a push to {branch}")
+        elif pl["provider"] == "bitbucket":
+            section = tree.get("pipelines") if isinstance(tree.get("pipelines"), dict) else {}
+            br = section.get("branches") if isinstance(section.get("branches"), dict) else {}
+            hit = [str(p) for p in br if _bb_glob(str(p), branch)]
+            if "default" in section or hit:
+                starts.append((f"{name} runs `{('branches: ' + hit[0]) if hit else 'default'}` on a push to {branch}",
+                               "remove `default:` or narrow `branches:`"))
+            elif "pull-requests" in section and not (prs_known and not pr):
+                unsure.append(f"{name} runs pull request pipelines, and devkit cannot check for an open pull request "
+                              f"on {branch}")
+            else:
+                quiet.append(f"{name} runs no pipeline for a push to {branch}")
+        else:
+            _azure_push_ci(name, tree, branch, pr, prs_known, starts, unsure, quiet)
+    if starts:
+        return {"starts": True, "why": "; ".join(w for w, _ in starts), "fix": starts[0][1], "files": files}
+    if unsure:
+        return {"starts": None, "why": "; ".join(unsure), "fix": "", "files": files}
+    return {"starts": False, "why": "; ".join(quiet), "fix": "", "files": files}
+
+
+def open_pr(pr_list, branch: str):
+    """{"number", "draft", "url"} of the branch's open pull request in a `gh pr list` result, or None."""
+    for p in pr_list or []:
+        if isinstance(p, dict) and p.get("headRefName") == branch and str(p.get("state") or "OPEN").upper() == "OPEN":
+            return {"number": p.get("number"), "draft": bool(p.get("isDraft", p.get("draft"))), "url": p.get("url")}
+    return None
+
+
+def cached_pr(top, branch: str, max_age: int = 900):
+    """The branch's open pull request from the registry's cache when it is at most `max_age` seconds old -> (pr or
+    None, known). Only GitHub remotes have one; known is False without a fresh cache."""
+    import time
+    from . import registry
+    remote = core.gitout(top, "config", "--get", "remote.origin.url")
+    parsed = core.parse_remote(remote) if remote else None
+    if not parsed or parsed[0] != "github.com" or not parsed[1]:
+        return None, False
+    f = Path(registry.STATE) / "prs" / f"{parsed[1]}__{parsed[2]}.json"
+    try:
+        if time.time() - f.stat().st_mtime > max_age:
+            return None, False
+        data = json.loads(f.read_text())
+    except (OSError, ValueError):
+        return None, False
+    return open_pr(data, branch), True
+
+
+def push_starts_ci(top, branch: str, src: str = None, remote: str = "origin") -> bool:
+    """For the guard's push budget (R5), which counts only the pushes that start CI: False only when devkit can tell
+    from the CI configuration that pushing `src` (default: the local branch) to `branch` starts no run, with the pull
+    requests of a registry cache at most 15 minutes old. Never raises."""
+    try:
+        top = str(top)
+        sha = core.gitout(top, "rev-parse", "--verify", "-q", f"{src or 'refs/heads/' + branch}^{{commit}}")
+        if not sha:
+            return True
+        rsha = core.gitout(top, "rev-parse", "--verify", "-q", f"refs/remotes/{remote}/{branch}^{{commit}}")
+        pr, known = cached_pr(top, branch)
+        return push_ci(top, branch, sha, remote_sha=rsha or None, pr=pr, prs_known=known)["starts"] is not False
+    except Exception:
+        return True
 
 
 # =========================================================================== dev ci init
@@ -3911,7 +4656,8 @@ def generate(root, provider: str = "github", stack: str = "auto", policy=None, b
         if not s_["test"]:
             notes.append(f"{s_['label']}: no tests found, so no test job; add tests and run `dev ci init --force`")
     if provider == "github":
-        files = {".github/workflows/ci.yml": _render_github(ctx, jobs, stacks, docker, pins),
+        # draft pull requests run nothing; "ready for review" starts the one run (spec P-fy3bwa0pshk R6)
+        files = {".github/workflows/ci.yml": draft_gate(_render_github(ctx, jobs, stacks, docker, pins))[0],
                  ".github/workflows/release.yml": _render_github(ctx, jobs, stacks, docker, pins, release=True)}
         if not f["updater"]:
             files[".github/dependabot.yml"] = _render_dependabot(ctx, stacks, docker, pins)
