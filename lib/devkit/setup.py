@@ -1275,6 +1275,8 @@ def _install_skills():
                 inside = out.resolve().parent == SKILLS_SHARE.resolve()  # resolved (`..` is devkit's install)
             except (OSError, ValueError, RuntimeError):  # a NUL in the name, a link loop (RuntimeError on 3.9)
                 inside = False
+            # and one folder name, never a path: `x/../kept-skill` resolves inside too, to another skill's folder
+            inside = inside and name not in (".", "..") and Path(name).name == name
             if not inside:
                 fail(f"{name!r} from {src['repo']}: not a folder name inside {tilde(SKILLS_SHARE)}, so it is skipped "
                      f"and nothing is deleted; rename the skill in skills.json, on a branch of the devkit checkout")

@@ -189,6 +189,18 @@ class CatalogTests(unittest.TestCase):
                "license": "MIT", "why": "w"}
         self.assertIn("skill:claude:_x.y-1", by_id(ext.catalog(fixture_team(), {"add": [add]}, None)))
 
+    def test_a_skill_name_is_ascii_so_no_other_spelling_opens_its_folder(self):
+        # APFS ignores Unicode normalization too: the jamo spelling of a Hangul syllable opens the team's folder of
+        # that syllable, and casefold does not see it. An overlay name is ASCII letters, digits, dot, dash, underscore
+        t = fixture_team()
+        t["skills"]["sources"].append({"repo": "team/kr", "ref": SHA_C, "license": "MIT", "why": "w",
+                                       "skills": {"\ud55c": "s/k"}})
+        for name in ("\u1112\u1161\u11ab", "caf\u00e9", "x\u0301"):
+            add = {"kind": "skill", "name": name, "repo": "someone/skills", "ref": SHA_C, "path": "s/x",
+                   "license": "MIT", "why": "w"}
+            with self.subTest(name=ascii(name)), self.assertRaisesRegex(ext.ExtError, "needs a name of ASCII"):
+                ext.catalog(t, {"add": [add]}, None)
+
     def test_each_kind_gets_its_id_source_and_pin_kind(self):
         cat = by_id(ext.catalog(fixture_team(), {}, {"postgres"}))
         sp = cat["plugin:claude:superpowers@claude-plugins-official"]
@@ -1457,18 +1469,22 @@ class InstallSkillsLayeringTests(unittest.TestCase):
         # skills.json names are not checked against the overlay's rule: `..` is the folder above the shared skills
         # folder (devkit's install, for the real one), `.` and '' the folder itself; the step skips them, deleting
         # nothing, and links the other skills
+        # `x/../kept-skill`, with a folder `x`, resolves to a folder right inside the shared one: a name is one
+        # folder name, never a path
         keep = self.share / "kept-skill"
         keep.mkdir()
         (keep / "SKILL.md").write_text("---\nname: kept-skill\n---\n")
+        (self.share / "x").mkdir()
         (self.share.parent / "install-file").write_text("devkit")
         t = fixture_team()
         t["skills"]["sources"].append({"repo": "someone/skills", "ref": SHA_C, "license": "MIT", "why": "w",
                                        "skills": {"..": "skills/up", ".": "skills/here", "": "skills/empty",
-                                                  "x/../..": "skills/climb"}})
+                                                  "x/../..": "skills/climb", "x/../kept-skill": "skills/over"}})
         self.run_step({}, team=t)
         self.assertEqual((self.share.parent / "install-file").read_text(), "devkit")
-        self.assertTrue((keep / "SKILL.md").exists(), "a skill in the shared folder was deleted")
-        self.assertFalse((self.share / "x").exists())
+        self.assertEqual((keep / "SKILL.md").read_text(), "---\nname: kept-skill\n---\n",
+                         "a skill in the shared folder was replaced")
+        self.assertEqual(list((self.share / "x").iterdir()), [])
         self.assertEqual(Path(os.readlink(self.claude / "skills" / "codebase-design")), self.share / "codebase-design")
 
 

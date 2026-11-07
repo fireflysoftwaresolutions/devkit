@@ -220,10 +220,10 @@ def _user_items(item) -> list:
         return [_plugin(agent, pid, meta, "user", True)]
     name = str(item.get("name") or "")
     # L1: never a word that reads as an option; and a name is a folder in the shared skills folder, so never `.`, `..`
-    # or a hidden one
-    if not re.fullmatch(r"\w[\w.\-]*", name):
-        raise ExtError(f"{label}: needs a name of letters, digits, dot, dash or underscore that starts with a letter, "
-                       f"digit or underscore (not a dot or a dash)")
+    # or a hidden one, and ASCII: APFS ignores Unicode normalization, so two spellings of one name open one folder
+    if not re.fullmatch(r"\w[\w.\-]*", name, re.ASCII):
+        raise ExtError(f"{label}: needs a name of ASCII letters, digits, dot, dash or underscore that starts with a "
+                       f"letter, digit or underscore (not a dot or a dash)")
     agents = item.get("agents") or list(AGENTS)
     if not set(agents) <= set(AGENTS):
         raise ExtError(f"{label}: agents must be claude and/or codex")
