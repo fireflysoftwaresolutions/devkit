@@ -119,11 +119,11 @@ class SessionGraphTests(unittest.TestCase):
             "  │  ├─ ✓ 1. API contract · done · Tech lead (Morpheus) · [architecture]",
             "  │  ├─ ! 2. orders REST endpoint · done · recheck (reopened: API contract) · Backend engineer (Tank)"
             " · [backend] · after 1",
-            "  │  │  └─ ○ Backend engineer (Tank) · Tank: orders endpoint · done · 33m",
+            "  │  │  └─ ○ Backend engineer (Tank) · orders endpoint · done · 33m",
             "  │  ├─ ✗ 3. checkout page component · blocked: waiting for decision D1 · Frontend engineer (Trinity)"
             " · [frontend] · after 1",
-            "  │  │  └─ ● Frontend engineer (Trinity) · Trinity: checkout page · waiting for decision D1 · 53m",
-            "  │  │     └─ ● QA engineer (Mouse) · Mouse: probe payloads · running · 40m",
+            "  │  │  └─ ● Frontend engineer (Trinity) · checkout page · waiting for decision D1 · 53m",
+            "  │  │     └─ ● QA engineer (Mouse) · probe payloads · running · 40m",
             "  │  ├─ ○ 4. write the docs · waiting for 3 · Tech lead (Morpheus) · [docs] · after 2, 3",
             "  │  ├─ – 5. load test · skipped · Tech lead (Morpheus) · after 1",
             "  │  └─ Lanes with no step",
@@ -132,11 +132,12 @@ class SessionGraphTests(unittest.TestCase):
             "  │  ├─ F-fxcheckout1 · doing · Checkout flow · tracks the run",
             "  │  └─ B-fxrefunds01 · todo · Refunds missing from the contract · tracks step 2",
             "  ├─ Decisions waiting for the developer · dev crew decide <id> \"<answer>\"",
-            "  │  └─ D1 · Trinity asks: Card form: hosted or our own? · options A: hosted | B: our own · recommends A",
+            "  │  └─ D1 · Frontend engineer (Trinity) asks: Card form: hosted or our own? · options A: hosted"
+            " | B: our own · recommends A",
             "  ├─ Approvals owed",
             "  │  └─ Code reviewer (Seraph) approves 2. orders REST endpoint",
             "  └─ Open messages",
-            "     └─ M1 · Mouse → Morpheus · not delivered: Which currency format?",
+            "     └─ M1 · QA engineer (Mouse) → Tech lead (Morpheus) · not delivered: Which currency format?",
         ]
         missing = [ln for ln in expected if ln not in lines]
         self.assertEqual(missing, [], "\n".join(lines))

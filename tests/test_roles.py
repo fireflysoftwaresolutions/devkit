@@ -24,7 +24,7 @@ TESTS = Path(__file__).resolve().parent
 sys.path.insert(0, str(TESTS.parent / "lib"))
 sys.path.insert(0, str(TESTS))
 
-from devkit import canary, core, crew, hooks, skillguard, state  # noqa: E402
+from devkit import canary, core, crew, dispatch, hooks, skillguard, state  # noqa: E402
 from devkit import continuity as ct  # noqa: E402
 from devkit import progress as pg  # noqa: E402
 from test_continuity import SID, T0, Base as ContinuityCase  # noqa: E402
@@ -189,6 +189,124 @@ class CrewCommandTests(unittest.TestCase):
         self.assertIn("Security engineer (The Keymaker)", show.strip().splitlines()[0])
         for out in (roster, route, decisions, show):
             self.assertEqual(bare(out), [], out)
+
+
+class ProgressOutputTests(unittest.TestCase):
+    # the progress update, the hook texts that deliver messages and decisions, and the refusals of dev progress name
+    # members role first and the tech lead by the role
+    def test_the_plan_and_agents_lines_name_owners_and_lanes_role_first(self):
+        with State() as t:
+            pg.start("Release", plan=["api=30m", "threat model=20m after api", "review=20m", "release=10m"],
+                     mode="guided")
+            pg.assign("threat model", "The Keymaker")
+            pg.assign("review", "Seraph")
+            pg.assign("release", "Link")
+            t.launch("l1", "devkit:link", "Link: release")
+            out = pg.render_update(pg.load_run("claude", "s1"), branch="b")
+        self.assertIn("○ 2. threat model · waiting for api, then Security engineer (The Keymaker) · ~", out)
+        self.assertIn("○ 3. review · waiting for Code reviewer (Seraph) · ~", out)
+        self.assertIn("▸ 4. release · Release engineer (Link): release · ", out)
+        self.assertIn("Agents: ▸ Release engineer (Link): release ", out)
+        self.assertEqual(bare(out), [], out)
+
+    def test_messages_and_decisions_name_their_sender_role_first(self):
+        with State() as t:
+            pg.start("Parser", plan=["parse"], mode="guided")
+            t.launch()
+            pg.crew_ask("Empty lines?", from_agent="a1")
+            pg.crew_decision("Accept empty lines?", options="A: yes | B: no", from_agent="a1")
+            to_lead = pg.on_tool_done("claude", {"session_id": "s1"})
+            pg.crew_answer("M1", "Yes")
+            to_neo = pg.on_tool_done("claude", {"session_id": "s1", "agent_id": "a1"})
+        self.assertIn("- M1 from Senior engineer (Neo): Empty lines?", to_lead)
+        self.assertIn("- D1 from Senior engineer (Neo): “", to_lead)
+        self.assertIn("from Tech lead (Morpheus): Yes (answer to M1)", to_neo)
+        for out in (to_lead, to_neo):
+            self.assertEqual(bare(out), [], out)
+
+    def test_the_refusals_name_the_owner_role_first_and_the_tech_lead_by_role(self):
+        refusals = {}
+
+        def refused(key, call, error=pg.StepError):
+            with self.assertRaises(error) as e:
+                call()
+            refusals[key] = str(e.exception)
+
+        with State() as t:
+            refused("no run", lambda: pg.crew_ask("Empty lines?"), ValueError)
+            refused("no lane", lambda: pg.step("parsed", from_agent="a1"))
+            pg.start("Parser", plan=["parse", "docs"])
+            pg.assign("parse", "Neo", scope="lib/parser/**")
+            t.launch("a1", "devkit:neo", "Neo: parse")
+            refused("main only", lambda: pg.assign("docs", "Tank", from_agent="a1"))
+            refused("owned", lambda: pg.step("parse finished", which="parse"))
+            refused("overlap", lambda: pg.assign("docs", "Tank", scope="lib/parser/x.py"))
+        self.assertIn("the tech lead starts one", refusals["no run"])
+        self.assertIn("this step has no lane to go to: the tech lead starts the run", refusals["no lane"])
+        self.assertIn("only the tech lead assigns the plan's steps: ask them with dev crew ask", refusals["main only"])
+        self.assertIn("belongs to Senior engineer (Neo), still working on it", refusals["owned"])
+        self.assertIn("overlaps the files Senior engineer (Neo) owns while working", refusals["overlap"])
+        for text in refusals.values():
+            self.assertEqual(bare(text), [], text)
+
+    def test_a_launch_that_names_none_of_its_members_steps_is_reported_role_first(self):
+        with State() as t:
+            pg.start("Parser", plan=["docs"])
+            pg.assign("docs", "Neo")
+            t.launch("a1", "devkit:neo", "Neo: profile the importer")
+            note = pg.on_tool_done("claude", {"session_id": "s1"})
+        self.assertIn("Senior engineer (Neo) started as “Neo: profile the importer”, which names none of Senior "
+                      "engineer (Neo)'s steps (“docs”)", note)
+
+    def test_a_launch_too_deep_names_the_tech_lead_by_role(self):
+        from test_crew_slots import call, config
+        with State() as t, config(max_depth=1):
+            pg.start("Work", plan=["api"])
+            t.launch("a_tank", "devkit:tank", "Tank: api")
+            deep = pg.launch_verdict("claude", call("Tank: schema lookup", "general-purpose", parent="a_tank"),
+                                     pg.load_run("claude", "s1"))
+        self.assertIn("levels below the tech lead; the limit is 1", deep)
+        self.assertIn("name it in your report and the tech lead assigns it.", deep)
+        self.assertEqual(bare(deep), [], deep)
+
+    def test_a_full_crew_names_who_holds_the_slots_role_first(self):
+        from test_crew_slots import call, config, verdict
+        with State() as t, config(max_parallel=1, reserve=0):
+            pg.start("Work", plan=["api", "docs"])
+            t.launch("a_tank", "devkit:tank", "Tank: api")
+            full = verdict("Neo: docs", "devkit:neo")
+            helper = pg.launch_verdict("claude", call("Tank: schema lookup", "general-purpose", parent="a_tank"),
+                                       pg.load_run("claude", "s1"))
+        self.assertIn("1 of 1 crew slots are in use (Backend engineer (Tank)): ", full)
+        self.assertIn("name it in your report and the tech lead assigns it.", helper)
+        for text in (full, helper):
+            self.assertEqual(bare(text), [], text)
+
+
+class DispatchTests(unittest.TestCase):
+    # a delegation, a decline and a busy member, in the messages the tech lead gets and in the dispatch view
+    def test_a_delegation_and_its_decline_name_both_members_role_first(self):
+        with State() as t:
+            pg.start("Feature", plan=["parser=30m"])
+            t.launch("a1", "devkit:neo", "Neo: parser")
+            dispatch.delegate("add the export column", to="Dozer", from_agent="a1")
+            delegated = pg.on_tool_done("claude", {"session_id": "s1"})
+            t.launch("a2", "devkit:dozer", "Dozer: add the export column")
+            dispatch.decline("add the export column", "needs a schema review", from_agent="a2")
+            declined = pg.on_tool_done("claude", {"session_id": "s1"})
+        self.assertIn("Senior engineer (Neo) delegates “add the export column” to Database engineer (Dozer)", delegated)
+        self.assertIn("Launch Database engineer (Dozer) when it is ready: dev crew next", delegated)
+        self.assertIn("Database engineer (Dozer) declined “add the export column”: needs a schema review", declined)
+        for out in (delegated, declined):
+            self.assertEqual(bare(out), [], out)
+
+    def test_a_step_for_a_busy_member_says_who_is_busy_role_first(self):
+        run = {"v": 2, "plan": [{"name": "docs", "label": "Neo", "state": "pending", "owner": "main"}],
+               "agents": {"a1": {"persona": "Neo", "label": "Neo: parser", "state": "running"}}}
+        with State():
+            _, waiting = dispatch._sorted(run)
+        self.assertEqual([why for _, why in waiting],
+                         ["Senior engineer (Neo) is busy: send it to them (SendMessage / send_input)"])
 
 
 class SessionContextTests(unittest.TestCase):

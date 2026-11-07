@@ -220,7 +220,7 @@ class RoleNameTests(TurnCase):
         sf.parent.mkdir(parents=True, exist_ok=True)
         state.replace(sf, dict(self.sess, agent="claude"))
         report = ("**[Firefly> DevKit · Tank]** api · `main` · the API\n- **Done:** built it\n- **Check:** ✓ 12 tests"
-                  "\n- **Next:** review\n\nNeeds from Morpheus: nothing")
+                  "\n- **Next:** review\n\nNeeds from the tech lead: nothing")
         first = self.subagent_stop(self.member("a1", report))
         self.assertEqual(first.get("decision"), "block")
         self.assertIn("Backend engineer (Tank)", first["reason"])

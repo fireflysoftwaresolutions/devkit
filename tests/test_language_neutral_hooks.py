@@ -184,7 +184,7 @@ class RouteHintTests(HookCase):
                                    "prompt": "build the JSON API server for the dashboard and implement the frontend "
                                              "live updates"})
         ctx = self.context(out)
-        self.assertIn("you are Morpheus", ctx)
+        self.assertIn("you are the Tech lead (Morpheus)", ctx)
         self.assertIn("a guess from the request's words", ctx)
 
 

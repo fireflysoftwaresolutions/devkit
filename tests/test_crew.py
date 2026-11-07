@@ -702,7 +702,7 @@ class DispatchCliTests(unittest.TestCase):
             self.assertIn("step “add a nullable column for the export date” for Database engineer (Dozer) · scope db/**",
                           out)
             self.assertIn("in the Database engineer (Dozer)'s lane now (they got a message)", out)
-            self.assertIn("Neo delegates", run_cli("crew", "inbox", from_agent="a2")[1])
+            self.assertIn("Senior engineer (Neo) delegates", run_cli("crew", "inbox", from_agent="a2")[1])
             rc, out, _ = run_cli("crew", "delegate", "review the parser before merge", from_agent="a1")
             self.assertEqual(rc, 0)
             self.assertIn("for Code reviewer (Seraph) (routed: ", out)

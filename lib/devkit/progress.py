@@ -847,7 +847,7 @@ def start(goal: str, steps: int = 0, estimate: str = "", cwd: str | None = None,
         with _tx(agent, sid):
             run = normalize(load_run(agent, sid) or {})
             if not run.get("goal"):
-                raise StepError("no progress run in this session: Morpheus starts one with dev progress start")
+                raise StepError("no progress run in this session: the tech lead starts one with dev progress start")
             lane = _lane(run, from_agent, now)
             lane.update(goal=goal, plan=[x[0] for x in parse_plan(plan)], done=0)
             run["updates"].append({"ts": round(now), "kind": "agent", "agent": from_agent, "text": f"plan: {goal}"})
@@ -937,8 +937,8 @@ def _main_only(from_agent, what: str, cwd: str | None = None):
     crew member asks him. The call ledger must name main (spec C4): a lane variable, a parent process or recency
     never does."""
     if from_agent:
-        raise StepError(f"only Morpheus {what}: ask him with dev crew ask \"…\" (your own steps: dev progress add, "
-                        "dev progress step)")
+        raise StepError(f"only the tech lead {what}: ask them with dev crew ask \"…\" (your own steps: dev progress "
+                        "add, dev progress step)")
     who = caller(cwd)
     c = who.get("caller")
     if c in ("main", "human"):
@@ -950,10 +950,10 @@ def _main_only(from_agent, what: str, cwd: str | None = None):
     _audit("caller.refused", what, f"caller {c}; session found by {who.get('how')}", "deny",
            session=str(who.get("session"))[:40])
     if c == "unknown" or not c:
-        raise StepError(f"only Morpheus {what}, and no open call of this session typed this command: type the "
+        raise StepError(f"only the tech lead {what}, and no open call of this session typed this command: type the "
                         f"command itself, not through a script or another shell, as a command of its own (spec C4)")
-    raise StepError(f"only Morpheus {what}: this command runs inside a crew member's call ({c[:16]}). Ask him with "
-                    f"dev crew ask \"…\"")
+    raise StepError(f"only the tech lead {what}: this command runs inside a crew member's call ({c[:16]}). Ask them "
+                    f"with dev crew ask \"…\"")
 
 
 def _step_text(s: dict, label: str = "") -> str:
@@ -1038,9 +1038,11 @@ def assign(which, label: str, cwd: str | None = None, now: float | None = None, 
                 if lane.get("state") == "running" and not _label_matches(label, lane):
                     clash = [g for g in globs for h in lane.get("scope") or [] if _globs_overlap(g, h)]
                     if clash:
-                        raise StepError(f"{', '.join(clash)} overlaps the files {lane.get('persona') or lane.get('label')} "
-                                        f"owns while working ({', '.join(lane.get('scope'))}). Give each member "
-                                        f"different files, or wait until they finish.")
+                        from . import crew
+                        raise StepError(f"{', '.join(clash)} overlaps the files "
+                                        f"{crew.who(lane.get('persona') or lane.get('label'))} owns while working "
+                                        f"({', '.join(lane.get('scope'))}). Give each member different files, or "
+                                        f"wait until they finish.")
             s["scope"] = globs
         lane_id = None if deps_open(run, s) else next((k for k, v in (run.get("agents") or {}).items()
                                                        if v.get("state") == "running" and _label_matches(label, v)), None)
@@ -1187,7 +1189,7 @@ def crew_ask(text: str, to: str | None = None, from_agent: str | None = None, cw
     with _tx(agent, sid):
         run = load_run(agent, sid)
         if not run:
-            raise ValueError("no progress run in this session: Morpheus starts one with dev progress start")
+            raise ValueError("no progress run in this session: the tech lead starts one with dev progress start")
         run = normalize(run)
         m = _post(run, from_agent or "main", _addr(run, to or ""), text, now)
         _save(run, touch_session=False)
@@ -1401,7 +1403,7 @@ def crew_decision(question: str, options=None, recommend: str = "", irreversible
     with _tx(agent, sid):
         run = load_run(agent, sid)
         if not run:
-            raise StepError("no progress run in this session: Morpheus starts one with dev progress start")
+            raise StepError("no progress run in this session: the tech lead starts one with dev progress start")
         run = normalize(run)
         opts = [o.strip() for o in (options if isinstance(options, list) else str(options or "").split("|")) if o.strip()]
         rec = (recommend or "").strip()
@@ -1470,7 +1472,7 @@ def crew_decide(decision_id: str, answer: str, cwd: str | None = None, now: floa
         run = normalize(load_run(agent, sid) or {})
         d = find(run)
         if d["state"] == "decided" and d.get("by") != "auto" and not ev:
-            raise StepError(f"{d['id']} was already recorded by Morpheus without the developer's evidence: “"
+            raise StepError(f"{d['id']} was already recorded by the tech lead without the developer's evidence: “"
                             f"{d['answer']}”. Only their own answer replaces it: ask with the question tool, "
                             f"exactly “{ask_text(d)}”, or they type: approve {d['id']}: <option>")
         if not ev and d.get("irreversible"):
@@ -1550,6 +1552,7 @@ def decisions_context(agent: str, sid: str) -> str:
             d["told"] = round(time.time())  # delivered to Morpheus; `shown` is when the developer saw it
             d.pop("surfaced", None)
         _save(run, touch_session=False)
+    from . import crew
     lines = ["devkit · decisions waiting for the developer (" + mode_of(run) + " mode). Ask with your question tool "
              "(AskUserQuestion), its question exactly as quoted below and the options as listed, or show the "
              "decision in your final message and let the developer type `approve D<n>[: <option>]`. Then record "
@@ -1557,7 +1560,7 @@ def decisions_context(agent: str, sid: str) -> str:
              "and resume the member who asked (SendMessage / send_input):"]
     for d in new:
         opts = (" Options: " + " | ".join(d["options"])) if d["options"] else ""
-        lines.append(f"- {d['id']} from {d['from_name']}: “{ask_text(d)}”{opts}"
+        lines.append(f"- {d['id']} from {crew.who(d['from_name'])}: “{ask_text(d)}”{opts}"
                      + (f" Recommended: {d['recommend']}." if d.get("recommend") else "")
                      + (f" Irreversible: {d['irreversible']}." if d.get("irreversible") else ""))
     return "\n".join(lines)
@@ -1568,9 +1571,10 @@ def messages_context(agent: str, sid: str, me: str) -> str:
     msgs = _take_messages(agent, sid, me)
     if not msgs:
         return ""
+    from . import crew
     lines = ["devkit · crew messages for you (answer with `dev crew answer <id> \"…\"`):"]
     for m in msgs:
-        lines.append(f"- {m['id']} from {m.get('from_name')}: {m['text']}"
+        lines.append(f"- {m['id']} from {crew.who(m.get('from_name'))}: {m['text']}"
                      + (f" (answer to {m['reply_to']})" if m.get("reply_to") else ""))
     return "\n".join(lines)
 
@@ -2203,8 +2207,10 @@ def check_close(run, target, text, explicit, force=False):
         return
     owner = target.get("owner") or "main"
     if owner != "main" and target.get("state") == "running":
+        from . import crew
         who = (run.get("agents") or {}).get(owner, {})
-        raise StepError(f"step “{target['name']}” belongs to {who.get('persona') or who.get('label') or 'a subagent'}, "
+        raise StepError(f"step “{target['name']}” belongs to "
+                        f"{crew.who(who.get('persona') or who.get('label') or 'a subagent')}, "
                         f"still working on it; it closes when that agent finishes. Use --force only if it is "
                         f"really done.")
     waiting = deps_open(run, target)
@@ -2391,7 +2397,7 @@ def step(text: str, nxt: str = "", cwd: str | None = None, kind: str = "step", c
         _main_only(None, "ends the run", cwd)
     if not load_run(agent, sid):  # no run yet: Morpheus's step starts one (start publishes, so never in the lock)
         if from_agent:
-            raise StepError("no progress run in this session, so this step has no lane to go to: Morpheus starts "
+            raise StepError("no progress run in this session, so this step has no lane to go to: the tech lead starts "
                             "the run (dev progress start); until then, report it in your message")
         start(text if kind != "step" else "work in progress", cwd=cwd, now=now)
         from_agent_lane = False
@@ -2493,6 +2499,14 @@ def step(text: str, nxt: str = "", cwd: str | None = None, kind: str = "step", c
     return run
 
 
+def _who_label(label: str) -> str:
+    """A lane label with the member role first: "Tank: the API" -> "Backend engineer (Tank): the API", "Seraph" ->
+    "Code reviewer (Seraph)"; a label that names no member ("general-purpose", "Explore: find X") stays as written."""
+    from . import crew
+    task = crew.task_of(label)
+    return f"{crew.who(label)}: {task}" if task != (label or "").strip() else crew.who(label)
+
+
 def crew_summary(run: dict, limit: int = 4, now: float | None = None) -> str:
     """Who in the crew works on what in this run, running first, then the slots in use and why the limit is lower
     (spec R7): "Tank ▸ the API · Kid ✓ installer · 1 of 4 slots in use". '' without crew members (the agent's own
@@ -2563,12 +2577,12 @@ def render_update(run: dict, branch: str | None = None, now: float | None = None
             mark = {"done": "✓", "running": "▸", "blocked": "■", "skipped": "–"}.get(s.get("state"), "○")
             main = (s.get("owner") or "main") == "main"
             waits = deps_open(run, s) if s.get("state") in ("pending", "blocked") else []
-            parts = [] if main else [agents.get(s["owner"], {}).get("label") or "subagent"]
+            parts = [] if main else [_who_label(agents.get(s["owner"], {}).get("label") or "subagent")]
             if waits:
-                parts.append("waiting for " + ", ".join(waits) + (f", then {s['label']}" if main and s.get("label")
-                                                                  else ""))
+                parts.append("waiting for " + ", ".join(waits) + (f", then {_who_label(s['label'])}"
+                                                                  if main and s.get("label") else ""))
             elif main and s.get("label"):
-                parts.append(f"waiting for {s['label']}")
+                parts.append(f"waiting for {_who_label(s['label'])}")
             if s.get("recheck"):
                 parts.append(f"recheck: {', '.join(s['recheck'])} reopened")
             who = "".join(f" · {p}" for p in parts)
@@ -2581,8 +2595,8 @@ def render_update(run: dict, branch: str | None = None, now: float | None = None
         parts = []
         for aid, a in agents.items():
             mins = active_minutes(run, a.get("started"), a.get("finished") or now, now, aid)
-            parts.append(f"{'▸' if a.get('state') == 'running' else '✓'} {a.get('label') or a.get('type') or aid[:8]}"
-                         f" {fmt_min(mins)}")
+            parts.append(f"{'▸' if a.get('state') == 'running' else '✓'} "
+                         f"{_who_label(a.get('label') or a.get('type') or aid[:8])} {fmt_min(mins)}")
         lines.append("Agents: " + " · ".join(parts))
     return "\n".join(lines)
 
@@ -3038,13 +3052,14 @@ def _bind_step(run: dict, aid: str, lane: dict, now: float):
             and (st.get("owner") or "main") == "main" and _label_matches(st["label"], lane)]
     if not mine:
         return
-    who, label = lane.get("persona") or lane.get("label") or "a subagent", lane.get("label") or ""
+    from . import crew
+    who, label = crew.who(lane.get("persona") or lane.get("label") or "a subagent"), lane.get("label") or ""
     scored = [(_name_score(_task_text(label), st["name"]), st) for st in mine]
     best = max(sc for sc, _ in scored)
     top = [st for sc, st in scored if sc == best]
     if not best[1] or len(top) > 1:
         names = ", ".join(f"“{st['name']}”" for st in (top if best[1] else mine))
-        what = f"names {names} equally" if best[1] else f"names none of {mine[0]['label']}'s steps ({names})"
+        what = f"names {names} equally" if best[1] else f"names none of {crew.who(mine[0]['label'])}'s steps ({names})"
         _post(run, "devkit", "main", f"{who} started as “{label}”, which {what}: the steps stay with you. If this "
               f"launch does one of them, link it: dev progress assign \"<step>\" --to \"{mine[0]['label']}\"", now,
               from_name="devkit")
@@ -3490,8 +3505,8 @@ def launch_verdict(agent: str, data: dict, run: dict, now: float | None = None):
     parent = str(data.get("agent_id") or "main")
     depth, most = launch_depth(sess, run, parent), int(cfg()["max_depth"])
     if depth > most:
-        return (f"This launch would run {depth} levels below Morpheus; the limit is {most} (progress.max_depth). Do "
-                f"this part yourself, or name it in your report and Morpheus assigns it.")
+        return (f"This launch would run {depth} levels below the tech lead; the limit is {most} (progress.max_depth). "
+                f"Do this part yourself, or name it in your report and the tech lead assigns it.")
     inp = data.get("tool_input") or {}
     kind = str(inp.get("subagent_type") or inp.get("agent_type") or "")
     label = str(inp.get("description") or inp.get("nickname") or inp.get("name") or "")
@@ -3501,13 +3516,13 @@ def launch_verdict(agent: str, data: dict, run: dict, now: float | None = None):
     b = slot_budget(agent, run, sess, now)
     used, limit, reserve = b["used"], b["limit"], b["reserve"]
     if used + cost > limit + 1e-9:
-        names = ", ".join(name for _, name, _ in b["busy"])
+        names = ", ".join(_who_label(name) for _, name, _ in b["busy"])
         head = f"{_n(used)} of {limit} crew slots are in use ({names}): the limit is {limit} at once"
         head += (f", lowered from {b['max']}: {b['why']}" if b["why"] else "") + \
             (f", and this launch takes {_n(cost)}" if cost != 1 else "")
         if parent != "main":
             return (f"{head}. A helper takes a slot like any crew member, so do this part yourself, or name it in "
-                    f"your report and Morpheus assigns it.")
+                    f"your report and the tech lead assigns it.")
         return (f"{head}. Wait for one to finish (you are notified), or give the work to one of them (SendMessage / "
                 f"send_input). progress.max_parallel in devkit config changes the limit.")
     if used + cost > limit - reserve + 1e-9:  # it would take the slot kept for the developer (spec R4)

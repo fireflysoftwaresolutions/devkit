@@ -148,7 +148,7 @@ def delegate(task: str, to: str = "auto", files=None, scope: str = "", after: st
     with progress._tx(agent, sid):
         run = load_run(agent, sid)
         if not run:
-            raise StepError("no progress run in this session: Morpheus starts one with dev progress start")
+            raise StepError("no progress run in this session: the tech lead starts one with dev progress start")
         run = normalize(run)
         if not (task or "").strip():
             raise StepError("say what to do: dev crew delegate \"<task>\" --to <member>")
@@ -190,12 +190,12 @@ def delegate(task: str, to: str = "auto", files=None, scope: str = "", after: st
     progress._audit("crew.delegate", f"{by} → {m['name']}", task.strip()[:300], project=run.get("project") or "",
                     step=name, routed="yes" if routed else "no")
     from . import crew
-    text = f"{by} delegates “{task.strip()[:200]}” to {crew.who(m)} (step “{name}”)"
+    text = f"{crew.who(by)} delegates “{task.strip()[:200]}” to {crew.who(m)} (step “{name}”)"
     if lane_id and s.get("owner") == lane_id:
         progress.crew_ask(text + ". It is in your lane now; if you cannot take it: dev crew decline "
                           f"\"{name}\" --why \"…\"", to=lane_id, from_agent=from_agent, cwd=cwd, now=now)
     elif from_agent:
-        progress.crew_ask(text + f". Launch {m['name']} when it is ready: dev crew next", to="main",
+        progress.crew_ask(text + f". Launch {crew.who(m)} when it is ready: dev crew next", to="main",
                           from_agent=from_agent, cwd=cwd, now=now)
     return {"step": s, "member": m, "routed": routed, "lane": lane_id if s.get("owner") == lane_id else None}
 
@@ -219,7 +219,8 @@ def decline(which: str, why: str, from_agent: str | None = None, cwd: str | None
         _log_change(run, s, old, "pending", from_agent or "main", f"declined by {who}: {why}", now)
         progress._audit("crew.decline", who, why[:300], project=run.get("project") or "", step=s["name"])
         progress._save(run, touch_session=False)
-    progress.crew_ask(f"{who} declined “{s['name']}”: {why}. Route it again: dev crew route \"{s['name']}\"",
+    from . import crew
+    progress.crew_ask(f"{crew.who(who)} declined “{s['name']}”: {why}. Route it again: dev crew route \"{s['name']}\"",
                       to="main", from_agent=from_agent, cwd=cwd, now=now)
     return s
 
@@ -237,7 +238,8 @@ def _sorted(run):
         elif deps:
             waiting.append((s, "after " + ", ".join(deps)))
         elif any(progress._label_matches(s["label"], v) for _, v in busy):
-            waiting.append((s, f"{s['label']} is busy: send it to them (SendMessage / send_input)"))
+            from . import crew
+            waiting.append((s, f"{crew.who(s['label'])} is busy: send it to them (SendMessage / send_input)"))
         else:
             launch.append(s)
     return launch, waiting

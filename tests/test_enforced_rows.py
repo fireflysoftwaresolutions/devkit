@@ -92,7 +92,7 @@ class MainOnlyTests(EnforcedRowCase):
         with mock.patch.object(pg, "caller", lambda *a, **k: member_call):
             with self.assertRaises(pg.StepError) as e:
                 pg.set_mode("auto", now=m(1))
-            self.assertIn("only Morpheus sets the mode", str(e.exception))
+            self.assertIn("only the tech lead sets the mode", str(e.exception))
         self.assertEqual(pg.mode_of(pg.load_run("claude", "s1")), "guided")  # unchanged
         self.assertEqual(pg.mode_of(pg.set_mode("auto", now=m(2))), "auto")  # Morpheus himself may
 

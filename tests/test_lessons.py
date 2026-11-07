@@ -67,7 +67,7 @@ class CrewPitfallTests(unittest.TestCase):
         from devkit import crew
         r = crew.load(team=False)
         self.assertIn("dev lesson add", crew.body(crew.member("tank", r), r))
-        self.assertIn("so Morpheus records it as a lesson", crew.body(crew.member("sparks", r), r))  # no shell
+        self.assertIn("so the tech lead records it as a lesson", crew.body(crew.member("sparks", r), r))  # no shell
 
 
 class LessonTests(unittest.TestCase):

@@ -223,7 +223,7 @@ class PlanDagTests(unittest.TestCase):
         run = pg.assign("ui", "Trinity", now=self.m(0))
         out = pg.render_update(run, branch="main", now=self.m(1))
         self.assertIn("○ 2. api · waiting for design · ~1h00m", out)
-        self.assertIn("○ 3. ui · waiting for design, then Trinity · ~1h00m", out)
+        self.assertIn("○ 3. ui · waiting for design, then Frontend engineer (Trinity) · ~1h00m", out)
         self.assertIn("○ 4. docs · waiting for api, ui · ~20m", out)
 
 

@@ -290,10 +290,11 @@ class CatalogTests(unittest.TestCase):
         for a in r["activities"]:
             with self.subTest(activity=a["id"]):
                 self.assertIn(f"`{a['id']}`", text)
-        self.assertIn("`backend` Back-end services and APIs · R Tank · A Seraph", text)
+        self.assertIn("`backend` Back-end services and APIs · R Backend engineer (Tank) · A Code reviewer (Seraph)",
+                      text)
         for flag in ("--activity", "--file", "--command", "--error", "--stack"):
             self.assertIn(flag, text)
-        self.assertLess(len(text), 7000)  # compact: it goes into every session's context
+        self.assertLess(len(text), 8000)  # compact: it goes into every session's context (hooks.CATALOG_MAX)
 
     def test_a_brief_declares_its_kind_of_work_and_carries_its_knowledge(self):
         r = crew.load(team=False)

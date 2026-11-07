@@ -380,7 +380,7 @@ class BriefTests(Base):
                                         "tokens). devkit's record wins over the summary:"), text[:200])
         self.assertLess(text.index("and tell me before you push"), text.index("keep `release/26.11.3` green"))
         for part in ("Tank", "step api", "Neo", "step ui", "do not relaunch them", "SendMessage continues one",
-                     "D1", "M1 from Neo", "Release 26.11.3", "current step api",
+                     "D1", "M1 from Senior engineer (Neo)", "Release 26.11.3", "current step api",
                      "your final message starts with the status block"):
             self.assertIn(part, text)
         (c,) = self.rec()["compactions"]
@@ -433,7 +433,8 @@ class BriefTests(Base):
         self.make_run()
         out = ct.on_pre_compact("claude", self.payload("PreCompact.manual"), now=T0)
         self.assertLessEqual(len(out), 2000)
-        for part in ("Tank (step api)", "Neo (step ui)", "D1", "M1", "release/26.11.3", "verbatim"):
+        for part in ("Backend engineer (Tank) on step api", "Senior engineer (Neo) on step ui", "D1", "M1",
+                     "release/26.11.3", "verbatim"):
             self.assertIn(part, out)
         codex = {"session_id": "c1", "turn_id": "t1", "transcript_path": None, "cwd": str(self.cwd),
                  "model": "gpt-5.5", "trigger": "auto", "hook_event_name": "PreCompact"}
@@ -486,9 +487,9 @@ class NotInTheSummaryTests(Base):
         summary = "<summary>Neo is building the UI; decision D12 and message M1 are open.</summary>"
         ct.on_post_compact("claude", self.payload("PostCompact.manual", compact_summary=summary), now=T0 + 5)
         got = ct.on_tool("claude", self.payload("PostToolUse.Bash"), now=T0 + 30)
-        self.assertIn("Tank (step api)", got)
+        self.assertIn("Backend engineer (Tank) on step api", got)
         self.assertIn("decision D1", got)  # D12 is not D1
-        self.assertNotIn("Neo (step ui)", got)
+        self.assertNotIn("Senior engineer (Neo) on step ui", got)
         self.assertNotIn("message M1", got)
 
 
@@ -511,7 +512,7 @@ class MemberTests(Base):
         for part in ("your own context was compacted", "Kid", "DevEx engineer", "step tooling", "lib/devkit/**",
                      "Measure", "Verify", "tooling: contract written, handlers next",
                      "«Kid: build the continuity reader.", "**[Firefly> DevKit · DevEx engineer (Kid)]**",
-                     "Needs from Morpheus:"):
+                     "Needs from the tech lead:"):
             self.assertIn(part, got)
         self.assertNotIn("K" * 8, got)
         self.assertLessEqual(len(got.encode()), 1536)
@@ -651,7 +652,7 @@ class CommandTests(Base):
                          ["forget", "--all"]):
                 with self.subTest(argv=argv):
                     err = self.cli(*argv, rc=2)
-                    self.assertTrue(err.startswith(f"{ui.FAIL} only Morpheus "), err)
+                    self.assertTrue(err.startswith(f"{ui.FAIL} only the tech lead "), err)
                     self.assertEqual(err.count("\n"), 1, err)
         self.assertTrue(ct.record_path("claude", SID).exists())
 
@@ -741,8 +742,8 @@ class ComplianceReview2Tests(Base):
         out = ct.brief("claude", SID, reason="manual", chat=True, provider="codex", now=T0)
         for text in ("MARKERREQUEST", "Which icon set", "behind a flag", "A: flag"):
             self.assertNotIn(text, out)
-        self.assertIn("decision D1 from Tank", out)
-        self.assertIn("M1 from Neo", out)
+        self.assertIn("decision D1 from Backend engineer (Tank)", out)
+        self.assertIn("M1 from Senior engineer (Neo)", out)
         self.assertIn("Which icon set", ct.brief("claude", SID, reason="manual", chat=True, provider="claude", now=T0))
 
     def test_c3_an_agent_reads_another_providers_session_without_its_text_whatever_provider_it_names(self):

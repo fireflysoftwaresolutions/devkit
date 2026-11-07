@@ -223,7 +223,8 @@ class TimeModelTests(unittest.TestCase):
             run = pg.load_run("claude", "s1")
             self.assertEqual(run["plan"][1]["state"], "done")
             self.assertEqual(run["agents"]["a1"]["state"], "done")
-            self.assertIn("Agents: \u2713 Neo: build the parser", pg.render_update(run, branch="main", now=self.m(30)))
+            self.assertIn("Agents: \u2713 Senior engineer (Neo): build the parser",
+                          pg.render_update(run, branch="main", now=self.m(30)))
 
     def test_a_step_closed_instantly_does_not_move_the_pace(self):
         with TempState():
@@ -336,11 +337,11 @@ class CrewCoordinationTests(unittest.TestCase):
             # Morpheus gets it with his next tool call; the subagent does not
             self.assertIsNone(pg.on_tool_done("claude", {"session_id": "s1", "agent_id": "a1"}))
             ctx = pg.on_tool_done("claude", {"session_id": "s1"})
-            self.assertIn("M1 from Neo", ctx)
+            self.assertIn("M1 from Senior engineer (Neo)", ctx)
             self.assertNotIn("M1", pg.on_tool_done("claude", {"session_id": "s1"}) or "")  # delivered once
             pg.crew_answer("M1", "Yes, skip them", now=self.m(3))
             ctx = pg.on_tool_done("claude", {"session_id": "s1", "agent_id": "a1"})
-            self.assertIn("from Morpheus: Yes, skip them (answer to M1)", ctx)
+            self.assertIn("from Tech lead (Morpheus): Yes, skip them (answer to M1)", ctx)
             # a message to a crew member who has not started yet waits for them
             pg.crew_ask("Review the parser when Neo is done", to="Seraph", now=self.m(4))
             launch("a2", "devkit:seraph", "Seraph: review the parser", self.m(5))
@@ -367,8 +368,9 @@ class CrewCoordinationTests(unittest.TestCase):
             self.addCleanup(mock.patch.stopall)
             self.assertIsNone(hooks._scope_violation("claude", edit(wt / "install.sh")))
             self.assertIsNone(hooks._scope_violation("claude", edit(wt / "tests" / "test_install_curl.py")))  # new folder
-            self.assertIn("outside Kid's scope", hooks._scope_violation("claude", edit(wt / "lib" / "cli.py")))
-            self.assertIn("outside Kid's scope", hooks._scope_violation("claude", edit(other / "install.sh")))
+            kid = "outside DevEx engineer (Kid)'s scope"
+            self.assertIn(kid, hooks._scope_violation("claude", edit(wt / "lib" / "cli.py")))
+            self.assertIn(kid, hooks._scope_violation("claude", edit(other / "install.sh")))
 
     def test_scope_keeps_parallel_agents_apart(self):
         from devkit import hooks
@@ -381,13 +383,13 @@ class CrewCoordinationTests(unittest.TestCase):
             self.assertIsNone(hooks._scope_violation("claude", edit("lib/parser/core.py")))
             self.assertIsNone(hooks._scope_violation("claude", edit("tests/test_parser.py")))
             why = hooks._scope_violation("claude", edit("lib/ui/app.ts"))
-            self.assertIn("outside Neo's scope", why)
+            self.assertIn("outside Senior engineer (Neo)'s scope", why)
             self.assertIn("dev crew ask", why)
             self.assertIsNone(hooks._scope_violation("claude", dict(edit("lib/ui/app.ts"), agent_id=None)))  # main
             with tempfile.TemporaryDirectory() as scratch:  # scratch files outside the repository are not shared
                 self.assertIsNone(hooks._scope_violation("claude", edit(os.path.join(scratch, "notes.md"))))
             other = os.path.expanduser("~/Development/acme/billing/src/app.py")  # another repository is not scratch
-            self.assertIn("outside Neo's scope", hooks._scope_violation("claude", edit(other)))
+            self.assertIn("outside Senior engineer (Neo)'s scope", hooks._scope_violation("claude", edit(other)))
 
     def test_only_launched_subagents_owe_a_report_and_corrections_are_recorded(self):
         import contextlib
@@ -589,7 +591,7 @@ class CrewGuardrailTests(unittest.TestCase):
             self.launch("a1", "devkit:tank", "Tank: api", self.m(1))
             with self.assertRaises(pg.StepError) as e:
                 pg.assign("ui", "Trinity", scope="services/web/**", now=self.m(2))
-            self.assertIn("overlaps the files Tank owns", str(e.exception))
+            self.assertIn("overlaps the files Backend engineer (Tank) owns", str(e.exception))
             pg.assign("ui", "Trinity", scope="web/**", now=self.m(2))  # disjoint: fine
 
     def test_the_main_session_respects_a_members_files(self):
@@ -602,7 +604,7 @@ class CrewGuardrailTests(unittest.TestCase):
                     "tool_input": {"file_path": os.path.join(repo, "lib/parser/core.py")}}
             verdict = hooks._crew_limits("claude", edit)
             self.assertEqual(verdict[0], "deny")
-            self.assertIn("belongs to Neo", verdict[1])
+            self.assertIn("belongs to Senior engineer (Neo)", verdict[1])
             other = dict(edit, tool_input={"file_path": os.path.join(repo, "docs/guide.md")})
             self.assertIsNone(hooks._crew_limits("claude", other))
             os.environ["DEVKIT_SCOPE_OVERRIDE"] = "1"
@@ -645,7 +647,7 @@ class GuidedAndAutoTests(unittest.TestCase):
             self.assertEqual(run["plan"][0]["state"], "blocked")
             self.assertEqual(run["agents"]["a1"]["waiting"], "D1")
             ctx = pg.on_tool_done("claude", {"session_id": "s1"})  # Morpheus is told to ask the developer
-            self.assertIn("D1 from Neo", ctx)
+            self.assertIn("D1 from Senior engineer (Neo)", ctx)
             self.assertIn("AskUserQuestion", ctx)
             with self.assertRaises(pg.StepError):  # no finishing with a decision open
                 pg.step("all done", kind="done", now=self.m(3))

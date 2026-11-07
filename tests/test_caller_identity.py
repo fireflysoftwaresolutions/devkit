@@ -84,7 +84,7 @@ class ConsultationTests(CallerCase):
                 rc, out = self.dev("crew", "decide", "D1", "yes")
                 pg.call_closed(data)
                 self.assertEqual(rc, 2)
-                self.assertIn("only Morpheus", out)
+                self.assertIn("only the tech lead", out)
                 self.assertEqual(self.decision()["state"], "pending")
 
     def test_empty_lane_variable_grants_nothing(self):
@@ -92,7 +92,7 @@ class ConsultationTests(CallerCase):
         self.call("DEVKIT_FROM_AGENT= dev crew decide D1 yes", aid="a_tank")
         rc, out = self.dev("crew", "decide", "D1", "yes", env={"DEVKIT_FROM_AGENT": ""})
         self.assertEqual(rc, 2)
-        self.assertIn("only Morpheus", out)
+        self.assertIn("only the tech lead", out)
         self.assertEqual(self.decision()["state"], "pending")
 
     def test_detached_command_is_not_morpheus(self):
@@ -111,7 +111,7 @@ class ConsultationTests(CallerCase):
         self.call("dev crew decide D1 yes", aid="a_tank")
         rc, out = self.dev("crew", "decide", "D1", "yes")
         self.assertEqual(rc, 2)
-        self.assertIn("only Morpheus", out)
+        self.assertIn("only the tech lead", out)
         self.assertEqual(self.decision()["state"], "pending")
 
     def test_morpheus_plain_command_is_allowed(self):
@@ -137,7 +137,7 @@ class MorpheusOnlyTests(CallerCase):
                 rc, out = self.dev(*args)
                 pg.call_closed(data)
                 self.assertEqual(rc, 2, out)
-                self.assertIn("only Morpheus", out)
+                self.assertIn("only the tech lead", out)
         run = self.run_()
         self.assertEqual((run["goal"], run["mode"], run["state"]), ("Work", "guided", "running"))
         self.assertEqual([(s["name"], s["state"], s.get("owner")) for s in run["plan"]], before)
@@ -149,7 +149,7 @@ class MorpheusOnlyTests(CallerCase):
         self.assertEqual(self.run_()["state"], "running")
         rc, out = self.dev("progress", "done", "finished", "--why", "ok", "--force")  # no open call at all
         self.assertEqual((rc, self.run_()["state"]), (2, "running"))
-        self.assertIn("only Morpheus", out)
+        self.assertIn("only the tech lead", out)
 
     def test_a_member_match_makes_a_lane_command_act_as_that_member(self):
         # variables only narrow: without DEVKIT_FROM_AGENT, the ledger still names the member
@@ -222,7 +222,7 @@ class RunTests(CallerCase):
             self.assertEqual(pg.resolve_session()[2], "recency")
             rc, out = self.dev("crew", "decide", "D1", "yes")
         self.assertEqual(rc, 2)
-        self.assertIn("only Morpheus", out)
+        self.assertIn("only the tech lead", out)
         self.assertEqual(self.decision()["state"], "pending")
 
     def test_two_sessions_in_one_repository_each_update_their_own_run(self):

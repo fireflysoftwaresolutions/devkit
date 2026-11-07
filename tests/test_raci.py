@@ -330,7 +330,7 @@ class MorpheusTests(unittest.TestCase):
         r = crew.load(team=False)
         text = hooks.morpheus_hint("build the JSON API server for the dashboard and implement the frontend live "
                                    "updates", r)
-        self.assertIn("you are Morpheus", text)
+        self.assertIn("you are the Tech lead (Morpheus)", text)
         self.assertIn("back-end services and APIs → Backend engineer (Tank) does it, Code reviewer (Seraph) approves", text)
         self.assertIn("front-end implementation → Frontend engineer (Trinity) does it", text)
         self.assertIn("Plan one step per kind of work", text)

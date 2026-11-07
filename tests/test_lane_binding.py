@@ -194,7 +194,7 @@ class ProvisionalLaneTests(LaneCase):
         self.assertEqual((self.step("parser")["owner"], self.step("parser")["state"]), ("main", "pending"))
         self.meta("a_neo", "toolu_neo", "Neo: parser")
         out = self.first_tool("a_neo", tool="Edit", file_path="lib/ui/app.ts")  # its first call, outside its files
-        self.assertIn("outside Neo's scope", out)
+        self.assertIn("outside Senior engineer (Neo)'s scope", out)
         self.assertEqual((self.lane("a_neo").get("binding"), self.step("parser")["owner"]), ("exact", "a_neo"))
 
     def test_a_failed_launch_is_removed_and_never_labels_the_next_agent(self):
@@ -239,7 +239,8 @@ class ProvisionalLaneTests(LaneCase):
         pg.assign("parser", "Neo", now=self.m(2))  # Morpheus links the step to the running lane
         self.assertEqual((self.step("parser")["owner"], self.lane("a_neo")["binding"]), ("a_neo", "confirmed"))
         self.assertNotIn('"deny"', self.first_tool("a_neo", tool="Edit", file_path="lib/parser/core.py"))
-        self.assertIn("outside Neo's scope", self.first_tool("a_neo", tool="Edit", file_path="lib/ui/app.ts"))
+        self.assertIn("outside Senior engineer (Neo)'s scope",
+                      self.first_tool("a_neo", tool="Edit", file_path="lib/ui/app.ts"))
 
     def test_a_launch_records_its_tool_use_id_and_its_parent(self):
         self.launch("toolu_fg", "F0 fg probe")
