@@ -194,6 +194,79 @@ def _track(text: str):
     return ahead, behind
 
 
+def _ahead_behind(top, base_ref):
+    """name -> (ahead, behind) of every local branch against `base_ref`, in one call (git 2.41's ahead-behind atom);
+    None when this git cannot."""
+    rc, out, _ = core.git(top, "for-each-ref", f"--format=%(refname:short)%00%(ahead-behind:{base_ref})", "refs/heads",
+                          timeout=60)
+    if rc != 0:
+        return None
+    res = {}
+    for ln in out.splitlines():
+        name, _, ab = ln.partition("\x00")
+        parts = ab.split()
+        if len(parts) == 2 and all(x.isdigit() for x in parts):
+            res[name] = (int(parts[0]), int(parts[1]))
+    return res
+
+
+def _walk(top, names, tips, exclude, with_ts=False):
+    """The commits that the local branches `names` reach and `exclude` (refs, or --remotes) does not, in one
+    `git rev-list` -> {sha: (commit time or None, bits)}, bit k set when names[k] reaches the commit; None when git
+    fails. In topological order every child comes before its parents, so one pass hands each commit's branches down."""
+    if not names:
+        return {}
+    args = ["rev-list", "--parents", "--topo-order"] + (["--timestamp"] if with_ts else []) + ["--not", *exclude,
+                                                                                               "--stdin"]
+    rc, out, _ = core.sh(["git", "-C", str(top), *args], input="".join(f"refs/heads/{n}\n" for n in names),
+                         timeout=60)
+    if rc != 0:
+        return None
+    own: dict = {}
+    for k, n in enumerate(names):
+        own[tips[n]] = own.get(tips[n], 0) | (1 << k)
+    reach: dict = {}
+    res = {}
+    for ln in out.splitlines():
+        parts = ln.split()
+        ts = None
+        if with_ts and parts:
+            ts, parts = (int(parts[0]) if parts[0].isdigit() else None), parts[1:]
+        if not parts:
+            continue
+        sha = parts[0]
+        bits = reach.pop(sha, 0) | own.get(sha, 0)
+        res[sha] = (ts, bits)
+        for parent in parts[1:]:
+            reach[parent] = reach.get(parent, 0) | bits
+    return res
+
+
+def _bits(bits: int, names) -> list:
+    out = []
+    while bits:
+        low = bits & -bits
+        out.append(names[low.bit_length() - 1])
+        bits ^= low
+    return out
+
+
+def _counts(walked, names):
+    """name -> (commits, oldest commit time) from a `_walk`; None when the walk failed."""
+    if walked is None:
+        return None
+    count, oldest = [0] * len(names), [None] * len(names)
+    for ts, bits in walked.values():
+        while bits:
+            low = bits & -bits
+            k = low.bit_length() - 1
+            count[k] += 1
+            if ts is not None and (oldest[k] is None or ts < oldest[k]):
+                oldest[k] = ts
+            bits ^= low
+    return {n: (count[k], oldest[k]) for k, n in enumerate(names)}
+
+
 def _carrier_order(r: dict, head: str):
     # among branches at the same commit, the one that carries the backup: the default branch, then one with an
     # upstream, then the one checked out, then by name
@@ -247,6 +320,10 @@ def map(repo, prs=None, offline=False, now=None, pid=None, default=None, current
         elif slug:
             prs = cached_prs(slug)
     tips = {p[0]: p[5] for p in raw}
+    names = [p[0] for p in raw]
+    # a few git calls for the whole repository instead of three per branch (a session start has 30 s, R8)
+    vs_base = _ahead_behind(top, base_ref) if base_ref else None
+    only_here = _counts(_walk(top, names, tips, ["--remotes"] if remotes else [], with_ts=True), names)
     rows = []
     for name, upstream, uremote, track, ts, sha, _ in raw:
         ref = f"refs/heads/{name}"
@@ -254,10 +331,16 @@ def map(repo, prs=None, offline=False, now=None, pid=None, default=None, current
         ahead, behind = _track(track) if upstream and not gone else (0, 0)
         b_behind = b_ahead = 0
         if base_ref and base_ref != ref:
-            lr = core.gitout(top, "rev-list", "--left-right", "--count", f"{base_ref}...{ref}").split()
-            b_behind, b_ahead = (int(lr[0]), int(lr[1])) if len(lr) == 2 else (0, 0)
+            if vs_base is not None and name in vs_base:
+                b_ahead, b_behind = vs_base[name]
+            else:
+                lr = core.gitout(top, "rev-list", "--left-right", "--count", f"{base_ref}...{ref}").split()
+                b_behind, b_ahead = (int(lr[0]), int(lr[1])) if len(lr) == 2 else (0, 0)
         unpushed, oldest = 0, None
-        if not remotes:
+        if only_here is not None and (not remotes or not (upstream and not gone and ahead == 0)):
+            unpushed, oldest = only_here.get(name, (0, None))
+            oldest = oldest if remotes else None
+        elif not remotes:
             unpushed = int(core.gitout(top, "rev-list", "--count", ref) or 0)
         elif not (upstream and not gone and ahead == 0):
             times = [int(x) for x in core.gitout(top, "log", "--format=%ct", ref, "--not", "--remotes").split()
@@ -278,6 +361,7 @@ def map(repo, prs=None, offline=False, now=None, pid=None, default=None, current
             "session": bool(c.get("active")),
             "pr": None, "task": None, "backup": None})
     by_name = {r["name"]: r for r in rows}
+    off_base = _walk(top, names, tips, [base_ref]) if base_ref else None  # who carries which commit, in one walk
     for r in rows:  # merged into: the default branch when the base has every commit, else the closest container
         if r["default"]:
             continue
@@ -285,8 +369,11 @@ def map(repo, prs=None, offline=False, now=None, pid=None, default=None, current
             r["merged_into"] = default
             continue
         sha = tips[r["name"]]
-        found = [x for x in core.gitout(top, "for-each-ref", "--contains", sha, "--format=%(refname:short)",
-                                        "refs/heads").splitlines() if x and x != r["name"] and x in by_name]
+        if off_base is not None and sha in off_base:
+            found = [x for x in _bits(off_base[sha][1], names) if x != r["name"]]
+        else:
+            found = [x for x in core.gitout(top, "for-each-ref", "--contains", sha, "--format=%(refname:short)",
+                                            "refs/heads").splitlines() if x and x != r["name"] and x in by_name]
         strict = [x for x in found if tips[x] != sha]
         same = [x for x in found if tips[x] == sha]
         if same and min([r] + [by_name[x] for x in same], key=lambda y: _carrier_order(y, head)) is not r:
@@ -296,7 +383,6 @@ def map(repo, prs=None, offline=False, now=None, pid=None, default=None, current
                 strict.sort(key=lambda x: (int(core.gitout(top, "rev-list", "--count", f"{sha}..refs/heads/{x}") or 0),
                                            x != default, x))
             r["merged_into"] = strict[0]
-    names = [r["name"] for r in rows]
     done = backups(pid)
     held = embargoes(pid)
     tasks = linked_tasks(pid, [n for n in names if n != default])

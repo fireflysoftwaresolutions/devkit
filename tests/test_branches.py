@@ -153,6 +153,31 @@ class MapTests(Sandbox):
         self.assertTrue(main["default"])
         self.assertEqual(main["backup"]["state"], "on_remote")
 
+    def test_many_branches_cost_no_more_git_commands_than_a_few(self):
+        # the session start has 30 s: the map runs a few git commands for the repository, not three per branch
+        self.scene()
+        calls = []
+        real = core.sh
+
+        def counted(args, *a, **kw):
+            calls.append(args)
+            return real(args, *a, **kw)
+
+        with mock.patch.object(core, "sh", side_effect=counted):
+            self.rows()
+        few = len(calls)
+        for k in range(12):
+            git(self.repo, "switch", "-q", "-c", f"feat/more-{k}", "main")
+            self.commit(f"feat: add more part {k}")
+        calls.clear()
+        with mock.patch.object(core, "sh", side_effect=counted):
+            rows = self.rows()
+        self.assertEqual(len(calls), few)
+        self.assertEqual((rows["feat/more-7"]["unpushed"], rows["feat/more-7"]["base_ahead"]), (1, 1))
+        self.assertEqual(rows["feat/more-7"]["oldest_unpushed"], int(self.now - 2 * HOUR))
+        self.assertEqual(rows["feat/inside"]["merged_into"], "release/x")
+        self.assertEqual((rows["release/x"]["unpushed"], rows["release/x"]["merged_into"]), (2, None))
+
     def test_a_branch_at_the_same_commit_leaves_the_backup_to_the_one_with_the_work(self):
         self.scene()
         git(self.repo, "branch", "feat/copy", "release/x")
