@@ -622,12 +622,13 @@ def install_cli():
     done(f"{tilde(ZSHRC)} sources shell/devkit.zsh (dcd, dwt, completion, Docker env)")
 
 
-def setup_git(quiet=False):
+def setup_git(quiet=False, commit_template=None):
+    """`commit_template`: dev setup's answer ("yes" or "no"), passed by `dev install --commit-template`."""
     with quiet_mode(quiet):
         _setup_git()
     if not quiet:  # a quiet run repairs drift: it never asks, so it never offers the template either
         step("Commit template")
-        offer_commit_template()
+        offer_commit_template(answer=commit_template)
 
 
 # --------------------------------------------------------------------------- the commit template (spec P-fy3bwa0pshk R9)
@@ -1724,7 +1725,7 @@ def install_prompt(starship: Path = None):
         note("not set up yet: dev setup prompt adds it to your prompt")
 
 
-def run_install(only=None, unverified_why=None, version=None, as_pinned=False) -> int:
+def run_install(only=None, unverified_why=None, version=None, as_pinned=False, commit_template=None) -> int:
     """`dev install`. From a checkout it pins the checkout (or switches to `version`), then starts itself again from
     that pinned copy (`--as-pinned`), which runs the steps, so every path they write names the copy; `only` re-applies
     some steps from the installed copy without pinning. -> exit code (1 when the copy was refused)."""
@@ -1739,10 +1740,11 @@ def run_install(only=None, unverified_why=None, version=None, as_pinned=False) -
     if core.real(target) != core.real(DEVKIT_HOME):
         argv = [sys.executable, str(target / "bin" / "dev"), "install", "--as-pinned"]
         argv += ["--only", ",".join(sorted(only))] if only else []
+        argv += ["--commit-template", commit_template] if commit_template else []
         sys.stdout.flush()
         sys.stderr.flush()
         os.execv(sys.executable, argv)
-    steps = [("config", ensure_config), ("tools", setup_tools), ("cli", install_cli), ("git", setup_git), ("handoff", setup_handoff),
+    steps = [("config", ensure_config), ("tools", setup_tools), ("cli", install_cli), ("git", lambda: setup_git(commit_template=commit_template)), ("handoff", setup_handoff),
              ("instructions", write_agent_instructions), ("skills", install_skills), ("claude", setup_claude),
              ("codex", setup_codex), ("desktop", setup_desktop), ("docker", setup_docker), ("docs", setup_docs_tools),
              ("launchd", setup_launchd), ("prompt", install_prompt)]

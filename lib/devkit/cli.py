@@ -1421,7 +1421,7 @@ def cmd_install(a):
         return 2
     only = {x.strip() for x in a.only.split(",") if x.strip()} if a.only else None
     rc = setup.run_install(only=only, unverified_why=why if a.unverified else None, version=a.version,
-                           as_pinned=a.as_pinned)
+                           as_pinned=a.as_pinned, commit_template=getattr(a, "commit_template", None))
     if rc == 0 and (not only or "claude" in only):  # what was installed: `dev config` tells new from removed
         try:
             write_install_record()
@@ -3485,6 +3485,9 @@ def build_parser():
                    help="pin HEAD although it is neither a release nor tested (`dev ci --run`); needs --why")
     p.add_argument("--why", help="the reason for --unverified, recorded in the audit")
     p.add_argument("--as-pinned", action="store_true", help=argparse.SUPPRESS)  # the second half, from the copy
+    p.add_argument("--commit-template", choices=["yes", "no"],
+                   help="dev setup's answer for the commit template: yes sets commit.template in the repositories "
+                        "without one, no leaves them; the git step records it")
     p = add("docs", cmd_docs, "Check documentation: Markdown, links and anchors, prose, diagrams")
     p.add_argument("check", choices=["check"])
     p.add_argument("paths", nargs="*", help="files or folders (default: the whole repository)")

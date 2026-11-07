@@ -1264,6 +1264,7 @@ compile. It keeps the newest three copies and any copy in use. Run it yourself, 
 | `--only STEPS` | Re-applies only these steps from the installed copy, without pinning. `STEPS` is a comma-separated list of `config,tools,cli,git,handoff,instructions,skills,claude,codex,desktop,docker,docs,launchd` |
 | `--version VERSION` | Switches to a copy pinned by an earlier install, for a rollback: `26.11.2`, or `26.11.2-<commit>`. It checks the copy against its checksums first |
 | `--unverified --why "…"` | Pins the checkout's commit although it is neither a release nor tested; the reason is recorded in the audit trail |
+| `--commit-template yes\|no` | The answer `dev setup` gives for the [commit template](git-and-github.md#the-template-in-your-editor): the git step records it, and `yes` sets `commit.template` in each repository that has none |
 
 The `tools` step installs only the Homebrew and npm packages that are missing for your stacks, git hosts, and clouds
 (and the Azure DevOps CLI extension), unless `packages.auto` is off. The `desktop` step builds the Claude Desktop

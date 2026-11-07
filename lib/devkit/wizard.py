@@ -54,6 +54,12 @@ def _commit_template_default() -> bool:
     return setup_mod.commit_template_answer() != "no"
 
 
+def _template_args(a) -> list:
+    """The commit template answer for `dev install`, whose git step applies and records it: the wizard writes no
+    devkit state itself."""
+    return ["--commit-template", "yes" if a.get("commit_template", True) else "no"]
+
+
 def _hw():
     def sysctl(k):
         return core.sh(["sysctl", "-n", k])[1]
@@ -339,14 +345,13 @@ def _run_lines(assume_yes=False, skip_packages=False) -> int:
 
     CONFIG_FILE.parent.mkdir(parents=True, exist_ok=True)
     CONFIG_FILE.write_text(json.dumps(new, indent=2, ensure_ascii=False) + "\n")
-    setup_mod.record_commit_template("yes" if a["commit_template"] else "no")  # the git step of `dev install` applies it
     print(f"\n  {ui.OK} saved {core.tilde(CONFIG_FILE)}")
     if not skip_packages:
         rc = install_packages(a["stacks"], a["use_claude"], extra=toolchain.groups({"hosts": a["hosts"], "clouds": a["clouds"]}))
         if rc != 0:
             print(f"  {ui.WARN} some packages failed; continuing with the configuration")
     py = sys.executable
-    subprocess.call([py, str(DEVKIT_HOME / "bin" / "dev"), "install"])
+    subprocess.call([py, str(DEVKIT_HOME / "bin" / "dev"), "install", *_template_args(a)])
     _post_install(p, a["use_claude"], a["use_codex"])
     if a["lock"]:
         subprocess.call([py, str(DEVKIT_HOME / "bin" / "dev"), "config", "lock"])
@@ -1228,8 +1233,6 @@ class _Wizard:
         new = build_config(self.d["config"], self.a, self.d["gh"]["login"])
         CONFIG_FILE.parent.mkdir(parents=True, exist_ok=True)
         CONFIG_FILE.write_text(json.dumps(new, indent=2, ensure_ascii=False) + "\n")
-        from . import setup as setup_mod
-        setup_mod.record_commit_template("yes" if self.a["commit_template"] else "no")  # `dev install` applies it
         self.saved_file = True
         cl.finish(i, "ok", core.tilde(CONFIG_FILE))
 
@@ -1305,7 +1308,7 @@ class _Wizard:
                 fails.append(s[2:])
             elif s.startswith("! "):
                 notes.append(s[2:])
-        rc = _exec(_dev("install"), line, log, env=_child_env())
+        rc = _exec(_dev("install", *_template_args(self.a)), line, log, env=_child_env())
         if fails or rc not in (0, None):
             cl.finish(i, "fail", f"{len(fails) or 1} problem{'s' if len(fails) > 1 else ''} in {len(parts)} parts",
                       [tui.bad("✗ ") + f for f in fails[:6]] + ([] if fails else self._tail(tail))
