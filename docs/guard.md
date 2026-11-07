@@ -227,7 +227,7 @@ three folders readable and writable by your account only (`0700`) every time it 
 | `PYTHONPATH`, `PYTHONSTARTUP`, `PYTHONHOME`, `PYTHONUSERBASE`, `PYTHONPLATLIBDIR`, `PYTHONEXECUTABLE`, or `PYTHONBREAKPOINT` set for the same commands | deny: they load other code into devkit's own process. `bin/dev` runs `python3 -I -S`, which ignores them, the current folder, and the user and site-packages folders (and their `.pth` files); the rule also covers `python3 bin/dev`. A repository's own tests may still set `PYTHONPATH` |
 | `dev install`, `dev update`, or `install.sh`, also from a program's code (`subprocess.run(['dev', 'install'])`, `os.system('dev install')`, AppleScript's `do shell script`) | deny: they change what every hook and the guard run, so the developer runs them, in a terminal. A `dev install` that runs outside the developer's terminal anyway records nothing new for the extensions. A terminal an agent opens can look like the developer's, so devkit audits every acceptance (`ext.accept`) and lists it at the session start and in `dev status` until the developer runs `dev ext ack`: see [Skills and plugins](skills-and-plugins.md#who-changes-extensions-and-how-drift-shows) |
 | A command `screen` starts (`screen -dm dev install`), a `tmux` shell command (`new`, `new-window`, `split-window`, `respawn-*`, `display-popup`, `tmux -c`, a name tmux abbreviates such as `new-w`), an `expect -c` script's `spawn`, `exec`, and `system`, AppleScript's `do script`, `write text`, and `keystroke`, and `xargs dev` or `xargs dev ext` (its input adds the command) | read as the command they run, for every rule: `screen -dm dev install` is refused as `dev install` is. These start the command in a terminal of their own, which passes devkit's own check for the developer's terminal |
-| Typing into a `screen` or `tmux` session: `screen -X` or `-Q` (`stuff`, `exec`, and every other command sent to a session, also after `-S`, `-p`, `-r`, or `-x`), tmux's `send-keys`, `send-prefix`, `paste-buffer`, `set-buffer`, `load-buffer`, `pipe-pane`, and `command-prompt`, a tmux command that carries a command (`run-shell`, `if-shell`, `set-hook`, `source-file`, `bind-key`, `confirm-before`, a menu or chooser template), `set-option` of a hook, `default-command`, `default-shell`, `command-alias`, `lock-command`, `copy-command`, or `editor`, a `#(…)` format, `set-option` or `setw` with `-a` or `-F` and a format with the `E` or `T` modifier (`#{E:@x}`), which can build a `#(…)` from pieces, a tmux command list (`\;`, `';'`, or a command tmux knows right after a tmux call and a `;` or a new line), a configuration file (`screen -c`, `tmux -f`), a tmux command it does not know, and a `screen` or `tmux` word the shell or a runner fills in (`$O`, `{}`) | deny, also for a name tmux abbreviates such as `send-k`, inside `sh -c`, `env`, `timeout`, `xargs`, `find -exec`, or `parallel`, and in a program's code: agents cannot type into a terminal session; the developer can. Screen expands `$VAR` and `$:cap:` in what it types and `stuff -k` types a terminal key, so the rule is an allowlist that fails closed instead of a reading of the keys. `screen -ls`, `screen -r x`, `screen -dm <command>`, `tmux ls`, `tmux attach`, and `tmux new -d '<command>'` stay open |
+| Typing into a `screen` or `tmux` session: `screen -X` or `-Q` (`stuff`, `exec`, and every other command sent to a session, also after `-S`, `-p`, `-r`, or `-x`), tmux's `send-keys`, `send-prefix`, `paste-buffer`, `set-buffer`, `load-buffer`, `pipe-pane`, and `command-prompt`, a tmux command that carries a command (`run-shell`, `if-shell`, `set-hook`, `source-file`, `bind-key`, `confirm-before`, a menu or chooser template), `set-option` of a hook, `default-command`, `default-shell`, `command-alias`, `lock-command`, `copy-command`, or `editor`, a `#(…)` format, `set-option` or `setw` with `-a` or `-F` and a format with the `E` or `T` modifier (`#{E:@x}`), which can build a `#(…)` from pieces, a tmux command list (`\;`, `';'`, or a command tmux knows right after a tmux call and a `;`; a new line ends the tmux call, so the next line is the shell's own command), a configuration file (`screen -c`, `tmux -f`), a tmux command it does not know, a `screen` or `tmux` word the shell or a runner fills in (`$O`, `{}`), and a `$` or a backtick anywhere in a tmux word, with spaces or without (`"$X(touch f)"` with `X='#'` is a `#(…)` format), except in the shell command that `new`, `new-window`, `split-window`, `respawn-*`, or `display-popup` starts, which the guard reads as `sh -c` | deny, also for a name tmux abbreviates such as `send-k`, inside `sh -c`, `env`, `timeout`, `xargs`, `find -exec`, or `parallel`, and in a program's code: agents cannot type into a terminal session; the developer can. Screen expands `$VAR` and `$:cap:` in what it types and `stuff -k` types a terminal key, so the rule is an allowlist that fails closed instead of a reading of the keys. `screen -ls`, `screen -r x`, `screen -dm <command>`, `tmux ls`, `tmux attach`, and `tmux new -d '<command>'` stay open |
 | `open -a Terminal` or `iTerm` (also by path or `-b` bundle id, and other terminal apps), or `open` of a `.command` or `.tool` file, also from a program's code | deny: the shell it starts is one the guard cannot read, and it looks like the developer's terminal. Opening files, folders, and URLs in other apps is allowed |
 | `dev update --check` (with `--quiet` and `--record` only) | allow: it only fetches tags and reports; any other word makes it the update itself, which is denied |
 | `dev ext update <name> --apply`, `dev ext add`, `remove`, `enable`, `disable` (also with `--project`), `dev ext ack`, and any other `dev ext` verb | deny: they change the plugins, skills, or MCP servers that run in every session on this Mac, or confirm that what was accepted was the developer's, so the developer runs them, in a terminal. The rule is an allowlist that fails closed: `dev ext ls`, `dev ext outdated`, a team pin bump (`dev ext update <name> --to <ref> --why "…"`), and `dev ext add\|remove --team` (a change to devkit's defaults in the checkout, which goes through a PR) are allowed; `--team` counts only before a `--`, after which it is the entry's name |
@@ -283,17 +283,21 @@ extension rule, these are not refused:
 Quoting or brace expansion around a command word is not read by the guard's rules until 26.11.5: `$'dev' ext ack`,
 `$"dev" install`, `dev {ext,} ack`, and `$'screen' -X …` reach the shell as `dev` and `screen`, but the guard does not
 take them for those commands. devkit's own terminal check (`set_by_developer()`) still refuses those `dev` commands
-when an agent runs them directly. Two line forms are not read as bash runs them until 26.11.5 either: a command
-split by a backslash-newline (`dev \` with `install` on the next line), and lines between two comments that each
-hold an apostrophe (the pair reads as one quoted word).
+when an agent runs them directly. One line form is not read as bash runs it until 26.11.5 either: lines between
+two comments that each hold an apostrophe (`ls # it's` and `dev install # don't` on the next line), because the pair
+reads as one quoted word. A command split by a backslash-newline is read as typed, with every backslash-newline
+removed (`dev \` with `install` on the next line is `dev install`), and with the backslash at the end of a comment
+dropped (bash ends a comment at its newline); a refusal in any of the three readings stands.
 
 Typing into a terminal session is refused outright: agents cannot type into a `screen` or `tmux` session at all. The
 guard refuses each command that types or carries a command, by its name, an alias, or a prefix tmux accepts; a `#(…)`
 format and what can build one from pieces (`set-option -a` or `-F`, a format with the `E` or `T` modifier); a tmux
-command list; a configuration file; and a word the shell or a runner fills in. It refuses them at the top level, in
-`sh -c`, `env`, `timeout`, `xargs`, `find -exec`, and `parallel`, and in the string literals of a program that starts
-a process. A command the guard does not read at all (a script file, a command built at run time) is outside this
-rule, as [What the guard cannot see](#what-the-guard-cannot-see) says.
+command list; a configuration file; a word the shell or a runner fills in; and a `$` or a backtick in any tmux word
+but the shell command a tmux command starts. It refuses them at the top level, in `sh -c`, `env`, `timeout`,
+`xargs`, `find -exec`, and `parallel`, and in the string literals of a program that starts a process; a literal the
+guard cannot read that names `tmux` or `screen` is refused as unreadable. A command the guard does not read at all (a
+script file, a command built at run time) is outside this rule, as
+[What the guard cannot see](#what-the-guard-cannot-see) says.
 
 The rules on git and on deleting files read each word as typed, so they miss what the shell expands
 (`git push {--force,origin} main`), a script a shell reads from its input (`bash <<< 'git push --force …'`), and a
@@ -448,8 +452,11 @@ DEVKIT_LOCAL_CI_PASSED=1.
 
 - A command the tokenizer cannot read (a quote that is never closed, such as an apostrophe in a comment) is refused,
   also in a line the command hands to a shell (`sh -c`, `eval`, a heredoc a shell reads), because bash may still run
-  the lines before it. Heredoc bodies are set aside first, so text with apostrophes can go in one. A script file or a
-  sourced file the guard cannot read is allowed, as before.
+  the lines before it. In a program that starts a process, a string literal the guard cannot read is refused when it
+  names `dev`, `claude`, `codex`, `tmux`, `screen`, `osascript`, or `open` as a whole word
+  (`os.system("dev install # don't")`); any other literal, such as `print("don't")`, is data. Heredoc bodies are set
+  aside first, so text with apostrophes can go in one. A script file or a sourced file the guard cannot read is
+  allowed, as before.
 - Most exceptions in the guard are logged to `~/.local/state/devkit/logs/hooks.log` and the call is allowed. These
   checks fail closed instead, because letting the call through would defeat them: a crew member's shell command that
   the lane check cannot read or judge; an irreversible action, in enforce, when the gate itself fails and the text
