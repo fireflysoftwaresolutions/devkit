@@ -469,8 +469,13 @@ class DecisionAnswerGrantTests(EvidenceCase):
                    {"options": "A: release | B: no, wait", "recommend": "A", "performs": "B"},
                    {"options": "A: release | B: (no)", "recommend": "A", "performs": "B"},
                    {"options": "A: release | B: nope", "recommend": "A", "performs": "B"},
+                   # quotes around the refusing word (Seraph's third probe), and a refusing word added after it
+                   {"options": "A: release | B: 'no'", "recommend": "A", "performs": "B"},
+                   {"options": "A: release | B: \u2018no\u2019", "recommend": "A", "performs": "B"},
+                   {"options": "A: release | B: pause", "recommend": "A", "performs": "B"},
                    # the default path: a recommended option that reads as waiting never performs the release
-                   {"options": "A: release | B: Wait.", "recommend": "B"}):
+                   {"options": "A: release | B: Wait.", "recommend": "B"},
+                   {"options": "A: release | B: 'wait'", "recommend": "B"}):
             with self.subTest(**kw):
                 with self.assertRaises(pg.StepError) as e:
                     pg.crew_decision("Release now?", irreversible="release", target="v26.11.4", now=m(1), **kw)

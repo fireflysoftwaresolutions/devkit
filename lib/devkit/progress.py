@@ -31,6 +31,7 @@ import json
 import os
 import re
 import shlex
+import unicodedata
 import statistics
 import subprocess
 import sys
@@ -1690,7 +1691,9 @@ def option_of(d: dict, text):
 _APPROVE_WORDS = frozenset({"approve", "approved", "yes"})
 # an option whose words start like this reads as not doing it, so it is never the default performing option
 _REFUSE_WORDS = frozenset({"no", "not", "don't", "dont", "never", "reject", "wait", "hold", "cancel", "abort", "stop",
-                           "skip", "keep", "later", "changes", "decline", "deny", "postpone", "nope", "nah"})
+                           "skip", "keep", "later", "changes", "decline", "deny", "postpone", "nope", "nah",
+                           "pause", "defer", "delay", "halt", "block", "refuse", "veto", "nay", "none", "negative",
+                           "abstain", "n"})
 
 
 def _option_text(o) -> str:
@@ -1714,8 +1717,10 @@ def _named_option(opts, text, prefix: bool = False):
 
 
 def _refuses(option) -> bool:
-    # the first word, whatever punctuation surrounds it: "No.", "no, wait", "(no)" and "Wait," all read as not doing it
-    words = re.findall(r"[a-z']+", _option_text(option).replace("\u2019", "'"))
+    # the first word, whatever punctuation or quotes surround it: "No.", "no, wait", "(no)", "'no'", "‘no’" and
+    # "Wait," all read as not doing it; an apostrophe counts only inside a word ("don't"); NFKC folds fullwidth letters
+    t = unicodedata.normalize("NFKC", _option_text(option)).lower().translate({0x2018: "'", 0x2019: "'", 0x02BC: "'"})
+    words = re.findall(r"[a-z]+(?:'[a-z]+)*", t)
     return bool(words) and (words[0] in _REFUSE_WORDS or words[:2] == ["do", "not"])
 
 
