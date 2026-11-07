@@ -140,22 +140,40 @@ class HandoffGateTests(TurnCase):
         self.commits(1)
         self.sess["milestones"] = [[self.t0 - 60, "dev push"]]  # before the note changed: not a milestone of it
         self.assertIsNone(self.nudge())
-        self.sess["milestones"].append([int(self.now) - 30, "dev progress step"])
-        self.assertIn("after `dev progress step`", self.nudge())
+        self.sess["milestones"].append([int(self.now) - 30, "dev progress done"])
+        self.assertIn("after `dev progress done`", self.nudge())
 
     def test_r3_a_member_never_gets_the_handoff_gate(self):
         self.commits(5)
         self.assertIsNone(self.nudge(agent_id="a-tank"))
 
-    def test_r3_the_post_tool_hook_records_milestones_of_the_main_session_only(self):
+    def test_r3_the_tech_leads_turn_while_crew_members_work_is_reminded_not_sent_back(self):
+        # five commits while the Backend engineer (Tank) works: they are the crew's work, which the tech lead records
+        # when the run ends, so the turn gets the reminder and no handoff block; once no member works, it blocks
+        self.commits(5)
+        from devkit import progress
+        run = {"agent": "claude", "session": "s1", "goal": "export", "plan": [], "updates": [],
+               "agents": {"a-tank": {"label": "Tank: the API", "persona": "Tank", "state": "running"}}}
+        state.replace(progress.run_path("claude", "s1"), run)
+        self.assertIn("5 commits since the handoff note", dict(hooks.turn_checklist("claude", self.data, self.sess))
+                      ["handoff"])
+        self.assertEqual(self.stop(DONE), {})
+        run["agents"]["a-tank"]["state"] = "done"
+        state.replace(progress.run_path("claude", "s1"), run)
+        self.assertIn("5 commit(s) in acme/api are newer than its handoff note", self.stop(DONE).get("reason", ""))
+
+    def test_r3_the_post_tool_hook_records_the_runs_end_not_each_step_and_only_in_the_main_session(self):
+        # a crew run closes a step every few minutes: only the run's end, a work item closed, a push, a PR or a
+        # release make the note due; a member's push is the tech lead's to record
         sf = hooks._session_file("claude", "s1")
         sf.parent.mkdir(parents=True, exist_ok=True)
         state.replace(sf, dict(self.sess, agent="claude"))
-        for payload in (self.shell("dev progress step 'parser' --check '✓ 4 tests'"),
-                        dict(self.shell("git push origin feat/x"), agent_id="a-tank"), self.shell("ls -la")):
+        for payload in (self.shell("dev progress step 'parser' --check '✓ 4 tests' --step parser"),
+                        dict(self.shell("git push origin feat/x"), agent_id="a-tank"), self.shell("ls -la"),
+                        self.shell("dev task done 3"), self.shell("dev progress done 'export shipped'")):
             with mock.patch("sys.stdin", io.StringIO(json.dumps(payload))), contextlib.redirect_stdout(io.StringIO()):
                 hooks.run("post-tool", "claude")
-        self.assertEqual([w for _, w in state.read(sf)["milestones"]], ["dev progress step"])
+        self.assertEqual([w for _, w in state.read(sf)["milestones"]], ["dev task done", "dev progress done"])
 
 
 class MeasuredTests(TurnCase):

@@ -505,9 +505,9 @@ def _handoff_state(agent: str, data: dict, sess: dict, now=None):
 def _handoff_nudge(agent: str, data: dict, sess: dict, now=None):
     """End of a development turn: the commits made since the handoff note last really changed send the turn back
     only when it matters (R3): handoff.block_after_commits of them (5), the oldest older than
-    handoff.block_after_minutes (60), or a milestone since the note changed (a step or work item closed, a push, a
-    PR, a release). Below that, the reminder before the end said it (turn_checklist). The check re-arms after each
-    update of the note."""
+    handoff.block_after_minutes (60), or a milestone since the note changed (the end of the run, a work item closed, a
+    push, a PR, a release). Below that, the reminder before the end said it (turn_checklist). Never for a member, and
+    the Stop hook skips it while members work. The check re-arms after each update of the note."""
     if data.get("stop_hook_active"):
         return None
     now = now or time.time()
@@ -800,7 +800,9 @@ def stop(agent: str):
             reasons.append(("plans", "devkit: you changed plan(s) without recording why: " + ", ".join(plans[:4]) +
                             ". Run `dev plan revise <file> --why \"…\"` for each (it versions the plan and logs the "
                             "reason), then finish."))
-        nudge = _handoff_nudge(agent, data, sess) if dev_turn else None
+        # while crew members work, the commits are theirs and the tech lead records them when the run ends (R3): the
+        # reminder before the end only (turn_checklist)
+        nudge = _handoff_nudge(agent, data, sess) if dev_turn and not busy else None
         if nudge:
             reasons.append(("handoff", nudge))
         _audit_turn_end(agent, data, sess, reasons)
@@ -1871,8 +1873,9 @@ CLOSING_CMD = re.compile(r"\bdev\s+(?:progress\s+done|handoff\s+--log|sync|task\
                          r"release)\b|\bgit\s+(?:-C\s+\S+\s+)?push\b|\bgh\s+pr\s+(?:create|merge)\b")
 CLOSING_GAP = 120  # seconds: parallel launches, or a closing command right after one, get one reminder
 COMMIT_CMD = re.compile(r"\bgit\s+(?:-C\s+\S+\s+)?commit\b|\bdev\s+commit\b")
-# what makes the handoff note due at once (R3): a plan step or work item closed, a push, a PR, a release
-MILESTONE_CMD = re.compile(r"\bdev\s+(?:progress\s+(?:step|done)|task\s+done|push|pr\s+(?:create|merge)|release)\b|"
+# what makes the handoff note due at once (R3): the end of the run, a work item closed, a push, a PR, a release. An
+# intermediate `dev progress step` is not one: a crew run closes a step every few minutes
+MILESTONE_CMD = re.compile(r"\bdev\s+(?:progress\s+done|task\s+done|push|pr\s+(?:create|merge)|release)\b|"
                            r"\bgit\s+(?:-C\s+\S+\s+)?push\b|\bgh\s+(?:pr\s+(?:create|merge)|release\s+create)\b")
 
 
