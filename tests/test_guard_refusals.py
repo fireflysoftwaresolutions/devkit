@@ -372,6 +372,23 @@ class TerminalLaunchersRunTheirCommand(unittest.TestCase):
             with self.subTest(caret=caret):
                 self.assertEqual(self.check(f"screen -S x -X stuff 'dev install^{caret}'"), guard.INSTALL_REASON)
 
+    def test_screen_stuff_with_an_editing_key_is_refused_whatever_it_types(self):
+        # readline and zle edit the line with every other control key (^@ sets a mark, ^A goes to its start, ^H and
+        # DEL delete, ^O runs it, ^K, ^U and ^W kill, ^Y yanks, ^T transposes, ESC starts a meta key), so the guard
+        # cannot read the line they make: it refuses the keys in caret, octal or raw form, and never raises on a NUL
+        for keys in ("^@dev install^M", "\\000dev install\\015", "dev install^M^@", "dev install^O",
+                     "dev install\\017", "dev^@ install^M", "dev installx^?^M", "install^Adev ^M", "dev installx^H^M",
+                     "dev install^Kx^M", "x^Udev install^M", "x ^Wdev install^M", "dev install^Y^M",
+                     "dev isntall^T^M", "ls^[^M", f"x{chr(0x15)}dev install^M", "pytest -q^C"):
+            with self.subTest(keys=keys):
+                self.assertEqual(self.check(f"screen -S x -X stuff '{keys}'"), guard.SCREEN_KEYS_REASON)
+        for cmd in ("timeout 5 screen -S x -X stuff 'dev^@ install^M'", "xargs screen -S x -X stuff 'x^U'",
+                    "sh -c \"screen -dm screen -S x -X stuff 'x^U'\""):
+            with self.subTest(cmd=cmd):
+                self.assertEqual(self.check(cmd), guard.SCREEN_KEYS_REASON)
+        # a tab is typed as it is, and a carriage return or line feed ends the line
+        self.assertIsNone(self.check("screen -S x -X stuff 'ls^I-la^M'"))
+
     def test_the_developers_acknowledgement_through_a_launcher_is_refused(self):
         for cmd in ("screen -dm dev ext ack", "tmux new -d 'dev ext ack'", "expect -c 'spawn dev ext ack'",
                     "echo ack | xargs dev ext"):
@@ -401,6 +418,32 @@ class TerminalLaunchersRunTheirCommand(unittest.TestCase):
                     "osascript -e 'display notification \"done\"'"):
             with self.subTest(cmd=cmd):
                 self.assertIsNone(self.check(cmd))
+
+
+class NulCharactersFailClosed(unittest.TestCase):
+    # a guard that raises lets the command through (hooks fail open): a NUL in a command or a path must give a verdict
+
+    setUp = HookEventsAreTheHarnesss.setUp
+    check = HookEventsAreTheHarnesss.check
+
+    def test_a_command_with_a_nul_character_is_refused(self):
+        # bash ends the line at a NUL and zsh keeps it in the word, so the guard cannot tell what runs
+        nul = chr(0)
+        for cmd in (f"dev install{nul}x", f"tmux new {nul}-d 'dev install'", f"cd /tmp && {nul}./install.sh",
+                    f"rm -rf ~{nul}/.local/share/devkit", f"echo hi{nul}"):
+            with self.subTest(cmd=cmd):
+                self.assertEqual(self.check(cmd), guard.NUL_REASON)
+
+    def test_a_file_path_is_read_up_to_its_nul_as_the_system_reads_it(self):
+        # the system reads a path as a C string, up to its first NUL: a protected file stays protected
+        nul, lock = chr(0), str(core.STATE / "ext-lock.json")
+        for tool, inp in (("Write", {"file_path": f"{lock}{nul}x", "content": "{}"}),
+                          ("Edit", {"file_path": f"{lock}{nul}", "old_string": "a", "new_string": "b"})):
+            with self.subTest(tool=tool):
+                v = guard.check(tool, inp, self.cwd, "claude")
+                self.assertEqual((v or ("allow",))[0], "deny")
+        self.assertIsNone(guard.check("Write", {"file_path": f"{self.cwd}/notes.md{nul}x", "content": "x"}, self.cwd,
+                                      "claude"))
 
 
 class InstallFromCodeIsTheDevelopers(unittest.TestCase):

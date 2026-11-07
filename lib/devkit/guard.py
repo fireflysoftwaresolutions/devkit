@@ -147,15 +147,25 @@ def record_bypasses(cmd, session: str = "", lane: str = "", mode: str = "") -> i
 UNKNOWN = Path("/__devkit_unknown__")
 
 
+_NUL = chr(0)
+
+
+def _c_path(p) -> str:
+    """A path as the system reads it, a C string: up to its first NUL. os.path raises on a NUL, and a guard that
+    raises lets the call through."""
+    return str(p).split(_NUL, 1)[0]
+
+
 def resolve(path, cwd) -> Path:
-    """Absolute real path, or UNKNOWN when it depends on shell state the hook cannot see ($VAR, $(…), `…`)."""
-    p = os.path.expanduser(os.path.expandvars(str(path)))
+    """Absolute real path, or UNKNOWN when it depends on shell state the hook cannot see ($VAR, $(…), `…`). A NUL ends
+    the path (_c_path), and the folder's."""
+    p = os.path.expanduser(os.path.expandvars(_c_path(path)))
     if "$" in p or "`" in p:
         return UNKNOWN
     if not os.path.isabs(p):
         if cwd is None or str(cwd) == str(UNKNOWN):
             return UNKNOWN
-        p = os.path.join(cwd, p)
+        p = os.path.join(_c_path(cwd), p)
     return Path(real(p))
 
 
@@ -960,6 +970,8 @@ def check_bash(cmd: str, cwd: str, agent: str):
     _BYPASSES.clear()
     if not cmd or not cmd.strip():
         return None
+    if _NUL in cmd:
+        return deny(NUL_REASON)
     v = protected_bash(cmd, cwd or os.getcwd()) or evidence_forgery(cmd, cwd or os.getcwd())
     if v:
         return v
@@ -1752,13 +1764,13 @@ def protected_patch(patch: str, cwd):
 
 def _lexical(path, cwd) -> Path:
     """Like resolve(), but the last component is not followed: the path of a link itself, not of what it points at."""
-    p = os.path.expanduser(os.path.expandvars(str(path)))
+    p = os.path.expanduser(os.path.expandvars(_c_path(path)))
     if "$" in p or "`" in p:
         return UNKNOWN
     if not os.path.isabs(p):
         if cwd is None or str(cwd) == str(UNKNOWN):
             return UNKNOWN
-        p = os.path.join(cwd, p)
+        p = os.path.join(_c_path(cwd), p)
     head, tail = os.path.split(os.path.normpath(p))
     return Path(os.path.join(real(head), tail)) if tail and tail not in (".", "..") else Path(real(p))
 
@@ -1883,6 +1895,16 @@ _TERMINAL_APPS = re.compile(r"(?:^|/)(?:terminal|iterm2?|iterm 2|warp|ghostty|al
                             r"(?:\.app)?/?$|^com\.(?:apple\.terminal|googlecode\.iterm2|mitchellh\.ghostty)$|"
                             r"^dev\.warp\.", re.I)
 _OPEN_VALUES = frozenset({"-a", "-b", "--env", "--stdin", "--stdout", "--stderr", "-u", "--url", "-s", "--arch"})
+SCREEN_KEYS_REASON = ("`screen -X stuff` types keys into a terminal that looks like the developer's (F1-R4, spec C10, "
+                      "K1), and a control key other than tab, a carriage return (^M) or a line feed (^J) edits the "
+                      "line instead of typing it: ^@ sets a mark, ^A goes to its start, ^H and DEL delete, ^O runs "
+                      "it, ^K, ^U and ^W kill, ^Y yanks, ESC starts a meta key. The guard cannot read the line those "
+                      "keys make, so it refuses them in every form (^X, \\NNN or the character itself). Run the "
+                      "command through the Bash tool, where the guard reads it, or stuff plain text that ends in ^M. "
+                      f"{_TAIL}")
+NUL_REASON = ("This command holds a NUL character, which shells read in different ways (bash ends the line there, "
+              "zsh keeps it in the word), so the guard cannot tell what runs. Write the command without it; to "
+              f"produce a NUL byte, use `printf '\\0'`. {_TAIL}")
 
 
 def terminal_open_refusal(argv) -> bool:
@@ -2045,7 +2067,7 @@ def _agent_script(argv, cwd):
         path = os.path.expanduser(a)
         if not os.path.isabs(path) and cwd and str(cwd) != str(UNKNOWN):
             path = os.path.join(str(cwd), path)
-        real = os.path.realpath(path) if os.path.isabs(path) else ""
+        real = os.path.realpath(_c_path(path)) if os.path.isabs(path) else ""
         cli = next((c for pkg, c in _AGENT_SCRIPTS if pkg in real), "")
         if cli:
             return cli, rest[k + 1:]
@@ -2104,7 +2126,7 @@ def agent_cli(word, cwd=None, search=False) -> str:
         path = os.path.expanduser(os.path.expandvars(text))
         if not os.path.isabs(path) and cwd and str(cwd) != str(UNKNOWN):
             path = os.path.join(str(cwd), path)
-        name = _agent_binary(os.path.realpath(path)) if os.path.isabs(path) and "$" not in path else ""
+        name = _agent_binary(os.path.realpath(_c_path(path))) if os.path.isabs(path) and "$" not in path else ""
     elif not name and search and text and not set(text) & set("$`"):
         found = shutil.which(text)
         name = _agent_binary(os.path.realpath(found)) if found else ""
@@ -2419,6 +2441,8 @@ class _Shell:
             return deny(EXT_REASON)
         if terminal_open_refusal(argv):
             return deny(TERMINAL_REASON)
+        if screen_keys_refusal(argv):
+            return deny(SCREEN_KEYS_REASON)
         if _INTERP.match(name) and _dev_args(argv) is None:
             why = code_session_refusal(argv, cwd, self.bodies)
             if why:
@@ -2692,6 +2716,8 @@ def _unwrap(argv):
         elif n in _WRAPPERS:
             argv = _wrapped(n, argv[1:])
         elif n == "screen":
+            if screen_keys_refusal(argv):  # keys the guard cannot read: the screen call itself is what segment refuses
+                return argv
             argv = _screen_command(argv[1:])
         elif n == "tmux":
             argv = _tmux_command(argv[1:])
@@ -2804,7 +2830,11 @@ def _wrapped(n, args):
 # and has a pty, so it passes set_by_developer(); the guard reads what each one runs, as a shell line where the tool
 # hands it to one
 _SCREEN_VALUES = frozenset({"-c", "-e", "-h", "-p", "-S", "-t", "-T", "-s", "-Logfile"})
-_SCREEN_EOL = re.compile(r"\\[nr]|[\r\n]")
+# the keys `-X stuff` types end a line at a carriage return, a line feed, \n or \r; every other control key but tab
+# edits the line (screen_keys_refusal refuses them) and ends a line here too, so no NUL or other control reaches a
+# rule that reads the line
+_SCREEN_EOL = re.compile(r"\\[nr]|[\x00-\x08\x0a-\x1f\x7f]")
+_SCREEN_EDIT_KEYS = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]")  # every control key but tab, LF and CR
 _SCREEN_OCTAL = re.compile(r"\\([0-7]{1,3})")  # `stuff 'd\145v install\015'` types `dev install` and Enter
 _SCREEN_CARET = re.compile(r"\^([!-~])")  # ^X types control-X: ^? is DEL, any other X is X & 0x1f
 
@@ -2819,6 +2849,23 @@ def _screen_keys(text: str) -> str:
 def _screen_command(args) -> list:
     """What `screen [options] [command …]` runs: the command after its options; with `-X`, the screen command it
     sends to a session (`stuff '<keys>'` types a line, `exec|screen <command>` starts one). [] when it runs none."""
+    kind, what = _screen_parse(args)
+    return ["sh", "-c", _SCREEN_EOL.sub("\n", what)] if kind == "keys" else what
+
+
+def screen_keys_refusal(argv) -> bool:
+    """`screen -X stuff '<keys>'` with a control key other than tab, CR or LF (^X, \\NNN or the character itself):
+    readline and zle edit the line with it (^@ sets a mark, ^A goes to its start, ^H and DEL delete, ^O runs it), so
+    the guard cannot read the line the keys make and refuses them (fails closed)."""
+    if not argv or os.path.basename(str(argv[0])) != "screen":
+        return False
+    kind, keys = _screen_parse([str(a) for a in argv[1:]])
+    return kind == "keys" and bool(_SCREEN_EDIT_KEYS.search(keys))
+
+
+def _screen_parse(args) -> tuple:
+    """What a screen call does: ("keys", <the keys `-X stuff` types, decoded as screen types them>) or ("run",
+    <the command it starts, [] for none>)."""
     i = 0
     while i < len(args) and args[i].startswith("-") and args[i] != "-":
         a = args[i]
@@ -2828,14 +2875,14 @@ def _screen_command(args) -> list:
         if a == "-X" or (a.startswith("-") and not a.startswith("--") and a.endswith("X")):
             sent = args[i + 1:]
             verb, rest = (sent[0] if sent else ""), sent[1:]
-            if verb == "stuff":  # a carriage return, a line feed, \n or \r in the typed keys ends the line
-                return ["sh", "-c", _SCREEN_EOL.sub("\n", _screen_keys(" ".join(rest)))] if rest else []
+            if verb == "stuff":
+                return ("keys", _screen_keys(" ".join(rest))) if rest else ("run", [])
             if verb == "exec":  # exec [fdpat] command …: the fd pattern is made of `.`, `!` and `|`
-                return rest[1:] if rest and set(rest[0]) <= set(".!|") else rest
-            return _screen_command(rest) if verb == "screen" else []
+                return "run", (rest[1:] if rest and set(rest[0]) <= set(".!|") else rest)
+            return _screen_parse(rest) if verb == "screen" else ("run", [])
         last = a[-1:] if not a.startswith("--") else ""
         i += 2 if a in _SCREEN_VALUES or ("-" + last) in _SCREEN_VALUES and len(a) > 2 and a != "-ls" else 1
-    return list(args[i:])
+    return "run", list(args[i:])
 
 
 _TMUX_GLOBAL_VALUES = frozenset({"-f", "-L", "-S", "-T"})
