@@ -180,12 +180,15 @@ for example _Security engineer (The Keymaker)_) and why, or _Not backed up_ with
 Mac, the oldest 2 h ago_, _no remote is configured_). Then the branch (with _current_ and its linked task), where it
 lives (_local only_ or _local + origin_), ahead and behind its upstream and the default branch, its pull request
 (draft or ready, with its checks; the link opens only `http` and `https` URLs), and its worktree with a live session.
-Merged branches are grey and come last; past three, **Show N more merged branches** lists the rest. The panel says
+Merged branches are grey and come last; past three, **Show N more merged branches** lists the rest. Under the table, a
+line gives the project's backup policy (`dev backup policy`): _on_, _off_ or _ask_ with who set it, when and why, or
+the default (on for a private repository, ask for a public one). The panel says
 when there is no remote (nothing can be backed up), when `gh` did not answer (no row can show its pull request), when
 the snapshot has no map yet (`dev sync` makes one), and when the project is not cloned here. Unknown is _—_, never 0.
 
-On the live page the tab also reads the map from git when it opens (at most once a minute): the snapshot's rows show
-at once, the header says _Checking with git…_ and then _Checked just now_, and git's answer replaces the rows. When
+On the live page the tab also reads the map from git when it opens (at most once a minute; the server itself reads
+a project's map at most once every 5 seconds and at most two at a time, whoever asks): the snapshot's rows show at
+once, the header says _Checking with git…_ and then _Checked just now_, and git's answer replaces the rows. When
 git cannot read the repository, a red callout quotes git's message, keeps the snapshot's rows with their age, and
 offers **Try again**. On a phone each branch stacks: the name, the backup state, then each value with its label.
 
@@ -403,7 +406,7 @@ versions (`#/portfolio`, `?p=<project>`, `?i=<initiative>`) still resolve.
 
 | | |
 | --- | --- |
-| Live page | Served by the dashboard server (`dev dashboard`), which keeps a snapshot of the data, rebuilds it when the files behind it change, and sends open pages the areas that changed. Details (a whole task, run, job, or CI result) come from its read-only API under `/api/v1`; `/api/v1/branches/<project id>` reads one project's branch map from git when its Branches tab opens (a `502` problem quotes git's message when it cannot) |
+| Live page | Served by the dashboard server (`dev dashboard`), which keeps a snapshot of the data, rebuilds it when the files behind it change, and sends open pages the areas that changed. Details (a whole task, run, job, or CI result) come from its read-only API under `/api/v1`; `/api/v1/branches/<project id>` reads one project's branch map from git when its Branches tab opens (a `502` problem quotes git's message when it cannot; the server reads a project's map at most once every 5 seconds and at most two maps at once, and one more gets a `429` problem with `Retry-After`) |
 | Static copy | `~/.local/state/devkit/dashboard/index.html` (or the file you name with `--export`): one self-contained HTML file (inline CSS, JS and SVG), written after every `dev sync` (session ends, debounced turn ends), by the hourly background job, and by `--path` |
 | Refresh | the live page updates in place; a static copy reloads every 2 minutes while visible (not while a drawer is open), keeping its view, filters, and scroll position |
 | Data | The registry (projects, git state, worktrees, PRs, initiatives, live sessions with progress, providers, drift). From the handoff repo: **work items** (`items/<scope>/<id>.md`, with lock and changelog), **presence** (`presence/<user>@<host>.json`), **session logs** (`sessions/<scope>/<YYYY-MM>.md`), **versioned plans** (`plans/<scope>/*.md`), notes, and initiative READMEs. Also the PR cache, the instruction canary, guard decisions, the operations log, **timing records**, and **active runs** |

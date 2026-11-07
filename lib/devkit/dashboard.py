@@ -1229,7 +1229,7 @@ def _project(p: dict, now: float) -> dict:
 # the branch map's fields the page shows (spec P-fy3bwa0pshk R8); branches.map makes the rows
 BRANCH_KEYS = ("name", "current", "default", "sha", "upstream", "upstream_gone", "ahead", "behind", "base_ahead", "base_behind",
                "where", "last_commit", "unpushed", "oldest_unpushed", "merged_into", "last_backup", "embargo", "embargo_via",
-               "worktree", "worktree_missing", "session", "pr", "task", "backup")
+               "worktree", "worktree_missing", "session", "pr", "task", "backup", "backup_policy")
 
 
 def branch_rows(rows):
@@ -3819,8 +3819,14 @@ function branchesPanel(p, live) {
     : lv && lv.state === "error" ? null : empty("No branch map in this copy", "The snapshot was made before devkit mapped branches. Run ", h("code", {text: "dev sync"}), ", then open the dashboard again."));
   else if (!rows.length) body.push(lv && lv.state === "error" ? null : (p.main || {}).branch ? empty("git listed no branches", "The checkout is on " + p.main.branch + ", but the map came back empty. ", h("code", {text: "dev branch ls"}), " in the repository shows what git says.")
     : empty("No branches yet", "The repository has no commits. Its first commit makes the first branch."));
-  else body.push(branchTable(rows, p, prsUnknown));
+  else body.push(branchTable(rows, p, prsUnknown), policyLine(rows[0].backup_policy));
   return panelFor(p, body, c, right);
+}
+/* the project's backup policy (dev backup policy): every row carries the same record, none for the default */
+function policyLine(pol) {
+  const words = pol ? pol.policy + (pol.who ? ", set by " + embargoWho(pol.who) : "") + (pol.when ? " on " + String(pol.when).slice(0, 10) : "") + (pol.why ? ": " + pol.why : "")
+    : "the default, on for a private repository and ask for a public one";
+  return h("p", {class: "t2 brpol", style: "margin:var(--s2) 0 0", text: "Backup policy: " + words + "."});
 }
 function panelFor(p, body, c, right) { const el = panel("Branches", c ? c.total : null, right, body, {id: "branches", flush: false}); el.setAttribute("data-project", p.id); return el; }
 function repoKv(p) {

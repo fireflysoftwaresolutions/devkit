@@ -636,17 +636,8 @@ class PolicyTests(BackupCase):
         self.ci(CI_PR_AND_MAIN)
 
     def backup(self, *argv):
-        # `dev backup …` with the arguments backup.register gives the command
-        os.chdir(self.repo)
-        ap = argparse.ArgumentParser(prog="dev")
-        q = ap.add_subparsers(dest="cmd").add_parser("backup")
-        backup.register(q)
-        q.set_defaults(fn=backup.cmd_backup)
-        a = ap.parse_args(["backup", *argv])
-        out, err = io.StringIO(), io.StringIO()
-        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
-            rc = a.fn(a)
-        return rc, " ".join((out.getvalue() + err.getvalue()).split())
+        # `dev backup …` through devkit's own parser (cli.py takes the arguments from backup.register)
+        return self.dev("backup", *argv)
 
     @contextlib.contextmanager
     def terminal(self, answer):

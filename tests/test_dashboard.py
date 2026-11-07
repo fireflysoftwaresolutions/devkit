@@ -968,6 +968,16 @@ class BranchMapTests(unittest.TestCase):
         self.assertEqual((d["counts"]["total"], d["counts"]["not_backed_up"]), (2, 2))
         self.assertEqual((d["prs"], d["mapped"]), ("none", int(NOW)))                        # not on GitHub: no PRs to ask for
 
+    def test_the_rows_carry_the_projects_backup_policy_for_the_page(self):
+        # dev backup policy: the page shows the project's choice under the branch table, from the rows it gets
+        from devkit import branches
+        d = dashboard.branch_detail("acme/widget", self.reg(self.repo), now=NOW)
+        self.assertEqual({r["backup_policy"] for r in d["rows"]}, {None})          # no choice: the page says the default
+        branches.set_backup_policy("acme/widget", "off", "a client's fork", "ana")
+        d = dashboard.branch_detail("acme/widget", self.reg(self.repo), now=NOW)
+        self.assertEqual([(r["backup_policy"]["policy"], r["backup_policy"]["why"]) for r in d["rows"]],
+                         [("off", "a client's fork")] * 2)
+
     def test_the_live_map_says_what_git_answered_when_it_cannot_read_the_repository(self):
         plain = self.root / "plain"
         plain.mkdir()

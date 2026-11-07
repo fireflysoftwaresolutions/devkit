@@ -3426,13 +3426,8 @@ def build_parser():
     w.add_argument("target", help="branch name or path")
     from . import backup
     p = add("backup", backup.cmd_backup, "Copy branches whose commits exist only on this Mac to the remote, when the "
-            "push starts no CI run")
-    p.add_argument("branches", nargs="*", help="the branches (default: the current one)")
-    p.add_argument("--all", action="store_true", help="every local branch with commits only on this Mac")
-    p.add_argument("--accept-ci", action="store_true", help="push although the push starts (or may start) CI")
-    p.add_argument("--public", action="store_true", help="push a branch that looks like a security fix anyway")
-    p.add_argument("--dry-run", action="store_true", help="every check, no push")
-    p.add_argument("--json", action="store_true")
+            "push starts no CI run · policy [on|off|ask]: the project's backup policy")
+    backup.register(p)
     p = add("sync", cmd_sync, "Refresh map + notes, commit and push")
     p.add_argument("--session", help=argparse.SUPPRESS)
     p.add_argument("--finish", action="store_true", help=argparse.SUPPRESS)
