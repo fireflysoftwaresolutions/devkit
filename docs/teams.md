@@ -92,6 +92,12 @@ Both services must agree on the event before either ships.
 The actor is your GitHub login, the machine's short host name, and the agent: `claude` or `codex` when an agent runs
 the command (detected from its environment), `human` otherwise.
 
+The item's changelog is the last `## Changelog` heading outside code blocks, at the end of the file, with only its
+entries (one list item per version) after it. Plans use the same rule. A description or a plan can contain that heading too, in a code example
+or as a section of its own, and devkit keeps those lines in the body. Every write compares the new text with the file
+on disk and refuses to drop a line that the command does not change, so a file devkit misreads stops the command
+instead of shrinking (see [Troubleshooting](troubleshooting.md#devkit-refused-to-write-a-task-or-plan-file)).
+
 ### Lifecycle
 
 <picture>

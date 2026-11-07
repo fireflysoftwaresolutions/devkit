@@ -127,6 +127,50 @@ class ItemTests(unittest.TestCase):
             self.assertEqual(work.recent_sessions("acme/api")[:2], ["second", "first"])
 
 
+class ItemRecordTests(unittest.TestCase):
+    def test_an_item_body_keeps_text_that_looks_like_record_structure(self):
+        shapes = {
+            "a fenced changelog heading in the middle":
+                "Intro.\n\n```markdown\n## Changelog\n- 26.11.0 first release\n```\n\n## Done when\n- [ ] it ships",
+            "a fenced changelog heading at the end": "The file:\n\n~~~\n## Changelog\n- v1 · first\n~~~",
+            "two fenced changelog headings":
+                "```text\n## Changelog\n```\n\nBetween.\n\n````md\n```\n## Changelog\n```\n````",
+            "frontmatter-like lines": "Context.\n\n---\nstatus: done\nversion: 9\n---\n\nEnd.",
+        }
+        with TempHandoff():
+            for shape, body in shapes.items():
+                with self.subTest(shape):
+                    it = work.create("acme/api", f"Item with {shape}", body=body, why="a reason", a=A)
+                    work.update(work.load(it["path"]), "move", why="start now", a=A, bucket="now")
+                    again = work.load(it["path"])
+                    self.assertEqual(again["body"], body)
+                    self.assertEqual([e.split(" · ")[0] for e in again["changelog"]], ["v2", "v1"])
+                    self.assertEqual(again["meta"]["bucket"], "now")
+
+    def test_a_changelog_entry_written_on_several_lines_is_kept(self):
+        with TempHandoff():
+            it = work.create("acme/api", "Export invoices", why="first line\nsecond line", a=A)
+            work.update(work.load(it["path"]), "move", why="start now", a=A, bucket="now")
+            log = work.load(it["path"])["changelog"]
+            self.assertEqual(len(log), 2)
+            self.assertTrue(log[1].endswith("why: first line\nsecond line"), log[1])
+
+    def test_a_write_may_drop_only_the_text_it_edits(self):
+        with TempHandoff():
+            it = work.create("acme/api", "Export invoices", body="Context.", why="a reason", a=A)
+            stale = work.load(it["path"])
+            on_disk = it["path"].read_text().replace("Context.", "Context.\n\nAdded by hand after the load.")
+            it["path"].write_text(on_disk)
+            with self.assertRaises(ValueError) as cm:
+                work.update(stale, "move", why="start now", a=A, bucket="now")
+            self.assertIn("Added by hand after the load.", str(cm.exception))
+            self.assertEqual(it["path"].read_text(), on_disk)
+            # an edit replaces the body and the title it read, so it may drop their old lines
+            work.update(work.load(it["path"]), "edit", why="CSV only", a=A, body="Only this.", title="Export CSV")
+            again = work.load(it["path"])
+            self.assertEqual((again["body"], again["title"]), ("Only this.", "Export CSV"))
+
+
 class PlanTests(unittest.TestCase):
     def test_versioned_plan(self):
         with TempHandoff():

@@ -20,6 +20,7 @@ import os
 import re
 import socket
 import time
+from collections import Counter
 from pathlib import Path
 
 from . import core
@@ -99,24 +100,117 @@ def item_path(scope: str, iid: str) -> Path:
     return scope_dir(scope) / f"{iid}.md"
 
 
-def parse(text: str) -> dict:
-    meta, body = {}, text
+# --------------------------------------------------------------------------- record files (items, plans)
+# A record is frontmatter, a body, and the record's own changelog: a `## Changelog` heading at the end with one
+# `- ` line per entry. Bodies are free Markdown, so the same heading can appear in them (a code example, a section
+# about a product's changelog): only the last one outside fenced code, followed by nothing but entries, is the
+# record's. A write never drops text of the record on disk that it does not edit (`write_record`).
+
+CHANGELOG = "## Changelog"
+_FENCE = re.compile(r"^[ \t]*(`{3,}|~{3,})(.*)$")
+_HEADING = re.compile(r"^ {0,3}#{1,6}(\s|$)")
+
+
+class RecordLossError(ValueError):
+    """A write would drop text of the record on disk that it does not edit."""
+
+
+def split_frontmatter(text: str):
+    """-> (frontmatter text, the rest). Frontmatter runs from a first line `---` to the next `---` line."""
     if text.startswith("---\n"):
-        end = text.find("\n---\n", 4)
+        end = text.find("\n---\n", 3)
         if end != -1:
-            for ln in text[4:end].splitlines():
-                k, _, v = ln.partition(":")
-                v = v.strip()
-                if v.startswith("[") and v.endswith("]"):
-                    meta[k.strip()] = [x.strip() for x in v[1:-1].split(",") if x.strip()]
-                else:
-                    meta[k.strip()] = v
-            body = text[end + 5:]
+            return text[4:end], text[end + 5:]
+    return "", text
+
+
+def _closes(line: str, mark: str) -> bool:
+    m = _FENCE.match(line)
+    return bool(m) and m.group(1)[0] == mark[0] and len(m.group(1)) >= len(mark) and not m.group(2).strip()
+
+
+def _fenced(lines: list) -> set:
+    """Indexes of the lines in fenced code blocks (``` or ~~~, fence lines included). A fence closes on a line of the
+    same character, at least as long, with nothing after it; a fence that never closes hides nothing."""
+    inside, i = set(), 0
+    while i < len(lines):
+        m = _FENCE.match(lines[i])
+        if m and not (m.group(1)[0] == "`" and "`" in m.group(2)):
+            end = next((j for j in range(i + 1, len(lines)) if _closes(lines[j], m.group(1))), None)
+            if end is not None:
+                inside.update(range(i, end + 1))
+                i = end + 1
+                continue
+        i += 1
+    return inside
+
+
+def split_changelog(body: str):
+    """-> (the body without the record's changelog, its entries). The record's changelog is the last `## Changelog`
+    heading outside fenced code, when only entries follow it: `- ` lines, each with the lines under it that are not
+    headings. Otherwise the record has no changelog yet and the whole body is text."""
+    lines = body.split("\n")
+    fenced = _fenced(lines)
+    head = next((i for i in range(len(lines) - 1, -1, -1) if lines[i].rstrip() == CHANGELOG and i not in fenced), None)
+    if head is None:
+        return body, []
+    entries = []
+    for ln in lines[head + 1:]:
+        if ln.startswith("- "):
+            entries.append(ln[2:].strip())
+        elif entries and ln.strip() and not _HEADING.match(ln):
+            entries[-1] += "\n" + ln.rstrip()
+        elif ln.strip():
+            return body, []
+    return "\n".join(lines[:head]), entries
+
+
+def _content(text: str) -> list:
+    return [" ".join(ln.split()) for ln in split_frontmatter(text)[1].splitlines() if ln.strip()]
+
+
+def lost_lines(before: str, after: str, edited=()) -> list:
+    """The lines of `before` after its frontmatter that `after` no longer has, apart from the `edited` lines (the old
+    text a change replaces). Spacing and line order are not compared; the frontmatter is the record's to change."""
+    have = Counter(_content(after)) + Counter(" ".join(ln.split()) for ln in edited if ln.strip())
+    lost = []
+    for ln in _content(before):
+        if have[ln] > 0:
+            have[ln] -= 1
+        else:
+            lost.append(ln)
+    return lost
+
+
+def write_record(path: Path, text: str, edited=()) -> None:
+    """Write a record file, but refuse (RecordLossError, the file unchanged) when the text would drop lines of the
+    version on disk that this change does not edit: a misread record must stop the command, never shrink."""
+    path = Path(path)
+    try:
+        before = path.read_text()
+    except FileNotFoundError:
+        before = ""
+    lost = lost_lines(before, text, edited)
+    if lost:
+        raise RecordLossError(
+            f"refused to write {path}: it would drop {len(lost)} line(s) of the record that this change does not edit, "
+            f"first “{lost[0][:100]}”. Nothing was written. If the file changed after devkit read it, run the command "
+            f"again; otherwise devkit misread the record: leave the file as it is and report the bug with it.")
+    path.write_text(text)
+
+
+def parse(text: str) -> dict:
+    meta = {}
+    front, body = split_frontmatter(text)
+    for ln in front.splitlines():
+        k, _, v = ln.partition(":")
+        v = v.strip()
+        if v.startswith("[") and v.endswith("]"):
+            meta[k.strip()] = [x.strip() for x in v[1:-1].split(",") if x.strip()]
+        else:
+            meta[k.strip()] = v
     title_m = re.search(r"^# (.+)$", body, re.M)
-    desc, changelog = body, []
-    if "\n## Changelog" in body:
-        desc, _, log = body.partition("\n## Changelog")
-        changelog = [ln[2:].strip() for ln in log.splitlines() if ln.startswith("- ")]
+    desc, changelog = split_changelog(body)
     desc = re.sub(r"^# .+\n?", "", desc.strip(), count=1).strip()
     meta["version"] = int(meta.get("version") or 1)
     return {"meta": meta, "title": meta.get("title") or (title_m.group(1) if title_m else ""), "body": desc,
@@ -292,7 +386,7 @@ def create(scope: str, title: str, kind="task", bucket="next", priority="normal"
     _touch(it, a, "create", why, f"{kind} “{title.strip()}” in {bucket}")
     p = item_path(scope, iid)
     p.parent.mkdir(parents=True, exist_ok=True)
-    p.write_text(render(it))
+    write_record(p, render(it))
     it["path"] = p
     _commit([p], f"{iid}: create {kind} “{title.strip()[:60]}” ({actor_str(a)})" + (f" — {why}" if why else ""))
     return it
@@ -322,6 +416,9 @@ def update(it: dict, op: str, why: str = "", a=None, **changes) -> dict:
                          f"coordinate with them or wait for the lock to expire")
     detail = ", ".join(f"{k}={v}" for k, v in changes.items() if k not in ("body",)) + \
         (" (body edited)" if "body" in changes else "")
+    edited = (it.get("body") or "").splitlines() if "body" in changes else []
+    if "title" in changes:
+        edited.append(f"# {it['meta'].get('title') or it.get('title')}")
     for k, v in changes.items():
         if k == "body":
             it["body"] = v
@@ -330,7 +427,7 @@ def update(it: dict, op: str, why: str = "", a=None, **changes) -> dict:
         else:
             it["meta"][k] = v
     _touch(it, a, op, why, detail)
-    it["path"].write_text(render(it))
+    write_record(it["path"], render(it), edited)
     _commit([it["path"]], f"{it['meta']['id']}: {op}{(' ' + detail) if detail else ''} ({actor_str(a)})"
             + (f" — {why}" if why else ""))
     return it
@@ -358,7 +455,7 @@ def claim(it: dict, a=None, hours: float = None, why: str = "", branch: str = ""
     if branch and f"branch:{branch}" not in links:
         m["links"] = links + [f"branch:{branch}"]
     _touch(it, a, "claim", why, f"lock until {m['lock_expires']}" + (f", on {branch}" if branch else ""))
-    it["path"].write_text(render(it))
+    write_record(it["path"], render(it))
     ok = _commit([it["path"]], f"{m['id']}: claim by {actor_str(a)}", wait=True)
     if not ok:
         pull()
@@ -389,7 +486,7 @@ def release(it: dict, a=None, why: str = "", status: str = None) -> dict:
     if status:
         m["status"] = status
     _touch(it, a, "release" if not status else status, why)
-    it["path"].write_text(render(it))
+    write_record(it["path"], render(it))
     _commit([it["path"]], f"{m['id']}: {'release' if not status else status} ({actor_str(a)})"
             + (f" — {why}" if why else ""), wait=True)
     return it
@@ -406,7 +503,10 @@ def renew_locks(a=None, hours: float = None) -> int:
         if holder and holder.startswith(me) and not expired:
             if parse_iso(it["meta"]["lock_expires"]) - time.time() < hours * 1800:
                 it["meta"]["lock_expires"] = now_iso(time.time() + hours * 3600)
-                it["path"].write_text(render(it))
+                try:
+                    write_record(it["path"], render(it))
+                except RecordLossError:
+                    continue  # left as it is: the next command on this item names the lines and the way out
                 changed.append(it["path"])
     if changed:
         _commit(changed, f"renew {len(changed)} lock(s) held by {me}")
@@ -423,7 +523,10 @@ def expire_locks() -> list:
             it["changelog"].insert(0, f"v{m['version'] + 1} · {now_iso()} · devkit · lock of {holder} expired")
             m["version"] += 1
             m["claimed_by"] = m["claimed_at"] = m["lock_expires"] = ""
-            it["path"].write_text(render(it))
+            try:
+                write_record(it["path"], render(it))
+            except RecordLossError:
+                continue  # left as it is: the next command on this item names the lines and the way out
             out.append(it["path"])
     if out:
         _commit(out, f"release {len(out)} expired lock(s)", push=False)

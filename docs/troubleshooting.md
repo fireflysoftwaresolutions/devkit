@@ -259,6 +259,17 @@ Two machines claimed the same item within seconds; the first push won. Pick anot
 
 `edit`, `move`, and `cancel` change the scope or the plan, so devkit records why. Add `--why "…"`.
 
+### devkit refused to write a task or plan file
+
+The message starts with `refused to write <file>: it would drop N line(s) of the record that this change does not
+edit` and quotes the first of those lines. devkit checks each write of a work item or a plan against the file on
+disk, and stops when the new text would lose lines that the command does not change. Nothing was written.
+
+1. If the file changed after the command read it (you edited it, or a sync pulled a teammate's change), run the
+   command again. It reads the current file.
+2. If it refuses again, devkit misread the file. Leave the file as it is, and report the bug with the file and the
+   message.
+
 ### The handoff repository does not push
 
 `dev` shows "the handoff repository could not be pushed since …" under Needs attention, and `dev audit --action

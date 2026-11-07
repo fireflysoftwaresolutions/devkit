@@ -22,18 +22,14 @@ FIELDS = ("id", "title", "kind", "scope", "status", "version", "body_sha", "crea
 
 
 def _split(text: str):
-    meta, body = {}, text
-    if text.startswith("---\n"):
-        end = text.find("\n---\n", 4)
-        if end != -1:
-            for ln in text[4:end].splitlines():
-                k, _, v = ln.partition(":")
-                meta[k.strip()] = v.strip()
-            body = text[end + 5:]
-    changelog = []
-    if "\n## Changelog" in body:
-        body, _, log = body.partition("\n## Changelog")
-        changelog = [ln[2:].strip() for ln in log.splitlines() if ln.startswith("- ")]
+    """-> (frontmatter fields, body, changelog entries); only the record's own changelog at the end is taken out of the
+    body (work.split_changelog), so a `## Changelog` in a code example or a section stays in the body."""
+    front, body = work.split_frontmatter(text)
+    meta = {}
+    for ln in front.splitlines():
+        k, _, v = ln.partition(":")
+        meta[k.strip()] = v.strip()
+    body, changelog = work.split_changelog(body)
     return meta, body.strip("\n"), changelog
 
 
@@ -81,7 +77,7 @@ def new(scope: str, title: str, a=None, kind: str = "plan") -> Path:
             "body_sha": _sha(body), "created": work.now_iso(), "created_by": f"{a['user']}@{a['host']}",
             "updated": work.now_iso(), "updated_by": f"{a['user']}@{a['host']}"}
     log = [f"v1 · {work.now_iso()} · {work.actor_str(a)} · created from the {kind} template"]
-    path.write_text(_render(meta, body, log))
+    work.write_record(path, _render(meta, body, log))
     work._commit([path], f"{meta['id']}: plan “{title[:60]}” created ({work.actor_str(a)})")
     return path
 
@@ -110,7 +106,7 @@ def revise(path: Path, why: str, a=None, status: str = None) -> dict:
     change = "adopted into devkit format" if adopted else (status or "revised")
     detail = f" ({stat.strip()})" if stat.strip() else ""
     log.insert(0, f"v{meta['version']} · {work.now_iso()} · {work.actor_str(a)} · {change}{detail} — why: {why}")
-    path.write_text(_render(meta, body, log))
+    work.write_record(path, _render(meta, body, log))
     work._commit([path], f"{meta['id']}: {change} v{meta['version']} ({work.actor_str(a)}) — {why}")
     return meta
 
