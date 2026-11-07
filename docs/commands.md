@@ -55,14 +55,17 @@ this Mac.
 | `--names` | Print only the project ids, one per line (with `--all`, every project) |
 | `--json` | The rows as JSON, with the portfolio projects that are not on this Mac |
 
-### `dev go <name>`
+### `dev go <name> [branch]`
 
 Prints a project's path. `<name>` is an id, an alias, or part of a name (see `dev alias` for how names match). When
-the match is not exact, a dim line on standard error names the project it picked (`kit → kit-consulting`). The `dcd`
-shell function uses it.
+the match is not exact, a dim line on standard error names the project it picked (`kit → kit-consulting`). With a
+`branch`, it prints the path of the project's managed worktree for that branch instead; part of the branch name is
+enough when only one worktree matches, and otherwise it lists the worktrees and exits with code `2`. The `dcd` shell
+function uses it.
 
 ```bash
-cd "$(dev go widget)"      # what `dcd widget` does
+cd "$(dev go widget)"              # what `dcd widget` does
+cd "$(dev go widget login)"        # what `dcd widget login` does: the worktree of feat/login
 ```
 
 ### `dev alias [<alias> [<project>] [--move] | rm <alias>]`
@@ -1208,7 +1211,7 @@ write and push, settings repair, cleanup, and job run, with secrets redacted. Se
 
 ## Environment
 
-### `dev setup [-y] [--skip-packages]` · `dev setup prompt [--remove] [-y]` · `dev setup commit-template [--remove] [-y]`
+### `dev setup [-y] [--skip-packages]` · `dev setup prompt | commit-template | shell [--remove] [-y]`
 
 The installation and configuration wizard. It detects the Mac, GitHub, and both agents. It asks for the development
 root, the handoff repository, which agents to configure and their permission modes, your stacks, your git hosts and
@@ -1230,12 +1233,20 @@ answer adds the helper, and nothing changes (exit code `2`). `--remove` needs no
 keep it. `--remove` takes devkit's template out of every repository and records a no, so `dev install` leaves them
 alone.
 
+`dev setup shell` turns on the [zsh helpers](getting-started.md#tab-completion-and-the-zsh-helpers): fzf pickers on
+<kbd>Ctrl</kbd>+<kbd>X</kbd> <kbd>i</kbd> (a work item), <kbd>p</kbd> (a project) and <kbd>b</kbd> (a branch),
+`dpick`, and `dcd` without a project. It says what it changes and asks; the answer is a file that `shell/devkit.zsh`
+reads, so `~/.zshrc` stays as it is. As with the prompt helper, the yes must be yours, typed in your own terminal: in an
+agent's call, neither `-y` nor a piped answer turns them on (exit code `2`), and a no is remembered.
+
 | Option | Effect |
 | --- | --- |
 | `-y`, `--yes` | Accept every default, without questions |
 | `--skip-packages` | Do not install Homebrew or npm packages |
 | `prompt` | Only the prompt helper |
-| `--remove` | With `prompt`: take the helper out again (the Starship block too, after a backup) |
+| `commit-template` | Only the commit template |
+| `shell` | Only the zsh helpers |
+| `--remove` | With `prompt`, `commit-template` or `shell`: take it out again (the Starship block too, after a backup) |
 
 ### `dev doctor`
 
@@ -1326,7 +1337,7 @@ compile. It keeps the newest three copies and any copy in use. Run it yourself, 
 
 | Option | Effect |
 | --- | --- |
-| `--only STEPS` | Re-applies only these steps from the installed copy, without pinning. `STEPS` is a comma-separated list of `config,tools,cli,git,handoff,instructions,skills,claude,codex,desktop,docker,docs,launchd` |
+| `--only STEPS` | Re-applies only these steps from the installed copy, without pinning. `STEPS` is a comma-separated list of `config,tools,cli,git,handoff,instructions,skills,claude,codex,desktop,docker,docs,launchd,prompt,shell` |
 | `--version VERSION` | Switches to a copy pinned by an earlier install, for a rollback: `26.11.2`, or `26.11.2-<commit>`. It checks the copy against its checksums first |
 | `--unverified --why "…"` | Pins the checkout's commit although it is neither a release nor tested; the reason is recorded in the audit trail |
 | `--commit-template yes\|no` | The answer `dev setup` gives for the [commit template](git-and-github.md#the-template-in-your-editor): the git step records it, and `yes` sets `commit.template` in each repository that has none |
@@ -1370,13 +1381,60 @@ Version, install path, and copyright.
 
 | Function | Effect |
 | --- | --- |
-| `dcd <name>` | `cd` into a project by its alias, id, or part of its name (when two or more match, `dev` lists them) |
+| `dcd <name> [branch]` | `cd` into a project by its alias, id, or part of its name, or into its managed worktree for `branch` (when two or more match, `dev` lists them) |
 | `dwt <branch> [--base REF]` | Create or reuse a managed worktree and `cd` into it |
 
-It also puts `~/.local/bin` on the PATH, sets the Docker and telemetry environment variables, and loads zsh completion
-for `dev` and `dcd`: the commands, project aliases, worktree branches, the verbs of `dev task`, `dev progress`, `dev crew`,
-and `dev agents` with their main options, the options of `dev dashboard` and `dev install` (its steps and the pinned
-copies for `--version`), and the Docker actions.
+It also puts `~/.local/bin` on the PATH, sets the Docker and telemetry environment variables, and loads Tab
+completion for `dev`, `dcd`, and `dwt` (see [`dev completion`](#dev-completion-zsh--bash)).
+
+With the zsh helpers on (`dev setup shell`) and fzf installed, it adds fzf pickers. A key you bound yourself keeps your
+binding.
+
+| Helper | Effect |
+| --- | --- |
+| <kbd>Ctrl</kbd>+<kbd>X</kbd> <kbd>i</kbd> | Insert a work item's id, picked from the project you are in |
+| <kbd>Ctrl</kbd>+<kbd>X</kbd> <kbd>p</kbd> | Insert a project's alias |
+| <kbd>Ctrl</kbd>+<kbd>X</kbd> <kbd>b</kbd> | Insert a branch of the repository you are in |
+| `dpick [task\|project\|branch\|worktree\|step\|plan\|member]` | Print one, picked with fzf: `git switch "$(dpick branch)"` |
+| `dcd` (no project) | Pick a project or worktree on this Mac, then `cd` into it |
+
+### `dev completion zsh | bash`
+
+Prints the Tab completion script for zsh or bash. Both are generated from `dev`'s own parser, so they offer every
+command, subcommand, option, and choice that `dev --help` shows, with its help text as the description, and nothing
+that only the agents' harness runs (`dev hook`). The zsh script is `shell/completions/_dev`, which
+`shell/devkit.zsh` loads; bash users add `eval "$(dev completion bash)"` to `~/.bashrc`. CI fails when the checked-in
+scripts differ from the parser (the D13 consistency check), and
+`bin/dev completion zsh > shell/completions/_dev` and `bin/dev completion bash > shell/completions/dev.bash` bring them
+up to date.
+
+Where an argument takes something devkit knows, completion offers the live values, each with a description:
+
+| Values | Offered for |
+| --- | --- |
+| Projects, by alias (the ones on this Mac first) | `dev go`, `status`, `open`, `claude`, `codex`, `handoff`, `ci`, `sec`, `du`, `wt new --repo`, every `-p`/`--project` |
+| Worktrees of a project, by branch | `dev go <name>`, `dcd <name>`, `dev wt rm`, `dev claude -w`, `dev codex -w` |
+| Work items of the project you are in (or of `-p`/`-i`) | the verbs of `dev task`; `show`, `history`, and `reopen` also offer done ones |
+| Plan steps of this project's live run | `dev progress step --step`, `assign`, `begin`, `reopen`, `skip`, `--approves`, and the steps `dev crew` takes |
+| Crew members by id, with their role | `dev crew show`, `brief`, `set`, `ask --to`, `delegate --to`, `dev progress assign --to`, `dev audit --member` |
+| Kinds of work from the RACI | `--activity`, `dev crew raci` |
+| Plans and specs of the project | `dev plan revise`, `approve`, `supersede` |
+| Branches of the repository you are in | `--base`, `--branch`, `--since`, `dev branch embargo`, `dev backup` |
+| Initiatives, pinned devkit copies | `-i`/`--initiative`, `dev task link --to`; `dev install --version` |
+
+The values come from `dev __complete <kind>`, which answers without building the full parser: about 35 ms with
+Homebrew's Python and about 100 ms with macOS's own `/usr/bin/python3`. The shell keeps them for 10 seconds
+(`_dev_ttl`), so a second Tab costs under a millisecond. How long a Tab waits for the command:
+
+| Tab | zsh and bash 4 or later | bash 3.2 (macOS) |
+| --- | --- | --- |
+| The first of its kind in this shell, with nothing to offer yet (`_dev_first_wait`) | 0.5 seconds | 1 second |
+| A later one, with older values to offer (`_dev_wait`) | 0.1 seconds | 1 second |
+
+bash 3.2 waits only in whole seconds. Past the wait, the Tab offers the values it has, and a later Tab picks up the new
+ones once the command has finished in the background. A command still unfinished after 30 seconds (`_dev_stale`)
+counts as dead, and the next Tab runs it again. The values wait in `~/.cache/devkit/complete`; each shell deletes the
+files there that are older than a day.
 
 Once `dev setup prompt` turned it on, it also draws the [prompt helper](getting-started.md#the-prompt-helper): before
 each prompt, `_devkit_prompt` sets `DEVKIT_PROMPT` and `DEVKIT_PROMPT_ASK` inside devkit projects and unsets them
@@ -1393,7 +1451,9 @@ costs well under 5 ms. `dev prompt refresh` writes that cache for every project 
 ## Internal commands
 
 `dev hook <event> --agent claude|codex` is the hook entry point that Claude Code and Codex call (see
-[Agents › Hooks](agents.md#hooks)). `dev __complete <projects|aliases|branches|commands>` feeds shell completion.
+[Agents › Hooks](agents.md#hooks)). `dev __complete <kind> [arg] [-p PROJECT | -i SLUG] [--tab]` feeds shell
+completion and the fzf pickers: `value:description` lines (`value<TAB>description` with `--tab`) for `projects`,
+`initiatives`, `tasks`, `steps`, `crew`, `activities`, `plans`, `branches`, `worktrees`, `versions`, and `places`.
 `dev jobs exec <job>` is what launchd runs for a scheduled job, `dev audit --publish` is the `audit` job's command,
 and `dev sync --delay N` is the queued near-real-time sync.
 

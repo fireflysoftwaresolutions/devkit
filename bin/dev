@@ -9,6 +9,13 @@ import sys
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.realpath(__file__)), "..", "lib"))
 
+if __name__ == "__main__" and sys.argv[1:2] == ["__complete"]:
+    # A Tab in the shell: answer from the live values alone, without building dev's parser (40 ms instead of 120).
+    from devkit import completion  # noqa: E402
+    rc = completion.main(sys.argv[2:])
+    if rc is not None:
+        sys.exit(rc)
+
 from devkit.cli import main  # noqa: E402
 
 if __name__ == "__main__":

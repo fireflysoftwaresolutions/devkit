@@ -9,6 +9,23 @@ Not released yet: the date is set when the release is tagged.
 
 ### Added
 
+- **Tab completion generated from `dev` itself.** `dev completion zsh|bash` prints it, and `shell/completions/_dev`
+  (zsh) and `shell/completions/dev.bash` (bash) are generated from the parser: every command, subcommand, option and
+  choice, with its help as the description, so a new command or flag is offered as soon as `dev` has it. The
+  hand-written file it replaces offered 68 of 75 commands (it missed `backup`, `free`, `gh`, `git`, `handoff-import`,
+  `mcp`, and `session`) and 37 options; the generated one offers all of them and 252 options. `dev hook`, which only
+  the agents' harness runs, stays out. A consistency check (D13) fails CI while the checked-in scripts
+  differ from the parser.
+- **Live values with descriptions:** project aliases, a project's worktrees, the work items of the project you are in,
+  the plan steps of its live run, crew members by id with their role, kinds of work, plans, branches, initiatives, and
+  pinned copies, wherever an argument takes one. A Tab waits at most 0.1 s for them when it has older values to show
+  and 0.5 s for the first of a kind in a new shell (1 s in macOS's bash 3.2, which waits in whole seconds), and a
+  second Tab within 10 s costs under a millisecond.
+- **`dcd <project> <branch>` and `dev go <project> <branch>`** go to a project's worktree; `dcd` and `dwt` complete
+  like `dev go` and `dev wt new`.
+- **zsh helpers, with your yes (`dev setup shell`):** fzf pickers on <kbd>Ctrl</kbd>+<kbd>X</kbd> <kbd>i</kbd> (a work
+  item), <kbd>p</kbd> (a project) and <kbd>b</kbd> (a branch), `dpick`, and `dcd` without a project. An agent's
+  `--yes` is not consent, and keys you bound yourself keep your binding. `dev install` asks once.
 - **The tech lead asks your decisions nicely, and together.** `dev crew decisions --ask` prints the pending decisions
   as question dialog calls ready to send: at most 4 questions per call, an irreversible decision alone in its call,
   each opening with `D<n> ·` and one line on who asks and what it blocks, with the recommended option first; `--json`
