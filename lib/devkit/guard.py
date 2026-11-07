@@ -356,9 +356,12 @@ def _split_heredocs(cmd: str):
                 while i < n:
                     j = cmd.find("\n", i)
                     j = n if j < 0 else j
-                    ln, i = cmd[i:j], j + 1
+                    ln, start, i = cmd[i:j], i, j + 1
                     if ln.strip() == delim:
                         break
+                    if ln.startswith(delim + ")"):  # bash 3.2 ends it here in a `$(…)` and reads on from the `)`,
+                        i = start + len(delim)      # zsh does not: read it as bash does, so what bash runs is seen
+                        break                       # (B-fy5f5i8c1hx)
                     body.append(ln)
                 bodies.append(("\n".join(body), expands))
             pending = []
@@ -2587,7 +2590,9 @@ _DATA_HEREDOC = re.compile(r"\$\(cat <<(['\"])([A-Za-z_][A-Za-z0-9_]*)\1\n")
 def _data_heredoc_end(cmd: str, i: int) -> int:
     """At a `$(` the shell expands: the end of `$(cat <<'TAG'` + body + a line `TAG` + `)`, a substitution that
     only prints its quoted heredoc (data, nothing runs), else -1. The body ends at its first `TAG` line, as in the
-    shell, and `)` must follow that line at once."""
+    shell, and `)` must follow that line at once. A body line that starts with the tag but is more than the tag
+    (`TAG)`, `TAG )`) fails closed: bash 3.2 (macOS /bin/bash) ends the heredoc there and runs what follows, while
+    zsh reads on, so the shells disagree on where the data stops (B-fy5f5i8c1hx)."""
     m = _DATA_HEREDOC.match(cmd, i)
     if not m:
         return -1
@@ -2596,8 +2601,11 @@ def _data_heredoc_end(cmd: str, i: int) -> int:
         nl = cmd.find("\n", j)
         if nl < 0:
             return -1
-        if cmd[j:nl] == tag:
+        line = cmd[j:nl]
+        if line == tag:
             return nl + 2 if cmd[nl + 1:nl + 2] == ")" else -1
+        if line.startswith(tag):
+            return -1
         j = nl + 1
 
 
@@ -3351,16 +3359,18 @@ def failopen(where: str, exc: BaseException):
 
 
 def crew_shell_verdict(cmd: str, cwd, scope=None, member=None, level=None, base=None, *, lane=None, session: str = "",
-                       agent: str = "claude", grant=None, now=None):
-    """For a crew member's shell command that devkit did not route to its lane: ("deny", why) when it runs a
-    `dev progress` or `dev crew` call that would act as Morpheus or change the team's crew, `dev crew sync` that
+                       agent: str = "claude", grant=None, now=None, routed: bool = False):
+    """For a crew member's shell command that devkit did not route to its lane (or, with `routed`, one it did):
+    ("deny", why) when it runs a `dev progress` or `dev crew` call that would act as Morpheus or change the team's crew, `dev crew sync` that
     writes outside the member's step scope, writes or deletes in the session scratchpad outside the member's own
     folder, or, in a review or read-only lane, runs anything the read-only allowlist does not name, or an irreversible
     action: tier 2 always, tier 1 without a step grant (spec C6); None otherwise.
     `scope`: the step scope, globs or layers of globs; `member`: the member's id; `level`: the lane's tool level
     (progress.lane_tools), of which the stricter of it and the member's roster level counts; `base`: the folder the
     scope globs count from (scope_base); `lane`: the lane's agent_id, whose step grants count for tier 1 (none without
-    it); `session`, `agent`: the session the lane runs in; `grant`: replaces progress.use_grant in tests."""
+    it); `session`, `agent`: the session the lane runs in; `grant`: replaces progress.use_grant in tests.
+    `routed`: devkit routes this command to the lane (hooks._route_subagent_progress), so the one lane call it is
+    passes, and everything else is judged as for any command: defense in depth if runs_one_command misreads it."""
     if not cmd or not str(cmd).strip():
         return None
     cwd = cwd or os.getcwd()
@@ -3384,9 +3394,13 @@ def crew_shell_verdict(cmd: str, cwd, scope=None, member=None, level=None, base=
             return deny(readonly_refusal(cmd, cwd, member))
         why = _member_gate(cmd, cwd, member, lane, agent, session, grant, now)
         return deny(why) if why else None
+    lanes = [1 for argv, code in calls for kind, _ in _dev_calls(argv, code) if kind == "lane"]
+    # the routed call, and the `cat` of a quoted heredoc message it carries (runs_one_command's data form)
+    one_routed = routed and lanes == [1] and [k for k, _ in _dev_calls(*calls[0])] == ["lane"] and \
+        all(argv == ["cat"] for argv, code in calls[1:])
     for argv, code in calls:
         for kind, args in _dev_calls(argv, code):
-            if kind == "lane":
+            if kind == "lane" and not one_routed:
                 return deny(LANE_REASON)
             if kind == "team":
                 sub = next((a for a in args[1:] if not a.startswith("-")), "")

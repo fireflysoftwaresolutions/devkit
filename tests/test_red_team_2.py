@@ -235,6 +235,45 @@ class RedTeam2(unittest.TestCase):
             with self.subTest(cmd=cmd):
                 self.assertIsNone(self.check(cmd))
 
+    # ---- B-fy5f5i8c1hx
+    BASH_HEREDOC = "printf '[%s]' \"$(cat <<'EOF'\nx\nEOF)\"; echo RAN\nEOF\n)\""
+
+    def test_heredoc_a_tag_line_with_more_than_the_tag_is_not_one_command(self):
+        # macOS /bin/bash 3.2 ends the heredoc at `EOF)` and runs what follows; zsh reads on. The lane router read
+        # zsh's way and routed the whole call as one command: now it fails closed, and the classifier sees what bash
+        # runs
+        self.assertFalse(guard.runs_one_command(self.BASH_HEREDOC))
+        self.assertFalse(guard.runs_one_command("dev crew ask \"$(cat <<'EOF'\nx\nEOF )\ngh pr merge 12\nEOF\n)\""))
+        ask = "dev crew ask \"$(cat <<'EOF'\nx\nEOF)\"; gh pr merge 12\nEOF\n)\""
+        self.assertFalse(guard.runs_one_command(ask))
+        self.assertIsNotNone(self.member(ask))
+        merge = ask.replace("dev crew ask", "printf %s")
+        self.assertIsNotNone(self.main(merge))
+        self.assertIsNotNone(self.member(merge))
+        msg = "dev crew ask \"$(cat <<'EOF'\nShould I merge 12; or wait && ask | Link?\nEOFX is a word\nEOF\n)\""
+        self.assertFalse(guard.runs_one_command(msg))  # a body line that starts with the tag fails closed too
+        self.assertTrue(guard.runs_one_command("dev crew ask \"$(cat <<'EOF'\nShould I merge 12; or wait?\nEOF\n)\""))
+
+    @unittest.skipUnless(os.path.exists("/bin/bash") and "version 3." in subprocess.run(
+        ["/bin/bash", "--version"], capture_output=True, text=True).stdout, "needs bash 3.2 (macOS /bin/bash)")
+    def test_heredoc_bash_3_2_runs_what_follows_the_tag_line(self):
+        out = subprocess.run(["/bin/bash", "-c", self.BASH_HEREDOC], capture_output=True, text=True).stdout
+        self.assertEqual(out, "[x]RAN\n")  # the echo ran as a command of its own
+
+    @unittest.skipUnless(shutil.which("zsh", path="/bin"), "needs /bin/zsh")
+    def test_heredoc_zsh_reads_the_same_line_as_data(self):
+        out = subprocess.run(["/bin/zsh", "-c", self.BASH_HEREDOC], capture_output=True, text=True).stdout
+        self.assertEqual(out, "[x\nEOF)\"; echo RAN]")  # one printf: the echo is text
+
+    def test_heredoc_a_routed_lane_call_is_still_judged(self):
+        # defense in depth for the router: a routed call passes its one lane call and nothing else
+        self.assertIsNone(self.member("dev crew ask \"$(cat <<'EOF'\nShould I merge 12?\nEOF\n)\"", routed=True))
+        self.assertIsNone(self.member("dev progress step \"x\" --check \"y\"", routed=True))
+        for cmd in ("dev progress step x && gh pr merge 12", "dev progress step x; dev crew ask y",
+                    "dev crew add-member x"):
+            with self.subTest(cmd=cmd):
+                self.assertIsNotNone(self.member(cmd, routed=True))
+
 
 if __name__ == "__main__":
     unittest.main()
