@@ -268,11 +268,11 @@ class AssignmentTests(unittest.TestCase):
         self.assertEqual((journey["state"], journey.get("owner") or "main"), ("pending", "main"))  # waits
 
     def test_a_step_reassigned_away_from_a_running_member_leaves_its_lane(self):
-        pg.start("Work", plan=["installer", "dashboard server"], now=self.m(0))
+        pg.start("Work", plan=["installer"], now=self.m(0))
         pg.assign("installer", "Kid", now=self.m(0))
         launch("a1", "devkit:kid", "Kid: installer", self.m(1))
-        run = pg.assign("dashboard server", "Kid", now=self.m(2))  # a mistake: Kid's running lane takes it
-        self.assertEqual(run["plan"][1]["owner"], "a1")
+        dispatch.delegate("dashboard server", to="Kid", now=self.m(2))  # a mistake: it joins Kid's working lane
+        self.assertEqual(pg.load_run("claude", "s1")["plan"][1]["owner"], "a1")
         run = pg.assign("dashboard server", "Tank", now=self.m(3))
         self.assertEqual((run["plan"][1]["owner"], run["plan"][1]["state"], run["plan"][1]["label"]),
                          ("main", "pending", "Tank"))

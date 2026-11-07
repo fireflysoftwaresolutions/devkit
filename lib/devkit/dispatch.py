@@ -9,7 +9,8 @@ only dispatcher:
 
   route      a task description (and the files it touches) -> crew members ranked by fit, with the reasons
   delegate   anyone adds a step for another member; it joins the plan with who asked. If that member is working,
-             the step goes to its lane and the member gets a message; otherwise Morpheus is told to launch it
+             the step goes to its lane and the member gets a message (its launch does not name the step, so only the
+             lane's evidence naming it closes it: progress._steps_about); otherwise Morpheus is told to launch it
   decline    a member hands a delegated step back to Morpheus, with the reason
   ready      steps whose dependencies are done (progress.deps_open: a review step also takes unverified work), assigned
              to a member who is not working, within the parallel limit:
@@ -183,7 +184,7 @@ def delegate(task: str, to: str = "auto", files=None, scope: str = "", after: st
         lane_id = next((k for k, v in (run.get("agents") or {}).items() if v.get("state") == "running"
                         and progress._label_matches(m["name"], v)), None)
         if lane_id and lane_id != from_agent and not progress.deps_open(run, s):  # a step that waits does not start
-            s.update(owner=lane_id, state="running", started=now)
+            s.update(owner=lane_id, state="running", started=now, joined=lane_id)  # its launch does not name it
             if s.get("scope"):
                 run["agents"][lane_id]["scope"] = sorted(set((run["agents"][lane_id].get("scope") or []) + s["scope"]))
         progress._save(run, touch_session=False)
@@ -192,8 +193,9 @@ def delegate(task: str, to: str = "auto", files=None, scope: str = "", after: st
     from . import crew
     text = f"{crew.who(by)} delegates “{task.strip()[:200]}” to {crew.who(m)} (step “{name}”)"
     if lane_id and s.get("owner") == lane_id:
-        progress.crew_ask(text + ". It is in your lane now; if you cannot take it: dev crew decline "
-                          f"\"{name}\" --why \"…\"", to=lane_id, from_agent=from_agent, cwd=cwd, now=now)
+        progress.crew_ask(text + f". It is in your lane now: record it with dev progress step \"…\" --step \"{name}\" "
+                          f"--check \"…\", or your report's ✓ does not close it; if you cannot take it: dev crew "
+                          f"decline \"{name}\" --why \"…\"", to=lane_id, from_agent=from_agent, cwd=cwd, now=now)
     elif from_agent:
         progress.crew_ask(text + f". Launch {crew.who(m)} when it is ready: dev crew next", to="main",
                           from_agent=from_agent, cwd=cwd, now=now)

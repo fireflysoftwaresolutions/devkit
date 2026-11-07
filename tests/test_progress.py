@@ -952,6 +952,74 @@ class ScopeWriteTests(unittest.TestCase):
             self.assertEqual(flagged["paths"], ["lib/api.py"])
 
 
+LANE_REPORT = ("**[Firefly> DevKit · Security engineer (The Keymaker)]** acme/api · `main` · {task}\n"
+               "- **Done:** {task}\n- **Check:** {check}\n- **Next:** the tech lead")
+
+
+class LaneEndTests(unittest.TestCase):
+    # B-fy9639hfz5t, seen live by the developer: "isolated python spawns", assigned to The Keymaker while its lane for
+    # "red team fixes part 3" ran, was bound to that lane, and the lane's ✓ ending closed it done with none of its
+    # work. A step binds only to the launch whose description names it (or a new launch), and a lane's end closes
+    # only the steps its evidence is about; any other step it holds goes back to pending, the reason in its history
+    def setUp(self):
+        self.state = TempState().__enter__()
+        self.addCleanup(self.state.__exit__, None, None, None)
+        self.t0 = time.time() - 3600
+        pg.start("Release", plan=["red team fixes part 3", "isolated python spawns"], now=self.m(0))
+        pg.assign("red team fixes part 3", "The Keymaker", now=self.m(0), why="the live plan's assignment")
+        launch("a_rt3", "devkit:keymaker", "The Keymaker: red team fixes part 3", at=self.m(1))
+
+    def m(self, minutes):
+        return self.t0 + minutes * 60
+
+    def run_(self):
+        return pg.load_run("claude", "s1")
+
+    def plan(self):
+        return {s["name"]: s for s in self.run_()["plan"]}
+
+    def stop(self, aid, check, at):
+        pg.on_subagent("claude", {"session_id": "s1", "agent_id": aid, "agent_type": "devkit:keymaker",
+                                  "last_assistant_message": LANE_REPORT.format(task="red team fixes part 3",
+                                                                               check=check)}, False, now=at)
+        return self.plan()
+
+    def test_a_step_assigned_while_its_member_works_on_another_waits_for_its_own_launch(self):
+        pg.assign("isolated python spawns", "The Keymaker", now=self.m(5), why="the live plan's assignment")
+        s = self.plan()["isolated python spawns"]
+        self.assertEqual((s["owner"], s["state"]), ("main", "pending"))
+        told = [x["text"] for x in self.run_().get("messages") or [] if x.get("to") == "main"]
+        self.assertTrue(any("isolated python spawns" in t and "red team fixes part 3" in t for t in told), told)
+        plan = self.stop("a_rt3", "✓ 18 red team tests pass on both Pythons", at=self.m(30))
+        self.assertEqual(plan["red team fixes part 3"]["state"], "done")
+        self.assertEqual((plan["isolated python spawns"]["owner"], plan["isolated python spawns"]["state"]),
+                         ("main", "pending"))
+        launch("a_spawns", "devkit:keymaker", "The Keymaker: isolated python spawns", at=self.m(31))
+        self.assertEqual(self.plan()["isolated python spawns"]["owner"], "a_spawns")
+
+    def test_a_lanes_end_closes_only_the_steps_its_evidence_is_about(self):
+        # two steps join the working lane by delegation (its member is told); the lane's dev progress step --step
+        # names one, so its ✓ closes that one and its own step; the other goes back to pending, with the reason
+        from devkit import dispatch
+        named, other = "M379 guard text says the tech lead", "M381 dev backup is tier 1 for members"
+        for task in (named, other):
+            self.assertEqual(dispatch.delegate(task, to="The Keymaker", now=self.m(5))["lane"], "a_rt3")
+        pg.step("the guard says the tech lead", which=named, check="✓ 3 guard tests", from_agent="a_rt3",
+                now=self.m(20))
+        plan = self.stop("a_rt3", "✓ 18 red team tests pass", at=self.m(30))
+        self.assertEqual([plan[n]["state"] for n in ("red team fixes part 3", named, other)],
+                         ["done", "done", "pending"])
+        self.assertEqual(plan[other]["owner"], "main")
+        back = [h for h in self.run_()["history"] if h["step"] == other][-1]
+        self.assertEqual((back["from"], back["to"]), ("running", "pending"))
+        self.assertIn("names", back["why"])
+
+    def test_a_lane_step_that_names_no_step_of_the_plan_is_refused(self):
+        with self.assertRaises(pg.StepError) as e:
+            pg.step("finished", which="spawns everywhere else", check="✓ ok", from_agent="a_rt3")
+        self.assertIn("red team fixes part 3", str(e.exception))
+
+
 class BoundaryTests(unittest.TestCase):
     # e6de8a9, L-fy1j7q5mw2i (Kid, M322, M349): what devkit writes while a test runs (runs, sessions, quota, call
     # ledger, the team's crew policy, the continuity records and the prompt helper's cache) lands in the test's folder

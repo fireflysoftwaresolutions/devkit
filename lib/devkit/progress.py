@@ -994,13 +994,14 @@ def _raci_assign(run: dict, s: dict, label: str, why: str, now: float, activity:
 
 def assign(which, label: str, cwd: str | None = None, now: float | None = None, scope: str = "",
            from_agent: str | None = None, why: str = "", activity: str = "", allow: str = "") -> dict:
-    """Hand a plan step to a subagent: the next subagent launched with this description (or a running lane with this
-    label) owns it, and its time is that subagent's time. `scope`: the files it owns (comma-separated globs); the
-    guard keeps that subagent's edits inside them. The crew's RACI must make the member Responsible for the step's
-    kind of work; `why` overrides it, recorded. `activity`: the step's kind of work, an id from dev crew raci, which
-    then decides whatever language the step is written in. `allow`: the tier-1 actions (push, pr) the member may
-    take in this step, each only with the developer's evidence for it (their grant, or a verified decision; spec
-    C6); the step's `allow` lists those that had it."""
+    """Hand a plan step to a subagent: the next subagent launched with this description owns it, or a working lane
+    of that member whose launch names the step and that holds no other step (_launch_takes; never a lane busy with
+    another step, B-fy9639hfz5t), and its time is that subagent's time. `scope`: the files it owns (comma-separated
+    globs); the guard keeps that subagent's edits inside them. The crew's RACI must make the member Responsible for
+    the step's kind of work; `why` overrides it, recorded. `activity`: the step's kind of work, an id from dev crew
+    raci, which then decides whatever language the step is written in. `allow`: the tier-1 actions (push, pr) the
+    member may take in this step, each only with the developer's evidence for it (their grant, or a verified
+    decision; spec C6); the step's `allow` lists those that had it."""
     _main_only(from_agent, "assigns the plan's steps", cwd)
     activity = _activity_id(activity) if activity else ""
     wanted = [x.strip().lower() for x in (allow or "").split(",") if x.strip()]
@@ -1044,8 +1045,16 @@ def assign(which, label: str, cwd: str | None = None, now: float | None = None, 
                                         f"({', '.join(lane.get('scope'))}). Give each member different files, or "
                                         f"wait until they finish.")
             s["scope"] = globs
-        lane_id = None if deps_open(run, s) else next((k for k, v in (run.get("agents") or {}).items()
-                                                       if v.get("state") == "running" and _label_matches(label, v)), None)
+        working = [k for k, v in (run.get("agents") or {}).items()
+                   if v.get("state") == "running" and _label_matches(label, v)]
+        lane_id = None if deps_open(run, s) else next((k for k in working if s.get("owner") == k
+                                                       or _launch_takes(run, k, s)), None)
+        if working and not lane_id and not deps_open(run, s) and s.get("state") not in DONE:
+            from . import crew
+            busy = run["agents"][working[0]]
+            _post(run, "devkit", "main", f"{crew.who(busy.get('persona') or label)} works as “{busy.get('label')}”, "
+                  f"which does not name “{s['name']}” (one step per launch): the step waits for a launch of its own "
+                  f"(dev crew next), and that lane's report cannot close it", now, from_name="devkit")
         if lane_id:
             s.update(owner=lane_id, state="running", started=s.get("started") or now)
             lane = run["agents"][lane_id]
@@ -1060,6 +1069,22 @@ def assign(which, label: str, cwd: str | None = None, now: float | None = None, 
         _advance_main(run, now)
         _save(run)
     return run
+
+
+def _launch_takes(run: dict, aid: str, s: dict) -> bool:
+    """May this working lane take step `s` when Morpheus assigns it (B-fy9639hfz5t)? Only when its launch names the
+    step, the way _bind_step reads a launch: the lane holds no other open step (one step per launch), and its
+    description's task text names some of the step's words and none of its member's other waiting steps better. A
+    step assigned while its member works on another one waits for a launch of its own."""
+    lane = (run.get("agents") or {}).get(aid) or {}
+    plan = run.get("plan") or []
+    if any(x is not s and x.get("owner") == aid and x.get("state") not in DONE for x in plan):
+        return False
+    text = _task_text(lane.get("label") or "")
+    mine = _name_score(text, s["name"])
+    rivals = [x for x in plan if x is not s and x.get("state") not in DONE and x.get("label")
+              and (x.get("owner") or "main") == "main" and _label_matches(x["label"], lane)]
+    return bool(mine[1]) and all(mine >= _name_score(text, x["name"]) for x in rivals)
 
 
 def _globs_overlap(a: str, b: str) -> bool:
@@ -2407,9 +2432,15 @@ def step(text: str, nxt: str = "", cwd: str | None = None, kind: str = "step", c
         run = load_run(agent, sid)
         if from_agent_lane:  # a subagent's update: its lane only
             run = normalize(run)
+            named = _find_step(run, which) if which not in (None, "") else None
+            if which not in (None, "") and not named:
+                raise StepError(f"no step “{which}” in the plan: " + "; ".join(
+                    f"{i}. {s['name']}" for i, s in enumerate(run.get("plan") or [], 1)))
             lane = _lane(run, from_agent, now)
-            lane["updates"] = (lane.get("updates") or [])[-19:] + [{"ts": round(now), "kind": kind, "text": text,
-                                                                    "check": check}]
+            u = {"ts": round(now), "kind": kind, "text": text, "check": check}
+            if named:  # the step this evidence is about: the lane's end closes it (_steps_about)
+                u["step"] = named["name"]
+            lane["updates"] = (lane.get("updates") or [])[-19:] + [u]
             if kind == "step":
                 lane["done"] = (lane.get("done") or 0) + 1
             if approves:
@@ -3060,9 +3091,11 @@ def _bind_step(run: dict, aid: str, lane: dict, now: float):
     if not best[1] or len(top) > 1:
         names = ", ".join(f"“{st['name']}”" for st in (top if best[1] else mine))
         what = f"names {names} equally" if best[1] else f"names none of {crew.who(mine[0]['label'])}'s steps ({names})"
-        _post(run, "devkit", "main", f"{who} started as “{label}”, which {what}: the steps stay with you. If this "
-              f"launch does one of them, link it: dev progress assign \"<step>\" --to \"{mine[0]['label']}\"", now,
-              from_name="devkit")
+        how = (f"If this launch does one of them, link it: dev progress assign \"<step>\" --to \"{mine[0]['label']}\""
+               if best[1] else "Each waits for a launch whose description names it (dev progress assign links a "
+               "step only to such a launch, B-fy9639hfz5t)")
+        _post(run, "devkit", "main", f"{who} started as “{label}”, which {what}: the steps stay with you. {how}",
+              now, from_name="devkit")
         return
     st = top[0]
     if not any(x is st for x in ready(run)):
@@ -3610,9 +3643,7 @@ def _on_subagent(agent: str, data: dict, started: bool, now: float | None = None
                 _audit("crew.finish", lane.get("persona") or lane.get("label") or aid,
                        f"{active_minutes(run, lane.get('started'), now, now, aid):.1f} active minutes",
                        project=run.get("project") or "", agent_id=aid[:16])
-            for st in run.get("plan") or []:
-                if st.get("owner") == aid and st.get("state") not in DONE:
-                    _end_member_step(run, st, lane or {}, aid, report, now, agent, sid)
+            _end_lane_steps(run, lane or {}, aid, report, now, agent, sid)
             run["step"] = sum(1 for x in run.get("plan") or [] if x.get("state") in ("done", "skipped"))
             _advance_main(run, now)
         _run_event(agent, sid, finish)
@@ -3692,6 +3723,42 @@ def _verified_by_review(run: dict, st: dict, check: str, now: float, agent: str,
         _log_change(run, x, "unverified", "done", aid, f"verified by the review “{st['name']}”: {check}", now)
         out.append(n)
     return out
+
+
+def _steps_about(lane: dict, aid: str, report: str, mine: list) -> list:
+    """Of the open steps a lane holds at its end (`mine`), those its evidence is about (B-fy9639hfz5t): the step its
+    launch names (of the steps that did not join it by delegation, those its description's task text names best, as
+    _bind_step chose), each step a `dev progress step --step` of the lane names, and each step whose name its
+    report's status block (task or Done) or one of its `dev progress step` texts spells out."""
+    from . import canary
+    ups = [u for u in lane.get("updates") or [] if u.get("kind") == "step"]
+    named = {u.get("step") for u in ups if u.get("step")}
+    task = _task_text(lane.get("label") or "")
+    scored = [(_name_score(task, st["name"]), st) for st in mine if st.get("joined") != aid]
+    best = max((sc for sc, _ in scored), default=(False, 0, 0.0))
+    launched = [st for sc, st in scored if best[1] and sc == best]
+    p = canary.parse_status(report or "") or {}
+    said = " ".join([p.get("task") or "", p.get("done") or ""] + [str(u.get("text") or "") for u in ups]).lower()
+    return [st for st in mine if st["name"] in named or any(st is x for x in launched)
+            or re.search(r"(?<!\w)" + re.escape(st["name"].lower()) + r"(?!\w)", said)]
+
+
+def _end_lane_steps(run: dict, lane: dict, aid: str, report: str, now: float, agent: str, sid: str):
+    """A lane's end at its SubagentStop: the steps its evidence is about end as its report or its last Check says
+    (_end_member_step); any other step it holds goes back to pending, still its member's, with the reason in its
+    history, so a lane's ✓ never closes work it did not do (B-fy9639hfz5t)."""
+    mine = [st for st in run.get("plan") or [] if st.get("owner") == aid and st.get("state") not in DONE]
+    about = _steps_about(lane, aid, report, mine)
+    who = lane.get("persona") or "the subagent"
+    for st in mine:
+        if any(st is x for x in about):
+            _end_member_step(run, st, lane, aid, report, now, agent, sid)
+            continue
+        old = st.get("state")
+        st.update(owner="main", state="pending", started=None)
+        st.pop("joined", None)
+        _log_change(run, st, old, "pending", "devkit", f"{who} ended, and neither its launch, its report nor its dev "
+                    f"progress step names this step: it waits for a launch of its own", now)
 
 
 def _end_member_step(run: dict, st: dict, lane: dict, aid: str, report: str, now: float, agent: str, sid: str):
