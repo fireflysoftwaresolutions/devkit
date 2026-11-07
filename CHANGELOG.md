@@ -168,8 +168,8 @@ Not released yet: the date is set when the release is tagged.
   you typed them, and a process an agent starts through a launcher can look the same: `screen` or `tmux`, `expect`,
   AppleScript's `do script`, `open` of a Terminal window or a `.command` file, or `launchctl`. The guard refuses the
   forms it can read, `screen -X stuff` octal escapes such as `\015` included, but not a script file or a command
-  built at run time. The notification, the session-start message, and the audit trail are the backstop until a kernel-level check lands in 26.11.5 (tasks B-fywplysktjc
-  and B-fyxqtml4lw3). See
+  built at run time. The notification, the session-start message, and the audit trail are the backstop until a
+  kernel-level check lands in 26.11.5. See
   [Who changes extensions](docs/skills-and-plugins.md#who-changes-extensions-and-how-drift-shows).
 
 ### Removed

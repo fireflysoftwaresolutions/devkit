@@ -441,9 +441,8 @@ typed it. devkit therefore shows every acceptance until you acknowledge it:
 process tree and the terminal, and a process an agent starts through a launcher can look the same: `screen` or
 `tmux`, `expect`, AppleScript's `do script`, `open` of a Terminal window or a `.command` file, or `launchctl`. The
 guard refuses the forms it can read (it decodes `screen -X stuff` octal escapes such as `\015`), not every one: a
-script file or a program that builds the command at run time gets through. The notification, the session-start message, and the audit trail are the
-backstop until a kernel-level check of who typed the command lands in 26.11.5 (tasks B-fywplysktjc and
-B-fyxqtml4lw3).
+script file or a program that builds the command at run time gets through. The notification, the session-start
+message, and the audit trail are the backstop until a kernel-level check of who typed the command lands in 26.11.5.
 
 devkit reads Codex's MCP servers only in the form `codex mcp add` writes: a `[mcp_servers.<name>]` table and its
 sub-tables, one `key = value` per line, with a string, number, `true` or `false`, or a one-line array. A server
