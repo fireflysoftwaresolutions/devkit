@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import contextlib
 import json
 import os
 import re
@@ -3538,8 +3539,12 @@ def main(argv=None) -> int:
     _ARGV = list(argv)
     ap = build_parser()
     a = ap.parse_args(argv)
-    if a.help and not a.cmd:
-        print_help()
+    if a.help:  # `dev -h <command>` shows the command's help and never runs it (B1: the guard reads it as help)
+        if a.cmd:
+            with contextlib.suppress(SystemExit):
+                ap.parse_args([a.cmd, "--help"])
+        else:
+            print_help()
         return 0
     if not a.cmd:
         return cmd_home(a) or 0

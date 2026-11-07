@@ -96,6 +96,14 @@ class StepApprovesTests(HookCase):
         self.assertEqual(pg.load_run("claude", "s1").get("approvals") or [], [])
 
 
+# The commands whose words the guard reads to tell what a dev call does (guard._dev_actions, _ro_dev, _crew_kind,
+# the cross-project and refusal rules).
+GUARDED = (["backup"], ["sync"], ["push"], ["pr", "create"], ["pr", "merge"], ["pr", "ready"], ["pr", "comment"],
+           ["pr", "review"], ["release"], ["issue", "create"], ["jobs", "run"], ["jobs", "exec"], ["commit"],
+           ["crew"], ["task"], ["plan"], ["delivery"], ["lesson"], ["test"], ["audit"], ["ci"], ["config"], ["hook"],
+           ["install"], ["update"], ["note"], ["handoff"], ["progress"], ["branch"])
+
+
 def _parsers(p, path=()):
     for act in p._actions:
         for name, sub in (getattr(act, "choices", None) or {}).items() if act.nargs == argparse.PARSER else ():
@@ -115,6 +123,24 @@ class ParserReadsFlagsAsTheGuardDoesTests(unittest.TestCase):
                 cli.build_parser().parse_args(argv)
             self.assertEqual(e.exception.code, 2)
         self.assertTrue(cli.build_parser().parse_args(["sync", "--scheduled"]).scheduled)  # the full flag works
+
+    def test_help_before_a_command_shows_its_help_and_runs_nothing(self):
+        rc, out = dev("-h", "version")
+        self.assertEqual(rc, 0)
+        self.assertIn("usage: dev version", out)
+        rc, out = dev("--help")
+        self.assertEqual(rc, 0)
+        self.assertNotIn("usage: dev version", out)
+
+    def test_the_guard_knows_every_value_option_of_the_commands_it_reads(self):
+        from devkit import guard
+        tree = dict(_parsers(cli.build_parser()))
+        values, flags = set(), set()
+        for path in GUARDED:
+            for act in tree[tuple(path)]._actions:
+                (flags if act.nargs == 0 else values).update(act.option_strings)
+        self.assertEqual(sorted(values - guard._DEV_VALUES), [])  # a value it does not know reads as a word
+        self.assertEqual(sorted(flags & guard._DEV_VALUES), [])  # a flag it reads as a value hides the next word
 
 
 if __name__ == "__main__":

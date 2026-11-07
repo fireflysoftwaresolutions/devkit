@@ -423,6 +423,12 @@ class RedTeam2(unittest.TestCase):
     # exact strings anywhere in the command. The guard now reads a dev command's words the way the parser does; a
     # prefix of a flag that adds an action still counts as the flag, for a dev whose parser takes abbreviations (an
     # older checkout's bin/dev).
+    def reader(self, cmd):
+        with settings():
+            v = guard.crew_shell_verdict(cmd, self.repo, None, "redteamprobe", level="read", lane="a1", session="s1",
+                                         grant=DenyAll())
+        return v[1] if v else None
+
     def test_b1_a_prefix_of_a_flag_that_pushes_is_the_flag(self):
         self.assertEqual(self.acts("dev sync --scheduled"), ["push"])  # baseline: the full flag is caught
         for cmd in ("dev sync --sched", "dev sync --fin", "bin/dev sync --sch --quiet", "dev sync --scheduled --off"):
@@ -432,6 +438,9 @@ class RedTeam2(unittest.TestCase):
         self.assertEqual(self.targets("dev backup --al"), [("push", "all-branches")])
         self.assertEqual(self.targets("dev push --force-w"), [("push-destructive", "feat/x")])
         self.assertEqual(self.acts("dev backup --dry-run --al"), [])  # the exact flag that skips the push still does
+        for cmd in ("dev commit --no-v -m x", "dev pr ready --ci-p", "dev pr ready --ci-p=1"):
+            with self.subTest(cmd=cmd):
+                self.assertIsNotNone(self.member(cmd))
 
     def test_b1_a_flag_after_double_dash_is_an_argument(self):
         self.assertEqual(self.acts("dev backup --dry-run feat/x"), [])  # baseline: a dry run pushes nothing
@@ -439,6 +448,57 @@ class RedTeam2(unittest.TestCase):
             with self.subTest(cmd=cmd):  # the parser takes the word after -- as a branch and pushes feat/x
                 self.assertIn(("push", "feat/x"), self.targets(cmd))
                 self.assert_tier_1(cmd)
+        self.assertIn("the tech lead runs it", self.member("dev crew brief neo -- --help") or "")
+        self.assertTrue(guard.stubs_accepted("dev commit --wip -m x"))  # baseline
+        self.assertFalse(guard.stubs_accepted("dev commit -m x -- --wip"))  # --wip there is a path to commit
+
+    def test_b1_a_leading_double_dash_or_help_does_not_hide_the_command(self):
+        self.assertEqual(self.acts("dev release --version 26.11.9"), ["release"])  # baseline
+        for cmd, act in (("dev -h release --version 26.11.9", "release"), ("dev --help push", "push"),
+                         ("dev --he backup", "push"), ("dev -- -h pr merge 12", "merge")):
+            with self.subTest(cmd=cmd):
+                self.assertEqual(self.acts(cmd), [act])
+                self.assertIsNotNone(self.member(cmd))
+        for cmd in ("dev -- install", "dev -h update", "dev -- hook prompt", "python3 bin/dev -- config edit"):
+            with self.subTest(cmd=cmd):
+                self.assertIsNotNone(self.check(cmd))
+        for cmd in ("dev install --help", "dev release -h", "dev push --help"):  # a subcommand's help runs nothing
+            with self.subTest(cmd=cmd):
+                self.assertIsNone(self.check(cmd))
+                self.assertEqual(self.acts(cmd), [])
+
+    def test_b1_a_value_is_read_where_the_parser_reads_it(self):
+        self.assertIsNone(self.reader("dev lesson add x"))  # baseline: a subcommand a read-only lane may run
+        self.assertIsNone(self.reader("dev task ls"))
+        self.assertIsNotNone(self.reader("dev lesson retire L-1 --why x"))
+        for cmd in ("dev lesson --search add retire L-1 --why x", "dev task -i ls done 3", "dev delivery -p show apply",
+                    "dev audit -o/tmp/trail.json", "dev audit --out=/tmp/trail.json"):
+            with self.subTest(cmd=cmd):  # the option takes the next word (or the rest of its own): a write runs
+                self.assertIsNotNone(self.reader(cmd))
+        # argparse keeps the last of a repeated option: the release it makes is the last version named
+        self.assertEqual(self.targets("dev release --version 26.11.4 --version 26.11.9"), [("release", "v26.11.9")])
+        with mock.patch.object(guard, "current_project", return_value="acme/widget"):
+            for cmd in ("dev task -p acme/widget -p acme/other add x", "python3 bin/dev task -pacme/other add x",
+                        "dev -- note -p acme/other set status=blocked", "dev task --proj acme/other add x"):
+                with self.subTest(cmd=cmd):
+                    self.assertIn("another project", self.check(cmd) or "")
+            self.assertIsNone(self.check("dev task -p acme/widget add x"))
+
+    def test_b1_dev_claude_hands_its_words_to_the_session(self):
+        self.assertIsNotNone(self.check("claude --bare -p hi"))  # baseline: the plain form is refused
+        for cmd in ("dev claude devkit -- --bare -p hi", "dev claude devkit --dangerously-skip-permissions",
+                    "dev codex -w feat/x devkit -- --yolo", "dev codex devkit -p evil"):
+            with self.subTest(cmd=cmd):
+                self.assertIsNotNone(self.check(cmd))
+                self.assertIsNotNone(self.member(cmd))
+        self.assertIsNone(self.check("dev claude devkit -- -p hi"))
+
+    def test_b1_dev_git_skips_the_hooks_as_git_does(self):
+        self.assertIsNotNone(self.member("git commit -n -m x"))  # baseline: git's short --no-verify is refused
+        for cmd in ("dev git commit -n -m x", "dev git -- commit -n -m x", "dev git commit --no-v -m x"):
+            with self.subTest(cmd=cmd):
+                self.assertIsNotNone(self.member(cmd))
+        self.assertIsNone(self.member("dev git commit -m x"))
 
 
 if __name__ == "__main__":

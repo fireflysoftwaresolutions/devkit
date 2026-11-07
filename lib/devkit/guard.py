@@ -960,8 +960,8 @@ def check_bash(cmd: str, cwd: str, agent: str):
                 res = deny(branch_violation(_opt_value(argv[3:], ("--head", "-H"))))
             elif argv[1:2] and argv[1] in ("pr", "issue", "release", "api"):
                 res = _attribution(cmd)
-        elif name == "dev" and len(argv) > 1 and argv[1] in ("task", "note", "handoff", "initiative"):
-            res = check_dev_cross(argv[1:], ecwd, envs)
+        elif (_dev_args(argv) or [""])[0] in ("task", "note", "handoff", "initiative"):
+            res = check_dev_cross(_dev_args(argv), ecwd, envs)
         elif name in ("rm", "unlink"):
             res = check_rm(argv[1:], ecwd, envs) if name == "rm" else steer_rm(argv[1:], ecwd, envs)
         elif name == "find" and ("-delete" in argv or any(x in argv for x in ("-exec", "-execdir")) and
@@ -1021,9 +1021,10 @@ def _dev_cross_violation(args, cwd):
     pid = current_project(cwd)
     if not pid:
         return None
-    proj = _opt_value(args, ("-p", "--project"))
-    init = _opt_value(args, ("-i", "--initiative"))
-    if args[:1] == ["initiative"] and len(args) > 2 and args[1] in ("add", "rm", "new"):
+    words = _dev_words(args)  # every -p/-i value counts: argparse keeps the last, so a first one proves nothing
+    proj = next((v for v in _dev_values(args, ("-p", "--project")) if v.lower() != pid), None)
+    init = next((v for v in _dev_values(args, ("-i", "--initiative")) if pid not in initiative_members(v)), None)
+    if words[:1] == ["initiative"] and len(words) > 2 and words[1] in ("add", "rm", "new"):
         return deny("Changing an initiative's membership is a portfolio decision: ask the user, or run it from "
                     f"{tilde(core.DEV)} (a portfolio-level session).")
     if proj and proj.lower() != pid:
@@ -1859,7 +1860,7 @@ class _Shell:
             return deny(why)
         dev = _dev_args(argv)
         if dev is not None:
-            return self.dev(dev, cwd)
+            return self.dev(dev, cwd, set(names) | self.exported)
         installer = argv[0] if name == "install.sh" else next(
             (a for a in args if not a.startswith(("-", "+"))), "") if name in _SHELLS else ""
         if installer and _devkit_installer(resolve(installer, cwd)):
@@ -1904,20 +1905,26 @@ class _Shell:
         inside = is_protected(Path(cwd)) if cwd and str(cwd) != str(UNKNOWN) else False
         return self.targets([c for c in _candidates(args) if inside or _pathlike(c)], cwd)
 
-    def dev(self, args, cwd):
-        if args[:1] in (["install"], ["update"]) and not {"-h", "--help"} & set(args[1:]):
+    def dev(self, args, cwd, names=()):
+        helps = _dev_skips(args[1:], "-h", "--help")
+        words = _dev_words(args)
+        if args[:1] in (["install"], ["update"]) and not helps:
             return deny(INSTALL_REASON)
-        if args[:2] == ["config", "set"]:
+        if args[:1] in (["claude"], ["codex"]):  # dev claude|codex execs the agent with the words after the query
+            why = guardless_session(args[0], [args[0], *[a for a in args[1:] if a != "--"]], names)
+            if why:
+                return deny(why)
+        if words[:2] == ["config", "set"]:
             keys = [k for a in args[2:] for k in {a.casefold(), a.casefold().split("=", 1)[-1]}]
             if any(k.startswith("safeguards") for k in keys):
                 return deny(SAFEGUARDS_REASON)
             if any(re.match(r"audit(?:\.|=|$)", k) for k in keys):
                 return deny(AUDIT_REASON)
-        if args[:2] == ["config", "edit"]:
+        if words[:2] == ["config", "edit"]:
             return deny(protected_reason(Path(real(core.CONFIG_FILE)), "edit"))
-        if args[:2] in (["config", "lock"], ["config", "unlock"]) and not {"-h", "--help"} & set(args[2:]):
-            return deny(LOCK_REASON.format(sub=args[1]))
-        if args[:1] == ["hook"] and not {"-h", "--help"} & set(args[1:]):
+        if words[:2] in (["config", "lock"], ["config", "unlock"]) and not helps:
+            return deny(LOCK_REASON.format(sub=words[1]))
+        if args[:1] == ["hook"] and not helps:
             return deny(HOOK_REASON)
         if args[:1] in (["rm"], ["mv"], ["cp"]):
             return self.segment(args[0], args, [], cwd)
@@ -2138,7 +2145,7 @@ def _dev_args(argv):
     interpreter's own flags: python3 -u -I -B …), else None."""
     n = os.path.basename(argv[0])
     if n == "dev":
-        return argv[1:]
+        return _dev_command(argv[1:])
     if _INTERP.match(n) and len(argv) > 1:
         i = 1
         while i < len(argv) and argv[i].startswith("-") and argv[i] not in ("-m", "-c", "-", "--"):
@@ -2150,10 +2157,19 @@ def _dev_args(argv):
             else:
                 break
         if i < len(argv) and os.path.basename(argv[i]) == "dev":
-            return argv[i + 1:]
+            return _dev_command(argv[i + 1:])
         if argv[i:i + 2] in (["-m", "devkit"], ["-m", "devkit.cli"]):
-            return argv[i + 2:]
+            return _dev_command(argv[i + 2:])
     return None
+
+
+def _dev_command(args) -> list:
+    """A dev call's words from its command on. dev's top-level parser takes only -h/--help and a `--` before the
+    command, and neither hides it: `dev -- install` runs install, and an older dev runs `dev -h release` (B1)."""
+    i = 0
+    while i < len(args) and (args[i] in ("--", "-h") or (len(args[i]) > 2 and "--help".startswith(args[i]))):
+        i += 1
+    return args[i:]
 
 
 # How the guard reads a dev command's flags: the way dev's parser does (B1). argparse ends the options at `--` (a
@@ -2192,9 +2208,27 @@ def _dev_sets(args, *flags) -> str:
     return ""
 
 
+def _dev_values(args, opts) -> list:
+    """Every value dev's parser takes for `opts`, in order (argparse keeps the last): `-p x`, `-px`, `--project x`,
+    `--project=x` and a prefix of a long option (`--proj x`), before `--`."""
+    words, out, i = _dev_opts(args), [], 0
+    while i < len(words):
+        a = words[i]
+        w, eq, v = a.partition("=") if a.startswith("--") else (a[:2], "=" if len(a) > 2 else "", a[2:])
+        if any(o == w if not o.startswith("--") else (w.startswith("--") and len(w) > 2 and o.startswith(w))
+               for o in opts):
+            if eq:
+                out.append(v)
+            elif i + 1 < len(words):
+                out.append(words[i + 1])
+                i += 1
+        i += 1
+    return out
+
+
 def _dev_words(args) -> list:
     """The words dev's parser reads as arguments (command, subcommand, branches, PR numbers): an option's value is
-    not one, and after `--` every word is one."""
+    not one (`dev lesson --search add retire` runs retire), and after `--` every word is one."""
     return _positionals(args, _DEV_VALUES)
 
 
@@ -2826,21 +2860,21 @@ def _program_calls(argv, cwd, bodies, depth):
 def _crew_kind(args) -> str:
     """For the arguments of a `dev` call: 'lane' (a call devkit routes to the caller's lane), 'read' (read-only crew),
     'sync' (`dev crew sync`), 'team' (changes the team's crew or briefs a member), '' (no progress or crew call)."""
-    pos = [a for a in args if not a.startswith("-")]
+    pos = _dev_words(args)
     if not pos or pos[0] not in ("progress", "crew"):
         return ""
-    if {"-h", "--help"} & set(args):
+    if _dev_skips(args, "-h", "--help"):
         return "read"
     if pos[0] == "progress":
         return "lane"
     rest = args[args.index("crew") + 1:]
-    sub = next((a for a in rest if not a.startswith("-")), None)
+    sub = pos[1] if len(pos) > 1 else None
     if sub is None or sub in _CREW_READ:
         return "read"
     if sub == "raci":
-        return "team" if any(a == "--set" or a.startswith("--set=") for a in rest) else "read"
+        return "team" if _dev_sets(rest, "--set") else "read"
     if sub == "sync":
-        return "read" if "--check" in rest else "sync"
+        return "read" if _dev_skips(rest, "--check") else "sync"
     return "lane" if sub in _CREW_LANE else "team"
 
 
@@ -3042,8 +3076,6 @@ _RO_DEV = {"status": None, "grep": None, "find": None, "files": None, "diff": No
            "version": None, "sec": ("scan",), "test": ("", "run", "plan", "audit", "prove"), "plan": ("show",),
            "lesson": ("add", "recur"), "task": ("", "ls", "list", "show"), "ci": ("", "status", "ls", "list"),
            "delivery": ("", "show"), "audit": ("", "verify", "show", "stats", "config")}
-_AUDIT_VALUES = {"--days", "--since", "--until", "--action", "--actor", "-p", "--project", "--member", "--category",
-                 "--severity", "--outcome", "--grep", "--format", "-o", "--out", "-n", "--lines"}
 _SED_ADDR = r"(?:\d+|\$|/(?:[^/\\\n]|\\.)*/I?)"
 _SED_PRINT = re.compile(rf"^(?:{_SED_ADDR}(?:\s*,\s*{_SED_ADDR})?)?\s*(?:p|q\d*)$")
 
@@ -3226,14 +3258,12 @@ def _ro_dev(args) -> str | None:
     kind = _crew_kind(args)
     if kind:  # dev progress and dev crew: the lane rules of crew_shell_verdict decide
         return None
-    pos = [a for a in args if not a.startswith("-")]
+    pos = _dev_words(args)  # options take values (--action guard, --search add): the subcommand is the next word
     sub = pos[0] if pos else ""
-    if sub == "audit":  # its filters take values (--action guard): the subcommand is the first other word
-        pos = _positionals(args, _AUDIT_VALUES)
     if sub in _RO_DEV and (_RO_DEV[sub] is None or (pos[1] if len(pos) > 1 else "") in _RO_DEV[sub]):
-        if sub == "ci" and {"--run", "--resume"} & set(args):
+        if sub == "ci" and _dev_sets(args, "--run", "--resume"):
             return "`dev ci --run` runs the pipeline's build and package steps"
-        if sub == "audit" and {"--publish", "-o", "--out"} & {a.split("=", 1)[0] for a in args}:
+        if sub == "audit" and _dev_sets(args, "--publish", "-o", "--out"):
             return "`dev audit --publish` commits the audit trail to the handoff repository, and `-o` writes a file"
         return None
     return f"`dev {' '.join(pos[:2]) or '…'}` changes devkit's records or the repository"
@@ -3687,14 +3717,16 @@ def _hatch_use(argv0, cwd, bodies) -> str | None:
         return "it unsets a DEVKIT_* variable"
     dev = _dev_args(argv)
     if dev is not None:
-        if any(a == "--ci-passed" or a.startswith("--ci-passed=") for a in dev):
+        if _dev_sets(dev, "--ci-passed"):
             return "`--ci-passed` records a local CI run as passed on your word"
-        if "--no-verify" in dev:
+        if _dev_sets(dev, "--no-verify"):
             return "`--no-verify` skips the project's git hooks"
-        pos = [a for a in dev if not a.startswith("-")]
+        pos = _dev_words(dev)
         if pos[:1] == ["config"] and pos[1:2] and pos[1] in ("set", "unset", "edit", "reset"):
             return "`dev config` changes devkit's configuration, which only the developer does"
-        return None
+        if dev[:1] != ["git"]:
+            return None
+        name, argv = "git", ["git", *(dev[2:] if dev[1:2] == ["--"] else dev[1:])]  # dev git runs git with them
     if name == "git":
         _, sub, gargs = _git_split(argv)
         if "--no-verify" in gargs or (sub == "commit" and _git_commit_skips_hooks(gargs)):
@@ -3981,9 +4013,15 @@ _GH_VALUES = {  # the options of each gh command that take a value: the first ot
     ("gist", "create"): "-d --desc -f --filename",
 }
 _GH_FIELDS = ("-f", "-F", "--field", "--raw-field", "--input")
-_DEV_VALUES = {"-m", "--message", "--body-file", "--title", "--base", "--body", "--version", "--notes-file", "-p",
-               "--project", "-i", "--initiative", "--label", "--state", "--assignee", "--interval", "--timeout",
-               "--lines", "--limit", "--branch", "--flaky", "--why"}
+# The value options of the dev commands whose words the guard reads (tests/test_cli_wiring.py checks it against the
+# parser: a value it does not know reads as an argument, a flag it takes for a value hides the next word).
+_DEV_VALUES = frozenset({
+    "-m", "--message", "--body-file", "--title", "--base", "--body", "--version", "--notes-file", "-p", "--project",
+    "-i", "--initiative", "--label", "--state", "--assignee", "--interval", "--timeout", "--lines", "--limit",
+    "--branch", "--flaky", "--why", "--action", "--actor", "--agent", "--breaking", "--category", "--commit-template",
+    "--days", "--delay", "--format", "--grep", "--lang", "--log", "--member", "--note", "--only", "--out", "--outcome",
+    "--provider", "--refs", "--renew", "--runner", "--search", "--session", "--severity", "--sha", "--since", "--stack",
+    "--step-timeout", "--until", "--verified", "-n", "-o"})
 _CURL_VALUES = frozenset(
     "-X --request -H --header -d --data --data-raw --data-binary --data-ascii --data-urlencode --json -F --form "
     "--form-string -T --upload-file -o --output -u --user -A --user-agent -e --referer -b --cookie -c --cookie-jar -w "
@@ -4323,7 +4361,7 @@ def _dev_actions(dargs, cwd, depth=0) -> list:
         if sub in ("ready", "comment", "review"):
             return [("pr-write", "pr/" + (sel or _branch(cwd)))]
     if cmd == "release":
-        v = (_opt_value(dargs, ("--version",)) or "").strip()
+        v = (_dev_values(dargs, ("--version",)) or [""])[-1].strip()  # argparse keeps the last --version
         return [("release", "v" + v.lstrip("v") if v else _next_release(cwd))]
     if cmd == "issue" and sub == "create":
         return [("pr-write", "issue/new")]
@@ -4614,7 +4652,7 @@ def code_session_refusal(argv, cwd, bodies, depth: int = 0) -> str | None:
             if why:
                 return why
             dargs = _dev_args(inner)
-            if dargs is not None and dargs[:1] == ["hook"] and not {"-h", "--help"} & set(dargs[1:]):
+            if dargs is not None and dargs[:1] == ["hook"] and not _dev_skips(dargs[1:], "-h", "--help"):
                 return HOOK_REASON
             if icode is not None and _INTERP.match(os.path.basename(inner[0])):
                 why = code_session_refusal(inner, cwd, [], depth + 1)
@@ -5213,7 +5251,7 @@ def stubs_accepted(cmd: str) -> bool:
             continue
         if "DEVKIT_ALLOW_STUBS" in names:
             return True
-        i, args = 0, dev[1:] if dev is not None else []
+        i, args = 0, _dev_opts(dev[1:]) if dev is not None else []  # after `--`, --wip is a path to commit
         while i < len(args):
             if args[i] in ("-m", "--message", "--body"):
                 i += 2
