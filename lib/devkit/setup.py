@@ -2234,6 +2234,34 @@ def free_disk_check(free_gb: float) -> tuple:
     return "Automation", "free disk", free_gb > 20, f"{free_gb:.0f} GB free", "dev free"
 
 
+def install_commands(packages) -> str:
+    """The commands that install these (kind, name) packages of wizard.DOCTOR_TOOLS, one per kind, in one line."""
+    pk = list(dict.fromkeys(packages))
+    cmds = [f"{cmd} {' '.join(n for k, n in pk if k == kind)}" for kind, cmd in
+            (("brew", "brew install"), ("cask", "brew install --cask"), ("npm", "npm install -g"))
+            if any(k == kind for k, _ in pk)]
+    return " · ".join(cmds + [n for k, n in pk if k == "script"])
+
+
+def tools_check(stacks, have=None) -> tuple:
+    """doctor's required-tools row: the base groups' tools on every Mac, and a stack's tools (its language server
+    included) only when the developer chose the stack (config `stacks`, which the wizard records). A stack not chosen
+    is no failure: the row names it, and `dev setup` adds it. The fix is the exact command that installs what is
+    missing. `have` stands in for the PATH lookup (the tests)."""
+    from . import wizard
+    have = have or core.have
+    tools = {t: how for g, group in wizard.DOCTOR_TOOLS.items() if g in wizard.BASE_GROUPS or g in stacks
+             for t, how in group.items()}
+    missing = [t for t in tools if not have(t)]
+    skipped = [wizard.STACK_UI[s][0] for s in wizard.STACKS if s not in stacks]
+    detail = f"{len(tools) - len(missing)}/{len(tools)} present"
+    if missing:
+        detail += f"; missing: {', '.join(missing)}"
+    if skipped:
+        detail += f" · not chosen: {', '.join(skipped)} (dev setup adds a stack)"
+    return "Toolchain", "required tools", not missing, detail, install_commands(tools[t] for t in missing)
+
+
 def doctor() -> int:
     print(ui.banner("doctor"))
     results = []
@@ -2241,12 +2269,7 @@ def doctor() -> int:
     def check(group, name, ok, detail="", fix=""):
         results.append((group, name, ok, detail, fix))
 
-    tools = ["git", "gh", "python3", "node", "npm", "pnpm", "uv", "java", "mvn", "gradle", "php", "composer",
-             "jdtls", "pyright", "typescript-language-server", "intelephense", "ng", "docker", "colima", "jq", "rg",
-             "fzf", "claude", "codex"]
-    missing = [t for t in tools if not core.have(t)]
-    check("Toolchain", "required tools", not missing, f"{len(tools) - len(missing)}/{len(tools)} present"
-          + (f"; missing: {', '.join(missing)}" if missing else ""), "run ./install.sh (Brewfile + npm globals)")
+    check(*tools_check(CFG.get("stacks") or []))
     rc, out, err = sh(["gh", "auth", "status"], timeout=20)
     check("GitHub", "gh authenticated", rc == 0, (out + err).split("\n")[1].strip() if rc == 0 else err[:120],
           "gh auth login -s repo,read:org,workflow,gist")

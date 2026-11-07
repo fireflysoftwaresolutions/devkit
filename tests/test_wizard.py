@@ -615,6 +615,20 @@ class InteractiveTests(unittest.TestCase):
         self.assertEqual(cfg["skills"]["groups"], core.DEFAULTS["skills"]["groups"])
 
 
+class DoctorToolsTests(unittest.TestCase):
+    def test_every_doctor_tool_comes_from_a_package_of_its_group(self):
+        # `dev doctor` requires a group's tools only when that group is installed, and names the package as the fix:
+        # both are wrong when the tool table drifts from the Brewfile or npm-globals.txt, or misses a stack.
+        repo = Path(__file__).resolve().parents[1]
+        self.assertEqual(set(wizard.DOCTOR_TOOLS) - set(wizard.BASE_GROUPS), set(wizard.STACKS))
+        for group, tools in wizard.DOCTOR_TOOLS.items():
+            listed = {m.groups() for m in map(wizard._BREW_RE.match, wizard.filtered(repo / "Brewfile", {group})) if m}
+            listed |= {("npm", n) for n in wizard.filtered(repo / "config" / "npm-globals.txt", {group})}
+            for tool, (kind, package) in tools.items():
+                if kind != "script":
+                    self.assertIn((kind, package), listed, f"{tool} ({group})")
+
+
 class DefaultsAndDetectionTests(unittest.TestCase):
     def test_stack_defaults(self):
         self.assertEqual(wizard.tui_defaults(fake_survey())["stacks"], ["java", "node"])

@@ -80,6 +80,35 @@ class CrewSkillCheckTests(unittest.TestCase):
         self.assertEqual(fix, "dev install --only codex")
 
 
+class RequiredToolsTests(unittest.TestCase):
+    # The required-tools row follows the stacks the wizard recorded (config `stacks`): the base tools on every Mac,
+    # a stack's tools only when the developer chose it. `have` stands in for PATH, so the developer's Mac never counts.
+    JAVA_PHP = {"java", "mvn", "gradle", "jdtls", "php", "composer", "intelephense"}
+
+    def test_python_and_node_without_java_or_php_tools_pass(self):
+        # the Recommended setup: 24 tools before, 7 of them for the Java and PHP stacks nobody chose
+        group, name, ok, detail, fix = setup.tools_check(["python", "node"], have=lambda t: t not in self.JAVA_PHP)
+        self.assertEqual((group, name, ok), ("Toolchain", "required tools", True))
+        self.assertIn("17/17 present", detail)
+        self.assertIn("not chosen: Java / Spring, PHP", detail)
+        self.assertIn("dev setup", detail)
+        self.assertEqual(fix, "")
+
+    def test_java_chosen_without_maven_fails_with_its_install_command(self):
+        php = {"php", "composer", "intelephense"}
+        _, _, ok, detail, fix = setup.tools_check(["java", "python", "node"],
+                                                  have=lambda t: t != "mvn" and t not in php)
+        self.assertFalse(ok)
+        self.assertIn("missing: mvn", detail)
+        self.assertEqual(fix, "brew install maven")
+
+    def test_a_missing_language_server_names_its_npm_install(self):
+        _, _, ok, detail, fix = setup.tools_check(["python"], have=lambda t: t != "pyright")
+        self.assertFalse(ok)
+        self.assertIn("missing: pyright", detail)
+        self.assertEqual(fix, "npm install -g pyright")
+
+
 class CrewRaciCheckTests(unittest.TestCase):
     BASE = {"activities": [{"id": "api", "R": ["tank"], "A": "seraph", "C": [], "I": []}]}
 
