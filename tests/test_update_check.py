@@ -256,8 +256,11 @@ class StatusTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             cache = Path(tmp) / "update-check.json"
             updatecheck.record({"checked": 1, "installed": "26.11.3", "newest": "v26.11.4", "behind": 1}, cache)
+            # the empty test home has no required plugins installed, so the extension drift (dev ext) would add its
+            # own item; this test is about the release notice only
             with mock.patch.object(updatecheck, "CACHE", cache), \
-                    mock.patch.object(updatecheck, "installed_version", return_value="26.11.3"):
+                    mock.patch.object(updatecheck, "installed_version", return_value="26.11.3"), \
+                    mock.patch("devkit.ext.status_needs", return_value=[]):
                 needs = cli.devkit_needs()
         self.assertEqual([(n["kind"], n["command"]) for n in needs], [("devkit", "dev update --check")])
         self.assertIn("v26.11.4", needs[0]["text"])
