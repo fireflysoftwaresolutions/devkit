@@ -17,10 +17,13 @@ them or for their team, follows the same rules:
   below goes under the block when it ends the turn.
 - **The block's bullets.** **Done**, **Check**, and **Next** always. **Progress** only while a `dev progress` run is
   active. **Crew** only when crew members worked in this turn or are working, each with what it works on (`▸`
-  working, `✓` done, `✗` failed or lost): `Tank ▸ the API · Sati ✓ the screens`. **You** only when there is
-  something only the developer can do or decide: a decision, an approval, or an action on their own machine or
-  account.
-  Work the crew can do never goes in **You**.
+  working, `✓` done, `✗` failed or lost): `Backend engineer (Tank) ▸ the API · UX designer (Sati) ✓ the screens`.
+  **You** only when there is something only the developer can do or decide: a decision, an approval, or an action on
+  their own machine or account. Work the crew can do never goes in **You**.
+- **Name crew members by role.** Write a member as `<Role> (<Name>)`, such as Backend engineer (Tank), or by the
+  role alone, in the developer's language; never by the Matrix name alone, and the main session is the tech lead.
+  The end-of-turn check sends a message or report back once when its prose breaks this. Commands keep the ids
+  (`--to tank`).
 - **Write plainly.** Use short sentences, everyday words, and concrete nouns ("the login page times out after 30 s,"
   not "authentication flow latency issues"). Use active voice. Explain each acronym the first time you use it.
 - **Cut whatever says nothing.** No buzzwords: robust, seamless, leverage, comprehensive, cutting-edge, game-changing.
@@ -78,8 +81,8 @@ plan's checklist under it:
 - **Done:** the CSV writer streams 10,000 rows in 1.2 s
 - **Check:** ✓ 12 new tests pass
 - **Progress:** 3/7 · 24m elapsed of ~40m · ETA ~15m
-- **Crew:** Dozer ▸ the export index migration (6 min of ~10) · Trinity ✓ the export button
-- **Next:** wire the endpoint once Dozer's migration lands
+- **Crew:** Database engineer (Dozer) ▸ the export index migration (6 min of ~10) · Frontend engineer (Trinity) ✓ the export button · 2 of 4 slots in use
+- **Next:** wire the endpoint once the Database engineer's migration lands
 ```
 
 ## 3. Status answer, when the developer asks "how is it going?" or "what's left?"
@@ -181,7 +184,40 @@ Done so far: <what you tried and what it showed> · Next: <the fix or the questi
 
 Record it with `dev progress block "<reason>" --next "<what is needed>"`.
 
-## 9. Pull request description
+## 9. Commit message
+
+`dev commit` writes the message in devkit's commit template (`config/git/commit-template.txt`). `dev setup` asks
+whether new commit messages open with it (`commit.template` in each repository that has none), the git step of
+`dev install` applies the answer, and `dev setup commit-template` changes it (`--remove` takes it out).
+
+```bash
+dev commit -a -m "fix(parser): keep quoted commas" \
+  --why "Rows with quoted commas were split in two, so imports lost data." \
+  --body "The tokenizer reads a quoted field whole." \
+  --verified "python3 -m unittest tests.test_parser (12 tests pass)"
+```
+
+```text
+fix(parser): keep quoted commas                ← Conventional Commit, imperative, ≤ 72 chars, no period
+
+Rows with quoted commas were split in two, so imports lost data.     ← why (--why)
+
+The tokenizer reads a quoted field whole.      ← what changed (--body, repeatable)
+
+Verified: python3 -m unittest tests.test_parser (12 tests pass)      ← how it was verified (--verified)
+
+Refs: PROJ-142                                 ← --refs, or the ticket of the task started on this branch
+BREAKING CHANGE: …                             ← only for a breaking change (--breaking, and ! in the header)
+```
+
+- `Refs:` names only what the repository host or tracker knows: an issue (`#142`, `owner/repo#142`), a URL, or a
+  ticket key. devkit task ids (`T-…`, `F-…`, `B-…`, `S-…`) stay in the private handoff, whose session log links each
+  commit to its task; a message that names one is refused.
+- The why says the problem and who it affects, not the files. The Verified line quotes the command you ran and its
+  result, never "tested."
+- No co-author or AI attribution lines: `dev commit` removes them and says how many.
+
+## 10. Pull request description
 
 `dev pr create` fills the template (the repository's own `.github/pull_request_template.md`, otherwise devkit's) from
 your commits, tasks, and local CI result. You write only the two parts that need you: the **What and why** and the **Risk and
@@ -205,7 +241,7 @@ Low. Read-only endpoint behind the existing `invoices:read` permission. Roll bac
 - Task T-fwk7a2… · Closes #142
 ```
 
-## 10. Merge message (squash)
+## 11. Merge message (squash)
 
 ```text
 feat(invoices): export invoices as CSV (#151)
@@ -218,7 +254,7 @@ Closes #142
 The title matches the PR title. The body is the "What and why" in one or two sentences. Never add co-author or AI
 attribution lines.
 
-## 11. Review comments
+## 12. Review comments
 
 Say what is wrong, why it matters and what to do, in that order. Mark how much it matters:
 
@@ -229,7 +265,7 @@ nit: "recieve" → "receive".
 question: should cancelled invoices be exported too? The ticket doesn't say.
 ```
 
-## 12. Handing work to a teammate
+## 13. Handing work to a teammate
 
 When the developer wants someone else to take a task, run `dev task delegate <n> --to <github-login> --why "<why it
 matters>"`. It assigns the work item, records the reason, writes the message below and copies it to the clipboard,
@@ -252,7 +288,7 @@ To draft any other message for a teammate (a question, a status note, a request 
 the ask in the first line, then why it matters, what "done" means, the deadline, where to find the context, and how
 to reply. Keep it under ten lines.
 
-## 13. Structured formats for everything you record
+## 14. Structured formats for everything you record
 
 Each kind of record has one shape, so anyone can read anything quickly. Use the commands, which create the right
 structure, instead of free text.
@@ -269,7 +305,7 @@ structure, instead of free text.
 | Session activity | `dev handoff --log "<outcome; next>"` | `YYYY-MM-DD HH:MM · user@host · agent · branch · outcome · next` |
 | Status block | the start of every final message | `` **[Firefly> DevKit]** <project> · `<branch>` · <task> ``, then **Done:** · **Check:** ✓/⚠/✗ evidence · **Progress:** (when a run is active) · **Crew:** (when members worked or work) · **You:** (when only the developer can act) · **Next:** |
 | Status report | `dev report [--days 7] [-i <initiative>]` | Summary table, then per initiative: health with reason · progress · milestone · done · in progress · next · blockers and risks · team |
-| PR, merge, review, handover | `dev pr create`, `dev task delegate` | Sections 9–12 of this skill |
+| Commit, PR, merge, review, handover | `dev commit`, `dev pr create`, `dev task delegate` | Sections 9–13 of this skill |
 
 Fill every placeholder (`_…_`) or delete the section if it does not apply. Never leave template text in a finished
 record. Plans are versioned: after you change one, run `dev plan revise <file> --why "…"`.
