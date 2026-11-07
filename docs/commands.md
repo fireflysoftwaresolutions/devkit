@@ -1337,9 +1337,10 @@ plugin that a repository's `.claude/settings.json` enables outside the catalog. 
 **Acceptances.** Each change `dev install` or `dev ext update --apply` accepts, and each entry that ships with the
 Codex app that `dev install` records for the first time, writes one `ext.accept` audit record with the terminal and
 the parent processes, sends a desktop notification, and stays listed at the session start and in `dev status` until
-you run [`dev ext ack`](#dev-ext-ack). In Claude Code, the session start shows that list to you as a message, not only
-to the agent. When the list is busy or does not parse, nothing is accepted: the change stays as drift, and
-`dev ext update --apply` says it was not recorded.
+you run [`dev ext ack`](#dev-ext-ack). The notification is a security notice: `DEVKIT_NO_NOTIFY=1` and
+`progress.notify: false` do not turn it off. In Claude Code, the session start shows that list to you as a message, not
+only to the agent. When the list is busy, does not parse, or cannot be written, nothing is accepted: the change stays as
+drift, and `dev ext update --apply` says it was not recorded.
 
 ### `dev ext outdated [<name>] [--agent claude|codex] [--json]`
 

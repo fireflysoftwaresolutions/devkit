@@ -24,6 +24,7 @@ import os
 import re
 import shlex
 import time
+import unicodedata
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from urllib.parse import urlparse
@@ -237,6 +238,13 @@ def _user_items(item) -> list:
     return [_skill(a, name, src, path, "user") for a in agents]
 
 
+def _devkits_skill_names() -> set:
+    """The skill names devkit itself puts in the shared skills folder, which no overlay skill may take: the skills in
+    devkit's own tree, and playwright-cli (the packages step installs it there)."""
+    from . import setup
+    return set(setup.local_skills(core.DEVKIT_HOME)) | {"playwright-cli"}
+
+
 def catalog(t: dict, user: dict = None, groups=None) -> list:
     """Every extension devkit manages, after layering. `groups`: the skill groups this Mac installs ({"all"} for
     every group; None for every group too). Raises ExtError on an invalid entry."""
@@ -273,10 +281,14 @@ def catalog(t: dict, user: dict = None, groups=None) -> list:
     out = [e for e in out if e.id not in retired]
     required = {e.id for e in out if e.required}  # M1: from the team layer, before an overlay entry can replace one
     added = [e for item in user["add"] for e in _user_items(item)]
+    reserved = _devkits_skill_names() if any(e.kind == "skill" for e in added) else set()
     mine = {}
     for e in added:
         if e.kind != "skill":
             continue
+        if e.name in reserved:
+            raise ExtError(f"ext.add skill {e.name}: devkit puts its own skill {e.name} in that folder, and one name "
+                           f"is one folder for both agents; give yours another name")
         if e.name in named:
             raise ExtError(f"ext.add skill {e.name}: the team's skill {e.name} (from {named[e.name]}) has that name, "
                            f"and one name is one folder for both agents; give yours another name, or change the team "
@@ -1085,16 +1097,17 @@ def _note_accepted(items: list, now: int, by: str, lock: Path = None) -> bool:
         doc["pending"] = list(doc.get("pending") or []) + out
     try:
         state.update(accepted_file(lock), add, indent=1)
-    except state.StateBusy as e:
+    except (state.StateBusy, OSError) as e:  # busy, unparsable, or not writable (a full disk): fail closed
         for eid, what in items:
             audit.record("ext.accept", eid, f"{what}; not accepted: the acceptance list could not be written ({e}), "
                                             f"so it stays as drift; {where}", "refused")
         return False
-    try:  # the developer sees it now, on the desktop, not only at the next session start
+    try:  # the developer sees it now, on the desktop, not only at the next session start: a security notice, which
+        # DEVKIT_NO_NOTIFY and progress.notify do not turn off (an agent can set either)
         from . import progress
         more = f" (and {len(items) - 1} more)" if len(items) > 1 else ""
-        progress.notify("extension accepted", f"{_shown(items[0][1])}{more}; tty {tty or 'none'}. Not you? "
-                                              f"dev audit --action ext.accept")
+        progress.notify("extension accepted", f"{_shown(items[0][1])}{more}; tty {_shown(tty, 40) or 'none'}. "
+                                              f"Not you? dev audit --action ext.accept", security=True)
     except Exception:
         pass
     return True
@@ -1108,9 +1121,13 @@ def pending_acceptances(lock: Path = None) -> list:
 
 
 def _shown(text, width: int = 100) -> str:
-    """One entry as the session line and `dev status` show it: no control characters (an escape sequence must not
-    redraw the terminal or hide the rest), cut to about `width` characters. The audit trail keeps the full text."""
-    s = re.sub(r"\s+", " ", re.sub(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f-\x9f]", "", str(text or ""))).strip()
+    """One entry as the session line, `dev status` and the desktop notice show it, cut to about `width` characters:
+    no control characters (an escape sequence must not redraw the terminal or hide the rest) and no format
+    characters (Unicode category Cf: the bidirectional controls that reorder what the developer reads, the zero-width
+    ones that split a name invisibly, and the tag characters that carry text only a model reads). Whitespace becomes
+    one space. The audit trail keeps the full text."""
+    s = "".join(c for c in str(text or "") if c.isspace() or unicodedata.category(c) not in ("Cc", "Cf"))
+    s = re.sub(r"\s+", " ", s).strip()
     return s if len(s) <= width else s[:width - 1].rstrip() + "…"
 
 

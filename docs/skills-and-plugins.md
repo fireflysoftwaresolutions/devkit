@@ -424,11 +424,11 @@ typed it. devkit therefore shows every acceptance until you acknowledge it:
 
 1. Each first record and each change `dev install` or `dev ext update --apply` accepts writes one `ext.accept`
    record to the audit trail, with the entry, the terminal (`tty`), and the parent processes it ran from, and sends
-   a desktop notification. The acceptance list is written first: when it is busy or does not parse, nothing is
-   accepted and the change stays as drift.
+   a desktop notification. The acceptance list is written first: when it is busy, does not parse, or cannot be
+   written (a full disk), nothing is accepted and the change stays as drift.
 2. The next session start and `dev status` list them: `extensions accepted since your last session: …`, each entry
-   cut to one short line. In Claude Code, the session start shows the list to you as a message, not only to the
-   agent.
+   cut to one short line without control, bidirectional, or zero-width characters. In Claude Code, the session start
+   shows the list to you as a message, not only to the agent.
 3. If you ran that `dev install`, run `dev ext ack` in your terminal. It clears the list and writes one `ext.ack`
    record per entry, with its terminal and parent processes; the next Claude Code session start shows you once when
    and from which terminal it ran. The guard refuses `dev ext ack` to agents in the forms it can read, and
@@ -440,9 +440,15 @@ typed it. devkit therefore shows every acceptance until you acknowledge it:
 **Known limits.** devkit decides that you ran `dev install`, `dev ext update --apply`, or `dev ext ack` from the
 process tree and the terminal, and a process an agent starts through a launcher can look the same: `screen` or
 `tmux`, `expect`, AppleScript's `do script`, `open` of a Terminal window or a `.command` file, or `launchctl`. The
-guard refuses the forms it can read (it decodes `screen -X stuff` octal escapes such as `\015`), not every one: a
-script file or a program that builds the command at run time gets through. The notification, the session-start
-message, and the audit trail are the backstop until a kernel-level check of who typed the command lands in 26.11.5.
+guard refuses the forms it can read (it decodes the octal escapes such as `\015` and the caret controls such as `^m`
+that `screen -X stuff` types), not every one: a script file or a program that builds the command at run time gets
+through. The desktop notification, the session-start message, and the audit trail are the backstop until a
+kernel-level check of who typed the command lands in 26.11.5.
+
+The acceptance notification is a security notice: `DEVKIT_NO_NOTIFY=1` and `progress.notify: false`, which an agent
+can set, do not turn it off. It shows only on macOS, and only while notifications are allowed for Script Editor, the
+app macOS lists `osascript` notifications under (System Settings › Notifications). Without it, the session-start
+message and the audit trail still show each acceptance.
 
 devkit reads Codex's MCP servers only in the form `codex mcp add` writes: a `[mcp_servers.<name>]` table and its
 sub-tables, one `key = value` per line, with a string, number, `true` or `false`, or a one-line array. A server
@@ -464,8 +470,9 @@ The pins have rules of their own:
 - **`dev install`** names each change it accepts before it records the lock.
 - **Your overlay** cannot add a copy of a devkit default, and a required default stays required.
 - **A skill name belongs to one source.** One name is one folder for both agents, so `dev ext add skill` refuses a
-  name that a devkit default already uses, for either agent, and two sources in `skills.json` with the same skill
-  name make the catalog invalid.
+  name that a devkit default already uses, for either agent, or that devkit puts in the shared skills folder itself
+  (a skill from devkit's own tree, or `playwright-cli`), and two sources in `skills.json` with the same skill name
+  make the catalog invalid.
 
 ## Left out on purpose
 

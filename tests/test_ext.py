@@ -6,6 +6,7 @@
 # Run: python3 -m unittest tests.test_ext -v
 import contextlib
 import dataclasses
+import errno
 import io
 import json
 import os
@@ -107,6 +108,29 @@ def plain(s: str) -> str:
     return ui.ANSI_RE.sub("", s)
 
 
+@contextlib.contextmanager
+def osascript_calls():
+    """The osascript commands devkit starts, captured at the process runner (core.sh) and never run: no test shows a
+    notification. Every other command runs as usual."""
+    calls, real = [], core.sh
+
+    def sh(args, **kw):
+        if args and Path(str(args[0])).name == "osascript":
+            calls.append([str(a) for a in args])
+            return 0, "", ""
+        return real(args, **kw)
+    with mock.patch.object(core, "sh", sh):
+        yield calls
+
+
+def setUpModule():
+    # the acceptance notice ignores DEVKIT_NO_NOTIFY and progress.notify (an agent can set either), and this module
+    # accepts entries: every osascript command its tests start is held at the process runner
+    held = osascript_calls()
+    held.__enter__()
+    unittest.addModuleCleanup(held.__exit__, None, None, None)
+
+
 class CatalogTests(unittest.TestCase):
     def test_two_team_sources_that_name_the_same_skill_are_refused(self):
         t = fixture_team()
@@ -123,6 +147,21 @@ class CatalogTests(unittest.TestCase):
         # and the skills step falls back to the team's sources alone: no overlay repository is fetched
         sources = ext.effective_skill_sources(fixture_team(), {"add": [add]})
         self.assertNotIn("someone/skills", [s["repo"] for s in sources])
+
+    def test_an_overlay_skill_cannot_take_the_name_of_devkits_own_skill_or_playwright_cli(self):
+        # one name is one folder in the shared skills folder: an overlay skill named after a skill devkit links from
+        # its own tree, or after playwright-cli (the packages step puts it there), would replace that folder
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        own = Path(tmp.name) / "agents" / "skills" / "devkit-own"
+        own.mkdir(parents=True)
+        (own / "SKILL.md").write_text("---\nname: devkit-own\n---\n")
+        for name in ("devkit-own", "playwright-cli"):
+            add = {"kind": "skill", "name": name, "repo": "someone/skills", "ref": SHA_C, "path": "s/x",
+                   "license": "MIT", "why": "w"}
+            with self.subTest(name=name), mock.patch.object(core, "DEVKIT_HOME", Path(tmp.name)):
+                with self.assertRaisesRegex(ext.ExtError, f"ext.add skill {name}: devkit"):
+                    ext.catalog(fixture_team(), {"add": [add]}, None)
 
     def test_each_kind_gets_its_id_source_and_pin_kind(self):
         cat = by_id(ext.catalog(fixture_team(), {}, {"postgres"}))
@@ -458,6 +497,22 @@ class LockAndDriftTests(unittest.TestCase):
         self.assert_still_drift(self.accept_beside(held=True))
         self.assertEqual(ext.pending_acceptances(self.lock), [])
 
+    def test_an_acceptance_the_list_cannot_take_because_the_disk_is_full_stays_drift(self):
+        # an OSError while the list is written (here a full disk) fails closed as a busy list does, and is audited,
+        # instead of stopping dev install
+        real = os.replace
+
+        def replace(src, dst, *a, **k):
+            if Path(dst) == ext.accepted_file(self.lock):
+                raise OSError(errno.ENOSPC, "No space left on device")
+            return real(src, dst, *a, **k)
+        with mock.patch.object(os, "replace", replace):
+            self.assert_still_drift(self.accept_beside())
+        rec = audit.records(days=1, action="ext.accept")[-1]
+        self.assertEqual(rec["outcome"], "blocked")  # the audit trail's word for refused
+        self.assertIn("not accepted: the acceptance list could not be written ([Errno 28] No space left on device)",
+                      rec["detail"])
+
     def test_each_listed_acceptance_is_cut_to_one_short_line_without_control_characters(self):
         what = "evil (claude plugin) \x1b[2J\x1b[Hall clear\r\n" + "x" * 400
         ext.accepted_file(self.lock).write_text(json.dumps(
@@ -607,6 +662,20 @@ class DriftWiringTests(unittest.TestCase):
         self.assertIn("superpowers", ext.accepted_line() or "")
         self.assertEqual(audit.records(days=1, action="ext.ack")[-1]["outcome"], "blocked")
 
+    def test_the_accepted_line_drops_bidirectional_and_zero_width_characters(self):
+        # L2: U+202E and its kin reorder what the developer reads, U+200B splits a name invisibly, and tag characters
+        # carry text only a model reads. Written as escapes, so this file holds none of them (semgrep refuses them)
+        hidden = ("\u202a\u202b\u202c\u202d\u202e\u2066\u2067\u2068\u2069\u200b\u200e\u200f\u061c\u2060\ufeff"
+                  "\U000e0041")
+        self.install(developer=True)
+        f = ext.accepted_file()
+        doc = json.loads(f.read_text())
+        doc["pending"][0]["what"] = "super" + hidden + "powers 7.0.1\u2069 evil"
+        f.write_text(json.dumps(doc))
+        line = ext.accepted_line()
+        self.assertIn("superpowers 7.0.1 evil", line)
+        self.assertEqual([hex(ord(c)) for c in line if c in hidden], [])
+
     def test_doctor_fails_the_lock_check_and_names_the_plugin(self):
         with mock.patch.object(ext, "homes", return_value=self.h):
             rows = {name: (ok, detail) for _, name, ok, detail, _ in ext.doctor_checks(str(self.tmp.name))}
@@ -652,13 +721,48 @@ class DriftSessionStartTests(HookCase):
                                               "source": "startup", "cwd": str(self.tmp.name)})
         return json.loads(out) if out.lstrip().startswith("{") else {"plain": out}
 
-    def test_an_acceptance_sends_a_desktop_notification(self):
-        from devkit import progress
-        with mock.patch.object(progress, "notify") as notify:
+    def accept_with_notices(self, env: dict = None) -> list:
+        # a real acceptance (progress.notify is not mocked) and the osascript commands it starts, held at the process
+        # runner; `env` goes on top of this run's environment, which has no DEVKIT_NO_NOTIFY unless `env` sets it
+        with mock.patch.dict(os.environ, env or {}), osascript_calls() as calls:
+            if "DEVKIT_NO_NOTIFY" not in (env or {}):
+                os.environ.pop("DEVKIT_NO_NOTIFY", None)
             DriftWiringTests.install(self, developer=True)
-        ((title, text), _), = notify.call_args_list
-        self.assertIn("accepted", title)
+        return calls
+
+    def test_an_acceptance_sends_its_text_and_title_to_osascript_as_arguments(self):
+        # B2-R6: json.dumps wrote the title's middle dot as a JSON escape, which AppleScript rejects (-2741), so no
+        # acceptance notice ever showed
+        (argv,) = self.accept_with_notices()
+        self.assertEqual(argv[0], "/usr/bin/osascript")  # an osascript planted earlier on PATH does not run
+        sep = argv.index("--")
+        text, title = argv[sep + 1:]
+        self.assertEqual(title, "devkit · extension accepted")
         self.assertIn("superpowers (claude plugin) 7.0.0 bb92a77 → 7.0.1 414603b", text)
+        self.assertIn("Not you? dev audit --action ext.accept", text)
+        script = argv[2:sep:2]
+        self.assertEqual(argv[1:sep:2], ["-e"] * len(script))
+        self.assertEqual([ln for ln in script if "superpowers" in ln or "accepted" in ln or "devkit" in ln], [])
+
+    @unittest.skipUnless(Path("/usr/bin/osacompile").exists(), "osacompile ships with macOS only")
+    def test_the_acceptance_notification_script_compiles(self):
+        (argv,) = self.accept_with_notices()
+        end = argv.index("--") if "--" in argv else len(argv)
+        lines = [a for i, a in enumerate(argv[:end]) if i and argv[i - 1] == "-e"]
+        p = subprocess.run(["/usr/bin/osacompile", "-o", "/dev/null", *(x for ln in lines for x in ("-e", ln))],
+                           capture_output=True, text=True, timeout=30)
+        self.assertEqual(p.returncode, 0, p.stderr)
+
+    def test_the_opt_outs_silence_progress_notices_but_not_an_acceptance(self):
+        # M5: an agent can set DEVKIT_NO_NOTIFY or progress.notify=false; the acceptance notice ignores both
+        from devkit import progress
+        with mock.patch.dict(core.CFG, {"progress": {"notify": False}}), \
+                mock.patch.dict(os.environ, {"DEVKIT_NO_NOTIFY": "1"}), osascript_calls() as calls:
+            progress.notify("run finished", "Export invoices")
+            self.assertEqual(calls, [])
+            DriftWiringTests.install(self, developer=True)
+        self.assertEqual(len(calls), 1)
+        self.assertIn("superpowers (claude plugin)", " ".join(calls[0]))
 
     def test_pending_acceptances_reach_claude_as_a_system_message_at_session_start(self):
         DriftWiringTests.install(self, developer=True)
