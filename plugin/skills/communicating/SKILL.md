@@ -122,7 +122,22 @@ successful runs. Use `dev ci status --watch` to follow a run to the end instead 
 
 Ask only when the decision is truly the developer's: product behavior, scope, cost, risk, and actions that are
 irreversible or have external effects. Decide everything else yourself and say what you decided. Use the harness's question tool when it
-has one; otherwise:
+has one (AskUserQuestion in Claude Code), and ask nicely:
+
+- **A plain question with its context.** One sentence the developer can answer at a glance, then who asks, what it
+  blocks, and what the choice changes. No internal jargon.
+- **The recommended option first**, then the others: 2 to 4 options, each with its letter (`A: Skip the empty
+  lines`). The recommended label ends in "(Recommended)" as devkit prints it.
+- **Ask decisions together**, at most 4 questions per call; when decisions piled up while the developer was
+  away, ask them together as soon as they are back.
+- **For a devkit decision, keep `D<n> ·` up front** (or put `D<n>` in the header) and keep each option's letter: that
+  is how devkit knows the answer is the developer's (their evidence). Reword everything else freely.
+  `dev crew decisions --ask` prints the call: send it as it is or reword it.
+- **A decision that leads to an irreversible action names what it acts on** (the tag, the branch, the PR) in the
+  question.
+
+When there is no question tool (Codex, for now), use this template, and for a devkit decision tell the developer
+to type `approve D<n>: <letter>`:
 
 ```markdown
 **[Firefly> DevKit]** <project> · `<branch>` · <task>

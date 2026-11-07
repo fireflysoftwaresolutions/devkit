@@ -577,33 +577,82 @@ class CrewSessionTests(unittest.TestCase):
         # M280 (F6, D4): dev crew ask --decision --approves "<steps>" keeps them on the decision, checked against the plan
         with TempState():
             pg.start("Parser", plan=["parse", "review"])
-            rc, _, _ = run_cli("crew", "ask", "--decision", "Ship the parser as it is?", "--options", "yes | no",
-                               "--recommend", "yes", "--approves", "parse")
+            rc, _, _ = run_cli("crew", "ask", "--decision", "Ship the parser as it is?", "--options",
+                               "A: yes | B: no", "--recommend", "A", "--approves", "parse")
             self.assertEqual(rc, 0)
             self.assertEqual(pg.load_run("claude", "s1")["decisions"][0]["approves"], ["parse"])
-            rc, _, err = run_cli("crew", "ask", "--decision", "And the docs?", "--options", "yes | no",
-                                 "--approves", "nosuch")
+            rc, _, err = run_cli("crew", "ask", "--decision", "And the docs?", "--options", "A: yes | B: no",
+                                 "--recommend", "A", "--approves", "nosuch")
             self.assertEqual(rc, 2)
             self.assertIn("nosuch", err)
 
-    def test_decisions_ask_prints_the_exact_question_for_the_question_tool(self):
+    def test_decisions_ask_prints_the_question_with_the_recommended_option_first(self):
         with TempState():
             pg.start("Parser", plan=["parse"])
             run_cli("crew", "ask", "--decision", "Rewrite or patch the parser?", "--options",
-                    "A: rewrite it | B: patch it", "--recommend", "A")
+                    "A: rewrite it | B: patch it", "--recommend", "B")
             rc, out, _ = run_cli("crew", "decisions", "--ask", "D1")
             self.assertEqual(rc, 0)
             self.assertEqual(pg.load_run("claude", "s1")["decisions"][0]["target"], "")
-            self.assertIn("question: D1 · Rewrite or patch the parser?", out)
-            self.assertIn("options: A: rewrite it | B: patch it", out)
+            self.assertIn("D1 · Rewrite or patch the parser?", out)
+            self.assertLess(out.index("B: patch it (Recommended)"), out.index("A: rewrite it"))
             self.assertIn("approve D1: <option>", out)
             self.assertEqual(run_cli("crew", "decisions", "--ask", "D9")[0], 2)
-            rc, _, err = run_cli("crew", "ask", "--decision", "Release 26.11.4 now?", "--options", "yes | no",
-                                 "--recommend", "yes", "--irreversible", "release")
+            rc, _, err = run_cli("crew", "ask", "--decision", "Release 26.11.4 now?", "--options", "A: yes | B: no",
+                                 "--recommend", "A", "--irreversible", "release")
             rc, _, err = run_cli("crew", "decide", "D2", "yes")
             self.assertEqual(rc, 2)  # irreversible, and no answer of the developer: it stays pending
             self.assertIn("D2 · Release 26.11.4 now?", err)
             self.assertEqual(pg.load_run("claude", "s1")["decisions"][1]["state"], "pending")
+
+    def test_decisions_ask_json_batches_four_questions_per_call_with_their_context(self):
+        with TempState() as t:
+            pg.start("Parser", plan=["parse", "ship"])
+            pg.set_mode("guided")
+            pg.assign("parse", "Neo")
+            t.launch()
+            run_cli("crew", "ask", "--decision", "Skip empty lines or reject the file?", "--options",
+                    "A: skip | B: reject", "--recommend", "B", from_agent="a1")
+            for n in range(2, 6):
+                run_cli("crew", "ask", "--decision", f"Keep option {n}?", "--options", "A: keep | B: drop",
+                        "--recommend", "A")
+            rc, out, _ = run_cli("crew", "decisions", "--ask", "--json")
+            self.assertEqual(rc, 0)
+            calls = json.loads(out)["calls"]
+            self.assertEqual([[q["header"] for q in c["questions"]] for c in calls], [["D1", "D2", "D3", "D4"], ["D5"]])
+            q = calls[0]["questions"][0]
+            self.assertTrue(q["question"].startswith("D1 · Skip empty lines or reject the file? "), q["question"])
+            self.assertIn("Senior engineer (Neo) asks", q["question"])
+            self.assertIn("“parse”", q["question"])  # the step it blocks
+            self.assertEqual([o["label"] for o in q["options"]], ["B: reject (Recommended)", "A: skip"])
+            self.assertIs(q["multiSelect"], False)
+            rc, out, _ = run_cli("crew", "decisions", "--ask", "D5", "d2", "--json")
+            self.assertEqual([q["header"] for q in json.loads(out)["calls"][0]["questions"]], ["D2", "D5"])
+
+    def test_a_decision_without_two_to_four_lettered_options_and_a_recommendation_is_refused(self):
+        with TempState():
+            pg.start("Parser", plan=["parse"])
+            for args, fix in (
+                    (["Skip or reject?", "--options", "skip | reject", "--recommend", "skip"],
+                     'dev crew ask --decision "Skip or reject?" --options "A: skip | B: reject" --recommend A'),
+                    (["Skip them?", "--options", "A: skip", "--recommend", "A"], "2 to 4 options"),
+                    (["Which?", "--options", "A: a | B: b | C: c | D: d | E: e", "--recommend", "A"], "2 to 4 options"),
+                    (["Skip or reject?", "--options", "A: skip | B: reject"], "--recommend A"),
+                    (["Skip or reject?", "--options", "A: skip | B: reject", "--recommend", "C"], "--recommend A"),
+                    (["Which file? " + "x" * 300, "--options", "A: skip | B: reject", "--recommend", "A"], "300")):
+                rc, _, err = run_cli("crew", "ask", "--decision", *args)
+                self.assertEqual(rc, 2, args)
+                self.assertIn(fix, err, args)
+            self.assertEqual(pg.load_run("claude", "s1").get("decisions") or [], [])
+
+    def test_an_irreversible_approval_without_options_is_asked_as_yes_or_no(self):
+        with TempState():
+            pg.start("Parser", plan=["parse"])
+            rc, _, _ = run_cli("crew", "ask", "--decision", "Push the fix branch?", "--irreversible", "push",
+                               "--target", "fix/parser")  # what the guard tells an agent to run
+            self.assertEqual(rc, 0)
+            d = pg.load_run("claude", "s1")["decisions"][0]
+            self.assertEqual((d["options"], d["recommend"]), (["A: yes", "B: no"], "A"))
 
     def test_irreversible_or_guided_decisions_wait_for_the_developer(self):
         with TempState() as t:
@@ -613,8 +662,8 @@ class CrewSessionTests(unittest.TestCase):
                                  "--irreversible", "release", "--target", "v26.11.2")
             self.assertEqual(rc, 0)  # release is not pre-approved: Morpheus asks the developer
             self.assertEqual(pg.load_run("claude", "s1")["decisions"][0]["target"], "v26.11.2")
-            self.assertIn("ask the developer now (AskUserQuestion / request_user_input) with the decision template, "
-                          'then: dev crew decide D1 "<answer>"', out)
+            self.assertIn("ask the developer now in one question call (dev crew decisions --ask prints it), then: "
+                          'dev crew decide D1 "<answer>"', out)
             pg.set_mode("guided")
             pg.assign("parse", "Neo")
             t.launch()

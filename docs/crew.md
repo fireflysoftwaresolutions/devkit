@@ -379,14 +379,39 @@ dev crew decide D3 "B: reject the file"     # your answer (or an override of an 
 
 How a decision travels:
 
-1. A member reaches a decision point and runs `dev crew ask --decision "<question>" --options "A | B" --recommend A`,
-   with `--approves "<steps>"` when your answer approves finished work.
+1. A member reaches a decision point and runs
+   `dev crew ask --decision "<question>" --options "A: <one choice> | B: <another>" --recommend A`, with
+   `--approves "<steps>"` when your answer approves finished work. A decision has a question under 300 characters,
+   2 to 4 options, each with its letter, and a recommendation that is one of them; devkit refuses any other shape
+   and prints the corrected command. An irreversible action asked without options is a yes-or-no question
+   (`A: yes | B: no`).
 2. **Auto:** the answer comes back at once, is recorded as decision D3, and the member goes on.
 3. **Guided:** the member's step is blocked, the member stops and reports that it waits for D3, and no tokens are
-   spent while it waits. The tech lead sees the decision with his next action and asks you with the question dialog
-   of Claude Code or Codex. Your answer is recorded with `dev crew decide`, and the tech lead resumes the member with
-   it; the member keeps everything it knew.
+   spent while it waits. The tech lead sees the decision with his next action and asks you with Claude Code's
+   question dialog (see [How the tech lead asks you](#how-the-tech-lead-asks-you)). Your answer is recorded with
+   `dev crew decide`, and the tech lead resumes the member with it; the member keeps everything it knew.
 4. The run cannot be closed while a decision is pending, and the final report lists the automatic decisions.
+
+### How the tech lead asks you
+
+`dev crew decisions --ask` prints the pending decisions as question dialog calls, ready to send: at most four
+questions per call (the rest go in a second call), each opening with `D<n> ·`, with one line on who asks and what it
+blocks, and the recommended option first (its label ends in "(Recommended)"). `dev crew decisions --ask D4 D5` asks only those,
+and `--json` prints the dialog's input.
+
+The tech lead may reword a question and add context. Three things bind your answer to the decision:
+
+- The decision's id up front (`D4 · …` or `D4: …`), or the dialog's header `D4`.
+- The option you pick: its letter (`A: Skip them and go on`, or `B`) or its words as the member wrote them.
+- For an irreversible action, the question names what the action acts on: the tag, the branch, or the PR.
+
+Text you type yourself (**Other**) is your answer in your own words: it settles a reversible question and picks no
+option. An answer to a question that names another decision, or a letter the decision does not have, picks no
+option either, and only one of its options, or your `approve D<n>` line, counts for an irreversible action.
+
+When decisions pile up while you are away, your next prompt tells the tech lead once to ask them together, in one
+dialog call; he is told again only when a new decision joins them. Codex's question dialog does not reach devkit
+yet: in Codex, the tech lead shows the decisions in his reply and you type `approve D4: A`.
 
 ## Guardrails
 

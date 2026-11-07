@@ -61,10 +61,10 @@ class EvidenceCase(unittest.TestCase):
                                              "transcript_path": str(self.transcript)}, now=at)
 
     # the developer answers a question tool call (AskUserQuestion's PostToolUse, and its result in the transcript)
-    def answered(self, question, label, at, options=("A: skip", "B: reject"), aid=None):
+    def answered(self, question, label, at, options=("A: skip", "B: reject"), aid=None, header="Decision"):
         self.n += 1
         tid = f"toolu_q{self.n:03d}"
-        qs = [{"question": question, "header": "Decision", "multiSelect": False,
+        qs = [{"question": question, "header": header, "multiSelect": False,
                "options": [{"label": o, "description": ""} for o in options]}]
         result = {"questions": qs, "answers": {question: label}}
         self.append({"type": "user", "uuid": f"u-{self.n}", "isSidechain": False, "toolUseResult": result,
@@ -113,12 +113,72 @@ class DecisionEvidenceTests(EvidenceCase):
         self.assertIsNotNone(self.human()[0]["used"])
         self.assertIsNotNone(self.decision("D1")["shown"])  # the question tool call showed it
 
-    def test_question_with_other_text_is_not_evidence(self):
+    def test_a_question_without_its_decision_id_up_front_is_not_evidence(self):
         self.ask()
         self.answered("Skip empty lines, or reject the whole file?", "B: reject", m(2))
-        self.answered(pg.ask_text(self.decision("D1")) + " Answer quickly.", "B: reject", m(2.5))
+        self.answered("Skip empty lines, or reject the whole file? See D1: the import step.", "B: reject", m(2.5))
         self.assertEqual(self.human(), [])
         self.assertFalse(pg.crew_decide("D1", "B: reject", now=m(3))["verified"])
+
+    # the developer asked for questions asked nicely: the tech lead may reword a decision and add context; its id up
+    # front ("D1 · …") or as the header, and the option's letter, bind the answer to that decision and option
+    def test_a_reworded_question_answered_with_a_lettered_label_verifies(self):
+        self.ask()
+        q = ("D1 · An import file has empty lines: should devkit skip them or reject the whole file? The Backend "
+             "engineer (Tank) asks; it blocks the import step.")
+        self.answered(q, "A: Skip them and go on (Recommended)", m(2),
+                      options=("A: Skip them and go on (Recommended)", "B: Reject the file"))
+        d = pg.crew_decide("D1", "A", now=m(3))
+        self.assertEqual((d["by"], d["verified"], d.get("option")), ("developer", True, "A: skip"))
+
+    def test_a_label_without_its_letter_that_equals_an_option_verifies(self):
+        self.ask()
+        self.answered("D1: empty lines in an import, skip them or reject the file?", "reject", m(2),
+                      options=("skip (Recommended)", "reject"))
+        d = pg.crew_decide("D1", "B", now=m(3))
+        self.assertEqual((d["by"], d["verified"], d.get("option")), ("developer", True, "B: reject"))
+
+    def test_the_header_can_name_the_decision(self):
+        self.ask()
+        self.answered("Empty lines in an import: skip them or reject the file?", "B: Reject the file", m(2),
+                      options=("A: Skip them (Recommended)", "B: Reject the file"), header="D1")
+        d = pg.crew_decide("D1", "B: reject", now=m(3))
+        self.assertEqual((d["by"], d["verified"], d.get("option")), ("developer", True, "B: reject"))
+
+    def test_an_answer_covers_only_the_decision_its_question_names(self):
+        self.ask()
+        self.ask("Rename the flag?", options="A: rename | B: keep", recommend="A", at=1.5)
+        self.answered("D2 · Should the flag get its new name now?", "A: Rename it", m(2),
+                      options=("A: Rename it", "B: Keep it"))
+        self.answered("D1 · Skip empty lines or reject the file?", "B: reject", m(2.5), header="D2")  # they disagree
+        self.assertEqual([h["covers"] for h in self.human()], ["D2"])
+        self.assertFalse(pg.crew_decide("D1", "A: skip", now=m(3))["verified"])
+
+    def test_free_text_is_the_developers_answer_but_no_option(self):
+        self.ask()
+        self.answered("D1 · Empty lines in an import: skip them or reject the file?", "Skip them, but log each one",
+                      m(2))  # typed under "Other": no label the call offered
+        d = pg.crew_decide("D1", "Skip them, but log each one", now=m(3))
+        self.assertEqual((d["by"], d["verified"], d["answer"], d.get("option")),
+                         ("developer", True, "Skip them, but log each one", None))
+
+    def test_a_letter_the_decision_lacks_is_free_text_not_an_option(self):
+        self.ask()
+        self.answered("D1 · Empty lines in an import: what should devkit do?", "C: Ask the sender", m(2),
+                      options=("A: Skip them", "B: Reject the file", "C: Ask the sender"))
+        with self.assertRaises(pg.StepError) as e:  # the developer chose C, which is not option A
+            pg.crew_decide("D1", "A", now=m(3))
+        self.assertIn("C: Ask the sender", str(e.exception))
+
+    def test_an_irreversible_decision_counts_only_when_the_question_names_its_target(self):
+        pg.crew_decision("Release now?", options="A: yes | B: no", recommend="A", irreversible="release",
+                         target="v26.11.4", now=m(1))
+        self.answered("D1 · Ship it?", "A: Yes", m(2), options=("A: Yes", "B: Not yet"))
+        with self.assertRaises(pg.StepError):  # what the developer approved must name what it acts on
+            pg.crew_decide("D1", "A", now=m(3))
+        self.answered("D1 · Release v26.11.4 now? It tags and publishes.", "A: Yes, release it", m(4),
+                      options=("A: Yes, release it", "B: Not yet"))
+        self.assertTrue(pg.crew_decide("D1", "A", now=m(5))["verified"])
 
     def test_the_recorded_answer_must_be_the_developers(self):
         self.ask()
@@ -426,6 +486,34 @@ class HookWiringTests(EvidenceCase):
         with mock.patch("sys.stdin", io.StringIO(json.dumps(data))), contextlib.redirect_stdout(out):
             hooks.run("guard", "claude")
         self.assertEqual(json.loads(out.getvalue())["hookSpecificOutput"]["permissionDecision"], "deny")
+
+
+class WaitingDecisionsPromptTests(EvidenceCase):
+    # decisions pile up while the developer is away: their next prompt tells the tech lead to ask them together
+    def prompt(self, text, at):
+        return pg.on_prompt("claude", {"session_id": "s1", "prompt": text}, now=at) or ""
+
+    def test_the_next_prompt_lists_the_waiting_decisions_once_per_batch(self):
+        self.ask()
+        self.ask("Rename the flag?", options="A: rename | B: keep", recommend="A", at=2)
+        pg.on_tool_done("claude", {"session_id": "s1"})  # the tech lead was told of both while the developer slept
+        self.assertIn("2 decisions wait for you (D1, D2): ask them now in one question call; `dev crew decisions "
+                      "--ask` prints it.", self.prompt("good morning", m(60)))
+        self.assertNotIn("wait for you", self.prompt("go on", m(61)))
+        self.ask("Drop the cache?", options="A: drop | B: keep", recommend="B", at=62)
+        self.assertIn("3 decisions wait for you (D1, D2, D3)", self.prompt("and now?", m(63)))
+
+    def test_decisions_answered_or_shown_since_the_last_prompt_are_left_out(self):
+        self.prompt("start the release", m(0.5))  # the developer's last prompt: nothing waits yet
+        self.ask()
+        self.ask("Rename the flag?", options="A: rename | B: keep", recommend="A", at=2)
+        self.ask("Drop the cache?", options="A: drop | B: keep", recommend="B", at=3)
+        self.ask("Keep the logs?", options="A: keep | B: drop", recommend="A", at=4)
+        self.shown("D2 waits for you.", m(5))  # the tech lead's reply showed D2 since that prompt
+        pg.crew_decide("D3", "A: drop", now=m(6))  # recorded: no longer waiting
+        self.typed("approve D1: B", m(7))  # the developer answers D1 in this very prompt
+        self.assertIn("1 decision waits for you (D4): ask it now in one question call; `dev crew decisions --ask` "
+                      "prints it.", self.prompt("approve D1: B", m(7)))
 
 
 class AuditCheckTests(EvidenceCase):

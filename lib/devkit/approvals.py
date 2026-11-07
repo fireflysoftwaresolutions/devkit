@@ -177,6 +177,14 @@ def _yes(answer) -> bool:
     return str(answer or "").strip().lower().startswith(("approve", "yes"))
 
 
+def _answer_words(d: dict) -> str:
+    """A decision's answer without its option letter: "A" or "A: approve" -> "approve" (options carry letters)."""
+    from .progress import option_of
+    text = str(option_of(d, d.get("answer")) or d.get("answer") or "")
+    head, sep, rest = text.partition(":")
+    return rest.strip() if sep and len(head.strip()) == 1 and head.strip().isalpha() else text
+
+
 def verdicts(run: dict) -> list:
     """Every verdict on the run's steps, oldest first: its approvals, and the developer's decided decisions that
     name steps and are verified by C5 evidence (a "developer" typed without evidence is not one)."""
@@ -185,7 +193,7 @@ def verdicts(run: dict) -> list:
         if d.get("approves") and d.get("state") == "decided" and d.get("by") == DEVELOPER and \
                 d.get("verified") is True:
             out.append({"ts": d.get("decided") or d.get("ts") or 0, "by": DEVELOPER, "steps": list(d["approves"]),
-                        "verdict": "approved" if _yes(d.get("answer")) else "changes", "via": "decision",
+                        "verdict": "approved" if _yes(_answer_words(d)) else "changes", "via": "decision",
                         "decision": d.get("id")})
     return sorted(out, key=lambda a: a.get("ts") or 0)
 
