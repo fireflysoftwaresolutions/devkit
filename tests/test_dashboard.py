@@ -1413,6 +1413,33 @@ class PageBehaviorTests(unittest.TestCase):
         out = self.probe(steps, 390, "#/overview")
         self.assertEqual((out["row"][:3], out["menu"][-1], out["more"]), (["now", "tasks", "background"], "health", "More"))
 
+    # A web font that lands after the last fit widens the views with no resize: document.fonts.ready waits for the slowest font, so the
+    # nav's own font can arrive long before it (CI: Inter in, Source Serif 4 still loading, the row 276 px in 273). The page here has no
+    # web font, so fonts.ready has settled; then the page's text font arrives, half as wide again, and the row must fit again.
+    def test_the_row_fits_again_when_a_font_arrives_after_the_last_fit(self):
+        views = ["now", "tasks", "background", "team", "projects", "initiatives", "activity", "explorer", "health"]
+        page = re.sub(r'<link rel="stylesheet" href="https://fonts\.googleapis\.com/[^"]*">', "", self.page, count=1)
+        self.assertNotEqual(page, self.page)
+        steps = """const fit = () => ({row: $$("#tabs .tab").map(a => a.getAttribute("data-view")), menu: $$("#moremenu a").map(a => a.getAttribute("data-view")),
+                tabs: [$("#tabs").scrollWidth, $("#tabs").clientWidth]});
+            out.before = fit();
+            const face = new FontFace("Late Wide", 'local("Arial"), local("ArialMT"), local("Helvetica"), local("DejaVu Sans"), local("Liberation Sans")', {sizeAdjust: "150%"});
+            document.fonts.add(face);
+            const css = document.createElement("style"); css.textContent = 'body { font-family: "Late Wide", ' + getComputedStyle(document.body).fontFamily + " }";
+            document.head.append(css);
+            out.status = await face.load().then(() => "loaded", () => "error");
+            await tick(100);
+            out.after = fit();"""
+        for width in (390, 1440):
+            out = self.probe(steps, width, "#/health", page=page)
+            if out["status"] != "loaded":
+                self.skipTest("no local Arial, Helvetica, DejaVu Sans or Liberation Sans to load as the late font")
+            before, after = out["before"], out["after"]
+            self.assertEqual(before["row"] + before["menu"], views, width)
+            self.assertLess(len(after["row"]), len(before["row"]), (width, before, after))       # the wider font moved views into More
+            self.assertEqual(after["row"] + after["menu"], views, width)                          # every view, in order, once
+            self.assertLessEqual(after["tabs"][0], after["tabs"][1], (width, after))             # and the row does not scroll sideways
+
     def test_the_more_menu_works_with_the_keyboard(self):
         out = self.probe("""const b = $("#morebtn"); out.menu = $$("#moremenu a").map(a => a.getAttribute("data-view")); b.focus(); key(b, "ArrowDown"); out.expanded = b.getAttribute("aria-expanded");
             out.first = document.activeElement.getAttribute("data-view"); key(document.activeElement, "End"); out.last = document.activeElement.getAttribute("data-view");
