@@ -296,17 +296,23 @@ def ready(run, now: float | None = None) -> dict:
     """{"launch": [steps ready to launch, in order], "queued": [steps that wait for a slot], "waiting": [(step,
     why)], "busy": [lanes working], "free": slots, "limit": n, "slots": progress.slot_budget, "why": {step: its
     place in the order}}: the ready steps in dispatch order, launched while their cost fits the limit less the
-    developer's reserve (spec R3-R5)."""
+    developer's reserve; a step the developer asked for in this turn may take the reserve, and goes ahead of queued
+    plan work (spec R3-R5)."""
     run = normalize(run)
     busy = progress.running_agents(run)
-    b = progress.slot_budget(run.get("agent") or "claude", run, None, now)  # launches count before they start
+    sess = core.read_json(progress.session_path(run.get("agent") or "", run.get("session") or ""), {}) or {}
+    b = progress.slot_budget(run.get("agent") or "claude", run, sess, now)  # launches count before they start
     free = max(0.0, b["limit"] - b["reserve"] - b["used"])
     _, waiting = _sorted(run)
     launch, queued, room, reasons = [], [], free, {}
-    for s, why in order(run, now):
+    for s, why in order(run, now, sess):
         reasons[s["name"]] = why
         cost = progress.step_cost(run, s)
-        if not queued and cost <= room + 1e-9:
+        mine = bool(sess.get("turn_started")) and progress.is_latest_request(run, sess, s)
+        if mine and cost <= room + b["reserve"] + 1e-9:
+            launch.append(s)
+            room -= cost  # below 0 once it took the reserve: nothing else fits
+        elif not queued and cost <= room + 1e-9:
             launch.append(s)
             room -= cost
         else:

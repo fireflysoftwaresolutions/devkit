@@ -186,6 +186,25 @@ class ReserveTests(unittest.TestCase):
             self.assertIsNone(verdict("Neo: fix the login timeout", "devkit:neo"))
 
 
+class ReserveOfferTests(unittest.TestCase):
+    # R4: dev crew next offers the reserved slot to the step the developer asked for in this turn, as the guard lets
+    # its launch take it; the plan's older steps stay queued
+    def test_dev_crew_next_offers_the_reserved_slot_to_the_developers_new_step(self):
+        with TempState() as st, config(max_parallel=2):
+            now = time.time()
+            pg.start("Work", plan="api=30m; docs=30m", now=now - 3600)
+            pg.assign("api", "Tank", why="test")
+            pg.assign("docs", "Ghost", why="test")
+            launch("a_tank", "devkit:tank", "Tank: api")
+            turn_started(st, now - 60)
+            pg.add_step("login fix=30m")  # what the developer asked for in this turn
+            pg.assign("login fix", "Neo", why="test")
+            r = dispatch.ready(pg.load_run("claude", "s1"))
+            self.assertEqual(([s["name"] for s in r["launch"]], [s["name"] for s in r["queued"]]),
+                             (["login fix"], ["docs"]))
+            self.assertIsNone(verdict("Neo: login fix", "devkit:neo"))
+
+
 class OrderTests(unittest.TestCase):
     def plan(self, st, spec, members):
         now = time.time()

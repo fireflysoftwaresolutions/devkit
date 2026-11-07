@@ -3495,7 +3495,9 @@ def launch_verdict(agent: str, data: dict, run: dict, now: float | None = None):
         return (f"{_n(used)} of {limit} crew slots are in use, and the last {reserve} is kept for the developer's own "
                 f"request (progress.reserve): queued plan work waits for a free slot. Launch it when a member "
                 f"finishes (dev crew next), or give it to a working member (SendMessage / send_input).")
-    return _order_verdict(run, sess, kind, label, b, cost, now) if parent == "main" else None
+    if parent != "main" or (sess.get("turn_started") and _for_the_developer(run, sess, kind, label)):
+        return None  # the developer's request of this turn is not held back by the plan's order (R4)
+    return _order_verdict(run, sess, kind, label, b, cost, now)
 
 
 def _for_the_developer(run, sess, kind: str, label: str) -> bool:
