@@ -702,6 +702,21 @@ class DriftWiringTests(unittest.TestCase):
         self.assertIn("superpowers 7.0.1 evil", line)
         self.assertEqual([hex(ord(c)) for c in line if c in hidden], [])
 
+    def test_the_accepted_line_drops_characters_that_render_as_nothing(self):
+        # Unicode's default-ignorable characters show nothing: the variation selectors (U+FE00-FE0F, U+E0100-E01EF),
+        # the combining grapheme joiner (U+034F), the Hangul fillers (U+115F, U+1160, U+3164, U+FFA0), the Khmer
+        # inherent vowels and the Mongolian variation selectors. A name in any script keeps reading as written, its
+        # accents and other marks included; an emoji loses only its presentation selector. Escapes, as above
+        hidden = "\ufe00\ufe0f\U000e0100\U000e01ef\u034f\u115f\u1160\u3164\uffa0\u17b4\u17b5\u180b\u180f"
+        self.install(developer=True)
+        f = ext.accepted_file()
+        doc = json.loads(f.read_text())
+        doc["pending"][0]["what"] = "super" + hidden + "powers \u00e9t\u00e9 \u65e5\u672c \u0416 \u2764\ufe0f x\u0301"
+        f.write_text(json.dumps(doc))
+        line = ext.accepted_line()
+        self.assertIn("superpowers \u00e9t\u00e9 \u65e5\u672c \u0416 \u2764 x\u0301", line)
+        self.assertEqual([hex(ord(c)) for c in line if c in hidden], [])
+
     def test_doctor_fails_the_lock_check_and_names_the_plugin(self):
         with mock.patch.object(ext, "homes", return_value=self.h):
             rows = {name: (ok, detail) for _, name, ok, detail, _ in ext.doctor_checks(str(self.tmp.name))}

@@ -1126,15 +1126,26 @@ def pending_acceptances(lock: Path = None) -> list:
     return [p for p in items or [] if isinstance(p, dict) and p.get("id")]
 
 
+# Unicode's Default_Ignorable_Code_Point ranges (DerivedCoreProperties.txt): characters that render as nothing, such
+# as the variation selectors, the combining grapheme joiner, the Hangul fillers and the tag characters
+_IGNORABLE = ((0x00AD, 0x00AD), (0x034F, 0x034F), (0x061C, 0x061C), (0x115F, 0x1160), (0x17B4, 0x17B5),
+              (0x180B, 0x180F), (0x200B, 0x200F), (0x202A, 0x202E), (0x2060, 0x206F), (0x3164, 0x3164),
+              (0xFE00, 0xFE0F), (0xFEFF, 0xFEFF), (0xFFA0, 0xFFA0), (0xFFF0, 0xFFF8), (0x1BCA0, 0x1BCA3),
+              (0x1D173, 0x1D17A), (0xE0000, 0xE0FFF))
+_IGNORABLE_RE = re.compile("[" + "".join(f"{re.escape(chr(a))}-{re.escape(chr(b))}" for a, b in _IGNORABLE) + "]")
+
+
 def _shown(text, width: int = 100) -> str:
     """One entry as the session line, `dev status` and the desktop notice show it, cut to about `width` characters:
-    no control characters (an escape sequence must not redraw the terminal or hide the rest) and no format
-    characters (Unicode category Cf: the bidirectional controls that reorder what the developer reads, the zero-width
-    ones that split a name invisibly, and the tag characters that carry text only a model reads) and no lone
-    surrogates (category Cs, which no program can be started with). Whitespace becomes
-    one space. The audit trail keeps the full text."""
+    no control characters (an escape sequence must not redraw the terminal or hide the rest), no format characters
+    (Unicode category Cf: the bidirectional controls that reorder what the developer reads, the zero-width ones that
+    split a name invisibly, and the tag characters that carry text only a model reads), no lone surrogates (category
+    Cs, which no program can be started with), and no other character Unicode says renders as nothing (_IGNORABLE:
+    the variation selectors, the combining grapheme joiner, the Hangul fillers). Letters, marks, digits,
+    punctuation and symbols of every script stay, so a name reads as written. Whitespace becomes one space. The audit
+    trail keeps the full text."""
     s = "".join(c for c in str(text or "") if c.isspace() or unicodedata.category(c) not in ("Cc", "Cf", "Cs"))
-    s = re.sub(r"\s+", " ", s).strip()
+    s = re.sub(r"\s+", " ", _IGNORABLE_RE.sub("", s)).strip()
     return s if len(s) <= width else s[:width - 1].rstrip() + "…"
 
 
