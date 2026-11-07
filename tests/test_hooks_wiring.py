@@ -218,6 +218,21 @@ class CrossSessionOwnershipTests(WiringCase):
         self.assertIn("Tank", v[1])
         self.assertIsNone(hooks._crew_limits("claude", self.tool("Edit", {"file_path": str(self.repo / "a.md")})))
 
+    def test_a_write_with_a_nul_in_a_file_a_member_owns_is_refused_not_failed_open(self):
+        # The Keymaker's finding: os.path raises on a NUL, so the scope check (_crew_limits) failed open on
+        # lib/a.py<NUL>x, a file another session's member owns; the guard refuses the path before that check runs
+        pg.RUNS.mkdir(parents=True, exist_ok=True)
+        pg.run_path("claude", "s2").write_text(json.dumps({
+            "goal": "Other work", "state": "running", "agent": "claude", "session": "s2", "project": "acme/api",
+            "started": time.time(), "plan": [],
+            "agents": {"a_t": {"state": "running", "persona": "Tank", "label": "Tank: api", "scope": ["lib/**"]}}}))
+        pg.session_path("claude", "s2").write_text(json.dumps({"agent": "claude", "session": "s2",
+                                                               "top": str(self.repo)}))
+        path = str(self.repo / "lib" / "a.py") + chr(0) + "x"
+        out = self.hook("guard", self.tool("Write", {"file_path": path, "content": "x"}), real_guard=True)
+        self.assertIn(guard.PATH_NUL_REASON, self.deny(out) or "")
+        self.assertEqual(self.records("guard.failopen"), [])
+
 
 class MainSessionTests(WiringCase):
     def test_an_escape_hatch_the_main_session_uses_is_recorded_and_named_at_the_next_prompt(self):

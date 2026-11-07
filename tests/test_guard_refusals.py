@@ -340,13 +340,11 @@ class TerminalLaunchersRunTheirCommand(unittest.TestCase):
 
     def test_each_launch_form_of_dev_install_is_refused(self):
         for cmd in ("screen -dm dev install", "screen -d -m -S x dev install", "screen -dmS x dev install",
-                    "screen -dm sh -c 'dev install'", "screen -S x -X stuff 'dev install\n'",
-                    "screen -S x -X stuff 'dev install\\n'", "screen -S x -X stuff 'dev install^M'",
-                    "screen -S x -X exec dev install", "tmux new -d 'dev install'",
+                    "screen -dm sh -c 'dev install'", "tmux new -d 'dev install'",
                     "tmux new-session -d -s x 'dev install --only codex'", "tmux new-session -d -s x dev install",
                     "tmux -L sock new -d 'dev install'", "tmux new-window 'dev install'",
-                    "tmux split-window -h 'dev install'", "tmux run-shell 'dev install'", "tmux run 'dev install'",
-                    "tmux send-keys -t x 'dev install' Enter", "tmux new -d \\; send-keys 'dev install' C-m",
+                    "tmux split-window -h 'dev install'", "tmux new-w 'dev install'", "tmux split 'dev install'",
+                    "tmux -2u new -d 'dev install'", "tmux kill-server \\; new -d 'dev install'",
                     "expect -c 'spawn dev install; expect eof'", "expect -c 'spawn -noecho dev install'",
                     "expect -c 'exec dev install'",
                     "osascript -e 'tell application \"Terminal\" to do script \"dev install\"'",
@@ -358,36 +356,92 @@ class TerminalLaunchersRunTheirCommand(unittest.TestCase):
             with self.subTest(cmd=cmd):
                 self.assertEqual(self.check(cmd), guard.INSTALL_REASON)
 
-    def test_screen_stuff_with_octal_escapes_is_read_as_screen_types_it(self):
-        # screen's stuff decodes \NNN octal escapes: \015 ends the line, \145 is an e
-        for cmd, reason in (("screen -S x -X stuff 'dev install\\015'", guard.INSTALL_REASON),
-                            ("screen -S x -X stuff 'd\\145v install\\012'", guard.INSTALL_REASON),
-                            ("screen -S x -X stuff 'dev ext ack\\15'", guard.EXT_REASON)):
+    # Round nine, the tech lead's decision (lesson L-fyrlq1cola2: an allowlist that fails closed): the guard no longer
+    # reads what screen and tmux type. Screen expands $VAR, ${VAR} and $:cap: in each -X word, `stuff -k` types a
+    # terminal key, and one line can be typed over several calls. Agents cannot type into a terminal session at all;
+    # the developer can
+    def test_typing_into_a_screen_session_is_refused_in_every_form(self):
+        typing = (
+            # the code reviewer's round-eight probe (probe_r8.py)
+            "screen -S x -X stuff 'install$:kh:dev ^M'", "screen -S x -X stuff 'dev installx$:kb:^M'",
+            "screen -S x -X stuff 'dev install$:kl:$:kl:$:kl:x^M'", "screen -S x -X stuff 'dev installx${BS}^M'",
+            "screen -S x -X stuff 'x^\\015'", "screen -S x -X stuff 'dev install\\b^M'",
+            "screen -S x -X stuff 'dev install\\e^M'", "screen -S x -X stuff 'dev install^M'",
+            "screen -S x -X stuff -k kh", "screen -S x -X stuff -k kb",
+            "screen -S x -X stuff 'dev '; screen -S x -X stuff 'install^M'",
+            "screen -S x -X stuff 'install'; screen -S x -X stuff -k kh; screen -S x -X stuff 'dev ^M'",
+            # round eight's editing keys, plain text, and the screen commands that start a program
+            "screen -S x -X stuff '^@dev install^M'", "screen -S x -X stuff 'dev installx^H^M'",
+            "screen -S x -X stuff 'x^Udev install^M'", "screen -S x -X stuff 'ls -la^M'",
+            "screen -S x -X exec dev install", "screen -S x -X screen dev install", "screen -X quit",
+            # -X after the options that name a session or a window, in a cluster, and -Q, which sends a command too
+            "screen -r x -X stuff 'dev install^M'", "screen -x x -X stuff x", "screen -p 0 -X stuff x",
+            "screen -S x -p 0 -X stuff x", "screen -dr x -X stuff x", "screen -dmS x -X stuff x", "screen -S x -Q stuff x",
+            # a word the shell or a runner fills in may be -X; an option screen does not have
+            "screen -S x $O stuff 'dev install^M'", "screen -S x `echo -X` stuff x", "screen -S $S stuff x",
+            "screen -dm $CMD stuff x", "screen -S x -k stuff",
+            # wrapped, nested, run by xargs, find or parallel (the words they add), and from a program's code
+            "env screen -S x -X stuff x", "timeout 5 screen -S x -X stuff x", "sudo -u me screen -S x -X stuff x",
+            "sh -c \"screen -S x -X stuff 'dev install^M'\"", "bash -c 'screen -r x -X stuff x'",
+            "echo x | xargs screen -S x -X stuff", "echo -X stuff x | xargs screen -S x",
+            "find . -exec screen -S x {} stuff x \\;", "parallel screen -S x ::: -X",
+            "python3 -c \"import subprocess; subprocess.run(['screen','-S','x','-X','stuff','x'])\"",
+            "python3 -c \"import os; os.system('screen -r x -X stuff x')\"",
+            "python3 -c \"import subprocess; o='-X'; subprocess.run(['screen','-S','x',o,'stuff','x'])\"")
+        for cmd in typing:
             with self.subTest(cmd=cmd):
-                self.assertEqual(self.check(cmd), reason)
-
-    def test_screen_stuff_reads_caret_controls_as_screen_maps_them(self):
-        # screen types ^X as X & 0x1f: ^M, ^m and ^- are a carriage return, ^J, ^j and ^* a line feed
-        for caret in "MmJj-*":
-            with self.subTest(caret=caret):
-                self.assertEqual(self.check(f"screen -S x -X stuff 'dev install^{caret}'"), guard.INSTALL_REASON)
-
-    def test_screen_stuff_with_an_editing_key_is_refused_whatever_it_types(self):
-        # readline and zle edit the line with every other control key (^@ sets a mark, ^A goes to its start, ^H and
-        # DEL delete, ^O runs it, ^K, ^U and ^W kill, ^Y yanks, ^T transposes, ESC starts a meta key), so the guard
-        # cannot read the line they make: it refuses the keys in caret, octal or raw form, and never raises on a NUL
-        for keys in ("^@dev install^M", "\\000dev install\\015", "dev install^M^@", "dev install^O",
-                     "dev install\\017", "dev^@ install^M", "dev installx^?^M", "install^Adev ^M", "dev installx^H^M",
-                     "dev install^Kx^M", "x^Udev install^M", "x ^Wdev install^M", "dev install^Y^M",
-                     "dev isntall^T^M", "ls^[^M", f"x{chr(0x15)}dev install^M", "pytest -q^C"):
-            with self.subTest(keys=keys):
-                self.assertEqual(self.check(f"screen -S x -X stuff '{keys}'"), guard.SCREEN_KEYS_REASON)
-        for cmd in ("timeout 5 screen -S x -X stuff 'dev^@ install^M'", "xargs screen -S x -X stuff 'x^U'",
-                    "sh -c \"screen -dm screen -S x -X stuff 'x^U'\""):
+                self.assertEqual(self.check(cmd), guard.TERMINAL_TYPING_REASON)
+        # listing, attaching, and a session that starts a command (read by the launcher rule) stay open
+        for cmd in ("screen -ls", "screen -list", "screen -wipe", "screen -r x", "screen -S x", "screen -dmS srv",
+                    "screen -dmS srv python3 -X dev -m http.server"):
             with self.subTest(cmd=cmd):
-                self.assertEqual(self.check(cmd), guard.SCREEN_KEYS_REASON)
-        # a tab is typed as it is, and a carriage return or line feed ends the line
-        self.assertIsNone(self.check("screen -S x -X stuff 'ls^I-la^M'"))
+                self.assertIsNone(self.check(cmd))
+
+    def test_tmux_commands_that_type_or_carry_a_command_are_refused_in_every_form(self):
+        typing = (
+            # the commands that type into a pane, in any form
+            "tmux send-keys -t x 'dev install' Enter", "tmux send-keys -t x C-a 'dev install' Enter",
+            "tmux send-keys -t x 'install' C-a 'dev ' Enter", "tmux send-keys -H -t x 64 65 76 0d",
+            "tmux send -t x ls Enter", "tmux send-k -t x x", "tmux send-prefix -t x", "tmux paste-buffer -t x",
+            "tmux pasteb -t x", "tmux set-buffer 'dev install'", "tmux setb x", "tmux load-buffer /tmp/x",
+            "tmux loadb -", "tmux pipe-pane -I -t x 'echo dev install'", "tmux pipep -t x cat",
+            "tmux command-prompt -I 'send-keys x'",
+            # the commands and options that carry a command
+            "tmux run-shell 'dev install'", "tmux run ls", "tmux run -b ls", "tmux run -C 'send-keys x'",
+            "tmux if-shell true 'run ls'", "tmux if -F 1 'send-keys x'", "tmux set-hook -g after-new-window 'run ls'",
+            "tmux source-file /tmp/x.conf", "tmux source /tmp/x.conf", "tmux set -g default-command 'dev install'",
+            "tmux set-option -g default-shell /tmp/x.sh", "tmux set -g default-c 'dev install'",
+            "tmux set -g after-new-window 'run ls'", "tmux set -s 'command-alias[9]' 'zz=send-keys'",
+            "tmux set -g lock-command 'dev install'", "tmux bind-key -n Enter run-shell 'dev install'",
+            "tmux confirm-before 'run ls'", "tmux display -p '#(dev install)'", "tmux set -g status-right '#(id)'",
+            # in a command list, however the `;` is written
+            "tmux new -d \\; send-keys 'dev install' C-m", "tmux new -d ';' send-keys x C-m",
+            "tmux new -d 'sh;' send-keys x C-m", "tmux new -d \\; set -g default-command 'dev install' \\; neww",
+            "tmux ls \\; if true 'run ls'",
+            # a word the shell or a runner fills in, a command tmux may not have, tmux run by xargs or parallel
+            "tmux $C -t x x", "tmux kill-session -t $S", "tmux frobnicate", "echo x | xargs tmux kill-session -t",
+            "parallel tmux kill-session -t ::: x",
+            # wrapped, nested, and from a program's code
+            "env tmux send-keys x", "timeout 5 tmux send-keys x", "sh -c \"tmux send-keys -t x 'dev install' Enter\"",
+            "python3 -c \"import subprocess; subprocess.run(['tmux','send-keys','-t','x','ls -la','Enter'])\"",
+            "python3 -c \"import subprocess; subprocess.run(['tmux','new','-d',';','send-keys','x'])\"",
+            "python3 -c \"import subprocess; k='send-keys'; subprocess.run(['tmux',k,'-t','x','x'])\"")
+        for cmd in typing:
+            with self.subTest(cmd=cmd):
+                self.assertEqual(self.check(cmd), guard.TERMINAL_TYPING_REASON)
+        # the commands that list, attach, read, or start a command (read by the launcher rule) stay open
+        for cmd in ("tmux ls", "tmux new -d -s x", "tmux has -t x", "tmux kill-session -t x",
+                    "tmux ls -F '#{session_name}'", "tmux capture-pane -p -t x", "tmux set -g mouse on",
+                    "tmux run -d 1", "tmux new -d -s x \\; split-window 'pytest -q'", "tmux new -d 'echo $HOME'"):
+            with self.subTest(cmd=cmd):
+                self.assertIsNone(self.check(cmd))
+
+    def test_a_configuration_file_for_a_terminal_session_is_refused(self):
+        # its commands (stuff, send-keys, run-shell) run when the session starts, and the guard does not read them
+        for cmd in ("tmux -f /tmp/x.conf new -d", "tmux -uf /tmp/x.conf new -d", "screen -c /tmp/rc -dm sh",
+                    "screen -dmc /tmp/rc sh"):
+            with self.subTest(cmd=cmd):
+                self.assertEqual(self.check(cmd), guard.TERMINAL_TYPING_REASON)
 
     def test_the_developers_acknowledgement_through_a_launcher_is_refused(self):
         for cmd in ("screen -dm dev ext ack", "tmux new -d 'dev ext ack'", "expect -c 'spawn dev ext ack'",
@@ -434,16 +488,52 @@ class NulCharactersFailClosed(unittest.TestCase):
             with self.subTest(cmd=cmd):
                 self.assertEqual(self.check(cmd), guard.NUL_REASON)
 
-    def test_a_file_path_is_read_up_to_its_nul_as_the_system_reads_it(self):
-        # the system reads a path as a C string, up to its first NUL: a protected file stays protected
+    def test_a_file_tools_path_with_a_nul_character_is_refused(self):
+        # the system reads a path up to its first NUL, and os.path raises on one: a rule after the guard (the crew's
+        # scopes in hooks._crew_limits) would raise and let the call through, so the guard refuses the path itself,
+        # in a file tool's file_path or notebook_path and an MCP tool's path keys, protected or not
         nul, lock = chr(0), str(core.STATE / "ext-lock.json")
         for tool, inp in (("Write", {"file_path": f"{lock}{nul}x", "content": "{}"}),
-                          ("Edit", {"file_path": f"{lock}{nul}", "old_string": "a", "new_string": "b"})):
-            with self.subTest(tool=tool):
-                v = guard.check(tool, inp, self.cwd, "claude")
-                self.assertEqual((v or ("allow",))[0], "deny")
-        self.assertIsNone(guard.check("Write", {"file_path": f"{self.cwd}/notes.md{nul}x", "content": "x"}, self.cwd,
-                                      "claude"))
+                          ("Edit", {"file_path": f"{lock}{nul}", "old_string": "a", "new_string": "b"}),
+                          ("Write", {"file_path": f"{self.cwd}/notes.md{nul}x", "content": "x"}),
+                          ("NotebookEdit", {"notebook_path": f"{self.cwd}/n.ipynb{nul}", "new_source": "x"}),
+                          ("mcp__chrome-devtools__take_screenshot", {"filePath": f"{self.cwd}/x{nul}.png"})):
+            with self.subTest(tool=tool, path=ascii([v for k, v in inp.items() if "path" in k.lower()])):
+                self.assertEqual(guard.check(tool, inp, self.cwd, "claude"), ("deny", guard.PATH_NUL_REASON))
+        self.assertIsNone(guard.check("Write", {"file_path": f"{self.cwd}/notes.md", "content": nul}, self.cwd,
+                                      "claude"))  # a NUL in the content is data
+
+
+class CommandLinesAreReadAsBashReadsThem(unittest.TestCase):
+    # Round nine: a backslash outside single quotes escapes the next character and a backslash-newline is a line
+    # continuation bash removes; a comment ends at its newline; a quoted or escaped `;` is a word bash passes on
+    # (tmux's command lists, find -exec … \;), while an operator `;` ends a command
+
+    setUp = HookEventsAreTheHarnesss.setUp
+    check = HookEventsAreTheHarnesss.check
+
+    def test_a_line_continuation_joins_the_words_bash_joins(self):
+        for cmd in ("dev \\\ninstall", "dev inst\\\nall", 'dev "inst\\\nall"'):
+            with self.subTest(cmd=cmd):
+                self.assertEqual(self.check(cmd), guard.INSTALL_REASON)
+        self.assertIn("force-push", self.check("git push --fo\\\nrce origin main") or "")
+        self.assertIn("Agents may not change or delete it", self.check("rm -rf \\\n~") or "")
+
+    def test_a_newline_after_an_escaped_quote_or_a_comment_ends_the_command(self):
+        for cmd in ("echo \\'\ndev install", 'echo \\"\ndev install', "ls # it's here\ndev install",
+                    "ls # a comment ends at its newline \\\ndev install",
+                    "echo a\\ #; dev install", "echo a#; dev install", "echo ${#x}; dev install"):
+            with self.subTest(cmd=cmd):
+                self.assertEqual(self.check(cmd), guard.INSTALL_REASON)
+
+    def test_a_quoted_or_escaped_semicolon_is_a_word(self):
+        self.assertEqual(guard.split_commands("tmux new -d \\; send-keys x"),
+                         [(["tmux", "new", "-d", ";", "send-keys", "x"], [])])
+        self.assertEqual(guard.split_commands("echo ';' \";\" 'a;b' x\\;; pwd"),
+                         [(["echo", ";", ";", "a;b", "x;"], []), (["pwd"], [])])
+        self.assertEqual(guard.split_commands("ls;pwd # x; y"), [(["ls"], []), (["pwd"], [])])
+        # so find's second -exec is read too
+        self.assertEqual(self.check("find . -name x -exec echo {} \\; -exec dev install \\;"), guard.INSTALL_REASON)
 
 
 class InstallFromCodeIsTheDevelopers(unittest.TestCase):

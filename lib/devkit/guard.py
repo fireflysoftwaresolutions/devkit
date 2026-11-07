@@ -289,22 +289,55 @@ def check_write_path(path, cwd, agent):
 # --------------------------------------------------------------------------- bash parsing
 
 def _newlines_to_semicolons(cmd: str) -> str:
-    out, q = [], None
-    i = 0
-    while i < len(cmd):
+    """`cmd` as bash reads its lines: a newline outside quotes ends a command (a `;`), a backslash outside single
+    quotes escapes the next character, a backslash-newline is a line continuation bash removes (`dev \\<newline>
+    install` runs `dev install`), and a `#` that starts a word outside quotes starts a comment, dropped up to its
+    newline (an apostrophe in it opens no quote)."""
+    out, q, i, n, starts = [], None, 0, len(cmd), True  # starts: a word may start here (no escaped character before)
+    while i < n:
         ch = cmd[i]
-        if q:
-            if ch == "\\" and q == '"' and i + 1 < len(cmd):
+        if ch == "\\" and q != "'" and i + 1 < n:
+            if cmd[i + 1] != "\n":
                 out.append(cmd[i:i + 2])
-                i += 2
-                continue
+                starts = False  # `a\ #` is one word: its `#` starts no comment
+            i += 2
+            continue
+        word_start, starts = starts, ch in " \t\n;&|()"
+        if q:
             if ch == q:
                 q = None
         elif ch in ("'", '"'):
             q = ch
+        elif ch == "#" and word_start:
+            end = cmd.find("\n", i)
+            i = n if end < 0 else end
+            continue
         elif ch == "\n":
             ch = ";"
         out.append(ch)
+        i += 1
+    return "".join(out)
+
+
+_LIT_SEMI = "\ue01b"  # stands for a `;` the shell passes on as a word (quoted or escaped) while a line is split
+
+
+def _literal_semicolons(text: str) -> str:
+    """`text` (a line _newlines_to_semicolons made) with each quoted or escaped `;` replaced by _LIT_SEMI, so it stays
+    a word, as bash passes it on: tmux's `\\;` command lists, `find … -exec … \\;`. Quotes and backslashes are read
+    as the tokenizer (shlex, posix) reads them; an operator `;` still ends a command."""
+    out, q, i, n = [], None, 0, len(text)
+    while i < n:
+        c = text[i]
+        if c == "\\" and i + 1 < n and (q is None or (q == '"' and text[i + 1] in '"\\')):
+            out.append(c + (_LIT_SEMI if text[i + 1] == ";" else text[i + 1]))
+            i += 2
+            continue
+        if q is None and c in "'\"":
+            q = c
+        elif c == q:
+            q = None
+        out.append(_LIT_SEMI if c == ";" and q else c)
         i += 1
     return "".join(out)
 
@@ -389,14 +422,16 @@ def strip_heredocs(cmd: str) -> str:
 def split_commands(cmd: str, ops: bool = False):
     """-> list of (argv, redirect_targets). None when the command cannot be tokenised. With `ops`, each entry is
     (argv, redirect_targets, the operator after the segment ('|', '&&', ';', … or ''), its here-strings (<<< …))."""
-    cmd = strip_heredocs(cmd)
+    line = _newlines_to_semicolons(strip_heredocs(cmd))
+    marked = ";" in line and _LIT_SEMI not in line  # a quoted or escaped `;` stays a word (_literal_semicolons)
     try:
-        lex = shlex.shlex(_newlines_to_semicolons(cmd), posix=True, punctuation_chars=";&|()<>")
+        lex = shlex.shlex(_literal_semicolons(line) if marked else line, posix=True, punctuation_chars=";&|()<>")
         lex.whitespace_split = True
         lex.commenters = ""
         tokens = list(lex)
     except ValueError:
         return None
+    words = [t.replace(_LIT_SEMI, ";") for t in tokens] if marked else tokens
     segs, argv, redirs, expect_redir, here, herestr = [], [], [], False, [], False
     for k, t in enumerate(tokens):
         nxt = tokens[k + 1] if k + 1 < len(tokens) else ""
@@ -421,12 +456,12 @@ def split_commands(cmd: str, ops: bool = False):
             continue
         if expect_redir is not False:
             if expect_redir:
-                redirs.append(t)
+                redirs.append(words[k])
             elif herestr:
-                here.append(t)
+                here.append(words[k])
             expect_redir, herestr = False, False
             continue
-        argv.append(t)
+        argv.append(words[k])
     if argv or redirs:
         segs.append((argv, redirs, "", here) if ops else (argv, redirs))
     return segs
@@ -1895,16 +1930,21 @@ _TERMINAL_APPS = re.compile(r"(?:^|/)(?:terminal|iterm2?|iterm 2|warp|ghostty|al
                             r"(?:\.app)?/?$|^com\.(?:apple\.terminal|googlecode\.iterm2|mitchellh\.ghostty)$|"
                             r"^dev\.warp\.", re.I)
 _OPEN_VALUES = frozenset({"-a", "-b", "--env", "--stdin", "--stdout", "--stderr", "-u", "--url", "-s", "--arch"})
-SCREEN_KEYS_REASON = ("`screen -X stuff` types keys into a terminal that looks like the developer's (F1-R4, spec C10, "
-                      "K1), and a control key other than tab, a carriage return (^M) or a line feed (^J) edits the "
-                      "line instead of typing it: ^@ sets a mark, ^A goes to its start, ^H and DEL delete, ^O runs "
-                      "it, ^K, ^U and ^W kill, ^Y yanks, ESC starts a meta key. The guard cannot read the line those "
-                      "keys make, so it refuses them in every form (^X, \\NNN or the character itself). Run the "
-                      "command through the Bash tool, where the guard reads it, or stuff plain text that ends in ^M. "
-                      f"{_TAIL}")
+TERMINAL_TYPING_REASON = (
+    "Agents cannot type into a terminal session; the developer can. What runs in a screen or tmux session looks like "
+    "the developer's own terminal to devkit (F1-R4, spec C10, K1), and the guard does not read what is typed there, "
+    "so it refuses screen's -X and -Q (stuff and every other command sent to a session), tmux's send-keys, "
+    "send-prefix, paste-buffer, set-buffer, load-buffer, pipe-pane and command-prompt, the tmux commands and options "
+    "that carry a command (run-shell, if-shell, set-hook, source-file, bind-key, a hook, default-command, "
+    "default-shell, a #() format), a configuration file (screen -c, tmux -f), a screen or tmux word the shell or a "
+    "runner fills in, and a tmux command it does not know. Run the command through the Bash tool, where the guard "
+    "reads it, or start it in a session of its own: `screen -dm <command>`, `tmux new -d '<command>'`. "
+    f"{_TAIL}")
 NUL_REASON = ("This command holds a NUL character, which shells read in different ways (bash ends the line there, "
               "zsh keeps it in the word), so the guard cannot tell what runs. Write the command without it; to "
               f"produce a NUL byte, use `printf '\\0'`. {_TAIL}")
+PATH_NUL_REASON = ("This path holds a NUL character. The system reads a path up to its first NUL, so the file written "
+                   "would not be the one named, and the guard's rules cannot read the path. Write the path without it.")
 
 
 def terminal_open_refusal(argv) -> bool:
@@ -2441,8 +2481,8 @@ class _Shell:
             return deny(EXT_REASON)
         if terminal_open_refusal(argv):
             return deny(TERMINAL_REASON)
-        if screen_keys_refusal(argv):
-            return deny(SCREEN_KEYS_REASON)
+        if terminal_typing_refusal(argv):
+            return deny(TERMINAL_TYPING_REASON)
         if _INTERP.match(name) and _dev_args(argv) is None:
             why = code_session_refusal(argv, cwd, self.bodies)
             if why:
@@ -2594,6 +2634,8 @@ class _Shell:
         i, takes = 0, {"-I", "-n", "-P", "-L", "-d", "-E", "-s", "-a", "-J", "-R", "-S"}
         while i < len(args) and args[i].startswith("-"):
             i += 2 if args[i] in takes else 1
+        if terminal_typing_refusal(_unwrap(args[i:], more=True), more=True):  # the words it adds may type
+            return deny(TERMINAL_TYPING_REASON)
         names, inner = _env_split(args[i:])
         if not inner:
             return None
@@ -2691,10 +2733,11 @@ class _Shell:
                     f"open it without 'w' or 'a' and print it. {_TAIL}")
 
 
-def _unwrap(argv):
+def _unwrap(argv, more: bool = False):
     """The command a segment really runs: without env/sudo/nohup prefixes, shell keywords (`then`, `do`, `{`, `!`),
     `timeout N`, `uv run`, the package runners (npx, npm exec|x, bun x, yarn exec, `pnpm|yarn <claude|codex>`: F3 of
-    re-review four) and the wrappers."""
+    re-review four) and the wrappers. A screen or tmux call that terminal_typing_refusal refuses is returned as it is,
+    for the walker to refuse; `more`: a runner (xargs) adds words after these."""
     while True:
         argv = _strip_prefix(argv)
         if not argv:
@@ -2715,14 +2758,11 @@ def _unwrap(argv):
             argv = _runner_command(argv[1:])  # `pnpm claude …` runs the package's bin, or the PATH's
         elif n in _WRAPPERS:
             argv = _wrapped(n, argv[1:])
-        elif n == "screen":
-            if screen_keys_refusal(argv):  # keys the guard cannot read: the screen call itself is what segment refuses
+        elif n in ("screen", "tmux"):
+            refused, run = (_screen_parse if n == "screen" else _tmux_parse)([str(a) for a in argv[1:]], more)
+            if refused:  # it types into a session: the call itself is what the walker refuses
                 return argv
-            argv = _screen_command(argv[1:])
-        elif n == "tmux":
-            argv = _tmux_command(argv[1:])
-        elif argv[0] in _TMUX_RUNS:  # a command after tmux's `\;` or `';'`, which the tokenizer reads as a new segment
-            argv = _tmux_command(argv)
+            argv = run
         elif n == "expect":
             argv = _expect_command(argv[1:])
         elif n == "yarn" and argv[1:3] == ["workspaces", "foreach"]:  # runs `yarn <command>` in each workspace
@@ -2827,114 +2867,243 @@ def _wrapped(n, args):
 
 
 # F1-R4 part 2: screen, tmux and expect start a command in a terminal of their own, which is re-parented to launchd
-# and has a pty, so it passes set_by_developer(); the guard reads what each one runs, as a shell line where the tool
-# hands it to one
-_SCREEN_VALUES = frozenset({"-c", "-e", "-h", "-p", "-S", "-t", "-T", "-s", "-Logfile"})
-# the keys `-X stuff` types end a line at a carriage return, a line feed, \n or \r; every other control key but tab
-# edits the line (screen_keys_refusal refuses them) and ends a line here too, so no NUL or other control reaches a
-# rule that reads the line
-_SCREEN_EOL = re.compile(r"\\[nr]|[\x00-\x08\x0a-\x1f\x7f]")
-_SCREEN_EDIT_KEYS = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]")  # every control key but tab, LF and CR
-_SCREEN_OCTAL = re.compile(r"\\([0-7]{1,3})")  # `stuff 'd\145v install\015'` types `dev install` and Enter
-_SCREEN_CARET = re.compile(r"\^([!-~])")  # ^X types control-X: ^? is DEL, any other X is X & 0x1f
+# and has a pty, so it passes set_by_developer(); the guard reads the command each one starts, as a shell line where
+# the tool hands it to one. Round nine (the tech lead's decision, lesson L-fyrlq1cola2): what screen and tmux would
+# type into a session is not read but refused, by an allowlist that fails closed (terminal_typing_refusal). Screen
+# expands $VAR, ${VAR} and $:cap: in each -X word and `stuff -k` types a terminal key, so no reading of it held.
+_SCREEN_FLAGS = frozenset("46aAdDfiLlmnOqrRUvx")  # screen's options without a value (-dm, -fn, -ln, -U, …)
+_SCREEN_VALUES = frozenset("ehpsStT")  # with one: the rest of the word, or the next word
+_SCREEN_SESSION = frozenset("dDrRx")  # last in its word, the next word may name a session (-r x, -x x, -d x)
 
 
-def _screen_keys(text: str) -> str:
-    """The keys `screen -X stuff '<text>'` types: \\NNN octal escapes, then ^X controls as screen maps them, so ^M,
-    ^m and ^- are a carriage return and ^J, ^j and ^* a line feed."""
-    text = _SCREEN_OCTAL.sub(lambda m: chr(int(m.group(1), 8) & 0xFF), text)
-    return _SCREEN_CARET.sub(lambda m: chr(0x7F) if m.group(1) == "?" else chr(ord(m.group(1)) & 0x1F), text)
-
-
-def _screen_command(args) -> list:
-    """What `screen [options] [command …]` runs: the command after its options; with `-X`, the screen command it
-    sends to a session (`stuff '<keys>'` types a line, `exec|screen <command>` starts one). [] when it runs none."""
-    kind, what = _screen_parse(args)
-    return ["sh", "-c", _SCREEN_EOL.sub("\n", what)] if kind == "keys" else what
-
-
-def screen_keys_refusal(argv) -> bool:
-    """`screen -X stuff '<keys>'` with a control key other than tab, CR or LF (^X, \\NNN or the character itself):
-    readline and zle edit the line with it (^@ sets a mark, ^A goes to its start, ^H and DEL delete, ^O runs it), so
-    the guard cannot read the line the keys make and refuses them (fails closed)."""
-    if not argv or os.path.basename(str(argv[0])) != "screen":
-        return False
-    kind, keys = _screen_parse([str(a) for a in argv[1:]])
-    return kind == "keys" and bool(_SCREEN_EDIT_KEYS.search(keys))
-
-
-def _screen_parse(args) -> tuple:
-    """What a screen call does: ("keys", <the keys `-X stuff` types, decoded as screen types them>) or ("run",
-    <the command it starts, [] for none>)."""
-    i = 0
-    while i < len(args) and args[i].startswith("-") and args[i] != "-":
+def _screen_parse(args, more: bool = False) -> tuple:
+    """-> (refused, command): whether a screen call may send a command to a session or holds what the guard does not
+    read, and the command it starts ([] for none). Its options are read as screen reads them: letters in one word,
+    a value as the rest of the word or the next word, and an optional session name after -d, -D, -r, -R, -x, -ls,
+    -list and -wipe. Refused: -X and -Q (they send a screen command: stuff, exec, …), -c (a configuration file), a
+    letter or long option screen does not have, a word the shell or a runner fills in (it may be -X), a session name
+    followed by more words (the command may start at either), and with `more` (xargs adds words) a call whose
+    command the words it adds could still change."""
+    i, n = 0, len(args)
+    while i < n:
         a = args[i]
+        if _shell_made(a):
+            return True, []
         if a == "--":
             i += 1
             break
-        if a == "-X" or (a.startswith("-") and not a.startswith("--") and a.endswith("X")):
-            sent = args[i + 1:]
-            verb, rest = (sent[0] if sent else ""), sent[1:]
-            if verb == "stuff":
-                return ("keys", _screen_keys(" ".join(rest))) if rest else ("run", [])
-            if verb == "exec":  # exec [fdpat] command …: the fd pattern is made of `.`, `!` and `|`
-                return "run", (rest[1:] if rest and set(rest[0]) <= set(".!|") else rest)
-            return _screen_parse(rest) if verb == "screen" else ("run", [])
-        last = a[-1:] if not a.startswith("--") else ""
-        i += 2 if a in _SCREEN_VALUES or ("-" + last) in _SCREEN_VALUES and len(a) > 2 and a != "-ls" else 1
-    return "run", list(args[i:])
+        if not a.startswith("-") or a == "-":
+            break
+        i += 1
+        if a == "-Logfile":
+            i += 1
+            continue
+        if a.startswith("--"):
+            if a in ("--help", "--version"):
+                continue
+            return True, []
+        session = a in ("-ls", "-list", "-wipe")
+        for k, c in enumerate(a[1:] if not session else "", 1):
+            if c in _SCREEN_VALUES:
+                if k == len(a) - 1:
+                    if i < n and _shell_made(args[i]):
+                        return True, []
+                    i += 1
+                break
+            if c not in _SCREEN_FLAGS:
+                return True, []
+            session = c in _SCREEN_SESSION and k == len(a) - 1
+        if session and i < n and not args[i].startswith("-"):
+            if _shell_made(args[i]) or i + 1 < n:
+                return True, []
+            i += 1
+    command = list(args[i:])
+    if command and _shell_made(command[0]):
+        return True, []
+    return (more and not command), command
 
 
-_TMUX_GLOBAL_VALUES = frozenset({"-f", "-L", "-S", "-T"})
-_TMUX_RUNS = {  # a tmux command that runs a shell command or types keys -> its options that take a value
-    "new-session": {"-c", "-e", "-F", "-f", "-n", "-s", "-t", "-x", "-y"},
-    "new-window": {"-c", "-e", "-F", "-n", "-t"},
-    "split-window": {"-c", "-e", "-F", "-l", "-p", "-t"},
-    "respawn-pane": {"-c", "-e", "-t"}, "respawn-window": {"-c", "-e", "-t"},
-    "run-shell": {"-c", "-d", "-t"}, "send-keys": {"-N", "-t"},
-    "pipe-pane": {"-t"}, "display-popup": {"-c", "-d", "-e", "-h", "-s", "-S", "-t", "-T", "-w", "-x", "-y", "-b"},
+_TMUX_COMMANDS = {  # every tmux command (3.5) -> its alias; tmux also takes a unique prefix of the name
+    "attach-session": "attach", "bind-key": "bind", "break-pane": "breakp", "capture-pane": "capturep",
+    "choose-buffer": "", "choose-client": "", "choose-tree": "", "clear-history": "clearhist",
+    "clear-prompt-history": "clearphist", "clock-mode": "", "command-prompt": "", "confirm-before": "confirm",
+    "copy-mode": "", "customize-mode": "", "delete-buffer": "deleteb", "detach-client": "detach",
+    "display-menu": "menu", "display-message": "display", "display-panes": "displayp", "display-popup": "popup",
+    "find-window": "findw", "has-session": "has", "if-shell": "if", "join-pane": "joinp", "kill-pane": "killp",
+    "kill-server": "", "kill-session": "", "kill-window": "killw", "last-pane": "lastp", "last-window": "last",
+    "link-window": "linkw", "list-buffers": "lsb", "list-clients": "lsc", "list-commands": "lscm",
+    "list-keys": "lsk", "list-panes": "lsp", "list-sessions": "ls", "list-windows": "lsw", "load-buffer": "loadb",
+    "lock-client": "lockc", "lock-server": "lock", "lock-session": "locks", "move-pane": "movep",
+    "move-window": "movew", "new-session": "new", "new-window": "neww", "next-layout": "nextl",
+    "next-window": "next", "paste-buffer": "pasteb", "pipe-pane": "pipep", "previous-layout": "prevl",
+    "previous-window": "prev", "refresh-client": "refresh", "rename-session": "rename", "rename-window": "renamew",
+    "resize-pane": "resizep", "resize-window": "resizew", "respawn-pane": "respawnp", "respawn-window": "respawnw",
+    "rotate-window": "rotatew", "run-shell": "run", "save-buffer": "saveb", "select-layout": "selectl",
+    "select-pane": "selectp", "select-window": "selectw", "send-keys": "send", "send-prefix": "",
+    "server-access": "", "set-buffer": "setb", "set-environment": "setenv", "set-hook": "", "set-option": "set",
+    "set-window-option": "setw", "show-buffer": "showb", "show-environment": "showenv", "show-hooks": "",
+    "show-messages": "showmsgs", "show-options": "show", "show-prompt-history": "showphist",
+    "show-window-options": "showw", "source-file": "source", "split-window": "splitw", "start-server": "start",
+    "suspend-client": "suspendc", "swap-pane": "swapp", "swap-window": "swapw", "switch-client": "switchc",
+    "unbind-key": "unbind", "unlink-window": "unlinkw", "wait-for": "wait",
 }
-for _short, _long in (("new", "new-session"), ("neww", "new-window"), ("splitw", "split-window"),
-                      ("respawnp", "respawn-pane"), ("respawnw", "respawn-window"), ("run", "run-shell"),
-                      ("send", "send-keys"), ("pipep", "pipe-pane"), ("popup", "display-popup")):
-    _TMUX_RUNS[_short] = _TMUX_RUNS[_long]
-_TMUX_KEYS = re.compile(r"^(?:Enter|C-[mjM]|KPEnter|Escape|Space|Tab|BSpace)$")
+_TMUX_ALIASES = {**{a: c for c, a in _TMUX_COMMANDS.items() if a}, "split-pane": "split-window",
+                 "splitp": "split-window", "server-info": "show-messages", "info": "show-messages",
+                 "choose-window": "choose-tree", "choose-session": "choose-tree"}  # and tmux's default command-alias
+_TMUX_TYPES = frozenset({"send-keys", "send-prefix", "paste-buffer", "set-buffer", "load-buffer", "pipe-pane",
+                         "command-prompt"})
+_TMUX_CARRIES = {  # a command that runs the command (or the file of commands) it carries -> its options that take a
+    # value, and how many words it takes before that command
+    "run-shell": ("cdt", 0), "if-shell": ("t", 0), "source-file": ("t", 0), "set-hook": ("t", 1),
+    "bind-key": ("NT", 1), "confirm-before": ("cpt", 0), "display-menu": ("bcCHsStTxy", 0),
+    "display-panes": ("dt", 0), "choose-tree": ("FfKOt", 0), "choose-buffer": ("FfKOt", 0),
+    "choose-client": ("FfKOt", 0),
+}
+_TMUX_STARTS = {  # a command that starts a shell command (read as one) -> its options that take a value
+    "new-session": "ceFfnstxy", "new-window": "ceFnt", "split-window": "ceFlpt", "respawn-pane": "cet",
+    "respawn-window": "cet", "display-popup": "bcdehsStTwxy",
+}
+_TMUX_SETS = frozenset({"set-option", "set-window-option"})
+# the options whose value is a command tmux runs (a hook is one too), matched as tmux matches a name: by a prefix
+_TMUX_RUN_OPTIONS = ("default-command", "default-shell", "command-alias", "copy-command", "editor", "lock-command",
+                     "after-", "alert-activity", "alert-bell", "alert-silence", "client-active", "client-attached",
+                     "client-detached", "client-focus-in", "client-focus-out", "client-resized",
+                     "client-session-changed", "client-light-theme", "client-dark-theme", "command-error",
+                     "pane-died", "pane-exited", "pane-focus-in", "pane-focus-out", "pane-mode-changed",
+                     "pane-set-clipboard", "pane-title-changed", "session-closed", "session-created",
+                     "session-renamed", "session-window-changed", "window-layout-changed", "window-linked",
+                     "window-pane-changed", "window-renamed", "window-resized", "window-unlinked")
+_TMUX_FORMAT = re.compile(r"#\{[^{}]*\}")  # a format, whose braces and ? the shell leaves alone in a quoted word
+_RUNNER_FILLS = re.compile(r"(?<!#)\{\d*(?:\.|//?|/\.|#|%)?\}")  # {} and parallel's {.} {/} {#} {%} {1} …
 
 
-def _tmux_command(args) -> list:
-    """What a tmux call runs, as `sh -c <line>`: the shell command of new-session, new-window, split-window,
-    respawn-*, run-shell, pipe-pane and display-popup, and the words send-keys types, for each command of a `;`
-    list; `tmux -c <line>` runs the line in a shell too. [] when it runs none (`tmux ls`, `tmux attach`)."""
-    i, lines = 0, []
-    while i < len(args) and args[i].startswith("-") and args[i] != "--":
+def _tmux_name(word):
+    """The tmux command `word` names, as tmux finds it: an alias, the full name, or a unique prefix of one; None for a
+    word that names no command or more than one."""
+    if word in _TMUX_ALIASES:
+        return _TMUX_ALIASES[word]
+    if word in _TMUX_COMMANDS:
+        return word
+    hits = [c for c in _TMUX_COMMANDS if word and c.startswith(word)]
+    return hits[0] if len(hits) == 1 else None
+
+
+def _tmux_unread(word) -> bool:
+    """A tmux word the guard cannot read: `#(…)` (a format that runs a shell command), or, in a word without
+    whitespace (it may be unquoted), `$` or a backtick, a glob, a brace expansion or a runner's {}: the shell or the
+    runner may make it a `;` and a command. A format's own braces and ? are left alone."""
+    w = str(word)
+    if "#(" in w:
+        return True
+    if any(c.isspace() for c in w):
+        return False
+    while _TMUX_FORMAT.search(w):
+        w = _TMUX_FORMAT.sub("", w)
+    return "$" in w or "`" in w or bool(set(w) & set("*?[")) or bool(_RUNNER_FILLS.search(w)) or \
+        bool(re.search(r"\{[^{}]*(?:,|\.\.)[^{}]*\}", w))
+
+
+def _tmux_args(words, values) -> tuple:
+    """-> (the option letters, the words after the options) of one tmux command, read as tmux reads them: letters in
+    one word, a value as the rest of the word or the next word, options until `--` or the first other word."""
+    letters, k = set(), 0
+    while k < len(words) and words[k].startswith("-") and len(words[k]) > 1:
+        w = words[k]
+        k += 1
+        if w == "--":
+            break
+        for j, c in enumerate(w[1:], 1):
+            letters.add(c)
+            if c in values:
+                k += 0 if j < len(w) - 1 else 1
+                break
+    return letters, list(words[k:])
+
+
+def _tmux_one(cmd) -> tuple:
+    """-> (refused, line) for one tmux command: refused when it types into a pane, carries a command, sets an option
+    whose value is one, is a command the guard does not know, or holds a word it cannot read; the shell line of a
+    command it starts (new-session, new-window, split-window, respawn-*, display-popup), else None."""
+    if not cmd:
+        return False, None
+    name = _tmux_name(cmd[0])
+    if name is None or name in _TMUX_TYPES or any(_tmux_unread(w) for w in cmd):
+        return True, None
+    if name in _TMUX_CARRIES:
+        values, names = _TMUX_CARRIES[name]
+        letters, pos = _tmux_args(cmd[1:], values)
+        return len(pos) > names or (name == "set-hook" and "R" in letters), None
+    if name in _TMUX_SETS:
+        option = (_tmux_args(cmd[1:], "t")[1] or [""])[0].split("[", 1)[0]
+        return bool(option) and any(o.startswith(option) or option.startswith(o) for o in _TMUX_RUN_OPTIONS), None
+    if name in _TMUX_STARTS:
+        pos = _tmux_args(cmd[1:], _TMUX_STARTS[name])[1]
+        return False, " ".join(pos) or None
+    return False, None
+
+
+def _tmux_parse(args, more: bool = False) -> tuple:
+    """-> (refused, command): whether a tmux call types into a pane or runs what the guard does not read
+    (_tmux_one, for each command of its `;` list; a configuration file, -f; with `more`, the words xargs adds, which
+    may start a command after a `;`), and what it starts, as `sh -c <line>`: the shell command of each command
+    that starts one, or the line of `tmux -c <line>`. [] when it starts none (`tmux ls`, `tmux attach`)."""
+    i, n = 0, len(args)
+    while i < n and args[i].startswith("-") and args[i] != "-":
         a = args[i]
-        if a == "-c" and i + 1 < len(args):
-            return ["sh", "-c", args[i + 1]]
-        i += 2 if a in _TMUX_GLOBAL_VALUES else 1
-    rest, cmds, cur = args[i + (1 if args[i:i + 1] == ["--"] else 0):], [], []
-    for w in rest:
-        if w in (";", "\\;"):
-            cmds.append(cur)
-            cur = []
-        elif w.endswith("\\;") or (w.endswith(";") and len(w) > 1):
-            cur.append(w.rstrip(";").rstrip("\\"))
+        i += 1
+        if a == "--":
+            break
+        if _tmux_unread(a):
+            return True, []
+        for k, c in enumerate(a[1:], 1):
+            if c in "cfLST":
+                value = a[k + 1:]
+                if not value:
+                    value, i = (args[i] if i < n else ""), i + 1
+                if c == "f" or _tmux_unread(value):
+                    return True, []
+                if c == "c":  # tmux -c runs the line in a shell, as a login shell does, and no tmux command
+                    return False, ["sh", "-c", value]
+                break
+            if c not in "2CDdlNquUvV":
+                return True, []
+    if more:
+        return True, []
+    cmds, cur = [], []
+    for w in args[i:]:
+        if w.endswith(";"):  # `;` ends a command, and so does a word that ends in one (`\;` as well: fails closed)
+            body = w[:-1].rstrip("\\")
+            if body:
+                cur.append(body)
             cmds.append(cur)
             cur = []
         else:
             cur.append(w)
     cmds.append(cur)
+    # a word the shell expands inside quotes may end in `;` once expanded: the words after it may start a command
+    cmds += [c[k + 1:] for c in list(cmds) for k, w in enumerate(c) if "$" in w or "`" in w]
+    lines = []
     for cmd in cmds:
-        if not cmd or cmd[0] not in _TMUX_RUNS:
-            continue
-        takes, k = _TMUX_RUNS[cmd[0]], 1
-        while k < len(cmd) and cmd[k].startswith("-") and cmd[k] != "--":
-            k += 2 if cmd[k] in takes or (cmd[k][-1:] and "-" + cmd[k][-1] in takes and len(cmd[k]) > 2) else 1
-        words = cmd[k + (1 if cmd[k:k + 1] == ["--"] else 0):]
-        if cmd[0] in ("send-keys", "send"):
-            words = [w for w in words if not _TMUX_KEYS.match(w)]
-        if words:
-            lines.append(" ".join(words))
-    return ["sh", "-c", "; ".join(lines)] if lines else []
+        refused, line = _tmux_one(cmd)
+        if refused:
+            return True, []
+        if line:
+            lines.append(line)
+    return False, (["sh", "-c", "; ".join(lines)] if lines else [])
+
+
+def terminal_typing_refusal(argv, more: bool = False) -> bool:
+    """True when a screen or tmux call would type into a terminal session or run what the guard does not read
+    (_screen_parse, _tmux_parse): agents cannot type into a terminal session; the developer can. `more`: a runner
+    (xargs) adds words the guard does not see after these."""
+    if not argv:
+        return False
+    name, args = os.path.basename(str(argv[0])), [str(a) for a in argv[1:]]
+    if name == "screen":
+        return _screen_parse(args, more)[0]
+    if name == "tmux":
+        return _tmux_parse(args, more)[0]
+    return False
 
 
 _EXPECT_RUN = re.compile(r"(?:^|[;\n\[{]|\bthen\b)\s*(?:spawn|exec|system)\s+([^;\n\]}]*)")
@@ -5790,6 +5959,24 @@ def _code_texts(code, name="") -> list:
 _CALL_LIST = re.compile(r"((?:'[^'\n]*'|\"[^\"\n]*\")\s*,\s*[\[(]\s*(?:(?:'[^'\n]*'|\"[^\"\n]*\")\s*,?\s*)+)[\])]")
 
 
+_CODE_SCREEN_SENDS = re.compile(r"-[A-Za-z0-9]*[XQ][A-Za-z0-9]*")
+
+
+def _code_types(code, name="") -> bool:
+    """True when a program that can start a process names screen or tmux and, among its other string literals, a
+    word that types into a session: screen's -X or -Q, a tmux command that types or carries a command (by its name or
+    alias), or a `#(` format. Such a program may build its words at run time (`['screen', '-S', s, opt, …]`), which
+    the guard does not read as one call, so the words decide (fails closed)."""
+    if not code or not _code_spawns(code, name):
+        return False
+    words = {next((g for g in m.groups() if g is not None), "").strip() for m in _STR_LIT.finditer(code)}
+    progs = {os.path.basename(w) for w in words}
+    if "screen" in progs and any(_CODE_SCREEN_SENDS.fullmatch(w) for w in words):
+        return True
+    carries = _TMUX_TYPES | set(_TMUX_CARRIES)
+    return "tmux" in progs and any("#(" in w or (_TMUX_ALIASES.get(w) or w) in carries for w in words)
+
+
 def code_session_refusal(argv, cwd, bodies, depth: int = 0) -> str | None:
     """Why an interpreter's program starts a nested agent session without devkit's hooks or sandbox, changes the
     extensions (EXT_REASON), runs `dev install|update` (INSTALL_REASON) or runs `dev hook`, in a command line it
@@ -5801,6 +5988,8 @@ def code_session_refusal(argv, cwd, bodies, depth: int = 0) -> str | None:
     name = os.path.basename(argv[0])
     code = _program(argv, cwd, bodies)[0]
     homes = set(_AGENT_HOME_ENV) & set(re.findall(r"\b[A-Z_]+\b", code or ""))
+    if _code_types(code, name):
+        return TERMINAL_TYPING_REASON
     for text in _code_texts(code, name):
         calls = shell_calls(text, cwd, depth + 1) or []
         for inner, icode in calls:
@@ -5813,7 +6002,11 @@ def code_session_refusal(argv, cwd, bodies, depth: int = 0) -> str | None:
                 return EXT_REASON
             if terminal_open_refusal(inner):
                 return TERMINAL_REASON
+            if terminal_typing_refusal(inner):
+                return TERMINAL_TYPING_REASON
             if os.path.basename(inner[0]) == "xargs":
+                if terminal_typing_refusal(_unwrap(_xargs_command(inner[1:]), more=True), more=True):
+                    return TERMINAL_TYPING_REASON
                 why = _xargs_dev_refusal(_unwrap(_xargs_command(inner[1:])))
                 if why:
                     return why
@@ -6560,9 +6753,21 @@ def member_write_exempt(path, cwd, scope=None, member=None, base=None) -> bool:
     return bool(layers) and all(scope_holds(ap, cwd, layer, base=base) for layer in layers)
 
 
+def _named_paths(tool, tool_input) -> list:
+    """The paths a tool call names: a file tool's file_path and notebook_path, and an MCP tool's path keys."""
+    if not isinstance(tool_input, dict):
+        return []
+    paths = [tool_input.get(k) for k in ("file_path", "notebook_path")]
+    if str(tool).startswith("mcp__"):
+        paths += _mcp_out_paths(tool_input)
+    return [p for p in paths if isinstance(p, str)]
+
+
 def check(tool: str, tool_input: dict, cwd: str, agent: str):
     tool_input = tool_input or {}
     _BYPASSES.clear()
+    if any(_NUL in p for p in _named_paths(tool, tool_input)):  # as check_bash refuses one in a command: a rule after
+        return deny(PATH_NUL_REASON)  # the guard (the crew's scopes) would raise on it and fail open
     if tool == "WebFetch":
         return webfetch_verdict(tool_input)
     if str(tool).startswith("mcp__"):  # by name (spec F8); C6 judges sending and publishing (F5)
