@@ -2070,10 +2070,11 @@ def crew_background_notice(sess: dict) -> str:
 
 
 def crew_finished_notice(sess: dict) -> str:
-    """Main session: the launched members that finished (kept by subagent_stop in `sess["crew_finished"]`), one line
-    each, told once. Claude Code has listed a finished member as running long after its report arrived, and only
-    TaskStop on its agent id removed it (L-fzh8oq4aby8). A member that stopped with background work still running is
-    named by crew_background_notice instead. Removes what it tells, one member at a time, like that notice."""
+    """Main session: the members it launched that finished (kept by subagent_stop in `sess["crew_finished"]`, only
+    for a launch devkit recorded from the main session), one line each, told once. Claude Code has listed a finished
+    member as running long after its report arrived, and only TaskStop on its agent id removed it (L-fzh8oq4aby8). A
+    member that stopped with background work still running is named by crew_background_notice instead. Removes what
+    it tells, one member at a time, like that notice."""
     done = sess.get("crew_finished") or {}
     lines = []
     for aid in list(done):
@@ -2199,6 +2200,21 @@ def _launch_meta(data: dict) -> dict:
     return meta if isinstance(meta, dict) and (meta.get("toolUseId") or meta.get("description")) else {}
 
 
+def _launched_by_main(sess: dict, lane, meta: dict, aid: str) -> bool:
+    """Do devkit's own records show that the main session launched this subagent? Its lane's parent, which binding
+    copies from the launch record; else the launch record the agent's meta file names, or the one already bound to
+    it, unless another agent holds that record. A launch description proves nothing: a member writes its helpers'
+    descriptions. With no record, False (fail closed)."""
+    if lane and lane.get("parent"):
+        return lane["parent"] == "main"
+    ls = (sess or {}).get("launches") or {}
+    tid = str((meta or {}).get("toolUseId") or "")
+    rec = ls.get(tid) if tid else None
+    if not isinstance(rec, dict):
+        rec = next((v for v in ls.values() if isinstance(v, dict) and v.get("agent_id") == aid), None)
+    return isinstance(rec, dict) and rec.get("parent") == "main" and rec.get("agent_id") in (None, "", aid)
+
+
 def _who(name: str) -> str:
     """A crew member as developers see it, role first ("Backend engineer (Tank)"); the name alone otherwise."""
     try:
@@ -2247,9 +2263,10 @@ def subagent_stop(agent: str):
         if sess is not None and sess.get("turn_class") != "other":
             from . import canary
             run, lane = progress.lane_of(agent, sid, aid)
+            meta = _launch_meta(data)
+            by_main = _launched_by_main(sess, lane, meta, aid)  # read before a pending lane is dropped
             if lane and lane.get("binding") == "pending":
                 lane = None  # never bound to a launch: a helper owes no report
-            meta = _launch_meta(data)
             label = (lane or {}).get("label") or meta.get("description") or ""
             name = (lane or {}).get("persona") or progress.persona(data.get("agent_type") or "", label) \
                 or label.split(":")[0].strip() or "Agent"
@@ -2302,9 +2319,11 @@ def subagent_stop(agent: str):
                 from . import gates
                 ref = copy.deepcopy(sess)
                 out = gates.check(name, data, sess, pid)
-                if out is None and agent == "claude" and aid and aid not in (sess.get("crew_background") or {}):
+                if out is None and agent == "claude" and aid and by_main and \
+                        aid not in (sess.get("crew_background") or {}):
                     # it finished: the tech lead hears it once, with the id Claude Code's TaskStop takes
-                    # (crew_finished_notice); Codex has no TaskStop and no such agent list
+                    # (crew_finished_notice); only for an agent devkit saw the main session launch, since a member
+                    # writes its helpers' labels; Codex has no TaskStop and no such agent list
                     sess.setdefault("crew_finished", {})[aid] = _who(name)
                 if sess != ref:  # only the gates' own mark and this one, on the fresh record
                     _patch_quietly(sf, ref, sess)
