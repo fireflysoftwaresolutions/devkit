@@ -269,13 +269,14 @@ class ScopeBaseTests(unittest.TestCase):
         path = str(ROOT / "lib" / "devkit" / "guard.py")
         home = str(core.HOME)
         self.assertFalse(guard.scope_holds(path, home, ["lib/devkit/guard.py"]))  # what the session's cwd gives
-        with mock.patch.object(guard, "DEV", ROOT.parents[1]):
-            base = guard.scope_base("fireflysoftwaresolutions/devkit", home)
+        # the workspace and the run's project id that name this checkout, wherever it sits (a main checkout at
+        # <dev>/<owner>/<repo> or a managed worktree below .worktrees/)
+        with mock.patch.object(guard, "DEV", ROOT.parent):
+            base = guard.scope_base(ROOT.name, home)
             self.assertEqual(os.path.realpath(base), os.path.realpath(ROOT))
             self.assertTrue(guard.scope_holds(path, home, ["lib/devkit/guard.py"], base=base))
             self.assertFalse(guard.scope_holds(path, home, ["tests/**"], base=base))
-            self.assertEqual(os.path.realpath(guard.scope_base("fireflysoftwaresolutions/devkit", CWD + "/lib")),
-                             os.path.realpath(ROOT))
+            self.assertEqual(os.path.realpath(guard.scope_base(ROOT.name, CWD + "/lib")), os.path.realpath(ROOT))
 
     def test_a_session_in_a_worktree_of_the_runs_repository_counts_from_that_worktree(self):
         with tempfile.TemporaryDirectory() as d:
@@ -290,8 +291,8 @@ class ScopeBaseTests(unittest.TestCase):
     def test_a_plan_named_by_the_scope_is_exempt_from_a_session_in_home(self):
         plan = core.HANDOFF / "plans" / "fireflysoftwaresolutions" / "devkit" / "f7-probe.md"
         scope = [str(core.HANDOFF / "plans" / "fireflysoftwaresolutions" / "devkit") + "/**"]
-        with mock.patch.object(guard, "DEV", ROOT.parents[1]):
-            base = guard.scope_base("fireflysoftwaresolutions/devkit", str(core.HOME))
+        with mock.patch.object(guard, "DEV", ROOT.parent):
+            base = guard.scope_base(ROOT.name, str(core.HOME))
             self.assertTrue(guard.member_write_exempt(str(plan), str(core.HOME), scope, "oracle", base=base))
             self.assertFalse(guard.member_write_exempt(str(ROOT / "README.md"), str(core.HOME), scope, "oracle",
                                                        base=base))

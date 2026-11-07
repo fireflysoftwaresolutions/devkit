@@ -216,6 +216,33 @@ class TheDiff(unittest.TestCase):
         self.assertEqual((["state: audit/2026-11.jsonl (changed)"], []),
                          _hermetic.changes(mid, _hermetic.snapshot(self.roots), self.roots, ["devkit-hermetic-abc"]))
 
+    # the file the run's own stdout or stderr goes to (dev ci --run streams the unit-test step into
+    # state/ci/logs/<key>/NN-*.log) is where the caller asked the output to go, not a leak; every other marked
+    # change below the roots still is one
+    def test_the_runs_own_output_file_is_not_a_leak(self):
+        os.makedirs(os.path.join(self.d, "state/ci/logs/o__r"))
+        out = open(os.path.join(self.d, "state/ci/logs/o__r/02-tests-unit-tests.log"), "w")
+        self.addCleanup(out.close)
+        before = _hermetic.snapshot(self.roots)
+        own = _hermetic.outputs(self.roots, before, fds=(out.fileno(),))
+        self.assertEqual({"state: ci/logs/o__r/02-tests-unit-tests.log"}, own)
+        out.write("ResourceWarning: unclosed file /tmp/devkit-hermetic-abc/home/.local/state/devkit/logs/sync.log\n")
+        out.flush()
+        self.touch("state/sleep.json", '{"cwd": "/tmp/devkit-hermetic-abc"}')
+        leaks, _ = _hermetic.changes(before, _hermetic.snapshot(self.roots), self.roots, ["devkit-hermetic-abc"],
+                                     own=own)
+        self.assertEqual(["state: sleep.json (changed)"], leaks)
+
+    # a terminal, a pipe or a file outside the roots is no file of the roots
+    def test_output_outside_the_roots_names_nothing(self):
+        r, w = os.pipe()
+        self.addCleanup(os.close, r)
+        self.addCleanup(os.close, w)
+        outside = tempfile.NamedTemporaryFile("w")
+        self.addCleanup(outside.close)
+        self.assertEqual(set(), _hermetic.outputs(self.roots, _hermetic.snapshot(self.roots),
+                                                  fds=(w, outside.fileno(), 987)))
+
 
 class LateRun(unittest.TestCase):
     # when devkit was imported before the isolation (python3 -m unittest discover -s tests, which skips
