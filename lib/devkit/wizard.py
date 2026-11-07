@@ -48,6 +48,12 @@ class Answers(dict):
     pass
 
 
+def _commit_template_default() -> bool:
+    """The commit template question's default: the recorded answer, yes before the first one (spec P-fy3bwa0pshk R9)."""
+    from . import setup as setup_mod
+    return setup_mod.commit_template_answer() != "no"
+
+
 def _hw():
     def sysctl(k):
         return core.sh(["sysctl", "-n", k])[1]
@@ -222,7 +228,8 @@ def plan_rows(a, skip_packages, saved=None) -> list:
             ("handoff", f"{a['handoff']} → {a['root']}/.handoff"),
             ("Claude Code", f"{a['claude_mode']}" if a["use_claude"] else "skip"),
             ("Codex", f"{cm} ({CODEX_MODES[cm][0]} / {CODEX_MODES[cm][1]})" if a["use_codex"] else "skip"),
-            ("stacks", ", ".join(a["stacks"])), ("git hosts", ", ".join(a["hosts"])),
+            ("stacks", ", ".join(a["stacks"])),
+            ("git hosts", ", ".join(a["hosts"]) + f" · commit template {'on' if a.get('commit_template', True) else 'off'}"),
             ("clouds", (", ".join(a["clouds"]) or "none") + (f" · agent skills: {', '.join(skills)}" if skills
                                                              else "")),
             ("packages", "skip" if skip_packages else "Homebrew + npm for the stacks, hosts and clouds"),
@@ -292,6 +299,8 @@ def _run_lines(assume_yes=False, skip_packages=False) -> int:
                     {k: v[0] for k, v in toolchain.HOSTS.items()},
                     list(dict.fromkeys((cfg.get("hosts") or []) + seen["hosts"])) or ["github"])
     a["hosts"] = list(dict.fromkeys(["github"] + hosts))
+    from . import setup as setup_mod
+    a["commit_template"] = p.yesno(setup_mod.COMMIT_TEMPLATE_QUESTION, setup_mod.commit_template_answer() != "no")
     p.section("Cloud and infrastructure (CLIs and sign-in checks)")
     a["clouds"] = p.multi("Clouds and infrastructure tools you use (numbers, or empty for none)",
                           {k: v[0] for k, v in toolchain.CLOUDS.items()},
@@ -330,6 +339,7 @@ def _run_lines(assume_yes=False, skip_packages=False) -> int:
 
     CONFIG_FILE.parent.mkdir(parents=True, exist_ok=True)
     CONFIG_FILE.write_text(json.dumps(new, indent=2, ensure_ascii=False) + "\n")
+    setup_mod.record_commit_template("yes" if a["commit_template"] else "no")  # the git step of `dev install` applies it
     print(f"\n  {ui.OK} saved {core.tilde(CONFIG_FILE)}")
     if not skip_packages:
         rc = install_packages(a["stacks"], a["use_claude"], extra=toolchain.groups({"hosts": a["hosts"], "clouds": a["clouds"]}))
@@ -588,7 +598,8 @@ def tui_defaults(d, detected=True) -> Answers:
         disk=int(dk.get("disk") or 80), autostart=bool(dk.get("autostart")),
         gc_auto=bool(cfg["gc"].get("auto", True)), interval=int(cfg["sync"].get("interval_minutes") or 60),
         lock=bool(cfg.get("lock")) and bool(agents.get("claude", True)),
-        ai=bool((cfg.get("ai") or {}).get("enabled", False)), skill_groups=saved_group_answers(saved))
+        ai=bool((cfg.get("ai") or {}).get("enabled", False)), skill_groups=saved_group_answers(saved),
+        commit_template=_commit_template_default())
 
 
 # --------------------------------------------------------------------------- interactive wizard: words
@@ -952,7 +963,13 @@ class _Wizard:
                 a["hosts"], help="devkit installs each host's CLI, checks the sign-in and shows its pipelines in "
                                  "dev ci status."),
                 store=lambda v: a.update(hosts=list(dict.fromkeys(["github"] + v))),
-                show=lambda: ", ".join(_label(k) for k in a["hosts"]))]
+                show=lambda: ", ".join(_label(k) for k in a["hosts"])),
+                _Q("commit_template", "Commit template", lambda: tui.Confirm(
+                    "Open new commit messages with devkit's template?", a["commit_template"],
+                    help="Sets commit.template in each repository that has none, in its own git config: the header "
+                         "rule, then why, what changed and how it was verified, then the Refs and BREAKING CHANGE "
+                         "trailers. Repositories with a template of their own keep it."),
+                   show=yes_no("commit_template"))]
         if key == "clouds":
             from . import toolchain
             saved = d.get("config")
@@ -1081,7 +1098,8 @@ class _Wizard:
             ("Workspace", f"{a['root']} · handoff {a['handoff']}"),
             ("Agents", ", ".join(agents) or "none"),
             ("Stacks", ", ".join(_label(k) for k in a["stacks"]) or "none"),
-            ("Git hosts and CI/CD", ", ".join(_label(k) for k in a["hosts"])),
+            ("Git hosts and CI/CD", ", ".join(_label(k) for k in a["hosts"])
+             + f" · commit template {'on' if a['commit_template'] else 'off'}"),
             ("Clouds", (", ".join(_label(k) for k in a["clouds"]) or "none")
              + (f" · agent skills: {', '.join(skills)}" if skills else "")),
             ("Docker", f"{a['cpu']} CPUs · {a['mem']} GB memory · {a['disk']} GB disk"
@@ -1210,6 +1228,8 @@ class _Wizard:
         new = build_config(self.d["config"], self.a, self.d["gh"]["login"])
         CONFIG_FILE.parent.mkdir(parents=True, exist_ok=True)
         CONFIG_FILE.write_text(json.dumps(new, indent=2, ensure_ascii=False) + "\n")
+        from . import setup as setup_mod
+        setup_mod.record_commit_template("yes" if self.a["commit_template"] else "no")  # `dev install` applies it
         self.saved_file = True
         cl.finish(i, "ok", core.tilde(CONFIG_FILE))
 

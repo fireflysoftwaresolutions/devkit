@@ -758,7 +758,11 @@ runs.
 | Option | Effect |
 | --- | --- |
 | `-m "…"` | The header; more `-m` options add paragraphs |
-| `--body "…"` | The body: why the change is needed |
+| `--why "…"` | The first paragraph of the body: why the change is needed ([the commit template](git-and-github.md#commits)) |
+| `--body "…"` | A body paragraph, repeatable: what changed (after `--why`), or the reason without `--why` |
+| `--verified "…"` | The last paragraph of the body, `Verified: …`: how you verified the change |
+| `--refs "…"` | The `Refs:` trailer: `#12`, `owner/repo#12`, a URL, or a ticket key; repeat it for more. Default: the ticket of the task started on this branch. A devkit task id is refused in it, as anywhere in the message |
+| `--breaking "…"` | The `BREAKING CHANGE:` trailer: what breaks, and how to move to the new behavior |
 | `-a`, `--all` | Stage every tracked change first |
 | `--amend` | Amend HEAD (keeps its message without `-m`); warns when HEAD was already pushed |
 | `--wip [-m "what"]` | Save everything, untracked files too, as a `wip:` commit instead of a stash |
@@ -1140,11 +1144,11 @@ write and push, settings repair, cleanup, and job run, with secrets redacted. Se
 
 ## Environment
 
-### `dev setup [-y] [--skip-packages]` · `dev setup prompt [--remove] [-y]`
+### `dev setup [-y] [--skip-packages]` · `dev setup prompt [--remove] [-y]` · `dev setup commit-template [--remove] [-y]`
 
 The installation and configuration wizard. It detects the Mac, GitHub, and both agents. It asks for the development
 root, the handoff repository, which agents to configure and their permission modes, your stacks, your git hosts and
-clouds, the Docker VM, automation, and the settings lock. It shows the plan and applies it only after you confirm:
+the commit template, clouds, the Docker VM, automation, and the settings lock. It shows the plan and applies it only after you confirm:
 the packages for your stacks, hosts, and clouds, then `dev install`, the sign-ins, and `dev doctor`. Run it again to
 change your choices.
 
@@ -1154,6 +1158,12 @@ asks once, and then shows the helper in the prompt you use. With Starship it add
 Starship, `oh-my-posh`, or Powerlevel10k it turns on devkit's own zsh block in `shell/devkit.zsh`, so `~/.zshrc` stays as
 it is. For `oh-my-posh` and Powerlevel10k it points you to the snippet for your theme. A no is remembered: `dev install`
 does not ask again.
+
+`dev setup commit-template` asks again whether new commit messages open with
+[devkit's commit template](git-and-github.md#the-template-in-your-editor), even after a no. A yes sets
+`commit.template` in the own git config of each repository that has none; repositories with a template of their own
+keep it. `--remove` takes devkit's template out of every repository and records a no, so `dev install` leaves them
+alone.
 
 | Option | Effect |
 | --- | --- |

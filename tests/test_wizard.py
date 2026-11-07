@@ -338,6 +338,7 @@ changes until you confirm.
      □ 3. bitbucket — Bitbucket · Pipelines
      □ 4. azure-devops — Azure DevOps · Pipelines
      Where your repositories and pipelines live (comma-separated numbers) → github, gitlab
+     Open new commit messages with devkit's template (commit.template in each repository that has none)? → yes
 
    6 Cloud and infrastructure (CLIs and sign-in checks)
      ■ 1. aws — AWS
@@ -367,7 +368,7 @@ changes until you confirm.
      Claude Code  bypassPermissions
      Codex        full (never / danger-full-access)
      stacks       python, node
-     git hosts    github, gitlab
+     git hosts    github, gitlab · commit template on
      clouds       aws
      packages     skip
      Docker VM    6 CPU · 12 GB · 80 GB
@@ -386,16 +387,16 @@ usual. `dev agents test` runs a live check of both agents.
 """
 
 
-def line_mode(saved=None, yes=True, typed=None, clouds=("aws",)):
+def line_mode(saved=None, yes=True, typed=None, clouds=("aws",), state=None):
     """Run `dev setup` through the line prompts with detection and commands stubbed: (rc, config, output, calls).
-    `clouds`: the cloud and infrastructure tools this Mac shows."""
+    `clouds`: the cloud and infrastructure tools this Mac shows. `state`: devkit's state folder (default: a temp one)."""
     seen = {"hosts": ["github", "gitlab"], "clouds": list(clouds), "evidence": {"gitlab": "x", "aws": "y"}}
     with tempfile.TemporaryDirectory() as d:
         cfgf = Path(d) / "config.json"
         if saved is not None:
             cfgf.write_text(json.dumps(saved))
         calls, answers = [], iter(typed or [])
-        with mock.patch.object(wizard, "CONFIG_FILE", cfgf), \
+        with mock.patch.object(wizard, "CONFIG_FILE", cfgf), mock.patch.object(setup, "STATE", state or Path(d)), \
                 mock.patch.object(wizard, "_hw", lambda: (12, 36, "26.1", "arm64")), \
                 mock.patch.object(core, "gh_user", lambda: {"login": "ada", "name": "Ada Lovelace", "id": 1}), \
                 mock.patch.object(core, "have", lambda t: t in ("gh", "brew")), \
@@ -427,8 +428,11 @@ class LineModeTests(unittest.TestCase):
         self.assertEqual(line_mode()[2], GOLDEN_YES)
 
     def test_typed_answers_in_the_line_prompts(self):
-        typed = ["~/Code", "", "n", "y", "2", "1,3", "", "", "8", "", "", "y", "n", "30", "y", "", "y"]
-        rc, cfg, out, _ = line_mode(yes=False, typed=typed)
+        typed = ["~/Code", "", "n", "y", "2", "1,3", "", "n", "", "8", "", "", "y", "n", "30", "y", "", "y"]
+        with tempfile.TemporaryDirectory() as state:
+            rc, cfg, out, _ = line_mode(yes=False, typed=typed, state=Path(state))
+            record = json.loads((Path(state) / "git" / "commit-template.json").read_text())
+        self.assertEqual(record["answer"], "no")  # recorded before `dev install`, whose git step reads it
         self.assertEqual(rc, 0)
         self.assertEqual(cfg["dev_root"], "~/Code")
         self.assertEqual(cfg["agents"], {"claude": False, "codex": True})
@@ -502,6 +506,7 @@ class InteractiveTests(unittest.TestCase):
                 return 0
             term = FakeTerm(keys)
             with mock.patch.object(wizard, "CONFIG_FILE", cfgf), mock.patch.object(wizard, "STATE", state), \
+                    mock.patch.object(setup, "STATE", state), \
                     mock.patch.object(wizard, "survey", lambda: fake_survey(saved, stacks, clouds)), \
                     mock.patch.object(wizard, "_exec", fake_exec), \
                     mock.patch.object(wizard, "package_status", lambda groups: []), \
@@ -509,6 +514,8 @@ class InteractiveTests(unittest.TestCase):
                     mock.patch("subprocess.call", side_effect=AssertionError("no attached commands expected")):
                 rc = wizard._Wizard(term, skip_packages=skip).run()
             cfg = json.loads(cfgf.read_text()) if cfgf.exists() else None
+            record = state / "git" / "commit-template.json"  # the commit template answer `dev install` reads
+            self.template_answer = json.loads(record.read_text())["answer"] if record.exists() else None
             return rc, cfg, term.text, ran
 
     def test_recommended_setup_accepts_what_was_detected(self):
@@ -518,6 +525,7 @@ class InteractiveTests(unittest.TestCase):
         self.assertEqual(cfg["hosts"], ["github", "gitlab"])
         self.assertEqual(cfg["docker"]["cpu"], 6)
         self.assertEqual([r[-1] for r in ran], ["install", "doctor"])
+        self.assertEqual(self.template_answer, "yes")  # the recommended setup uses the commit template
         self.assertIn("devkit is ready.", text)
         self.assertRegex(text, r"Good (morning|afternoon|evening), Ada\.")
         self.assertNotIn("[31m", text)  # the escape sequence in the GitHub name was removed
@@ -533,7 +541,7 @@ class InteractiveTests(unittest.TestCase):
                 + ENTER + b"\x15team/handoff" + ENTER  # workspace
                 + DOWN + SPACE + ENTER + ENTER    # agents: Codex off, Claude Code mode kept
                 + b"a" + ENTER                    # stacks: all
-                + ENTER + ENTER                   # hosts, clouds
+                + ENTER + b"n" + ENTER            # hosts, no commit template, clouds
                 + b"99" + ENTER + BS + BS + b"4" + ENTER + ENTER + ENTER + b"n"  # docker, with a fixed typo
                 + b"n" + b"30" + ENTER + ENTER + ENTER  # automation: background AI stays off
                 + DOWN + ENTER + b"6" + ENTER     # review → change a section → Docker
@@ -548,6 +556,8 @@ class InteractiveTests(unittest.TestCase):
         self.assertEqual((cfg["gc"], cfg["sync"], cfg["lock"]), ({"auto": False}, {"interval_minutes": 30}, False))
         self.assertIn("Enter a whole number from 1 to 8.", text)
         self.assertIn("Step 6 of 8 · Docker", text)
+        self.assertEqual(self.template_answer, "no")
+        self.assertIn("commit template off", text)  # the review says it
 
     def test_esc_on_the_first_question_returns_to_the_welcome(self):
         rc, cfg, text, _ = self.run_wizard(DOWN + ENTER + ESC + UP + ENTER + ENTER)  # focus comes back on Customize
@@ -585,7 +595,7 @@ class InteractiveTests(unittest.TestCase):
         self.assertEqual(cfg["skills"]["groups"], core.DEFAULTS["skills"]["groups"] + ["iac"])
         self.assertIn("OpenTofu / Terraform · agent skills: iac", text)
         # Customize: the question follows the clouds, and No keeps the default groups
-        keys = (DOWN + ENTER + ENTER * 2 + ENTER * 3 + ENTER + ENTER + ENTER  # to the clouds, terraform kept
+        keys = (DOWN + ENTER + ENTER * 2 + ENTER * 3 + ENTER + ENTER * 2 + ENTER  # to the clouds, terraform kept
                 + b"n" + ENTER * 3 + b"n" + b"n" + ENTER + ENTER + b"n"   # no skills; docker; automation
                 + ENTER)                                                  # apply
         rc, cfg, text, _ = self.run_wizard(keys, clouds=("terraform",))
@@ -832,6 +842,8 @@ class PseudoTerminalTests(unittest.TestCase):
         t.expect("Stacks you work in")
         t.send(b"a" + ENTER)
         t.expect("Where your code and pipelines live")
+        t.send(ENTER)
+        t.expect("Open new commit messages with devkit's template?")
         t.send(ENTER)
         t.expect("Clouds and infrastructure tools")
         t.send(ENTER)

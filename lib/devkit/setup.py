@@ -625,6 +625,141 @@ def install_cli():
 def setup_git(quiet=False):
     with quiet_mode(quiet):
         _setup_git()
+    if not quiet:  # a quiet run repairs drift: it never asks, so it never offers the template either
+        step("Commit template")
+        offer_commit_template()
+
+
+# --------------------------------------------------------------------------- the commit template (spec P-fy3bwa0pshk R9)
+# config/git/commit-template.txt is the message git opens for a commit written in an editor. `dev setup` asks whether
+# to use it, and the git step of `dev install` (which `dev setup` runs) applies the answer: commit.template in each
+# repository's own config. It asks once and keeps the answer. A repository with a template of its own (local or
+# global) keeps it, and one where the developer removed devkit's is never set again, except by
+# `dev setup commit-template`, which asks again (`--remove` takes devkit's out everywhere).
+
+COMMIT_TEMPLATE_QUESTION = "Open new commit messages with devkit's template (commit.template in each repository that has none)?"
+
+
+def commit_template_copy() -> Path:
+    """The file repositories point at: a copy in devkit's state, refreshed by each install. A pinned copy's path would
+    break git once that copy is pruned (git cannot commit with a template it cannot read)."""
+    return STATE / "git" / "commit-template.txt"
+
+
+def _commit_template_record() -> Path:
+    return STATE / "git" / "commit-template.json"  # {"answer": "yes" | "no", "when": iso, "set": [repository paths]}
+
+
+def commit_template_answer() -> str:
+    """"yes", "no", or "" before the developer answered."""
+    a = (read_json(_commit_template_record(), {}) or {}).get("answer", "")
+    return a if a in ("yes", "no") else ""
+
+
+def record_commit_template(answer: str, added=()) -> None:
+    """Keep the answer ("yes" or "no") and the repositories devkit set it in."""
+    if answer not in ("yes", "no"):
+        raise ValueError(f"the commit template answer is yes or no, not {answer!r}")
+    f = _commit_template_record()
+    rec = read_json(f, {}) or {}
+    when = rec.get("when") if rec.get("answer") == answer else time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+    f.parent.mkdir(parents=True, exist_ok=True)
+    f.write_text(json.dumps({"answer": answer, "when": when, "set": sorted(set(rec.get("set") or []) | set(map(str, added)))})
+                 + "\n")
+
+
+def _names(rs) -> str:
+    return ", ".join(Path(r).name for r in rs[:6]) + (f" (+{len(rs) - 6} more)" if len(rs) > 6 else "")
+
+
+def _commit_template_rows(repos, reset=False):
+    """-> (devkit's, their own, without one): every config scope counts, so a global template is theirs. Without
+    `reset`, a repository devkit set before and that has none now was cleaned by the developer: it is left out."""
+    from . import registry
+    copy, before = commit_template_copy(), set((read_json(_commit_template_record(), {}) or {}).get("set") or [])
+    ours, own, free = [], [], []
+    for r in (registry.discover()[0] if repos is None else repos):
+        r = str(r)
+        cur = core.gitout(r, "config", "--get", "commit.template")
+        if cur and core.real(os.path.expanduser(cur)) == core.real(copy):
+            ours.append(r)
+        elif cur:
+            own.append(r)
+        elif reset or r not in before:
+            free.append(r)
+    return ours, own, free
+
+
+def offer_commit_template(repos=None, ask=None, say=None, interactive=None, answer=None, reset=False) -> dict:
+    """Give devkit's commit template to the repositories (default: the workspace's main checkouts) that have none, as
+    the developer answered (`answer`, else the recorded one). Without an answer, `ask(question) -> text` asks when
+    `interactive` (default: a terminal, not quiet, not a scheduled job). `say(text)` reports (default: the install
+    step's lines). `reset`: also the repositories the developer took it out of. -> {"answer", "set", "devkit", "own"}."""
+    explain = say or print
+    report = (lambda kind, text: say(text)) if say else (lambda kind, text: (done if kind == "done" else note)(text))
+    if interactive is None:
+        interactive = sys.stdin.isatty() and not _QUIET[0] and not os.environ.get("DEVKIT_JOB")
+    copy, text = commit_template_copy(), (CONF / "git" / "commit-template.txt").read_text()
+    if not copy.exists() or copy.read_text() != text:
+        copy.parent.mkdir(parents=True, exist_ok=True)
+        copy.write_text(text)
+    recorded = commit_template_answer()
+    answer = answer or recorded
+    ours, own, free = _commit_template_rows(repos, reset)
+    res = {"answer": answer, "set": [], "devkit": ours, "own": own}
+    kept = f"; {len(own)} keep their own" if own else ""
+    if not answer and free:
+        if not interactive:
+            report("note", f"{len(free)} repositories have no commit template: run `dev setup commit-template` in a "
+                           "terminal (or `dev install --only git`) to choose whether they use devkit's")
+            return res
+        explain(f"\n  {ui.bold('Commit template')}\n  git can open each new commit message with devkit's template: "
+                "the header rule, then why, what\n  changed and how it was verified, then the Refs and BREAKING CHANGE "
+                f"trailers.\n  {len(free)} repositories have none: {_names(free)}.\n  devkit sets commit.template in "
+                "each one's own git config; repositories with a\n  template of their own keep it.")
+        answer = "yes" if (ask or input)("  Use it? [Y/n] ").strip().lower() in ("", "y", "yes") else "no"
+        res["answer"] = answer
+    if answer and answer != recorded:
+        record_commit_template(answer)
+    if answer == "no" or not free:
+        report("note" if answer == "no" else "done",
+               "devkit's commit template is off; turn it on: dev setup commit-template" if answer == "no" else
+               f"{len(ours)} repositories use devkit's commit template{kept}")
+        return res
+    for r in free:
+        rc, _, err = core.git(r, "config", "--local", "commit.template", str(copy))
+        if rc == 0:
+            res["set"].append(r)
+        else:
+            report("note", f"{Path(r).name}: git config commit.template failed: {err}")
+    record_commit_template("yes", res["set"])
+    report("done", f"commit.template set in {len(res['set'])} repositories: {_names(res['set'])} · "
+                   f"{len(ours) + len(res['set'])} use devkit's{kept} · take it out: dev setup commit-template --remove")
+    return res
+
+
+def setup_commit_template(assume_yes: bool = False, remove: bool = False, ask=None, say=print, repos=None) -> int:
+    """`dev setup commit-template`: ask again, even after a no, and on a yes set the template in every repository
+    without one, those the developer cleaned included. `remove` unsets devkit's everywhere and records a no.
+    -> exit code."""
+    if remove:
+        ours, _, _ = _commit_template_rows(repos)
+        gone = [r for r in ours if core.git(r, "config", "--local", "--unset", "commit.template")[0] == 0]
+        record_commit_template("no")
+        say(f"  {ui.OK} devkit's commit template is off; taken out of {len(gone)} repositories"
+            + (f": {_names(gone)}" if gone else "") + ". Turn it on again: dev setup commit-template")
+        return 0
+    if not assume_yes:
+        _, _, free = _commit_template_rows(repos, reset=True)
+        say(f"\n  {ui.bold('Commit template')}\n  git can open each new commit message with devkit's template "
+            f"({tilde(CONF / 'git' / 'commit-template.txt')}).\n  {len(free)} repositories have none"
+            + (f": {_names(free)}" if free else "") + ". Repositories with a template of their own keep it.")
+        if (ask or input)("  Use it? [Y/n] ").strip().lower() not in ("", "y", "yes"):
+            record_commit_template("no")
+            say(f"  {ui.dim('Nothing changed. Turn it on later: dev setup commit-template')}")
+            return 0
+    res = offer_commit_template(repos, say=lambda t: say(f"  {ui.OK} {t}"), answer="yes", reset=True)
+    return 0 if res["answer"] == "yes" else 1
 
 
 def _setup_git():

@@ -673,6 +673,93 @@ def _guard_commit(c, message: str):
     return guard.check_git(["git", "commit", "-m", message], c.top, text)
 
 
+# The commit template (config/git/commit-template.txt, spec P-fy3bwa0pshk R9): the header; the why, what changed and
+# `Verified:` paragraphs; then the `Refs:` and `BREAKING CHANGE:` trailers. devkit's task ids stay in the private
+# handoff, whose session log links commits to tasks: `Refs:` names only what the repository's host or tracker knows.
+TICKET_LINKS = ("ticket", "issue", "jira", "ref", "refs")
+_REF_ISSUE = re.compile(r"^(?:[\w.-]+/[\w.-]+)?#\d+$")
+_REF_URL = re.compile(r"^https?://\S+$")
+
+
+def ticket_ref(value: str):
+    """A `Refs:` value from a task link (`ticket:PROJ-142`, `issue:#12`, a URL) or from `--refs`: an issue (`#12`,
+    `owner/repo#12`), a URL or a ticket key; None for anything else, devkit's own task ids and links included."""
+    v = (value or "").strip()
+    kind, sep, rest = v.partition(":")
+    if sep and kind.lower() in TICKET_LINKS:
+        v = rest.strip()
+    if not v or _WORK_ID.search(v):
+        return None
+    if v.isdigit():
+        v = "#" + v
+    return v if _REF_ISSUE.match(v) or _REF_URL.match(v) or _JIRA.fullmatch(v) else None
+
+
+def task_tickets(c) -> list:
+    """The tickets of the tasks started on this branch and not finished: `dev task start` links the branch
+    (`branch:<name>`) and keeps the lock holder in `claimed_by`; `dev task release|done` clears them."""
+    if not (c and c.branch and c.pid):
+        return []
+    try:
+        from . import work
+        items = work.all_items(c.pid)
+    except Exception:
+        return []
+    out = []
+    for it in items:
+        m = it.get("meta") or {}
+        links = m.get("links") or []
+        if isinstance(links, str):
+            links = [x.strip() for x in links.strip("[]").split(",")]
+        if (not m.get("claimed_by") or m.get("status") in ("done", "cancelled")
+                or f"branch:{c.branch}" not in links):
+            continue
+        for ref in filter(None, map(ticket_ref, links)):
+            if ref not in out:
+                out.append(ref)
+    return out
+
+
+def commit_message(header: str, why: str = "", paragraphs=(), verified: str = "", refs=(), breaking: str = "") -> str:
+    """The message in the commit template's order. `verified` gets its `Verified:` label when it has none."""
+    body = [p.strip() for p in [why, *paragraphs] if p and p.strip()]
+    v = (verified or "").strip()
+    if v:
+        body.append(v if v.lower().startswith("verified:") else f"Verified: {v}")
+    trailers = [f"Refs: {', '.join(refs)}"] if refs else []
+    if breaking and breaking.strip():
+        trailers.append(f"BREAKING CHANGE: {breaking.strip()}")
+    return "\n\n".join([header] + body + (["\n".join(trailers)] if trailers else []))
+
+
+def _task_id_refusal(ids) -> int:
+    return refuse(f"the message names devkit task id {', '.join(ids)}: task ids stay in the private handoff, whose "
+                  "session log links each commit to its task", 'name the issue or ticket instead (--refs "#12", '
+                  "--refs PROJ-142 or a URL), or leave the id out")
+
+
+def _commit_refs(c, a, text: str):
+    """-> (refs, refusal exit code or None, what the output says about them)."""
+    refs = []
+    for r in getattr(a, "refs", None) or []:
+        ids = _WORK_ID.findall(r)
+        if ids:
+            return [], _task_id_refusal(ids), ""
+        t = ticket_ref(r)
+        if not t:
+            return [], refuse(f"Refs takes an issue number (#12 or owner/repo#12), a URL or a ticket key (PROJ-142), "
+                              f"not `{r}`"), ""
+        refs.append(t)
+    if refs or re.search(r"(?mi)^refs:", text):
+        return refs, None, ""
+    found = task_tickets(c)
+    if len(found) == 1:
+        return found, None, f"Refs: {found[0]} from the task on {c.branch}"
+    if found:
+        return [], None, f"no Refs: the tasks on {c.branch} name {', '.join(found)}; name one with --refs"
+    return [], None, ""
+
+
 def cmd_commit(a) -> int:
     c = ctx()
     if c is None:
@@ -682,20 +769,32 @@ def cmd_commit(a) -> int:
     if a.wip:
         return _wip(c, a)
     msgs = list(a.message or [])
+    template = [f"--{k}" for k in ("why", "verified", "refs", "breaking") if getattr(a, k, None)]
+    if template and not msgs:
+        return refuse(f"{', '.join(template)} {'writes' if len(template) == 1 else 'write'} the message around its "
+                      f"header", 'dev commit -m "type(scope): summary" --why "…" --verified "…"')
     if not msgs and not a.amend:
-        return refuse("give a message", 'dev commit -m "type(scope): summary" [--body "why"]')
+        return refuse("give a message", 'dev commit -m "type(scope): summary" [--why "…"] [--verified "…"]')
     g = _branch_gate(c)
     if g:
         return g
-    header, body = "", []
+    message, removed, said = "", 0, ""
     if msgs:
         first, _, rest = msgs[0].partition("\n")
         header = first.strip()
-        body = [x for x in ([rest.strip()] + msgs[1:] + ([a.body] if a.body else [])) if x and x.strip()]
+        what = [x for x in ([rest.strip()] + msgs[1:] + list(a.body or [])) if x and x.strip()]
         v = message_violation(header)
         if v:
             return refuse(v)
-    message, removed = strip_attribution("\n\n".join([header] + body)) if msgs else ("", 0)
+        refs, refused, said = _commit_refs(c, a, "\n".join(what))
+        if refused is not None:
+            return refused
+        message, removed = strip_attribution(commit_message(header, getattr(a, "why", None) or "", what,
+                                                            getattr(a, "verified", None) or "", refs,
+                                                            getattr(a, "breaking", None) or ""))
+        ids = list(dict.fromkeys(_WORK_ID.findall(message)))
+        if ids:
+            return _task_id_refusal(ids)
     if a.paths:
         rc, _, err = core.git(c.top, "add", "--", *a.paths)
         if rc != 0:
@@ -721,6 +820,8 @@ def cmd_commit(a) -> int:
     files, ins, dels = _shortstat(c.top)
     ahead = _count(c.top, f"{_base_ref(c)}..HEAD") if c.has_origin else 0
     extra = [f"{files} file(s) +{ins} −{dels}", c.branch + (f" ↑{ahead}" if ahead else "")]
+    if said:
+        extra.append(said)
     if removed:
         extra.append(f"removed {removed} AI-attribution line(s)")
     if pushed_before:
@@ -2962,7 +3063,13 @@ def register(add):
 
     p = add("commit", cmd_commit, "Conventional Commit of the staged changes, -a (tracked) or the given paths")
     p.add_argument("-m", "--message", action="append", help="header `type(scope): summary`; more -m add paragraphs")
-    p.add_argument("--body", help="body: why the change is needed")
+    p.add_argument("--why", help="first paragraph of the body: why the change is needed (the commit template)")
+    p.add_argument("--body", action="append", help="a body paragraph (repeat for more): what changed (after --why), "
+                                                   "or the reason without --why")
+    p.add_argument("--verified", help="last paragraph of the body: how you verified it, as `Verified: …`")
+    p.add_argument("--refs", action="append", help="trailer `Refs:`, an issue (#12), a URL or a ticket key (repeat for "
+                                                   "more); default: the ticket of the task started on this branch")
+    p.add_argument("--breaking", help="trailer `BREAKING CHANGE:`: what breaks and how to move to the new behavior")
     p.add_argument("-a", "--all", action="store_true", help="stage every tracked change first")
     p.add_argument("--amend", action="store_true", help="amend HEAD (keeps its message without -m)")
     p.add_argument("--wip", action="store_true", help="save everything as a WIP commit (instead of git stash)")

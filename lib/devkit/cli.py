@@ -3019,6 +3019,9 @@ def cmd_setup(a):
     if getattr(a, "what", None) == "prompt":
         from . import setup as setup_mod
         return setup_mod.setup_prompt(assume_yes=a.yes, remove=a.remove)
+    if getattr(a, "what", None) == "commit-template":
+        from . import setup as setup_mod
+        return setup_mod.setup_commit_template(assume_yes=a.yes, remove=a.remove)
     from . import wizard
     return wizard.run(assume_yes=a.yes, skip_packages=a.skip_packages)
 
@@ -3496,9 +3499,11 @@ def build_parser():
     p.add_argument("-v", "--verbose", action="store_true")
     p = add("diagram", cmd_diagram, "Branded SVG diagrams from JSON specs (render · check · new)")
     p.add_argument("rest", nargs=argparse.REMAINDER, help="render <spec|dir> [--out DIR] [--png] · check <spec|svg|dir> · new <kind> <name>")
-    p = add("setup", cmd_setup, "Installation and configuration wizard; dev setup prompt adds the prompt helper")
-    p.add_argument("what", nargs="?", choices=["prompt"], help="prompt: only the prompt helper")
-    p.add_argument("--remove", action="store_true", help="with prompt: take the prompt helper out again")
+    p = add("setup", cmd_setup, "Installation and configuration wizard; dev setup prompt adds the prompt helper, "
+                                "dev setup commit-template the commit template")
+    p.add_argument("what", nargs="?", choices=["prompt", "commit-template"],
+                   help="prompt: only the prompt helper; commit-template: only the commit template (commit.template)")
+    p.add_argument("--remove", action="store_true", help="with prompt or commit-template: take it out again")
     p.add_argument("-y", "--yes", action="store_true", help="accept every default (non-interactive)")
     p.add_argument("--skip-packages", action="store_true", help="do not install Homebrew/npm packages")
     add("prompt", cmd_prompt, "What devkit's prompt helper shows here; refresh writes it for this Mac").add_argument(

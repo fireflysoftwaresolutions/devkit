@@ -13,7 +13,8 @@ reference of every option is in [Commands › Git and GitHub](commands.md#git-an
 ```bash
 dev branch new feat/invoice-export --ticket PROJ-142    # from an up-to-date origin/main
 # … work in small, tested steps …
-dev commit -a -m "feat(invoice): add CSV export" --body "Finance copies invoices by hand every month."
+dev commit -a -m "feat(invoice): add CSV export" --why "Finance copies invoices by hand every month." \
+  --verified "python3 -m unittest tests.test_export (8 tests pass)"
 dev ci --run                                            # run what CI runs, here; record the evidence
 dev push                                                # one push, after the checks
 dev pr create --dry-run | sed '1,/^---$/d' > body.md   # the PR body, pre-filled from the template
@@ -66,6 +67,44 @@ until you add `--apply`.
 `dev commit -m "type(scope): summary"` commits the staged changes, every tracked change with `-a`, or only the paths
 you list. More `-m` options add paragraphs, and `--body` adds the reason.
 
+The message follows devkit's commit template, [`config/git/commit-template.txt`](../config/git/commit-template.txt):
+the header, then why, what changed, and how it was verified, then the trailers. `dev commit` writes it for you:
+
+```bash
+dev commit parser.py -m "fix(parser): keep quoted commas" \
+  --why "Rows with quoted commas were split in two." \
+  --body "The tokenizer reads a quoted field whole." \
+  --verified "python3 -m unittest tests.test_parser (12 tests pass)"
+```
+
+```text
+fix(parser): keep quoted commas
+
+Rows with quoted commas were split in two.
+
+The tokenizer reads a quoted field whole.
+
+Verified: python3 -m unittest tests.test_parser (12 tests pass)
+
+Refs: PROJ-142
+```
+
+| Option | Writes |
+| --- | --- |
+| `--why` | The first paragraph: why the change is needed |
+| `--body`, more `-m` | What changed. Without `--why`, `--body` is the reason, as before |
+| `--verified` | The last paragraph, `Verified: …` (the label is added when you leave it out) |
+| `--refs` | The `Refs:` trailer: `#12`, `owner/repo#12`, a URL, or a ticket key such as `PROJ-142`. Repeat it for more |
+| `--breaking` | The `BREAKING CHANGE:` trailer: what breaks, and how to move to the new behavior |
+
+- **`Refs:` from your task.** Without `--refs`, `dev commit` fills `Refs:` with the ticket of the task you started on
+  this branch (`dev task start` links the branch to the task). A task's ticket is one of its links: `ticket:PROJ-142`,
+  `issue:#12`, or a URL. When the started tasks on the branch name different tickets, nothing is filled, and the output
+  names them so you can pick one with `--refs`. A message that already has a `Refs:` line keeps it.
+- **No devkit task ids.** A message that names a devkit task id (`T-…`, `F-…`, `B-…`, or `S-…`) is refused, whether
+  it is in the header, the body, or `--refs`. Task ids stay in the private handoff, whose session log already links
+  each commit to its task.
+
 | The header must | Refused example |
 | --- | --- |
 | Be a Conventional Commit, `type(scope): summary` | `Added invoice export` |
@@ -83,6 +122,27 @@ you list. More `-m` options add paragraphs, and `--body` adds the reason.
 - **No secrets.** The guard's gitleaks scan runs on what the commit records.
 - **Amend with care.** `--amend` keeps the message unless you give `-m`. Amending a commit that is already pushed works,
   and the output tells you that the next push needs `dev push --force-with-lease`.
+
+### The template in your editor
+
+`git commit` without `-m` opens the template when it is the repository's `commit.template`. `dev setup` asks for it
+with your git hosts ("Open new commit messages with devkit's template?"), and the git step of `dev install`, which
+`dev setup` runs, applies the answer. The answer is kept:
+
+- **Yes:** it sets `commit.template` in each repository's own git config (never the global one), and in repositories
+  you clone later on the next install, without asking again.
+- **No:** nothing changes, and nobody asks again.
+- **Not answered yet:** `dev install` asks in a terminal. Without one (a scheduled job), nothing changes, and the step
+  says how to choose.
+
+`dev setup commit-template` asks again, even after a no, and `dev setup commit-template --remove` takes devkit's
+template out of every repository and records a no.
+
+A repository with a template of its own, in its config or your global config, keeps it. A repository where you removed
+devkit's (`git config --unset commit.template`) is never set again by `dev install`; only `dev setup commit-template`
+sets it again. The repositories point at a copy, `~/.local/state/devkit/git/commit-template.txt`, that each install
+refreshes. Because every line of the template is a comment, closing the editor without writing a message commits
+nothing.
 
 ### Work in progress instead of a stash
 
