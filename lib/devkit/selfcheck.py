@@ -107,7 +107,7 @@ def d1_enforced_rows(rows=None, home=None) -> list:
             continue
         mod, _, fn = row["ref"].rpartition(".")
         try:
-            ok = bool(mod) and callable(getattr(importlib.import_module(mod), fn, None))
+            ok = bool(mod) and callable(getattr(importlib.import_module(mod), fn, None))  # nosemgrep: python.lang.security.audit.non-literal-import.non-literal-import (the name comes from crew.ENFORCEMENT, a constant in devkit's source)
         except ImportError:
             ok = False
         if not ok:

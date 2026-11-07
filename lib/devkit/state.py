@@ -182,7 +182,7 @@ def _write(path: Path, doc: dict, indent):
     d.mkdir(parents=True, exist_ok=True, mode=0o700)
     if str(d) not in _tight:
         try:
-            os.chmod(d, 0o700)
+            os.chmod(d, 0o700)  # nosemgrep: python.lang.security.audit.insecure-file-permissions.insecure-file-permissions (0700 is owner-only: this tightens the folder)
         except OSError:
             pass
         _tight.add(str(d))

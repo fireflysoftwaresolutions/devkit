@@ -188,7 +188,7 @@ def _remove_tree(path: Path):
     """Delete a pinned copy or a leftover of one: its folders are read-only, so they are made writable first."""
     for d, _, _ in os.walk(path):
         try:
-            os.chmod(d, 0o755)
+            os.chmod(d, 0o755)  # nosemgrep: python.lang.security.audit.insecure-file-permissions.insecure-file-permissions (adds only the owner's write to a 0555 folder, so rmtree can delete it)
         except OSError:
             pass
     shutil.rmtree(path, ignore_errors=True)
@@ -1158,7 +1158,7 @@ def build_codex_plugin() -> Path:
         if (src / name).exists():  # without the modes: the pinned copy is read-only, this build must stay writable
             _sh.copytree(src / name, tmp / name, copy_function=_sh.copyfile)
     for d, _, _ in os.walk(tmp):
-        os.chmod(d, 0o755)
+        os.chmod(d, 0o755)  # nosemgrep: python.lang.security.audit.insecure-file-permissions.insecure-file-permissions (mkdir's default, undoing the 0555 copytree copied; below the 0700 devkit root)
     for cmd in sorted((src / "commands").glob("*.md")):
         text = cmd.read_text()
         m = re.match(r"---\s*\n(.*?)\n---\s*\n(.*)$", text, re.S)

@@ -701,7 +701,7 @@ def _tail(fh):
 def _private_dir(d: Path):
     d.mkdir(parents=True, exist_ok=True, mode=0o700)
     if stat.S_IMODE(d.stat().st_mode) != 0o700:
-        os.chmod(d, 0o700)
+        os.chmod(d, 0o700)  # nosemgrep: python.lang.security.audit.insecure-file-permissions.insecure-file-permissions (0700 is owner-only: this tightens the folder)
 
 
 def month_file(ts: float) -> Path:
