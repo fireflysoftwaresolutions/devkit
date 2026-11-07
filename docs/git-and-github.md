@@ -54,8 +54,29 @@ that already exists here or on `origin`, is refused.
 proper name before its first push. It refuses to rename the default branch and permanent branches, and a branch that
 is already on `origin`, because the remote branch and its PR would stay behind.
 
-`dev branch ls` lists the local branches with their upstream (ahead ↑, behind ↓, or `gone`), how far each is from
-`origin/<default>`, its PR, its age, and the worktree that has it checked out.
+`dev branch ls` prints the branch map: one row per local branch with where it lives (local only, or local and
+`origin`), how far it is ahead (↑) and behind (↓) its upstream and the default branch, the commits that exist only on
+this Mac and the branch that carries them, its last backup, an embargo, its worktree, its pull request, and its
+linked task. Each row ends with whether its work is safe off this Mac, or why not:
+
+```text
+  fireflysoftwaresolutions/devkit · 4 branches · 1 not backed up ──────────────────────────────────
+  * release/26.11.3        local + origin  ↑19 ↓0 · 262 ahead of main · not backed up: the backup
+                                           policy of fireflysoftwaresolutions/devkit is ask, the
+                                           default for a public repository, and the developer has
+                                           not answered
+    feat/curl-install      local only      merged into release/26.11.3 · nothing to back up
+    main                   local + origin  ↑0 ↓0 · default branch · nothing to back up
+  Backup policy: the default: on for a private repository, ask for a public one (dev backup policy).
+  Backups wait for commits older than 30 min (backup.after_minutes).
+```
+
+`--offline` skips the fetch and the GitHub lookups, and `--json` gives the same rows to tools. `dev status` and the
+handoff note's generated block show the same rows, the dashboard shows them in each project's Branches tab, and the
+session-start context names the branches that exist only on this Mac and the embargoed ones.
+`dev backup` copies a branch that is not backed up to the remote when that push starts no CI run, and
+`dev branch embargo` keeps one off every remote; see
+[Delivery › Back up early, CI once](delivery.md#back-up-early-ci-once).
 
 `dev branch clean` lists the local branches that can go: merged into the default branch, whose PR was merged at the
 same commit, or gone upstream with every commit on the remote. It keeps the current branch, permanent branches,
@@ -92,7 +113,7 @@ Refs: PROJ-142
 | Option | Writes |
 | --- | --- |
 | `--why` | The first paragraph: why the change is needed |
-| `--body`, more `-m` | What changed. Without `--why`, `--body` is the reason, as before |
+| `--body`, more `-m` | What changed; repeat `--body` for more paragraphs. Without `--why`, `--body` is the reason, as before |
 | `--verified` | The last paragraph, `Verified: …` (the label is added when you leave it out) |
 | `--refs` | The `Refs:` trailer: `#12`, `owner/repo#12`, a URL, or a ticket key such as `PROJ-142`. Repeat it for more |
 | `--breaking` | The `BREAKING CHANGE:` trailer: what breaks, and how to move to the new behavior |

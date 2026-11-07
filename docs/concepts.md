@@ -91,8 +91,9 @@ nothing falls between them.
 
 ### Who does the work, and how long it takes
 
-When a task needs more than one kind of expertise, the main session leads devkit's crew as Morpheus: 25 specialist
-agents, each in its own lane, with its own files and time (see [The crew](crew.md)). Every run's plan has steps with
+When a task needs more than one kind of expertise, the main session leads devkit's crew as the tech lead (Morpheus):
+25 specialist agents, named by role, each in its own lane, with its own files and time, within the crew's slots (see
+[The crew](crew.md)). Every run's plan has steps with
 estimates and dependencies; devkit counts only active time and gives the ETA as a range along the critical path, so
 parallel lanes shorten it and waiting for you does not (see
 [Progress and communication › Time and estimates](progress-and-communication.md#time-and-estimates)).
@@ -213,8 +214,14 @@ commands, permanent deletes and overwrites through `dev rm`, `dev mv`, and `dev 
 budget, no blind CI re-runs, merges and releases through `dev pr merge` and `dev release`, no shared stash, no commit
 gated on a pipe, branch names, tags that follow the delivery policy, no AI attribution, no secrets in commits,
 isolation in the handoff repository, and no settings that switch devkit off. Each denial explains the
-right way, so the agent corrects itself in one step. It fails open: a bug in the guard never blocks work. The full
-list is in [Guard rules](guard.md).
+right way, so the agent corrects itself in one step.
+
+The guard is a seatbelt, not a sandbox: it catches an agent's mistakes and the common forms of prompt injection, and
+a determined program can still find a form it does not recognize. Most of it fails open, so a bug in the guard does
+not block your work. The checks where failing open would let an action through fail closed instead: the
+irreversible-action gate, which refuses a command that names an irreversible action when the gate itself fails, and
+the lane check, which refuses a crew member's command it cannot check. The full list is in
+[Guard rules](guard.md).
 
 ## The status block
 

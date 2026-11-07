@@ -97,28 +97,39 @@ matching files must also contain; with `content_files`, files of those globs mat
 | `progress.max_parallel` | `4` | The crew's slots: how many crew members may work at once (1 to 10), counting the helpers they launch; the guard refuses a launch that does not fit ([The crew](crew.md#guardrails)). The team's `policy/progress.json` in the handoff repository may set a lower ceiling, such as `{"max_parallel": 3}` |
 | `progress.quota_steps` | `{"50": 1.0, "70": 0.75, "85": 0.5}` | How the plan's recorded usage lowers the slots: from each usage percent, this share of `max_parallel`, rounded down (never below one). The 5-hour and the weekly windows both count, and the lower result wins; an expired reading counts for nothing. Setting a step adds it or changes its share; a share of `1` turns a step off. With 6 slots at 87 %, 3 members work at once |
 | `progress.quota_percent` | `90` | From this usage of the 5-hour or the weekly window, one crew member works at a time, until the window resets |
-| `progress.slot_weights` | `{"builder": 1.0, "review": 0.5, "read": 0.5, "scout": 0.0}` | What one launch costs, by kind (0 to 1): a review-only or read-only member (its tool level, or its parent's for a helper), the lookup scout (Sparks), or a builder (every other agent). The costs in use must fit the slots, so two reviewers fit in one builder's slot and a scout lookup always runs |
+| `progress.slot_weights` | `{"builder": 1.0, "review": 0.5, "read": 0.5, "scout": 0.0}` | What one launch costs, by kind (0 to 1): a review-only or read-only member (its tool level, or its parent's for a helper), the Lookup scout (Sparks), or a builder (every other agent). The costs in use must fit the slots, so two reviewers fit in one builder's slot and the Lookup scout (Sparks) always runs |
 | `progress.reserve` | `1` | Slots kept for the developer's own request while the crew works: queued plan steps from an earlier turn do not take them; a launch for what the developer asked in the current turn does (audited as `crew.reserve`). Never the last slot of a limit of one |
 | `progress.max_depth` | `2` | How many levels of agents may run below the main session (1 to 5): crew members, and the helpers they launch. A deeper launch is refused |
 | `progress.stale_agent_hours` | `6` | A crew member with no report for this long is closed as lost, and its step goes back to the main session |
 | `progress.stale_agent_minutes` | `90` | The reconciler's limit: a working crew member silent this long (no hook, no update) is lost and frees its slot, and its step waits for a new owner. It works again, with its step, at its next hook. A member stopped with TaskStop frees its slot at once, and its step waits unverified |
-
-`dev crew` and `dev crew next` show the slots in use and why the limit is lower ("1 of 3 slots in use (lowered from 6:
-5-hour usage at 87 %)"), the status block's Crew line ends with the same, and each change of the effective limit is
-audited (`crew.limit`). `dev crew next` lists the ready steps in the order Morpheus launches them: the longest critical
-path first, then your latest request, then the oldest; a launch out of that order needs `dev crew next --first
-"<step>" --why "…"`. You set any of these keys in a terminal with `dev config set progress.max_parallel 6`, validated
-and audited; agents are refused.
 | `work.mode` | `guided` | `guided`: decisions that are the developer's wait for the developer; `auto`: the crew goes on with the recommended option and records it. A run can set its own (`--mode`) |
 | `crew.gates.enforce` | `true` | At SubagentStop, the crew gates send a member back once for each proof, skill, unfinished line, test that cannot fail, or lesson it still owes; `false` only records them in the audit trail (see [The crew › Every report is checked](crew.md#every-report-is-checked)) |
-| `crew.route_hint` | `true` | The prompt hook adds Morpheus's route for each request, a guess from the request's words (English only); `false` leaves it out |
+| `crew.route_hint` | `true` | The prompt hook adds the tech lead's route for each request, a guess from the request's words (English only); `false` leaves it out |
 | `ui.powerline` | `false` | Draw Nerd Font arrows between the status pills in `dev status` and `dev overview` (needs a Nerd Font in your terminal) |
 | `dashboard.idle_minutes` | `30` | The live dashboard server stops after this many minutes with no page open and no request |
 | `handoff.enforce` | `true` | When a session made commits without updating the handoff note, the Stop hook asks the agent once to update it |
 | `handoff.block_after_commits` | `5` | Below this many commits newer than the handoff note, the reminder before the end of the turn is enough; at it, the Stop hook sends the turn back |
-| `handoff.block_after_minutes` | `60` | The Stop hook also sends the turn back when the oldest commit newer than the note is this many minutes old, or after a milestone (a step or work item closed, a push, a PR, a release) |
+| `handoff.block_after_minutes` | `60` | The Stop hook also sends the turn back when the oldest commit newer than the note is this many minutes old, or after a milestone: the end of a run (`dev progress done`), a work item closed, a push, a PR, or a release. An intermediate step is not a milestone, and a milestone counts only the commits made before it. While crew members work, the main session gets the reminder only, and a crew member is never sent back for the note |
 | `canary.enforce` | `true` | When a final message lacks the status block, the Stop hook asks the agent to reply again with it; at SubagentStop, a crew member without its status block or its `dev progress step` is sent back once |
-| `canary.roles` | `true` | When a final message or a crew member's report names a crew member alone instead of `<role> (<Name>)`, such as Backend engineer (Tank), the Stop or SubagentStop hook sends it back once per turn (per member for reports). The role can be in any language; the status block's header and Crew line count, and names in code spans and commands do not. Morpheus, the session itself, is not checked. Off with `canary.enforce` too |
+| `canary.roles` | `true` | When a final message or a crew member's report names a crew member alone instead of `<role> (<Name>)`, such as Backend engineer (Tank), the Stop or SubagentStop hook sends it back once per turn (per member for reports). The role can be in any language; the status block's header and Crew line count, and names in code spans and commands do not. The tech lead (Morpheus) is checked too, so write the main session as the tech lead. Off with `canary.enforce` too |
+
+`dev crew` and `dev crew next` show the slots in use and why the limit is lower ("1 of 3 slots in use (lowered from 6:
+5-hour usage at 87 %)"), the status block's Crew line ends with the same, and each change of the effective limit is
+audited (`crew.limit`). `dev crew next` lists the ready steps in the order the tech lead launches them: the longest
+critical path first, then your latest request, then the oldest; a launch out of that order needs
+`dev crew next --first "<step>" --why "…"`. You set any of these keys in a terminal with
+`dev config set progress.max_parallel 6`, validated and audited; agents are refused.
+
+### Backups
+
+`dev backup` and the hourly `dev sync` copy branches whose commits exist only on this Mac to the remote, when that
+push starts no CI run (see [Git and GitHub › Branches](git-and-github.md#branches)). Each project's backup policy is
+not a key here: it lives in the project's handoff note, set with `dev backup policy on|off|ask`.
+
+| Key | Default | Meaning |
+| --- | --- | --- |
+| `backup.auto` | `true` | `dev sync` backs up the branches that need it, every hour and at the end of a session; `false` leaves backups to `dev backup` |
+| `backup.after_minutes` | `30` | `dev sync` backs up only commits older than this (0 to 1,440 minutes), because a younger commit may still be amended; `dev backup` takes them all |
 
 ### Background AI
 

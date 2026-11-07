@@ -32,8 +32,9 @@ block, progress updates, approvals, the crew graph, and the dashboard.
 | --- | --- |
 | [Teams and machines](teams.md) | Sharing a handoff repository: work items, locks, reasons, and history, delegation, versioned plans, session logs, presence, merge rules |
 | [Initiatives](initiatives.md) | Cross-project initiatives: creating them, who may write what, progress, adopting an older handoff repository |
-| [The crew](crew.md) | devkit's 25 specialist agents and Morpheus: who does what, parallel or in sequence, lanes, scopes, messages, delegation, guided or automatic decisions, the crew canary |
+| [The crew](crew.md) | devkit's 25 specialist agents and the tech lead (Morpheus): who does what, parallel or in sequence, slots, lanes, scopes, messages, delegation, guided or automatic decisions, the crew canary |
 | [Progress and communication](progress-and-communication.md) | `dev progress`, ETA and calibrated estimates, notifications, what the hooks add, `dev time`, the message templates, status reports |
+| [Continuity](continuity.md) | What devkit keeps of a session through compaction, resume, and `/clear`, the continuity brief, `dev session`, and `devkit_resume` in chat |
 | [Dashboard](dashboard.md) | The live command center: `dev dashboard` and its server, the views, Background work, the crew, drawers, live and honest states, search, shortcuts, routes |
 | [Git and GitHub](git-and-github.md) | `dev branch`, `commit`, `rebase`, `push`, `pr`, `run`, `release`, and `issue`: local CI evidence, the PR template, safe merges, releases by the policy |
 | [Testing](testing.md) | `dev test`: failed first, then the blast radius of your changes; `dev test audit` and `dev test prove`: tests that can fail; `dev ci --run --resume` |
@@ -54,7 +55,7 @@ block, progress updates, approvals, the crew graph, and the dashboard.
 | [Configuration](configuration.md) | Every key of `~/.config/devkit/config.json`, personal agent rules, environment variables, the files that apply to everyone |
 | [Agents](agents.md) | What devkit configures in Claude Code and Codex, the crew's agents and Codex roles, the global instructions, every hook, how devkit stays on |
 | [Skills and plugins](skills-and-plugins.md) | The devkit plugin, required skills, the curated catalog and optional groups, and what was left out |
-| [Models and tokens](models-and-tokens.md) | Models, effort, and subagents; Sparks, the scout; Codex profiles; the routing rules |
+| [Models and tokens](models-and-tokens.md) | Models, effort, and subagents; the Lookup scout (Sparks); Codex profiles; the routing rules |
 | [Templates](templates.md) | Plan, spec, spike, bug-fix, and ADR templates; task templates; the pull request template |
 | [Guard rules](guard.md) | Every rule the guard enforces, per agent, including devkit's own state and the forged-environment rules, with example messages, and escape hatches |
 | [Troubleshooting](troubleshooting.md) | Logs, common problems (pin refusals and rollback included), and how to reset |

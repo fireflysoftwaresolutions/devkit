@@ -301,7 +301,8 @@ nothing. This Mac's Starship prompt with the helper:
 When devkit has not refreshed the helper for 24 hours, only the project part stays. Without UTF-8 (`LANG=C`) the
 glyphs become `*`, `>`, `ok`, `x` and `...`.
 
-Add it with `dev setup prompt` (`dev install` also asks once). It says what it changes, asks, and then:
+Add it with `dev setup prompt` (`dev install` also asks once), in your own terminal: run by an agent, it changes
+nothing and exits with code 2, because only you can agree to it. It says what it changes, asks, and then:
 
 - **Starship:** adds a marked block to `~/.config/starship.toml`, after saving a copy in
   `~/.local/state/devkit/backups/`. It puts `${env_var.DEVKIT_PROMPT}` and `${env_var.DEVKIT_PROMPT_ASK}` into your
@@ -357,9 +358,14 @@ function prompt_devkit() {
 }
 ```
 
-**What a prompt costs.** Nothing runs when the prompt is drawn: devkit's hooks and commands (`dev status`,
-`dev alias`, `dev ci watch`) write the helper's facts ahead of time to `~/.local/state/devkit/prompt/cache.zsh`, and a
-zsh function reads them with builtins only, never Python, git, or another program. Measured on an Apple Silicon Mac
+**What a prompt costs.** Nothing runs when the prompt is drawn. devkit writes the helper's facts ahead of time to
+`~/.local/state/devkit/prompt/cache.zsh`: the hooks refresh the folder's project after a tool call (at most every 5
+seconds) and at once when you send a prompt, a turn ends, or a crew member starts or stops, so an answered question
+or a member that finished shows in your next prompt; `dev status`, `dev alias`, `dev prompt refresh`, and
+`dev ci watch` refresh it too. A refresh from a hook reads a few files and runs no git, network call, or other
+program. A zsh function reads the cache with builtins only, never Python, git, or another program, and only when the
+cache is a regular file of yours, not a link, in a folder of yours, and neither is writable by anyone else; only
+digits from it become numbers. Measured on an Apple Silicon Mac
 with 40 projects of 3 checkouts each: 0.13 ms per prompt, and 1.7 ms for a prompt right after devkit rewrote the
 cache. The budget is 5 ms, and a test holds it. `DEVKIT_PROMPT` and `DEVKIT_PROMPT_ASK` hold plain text, because Starship
 and `oh-my-posh` escape a `%` for zsh themselves; the preceding snippets escape it for zsh and Powerlevel10k.
