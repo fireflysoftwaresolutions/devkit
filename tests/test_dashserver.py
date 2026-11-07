@@ -255,6 +255,18 @@ class ServerTests(unittest.TestCase):
             status, headers, body = self.srv.request(path)
             self.assertEqual((status, headers["content-type"], json.loads(body)["status"]), (404, "application/problem+json", 404), path)
 
+    def test_a_projects_branch_map_is_read_on_demand_and_a_git_failure_is_a_502_problem(self):
+        plain = self.state.root / "plain"        # a folder that is not a repository: git refuses to read it
+        plain.mkdir()
+        self.srv.snap.reg = {"projects": [{"id": "acme/widget", "path": str(plain), "local": True, "github": None, "main": {}, "worktrees": []}]}
+        status, headers, body = self.srv.request("/api/v1/branches/acme/widget")
+        pb = json.loads(body)
+        self.assertEqual((status, headers["content-type"], pb["title"]), (502, "application/problem+json", "git could not read the branches"))
+        self.assertIn("not a git repository", pb["detail"])
+        for path in ("/api/v1/branches/acme/nope", "/api/v1/branches/", "/api/v1/branches/acme/../widget"):
+            status, _, body = self.srv.request(path)
+            self.assertEqual((status, json.loads(body)["status"]), (404, 404), path)
+
 
 class GzipTests(unittest.TestCase):
     def test_large_answers_are_compressed_for_a_client_that_accepts_it(self):

@@ -892,6 +892,109 @@ class DetailTests(unittest.TestCase):
             self.assertIn(k, d)
 
 
+def branch_row(name, state="on_remote", reason="", **kw):
+    """One row of the branch map (branches.map) as the registry keeps it: a branch on origin unless kw says otherwise."""
+    r = {"name": name, "current": False, "default": False, "default_branch": "main", "sha": "1a2b3c4", "upstream": "origin/" + name,
+         "upstream_remote": "origin", "upstream_gone": False, "ahead": 0, "behind": 0, "base": "origin/main", "base_ahead": 0, "base_behind": 0,
+         "where": "local + origin", "last_commit": int(NOW - 3600), "unpushed": 0, "oldest_unpushed": None, "merged_into": None, "last_backup": None,
+         "embargo": None, "embargo_via": None, "worktree": None, "worktree_missing": False, "changes": None, "session": False, "pr": None, "task": None,
+         "backup": {"state": state, "reason": reason}}
+    r.update(kw)
+    return r
+
+
+class BranchMapTests(unittest.TestCase):
+    """The branch map on the page (spec P-fy3bwa0pshk R8): the registry's rows reach the page in the map's order, and
+    the live server maps one project on demand, saying what git or gh answered."""
+
+    def setUp(self):
+        from devkit import audit
+        self.tmp = tempfile.TemporaryDirectory()
+        self.root = Path(self.tmp.name).resolve()
+        iso_git = {"GIT_CONFIG_GLOBAL": "/dev/null", "GIT_CONFIG_NOSYSTEM": "1", "GIT_AUTHOR_NAME": "Ana Dev", "GIT_AUTHOR_EMAIL": "ana@example.com",
+                   "GIT_COMMITTER_NAME": "Ana Dev", "GIT_COMMITTER_EMAIL": "ana@example.com"}
+        self.patches = [mock.patch.object(core, "STATE", self.root / "state"), mock.patch.object(core, "NOTES", self.root / "handoff" / "projects"),
+                        mock.patch.object(audit, "AUDIT", self.root / "state" / "audit"), mock.patch.object(work, "ITEMS", self.root / "handoff" / "items"),
+                        mock.patch.dict(core.GIT_ENV, iso_git)]
+        from devkit import registry as reg_mod
+        self.patches.append(mock.patch.object(reg_mod, "STATE", self.root / "state"))
+        for p in self.patches:
+            p.start()
+        self.repo = self.root / "widget"
+        self.git("init", "-q", "-b", "main", str(self.repo), cwd=self.root)
+        (self.repo / "a.txt").write_text("a\n")
+        self.git("add", "-A")
+        self.git("commit", "-q", "-m", "chore: start")
+        self.git("switch", "-q", "-c", "feat/export")
+        (self.repo / "b.txt").write_text("b\n")
+        self.git("add", "-A")
+        self.git("commit", "-q", "-m", "feat: export")
+
+    def tearDown(self):
+        for p in reversed(self.patches):
+            p.stop()
+        self.tmp.cleanup()
+
+    def git(self, *args, cwd=None):
+        rc, out, err = core.sh(["git", "-C", str(cwd or self.repo), *args], timeout=60)
+        self.assertEqual(rc, 0, err or out)
+        return out
+
+    def reg(self, path, **kw):
+        p = {"id": "acme/widget", "path": str(path), "local": True, "github": None, "default_branch": "main",
+             "main": {"branch": "feat/export", "path": str(path)}, "worktrees": []}
+        p.update(kw)
+        return {"projects": [p]}
+
+    def test_the_page_gets_the_rows_in_the_maps_order_and_no_map_stays_unknown(self):
+        reg = registry()
+        reg["projects"][0]["branches"] = [branch_row("main", default=True), branch_row("fix/old", "merged", "its commits are in main", merged_into="main"),
+                                          branch_row("feat/x", "not_backed_up", "2 commits only on this Mac", where="local only", upstream=None, unpushed=2,
+                                                     worktree=str(core.HOME / "Development/.worktrees/acme/widget/feat-x")),
+                                          branch_row("release/1", current=True)]
+        with TempState():
+            d = dashboard.collect(reg, handoff=self.root / "handoff", now=NOW)
+        widget, api = d["projects"][0], d["projects"][1]
+        self.assertEqual([r["name"] for r in widget["branches"]], ["release/1", "feat/x", "fix/old", "main"])   # current, at risk, newest, default last
+        self.assertEqual(widget["branches"][1]["worktree"], "~/Development/.worktrees/acme/widget/feat-x")      # a path in the home folder, as ~
+        self.assertEqual(widget["branches"][1]["backup"], {"state": "not_backed_up", "reason": "2 commits only on this Mac"})
+        self.assertIsNone(api["branches"])                                  # no map: unknown, never "no branches"
+
+    def test_the_live_map_reads_the_repository_now(self):
+        d = dashboard.branch_detail("acme/widget", self.reg(self.repo), now=NOW)
+        rows = {r["name"]: r for r in d["rows"]}
+        self.assertEqual([r["name"] for r in d["rows"]], ["feat/export", "main"])          # the current branch first
+        self.assertEqual((rows["feat/export"]["where"], rows["feat/export"]["backup"]["state"]), ("local only", "no_remote"))
+        self.assertEqual((d["counts"]["total"], d["counts"]["not_backed_up"]), (2, 2))
+        self.assertEqual((d["prs"], d["mapped"]), ("none", int(NOW)))                        # not on GitHub: no PRs to ask for
+
+    def test_the_live_map_says_what_git_answered_when_it_cannot_read_the_repository(self):
+        plain = self.root / "plain"
+        plain.mkdir()
+        d = dashboard.branch_detail("acme/widget", self.reg(plain), now=NOW)
+        self.assertEqual(d["error"]["source"], "git")
+        self.assertIn("not a git repository", d["error"]["detail"])
+        self.assertNotIn("rows", d)
+
+    def test_the_live_map_says_when_gh_is_missing_or_did_not_answer(self):
+        from devkit import registry as reg_mod
+        r = self.reg(self.repo, github="acme/widget")
+        with mock.patch.object(core, "have", lambda tool: tool != "gh"):
+            self.assertEqual(dashboard.branch_detail("acme/widget", r, now=NOW)["prs"], "missing")
+        with mock.patch.object(core, "have", lambda tool: True), mock.patch.object(reg_mod, "prs", lambda slug, **kw: None):
+            self.assertEqual(dashboard.branch_detail("acme/widget", r, now=NOW)["prs"], "error")
+        pr41 = {"number": 41, "state": "OPEN", "headRefName": "feat/export", "isDraft": True, "url": "https://github.com/acme/widget/pull/41", "title": "Export", "checks": "passing"}
+        with mock.patch.object(core, "have", lambda tool: True), mock.patch.object(reg_mod, "prs", lambda slug, **kw: [pr41]):
+            d = dashboard.branch_detail("acme/widget", r, now=NOW)
+        self.assertEqual((d["prs"], d["rows"][0]["pr"]["number"], d["rows"][0]["pr"]["draft"]), ("ok", 41, True))
+
+    def test_the_live_map_is_only_for_projects_cloned_here(self):
+        self.assertIsNone(dashboard.branch_detail("acme/nope", self.reg(self.repo), now=NOW))
+        not_here = self.reg(self.repo, local=False)
+        not_here["projects"][0]["path"] = None
+        self.assertIsNone(dashboard.branch_detail("acme/widget", not_here, now=NOW))
+
+
 # --------------------------------------------------------------------------- the page itself, in a real browser
 
 def find_chrome():
@@ -1313,6 +1416,83 @@ class PageBehaviorTests(unittest.TestCase):
             self.assertNotIn("Blocked", shown)
         self.assertNotIn("crew docs", out["needs"])                                              # Morpheus checks it; nothing asks the developer
 
+    @staticmethod
+    def with_branches(d):
+        # acme/widget's branch map: backed up, only on this Mac, embargoed, the default branch, and five merged branches
+        t = time.time()
+        w = next(p for p in d["projects"] if p["id"] == "acme/widget")
+        merged = [branch_row(f"fix/old-{i}", "merged", "its commits are in main", merged_into="main", last_commit=int(t - (10 + i) * 86400)) for i in range(5)]
+        merged[0]["pr"] = {"number": 30, "state": "merged", "draft": False, "checks": None, "url": "javascript:alert(1)", "title": "Old fix"}
+        w["branches"] = [
+            branch_row("release/1", "backed_up", current=True, ahead=2, base_ahead=12, last_backup=int(t - 240),
+                       pr={"number": 41, "state": "open", "draft": True, "checks": "passing", "url": "https://github.com/acme/widget/pull/41", "title": "Release 1"}),
+            branch_row("feat/x", "not_backed_up", "3 commits only on this Mac", where="local only", upstream=None, unpushed=3, oldest_unpushed=int(t - 7200),
+                       base_ahead=3, worktree="~/Development/.worktrees/acme/widget/feat-x", session=True, task={"id": "T-a1", "title": "Ship export", "status": "doing"}),
+            branch_row("release/x", "embargoed", 'embargoed until "guard refusal rules"', where="local only", upstream=None, unpushed=2, base_ahead=2,
+                       embargo={"why": "keeps the guard fix off the public remote", "until": "guard refusal rules", "who": "link", "when": "2026-11-06T10:00:00Z"}),
+            branch_row("main", "on_remote", default=True)] + merged
+
+    def test_the_branches_tab_shows_where_each_branch_lives_and_whether_it_is_backed_up(self):
+        out = self.probe("""await go("#/projects/acme/widget?tab=branches"); const box = $("#branches");
+            out.cols = $$("thead th", box).map(text); out.head = text($(".ph", box)); out.tab = text($("#tab-branches"));
+            out.rows = $$("tbody tr", box).map(text); out.quiet = $$("tbody tr.quiet", box).map(tr => text($("th", tr)));
+            out.links = $$("tbody a[target=_blank]", box).map(a => [a.textContent, a.getAttribute("href")]);
+            const more = $$("button", box).find(b => text(b).startsWith("Show")); out.more = text(more); more.focus(); more.click(); await tick(100);
+            out.after = $$("#branches tbody tr").length; out.focusIn = $("#branches").contains(document.activeElement);
+            await go("#/projects/acme/widget"); out.facts = text($$(".kv dt").find(dt => text(dt) === "Branches").nextElementSibling);
+            await go("#/projects?layout=table"); out.cell = text($$("table.pt tbody tr").find(tr => text(tr).includes("widget")).querySelector("td.c-bk"));
+            await go("#/projects?layout=cards"); out.tile = text($$(".ptile").find(x => text(x).includes("widget")));""", page=self.variant(self.with_branches))
+        self.assertEqual(out["cols"], ["Backup", "Branch", "Where", "Ahead / behind", "Pull request", "Worktree"])
+        self.assertEqual(out["head"], "Branches 9 1 not backed up 1 embargoed")                 # a static copy: the navbar says when it was made
+        self.assertEqual(out["tab"], "Branches 9")
+        rel1, featx, relx, main = out["rows"][:4]
+        self.assertEqual(rel1, "Backed up 4 min ago release/1current local + origin ↑2 ↓0 12 ahead of main #41 draft checks passing main checkout")
+        self.assertEqual(featx, "Not backed up 3 commits only on this Mac, the oldest 2 h ago. feat/x T-a1 Ship export local only ↑3 3 ahead of main — feat-x live session")
+        self.assertEqual(relx, "Embargoed Until “guard refusal rules” Release engineer (Link): keeps the guard fix off the public remote release/x local only ↑2 2 ahead of main — —")
+        self.assertEqual(main, "On the remote main local + origin ↑0 ↓0 default branch — —")
+        self.assertEqual(out["quiet"], ["fix/old-0", "fix/old-1", "fix/old-2"])                 # merged: quiet, last, the first three
+        self.assertTrue(out["rows"][4].startswith("Merged into main fix/old-0 local + origin"), out["rows"][4])
+        self.assertEqual(out["more"], "Show 2 more merged branches")
+        self.assertEqual((out["after"], out["focusIn"]), (9, True))
+        self.assertEqual(out["links"], [["#41", "https://github.com/acme/widget/pull/41"], ["#30", "#"]])   # a javascript: URL is never a link
+        self.assertEqual(out["facts"], "9 branches, 1 not backed up, 1 embargoed")
+        self.assertEqual(out["cell"], "1")
+        self.assertIn("acme · 1 not backed up", out["tile"])
+
+    def test_the_branch_map_says_when_it_is_missing_empty_without_a_remote_or_without_gh(self):
+        def change(d):
+            w = next(p for p in d["projects"] if p["id"] == "acme/widget")
+            w.update(remote="", github=None, branches=[branch_row("main", "no_remote", "no remote is configured", default=True, current=True,
+                                                                  where="local only", upstream=None, unpushed=4)])
+            old = next(p for p in d["projects"] if p["id"] == "acme/old")
+            old.update(prs_known=False, github="acme/old", remote="https://github.com/acme/old.git", branches=[branch_row("main", default=True, current=True)])
+            for pid, main, rows in (("acme/broken", {"branch": "main"}, []), ("acme/fresh", {}, []), ("acme/legacy", {"branch": "main"}, None)):
+                d["projects"].append(dict(old, id=pid, name=pid.split("/")[1], main=main, branches=rows, prs_known=True, github=None))
+        out = self.probe("""const view = async id => { await go("#/projects/" + id + "?tab=branches"); return text($("#branches")); };
+            for (const id of ["acme/widget", "acme/old", "acme/broken", "acme/fresh", "acme/legacy", "acme/api"]) out[id] = await view(id);
+            await go("#/projects?layout=table"); out.cells = Object.fromEntries($$("table.pt tbody tr").map(tr => [text($(".pname a", tr)), text($("td.c-bk", tr))]));""",
+                         page=self.variant(change))
+        self.assertIn("No remote Every branch exists only on this Mac.", out["acme/widget"])
+        self.assertIn("Not backed up No remote is configured. main", out["acme/widget"])
+        self.assertIn("Pull requests not known gh did not answer", out["acme/old"])
+        self.assertIn("git listed no branches The checkout is on main, but the map came back empty.", out["acme/broken"])
+        self.assertIn("No branches yet The repository has no commits.", out["acme/fresh"])
+        self.assertIn("No branch map in this copy", out["acme/legacy"])
+        self.assertIn("No branches on this Mac", out["acme/api"])
+        self.assertIn("dev clone acme/api", out["acme/api"])
+        self.assertEqual(out["cells"], {"widget": "1", "api": "—", "old": "0", "broken": "—", "fresh": "0", "legacy": "—"})   # unknown is —, never 0
+
+    def test_the_branch_map_stacks_on_a_phone_without_scrolling_sideways(self):
+        out = self.probe("""await go("#/projects/acme/widget?tab=branches"); const tr = $("#branches tbody tr");
+            out.first = text(tr.firstElementChild.tagName === "TH" ? tr.firstElementChild : $("th", tr)); out.firstShown = getComputedStyle($("th", tr)).order;
+            out.row = text(tr); out.page = [document.documentElement.scrollWidth, document.documentElement.clientWidth];
+            out.rowW = [tr.getBoundingClientRect().right, document.documentElement.clientWidth];""", width=390, page=self.variant(self.with_branches))
+        self.assertLessEqual(out["page"][0], out["page"][1])
+        self.assertLessEqual(out["rowW"][0], out["rowW"][1])
+        self.assertEqual(out["firstShown"], "-1")                                                # the name leads the stacked row
+        self.assertIn("Where local + origin", out["row"])                                       # each value says what it is
+        self.assertIn("Pull request #41 draft", out["row"])
+
 
 class LivePageTests(unittest.TestCase):
     """The live page against a small stand-in server: the session-ended state, and an update that arrives while a drawer is open."""
@@ -1414,6 +1594,43 @@ class LivePageTests(unittest.TestCase):
         self.assertEqual(out["title"], "Ship export")
         self.assertEqual(out["flash"], ["task~T-a2"])                                            # only the row that changed
         self.assertIn("Decision waiting: Drop the old importer?, asked by Backend engineer (Tank).", out["said"])
+
+    @unittest.skipUnless(CHROME, NO_CHROME)
+    def test_the_branches_tab_reads_git_now_shows_its_error_and_tries_again(self):
+        data = json.loads(json.dumps(self.data))
+        PageBehaviorTests.with_branches(data)
+        data["generated"] = int(time.time()) - 90         # the snapshot is a minute and a half old, whenever the suite reaches this test
+        asked = []
+        fresh = {"project": "acme/widget", "rows": [branch_row("feat/live", "not_backed_up", "1 commit only on this Mac", current=True, where="local only", upstream=None, unpushed=1)],
+                 "counts": {"total": 1, "not_backed_up": 1, "embargoed": 0, "waiting": 0}, "prs": "ok", "mapped": int(time.time())}
+        steps = """window.addEventListener("hashchange", () => { out.loading = text($("#branches .brst")); out.rowsWhileLoading = $$("#branches tbody tr").length; });
+            await go("#/projects/acme/widget?tab=branches"); await tick(300); out.error = text($("#branches .callout")); out.rows = $$("#branches tbody tr").length;
+            $("#branches .brretry").click(); await tick(500); out.after = $$("#branches tbody tr").map(text); out.status = text($("#branches .brst")); out.callout = !!$("#branches .callout");
+            out.focusIn = $("#branches").contains(document.activeElement);"""
+
+        def routes(path):
+            if path == "/":
+                return 200, "text/html", dashboard.page(data).replace("</body>", PROBE % steps + "</body>").encode()
+            if path.startswith("/api/v1/branches/"):
+                asked.append(path)
+                if len(asked) == 1:
+                    return 502, "application/problem+json", json.dumps({"title": "git could not read the branches", "status": 502,
+                                                                        "detail": "fatal: not a git repository (or any of the parent directories): .git"}).encode()
+                return 200, "application/json", json.dumps(fresh).encode()
+            if path.startswith("/api/v1/events"):
+                return 200, "text/event-stream", b"retry: 60000\n\n"
+            if path == "/api/v1/health":
+                return 200, "application/json", json.dumps({"ok": True, "version": data["version"]}).encode()
+            return 404, "application/problem+json", b'{"title": "Not found"}'
+        out = chrome(self.serve(routes) + "/#/overview", 1440, budget=15000)
+        self.assertEqual((out["loading"], out["rowsWhileLoading"]), ("Checking with git…", 8))  # the snapshot's rows show at once
+        self.assertEqual(out["error"], "git could not read the branches fatal: not a git repository (or any of the parent directories): .git "
+                                       "The rows below are from 1 min ago. Try again")
+        self.assertEqual(out["rows"], 8)
+        self.assertEqual(asked, ["/api/v1/branches/acme/widget"] * 2)
+        self.assertEqual(len(out["after"]), 1)                                                    # git's answer replaces the snapshot's rows
+        self.assertIn("feat/live", out["after"][0])
+        self.assertEqual((out["status"], out["callout"], out["focusIn"]), ("Checked just now", False, True))
 
 
 if __name__ == "__main__":

@@ -1222,7 +1222,62 @@ def _project(p: dict, now: float) -> dict:
     out["task_index"] = {t: i + 1 for i, t in enumerate(_open_tasks(ns))}
     if isinstance(out.get("status_line"), dict):
         out["status_line"] = dict(out["status_line"], parts=status_parts(out["status_line"].get("line")))
+    out["branches"] = branch_rows(p.get("branches"))
     return out
+
+
+# the branch map's fields the page shows (spec P-fy3bwa0pshk R8); branches.map makes the rows
+BRANCH_KEYS = ("name", "current", "default", "sha", "upstream", "upstream_gone", "ahead", "behind", "base_ahead", "base_behind",
+               "where", "last_commit", "unpushed", "oldest_unpushed", "merged_into", "last_backup", "embargo", "embargo_via",
+               "worktree", "worktree_missing", "session", "pr", "task", "backup")
+
+
+def branch_rows(rows):
+    """The page's rows in the map's order: the current branch, work at risk, the newest; the default branch last. None
+    stays None: a registry without the map is unknown, which is not the same as a repository without branches."""
+    if rows is None:
+        return None
+    from . import branches
+    out = []
+    for r in branches.ordered(rows):
+        x = {k: r.get(k) for k in BRANCH_KEYS}
+        if x["worktree"]:
+            x["worktree"] = core.tilde(x["worktree"])
+        out.append(x)
+    return out
+
+
+def _git_error(text: str) -> str:
+    line = next((ln.strip() for ln in str(text or "").splitlines() if ln.strip()), "")
+    return _redact(line)[:300] or "git stopped without saying why"
+
+
+def branch_detail(pid: str, reg: dict, now: float = None):
+    """One project's branch map, read now (GET /api/v1/branches/{id}): {project, rows, counts, prs, mapped}, or
+    {project, error: {source, detail}} when git cannot read the repository; None for a project not cloned here.
+    prs says where the pull requests came from: ok (gh, or its recent cache), missing (gh is not installed; the last
+    cached list, if any), error (gh did not answer and nothing is cached), none (not a GitHub repository)."""
+    p = next((x for x in (reg or {}).get("projects") or [] if isinstance(x, dict) and x.get("id") == pid), None)
+    if not p or p.get("local") is False or not p.get("path"):
+        return None
+    from . import branches, registry
+    now = now or time.time()
+    path = p["path"]
+    rc, _, err = core.git(path, "for-each-ref", "--count=1", "--format=%(refname)", "refs/heads", timeout=15)
+    if rc != 0:
+        return {"project": pid, "error": {"source": "git", "detail": _git_error(err)}}
+    slug, prs, state = p.get("github"), [], "none"
+    if slug and not core.have("gh"):
+        prs, state = branches.cached_prs(slug) or [], "missing"
+    elif slug:
+        got = registry.prs(slug, max_age=900)
+        prs, state = (got, "ok") if got is not None else ([], "error")
+    seen = [c for c in [p.get("main")] + list(p.get("worktrees") or []) if isinstance(c, dict) and not c.get("missing")]
+    try:
+        rows = branches.map(path, prs=prs, offline=True, pid=pid, default=p.get("default_branch"), checkouts=seen, now=now)
+    except Exception as e:  # git read the branches but failed a later question: say what it said
+        return {"project": pid, "error": {"source": "git", "detail": _git_error(str(e))}}
+    return {"project": pid, "rows": branch_rows(rows), "counts": branches.counts(rows), "prs": state, "mapped": int(now)}
 
 
 def _initiative(i: dict, items: list = None) -> dict:
@@ -2019,6 +2074,17 @@ pre.log{margin:0;padding:var(--s3);border-radius:var(--rs);background:var(--wash
 .cirow .ca{display:flex;flex-wrap:wrap;gap:var(--s2)}
 .foot2{margin:var(--s3) 0 0;font-size:var(--fs-1);color:var(--text-2)}
 table.jt td.c-job{max-width:340px} table.jt .jab{display:block;font-size:var(--fs-1);color:var(--text-2);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+/* the branch map: the backup state leads each row; the name is the row header; merged branches are quiet */
+table.bt td,table.bt th[scope="row"]{vertical-align:top;height:auto;padding-top:10px;padding-bottom:10px}
+table.bt th[scope="row"]{font-size:var(--fs-2);font-weight:400;color:var(--strong);white-space:normal;min-width:200px}
+table.bt .bn{font-size:var(--fs-1);overflow-wrap:anywhere;color:var(--strong)} table.bt th .tag{margin-left:6px;vertical-align:1px}
+table.bt .bsub{display:block;font-size:var(--fs-1);color:var(--text-2);line-height:1.4;margin-top:2px;overflow-wrap:anywhere}
+table.bt .bsub a{color:inherit} table.bt .bsub a:hover{color:var(--strong)}
+table.bt td.c-bk{min-width:210px;max-width:340px} table.bt td.c-ab{white-space:nowrap} table.bt td.c-wt{max-width:220px}
+table.bt td.c-wt .mono{font-size:var(--fs-1);overflow-wrap:anywhere}
+table.bt tr.quiet td,table.bt tr.quiet th,table.bt tr.quiet .bn{color:var(--text-2)}
+table.bt td.c-more{padding:var(--s3) var(--s2)}
+.brst{font-size:var(--fs-1);color:var(--text-2);white-space:nowrap}
 table.t .cl{display:none}
 .jstrip rect.k-mark{fill:var(--mark)} .jstrip rect.k-risk{fill:var(--s-risk)}
 /* the run drawer's steps and the connected task's connections */
@@ -2075,6 +2141,10 @@ table.raci td,table.raci th[scope="row"]{height:auto;padding-top:var(--s2);paddi
   .navmore{position:static}.navmore .menu{right:var(--s4)} .banner{padding:var(--s3) var(--s4) 0}
   .head .sub{overflow-wrap:anywhere;min-width:0}
   table.jt thead,table.crew thead{display:none}
+  table.bt thead{display:none} table.bt,table.bt tbody,table.bt tr,table.bt td,table.bt th[scope="row"]{display:block;width:100%;min-width:0;max-width:none}
+  table.bt tr{display:grid;grid-template-columns:minmax(0,1fr);gap:4px;padding:var(--s3) var(--s2);border-bottom:1px solid var(--line-soft)}
+  table.bt td,table.bt th[scope="row"],table.bt td:first-child{height:auto;border:0;padding:0;white-space:normal}
+  table.bt th[scope="row"]{order:-1} table.bt td.nil{display:none} table.bt td.c-ab .bsub{display:inline;margin:0 0 0 6px}
   table.jt,table.jt tbody,table.jt tr,table.jt td,table.crew,table.crew tbody,table.crew tr,table.crew td,table.crew th{display:block;width:100%}
   table.jt tr,table.crew tr{display:grid;grid-template-columns:minmax(0,1fr);gap:2px;padding:var(--s3) var(--s2);border-bottom:1px solid var(--line-soft)}
   table.jt td,table.crew td,table.crew th,table.crew th:first-child,table.jt td:first-child,table.crew td:first-child{height:auto;border:0;padding:0;white-space:normal;max-width:none}
@@ -3556,15 +3626,22 @@ function nowCell(p) {
   if (!d.length) return h("span", {class: "muted", text: p.cnt.open ? plural(p.cnt.open, "open task") : "—"});
   return h("div", {class: "slt"}, h("div", {class: "ell", title: d[0].title}, istatusIcon(d[0].status), " ", d[0].title), h("div", {class: "who"}, d[0].holder ? (isMe(d[0].holder) ? "you" : d[0].holder) : "unclaimed", d.length > 1 ? " · +" + (d.length - 1) + " more" : ""));
 }
+/* the project list's count of branches not backed up: a link to the map when there are some; unknown is "—", never 0 */
+function riskCell(p) {
+  if (!branchesKnown(p)) return h("span", {class: "muted", title: p.local ? "No branch map yet" : "Not cloned on this Mac", text: "—"});
+  const c = branchCounts(p.branches);
+  if (!c.risk) return h("span", {class: "num t2", title: plural(c.total, "branch", "branches") + ", none only on this Mac", text: "0"});
+  return h("a", {class: "stat num", href: link({view: "projects", id: p.id, tab: "branches"}), "data-nav": "", "aria-label": plural(c.risk, "branch", "branches") + " not backed up: open the branch map"}, stateDot("risk"), String(c.risk));
+}
 function projectTable(ps) {
   const th = (label, key, cls) => h("th", {scope: "col", class: cls || null, "aria-sort": S.sort === key ? "descending" : null}, key ? h("button", {type: "button", onclick: () => set({sort: key}, true), text: label + (S.sort === key ? " ↓" : "")}) : label);
   return h("div", {class: "tw st"}, h("table", {class: "t pt"},
-    h("thead", null, h("tr", null, th("", "attention", "c-health"), th("Project", "name"), th("Status", "priority", "c-st"), h("th", {class: "c-prog", text: "Progress"}), th("In progress", "tasks"), h("th", {text: "Latest agent status"}), h("th", {text: "PRs"}), h("th", {class: "c-act", text: "7 days"}), th("Last activity", "activity", "c-last"), h("th", {class: "c-who", text: "Who"}))),
+    h("thead", null, h("tr", null, th("", "attention", "c-health"), th("Project", "name"), th("Status", "priority", "c-st"), h("th", {class: "c-prog", text: "Progress"}), th("In progress", "tasks"), h("th", {text: "Latest agent status"}), h("th", {text: "PRs"}), h("th", {class: "c-bk", text: "Not backed up"}), h("th", {class: "c-act", text: "7 days"}), th("Last activity", "activity", "c-last"), h("th", {class: "c-who", text: "Who"}))),
     h("tbody", null, ps.map(p => h("tr", {onclick: rowClick(() => openModal("project", p.id))},
       h("td", {class: "c-health"}, healthDot(p)),
       h("td", {class: "c-name"}, h("span", {class: "pname"}, modalLink("project", p.id, p.name || p.id), ONPROJ.has(p.id) || p.live ? h("span", {class: "dot d-live", style: "margin-left:8px;vertical-align:1px", title: "Live session", "aria-label": "live session"}) : null, p.local ? null : h("span", {class: "tag", style: "margin-left:8px", title: "Handoff note only — clone with dev clone " + p.id, text: "not cloned"})), h("span", {class: "powner", text: p.owner + ((p.main || {}).branch ? " · " + p.main.branch : "")})),
       h("td", {class: "c-st"}, statusBadge(p.status), prioIcon(p.priority)),
-      h("td", {class: "c-prog"}, progressBar(p)), h("td", {class: "c-now"}, nowCell(p)), h("td", {class: "c-status"}, latest(p)), h("td", {class: "c-prs"}, prPills(p, 2)),
+      h("td", {class: "c-prog"}, progressBar(p)), h("td", {class: "c-now"}, nowCell(p)), h("td", {class: "c-status"}, latest(p)), h("td", {class: "c-prs"}, prPills(p, 2)), h("td", {class: "c-bk"}, riskCell(p)),
       h("td", {class: "c-act"}, h("div", {style: "display:flex;gap:8px;align-items:center"}, sparkline(p, 30, 64, 16), h("span", {class: "num t2", style: "font-size:var(--fs-1)", text: String(sum7(p))}))),
       h("td", {class: "c-last num t2", text: rel(p.last_activity)}), h("td", {class: "c-who"}, avatars(p.people, 3)))))));
 }
@@ -3573,7 +3650,7 @@ function projectCard(p) {
   const st = hstate(p);
   return h("article", {class: "ptile", onclick: rowClick(() => openModal("project", p.id))},
     h("div", {class: "pt-h"}, h("span", {class: "dot k-" + st, role: "img", title: (HWHY[st] || HS[st]) + (p.health.reasons.length ? ": " + p.health.reasons.join(", ") : ""), "aria-label": HS[st]}),
-      h("div", {class: "pt-n"}, modalLink("project", p.id, p.name || p.id, "strong ell"), h("span", {class: "t2 ell", text: p.local ? p.owner : p.owner + ", not cloned"})), progRing(p, 36)),
+      h("div", {class: "pt-n"}, modalLink("project", p.id, p.name || p.id, "strong ell"), h("span", {class: "t2 ell"}, p.local ? p.owner : p.owner + ", not cloned", branchesKnown(p) && branchCounts(p.branches).risk ? [" · ", stateDot("risk"), " " + branchCounts(p.branches).risk + " not backed up"] : null)), progRing(p, 36)),
     h("div", {class: "pt-f"}, ciStrip(p, 6), spark(commitSeries([p], 14), "Commits per day", "commit")));
 }
 function viewProjects(main) {
@@ -3594,7 +3671,7 @@ function viewProjects(main) {
     main.append(g ? panel(g, list.length, null, body, {cls: "mb", flush: true}) : body);
   }
 }
-const PTABS = [["overview", "Overview"], ["tasks", "Tasks"], ["prs", "Pull requests"], ["worktrees", "Worktrees"], ["plans", "Plans"], ["sessions", "Sessions"], ["note", "Handoff note"]];
+const PTABS = [["overview", "Overview"], ["tasks", "Tasks"], ["prs", "Pull requests"], ["branches", "Branches"], ["worktrees", "Worktrees"], ["plans", "Plans"], ["sessions", "Sessions"], ["note", "Handoff note"]];
 function viewUnknownProject(main) {
   const id = S.id, inits = INITS.filter(x => x.projects.includes(id));
   main.append(crumbs([["Projects", link({view: "projects", id: "", tab: ""})], [id]]));
@@ -3620,6 +3697,132 @@ function wtTable(p) {
       h("td", {text: w.missing ? "missing" : ((w.modified || 0) + (w.untracked || 0)) ? ((w.modified || 0) + (w.untracked || 0)) + " changed" : w.unpushed ? w.unpushed + " unpushed" : "clean"}),
       h("td", {text: w.active ? "live" : rel(w.last_activity)}), h("td", {class: "num", text: kb(w.size_kb)}), h("td", null, w.branch ? icopy("dev wt rm " + w.branch, "Remove") : null)))))));
 }
+/* ---------------------------------------------------------------- the branch map (spec P-fy3bwa0pshk R8): where each branch lives and whether its work
+   is safe off this Mac. The snapshot's rows show at once; on the Branches tab the live page also reads the map from git now (GET /api/v1/branches/{id}) */
+const BRISK = ["not_backed_up", "no_remote"];
+const BSTATE = {backed_up: ["ok", "Backed up"], on_remote: ["ok", "On the remote"], merged: ["done", "Merged"], waiting: ["hol", "Backup waits"],
+  embargoed: ["warn", "Embargoed"], not_backed_up: ["risk", "Not backed up"], no_remote: ["risk", "Not backed up"]};
+const BR = new Map();   /* project id -> what the live page read: {state: loading|ok|error|stopped|ended, data, problem, at, last} */
+const BR_AGE = 60000;   /* the Branches tab reads the map again when its last read is older than this */
+const MERGED_SHOWN = 3;
+function branchCounts(rows) {
+  if (!rows) return null;
+  const c = {total: rows.length, risk: 0, embargoed: 0, waiting: 0, merged: 0};
+  for (const r of rows) { const st = (r.backup || {}).state; if (BRISK.includes(st)) c.risk++; if (st === "waiting") c.waiting++; if (st === "merged") c.merged++; if (r.embargo) c.embargoed++; }
+  return c;
+}
+/* unknown is not 0: no map in the snapshot, or a map that came back empty for a checkout that is on a branch (git failed) */
+function branchesKnown(p) { return p.local && Array.isArray(p.branches) && !(p.branches.length === 0 && (p.main || {}).branch); }
+function embargoWho(s) { const m = member(s); return m ? roleName(m) : String(s || ""); }
+function branchLive(p) {
+  if (!LIVE.on || !p.local) return null;
+  const b = BR.get(p.id);
+  if (!b || (b.state !== "loading" && Date.now() - b.at > BR_AGE)) loadBranches(p.id);
+  return BR.get(p.id);
+}
+async function loadBranches(id) {
+  const prev = BR.get(id), last = prev ? (prev.state === "ok" ? prev : prev.last) : null;
+  BR.set(id, {state: "loading", at: Date.now(), last});
+  let next;
+  try {
+    const r = await fetch("/api/v1/branches/" + id.split("/").map(encodeURIComponent).join("/"), {cache: "no-store", credentials: "same-origin", headers: {Accept: "application/json"}});
+    if (r.status === 401) { setLive("ended"); next = {state: "ended"}; }
+    else if (!r.ok) { let pb = {}; try { pb = await r.json(); } catch (e) { pb = {}; } next = {state: "error", problem: pb, status: r.status}; }
+    else next = {state: "ok", data: await r.json()};
+  } catch (e) { next = {state: "stopped"}; }
+  next.at = Date.now(); if (next.state !== "ok") next.last = last;
+  BR.set(id, next);
+  if (next.state === "error") announce("git could not read the branches of " + repoName(id) + ".");
+  redrawBranches(id);
+}
+function retryBranches(id) { const b = BR.get(id); if (b && b.state !== "loading") { b.at = 0; } redrawBranches(id, true); }
+/* the panel is replaced in place; focus that was inside it stays inside it */
+function redrawBranches(id, refocus) {
+  const box = $("#branches"), p = BYID.get(id);
+  if (!box || !p || box.getAttribute("data-project") !== id) return;
+  const had = refocus || box.contains(document.activeElement), fresh = branchesPanel(p, true);
+  box.replaceWith(fresh); fitTables(fresh.parentNode || undefined);
+  if (had) { const t = $(".brretry", fresh) || $("h2", fresh); if (t) { if (!t.hasAttribute("tabindex") && t.tagName === "H2") t.setAttribute("tabindex", "-1"); t.focus({preventScroll: true}); } }
+}
+function aheadCell(r) {
+  if (r.upstream && !r.upstream_gone) return h("span", {class: "num", title: r.ahead + " ahead of " + r.upstream + ", " + r.behind + " behind", text: "↑" + r.ahead + " ↓" + r.behind});
+  if (r.unpushed && !r.merged_into) return h("span", {class: "num", title: plural(r.unpushed, "commit") + " on no remote", text: "↑" + r.unpushed});
+  return h("span", {class: "t2", title: "No upstream branch", text: "—"});
+}
+function baseText(r, p) {
+  if (r.merged_into || r.default) return r.default ? "default branch" : "";
+  const d = p.default_branch || "main";
+  if (r.base_ahead) return r.base_ahead + " ahead of " + d + (r.base_behind ? ", " + r.base_behind + " behind" : "");
+  return r.base_behind ? r.base_behind + " behind " + d : "";
+}
+function backupCell(r) {
+  const b = r.backup || {}, st = BSTATE[b.state] || ["none", "Not known"], emb = r.embargo, lines = [];
+  let word = st[1];
+  if (b.state === "backed_up") word = "Backed up " + rel(r.last_backup);
+  else if (b.state === "merged") word = "Merged into " + r.merged_into;
+  else if (b.state === "embargoed") lines.push(emb && emb.until ? "Until “" + emb.until + "”" : "Until it is lifted");
+  else if (b.reason) lines.push(sentence(b.reason + (b.state === "not_backed_up" && r.oldest_unpushed && /only on this Mac$/.test(b.reason) ? ", the oldest " + rel(r.oldest_unpushed) : "")));
+  if (emb && b.state !== "embargoed") lines.push("Embargoed" + (emb.until ? " until “" + emb.until + "”" : ""));
+  if (emb && (emb.why || emb.who)) lines.push((emb.who ? embargoWho(emb.who) + ": " : "") + (emb.why || "no reason given"));
+  if (r.embargo_via) lines.push("Held by the embargo on " + r.embargo_via);
+  return [stateWord(st[0], word), lines.map(t => h("span", {class: "bsub", text: t}))];
+}
+function prCell(pr, unknown) {
+  if (!pr) return unknown ? h("span", {class: "t2", title: "Pull requests unknown: gh did not answer", text: "not known"}) : null;
+  const open = pr.state === "open", word = open ? (pr.draft ? "draft" : "ready") : pr.state || "";
+  return [h("a", {href: safeUrl(pr.url), target: "_blank", rel: "noopener noreferrer", title: pr.title || null, text: "#" + pr.number}), " ", open ? h("span", {class: "tag", text: word}) : h("span", {class: "t2", text: word}),
+    open && pr.checks && pr.checks !== "unknown" ? h("span", {class: "bsub"}, h("span", {class: "badge"}, h("span", {class: "dot d-" + pr.checks, "aria-hidden": "true"}), "checks " + pr.checks)) : null];
+}
+function wtCell(r) {
+  if (r.worktree) return [h("span", {class: "mono", title: r.worktree, text: r.worktree.split("/").pop()}), r.worktree_missing ? h("span", {class: "bsub", text: "Missing on disk"}) : null,
+    r.session ? h("span", {class: "bsub"}, h("span", {class: "stat"}, h("span", {class: "dot d-live", "aria-hidden": "true"}), "live session")) : null];
+  return r.current ? h("span", {class: "t2", text: "main checkout"}) : null;
+}
+function branchRow(r, p, prsUnknown) {
+  const b = r.backup || {}, base = baseText(r, p), pr = prCell(r.pr, prsUnknown), wt = wtCell(r);
+  const cell = (cls, label, body) => h("td", {class: cls + (body == null ? " nil" : "")}, h("span", {class: "cl", text: label + " "}), body == null ? h("span", {class: "t2", text: "—"}) : body);
+  return h("tr", {class: b.state === "merged" ? "quiet" : null, "data-key": "branch~" + r.name, "data-sig": [b.state, r.ahead, r.behind, r.unpushed, r.last_backup, (r.pr || {}).number, (r.pr || {}).checks].join("|")},
+    h("td", {class: "c-bk"}, backupCell(r)),
+    h("th", {scope: "row"}, h("span", {class: "bn mono", title: r.sha ? r.name + " at " + r.sha : null, text: r.name}), r.current ? h("span", {class: "tag", text: "current"}) : null,
+      r.task ? h("span", {class: "bsub"}, h("a", {href: taskHref(r.task.id), "data-nav": "", onclick: e => { e.preventDefault(); openTask(r.task.id); }, text: r.task.id}), " ", r.task.title || "") : null),
+    cell("c-where", "Where", h("span", {text: r.where || "—"})),
+    h("td", {class: "c-ab"}, h("span", {class: "cl", text: "Ahead / behind "}), aheadCell(r), base ? h("span", {class: "bsub", text: base}) : null),
+    cell("c-pr", "Pull request", pr), cell("c-wt", "Worktree", wt));
+}
+function branchTable(rows, p, prsUnknown) {
+  const lead = rows.filter(r => (r.backup || {}).state !== "merged"), merged = rows.filter(r => (r.backup || {}).state === "merged");
+  const key = "br:" + p.id, all = !!SHOWN[key] || merged.length <= MERGED_SHOWN + 1, shown = lead.concat(all ? merged : merged.slice(0, MERGED_SHOWN));
+  return h("div", {class: "tw"}, h("table", {class: "t bt"}, h("thead", null, h("tr", null, ["Backup", "Branch", "Where", "Ahead / behind", "Pull request", "Worktree"].map(x => h("th", {scope: "col", text: x})))),
+    h("tbody", null, shown.map(r => branchRow(r, p, prsUnknown)),
+      all ? null : h("tr", null, h("td", {class: "c-more", colspan: "6"}, h("button", {class: "btn sm", type: "button", onclick: () => { SHOWN[key] = 1; redrawBranches(p.id, true); }}, "Show " + plural(merged.length - MERGED_SHOWN, "more merged branch", "more merged branches")))))));
+}
+/* live: whether to read the map now (the Branches tab); the overview's facts use the snapshot */
+function branchesPanel(p, live) {
+  const lv = live ? branchLive(p) : null, got = lv && (lv.state === "ok" ? lv : lv.last);
+  const fresh = got && got.data && (got.data.mapped || 0) >= (D.generated || 0) ? got.data : null;
+  const rows = fresh ? fresh.rows : p.branches, c = branchCounts(rows);
+  const prs = fresh ? fresh.prs : p.github && p.prs_known === false ? "error" : "ok", prsUnknown = prs === "error" || (prs === "missing" && !(rows || []).some(r => r.pr));
+  const when = fresh ? fresh.mapped : D.generated;
+  const status = !LIVE.on ? null : lv && lv.state === "loading" ? "Checking with git…" : "Checked " + rel(when);   /* a static copy: the navbar says when it was made */
+  const right = [c && c.risk ? h("span", {class: "badge"}, stateDot("risk"), c.risk + " not backed up") : null, c && c.embargoed ? h("span", {class: "badge"}, stateDot("warn"), c.embargoed + " embargoed") : null,
+    p.local && status ? h("span", {class: "brst", role: "status", text: status}) : null, p.local ? icopy("dev branch ls", "Copy the command that lists the branches") : null];
+  const body = [];
+  if (lv && lv.state === "error") { const pb = lv.problem || {};
+    body.push(callout("risk", pb.title || "Could not read the branches", [h("span", {text: pb.detail || "The server answered " + (lv.status || "with an error") + "."}), rows && rows.length ? " The rows below are from " + rel(when) + "." : ""],
+      h("button", {class: "btn brretry", type: "button", onclick: () => retryBranches(p.id)}, "Try again"))); }
+  else if (lv && lv.state === "stopped") body.push(h("div", {class: "notice", style: "margin:0 0 var(--s3)"}, "The dashboard server is not answering, so these rows are from " + rel(when) + ". Start it again with ", h("code", {text: "dev dashboard"}), "."));
+  if (!p.local) return panelFor(p, body.concat(empty("No branches on this Mac", "The project is not cloned here. Clone it to see where its branches live: ", h("code", {text: "dev clone " + p.id}))), c, right);
+  const noRemote = (rows || []).some(r => (r.backup || {}).state === "no_remote") || (rows && !rows.length && !p.remote);
+  if (noRemote) body.push(callout("warn", "No remote", "Every branch exists only on this Mac. devkit backs up branches to the remote, so nothing here can be backed up until the repository has one.", icopy("git remote add origin <url>", "Copy the command that adds a remote")));
+  if (rows && rows.length && prsUnknown) body.push(callout("info", "Pull requests not known", prs === "missing" ? "gh is not installed, so the rows cannot show their pull requests. Install it and sign in with gh auth login." : "gh did not answer, so the rows cannot show their pull requests. gh auth status shows why.", icopy(prs === "missing" ? "gh auth login" : "gh auth status", "Copy")));
+  if (rows == null) body.push(lv && lv.state === "loading" ? h("p", {class: "empty", role: "status", text: "Reading the branches with git…"})
+    : lv && lv.state === "error" ? null : empty("No branch map in this copy", "The snapshot was made before devkit mapped branches. Run ", h("code", {text: "dev sync"}), ", then open the dashboard again."));
+  else if (!rows.length) body.push(lv && lv.state === "error" ? null : (p.main || {}).branch ? empty("git listed no branches", "The checkout is on " + p.main.branch + ", but the map came back empty. ", h("code", {text: "dev branch ls"}), " in the repository shows what git says.")
+    : empty("No branches yet", "The repository has no commits. Its first commit makes the first branch."));
+  else body.push(branchTable(rows, p, prsUnknown));
+  return panelFor(p, body, c, right);
+}
+function panelFor(p, body, c, right) { const el = panel("Branches", c ? c.total : null, right, body, {id: "branches", flush: false}); el.setAttribute("data-project", p.id); return el; }
 function repoKv(p) {
   const m = p.main || {};
   return h("dl", {class: "kv"},
@@ -3627,6 +3830,8 @@ function repoKv(p) {
     p.remote ? [h("dt", {text: "Remote"}), h("dd", null, p.github ? h("a", {href: "https://github.com/" + p.github, target: "_blank", rel: "noopener noreferrer", text: p.remote}) : p.remote)] : null,
     p.local ? [h("dt", {text: "Branch"}), h("dd", {text: (m.branch || "—") + (m.modified || m.untracked ? " · " + ((m.modified || 0) + (m.untracked || 0)) + " changed" : " · clean") + (m.ahead ? " · ↑" + m.ahead : "") + (m.behind ? " · ↓" + m.behind : "")})] : null,
     m.last_commit ? [h("dt", {text: "Last commit"}), h("dd", {text: rel(m.last_commit_ts) + " · " + m.last_commit})] : null,
+    branchesKnown(p) ? (c => [h("dt", {text: "Branches"}), h("dd", null, h("a", {href: link({tab: "branches"}), text: plural(c.total, "branch", "branches")}),
+      c.risk ? [", ", h("span", {class: "stat"}, stateDot("risk"), c.risk + " not backed up")] : c.total ? ", none only on this Mac" : null, c.embargoed ? ", " + c.embargoed + " embargoed" : null)])(branchCounts(p.branches)) : null,
     (p.commands || []).length ? [h("dt", {text: "Commands"}), h("dd", null, p.commands.map(c => h("code", {style: "margin-right:8px", text: c})))] : null,
     p.local && !p.canonical_ok && p.canonical ? [h("dt", {text: "Layout"}), h("dd", null, "Not at its canonical path — ", h("code", {text: "dev adopt " + p.path}))] : null,
     p.stack.length ? [h("dt", {text: "Stack"}), h("dd", null, p.stack.map(s => h("span", {class: "stk", text: s})))] : null,
@@ -3683,7 +3888,7 @@ function viewProject(main) {
     statTile({label: "Open PRs", value: p.prs, href: link({tab: "prs"}), viz: ciStrip(p, 14), cls: "sp-3"}),
     statTile({label: "Commits, 14 days", value: commitSeries([p], 14).reduce((a, d) => a + d[1], 0), viz: spark(commitSeries([p], 14), "Commits per day", "commit", true), cls: "sp-3"}),
     statTile({label: "Live sessions", value: here.length, viz: here.length ? h("div", {class: "sbars"}, here.map(s => { const x = BYWHO.get(s.who), i = x ? x.sessions.indexOf(x.sessions.find(z => z.session === s.session && z.agent === s.agent)) : -1; return sessBar(s, s.who, Math.max(0, i)); })) : h("span", {class: "t2", text: "Nobody here now"}), cls: "sp-3"})));
-  main.append(pageTabs([["overview", "Overview"], ["tasks", "Tasks", p.cnt.open], ["prs", "Pull requests", p.prs], ["worktrees", "Worktrees", p.wts.length], ["plans", "Plans", plansL.length || (p.plans || []).length], ["sessions", "Sessions", sess.length], ["note", "Handoff note"]], tab));
+  main.append(pageTabs([["overview", "Overview"], ["tasks", "Tasks", p.cnt.open], ["prs", "Pull requests", p.prs], ["branches", "Branches", branchesKnown(p) ? p.branches.length : null], ["worktrees", "Worktrees", p.wts.length], ["plans", "Plans", plansL.length || (p.plans || []).length], ["sessions", "Sessions", sess.length], ["note", "Handoff note"]], tab));
   const tp = h("div", {class: "tabpanel", id: "tabpanel", role: "tabpanel", "aria-labelledby": "tab-" + tab}); main.append(tp);
   if (tab === "overview") {
     const doing = sortItems(p.items.filter(i => i.status === "doing" || i.status === "blocked")), next = sortItems(p.items.filter(i => i.status === "todo")).slice(0, 4);
@@ -3701,6 +3906,7 @@ function viewProject(main) {
         tt ? h("details", {class: "recent"}, h("summary", null, "How long work takes here"), timeBody(tt, false)) : null)));
   } else if (tab === "tasks") tp.append(itemsBlock(p.items, {scope: p.id}));
   else if (tab === "prs") tp.append(prTable(p));
+  else if (tab === "branches") tp.append(branchesPanel(p, true));
   else if (tab === "worktrees") tp.append(wtTable(p));
   else if (tab === "plans") tp.append(plansBlock(plansL, p.id, p.plans));
   else if (tab === "sessions") tp.append(sessionsBlock(sess, false));

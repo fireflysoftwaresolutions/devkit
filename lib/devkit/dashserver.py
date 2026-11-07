@@ -12,7 +12,7 @@ SameSite=Strict cookie that a one-time ticket buys), sends a nonce CSP with the 
 
 API (all under /api/v1, JSON; errors are RFC 9457 problem details):
   GET /health · /ticket · /dashboard[?omit=a,b|only=a,b] (ETag, 304) · /events (SSE) · /items/{id} · /runs/{id}
-      /jobs · /jobs/{name} · /ci · /files[?path=<relative .md>]
+      /jobs · /jobs/{name} · /ci · /files[?path=<relative .md>] · /branches/{project id}
 """
 from __future__ import annotations
 
@@ -55,6 +55,7 @@ GZIP_MIN = 1400
 VOLATILE = {"rendered", "generated"}   # change on every build: not a reason to tell the pages
 AREA_RE = re.compile(r"[a-z_]{1,40}")
 TO_RE = re.compile(r"/[A-Za-z0-9/._~%?=&,:+-]{0,500}")
+PROJECT_RE = re.compile(r"[A-Za-z0-9_.-]{1,100}(?:/[A-Za-z0-9_.-]{1,100}){0,6}")  # a project id: owner/repo, host/group/…/repo
 SERVE_MARKS = ("devkit.dashserver serve", "dashboard serve")
 _CHILDREN = {}              # servers this process started: kept, so they are reaped (no zombie, no warning)
 
@@ -457,6 +458,14 @@ def make_handler(app: App):
             if sub.startswith("/runs/"):
                 d = dashboard.run_detail(sub[len("/runs/"):])
                 return self._json(200, d) if d else self._problem(404, "Not found", "No progress run with this id.")
+            if sub.startswith("/branches/"):  # one project's branch map, read now (spec P-fy3bwa0pshk R8)
+                pid = sub[len("/branches/"):]
+                d = dashboard.branch_detail(pid, snap.reg) if PROJECT_RE.fullmatch(pid) and ".." not in pid else None
+                if d is None:
+                    return self._problem(404, "Not found", "No project with this id is cloned on this Mac.")
+                if d.get("error"):
+                    return self._problem(502, "git could not read the branches", d["error"]["detail"])
+                return self._json(200, d)
             if sub == "/jobs":
                 return self._json(200, dashboard.jobs_detail())
             if sub.startswith("/jobs/"):

@@ -52,7 +52,7 @@ amber dot on a view says it holds something that needs you.
 | **Tasks** | `g t` | Every work item across projects and initiatives, as a board (Now · Next · Later · Closed) or grouped by scope. Filter by status, scope, and who claimed it (anyone, or only you). Every card shows who holds the lock and opens the task's drawer |
 | **Background** | `g b` | _Is anything running, failing, or waiting for you, and when is it done?_ Agent runs, CI results, and scheduled jobs on this Mac (see [Background work](#background-work)) |
 | **Team** | `g m` | _Who is doing what right now?_ The tabs **People**, **Crew** (`g c`), and **Who does what** (see [Team and the crew](#team-and-the-crew)) |
-| **Projects** | `g p` | A tile grid: a status dot, the name, a progress ring, a CI strip (one dot per open PR: green passing, red failing, yellow running), and the 14-day commit sparkline. **Table** switches to the dense table (health, status, progress, the task in progress, the latest agent status, PRs, 7-day activity on screens wider than 1600 px, last activity, people). It is sorted by _needs attention_, can be grouped by initiative, owner, status, or priority, and filtered by the facet row. A tile or a row opens the project's drawer |
+| **Projects** | `g p` | A tile grid: a status dot, the name, a progress ring, a CI strip (one dot per open PR: green passing, red failing, yellow running), and the 14-day commit sparkline; a tile adds _N not backed up_ when branches exist only on this Mac. **Table** switches to the dense table (health, status, progress, the task in progress, the latest agent status, PRs, branches not backed up, 7-day activity on screens wider than 1600 px, last activity, people). The not-backed-up count links to the project's branch map; it reads _—_ when the map is not known (not cloned here, or no map yet), never 0. It is sorted by _needs attention_, can be grouped by initiative, owner, status, or priority, and filtered by the facet row. A tile or a row opens the project's drawer |
 | **Initiatives** | `g i` | _How is each program going?_ A card grid (ring, member waffle, due pill, people, open tasks) with a **Table** toggle for the compact table (status, name and goal, progress, the due date with the milestone under it, tasks, member projects, people, last activity). Filter by status and sort by priority, due date, progress, or activity. A milestones-and-due-dates roadmap follows. A card or a row opens the initiative's drawer, which links to the full page |
 | **Activity** | `g a` | A calendar heatmap of the last 26 weeks (one square per day, darker for more commits, sessions, and finished tasks; the day's numbers on hover, and a **Table** view), three counters with 14-day sparklines, the timeline (live sessions, session logs, completed and blocked tasks, merged PRs, operations, canary misses over 7 or 30 days), and the most active projects. Commits are kept for 30 days |
 | **Explorer** | `g e` | The handoff repository as a tree, with a safe Markdown viewer and find-in-file (`↵` / `⇧↵` step through matches). Up to 2 MB is embedded, newest first |
@@ -169,8 +169,30 @@ this Mac** has `dev clone <id>` as its amber button instead; its note, tasks, pl
 handoff repo. Four stat tiles follow: open tasks as a segmented bar, open PRs as a CI strip, commits in 14 days as a
 sparkline, and the live sessions as progress bars. The tabs are **Overview** (live sessions, each shown once; doing or
 blocked and up next; purpose and current state; the latest status; repository facts; and, behind a disclosure, how
-long work takes here), **Tasks**, **Pull requests** (CI, review, merge state, size, a command each), **Worktrees**
-(`dev wt rm`), **Plans**, **Sessions**, and **Handoff note** (the full note, rendered).
+long work takes here), **Tasks**, **Pull requests** (CI, review, merge state, size, a command each), **Branches**
+(below), **Worktrees** (`dev wt rm`), **Plans**, **Sessions**, and **Handoff note** (the full note, rendered). The
+repository facts on the Overview count the branches and those not backed up, and link to the Branches tab.
+
+**Branches** is the branch map (the same rows as `dev branch ls`): one row per local branch, work at risk first.
+Each row leads with whether the work is safe off this Mac, as _Backed up 6 min ago_, _On the remote_, _Backup waits_
+(commits younger than `backup.after_minutes`), _Embargoed_ with its condition, who set it (a crew member by role,
+for example _Security engineer (The Keymaker)_) and why, or _Not backed up_ with the reason (_3 commits only on this
+Mac, the oldest 2 h ago_, _no remote is configured_). Then the branch (with _current_ and its linked task), where it
+lives (_local only_ or _local + origin_), ahead and behind its upstream and the default branch, its pull request
+(draft or ready, with its checks; the link opens only `http` and `https` URLs), and its worktree with a live session.
+Merged branches are grey and come last; past three, **Show N more merged branches** lists the rest. The panel says
+when there is no remote (nothing can be backed up), when `gh` did not answer (no row can show its pull request), when
+the snapshot has no map yet (`dev sync` makes one), and when the project is not cloned here. Unknown is _—_, never 0.
+
+On the live page the tab also reads the map from git when it opens (at most once a minute): the snapshot's rows show
+at once, the header says _Checking with git…_ and then _Checked just now_, and git's answer replaces the rows. When
+git cannot read the repository, a red callout quotes git's message, keeps the snapshot's rows with their age, and
+offers **Try again**. On a phone each branch stacks: the name, the backup state, then each value with its label.
+
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="images/dashboard/branches-1440-dark.webp">
+  <img src="images/dashboard/branches-1440-light.webp" alt="The Branches tab of the project lending-core: 11 branches, 1 not backed up and 1 embargoed. One row per branch: feat/invoice-export, current, backed up 6 minutes ago, local and origin, 2 ahead and 14 ahead of main, draft PR #48 with checks passing, in the main checkout; fix/rounding-error, not backed up with 3 commits only on this Mac, the oldest 2 hours ago, local only, in a worktree with a live session; hotfix/auth-header, embargoed until the advisory is published by the Security engineer (The Keymaker); feat/rate-limits, whose backup waits for commits younger than 30 minutes; refactor/ledger-ports and main on the remote, PR #45 ready with checks failing; then three grey merged branches and a Show 2 more merged branches button." width="100%">
+</picture>
 
 A member of an initiative that has no handoff note yet still gets a page: the not-cloned call to action and the
 initiatives that list it.
@@ -381,7 +403,7 @@ versions (`#/portfolio`, `?p=<project>`, `?i=<initiative>`) still resolve.
 
 | | |
 | --- | --- |
-| Live page | Served by the dashboard server (`dev dashboard`), which keeps a snapshot of the data, rebuilds it when the files behind it change, and sends open pages the areas that changed. Details (a whole task, run, job, or CI result) come from its read-only API under `/api/v1` |
+| Live page | Served by the dashboard server (`dev dashboard`), which keeps a snapshot of the data, rebuilds it when the files behind it change, and sends open pages the areas that changed. Details (a whole task, run, job, or CI result) come from its read-only API under `/api/v1`; `/api/v1/branches/<project id>` reads one project's branch map from git when its Branches tab opens (a `502` problem quotes git's message when it cannot) |
 | Static copy | `~/.local/state/devkit/dashboard/index.html` (or the file you name with `--export`): one self-contained HTML file (inline CSS, JS and SVG), written after every `dev sync` (session ends, debounced turn ends), by the hourly background job, and by `--path` |
 | Refresh | the live page updates in place; a static copy reloads every 2 minutes while visible (not while a drawer is open), keeping its view, filters, and scroll position |
 | Data | The registry (projects, git state, worktrees, PRs, initiatives, live sessions with progress, providers, drift). From the handoff repo: **work items** (`items/<scope>/<id>.md`, with lock and changelog), **presence** (`presence/<user>@<host>.json`), **session logs** (`sessions/<scope>/<YYYY-MM>.md`), **versioned plans** (`plans/<scope>/*.md`), notes, and initiative READMEs. Also the PR cache, the instruction canary, guard decisions, the operations log, **timing records**, and **active runs** |
