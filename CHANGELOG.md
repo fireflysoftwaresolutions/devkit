@@ -128,9 +128,12 @@ Not released yet: the date is set when the release is tagged.
   devkit nor records what ships with the Codex app for the first time: it names them, and they stay as drift. The
   first record names each MCP server with the command and arguments it runs.
 - **Every acceptance shows until you acknowledge it.** A process an agent starts in `screen`, `tmux`, or a Terminal
-  window can look like your terminal, so each change `dev install` accepts and each Codex app entry it records for
-  the first time writes an `ext.accept` audit record (the entry, the terminal, the parent processes) and stays
-  listed at the session start and in `dev status` until you run the new `dev ext ack`, which only you can run.
+  window can look like your terminal, so each change `dev install` or `dev ext update --apply` accepts and each
+  Codex app entry `dev install` records for the first time writes an `ext.accept` audit record (the entry, the
+  terminal, the parent processes), sends a desktop notification, and stays listed at the session start and in
+  `dev status` until you run the new `dev ext ack` in your terminal. In Claude Code, the session start shows that
+  list to you as a message, and shows the last `dev ext ack` once with its time and terminal. An acceptance the list
+  cannot take (busy, or a file that does not parse) is not made: the change stays as drift.
   The guard now reads what `screen`, `tmux`, `expect -c`, and AppleScript's `do script` run, refuses `open` of a
   Terminal or iTerm window or a `.command` file and `xargs dev`, and skips a package manager's own options before
   its verb (`npm --silent exec`, `pnpm -C . exec`, `uv --quiet run`, `uv run --with x`).
@@ -149,7 +152,8 @@ Not released yet: the date is set when the release is tagged.
   `LD_*`, `NPM_CONFIG_*`, …) are refused. `dev ext update` moves a skill pin only to a commit on the repository's
   default branch, never to a fork's commit served under the same name, and changes nothing when the review cannot
   be read. `dev ext update --apply` accepts only the version it reviewed, and `dev install` names each change it
-  accepts. An overlay copy of a devkit default keeps it required, and `dev ext add` refuses one.
+  accepts. An overlay copy of a devkit default keeps it required, and `dev ext add` refuses one, and a skill whose
+  name a devkit default already uses, for either agent: one name is one folder for both agents.
 
 ### Known limits
 
@@ -160,6 +164,13 @@ Not released yet: the date is set when the release is tagged.
   into a shell, a command `tmux`, `screen`, `expect`, or a git alias starts later, and options that load a plugin
   for one session only get through; drift at the session start, in `dev status`, and in `dev doctor` is the
   backstop. [What the guard cannot see](docs/guard.md#what-the-guard-cannot-see) lists them.
+- `dev install`, `dev ext update --apply`, and `dev ext ack` take the process tree and the terminal as proof that
+  you typed them, and a process an agent starts through a launcher can look the same: `screen` or `tmux` (with
+  `screen -X stuff` octal escapes such as `\015`, which the guard does not decode), `expect`, AppleScript's
+  `do script`, `open` of a Terminal window or a `.command` file, or `launchctl`. The notification, the session-start
+  message, and the audit trail are the backstop until a kernel-level check lands in 26.11.5 (tasks B-fywplysktjc
+  and B-fyxqtml4lw3). See
+  [Who changes extensions](docs/skills-and-plugins.md#who-changes-extensions-and-how-drift-shows).
 
 ### Removed
 

@@ -1334,9 +1334,12 @@ skill or MCP server that is not at its pin, a required extension that is off, a 
 plugin that a repository's `.claude/settings.json` enables outside the catalog. To accept a vendor change, run
 `dev install`, or `dev ext update <name> --apply --why "…"`, in a terminal.
 
-**Acceptances.** Each change `dev install` accepts, and each entry that ships with the Codex app that it records for
-the first time, writes one `ext.accept` audit record with the terminal and the parent processes, and stays listed
-at the session start and in `dev status` until you run [`dev ext ack`](#dev-ext-ack).
+**Acceptances.** Each change `dev install` or `dev ext update --apply` accepts, and each entry that ships with the
+Codex app that `dev install` records for the first time, writes one `ext.accept` audit record with the terminal and
+the parent processes, sends a desktop notification, and stays listed at the session start and in `dev status` until
+you run [`dev ext ack`](#dev-ext-ack). In Claude Code, the session start shows that list to you as a message, not only
+to the agent. When the list is busy or does not parse, nothing is accepted: the change stays as drift, and
+`dev ext update --apply` says it was not recorded.
 
 ### `dev ext outdated [<name>] [--agent claude|codex] [--json]`
 
@@ -1378,8 +1381,9 @@ Only you run `--apply`, in a terminal.
 ### `dev ext ack`
 
 Confirms that the extensions accepted since your last acknowledgement were yours: it prints each one, clears the
-list the session start and `dev status` show, and writes one `ext.ack` audit record per entry. A terminal an agent
-opens can look like yours, so devkit lists every acceptance until you run this.
+list the session start and `dev status` show, and writes one `ext.ack` audit record per entry with the terminal and
+the parent processes. A terminal an agent opens can look like yours, so devkit lists every acceptance until you run
+this, and the next Claude Code session start shows you once when and from which terminal the last `dev ext ack` ran.
 
 ```bash
 dev ext ack

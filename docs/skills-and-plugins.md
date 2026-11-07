@@ -422,14 +422,28 @@ A terminal an agent opens can look like yours: a command it starts in `screen`, 
 agent marker, a terminal of its own, and launchd as its parent, and no check inside a process can prove that you
 typed it. devkit therefore shows every acceptance until you acknowledge it:
 
-1. Each first record and each accepted change writes one `ext.accept` record to the audit trail, with the entry,
-   the terminal (`tty`), and the parent processes it ran from.
-2. The next session start and `dev status` list them: `extensions accepted since your last session: …`.
+1. Each first record and each change `dev install` or `dev ext update --apply` accepts writes one `ext.accept`
+   record to the audit trail, with the entry, the terminal (`tty`), and the parent processes it ran from, and sends
+   a desktop notification. The acceptance list is written first: when it is busy or does not parse, nothing is
+   accepted and the change stays as drift.
+2. The next session start and `dev status` list them: `extensions accepted since your last session: …`, each entry
+   cut to one short line. In Claude Code, the session start shows the list to you as a message, not only to the
+   agent.
 3. If you ran that `dev install`, run `dev ext ack` in your terminal. It clears the list and writes one `ext.ack`
-   record per entry. Agents cannot run it: the guard refuses it in every form, and `dev ext ack` itself checks that
-   it runs in your terminal.
+   record per entry, with its terminal and parent processes; the next Claude Code session start shows you once when
+   and from which terminal it ran. The guard refuses `dev ext ack` to agents in the forms it can read, and
+   `dev ext ack` itself checks that it runs in your terminal. Neither proves that you typed it: see the known
+   limits below.
 4. If you did not, do not acknowledge it. Remove what it accepted (for a Codex MCP server, `codex mcp remove <name>`
    in your terminal), and read `dev audit --action ext.accept` to see which process accepted it.
+
+**Known limits.** devkit decides that you ran `dev install`, `dev ext update --apply`, or `dev ext ack` from the
+process tree and the terminal, and a process an agent starts through a launcher can look the same: `screen` or
+`tmux` (including `screen -X stuff` with octal escapes such as `\015`, which the guard does not decode), `expect`,
+AppleScript's `do script`, `open` of a Terminal window or a `.command` file, or `launchctl`. The guard refuses the
+forms it can read, not every one. The notification, the session-start message, and the audit trail are the
+backstop until a kernel-level check of who typed the command lands in 26.11.5 (tasks B-fywplysktjc and
+B-fyxqtml4lw3).
 
 devkit reads Codex's MCP servers only in the form `codex mcp add` writes: a `[mcp_servers.<name>]` table and its
 sub-tables, one `key = value` per line, with a string, number, `true` or `false`, or a one-line array. A server
@@ -450,6 +464,9 @@ The pins have rules of their own:
 - **`dev ext update --apply`** accepts only the version it reviewed; anything else stays drift until you check it.
 - **`dev install`** names each change it accepts before it records the lock.
 - **Your overlay** cannot add a copy of a devkit default, and a required default stays required.
+- **A skill name belongs to one source.** One name is one folder for both agents, so `dev ext add skill` refuses a
+  name that a devkit default already uses, for either agent, and two sources in `skills.json` with the same skill
+  name make the catalog invalid.
 
 ## Left out on purpose
 
