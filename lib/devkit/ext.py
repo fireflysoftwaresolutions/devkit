@@ -1013,9 +1013,6 @@ def record_lock(agent: str, h: Homes = None, by: str = "dev install", t: dict = 
     return count[0]
 
 
-ACCEPTED_LIMIT = 200  # entries kept in the acceptance list; the audit trail keeps every one
-
-
 def accepted_file(lock: Path = None) -> Path:
     """The acceptance list, next to the lock it belongs to (a temporary lock keeps its own list)."""
     return (lock or lock_file()).with_name("ext-accepted.json")
@@ -1054,7 +1051,8 @@ def _note_accepted(items: list, now: int, by: str, lock: Path = None):
                     "record": (rec or {}).get("id", "")})
 
     def add(doc):
-        doc["pending"] = (list(doc.get("pending") or []) + out)[-ACCEPTED_LIMIT:]
+        # never trimmed: a flood of acceptances must not push an earlier one out of the developer's sight
+        doc["pending"] = list(doc.get("pending") or []) + out
     try:
         state.update(accepted_file(lock), add, indent=1)
     except state.StateBusy:

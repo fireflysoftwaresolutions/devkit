@@ -374,6 +374,7 @@ class TerminalLaunchersRunTheirCommand(unittest.TestCase):
         for cmd in ("open -a Terminal x.command", "open x.command", "open ~/x.tool", "open -a Terminal",
                     "open -a iTerm", "open -a 'iTerm 2' .", "open -a /System/Applications/Utilities/Terminal.app .",
                     "open -b com.apple.Terminal .", "open -b com.googlecode.iterm2", "open -na Terminal",
+                    "open -u file:///tmp/x.command", "open --url file:///tmp/x.tool",
                     "python3 -c \"import subprocess; subprocess.Popen(['open','-a','Terminal','/tmp/x.command'])\""):
             with self.subTest(cmd=cmd):
                 self.assertEqual(self.check(cmd), guard.TERMINAL_REASON)

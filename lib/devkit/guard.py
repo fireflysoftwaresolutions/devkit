@@ -1857,6 +1857,12 @@ def terminal_open_refusal(argv) -> bool:
                 return True
             i += 2
             continue
+        if a == "--args":  # the words after it go to the app, not to open
+            return False
+        if a in ("-u", "--url") or a.startswith("--url="):  # a file:// URL to a .command file opens it in Terminal
+            url = a.split("=", 1)[1] if "=" in a else (args[i + 1] if i + 1 < len(args) else "")
+            if url.casefold().rstrip("/").endswith((".command", ".tool")):
+                return True
         if a in _OPEN_VALUES:
             i += 2
             continue
