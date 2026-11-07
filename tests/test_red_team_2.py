@@ -274,6 +274,20 @@ class RedTeam2(unittest.TestCase):
             with self.subTest(cmd=cmd):
                 self.assertIsNotNone(self.member(cmd, routed=True))
 
+    # ---- MCP (Seraph)
+    def test_mcp_a_raise_in_the_tool_gate_fails_closed(self):
+        # the tool's name was passed as the text to judge, and a name never reads as an irreversible command, so a
+        # raise inside the gate let every MCP call through while the gate enforces
+        with settings(), mock.patch.object(guard, "mcp_external", side_effect=RuntimeError("boom")):
+            v = guard.irreversible_tool_verdict("mcp__github__merge_pull_request", {}, self.repo, session="s1",
+                                                grant=DenyAll())
+        self.assertIsNotNone(v)
+        self.assertIn("could not check", v[1])
+        records = [json.loads(ln) for f in (Path(self.tmp.name) / "audit").rglob("*.jsonl")
+                   for ln in f.read_text().splitlines() if ln.strip()]
+        self.assertTrue(any(r["action"] == "guard.irreversible" and (r.get("evidence") or {}).get("rule") ==
+                            "gate-error" and r["outcome"] == "blocked" for r in records), records)
+
 
 if __name__ == "__main__":
     unittest.main()

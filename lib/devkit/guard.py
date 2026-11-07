@@ -5012,7 +5012,8 @@ def irreversible_tool_verdict(tool: str, tool_input, cwd, *, agent: str = "claud
         a = {"action": act, "tier": 2, "target": str(tool), "repo": _repo_of(cwd), "words": str(tool)}
         return _main_gate([a], agent, session, grant, now)
     except Exception as e:
-        return _gate_failed("irreversible", e, _safe_setting(now), session, str(tool or ""))
+        # a tool name never matches _IRREV_TEXT, so passing it would fail open: in enforce, a raise denies (Seraph)
+        return _gate_failed("irreversible", e, _safe_setting(now), session, None)
 
 
 def _member_gate(cmd, cwd, member, lane, agent, session, grant, now) -> str | None:
