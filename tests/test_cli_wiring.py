@@ -101,7 +101,7 @@ class StepApprovesTests(HookCase):
 GUARDED = (["backup"], ["sync"], ["push"], ["pr", "create"], ["pr", "merge"], ["pr", "ready"], ["pr", "comment"],
            ["pr", "review"], ["release"], ["issue", "create"], ["jobs", "run"], ["jobs", "exec"], ["commit"],
            ["crew"], ["task"], ["plan"], ["delivery"], ["lesson"], ["test"], ["audit"], ["ci"], ["config"], ["hook"],
-           ["install"], ["update"], ["note"], ["handoff"], ["progress"], ["branch"])
+           ["install"], ["update"], ["note"], ["handoff"], ["progress"], ["branch"], ["branch", "embargo"])
 
 
 def _parsers(p, path=()):

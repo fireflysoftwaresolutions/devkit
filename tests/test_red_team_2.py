@@ -359,7 +359,7 @@ class RedTeam2(unittest.TestCase):
         self.assertEqual(self.targets("dev backup"), [("push", "feat/x")])  # the current branch
         self.assertEqual(self.targets("dev backup feat/a feat/b"), [("push", "feat/a"), ("push", "feat/b")])
         self.assertEqual(self.targets("bin/dev backup --all --accept-ci"), [("push", "all-branches")])
-        for cmd in ("dev backup", "dev backup feat/a", "dev backup --all", "python3 bin/dev backup --public feat/a"):
+        for cmd in ("dev backup", "dev backup feat/a", "dev backup --all", "python3 bin/dev backup --accept-ci feat/a"):
             with self.subTest(cmd=cmd):
                 self.assert_tier_1(cmd)
         self.assertEqual(self.acts("dev backup --dry-run --all"), [])
@@ -499,6 +499,43 @@ class RedTeam2(unittest.TestCase):
             with self.subTest(cmd=cmd):
                 self.assertIsNotNone(self.member(cmd))
         self.assertIsNone(self.member("dev git commit -m x"))
+
+    # ---- B2 (the release engineer's lines, with the tech lead's refinement): lifting an embargo, publishing a branch
+    # that looks like a security fix and setting the backup policy are the developer's own decisions: tier 2, never a
+    # crew member's, the main session's only with the developer's typed grant. A dry run writes nothing.
+    def test_b2_the_developers_own_publishing_decisions_are_tier_2(self):
+        with mock.patch.object(guard, "current_project", return_value="acme/widget"):
+            self.assertEqual(self.targets("dev branch embargo feat/x --why 'a token leak'"), [])  # baseline: set one
+            for cmd, target in (("dev branch embargo --lift feat/x", "embargo/feat/x"),
+                                ("dev branch embargo feat/x --lift", "embargo/feat/x"),
+                                ("bin/dev branch embargo --li feat/x", "embargo/feat/x"),
+                                ("dev -h branch embargo --lift feat/x", "embargo/feat/x"),
+                                ("dev backup policy off", "backup-policy/acme/widget"),
+                                ("dev backup policy on -p acme/other", "backup-policy/acme/other")):
+                with self.subTest(cmd=cmd):
+                    self.assertEqual(self.targets(cmd), [("developer-only", target)])
+                    self.assertIn("developer's own decisions", self.main(cmd) or "")
+                    self.assertIn("Crew members never run", self.member(cmd) or "")
+            for cmd in ("dev backup --public feat/a", "python3 bin/dev backup feat/a --pub"):
+                with self.subTest(cmd=cmd):
+                    self.assertEqual(self.targets(cmd), [("developer-only", "backup-public/acme/widget"),
+                                                         ("push", "feat/a")])
+            self.assertIn("`grant developer-only embargo/feat/x`", self.main("dev branch embargo --lift feat/x"))
+            self.assertNotIn("grant developer-only", self.main("dev branch embargo --lift"))  # `?`: no grant covers it
+            for cmd in ("dev branch embargo", "dev backup policy", "dev backup --public --dry-run",
+                        "dev branch embargo --lift -h"):  # the list, the policy read, a dry run, the help
+                with self.subTest(cmd=cmd):
+                    self.assertNotIn("developer-only", self.acts(cmd))
+            self.assertEqual(self.acts("dev backup feat/a -- --public"), ["push", "push"])  # after --: a branch name
+
+            def grant(action, target, repo, consume):  # the developer typed `grant developer-only embargo/feat/x`
+                hit = (action, target) == ("developer-only", "embargo/feat/x")
+                return {"id": "E2:t", "source": "E2", "uses_left": 1, "expires": 0} if hit else None
+            with settings():
+                self.assertIsNone(guard.irreversible_verdict("dev branch embargo --lift feat/x", self.repo,
+                                                             agent="claude", session="s1", grant=grant))
+                self.assertIsNotNone(guard.irreversible_verdict("dev branch embargo --lift feat/y", self.repo,
+                                                                agent="claude", session="s1", grant=grant))
 
 
 if __name__ == "__main__":
