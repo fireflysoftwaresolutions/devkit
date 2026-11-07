@@ -23,6 +23,6 @@
     {"from": "canary", "to": "morpheus", "label": "checked report", "style": "dashed", "from_side": "left",
      "to_side": "left", "via": [[-0.85, 3], [-0.85, 1]]},
     {"from": "morpheus", "to": "ciwatch", "label": "push once"},
-    {"from": "ciwatch", "to": "link", "label": "failure, via Morpheus", "style": "dashed", "label_at": "source"}
+    {"from": "ciwatch", "to": "link", "label": "failure, via the tech lead", "style": "dashed", "label_at": "source"}
   ]
 }

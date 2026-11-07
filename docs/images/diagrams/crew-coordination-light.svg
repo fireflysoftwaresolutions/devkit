@@ -24,8 +24,8 @@
 <rect x="604.6" y="188.0" width="78.7" height="24.0" rx="11.0" fill="#F3F1EB"/>
 <text x="644.0" y="204.0" font-size="13" font-weight="400" fill="#62645B" text-anchor="middle">push once</text>
 <path d="M840.0,240.0 L840.0,360.5" fill="none" stroke="#62645B" stroke-width="1.5" stroke-linejoin="round" stroke-dasharray="6 5" stroke-linecap="butt"/><polygon points="840.0,368.0 836.0,360.0 844.0,360.0" fill="#62645B"/>
-<rect x="768.9" y="292.0" width="142.3" height="24.0" rx="11.0" fill="#F3F1EB"/>
-<text x="840.0" y="308.0" font-size="13" font-weight="400" fill="#62645B" text-anchor="middle">failure, via Morpheus</text>
+<rect x="760.1" y="292.0" width="159.8" height="24.0" rx="11.0" fill="#F3F1EB"/>
+<text x="840.0" y="308.0" font-size="13" font-weight="400" fill="#62645B" text-anchor="middle">failure, via the tech lead</text>
 <circle cx="448.0" cy="16.0" r="9" fill="#FFFFFF" stroke="#62645B" stroke-width="1.5"/><path d="M431.0,44.0 Q431.0,28.0 448.0,28.0 Q465.0,28.0 465.0,44.0 Z" fill="#FFFFFF" stroke="#62645B" stroke-width="1.5"/>
 <text x="448.0" y="70.0" font-size="16" font-weight="600" fill="#272820" text-anchor="middle">Developer</text>
 <rect x="320.0" y="160.0" width="256.0" height="80.0" rx="6.0" fill="#FFB34A" stroke="#F0A33C" stroke-width="2"/>
