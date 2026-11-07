@@ -1166,15 +1166,70 @@ def verify(team: bool = True) -> dict:
 
 # --------------------------------------------------------------------------- publish and prune (R2 anchor, R3)
 
+# GitHub refuses a pushed file over 100 MB, and from then on every handoff push, so no month copy is published past
+# this. A stopgap for 26.11.3: 26.11.4 publishes daily gzipped segments instead of whole months.
+PUBLISH_LIMIT = 45 * 1024 * 1024
+HELD_FIX = ("nothing is lost: every record stays in this machine's trail and dev audit verify checks it; devkit "
+            "26.11.4 publishes daily segments instead of whole months, so run dev update once it is released")
+
+
+def _mb(n: int) -> str:
+    return core.human_kb(n / 1024)
+
+
+def _held(f: Path, size: int) -> dict:
+    # a month file over PUBLISH_LIMIT: what the job's record, dev audit stats and dev doctor say about it
+    pub = team_dir() / f.name
+    published = pub.stat().st_size if pub.exists() else 0
+    return {"month": f.stem, "path": str(f), "bytes": size, "published": published, "limit": PUBLISH_LIMIT,
+            "text": f"{f.stem} is not published: {_mb(size)} here, over the {_mb(PUBLISH_LIMIT)} limit for a "
+                    f"handoff copy (GitHub refuses files over 100 MB, and then every handoff push); its handoff "
+                    f"copy stays at {_mb(published)}",
+            "fix": HELD_FIX}
+
+
+def _to_publish() -> list:
+    return sorted(AUDIT.glob("*.jsonl"))[-3:] if AUDIT.exists() else []  # this machine's last three month files
+
+
+def held() -> list:
+    # the month files the audit job leaves unpublished because they passed PUBLISH_LIMIT
+    if not settings()["publish"]:
+        return []
+    out = []
+    for f in _to_publish():
+        try:
+            size = f.stat().st_size
+        except OSError:
+            continue
+        if size > PUBLISH_LIMIT:
+            out.append(_held(f, size))
+    return out
+
+
+def publish_checks() -> list:
+    # dev doctor's rows (group, name, ok, detail, fix): one per held month, else one that passes; none when publish
+    # is off
+    if not settings()["publish"]:
+        return []
+    rows = [("Automation", "audit handoff copy", False, h["text"], h["fix"]) for h in held()]
+    return rows or [("Automation", "audit handoff copy", True,
+                     f"every month under the {_mb(PUBLISH_LIMIT)} limit for a handoff copy", "")]
+
+
 def publish() -> list:
     """Copy this machine's last three month files into the handoff repository (audit/<user>@<host>/). A local file
-    that no longer extends its published copy is never published over it. -> files changed."""
+    that no longer extends its published copy is never published over it, and one over PUBLISH_LIMIT is not
+    published at all (its copy stays as it was). -> files changed."""
     if not settings()["publish"] or not AUDIT.exists():
         return []
     dest, changed = team_dir(), []
-    for f in sorted(AUDIT.glob("*.jsonl"))[-3:]:
+    for f in _to_publish():
         target = dest / f.name
         data = f.read_bytes()
+        if len(data) > PUBLISH_LIMIT:
+            record("audit.publish", core.tilde(f), _held(f, len(data))["text"], "blocked", severity="warning")
+            continue
         old = target.read_bytes() if target.exists() else b""
         if old == data:
             continue
@@ -1459,6 +1514,8 @@ def cmd_audit(a) -> int:
         if not a.quiet:
             print(f"{ui.OK} audit published ({len(changed)} file(s) changed)"
                   + (f" · pruned {', '.join(pruned['removed'])}" if pruned["removed"] else ""))
+            for h in held():
+                print(f"  {ui.FAIL} {h['text']}\n      {ui.ARROW} {h['fix']}")
         return 0
     if act not in COMMANDS:
         ui.err(f"unknown audit command “{act}”: dev audit [verify|export|show <id>|stats|config]")
@@ -1483,10 +1540,13 @@ def cmd_audit(a) -> int:
         return 2
     if act == "stats":
         st = stats(recs)
+        st["held"] = held()
         if a.json or a.format == "json":
             print(json.dumps(st, indent=1))
             return 0
         print(ui.section(f"Audit statistics · {st['total']} record(s)"))
+        for h in st["held"]:
+            print(f"  {ui.FAIL} {h['text']}\n      {ui.ARROW} {h['fix']}")
         print(ui.table([[c, n] for c, n in sorted(st["categories"].items(), key=lambda kv: -kv[1])],
                        ["CATEGORY", "RECORDS"]))
         cats = [c for c in CATEGORIES if c in st["categories"]]

@@ -2045,6 +2045,9 @@ def doctor() -> int:
         check("Automation", f"job {jname}", okj, f"{_jobs.schedule_text(jj)} · last " +
               (core.ago(lr["start"]) + (" ok" if lr.get("rc") == 0 else f" exit {lr.get('rc')}") if lr else "never"),
               f"dev jobs show {jname}")
+    from . import audit
+    for row in audit.publish_checks():
+        check(*row)
     from . import canary
     sm = canary.summary(7)
     tot = sum(t for _, t in sm.values())

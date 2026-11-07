@@ -243,7 +243,10 @@ problem it prints the file, the line, and the record's id, and exits `1`:
 
 Records written since the last publish are counted as _not yet published, so not yet anchored_. Every run is itself
 recorded as `audit.verify`, with `critical` severity when it fails. The daily job never publishes a local file over a
-published copy it no longer extends; it records `audit.publish` as blocked and critical instead.
+published copy it no longer extends; it records `audit.publish` as blocked and critical instead. It never publishes a
+month file over 45 MB either, because GitHub refuses files over 100 MB and then every handoff push: that month's copy
+stays as it was, the job records `audit.publish` as blocked with `warning` severity, and `dev audit stats` and
+`dev doctor` say so until devkit 26.11.4 publishes daily segments instead of whole months.
 
 ## Query and export
 
