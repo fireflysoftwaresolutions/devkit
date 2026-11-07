@@ -98,6 +98,8 @@ COMMANDS = [
         ("config [--check]|repair|lock|…", "The agent settings devkit manages: what differs, why, the fix"),
         ("guard check <cmd>|--write p", "Simulate what the guard decides for a command or a file write"),
         ("plugin validate", "Validate the devkit plugin with Claude Code's validator and Codex's parser"),
+        ("ext ls|outdated|update|add|remove|enable|disable|ack",
+         "Third-party plugins, skills and MCP servers: pins, updates, drift, your own set"),
         ("desktop pack|status", "Claude Desktop extension: build the .mcpb bundle, check what is installed"),
         ("install [--only step]", "Pin the checkout read-only for the hooks, then apply the configuration"),
         ("update", "Move devkit to the newest release (or pull its branch), pin it and re-apply it"),
@@ -895,8 +897,9 @@ def cmd_status(a):
         print("\n".join(render_home(v)))
         return 0
     v = status_view(reg, p, w)
-    v["needs_you"] += devkit_needs()
-    _prompt_refresh(reg, (w or {}).get("path") or p.get("path") if a.query else os.getcwd())
+    where = ((w or {}).get("path") or p.get("path")) if a.query else os.getcwd()
+    v["needs_you"] += devkit_needs(where)  # the plugins of the project asked about, not of the folder it runs in
+    _prompt_refresh(reg, where)
     v["show_all"] = bool(getattr(a, "all", False))
     if getattr(a, "json", False):
         print(json.dumps(v, indent=2, ensure_ascii=False, default=str))

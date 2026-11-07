@@ -458,6 +458,19 @@ class LockAndDriftTests(unittest.TestCase):
         self.assert_still_drift(self.accept_beside(held=True))
         self.assertEqual(ext.pending_acceptances(self.lock), [])
 
+    def test_each_listed_acceptance_is_cut_to_one_short_line_without_control_characters(self):
+        what = "evil (claude plugin) \x1b[2J\x1b[Hall clear\r\n" + "x" * 400
+        ext.accepted_file(self.lock).write_text(json.dumps(
+            {"pending": [{"id": "plugin:claude:evil@x", "what": what, "at": 1, "tty": "/dev/ttys001\x07"}]}))
+        line = ext.accepted_line(self.lock)
+        with mock.patch.object(ext, "lock_file", return_value=self.lock):
+            (need,) = [n["text"] for n in ext.status_needs(str(self.tmp.name)) if "accepted since" in n["text"]]
+        for text in (line, need):
+            self.assertNotRegex(text, r"[\x00-\x1f\x7f]")
+            self.assertIn("evil (claude plugin) [2J[Hall clear", text)
+            self.assertNotIn("x" * 100, text)
+            self.assertIn("…", text)
+
     def test_the_acceptance_list_is_never_trimmed(self):
         first = {"id": "plugin:claude:first@x", "what": "the first one", "at": 1, "by": "dev install"}
         ext.accepted_file(self.lock).write_text(json.dumps(
@@ -524,6 +537,24 @@ class DriftWiringTests(unittest.TestCase):
         with mock.patch.object(ext, "homes", return_value=self.h):
             needs = cli.devkit_needs(str(self.tmp.name))
         self.assertEqual([n["command"] for n in needs if "superpowers" in n["text"]], ["dev ext ls"])
+
+    def test_dev_status_of_another_project_reads_that_projects_plugins(self):
+        proj = Path(self.tmp.name) / "other-project"
+        (proj / ".claude").mkdir(parents=True)
+        (proj / ".claude" / "settings.json").write_text(json.dumps({"enabledPlugins": {"kid-stranger@x": True}}))
+        subprocess.run(["git", "init", "-q", str(proj)], check=True)  # project settings are read at its top level
+        out = io.StringIO()
+        args = mock.Mock(query="other-project", json=True, all=False)
+        every = ext.drift_text
+        with mock.patch.object(ext, "homes", return_value=self.h), \
+                mock.patch.object(ext, "drift_text", lambda rows, limit=4: every(rows, limit=50)), \
+                mock.patch.object(cli, "_reg", return_value={}), \
+                mock.patch.object(cli, "_resolve", return_value={"path": str(proj)}), \
+                mock.patch.object(cli, "status_view", return_value={"needs_you": []}), \
+                mock.patch.object(cli, "_prompt_refresh", lambda *a, **k: None), contextlib.redirect_stdout(out):
+            cli.cmd_status(args)
+        texts = [n["text"] for n in json.loads(out.getvalue())["needs_you"]]
+        self.assertTrue(any("kid-stranger" in t for t in texts), texts)
 
     def install(self, developer: bool) -> str:
         out = io.StringIO()  # setup's progress lines stay out of the test log
@@ -1109,6 +1140,16 @@ class EffectiveSetTests(unittest.TestCase):
         cd = [s for s in sources if "codebase-design" in s["skills"]]
         self.assertEqual([s.get("agents") for s in cd], [["claude"]])
         self.assertTrue(any("grill-with-docs" in s["skills"] and not s.get("agents") for s in sources))
+
+
+class HelpTests(unittest.TestCase):
+    def test_dev_help_lists_dev_ext_and_its_verbs(self):
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            cli.print_help()
+        (line,) = [ln for ln in plain(out.getvalue()).splitlines() if ln.strip().startswith("dev ext ")]
+        for verb in ("ls", "outdated", "update", "add", "remove", "enable", "disable", "ack"):
+            self.assertIn(verb, line)
 
 
 class DoctorEffectiveSetTests(unittest.TestCase):

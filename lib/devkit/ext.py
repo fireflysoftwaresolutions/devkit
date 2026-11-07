@@ -1100,10 +1100,17 @@ def pending_acceptances(lock: Path = None) -> list:
     return [p for p in items or [] if isinstance(p, dict) and p.get("id")]
 
 
+def _shown(text, width: int = 100) -> str:
+    """One entry as the session line and `dev status` show it: no control characters (an escape sequence must not
+    redraw the terminal or hide the rest), cut to about `width` characters. The audit trail keeps the full text."""
+    s = re.sub(r"\s+", " ", re.sub(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f-\x9f]", "", str(text or ""))).strip()
+    return s if len(s) <= width else s[:width - 1].rstrip() + "…"
+
+
 def accepted_text(items: list, limit: int = 4) -> str:
     def one(p):
         when = time.strftime("%d %b %H:%M", time.localtime(int(p.get("at") or 0)))
-        return f"{p.get('what') or p['id']} ({when}, tty {p.get('tty') or 'none'})"
+        return f"{_shown(p.get('what') or p['id'])} ({when}, tty {_shown(p.get('tty'), 40) or 'none'})"
     more = f"; and {len(items) - limit} more" if len(items) > limit else ""
     return "; ".join(one(p) for p in items[:limit]) + more
 
