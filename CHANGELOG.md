@@ -3,6 +3,20 @@
 All notable changes to devkit. Versions follow CalVer `YY.MM.PATCH` (PATCH restarts at 0 each month); tags are
 `vYY.MM.PATCH`. Sections follow [Keep a Changelog](https://keepachangelog.com/).
 
+## [26.11.5] - Unreleased
+
+### Changed
+
+- **The documentation matches what devkit does.** The README, the docs index, and the guides now show what 26.11.4
+  added where you look for it: `dev ext`, `dev update --check`, Tab completion and the zsh helpers, `dev impeccable`,
+  the dashboard's Now view (the tutorials say the dashboard opens on it), how your answers to irreversible decisions
+  count, and the guard's refusals of terminal typing and of commands it cannot read, each with a Troubleshooting
+  entry. The 16 command blocks whose `#` comments held an apostrophe, which the guard refused when an agent copied one
+  whole, are reworded. Pages that promised guard fixes, a kernel-level terminal check, and an audit re-seal for
+  26.11.5 now say they are planned. The Next.js MCP server is added with `dev ext add`, because agents cannot run
+  `claude mcp add`. [The crew](docs/crew.md#rooms-planned-for-26116) describes rooms, planned for 26.11.6 and not
+  available yet. Disk use is in the index, and `skills.optional` is in Configuration.
+
 ## [26.11.4] - 2026-11-07
 
 This release adds `dev ext` to see, update, and add the third-party plugins, skills, and MCP servers devkit installs,
