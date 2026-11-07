@@ -17,7 +17,23 @@ the directory used to resolve later paths, leading `VAR=value`, `sudo`, `env`, `
 `builtin`, `nice`, and `caffeinate` prefixes are skipped, heredoc bodies are treated as data, and output redirections
 (`>`, `>>`) are checked as writes. The guard also reads what the shell runs inside a command: `$(…)` and backtick
 substitutions, `sh -c` and `eval` strings, `xargs` and `find -exec` commands, and a pager that git or gh starts. Quoted
-text a command only carries, such as a `dev crew ask` message, is data and never read as a command.
+text a command only carries, such as a `dev crew ask` message, is data and never read as a command. A heredoc body
+ends at its tag line, and also at a line that starts with the tag and `)`: macOS `/bin/bash` 3.2 ends a heredoc there
+inside `$(…)` and runs what follows, while zsh reads on, so the guard reads it the way that shows what bash runs.
+
+## What the guard is and is not
+
+The guard is a seatbelt. It catches an agent's mistakes and the common forms of prompt injection: a command that
+deletes your work, pushes or merges without approval, switches devkit off, or starts a session without its hooks. It
+reads the command text and the commands the shell, a pager, or an interpreter's string literals hand to a process.
+
+It is not a sandbox. A determined program can still find a form the guard does not recognize, for example a command
+it assembles at run time from pieces the guard cannot read, or a file it unpacks and git later runs. Each such form
+the red team finds becomes a rule here and a test, but the list can never be complete.
+
+The lasting boundary is credentials: what an agent's tools can reach is limited by the tokens and keys they hold.
+Separating the agents' credentials from yours is planned for devkit 26.11.4. Until then, treat the guard as the net
+under your own review, not as a replacement for it.
 
 ## Decisions
 
@@ -35,7 +51,8 @@ text a command only carries, such as a `dev crew ask` message, is data and never
 | --- | --- |
 | Temp: `/tmp`, `/private/tmp`, `/var/folders`, `$TMPDIR`, `$CLAUDE_CODE_TMPDIR`, `~/Development/.tmp` | allow |
 | Agent and tool config: `~/.claude`, `~/.codex`, `~/.agents`, `~/.config`, `~/.local`, `~/.cache`, `~/.docker`, `~/.colima`, `~/.lima`, `~/.ssh`, `~/.npm`, `~/.m2`, `~/.gradle`, `~/.composer`, `~/.cargo` | allow |
-| Dotfiles directly in `~` (`~/.zshrc`, `~/.gitconfig`) | allow |
+| Dotfiles directly in `~` (`~/.zshrc`, `~/.zprofile`) | allow |
+| A repository's git folder: the `.git` folder or file itself, and its `config`, `config.worktree`, `hooks/`, `info/`, and `commondir` (also of a submodule under `.git/modules/` or a linked worktree under `.git/worktrees/`), and git's own configuration (`~/.gitconfig`, `~/.config/git/config`), by the Write and Edit tools, `apply_patch`, redirections, `cp`, `tee`, and `ln` | deny: git runs what they name (a pager, fsmonitor, an ssh command, a hook) under later ordinary git calls. Use `.gitignore` for ignores; ask the developer for anything else |
 | `/dev/…` | allow |
 | Inside the dev root, valid layout | allow |
 | Inside the dev root, a file directly in `~/Development` | deny |
@@ -102,6 +119,7 @@ If devkit really should be off somewhere, change devkit's own configuration (see
 | `git commit`, `tag`, `merge`, or `notes` whose message (inline or `-F` file) contains AI attribution | deny |
 | `git init <dir>` that breaks the layout | deny |
 | `git config` that sets `core.pager`, `pager.<command>`, or a key the guard cannot read (`git config $K …`), in any scope or file, also as `git config set` | deny: git runs the pager as a command each time it pages, under every later read. Use `git --no-pager` or `-P` for one call |
+| `git config` that sets `core.editor`, `sequence.editor`, `core.fsmonitor`, `core.sshCommand`, `core.hooksPath`, `include.path`, or `includeIf.<condition>.path` (the main session and crew members alike) | deny: their value is a command line, or a file git runs or reads more configuration from, under later calls such as `git status` or `git fetch` |
 
 AI attribution means any of: `Co-Authored-By: Claude`, `Codex`, `ChatGPT`, `OpenAI`, `Anthropic`, `Copilot`,
 `GitHub Copilot`, `Gemini`, or `Cursor`, `noreply@anthropic.com`, `noreply@openai.com`, `copilot@github.com`,
@@ -215,7 +233,13 @@ started without them would have no guard, so these are denied to every agent:
 | `claude --dangerously-*`, `--allow-dangerously-*`, or `--permission-mode bypassPermissions` | They drop the permission checks |
 | `codex -c` or `--config` on a key that names hooks, the sandbox, approvals, or `features`, or a key the guard cannot read | They rewrite the hooks, the sandbox, or the approval policy |
 | `codex --sandbox danger-full-access`, `--dangerously-*`, `--yolo`, or `--disable <feature>` | They turn the sandbox or a feature off |
+| `codex -p <profile>` or `--profile <profile>` | A profile in `config.toml` can set the same sandbox, approval, and hook keys as `-c`. Start a profiled session yourself, in a terminal |
 | `CLAUDE_CONFIG_DIR` or `CODEX_HOME` set for either | They point the session at another settings folder |
+
+These rules also apply when a package runner starts the agent (`npx @anthropic-ai/claude-code`, `npx claude-code`,
+`bunx`, `pnpm dlx`, `yarn dlx`, `@openai/codex`), and when interpreter code hands the command to a process
+(`subprocess.run(['claude', '--bare', …])`, `os.system('claude --bare …')`, `child_process.spawn('dev', ['hook',
+…])`). The same goes for `dev hook <event>`, which no agent tool call runs.
 
 A nested session with your own settings still runs, and so does a prompt that only names these flags. If the work
 needs another configuration, start that session yourself in a terminal.
@@ -227,12 +251,17 @@ gives it. When the shell names the program only when it runs, the guard cannot k
 action `unknown`, tier 2, with the target `cmd-<hash>` of that exact command text. For example:
 
 - `$(printf gh) pr merge 12`, `${X:-gh} pr merge 12`, `g=gh; $g pr merge 12`, or `env -S 'gh pr merge 12'`;
-- `gh $SUB merge 12` or `gh pr $ACT 12`, where a variable names gh's command;
+- `gh $SUB merge 12` or `gh pr $ACT 12`, where a variable names gh's command, and `git $SUB push`, where a variable
+  names git's;
 - a program that builds the name of what it calls, such as `getattr(__import__('os'), 'sys' + 'tem')`.
 
 A pager is a command too: `git -c core.pager=…`, `-c pager.<command>=…`, `GIT_PAGER`, and `PAGER` for git, and
-`GH_PAGER` and `PAGER` for gh, are classified as the command they name. A pager from a source the guard cannot read
-(`--config-env`, `GIT_CONFIG_PARAMETERS`) is `unknown`.
+`GH_PAGER` and `PAGER` for gh, are classified as the command they name, and so are `core.editor`,
+`sequence.editor`, `core.fsmonitor`, and `core.sshCommand` set with `-c` or a `GIT_CONFIG_KEY_<n>` pair on the
+command. A git call gets configuration from a source the guard cannot read, and is `unknown`, when it uses
+`--config-env` for one of these keys, sets `core.hooksPath` or an include with `-c`, or runs with `GIT_CONFIG_GLOBAL`
+or `GIT_CONFIG_SYSTEM` (other than `/dev/null`), `GIT_CONFIG_PARAMETERS`, or a `GIT_CONFIG_COUNT` whose pairs are not
+all on the command. A crew member may not set these variables at all.
 
 A crew member never runs tier 2, even with a grant. In the main session, while `safeguards.irreversible_main` enforces,
 the refusal names the command's target. Write the program's name out as a plain word when you can. If it must run as
