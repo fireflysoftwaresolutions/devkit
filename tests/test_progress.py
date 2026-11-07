@@ -918,6 +918,20 @@ class StepGrantTests(TranscriptCase):
         self.assertEqual(pg.load_run("claude", "s1")["plan"][0].get("allow"), [])
 
 
+class EstimateRoundingTests(unittest.TestCase):
+    # Trinity's 6c45efc and Link's 38a7c16: an estimate or a time left rounds like the dashboard's fmtAbout (to 5
+    # minutes, to the minute under 10), while measured time stays exact; the status block and dev progress print both
+    def test_the_status_block_rounds_estimates_and_keeps_measured_time_exact(self):
+        self.assertEqual(pg.fmt_range(27.4, 43), "~25m–45m")
+        with TempState():
+            t0 = time.time() - 60
+            pg.start("Work", plan=["api=12m", "docs=107m"], now=t0)
+            block = pg.render_update(pg.load_run("claude", "s1"), branch="b", now=t0 + 7 * 60)
+        self.assertIn("of ~2h00m", block)  # 119 minutes, estimated
+        self.assertIn("api · 7m of ~10m", block)  # 7 minutes measured, 12 estimated
+        self.assertIn("docs · ~1h45m", block)
+
+
 class ScopeWriteTests(unittest.TestCase):
     # M292: Seraph (review-only) was flagged for docs/audit.md, which Neo, whose step scope holds it, changed during
     # Seraph's shell call. A file a running lane's scope holds is that lane's; the reviewer is flagged for the rest

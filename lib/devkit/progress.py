@@ -773,7 +773,8 @@ def eta_range(run, now=None):
 
 
 def fmt_range(lo, hi) -> str:
-    a, b = fmt_min(lo), fmt_min(hi)
+    """An ETA range, rounded like every estimate (fmt_about): "~25m–45m"."""
+    a, b = fmt_about(lo), fmt_about(hi)
     return f"~{a}" if a == b else f"~{a}–{b}"
 
 
@@ -801,7 +802,7 @@ def headline(run: dict, now: float | None = None) -> str:
     parts = [f"{done}/{len(plan)}" if plan else "no plan",
              f"{fmt_min(act)} active" + (f" ({fmt_min(wall)} wall)" if wall - act >= 5 else "")]
     if run.get("estimate"):
-        parts[-1] += f" of ~{fmt_min(run.get('estimate_cal') or run['estimate'])}"
+        parts[-1] += f" of ~{fmt_about(run.get('estimate_cal') or run['estimate'])}"
     if run.get("state") == "running":
         lo, hi = eta_range(run, now)
         parts.append(f"ETA {fmt_range(lo, hi)}")
@@ -2552,9 +2553,9 @@ def render_update(run: dict, branch: str | None = None, now: float | None = None
                 parts.append(f"recheck: {', '.join(s['recheck'])} reopened")
             who = "".join(f" · {p}" for p in parts)
             if s.get("state") in ("done", "running"):
-                tm = f" · {fmt_min(step_minutes(run, s, now))} of ~{fmt_min(s.get('est') or 0)}"
+                tm = f" · {fmt_min(step_minutes(run, s, now))} of ~{fmt_about(s.get('est') or 0)}"
             else:
-                tm = f" · ~{fmt_min(s.get('est') or 0)}"
+                tm = f" · ~{fmt_about(s.get('est') or 0)}"
             lines.append(f"{mark} {i}. {s['name']}{who}{tm}")
     if agents:
         parts = []
