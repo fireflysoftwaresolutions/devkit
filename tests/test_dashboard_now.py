@@ -79,7 +79,7 @@ class NowScreenTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         cls.tmp = tempfile.TemporaryDirectory()
-        cls.base = T.fixture_data(Path(cls.tmp.name) / "handoff")
+        cls.base = T.fixture_data(Path(cls.tmp.name) / "handoff", T.NOW)
 
     @classmethod
     def tearDownClass(cls):
@@ -309,7 +309,7 @@ class NowLiveTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         cls.tmp = tempfile.TemporaryDirectory()
-        cls.data = dict(with_doc(T.fixture_data(Path(cls.tmp.name) / "handoff"), "example"), live=True, snapshot=1)
+        cls.data = dict(with_doc(T.fixture_data(Path(cls.tmp.name) / "handoff", T.NOW), "example"), live=True, snapshot=1)
 
     @classmethod
     def tearDownClass(cls):
