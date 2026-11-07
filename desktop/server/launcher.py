@@ -178,7 +178,7 @@ def main() -> int:
         return rescue(found)
     dev = os.path.join(found["home"], "bin", "dev")
     sys.stdout.flush()
-    os.execv(sys.executable, [sys.executable, dev, "mcp"])
+    os.execv(sys.executable, [sys.executable, "-I", "-S", dev, "mcp"])  # as bin/dev's shebang: no planted code
     return 0  # not reached
 
 

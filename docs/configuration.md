@@ -69,13 +69,17 @@ Apply agent changes with `dev install --only claude` or `dev install --only code
 
 Apply group changes with `dev install --only skills`. Rule changes apply at the next prompt.
 
+A rule triggers on what the work does, never on the words of a prompt: `files` (globs of changed files), `commands`
+(command words the agent runs), and `activities` (kinds of work from `dev crew raci`). `content` is a pattern the
+matching files must also contain; with `content_files`, files of those globs match too when they contain it.
+
 ```json
 {
   "skills": {
     "rules": [
       { "id": "ui", "skills": { "claude": ["frontend-design"], "codex": ["impeccable", "frontend-design"] } },
-      { "id": "terraform", "why": "Terraform style and tests", "files": ["*.tf"],
-        "prompt": "\\bterraform\\b", "skills": { "claude": ["terraform-style-guide"], "codex": ["terraform-style-guide"] } }
+      { "id": "terraform", "why": "Terraform style and tests", "files": ["*.tf"], "activities": ["infrastructure"],
+        "skills": { "claude": ["terraform-style-guide"], "codex": ["terraform-style-guide"] } }
     ]
   }
 }
@@ -90,12 +94,57 @@ Apply group changes with `dev install --only skills`. Rule changes apply at the 
 | `progress.notify` | `true` | Desktop notifications when a run blocks or finishes, and when a long turn ends |
 | `progress.notify_after_minutes` | `10` | A turn at least this long sends a notification when it ends |
 | `progress.slow_tool_seconds` | `20` | Tool calls at least this slow are recorded for `dev time` |
-| `progress.max_parallel` | `4` | Crew members that may work at once; the guard refuses a further launch ([The crew](crew.md#guardrails)) |
+| `progress.max_parallel` | `4` | The crew's slots: how many crew members may work at once (1 to 10), counting the helpers they launch; the guard refuses a launch that does not fit ([The crew](crew.md#guardrails)). The team's `policy/progress.json` in the handoff repository may set a lower ceiling, such as `{"max_parallel": 3}` |
+| `progress.quota_steps` | `{"50": 1.0, "70": 0.75, "85": 0.5}` | How the plan's recorded usage lowers the slots: from each usage percent, this share of `max_parallel`, rounded down (never below one). The 5-hour and the weekly windows both count, and the lower result wins; an expired reading counts for nothing. Setting a step adds it or changes its share; a share of `1` turns a step off. With 6 slots at 87 %, 3 members work at once |
+| `progress.quota_percent` | `90` | From this usage of the 5-hour or the weekly window, one crew member works at a time, until the window resets |
+| `progress.slot_weights` | `{"builder": 1.0, "review": 0.5, "read": 0.5, "scout": 0.0}` | What one launch costs, by kind (0 to 1): a review-only or read-only member (its tool level, or its parent's for a helper), the Lookup scout (Sparks), or a builder (every other agent). The costs in use must fit the slots, so two reviewers fit in one builder's slot and the Lookup scout (Sparks) always runs |
+| `progress.reserve` | `1` | Slots kept for the developer's own request while the crew works: queued plan steps from an earlier turn do not take them; a launch for what the developer asked in the current turn does (audited as `crew.reserve`). Never the last slot of a limit of one |
+| `progress.max_depth` | `2` | How many levels of agents may run below the main session (1 to 5): crew members, and the helpers they launch. A deeper launch is refused |
 | `progress.stale_agent_hours` | `6` | A crew member with no report for this long is closed as lost, and its step goes back to the main session |
+| `progress.stale_agent_minutes` | `90` | The reconciler's limit: a working crew member silent this long (no hook, no update) is lost and frees its slot, and its step waits for a new owner. It works again, with its step, at its next hook. A member stopped with TaskStop frees its slot at once, and its step waits unverified |
 | `work.mode` | `guided` | `guided`: decisions that are the developer's wait for the developer; `auto`: the crew goes on with the recommended option and records it. A run can set its own (`--mode`) |
+| `crew.gates.enforce` | `true` | At SubagentStop, the crew gates send a member back once for each proof, skill, unfinished line, test that cannot fail, or lesson it still owes; `false` only records them in the audit trail (see [The crew › Every report is checked](crew.md#every-report-is-checked)) |
+| `crew.route_hint` | `true` | The prompt hook adds the tech lead's route for each request, a guess from the request's words (English only); `false` leaves it out |
 | `ui.powerline` | `false` | Draw Nerd Font arrows between the status pills in `dev status` and `dev overview` (needs a Nerd Font in your terminal) |
+| `dashboard.idle_minutes` | `30` | The live dashboard server stops after this many minutes with no page open and no request |
 | `handoff.enforce` | `true` | When a session made commits without updating the handoff note, the Stop hook asks the agent once to update it |
-| `canary.enforce` | `true` | When a final message lacks the status block, the Stop hook asks the agent to reply again with it |
+| `handoff.block_after_commits` | `5` | Below this many commits newer than the handoff note, the reminder before the end of the turn is enough; at it, the Stop hook sends the turn back |
+| `handoff.block_after_minutes` | `60` | The Stop hook also sends the turn back when the oldest commit newer than the note is this many minutes old, or after a milestone: the end of a run (`dev progress done`), a work item closed, a push, a PR, or a release. An intermediate step is not a milestone, and a milestone counts only the commits made before it. While crew members work, the main session gets the reminder only, and a crew member is never sent back for the note |
+| `canary.enforce` | `true` | When a final message lacks the status block, the Stop hook asks the agent to reply again with it; at SubagentStop, a crew member without its status block or its `dev progress step` is sent back once |
+| `canary.roles` | `true` | When a final message or a crew member's report names a crew member alone instead of `<role> (<Name>)`, such as Backend engineer (Tank), the Stop or SubagentStop hook sends it back once per turn (per member for reports). The role can be in any language; the status block's header and Crew line count, and names in code spans and commands do not. The tech lead (Morpheus) is checked too, so write the main session as the tech lead. Off with `canary.enforce` too |
+
+`dev crew` and `dev crew next` show the slots in use and why the limit is lower ("1 of 3 slots in use (lowered from 6:
+5-hour usage at 87 %)"), the status block's Crew line ends with the same, and each change of the effective limit is
+audited (`crew.limit`). `dev crew next` lists the ready steps in the order the tech lead launches them: the longest
+critical path first, then your latest request, then the oldest; a launch out of that order needs
+`dev crew next --first "<step>" --why "…"`. You set any of these keys in a terminal with
+`dev config set progress.max_parallel 6`, validated and audited; agents are refused.
+
+### Backups
+
+`dev backup` and the hourly `dev sync` copy branches whose commits exist only on this Mac to the remote, when that
+push starts no CI run (see [Git and GitHub › Branches](git-and-github.md#branches)). Each project's backup policy is
+not a key here: it lives in the project's handoff note, set with `dev backup policy on|off|ask`.
+
+| Key | Default | Meaning |
+| --- | --- | --- |
+| `backup.auto` | `true` | `dev sync` backs up the branches that need it, every hour and at the end of a session; `false` leaves backups to `dev backup` |
+| `backup.after_minutes` | `30` | `dev sync` backs up only commits older than this (0 to 1,440 minutes), because a younger commit may still be amended; `dev backup` takes them all |
+
+### Background AI
+
+Jobs that run with no agent session, such as `dev sleep` merging lessons written in different languages, can ask a
+small model, headless. It is off until you turn it on; `dev setup` asks once. Off, over its daily budget, or failing,
+the job compares the lessons' anchors instead.
+
+| Key | Default | Meaning |
+| --- | --- | --- |
+| `ai.enabled` | `false` | Let background jobs ask a model. Each call runs outside any repository, saves nothing, and has a timeout |
+| `ai.agent` | empty | `claude` or `codex`; empty uses the first one installed |
+| `ai.model.claude` · `ai.model.codex` | `haiku` · `gpt-6-luna` | The model each agent uses for these calls (`claude -p` with no tools, or `codex exec` with a read-only sandbox) |
+| `ai.daily_calls` | `20` | At most this many calls a day |
+| `ai.timeout` | `60` | Seconds before a call is given up |
+| `ai.asked` | — | Set by `dev setup` once you answered, so it does not ask again |
 
 ### Branch names
 
@@ -110,6 +159,7 @@ Apply group changes with `dev install --only skills`. Rule changes apply at the 
 | --- | --- | --- |
 | `commits.types` | `feat`, `fix`, `docs`, `style`, `refactor`, `perf`, `test`, `build`, `ci`, `chore`, `revert`, `deps` | The Conventional Commit types that `dev commit` and PR titles accept; your list replaces the default |
 | `gitx.github_hosts` | `[]` | GitHub Enterprise hosts, for example `["github.acme.com"]`, whose repositories `dev pr`, `dev run`, `dev release`, and `dev issue` treat as GitHub |
+| `delivery.draft_pr` | `false` | When `true`, `dev pr create` opens a draft pull request unless you pass `--ready`; `dev pr ready` marks it ready, which starts the one CI run |
 
 See [Git and GitHub](git-and-github.md).
 
@@ -138,6 +188,18 @@ See [Git and GitHub](git-and-github.md).
 | --- | --- | --- |
 | `jobs.<name>` | the built-in jobs | Changes a scheduled job (`every` in minutes, `at`, `weekly`, `timeout`, `notify`, `enabled`, `about`, `run_at_load`), or adds your own with `cmd`. `dev jobs set`, `enable`, and `disable` write these keys for you. See [Scheduled jobs and the audit trail](jobs-and-audit.md#add-your-own-job) |
 | `audit.publish` | `true` | The `audit` job publishes this machine's audit trail to `audit/<user>@<host>/` in the handoff repository; `false` keeps it local |
+| `audit.retention.local_months` | `13` | Months of audit records kept on this machine: a full year plus one month. A value under `floor_months` is raised to it |
+| `audit.retention.team_months` | `13` | Months of this machine's records kept in the handoff copy, which more people can read. Pruning removes files from the working copy only; git history keeps every published month. See [The audit trail › Retention](audit.md#retention) |
+| `audit.retention.floor_months` | `3` | The least any retention may be, and the hard minimum itself: `dev config validate` refuses 1 or 2. For fewer records, set `audit.level` to `security` instead |
+| `audit.hold` | `false` | A legal hold: `true` stops all pruning on this machine and in the handoff copy |
+| `audit.level` | `changes` | How much is recorded: `security` (refusals, security and configuration records, overrides), `changes` (everything devkit records), or `all` (also read-only commands). See [The audit trail › Levels](audit.md#levels-how-much-is-recorded) |
+| `audit.forward` | `""` | Also sends each new record to an absolute path to a file (JSON lines), `syslog`, or `syslog://host:port` (CEF lines). See [The audit trail › Query and export](audit.md#query-and-export) |
+| `audit.redact.extra` | `[]` | More regular expressions for the redactor, for secrets only your team uses |
+
+Only you change `audit.*`, in a terminal: agents are refused `dev config set audit.*`. The team policy,
+`policy/audit.json` in the handoff repository, can raise the retention and the level and add redaction patterns for
+every machine; it can never lower or remove them. `dev config validate` checks every value; `dev audit config` shows the
+effective ones.
 
 ```json
 {
@@ -151,6 +213,17 @@ See [Git and GitHub](git-and-github.md).
 ```
 
 Run `dev jobs install` after editing these keys by hand.
+
+### Safeguards
+
+Only you change these, in a terminal (`dev config edit`): the guard refuses `dev config set safeguards.*` and
+`dev config edit` to every agent.
+
+| Key | Default | Meaning |
+| --- | --- | --- |
+| `safeguards.readonly_commands` | `[]` | More command prefixes that review and read-only crew members may run, such as `"make lint"`, on top of devkit's read-only allowlist (readers, git and gh reads, devkit's reading commands, and the common checks such as `pytest`, `ruff check`, and `tsc --noEmit`) |
+| `safeguards.irreversible_member` | `enforce` | `audit` only records the irreversible actions crew members try instead of refusing them; any other value enforces |
+| `safeguards.irreversible_main` | audits for the gate's first week on this Mac, then `enforce` | The same for the main session's gate: its tier-2 actions, and the MCP tools that send or publish outside this machine, need your grant or a verified decision; during the first week they are only recorded (see [Guard rules](guard.md)) |
 
 ### For another developer
 
@@ -174,15 +247,15 @@ Never edit the generated files directly; the next install overwrites them, and `
 
 | Variable | Effect |
 | --- | --- |
-| `DEV_ROOT` | Overrides `dev_root` |
-| `DEVKIT_CONFIG` | Path of the config file (default `~/.config/devkit/config.json`) |
+| `DEV_ROOT` | Overrides `dev_root`, only when you set it in your own terminal (see the note after this table) |
+| `DEVKIT_CONFIG` | Path of the config file (default `~/.config/devkit/config.json`), only when you set it in your own terminal |
 | `DEVKIT_GUARD=off` | In the environment of the agent process (`DEVKIT_GUARD=off claude`), turns the guard off for that whole session (see [Guard rules](guard.md#escape-hatches)) |
-| `DEVKIT_LOCAL_CI_PASSED=1` | Prefix of a `git push`: says the full local suite just passed, lifting the push budget for that push. `dev push`, `dev pr create`, and `dev release` accept it like `--ci-passed` |
+| `DEVKIT_LOCAL_CI_PASSED=1` | Prefix of a plain `git push` in the main session: says the full local suite just passed, lifting the push budget for that push. `dev push`, `dev pr create`, and `dev release` do not read it from their environment: pass `--ci-passed` (recorded as attested), or let the evidence of a real `dev ci --run` lift the budget |
 | `DEVKIT_FLAKY=1` | Prefix of `gh run rerun`: says the failure is a proven flaky test (prefer `dev run rerun <id> --flaky "…"`) |
 | `DEVKIT_RAW_GH=1` | Prefix of `gh pr merge` or `gh release create`: runs gh's own command instead of `dev pr merge` or `dev release`; `--admin` stays refused |
 | `DEVKIT_PIPE_OK=1` | In a command that commits, pushes, or tags after a pipe: says the pipe's last command is the real check (prefer `set -o pipefail`) |
 | `DEVKIT_CROSS_PROJECT=1` | Prefix of `dev task`, `dev note`, or `dev handoff`, or in the agent's environment: lets a project session change another project's records when you asked for it |
-| `DEVKIT_SKIP_SECRET_SCAN=1` | In the agent's environment: the guard does not run gitleaks before `git commit` |
+| `DEVKIT_SKIP_SECRET_SCAN=1` | Prefix of a plain `git commit` in the main session: the guard does not run gitleaks before that commit. `dev commit` does not read it from its environment |
 | `DEVKIT_RAW_FS=1` | Prefix of `rm`, `find -delete`, `xargs rm`, `git clean -f`, or an overwriting `cp` or `mv`: lets the command delete or overwrite directly instead of through `dev rm`, `dev mv`, or `dev cp` |
 | `DEVKIT_TAG_ANY=1` | Prefix of `git tag`: allows a tag that breaks the recorded delivery policy |
 | `GITLAB_TOKEN` | `dev ci status` for GitLab when `glab` is not installed (`GITLAB_PRIVATE_TOKEN` works too) |
@@ -201,6 +274,14 @@ Never edit the generated files directly; the next install overwrites them, and `
 | `DEVKIT_JOB` | Set to the job's name while a scheduled job runs |
 | `CODEX_HOME` | Codex home (default `~/.codex`) |
 | `CLAUDE_CODE_TMPDIR` | Claude Code's temp root; devkit treats it as temp and purges it |
+
+**Who may point devkit elsewhere.** `HOME`, `DEVKIT_CONFIG`, and `DEV_ROOT` decide which state, configuration, and
+handoff repository devkit reads, so devkit takes a non-standard `DEVKIT_CONFIG` or `DEV_ROOT` only from a command you
+run in your own terminal, with no agent among its parent processes. Set by an agent's command or a hook, devkit
+ignores it with a warning on stderr and uses `~/.config/devkit/config.json` and the configured `dev_root`. The guard
+refuses these variables, and every other `DEVKIT_*` variable but the one-command escape hatches, in an agent's
+command (see [Guard rules › devkit's own state, configuration, and
+install](guard.md#devkits-own-state-configuration-and-install)).
 
 The shell integration and the agents' environments also set `DOCKER_HOST`, `TESTCONTAINERS_DOCKER_SOCKET_OVERRIDE`,
 `NG_CLI_ANALYTICS=false`, `NEXT_TELEMETRY_DISABLED=1`, and `SUPERPOWERS_DISABLE_TELEMETRY=1`. Claude Code's

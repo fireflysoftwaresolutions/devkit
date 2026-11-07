@@ -1,0 +1,81 @@
+{
+ "cwd": "/Users/dev/Development/.tmp/f0/repo",
+ "duration_ms": 15424,
+ "effort": {
+  "level": "medium"
+ },
+ "hook_event_name": "PostToolUse",
+ "permission_mode": "bypassPermissions",
+ "prompt_id": "e2e95d7a-40e4-4785-8ebd-942160ad22f4",
+ "session_id": "043c3a29-420b-4c79-8e10-aef6ee7d46ac",
+ "tool_input": {
+  "description": "F0 fg probe",
+  "prompt": "Use the Agent tool exactly once: subagent_type general-purpose, description 'F0 nested probe', prompt 'Reply with the single word nested.' Wait for it, then reply with: fg done.\n\n## devkit · your repo…",
+  "run_in_background": false,
+  "subagent_type": "general-purpose"
+ },
+ "tool_name": "Agent",
+ "tool_response": {
+  "agentId": "aaf06cf734666aa86",
+  "agentType": "general-purpose",
+  "canContinueAgent": true,
+  "content": [
+   {
+    "text": "<tools-used-before-summary>Agent</tools-used-before-summary>\n",
+    "type": "text"
+   },
+   {
+    "text": "**[Firefly> DevKit · F0 fg probe]** f0-repo · `main` · foreground subagent probe\n\n- **Done:** ran one general-purpose subagent in the foreground with the prompt \"Reply with the single word nested.\"\n- …",
+    "type": "text"
+   }
+  ],
+  "harnessNoteCount": 1,
+  "harnessSectionHash": "a5ab54f8c0c5ca03",
+  "harnessTailCount": 0,
+  "prompt": "Use the Agent tool exactly once: subagent_type general-purpose, description 'F0 nested probe', prompt 'Reply with the single word nested.' Wait for it, then reply with: fg done.\n\n## devkit · your repo…",
+  "resolvedModel": "claude-haiku-5-5",
+  "status": "completed",
+  "toolsUsed": [
+   "Agent"
+  ],
+  "totalDurationMs": 15424,
+  "totalTokens": 44843,
+  "totalToolUseCount": 1,
+  "usage": {
+   "cache_creation": {
+    "ephemeral_1h_input_tokens": 0,
+    "ephemeral_5m_input_tokens": 9732
+   },
+   "cache_creation_input_tokens": 9732,
+   "cache_read_input_tokens": 34641,
+   "fallback_credit": null,
+   "inference_geo": "global",
+   "input_tokens": 2,
+   "iterations": [
+    {
+     "cache_creation": {
+      "ephemeral_1h_input_tokens": 0,
+      "ephemeral_5m_input_tokens": 9732
+     },
+     "cache_creation_input_tokens": 9732,
+     "cache_read_input_tokens": 34641,
+     "input_tokens": 2,
+     "output_tokens": 468,
+     "type": "message"
+    }
+   ],
+   "output_tokens": 468,
+   "output_tokens_details": {
+    "thinking_tokens": 331
+   },
+   "server_tool_use": {
+    "web_fetch_requests": 0,
+    "web_search_requests": 0
+   },
+   "service_tier": "standard",
+   "speed": "standard"
+  }
+ },
+ "tool_use_id": "toolu_01WdHCfahvC1LWp4RLcvDuL5",
+ "transcript_path": "/Users/dev/.claude/projects/-Users-dev-Development--tmp-f0-repo/043c3a29-420b-4c79-8e10-aef6ee7d46ac.jsonl"
+}

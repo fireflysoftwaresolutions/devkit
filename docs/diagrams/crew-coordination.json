@@ -2,19 +2,19 @@
   "name": "crew-coordination",
   "kind": "flow",
   "equal_widths": "all",
-  "title": "How Morpheus leads the crew",
-  "desc": "The developer gives Morpheus, the main session, a goal. Morpheus plans the steps with their dependencies and briefs crew members, each in its own lane with its own files, up to four at once. Members send questions and decisions back to Morpheus, who asks the developer the decisions that are theirs. At SubagentStop, the crew canary checks that each report starts with the member's status block before it reaches Morpheus. After the push, CI watch follows the run and sends a failure's diagnosis to Morpheus, who hands the fix to Link.",
+  "title": "How the tech lead (Morpheus) leads the crew",
+  "desc": "The developer gives the tech lead (Morpheus), the main session, a goal. The tech lead plans the steps with their dependencies and briefs crew members, each in its own lane with its own files, up to the slot limit (four by default, lower when usage is high). Members send questions and decisions back to the tech lead, who asks the developer the decisions that are theirs. At SubagentStop, devkit checks each report before it reaches the tech lead: the member's status block, its recorded step, and the crew gates. After the push, CI watch follows the run and sends a failure's diagnosis to the tech lead, who hands the fix to the Release engineer (Link).",
   "nodes": [
     {"id": "dev", "label": "Developer", "shape": "actor", "col": 1, "row": 0},
-    {"id": "morpheus", "label": "Morpheus", "sub": "plan with dependencies", "col": 1, "row": 1, "emphasis": true},
+    {"id": "morpheus", "label": "Tech lead (Morpheus)", "sub": "plan with dependencies", "col": 1, "row": 1, "emphasis": true},
     {"id": "ciwatch", "label": "CI watch", "sub": "first error · class · action", "family": "olive", "col": 2, "row": 1},
-    {"id": "tank", "label": "Tank", "sub": "services/**", "col": 0, "row": 2},
-    {"id": "trinity", "label": "Trinity", "sub": "web/**", "col": 1, "row": 2},
-    {"id": "link", "label": "Link", "sub": ".github/workflows/**", "col": 2, "row": 2},
-    {"id": "canary", "label": "Crew canary", "sub": "SubagentStop · status block", "family": "olive", "col": 1, "row": 3}
+    {"id": "tank", "label": "Backend engineer (Tank)", "sub": "services/**", "col": 0, "row": 2},
+    {"id": "trinity", "label": "Frontend engineer (Trinity)", "sub": "web/**", "col": 1, "row": 2},
+    {"id": "link", "label": "Release engineer (Link)", "sub": ".github/workflows/**", "col": 2, "row": 2},
+    {"id": "canary", "label": "Crew checks", "sub": "status block · step · gates", "family": "olive", "col": 1, "row": 3}
   ],
   "groups": [
-    {"id": "lanes", "title": "Lanes · own time and files · up to four", "nodes": ["tank", "trinity", "link"]}
+    {"id": "lanes", "title": "Lanes · own time and files · slot limit", "nodes": ["tank", "trinity", "link"]}
   ],
   "edges": [
     {"from": "dev", "to": "morpheus", "label": "goal · decisions", "both": true},
@@ -23,6 +23,6 @@
     {"from": "canary", "to": "morpheus", "label": "checked report", "style": "dashed", "from_side": "left",
      "to_side": "left", "via": [[-0.85, 3], [-0.85, 1]]},
     {"from": "morpheus", "to": "ciwatch", "label": "push once"},
-    {"from": "ciwatch", "to": "link", "label": "failure, via Morpheus", "style": "dashed", "label_at": "source"}
+    {"from": "ciwatch", "to": "link", "label": "failure, via the tech lead", "style": "dashed", "label_at": "source"}
   ]
 }

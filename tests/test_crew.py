@@ -13,12 +13,13 @@ import tempfile
 import time
 import unittest
 from pathlib import Path
+from unittest import mock
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "lib"))
 sys.path.insert(0, str(ROOT / "tests"))
 
-from devkit import audit, canary, cli, core, crew, hooks, mcp, ui  # noqa: E402
+from devkit import audit, canary, cli, core, crew, hooks, mcp, selfcheck, ui  # noqa: E402
 from devkit import progress as pg  # noqa: E402
 from test_progress import TempState as ProgressState  # noqa: E402
 
@@ -29,15 +30,24 @@ except ImportError:  # Python 3.9
 
 
 def member(**kw) -> dict:
-    m = {"id": "pat", "name": "Pat", "role": "Test engineer", "summary": "Writes the tests that matter.",
+    m = {"id": "pat", "name": "Pat", "title": "Test engineer", "role": "Test engineer", "summary": "Writes the tests that matter.",
          "personality": "Curious.", "use_when": ["missing tests"], "skills": ["testing"], "tools": "all",
-         "tier": "standard", "returns": "the tests and their results"}
+         "tier": "standard", "returns": "the tests and their results", "goal": "Tests that catch real bugs.",
+         "procedure": [{"phase": "Map", "do": "Map what can break."},
+                       {"phase": "Test", "do": "Write one test per behavior.", "devkit": ["dev test"], "proof": "dev test"}],
+         "devkit": ["dev test"],
+         "done_when": ["every new test fails without the change"]}
     m.update(kw)
     return m
 
 
 def roster(*members, rule="Write in American English.") -> dict:
-    return {"language_rule": rule, "members": list(members) or [member()], "warnings": []}
+    members = list(members) or [member()]
+    workers = [m["id"] for m in members if isinstance(m, dict) and not m.get("main") and m.get("id")]
+    return {"language_rule": rule, "members": members, "warnings": [],  # each member does its own kind of work
+            "activities": [{"id": f"work-{w}", "name": f"Work of {w}", "R": [w], "A": w, "C": [], "I": [],
+                            "signals": [f"{w} work"], "self_approval": "a test roster: nobody else to approve"}
+                           for w in workers]}
 
 
 def frontmatter(text: str) -> dict:
@@ -81,10 +91,13 @@ class TempState(ProgressState):
 
     @staticmethod
     def launch(agent_id="a1", kind="devkit:neo", description="Neo: build the parser"):
-        """A subagent starts in this session (what the hooks record when the Agent tool runs)."""
-        pg.note_agent_launch("claude", {"session_id": "s1", "tool_input": {"description": description,
-                                                                            "subagent_type": kind}})
+        """A subagent starts in this session (what the hooks record when the Agent tool runs: the call, the agent's
+        start, the call's result naming the agent)."""
+        pg.note_agent_launch("claude", {"session_id": "s1", "tool_use_id": f"toolu_{agent_id}",
+                                        "tool_input": {"description": description, "subagent_type": kind}})
         pg.on_subagent("claude", {"session_id": "s1", "agent_id": agent_id, "agent_type": kind}, True)
+        pg.launch_result("claude", {"session_id": "s1", "tool_use_id": f"toolu_{agent_id}",
+                                    "tool_response": {"agentId": agent_id}})
 
     @staticmethod
     def audit_actions() -> list:
@@ -136,11 +149,42 @@ class RosterTests(unittest.TestCase):
     def test_unknown_skills_are_warnings_not_errors(self):
         m = member(skills=["testing", "java-junit", "superpowers:anything", "devkit:testing", "nope", "devkit:nope",
                            "other-plugin:x"], extra=1, keywords=["test", "coverage"])
-        errors, warnings = crew.check({"language_rule": "x", "members": [m]})
+        errors, warnings = crew.check(dict(roster(m), language_rule="x"))
         self.assertEqual(errors, [])
         self.assertEqual([w.split("`")[3] for w in warnings if "unknown skill" in w],
                          ["nope", "devkit:nope", "other-plugin:x"])
         self.assertIn("unknown field `extra`", " ".join(warnings))
+
+    # an activity's `files` are globs that anchor its steps (raci.anchor), and `no_files` says why it has none;
+    # anything else is refused, so a typo cannot widen or silence a kind of work's anchor
+    def test_an_activitys_files_are_a_list_of_globs_and_no_files_is_its_reason(self):
+        r = roster()
+        act = r["activities"][0]
+        for field, bad, needle in (("files", "*.po", "`files` must be a list of globs"),
+                                   ("files", ["*.po", " "], "`files` must be a list of globs"),
+                                   ("no_files", ["none"], "`no_files` must be the reason, as text")):
+            with self.subTest(field=field, bad=bad):
+                errors, _ = crew.check(dict(r, activities=[dict(act, **{field: bad})]))
+                self.assertIn(needle, " ".join(errors))
+        good = dict(act, files=["**/locales/**", "*.po"])
+        self.assertEqual(crew.check(dict(r, activities=[good]))[0], [])
+
+    # a skill the crew names that this Mac has not installed for an agent is a warning with its install group and
+    # command (selfcheck D8); without agents, check() reads no machine state, so load() stays the same everywhere
+    def test_a_named_skill_that_is_not_installed_is_a_warning_naming_its_group(self):
+        r = roster(member(skills=["testing", "terraform-style-guide"]))
+        with tempfile.TemporaryDirectory() as d:
+            home, skills = Path(d) / "agent", Path(d) / "skills"
+            (skills / "testing").mkdir(parents=True)
+            (skills / "testing" / "SKILL.md").write_text("x")
+            with mock.patch.dict(selfcheck.AGENT_HOMES, {"claude": (home, skills)}):
+                _, warnings = crew.check(r, agents=("claude",))
+                _, plain = crew.check(r)
+        missing = [w for w in warnings if "not installed" in w]
+        self.assertEqual(len(missing), 1, warnings)
+        self.assertIn("claude: named by the crew but not installed: terraform-style-guide (group iac)", missing[0])
+        self.assertIn("dev install --only skills", missing[0])
+        self.assertFalse([w for w in plain if "not installed" in w])
 
     def test_member_lookup(self):
         for q, want in (("neo", "neo"), ("NEO", "neo"), ("devkit:neo", "neo"), ("The Oracle", "oracle"),
@@ -161,8 +205,8 @@ class RosterTests(unittest.TestCase):
 # --------------------------------------------------------------------------- rendering
 
 class RenderTests(unittest.TestCase):
-    TOOLS = {"all": None, "build": "Read, Write, Edit, Grep, Glob, Bash", "review": "Read, Grep, Glob, Bash",
-             "read": "Read, Grep, Glob"}
+    TOOLS = {"all": None, "build": "Read, Write, Edit, Grep, Glob, Bash, Skill", "review": "Read, Grep, Glob, Bash, Skill",
+             "read": "Read, Grep, Glob, Skill"}
 
     def test_frontmatter_for_every_tools_and_tier_combination(self):
         for tools, allowed in self.TOOLS.items():
@@ -187,17 +231,21 @@ class RenderTests(unittest.TestCase):
         self.assertEqual(body.splitlines()[0], crew.MARK)
         self.assertTrue(body.splitlines()[1].startswith("You are Pat, the crew's test engineer. Curious and exact."))
         heads = [ln for ln in body.splitlines() if ln.startswith("## ")]
-        self.assertEqual(heads, ["## Mission", "## When Morpheus sends work to you", "## Skills to load first",
-                                 "## How you work", "## Your report", "## Language"])
-        self.assertIn("**[Firefly> DevKit · Pat]** <project> · `<branch>` · <task>\n- **Done:**", body)
+        self.assertEqual(heads, ["## Mission", "## Goal", "## When the tech lead sends work to you", "## Skills to load first",
+                                 "## Your procedure", "## Your place in the crew's RACI", "## Your devkit commands",
+                                 "## How you work with the crew", "## Your report", "## Language"])
+        self.assertIn("**[Firefly> DevKit · Test engineer (Pat)]** <project> · `<branch>` · <task>\n- **Done:**", body)
         self.assertIn("- **Check:** <✓ | ⚠ | ✗>", body)
         self.assertIn("Then deliver: the tests and their results.", body)
-        self.assertIn('`Needs from Morpheus:`', body)
+        self.assertIn('`Needs from the tech lead:`', body)
         self.assertIn("Not yours: design.", body)
-        self.assertIn("- `testing`", body)
+        self.assertIn("\n`testing`\n", body)  # the skills on one line
         self.assertIn('dev crew ask "<question>"', body)
         self.assertIn('dev progress step "<what finished>" --check "<evidence>"', body)
-        self.assertIn("You cannot launch other agents", body)
+        # members may launch narrow helpers within their own limits (Tank's F3: nested agents)
+        self.assertIn("Launch a helper agent only for a narrow lookup or a slice of your own files", body)
+        self.assertIn("cannot go deeper than progress.max_depth", body)
+        self.assertNotIn("You cannot launch other agents", body)
         self.assertTrue(body.rstrip().endswith("Write in the developer's language."))
         review = crew.body(member(tools="review"), roster())
         self.assertIn("review-only", review)
@@ -208,12 +256,24 @@ class RenderTests(unittest.TestCase):
         self.assertIn("None. Load a skill only when your brief names one.", read)
         self.assertNotIn("review-only", crew.body(member(tools="build"), roster()))
 
+    # members record where a lesson applies (its anchors), so it is recalled by behavior in any language; a member
+    # without a shell names them for Morpheus
+    def test_the_learn_text_asks_for_the_lessons_anchors(self):
+        shell = crew.body(member(), roster())
+        for needle in ('dev lesson add "…" --cause "…" --prevent "…" --file', "--command", "--error",
+                       'dev lesson anchor <id>'):
+            self.assertIn(needle, shell)
+        read = crew.body(member(tools="read", skills=[]), roster())
+        self.assertIn("the files, commands or error text it applies to", read)
+
     def test_every_shipped_agent_is_short_and_its_report_passes_the_crew_canary(self):
         r = crew.load()
         for m in crew.members(r, include_main=False):
             with self.subTest(member=m["id"]):
                 text = crew.render_claude(m, r)
-                self.assertLess(len(text.splitlines()), 70)
+                # a full definition (goal, procedure, RACI, commands, done-when), still about 2k tokens at most
+                self.assertLess(len(text.splitlines()), 100)
+                self.assertLess(len(text), 8000)
                 self.assertTrue(canary.MARKER_RE.match(crew.status_header(m, "api", "main", "parser")))
 
     def test_the_main_session_role_gets_no_agent_and_scout_is_an_alias(self):
@@ -269,6 +329,61 @@ class CodexTests(unittest.TestCase):
 
 # --------------------------------------------------------------------------- sync
 
+class ShippedProcedureTests(unittest.TestCase):
+    # Morpheus tags each step's kind of work, follows the session graph and reopens a work item that comes back;
+    # Seraph reads the graph before the diff (R2-11)
+    def test_morpheus_and_seraph_name_todays_crew_commands(self):
+        r = crew.load(team=False)
+
+        def commands(mid):
+            m = crew.member(mid, r)
+            return set(m["devkit"]) | {c for x in m["procedure"] for c in x.get("devkit") or []}
+        self.assertLessEqual({"dev crew graph", "dev task reopen", "dev progress assign --activity"},
+                             commands("morpheus"))
+        plan = next(x for x in crew.member("morpheus", r)["procedure"] if x["phase"] == "Plan")
+        self.assertIn("`[backend]`", plan["do"])
+        self.assertIn("dev crew graph", commands("seraph"))
+
+    # the proofs devkit looks for are the commands the gates name: new tests that can fail, the local CI run, the
+    # revised plan, and a recorded verdict (R2-6)
+    def test_the_proofs_are_the_commands_the_gates_name(self):
+        r = crew.load(team=False)
+        for mid in ("neo", "trinity", "tank", "dozer", "switch", "rama", "kid", "trainman"):
+            with self.subTest(member=mid):
+                self.assertIn("dev test prove", crew.proofs(crew.member(mid, r)))
+        self.assertIn("dev ci --run", crew.proofs(crew.member("link", r)))
+        self.assertIn("dev ci --run", crew.proofs(crew.member("trainman", r)))
+        self.assertIn("dev plan revise", crew.proofs(crew.member("architect", r)))
+        self.assertIn("dev progress step", crew.proofs(crew.member("seraph", r)))
+
+
+class EnforcementMatrixTests(unittest.TestCase):
+    # every rule has a stable id (E-…) that docs cite (D11) and that survives a reworded rule
+    def test_every_rule_has_a_unique_stable_id(self):
+        ids = [row[0] for row in crew.ENFORCEMENT]
+        self.assertTrue(all(len(row) == 5 for row in crew.ENFORCEMENT))
+        self.assertEqual([i for i in ids if not selfcheck.MATRIX_ID.fullmatch(f"`{i}`")], [])
+        self.assertEqual(len(ids), len(set(ids)))
+
+    # M332: the rules 3fb1dbb (F5, F7, F8) and 5b7a6a3 (F6) wired are enforced, each by the check its row names; the
+    # shell scope holds for review-only and read-only members only, and the row says so (D11 checks docs/crew.md)
+    def test_the_wired_rules_are_enforced_by_their_checks(self):
+        rows = {row[0]: row for row in crew.ENFORCEMENT}
+        wired = ("E-irreversible", "E-verdict", "E-no-self-approval", "E-evidence", "E-escape", "E-shell-scope")
+        self.assertEqual([rows[i][4] for i in wired], ["enforced"] * len(wired))
+        self.assertEqual([r for r, *_, ok in crew.enforcement() if not ok], [])
+        self.assertIn("review-only and read-only", rows["E-shell-scope"][1])
+
+    # dev crew rules prints each rule with its id
+    def test_rules_prints_each_rules_id(self):
+        with TempState():
+            rc, out, _ = run_cli("crew", "rules")
+        self.assertEqual(rc, 0)
+        for rid, rule, *_ in crew.ENFORCEMENT:
+            with self.subTest(rule=rid):
+                self.assertIn(rid, out)
+
+
 class SyncTests(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
@@ -294,7 +409,8 @@ class SyncTests(unittest.TestCase):
 
     def test_only_marked_files_are_removed(self):
         crew.sync(roster=self.r, agents_dir=self.dir)
-        gone = dict(self.r, members=[self.r["members"][1]])  # Pat leaves the roster
+        gone = dict(self.r, members=[self.r["members"][1]],  # Pat leaves the roster, and its kind of work
+                    activities=[x for x in self.r["activities"] if x["R"] != ["pat"]])
         (self.dir / "mine.md").write_text("---\nname: mine\n---\nHand-written.\n")
         (self.dir / "quoted.md").write_text(f"---\nname: quoted\n---\nNotes.\n{crew.MARK}\n")  # mark, not first
         self.assertEqual(self.names(crew.sync(check=True, roster=gone, agents_dir=self.dir)), [("remove", "pat.md")])
@@ -316,8 +432,8 @@ class BriefTests(unittest.TestCase):
                                                       "2", cwd=d))
         for needle in ("subagent_type: devkit:neo", "agent type: neo", 'description: "Neo: ',
                        "You own only these files: `lib/parser/**`, `tests/test_parser.py`", "## Task\n\nBuild the CSV parser.",
-                       "**[Firefly> DevKit · Neo]** <project> · `<branch>` · <the task, in a few words>",
-                       "- **Check:** <✓ | ⚠ | ✗>", '`Needs from Morpheus:`', _sentence(neo["returns"]),
+                       "**[Firefly> DevKit · Senior engineer (Neo)]** <project> · `<branch>` · <the task, in a few words>",
+                       "- **Check:** <✓ | ⚠ | ✗>", '`Needs from the tech lead:`', _sentence(neo["returns"]),
                        'dev progress step "<what finished>" --check "<evidence>"', 'dev crew ask "'):
             self.assertIn(needle, text)
         for s in neo["skills"]:
@@ -344,7 +460,7 @@ class BriefTests(unittest.TestCase):
     def test_show(self):
         rc, out, _ = run_cli("crew", "show", "The", "Keymaker")
         self.assertEqual(rc, 0)
-        for needle in ("The Keymaker · Security engineer", "devkit:keymaker", "~/.codex/agents/keymaker.toml",
+        for needle in ("Security engineer (The Keymaker)", "devkit:keymaker", "~/.codex/agents/keymaker.toml",
                        "github-actions-hardening", "build: read, write and run commands (no web)", "keywords"):
             self.assertIn(needle, out)
         self.assertIn("not a subagent", run_cli("crew", "show", "morpheus")[1])
@@ -363,15 +479,16 @@ class CrewSessionTests(unittest.TestCase):
             t.launch()
             rc, out, _ = run_cli("crew", "ask", "Should the parser accept empty lines?", from_agent="a1")
             self.assertEqual(rc, 0)
-            self.assertIn("M1 to Morpheus: Should the parser accept empty lines?", out)
+            self.assertIn("M1 to Tech lead (Morpheus): Should the parser accept empty lines?", out)
             rc, out, _ = run_cli("crew", "inbox")
-            self.assertIn("M1 from Neo: Should the parser accept empty lines?", out)
+            self.assertIn("M1 from Senior engineer (Neo): Should the parser accept empty lines?", out)
             self.assertIn("no new messages", run_cli("crew", "inbox")[1])  # delivered once
             rc, out, _ = run_cli("crew", "answer", "M1", "Yes,", "skip", "them")
             self.assertEqual(rc, 0)
-            self.assertIn("M2 to Neo (answer to M1): Yes, skip them", out)
+            self.assertIn("M2 to Senior engineer (Neo), the answer to M1: Yes, skip them", out)
             self.assertIn("no new messages", run_cli("crew", "inbox")[1])  # the answer is Neo's, not Morpheus's
-            self.assertIn("M2 from Morpheus: Yes, skip them (answer to M1)", run_cli("crew", "inbox", from_agent="a1")[1])
+            self.assertIn("M2 from Tech lead (Morpheus): Yes, skip them (answer to M1)",
+                          run_cli("crew", "inbox", from_agent="a1")[1])
             rc, _, err = run_cli("crew", "answer", "M9", "x")
             self.assertEqual(rc, 2)
             self.assertIn("no message M9", err)
@@ -391,11 +508,12 @@ class CrewSessionTests(unittest.TestCase):
             pg.crew_ask("Empty lines?", from_agent="a1")
             rc, out, _ = run_cli("crew")
             self.assertEqual(rc, 0)
-            for needle in ("Crew · 26 members · Parser", "Working now", "Neo: build the parser", "Assigned steps",
-                           "2. review → Seraph · pending · waiting for its agent · scope lib/**", "Open messages",
-                           "M1 Neo → Morpheus · not delivered: Empty lines?", "Mode guided"):
+            for needle in ("Crew · 26 members · Parser", "Working now", "build the parser", "Assigned steps",
+                           "2. review → Code reviewer (Seraph) · pending · waiting for its agent · scope lib/**",
+                           "Open messages", "M1 Senior engineer (Neo) → Tech lead (Morpheus) · not delivered: Empty lines?",
+                           "Mode guided"):
                 self.assertIn(needle, out)
-            self.assertIn("● neo", out)  # the roster marks who is working
+            self.assertIn("● Senior engineer", out)  # the roster marks who is working
             for argv in (("crew", "--json"), ("crew", "--json", "--latest")):
                 with self.subTest(argv=argv):
                     data = json.loads(run_cli(*argv)[1])
@@ -418,16 +536,20 @@ class CrewSessionTests(unittest.TestCase):
             self.assertIn("no progress run", out)
             self.assertEqual(run_cli("crew", "mode", "auto")[0], 2)  # no run to set it on
             pg.start("Parser", plan=["parse"])
-            rc, out, _ = run_cli("crew", "mode", "auto", "--approve", "push, pr")
+            rc, out, _ = run_cli("crew", "mode", "auto", "--approve", "push feat/*, pr feat/*")
             self.assertEqual(rc, 0)
             self.assertIn("Mode auto", out)
-            self.assertIn("pre-approved irreversible actions: push, pr", run_cli("crew", "mode")[1])
+            self.assertIn("no grant of the developer for push feat/*, pr feat/*: they open nothing", out)  # spec C5
+            self.assertIn("pre-approved irreversible actions: push feat/*, pr feat/*", run_cli("crew", "mode")[1])
+            rc, _, err = run_cli("crew", "mode", "auto", "--approve", "push")
+            self.assertEqual(rc, 2)  # a pre-approval names its target (spec C6)
+            self.assertIn("name one target for each pre-approval", err)
             rc, _, err = run_cli("crew", "mode", "auto", "--approve", "launch-rockets")
             self.assertEqual(rc, 2)
             self.assertIn("unknown action", err)
             rc, _, err = run_cli("crew", "mode", "guided", from_agent="a1")
             self.assertEqual(rc, 2)  # a crew member never changes the mode
-            self.assertIn("only Morpheus", err)
+            self.assertIn("only the tech lead", err)
             self.assertEqual(pg.mode_of(pg.load_run("claude", "s1")), "auto")
             self.assertEqual(run_cli("crew", "mode", "--approve", "push")[0], 2)
 
@@ -444,17 +566,53 @@ class CrewSessionTests(unittest.TestCase):
             self.assertIn("auto · review", out)
             self.assertIn("no pending decisions", run_cli("crew", "decisions", "--pending")[1])
             rc, out, _ = run_cli("crew", "decide", "D1", "B")
+            self.assertEqual(rc, 0)  # no answer of the developer to D1 reached devkit: Morpheus's, unverified
+            self.assertIn("D1 recorded by the tech lead, not verified by the developer: B: patch it (overrides the "
+                          "automatic choice A)", out)
+            listed = run_cli("crew", "decisions")[1]
+            self.assertIn("B: patch it (was A)", listed)
+            self.assertIn("morpheus · unverified", listed)
+
+    def test_a_decision_names_the_steps_the_developers_answer_approves(self):
+        # M280 (F6, D4): dev crew ask --decision --approves "<steps>" keeps them on the decision, checked against the plan
+        with TempState():
+            pg.start("Parser", plan=["parse", "review"])
+            rc, _, _ = run_cli("crew", "ask", "--decision", "Ship the parser as it is?", "--options", "yes | no",
+                               "--recommend", "yes", "--approves", "parse")
             self.assertEqual(rc, 0)
-            self.assertIn("D1 decided by the developer: B: patch it (overrides the automatic choice A)", out)
-            self.assertIn("B: patch it (was A)", run_cli("crew", "decisions")[1])
+            self.assertEqual(pg.load_run("claude", "s1")["decisions"][0]["approves"], ["parse"])
+            rc, _, err = run_cli("crew", "ask", "--decision", "And the docs?", "--options", "yes | no",
+                                 "--approves", "nosuch")
+            self.assertEqual(rc, 2)
+            self.assertIn("nosuch", err)
+
+    def test_decisions_ask_prints_the_exact_question_for_the_question_tool(self):
+        with TempState():
+            pg.start("Parser", plan=["parse"])
+            run_cli("crew", "ask", "--decision", "Rewrite or patch the parser?", "--options",
+                    "A: rewrite it | B: patch it", "--recommend", "A")
+            rc, out, _ = run_cli("crew", "decisions", "--ask", "D1")
+            self.assertEqual(rc, 0)
+            self.assertEqual(pg.load_run("claude", "s1")["decisions"][0]["target"], "")
+            self.assertIn("question: D1 · Rewrite or patch the parser?", out)
+            self.assertIn("options: A: rewrite it | B: patch it", out)
+            self.assertIn("approve D1: <option>", out)
+            self.assertEqual(run_cli("crew", "decisions", "--ask", "D9")[0], 2)
+            rc, _, err = run_cli("crew", "ask", "--decision", "Release 26.11.4 now?", "--options", "yes | no",
+                                 "--recommend", "yes", "--irreversible", "release")
+            rc, _, err = run_cli("crew", "decide", "D2", "yes")
+            self.assertEqual(rc, 2)  # irreversible, and no answer of the developer: it stays pending
+            self.assertIn("D2 · Release 26.11.4 now?", err)
+            self.assertEqual(pg.load_run("claude", "s1")["decisions"][1]["state"], "pending")
 
     def test_irreversible_or_guided_decisions_wait_for_the_developer(self):
         with TempState() as t:
             pg.start("Parser", plan=["parse", "ship"])
-            pg.set_mode("auto", approve="push")
+            pg.set_mode("auto", approve="push feat/*")
             rc, out, _ = run_cli("crew", "ask", "--decision", "Release 26.11.2 now?", "--recommend", "yes",
-                                 "--irreversible", "release")
+                                 "--irreversible", "release", "--target", "v26.11.2")
             self.assertEqual(rc, 0)  # release is not pre-approved: Morpheus asks the developer
+            self.assertEqual(pg.load_run("claude", "s1")["decisions"][0]["target"], "v26.11.2")
             self.assertIn("ask the developer now (AskUserQuestion / request_user_input) with the decision template, "
                           'then: dev crew decide D1 "<answer>"', out)
             pg.set_mode("guided")
@@ -464,21 +622,22 @@ class CrewSessionTests(unittest.TestCase):
                                  "--recommend", "B", from_agent="a1")
             self.assertEqual(rc, 0)
             self.assertIn("waiting for the developer's decision D2: stop here and end your report with your status "
-                          "block (Check: – waiting for D2; Needs from Morpheus: D2). Morpheus resumes you with the "
-                          "answer", out)
+                          "block (Check: – waiting for D2; Needs from the tech lead: D2). The tech lead resumes you "
+                          "with the answer", out)
             run = pg.load_run("claude", "s1")
             self.assertEqual(run["agents"]["a1"].get("waiting"), "D2")
             view = run_cli("crew")[1]
             self.assertIn("Decisions waiting for the developer", view)
-            self.assertIn("D2 Neo: Drop the legacy column? · options A: drop | B: keep · recommends B", view)
+            self.assertIn("D2 Senior engineer (Neo): Drop the legacy column? · options A: drop | B: keep · recommends B",
+                          view)
             self.assertEqual([d["id"] for d in json.loads(run_cli("crew", "--json")[1])["run"]["decisions"]],
                              ["D1", "D2"])
             rc, _, err = run_cli("crew", "decide", "D2", "B", from_agent="a1")
             self.assertEqual(rc, 2)  # only Morpheus records the developer's answers
-            self.assertIn("only Morpheus", err)
+            self.assertIn("only the tech lead", err)
             rc, out, _ = run_cli("crew", "decide", "D2", "B")
             self.assertEqual(rc, 0)
-            self.assertIn("resume Neo with SendMessage / send_input and the answer", out)
+            self.assertIn("resume Senior engineer (Neo) with SendMessage / send_input and the answer", out)
             self.assertNotIn("waiting", pg.load_run("claude", "s1")["agents"]["a1"])
             self.assertIn("Drop the legacy column? → B", run_cli("crew", "inbox", from_agent="a1")[1])
             self.assertEqual(run_cli("crew", "decide", "D2", "A")[0], 2)  # the developer's answer stands
@@ -505,6 +664,15 @@ class DispatchCliTests(unittest.TestCase):
                 self.assertEqual(rc, 2)
                 self.assertIn(needle, err)
 
+    def test_the_slot_total_is_the_parallel_limit_that_drops_to_one_on_a_short_quota(self):
+        from unittest import mock
+        with TempState():
+            run = {"v": 2, "agent": "claude", "session": "s1", "plan": [], "agents": {}}
+            with mock.patch.object(pg, "quota_used", lambda agent, now=None: 95.0):  # the 5-hour usage: external
+                self.assertEqual(crew.ready_view(run)["max_parallel"], 1)
+            with mock.patch.object(pg, "quota_used", lambda agent, now=None: 10.0):
+                self.assertEqual(crew.ready_view(run)["max_parallel"], pg.cfg()["max_parallel"])
+
     def test_route_the_plan_then_apply(self):
         with TempState():
             rc, _, err = run_cli("crew", "route", "--plan")
@@ -513,8 +681,8 @@ class DispatchCliTests(unittest.TestCase):
             pg.start("Feature", plan=["requirements and acceptance criteria", "database migration", "pipeline caching"])
             rc, out, _ = run_cli("crew", "route", "--plan")
             self.assertEqual(rc, 0)
-            self.assertIn("requirements and acceptance criteria → The Oracle", out)
-            self.assertIn("database migration → Dozer", out)
+            self.assertIn("requirements and acceptance criteria → Business analyst (The Oracle)", out)
+            self.assertIn("database migration → Database engineer (Dozer)", out)
             self.assertIn("assign them: dev crew route --plan --apply", out)
             self.assertFalse(any(s.get("label") for s in pg.load_run("claude", "s1")["plan"]))  # only proposed
             rc, out, _ = run_cli("crew", "route", "--plan", "--apply")
@@ -531,13 +699,14 @@ class DispatchCliTests(unittest.TestCase):
             rc, out, _ = run_cli("crew", "delegate", "add a nullable column for the export date", "--to", "Dozer",
                                  "--scope", "db/**", from_agent="a1")
             self.assertEqual(rc, 0)
-            self.assertIn("step “add a nullable column for the export date” for Dozer · scope db/**", out)
-            self.assertIn("in Dozer's lane now (they got a message)", out)
-            self.assertIn("Neo delegates", run_cli("crew", "inbox", from_agent="a2")[1])
+            self.assertIn("step “add a nullable column for the export date” for Database engineer (Dozer) · scope db/**",
+                          out)
+            self.assertIn("in the Database engineer (Dozer)'s lane now (they got a message)", out)
+            self.assertIn("Senior engineer (Neo) delegates", run_cli("crew", "inbox", from_agent="a2")[1])
             rc, out, _ = run_cli("crew", "delegate", "review the parser before merge", from_agent="a1")
             self.assertEqual(rc, 0)
-            self.assertIn("for Seraph (routed: ", out)
-            self.assertIn("Morpheus launches Seraph when it is ready: dev crew next", out)
+            self.assertIn("for Code reviewer (Seraph) (routed: ", out)
+            self.assertIn("The tech lead launches Code reviewer (Seraph) when it is ready: dev crew next", out)
             self.assertIn("crew.delegate", t.audit_actions())  # recorded, in the test's own audit trail
             for argv, needle in ((("--to", "Nobody"), "no crew member"), (("--after", "no-such-step"), "no step")):
                 with self.subTest(argv=argv):
@@ -560,10 +729,12 @@ class DispatchCliTests(unittest.TestCase):
             rc, out, _ = run_cli("crew", "decline", "add the export column", "--why", "it needs a migration plan first",
                                  from_agent="a2")
             self.assertEqual(rc, 0)
-            self.assertIn("handed “add the export column” back to Morpheus: it needs a migration plan first", out)
+            self.assertIn("handed “add the export column” back to the tech lead: it needs a migration plan first", out)
             step = pg.load_run("claude", "s1")["plan"][-1]
             self.assertEqual((step["state"], step["owner"], step["label"]), ("pending", "main", ""))
-            self.assertIn("from Dozer: Dozer declined “add the export column”", run_cli("crew", "inbox")[1])
+            inbox = run_cli("crew", "inbox")[1]
+            self.assertIn("from Database engineer (Dozer): ", inbox)
+            self.assertIn(" declined “add the export column”", inbox)
             self.assertIn("crew.decline", t.audit_actions())
 
     def test_next_shows_ready_queued_waiting_busy_and_the_mode(self):
@@ -574,11 +745,12 @@ class DispatchCliTests(unittest.TestCase):
                 pg.assign(step, who)
             rc, out, _ = run_cli("crew", "next")
             self.assertEqual(rc, 0)
-            self.assertIn("4 of 4 crew slots free · mode guided", out)
+            self.assertIn("Slots: 0 of 4 slots in use · 1 kept for the developer's own request · mode guided", out)
             self.assertIn("Ready to launch", out)
-            self.assertIn('  Ghost: docs\n    dev crew brief ghost docs --step docs', out)
-            self.assertIn("Tank: api · after design", out)
-            self.assertIn("Trinity: ui · after design", out)
+            self.assertIn('  Technical writer (Ghost): docs · ~10m, no step waits for it · waiting since', out)
+            self.assertIn('\n    dev crew brief ghost docs --step docs', out)
+            self.assertIn("Backend engineer (Tank): api · after design", out)
+            self.assertIn("Frontend engineer (Trinity): ui · after design", out)
             self.assertNotIn("auto mode", out)
             self.assertEqual(run_cli(*shlex.split('crew brief ghost "docs" --step "docs"'))[0], 0)  # runs as printed
             pg.set_mode("auto")
@@ -586,11 +758,11 @@ class DispatchCliTests(unittest.TestCase):
             for i, who in enumerate(("neo", "mouse", "dozer", "link")):  # every crew slot busy
                 t.launch(f"b{i}", f"devkit:{who}", f"{who.title()}: other work")
             rc, out, _ = run_cli("crew", "next")
-            self.assertIn("0 of 4 crew slots free", out)
+            self.assertIn("Slots: 4 of 4 slots in use", out)
             self.assertIn("Queued until a slot frees", out)
-            self.assertIn("  Ghost: docs\n", out)
+            self.assertIn("  Technical writer (Ghost): docs · ~10m", out)
             self.assertIn("Busy", out)
-            self.assertIn("Mouse · Mouse: other work", out)
+            self.assertIn("QA engineer (Mouse) · other work", out)
             self.assertNotIn("Ready to launch", out)
             self.assertNotIn("launch all ready members", out)
             ready = json.loads(run_cli("crew", "--json")[1])["run"]["ready"]
@@ -650,7 +822,9 @@ class WiringTests(unittest.TestCase):
         with TempState():
             data = json.loads(run_cli("crew", "--json", "--latest")[1])
         self.assertIsNone(data["run"])
-        self.assertLess(len(mcp.compact_json(mcp._prune(data))), mcp.MAX_TEXT)  # never cut by mcp.cap()
+        digest = mcp._HANDLERS["devkit_crew"][3]  # what the tool returns: the digest, then the prune
+        self.assertLess(len(mcp.compact_json(mcp._prune(digest(data, {})))), mcp.MAX_TEXT)  # never cut by mcp.cap()
+        self.assertIn("raci", digest(data, {}))
         self.assertEqual(data["members"][0]["id"], "morpheus")
         self.assertNotIn("spawn", data["members"][0])  # the main session's role is never spawned
 

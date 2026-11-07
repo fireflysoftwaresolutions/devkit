@@ -1,14 +1,22 @@
 # Copyright (c) 2026 Firefly Software Solutions Inc.
 # SPDX-License-Identifier: Apache-2.0
 """Tests for the dashboard (decisions in Python, safe rendering). Run: python3 -m unittest discover -s tests -v"""
+import glob
+import html as htmlmod
+import http.server
 import json
+import os
 import re
+import shutil
 import socket
+import subprocess
 import sys
 import tempfile
+import threading
 import time
 import unittest
 from pathlib import Path
+from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "lib"))
 
@@ -182,6 +190,11 @@ class RenderTests(unittest.TestCase):
         self.assertIn('class="ff ff-light"', self.html)
         self.assertIn(core.COPYRIGHT.replace("&", "&amp;"), self.html)
 
+    def test_only_open_url_opens_a_tab_and_it_goes_through_safe_url(self):
+        js = dashboard.JS
+        self.assertEqual(js.count("window.open("), 1, "a URL from the data must open through openUrl, never directly")
+        self.assertIn('function openUrl(u) { const s = safeUrl(u); if (s !== "#") window.open(s, "_blank", "noopener"); }', js)
+
     def test_everything_is_escaped(self):
         self.assertNotIn(EVIL, self.html)
         self.assertNotIn(BREAKOUT, self.html)
@@ -337,6 +350,44 @@ class RenderTests(unittest.TestCase):
         self.assertEqual(strip("1 commit(s) · status: " + LEGACY + " widget@main · z"), "1 commit(s) · status: widget@main · z")
         self.assertEqual(strip("devkit@main · no marker"), "devkit@main · no marker")
         self.assertIn("function markerChip", dashboard.JS)
+
+    def test_static_export_is_the_page_of_its_data(self):
+        """`render` (dev sync, --export) is `page()` of its own data with no nonce: no CSP attributes, no live flag."""
+        self.assertEqual(self.html, dashboard.page(self.data))   # the same data again (a second collect sees a later clock)
+        self.assertNotIn("nonce=", self.html)
+        self.assertNotIn("live", self.data)
+        self.assertIn('<script>(function(){try{var t=JSON.parse(localStorage.getItem("devkit.theme"))', self.html)
+        self.assertIn('<script id="devkit-data" type="application/json">', self.html)
+
+    def test_a_nonce_marks_every_inline_script_and_style_and_nothing_else(self):
+        nonce = "Zm9vYmFyYmF6cXV4MTIzNA"
+        live = dashboard.page(self.data, nonce=nonce)
+        tags = re.findall(r"<(script|style)\b([^>]*)>", live)
+        self.assertEqual(sorted(t for t, _ in tags), ["script", "script", "script", "style"])
+        self.assertTrue(all(f'nonce="{nonce}"' in attrs for _, attrs in tags), tags)
+        self.assertEqual(live.replace(f' nonce="{nonce}"', ""), self.html)      # the static page plus nonces, byte for byte
+
+    def test_live_mode_replaces_the_timed_reload_and_the_static_page_keeps_it(self):
+        # live (D.live, from the server): the event stream, partial fetches and an in-place re-render; the static
+        # export still reloads every 2 minutes and never opens a stream
+        js = dashboard.JS
+        boot = js[js.index("(function boot() {"):]
+        live_at, reload_at = boot.index("if (LIVE.on) { liveStart(); return; }"), boot.index("location.reload()")
+        self.assertLess(live_at, reload_at)                                   # live returns before the reload timer
+        self.assertEqual(js.count("new EventSource("), 1)
+        self.assertIn('new EventSource("/api/v1/events?since=" + ver)', js[js.index("function liveStart()"):])
+        self.assertIn('"only=" + areas.map(encodeURIComponent).join(",")', js)
+        self.assertIn('liveGet("/api/v1/files")', js)
+        derive = js[js.index("function derive() {"):js.index("\n}\nderive();")]
+        for name in ("ITEMS", "P", "PEOPLE", "RUNS", "INITS", "FILES", "ACTIONS", "W"):
+            self.assertIn(f"\n  {name} = ", derive, name)                      # every derived constant is re-derived
+        self.assertIn("D = LIVE.pending; LIVE.pending = null; derive(); IDX = null;", js)
+        self.assertEqual(re.findall(r"^const (?:ITEMS|P|PEOPLE|RUNS|INITS|FILES|ACTIONS|D) = ", js, re.M), [])
+
+    def test_a_nonce_that_could_break_out_of_the_attribute_is_refused(self):
+        for bad in ('abcdefghijklmnop" onload="alert(1)', "short"):
+            with self.assertRaises(ValueError, msg=bad):
+                dashboard.page(self.data, nonce=bad)
 
     def test_explorer_cap(self):
         files, meta = dashboard.explorer_files(self.handoff, cap=150)
@@ -601,6 +652,1061 @@ class TeamWorkTests(unittest.TestCase):
         self.assertEqual(r("gh auth login --token abc123"), "gh auth login --token ***")
         self.assertEqual(r("password=hunter2 ./run"), "password=*** ./run")
         self.assertEqual(r("git clone fireflyframework-org-redesign-handoff-really-long"), "git clone fireflyframework-org-redesign-handoff-really-long")
+
+
+def local_ts(y, mo, d, hh, mm):
+    return time.mktime((y, mo, d, hh, mm, 0, 0, 0, -1))
+
+
+class DetailTests(unittest.TestCase):
+    """The data the page lacked: honest project states, jobs, CI watches, whole runs and items, explorer files."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.root = Path(self.tmp.name)
+        self.state = TempState()
+        self.st = self.state.__enter__()
+        from devkit import jobs, progress
+        self.patches = [mock.patch.object(progress, "RUNS", self.st / "runs"),
+                        mock.patch.object(jobs, "JOURNAL", self.st / "jobs" / "journal.jsonl"),
+                        mock.patch.object(jobs, "LOGS", self.st / "logs" / "jobs"),
+                        mock.patch.object(jobs, "AGENTS_DIR", self.root / "LaunchAgents")]
+        for p in self.patches:
+            p.start()
+
+    def tearDown(self):
+        for p in self.patches:
+            p.stop()
+        self.state.__exit__()
+        self.tmp.cleanup()
+
+    def test_a_project_without_git_or_pr_data_is_not_known(self):
+        widget, remote_only = registry()["projects"]
+        self.assertTrue(dashboard.project_health(widget, NOW)["known"])
+        h = dashboard.project_health(remote_only, NOW)
+        self.assertEqual((h["level"], h["known"]), ("ok", False))     # nothing wrong, and nothing to show it is right
+        plain = {"id": "_local/x", "git": False, "main": {}, "prs_open": []}
+        self.assertFalse(dashboard.project_health(plain, NOW)["known"])
+        self.assertIn('if (p.health && p.health.known === false) return "none";', dashboard.JS)
+
+    def test_jobs_show_the_last_and_next_run_and_failures(self):
+        from devkit import jobs
+        now = local_ts(2026, 11, 6, 10, 0)
+        defs = {"sync": {"enabled": True, "every": 60, "about": "map", "cmd": ["sync"], "timeout": 20},
+                "gc": {"enabled": True, "at": "04:00", "cmd": ["gc"], "timeout": 30},
+                "lessons": {"enabled": False, "weekly": "fri 16:00", "cmd": ["lesson"], "timeout": 5}}
+        jobs.JOURNAL.parent.mkdir(parents=True)
+        jobs.JOURNAL.write_text("".join(json.dumps(r) + "\n" for r in [
+            {"job": "sync", "start": now - 7200, "end": now - 7100, "rc": 0, "duration": 100, "summary": "ok"},
+            {"job": "gc", "start": now - 3 * 3600, "end": now - 3 * 3600 + 5, "rc": 0, "duration": 5, "summary": "freed 1 GB"},
+            {"job": "sync", "start": now - 3600, "end": now - 3500, "rc": 1, "duration": 100, "summary": "push failed"}]))
+        jobs.AGENTS_DIR.mkdir()
+        (jobs.AGENTS_DIR / "com.devkit.job.sync.plist").write_text("x")
+        with mock.patch.object(jobs, "jobs", lambda: defs), mock.patch("time.time", lambda: now):
+            out = {j["name"]: j for j in dashboard.jobs_summary(now)}
+        self.assertEqual((out["sync"]["state"], out["sync"]["runs"], out["sync"]["failed"]), ("failed", 2, 1))
+        self.assertEqual(out["sync"]["last"]["summary"], "push failed")
+        self.assertEqual(out["sync"]["next"], round(now - 3600 + 3600))        # every 60 min from the last start
+        self.assertEqual(out["gc"]["next"], round(local_ts(2026, 11, 7, 4, 0)))  # 04:00 has passed today
+        self.assertEqual((out["lessons"]["state"], out["lessons"]["next"]), ("off", None))
+        self.assertEqual([out[n]["installed"] for n in ("sync", "gc")], [True, False])
+
+    def test_one_job_has_its_history_newest_first_and_its_log_tail(self):
+        from devkit import jobs
+        now = time.time()
+        defs = {"sync": {"enabled": True, "every": 60, "cmd": ["sync"], "timeout": 20}}
+        jobs.JOURNAL.parent.mkdir(parents=True)
+        jobs.JOURNAL.write_text("".join(json.dumps({"job": "sync", "start": now - 60 * k, "rc": 0, "summary": f"run {k}"}) + "\n"
+                                        for k in (3, 2, 1)))
+        jobs.LOGS.mkdir(parents=True)
+        (jobs.LOGS / "sync.log").write_text("\n".join(f"line {i}" for i in range(250)) + "\n")
+        with mock.patch.object(jobs, "jobs", lambda: defs), mock.patch.object(jobs, "loaded", lambda n: True):
+            one = dashboard.jobs_detail("sync")
+            self.assertIsNone(dashboard.jobs_detail("nope"))
+            self.assertIsNone(dashboard.jobs_detail("../sync"))
+            every = dashboard.jobs_detail()
+        self.assertEqual([r["summary"] for r in one["history"]], ["run 1", "run 2", "run 3"])
+        self.assertEqual((len(one["log"]), one["log"][0], one["log"][-1]), (200, "line 50", "line 249"))
+        self.assertTrue(one["loaded"])
+        self.assertEqual(([j["name"] for j in every["jobs"]], every["complete"]), (["sync"], True))
+
+    def test_ci_watches_newest_first_with_the_first_error_and_live_watchers(self):
+        w = self.st / "ci" / "watch"
+        w.mkdir(parents=True)
+        diag = {"run": "ci", "number": 9, "id": 4242, "url": "https://x/9", "class": "test", "action": "reproduce it locally",
+                "failed_jobs": [{"name": "unit", "step": "pytest"}], "excerpt": "E" * 2000}
+        (w / "acme_widget-main.json").write_text(json.dumps({"ts": 100, "state": "passed", "repo": "acme/widget", "branch": "main",
+                                                            "runs": [], "diagnoses": []}))
+        (w / "acme_widget-fix_y.json").write_text(json.dumps({"ts": 200, "state": "failed", "repo": "acme/widget", "branch": "fix/y",
+                                                             "sha": "abc1234", "runs": [{"name": "ci", "number": 9}], "diagnoses": [diag]}))
+        os.utime(w / "acme_widget-main.json", (100, 100))
+        dead = subprocess.Popen([sys.executable, "-c", "pass"])
+        dead.wait()
+        (w / "widget-fix_y-abc1234.lock").write_text(f"{os.getpid()} 150")
+        (w / "widget-main-def5678.lock").write_text(f"{dead.pid} 140")
+        ci = dashboard.ci_watches()
+        self.assertEqual([x["branch"] for x in ci["watches"]], ["fix/y", "main"])
+        top = ci["watches"][0]
+        self.assertEqual((top["class"], top["action"], len(top["first_error"])), ("test", "reproduce it locally", 600))
+        self.assertEqual((top["failures"][0]["id"], top["failures"][0]["jobs"]), (4242, [{"name": "unit", "step": "pytest"}]))
+        self.assertTrue(ci["complete"])
+        self.assertEqual(len(dashboard.ci_watches(excerpt=0)["watches"][0]["first_error"]), 2000)
+        self.assertEqual(ci["watching"], [{"key": "widget-fix_y", "sha": "abc1234", "pid": os.getpid(), "since": 150}])
+
+    def test_an_item_is_whole_with_everything_that_names_it(self):
+        from devkit import progress
+        h = self.root / "handoff"
+        make_handoff(h)
+        log = [f"v{n} · {iso(NOW - n)} · me@testmac (claude) · note: entry {n}" for n in range(100, 0, -1)]
+        item(h, "acme/widget", "T-big", "Long task", "doing", "now", "me@testmac (claude:sess12345678)", NOW + 3600, ["initiative:lending"], log=log)
+        f = h / "items/acme/widget/T-big.md"
+        f.write_text(f.read_text().replace("Body " + EVIL, "x" * 10_000))
+        (h / "plans/acme/widget/export.md").write_text("# Export plan\n\nCovers T-big.\n")
+        (h / "sessions/acme/widget/2026-11.md").write_text(f"# Sessions\n\n- {time.strftime('%Y-%m-%d %H:%M', time.localtime(NOW))} · me@testmac · claude · `main` · worked on T-big\n")
+        (self.st / "sessions").mkdir()
+        (self.st / "sessions" / "claude-sess12345678-rest.json").write_text(json.dumps({"branch": "feat/export", "top": "/w/export"}))
+        progress.RUNS.mkdir()
+        (progress.RUNS / "claude-other.json").write_text(json.dumps({"v": 2, "agent": "claude", "session": "other", "goal": "Ship T-big",
+                                                                     "state": "running", "started": NOW - 600, "plan": [], "intervals": []}))
+        reg = registry()
+        reg["projects"][0]["worktrees"].append({"path": "/w/export", "branch": "feat/export"})
+        reg["projects"][0]["prs_open"].append(pr(40, branch="feat/export"))
+        reg["projects"][0]["path"] = None
+        d = dashboard.item_detail("T-big", handoff=h, reg=reg, now=NOW)
+        self.assertEqual((len(d["body"]), len(d["changelog"])), (10_000, 100))
+        self.assertEqual(d["links"], [{"kind": "initiative", "target": "lending", "text": "initiative:lending"}])
+        self.assertEqual((d["lock"]["state"], d["lock"]["session"]), ("held", "sess12345678"))
+        self.assertEqual(d["plans"], [{"path": "plans/acme/widget/export.md", "title": "Export plan"}])
+        self.assertEqual(len(d["sessions"]), 1)
+        self.assertEqual(d["branches"], [{"branch": "feat/export", "worktree": "/w/export", "match": "the holder's session works on it"}])
+        self.assertEqual([(p["number"], p["match"]) for p in d["prs"]], [(40, "the PR's branch is linked")])
+        self.assertEqual((d["run"]["id"], d["run"]["match"]), ("claude-other", "its goal or a step has the id"))
+        for bad in ("T-nope", "../../etc/passwd", "T-big/../x", ""):
+            self.assertIsNone(dashboard.item_detail(bad, handoff=h, reg=reg), bad)
+
+    def test_a_run_is_whole_with_evidence_history_lanes_decisions_and_questions(self):
+        from devkit import progress
+        progress.RUNS.mkdir()
+        now = time.time()
+        run = {"v": 2, "agent": "claude", "session": "s1", "project": "acme/widget", "goal": "Ship", "state": "running", "mode": "auto",
+               "started": now - 1200, "estimate": 40, "intervals": [[now - 1200, None, "turn", "main"]],
+               "plan": [{"name": "api", "state": "done", "owner": "a1", "est": 20, "started": now - 1200, "finished": now - 600},
+                        {"name": "ui", "state": "running", "owner": "main", "est": 20, "after": ["api"], "started": now - 600}],
+               "agents": {"a1": {"label": "Tank: the API", "persona": "Tank", "state": "done", "scope": "lib/**", "started": now - 1200, "finished": now - 600}},
+               "updates": [{"ts": now - 600, "kind": "step", "text": "api done", "check": "12 tests green", "step": "api"},
+                           {"ts": now - 300, "kind": "note", "text": "styling", "step": "ui"}],
+               "history": [{"ts": now - 600, "step": "api", "from": "running", "to": "done", "by": "a1"}],
+               "decisions": [{"id": "D1", "state": "pending", "question": "Keep the old URL?"}],
+               "messages": [{"id": "M1", "from": "a1", "to": "main", "text": "may I touch cli.py?"}]}
+        (progress.RUNS / "claude-s1.json").write_text(json.dumps(run))
+        d = dashboard.run_detail("claude-s1", now=now)
+        api, ui = d["steps"]
+        self.assertEqual((api["owner_label"], api["scope"], ui["after"]), ("Tank", "lib/**", ["api"]))
+        self.assertEqual([e["check"] for e in api["evidence"]], ["12 tests green"])
+        self.assertEqual(ui["evidence"], [])                                          # a note is not evidence
+        self.assertEqual([x["to"] for x in api["history"]], ["done"])
+        self.assertEqual((d["lanes"][0]["persona"], d["mode"]), ("Tank", "auto"))
+        self.assertEqual((d["decisions"][0]["id"], d["questions"][0]["text"]), ("D1", "may I touch cli.py?"))
+        self.assertIsNotNone(d["eta_lo"])
+        for bad in ("claude-nope", "../runs/claude-s1", "..", ""):
+            self.assertIsNone(dashboard.run_detail(bad), bad)
+        runs = dashboard._runs(now, "testmac")
+        self.assertEqual((runs[0]["id"], runs[0]["host"], runs[0]["mode"]), ("claude-s1", "testmac", "auto"))
+        self.assertEqual(([q["id"] for q in runs[0]["questions"]], [x["id"] for x in runs[0]["decisions"]]), (["M1"], ["D1"]))
+        self.assertEqual(runs[0]["plan"][1]["after"], ["api"])
+
+    def crew_run(self, now):
+        # the live release run of 2026-11-06 in small: the lead's own last update is 78 minutes old, a crew lane reports
+        from devkit import progress
+        progress.RUNS.mkdir(exist_ok=True)
+        run = {"v": 2, "agent": "claude", "session": "s1", "project": "acme/widget", "goal": "Release 26.11.3", "state": "running",
+               "started": now - 9600, "estimate": 60, "estimate_cal": 25.8,
+               "intervals": [[now - 9600, now - 4680, "turn", "main"], [now - 2880, None, "agent", "a2"]],
+               "plan": [{"name": "F4 caller identity", "title": "knowing who ran each command", "state": "running", "owner": "a2", "est": 60,
+                         "started": now - 2880}],
+               "agents": {"a2": {"label": "Tank: F4 caller identity", "persona": "Tank", "state": "running", "started": now - 2880,
+                                 "updates": [{"ts": now - 180, "kind": "note", "text": "ledger written"}]}},
+               "updates": [{"ts": now - 4680, "kind": "step", "text": "design done"},
+                           {"ts": now - 180, "kind": "agent", "agent": "a2", "text": "ledger written"}],
+               "history": [], "decisions": [], "messages": [{"id": "M1", "ts": now - 240, "from": "a2", "to": "main", "text": "may I touch cli.py?"}]}
+        (progress.RUNS / "claude-s1.json").write_text(json.dumps(run))
+        return run
+
+    def test_a_run_is_seen_when_its_crew_reports_though_the_lead_is_quiet(self):
+        from devkit import progress
+        now = time.time()
+        run = self.crew_run(now)
+        r = dashboard._runs(now, "testmac")[0]
+        self.assertAlmostEqual(r["updated"], now - 4680, delta=1)                    # the lead's own last update stays what it was
+        self.assertAlmostEqual(r["seen"], now - 180, delta=1)                        # the lane's note 3 minutes ago is a sign of life
+        self.assertAlmostEqual(dashboard.run_detail("claude-s1", now=now)["seen"], now - 180, delta=1)
+        run["agents"]["a2"]["last_seen"] = now - 60                                  # a lane's last hook (contract C3) counts too
+        (progress.RUNS / "claude-s1.json").write_text(json.dumps(run))
+        self.assertAlmostEqual(dashboard._runs(now, "testmac")[0]["seen"], now - 60, delta=1)
+
+    def test_of_about_is_the_plans_current_total_not_the_first_estimate(self):
+        from devkit import progress
+        progress.RUNS.mkdir()
+        now = time.time()
+        # one open turn for two hours: 120 active minutes. "design" took its 60-minute estimate (pace 1.0); "build" has used its
+        # 60 minutes and keeps 15% of them (9); "release" needs its 30: 39 minutes left, so the plan's total is 120 + 39 = 159
+        run = {"v": 2, "agent": "claude", "session": "s2", "goal": "Release", "state": "running", "started": now - 7200, "estimate": 60,
+               "estimate_cal": 25.8, "intervals": [[now - 7200, None, "turn", "main"]],
+               "plan": [{"name": "design", "state": "done", "owner": "main", "est": 60, "started": now - 7200, "finished": now - 3600},
+                        {"name": "build", "state": "running", "owner": "main", "est": 60, "after": ["design"], "started": now - 3600},
+                        {"name": "release", "state": "pending", "owner": "main", "est": 30, "after": ["build"]}],
+               "agents": {}, "updates": [], "history": [], "decisions": [], "messages": []}
+        (progress.RUNS / "claude-s2.json").write_text(json.dumps(run))
+        r = dashboard._runs(now, "testmac")[0]
+        self.assertEqual((r["total_min"], r["eta_min"], r["estimate_cal"]), (159, 39, 25.8))
+        self.assertEqual(dashboard.run_detail("claude-s2", now=now)["total_min"], 159)
+
+    def test_a_step_keeps_its_plain_title_for_the_page(self):
+        now = time.time()
+        self.crew_run(now)
+        self.assertEqual(dashboard._runs(now, "testmac")[0]["plan"][0]["title"], "knowing who ran each command")
+        self.assertEqual(dashboard.run_detail("claude-s1", now=now)["steps"][0]["title"], "knowing who ran each command")
+
+    def test_explorer_files_stay_inside_the_handoff_repository(self):
+        h = self.root / "handoff"
+        make_handoff(h)
+        (self.root / "secret.md").write_text("secret")
+        (h / "projects" / "link.md").symlink_to(self.root / "secret.md")
+        (h / ".git").mkdir()
+        (h / ".git" / "x.md").write_text("git")
+        (h / "registry.json").write_text("{}")
+        self.assertEqual(dashboard.file_detail("projects/acme/widget.md", h)["text"], (h / "projects/acme/widget.md").read_text())
+        for bad in ("../secret.md", "projects/link.md", ".git/x.md", "registry.json", "/etc/passwd", "../../etc/passwd", "", "a\x00b"):
+            self.assertIsNone(dashboard.file_detail(bad, h), bad)
+
+    def test_counts_state_their_window(self):
+        h = self.root / "handoff"
+        make_handoff(h)
+        (self.st / "logs").mkdir()
+        (self.st / "logs" / "hooks.log").write_text("2026-11-01 10:00 guard claude deny: Branch `x`\n2026-11-03 09:00 guard codex ask: git stash\n")
+        d = dashboard.collect(registry(), handoff=h, now=NOW)
+        self.assertEqual((d["windows"]["guard_since"], d["windows"]["guard_capped"]), ("2026-11-01 10:00", False))
+        self.assertEqual(d["windows"]["sessions_since"], min(s["ts"] for s in d["session_log"]))
+        self.assertEqual(d["windows"]["commits_days"], 30)
+        for k in ("jobs", "ci", "crew"):
+            self.assertIn(k, d)
+
+
+def branch_row(name, state="on_remote", reason="", **kw):
+    """One row of the branch map (branches.map) as the registry keeps it: a branch on origin unless kw says otherwise."""
+    r = {"name": name, "current": False, "default": False, "default_branch": "main", "sha": "1a2b3c4", "upstream": "origin/" + name,
+         "upstream_remote": "origin", "upstream_gone": False, "ahead": 0, "behind": 0, "base": "origin/main", "base_ahead": 0, "base_behind": 0,
+         "where": "local + origin", "last_commit": int(NOW - 3600), "unpushed": 0, "oldest_unpushed": None, "merged_into": None, "last_backup": None,
+         "embargo": None, "embargo_via": None, "worktree": None, "worktree_missing": False, "changes": None, "session": False, "pr": None, "task": None,
+         "backup": {"state": state, "reason": reason}}
+    r.update(kw)
+    return r
+
+
+class BranchMapTests(unittest.TestCase):
+    """The branch map on the page (spec P-fy3bwa0pshk R8): the registry's rows reach the page in the map's order, and
+    the live server maps one project on demand, saying what git or gh answered."""
+
+    def setUp(self):
+        from devkit import audit
+        self.tmp = tempfile.TemporaryDirectory()
+        self.root = Path(self.tmp.name).resolve()
+        iso_git = {"GIT_CONFIG_GLOBAL": "/dev/null", "GIT_CONFIG_NOSYSTEM": "1", "GIT_AUTHOR_NAME": "Ana Dev", "GIT_AUTHOR_EMAIL": "ana@example.com",
+                   "GIT_COMMITTER_NAME": "Ana Dev", "GIT_COMMITTER_EMAIL": "ana@example.com"}
+        self.patches = [mock.patch.object(core, "STATE", self.root / "state"), mock.patch.object(core, "NOTES", self.root / "handoff" / "projects"),
+                        mock.patch.object(audit, "AUDIT", self.root / "state" / "audit"), mock.patch.object(work, "ITEMS", self.root / "handoff" / "items"),
+                        mock.patch.dict(core.GIT_ENV, iso_git)]
+        from devkit import registry as reg_mod
+        self.patches.append(mock.patch.object(reg_mod, "STATE", self.root / "state"))
+        for p in self.patches:
+            p.start()
+        self.repo = self.root / "widget"
+        self.git("init", "-q", "-b", "main", str(self.repo), cwd=self.root)
+        (self.repo / "a.txt").write_text("a\n")
+        self.git("add", "-A")
+        self.git("commit", "-q", "-m", "chore: start")
+        self.git("switch", "-q", "-c", "feat/export")
+        (self.repo / "b.txt").write_text("b\n")
+        self.git("add", "-A")
+        self.git("commit", "-q", "-m", "feat: export")
+
+    def tearDown(self):
+        for p in reversed(self.patches):
+            p.stop()
+        self.tmp.cleanup()
+
+    def git(self, *args, cwd=None):
+        rc, out, err = core.sh(["git", "-C", str(cwd or self.repo), *args], timeout=60)
+        self.assertEqual(rc, 0, err or out)
+        return out
+
+    def reg(self, path, **kw):
+        p = {"id": "acme/widget", "path": str(path), "local": True, "github": None, "default_branch": "main",
+             "main": {"branch": "feat/export", "path": str(path)}, "worktrees": []}
+        p.update(kw)
+        return {"projects": [p]}
+
+    def test_the_page_gets_the_rows_in_the_maps_order_and_no_map_stays_unknown(self):
+        reg = registry()
+        reg["projects"][0]["branches"] = [branch_row("main", default=True), branch_row("fix/old", "merged", "its commits are in main", merged_into="main"),
+                                          branch_row("feat/x", "not_backed_up", "2 commits only on this Mac", where="local only", upstream=None, unpushed=2,
+                                                     worktree=str(core.HOME / "Development/.worktrees/acme/widget/feat-x")),
+                                          branch_row("release/1", current=True)]
+        with TempState():
+            d = dashboard.collect(reg, handoff=self.root / "handoff", now=NOW)
+        widget, api = d["projects"][0], d["projects"][1]
+        self.assertEqual([r["name"] for r in widget["branches"]], ["release/1", "feat/x", "fix/old", "main"])   # current, at risk, newest, default last
+        self.assertEqual(widget["branches"][1]["worktree"], "~/Development/.worktrees/acme/widget/feat-x")      # a path in the home folder, as ~
+        self.assertEqual(widget["branches"][1]["backup"], {"state": "not_backed_up", "reason": "2 commits only on this Mac"})
+        self.assertIsNone(api["branches"])                                  # no map: unknown, never "no branches"
+
+    def test_the_live_map_reads_the_repository_now(self):
+        d = dashboard.branch_detail("acme/widget", self.reg(self.repo), now=NOW)
+        rows = {r["name"]: r for r in d["rows"]}
+        self.assertEqual([r["name"] for r in d["rows"]], ["feat/export", "main"])          # the current branch first
+        self.assertEqual((rows["feat/export"]["where"], rows["feat/export"]["backup"]["state"]), ("local only", "no_remote"))
+        self.assertEqual((d["counts"]["total"], d["counts"]["not_backed_up"]), (2, 2))
+        self.assertEqual((d["prs"], d["mapped"]), ("none", int(NOW)))                        # not on GitHub: no PRs to ask for
+
+    def test_the_rows_carry_the_projects_backup_policy_for_the_page(self):
+        # dev backup policy: the page shows the project's choice under the branch table, from the rows it gets
+        from devkit import branches
+        d = dashboard.branch_detail("acme/widget", self.reg(self.repo), now=NOW)
+        self.assertEqual({r["backup_policy"] for r in d["rows"]}, {None})          # no choice: the page says the default
+        branches.set_backup_policy("acme/widget", "off", "a client's fork", "ana")
+        d = dashboard.branch_detail("acme/widget", self.reg(self.repo), now=NOW)
+        self.assertEqual([(r["backup_policy"]["policy"], r["backup_policy"]["why"]) for r in d["rows"]],
+                         [("off", "a client's fork")] * 2)
+
+    def test_the_live_map_says_what_git_answered_when_it_cannot_read_the_repository(self):
+        plain = self.root / "plain"
+        plain.mkdir()
+        d = dashboard.branch_detail("acme/widget", self.reg(plain), now=NOW)
+        self.assertEqual(d["error"]["source"], "git")
+        self.assertIn("not a git repository", d["error"]["detail"])
+        self.assertNotIn("rows", d)
+
+    def test_the_live_map_says_when_gh_is_missing_or_did_not_answer(self):
+        from devkit import registry as reg_mod
+        r = self.reg(self.repo, github="acme/widget")
+        with mock.patch.object(core, "have", lambda tool: tool != "gh"):
+            self.assertEqual(dashboard.branch_detail("acme/widget", r, now=NOW)["prs"], "missing")
+        with mock.patch.object(core, "have", lambda tool: True), mock.patch.object(reg_mod, "prs", lambda slug, **kw: None):
+            self.assertEqual(dashboard.branch_detail("acme/widget", r, now=NOW)["prs"], "error")
+        pr41 = {"number": 41, "state": "OPEN", "headRefName": "feat/export", "isDraft": True, "url": "https://github.com/acme/widget/pull/41", "title": "Export", "checks": "passing"}
+        with mock.patch.object(core, "have", lambda tool: True), mock.patch.object(reg_mod, "prs", lambda slug, **kw: [pr41]):
+            d = dashboard.branch_detail("acme/widget", r, now=NOW)
+        self.assertEqual((d["prs"], d["rows"][0]["pr"]["number"], d["rows"][0]["pr"]["draft"]), ("ok", 41, True))
+
+    def test_the_live_map_is_only_for_projects_cloned_here(self):
+        self.assertIsNone(dashboard.branch_detail("acme/nope", self.reg(self.repo), now=NOW))
+        not_here = self.reg(self.repo, local=False)
+        not_here["projects"][0]["path"] = None
+        self.assertIsNone(dashboard.branch_detail("acme/widget", not_here, now=NOW))
+
+
+# --------------------------------------------------------------------------- the page itself, in a real browser
+
+def find_chrome():
+    """A Chrome or Chromium for the page's behavior tests: $DEVKIT_TEST_CHROME, Google Chrome, or a Playwright build.
+
+    The run's HOME is a temporary one (tests/_hermetic.py), so Playwright's browsers are looked up in the account's own
+    home too. A full browser comes before Playwright's headless shell: CI's macOS runner has Google Chrome, and only a
+    full browser shows what it does there at start and exit (the login keychain, see run_chrome)."""
+    homes = [Path.home()]
+    try:
+        import pwd
+        homes.append(Path(pwd.getpwuid(os.getuid()).pw_dir))
+    except (ImportError, KeyError, OSError):
+        pass
+    caches = [h / "Library/Caches/ms-playwright" for h in dict.fromkeys(homes)]
+    cands = [os.environ.get("DEVKIT_TEST_CHROME"), "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
+             "/Applications/Chromium.app/Contents/MacOS/Chromium"]
+    for cache in caches:
+        cands += sorted(glob.glob(str(cache / "chromium-*/chrome-mac*/*.app/Contents/MacOS/*")), reverse=True)
+    for cache in caches:
+        cands += sorted(glob.glob(str(cache / "chromium_headless_shell-*/chrome-headless-shell-*/chrome-headless-shell")), reverse=True)
+    cands += [shutil.which(n) for n in ("google-chrome", "chromium", "chromium-browser")]
+    return next((c for c in cands if c and os.path.isfile(c) and os.access(c, os.X_OK)), None)
+
+
+CHROME = find_chrome()
+NO_CHROME = "the page's behavior tests need Chrome or Chromium (set DEVKIT_TEST_CHROME to its binary)"
+# runs after the app's own script: `steps` fill `out`, which comes back as JSON in the dumped DOM
+PROBE = """<script>(async () => { const out = {}; const tick = ms => new Promise(r => setTimeout(r, ms));
+const $ = (s, r) => (r || document).querySelector(s), $$ = (s, r) => Array.from((r || document).querySelectorAll(s));
+const text = el => el ? el.innerText.replace(/\\s+/g, " ").trim() : null;
+const go = async hs => { location.hash = hs; await tick(200); };
+const key = (el, k) => el.dispatchEvent(new KeyboardEvent("keydown", {key: k, bubbles: true}));
+await tick(100);
+try { %s } catch (e) { out.probeError = String(e && e.stack || e); }
+out.pageError = text($("#dk-error"));
+const pre = document.createElement("pre"); pre.id = "probe-out"; pre.textContent = JSON.stringify(out); document.body.append(pre);
+if (window.parent !== window) parent.postMessage(pre.textContent, "*"); })();</script>"""
+CHROME_MIN_WIDTH = 500  # a full Chrome never makes its window narrower, headless or not: a 390 window is 500 wide
+# a narrower width: the page in an iframe that wide (its media queries and widths are a phone's), whose probe hands
+# `out` to this page, the one Chrome dumps
+NARROW = """<!doctype html><html><head><meta charset="utf-8"><style>html, body { margin: 0 } iframe { border: 0; display: block }</style></head>
+<body><iframe src="%s" width="%d" height="%d"></iframe><script>addEventListener("message", e => {
+const pre = document.createElement("pre"); pre.id = "probe-out"; pre.textContent = e.data; document.body.append(pre); });</script></body></html>"""
+
+
+_CHROME_HUNG = []  # the page of the first call that ran out of time: every later call fails at once
+
+
+def run_chrome(url: str, width: int, height: int = 900, budget: int = 6000, timeout: int = 120) -> subprocess.CompletedProcess:
+    """Headless Chrome dumping the DOM of `url` once its virtual time `budget` (ms) has run.
+
+    --use-mock-keychain: the run's HOME has no login keychain (tests/_hermetic.py), and a full Chrome that reaches for
+    it there stalls at exit until its teardown watchdog kills it, or hangs until the timeout, test after test (the CI
+    run of PR #6 was cancelled after 15 minutes). One call that runs out of time makes every later call fail at once,
+    so a browser that hangs costs one timeout, not one per test."""
+    if _CHROME_HUNG:
+        raise AssertionError(f"headless Chrome ran out of time in an earlier test ({_CHROME_HUNG[0]}); not started again")
+    with tempfile.TemporaryDirectory() as prof:
+        try:
+            return subprocess.run([CHROME, "--headless", "--use-mock-keychain", "--disable-gpu", "--no-first-run", "--no-default-browser-check",
+                                   "--hide-scrollbars", f"--user-data-dir={prof}", f"--window-size={width},{height}",
+                                   f"--virtual-time-budget={budget}", "--dump-dom", url], capture_output=True, text=True, timeout=timeout)
+        except subprocess.TimeoutExpired as e:
+            _CHROME_HUNG.append(url)
+            err = e.stderr.decode(errors="replace") if isinstance(e.stderr, bytes) else (e.stderr or "")
+            raise AssertionError(f"headless Chrome did not finish in {timeout} s: {err[-1500:]}") from None
+
+
+def chrome(url: str, width: int, height: int = 900, budget: int = 6000) -> str:
+    res = run_chrome(url, width, height, budget)
+    m = re.search(r'<pre id="probe-out">(.*?)</pre>', res.stdout, re.S)
+    if not m:
+        raise AssertionError("the probe did not finish: " + res.stderr[-1500:])
+    return json.loads(htmlmod.unescape(m.group(1)))
+
+
+def browse(page: str, steps: str, width: int = 1440, hash_: str = "", budget: int = 6000) -> dict:
+    """Load a page in headless Chromium at a width, run the probe's `steps` (JS that fills `out`) and return `out`.
+    Below CHROME_MIN_WIDTH the page runs in an iframe of that width (NARROW)."""
+    with tempfile.TemporaryDirectory() as t:
+        f = Path(t) / "page.html"
+        f.write_text(page.replace("</body>", PROBE % steps + "</body>"), encoding="utf-8")
+        if width >= CHROME_MIN_WIDTH:
+            return chrome(f.as_uri() + hash_, width, budget=budget)
+        narrow = Path(t) / "narrow.html"
+        narrow.write_text(NARROW % (htmlmod.escape(f.name + hash_), width, 900), encoding="utf-8")
+        return chrome(narrow.as_uri(), CHROME_MIN_WIDTH, budget=budget)
+
+
+def fixture_data(root: Path) -> dict:
+    """The page's data for the behavior tests: the registry fixture, plus runs, jobs, CI watches and a crew, all fixed."""
+    t = time.time()
+    make_handoff(root)
+    (root / "projects/acme/old.md").write_text("# acme/old\n\n| Workstream | Owner | Milestone | Status | Next step | Notes |\n|---|---|---|---|---|---|\n"
+                                               "| Underwriting | Platform | Pilot readiness | Running | Integration tests | Waiting on the bank |\n")
+    reg = registry()
+    reg["projects"].append({"id": "acme/old", "owner": "acme", "name": "old", "path": "/Users/t/Development/acme/old", "local": True, "github": "acme/old",
+                            "main": {"branch": "main"}, "worktrees": [], "prs_open": [], "prs_known": True, "last_activity": int(NOW - 30 * 86400),
+                            "note": "projects/acme/old.md", "note_summary": {"status": "active", "priority": "normal", "tasks": {}},
+                            "status_line": {"ts": int(NOW - 30 * 86400), "agent": "claude", "line": SAVED, "branch": "release/1"}})
+    d = dashboard.collect(reg, handoff=root, now=NOW)
+    plan = lambda name, state, est, mins, owner="main", label="", persona="", after=(): {  # noqa: E731
+        "name": name, "state": state, "est": est, "min": mins, "owner": owner, "label": label, "persona": persona, "after": list(after), "scope": "", "waiting": ""}
+    d["runs"] = [
+        {"id": "claude-rel", "agent": "claude", "session": "rel", "project": "acme/widget", "goal": "Release 26.11.3 (T-a1)", "state": "running", "mode": "guided",
+         "host": "testmac", "step": 1, "steps": 5, "estimate": 180, "estimate_cal": 234, "started": t - 9600, "finished": None, "eta_min": 30, "eta_lo": 25, "eta_hi": 40,
+         "active_min": 130, "wall_min": 160, "pace": 1.3, "updated": t - 240, "last": "the snapshot rebuild debounces registry builds", "next": "Trinity builds the screens",
+         "plan": [plan("design", "done", 15, 14), plan("dashboard server", "running", 45, 34, "Tank: dashboard server", persona="Tank", after=["design"]),
+                  plan("dashboard ui", "running", 60, 2, after=["dashboard server"]), plan("crew docs", "pending", 30, 0, label="Ghost"),
+                  plan("release", "pending", 20, 0, after=["dashboard ui"])],
+         "agents": [{"label": "Tank: dashboard server", "state": "running", "min": 34}, {"label": "Sati: dashboard screens", "state": "running", "min": 18},
+                    {"label": "Sati: dashboard screens", "state": "running", "min": 3}, {"label": "Codex settings research", "state": "done", "min": 9},
+                    {"label": "Neo2: graph engine", "state": "done", "min": 4}],
+         "decisions": [{"id": "D2", "ts": t - 720, "question": "Keep the 2-minute reload? " + EVIL, "options": ["Keep it", "Drop it"], "recommend": "Keep it",
+                        "irreversible": "", "from_name": "Tank"}],
+         "questions": [{"id": "M9", "ts": t - 180, "from_name": "Sati", "text": "Which data needs do you take?"}], "updates": []},
+        {"id": "codex-old", "agent": "codex", "session": "old", "project": "acme/api", "goal": "Migrate the importer for T-a4", "state": "running", "mode": "auto",
+         "host": "testmac", "step": 1, "steps": 2, "estimate": 60, "started": t - 7200, "finished": None, "eta_min": 20, "eta_lo": 15, "eta_hi": 25, "active_min": 50,
+         "wall_min": 120, "pace": 1.0, "updated": t - 47 * 60, "last": "", "next": "", "plan": [plan("map fields", "done", 30, 25), plan("import", "running", 30, 25)],
+         "agents": [], "decisions": [], "questions": [], "updates": []}]
+    d["jobs"] = [
+        {"name": "doctor", "about": "Weekly health check of the whole setup", "schedule": "weekly, mon 09:00", "enabled": True, "installed": True, "notify": "failure",
+         "timeout_min": 10, "next": int(t + 3 * 86400), "last": {"start": t - 86400, "end": t - 86400 + 41, "rc": 2, "duration": 41, "summary": "2 checks failed"},
+         "state": "failed", "runs": 4, "failed": 1},
+        {"name": "sync", "about": "Projects map, PRs, sizes", "schedule": "every 1 h", "enabled": True, "installed": True, "notify": "failure", "timeout_min": 20,
+         "next": int(t - 2 * 3600), "last": {"start": t - 3 * 3600, "end": t - 3 * 3600 + 17, "rc": 0, "duration": 17, "summary": ""}, "state": "ok", "runs": 712, "failed": 0},
+        {"name": "sleep", "about": "Lessons: decay, merge, forget", "schedule": "daily at 03:30", "enabled": True, "installed": True, "notify": "failure", "timeout_min": 15,
+         "next": int(t + 3600), "last": {"start": t - 3600, "end": t - 3591, "rc": 0, "duration": 9, "summary": ""}, "state": "ok", "runs": 30, "failed": 0},
+        {"name": "lessons", "about": "Weekly lesson review", "schedule": "weekly, fri 16:00", "enabled": False, "installed": True, "notify": "always", "timeout_min": 5,
+         "next": None, "last": {"start": t - 5 * 86400, "end": t - 5 * 86400 + 2, "rc": 0, "duration": 2, "summary": ""}, "state": "off", "runs": 4, "failed": 0},
+        {"name": "audit", "about": "Publishes the audit trail", "schedule": "daily at 05:00", "enabled": True, "installed": False, "notify": "failure", "timeout_min": 5,
+         "next": int(t + 7200), "last": {"start": t - 7200, "end": t - 7199, "rc": 0, "duration": 1, "summary": ""}, "state": "ok", "runs": 2, "failed": 0},
+        {"name": "gc", "about": "Reclaims disk safely", "schedule": "daily at 04:00", "enabled": True, "installed": True, "notify": "failure", "timeout_min": 30,
+         "next": int(t + 5400), "last": None, "state": "never", "runs": 0, "failed": 0}]
+    fail = {"id": 18562211, "run": "ci", "number": 14, "url": "https://github.com/acme/widget/actions/runs/18562211", "class": "test",
+            "action": "a test failed. Reproduce it locally, fix it, then push once", "jobs": [{"name": "test", "step": "Run tests"}],
+            "excerpt": EVIL + "\nFAILED tests/test_x.py::test_y - AssertionError: assert 2 == 3"}
+    watch = lambda branch, sha, state, ago, fails=(): {"repo": "acme/widget", "branch": branch, "sha": sha, "state": state, "ts": int(t - ago), "minutes": 3.1,  # noqa: E731
+                                                       "provider": "github", "error": None, "runs": [{"name": "ci", "number": 14, "status": "success" if state == "passed" else "failure"}],
+                                                       "failures": list(fails), "class": fails[0]["class"] if fails else "", "action": "", "first_error": ""}
+    d["ci"] = {"watches": [watch("feat/x", "4ca6703", "failed", 720, [fail]), watch("release/26.11.2", "5f1bb6b", "passed", 7200),
+                           watch("feat/x", "1111111", "passed", 9000), dict(watch("main", "45ec3e4", "none", 3600), repo="acme/api", runs=[]),
+                           watch("old/branch", "abcdef0", "passed", 20 * 86400)],
+               "complete": True, "total": 5, "watching": [{"key": "widget-main", "sha": "d11f175", "pid": 4242, "since": int(t - 180)}]}
+    member = lambda i, n, t, tools="all", tier="standard", main=False: {"id": i, "name": n, "title": t, "tier": tier, "tools": tools, "summary": f"What {n} does.", "main": main}  # noqa: E731
+    d["crew"] = {"members": [member("morpheus", "Morpheus", "Tech lead", tier="strong", main=True), member("tank", "Tank", "Backend engineer"),
+                             member("sati", "Sati", "UX designer", "build", "strong"), member("trinity", "Trinity", "Frontend engineer"),
+                             member("ghost", "Ghost", "Technical writer", "build"), member("seraph", "Seraph", "Code reviewer", "review", "strong"),
+                             member("link", "Link", "Release engineer"), member("sparks", "Sparks", "Lookup scout", "read", "fast")],
+                 "activities": [{"id": "plan", "name": "Planning, estimates, status and integration", "R": ["morpheus"], "A": "morpheus", "C": [], "I": []},
+                                {"id": "ux", "name": "UX and visual design", "R": ["sati"], "A": "sati", "C": ["trinity"], "I": ["morpheus"]},
+                                {"id": "backend", "name": "Back-end services and APIs", "R": ["tank"], "A": "seraph", "C": ["sati"], "I": ["trinity"]},
+                                {"id": "docs", "name": "Documentation", "R": ["ghost"], "A": "ghost", "C": ["tank"], "I": []}]}
+    for x in d["people"]:   # a run on another machine reaches this Mac only through presence
+        if x["who"] == "bob@studio":
+            x["sessions"][0]["progress"] = {"goal": "Reconcile ledgers", "state": "running", "step": 1, "steps": 3, "estimate": 40, "started": int(t - 1200),
+                                            "eta_min": 25, "active_min": 18, "wall_min": 20, "plan": [], "agents": [], "last": "matching rows", "next": "", "updated": int(t - 300)}
+    return d
+
+
+@unittest.skipUnless(CHROME, NO_CHROME)
+class HeadlessChromeTests(unittest.TestCase):
+
+    # The run's HOME has no login keychain: a Chrome that reaches for it stalls at exit and its teardown watchdog
+    # kills it (exit 2), or it hangs until the timeout, as every browser test did on CI's macOS runner for PR #6
+    def test_chrome_dumps_the_page_and_exits_cleanly_under_the_runs_home(self):
+        with tempfile.TemporaryDirectory() as t:
+            f = Path(t) / "page.html"
+            f.write_text('<html><body><pre id="probe-out">{"ok": 1}</pre></body></html>', encoding="utf-8")
+            res = run_chrome(f.as_uri(), 800, budget=1000, timeout=60)
+        self.assertEqual(res.returncode, 0, res.stderr[-1500:])
+        self.assertIn('<pre id="probe-out">{"ok": 1}</pre>', res.stdout)
+
+    # Chrome's window is never narrower than 500: a phone width must still reach the page's media queries
+    def test_a_phone_width_below_chromes_window_minimum_is_the_pages_own_width(self):
+        page = "<html><head><style>body { margin: 0 } @media (max-width: 400px) { p { width: 10px } }</style></head><body><p>x</p></body></html>"
+        out = browse(page, 'out.inner = innerWidth; out.client = document.documentElement.clientWidth; out.p = $("p").offsetWidth;', 390, budget=1000)
+        self.assertEqual((out["inner"], out["client"], out["p"]), (390, 390, 10))
+        out = browse(page, 'out.inner = innerWidth; out.p = $("p").offsetWidth;', 768, budget=1000)
+        self.assertEqual((out["inner"], out["p"]), (768, 768))
+
+
+@unittest.skipUnless(CHROME, NO_CHROME)
+class PageBehaviorTests(unittest.TestCase):
+    """The page's behavior from fixture data, in headless Chromium: what each view shows, the honest states, role-first names,
+    the navigation at every width, the drawers, and the live states."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.tmp = tempfile.TemporaryDirectory()
+        cls.data = fixture_data(Path(cls.tmp.name) / "handoff")
+        cls.page = dashboard.page(cls.data)
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.tmp.cleanup()
+
+    def probe(self, steps, width=1440, hash_="#/overview", budget=6000, page=None):
+        out = browse(page or self.page, steps, width, hash_, budget)
+        self.assertIsNone(out.get("probeError"), out.get("probeError"))
+        self.assertIsNone(out.get("pageError"), out.get("pageError"))
+        return out
+
+    def variant(self, change):
+        # the fixture's page with one change to a copy of its data
+        d = json.loads(json.dumps(self.data))
+        change(d)
+        return dashboard.page(d)
+
+    def test_a_javascript_url_in_the_data_is_never_opened(self):
+        """A PR's url is data: the search result and the command palette open it only through safeUrl, so a
+        javascript: URL opens nothing, also in the static export where no CSP applies."""
+        def bad(d):
+            next(p for p in d["projects"] if p["id"] == "acme/widget")["prs_open"][0]["url"] = "javascript:alert(1)"
+        out = self.probe("""const opened = []; window.open = u => { opened.push(String(u)); return null; };
+            await go("#/search?q=PR%2022"); $$("main .results .res").find(b => text(b).includes("#22")).click();
+            await go("#/search?q=PR%2017"); $$("main .results .res").find(b => text(b).includes("#17")).click();
+            document.dispatchEvent(new KeyboardEvent("keydown", {key: "k", metaKey: true, bubbles: true})); await tick(100);
+            const inp = $("#palette input"); inp.value = "#22"; inp.dispatchEvent(new Event("input", {bubbles: true})); await tick(100);
+            $$("#pal-list li").find(li => text(li).includes("#22")).click(); await tick(100);
+            out.opened = opened;""", page=self.variant(bad))
+        self.assertEqual(out["opened"], ["https://github.com/acme/widget/pull/17"])  # the safe one opens; javascript: never
+
+    def test_background_work_puts_what_waits_for_you_first(self):
+        out = self.probe("""out.sections = $$("main section[id]").map(s => s.id); out.waiting = text($("#waiting")); out.runs = $$("#runs .rcard").map(text);
+            out.ci = $$("#ci .cirow").map(text); out.more = text($("#ci .pb > .btn")); out.jobs = $$("#jobs tbody tr").map(text); out.imgs = $$("img").length;
+            out.figs = $$(".stile .s-l").map(text); out.dot = $('#tabs [data-view="background"] .n').getAttribute("aria-label");""", hash_="#/background")
+        self.assertEqual(out["sections"], ["waiting", "runs", "ci", "jobs"])
+        self.assertIn("Keep the 2-minute reload? " + EVIL, out["waiting"])                      # agent text is text, never HTML
+        self.assertEqual(out["imgs"], 0)
+        self.assertIn("Backend engineer (Tank) asks · Options: Keep it, Drop it · Recommended: Keep it", out["waiting"])
+        self.assertEqual(out["figs"], ["Waiting for you", "Runs", "CI failures, 14 days", "Scheduled jobs"])
+        self.assertIn("1 decision waiting for you", out["dot"])
+        rel_, lost = out["runs"][0], out["runs"][1]
+        self.assertIn("Blocked · waiting for you", rel_)
+        self.assertIn("“dashboard ui” is running before “dashboard server” finished.", rel_)
+        self.assertIn("Two UX designer (Sati) lanes run “dashboard screens”.", rel_)
+        self.assertIn("dashboard server · Backend engineer (Tank)", rel_)
+        self.assertIn("Stopped reporting", lost)
+        self.assertIn("No update for 47 min and its session is not live.", lost)
+        self.assertTrue(out["ci"][0].startswith("Failed · widget · feat/x @ 4ca6703"), out["ci"][0])
+        self.assertIn("ci #14 failed in “test”, step “Run tests” · Test failure", out["ci"][0])
+        self.assertIn("FAILED tests/test_x.py::test_y", out["ci"][0])
+        self.assertTrue(out["ci"][1].startswith("Watching · widget · main @ d11f175"), out["ci"][1])
+        self.assertEqual(sum("feat/x" in r for r in out["ci"]), 1)                                # the latest result per branch
+        self.assertEqual(out["more"], "Show 1 older result")
+        jobs = out["jobs"]
+        self.assertTrue(jobs[0].startswith("Failed (exit 2) doctor"), jobs[0])
+        self.assertIn("Mondays at 09:00", jobs[0])
+        self.assertEqual([j.split(" ")[0] for j in jobs[1:]], ["Not", "Overdue", "OK", "No", "Off"])
+        self.assertIn("by ", jobs[2])                                                            # an interval's next run is an upper bound
+
+    def test_navigation_never_scrolls_sideways_and_every_view_stays_reachable(self):
+        views = ["overview", "tasks", "background", "team", "projects", "initiatives", "activity", "explorer", "health"]
+        steps = """out.row = $$("#tabs .tab").map(a => a.getAttribute("data-view")); out.menu = $$("#moremenu a").map(a => a.getAttribute("data-view"));
+            out.tabs = [$("#tabs").scrollWidth, $("#tabs").clientWidth]; out.page = [document.documentElement.scrollWidth, document.documentElement.clientWidth];
+            out.more = text($("#morebtn")); out.tabRoles = $$("[role=tab]").filter(el => !el.closest(".ptabs")).length; out.current = $('nav[aria-label="Views"] [aria-current="page"]').getAttribute("data-view");"""
+        for width in (320, 390, 768, 1024, 1180, 1440, 1600):
+            out = self.probe(steps, width, "#/health")
+            self.assertEqual(out["row"] + out["menu"], views, width)                               # every view, in order, once
+            self.assertLessEqual(out["tabs"][0], out["tabs"][1], width)
+            self.assertLessEqual(out["page"][0], out["page"][1], width)
+            self.assertEqual((out["tabRoles"], out["current"]), (0, "health"), width)
+            if width >= 1440:
+                self.assertEqual(out["menu"], [], width)
+            if out["menu"]:
+                self.assertEqual(out["more"], "Health", width)                                  # the current view inside More names itself
+        out = self.probe(steps, 390, "#/overview")
+        self.assertEqual((out["row"][:3], out["menu"][-1], out["more"]), (["overview", "tasks", "background"], "health", "More"))
+
+    def test_the_more_menu_works_with_the_keyboard(self):
+        out = self.probe("""const b = $("#morebtn"); out.menu = $$("#moremenu a").map(a => a.getAttribute("data-view")); b.focus(); key(b, "ArrowDown"); out.expanded = b.getAttribute("aria-expanded");
+            out.first = document.activeElement.getAttribute("data-view"); key(document.activeElement, "End"); out.last = document.activeElement.getAttribute("data-view");
+            key(document.activeElement, "ArrowDown"); out.wrap = document.activeElement.getAttribute("data-view");
+            key(document.activeElement, "Escape"); out.back = document.activeElement.id; out.closed = $("#moremenu").hidden;
+            key(b, "ArrowDown"); document.activeElement.click(); await tick(200); out.hash = location.hash; out.menuOpen = !!$("#moremenu") && !$("#moremenu").hidden;""", 390)
+        first = out["menu"][0]
+        self.assertEqual((out["expanded"], out["first"], out["last"], out["wrap"]), ("true", first, "health", first))
+        self.assertEqual((out["back"], out["closed"]), ("morebtn", True))
+        self.assertTrue(out["hash"].startswith("#/" + first), out["hash"])
+        self.assertFalse(out["menuOpen"])
+
+    def test_no_data_and_no_recent_activity_are_never_on_track(self):
+        out = self.probe("""out.dots = Object.fromEntries($$(".ptile").map(t => [text($(".pt-n .strong", t)), $(".pt-h .dot", t).getAttribute("aria-label")]));
+            await go("#/overview"); out.tile = text($$(".stile")[2]);""", 1440, "#/projects")
+        self.assertEqual(out["dots"], {"widget": "Off track", "api": "No data", "old": "Quiet"})
+        self.assertIn("1 quiet", out["tile"])
+        self.assertIn("1 no data", out["tile"])
+        self.assertNotIn("on track", out["tile"])
+
+    def test_contradictions_are_flagged_where_they_occur(self):
+        out = self.probe("""out.project = text($(".phead")); await go("#/health"); out.health = $$("section[aria-label=Contradictions] li").map(text);""", 1440, "#/projects/acme/old")
+        self.assertIn("The latest status was saved on release/1; git is on main now. It may be out of date.", out["project"])     # C3
+        flags = " | ".join(out["health"])
+        for text in ("Done, but still claimed by bob@studio.", "The goal names T-a4, which is done.", "No update for 47 min and its session is not live.",
+                     "“dashboard ui” is running before “dashboard server” finished."):
+            self.assertIn(text, flags)
+
+    def test_the_crew_and_who_does_what_name_members_role_first(self):
+        out = self.probe("""out.working = $$("#tabpanel .prows li").map(text); out.roster = $$("table.crew tbody tr").map(text); out.tabs = $$(".ptab").map(text);
+            await go("#/team?tab=raci&rm=tank"); out.sum = text($("#tabpanel .lead")); out.rows = $$("table.raci tbody th").map(text);
+            out.me = $$("table.raci .me").map(text); await go("#/team?tab=raci&rm=tank&rall=1"); out.all = $$("table.raci tbody th").length;""", 1440, "#/team?tab=crew")
+        self.assertEqual(out["tabs"], ["People", "Crew 8", "Who does what 4"])
+        self.assertTrue(out["working"][0].startswith("■ Backend engineer (Tank) dashboard server"), out["working"])
+        self.assertIn("Waiting for you · D2", out["working"][0])
+        self.assertEqual([w[:20] for w in out["working"][1:]], ["▸ UX designer (Sati)"] * 2)
+        self.assertTrue(out["roster"][0].startswith("Tech lead (Morpheus)"), out["roster"][0])
+        self.assertIn("Leads Release 26.11.3 (T-a1)", out["roster"][0])
+        self.assertEqual(out["sum"], "Backend engineer (Tank) does 1 kind of work, approves 0, is consulted on 1 and is informed about 0.")
+        self.assertEqual(out["rows"], ["Back-end services and APIs", "Documentation"])
+        self.assertEqual(out["me"], ["Backend engineer (Tank)", "Backend engineer (Tank)"])
+        self.assertEqual(out["all"], 4)
+
+    def test_the_run_drawer_shows_each_step_with_its_owner_and_what_waits_for_you(self):
+        out = self.probe("""const m = $("#modal"); out.open = m.open; out.title = text($("#modal-title")); out.steps = $$("ol.steps", m)[0] ? $$("li", $$("ol.steps", m)[0]).map(text) : [];
+            out.crew = $$("li", $$("ol.steps", m)[1]).map(text); out.waiting = text($("#waiting-for-you")); out.notice = text($(".notice", m)); out.flags = $$(".callout", m).map(text);""",
+                         1440, "#/background?modal=" + "run:claude-rel")
+        self.assertTrue(out["open"])
+        self.assertEqual(out["title"], "Release 26.11.3 (T-a1)")
+        self.assertIn("dashboard server · Backend engineer (Tank) Running · 34m of ~45m", out["steps"][1])
+        self.assertIn("crew docs · Technical writer (Ghost)", out["steps"][3])
+        self.assertIn("Assigned to Technical writer (Ghost), not started.", out["steps"][3])
+        self.assertIn("Waits for ▸ dashboard ui", out["steps"][4])
+        self.assertIn("Keep it (recommended) · Drop it", out["waiting"])
+        self.assertIn("Asked by Backend engineer (Tank)", out["waiting"])
+        self.assertTrue(any("Done: Subagent: Codex settings research Done · 9m" in c for c in out["crew"]), out["crew"])
+        self.assertTrue(any("Done: Neo2 (not in the crew)" in c for c in out["crew"]), out["crew"])
+        self.assertIn("A static copy from", out["notice"])
+        self.assertIn("“dashboard ui” is running before “dashboard server” finished.", " ".join(out["flags"]))
+
+    def test_the_job_and_ci_drawers_say_why_it_failed_and_what_to_do(self):
+        out = self.probe("""await go("#/background?modal=job%3Adoctor"); out.job = text($("#modal .pline:last-of-type")); out.jobBody = text($("#modal .mbody")); out.jobFoot = text($("#modal .mf"));
+            await go("#/background?modal=job%3Async"); out.sync = text($("#modal .callout"));
+            await go("#/background?modal=ci%3Aacme%2Fwidget%40feat%2Fx"); out.ci = text($("#modal .mbody")); out.ciFoot = text($("#modal .mf")); out.imgs = $$("img").length;""", 1440, "#/background")
+        self.assertEqual(out["job"], "Failed (exit 2) Mondays at 09:00 On")
+        for text in ("Failures, 30 days 1 of 4", "The whole job: its runs and log needs the live dashboard", "Run it now dev jobs run doctor", "Turn it off dev jobs disable doctor"):
+            self.assertIn(text, out["jobBody"])
+        self.assertEqual(out["jobFoot"], "Copy dev jobs run doctor")
+        self.assertIn("Overdue It last ran 3 h ago and runs every 1 h. The Mac may have been asleep, or launchd stopped it.", out["sync"])
+        for text in ("ci #14 failed Test failure", "Failed job test, step “Run tests”", EVIL + " FAILED tests/test_x.py::test_y",
+                     "Next A test failed. Reproduce it locally, fix it, then push once.", "Hand it to Release engineer (Link)"):
+            self.assertIn(text, out["ci"])
+        self.assertEqual((out["ciFoot"], out["imgs"]), ("Open the log on GitHub Copy dev run view 18562211 --failed", 0))
+
+    def test_a_drawer_opens_from_its_row_traps_focus_and_esc_returns_it(self):
+        out = self.probe("""const a = $("#runs .rcard .rh a"); a.focus(); a.click(); await tick(200); out.open = $("#modal").open; out.focus = document.activeElement.getAttribute("aria-label");
+            out.inside = $("#modal").contains(document.activeElement); const cs = getComputedStyle($("#modal")); out.side = [cs.right, cs.top, Math.round(parseFloat(cs.height)) === innerHeight, parseFloat(cs.width) <= 760];
+            key(document.activeElement, "Escape"); await tick(200); out.closed = !$("#modal").open; out.back = document.activeElement === a; out.hash = location.hash;""", 1440, "#/background")
+        self.assertEqual((out["open"], out["focus"], out["inside"], out["side"]), (True, "Close (Esc)", True, ["0px", "0px", True, True]))   # a right-hand drawer, full height, at most 760 px
+        self.assertEqual((out["closed"], out["back"], out["hash"]), (True, True, "#/background"))
+
+    def test_a_drawer_for_a_record_that_is_gone_says_so(self):
+        out = self.probe("""out.run = text($("#modal-title")); out.runBody = text($("#modal .mbody")); await go("#/background?modal=job%3Anope"); out.job = text($("#modal-title"));
+            await go("#/tasks?task=T-nope"); out.task = text($("#modal-title")); out.taskBody = text($("#modal .mbody")); out.foot = text($("#modal .mf"));""", 1440, "#/background?modal=run%3Anope")
+        self.assertEqual((out["run"], out["job"], out["task"]), ("Run nope no longer exists", "Job nope no longer exists", "Task T-nope no longer exists"))
+        self.assertEqual(out["runBody"], "Runs live on the machine that ran them, and a finished run leaves this page after an hour.")
+        self.assertEqual(out["taskBody"], "It may have been deleted or moved to another project. The lists update on their own.")
+        self.assertEqual(out["foot"], "Close")
+
+    def test_brackets_move_to_the_next_and_previous_record_of_the_list(self):
+        out = self.probe("""const keys = $$("#view [data-open^='task:']").map(e => e.getAttribute("data-open")); out.keys = keys.slice(0, 2);
+            location.hash = "#/tasks?task=" + keys[0].slice(5); await tick(200); key(document.activeElement, "]"); await tick(200); out.next = location.hash;
+            key(document.activeElement, "["); await tick(200); out.back = location.hash; out.open = $("#modal").open;""", 1440, "#/tasks")
+        first, second = (k[len("task:"):] for k in out["keys"])
+        self.assertIn("task=" + second, out["next"])
+        self.assertIn("task=" + first, out["back"])
+        self.assertTrue(out["open"])
+
+    def test_the_connected_task_answers_first_and_says_how_each_link_was_found(self):
+        out = self.probe("""const m = $("#modal"); out.dts = $$(".ans dt", m).map(text); out.ans = $$(".ans dd", m).map(text); out.conns = $$(".conn", m).map(text);
+            out.notFound = text($(".msec .tnote", m)); out.notice = text($(".notice", m));
+            await go("#/tasks?task=T-a4"); out.flags = $$("#modal .callout").map(text);""", 1440, "#/tasks?task=T-a1")
+        self.assertEqual(out["dts"], ["Who has it", "What blocks it", "What's next"])
+        self.assertTrue(out["ans"][0].startswith("me@testmac with Claude Code, since"), out["ans"][0])
+        self.assertIn("The lock ends in", out["ans"][0])
+        self.assertIn("Tech lead (Morpheus) works on it in “Release 26.11.3 (T-a1)”.", out["ans"][0])
+        self.assertIn("Waiting for your answer to D2 in “Release 26.11.3 (T-a1)”.", out["ans"][1])
+        self.assertIn("Trinity builds the screens", out["ans"][2])
+        self.assertTrue(any(c.startswith("Run Release 26.11.3 (T-a1)") and "Found: Its goal or a step has the id." in c for c in out["conns"]), out["conns"])
+        self.assertEqual(out["notFound"], "Not found: a branch, a pull request or a plan.")
+        self.assertIn("A static copy from", out["notice"])
+        self.assertIn("Done, but still claimed by bob@studio.", " | ".join(out["flags"]))                                   # C1
+        self.assertIn("The goal of the run “Migrate the importer for T-a4” names T-a4, which is done.", " | ".join(out["flags"]))  # C11
+
+    def test_the_static_copy_says_it_is_static(self):
+        out = self.probe("""out.live = text($("#live")); out.dot = !!$("#live .dot"); out.banner = $("#banner").hidden; $("#live").click(); out.pop = text($("#livepop"));""")
+        self.assertTrue(out["live"].startswith("Generated "), out["live"])
+        self.assertEqual((out["dot"], out["banner"]), (False, True))
+        self.assertIn("A static copy It does not update. Run dev dashboard for the live page.", out["pop"])
+
+    def test_every_view_fits_a_phone_and_tables_keep_their_words(self):
+        out = self.probe("""out.w = {}; for (const hs of ["#/overview", "#/tasks", "#/background", "#/team", "#/team?tab=crew", "#/team?tab=raci", "#/projects", "#/initiatives", "#/activity", "#/health", "#/explorer?f=projects/acme/old.md"]) {
+              await go(hs); out.w[hs] = document.documentElement.scrollWidth; }
+            out.cells = $$(".md td").map(td => td.getBoundingClientRect().height); out.line = parseFloat(getComputedStyle($(".md td")).lineHeight);""", 390, budget=9000)
+        for view, w in out["w"].items():
+            self.assertLessEqual(w, 390, view)
+        self.assertLess(max(out["cells"]), 3 * out["line"] + 20)                                 # words wrap whole, never letter by letter
+
+    def test_a_run_whose_crew_reports_is_running_though_its_lead_was_quiet(self):
+        # the live run of 2026-11-06: the lead's last update 47 min ago, a lane reported 3 min ago, the session not in presence
+        def change(d):
+            d["runs"][1].update(seen=int(time.time() - 180), agents=[{"label": "Neo: importer mapping", "state": "running", "min": 20}])
+        out = self.probe("""out.cards = $$("#runs .rcard").map(text); out.dot = $('#tabs [data-view="background"] .n').getAttribute("aria-label");
+            await go("#/health"); out.flags = $$("section[aria-label=Contradictions] li").map(text);""", hash_="#/background", page=self.variant(change))
+        card = next(c for c in out["cards"] if c.startswith("Migrate the importer"))
+        self.assertTrue(card.startswith("Migrate the importer for T-a4 Running · 15m–25m left"), card)
+        self.assertNotIn("Stopped reporting", card + out["dot"])
+        self.assertFalse([f for f in out["flags"] if "No update for" in f], out["flags"])
+
+    def test_of_about_is_the_plans_current_total_beside_the_time_left(self):
+        # the live card read "4h09m active of about 26m" beside "3h14m–5h04m left": 26m was the first estimate, calibrated
+        def change(d):
+            d["runs"][1].update(seen=int(time.time() - 180), active_min=256, wall_min=256, eta_min=236, eta_lo=189, eta_hi=295.2,
+                                estimate=60, estimate_cal=25.8, total_min=492)
+        out = self.probe("""out.card = text($$("#runs .rcard").find(c => text(c).startsWith("Migrate the importer"))); await go("#/background?modal=run%3Acodex-old"); out.figs = text($("#modal .mfigs"));""",
+                         hash_="#/background", page=self.variant(change))
+        self.assertIn("4h16m active of about 8h10m", out["card"])                               # 256 active + 236 left, to 5 minutes
+        self.assertIn("3h10m–4h55m left", out["card"])
+        self.assertNotIn("of about 25m", out["card"] + out["figs"])
+        self.assertIn("Time 4h16m active of about 8h10m first estimate 25m", out["figs"])
+        self.assertIn("Left 3h10m–4h55m", out["figs"])
+
+    def test_estimates_round_to_five_minutes_and_measured_times_stay_exact(self):
+        # "of about 1h59m" claimed a precision no estimate has: an estimate or a time left rounds to 5 minutes, under 10 minutes
+        # to the minute; active, wall and elapsed time are measured and stay exact
+        def change(d):
+            d["runs"][1].update(seen=int(time.time() - 180), active_min=84, wall_min=84, total_min=119, eta_min=35, eta_lo=27.4, eta_hi=43,
+                                estimate=60, estimate_cal=156)
+            d["runs"][1]["plan"][1].update(est=12, min=7)
+            d["runs"][0].update(eta_min=5, eta_lo=3.2, eta_hi=7.4)
+        out = self.probe("""out.card = text($$("#runs .rcard").find(c => text(c).startsWith("Migrate the importer")));
+            await go("#/background?modal=run%3Acodex-old"); out.figs = text($("#modal .mfigs")); out.steps = $$("#modal ol.steps li").map(text);
+            await go("#/background?modal=run%3Aclaude-rel"); out.short = text($("#modal .mfigs"));""", hash_="#/background", page=self.variant(change))
+        self.assertIn("1h24m active of about 2h00m", out["card"])                               # 119 → 120; 84 measured, not 85
+        self.assertIn("25m–45m left", out["card"])                                              # 27.4 → 25, 43 → 45
+        self.assertIn("7m of ~10m", out["card"])                                                # the step's 12-minute estimate
+        self.assertIn("Time 1h24m active of about 2h00m first estimate 2h35m", out["figs"])     # 156 → 155
+        self.assertIn("Left 25m–45m", out["figs"])
+        self.assertTrue(any("7m of ~10m" in s for s in out["steps"]), out["steps"])
+        self.assertIn("Left 3m–7m", out["short"])                                               # under 10 minutes: to the minute
+
+    def test_lists_show_what_a_step_does_and_never_its_code(self):
+        def change(d):
+            plan, lanes = d["runs"][0]["plan"], d["runs"][0]["agents"]
+            plan[1].update(name="F4 caller identity", title="knowing who ran each command", owner="Tank: F4 caller identity")
+            plan[2]["after"] = ["F4 caller identity"]
+            plan[3]["name"] = "K1 protect devkit state"                                          # no title: its name without the code
+            lanes[0]["label"] = "Tank: F4 caller identity"
+        out = self.probe("""out.card = text($("#runs .rcard")); await go("#/team?tab=crew"); out.working = $$("#tabpanel .prows li").map(text);
+            await go("#/background?modal=run%3Aclaude-rel"); const m = $("#modal"); out.steps = $$("li", $$("ol.steps", m)[0]).map(text);
+            out.codes = $$("ol.steps .sc", m).map(text); out.crew = $$("li", $$("ol.steps", m)[1]).map(text);""", hash_="#/background", page=self.variant(change))
+        self.assertIn("▸ Running: knowing who ran each command · Backend engineer (Tank)", out["card"])
+        self.assertIn("○ To do: protect devkit state · Technical writer (Ghost)", out["card"])
+        self.assertIn("“dashboard ui” is running before “knowing who ran each command” finished.", out["card"])
+        self.assertTrue(out["working"][0].startswith("■ Backend engineer (Tank) knowing who ran each command · "), out["working"][0])
+        for shown in [out["card"]] + out["working"] + out["crew"]:
+            self.assertIsNone(re.search(r"\b(F4|K1)\b", shown), shown)                              # codes stay with the crew
+        self.assertIn("knowing who ran each command", out["steps"][1])
+        self.assertEqual(out["codes"], ["F4 caller identity", "K1"])                             # the drawer keeps them, dim
+
+    def test_decisions_say_the_tech_lead_records_the_answer(self):
+        out = self.probe("""out.waiting = text($("#waiting")); await go("#/background?modal=run%3Aclaude-rel"); out.drawer = text($("#waiting-for-you"));""",
+                         hash_="#/background")
+        self.assertIn("answer in that session; Tech lead (Morpheus) records it", out["waiting"])
+        self.assertIn("Answer in the session; Tech lead (Morpheus) records it.", out["drawer"])
+
+    def test_a_step_that_stopped_without_evidence_waits_for_the_tech_lead_in_amber(self):
+        # contract C3: a lane that stops without evidence leaves its step unverified; Morpheus closes or reopens it
+        def change(d):
+            d["runs"][0]["plan"][3].update(state="unverified", owner="Ghost: crew docs", persona="Ghost")
+            d["runs"][0]["agents"].append({"label": "Ghost: crew docs", "state": "unverified", "min": 12})
+        out = self.probe("""const w = document.createElement("span"); w.className = "warn-t"; document.body.append(w); out.amber = getComputedStyle(w).color;
+            const row = $$("#runs .rcard .rsteps li").find(li => text(li).includes("crew docs")); out.row = text(row); out.cls = row && row.className; out.color = row && getComputedStyle($(".g", row)).color;
+            await go("#/team?tab=crew"); const g = $$("#tabpanel .prows li").find(li => text(li).includes("Ghost")); out.working = text(g) || ""; out.wcolor = g && getComputedStyle($(".g", g)).color;
+            await go("#/background?modal=run%3Aclaude-rel"); const m = $("#modal"); out.step = text($$("li", $$("ol.steps", m)[0])[3]); out.lane = $$("li", $$("ol.steps", m)[1]).map(text).find(t => t.includes("Ghost"));
+            await go("#/actions"); out.needs = text($("main"));""", hash_="#/background", page=self.variant(change))
+        self.assertEqual(out["row"], "! Tech lead (Morpheus) checks it: crew docs · Technical writer (Ghost) Tech lead (Morpheus) checks it")
+        self.assertEqual((out["cls"], out["color"], out["wcolor"]), ("unverified", out["amber"], out["amber"]))
+        self.assertIn("Technical writer (Ghost) crew docs", out["working"])
+        self.assertIn("Tech lead (Morpheus) checks it", out["working"])
+        self.assertIn("Tech lead (Morpheus) checks it", out["step"])
+        self.assertIn("Tech lead (Morpheus) checks it", out["lane"])
+        for shown in (out["row"], out["working"], out["step"], out["lane"]):
+            self.assertNotIn("Blocked", shown)
+        self.assertNotIn("crew docs", out["needs"])                                              # Morpheus checks it; nothing asks the developer
+
+    @staticmethod
+    def with_branches(d):
+        # acme/widget's branch map: backed up, only on this Mac, embargoed, the default branch, and five merged branches
+        t = time.time()
+        w = next(p for p in d["projects"] if p["id"] == "acme/widget")
+        merged = [branch_row(f"fix/old-{i}", "merged", "its commits are in main", merged_into="main", last_commit=int(t - (10 + i) * 86400)) for i in range(5)]
+        merged[0]["pr"] = {"number": 30, "state": "merged", "draft": False, "checks": None, "url": "javascript:alert(1)", "title": "Old fix"}
+        w["branches"] = [
+            branch_row("release/1", "backed_up", current=True, ahead=2, base_ahead=12, last_backup=int(t - 240),
+                       pr={"number": 41, "state": "open", "draft": True, "checks": "passing", "url": "https://github.com/acme/widget/pull/41", "title": "Release 1"}),
+            branch_row("feat/x", "not_backed_up", "3 commits only on this Mac", where="local only", upstream=None, unpushed=3, oldest_unpushed=int(t - 7200),
+                       base_ahead=3, worktree="~/Development/.worktrees/acme/widget/feat-x", session=True, task={"id": "T-a1", "title": "Ship export", "status": "doing"}),
+            branch_row("release/x", "embargoed", 'embargoed until "guard refusal rules"', where="local only", upstream=None, unpushed=2, base_ahead=2,
+                       embargo={"why": "keeps the guard fix off the public remote", "until": "guard refusal rules", "who": "link", "when": "2026-11-06T10:00:00Z"}),
+            branch_row("main", "on_remote", default=True)] + merged
+
+    def test_the_branches_tab_shows_where_each_branch_lives_and_whether_it_is_backed_up(self):
+        out = self.probe("""await go("#/projects/acme/widget?tab=branches"); const box = $("#branches");
+            out.cols = $$("thead th", box).map(text); out.head = text($(".ph", box)); out.tab = text($("#tab-branches"));
+            out.rows = $$("tbody tr", box).map(text); out.quiet = $$("tbody tr.quiet", box).map(tr => text($("th", tr)));
+            out.links = $$("tbody a[target=_blank]", box).map(a => [a.textContent, a.getAttribute("href")]);
+            const more = $$("button", box).find(b => text(b).startsWith("Show")); out.more = text(more); more.focus(); more.click(); await tick(100);
+            out.after = $$("#branches tbody tr").length; out.focusIn = $("#branches").contains(document.activeElement);
+            await go("#/projects/acme/widget"); out.facts = text($$(".kv dt").find(dt => text(dt) === "Branches").nextElementSibling);
+            await go("#/projects?layout=table"); out.cell = text($$("table.pt tbody tr").find(tr => text(tr).includes("widget")).querySelector("td.c-bk"));
+            await go("#/projects?layout=cards"); out.tile = text($$(".ptile").find(x => text(x).includes("widget")));""", page=self.variant(self.with_branches))
+        self.assertEqual(out["cols"], ["Backup", "Branch", "Where", "Ahead / behind", "Pull request", "Worktree"])
+        self.assertEqual(out["head"], "Branches 9 1 not backed up 1 embargoed")                 # a static copy: the navbar says when it was made
+        self.assertEqual(out["tab"], "Branches 9")
+        rel1, featx, relx, main = out["rows"][:4]
+        self.assertEqual(rel1, "Backed up 4 min ago release/1current local + origin ↑2 ↓0 12 ahead of main #41 draft checks passing main checkout")
+        self.assertEqual(featx, "Not backed up 3 commits only on this Mac, the oldest 2 h ago. feat/x T-a1 Ship export local only ↑3 3 ahead of main — feat-x live session")
+        self.assertEqual(relx, "Embargoed Until “guard refusal rules” Release engineer (Link): keeps the guard fix off the public remote release/x local only ↑2 2 ahead of main — —")
+        self.assertEqual(main, "On the remote main local + origin ↑0 ↓0 default branch — —")
+        self.assertEqual(out["quiet"], ["fix/old-0", "fix/old-1", "fix/old-2"])                 # merged: quiet, last, the first three
+        self.assertTrue(out["rows"][4].startswith("Merged into main fix/old-0 local + origin"), out["rows"][4])
+        self.assertEqual(out["more"], "Show 2 more merged branches")
+        self.assertEqual((out["after"], out["focusIn"]), (9, True))
+        self.assertEqual(out["links"], [["#41", "https://github.com/acme/widget/pull/41"], ["#30", "#"]])   # a javascript: URL is never a link
+        self.assertEqual(out["facts"], "9 branches, 1 not backed up, 1 embargoed")
+        self.assertEqual(out["cell"], "1")
+        self.assertIn("acme · 1 not backed up", out["tile"])
+
+    def test_the_branch_map_says_when_it_is_missing_empty_without_a_remote_or_without_gh(self):
+        def change(d):
+            w = next(p for p in d["projects"] if p["id"] == "acme/widget")
+            w.update(remote="", github=None, branches=[branch_row("main", "no_remote", "no remote is configured", default=True, current=True,
+                                                                  where="local only", upstream=None, unpushed=4)])
+            old = next(p for p in d["projects"] if p["id"] == "acme/old")
+            old.update(prs_known=False, github="acme/old", remote="https://github.com/acme/old.git", branches=[branch_row("main", default=True, current=True)])
+            for pid, main, rows in (("acme/broken", {"branch": "main"}, []), ("acme/fresh", {}, []), ("acme/legacy", {"branch": "main"}, None)):
+                d["projects"].append(dict(old, id=pid, name=pid.split("/")[1], main=main, branches=rows, prs_known=True, github=None))
+        out = self.probe("""const view = async id => { await go("#/projects/" + id + "?tab=branches"); return text($("#branches")); };
+            for (const id of ["acme/widget", "acme/old", "acme/broken", "acme/fresh", "acme/legacy", "acme/api"]) out[id] = await view(id);
+            await go("#/projects?layout=table"); out.cells = Object.fromEntries($$("table.pt tbody tr").map(tr => [text($(".pname a", tr)), text($("td.c-bk", tr))]));""",
+                         page=self.variant(change))
+        self.assertIn("No remote Every branch exists only on this Mac.", out["acme/widget"])
+        self.assertIn("Not backed up No remote is configured. main", out["acme/widget"])
+        self.assertIn("Pull requests not known gh did not answer", out["acme/old"])
+        self.assertIn("git listed no branches The checkout is on main, but the map came back empty.", out["acme/broken"])
+        self.assertIn("No branches yet The repository has no commits.", out["acme/fresh"])
+        self.assertIn("No branch map in this copy", out["acme/legacy"])
+        self.assertIn("No branches on this Mac", out["acme/api"])
+        self.assertIn("dev clone acme/api", out["acme/api"])
+        self.assertEqual(out["cells"], {"widget": "1", "api": "—", "old": "0", "broken": "—", "fresh": "0", "legacy": "—"})   # unknown is —, never 0
+
+    def test_the_branch_map_stacks_on_a_phone_without_scrolling_sideways(self):
+        out = self.probe("""await go("#/projects/acme/widget?tab=branches"); const tr = $("#branches tbody tr");
+            out.first = text(tr.firstElementChild.tagName === "TH" ? tr.firstElementChild : $("th", tr)); out.firstShown = getComputedStyle($("th", tr)).order;
+            out.row = text(tr); out.page = [document.documentElement.scrollWidth, document.documentElement.clientWidth];
+            out.rowW = [tr.getBoundingClientRect().right, document.documentElement.clientWidth];""", width=390, page=self.variant(self.with_branches))
+        self.assertLessEqual(out["page"][0], out["page"][1])
+        self.assertLessEqual(out["rowW"][0], out["rowW"][1])
+        self.assertEqual(out["firstShown"], "-1")                                                # the name leads the stacked row
+        self.assertIn("Where local + origin", out["row"])                                       # each value says what it is
+        self.assertIn("Pull request #41 draft", out["row"])
+
+
+class LivePageTests(unittest.TestCase):
+    """The live page against a small stand-in server: the session-ended state, and an update that arrives while a drawer is open."""
+
+    def serve(self, routes):
+        class H(http.server.BaseHTTPRequestHandler):
+            def log_message(self, *a):
+                pass
+
+            def do_GET(self):
+                status, ctype, body = routes(self.path)
+                if not status:              # a server that stopped: the connection closes without an answer
+                    self.close_connection = True
+                    return
+                self.send_response(status)
+                self.send_header("Content-Type", ctype)
+                self.send_header("Content-Length", str(len(body)))
+                self.send_header("Connection", "close")
+                self.end_headers()
+                self.wfile.write(body)
+        srv = http.server.ThreadingHTTPServer(("127.0.0.1", 0), H)
+        threading.Thread(target=srv.serve_forever, daemon=True).start()
+        self.addCleanup(srv.server_close)
+        self.addCleanup(srv.shutdown)
+        return f"http://127.0.0.1:{srv.server_address[1]}"
+
+    @classmethod
+    def setUpClass(cls):
+        cls.tmp = tempfile.TemporaryDirectory()
+        cls.root = Path(cls.tmp.name) / "handoff"
+        cls.data = dict(fixture_data(cls.root), live=True, snapshot=1)
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.tmp.cleanup()
+
+    def page(self, steps):
+        return dashboard.page(self.data).replace("</body>", PROBE % steps + "</body>").encode()
+
+    @unittest.skipUnless(CHROME, NO_CHROME)
+    def test_a_401_ends_the_session_and_says_how_to_sign_in_again(self):
+        steps = """await tick(1500); out.word = text($("#live")); out.label = $("#live").getAttribute("aria-label"); out.banner = text($("#banner"));"""
+        problem = json.dumps({"type": "about:blank", "title": "Unauthorized", "status": 401}).encode()
+        base = self.serve(lambda path: (200, "text/html", self.page(steps)) if path == "/" else (401, "application/problem+json", problem))
+        out = chrome(base + "/#/overview", 1440)
+        self.assertEqual((out["word"], out["label"]), ("Session ended", "Live updates: session ended"))
+        self.assertIn("This page is no longer signed in.", out["banner"])
+        self.assertIn("Run dev dashboard to open a signed-in page.", out["banner"])
+
+    @unittest.skipUnless(CHROME, NO_CHROME)
+    def test_a_server_that_stops_answering_reads_reconnecting_then_offline_after_30_seconds(self):
+        steps = """await tick(5000); out.first = text($("#live")); await tick(35000); out.second = text($("#live")); out.banner = text($("#banner"));"""
+        base = self.serve(lambda path: (200, "text/html", self.page(steps)) if path == "/" else (0, "", b""))
+        out = chrome(base + "/#/overview", 1440, budget=60000)
+        self.assertEqual((out["first"], out["second"]), ("Reconnecting…", "Offline"))
+        self.assertIn("The dashboard server stopped. It stops by itself after 30 minutes with no open page. You are looking at data from", out["banner"])
+
+    @unittest.skipUnless(CHROME, NO_CHROME)
+    def test_a_new_devkit_version_asks_for_a_reload(self):
+        steps = """await tick(7000); out.banner = text($("#banner")); out.primary = text($("#banner .btn.primary"));"""
+
+        def routes(path):
+            if path == "/":
+                return 200, "text/html", self.page(steps)
+            if path.startswith("/api/v1/events"):
+                return 200, "text/event-stream", b"retry: 60000\n\n"
+            if path == "/api/v1/health":
+                return 200, "application/json", b'{"ok": true, "version": "99.1.0"}'
+            return 404, "application/problem+json", b'{"title": "Not found"}'
+        out = chrome(self.serve(routes) + "/#/overview", 1440, budget=15000)
+        self.assertIn("devkit was updated to 99.1.0. Reload to get the new page. This page changes nothing, so reloading is safe.", out["banner"])
+        self.assertEqual(out["primary"], "Reload")
+
+    @unittest.skipUnless(CHROME, NO_CHROME)
+    def test_an_update_keeps_the_open_drawer_flashes_changed_rows_and_announces_decisions(self):
+        items = [dict(i, status="blocked") if i["id"] == "T-a2" else i for i in self.data["items"]]
+        runs = json.loads(json.dumps(self.data["runs"]))
+        runs[1]["decisions"] = [{"id": "D7", "ts": NOW, "question": "Drop the old importer?", "options": ["Yes", "No"], "recommend": "No", "irreversible": "", "from_name": "Tank"}]
+        detail = {"id": "T-a1", "title": "Ship export", "scope": "acme/widget", "type": "task", "status": "doing", "meta": {"bucket": "now", "version": 2},
+                  "body": "Body", "changelog": [], "links": [], "lock": {"holder": "me@testmac (claude:abc)", "agent": "claude", "session": "abc", "expires": iso(NOW + 3600), "state": "held"},
+                  "plans": [], "sessions": [], "branches": [], "prs": [], "ci": [], "commits": [], "commits_complete": True, "run": None, "runs": [], "path": "items/acme/widget/T-a1.md"}
+        event = b'retry: 60000\n\nid: 2\nevent: snapshot\ndata: {"version": 2, "changed": ["items", "runs"]}\n\n'
+
+        def routes(path):
+            if path == "/":
+                return 200, "text/html", self.page("""await tick(12000); out.open = $("#modal").open; out.title = text($("#modal-title")); out.flash = $$(".flash").map(e => e.getAttribute("data-key"));
+                    out.said = $("#live-status").textContent; out.card = text($('[data-key="task~T-a2"]'));""")
+            if path.startswith("/api/v1/events"):
+                return 200, "text/event-stream", event
+            if path.startswith("/api/v1/dashboard"):
+                return 200, "application/json", json.dumps({"items": items, "runs": runs, "snapshot": 2, "live": True}).encode()
+            if path == "/api/v1/items/T-a1":
+                return 200, "application/json", json.dumps(detail).encode()
+            if path == "/api/v1/health":
+                return 200, "application/json", json.dumps({"ok": True, "version": self.data["version"]}).encode()
+            return 404, "application/problem+json", b'{"title": "Not found"}'
+        out = chrome(self.serve(routes) + "/#/tasks?task=T-a1", 1440, budget=20000)
+        self.assertTrue(out["open"])
+        self.assertEqual(out["title"], "Ship export")
+        self.assertEqual(out["flash"], ["task~T-a2"])                                            # only the row that changed
+        self.assertIn("Decision waiting: Drop the old importer?, asked by Backend engineer (Tank).", out["said"])
+
+    @unittest.skipUnless(CHROME, NO_CHROME)
+    def test_the_branches_tab_reads_git_now_shows_its_error_and_tries_again(self):
+        data = json.loads(json.dumps(self.data))
+        PageBehaviorTests.with_branches(data)
+        data["generated"] = int(time.time()) - 90         # the snapshot is a minute and a half old, whenever the suite reaches this test
+        asked = []
+        fresh = {"project": "acme/widget", "rows": [branch_row("feat/live", "not_backed_up", "1 commit only on this Mac", current=True, where="local only", upstream=None, unpushed=1)],
+                 "counts": {"total": 1, "not_backed_up": 1, "embargoed": 0, "waiting": 0}, "prs": "ok", "mapped": int(time.time())}
+        steps = """window.addEventListener("hashchange", () => { out.loading = text($("#branches .brst")); out.rowsWhileLoading = $$("#branches tbody tr").length; });
+            await go("#/projects/acme/widget?tab=branches"); await tick(300); out.error = text($("#branches .callout")); out.rows = $$("#branches tbody tr").length;
+            $("#branches .brretry").click(); await tick(500); out.after = $$("#branches tbody tr").map(text); out.status = text($("#branches .brst")); out.callout = !!$("#branches .callout");
+            out.focusIn = $("#branches").contains(document.activeElement);"""
+
+        def routes(path):
+            if path == "/":
+                return 200, "text/html", dashboard.page(data).replace("</body>", PROBE % steps + "</body>").encode()
+            if path.startswith("/api/v1/branches/"):
+                asked.append(path)
+                if len(asked) == 1:
+                    return 502, "application/problem+json", json.dumps({"title": "git could not read the branches", "status": 502,
+                                                                        "detail": "fatal: not a git repository (or any of the parent directories): .git"}).encode()
+                return 200, "application/json", json.dumps(fresh).encode()
+            if path.startswith("/api/v1/events"):
+                return 200, "text/event-stream", b"retry: 60000\n\n"
+            if path == "/api/v1/health":
+                return 200, "application/json", json.dumps({"ok": True, "version": data["version"]}).encode()
+            return 404, "application/problem+json", b'{"title": "Not found"}'
+        out = chrome(self.serve(routes) + "/#/overview", 1440, budget=15000)
+        self.assertEqual((out["loading"], out["rowsWhileLoading"]), ("Checking with git…", 8))  # the snapshot's rows show at once
+        self.assertEqual(out["error"], "git could not read the branches fatal: not a git repository (or any of the parent directories): .git "
+                                       "The rows below are from 1 min ago. Try again")
+        self.assertEqual(out["rows"], 8)
+        self.assertEqual(asked, ["/api/v1/branches/acme/widget"] * 2)
+        self.assertEqual(len(out["after"]), 1)                                                    # git's answer replaces the snapshot's rows
+        self.assertIn("feat/live", out["after"][0])
+        self.assertEqual((out["status"], out["callout"], out["focusIn"]), ("Checked just now", False, True))
 
 
 if __name__ == "__main__":

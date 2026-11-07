@@ -1,0 +1,9 @@
+{
+ "cwd": "/Users/dev/Development/.tmp/f0/repo",
+ "hook_event_name": "UserPromptSubmit",
+ "permission_mode": "bypassPermissions",
+ "prompt": "This is an automated hook test in a scratch repository. Do exactly these steps in order, nothing else:\n1. Bash: echo S2_ORIGINAL\n2. Bash: echo S7_ASK   (if it is refused or needs approval, note that a…",
+ "prompt_id": "e2e95d7a-40e4-4785-8ebd-942160ad22f4",
+ "session_id": "043c3a29-420b-4c79-8e10-aef6ee7d46ac",
+ "transcript_path": "/Users/dev/.claude/projects/-Users-dev-Development--tmp-f0-repo/043c3a29-420b-4c79-8e10-aef6ee7d46ac.jsonl"
+}

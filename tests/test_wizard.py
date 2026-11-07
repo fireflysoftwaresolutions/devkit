@@ -30,6 +30,13 @@ def plain(s) -> str:
     return tui.strip(s)
 
 
+def dev_args(argv) -> list:
+    """The arguments of a `dev` call after its bin/dev path, whatever the interpreter flags before it."""
+    argv = [str(a) for a in argv]
+    i = next((n for n, a in enumerate(argv) if a.endswith("/bin/dev")), None)
+    return argv[i + 1:] if i is not None else []
+
+
 class FakeTerm(tui.Terminal):
     """A terminal that reads scripted bytes and writes to a string (no termios, no TTY)."""
 
@@ -286,10 +293,10 @@ SNAPSHOT_FIRST = {
     "dev_root": "~/Development", "github_user": "ada", "handoff_repo": "ada/handoff",
     "agents": {"claude": True, "codex": True}, "claude": {"default_mode": "bypassPermissions"},
     "codex": {"mode": "full", "approval_policy": "never", "sandbox_mode": "danger-full-access"},
-    "stacks": ["java", "python", "php", "node"], "lock": False, "hosts": ["github", "gitlab"], "clouds": ["aws"],
+    "stacks": ["python", "node"], "lock": False, "hosts": ["github", "gitlab"], "clouds": ["aws"],
     "docker": {"cpu": 6, "memory": 12, "disk": 80, "autostart": False}, "gc": {"auto": True},
-    "sync": {"interval_minutes": 60}}
-SAVED = {"stacks": ["python"], "hosts": ["bitbucket"], "clouds": [], "docker": {"cpu": 4, "memory": 8},
+    "sync": {"interval_minutes": 60}, "ai": {"enabled": False, "asked": True}}
+SAVED ={"stacks": ["python"], "hosts": ["bitbucket"], "clouds": [], "docker": {"cpu": 4, "memory": 8},
          "editor": "zed", "agents": {"claude": True, "codex": False}, "lock": True}
 SNAPSHOT_RERUN = {
     "stacks": ["python"], "hosts": ["github", "bitbucket", "gitlab"], "clouds": ["aws"],
@@ -297,7 +304,7 @@ SNAPSHOT_RERUN = {
     "agents": {"claude": True, "codex": True}, "lock": True, "dev_root": "~/Development", "github_user": "ada",
     "handoff_repo": "ada/handoff", "claude": {"default_mode": "bypassPermissions"},
     "codex": {"mode": "full", "approval_policy": "never", "sandbox_mode": "danger-full-access"},
-    "gc": {"auto": True}, "sync": {"interval_minutes": 60}}
+    "gc": {"auto": True}, "sync": {"interval_minutes": 60}, "ai": {"enabled": False, "asked": True}}
 # The line prompts' output with --yes, as `dev setup` printed it before the interactive wizard existed.
 GOLDEN_YES = """\
 Good <time>, Ada. This wizard sets up devkit on this Mac. Press Enter to keep the value in [brackets]; nothing \
@@ -325,11 +332,11 @@ changes until you confirm.
      Codex autonomy → full
 
    4 Stacks (toolchains, language servers, skills)
-     ■ 1. java — Java / Spring (JDK, Maven, Gradle, jdtls)
+     □ 1. java — Java / Spring (JDK, Maven, Gradle, jdtls)
      ■ 2. python — Python (uv, pyright)
-     ■ 3. php — PHP (php, Composer, intelephense)
+     □ 3. php — PHP (php, Composer, intelephense)
      ■ 4. node — Node / TypeScript / Angular / React (pnpm, tsc, ng)
-     Stacks you develop in (comma-separated numbers) → java, python, php, node
+     Stacks you develop in (comma-separated numbers) → python, node
 
    5 Git hosts and CI/CD (CLIs, sign-in checks, `dev ci status`)
      found on this Mac: gitlab (x); aws (y)
@@ -338,6 +345,7 @@ changes until you confirm.
      □ 3. bitbucket — Bitbucket · Pipelines
      □ 4. azure-devops — Azure DevOps · Pipelines
      Where your repositories and pipelines live (comma-separated numbers) → github, gitlab
+     Open new commit messages with devkit's template (commit.template in each repository that has none)? → yes
 
    6 Cloud and infrastructure (CLIs and sign-in checks)
      ■ 1. aws — AWS
@@ -357,6 +365,7 @@ changes until you confirm.
    8 Automation
      Reclaim disk automatically (merged worktrees, idle build output, stale temp)? → yes
      Background sync interval (minutes) → 60
+     Let background jobs ask a small model (Claude Haiku or Codex's gpt-6-luna, at most 20 calls a day), for example to merge duplicate lessons written in different languages? → no
      Lock Claude Code settings with a managed-settings file (needs your admin password)? → no
 
    9 Plan
@@ -365,12 +374,12 @@ changes until you confirm.
      handoff      ada/handoff → ~/Development/.handoff
      Claude Code  bypassPermissions
      Codex        full (never / danger-full-access)
-     stacks       java, python, php, node
-     git hosts    github, gitlab
+     stacks       python, node
+     git hosts    github, gitlab · commit template on
      clouds       aws
      packages     skip
      Docker VM    6 CPU · 12 GB · 80 GB
-     automation   sync every 60 min · safe cleanup on
+     automation   sync every 60 min · safe cleanup on · background AI off
      lock         off (drift is still blocked and repaired)
      Apply this plan? → yes
 
@@ -385,21 +394,22 @@ usual. `dev agents test` runs a live check of both agents.
 """
 
 
-def line_mode(saved=None, yes=True, typed=None):
-    """Run `dev setup` through the line prompts with detection and commands stubbed: (rc, config, output, calls)."""
+def line_mode(saved=None, yes=True, typed=None, clouds=("aws",), state=None):
+    """Run `dev setup` through the line prompts with detection and commands stubbed: (rc, config, output, calls).
+    `clouds`: the cloud and infrastructure tools this Mac shows. `state`: devkit's state folder (default: a temp one)."""
+    seen = {"hosts": ["github", "gitlab"], "clouds": list(clouds), "evidence": {"gitlab": "x", "aws": "y"}}
     with tempfile.TemporaryDirectory() as d:
         cfgf = Path(d) / "config.json"
         if saved is not None:
             cfgf.write_text(json.dumps(saved))
         calls, answers = [], iter(typed or [])
-        with mock.patch.object(wizard, "CONFIG_FILE", cfgf), \
+        with mock.patch.object(wizard, "CONFIG_FILE", cfgf), mock.patch.object(setup, "STATE", state or Path(d)), \
                 mock.patch.object(wizard, "_hw", lambda: (12, 36, "26.1", "arm64")), \
                 mock.patch.object(core, "gh_user", lambda: {"login": "ada", "name": "Ada Lovelace", "id": 1}), \
                 mock.patch.object(core, "have", lambda t: t in ("gh", "brew")), \
                 mock.patch.object(providers, "status", lambda include_account=True: {
                     "claude": {"installed": True, "logged_in": True}, "codex": {"installed": True, "logged_in": False}}), \
-                mock.patch.object(toolchain, "detect", lambda: {"hosts": ["github", "gitlab"], "clouds": ["aws"],
-                                                                "evidence": {"gitlab": "x", "aws": "y"}}), \
+                mock.patch.object(toolchain, "detect", lambda: seen), \
                 mock.patch("subprocess.call", lambda argv, **kw: calls.append(list(argv)) or 0), \
                 mock.patch("builtins.input", lambda prompt="": (print(prompt, end=""), next(answers))[1]), \
                 mock.patch("sys.stdin", _Stdin(not yes)), mock.patch("sys.stdout", io.StringIO()) as out:
@@ -415,7 +425,8 @@ class LineModeTests(unittest.TestCase):
         self.assertEqual(rc, 0)
         self.assertEqual(cfg, SNAPSHOT_FIRST)
         self.assertEqual(list(cfg), list(SNAPSHOT_FIRST))  # same key order in the file
-        self.assertEqual([c[-1] for c in calls], ["install", "doctor"])
+        self.assertEqual([dev_args(c)[0] for c in calls], ["install", "doctor"])
+        self.assertEqual(dev_args(calls[0])[1:], ["--commit-template", "yes"])  # the default, applied by `dev install`
 
     def test_yes_on_a_configured_mac_keeps_the_saved_values(self):
         rc, cfg, _, _ = line_mode(saved=SAVED)
@@ -425,8 +436,11 @@ class LineModeTests(unittest.TestCase):
         self.assertEqual(line_mode()[2], GOLDEN_YES)
 
     def test_typed_answers_in_the_line_prompts(self):
-        typed = ["~/Code", "", "n", "y", "2", "1,3", "", "", "8", "", "", "y", "n", "30", "", "y"]
-        rc, cfg, out, _ = line_mode(yes=False, typed=typed)
+        typed = ["~/Code", "", "n", "y", "2", "1,3", "", "n", "", "8", "", "", "y", "n", "30", "y", "", "y"]
+        with tempfile.TemporaryDirectory() as state:
+            rc, cfg, out, calls = line_mode(yes=False, typed=typed, state=Path(state))
+            self.assertEqual(list(Path(state).iterdir()), [])  # the wizard itself writes no devkit state
+        self.assertEqual(dev_args(calls[0]), ["install", "--commit-template", "no"])  # `dev install` applies the answer
         self.assertEqual(rc, 0)
         self.assertEqual(cfg["dev_root"], "~/Code")
         self.assertEqual(cfg["agents"], {"claude": False, "codex": True})
@@ -435,6 +449,7 @@ class LineModeTests(unittest.TestCase):
         self.assertEqual(cfg["stacks"], ["java", "php"])
         self.assertEqual(cfg["docker"], {"cpu": 8, "memory": 12, "disk": 80, "autostart": True})
         self.assertEqual((cfg["gc"], cfg["sync"], cfg["lock"]), ({"auto": False}, {"interval_minutes": 30}, False))
+        self.assertEqual(cfg["ai"], {"enabled": True, "asked": True})  # asked once, and answered yes
         self.assertIn("[Y/n]", out)
 
     def test_falls_back_to_line_prompts_without_a_terminal_or_with_yes(self):
@@ -451,11 +466,33 @@ class LineModeTests(unittest.TestCase):
             self.assertEqual(lines.call_count, 3)
 
 
-def fake_survey(saved=None, stacks=None):
+TERRAFORM_SKILLS = "Add the agent skills for OpenTofu / Terraform (terraform-style-guide, terraform-test)?"
+
+
+class OptionalSkillGroupTests(unittest.TestCase):
+    # b1993f1: skills.optional groups (iac for terraform) are offered for the tools picked, never installed by default
+    def test_terraform_is_offered_its_skill_group_and_yes_adds_it_to_the_default_groups(self):
+        rc, cfg, out, _ = line_mode(clouds=("aws", "terraform"))
+        self.assertEqual(rc, 0)
+        self.assertIn(f"{TERRAFORM_SKILLS} → yes", out)
+        self.assertEqual(cfg["skills"], {"groups": core.DEFAULTS["skills"]["groups"] + ["iac"]})
+        self.assertIn("aws, terraform · agent skills: iac", out)  # the plan says it
+
+    def test_a_declined_offer_stays_declined_on_a_rerun(self):
+        saved = dict(SAVED, clouds=["terraform"], skills={"groups": ["postgres"]})
+        rc, cfg, out, _ = line_mode(saved=saved, clouds=("terraform",))
+        self.assertIn(f"{TERRAFORM_SKILLS} → no", out)
+        self.assertEqual(cfg["skills"], {"groups": ["postgres"]})
+        rc, cfg, out, _ = line_mode(saved=dict(saved, clouds=[], skills={"groups": ["postgres", "iac"]}), clouds=())
+        self.assertNotIn("agent skills for", out)  # terraform not picked: not asked, and the saved groups stay
+        self.assertEqual(cfg["skills"], {"groups": ["postgres", "iac"]})
+
+
+def fake_survey(saved=None, stacks=None, clouds=()):
     return {"cpus": 8, "ram": 16, "macos": "26.1", "arch": "arm64", "brew": True,
             "gh": {"login": "ada", "name": "\x1b[31mAda Lovelace", "id": 1},
             "providers": {"claude": {"installed": True, "logged_in": True}, "codex": {"installed": True, "logged_in": True}},
-            "config": saved, "seen": {"hosts": ["github", "gitlab"], "clouds": [], "evidence": {"gitlab": "glab"}},
+            "config": saved, "seen": {"hosts": ["github", "gitlab"], "clouds": list(clouds), "evidence": {"gitlab": "glab"}},
             "stacks_found": {"counts": stacks if stacks is not None else {"java": 2, "node": 1}, "repos": 3},
             "docker": {"colima": True, "running": True}}
 
@@ -463,7 +500,7 @@ def fake_survey(saved=None, stacks=None):
 class InteractiveTests(unittest.TestCase):
     """The interactive wizard driven in-process with scripted keys (detection and commands stubbed)."""
 
-    def run_wizard(self, keys: bytes, saved=None, stacks=None, skip=True):
+    def run_wizard(self, keys: bytes, saved=None, stacks=None, skip=True, clouds=()):
         with tempfile.TemporaryDirectory() as d:
             cfgf, state = Path(d) / "config.json", Path(d) / "state"
             if saved is not None:
@@ -477,13 +514,19 @@ class InteractiveTests(unittest.TestCase):
                 return 0
             term = FakeTerm(keys)
             with mock.patch.object(wizard, "CONFIG_FILE", cfgf), mock.patch.object(wizard, "STATE", state), \
-                    mock.patch.object(wizard, "survey", lambda: fake_survey(saved, stacks)), \
+                    mock.patch.object(setup, "STATE", state), \
+                    mock.patch.object(wizard, "survey", lambda: fake_survey(saved, stacks, clouds)), \
                     mock.patch.object(wizard, "_exec", fake_exec), \
                     mock.patch.object(wizard, "package_status", lambda groups: []), \
                     mock.patch.object(providers, "status", lambda include_account=True: fake_survey()["providers"]), \
                     mock.patch("subprocess.call", side_effect=AssertionError("no attached commands expected")):
                 rc = wizard._Wizard(term, skip_packages=skip).run()
             cfg = json.loads(cfgf.read_text()) if cfgf.exists() else None
+            # the commit template answer goes to `dev install`, which applies it; the wizard writes no state for it
+            install = next((r for r in ran if dev_args(r)[:1] == ["install"]), [])
+            self.template_answer = install[install.index("--commit-template") + 1] \
+                if "--commit-template" in install else None
+            self.assertFalse((state / "git").exists())
             return rc, cfg, term.text, ran
 
     def test_recommended_setup_accepts_what_was_detected(self):
@@ -492,19 +535,26 @@ class InteractiveTests(unittest.TestCase):
         self.assertEqual(cfg["stacks"], ["java", "node"])  # from the repositories, not every stack
         self.assertEqual(cfg["hosts"], ["github", "gitlab"])
         self.assertEqual(cfg["docker"]["cpu"], 6)
-        self.assertEqual([r[-1] for r in ran], ["install", "doctor"])
+        self.assertEqual([dev_args(r)[0] for r in ran], ["install", "doctor"])
+        self.assertEqual(self.template_answer, "yes")  # the recommended setup uses the commit template
         self.assertIn("devkit is ready.", text)
         self.assertRegex(text, r"Good (morning|afternoon|evening), Ada\.")
         self.assertNotIn("[31m", text)  # the escape sequence in the GitHub name was removed
+
+    def test_a_first_run_with_no_repositories_asks_the_stacks_with_python_and_node_preselected(self):
+        rc, cfg, text, ran = self.run_wizard(ENTER + ENTER + ENTER, stacks={})
+        self.assertEqual(rc, 0)
+        self.assertIn("Stacks", text)  # asked even on the recommended path
+        self.assertEqual(cfg["stacks"], ["python", "node"])  # Return keeps the light preselection
 
     def test_customize_then_change_a_section_from_the_review(self):
         keys = (DOWN + ENTER                      # Customize
                 + ENTER + b"\x15team/handoff" + ENTER  # workspace
                 + DOWN + SPACE + ENTER + ENTER    # agents: Codex off, Claude Code mode kept
                 + b"a" + ENTER                    # stacks: all
-                + ENTER + ENTER                   # hosts, clouds
+                + ENTER + b"n" + ENTER            # hosts, no commit template, clouds
                 + b"99" + ENTER + BS + BS + b"4" + ENTER + ENTER + ENTER + b"n"  # docker, with a fixed typo
-                + b"n" + b"30" + ENTER + ENTER    # automation
+                + b"n" + b"30" + ENTER + ENTER + ENTER  # automation: background AI stays off
                 + DOWN + ENTER + b"6" + ENTER     # review → change a section → Docker
                 + ENTER + ENTER + ENTER + b"y"    # … start at login after all
                 + ENTER)                          # apply
@@ -517,6 +567,8 @@ class InteractiveTests(unittest.TestCase):
         self.assertEqual((cfg["gc"], cfg["sync"], cfg["lock"]), ({"auto": False}, {"interval_minutes": 30}, False))
         self.assertIn("Enter a whole number from 1 to 8.", text)
         self.assertIn("Step 6 of 8 · Docker", text)
+        self.assertEqual(self.template_answer, "no")
+        self.assertIn("commit template off", text)  # the review says it
 
     def test_esc_on_the_first_question_returns_to_the_welcome(self):
         rc, cfg, text, _ = self.run_wizard(DOWN + ENTER + ESC + UP + ENTER + ENTER)  # focus comes back on Customize
@@ -548,11 +600,25 @@ class InteractiveTests(unittest.TestCase):
         self.assertIn("No changes from your saved setup", text)
         self.assertEqual(rc, 1)
 
+    def test_terraform_found_gets_its_skill_group_offered_in_the_clouds_section(self):
+        # Recommended: what was found, the offer accepted, and the review says so
+        rc, cfg, text, _ = self.run_wizard(ENTER + ENTER, clouds=("terraform",))
+        self.assertEqual(cfg["skills"]["groups"], core.DEFAULTS["skills"]["groups"] + ["iac"])
+        self.assertIn("OpenTofu / Terraform · agent skills: iac", text)
+        # Customize: the question follows the clouds, and No keeps the default groups
+        keys = (DOWN + ENTER + ENTER * 2 + ENTER * 3 + ENTER + ENTER * 2 + ENTER  # to the clouds, terraform kept
+                + b"n" + ENTER * 3 + b"n" + b"n" + ENTER + ENTER + b"n"   # no skills; docker; automation
+                + ENTER)                                                  # apply
+        rc, cfg, text, _ = self.run_wizard(keys, clouds=("terraform",))
+        self.assertIn(TERRAFORM_SKILLS, text)
+        self.assertEqual(rc, 0)
+        self.assertEqual(cfg["skills"]["groups"], core.DEFAULTS["skills"]["groups"])
+
 
 class DefaultsAndDetectionTests(unittest.TestCase):
     def test_stack_defaults(self):
         self.assertEqual(wizard.tui_defaults(fake_survey())["stacks"], ["java", "node"])
-        self.assertEqual(wizard.tui_defaults(fake_survey(stacks={}))["stacks"], list(wizard.STACKS))
+        self.assertEqual(wizard.tui_defaults(fake_survey(stacks={}))["stacks"], ["python", "node"])  # light first run
         self.assertEqual(wizard.tui_defaults(fake_survey({"stacks": ["php"]}))["stacks"], ["php"])
         self.assertEqual(wizard.tui_defaults(fake_survey({"stacks": []}))["stacks"], [])
 
@@ -788,6 +854,8 @@ class PseudoTerminalTests(unittest.TestCase):
         t.send(b"a" + ENTER)
         t.expect("Where your code and pipelines live")
         t.send(ENTER)
+        t.expect("Open new commit messages with devkit's template?")
+        t.send(ENTER)
         t.expect("Clouds and infrastructure tools")
         t.send(ENTER)
         t.expect("VM CPUs")
@@ -808,6 +876,8 @@ class PseudoTerminalTests(unittest.TestCase):
         t.send(b"n")
         t.expect("Background sync interval (minutes)")
         t.send(b"30" + ENTER)
+        t.expect("Let background jobs ask a small model")
+        t.send(ENTER)
         t.expect("Lock Claude Code settings?")
         t.send(ENTER)
         t.expect("Apply this plan?")
@@ -820,9 +890,10 @@ class PseudoTerminalTests(unittest.TestCase):
             "codex": {"mode": "full", "approval_policy": "never", "sandbox_mode": "danger-full-access"},
             "stacks": ["java", "python", "php", "node"], "lock": False, "hosts": ["github"], "clouds": [],
             "docker": {"cpu": 4, "memory": 6, "disk": 80, "autostart": True}, "gc": {"auto": False},
-            "sync": {"interval_minutes": 30}})
-        ran = [c["argv"][0] if c["argv"][0] in ("brew", "npm") else c["argv"][-1] for c in t.calls()]
+            "sync": {"interval_minutes": 30}, "ai": {"enabled": False, "asked": True}})
+        ran = [c["argv"][0] if c["argv"][0] in ("brew", "npm") else dev_args(c["argv"])[0] for c in t.calls()]
         self.assertEqual(ran, ["brew", "npm", "install", "doctor"])
+        self.assertIn(["install", "--commit-template", "yes"], [dev_args(c["argv"]) for c in t.calls()])
         log = self.home / ".local" / "state" / "devkit" / "logs" / "setup.log"
         self.assertEqual(log.stat().st_mode & 0o777, 0o600)
         raw = t.out.decode("utf-8", "replace")
@@ -850,7 +921,7 @@ class PseudoTerminalTests(unittest.TestCase):
         raw = t.out.decode("utf-8", "replace")
         self.assertNotIn("\x1b[?1049h", raw)
         self.assertIn("1 This machine", raw)
-        self.assertEqual(t.config()["stacks"], ["java", "python", "php", "node"])  # unchanged line-mode default
+        self.assertEqual(t.config()["stacks"], ["python", "node"])  # the light first-run default
 
 
 if __name__ == "__main__":

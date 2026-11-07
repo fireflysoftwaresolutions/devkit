@@ -27,8 +27,8 @@ from .core import DEV, STATE
 MARKER = "[Firefly> DevKit]"
 # The marker, optionally wrapped in ** or backticks. The legacy `DevKit ·` (before 26.11.0) is still accepted, so
 # sessions that loaded the older instructions are not reported as misses.
-_MARK = r"(?:\[\s*firefly\s*>\s*devkit(?:\s*·\s*[^\]\n]{1,40})?\s*\]|devkit\b)"  # crew: [Firefly> DevKit · Neo]
-CREW_RE = re.compile(r"^[*`_\s]*\[\s*firefly\s*>\s*devkit\s*·\s*([^\]\n]{1,40}?)\s*\]", re.I)
+_MARK = r"(?:\[\s*firefly\s*>\s*devkit(?:\s*·\s*[^\]\n]{1,80})?\s*\]|devkit\b)"  # crew: [Firefly> DevKit · Neo]
+CREW_RE = re.compile(r"^[*`_\s]*\[\s*firefly\s*>\s*devkit\s*·\s*([^\]\n]{1,80}?)\s*\]", re.I)
 MARKER_RE = re.compile(r"^[*`_\s]*" + _MARK, re.I)
 LOG = STATE / "canary.jsonl"
 
@@ -89,12 +89,82 @@ def has_marker(text: str) -> bool:
     return bool(MARKER_RE.match(first.strip()))
 
 
+# The role check (the developer, M346; lesson L-fy2lfvacp64): a final message names a crew member as
+# `<role> (<Name>)`, the role in any language, so the Matrix names never stand alone. It reads the structure only: the
+# roster's name inside parentheses right after other words. Code blocks, code spans and links are not prose.
+_NOT_PROSE = (re.compile(r"(?ms)^[ \t]*(`{3,}|~{3,}).*?(?:^[ \t]*\1[ \t]*$|\Z)"),  # fenced code blocks
+              re.compile(r"(`+)[^\n]*?\1"),  # code spans, commands among them
+              re.compile(r"\b[a-z][a-z0-9+.-]*://\S+"))  # links
+_ROLE_BEFORE = re.compile(r"[\w)\]*]\s*[(（]$")  # "Backend engineer (", "バックエンドエンジニア（"
+_ROLE_AFTER = re.compile(r"[)）]")
+
+
+def _prose(text: str) -> str:
+    for pat in _NOT_PROSE:
+        text = pat.sub(" ", text)
+    return text
+
+
+def _name_patterns(roster=None) -> list:
+    """[(compiled pattern, member name)] for every crew member, the main one too (the developer's decision: the
+    tech lead is "Tech lead (Morpheus)" or the role alone, and reports end with "Needs from the tech lead:"): the
+    name and each alias as written, a leading "The " optional or lowercase. A name inside a path, a file name or a
+    longer word is not one."""
+    from . import crew
+    out = []
+    for m in crew.members(roster):
+        for n in [m.get("name")] + list(crew.aliases(m)):
+            if not isinstance(n, str) or not n.strip():
+                continue
+            n = n.strip()
+            core_ = n[4:] if n.startswith("The ") else n
+            pat = r"\s+".join(re.escape(w) for w in core_.split())
+            if core_ != n:
+                pat = r"(?:[Tt]he\s+)?" + pat
+            out.append((re.compile(r"(?<![\w/\\.@-])" + pat + r"(?![\w/\\@-]|\.\w)"), m["name"]))
+    return out
+
+
+def bare_names(text: str, roster=None) -> list:
+    """The crew members the prose of a final message names outside `<role> (<Name>)` -> their roster names, in the
+    order they first appear. The status block's header and Crew line are prose too. [] when the roster is
+    unreadable (fails open)."""
+    try:
+        from . import crew
+        pats = _name_patterns(roster)
+        forms = [crew.who(m) for m in crew.members(roster) if m.get("title")]
+    except Exception:
+        return []
+    prose = _prose(text or "")
+    for form in forms:  # a title may hold a name the member answers to: "Lookup scout (Sparks)", alias scout
+        prose = prose.replace(form, " " * len(form))
+    found = []
+    for pat, name in pats:
+        for hit in pat.finditer(prose):
+            if _ROLE_BEFORE.search(prose[:hit.start()]) and _ROLE_AFTER.match(prose, hit.end()):
+                continue
+            found.append((hit.start(), name))
+    return list(dict.fromkeys(name for _, name in sorted(found)))
+
+
+def roles_reason(names: list, roster=None) -> str:
+    """What to fix, with each name's role form from the roster ("Backend engineer (Tank)")."""
+    from . import crew
+    forms = []
+    for n in names:
+        m = crew.member(n, roster)
+        forms.append(crew.who(m) if m else f"<role> ({n})")
+    return (f"names crew members without their role: {', '.join(names)}. Write each one as <role> (<Name>), the role "
+            f"in the message's language, for example {', '.join(forms)}, or the role alone; the status block's "
+            f"header and Crew line too. Names in code spans and commands are fine.")
+
+
 STATUS_RE = re.compile(r"^[*`_\s]*" + _MARK + r"[*`\s]*[·:—-]?\s*(.*)$", re.I)
 
 
 SEP = " ❯ "
 GLYPHS = "✓⚠✗–"
-BULLET_RE = re.compile(r"^\s*[-*•]\s+\**\s*(done|check|progress|next)\s*\**\s*:\s*\**\s*(.*)$", re.I)
+BULLET_RE = re.compile(r"^\s*[-*•]\s+\**\s*(done|check|progress|crew|you|next)\s*\**\s*:\s*\**\s*(.*)$", re.I)
 
 
 def _clean(s: str) -> str:
@@ -102,10 +172,11 @@ def _clean(s: str) -> str:
 
 
 def parse_status(text: str):
-    """The status block -> {project, branch, task, done, check, progress, next}, or None without the marker.
+    """The status block -> {project, branch, task, done, check, progress, crew, you, next}, or None without the
+    marker. Progress, Crew and You are optional.
 
     **[Firefly> DevKit]** api · `main` · Invoice export
-    - **Done:** …   - **Check:** ✓ …   - **Progress:** …   - **Next:** …"""
+    - **Done:** …   - **Check:** ✓ …   - **Progress:** …   - **Crew:** …   - **You:** …   - **Next:** …"""
     lines = [ln for ln in (text or "").splitlines() if ln.strip()]
     if not lines:
         return None
@@ -113,9 +184,9 @@ def parse_status(text: str):
     if not m:
         return None
     head = m.group(1).strip()
-    out = {"project": "", "branch": "", "task": "", "done": "", "check": "", "progress": "", "next": "",
-           "legacy": False}
-    for ln in lines[1:7]:
+    out = {"project": "", "branch": "", "task": "", "done": "", "check": "", "progress": "", "crew": "", "you": "",
+           "next": "", "legacy": False}
+    for ln in lines[1:9]:
         b = BULLET_RE.match(ln)
         if not b:
             break
@@ -142,6 +213,10 @@ def status_text(text: str) -> str:
     parts = [f"{p['project'] or '-'} · {p['branch'] or '-'}", p["task"] or "-", p["done"], p["check"]]
     if p["progress"]:
         parts.append("▸ " + p["progress"])
+    if p.get("crew"):
+        parts.append("crew: " + p["crew"])
+    if p.get("you"):
+        parts.append("you → " + p["you"])
     if p["next"]:
         parts.append("next → " + p["next"])
     return SEP.join(x for x in parts if x)
@@ -171,7 +246,7 @@ def format_issues(text: str) -> list:
             issues.append(f"no **{k.capitalize()}:** bullet")
     if p.get("check") and p["check"][:1] not in GLYPHS:
         issues.append("Check does not start with ✓, ⚠, ✗ or –")
-    if any(len(p.get(k) or "") > 160 for k in ("done", "check", "next")):
+    if any(len(p.get(k) or "") > 160 for k in ("done", "check", "crew", "you", "next")):
         issues.append("a bullet is longer than one plain sentence")
     if re.search(r"\bT-[0-9a-z]{8,}\b", " ".join(p.get(k) or "" for k in ("task", "done", "next"))):
         issues.append("internal task IDs in the block (use the task's title)")
@@ -261,13 +336,59 @@ def instructions_loaded(agent: str, sid: str):
     return any(want in ln for ln in f.read_text().splitlines())
 
 
-def save_status(pid, agent: str, line: str, branch=None):
+STATUS_MAX = 8000  # characters of a saved status block: a real block is far shorter; this only bounds a runaway one
+
+
+def bounded(line: str, limit: int = STATUS_MAX) -> str:
+    """The whole line when it fits; else cut at the last word that fits, with "…" (never inside a word)."""
+    line = line or ""
+    if len(line) <= limit:
+        return line
+    cut = line[:limit - 2]
+    cut = cut[:cut.rfind(" ")] if " " in cut else cut
+    return cut.rstrip() + " …"
+
+
+def save_status(pid, agent: str, line: str, branch=None, path=None):
+    """The latest status block of a project, whole (dev status shows every bullet). `path` is the checkout the
+    session worked in, so dev status can say when an update came from a worktree or a copy."""
     if not pid or not line:
         return
     d = STATE / "status"
     d.mkdir(parents=True, exist_ok=True)
-    (d / (pid.replace("/", "__") + ".json")).write_text(json.dumps(
-        {"ts": round(time.time()), "agent": agent, "line": line[:700], "branch": branch}))
+    rec = {"ts": round(time.time()), "agent": agent, "line": bounded(line), "branch": branch}
+    if path:
+        rec["path"] = str(path)
+    (d / (pid.replace("/", "__") + ".json")).write_text(json.dumps(rec))
+
+
+def parse_line(line: str) -> dict:
+    """A saved status line -> {project, branch, task, done, check, progress, crew, you, next}; {} when it is not in
+    the status-block form (the older one-line forms)."""
+    segs = segments(line or "")
+    if not (segs and " · " in segs[0] and len(segs) >= 3):
+        return {}
+    where, task, rest = segs[0], segs[1], segs[2:]
+    project, _, branch = where.partition(" · ")
+    out = {"project": project.strip(), "branch": branch.strip(), "task": "" if task == "-" else task, "done": "",
+           "check": "", "progress": "", "crew": "", "you": "", "next": ""}
+    done = []
+    for x in rest:
+        low = x.lower()
+        if low.startswith("next →"):
+            out["next"] = x[len("next →"):].strip()
+        elif low.startswith("you →"):
+            out["you"] = x.split("→", 1)[1].strip()
+        elif low.startswith("crew:"):
+            out["crew"] = x[len("crew:"):].strip()
+        elif x.startswith("▸") and not out["progress"]:
+            out["progress"] = x[1:].strip()
+        elif x[:1] in GLYPHS and not out["check"]:
+            out["check"] = x
+        else:
+            done.append(x)
+    out["done"] = " ".join(done)
+    return out
 
 
 def miss_message(agent: str, sid: str) -> str:
@@ -337,6 +458,32 @@ def by_member(days: int = 7) -> dict:
             ok, n = out.get(r.get("member") or "subagent", (0, 0))
             out[r.get("member") or "subagent"] = (ok + bool(r.get("ok")), n + 1)
     return out
+
+
+def stop_blocks(days: int = 7) -> dict:
+    """The Stop hook's blocks and the reminders that made one unnecessary (threaded turn endings, R4) ->
+    {"blocked": {(day, rule): n}, "prevented": {(day, rule): n}}, from the audit trail. The day is the developer's
+    local one, as in the deviations list (the record's `time` is UTC)."""
+    from . import audit
+    out = {"blocked": {}, "prevented": {}}
+    for action, key in (("stop.block", "blocked"), ("stop.prevented", "prevented")):
+        for r in audit.records(days, action):
+            rule = (r.get("evidence") or {}).get("rule") or str(r.get("detail") or "?").split(" · ")[0]
+            k = (time.strftime("%Y-%m-%d", time.localtime(r.get("ts") or 0)), rule)
+            out[key][k] = out[key].get(k, 0) + 1
+    return out
+
+
+def stop_block_lines(days: int = 7) -> list:
+    """`dev canary`'s Stop hook section: the turns sent back per day and rule, and the reminders that prevented one."""
+    st = stop_blocks(days)
+    out = []
+    for key, head in (("blocked", "sent back"), ("prevented", "prevented by a reminder")):
+        by_day = {}
+        for (day, rule), n in sorted(st[key].items()):
+            by_day.setdefault(day, []).append(f"{rule} {n}")
+        out += [f"  {head:<24} {day}  " + " · ".join(parts) for day, parts in sorted(by_day.items())]
+    return out or ["  none: no turn was sent back by the Stop hook"]
 
 
 def summary(days: int = 7) -> dict:

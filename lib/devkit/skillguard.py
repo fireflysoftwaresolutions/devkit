@@ -2,10 +2,13 @@
 # SPDX-License-Identifier: Apache-2.0
 """Skill enforcement: the right skills are loaded for the work being done (config/skill-rules.json).
 
-1. Prompt   UserPromptSubmit names the skills a request needs (rules matching the prompt) that are not loaded yet.
-2. Brief    PreToolUse on Claude's Agent/Task tool appends the required skills to a subagent's brief (updatedInput).
+1. Catalog  the session's catalog (`crew.catalog`) lists the skills by kind of work; the model picks them, whatever
+            language the developer writes in. Rules never match the developer's words (crew gap review, C13).
+2. Brief    PreToolUse on Claude's Agent/Task tool appends the required skills to a subagent's brief (updatedInput):
+            those of the brief's declared kind of work, else of its member's Responsible one.
 3. Finish   Stop refuses to end a turn that changed files matching a rule while the rule's skills were never
             loaded in the session (once per skill per session), with the reason and the files.
+Rules also answer for a kind of work (`rules_for_activity`) and for a command the agent runs (`rules_for_command`).
 
 Loaded skills are read from the session transcript: Claude's Skill tool calls and reads of SKILL.md files; Codex
 shell commands that read a skill's SKILL.md. Everything fails open.
@@ -56,6 +59,25 @@ def installed(agent: str) -> set:
     return out
 
 
+def skill_path(name: str, agent: str = "claude"):
+    """The SKILL.md of a skill on this Mac (devkit's own, personal or linked skills, then plugin caches, newest
+    version first), or None. `superpowers:writing-plans` and `writing-plans` both work."""
+    short_ = short(name)
+    own = core.DEVKIT_HOME / "plugin" / "skills" / short_ / "SKILL.md"
+    if own.exists() and (":" not in name or name.split(":")[0] == "devkit"):
+        return own
+    roots = [core.CLAUDE_HOME / "skills"] if agent == "claude" else [core.HOME / ".agents" / "skills", core.CODEX_HOME / "skills"]
+    for r in roots:
+        f = r / short_ / "SKILL.md"
+        if f.exists():
+            return f
+    cache = core.CLAUDE_HOME / "plugins" / "cache" if agent == "claude" else core.CODEX_HOME / "plugins" / "cache"
+    plugin = name.split(":")[0] if ":" in name else "*"
+    hits = sorted(cache.glob(f"*/{plugin}/*/skills/{short_}/SKILL.md"), key=lambda p: p.stat().st_mtime, reverse=True) \
+        if cache.exists() else []
+    return hits[0] if hits else (own if own.exists() else None)
+
+
 def _match_path(path: str, pattern: str) -> bool:
     p = path.replace("\\", "/")
     if "/" in pattern:
@@ -92,12 +114,39 @@ def _read_matches(p, rx) -> bool:
         return True  # deleted or unreadable: judge by the path
 
 
-def rules_for_text(text: str) -> list:
-    out = []
-    for r in rules():
-        if r.get("prompt") and re.search(r["prompt"], text or "", re.I):
-            out.append(r)
-    return out
+def rules_for_activity(activity_id: str) -> list:
+    """The rules for a declared kind of work (an id from the crew's RACI)."""
+    return [r for r in rules() if activity_id and activity_id in (r.get("activities") or [])]
+
+
+def rules_for_command(command: str) -> list:
+    """The rules whose command words a shell command runs ("gh workflow run ci.yml" → workflows); text inside quotes
+    is not a command."""
+    from .lessons import runs
+    return [r for r in rules() if any(runs(command, c) for c in r.get("commands") or [])]
+
+
+DECLARED = re.compile(r"^Kind of work: .*\(`([a-z0-9-]+)`\)\s*$", re.M)  # the line `dev crew brief` writes
+OWNED = re.compile(r"^You own only these files: (.+?)\.(?: |$)", re.M)  # up to the sentence end
+
+
+def brief_activity(brief: str, description: str = ""):
+    """The kind of work a subagent's brief is for: the one it declares, else the Responsible one of the crew member
+    its description names ("Tank: the API"). None for a helper that is no crew member."""
+    from . import crew, raci
+    m = DECLARED.search(brief or "")
+    if m and raci.activity(m.group(1)):
+        return raci.activity(m.group(1))
+    who = crew._for_label((description or "").split(":")[0].strip()) if description else None
+    if not who or who.get("main"):
+        return None
+    return raci.anchor("", member=who["id"], files=owned_files(brief))[0]
+
+
+def owned_files(brief: str) -> list:
+    """The file scope a brief gives its member (the line `dev crew brief` writes)."""
+    m = OWNED.search(brief or "")
+    return re.findall(r"`([^`]+)`", m.group(1)) if m else []
 
 
 def required(rule: dict, agent: str) -> list:
@@ -157,24 +206,9 @@ def scan(agent: str, transcript: str, offset: int = 0):
 
 # --------------------------------------------------------------------------- hook entry points
 
-def on_prompt(agent: str, prompt: str, sess: dict) -> str:
-    if not enabled():
-        return ""
-    have = installed(agent)
-    loaded = set(sess.get("skills_loaded") or [])
-    lines = []
-    for r in rules_for_text(prompt):
-        need = [s for s in required(r, agent) if s not in loaded and s in have]
-        if need:
-            lines.append(f"- {', '.join(need)} — {r['why']}")
-    if not lines:
-        return ""
-    return ("devkit · skills this request needs (load each " + how_to_load(agent) + " before you start, and "
-            "follow it; if a subagent does the work, its brief must name them):\n" + "\n".join(dict.fromkeys(lines)))
-
-
-def on_agent_brief(agent: str, tool_input: dict):
-    """Claude Agent/Task: the brief gets the skills its work requires. -> updated tool input, or None."""
+def on_agent_brief(agent: str, tool_input: dict, project: str = ""):
+    """Claude Agent/Task: the brief gets the skills its work requires and the known pitfalls (lessons) for its task.
+    -> updated tool input, or None."""
     if not enabled() or agent != "claude":
         return None
     brief = tool_input.get("prompt") or ""
@@ -182,10 +216,18 @@ def on_agent_brief(agent: str, tool_input: dict):
         return None
     have = installed("claude")
     need = []
-    for r in rules_for_text(brief + " " + (tool_input.get("description") or "")):
-        for s in required(r, "claude"):
-            if s in have and not re.search(rf"\b{re.escape(s)}\b", brief, re.I):
-                need.append((s, r["why"]))
+    try:  # the brief's kind of work: declared, or its member's (the crew's RACI), never its words
+        from . import raci
+        act = brief_activity(brief, tool_input.get("description") or "")
+    except Exception:
+        act = None
+    if act:
+        cands = [(short(sk), f"what devkit knows about {raci._lower(act['name'])}")
+                 for sk in (act.get("knowledge") or {}).get("skills") or []]
+        cands += [(s, r["why"]) for r in rules_for_activity(act["id"]) for s in required(r, "claude")]
+        for s, why in cands:
+            if s in have and not re.search(rf"\b{re.escape(s)}\b", brief, re.I) and s not in [x for x, _ in need]:
+                need.append((s, why))
     extra = ""
     if need:
         seen = dict.fromkeys(need)
@@ -193,12 +235,28 @@ def on_agent_brief(agent: str, tool_input: dict):
                 "it (if the Skill tool is not available, read its SKILL.md under ~/.claude):\n" + \
                 "\n".join(f"- `{s}` — {why}" for s, why in seen) + \
                 "\nSay in your report which ones you loaded and how you applied them."
+    if project and "devkit · known pitfalls" not in brief and "## Known pitfalls" not in brief:
+        try:
+            from . import lessons
+            picked = lessons.for_task(project, activity=(act or {}).get("id"), files=owned_files(brief))
+        except Exception:
+            picked = []
+        if picked:
+            extra += ("\n\n## devkit · known pitfalls\nLessons from earlier mistakes in this work; follow their "
+                      "prevention. If one happens again, run `dev lesson recur <id> --evidence \"…\"`; a new mistake "
+                      "that could repeat gets `dev lesson add \"…\" --cause \"…\" --prevent \"…\"`.\n"
+                      + "\n".join(lessons.pitfall_lines(picked)))
     if "Firefly> DevKit" not in brief:  # every crew member reports the same way (the SubagentStop hook checks it)
-        name = (tool_input.get("description") or "").split(":")[0].strip() or "Agent"
+        name = (tool_input.get("description") or "").split(":")[0].strip()[:30] or "Agent"
+        try:  # the member's role first, as the developer reads every member ("Frontend engineer (Trinity)")
+            from . import crew
+            name = crew.who(name)
+        except Exception:
+            pass
         extra += (f"\n\n## devkit · your report\nStart your final report with your status block: **[Firefly> DevKit · "
-                  f"{name[:30]}]** <project> · `<branch>` · <task>, then - **Done:**, - **Check:** (✓/⚠/✗ + "
+                  f"{name}]** <project> · `<branch>` · <task>, then - **Done:**, - **Check:** (✓/⚠/✗ + "
                   f"evidence) and - **Next:**. Record progress with `dev progress step \"…\"` (it goes to your own "
-                  f"lane) and ask Morpheus with `dev crew ask \"…\"` when you need a decision.")
+                  f"lane) and ask the tech lead with `dev crew ask \"…\"` when you need a decision.")
     if not extra:
         return None
     return {**tool_input, "prompt": brief + extra}

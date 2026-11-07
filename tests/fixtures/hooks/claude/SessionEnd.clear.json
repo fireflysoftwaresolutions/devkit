@@ -1,0 +1,8 @@
+{
+ "cwd": "/Users/dev/Development/.tmp/f10/repo",
+ "hook_event_name": "SessionEnd",
+ "prompt_id": "ff0256bd-8712-4582-9920-2065b64ef06c",
+ "reason": "clear",
+ "session_id": "8f6d96ec-ae34-4d6f-9063-b0e8e1b00a57",
+ "transcript_path": "/Users/dev/.claude/projects/-Users-dev-Development--tmp-f10-repo/8f6d96ec-ae34-4d6f-9063-b0e8e1b00a57.jsonl"
+}

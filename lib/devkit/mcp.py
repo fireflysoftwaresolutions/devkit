@@ -5,8 +5,10 @@
 A stdlib MCP server on stdio: JSON-RPC 2.0, one message per line. Every tool runs a `dev` command as a subprocess
 (an argument list, never a shell) with a timeout, NO_COLOR=1 and DEVKIT_AGENT=claude-desktop, and returns its output
 as compact text, plus structuredContent when the command printed JSON. The reads are the commands a developer runs
-in a terminal; the two writes (devkit_task_add, devkit_task_update) run `dev task`, so the guard and the audit trail
-apply exactly as they do there.
+in a terminal. The two writes (devkit_task_add, devkit_task_update) run `dev task` as this server's own subprocess,
+so the audit trail records them but the guard does not see them: the guard is a hook on the agent's own tool calls.
+Text injected through another connector can drive these tools, which is why both say to act only when the developer
+asks. They never count as the developer's evidence, and no tool runs progress, crew, push, pr, release or config.
 
 The Claude Desktop extension (desktop/, built with `dev desktop pack`) starts desktop/server/launcher.py, which finds
 this checkout and execs `dev mcp`. Updating devkit therefore updates the tools without reinstalling the extension.
@@ -45,8 +47,18 @@ INSTRUCTIONS = (
     "**[Firefly> DevKit]** <project> · `<branch>` · <the task, in a few plain words>\n"
     "- **Done:** <what was done or found, one sentence>\n"
     "- **Check:** <✓ verified | ⚠ partly or not verified | ✗ failed | – nothing to verify> <the evidence>\n"
+    "- **Crew:** <who in the crew worked on what> (only when crew members worked)\n"
+    "- **You:** <what only the developer can do or decide now> (only when there is something)\n"
     "- **Next:** <the next step, and who takes it>\n"
-    "Use `-` for a part that does not apply. Each bullet is one plain sentence of about 100 characters at most."
+    "Use `-` for a part that does not apply. Each bullet is one plain sentence of about 100 characters at most.\n\n"
+    "In development work the main session is Morpheus, the tech lead: it routes each kind of work to the crew member "
+    "the RACI makes responsible (devkit_crew lists them and who approves what), and the crew reports through devkit "
+    "(progress steps, crew questions, status blocks). In Claude Desktop, development happens in the Code tab (Claude "
+    "Code, with devkit's guard, hooks and crew); here in chat or Cowork, report and plan from devkit's data, and when "
+    "the developer asks for a code change, tell them to open the project in the Code tab. devkit_rules returns the "
+    "complete rules, or one section, whenever you need them.\n\n"
+    "After a conversation summary or a resume, call devkit_resume before you report or plan development work: devkit's "
+    "record of the session wins over the summary."
 )
 
 # --------------------------------------------------------------------------- tool definitions
@@ -57,6 +69,7 @@ _HANDLERS = {}  # name -> (argv builder, timeout, json output?, digest, exit 1 i
 READ = {"readOnlyHint": True, "destructiveHint": False, "idempotentHint": True, "openWorldHint": False}
 READ_REMOTE = dict(READ, openWorldHint=True)
 WRITE = {"readOnlyHint": False, "destructiveHint": False, "idempotentHint": False, "openWorldHint": True}
+CHANGE = dict(WRITE, destructiveHint=True)  # changes or ends what exists: another task's state and its lock
 
 PROJECT = {"type": "string", "minLength": 1, "maxLength": 200,
            "description": "Project id as devkit_overview lists it, for example `acme/billing` (a unique part of the "
@@ -102,6 +115,15 @@ def _iso(ts) -> str:
 def _short(text, n=240) -> str:
     text = " ".join(str(text or "").split())
     return text if len(text) <= n else text[:n - 1] + "…"
+
+
+def _digest_crew(d, a):
+    """The crew for a reply: who each member is (role first) and the RACI. The agent-facing procedure, commands and
+    definition of done stay out (they are in each member's brief)."""
+    if not isinstance(d, dict):
+        return d
+    keep = ("id", "title", "name", "role", "main", "summary", "goal", "use_when", "not_for", "tools", "tier", "spawn")
+    return dict(d, members=[{k: m[k] for k in keep if k in m} for m in d.get("members") or []])
 
 
 def _digest_overview(d, a):
@@ -151,12 +173,14 @@ def _digest_audit(records, a):
     for r in records:
         k = str(r.get("action", "")).split(".")[0]
         counts[k] = counts.get(k, 0) + 1
-    shown = records[-limit:]
+    shown, out = records[-limit:], []
+    for r in shown:
+        who = r.get("actor") or {}  # schema v2 (docs/audit.md): who acted is under `actor`
+        out.append({"time": _iso(r.get("ts")), "who": f"{who.get('user')}@{who.get('host')}", "agent": who.get("agent"),
+                    "action": r.get("action"), "target": _short(r.get("target"), 200), "outcome": r.get("outcome"),
+                    "detail": _short(r.get("detail"), 200)})
     return {"total": len(records), "shown": len(shown),
-            "by_action": dict(sorted(counts.items(), key=lambda kv: -kv[1])[:15]),
-            "records": [{"time": _iso(r.get("ts")), "who": f"{r.get('user')}@{r.get('host')}", "agent": r.get("agent"),
-                         "action": r.get("action"), "target": _short(r.get("target"), 200),
-                         "outcome": r.get("outcome"), "detail": _short(r.get("detail"), 200)} for r in shown]}
+            "by_action": dict(sorted(counts.items(), key=lambda kv: -kv[1])[:15]), "records": out}
 
 
 _tool("devkit_overview", "Portfolio overview",
@@ -263,7 +287,26 @@ _tool("devkit_crew", "Crew",
       "own), the plan steps assigned to each member, who is ready to launch, queued or waiting and why, open crew "
       "messages, the mode (guided: the developer decides; auto: the crew goes on and records) with its approvals, "
       "and the decisions waiting for the developer.",
-      {}, lambda a: ["crew", "--json", "--latest"], READ, json_out=True)
+      {}, lambda a: ["crew", "--json", "--latest"], READ, json_out=True, digest=_digest_crew)
+
+_tool("devkit_resume", "Resume",
+      "What devkit kept of a project's latest agent session (open run or requests, last 12 hours), so you can pick it "
+      "up after a summary, a resume or a new chat: the run and its current step, the crew working now, the "
+      "decisions and messages waiting, the last status block and git. devkit's record wins over a summary. The "
+      "developer's request text is shown, cut to 200 characters, only when this app is the session's own provider; "
+      "otherwise their count and times.",
+      {"project": PROJECT},
+      lambda a: ["session", "brief", "--latest", "--for-chat"]
+      + ([f"--project={a['project']}"] if a.get("project") else [])
+      + ([f"--provider={a['_client']}"] if a.get("_client") else []), READ)
+
+_tool("devkit_rules", "devkit rules",
+      "devkit's global rules for agents, exactly as Claude Code and Codex get them: the status block, the workspace, "
+      "how to work, Morpheus and the crew's RACI, Git, delivery, the handoff and the guard. Give `section` (a number "
+      "from 0 to 12, or words from a title such as \"status block\" or \"crew\") for one part.",
+      {"section": {"type": "string", "minLength": 1, "maxLength": 60,
+                   "description": "Optional: one section by number (0-12) or words from its title."}},
+      lambda a: ["agents", "rules"] + (["--section", a["section"]] if a.get("section") else []), READ)
 
 _tool("devkit_doctor", "Doctor",
       "Checks the whole devkit setup on this Mac (toolchain, GitHub sign-in and git identity, workspace and handoff "
@@ -314,7 +357,7 @@ _tool("devkit_task_update", "Update task",
                "description": "The reason, recorded in the item's changelog (required to block)."},
        "project": PROJECT, "initiative": INITIATIVE},
       lambda a: ["task", a["action"]] + _scope(a) + ([f"--why={a['why']}"] if a.get("why") else []) + ["--", a["id"]],
-      WRITE, required=("id", "action"))
+      CHANGE, required=("id", "action"))
 
 
 # --------------------------------------------------------------------------- arguments
@@ -421,7 +464,9 @@ def run_dev(argv: list, timeout: float = DEFAULT_TIMEOUT, call: Call = None, pro
     call = call or Call()
     with tempfile.TemporaryFile() as out, tempfile.TemporaryFile() as err:
         try:
-            call.proc = subprocess.Popen([sys.executable, str(DEV_BIN)] + [str(x) for x in argv], cwd=cwd or _cwd(),
+            # -I -S as bin/dev's shebang; -I ignores PYTHONIOENCODING, so -X utf8 keeps the output UTF-8
+            call.proc = subprocess.Popen([sys.executable, "-I", "-S", "-X", "utf8", str(DEV_BIN)] + [str(x) for x in argv],
+                                         cwd=cwd or _cwd(),
                                          stdin=subprocess.DEVNULL, stdout=out, stderr=err, env=env,
                                          start_new_session=True)
         except OSError as e:
@@ -488,14 +533,27 @@ def compact_json(x) -> str:
     return json.dumps(x, ensure_ascii=False, separators=(",", ":"))
 
 
-def call_tool(name: str, args, call: Call = None, progress=None, structured: bool = True) -> dict:
+def client_provider(info) -> str | None:
+    """The provider of the app that connected, from initialize's clientInfo (the server's own handshake, never a tool
+    argument the model writes): claude for Anthropic's apps, codex for OpenAI's; None when the name says neither,
+    and devkit_resume then shows no request text."""
+    name = str((info or {}).get("name") or "").lower() if isinstance(info, dict) else ""
+    if re.search(r"claude|anthropic", name):
+        return "claude"
+    if re.search(r"openai|chatgpt|codex", name):
+        return "codex"
+    return None
+
+
+def call_tool(name: str, args, call: Call = None, progress=None, structured: bool = True, client=None) -> dict:
     """Run a tool -> an MCP CallToolResult. Unknown tools raise KeyError (a protocol error); everything else, bad
-    arguments included, comes back as a result with isError so the model can correct itself."""
+    arguments included, comes back as a result with isError so the model can correct itself. `client`: the
+    connected app's provider (client_provider), which only the server sets."""
     if name not in _HANDLERS:
         raise KeyError(name)
     _, timeout, json_out, digest, report_on_exit1 = _HANDLERS[name]
     try:
-        a = validate(name, args)
+        a = dict(validate(name, args), _client=client)
         argv = build_argv(name, a)
     except ValueError as e:
         return _result(f"Invalid arguments for {name}: {e}", error=True)
@@ -556,6 +614,7 @@ class Server:
         self.rfile, self.wfile = rfile, wfile
         self.lock = threading.Lock()
         self.version = PROTOCOL_VERSIONS[0]
+        self.client = None   # the connected app's provider, from initialize (client_provider)
         self.calls = {}      # request id (JSON) -> Call
         self.threads = []
         self.closed = False
@@ -628,6 +687,7 @@ class Server:
             if method == "initialize":
                 asked = params.get("protocolVersion")
                 self.version = asked if asked in PROTOCOL_VERSIONS else PROTOCOL_VERSIONS[0]
+                self.client = client_provider(params.get("clientInfo"))
                 return {"jsonrpc": "2.0", "id": mid, "result": {
                     "protocolVersion": self.version, "capabilities": {"tools": {"listChanged": False}},
                     "serverInfo": {"name": "devkit", "version": core.VERSION}, "instructions": INSTRUCTIONS}}
@@ -668,7 +728,7 @@ class Server:
                                       "message": f"{params.get('name')} still running ({seconds:.0f} s)"}})
         try:
             result = call_tool(params["name"], params.get("arguments"), call, progress,
-                               structured=self.version >= "2025-06-18")
+                               structured=self.version >= "2025-06-18", client=self.client)
             return None if call.cancelled else {"jsonrpc": "2.0", "id": mid, "result": result}
         except Exception as e:
             _log(f"internal error in {params.get('name')}: {e!r}")

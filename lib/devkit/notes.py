@@ -11,6 +11,12 @@ humans, Claude and Codex all read and write:
     milestone: v2.4 release
     due: 2026-12-01
     tags: [payments, api]
+    embargo:                              branches a backup never pushes (dev branch embargo)
+      - branch: fix/x
+        why: "…"
+        until: "<step or date>"
+        who: …
+        when: 2026-11-06T10:00:00Z
     ---
     # owner/repo
     <!-- dev:auto:start --> … <!-- dev:auto:end -->   generated facts (dev sync)
@@ -26,6 +32,7 @@ Every function here takes and returns note text (no I/O) so it is easy to test.
 """
 from __future__ import annotations
 
+import json
 import re
 import time
 
@@ -143,19 +150,63 @@ def is_placeholder(line: str) -> bool:
 
 # --------------------------------------------------------------------------- frontmatter
 
+def _block_value(v: str) -> str:
+    """A value inside a record list: JSON-quoted when it was written quoted, else the text without a comment."""
+    v = v.strip()
+    if v.startswith('"'):
+        try:
+            out = json.loads(v)
+            return out if isinstance(out, str) else str(out)
+        except ValueError:
+            return v.strip('"')
+    return v.split(" #", 1)[0].strip().strip("'")
+
+
+def _records(lines: list) -> list:
+    """The indented lines under `key:` -> a list of records ({field: text}); `- text` items become plain strings."""
+    out = []
+    for ln in lines:
+        s = ln.strip()
+        if not s or s.startswith("#"):
+            continue
+        if s.startswith("- "):
+            s = s[2:].strip()
+            if ":" not in s:
+                out.append(_block_value(s))
+                continue
+            out.append({})
+        if ":" in s and out and isinstance(out[-1], dict):
+            k, _, v = s.partition(":")
+            out[-1][k.strip()] = _block_value(v)
+    return out
+
+
 def split_frontmatter(text: str):
-    """-> (meta dict, body text). Tolerant: no frontmatter gives ({}, text)."""
+    """-> (meta dict, body text). Tolerant: no frontmatter gives ({}, text). A key with no value followed by indented
+    `- field: value` lines is a list of records (the `embargo:` list, spec P-fy3bwa0pshk R3)."""
     if not text.startswith("---\n"):
         return {}, text
     end = text.find("\n---\n", 4)
     if end == -1:
         return {}, text
     meta = {}
-    for ln in text[4:end].splitlines():
+    lines = text[4:end].splitlines()
+    i = 0
+    while i < len(lines):
+        ln = lines[i]
+        i += 1
         if ":" not in ln or ln.lstrip().startswith("#"):
             continue
         k, _, v = ln.partition(":")
         v = v.split(" #", 1)[0].strip()
+        if not v and not ln[:1].isspace():
+            block = []
+            while i < len(lines) and lines[i][:1].isspace():
+                block.append(lines[i])
+                i += 1
+            if block:
+                meta[k.strip()] = _records(block)
+                continue
         if v.startswith("[") and v.endswith("]"):
             meta[k.strip()] = [x.strip().strip("'\"") for x in v[1:-1].split(",") if x.strip()]
         else:
@@ -163,15 +214,47 @@ def split_frontmatter(text: str):
     return meta, text[end + 5:]
 
 
+_PLAIN = re.compile(r"[A-Za-z0-9_./@+-][A-Za-z0-9_./@+:,() -]*")
+
+
+def _block_text(v) -> str:
+    v = str(v if v is not None else "")
+    return v if _PLAIN.fullmatch(v) and not v.endswith(" ") and " #" not in v else json.dumps(v, ensure_ascii=False)
+
+
 def render_frontmatter(meta: dict) -> str:
     lines = ["---"]
     order = INITIATIVE_KEYS if meta.get("kind") == "initiative" else META_KEYS
     for k in list(order) + [k for k in meta if k not in order]:
         v = meta.get(k, [] if k == "tags" else "")
+        if isinstance(v, list) and any(isinstance(x, dict) for x in v):
+            lines.append(f"{k}:")
+            for rec in v:
+                pairs = list(rec.items()) if isinstance(rec, dict) else []
+                if not pairs:
+                    lines.append(f"  - {_block_text(rec)}")
+                    continue
+                lines.append(f"  - {pairs[0][0]}: {_block_text(pairs[0][1])}")
+                lines += [f"    {f}: {_block_text(x)}" for f, x in pairs[1:]]
+            continue
         if isinstance(v, list):
             v = "[" + ", ".join(v) + "]"
         lines.append(f"{k}: {v}".rstrip())
     return "\n".join(lines) + "\n---\n"
+
+
+EMBARGO_FIELDS = ("why", "until", "who", "when")
+
+
+def embargoes(text: str) -> list:
+    """The note's embargoed branches (spec P-fy3bwa0pshk R3): [{branch, why, until, who, when}], in the order written.
+    A backup never pushes these branches; every branch view shows the embargo."""
+    meta, _ = split_frontmatter(text or "")
+    out = []
+    for rec in meta.get("embargo") or []:
+        if isinstance(rec, dict) and rec.get("branch"):
+            out.append({"branch": rec["branch"], **{f: rec.get(f, "") for f in EMBARGO_FIELDS}})
+    return out
 
 
 def set_meta(text: str, **kv) -> str:
@@ -448,6 +531,7 @@ def summarize(text: str) -> dict:
         "milestone": meta.get("milestone") or "",
         "due": meta.get("due") or "",
         "tags": meta.get("tags") or [],
+        "embargo": embargoes(text),
         "purpose": meaningful(sec.get("Purpose", "")),
         "state": meaningful(sec.get("Current state", "")),
         "decisions": meaningful(sec.get("Decisions and gotchas", "")),

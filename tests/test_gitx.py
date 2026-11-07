@@ -15,6 +15,7 @@ import tempfile
 import time
 import unittest
 from pathlib import Path
+from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "lib"))
 
@@ -83,6 +84,11 @@ def git(cwd, *args, env=None):
     return out
 
 
+# A workflow that runs on every push: the push budget counts only pushes that start CI
+CI_ON_PUSH = {".github/workflows/ci.yml": "on: [push]\njobs:\n  t:\n    runs-on: ubuntu-latest\n    steps:\n"
+                                          "      - run: echo hi\n"}
+
+
 class Sandbox:
     """A repository `widget` whose origin is a bare repo, devkit state in a temp dir, gh faked."""
 
@@ -91,7 +97,7 @@ class Sandbox:
         self.root = Path(self.tmp.name).resolve()
         self.saved_git_env = {k: core.GIT_ENV.get(k) for k in ISOLATE}
         core.GIT_ENV.update(ISOLATE)
-        self.saved_os = {k: os.environ.pop(k, None) for k in gitx.ACK_VARS + ("DEVKIT_AGENT",)}
+        self.saved_os = {k: os.environ.pop(k, None) for k in ("DEVKIT_FLAKY", "DEVKIT_CROSS_PROJECT", "DEVKIT_AGENT")}
         self.saved = (core.STATE, core.HANDOFF, gitx.GH, gitx.EXEC, gitx.SLEEP, gitx._me, gitx._handoff_log,
                       gitx.TEMPLATE_DIR, cistatus.runs_for, delivery.POLICIES)
         core.STATE = self.root / "state"
@@ -391,7 +397,7 @@ class PushTests(unittest.TestCase):
     def test_needs_evidence_then_pushes_once_with_upstream(self):
         with Sandbox() as s:
             s.branch("feat/x")
-            s.commit("feat: add x")
+            s.commit("feat: add x", CI_ON_PUSH)
             rc, _, err = dev("push")
             self.assertEqual(rc, 2)
             self.assertIn("no local CI evidence", err)
@@ -484,6 +490,7 @@ class PushTests(unittest.TestCase):
     def test_push_budget_applies_and_a_real_local_run_lifts_it(self):
         with Sandbox() as s:
             s.branch("feat/loop")
+            s.commit("ci: run on push", CI_ON_PUSH)
             for i in range(2):
                 s.commit(f"fix: attempt {i}")
                 self.assertEqual(dev("push", "--ci-passed")[0], 0)
@@ -491,11 +498,12 @@ class PushTests(unittest.TestCase):
             rc, _, err = dev("push", "--ci-passed")
             self.assertEqual(rc, 2)
             self.assertIn("push #3", err)
-            os.environ["DEVKIT_LOCAL_CI_PASSED"] = "1"
-            try:
-                self.assertEqual(dev("push")[0], 0)
-            finally:
-                os.environ.pop("DEVKIT_LOCAL_CI_PASSED")
+            with mock.patch.dict(os.environ, {"DEVKIT_LOCAL_CI_PASSED": "1"}):  # dev's environment lifts nothing (F8)
+                rc, _, err = dev("push")
+            self.assertEqual(rc, 2)
+            self.assertIn("push #3", err)
+            gitx.record_evidence(s.ctx(), "run", gitx._head(s.ctx().top)[1])  # what `dev ci --run` records
+            self.assertEqual(dev("push")[0], 0)
 
     def test_dry_run_pushes_and_records_nothing(self):
         with Sandbox() as s:
@@ -806,7 +814,9 @@ class PrTests(unittest.TestCase):
                 self.assertEqual(rc, 2, t)
                 self.assertIn(why, err)
 
-    def test_create_needs_the_push_and_the_evidence(self):
+    def test_the_evidence_gates_a_ready_pr_and_dev_pr_ready_not_a_draft(self):
+        # no workflow runs on a draft here, so opening one costs no CI run: the evidence check moves to `dev pr ready`,
+        # which starts the one run; a PR opened ready for review still needs it
         with Sandbox() as s:
             s.branch("feat/np")
             s.commit("feat: add np")
@@ -814,9 +824,41 @@ class PrTests(unittest.TestCase):
             self.assertEqual(rc, 2)
             self.assertIn("not on origin", err)
             git(s.repo, "push", "-q", "-u", "origin", "feat/np")
+            s.gh.on(["pr", "create"], "https://github.com/acme/widget/pull/7\n")
+            rc, _, err = dev("pr", "create")
+            self.assertEqual(rc, 2)
+            self.assertIn("no local CI evidence", err)
+            self.assertEqual(s.gh.called("pr", "create"), [])
+            rc, out, err = dev("pr", "create", "--draft")
+            self.assertEqual(rc, 0, err)
+            self.assertIn("--draft", s.gh.called("pr", "create")[0])
+            self.assertIn("dev pr ready", out)
+            text, _ = gitx.pr_template(s.repo)
+            body = text.replace("## Changes", "Adds np.\n\n## Changes").replace(
+                "## Risk and rollback", "- Ran python3 -m unittest: 42 passed\n\n## Risk and rollback")
+            s.gh.on(["pr", "view"], _pr(isDraft=True, title="feat: add np", headRefName="feat/np",
+                                        headRefOid=s.head(), body=body))
+            s.gh.on(["pr", "ready"], "")
+            rc, _, err = dev("pr", "ready")
+            self.assertEqual(rc, 2)
+            self.assertIn("no local CI evidence", err)
+            self.assertEqual(s.gh.called("pr", "ready"), [])
+            dev("ci", "--mark-passed", "--note", "python3 -m unittest: 42 passed")
+            rc, out, err = dev("pr", "ready")
+            self.assertEqual(rc, 0, err)
+            self.assertEqual(len(s.gh.called("pr", "ready")), 1)
+
+    def test_a_draft_still_needs_evidence_where_ci_runs_on_drafts(self):
+        with Sandbox() as s:
+            s.branch("feat/np")
+            s.commit("ci: run the tests on pull requests", {".github/workflows/ci.yml": (
+                "on:\n  pull_request:\njobs:\n  test:\n    runs-on: ubuntu-latest\n    steps:\n      - run: make test\n")})
+            git(s.repo, "push", "-q", "-u", "origin", "feat/np")
             rc, _, err = dev("pr", "create", "--draft")
             self.assertEqual(rc, 2)
             self.assertIn("no local CI evidence", err)
+            self.assertIn("ci.yml", err)  # why a draft is not free here
+            self.assertEqual(s.gh.called("pr", "create"), [])
 
     def test_create_reports_an_open_pr(self):
         with Sandbox() as s:
@@ -894,6 +936,28 @@ class PrTests(unittest.TestCase):
             watch = [c for c in s.gh.calls if "--watch" in c]
             self.assertEqual(len(watch), 1)
             self.assertEqual(s.gh.called("run", "view", "111")[0][-2:], ["--job", "222"])
+
+    def test_every_check_skipped_waits_for_the_real_run(self):
+        # B3: a draft's run skips every job with the draft gate; after `dev pr ready` the real run starts. Until then
+        # the checks are "no checks yet": --watch waits and says so, and merge refuses, never green.
+        with Sandbox() as s:
+            s.branch("feat/invoice")
+            s.commit("ci: add the workflow", {".github/workflows/ci.yml": (
+                "on: [pull_request]\njobs:\n  t:\n    if: github.event.pull_request.draft == false\n"
+                "    runs-on: ubuntu-latest\n    steps:\n      - run: echo hi\n")})
+            s.gh.on(["pr", "checks"], [{"name": "t", "bucket": "skipping", "workflow": "CI", "link": "x"}])
+            rc, out, _ = dev("pr", "checks", "7", "--watch")
+            self.assertEqual(rc, 8, out)
+            self.assertIn("no checks yet for 7: every check was skipped", out)
+            self.assertNotIn("✓", out)
+            self.assertGreaterEqual(len(s.gh.called("pr", "checks")), 6)  # it waited for the real run to report
+            s.gh.on(["repo", "view"], {"squashMergeAllowed": True, "viewerDefaultMergeMethod": "SQUASH"})
+            s.gh.on(["pr", "merge"], "")
+            s.gh.on(["pr", "view"], _pr(statusCheckRollup=[{"conclusion": "SKIPPED"}, {"conclusion": "SKIPPED"}]))
+            rc, _, err = dev("pr", "merge", "7")
+            self.assertEqual(rc, 2)
+            self.assertIn("every check was skipped, so no real run has reported yet (dev pr checks 7 --watch)", err)
+            self.assertEqual(s.gh.called("pr", "merge"), [])
 
     def test_ls_mine_and_review(self):
         with Sandbox() as s:
@@ -1147,6 +1211,25 @@ class PassthroughTests(unittest.TestCase):
             self.assertEqual(s.execs, [])
             self.assertEqual(dev("gh", "pr", "list")[0], 0)
             self.assertEqual(s.execs[-1][0], ["gh", "pr", "list"])
+
+    def test_gh_pr_create_opens_a_draft_without_evidence_where_drafts_run_no_ci(self):
+        with Sandbox() as s:
+            s.branch("feat/invoice")
+            s.commit("feat(invoice): add csv export")
+            rc, _, err = dev("gh", "pr", "create", "--draft", "--title", "feat(invoice): add csv export", "--body", "y")
+            self.assertEqual(rc, 0, err)
+            self.assertEqual(s.execs[-1][0][:4], ["gh", "pr", "create", "--draft"])
+
+    def test_dev_git_and_dev_gh_take_no_hatch_from_their_environment(self):
+        # dev's environment is not the command the guard parsed: an exported DEVKIT_FLAKY=1 let every later
+        # `dev gh run rerun` through (decided for 26.11.3: the hatches are a command's own prefix, never dev's env)
+        with Sandbox() as s:
+            s.branch("feat/rerun")
+            with mock.patch.dict(os.environ, {"DEVKIT_FLAKY": "1", "DEVKIT_CROSS_PROJECT": "1"}):
+                rc, _, err = dev("gh", "run", "rerun", "5", "--failed")
+            self.assertEqual(rc, 2)
+            self.assertIn("Re-running CI without a change", err)
+            self.assertEqual(s.execs, [])
 
 
 

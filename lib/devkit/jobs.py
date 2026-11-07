@@ -41,7 +41,8 @@ DEFAULT_JOBS = {
            "cmd": ["gc", "--apply", "--yes", "--auto-only"], "at": "04:00", "timeout": 30},
     "repair": {"about": "Restores devkit-managed agent settings and Codex hook trust if anything drifted",
                "cmd": ["config", "repair", "--quiet"], "every": 360, "timeout": 5},
-    "audit": {"about": "Publishes this machine's audit trail to the handoff repo and prunes local copies over 2 years",
+    "audit": {"about": "Publishes this machine's audit trail to the handoff repo and prunes it by audit.retention "
+                       "(records audit.prune)",
               "cmd": ["audit", "--publish", "--quiet"], "at": "05:00", "timeout": 5},
     "doctor": {"about": "Weekly health check of the whole setup; notifies when a check fails",
                "cmd": ["doctor"], "weekly": "mon 09:00", "timeout": 10},
@@ -87,7 +88,7 @@ def schedule_text(j: dict) -> str:
 def plist_for(name: str, j: dict) -> dict:
     py = "/opt/homebrew/bin/python3" if Path("/opt/homebrew/bin/python3").exists() else sys.executable
     d = {"Label": LABEL.format(name),
-         "ProgramArguments": [py, str(DEVKIT_HOME / "bin" / "dev"), "jobs", "exec", name],
+         "ProgramArguments": [py, "-I", "-S", str(DEVKIT_HOME / "bin" / "dev"), "jobs", "exec", name],  # as its shebang
          "ProcessType": "Background", "LowPriorityIO": True, "Nice": 10,
          "StandardOutPath": str(LOGS / f"{name}.launchd.log"), "StandardErrorPath": str(LOGS / f"{name}.launchd.log"),
          "EnvironmentVariables": {"PATH": f"/opt/homebrew/bin:/opt/homebrew/sbin:/usr/local/bin:/usr/bin:/bin:"
@@ -191,7 +192,7 @@ def execute(name: str) -> int:
             fh.write(f"\n=== {core.fmt_ts(start)} · dev {' '.join(j['cmd'])}\n")
             fh.flush()
             try:
-                p = subprocess.run([sys.executable, str(DEVKIT_HOME / "bin" / "dev"), *j["cmd"]], stdout=fh,
+                p = subprocess.run([sys.executable, "-I", "-S", str(DEVKIT_HOME / "bin" / "dev"), *j["cmd"]], stdout=fh,
                                    stderr=subprocess.STDOUT, stdin=subprocess.DEVNULL, timeout=int(j["timeout"]) * 60,
                                    env={**os.environ, "DEVKIT_JOB": name, "DEVKIT_NO_NOTIFY": "1", "NO_COLOR": "1"})
                 rc = p.returncode

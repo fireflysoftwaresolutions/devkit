@@ -91,8 +91,9 @@ nothing falls between them.
 
 ### Who does the work, and how long it takes
 
-When a task needs more than one kind of expertise, the main session leads devkit's crew as Morpheus: 25 specialist
-agents, each in its own lane, with its own files and time (see [The crew](crew.md)). Every run's plan has steps with
+When a task needs more than one kind of expertise, the main session leads devkit's crew as the tech lead (Morpheus):
+25 specialist agents, named by role, each in its own lane, with its own files and time, within the crew's slots (see
+[The crew](crew.md)). Every run's plan has steps with
 estimates and dependencies; devkit counts only active time and gives the ETA as a range along the critical path, so
 parallel lanes shorten it and waiting for you does not (see
 [Progress and communication › Time and estimates](progress-and-communication.md#time-and-estimates)).
@@ -213,8 +214,14 @@ commands, permanent deletes and overwrites through `dev rm`, `dev mv`, and `dev 
 budget, no blind CI re-runs, merges and releases through `dev pr merge` and `dev release`, no shared stash, no commit
 gated on a pipe, branch names, tags that follow the delivery policy, no AI attribution, no secrets in commits,
 isolation in the handoff repository, and no settings that switch devkit off. Each denial explains the
-right way, so the agent corrects itself in one step. It fails open: a bug in the guard never blocks work. The full
-list is in [Guard rules](guard.md).
+right way, so the agent corrects itself in one step.
+
+The guard is a seatbelt, not a sandbox: it catches an agent's mistakes and the common forms of prompt injection, and
+a determined program can still find a form it does not recognize. Most of it fails open, so a bug in the guard does
+not block your work. The checks where failing open would let an action through fail closed instead: the
+irreversible-action gate, which refuses a command that names an irreversible action when the gate itself fails, and
+the lane check, which refuses a crew member's command it cannot check. The full list is in
+[Guard rules](guard.md).
 
 ## The status block
 
@@ -253,23 +260,23 @@ general question, or consulting work done with the Firefly consulting kit (decks
 gets a normal answer, with no status block, no required skills, and no nudges. Developing the consulting kit itself
 is development work.
 
-devkit decides per turn, in two steps:
+devkit decides per turn, at the end of it, from what the turn did, never from your words: you write in any language.
+The Stop hook counts a turn as development work when any of these is true:
 
-1. **The request.** The prompt hook classifies it as development, other, or no signal. A follow-up with no signal
-   (for example _continue_ or _yes_) keeps the previous turn's class. For a request of the other class, the hook adds
-   nothing to the context.
-2. **Where and what the turn did.** Inside a repository, a request with no signal at all (a status question)
-   counts as development. Otherwise the Stop hook looks at the turn's tool calls. A turn with no signal counts as development
-   when it edited files in a repository or ran development commands. An "other" turn counts only when it did
-   something strong: a commit, a push, a tag, or a test or build run. A deck built inside a repository stays
-   consulting work.
+- **The agent declared it:** its final message starts with the status block.
+- **It ran development commands:** a commit, push, or tag, a test or build run, or a `dev` command.
+- **It changed files inside a repository.**
+- **It used repository tools** (reading, searching, editing, a shell) in a session that works inside a repository.
+
+A turn that used the Firefly consulting kit counts only when it also ran a strong development command, such as a
+commit, a push, or a test run, so a deck built inside a repository stays consulting work.
 
 | Request | Turn | devkit |
 | --- | --- | --- |
-| "Dame una receta de tortilla de patatas" | a web search | nothing |
+| "Dame una receta de tortilla de patatas" | a web search, outside a repository | nothing |
 | "Hazme un deck para Example Bank" | the consulting kit's skills | nothing |
 | "Fix the failing test in the parser" | edits, a test run | the status block, required skills, reminders |
-| "continúa" after a development turn | anything | the same as the turn before |
+| "continúa" after a development turn | edits, a test run | the same as any development turn |
 
 `DEVKIT_SCOPE=all` turns the scope off, so every turn is checked as before (useful to test the canary).
 

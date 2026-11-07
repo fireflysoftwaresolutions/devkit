@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import contextlib
 import json
 import os
 import re
@@ -19,16 +20,17 @@ COPYRIGHT = core.COPYRIGHT
 
 COMMANDS = [
     ("Projects", [
-        ("ls", "List every project: stack, branch, state, worktrees, PRs, activity, size"),
-        ("go <query>", "Print a project's path (shell: `dcd <query>` jumps there)"),
-        ("status", "Status of the project you are in, with what needs attention"),
+        ("ls [--all]", "The projects on this Mac: branch, your changes, checks, worktrees, activity"),
+        ("go <name>", "Print a project's path (shell: `dcd <name>` jumps there)"),
+        ("status [name]", "What needs you, checks, the crew and the last update of a project"),
+        ("alias [<alias> [project]|rm]", "Short project names shared by the team; dev status, go, open, wt take them"),
         ("clone <owner/repo|url>", "Clone by host/owner/repo (GitHub, GitLab, Bitbucket, any git URL)"),
         ("new <name> [--github]", "Start a project in _local/<name>, or create it on GitHub"),
         ("adopt <path>", "Move a misplaced repo into the canonical layout (fixes worktrees + agent history)"),
         ("open [query]", "Open a project in your editor"),
     ]),
     ("Portfolio", [
-        ("dashboard", "Open the HTML command centre: projects, tasks, activity, explorer, health"),
+        ("dashboard", "Open the live command centre: projects, tasks, background work, team, health"),
         ("overview [--json]", "Portfolio digest for you and your agents: status, Now tasks, last sessions"),
         ("standup [--days N]", "What happened in the last N days and what is in progress"),
         ("initiative [new|add|ls|show]", "Cross-project initiatives: member projects, workstreams, progress"),
@@ -63,7 +65,8 @@ COMMANDS = [
     ("Delivery", [
         ("ci [--commands] · audit · init",
          "What CI runs (run it locally first); `ci audit [--fix]` diagnoses pipelines on any host; `ci init` sets one up"),
-        ("branch new|rename|ls|clean", "Branches from an up-to-date main, with valid names; tidy merged ones"),
+        ("branch new|rename|ls|clean", "Branches from an up-to-date main, with valid names; where each one lives "
+                                       "(ls); tidy merged ones"),
         ("commit · push · rebase", "Conventional commits, push after local CI evidence (dev ci --run), rebase on main"),
         ("pr create|ls|checks|merge", "PRs with the template, checks with failing logs, safe merges"),
         ("release [--dry-run]", "Tag and publish by the delivery policy, with the CHANGELOG section"),
@@ -71,7 +74,9 @@ COMMANDS = [
         ("issue ls|view|create", "Issues, compact"),
         ("git … · gh …", "Escape hatches to git and gh, with the same policy checks"),
         ("stubs [--staged|--all]", "Unfinished work: stubs, placeholders, TODOs without a task (also checked on commit)"),
-        ("crew [show|brief|route|delegate|next|ask|mode|decide]", "The specialist agents: who does what, briefs, routing, delegation, decisions"),
+        ("crew [show|brief|route|delegate|next|ask|mode|decide|graph|rules|raci]",
+         "The specialist agents: who does what, briefs, routing, delegation, decisions, the live graph, the rules, "
+         "the RACI"),
         ("ci status [--watch]", "Live CI/CD runs (GitHub, GitLab, Bitbucket, Azure): jobs, steps, elapsed, ETA"),
         ("calver [--next]", "Current and next CalVer version YY.MM.PATCH from the repository's tags"),
         ("sec scan [--history]", "Security: secrets (gitleaks), dependencies (osv-scanner), SAST (Semgrep), Trivy"),
@@ -81,20 +86,21 @@ COMMANDS = [
     ("Tracking and disk", [
         ("canary", "How often Claude/Codex replies carried the “[Firefly> DevKit]” instruction marker"),
         ("sync", "Refresh the projects map and handoff notes, commit and push the handoff repo"),
-        ("gc [--apply]", "Show (or reclaim) merged worktrees, stale build output and temp files"),
-        ("du", "Disk usage of projects, worktrees, agent data, temp and Docker"),
+        ("backup [<branch>…] [--all]", "Copy branches with commits only on this Mac to the remote (no CI run)"),
+        ("du [<name>] [--plan|--refresh]", "What fills your disk, why, and the plan to free it safely"),
+        ("free [<n>…|--safe]", "Free items of the dev du plan: asks first, refuses work not committed or pushed"),
     ]),
     ("Environment", [
         ("setup [--yes]", "The installation and configuration wizard (first install, or to change choices)"),
         ("doctor", "Verify the whole setup (git, gh, Claude, Codex, skills, Docker, automation)"),
         ("agents [test [claude|codex]]", "Claude Code and Codex: installed, signed in, plan, quota; live self-tests"),
-        ("config diff|repair|lock|…", "Preview and enforce the agent settings devkit manages"),
+        ("config [--check]|repair|lock|…", "The agent settings devkit manages: what differs, why, the fix"),
         ("guard check <cmd>|--write p", "Simulate what the guard decides for a command or a file write"),
         ("plugin validate", "Validate the devkit plugin with Claude Code's validator and Codex's parser"),
         ("desktop pack|status", "Claude Desktop extension: build the .mcpb bundle, check what is installed"),
-        ("install [--only step]", "Apply the devkit configuration (idempotent)"),
-        ("update", "Pull the latest devkit and re-apply it"),
-        ("docker up|down|status|prune", "Run Docker on a Colima VM"),
+        ("install [--only step]", "Pin the checkout read-only for the hooks, then apply the configuration"),
+        ("update", "Move devkit to the newest release (or pull its branch), pin it and re-apply it"),
+        ("docker up|down|status|trim|prune", "Run Docker on a Colima VM; trim returns its free space to macOS"),
         ("version", "Show the devkit version"),
     ]),
 ]
@@ -116,31 +122,42 @@ def _reg(prs=True, refresh=False, sizes=False):
     return registry.build(with_prs=prs, refresh_prs=refresh, with_sizes=sizes)
 
 
-def _resolve(reg, query, cwd=None):
-    """Project from a query, or from cwd when no query. Exits with a message when ambiguous/unknown."""
+_ARGV = []  # the arguments of this dev command (main sets them), so a tie can print the command for each match
+
+
+def _resolve(reg, query, cwd=None, note=False, here=False):
+    """Project from a query (an id, alias, path or part of a name), or from cwd when no query. A tie lists every
+    match with the command for it and exits 2; devkit never guesses (decision (a)). `note`: when the match was not
+    exact, say on stderr which project was picked (`kit → kit-consulting`). `here`: the project must be on this Mac."""
     if not query:
         p, w = registry.project_for_cwd(reg, cwd or os.getcwd())
         if not p:
-            ui.err(f"not inside a project ({tilde(os.getcwd())}); pass a project name")
+            ui.err(f"not inside a project ({tilde(os.getcwd())}); pass a project name or alias (dev ls lists them)")
             sys.exit(2)
         return p
-    found = registry.find(reg, query)
-    if len(found) == 1:
-        return found[0]
+    m = registry.match(reg, query)
+    found = m["projects"]
+    amap = registry.alias_map(reg["projects"])
     if not found:
-        ui.err(f"no project matches “{query}” — `dev ls` lists them")
+        ui.err(f"no project matches “{query}”: dev ls lists the projects on this Mac, dev ls --all the portfolio")
         sys.exit(2)
-    if shutil.which("fzf") and sys.stdin.isatty() and sys.stderr.isatty():
-        import subprocess
-        r = subprocess.run(["fzf", "--height=40%", "--reverse", f"--query={query}", "--prompt=project> "],
-                           input="\n".join(p["id"] for p in found), capture_output=True, text=True)
-        pick = r.stdout.strip()
+    if len(found) > 1:
+        ui.err(f"“{query}” matches {len(found)} projects. Pick one:")
+        argv = _ARGV or ["status", query]
         for p in found:
-            if p["id"] == pick:
-                return p
-        sys.exit(130)
-    ui.err(f"“{query}” matches several projects: " + ", ".join(p["id"] for p in found))
-    sys.exit(2)
+            alias = amap.get(p["id"], p["id"])
+            where = "on this Mac" if registry.is_local(p) else "not on this Mac"
+            print(f"    {ui.bold(alias)}  {ui.dim(p['id'] + ' · ' + where)}", file=sys.stderr)
+            print(ui.command("dev " + " ".join(alias if x == query else x for x in argv), 6), file=sys.stderr)
+        sys.exit(2)
+    p = found[0]
+    if here and not registry.is_local(p):
+        ui.err(f"{amap.get(p['id'], p['id'])} is not on this Mac. Get it first:")
+        print(ui.command(f"dev clone {p['id']}", 4), file=sys.stderr)
+        sys.exit(2)
+    if note and not m["exact"]:
+        print(ui.dim(f"{query} → {amap.get(p['id'], p['id'])}"), file=sys.stderr)
+    return p
 
 
 def _state(co):
@@ -278,85 +295,629 @@ def cmd_home(a):
 
 # --------------------------------------------------------------------------- projects
 
+def _changes(co: dict, short: bool = False) -> str:
+    """A checkout's state in plain words: "78 commits to push, 1 new file not added" (short: "78 to push, 1 new file")."""
+    if not co:
+        return ""
+    bits = []
+    push = co.get("ahead") or co.get("unpushed") or 0
+    if co.get("modified"):
+        n = co["modified"]
+        bits.append(f"{n} changed" if short else f"{n} changed file{'s' if n != 1 else ''}")
+    if push:
+        bits.append(f"{push} to push" if short else f"{push} commit{'s' if push != 1 else ''} to push")
+    if co.get("behind"):
+        n = co["behind"]
+        bits.append(f"{n} to pull" if short else f"{n} commit{'s' if n != 1 else ''} to pull")
+    if co.get("untracked"):
+        n = co["untracked"]
+        bits.append(f"{n} new file{'s' if n != 1 else ''}" + ("" if short else " not added"))
+    return ", ".join(bits)
+
+
+def _working_here(p: dict, sessions=()) -> bool:
+    """A session works in this project now: a live agent session, or a process inside one of its folders."""
+    if any(s.get("project") == p["id"] and s.get("active") for s in sessions or []):
+        return True
+    return bool((p.get("main") or {}).get("active") or any(w.get("active") for w in p.get("worktrees") or []))
+
+
+def _checks_cell(p: dict, offline: bool):
+    """(glyph, word) for the CHECKS column: the open PR's checks, else the branch's latest CI run (cached for 15 min)."""
+    co = p.get("main") or {}
+    pr = next((x for x in p.get("prs_open") or [] if x.get("branch") == co.get("branch")), None)
+    state = {"passing": "success", "failing": "failed", "pending": "running"}.get((pr or {}).get("checks"))
+    if not state and not offline and p.get("path") and co.get("branch"):
+        try:
+            from . import cistatus
+            runs = cistatus.runs_for(p["path"], co.get("branch"), limit=1, detail=True, max_age=900).get("runs")
+            state = runs[0]["status"] if runs else None
+        except Exception:
+            state = None
+    return {"success": (ui.glyph("ok"), "passed"), "failed": (ui.glyph("fail"), "failed"),
+            "running": (ui.glyph("running"), "running"), "queued": (ui.glyph("running"), "queued")}.get(
+        state, (ui.glyph("none"), ""))
+
+
+def _ls_rows(reg: dict, offline: bool = True) -> list:
+    amap = registry.alias_map(reg["projects"])
+    here, _ = registry.split_local(reg["projects"])
+    rows = []
+    for p in here:
+        co = p.get("main") or {}
+        g, word = _checks_cell(p, offline)
+        size = (p.get("size_kb") or 0) + sum(w.get("size_kb") or 0 for w in p.get("worktrees") or [])
+        rows.append({"alias": amap.get(p["id"], p["id"]), "id": p["id"], "name": p.get("name") or "",
+                     "working": _working_here(p, reg.get("sessions")), "layout": not p.get("canonical_ok", True),
+                     "branch": co.get("branch") or "not on a branch", "changes": _changes(co, short=True),
+                     "checks": g, "checks_word": word, "worktrees": len(p.get("worktrees") or []),
+                     "last": p.get("last_activity"), "size_kb": size if p.get("size_kb") is not None else None,
+                     "path": p.get("path")})
+    rows.sort(key=lambda r: -(r["last"] or 0))
+    return rows
+
+
+def _project_table(rows: list, cols: int) -> list:
+    """The projects on this Mac, one row each (Sati's `dev ls`): the alias you type, the branch, your changes,
+    checks, worktrees and last activity; at 100 columns and wider also the size and the repository name."""
+    wide = cols >= 100
+    W = ui.text_width(cols) if not wide else min(cols, 120)
+    heads = ["NAME", "BRANCH", "YOUR CHANGES", "CHECKS", "WORKTREES" if wide else "WT", "LAST"] + (
+        ["SIZE"] if wide else [])
+    cells = []
+    for r in rows:
+        name = r["alias"] + (f" ({r['name']})" if wide and r["name"] and r["name"].lower() != r["alias"] else "")
+        cells.append([name + (" !" if r["layout"] else ""), r["branch"], r["changes"] or ui.glyph("none"),
+                      r["checks"] + (" " + r["checks_word"] if wide and r["checks_word"] else ""), str(r["worktrees"]),
+                      ui.rel_time(r["last"], short=not wide) if not r["working"] else "now"]
+                     + ([ui.size_text(r["size_kb"])] if wide else []))
+    widths = [max([len(h)] + [ui.visible_len(c[i]) for c in cells]) for i, h in enumerate(heads)]
+    room = W - 5 - 2 * (len(heads) - 1)
+    for i, floor in ((2, 18), (1, 12), (0, 12)):  # your changes, then the branch, then the name give way
+        over = sum(widths) - room
+        if over > 0:
+            widths[i] = max(floor, widths[i] - over)
+    right = {4} | ({6} if wide else set())
+
+    def fmt(vals, style=None):
+        out = []
+        for i, v in enumerate(vals):
+            v = ui.fit_cell(v, widths[i])
+            pad = " " * (widths[i] - ui.visible_len(v))
+            out.append(pad + v if i in right else v + pad)
+        return "  ".join(out).rstrip()
+    lines = ["     " + ui.dim(fmt(heads))]
+    for r, c in zip(rows, cells):
+        mark = ui.green(ui.glyph("session")) if r["working"] else " "
+        text = fmt(c)
+        if r["layout"]:
+            text = text.replace(" !", " " + ui.amber("!"), 1)
+        lines.append(f"  {mark}  {text}")
+    return lines
+
+
+def _ls_legend(rows: list, cols: int) -> list:
+    bits = []
+    if any(r["working"] for r in rows):
+        bits.append(f"{ui.green(ui.glyph('session'))} a session is working in it now")
+    lay = [r for r in rows if r["layout"]]
+    if lay:
+        bits.append(f"{ui.amber('!')} outside devkit's folder layout" +
+                    (f": dev adopt {tilde(lay[0]['path'])}" if cols >= 100 and len(lay) == 1 else ""))
+    return ["  " + "    ".join(bits)] if bits else []
+
+
+def _empty_mac(n_portfolio: int, cols: int) -> list:
+    lists = f" (dev ls --all lists {n_portfolio})" if n_portfolio else ""
+    return (ui.para(f"No projects on this Mac yet. Get one from your portfolio{lists}:", cols)
+            + [ui.command("dev clone <name>", 4)] + ui.para("Start a new one:", cols)
+            + [ui.command("dev new <name>", 4)])
+
+
+def _portfolio_footer(n: int) -> str:
+    if not n:
+        return ""
+    return (f"  {n} more project{'s' if n != 1 else ''} in your portfolio "
+            f"{'are' if n != 1 else 'is'} not on this Mac: {ui.cyan('dev ls --all')}")
+
+
 def cmd_ls(a):
     reg = _reg(prs=not a.offline)
-    rows = []
-    for p in reg["projects"]:
-        co = p["main"]
-        act = sum(1 for w in p["worktrees"] if w.get("active")) + (1 if co.get("active") else 0)
-        rows.append([ui.bold(p["id"]) if p["canonical_ok"] else ui.yellow(p["id"] + " *"),
-                     ", ".join(p["stack"]) or "-", co.get("branch") or "-", _state(co) if co else "-",
-                     str(len(p["worktrees"])) if p["worktrees"] else "-",
-                     str(len(p["prs_open"])) if p.get("prs_known") else "-",
-                     (ui.ACTIVE + " " if act else "") + ago(p.get("last_activity")), human_kb(p.get("size_kb"))])
+    cols = ui.width()
+    here, away = registry.split_local(reg["projects"])
     if a.names:
-        print("\n".join(p["id"] for p in reg["projects"]))
+        print("\n".join(p["id"] for p in (reg["projects"] if a.all else here)))
         return 0
-    print(ui.table(rows, ["PROJECT", "STACK", "BRANCH", "STATE", "WT", "PRS", "ACTIVITY", "SIZE"],
-                   max_widths={1: 28, 2: 30}))
-    if any(not p["canonical_ok"] for p in reg["projects"]):
-        print(f"\n  {ui.yellow('*')} {ui.dim('not in the canonical layout — `dev adopt <path>`')}")
+    rows = _ls_rows(reg, offline=a.offline)
+    if getattr(a, "json", False):
+        print(json.dumps({"local": rows, "portfolio": [{"id": p["id"], "alias": registry.alias_map(
+            reg["projects"]).get(p["id"])} for p in away]}, indent=2, ensure_ascii=False))
+        return 0
+    print()
+    if not rows:
+        print("\n".join(_empty_mac(len(away), cols)))
+    else:
+        print(ui.rule_title(f"Projects on this Mac · {len(rows)}", cols))
+        print("\n".join(_project_table(rows, cols)))
+        print()
+        print("\n".join(_ls_legend(rows, cols)))
+    if a.all and away:
+        print()
+        print(ui.rule_title(f"In your portfolio, not on this Mac · {len(away)}", cols))
+        amap = registry.alias_map(reg["projects"])
+        by_owner = {}
+        for p in sorted(away, key=lambda x: x["id"]):
+            by_owner.setdefault(p.get("owner") or "", []).append(amap.get(p["id"], p["id"]))
+        ncol = 3 if cols >= 100 else 2
+        cw = (ui.text_width(cols) - 4) // ncol
+        for owner, names in by_owner.items():
+            print(f"  {ui.bold(owner or 'other')} {ui.dim('· ' + str(len(names)))}")
+            per = -(-len(names) // ncol)
+            for i in range(per):
+                cells = [names[i + k * per] for k in range(ncol) if i + k * per < len(names)]
+                print("    " + "".join(ui.fit_cell(c, cw - 2).ljust(cw) for c in cells).rstrip())
+        print()
+        example = amap.get(away[0]["id"], away[0]["id"])
+        print(f"  Get one on this Mac, for example {example}:")
+        print(ui.command(f"dev clone {example}", 4))
+    elif away:
+        print(_portfolio_footer(len(away)))
+    print()
     return 0
 
 
-def cmd_go(a):
-    p = _resolve(_reg(prs=False), a.query)
-    print(p["path"])
+def cmd_alias(a):
+    """dev alias · dev alias <alias> [project] [--move] · dev alias rm <alias>"""
+    reg = _reg(prs=False)
+    ps = reg["projects"]
+    if a.alias == "rm":
+        if not a.project:
+            ui.err("name the alias to remove: dev alias rm <alias>")
+            return 2
+        try:
+            pid = registry.remove_alias(a.project)
+        except registry.AliasError as e:
+            ui.err(str(e))
+            return 2
+        now_ = registry.alias_map(ps).get(pid, pid)
+        _prompt_refresh(reg)
+        print(f"{ui.OK} removed {a.project}: {pid} is {ui.bold(now_)} again")
+        return 0
+    if a.alias:
+        p = _resolve(reg, a.project) if a.project else _resolve(reg, None)
+        try:
+            prev = registry.set_alias(a.alias.lower(), p["id"], ps, move=a.move)
+        except registry.AliasError as e:
+            ui.err(str(e))
+            return 2
+        moved = f" (moved from {prev.rsplit('/', 1)[-1]})" if prev else ""
+        _prompt_refresh(reg)
+        print(f"{ui.OK} {ui.bold(a.alias.lower())} is now the alias of {p['id']}{moved}. Try it:")
+        print(ui.command(f"dev status {a.alias.lower()}", 4))
+        return 0
+    explicit = registry.load_aliases()
+    amap = registry.alias_map(ps, explicit)
+    by_pid = {rec["project"]: (al, rec) for al, rec in explicit.items()}
+    here, _ = registry.split_local(ps)
+    show = here + [p for p in ps if p["id"] in by_pid and p not in here]
+    rows = []
+    for p in show:
+        al, rec = by_pid.get(p["id"], (amap.get(p["id"], p["id"]), None))
+        who = f"{rec.get('by') or 'someone'}, {rec.get('at') or ''}".rstrip(", ") if rec else ui.dim("repository name")
+        rows.append([ui.bold(al), p["id"], who])
+    print()
+    if rows:
+        print(ui.table(rows, ["ALIAS", "PROJECT", "SET BY"]))
+    else:
+        print("  No projects on this Mac yet: dev ls --all lists the portfolio.")
+    print(f"\n  {ui.dim('Set one: dev alias <alias> [project] · remove it: dev alias rm <alias>')}\n")
     return 0
 
 
-def _print_status(p, w=None):
-    co = w or p["main"]
-    print(ui.section(p["id"]))
-    print(ui.kv("path", tilde(w["path"] if w else p["path"]) + ("" if p["canonical_ok"] else ui.yellow(f"  (canonical: {tilde(p['canonical'])})"))))
-    if p.get("remote"):
-        print(ui.kv("remote", p["remote"]))
-    print(ui.kv("stack", ", ".join(p["stack"]) or "-"))
-    if p.get("commands"):
-        print(ui.kv("commands", " · ".join(p["commands"])))
-    print(ui.kv("branch", f"{co.get('branch')} · {_state(co)}" + (f" · PR #{co['pr']['number']} {co['pr']['state'].lower()}" if co.get("pr") else "")))
-    if co.get("last_commit"):
-        print(ui.kv("last commit", f"{core.fmt_ts(co.get('last_commit_ts'))} {co.get('last_commit')[:70]}"))
-    if p["worktrees"]:
-        live = sum(1 for x in p["worktrees"] if x.get("active"))
-        print(ui.kv("worktrees", f"{len(p['worktrees'])} ({live} live) — dev wt ls"))
-    if p.get("prs_open"):
-        print(ui.kv("open PRs", ", ".join(f"#{x['number']}" for x in p["prs_open"][:10])))
-    print(ui.kv("handoff", tilde(core.note_path(p["id"]))))
+# --------------------------------------------------------------------------- the prompt segment (R9)
+
+def _prompt_refresh(reg, cwd=None):
+    """Commands that just read the facts give them to the prompt's cache too (never fails the command)."""
+    from . import prompt
+    prompt.safe_refresh(cwd, reg=reg, force=True)
+
+
+def cmd_prompt(a):
+    """dev prompt: what the prompt shows here and how it reaches the prompt · dev prompt refresh: write the cache for
+    every project on this Mac."""
+    from . import prompt
+    if a.action == "refresh":
+        done = prompt.refresh(reg=_reg(prs=False))
+        print(f"{ui.OK} the prompt knows {len(done)} project{'s' if len(done) != 1 else ''} on this Mac")
+        return 0
+    m = prompt.mode()
+    seg, ask = prompt.show(os.getcwd())
+    print()
+    if not m or m == "off":
+        print(f"  {ui.glyph('none')} The prompt helper is off. Add it:")
+        print(ui.command("dev setup prompt", 4))
+    elif seg:
+        print(f"  {seg}" + (f"  {ask}" if ask else ""))
+        print(f"  {ui.dim(f'Shown through {m}. Take it out: dev setup prompt --remove')}")
+    else:
+        print(f"  {ui.glyph('none')} Nothing here: this folder is not in a devkit project, or the prompt has not "
+              "seen it yet (dev prompt refresh).")
+    print()
+    return 0
+
+
+# --------------------------------------------------------------------------- dev status (Sati's design, R3)
+
+def _ci_for(path, branch):
     try:
         from . import cistatus
-        res = cistatus.runs_for(w["path"] if w else p["path"], co.get("branch"), limit=1, detail=True, max_age=60)
-        if res.get("runs"):
-            r0 = res["runs"][0]
-            print(ui.kv("CI", cistatus.describe(r0)))
-            if r0.get("jobs"):
-                print(" " * 17 + cistatus.job_summary(r0["jobs"]))
-                shown, more = cistatus.jobs_to_show(r0["jobs"], 3)
-                for j in shown:
-                    print(" " * 17 + cistatus.describe_job(j))
-        elif res.get("error") and res.get("provider"):
-            print(ui.kv("CI", ui.dim(res["error"][:100])))
+        return cistatus.runs_for(path, branch, limit=1, detail=True, max_age=60)
+    except Exception:
+        return {"runs": [], "error": "unavailable"}
+
+
+def _has_ci_files(path) -> bool:
+    root = Path(path or ".")
+    return any((root / f).exists() for f in (".github/workflows", ".gitlab-ci.yml", "bitbucket-pipelines.yml",
+                                             "azure-pipelines.yml"))
+
+
+def _checks_view(res: dict, co: dict, path) -> dict:
+    """The latest checks of this branch (or its open PR), in words."""
+    runs = (res or {}).get("runs") or []
+    pr = co.get("pr") if isinstance(co.get("pr"), dict) else None
+    where = f"PR {pr['number']}" if pr and pr.get("state") == "OPEN" else (co.get("branch") or "this branch")
+    if not runs:
+        if (res or {}).get("error") and (res or {}).get("provider"):
+            return {"state": "unknown", "text": f"{ui.glyph('none')} could not read the checks: "
+                                                f"{str(res['error'])[:80]}", "command": "dev ci status"}
+        if co.get("branch") and not co.get("upstream") and (co.get("unpushed") or co.get("ahead") or not pr):
+            return {"state": "none", "text": f"{ui.glyph('none')} not run yet: nothing is pushed on this branch"}
+        if not _has_ci_files(path):
+            return {"state": "none", "text": f"{ui.glyph('none')} this project has no checks yet. Set them up: "
+                                             f"dev ci init", "command": ""}
+        return {"state": "none", "text": f"{ui.glyph('none')} no run on {where} yet"}
+    r = runs[0]
+    st = r.get("status")
+    if st in ("running", "queued"):
+        jobs = r.get("jobs") or []
+        done = sum(1 for j in jobs if j.get("status") not in ("running", "queued"))
+        left = f", about {ui.duration(r['eta'])} left" if r.get("eta") else ""
+        prog = f": {done} of {len(jobs)} jobs done" if jobs else ""
+        return {"state": "running", "text": f"{ui.glyph('running')} running on {where}{prog}{left}",
+                "id": r.get("id"), "url": r.get("url")}
+    when = ui.rel_time(r.get("finished") or r.get("started"))
+    num = f"run {r['number']}, " if r.get("number") else ""
+    if st == "success":
+        return {"state": "passed", "text": f"{ui.glyph('ok')} passed on {where}, {when} ({num}took "
+                                           f"{ui.duration(r.get('elapsed'))})", "id": r.get("id"), "url": r.get("url")}
+    if st == "failed":
+        bad = next((j.get("name") for j in r.get("jobs") or [] if j.get("status") == "failed"), "")
+        return {"state": "failed", "text": f"{ui.glyph('fail')} failed on {where}, {when}" + (f": {bad}" if bad else ""),
+                "command": "dev run view --failed", "id": r.get("id"), "url": r.get("url")}
+    return {"state": st or "unknown", "text": f"{ui.glyph('none')} {st} on {where}, {when}"}
+
+
+def _crew_now(runs: list, roster, now: float) -> dict:
+    """Who works now in the project's working runs (the shared rule: registry.run_working), each as role and name
+    with what the step does, never its code (decision (c)); the plan's steps done and the time left."""
+    from . import crew as crew_mod, progress as pg
+    working = [r for r in runs if registry.run_working(r, now)]
+    out = {"working": bool(working), "members": [], "plan": None, "goal": ""}
+    for run in working:
+        plan = run.get("plan") or []
+        for lid, lane in (run.get("agents") or {}).items():
+            if lane.get("state") != "running":
+                continue
+            m = crew_mod._for_lane(lane, roster)
+            who = crew_mod.who(m) if m else (lane.get("persona") or lane.get("label") or "a crew member")
+            steps = [s for s in plan if isinstance(s, dict) and s.get("owner") == lid and s.get("state") in
+                     ("running", "blocked")]
+            what = [s.get("title") or registry.plain_step(s.get("name") or "") for s in steps]
+            if not steps and ":" in (lane.get("label") or ""):
+                what = [registry.plain_step(lane["label"].split(":", 1)[1])]
+            what = [x for x in what if x]
+            out["members"].append({"who": who, "on": what, "member": (m or {}).get("id", "")})
+        if plan and out["plan"] is None:
+            done = sum(1 for s in plan if isinstance(s, dict) and s.get("state") in ("done", "skipped"))
+            try:
+                left = pg.eta(run, now)
+            except Exception:
+                left = None
+            out["plan"] = {"done": done, "total": len(plan), "left_min": left}
+            out["goal"] = run.get("goal") or ""
+    return out
+
+
+def _where_from(p: dict, co: dict, sl: dict, parsed: dict) -> str:
+    """Which checkout a saved update came from, when it is not the one shown: "in the kit-consulting-ci copy
+    (fix/chat-subagent-progress)"."""
+    cur_path, cur_branch = co.get("path") or p.get("path") or "", co.get("branch") or ""
+    path, branch = sl.get("path") or "", parsed.get("branch") or sl.get("branch") or ""
+    wts = p.get("worktrees") or []
+
+    def describe(w):
+        b = w.get("branch") or "not on a branch"
+        loc = w.get("location")
+        if loc == "stray":
+            return f"in the {Path(w['path']).name} copy ({b})"
+        if loc == "claude":
+            return f"in a Claude Code worktree ({b})"
+        if loc == "codex":
+            return f"in a Codex worktree ({b})"
+        return f"in the {b} worktree"
+    if path and cur_path and core.real(path) != core.real(cur_path):
+        w = next((x for x in wts if core.real(x.get("path") or "") == core.real(path)), None)
+        if w:
+            return describe(w)
+        if p.get("path") and core.real(path) == core.real(p["path"]):
+            return f"in the main checkout ({branch})" if branch else "in the main checkout"
+        return f"in {tilde(path)}"
+    if branch and cur_branch and branch != cur_branch and not path:
+        w = next((x for x in wts if x.get("branch") == branch), None)
+        return describe(w) if w else f"on {branch}"
+    return ""
+
+
+def _layout_need(p: dict, alias: str, standalone: bool) -> dict:
+    copies = [w for w in p.get("worktrees") or [] if w.get("location") == "stray"]
+    n = len(copies)
+    with_ = f", with {n} cop{'ies' if n != 1 else 'y'} next to it" if n else ""
+    subject = "This project is" if standalone else f"{alias} is"
+    return {"kind": "layout", "text": f"{subject} outside devkit's folder layout{with_}, so some devkit commands skip "
+                                      "it. Close its sessions, then move it" + (" with all its worktrees:" if standalone
+                                                                                 else ":"),
+            "command": f"dev adopt {tilde(p.get('path') or '')}", "project": p["id"]}
+
+
+def _decision_need(d: dict, roster) -> dict:
+    from . import crew as crew_mod
+    m = crew_mod.member(d.get("from_name"), roster) if d.get("from_name") else None
+    who = f"The {crew_mod.who(m)[:1].lower()}{crew_mod.who(m)[1:]}" if m and m.get("title") else (
+        (m or {}).get("name") or d.get("from_name") or "Morpheus")
+    q = (d.get("question") or "").rstrip()
+    rec = f" {m['name'] if m else who} recommends {d['recommend']}." if d.get("recommend") else ""
+    answer = f"approve {d['id']}" + (f": {d['recommend']}" if d.get("recommend") else "")
+    return {"kind": "decision", "id": d.get("id"), "text": f"{who} asks: {q}{rec} Answer in the chat with the "
+                                                           "session:", "command": answer, "ts": d.get("ts")}
+
+
+def _issue_needs(reg: dict, p: dict) -> list:
+    out = []
+    for kind, msg in reg.get("issues") or []:
+        if kind == "layout" or "worktree outside the managed locations" in msg:
+            continue  # the layout item covers them, with dev adopt
+        if p["id"] in msg or (p.get("path") and tilde(p["path"]) in msg):
+            head, cmd, _ = _attention([(kind, msg)])[0]
+            out.append({"kind": kind, "text": head.replace(f"{p['id']}: ", "", 1) + ".", "command": cmd})
+    return out
+
+
+def status_view(reg: dict, p: dict, w: dict = None, runs=None, ci=None, roster=None, now=None) -> dict:
+    """Everything `dev status` shows for one project, in Sati's order: what needs you, what happens now (checks, the
+    crew, the plan), the last update, then the details. `--json` prints this."""
+    from . import canary, crew as crew_mod, progress as pg
+    now = now or time.time()
+    roster = roster or crew_mod.load()
+    amap = registry.alias_map(reg["projects"])
+    alias = amap.get(p["id"], p["id"])
+    co = dict(w or p.get("main") or {})
+    co.setdefault("path", (w or {}).get("path") or p.get("path"))
+    local = registry.is_local(p)
+    runs = pg.active_runs() if runs is None else runs
+    mine = [r for r in runs if r.get("project") == p["id"]]
+    needs = [_decision_need(d, roster) for r in mine for d in pg.pending_decisions(r)]
+    sl = p.get("status_line") or registry.status_line(p["id"]) or {}
+    parsed = canary.parse_line(sl.get("line") or "") if sl.get("line") else {}
+    if parsed.get("you"):
+        needs.append({"kind": "you", "text": parsed["you"], "command": "", "ts": sl.get("ts")})
+    if local and not p.get("canonical_ok", True):
+        needs.append(_layout_need(p, alias, True))
+    needs += _issue_needs(reg, p) if local else []
+    checks = _checks_view(ci if ci is not None else _ci_for(co.get("path"), co.get("branch")), co, co.get("path")) \
+        if local else {"state": "none", "text": f"{ui.glyph('none')} not on this Mac"}
+    crew_now = _crew_now(mine, roster, now)
+    last = None
+    if sl.get("line"):
+        last = {"agent": (sl.get("agent") or "").capitalize() or "an agent", "ts": sl.get("ts"),
+                "when": ui.rel_time(sl.get("ts"), now), "title": parsed.get("task") or "",
+                "done": parsed.get("done") if parsed else sl["line"], "check": parsed.get("check", ""),
+                "next": parsed.get("next", ""), "where": _where_from(p, co, sl, parsed) if parsed and local else ""}
+    wts = p.get("worktrees") or []
+    live = sum(1 for x in wts if x.get("active"))
+    details = {"branch": co.get("branch"), "changes": _changes(co), "commit": co.get("last_commit") or "",
+               "commit_ts": co.get("last_commit_ts"), "worktrees": len(wts), "worktrees_in_use": live,
+               "folder": co.get("path") or p.get("path"), "notes": str(core.note_path(p["id"])),
+               "commands": p.get("commands") or []}
+    from . import branches as branchmap
+    return {"project": p["id"], "alias": alias, "local": local, "branch": co.get("branch"), "needs_you": needs,
+            "checks": checks, "crew": crew_now, "last_update": last,
+            "branches": branchmap.ordered(p.get("branches")) if local else [], "details": details,
+            "tasks": ((p.get("note_summary") or {}).get("tasks") or {}), "plans": p.get("plans") or []}
+
+
+def _render_needs(needs: list, cols: int, title: str = "Needs you") -> list:
+    out = [""]
+    if not needs:
+        return out + ["  " + ui.bold(title), f"  {ui.green(ui.glyph('ok'))}  Nothing needs you right now."]
+    out.append("  " + ui.amber(f"{title} · {len(needs)}"))
+    for n in needs:
+        out += ui.para(n["text"], cols, indent=5, first="  " + ui.amber("!") + "  ")
+        if n.get("command"):
+            out.append(ui.command(n["command"], 5))
+    return out
+
+
+def render_status(v: dict, cols: int = None) -> list:
+    """Sati's `dev status` screen as lines: fits the terminal (text wraps at 100 columns), reads the same with
+    NO_COLOR=1, and never cuts a word or a status block."""
+    cols = cols or ui.width()
+    W = ui.text_width(cols)
+    d = v["details"]
+    out = ui.title_line(v["alias"], v["project"] if v["project"] != v["alias"] else "", d.get("branch") or "", cols)
+    out += _render_needs(v["needs_you"], cols)
+    out += ["", "  " + ui.bold("Right now")]
+    ck = v["checks"]
+    out += ui.row("Checks", ck["text"], cols)
+    if ck.get("command"):
+        out.append(ui.command(ck["command"], 2 + ui.LABEL_W))
+    cr = v["crew"]
+    if cr["members"]:
+        out += ui.row("Crew", f"{ui.glyph('working')} {len(cr['members'])} working", cols, style=None)
+        for m in cr["members"][:6]:
+            text = m["who"] + (" on " + ", ".join(m["on"]) if m["on"] else "")
+            out += ui.row("", text, cols)
+        if len(cr["members"]) > 6:
+            out += ui.row("", f"and {len(cr['members']) - 6} more (dev progress)", cols)
+    else:
+        out += ui.row("Crew", f"{ui.glyph('none')} nobody is working now", cols)
+    if cr.get("plan") and cr["working"]:
+        pl = cr["plan"]
+        left = f", about {ui.duration(pl['left_min'] * 60)} left" if pl.get("left_min") else ""
+        out += ui.row("Plan", f"{pl['done']} of {pl['total']} steps done{left}", cols)
+    last = v.get("last_update")
+    if last:
+        head = f"Last update from {last['agent']}, {last['when']}" + (f", {last['where']}" if last.get("where") else "")
+        head += f": {last['title']}" if last.get("title") else ""
+        out += [""] + ["  " + ui.bold(x) for x in ui.wrap(head, W - 3)]
+        if last.get("done"):
+            out += ui.row("Done", last["done"], cols)
+        if last.get("check"):
+            g = last["check"][:1]
+            style = ui.green if g == "✓" else ui.red if g == "✗" else ui.yellow if g == "⚠" else None
+            out += ui.row("Check", last["check"], cols, style=style)
+        if last.get("next"):
+            out += ui.row("Next", last["next"], cols)
+    if v.get("branches"):  # where each branch lives (spec P-fy3bwa0pshk R8)
+        from . import branches as branchmap
+        out += branchmap.status_lines(v["branches"], cols)
+    out += ["", "  " + ui.bold("Details")]
+    if not v.get("local"):
+        out += ui.row("Folder", "not on this Mac. Get it:", cols)
+        out.append(ui.command(f"dev clone {v['project']}", 2 + ui.LABEL_W))
+        d = dict(d, folder=None, commit=None, worktrees=0)
+    else:
+        branch = d.get("branch") or "not on a branch"
+        out += ui.row("Branch", branch + (f": {d['changes']}" if d.get("changes") else ": nothing to commit or push"),
+                      cols)
+    if d.get("commit"):
+        out += ui.row("Commit", (f"{ui.clock_time(d['commit_ts'])}, " if d.get("commit_ts") else "") + d["commit"],
+                      cols)
+    if d.get("worktrees"):
+        use = f"{d['worktrees_in_use']} in use" if d["worktrees_in_use"] else "none in use"
+        out += ui.row("Worktrees", f"{d['worktrees']}, {use} (dev wt ls)", cols)
+    room = W - 2 - ui.LABEL_W - 1
+    if d.get("folder"):
+        out += ui.row("Folder", ui.short_path(d["folder"], room), cols)
+    out += ui.row("Notes", ui.short_path(d["notes"], room), cols)
+    if d.get("commands"):
+        out += ui.row("Commands", ", ".join(d["commands"]), cols)
+    if v.get("show_all"):
+        t = v.get("tasks") or {}
+        out += ["", "  " + ui.bold("Tasks")]
+        for bucket in ("now", "next", "later"):
+            if t.get(bucket):
+                out += ui.row(bucket.capitalize(), "; ".join(t[bucket][:8]), cols)
+        if not any(t.get(b) for b in ("now", "next", "later")):
+            out.append(f"  {ui.glyph('none')} no open tasks (dev task add \"…\" adds one)")
+        if v.get("plans"):
+            out += ["", "  " + ui.bold("Plans")]
+            for pl in v["plans"][:8]:
+                out += ui.para(pl["title"], cols, indent=4)
+    out += ["", "  " + ui.dim("More: dev status --all (tasks and plans), dev status --json (for tools)")]
+    return out
+
+
+def home_view(reg: dict, runs=None, name: str = None, roster=None, offline: bool = True) -> dict:
+    """`dev status` outside a project: what needs you across this Mac's projects, then the projects."""
+    from . import crew as crew_mod, progress as pg
+    roster = roster or crew_mod.load()
+    runs = pg.active_runs() if runs is None else runs
+    here, away = registry.split_local(reg["projects"])
+    amap = registry.alias_map(reg["projects"])
+    needs = []
+    for p in here:
+        alias = amap.get(p["id"], p["id"])
+        for r in runs:
+            if r.get("project") == p["id"]:
+                for d in pg.pending_decisions(r):
+                    n = _decision_need(d, roster)
+                    n.update(text=f"{alias}: {n['text'][:1].lower()}{n['text'][1:]}", command=f"dev status {alias}")
+                    needs.append(n)
+        if not p.get("canonical_ok", True):
+            needs.append(_layout_need(p, alias, False))
+    working = sum(1 for s in reg.get("sessions") or [] if s.get("active"))
+    return {"greeting": ui.greeting(name if name is not None else core.gh_user().get("name", "")),
+            "local": len(here), "portfolio_only": len(away), "sessions_working": working, "needs_you": needs,
+            "projects": _ls_rows(reg, offline=offline)}
+
+
+def render_home(v: dict, cols: int = None) -> list:
+    cols = cols or ui.width()
+    n, s = v["local"], v["sessions_working"]
+    head = f"On this Mac: {n} project{'s' if n != 1 else ''}" + (
+        f", {s} session{'s' if s != 1 else ''} working" if s else "")
+    out = ["", ui.rule_title(head, cols)]
+    out += ui.para(f"{v['greeting']} You are not inside a project; dev status <name> shows one from here.", cols)
+    out += _render_needs(v["needs_you"], cols)
+    if v["projects"]:
+        out += ["", "  " + ui.bold("Projects")] + _project_table(v["projects"], cols)
+    else:
+        out += [""] + _empty_mac(v["portfolio_only"], cols)
+    out.append("")
+    foot = _portfolio_footer(v["portfolio_only"])
+    if foot:
+        out.append(foot)
+    try:
+        from . import canary
+        sm = canary.summary(7)
+        ok_, tot = sum(o for o, _ in sm.values()), sum(t for _, t in sm.values())
+        if tot:
+            out.append(f"  {ui.dim(f'Agents followed devkit’s rules in {100 * ok_ // tot}% of replies this week (dev canary).')}")
     except Exception:
         pass
-    sl = p.get("status_line") or registry.status_line(p["id"])
-    if sl and sl.get("line"):
-        print(ui.kv("last status", ui.dim(f"{sl.get('agent', '')} · {ago(sl.get('ts'))}")))
-        print(ui.status_block(sl["line"]))
+    return out + [""]
 
 
 def cmd_status(a):
     reg = _reg(prs=True)
-    p, w = registry.project_for_cwd(reg, os.getcwd()) if not a.query else (_resolve(reg, a.query), None)
+    if a.query:
+        p, w = _resolve(reg, a.query), None
+    else:
+        p, w = registry.project_for_cwd(reg, os.getcwd())
     if not p:
-        return cmd_home(a)
-    _print_status(p, w)
-    mine = [m for k, m in reg["issues"] if p["id"] in m or tilde(p["path"]) in m]
-    if mine:
-        print(ui.section("Needs attention"))
-        for m in mine:
-            print(f"  {ui.WARN} {m}")
+        v = home_view(reg, offline=False)
+        _prompt_refresh(reg)
+        if getattr(a, "json", False):
+            print(json.dumps(v, indent=2, ensure_ascii=False, default=str))
+            return 0
+        print("\n".join(render_home(v)))
+        return 0
+    v = status_view(reg, p, w)
+    _prompt_refresh(reg, (w or {}).get("path") or p.get("path") if a.query else os.getcwd())
+    v["show_all"] = bool(getattr(a, "all", False))
+    if getattr(a, "json", False):
+        print(json.dumps(v, indent=2, ensure_ascii=False, default=str))
+        return 0
+    print("\n".join(render_status(v)))
     print()
     return 0
+
+
+def cmd_branch(a):
+    """`dev branch ls` is the branch map (branches.py, spec P-fy3bwa0pshk R7); new, rename and clean stay in gitx."""
+    if getattr(a, "branch_cmd", None) in ("ls", "embargo"):
+        from . import branches as branchmap
+        return branchmap.cmd_ls(a) if a.branch_cmd == "ls" else branchmap.cmd_embargo(a)
+    from . import gitx
+    return gitx.cmd_branch(a)
+
+
+def cmd_go(a):
+    p = _resolve(_reg(prs=False), a.query, note=True, here=True)
+    print(p["path"])
+    return 0
+
 
 
 def _trust_codex(path: Path):
@@ -369,6 +930,8 @@ def _trust_codex(path: Path):
 
 
 def cmd_clone(a):
+    if "/" not in a.repo and ":" not in a.repo and "@" not in a.repo:  # an alias or a name from the portfolio
+        a.repo = _resolve(_reg(prs=False), a.repo)["id"]
     src = core.clone_source(a.repo)
     if not src:
         ui.err("expected owner/repo, host/group/repo or a git URL (https or ssh)")
@@ -478,16 +1041,16 @@ def cmd_adopt(a):
     _trust_codex(dest)
     gc._log(f"adopt · {p['id']}: {tilde(old_main)} → {tilde(dest)}")
     print(f"  {ui.WARN} Claude Desktop / Codex app chats opened at the old path should be restarted from {tilde(dest)}")
-    if core.real(old_main) == core.real(core.DEVKIT_HOME):
+    if core.real(old_main) == core.real(core.source_home()):
         import subprocess  # devkit moved itself: its paths are embedded in hooks, links and launchd — re-apply them
         print(f"  {ui.ARROW} devkit moved itself; re-applying its configuration from {tilde(dest)}")
-        return subprocess.call([sys.executable, str(dest / "bin" / "dev"), "install"])
+        return subprocess.call([sys.executable, "-I", "-S", str(dest / "bin" / "dev"), "install"])  # as its shebang
     return cmd_sync(argparse.Namespace(session=None, finish=False, offline=True, scheduled=False, no_push=False,
                                        quiet=True))
 
 
 def cmd_open(a):
-    p = _resolve(_reg(prs=False), a.query)
+    p = _resolve(_reg(prs=False), a.query, note=True, here=True)
     editor = CFG.get("editor") or os.environ.get("EDITOR", "code")
     return run([editor, p["path"]])
 
@@ -496,7 +1059,7 @@ def cmd_open(a):
 
 def _launch(tool: str, a):
     reg = _reg(prs=False)
-    p = _resolve(reg, a.query)
+    p = _resolve(reg, a.query, note=True, here=True)
     path = p["path"]
     if a.worktree:
         path = wt_new(p, a.worktree, base=None, quiet=True)
@@ -600,7 +1163,7 @@ def cmd_wt(a):
         if v:
             ui.err(v)
             return 2
-        p = _resolve(reg, a.repo)
+        p = _resolve(reg, a.repo, note=True, here=True)
         path = wt_new(p, a.branch, base=a.base, deps=not a.no_deps)
         if path:
             print(path)
@@ -687,6 +1250,11 @@ def cmd_sync(a):
                 reg["drift"] = [d.as_dict() for d in policy.diff()]
             except Exception:
                 pass
+            try:
+                from . import approvals
+                approvals.sweep()
+            except Exception:
+                pass
         try:
             from . import sleep as _sleep
             if a.scheduled and _sleep.due() and not (core.HOME / "Library" / "LaunchAgents" /
@@ -695,6 +1263,13 @@ def cmd_sync(a):
         except Exception as e:
             if not a.quiet:
                 ui.warn(f"sleep: {e}")
+        if (a.scheduled or a.finish) and not a.offline and not a.no_push:
+            try:  # back up the branches whose commits exist only on this Mac (spec P-fy3bwa0pshk R4)
+                from . import backup
+                backup.sync(reg, quiet=a.quiet)
+            except Exception as e:  # never let a backup break the sync
+                if not a.quiet:
+                    ui.warn(f"backup: {e}")
         try:
             from . import work
             if a.renew:
@@ -716,10 +1291,11 @@ def cmd_sync(a):
                 ui.warn(f"dashboard: {e}")
         if a.session and a.finish:
             agent, _, sid = a.session.partition(":")
+            from . import state as _state
             for suffix in (".json", ".stop"):
                 f = STATE / "sessions" / f"{agent}-{sid}{suffix}"
-                if f.exists():
-                    f.unlink()
+                if f.exists():  # under the record's lock, so a hook that already read it cannot write it back
+                    _state.remove(f) if suffix == ".json" else f.unlink()
         commit_push(push=CFG["sync"].get("push", True) and not a.no_push, quiet=a.quiet)
         (STATE / "last-sync.json").write_text(json.dumps({"ts": time.time(), "changed": changed,
                                                          "gc": [m for _, m in results]}))
@@ -728,6 +1304,12 @@ def cmd_sync(a):
             canary.prune()
             _rotate_log(STATE / "logs" / "sync.log")
             _expire_sessions()
+            try:  # continuity records unchanged for 7 days, and clear links older than 10 minutes (spec C12)
+                from . import continuity
+                continuity.expire()
+            except Exception as e:
+                if not a.quiet:
+                    ui.warn(f"continuity: {e}")
         if not a.quiet:
             print(f"{ui.OK} synced {len(reg['projects'])} projects · {len(changed)} file(s) changed"
                   + (f" · gc: {len(results)} action(s)" if results else "") + f" · {tilde(HANDOFF / 'PROJECTS.md')}")
@@ -755,6 +1337,15 @@ def _expire_sessions(days=7):
 
 
 def cmd_gc(a):
+    """`dev gc` is `dev free` under its old name (Hamann's decision (b)); `--apply` (and `-v`) keep the unattended
+    cleanup that scripts and the nightly gc job run."""
+    if a.apply or a.verbose:
+        return _gc_unattended(a)
+    from . import disk
+    return disk.cmd_free(a)
+
+
+def _gc_unattended(a):
     print(ui.section("Scanning (PR states refreshed from GitHub)"))
     reg = registry.build(with_prs=True, refresh_prs=True, with_sizes=True)
     pl = gc.plan(reg, with_sizes=True)
@@ -790,28 +1381,27 @@ def cmd_gc(a):
                                        quiet=False, renew=None))
 
 
-def cmd_du(a):
-    reg = registry.build(with_prs=False, with_sizes=True, refresh_sizes=a.refresh)
+def _du_rows(reg: dict) -> list:
+    """[alias, main size, worktrees size, worktrees] for the projects on this Mac (R1), largest first."""
+    here, _ = registry.split_local(reg["projects"])
+    amap = registry.alias_map(reg["projects"])
     rows = []
-    for p in sorted(reg["projects"], key=lambda x: -(x.get("size_kb") or 0)):
-        wt_kb = sum(w.get("size_kb") or 0 for w in p["worktrees"])
-        rows.append([p["id"], human_kb(p.get("size_kb")), human_kb(wt_kb) if p["worktrees"] else "-",
-                     str(len(p["worktrees"]))])
-    print(ui.section("Projects (main checkout · its worktrees)"))
-    print(ui.table(rows, ["PROJECT", "MAIN", "WORKTREES", "N"]))
-    print(ui.section("Agent data, temp, caches"))
-    extra = [("Claude transcripts (~/.claude/projects)", core.CLAUDE_HOME / "projects"),
-             ("Claude temp", Path(core.real("/tmp")) / f"claude-{os.getuid()}"),
-             ("Codex home (~/.codex)", core.CODEX_HOME), ("devkit temp (~/Development/.tmp)", core.TMP_ROOT),
-             ("npm cache", core.HOME / ".npm"), ("Homebrew cache", core.HOME / "Library" / "Caches" / "Homebrew"),
-             ("Colima VM disk", core.HOME / ".colima")]
-    for label, path in extra:
-        if path.exists():
-            print(ui.kv(label, human_kb(core.du_kb(path, timeout=120)), key_width=42))
-    if core.have("docker") and core.sh(["docker", "info"], timeout=10)[0] == 0:
-        print(ui.section("Docker"))
-        print("\n".join("  " + ln for ln in core.sh(["docker", "system", "df"], timeout=30)[1].splitlines()))
-    return 0
+    for p in sorted(here, key=lambda x: -(x.get("size_kb") or 0)):
+        wts = p.get("worktrees") or []
+        wt_kb = sum(w.get("size_kb") or 0 for w in wts)
+        rows.append([amap.get(p["id"], p["id"]), human_kb(p.get("size_kb")), human_kb(wt_kb) if wts else "-",
+                     str(len(wts))])
+    return rows
+
+
+def cmd_du(a):
+    from . import disk
+    return disk.cmd_du(a)
+
+
+def cmd_free(a):
+    from . import disk
+    return disk.cmd_free(a)
 
 
 # --------------------------------------------------------------------------- environment
@@ -823,17 +1413,76 @@ def cmd_doctor(a):
 
 def cmd_install(a):
     from . import setup
-    setup.run_install(only=set(a.only.split(",")) if a.only else None)
-    return 0
+    why = (a.why or "").strip()
+    if a.unverified and not why:
+        ui.err('--unverified needs --why "<reason>": it is recorded in the audit')
+        return 2
+    if why and not a.unverified:
+        ui.err("--why goes with --unverified (the reason to install a commit that is neither a release nor tested)")
+        return 2
+    only = {x.strip() for x in a.only.split(",") if x.strip()} if a.only else None
+    rc = setup.run_install(only=only, unverified_why=why if a.unverified else None, version=a.version,
+                           as_pinned=a.as_pinned, commit_template=getattr(a, "commit_template", None))
+    if rc == 0 and (not only or "claude" in only):  # what was installed: `dev config` tells new from removed
+        try:
+            write_install_record()
+        except Exception as e:
+            ui.warn(f"could not record what was installed ({e}); dev config may show removed settings as new")
+    return rc
+
+
+RELEASE_TAG_RE = re.compile(r"^v(\d+)\.(\d+)\.(\d+)$")
+
+
+def newest_release(tags):
+    """The newest release tag (vYY.MM.PATCH) among `tags`, compared as numbers: v26.11.10 is newer than v26.11.2.
+    None when no tag is a release (other tags, such as v26.12.0-rc1 or nightly, are not)."""
+    found = [(tuple(int(x) for x in m.groups()), t) for t in tags if (m := RELEASE_TAG_RE.match(t.strip()))]
+    return max(found)[1] if found else None
+
+
+def update_checkout(home: Path):
+    """Bring the devkit checkout at `home` up to date -> (exit code, message, whether to run `dev install`).
+
+    Detached at a release tag (how the installer leaves it): fetch the tags and check out the newest release when it
+    is newer. On a branch: `git pull --ff-only`. Refused, with nothing changed, when tracked files have local changes
+    or HEAD is detached somewhere that is not a release."""
+    where = tilde(home)
+    rc, dirty, err = core.git(home, "status", "--porcelain", "--untracked-files=no")
+    if rc != 0:
+        return rc, f"{where} is not a git checkout: {err}", False
+    if dirty:
+        return 1, (f"{where} has local changes, so nothing was updated. Commit or discard them first "
+                   f"(git -C {where} status)."), False
+    branch = core.gitout(home, "symbolic-ref", "-q", "--short", "HEAD")
+    if branch:
+        rc, out, err = core.git(home, "pull", "--ff-only", timeout=120)
+        return rc, f"{branch}: {out or err}", rc == 0
+    current = newest_release(core.gitout(home, "tag", "--points-at", "HEAD").split())
+    if not current:
+        at = core.gitout(home, "rev-parse", "--short", "HEAD")
+        return 1, (f"{where} is at commit {at}, which is neither a release nor a branch, so nothing was updated. "
+                   f"Check out a release (git -C {where} checkout <tag>) or a branch, then run dev update."), False
+    rc, out, err = core.git(home, "fetch", "--quiet", "--tags", timeout=120)
+    if rc != 0:
+        return rc, f"git fetch --tags failed: {err or out}", False
+    newest = newest_release(core.gitout(home, "tag", "--list", "v*").split() + [current])
+    if newest == current:
+        return 0, f"already at the newest release, {current}", False
+    rc, out, err = core.git(home, "-c", "advice.detachedHead=false", "checkout", "--quiet", newest, timeout=60)
+    if rc != 0:
+        return rc, f"git checkout {newest} failed: {err or out}", False
+    return 0, f"{current} → {newest}", True
 
 
 def cmd_update(a):
-    print(f"{ui.ARROW} updating {tilde(core.DEVKIT_HOME)}")
-    rc, out, err = core.git(core.DEVKIT_HOME, "pull", "--ff-only", timeout=120)
-    print(f"  {ui.OK if rc == 0 else ui.FAIL} {out or err}")
-    if rc != 0:
+    home = core.source_home()  # the checkout; `dev` itself may run from the pinned copy, which git never changes
+    print(f"{ui.ARROW} updating {tilde(home)}")
+    rc, message, install = update_checkout(home)
+    print(f"  {ui.OK if rc == 0 else ui.FAIL} {message}")
+    if rc != 0 or not install:
         return rc
-    os.execv(sys.executable, [sys.executable, str(core.DEVKIT_HOME / "bin" / "dev"), "install"])
+    os.execv(sys.executable, [sys.executable, "-I", "-S", str(home / "bin" / "dev"), "install"])  # pins the release
 
 
 def cmd_docker(a):
@@ -860,6 +1509,9 @@ def cmd_docker(a):
         if core.sh(["docker", "info"], timeout=10)[0] == 0:
             run(["docker", "system", "df"])
         return 0
+    if a.action == "trim":
+        from . import disk
+        return disk.cmd_trim(a)
     if a.action == "prune":
         run(["docker", "system", "prune", "-f"])
         return run(["docker", "builder", "prune", "-f"])
@@ -963,6 +1615,9 @@ def cmd_ci_watch(a, top):
 
 def cmd_canary(a):
     from . import canary
+    print(ui.section(f"Stop hook — last {a.days} days (aim: no turn sent back)"))
+    for line in canary.stop_block_lines(a.days):
+        print(line)
     rs = canary.records(a.days)
     print(ui.section(f"Instruction canary {canary.MARKER} — last {a.days} days"))
     if not rs:
@@ -1141,6 +1796,18 @@ def delegate_message(it: dict, who: str, why: str, label: str) -> str:
     return "\n".join(lines)
 
 
+def _task_branch(scope: str) -> str:
+    """The branch checked out here when it belongs to the task's project and is not a permanent one: `dev task start`
+    links it (`branch:<name>`), so the branch map finds the task without its id in the branch name."""
+    top = core.gitout(os.getcwd(), "rev-parse", "--show-toplevel")
+    branch = core.gitout(top, "branch", "--show-current") if top else ""
+    if not branch or branch in ("main", "master", "develop", "trunk", "gh-pages"):
+        return ""
+    main = registry.main_of(Path(top)) or Path(top)
+    pid = core.project_identity(main, core.gitout(top, "config", "--get", "remote.origin.url"))[0]
+    return branch if pid == scope and branch != registry.default_branch(main) else ""
+
+
 def cmd_task(a):
     from . import work
     scope, label = _scope(a)
@@ -1155,10 +1822,10 @@ def cmd_task(a):
             if "_" in body and not a.body:
                 print(ui.dim(f"  fill in the description: dev task edit {it['meta']['id']} --body-file <file> --why \"…\""))
             if a.claim:
-                work.claim(it, why=a.why or "")
+                work.claim(it, why=a.why or "", branch=_task_branch(scope))
                 print(f"{ui.OK} claimed by you")
         elif act in ("start", "claim"):
-            it = work.claim(work.find(" ".join(a.selector), scope), why=a.why or "")
+            it = work.claim(work.find(" ".join(a.selector), scope), why=a.why or "", branch=_task_branch(scope))
             print(f"{ui.OK} {it['meta']['id']} claimed until {it['meta']['lock_expires']} — others see it as yours")
         elif act == "release":
             it = work.release(work.find(" ".join(a.selector), scope), why=a.why or "", status="todo")
@@ -1167,6 +1834,9 @@ def cmd_task(a):
             it = work.find(" ".join(a.selector), scope)
             it = work.release(it, why=a.why or "", status="done")
             print(f"{ui.OK} {it['meta']['id']} done")
+        elif act == "reopen":
+            it = work.reopen(work.find(" ".join(a.selector), scope), why=a.why or "")
+            print(f"{ui.OK} {it['meta']['id']} reopened (todo) · why: {a.why}")
         elif act == "block":
             it = work.update(work.find(" ".join(a.selector), scope), "block", why=a.why or "", status="blocked")
             print(f"{ui.OK} {it['meta']['id']} blocked")
@@ -1283,8 +1953,13 @@ def cmd_progress(a):
     from_agent = os.environ.get("DEVKIT_FROM_AGENT") or None  # set by the hooks inside a subagent
     if act == "start":
         names = [x.strip() for x in (a.plan or "").split(";") if x.strip()]
-        run = pg.start(" ".join(a.goal), a.steps or len(names), a.estimate or "", plan=names, from_agent=from_agent,
-                       mode=getattr(a, "mode", "") or "")
+        try:
+            run = pg.start(" ".join(a.goal), a.steps or len(names), a.estimate or "", plan=names,
+                           from_agent=from_agent, mode=getattr(a, "mode", "") or "",
+                           replace=getattr(a, "replace", False), why=getattr(a, "why", "") or "")
+        except ValueError as e:
+            ui.err(str(e))
+            return 2
         if from_agent:
             print(f"{ui.OK} lane plan recorded · {' '.join(a.goal)}")
             return 0
@@ -1293,7 +1968,7 @@ def cmd_progress(a):
               + (f" · estimate {pg.fmt_min(run['estimate'])}" if run["estimate"] else ""))
         hints = []
         if cal["ratio"] and run["estimate"]:
-            hints.append(f"runs here take {cal['ratio']}× their estimate → plan for ~{pg.fmt_min(run['estimate_cal'])}")
+            hints.append(f"runs here take {cal['ratio']}× their estimate → plan for ~{_about(run['estimate_cal'])}")
         if cal["turn_median"]:
             hints.append(f"median turn {pg.fmt_min(cal['turn_median'])}, p90 {pg.fmt_min(cal['turn_p90'])}")
         if hints:
@@ -1322,7 +1997,8 @@ def cmd_progress(a):
                                                      .get("plan") or [])} if not from_agent else {}
         try:
             run = pg.step(" ".join(a.text), a.next or "", kind=kind, check=check, which=getattr(a, "step", None),
-                          from_agent=from_agent, force=getattr(a, "force", False))
+                          from_agent=from_agent, force=getattr(a, "force", False), why=getattr(a, "why", "") or "",
+                          approves=getattr(a, "approves", "") or "")
         except ValueError as e:
             ui.err(str(e))
             return 2
@@ -1339,7 +2015,12 @@ def cmd_progress(a):
     if act in ("assign", "begin", "add", "reopen", "skip"):
         try:
             if act == "assign":
-                run = pg.assign(a.which, " ".join(a.to), scope=getattr(a, "scope", "") or "", from_agent=from_agent)
+                extra = {}
+                if getattr(a, "activity", None):  # the kind of work, whatever language the step is written in
+                    from . import raci
+                    extra["activity"] = raci.resolve_activity(a.activity)["id"]
+                run = pg.assign(a.which, " ".join(a.to), scope=getattr(a, "scope", "") or "", from_agent=from_agent,
+                                why=getattr(a, "why", "") or "", allow=getattr(a, "allow", "") or "", **extra)
             elif act == "begin":
                 run = pg.begin(a.which, from_agent=from_agent)
             elif act == "add":
@@ -1379,9 +2060,19 @@ def cmd_progress(a):
     for who, s_ in others:
         p_ = s_["progress"]
         print(f"  {ui.ACTIVE} {who} · {s_.get('agent')} · {s_.get('project')} · {p_.get('goal')} — "
-              f"{p_.get('step')}/{p_.get('steps') or '?'}" + (f" · ETA ~{p_['eta_min']}m" if p_.get("eta_min") else ""))
+              f"{p_.get('step')}/{p_.get('steps') or '?'}" + (f" · ETA ~{_about(p_['eta_min'])}" if p_.get("eta_min")
+                                                               else ""))
     print()
     return 0
+
+
+def _about(m) -> str:
+    """An estimate or a time left, as the dashboard shows it (fmtAbout): to 5 minutes, and to the minute under 10,
+    so "~" claims no more precision than an estimate has. Measured times keep progress.fmt_min."""
+    from . import progress as pg
+    m = max(0.0, float(m or 0))
+    r = int(m + 0.5)  # halves round up, as Math.round does on the dashboard
+    return pg.fmt_min(r if r < 10 else int(m / 5 + 0.5) * 5)
 
 
 def cmd_report(a):
@@ -1484,6 +2175,21 @@ def _lesson_scope(a):
     return delivery.scope_for(top)
 
 
+def _lesson_anchors(a) -> dict:
+    """The anchors given on the command line: where a lesson applies, in terms that mean the same in any language."""
+    return {"files": getattr(a, "file", None) or [], "commands": getattr(a, "command", None) or [],
+            "activities": getattr(a, "activity", None) or [], "errors": getattr(a, "error", None) or [],
+            "stack": getattr(a, "stack", None) or []}
+
+
+def _anchor_flags(x):
+    x.add_argument("--file", action="append", help="a file or glob it applies to (repeat)")
+    x.add_argument("--command", action="append", help="the command words it applies to, e.g. \"git push --force\"")
+    x.add_argument("--activity", action="append", help="the kind of work it applies to: an id from the crew's RACI")
+    x.add_argument("--error", action="append", help="an error signature: text the tool output shows when it happens")
+    x.add_argument("--stack", action="append", help="the stack it applies to: python, java, angular, …")
+
+
 def cmd_lesson(a):
     from . import lessons
     act = a.lesson_cmd or "ls"
@@ -1493,10 +2199,18 @@ def cmd_lesson(a):
             les = lessons.add(scope, " ".join(a.title), kind=a.kind, severity=a.severity, happened=a.happened or "",
                               cause=a.cause or "", fix=a.fix or "", prevention=a.prevent or "",
                               detection=a.detect or "", evidence=a.evidence or [], tags=a.tag or [], why=a.why or "",
-                              retire_when=a.retire_when or "")
+                              retire_when=a.retire_when or "", **_lesson_anchors(a))
             print(f"{ui.OK} {les['meta']['id']} recorded in {scope} → {tilde(les['path'])}")
+            if not any(_lesson_anchors(a).values()):
+                print(ui.dim("  no anchors: only the session start recalls it. Add where it applies: dev lesson anchor "
+                             + les["meta"]["id"] + " --file … --command … --activity … --error … --why …"))
             print(ui.dim("  automate it when you can: dev lesson prevent " + les["meta"]["id"] +
                          " --by test|lint|guard|skill|ci --ref … --why …"))
+            return 0
+        if act == "anchor":
+            les = lessons.set_anchors(lessons.find(" ".join(a.selector)), a.why or "", **_lesson_anchors(a))
+            print(f"{ui.OK} {les['meta']['id']} anchored · " + " · ".join(
+                f"{k} {', '.join(v)}" for k, v in lessons.anchors(les).items() if v))
             return 0
         if act == "restore":
             les = lessons.restore(" ".join(a.selector), a.why or "")
@@ -1652,30 +2366,6 @@ def cmd_jobs(a):
     return 0
 
 
-def cmd_audit(a):
-    from . import audit
-    if a.publish:
-        changed = audit.publish()
-        audit.prune()
-        if changed:
-            from . import work
-            work._commit(changed, f"audit: {len(changed)} file(s) from {audit.actor()['host']}")
-        if not a.quiet:
-            print(f"{ui.OK} audit published ({len(changed)} file(s) changed)")
-        return 0
-    rs = audit.records(a.days, a.action, a.actor, a.team)
-    if a.json:
-        print(json.dumps(rs, indent=1, ensure_ascii=False))
-        return 0
-    print(ui.section(f"Audit · last {a.days} days" + (" · team" if a.team else "") + f" · {len(rs)} record(s)"))
-    for r in rs[-a.lines:]:
-        bad = r.get("outcome") not in ("ok", None)
-        who = f"{r.get('user')}@{r.get('host')} {r.get('agent')}"
-        print(f"  {ui.dim(core.fmt_ts(r['ts']))} {(ui.red if bad else ui.cyan)(r.get('action', ''))[:40]:<28} "
-              f"{r.get('target', '')[:70]}  {ui.dim(who)}" + (f"  {ui.red(r['outcome'])}" if bad else ""))
-    return 0
-
-
 def cmd_team(a):
     from . import work
     t = work.team(max_age_h=a.hours)
@@ -1719,7 +2409,7 @@ def cmd_note(a):
 
 def overview_data(days=7):
     reg = registry.build(with_prs=True, refresh_prs=False, pr_max_age=10 ** 9)  # fresh, local, cached PR data
-    from . import canary
+    from . import branches as branchmap, canary
     import datetime as dt
     since = (dt.date.today() - dt.timedelta(days=days)).isoformat()
     out = []
@@ -1733,6 +2423,7 @@ def overview_data(days=7):
                     "last_session": (ns.get("sessions") or [None])[0], "status_line": p.get("status_line"),
                     "branch": (p.get("main") or {}).get("branch"), "open_prs": len(p.get("prs_open", [])),
                     "worktrees": len(p.get("worktrees", [])), "live_sessions": live, f"commits_{days}d": commits,
+                    "branches": branchmap.counts(p.get("branches")),
                     "last_activity": p.get("last_activity"), "path": p["path"]})
     order = {"blocked": 0, "active": 1, "paused": 2, "done": 3, "archived": 4}
     out.sort(key=lambda x: (order.get(x["status"], 9), x["priority"] != "high", -(x["last_activity"] or 0)))
@@ -1748,8 +2439,9 @@ def cmd_overview(a):
     if a.json:
         print(json.dumps(data, indent=1, ensure_ascii=False))
         return 0
+    at_risk = sum((x.get("branches") or {}).get("not_backed_up", 0) for x in data["projects"])
     print(ui.section(f"Portfolio · {len(data.get('initiatives', []))} initiatives · {len(data['projects'])} projects"
-                     f" · canary {data['canary']}"))
+                     f" · canary {data['canary']}" + (f" · {at_risk} branches not backed up" if at_risk else "")))
     for i in data.get("initiatives", []):
         pct = f"{i['progress']}%" if i["progress"] is not None else "–"
         bar = ""
@@ -1785,6 +2477,12 @@ def cmd_overview(a):
             print(f"    {ui.dim(x['purpose'])}")
         if x["status_line"]:
             print(f"    {ui.status_pills(x['status_line']['line'])}  {ui.dim(x['status_line']['agent'] + ' · ' + ago(x['status_line']['ts']))}")
+        bc = x.get("branches") or {}
+        if bc.get("not_backed_up") or bc.get("embargoed"):  # where the work lives (spec P-fy3bwa0pshk R8)
+            text = f"{bc['total']} branch{'es' if bc['total'] != 1 else ''}" + "".join(
+                f" · {bc[k]} {label}" for k, label in (("not_backed_up", "not backed up"), ("embargoed", "embargoed"))
+                if bc.get(k))
+            print(f"    {ui.amber(text) if bc.get('not_backed_up') else text}  {ui.dim('dev branch ls')}")
         for t in x["now"][:3]:
             print(f"    {ui.cyan('▸')} {t}")
         if x["open_tasks"] > len(x["now"][:3]):
@@ -1833,22 +2531,6 @@ def cmd_standup(a):
     return 0
 
 
-def cmd_dashboard(a):
-    try:
-        from . import dashboard
-    except ImportError:
-        ui.err("the HTML dashboard module is not installed in this devkit version")
-        return 1
-    reg = _reg(prs=True)
-    path = dashboard.write(reg)
-    if a.path or a.no_open:
-        print(path)
-    if not a.no_open and not a.path:
-        dashboard.open_in_browser(path)
-        print(f"{ui.OK} dashboard → {tilde(path)}")
-    return 0
-
-
 def cmd_config(a):
     from . import policy, setup
     act = a.config_cmd or "diff"
@@ -1858,6 +2540,18 @@ def cmd_config(a):
         return 0
     if act == "validate":
         return _config_validate()
+    if act == "set":
+        if not a.key or a.value is None:
+            ui.err("dev config set <key> <value>, such as: dev config set progress.max_parallel 6")
+            return 2
+        try:
+            old, new = core.config_set(a.key, a.value)
+        except core.ConfigError as e:
+            ui.err(str(e))
+            return 2
+        print(f"{ui.OK} {a.key}: {json.dumps(old, ensure_ascii=False)} → {json.dumps(new, ensure_ascii=False)} "
+              f"in {tilde(core.CONFIG_FILE)} (audited)")
+        return 0
     if act == "edit":
         editor = os.environ.get("EDITOR") or CFG.get("editor") or "vi"
         run([editor, str(core.CONFIG_FILE)])
@@ -1878,6 +2572,8 @@ def cmd_config(a):
     if act == "repair":
         with setup.quiet_mode(True):
             fixed = policy.repair()
+        if fixed:
+            write_install_record()
         if not a.quiet:
             print(f"{ui.OK} restored {len(fixed)} setting(s)" if fixed else f"{ui.OK} nothing to repair")
             for d in fixed:
@@ -1890,26 +2586,257 @@ def cmd_config(a):
             print(ui.section("Recent config events"))
             print("\n".join("  " + ln for ln in log.read_text().splitlines()[-15:]))
         return 0
-    drift = policy.diff()
-    print(ui.section("devkit-managed settings: desired (devkit config) vs installed"))
+    broken = _config_broken()
+    if broken:
+        print(f"{ui.FAIL} {broken} Fix it:")
+        print(ui.command("dev config edit", 2))
+        return 2
+    try:
+        from .setup import load_conf
+        hooks_conf = load_conf("claude/settings.json").get("hooks") or {}
+    except Exception:
+        hooks_conf = {}
+    try:
+        lock = policy.lock_status()
+    except Exception:
+        lock = ""
+    return config_report(policy.diff(), core.read_json(_install_record_file(), {}) or {}, hooks_conf,
+                         check=getattr(a, "check", False), lock=lock)
+
+
+# --------------------------------------------------------------------------- dev config as a report (R11)
+
+# What each devkit hook does, in one line, for `dev config` (the command's subcommand after `dev hook`).
+HOOK_INFO = {
+    "session-start": "when a session starts, devkit gives it the project, its handoff note and the known pitfalls.",
+    "guard": "before a shell command, a file write or a crew launch, devkit's guard checks the workspace rules.",
+    "stop": "when a reply ends, devkit checks its status block and keeps it as the project's latest status.",
+    "session-end": "when a session ends, devkit closes its records and syncs the handoff repository.",
+    "config-change": "when settings change, devkit keeps the settings it manages in place.",
+    "instructions-loaded": "when instructions load, devkit notes which files the session read.",
+    "prompt": "when you send a message, devkit adds progress, crew messages and the route for the request.",
+    "post-tool": "after a tool runs, devkit records progress and timing and reminds the agent to update you.",
+    "post-tool-failure": "when a tool call fails, devkit closes its record; when starting a crew member fails, devkit "
+                         "frees its crew slot at once.",
+    "subagent-start": "when a crew member starts, devkit binds it to its step and its brief.",
+    "subagent-stop": "when a crew member stops, devkit checks its report and its step.",
+}
+# Plain names for the settings people meet most often; the key follows in parentheses.
+KEY_INFO = {"permissions.defaultMode": "Who may run commands without asking",
+            "user.name": "Your name on commits", "user.email": "Your email on commits",
+            "core.excludesFile": "The files git ignores everywhere",
+            "cleanupPeriodDays": "How many days Claude Code keeps chats",
+            "skipDangerousModePermissionPrompt": "Skip the warning for the mode that never asks",
+            "fastModePerSessionOptIn": "Fast mode is chosen per session"}
+TARGETS = {"claude": "Claude Code  ~/.claude/settings.json", "codex": "Codex  ~/.codex/config.toml",
+           "instructions": "Agent instructions", "skills": "Skills", "git": "git  ~/.gitconfig"}
+
+
+def _install_record_file() -> Path:
+    return core.STATE / "config-installed.json"
+
+
+_DEV_PATH = re.compile(r"'?[^'\s]*/bin/dev'?")
+
+
+def _norm_cmd(cmd: str) -> str:
+    """A hook command with devkit's path shown as `dev`: the same hook whichever pinned copy installed it."""
+    return _DEV_PATH.sub("dev", str(cmd or ""), count=1).strip()
+
+
+def _config_broken() -> str:
+    f = core.CONFIG_FILE
+    if not f.exists():
+        return ""
+    try:
+        json.loads(f.read_text())
+    except ValueError as e:
+        line = f"line {e.lineno}: {e.msg[:1].lower()}{e.msg[1:]}" if hasattr(e, "lineno") else str(e)
+        return f"{tilde(f)} is not valid JSON ({line})."
+    except OSError as e:
+        return f"{tilde(f)} can't be read ({e.strerror})."
+    return ""
+
+
+def write_install_record():
+    """What `dev install` (or `dev config repair`) just installed, so `dev config` can tell a setting that is new in
+    this devkit version from one removed outside devkit."""
+    from . import policy
+    rec = {"ts": round(time.time()), "version": core.VERSION}
+    try:
+        flat, hooks = policy.claude_desired()
+        rec["claude"] = {"keys": {policy._key(k): v for k, v in flat.items()},
+                         "hooks": {ev: [_norm_cmd(c) for c in cmds] for ev, cmds in hooks.items()}}
+    except Exception:
+        pass
+    rec["instructions"] = {"keys": {tilde(t): _sha(t) for t in (core.CLAUDE_HOME / "CLAUDE.md",
+                                                                core.CODEX_HOME / "AGENTS.md") if t.exists()}}
+    f = _install_record_file()
+    f.parent.mkdir(parents=True, exist_ok=True)
+    f.write_text(json.dumps(rec, indent=1, ensure_ascii=False))
+
+
+def _hook_group(hooks_conf: dict, event: str, cmd: str):
+    for g in hooks_conf.get(event) or []:
+        for h in g.get("hooks") or []:
+            if _norm_cmd(h.get("command")) == _norm_cmd(cmd):
+                return g, h
+    return {}, {}
+
+
+def _sha(path) -> str:
+    import hashlib
+    try:
+        return hashlib.sha256(Path(path).read_bytes()).hexdigest()[:16]
+    except OSError:
+        return ""
+
+
+def _instructions(d) -> tuple:
+    """(state, version that wrote it) of an instructions file: missing, hand-written, outdated or current."""
+    path = Path(os.path.expanduser(d.key))
+    try:
+        from .setup import instructions_state
+        state = instructions_state(path)
+    except Exception:
+        state = "outdated" if d.current is not None else "missing"
+    try:
+        m = re.search(r"generated by devkit (\S+)", path.read_text()[:200])
+    except OSError:
+        m = None
+    return state, m.group(1) if m else ""
+
+
+def _kind(d, record: dict) -> str:
+    """new (in this devkit version, not installed yet) · removed (outside devkit) · changed (outside devkit)."""
+    from . import policy
+    rec = record.get(d.target) or {}
+    if d.target == "instructions":
+        state, _ = _instructions(d)
+        if state == "missing":
+            return "removed" if d.key in (rec.get("keys") or {}) else "new"
+        if state == "hand-written":
+            return "changed"
+        old = (rec.get("keys") or {}).get(d.key)
+        return "changed" if old and old != _sha(os.path.expanduser(d.key)) else "new"
+    if d.key.startswith("hooks.") and d.target == "claude":
+        installed = [_norm_cmd(c) for c in (rec.get("hooks") or {}).get(d.key[6:], [])]
+        return "removed" if _norm_cmd(d.desired) in installed else "new"
+    keys = rec.get("keys") or {}
+    if d.current is policy.MISSING:
+        return "removed" if d.key in keys else "new"
+    if d.key in keys and keys[d.key] == d.current:
+        return "new"  # what devkit installed last time: this version wants another value
+    return "changed"
+
+
+def _value(v) -> str:
+    from . import policy
+    if v is policy.MISSING or v is None:
+        return "not set"
+    if isinstance(v, (list, tuple)):
+        return ", ".join(str(x) for x in v) or "(empty list)"
+    return v if isinstance(v, str) else json.dumps(v, ensure_ascii=False)
+
+
+KINDS = {"new": ("new", "New in this devkit version, not installed yet", "Install it:", "dev install"),
+         "removed": ("removed", "Removed outside devkit", "Put it back:", "dev config repair"),
+         "changed": ("changed", "Changed outside devkit", "Put devkit's value back:", "dev config repair")}
+
+
+def _drift_lines(d, kind: str, hooks_conf: dict, cols: int) -> list:
+    g_name, title, fix_text, fix = KINDS[kind]
+    mark = {"new": ui.green, "removed": ui.red, "changed": ui.yellow}[kind](ui.glyph(g_name))
+    out = [f"  {mark}  {ui.bold(title)}"]
+    body = []
+    if d.key.startswith("hooks.") and d.target == "claude":
+        event = d.key[6:]
+        g, h = _hook_group(hooks_conf, event, d.desired)
+        cmd = _norm_cmd(d.desired)
+        sub = cmd.split()[2] if cmd.startswith("dev hook ") and len(cmd.split()) > 2 else ""
+        body += ui.para("A hook: " + HOOK_INFO.get(sub, "devkit runs a command at this moment."), cols, indent=5)
+        limit = f" ({h['timeout']} s limit)" if h.get("timeout") else ""
+        body += ui.row("Event", event, cols, indent=7)
+        body += ui.row("Matches", ", ".join((g.get("matcher") or "").split("|")) or "everything", cols, indent=7)
+        body += ui.row("Runs", cmd + limit, cols, indent=7)
+    elif d.target == "instructions":
+        agent = "Codex" if d.key.endswith("AGENTS.md") else "Claude Code"
+        _, ver = _instructions(d)
+        text = {"new": f"{agent}'s global instructions ({d.key}) come from devkit {ver or 'an older version'}; this "
+                       "version writes newer ones.",
+                "removed": f"{agent}'s global instructions ({d.key}) are missing.",
+                "changed": f"{agent}'s global instructions ({d.key}) were edited by hand. Personal rules belong in "
+                           "~/.config/devkit/AGENTS.personal.md, which dev install adds to them."}[kind]
+        body += ui.para(text, cols, indent=5)
+    elif d.target == "skills":
+        body += ui.para(f"A skill devkit installs is not linked: {d.key}", cols, indent=5)
+    else:
+        name = KEY_INFO.get(d.key)
+        body += ui.para(f"{name} ({d.key})" if name else d.key, cols, indent=5)
+        if isinstance(d.desired, list) and isinstance(d.current, list):
+            add = [x for x in d.desired if x not in d.current]
+            gone = [x for x in d.current if x not in d.desired]
+            if add:
+                body += ui.row("devkit adds", _value(add), cols, lw=17, indent=7)
+            if gone:
+                body += ui.row("extra now", _value(gone), cols, lw=17, indent=7)
+        else:
+            body += ui.row("devkit's value", _value(d.desired), cols, lw=17, indent=7)
+            body += ui.row("installed now", _value(d.current), cols, lw=17, indent=7)
+    out += body + [" " * 5 + fix_text, ui.command(fix, 5)]
+    if kind == "changed" and d.target != "instructions":
+        out += ui.para("Or keep yours by adding it to your devkit config: dev config edit", cols, indent=5)
+    return out
+
+
+def config_report(drift: list, record: dict, hooks_conf: dict, check: bool = False, cols: int = None,
+                  lock: str = "") -> int:
+    """`dev config`: each difference says what it is, shows readable fields and names the fix; exits 0. With
+    `check` (scripts, dev doctor): one line and exit 1 when something differs, nothing and exit 0 otherwise."""
+    n = len(drift)
+    if check:
+        if n:
+            print(f"{n} setting{'s' if n != 1 else ''} differ{'s' if n == 1 else ''} from what devkit installs: run "
+                  "dev config for details.")
+        return 1 if n else 0
+    cols = cols or ui.width()
+    kinds = [(d, _kind(d, record)) for d in drift]
+    counts = {}
+    for _, k in kinds:
+        counts[k] = counts.get(k, 0) + 1
+    words = [f"{counts['new']} to install"] if counts.get("new") else []
+    words += [f"{counts['changed']} changed outside devkit"] if counts.get("changed") else []
+    words += [f"{counts['removed']} removed outside devkit"] if counts.get("removed") else []
+    print()
+    print(ui.rule_title("devkit settings: " + (", ".join(words) if words else "all installed"), cols))
+    print("\n".join(ui.para("devkit compares the settings this version wants with what is installed in Claude Code, "
+                            "Codex, git and your skills.", cols)))
+    locked = lock == "on"
     if not drift:
-        print(f"  {ui.OK} everything matches · lock {policy.lock_status()}")
+        print(f"\n  {ui.green(ui.glyph('ok'))} All devkit settings are installed and match.")
+        if locked:
+            print(f"  {ui.dim('Settings lock is on: Claude Code can’t override these.')}")
+        print()
         return 0
-    cur_t = None
-    for d in drift:
-        if d.target != cur_t:
-            cur_t = d.target
-            print(f"\n  {ui.bold(cur_t)}")
-        cur = ui.dim("missing") if d.current is policy.MISSING else ui.red(json.dumps(d.current, ensure_ascii=False)[:60])
-        print(f"   {ui.yellow('~')} {d.key:<48} {cur} {ui.ARROW} {ui.green(json.dumps(d.desired, ensure_ascii=False)[:60])}")
-    print(f"\n  {ui.dim(f'{len(drift)} difference(s) — `dev config repair` restores them; edits belong in devkit config')}")
-    return 1
+    cur = None
+    for d, k in sorted(kinds, key=lambda x: list(TARGETS).index(x[0].target) if x[0].target in TARGETS else 99):
+        if d.target != cur:
+            cur = d.target
+            print(f"\n  {ui.bold(TARGETS.get(cur, cur))}")
+        print("\n".join(_drift_lines(d, k, hooks_conf, cols)))
+    if any(k == "changed" and d.target == "claude" for d, k in kinds) and not locked:
+        print()
+        print("\n".join(ui.para("To stop this, lock the settings: dev config lock. It asks for your Mac password.",
+                                cols)))
+    print(f"\n  {ui.green(ui.glyph('ok'))} Everything else matches.\n")
+    return 0
 
 
 def _config_validate() -> int:
     from .core import DEFAULTS
     errors = []
     cfg = core.read_json(core.CONFIG_FILE, None)
+    errors += core.config_errors(cfg or {})  # value checks: the audit retention floor, levels and formats
     if cfg is None and core.CONFIG_FILE.exists():
         errors.append(f"{tilde(core.CONFIG_FILE)} is not valid JSON")
     for k in (cfg or {}):
@@ -2021,8 +2948,34 @@ def _quota_text(q: dict) -> str:
     return (ui.red("exhausted · ") + txt) if not q.get("available") else (ui.yellow(txt) if (used or 0) >= 80 else txt)
 
 
+def rules_text(section: str = "") -> str:
+    """devkit's global rules as `dev install` writes them, or one section ("0", "3", "crew", "status block")."""
+    from . import setup
+    text = setup.render_instructions().split("\n", 1)[1]  # without the generated-by line
+    if not section:
+        return text
+    want = section.strip().lower()
+    parts = re.split(r"(?m)^(?=## )", text)
+    for p in parts:
+        head = p.split("\n", 1)[0].lower()
+        if head.startswith(f"## {want}.") or (not want.isdigit() and want in head):
+            return p.strip()
+    subs = re.split(r"(?m)^(?=### )", text)
+    for p in subs:
+        if p.startswith("### ") and want in p.split("\n", 1)[0].lower():
+            return re.split(r"(?m)^## ", p)[0].strip()
+    raise ValueError(f"no section {section!r}: give its number (0-12) or words from its title")
+
+
 def cmd_agents(a):
     from . import providers
+    if a.action == "rules":
+        try:
+            print(rules_text(getattr(a, "section", "") or ""))
+        except ValueError as e:
+            ui.err(str(e))
+            return 2
+        return 0
     if a.action == "test":
         targets = ["claude", "codex"] if a.agent in (None, "all") else [a.agent]
         rc = 0
@@ -2064,6 +3017,12 @@ def cmd_agents(a):
 
 
 def cmd_setup(a):
+    if getattr(a, "what", None) == "prompt":
+        from . import setup as setup_mod
+        return setup_mod.setup_prompt(assume_yes=a.yes, remove=a.remove)
+    if getattr(a, "what", None) == "commit-template":
+        from . import setup as setup_mod
+        return setup_mod.setup_commit_template(assume_yes=a.yes, remove=a.remove)
     from . import wizard
     return wizard.run(assume_yes=a.yes, skip_packages=a.skip_packages)
 
@@ -2088,7 +3047,12 @@ def cmd_diagram(a):
 
 
 def cmd_version(a):
-    print(f"devkit {core.VERSION} · {tilde(core.DEVKIT_HOME)}\n{COPYRIGHT}")
+    where = tilde(core.DEVKIT_HOME)
+    if core.is_pinned():
+        where += f" (pinned copy of {tilde(core.source_home())})"
+    elif core.is_pinned(core.runtime_home()):
+        where += f" (checkout; the hooks run {tilde(core.runtime_home())})"
+    print(f"devkit {core.VERSION} · {where}\n{COPYRIGHT}")
     return 0
 
 
@@ -2104,10 +3068,15 @@ def cmd_mcp(a):
 
 def cmd_complete(a):
     if a.kind == "projects":
-        reg = core.read_json(HANDOFF / "registry.json", {}) or {}
+        reg = core.read_json(core.HANDOFF / "registry.json", {}) or {}
         print("\n".join(p["id"] for p in reg.get("projects", [])))
+    elif a.kind == "aliases":  # alias:project, for zsh's _describe; the projects on this Mac first
+        ps = (core.read_json(core.HANDOFF / "registry.json", {}) or {}).get("projects", [])
+        amap = registry.alias_map(ps)
+        here, away = registry.split_local(ps)
+        print("\n".join(f"{amap.get(p['id'], p['id']).replace(':', '_')}:{p['id']}" for p in here + away))
     elif a.kind == "branches":
-        reg = core.read_json(HANDOFF / "registry.json", {}) or {}
+        reg = core.read_json(core.HANDOFF / "registry.json", {}) or {}
         print("\n".join(sorted({w.get("branch") for p in reg.get("projects", []) for w in p.get("worktrees", [])
                                 if w.get("branch")})))
     elif a.kind == "commands":
@@ -2117,8 +3086,17 @@ def cmd_complete(a):
 
 # --------------------------------------------------------------------------- parser
 
+class Parser(argparse.ArgumentParser):
+    """dev's parser: no abbreviated flags. argparse reads a unique prefix as the flag (`dev sync --sched` ran a
+    scheduled sync) while the guard matches the flag itself (B1). Subparsers are built with the parent's class, so
+    every `dev` command and subcommand gets it."""
+
+    def __init__(self, *args, allow_abbrev=False, **kwargs):
+        super().__init__(*args, allow_abbrev=allow_abbrev, **kwargs)
+
+
 def build_parser():
-    ap = argparse.ArgumentParser(prog="dev", add_help=False)
+    ap = Parser(prog="dev", add_help=False)
     ap.add_argument("-h", "--help", action="store_true")
     sp = ap.add_subparsers(dest="cmd")
 
@@ -2128,11 +3106,21 @@ def build_parser():
         return p
 
     add("help", lambda a: print_help(), "Show help")
-    p = add("ls", cmd_ls, "List projects")
-    p.add_argument("--offline", action="store_true", help="use cached PR data only")
+    p = add("ls", cmd_ls, "The projects on this Mac; --all adds the portfolio")
+    p.add_argument("--offline", action="store_true", help="use cached PR data only, no checks")
     p.add_argument("--names", action="store_true", help="print project ids only")
-    add("go", cmd_go, "Print a project's path").add_argument("query")
-    add("status", cmd_status, "Project status").add_argument("query", nargs="?")
+    p.add_argument("--all", action="store_true", help="also the portfolio projects that are not on this Mac")
+    p.add_argument("--json", action="store_true", help="the rows as JSON (for tools)")
+    add("go", cmd_go, "Print a project's path").add_argument("query", help="an id, an alias or part of a name")
+    p = add("alias", cmd_alias, "Short names for projects, shared by the team: dev alias <alias> [project], "
+                                "dev alias rm <alias>, dev alias (list)")
+    p.add_argument("alias", nargs="?", help="the alias to set, or rm")
+    p.add_argument("project", nargs="?", help="the project (default: the one you are in); after rm, the alias")
+    p.add_argument("--move", action="store_true", help="take the alias from the project that has it")
+    p = add("status", cmd_status, "Project status: what needs you, checks, the crew, the last update, details")
+    p.add_argument("query", nargs="?", help="an id, an alias or part of a name (default: the project you are in)")
+    p.add_argument("--json", action="store_true", help="the same data as JSON (for tools)")
+    p.add_argument("--all", action="store_true", help="also the project's tasks and plans")
     add("clone", cmd_clone, "Clone into the canonical layout").add_argument("repo", help="owner/repo, host/group/repo or any git URL")
     p = add("new", cmd_new, "Start a new project")
     p.add_argument("name")
@@ -2157,6 +3145,9 @@ def build_parser():
     p.add_argument("--path", action="store_true")
     p.add_argument("--log", metavar="TEXT", help="append a line to the session log")
     p.add_argument("--agent", default="human", help="who is logging (human, claude, codex)")
+    from . import continuity
+    continuity.add_arguments(add("session", continuity.cmd_session, "A session's continuity: what devkit kept "
+                                                                    "through compaction, /clear and resume"))
     p = add("task", cmd_task, "Work items of a project (or of an initiative with -i): add, claim, done, history")
     p.add_argument("-p", "--project", help="project (default: the one you are in)")
     p.add_argument("-i", "--initiative", help="an initiative instead of a project")
@@ -2178,7 +3169,7 @@ def build_parser():
     for verb, h in (("start", "claim the lock and move to Now (doing)"), ("claim", "same as start"),
                     ("release", "give the lock back (back to todo)"), ("done", "mark done and release"),
                     ("block", "mark blocked (needs --why)"), ("unblock", "back to work (todo, or doing if claimed)"),
-                    ("cancel", "cancel (needs --why)"),
+                    ("cancel", "cancel (needs --why)"), ("reopen", "back to todo after done or cancel (needs --why)"),
                     ("show", "an item with its history"), ("history", "an item's changelog")):
         t = tsp.add_parser(verb, help=h)
         t.add_argument("selector", nargs="+", help="id (T-…), number from `dev task`, or a unique part of the title")
@@ -2239,6 +3230,8 @@ def build_parser():
                         "recommended option and records it (default: devkit config work.mode, else guided)")
     x.add_argument("--plan", help="the steps, separated by ';', each with an optional estimate: "
                                   "\"design=30m; build=2h; docs\"")
+    x.add_argument("--replace", action="store_true", help="replace this session's live run (needs --why)")
+    x.add_argument("--why", help="why the live run is replaced (kept in the new run)")
     x = gsp.add_parser("note", help="an update while a step is still running: no step changes state")
     x.add_argument("text", nargs="+")
     x.add_argument("--next", help="what comes next")
@@ -2253,10 +3246,19 @@ def build_parser():
                                                                 "dependencies done, no subagent still on it)")
         if verb == "step":
             x.add_argument("--no-check", action="store_true", help="nothing to verify for this step (shown as ⚠)")
+            x.add_argument("--approves", help="the finished steps this Check approves (✓) or sends back (✗ or ⚠): "
+                                              "\"api, screens\"")
+        if verb == "done":
+            x.add_argument("--why", help="end the run although an Accountable member has not approved (recorded)")
     x = gsp.add_parser("assign", help="hand a plan step to a subagent: the one launched with this description owns it")
     x.add_argument("which", help="step number or part of its name")
     x.add_argument("--to", nargs="+", required=True, help="the subagent's description or name, e.g. Neo")
     x.add_argument("--scope", help="the files it owns, comma-separated globs; the guard keeps its edits inside them")
+    x.add_argument("--why", help="assign a member the crew's RACI does not make Responsible (recorded)")
+    x.add_argument("--activity", help="the step's kind of work, an id from dev crew raci (backend, ux, …): it decides "
+                                      "the RACI check and the approver, in any language")
+    x.add_argument("--allow", help="the irreversible actions this member may take in the step: push, pr (tier 1 "
+                                   "only), each with the developer's grant (spec C6)")
     x = gsp.add_parser("begin", help="mark a plan step as started (parallel work you do yourself)")
     x.add_argument("which", help="step number or part of its name")
     x = gsp.add_parser("add", help="add a step found during the work: \"name=30m after other\"")
@@ -2307,6 +3309,11 @@ def build_parser():
     x.add_argument("--tag", action="append")
     x.add_argument("--retire-when", help="the outside condition that makes it obsolete (a tool version, an issue)")
     x.add_argument("--why")
+    _anchor_flags(x)
+    x = lsp.add_parser("anchor", help="add where a lesson applies (files, commands, kinds of work, errors, stack)")
+    x.add_argument("selector", nargs="+")
+    x.add_argument("--why", required=True, help="why (kept in the lesson's history)")
+    _anchor_flags(x)
     for verb, h_ in (("show", "a lesson with its history"), ("recur", "it happened again (counts repeats)"),
                      ("retire", "no longer applies (needs --why)"), ("restore", "bring back a forgotten lesson")):
         x = lsp.add_parser(verb, help=h_)
@@ -2348,15 +3355,9 @@ def build_parser():
     x = jsp.add_parser("journal", help="past runs of every job: start, result, duration, last line")
     x.add_argument("--days", type=int, default=7)
     x.add_argument("-n", "--lines", type=int, default=40)
-    p = add("audit", cmd_audit, "The audit trail: every change, decision and job run devkit made")
-    p.add_argument("--days", type=float, default=7)
-    p.add_argument("--action", help="only actions starting with this, e.g. guard, job, task, rm")
-    p.add_argument("--actor", help="user@host or agent")
-    p.add_argument("--team", action="store_true", help="every machine (from the handoff repository)")
-    p.add_argument("--json", action="store_true")
-    p.add_argument("-n", "--lines", type=int, default=60)
-    p.add_argument("--publish", action="store_true", help=argparse.SUPPRESS)
-    p.add_argument("--quiet", action="store_true")
+    from . import audit as audit_mod
+    audit_mod.add_arguments(add("audit", audit_mod.cmd_audit,
+                                "The audit trail: query, verify, export, show, stats and config"))
     p = add("report", cmd_report, "Status report (Markdown): health, progress, done, in progress, next, risks, team")
     p.add_argument("--days", type=int, default=7)
     p.add_argument("-i", "--initiative")
@@ -2386,16 +3387,19 @@ def build_parser():
     p.add_argument("--days", type=int, default=7)
     p.add_argument("--all", action="store_true", help="include archived projects")
     add("standup", cmd_standup, "Recent work and what is in progress").add_argument("--days", type=int, default=1)
-    p = add("dashboard", cmd_dashboard, "Open the HTML dashboard")
-    p.add_argument("--no-open", action="store_true")
-    p.add_argument("--path", action="store_true", help="print the file path only")
-    p = add("config", cmd_config, "Preview and enforce devkit-managed agent settings")
+    from . import dashserver
+    dashserver.add_arguments(add("dashboard", dashserver.cmd_dashboard, "Open the live dashboard (a local, read-only app)"))
+    p = add("config", cmd_config, "The agent settings devkit manages: what differs, why, and the fix")
     p.add_argument("config_cmd", nargs="?", choices=["diff", "repair", "show", "edit", "validate", "lock", "unlock",
-                                                     "status"])
+                                                     "status", "set"])
+    p.add_argument("key", nargs="?", help="set: the key, such as progress.max_parallel")
+    p.add_argument("value", nargs="?", help='set: the value, as JSON when it parses (6, true, {"70": 0.5})')
     p.add_argument("--quiet", action="store_true")
+    p.add_argument("--check", action="store_true", help="one line and exit 1 when a setting differs (for scripts)")
     p = add("agents", cmd_agents, "Claude Code and Codex: install, sign-in, plan, quota, self-test")
-    p.add_argument("action", nargs="?", choices=["status", "test"], default="status")
+    p.add_argument("action", nargs="?", choices=["status", "test", "rules"], default="status")
     p.add_argument("agent", nargs="?", choices=["claude", "codex", "all"])
+    p.add_argument("--section", help="rules: one section, by number (0-12) or words from its title")
     p.add_argument("--json", action="store_true")
     p.add_argument("--model", help="model for the self-test session")
     p.add_argument("-v", "--verbose", action="store_true", help="show the agent's reply")
@@ -2420,6 +3424,10 @@ def build_parser():
     w.add_argument("--all", action="store_true")
     w = wsp.add_parser("rm", help="remove a worktree safely")
     w.add_argument("target", help="branch name or path")
+    from . import backup
+    p = add("backup", backup.cmd_backup, "Copy branches whose commits exist only on this Mac to the remote, when the "
+            "push starts no CI run · policy [on|off|ask]: the project's backup policy")
+    backup.register(p)
     p = add("sync", cmd_sync, "Refresh map + notes, commit and push")
     p.add_argument("--session", help=argparse.SUPPRESS)
     p.add_argument("--finish", action="store_true", help=argparse.SUPPRESS)
@@ -2429,12 +3437,16 @@ def build_parser():
     p.add_argument("--quiet", action="store_true")
     p.add_argument("--renew", metavar="AGENT", help=argparse.SUPPRESS)
     p.add_argument("--delay", type=int, default=0, help=argparse.SUPPRESS)
-    p = add("gc", cmd_gc, "Reclaim disk safely")
-    p.add_argument("--apply", action="store_true")
+    from . import disk as _disk
+    _disk.add_du_arguments(add("du", cmd_du, "What fills your disk, why, and the plan to free it safely"))
+    _disk.add_free_arguments(add("free", cmd_free, "Free items of the dev du plan by number, or every safe one: "
+                                                   "asks first, refuses work that is not committed or pushed"))
+    p = _disk.add_free_arguments(add("gc", cmd_gc, "Reclaim disk: the same as dev free; --apply runs the unattended "
+                                                   "cleanup of the nightly gc job"))
+    p.add_argument("--apply", action="store_true", help="the unattended cleanup: merged worktrees, idle build "
+                                                         "output, stale temp (asks unless -y)")
     p.add_argument("--auto-only", action="store_true", help="only what is safe without a person (the gc job)")
-    p.add_argument("-y", "--yes", action="store_true")
-    p.add_argument("-v", "--verbose", action="store_true")
-    add("du", cmd_du, "Disk usage report").add_argument("--refresh", action="store_true")
+    p.add_argument("-v", "--verbose", action="store_true", help="with --apply's plan, also what is kept and why")
     p = add("canary", cmd_canary, "Instruction-compliance canary report")
     p.add_argument("--days", type=int, default=7)
     p.add_argument("--limit", type=int, default=20)
@@ -2461,7 +3473,7 @@ def build_parser():
     gitx.add_ci_arguments(p)
     from . import pipelines
     pipelines.add_ci_arguments(p)
-    gitx.register(add)
+    gitx.register(lambda name, fn, help_, **kw: add(name, cmd_branch if name == "branch" else fn, help_, **kw))
     from . import testx
     testx.register(add)
     add("mcp", cmd_mcp, "Serve devkit's tools over MCP on stdio (the Claude Desktop extension runs this)")
@@ -2470,8 +3482,17 @@ def build_parser():
     from . import crew
     crew.register(add)
     add("doctor", cmd_doctor, "Verify the setup")
-    add("install", cmd_install, "Apply configuration").add_argument(
-        "--only", help="comma list: config,tools,cli,git,handoff,instructions,skills,claude,codex,desktop,docker,docs,launchd")
+    p = add("install", cmd_install, "Pin devkit for the hooks, then apply the configuration")
+    p.add_argument("--only", help="comma list: config,tools,cli,git,handoff,instructions,skills,claude,codex,desktop,"
+                                  "docker,docs,launchd; re-applies them from the installed copy without pinning")
+    p.add_argument("--version", help="switch to a pinned copy kept from an earlier install (rollback), e.g. 26.11.2")
+    p.add_argument("--unverified", action="store_true",
+                   help="pin HEAD although it is neither a release nor tested (`dev ci --run`); needs --why")
+    p.add_argument("--why", help="the reason for --unverified, recorded in the audit")
+    p.add_argument("--as-pinned", action="store_true", help=argparse.SUPPRESS)  # the second half, from the copy
+    p.add_argument("--commit-template", choices=["yes", "no"],
+                   help="dev setup's answer for the commit template: yes sets commit.template in the repositories "
+                        "without one, no leaves them; the git step records it")
     p = add("docs", cmd_docs, "Check documentation: Markdown, links and anchors, prose, diagrams")
     p.add_argument("check", choices=["check"])
     p.add_argument("paths", nargs="*", help="files or folders (default: the whole repository)")
@@ -2486,12 +3507,18 @@ def build_parser():
     p.add_argument("-v", "--verbose", action="store_true")
     p = add("diagram", cmd_diagram, "Branded SVG diagrams from JSON specs (render · check · new)")
     p.add_argument("rest", nargs=argparse.REMAINDER, help="render <spec|dir> [--out DIR] [--png] · check <spec|svg|dir> · new <kind> <name>")
-    p = add("setup", cmd_setup, "Installation and configuration wizard")
+    p = add("setup", cmd_setup, "Installation and configuration wizard; dev setup prompt adds the prompt helper, "
+                                "dev setup commit-template the commit template")
+    p.add_argument("what", nargs="?", choices=["prompt", "commit-template"],
+                   help="prompt: only the prompt helper; commit-template: only the commit template (commit.template)")
+    p.add_argument("--remove", action="store_true", help="with prompt or commit-template: take it out again")
     p.add_argument("-y", "--yes", action="store_true", help="accept every default (non-interactive)")
     p.add_argument("--skip-packages", action="store_true", help="do not install Homebrew/npm packages")
-    add("update", cmd_update, "Update devkit")
+    add("prompt", cmd_prompt, "What devkit's prompt helper shows here; refresh writes it for this Mac").add_argument(
+        "action", nargs="?", choices=["refresh"])
+    add("update", cmd_update, "Update devkit: the newest release, or a pull of its branch")
     add("docker", cmd_docker, "Docker on Colima").add_argument(
-        "action", choices=["up", "down", "status", "prune", "autostart-on", "autostart-off"])
+        "action", choices=["up", "down", "status", "trim", "prune", "autostart-on", "autostart-off"])
     add("version", cmd_version, "Show version")
     p = add("hook", cmd_hook, argparse.SUPPRESS)
     p.add_argument("event")
@@ -2502,11 +3529,17 @@ def build_parser():
 
 
 def main(argv=None) -> int:
+    global _ARGV
     argv = sys.argv[1:] if argv is None else argv
+    _ARGV = list(argv)
     ap = build_parser()
     a = ap.parse_args(argv)
-    if a.help and not a.cmd:
-        print_help()
+    if a.help:  # `dev -h <command>` shows the command's help and never runs it (B1: the guard reads it as help)
+        if a.cmd:
+            with contextlib.suppress(SystemExit):
+                ap.parse_args([a.cmd, "--help"])
+        else:
+            print_help()
         return 0
     if not a.cmd:
         return cmd_home(a) or 0

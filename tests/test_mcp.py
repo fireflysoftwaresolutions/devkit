@@ -146,7 +146,7 @@ class ServerTests(unittest.TestCase):
     def test_tools_list_matches_the_definitions(self):
         tools = self.s.request("tools/list")["result"]["tools"]
         self.assertEqual([t["name"] for t in tools], [t["name"] for t in mcp.TOOLS])
-        self.assertEqual(len(tools), 18)
+        self.assertEqual(len(tools), 20)
         for t in tools:
             with self.subTest(tool=t["name"]):
                 self.assertTrue(t["name"].startswith("devkit_"))
@@ -156,6 +156,9 @@ class ServerTests(unittest.TestCase):
                     self.assertIsInstance(t["annotations"][hint], bool)
         writes = {t["name"] for t in tools if not t["annotations"]["readOnlyHint"]}
         self.assertEqual(writes, {"devkit_task_add", "devkit_task_update"})
+        # K5: devkit_task_update can block, finish or release any project's task and its lock
+        destructive = {t["name"] for t in tools if t["annotations"]["destructiveHint"]}
+        self.assertEqual(destructive, {"devkit_task_update"})
 
     def test_call_returns_json_as_text_and_structured_content(self):
         r = self.s.call("devkit_audit", {"days": 1, "action": "guard"})["result"]
@@ -323,6 +326,14 @@ class DigestTests(unittest.TestCase):
         self.assertEqual(d["projects"][0]["status_block"], "**[Firefly> DevKit]** api · `main` · Export")
         self.assertEqual(len(mcp._digest_overview(data, {"days": 7, "include_all": True})["projects"]), 3)
 
+    def test_audit_digest_names_who_from_the_schema_v2_actor(self):
+        # `dev audit --json` prints schema v2 records: user, host and agent live under `actor`, not at the top level
+        rec = {"v": 2, "id": "01J", "ts": 1793948774.0, "time": "2026-11-06T10:26:14Z", "action": "guard.deny",
+               "target": "git push", "outcome": "deny", "detail": "",
+               "actor": {"user": "ann", "host": "mac", "agent": "claude", "session": "s1"}}
+        d = mcp._digest_audit([rec], {"limit": 50})
+        self.assertEqual((d["records"][0]["who"], d["records"][0]["agent"]), ("ann@mac", "claude"))
+
 
 class ManifestTests(unittest.TestCase):
     def test_manifest_tools_match_the_server(self):
@@ -335,7 +346,7 @@ class ManifestTests(unittest.TestCase):
         self.assertEqual((m["manifest_version"], m["name"], m["display_name"]), ("0.4", "devkit", "devkit"))
         self.assertEqual(m["server"]["type"], "python")
         self.assertEqual(m["server"]["entry_point"], "server/launcher.py")
-        self.assertEqual(m["server"]["mcp_config"]["args"], ["${__dirname}/server/launcher.py"])
+        self.assertEqual(m["server"]["mcp_config"]["args"], ["-I", "-S", "${__dirname}/server/launcher.py"])
         self.assertEqual(m["server"]["mcp_config"]["env"]["DEVKIT_HOME"], "${user_config.devkit_home}")
         self.assertEqual(m["user_config"]["devkit_home"]["type"], "directory")
         self.assertFalse(m["user_config"]["devkit_home"]["required"])

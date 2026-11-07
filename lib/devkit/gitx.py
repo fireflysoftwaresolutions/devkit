@@ -395,20 +395,18 @@ def evidence(c, rev="HEAD"):
     return next((m for m in _markers(c) if m.get("tree") == tree), None)
 
 
-def _attested() -> bool:
-    return bool(os.environ.get("DEVKIT_LOCAL_CI_PASSED"))
-
-
 def _evidence_or_attest(c, ci_passed: bool, action: str):
-    """-> (marker or None). `--ci-passed` (or DEVKIT_LOCAL_CI_PASSED=1) records an attestation for HEAD."""
+    """-> (marker or None). `--ci-passed` records an attestation for HEAD. dev never takes it from its own
+    environment (spec F8, rule 4): a variable there may have been set by anything that started dev."""
     ev = evidence(c)
-    if ev or not (ci_passed or _attested()):
+    if ev or not ci_passed:
         return ev
     _, tree = _head(c.top)
     return record_evidence(c, "attested", tree, note=f"dev {action} --ci-passed") if tree else None
 
 
-def no_evidence(c, action: str, rev="HEAD") -> int:
+def no_evidence(c, action: str, rev="HEAD", draft_ci: str = "") -> int:
+    """Refuse `action` for lack of local CI evidence. `draft_ci`: why opening a draft PR would start CI here."""
     sha, tree = _head(c.top, rev)
     detail = ""
     last = next(iter(_markers(c)), None)
@@ -418,9 +416,27 @@ def no_evidence(c, action: str, rev="HEAD") -> int:
             more = f" (+{len(names) - 4} more)" if len(names) > 4 else ""
             detail = (f"; the last local run ({last.get('how')}, {_age(last.get('ts'))}) verified a different tree, "
                       f"changed since: {', '.join(names[:4])}{more}")
+    if draft_ci:
+        detail += f"; a draft is no exception here: {draft_ci}"
     return refuse(f"no local CI evidence for {sha[:7] or 'HEAD'}{detail}",
                   f"run what CI runs: `dev ci --run` (or run your suite, then `dev ci --mark-passed --note "
-                  f"\"<command>: <result>\"`). If it passed in this session already: `dev {action} --ci-passed`.")
+                  f"\"<command>: <result>\"`). If it passed in this session already: `dev {action} --ci-passed`."
+                  + (" To open drafts without it, gate the jobs on drafts: `dev ci audit --fix`." if draft_ci else ""))
+
+
+def draft_ci(c, branch: str, head: str) -> str:
+    """Why opening a draft PR of `head` would start CI, or '' when the CI configuration says it starts no run: a draft
+    then needs no local CI evidence, and `dev pr ready`, which starts the one run, asks for it (spec P-fy3bwa0pshk R6).
+    The branch is already on the remote, so only the pull request's own runs count."""
+    from . import pipelines
+    try:
+        r = pipelines.push_ci(c.top, branch, head, remote_sha=head, pr={"number": "new", "draft": True})
+    except Exception as e:  # unreadable configuration: count it as a run, as the push budget does
+        return f"devkit could not read the CI configuration ({e})"
+    if r.get("starts") is False:
+        return ""
+    why = (r.get("why") or "").replace("draft PR #new", "a new draft PR")
+    return why if r.get("starts") else f"devkit cannot tell whether it starts CI ({why or 'unknown CI'})"
 
 
 def describe_evidence(ev) -> str:
@@ -657,6 +673,93 @@ def _guard_commit(c, message: str):
     return guard.check_git(["git", "commit", "-m", message], c.top, text)
 
 
+# The commit template (config/git/commit-template.txt, spec P-fy3bwa0pshk R9): the header; the why, what changed and
+# `Verified:` paragraphs; then the `Refs:` and `BREAKING CHANGE:` trailers. devkit's task ids stay in the private
+# handoff, whose session log links commits to tasks: `Refs:` names only what the repository's host or tracker knows.
+TICKET_LINKS = ("ticket", "issue", "jira", "ref", "refs")
+_REF_ISSUE = re.compile(r"^(?:[\w.-]+/[\w.-]+)?#\d+$")
+_REF_URL = re.compile(r"^https?://\S+$")
+
+
+def ticket_ref(value: str):
+    """A `Refs:` value from a task link (`ticket:PROJ-142`, `issue:#12`, a URL) or from `--refs`: an issue (`#12`,
+    `owner/repo#12`), a URL or a ticket key; None for anything else, devkit's own task ids and links included."""
+    v = (value or "").strip()
+    kind, sep, rest = v.partition(":")
+    if sep and kind.lower() in TICKET_LINKS:
+        v = rest.strip()
+    if not v or _WORK_ID.search(v):
+        return None
+    if v.isdigit():
+        v = "#" + v
+    return v if _REF_ISSUE.match(v) or _REF_URL.match(v) or _JIRA.fullmatch(v) else None
+
+
+def task_tickets(c) -> list:
+    """The tickets of the tasks started on this branch and not finished: `dev task start` links the branch
+    (`branch:<name>`) and keeps the lock holder in `claimed_by`; `dev task release|done` clears them."""
+    if not (c and c.branch and c.pid):
+        return []
+    try:
+        from . import work
+        items = work.all_items(c.pid)
+    except Exception:
+        return []
+    out = []
+    for it in items:
+        m = it.get("meta") or {}
+        links = m.get("links") or []
+        if isinstance(links, str):
+            links = [x.strip() for x in links.strip("[]").split(",")]
+        if (not m.get("claimed_by") or m.get("status") in ("done", "cancelled")
+                or f"branch:{c.branch}" not in links):
+            continue
+        for ref in filter(None, map(ticket_ref, links)):
+            if ref not in out:
+                out.append(ref)
+    return out
+
+
+def commit_message(header: str, why: str = "", paragraphs=(), verified: str = "", refs=(), breaking: str = "") -> str:
+    """The message in the commit template's order. `verified` gets its `Verified:` label when it has none."""
+    body = [p.strip() for p in [why, *paragraphs] if p and p.strip()]
+    v = (verified or "").strip()
+    if v:
+        body.append(v if v.lower().startswith("verified:") else f"Verified: {v}")
+    trailers = [f"Refs: {', '.join(refs)}"] if refs else []
+    if breaking and breaking.strip():
+        trailers.append(f"BREAKING CHANGE: {breaking.strip()}")
+    return "\n\n".join([header] + body + (["\n".join(trailers)] if trailers else []))
+
+
+def _task_id_refusal(ids) -> int:
+    return refuse(f"the message names devkit task id {', '.join(ids)}: task ids stay in the private handoff, whose "
+                  "session log links each commit to its task", 'name the issue or ticket instead (--refs "#12", '
+                  "--refs PROJ-142 or a URL), or leave the id out")
+
+
+def _commit_refs(c, a, text: str):
+    """-> (refs, refusal exit code or None, what the output says about them)."""
+    refs = []
+    for r in getattr(a, "refs", None) or []:
+        ids = _WORK_ID.findall(r)
+        if ids:
+            return [], _task_id_refusal(ids), ""
+        t = ticket_ref(r)
+        if not t:
+            return [], refuse(f"Refs takes an issue number (#12 or owner/repo#12), a URL or a ticket key (PROJ-142), "
+                              f"not `{r}`"), ""
+        refs.append(t)
+    if refs or re.search(r"(?mi)^refs:", text):
+        return refs, None, ""
+    found = task_tickets(c)
+    if len(found) == 1:
+        return found, None, f"Refs: {found[0]} from the task on {c.branch}"
+    if found:
+        return [], None, f"no Refs: the tasks on {c.branch} name {', '.join(found)}; name one with --refs"
+    return [], None, ""
+
+
 def cmd_commit(a) -> int:
     c = ctx()
     if c is None:
@@ -666,20 +769,32 @@ def cmd_commit(a) -> int:
     if a.wip:
         return _wip(c, a)
     msgs = list(a.message or [])
+    template = [f"--{k}" for k in ("why", "verified", "refs", "breaking") if getattr(a, k, None)]
+    if template and not msgs:
+        return refuse(f"{', '.join(template)} {'writes' if len(template) == 1 else 'write'} the message around its "
+                      f"header", 'dev commit -m "type(scope): summary" --why "…" --verified "…"')
     if not msgs and not a.amend:
-        return refuse("give a message", 'dev commit -m "type(scope): summary" [--body "why"]')
+        return refuse("give a message", 'dev commit -m "type(scope): summary" [--why "…"] [--verified "…"]')
     g = _branch_gate(c)
     if g:
         return g
-    header, body = "", []
+    message, removed, said = "", 0, ""
     if msgs:
         first, _, rest = msgs[0].partition("\n")
         header = first.strip()
-        body = [x for x in ([rest.strip()] + msgs[1:] + ([a.body] if a.body else [])) if x and x.strip()]
+        what = [x for x in ([rest.strip()] + msgs[1:] + list(a.body or [])) if x and x.strip()]
         v = message_violation(header)
         if v:
             return refuse(v)
-    message, removed = strip_attribution("\n\n".join([header] + body)) if msgs else ("", 0)
+        refs, refused, said = _commit_refs(c, a, "\n".join(what))
+        if refused is not None:
+            return refused
+        message, removed = strip_attribution(commit_message(header, getattr(a, "why", None) or "", what,
+                                                            getattr(a, "verified", None) or "", refs,
+                                                            getattr(a, "breaking", None) or ""))
+        ids = list(dict.fromkeys(_WORK_ID.findall(message)))
+        if ids:
+            return _task_id_refusal(ids)
     if a.paths:
         rc, _, err = core.git(c.top, "add", "--", *a.paths)
         if rc != 0:
@@ -705,6 +820,8 @@ def cmd_commit(a) -> int:
     files, ins, dels = _shortstat(c.top)
     ahead = _count(c.top, f"{_base_ref(c)}..HEAD") if c.has_origin else 0
     extra = [f"{files} file(s) +{ins} −{dels}", c.branch + (f" ↑{ahead}" if ahead else "")]
+    if said:
+        extra.append(said)
     if removed:
         extra.append(f"removed {removed} AI-attribution line(s)")
     if pushed_before:
@@ -925,9 +1042,9 @@ def push_branch(c, lease=False, ci_passed=False, dry_run=False, allow_behind=Fal
         return refuse(f"`{b}` is {behind} commit(s) behind {base}: rebase before review",
                       "dev rebase, re-run the local suite, then dev push (or --allow-behind)")
     ev = evidence(c) if dry_run else _evidence_or_attest(c, ci_passed, "push")
-    if not ev and not (dry_run and (ci_passed or _attested())):
+    if not ev and not (dry_run and ci_passed):
         return no_evidence(c, "push")
-    envs = frozenset({"DEVKIT_LOCAL_CI_PASSED"} if (ev and ev.get("how") == "run") or _attested() else ())
+    envs = frozenset({"DEVKIT_LOCAL_CI_PASSED"} if ev and ev.get("how") == "run" else ())  # only a real run lifts it
     args = ["-u", "origin", b] + ([f"--force-with-lease={b}:{remote}"] if diverged else [])
     what = f"{len(log)} commit(s)" + (" · force-with-lease" if diverged else "") + (" · first push" if not remote else "")
     if dry_run:
@@ -1137,10 +1254,16 @@ def plan_workflow(text: str, fname: str, root: str) -> list:
     return jobs
 
 
+_DRAFT_GATE = re.compile(r"\s*(&&\s*)?(github\.event\.pull_request\.draft\s*==\s*false|!\s*github\.event\.pull_request"
+                         r"\.draft)\b(\s*&&)?\s*")
+
+
 def _condition(cond: str) -> str:
     """'run' | 'never' (only on other events, or only after a failure) | 'unknown'."""
     c = cond.replace("${{", "").replace("}}", "").strip()
-    if re.fullmatch(r"(always|success)\(\)", c):
+    # the draft gate (`dev ci init`, spec P-fy3bwa0pshk R6) holds for a ready PR and a push: judge what is left
+    c = re.sub(r"^\((.*)\)$", r"\1", _DRAFT_GATE.sub("", c).strip()).strip()
+    if not c or re.fullmatch(r"(always|success)\(\)", c):
         return "run"
     if re.fullmatch(r"(failure|cancelled)\(\)", c):
         return "never"
@@ -1833,12 +1956,15 @@ def _pr_create(c, a) -> int:
     if v:
         return refuse(v.split(" Rename it:")[0], "dev branch rename <type>/<topic>, then dev push")
     base = a.base or c.default
+    draft = bool(a.draft) or (draft_by_default() and not getattr(a, "ready", False))
     remote = _ref_sha(c.top, f"refs/remotes/origin/{b}")
     head = _ref_sha(c.top, "HEAD")
     if not remote:
-        return refuse(f"`{b}` is not on origin yet", "dev push (runs the local-CI gate), then dev pr create")
+        return refuse(f"`{b}` is not on origin yet", "dev push (runs the local-CI gate), then dev pr create"
+                      + (" (or dev backup, when that push starts no CI run)" if draft else ""))
     if remote != head:
-        return refuse(f"HEAD ({head[:7]}) is not what origin/{b} has ({remote[:7]})", "dev push first")
+        return refuse(f"HEAD ({head[:7]}) is not what origin/{b} has ({remote[:7]})",
+                      "dev push first" + (" (or dev backup)" if draft else ""))
     lang = lang_of(a)
     existing, _ = gh_json(["pr", "list", "-R", c.slug, "--head", b, "--state", "open", "--json", "number,url"], c)
     if existing and not a.dry_run:
@@ -1846,7 +1972,9 @@ def _pr_create(c, a) -> int:
         return 0
     ev = evidence(c) if a.dry_run else _evidence_or_attest(c, a.ci_passed, "pr create")
     if not ev and not a.dry_run:
-        return no_evidence(c, "pr create")
+        why = draft_ci(c, b, head) if draft else ""
+        if not draft or why:
+            return no_evidence(c, "pr create", draft_ci=why)
     commits = branch_commits(c, f"origin/{base}" if _ref_sha(c.top, f"refs/remotes/origin/{base}") else base)
     title = (a.title or derive_title(b, commits)).strip()
     v = message_violation(title, "PR title")
@@ -1872,20 +2000,22 @@ def _pr_create(c, a) -> int:
               (f"\nstill empty: {', '.join(missing)}" if missing else "") + "\n---", file=sys.stderr)
         print(body)
         return 0
-    if missing and not a.draft:
+    if missing and not draft:
         return refuse(f"PR body: {' and '.join(f'“{m}”' for m in missing)} {'is' if len(missing) == 1 else 'are'} empty",
                       "dev pr create --dry-run prints the pre-filled body: fill those sections, then "
                       "dev pr create --body-file <file> (or --draft for an early draft)")
     args = ["pr", "create", "-R", c.slug, "--head", b, "--base", base, "--title", title, "--body", body]
-    if a.draft:
+    if draft:
         args.append("--draft")
     done, out, err = gh_do(args, c)
     if not done:
         return fail(f"gh pr create failed: {err}")
     url = (out.strip().splitlines() or [""])[-1]
     n = url.rstrip("/").rsplit("/", 1)[-1]
-    ok(f"PR #{n} opened{' as draft' if a.draft else ''} · {title} · {url}" +
-       (f" · removed {removed} AI-attribution line(s)" if removed else "") + " · watch: dev pr checks --watch")
+    ok(f"PR #{n} opened{' as draft' if draft else ''} · {title} · {url}" +
+       (f" · removed {removed} AI-attribution line(s)" if removed else "") +
+       (" · no CI runs on the draft: after `dev ci --run`, `dev pr ready` starts the one run" if draft and not ev
+        else " · watch: dev pr checks --watch"))
     return 0
 
 
@@ -2035,9 +2165,9 @@ def _pr_checks(c, a) -> int:
         if sys.stderr.isatty():
             print(ui.dim(f"  watching the checks of {sel} (gh pr checks --watch); only the result is printed"),
                   file=sys.stderr)
-        for _ in range(6):  # a fresh push: wait up to ~2 minutes for the checks to be reported
-            rc, out, err = GH(["pr", "checks", sel, "-R", c.slug, "--json", "name"], cwd=c.top, timeout=60)
-            if "no checks reported" not in (out + err).lower():
+        for _ in range(6):  # a fresh push or `dev pr ready`: wait up to ~2 minutes for the real run to report
+            rc, out, err = GH(["pr", "checks", sel, "-R", c.slug, "--json", "name,bucket"], cwd=c.top, timeout=60)
+            if "no checks reported" not in (out + err).lower() and not _only_skipped(out):
                 break
             SLEEP(20)
         args = ["pr", "checks", sel, "-R", c.slug, "--watch", "--interval", str(a.interval)]
@@ -2059,6 +2189,10 @@ def _pr_checks(c, a) -> int:
     for ch in checks:
         count[ch.get("bucket") or "pending"] = count.get(ch.get("bucket") or "pending", 0) + 1
     nfail, npend = count.get("fail", 0) + count.get("cancel", 0), count.get("pending", 0)
+    if checks and count.get("skipping", 0) == len(checks):  # a draft's run: no real run yet, never green (B3)
+        print(f"{ui.INFO} no checks yet for {sel}: every check was skipped (a draft's run, or the real run has not "
+              f"reported); the real run starts when the PR is ready (dev pr ready), then dev pr checks {sel} --watch")
+        return 8
     mark = ui.FAIL if nfail else ui.INFO if npend else ui.OK
     print(f"{mark} checks {('#' + sel) if sel.isdigit() else sel}: {count.get('pass', 0)} pass · {nfail} fail · "
           f"{npend} pending" + (f" · {count['skipping']} skipped" if count.get("skipping") else ""))
@@ -2073,6 +2207,22 @@ def _pr_checks(c, a) -> int:
                 print("    " + ln)
         info("reproduce locally (dev ci --run), fix, then push once")
     return 1 if nfail else 8 if npend else 0
+
+
+def _only_skipped(text) -> bool:
+    """True when `gh pr checks --json name,bucket` lists checks and every one was skipped."""
+    try:
+        rows = json.loads(text or "[]")
+    except ValueError:
+        return False
+    return isinstance(rows, list) and bool(rows) and all(
+        isinstance(r, dict) and r.get("bucket") == "skipping" for r in rows)
+
+
+def _rollup_skipped(rollup) -> bool:
+    """True when a statusCheckRollup holds checks and every one was skipped."""
+    return bool(rollup) and all(str(c.get("conclusion") or c.get("state") or c.get("status") or "").upper() ==
+                                "SKIPPED" for c in rollup if isinstance(c, dict))
 
 
 def _pr_workflows(top) -> bool:
@@ -2095,6 +2245,8 @@ def merge_gate(c, p, auto=False) -> list:
         why.append(f"checks are failing (dev pr checks {n})")
     elif checks == "pending" and not auto:
         why.append(f"checks are still running (dev pr checks {n} --watch, or dev pr merge {n} --auto)")
+    elif checks == "none" and _rollup_skipped(p.get("statusCheckRollup")):
+        why.append(f"every check was skipped, so no real run has reported yet (dev pr checks {n} --watch)")
     elif checks == "none" and _pr_workflows(c.top):
         why.append("no checks reported yet")
     review = p.get("reviewDecision") or ""
@@ -2203,7 +2355,8 @@ def _after_merge(c, head: str) -> str:
 
 def _pr_ready(c, a) -> int:
     sel = _sel(c, a)
-    p, err = gh_json(["pr", "view", sel or "", "-R", c.slug, "--json", "number,title,body,isDraft,url"], c)
+    p, err = gh_json(["pr", "view", sel or "", "-R", c.slug, "--json",
+                      "number,title,body,isDraft,url,headRefName,headRefOid"], c)
     if p is None:
         return fail(f"no PR for {sel}: {err}")
     v = message_violation(p.get("title", ""), "PR title")
@@ -2217,11 +2370,23 @@ def _pr_ready(c, a) -> int:
     if not p.get("isDraft"):
         ok(f"#{p['number']} is already ready for review · {p['url']}")
         return 0
+    if p.get("headRefName") and p.get("headRefName") == c.branch:  # ready starts the one CI run (spec P-fy3bwa0pshk R6)
+        head = _ref_sha(c.top, "HEAD")
+        if p.get("headRefOid") and head != p["headRefOid"]:
+            return refuse(f"PR #{p['number']} is at {p['headRefOid'][:7]} and your HEAD at {head[:7]}: the one CI run "
+                          "would check another tree", "dev push (or dev backup) first, then dev pr ready")
+        if not _evidence_or_attest(c, getattr(a, "ci_passed", False), "pr ready"):
+            return no_evidence(c, "pr ready")
     done, _, err = gh_do(["pr", "ready", str(p["number"]), "-R", c.slug], c)
     if not done:
         return fail(f"gh pr ready failed: {err}")
-    ok(f"#{p['number']} is ready for review · {p['url']}")
+    ok(f"#{p['number']} is ready for review · {p['url']} · its CI runs now: dev pr checks --watch")
     return 0
+
+
+def draft_by_default() -> bool:
+    """`delivery.draft_pr` (default false): `dev pr create` opens a draft unless --ready (spec P-fy3bwa0pshk R6)."""
+    return (core.CFG.get("delivery") or {}).get("draft_pr", False) is True
 
 
 def _text_arg(a):
@@ -2668,7 +2833,10 @@ def cmd_issue(a) -> int:
 
 # --------------------------------------------------------------------------- dev git … · dev gh … (escape hatches)
 
-ACK_VARS = ("DEVKIT_FLAKY", "DEVKIT_LOCAL_CI_PASSED", "DEVKIT_CROSS_PROJECT", "DEVKIT_SKIP_SECRET_SCAN")
+# `dev git` and `dev gh` pass no escape hatch from their environment to the guard (spec F8, rule 4; decided for
+# 26.11.3 for DEVKIT_FLAKY and DEVKIT_CROSS_PROJECT too): dev's environment is not the command the guard parsed, and an
+# exported hatch would lift a rule for every later call. A hatch is a command's own prefix at PreToolUse
+# (`DEVKIT_FLAKY=1 gh run rerun 5`, a recorded use), or, for the push budget, a real local run's evidence.
 
 
 def _agent() -> str:
@@ -2676,7 +2844,7 @@ def _agent() -> str:
 
 
 def _guard_cmd(argv, cwd):
-    acks = [f"{k}=1" for k in ACK_VARS if os.environ.get(k)]
+    acks = []
     if list(argv[:1]) == ["gh"] and list(argv[1:3]) in (["pr", "merge"], ["release", "create"]):
         acks.append("DEVKIT_RAW_GH=1")  # devkit gates these itself below (checks, reviews, policy); `--admin` stays refused
     return guard.check_bash(" ".join(shlex.quote(x) for x in acks + list(argv)), cwd, _agent())
@@ -2699,11 +2867,12 @@ def _git_sub(args):
     return None, []
 
 
-def git_push_policy(args, cwd):
-    """`dev git push …`: the dev push rules for arbitrary push arguments. Exit code to refuse with, or None."""
+def git_push_policy(args, cwd, ci_passed: bool = False):
+    """`dev git push …`: the dev push rules for arbitrary push arguments. Exit code to refuse with, or None.
+    `ci_passed`: the command's own --ci-passed, which stands for local CI evidence but never lifts the push budget."""
     c = ctx(cwd)
     text = "git push " + " ".join(args)
-    acks = {k for k in ACK_VARS if os.environ.get(k)}
+    acks = set()
     force = any(x in ("--force", "-f") or (re.match(r"^-[a-zA-Z]*f[a-zA-Z]*$", x) and not x.startswith("--"))
                 for x in args) or any(x.startswith("+") for x in args if not x.startswith("-"))
     if force:
@@ -2725,7 +2894,7 @@ def git_push_policy(args, cwd):
             return refuse(f"`{dst}` is the default branch: changes go through a branch and a PR",
                           "dev push from your branch (only when the user explicitly asks: plain `git push`)")
         ev = evidence(c, src)
-        if not ev and _attested():
+        if not ev and ci_passed:
             ev = {"how": "attested"}
         if not ev:
             return no_evidence(c, "push", rev=src)
@@ -2795,11 +2964,11 @@ def cmd_git(a) -> int:
     if sub in _INTERACTIVE and any(x in _INTERACTIVE[sub] for x in rest) and not sys.stdin.isatty():
         return refuse(f"`git {sub} {' '.join(x for x in rest if x in _INTERACTIVE[sub])}` needs an interactive terminal")
     if sub == "push":
-        if "--ci-passed" in rest:
+        ci_passed = "--ci-passed" in rest
+        if ci_passed:
             rest = [x for x in rest if x != "--ci-passed"]
             args = [x for x in args if x != "--ci-passed"]
-            os.environ["DEVKIT_LOCAL_CI_PASSED"] = "1"
-        r = git_push_policy(rest, cwd)
+        r = git_push_policy(rest, cwd, ci_passed=ci_passed)
     elif sub == "commit":
         r = git_commit_policy(rest, cwd)
     else:
@@ -2824,8 +2993,11 @@ def cmd_gh(a) -> int:
     head = args[:2]
     if c is not None and c.provider == "github":
         if head == ["pr", "create"]:
-            if not (evidence(c) or ci_passed or _attested()):
-                return no_evidence(c, "pr create")
+            draft = "--draft" in args or "-d" in args
+            if not (evidence(c) or ci_passed):
+                why = draft_ci(c, c.branch, _ref_sha(c.top, "HEAD")) if draft else ""
+                if not draft or why:
+                    return no_evidence(c, "pr create", draft_ci=why)
             t = guard._opt_value(args[2:], ("--title", "-t"))
             if t and message_violation(t, "PR title"):
                 return refuse(message_violation(t, "PR title"))
@@ -2836,7 +3008,7 @@ def cmd_gh(a) -> int:
                     body = Path(cwd, bf).read_text()
                 except OSError:
                     body = None
-            if body is not None and "--draft" not in args and "-d" not in args:
+            if body is not None and not draft:
                 missing = body_problems(body, pr_template(c.top, lang_of())[0])
                 if missing:
                     return refuse(f"PR body: {' and '.join(missing)} empty", "fill them, or open it with --draft")
@@ -2859,7 +3031,7 @@ def cmd_gh(a) -> int:
         elif head == ["release", "create"]:
             if c.branch != c.default or _dirty(c.top, untracked=False):
                 return refuse(f"release from a clean `{c.default}`", "dev release (checks, tag, notes)")
-            if not (evidence(c) or ci_passed or _attested()):
+            if not (evidence(c) or ci_passed):
                 return no_evidence(c, "release")
     return EXEC(["gh", *args], cwd=cwd)
 
@@ -2869,6 +3041,7 @@ def cmd_gh(a) -> int:
 COMMAND_NAMES = ("branch", "commit", "rebase", "push", "pr", "run", "release", "issue", "git", "gh")
 HELP = ("Git and GitHub", [
     ("branch new|rename|ls|clean", "Branches from an up-to-date origin/<default>, named by the standard"),
+    ("branch embargo <branch> --why …", "Keep a branch off the remote; dev backup and dev sync never push it"),
     ("commit -m \"type(scope): …\"", "Conventional Commit (-a, paths, --amend); --wip/--unwip instead of a stash"),
     ("rebase [--continue|--abort]", "Fetch and rebase on origin/<default>, with a conflict report"),
     ("push [--force-with-lease]", "One push: local-CI evidence, budget, no default branch, URL of the PR"),
@@ -2886,8 +3059,8 @@ def _lang_arg(p):
 
 def register(add):
     """Add the git/GitHub commands. `add(name, fn, help)` returns an argparse subparser; handlers return exit codes."""
-    p = add("branch", cmd_branch, "Branches: new (from an up-to-date origin/<default>) · rename · ls · clean")
-    sp = p.add_subparsers(dest="branch_cmd", metavar="new|rename|ls|clean")
+    p = add("branch", cmd_branch, "Branches: new (from an up-to-date origin/<default>) · rename · ls · clean · embargo")
+    sp = p.add_subparsers(dest="branch_cmd", metavar="new|rename|ls|clean|embargo")
     sp.required = True
     q = sp.add_parser("new", help="create <type>/<topic> from an up-to-date origin/<default> and switch to it")
     q.add_argument("name", help="<type>/<topic>, e.g. feat/invoice-export")
@@ -2903,10 +3076,22 @@ def register(add):
         q.add_argument("--json", action="store_true")
         if name == "clean":
             q.add_argument("--apply", action="store_true", help="delete them")
+    q = sp.add_parser("embargo", help="keep a branch off the remote: a backup never pushes it (no branch: the list)")
+    q.add_argument("branch", nargs="?", help="the branch (default with --lift: none; without a branch: list them)")
+    q.add_argument("--why", help="why it stays off the remote (required to set one)")
+    q.add_argument("--until", help="the step or date after which it may be public")
+    q.add_argument("--lift", action="store_true", help="end the embargo of the branch")
+    q.add_argument("--json", action="store_true")
 
     p = add("commit", cmd_commit, "Conventional Commit of the staged changes, -a (tracked) or the given paths")
     p.add_argument("-m", "--message", action="append", help="header `type(scope): summary`; more -m add paragraphs")
-    p.add_argument("--body", help="body: why the change is needed")
+    p.add_argument("--why", help="first paragraph of the body: why the change is needed (the commit template)")
+    p.add_argument("--body", action="append", help="a body paragraph (repeat for more): what changed (after --why), "
+                                                   "or the reason without --why")
+    p.add_argument("--verified", help="last paragraph of the body: how you verified it, as `Verified: …`")
+    p.add_argument("--refs", action="append", help="trailer `Refs:`, an issue (#12), a URL or a ticket key (repeat for "
+                                                   "more); default: the ticket of the task started on this branch")
+    p.add_argument("--breaking", help="trailer `BREAKING CHANGE:`: what breaks and how to move to the new behavior")
     p.add_argument("-a", "--all", action="store_true", help="stage every tracked change first")
     p.add_argument("--amend", action="store_true", help="amend HEAD (keeps its message without -m)")
     p.add_argument("--wip", action="store_true", help="save everything as a WIP commit (instead of git stash)")
@@ -2931,7 +3116,9 @@ def register(add):
     q = sp.add_parser("create", help="open the PR of the pushed branch, body from the PR template")
     q.add_argument("--title", help="Conventional Commit title (default: the first commit, else the branch)")
     q.add_argument("--base", help="base branch (default: the repository default)")
-    q.add_argument("--draft", action="store_true", help="open as a draft (empty sections allowed)")
+    q.add_argument("--draft", action="store_true", help="open as a draft (empty sections allowed); the default "
+                   "with delivery.draft_pr")
+    q.add_argument("--ready", action="store_true", help="ready for review although delivery.draft_pr opens drafts")
     q.add_argument("--fill", action="store_true", help="fill from the commits and the template (the default)")
     q.add_argument("--body-file", help="your own body (devkit checks it); - reads stdin")
     q.add_argument("--edit", action="store_true", help="edit the pre-filled body in $EDITOR first")
@@ -2963,8 +3150,9 @@ def register(add):
     q.add_argument("--auto", action="store_true", help="let GitHub merge when the checks pass")
     q.add_argument("--keep-branch", action="store_true")
     q.add_argument("--dry-run", action="store_true")
-    q = sp.add_parser("ready", help="mark a draft ready for review (title and body checked)")
+    q = sp.add_parser("ready", help="mark a draft ready for review: the one CI run (title, body and local CI checked)")
     q.add_argument("number", nargs="?")
+    q.add_argument("--ci-passed", action="store_true", help="attest that the local suite passed on HEAD")
     _lang_arg(q)
     for name in ("comment", "review"):
         q = sp.add_parser(name, help="comment on a PR" if name == "comment" else "approve, request changes or comment")

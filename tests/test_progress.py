@@ -8,23 +8,52 @@ import tempfile
 import time
 import unittest
 from pathlib import Path
+from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "lib"))
 
-from devkit import canary  # noqa: E402
+from devkit import canary, continuity, core, prompt  # noqa: E402
 from devkit import progress as pg  # noqa: E402
 
 
+def boundary(root, real_caller=False) -> list:
+    # what every progress test fakes, as patchers to start and stop: devkit's configuration (its defaults, never the
+    # developer's ~/.config/devkit), this test process's real parents (they never name a session), the call ledger
+    # (in the test's folder), the plan's usage windows and the crew limit last seen (in the test's folder, never the
+    # developer's quota), the team's crew policy (in the test's folder, never the handoff repository's), the
+    # continuity records and the prompt helper's cache the hooks write (in the test's folder) and who calls: Morpheus,
+    # from a call of his. real_caller: the tests of caller identity (tests/test_caller_identity.py) use devkit's own
+    # ledger and session lookup instead.
+    out = [mock.patch.dict(core.CFG, {"progress": {}, "work": {}}),
+           mock.patch.object(pg, "_ancestor_pids", lambda: [], create=True),
+           mock.patch.object(pg, "CALLS", Path(root) / "calls", create=True),
+           mock.patch.object(pg, "TEAM_POLICY", Path(root) / "policy" / "progress.json", create=True),
+           mock.patch.object(pg, "QUOTA", Path(root) / "quota"),  # the usage windows and the crew limit last seen
+           mock.patch.object(continuity, "CONT", Path(root) / "continuity"),
+           mock.patch.object(prompt, "STATE", Path(root) / "prompt-state")]
+    if not real_caller:
+        out.append(mock.patch.object(pg, "caller", lambda *a, **k: {"caller": "main", "how": "test"}, create=True))
+    return out
+
+
 class TempState:
+    def __init__(self, real_caller=False):
+        self.real_caller = real_caller
+
     def __enter__(self):
         self.tmp = tempfile.TemporaryDirectory()
         root = Path(self.tmp.name)
         from devkit import audit
-        self.saved = (pg.RUNS, pg.TIMING, pg.PENDING, pg.SESSIONS, pg._publish, os.environ.get("DEVKIT_SESSION"))
+        self.saved = (pg.RUNS, pg.TIMING, pg.PENDING, pg.SESSIONS, pg.QUOTA, pg._publish,
+                      os.environ.get("DEVKIT_SESSION"))
         self.audit_saved = audit.AUDIT
         audit.AUDIT = root / "audit"  # tests never write to the real audit trail
         pg.RUNS, pg.TIMING, pg.SESSIONS = root / "runs", root / "timing", root / "sessions"
         pg.PENDING = pg.TIMING / "pending"
+        pg.QUOTA = root / "quota"  # the real 5-hour usage never changes the parallel limit under test
+        self.boundary = boundary(root, self.real_caller)
+        for p in self.boundary:
+            p.start()
         pg._publish = lambda: None
         os.environ["DEVKIT_SESSION"] = "claude:s1"
         os.environ["DEVKIT_NO_NOTIFY"] = "1"
@@ -37,12 +66,24 @@ class TempState:
     def __exit__(self, *exc):
         from devkit import audit
         audit.AUDIT = self.audit_saved
-        pg.RUNS, pg.TIMING, pg.PENDING, pg.SESSIONS, pg._publish, env = self.saved
+        pg.RUNS, pg.TIMING, pg.PENDING, pg.SESSIONS, pg.QUOTA, pg._publish, env = self.saved
+        for p in reversed(self.boundary):
+            p.stop()
         if env is None:
             os.environ.pop("DEVKIT_SESSION", None)
         else:
             os.environ["DEVKIT_SESSION"] = env
         self.tmp.cleanup()
+
+
+def launch(aid, kind, label, at=None, sid="s1"):
+    # Claude Code's sequence for one subagent launch: the Agent call (PreToolUse, with its tool_use_id), the agent's
+    # start, and the call's result naming the agent it started (the lane binds to its launch exactly)
+    pg.note_agent_launch("claude", {"session_id": sid, "tool_use_id": f"toolu_{aid}",
+                                    "tool_input": {"description": label, "subagent_type": kind}}, now=at)
+    pg.on_subagent("claude", {"session_id": sid, "agent_id": aid, "agent_type": kind}, True, now=at)
+    pg.launch_result("claude", {"session_id": sid, "tool_use_id": f"toolu_{aid}", "tool_response": {"agentId": aid}},
+                     now=at)
 
 
 class ProgressTests(unittest.TestCase):
@@ -155,9 +196,7 @@ class TimeModelTests(unittest.TestCase):
             self.assertEqual([s["est"] for s in run["plan"]], [10, 20, 30])
             run = pg.assign("build", "Neo", now=self.m(0))
             self.assertEqual(run["plan"][1]["state"], "pending")  # waits for its subagent
-            pg.note_agent_launch("claude", {"session_id": "s1", "tool_input": {"description": "Neo: build the parser",
-                                                                                "subagent_type": "devkit:neo"}})
-            pg.on_subagent("claude", {"session_id": "s1", "agent_id": "a1", "agent_type": "devkit:neo"}, True)
+            launch("a1", "devkit:neo", "Neo: build the parser")
             run = pg.load_run("claude", "s1")
             self.assertEqual(run["plan"][1]["owner"], "a1")
             self.assertEqual(run["agents"]["a1"]["label"], "Neo: build the parser")
@@ -178,12 +217,14 @@ class TimeModelTests(unittest.TestCase):
             run = pg.step("parser half done", from_agent="a1", now=self.m(25))
             self.assertEqual(run["plan"][2]["state"], "running")
             self.assertEqual(run["agents"]["a1"]["done"], 1)
-            # when the subagent stops, its step is done with its own time
-            pg.on_subagent("claude", {"session_id": "s1", "agent_id": "a1", "agent_type": "devkit:neo"}, False)
+            # when the subagent stops with its evidence (its report's Check), its step is done with its own time
+            pg.on_subagent("claude", {"session_id": "s1", "agent_id": "a1", "agent_type": "devkit:neo",
+                                      "last_assistant_message": "**[Firefly> DevKit · Crew member]** api · `main` · step\n- **Done:** the step\n- **Check:** ✓ its tests pass\n- **Next:** Morpheus"}, False)
             run = pg.load_run("claude", "s1")
             self.assertEqual(run["plan"][1]["state"], "done")
             self.assertEqual(run["agents"]["a1"]["state"], "done")
-            self.assertIn("Agents: \u2713 Neo: build the parser", pg.render_update(run, branch="main", now=self.m(30)))
+            self.assertIn("Agents: \u2713 Senior engineer (Neo): build the parser",
+                          pg.render_update(run, branch="main", now=self.m(30)))
 
     def test_a_step_closed_instantly_does_not_move_the_pace(self):
         with TempState():
@@ -228,9 +269,7 @@ class TimeModelTests(unittest.TestCase):
         with TempState():
             pg.start("Feature", plan=["api", "ui"], now=self.m(0))
             pg.assign("ui", "Trinity", now=self.m(0))
-            pg.note_agent_launch("claude", {"session_id": "s1", "tool_input": {"description": "Trinity: ui"}})
-            pg.on_subagent("claude", {"session_id": "s1", "agent_id": "a1", "agent_type": "devkit:trinity"}, True,
-                           now=self.m(1))
+            launch("a1", "devkit:trinity", "Trinity: ui", self.m(1))
             with self.assertRaises(pg.StepError) as e:
                 pg.step("ui done", which="ui", now=self.m(2))
             self.assertIn("still working on it", str(e.exception))
@@ -292,46 +331,65 @@ class CrewCoordinationTests(unittest.TestCase):
     def test_messages_reach_the_right_crew_member(self):
         with TempState():
             pg.start("Feature", plan=["build"], now=self.m(0))
-            pg.note_agent_launch("claude", {"session_id": "s1", "tool_input": {"description": "Neo: build it",
-                                                                                "subagent_type": "devkit:neo"}})
-            pg.on_subagent("claude", {"session_id": "s1", "agent_id": "a1", "agent_type": "devkit:neo"}, True,
-                           now=self.m(1))
+            launch("a1", "devkit:neo", "Neo: build it", self.m(1))
             q = pg.crew_ask("Should the parser accept empty lines?", from_agent="a1", now=self.m(2))
             self.assertEqual((q["to"], q["to_name"]), ("main", "Morpheus"))
             # Morpheus gets it with his next tool call; the subagent does not
             self.assertIsNone(pg.on_tool_done("claude", {"session_id": "s1", "agent_id": "a1"}))
             ctx = pg.on_tool_done("claude", {"session_id": "s1"})
-            self.assertIn("M1 from Neo", ctx)
+            self.assertIn("M1 from Senior engineer (Neo)", ctx)
             self.assertNotIn("M1", pg.on_tool_done("claude", {"session_id": "s1"}) or "")  # delivered once
             pg.crew_answer("M1", "Yes, skip them", now=self.m(3))
             ctx = pg.on_tool_done("claude", {"session_id": "s1", "agent_id": "a1"})
-            self.assertIn("from Morpheus: Yes, skip them (answer to M1)", ctx)
+            self.assertIn("from Tech lead (Morpheus): Yes, skip them (answer to M1)", ctx)
             # a message to a crew member who has not started yet waits for them
             pg.crew_ask("Review the parser when Neo is done", to="Seraph", now=self.m(4))
-            pg.on_subagent("claude", {"session_id": "s1", "agent_id": "a2", "agent_type": "devkit:seraph"}, True,
-                           now=self.m(5))
+            launch("a2", "devkit:seraph", "Seraph: review the parser", self.m(5))
             self.assertIn("Review the parser", pg.on_tool_done("claude", {"session_id": "s1", "agent_id": "a2"}))
+
+    def test_scope_follows_the_member_into_a_worktree_of_the_same_repository(self):
+        import subprocess
+        from devkit import hooks
+        with TempState(), tempfile.TemporaryDirectory() as d:
+            main, wt, other = Path(d) / "api", Path(d) / "wt", Path(d) / "other"
+            for r in (main, other):
+                subprocess.run(["git", "init", "-q", str(r)], check=True)
+                subprocess.run(["git", "-C", str(r), "-c", "user.email=a@example.com", "-c", "user.name=a", "commit",
+                                "-q", "--allow-empty", "-m", "init"], check=True)
+            subprocess.run(["git", "-C", str(main), "worktree", "add", "-q", "-b", "feat/x", str(wt)], check=True)
+            pg.start("Feature", plan=["installer"], now=self.m(0))
+            pg.assign("installer", "Kid", scope="install.sh,tests/test_install*.py", now=self.m(0))
+            launch("a1", "devkit:kid", "Kid: installer", self.m(1))
+            edit = lambda p: {"session_id": "s1", "agent_id": "a1", "tool_name": "Edit", "cwd": str(main),  # noqa: E731
+                              "tool_input": {"file_path": str(p)}}
+            from unittest import mock
+            real_temp = hooks.core.is_temp  # the fixture lives in a temp folder; real worktrees do not
+            mock.patch.object(hooks.core, "is_temp", lambda p: real_temp(p) and not str(p).startswith(d)).start()
+            self.addCleanup(mock.patch.stopall)
+            self.assertIsNone(hooks._scope_violation("claude", edit(wt / "install.sh")))
+            self.assertIsNone(hooks._scope_violation("claude", edit(wt / "tests" / "test_install_curl.py")))  # new folder
+            kid = "outside DevEx engineer (Kid)'s scope"
+            self.assertIn(kid, hooks._scope_violation("claude", edit(wt / "lib" / "cli.py")))
+            self.assertIn(kid, hooks._scope_violation("claude", edit(other / "install.sh")))
 
     def test_scope_keeps_parallel_agents_apart(self):
         from devkit import hooks
         with TempState(), tempfile.TemporaryDirectory() as repo:
             pg.start("Feature", plan=["parser", "ui"], now=self.m(0))
             pg.assign("parser", "Neo", scope="lib/parser/**,tests/test_parser.py", now=self.m(0))
-            pg.note_agent_launch("claude", {"session_id": "s1", "tool_input": {"description": "Neo: parser"}})
-            pg.on_subagent("claude", {"session_id": "s1", "agent_id": "a1", "agent_type": "devkit:neo"}, True,
-                           now=self.m(1))
+            launch("a1", "devkit:neo", "Neo: parser", self.m(1))
             edit = lambda p: {"session_id": "s1", "agent_id": "a1", "tool_name": "Edit", "cwd": repo,  # noqa: E731
                               "tool_input": {"file_path": os.path.join(repo, p)}}
             self.assertIsNone(hooks._scope_violation("claude", edit("lib/parser/core.py")))
             self.assertIsNone(hooks._scope_violation("claude", edit("tests/test_parser.py")))
             why = hooks._scope_violation("claude", edit("lib/ui/app.ts"))
-            self.assertIn("outside Neo's scope", why)
+            self.assertIn("outside Senior engineer (Neo)'s scope", why)
             self.assertIn("dev crew ask", why)
             self.assertIsNone(hooks._scope_violation("claude", dict(edit("lib/ui/app.ts"), agent_id=None)))  # main
             with tempfile.TemporaryDirectory() as scratch:  # scratch files outside the repository are not shared
                 self.assertIsNone(hooks._scope_violation("claude", edit(os.path.join(scratch, "notes.md"))))
             other = os.path.expanduser("~/Development/acme/billing/src/app.py")  # another repository is not scratch
-            self.assertIn("outside Neo's scope", hooks._scope_violation("claude", edit(other)))
+            self.assertIn("outside Senior engineer (Neo)'s scope", hooks._scope_violation("claude", edit(other)))
 
     def test_only_launched_subagents_owe_a_report_and_corrections_are_recorded(self):
         import contextlib
@@ -342,6 +400,9 @@ class CrewCoordinationTests(unittest.TestCase):
             saved, saved_sf = canary.LOG, hooks._session_file
             canary.LOG = Path(d) / "canary.jsonl"
             hooks._session_file = lambda agent, sid: pg.SESSIONS / f"{agent}-{sid}.json"  # noqa: E731
+            gates_off = mock.patch.dict(hooks.core.CFG, {"crew": {"gates": {"enforce": False}}})
+            gates_off.start()  # this test is the report canary's; the crew gates only record here (their own test
+            self.addCleanup(gates_off.stop)  # is test_a_member_missing_a_proof_is_sent_back_once)
 
             def stop(payload):
                 out = io.StringIO()
@@ -360,7 +421,7 @@ class CrewCoordinationTests(unittest.TestCase):
                             "agent_transcript_path": str(tr), "last_assistant_message": "Done. The parser works."}
                 sent_back = json.loads(stop(launched))  # launched with the Agent tool: sent back once
                 self.assertEqual(sent_back["decision"], "block")
-                self.assertIn("DevKit · Neo]", sent_back["reason"])  # by the name its launch gave it
+                self.assertIn("DevKit · Senior engineer (Neo)]", sent_back["reason"])  # by the name its launch gave it
                 fixed = dict(launched, stop_hook_active=True, last_assistant_message=(
                     "**[Firefly> DevKit · Neo]** api · `main` · parser\n- **Done:** x\n- **Check:** \u2713 3 tests\n"
                     "- **Next:** review"))
@@ -370,6 +431,42 @@ class CrewCoordinationTests(unittest.TestCase):
                 with mock.patch.dict(hooks.core.CFG, {"canary": {"enforce": False}}):
                     self.assertEqual(stop(dict(launched, agent_id="a2")), "")  # measured, not sent back
                 self.assertEqual(canary.by_member(1), {"Neo": (0, 2)})
+            finally:
+                canary.LOG, hooks._session_file = saved, saved_sf
+
+    def test_a_member_missing_a_proof_is_sent_back_once(self):
+        import contextlib
+        import io
+        from unittest import mock
+        from devkit import hooks
+        with TempState(), tempfile.TemporaryDirectory() as d:
+            saved, saved_sf = canary.LOG, hooks._session_file
+            canary.LOG = Path(d) / "canary.jsonl"
+            hooks._session_file = lambda agent, sid: pg.SESSIONS / f"{agent}-{sid}.json"  # noqa: E731
+
+            def stop(payload):
+                out = io.StringIO()
+                with mock.patch("sys.stdin", io.StringIO(json.dumps(payload))), contextlib.redirect_stdout(out):
+                    hooks.subagent_stop("claude")
+                return out.getvalue()
+            try:
+                tr = Path(d) / "agent-k1.jsonl"  # Kid's own transcript: it ran the tests, never recorded its step
+                tr.write_text("\n".join(json.dumps(r) for r in (
+                    {"type": "assistant", "isSidechain": True, "message": {"role": "assistant", "content": [
+                        {"type": "tool_use", "id": "toolu_0001", "name": "Bash", "input": {"command": "bin/dev test"}}]}},
+                    {"type": "user", "isSidechain": True, "message": {"role": "user", "content": [
+                        {"type": "tool_result", "tool_use_id": "toolu_0001", "content": "ok", "is_error": False}]}},
+                )) + "\n")
+                (Path(d) / "agent-k1.meta.json").write_text(json.dumps({"toolUseId": "toolu_k",
+                                                                        "description": "Kid: installer"}))
+                report = ("**[Firefly> DevKit · DevEx engineer (Kid)]** api · `main` · installer\n- **Done:** x\n"
+                          "- **Check:** ✓ 3 tests\n- **Next:** review")  # the status block is there
+                data = {"session_id": "s1", "agent_id": "k1", "agent_type": "general-purpose", "cwd": d,
+                        "agent_transcript_path": str(tr), "last_assistant_message": report}
+                first = json.loads(stop(data) or "{}")
+                self.assertEqual(first.get("decision"), "block")
+                self.assertIn("dev progress step", first.get("reason", ""))
+                self.assertEqual(stop(dict(data, stop_hook_active=True)), "")  # once, like the canary
             finally:
                 canary.LOG, hooks._session_file = saved, saved_sf
 
@@ -395,6 +492,77 @@ class CrewCoordinationTests(unittest.TestCase):
                 canary.LOG = saved
 
 
+class DeclaredActivityTests(unittest.TestCase):
+    # A step's kind of work rests on language-neutral anchors (spec C13, Kid's M41 and M45): an explicit activity id
+    # (--activity on assign, [id] in a plan spec), the assigned member's Responsible activity, the files in its scope.
+    T0 = 1_800_000_000.0
+
+    def step(self, name):
+        return next(s for s in pg.load_run("claude", "s1")["plan"] if s["name"] == name)
+
+    def test_assign_stores_an_explicit_activity_and_checks_the_member_against_it(self):
+        with TempState():
+            pg.start("Feature", plan=["paso 2", "paso 3"], now=self.T0)
+            pg.assign("paso 2", "Tank", activity="backend", now=self.T0)
+            s = self.step("paso 2")
+            self.assertEqual((s["activity"], s["activity_from"]), ("backend", "explicit"))
+            with self.assertRaises(pg.StepError) as e:
+                pg.assign("paso 3", "Tank", activity="ux", now=self.T0)
+            self.assertIn("--to Sati", str(e.exception))
+            with self.assertRaises(pg.StepError) as e:
+                pg.assign("paso 3", "Tank", activity="nope", now=self.T0)
+            self.assertIn("backend", str(e.exception))  # the refusal names the ids
+            self.assertEqual(self.step("paso 3")["label"], "")
+
+    def test_an_explicit_activity_stays_when_the_step_is_assigned_again(self):
+        with TempState():
+            pg.start("Feature", plan=["paso 2"], now=self.T0)
+            pg.assign("paso 2", "Tank", activity="backend", now=self.T0)
+            with self.assertRaises(pg.StepError):
+                pg.assign("paso 2", "Sati", now=self.T0)  # still back-end work: Sati is not on it
+            self.assertEqual(self.step("paso 2")["activity"], "backend")
+
+    def test_files_in_scope_of_the_members_own_kind_confirm_an_assignment_the_words_would_refuse(self):
+        with TempState():
+            pg.start("Feature", plan=["build the JSON API server"], now=self.T0)
+            pg.assign("build the JSON API server", "Kid", scope="bin/**", now=self.T0)
+            s = self.step("build the JSON API server")
+            self.assertEqual((s["label"], s["activity"], s["activity_from"]), ("Kid", "tooling", "member"))
+
+    def test_a_plan_spec_declares_its_kind_of_work_after_its_dependencies(self):
+        with TempState():
+            pg.start("Feature", plan="design=30m; api=1h after design [backend]", now=self.T0)
+            s = self.step("api")
+            self.assertEqual((s["after"], s["est"], s["activity"], s["activity_from"]),
+                             (["design"], 60, "backend", "explicit"))
+            pg.add_step("docs=30m [docs]", now=self.T0)
+            self.assertEqual(self.step("docs")["activity"], "docs")
+            with self.assertRaises(pg.StepError) as e:
+                pg.add_step("more=10m [nope]", now=self.T0)
+            self.assertIn("no kind of work", str(e.exception))
+            self.assertEqual([x["name"] for x in pg.load_run("claude", "s1")["plan"]], ["design", "api", "docs"])
+
+
+class RouteTests(unittest.TestCase):
+    def ids(self, task):
+        from devkit import dispatch
+        return [(m["id"], why) for m, _, why in dispatch.route(task)]
+
+    def test_hyphenated_keywords_hit_only_as_whole_phrases(self):
+        # live misroutes: "app-store" gave Switch the word "app", "write-up" gave Ghost the word "up"
+        for task, member, word in (("upgrade the app from Spring Boot 2.7 to 3.3", "switch", "app"),
+                                   ("set up Dependabot for the repo", "ghost", "up")):
+            with self.subTest(task=task):
+                hits = [why for mid, why in self.ids(task) if mid == member]
+                self.assertFalse(any(f"keywords: {word}" in w for why in hits for w in why))
+        switch = dict(self.ids("publish the release to the App Store"))
+        self.assertTrue(any("app store" in w or "app-store" in w for w in switch.get("switch") or []))
+
+    def test_a_planning_request_routes_to_morpheus_first(self):
+        # planning is Morpheus's kind of work (the RACI's R); the route used to look only at the crew without him
+        self.assertEqual(self.ids("resolve the merge conflicts and integrate the branches")[0][0], "morpheus")
+
+
 class CrewGuardrailTests(unittest.TestCase):
     T0 = 1_800_000_000.0
 
@@ -402,9 +570,7 @@ class CrewGuardrailTests(unittest.TestCase):
         return self.T0 + minutes * 60
 
     def launch(self, aid, kind, label, at):
-        pg.note_agent_launch("claude", {"session_id": "s1", "tool_input": {"description": label,
-                                                                            "subagent_type": kind}})
-        pg.on_subagent("claude", {"session_id": "s1", "agent_id": aid, "agent_type": kind}, True, now=at)
+        launch(aid, kind, label, at)
 
     def test_at_most_four_members_at_once(self):
         from devkit import hooks
@@ -416,7 +582,7 @@ class CrewGuardrailTests(unittest.TestCase):
             verdict = hooks._crew_limits("claude", spawn)
             self.assertEqual(verdict[0], "deny")
             self.assertIn("the limit is 4", verdict[1])
-            self.assertIsNone(hooks._crew_limits("claude", dict(spawn, agent_id="a0")))  # not the main's launch
+            self.assertEqual(hooks._crew_limits("claude", dict(spawn, agent_id="a0"))[0], "deny")  # a helper too
 
     def test_overlapping_scopes_are_refused(self):
         with TempState():
@@ -425,7 +591,7 @@ class CrewGuardrailTests(unittest.TestCase):
             self.launch("a1", "devkit:tank", "Tank: api", self.m(1))
             with self.assertRaises(pg.StepError) as e:
                 pg.assign("ui", "Trinity", scope="services/web/**", now=self.m(2))
-            self.assertIn("overlaps the files Tank owns", str(e.exception))
+            self.assertIn("overlaps the files Backend engineer (Tank) owns", str(e.exception))
             pg.assign("ui", "Trinity", scope="web/**", now=self.m(2))  # disjoint: fine
 
     def test_the_main_session_respects_a_members_files(self):
@@ -438,7 +604,7 @@ class CrewGuardrailTests(unittest.TestCase):
                     "tool_input": {"file_path": os.path.join(repo, "lib/parser/core.py")}}
             verdict = hooks._crew_limits("claude", edit)
             self.assertEqual(verdict[0], "deny")
-            self.assertIn("belongs to Neo", verdict[1])
+            self.assertIn("belongs to Senior engineer (Neo)", verdict[1])
             other = dict(edit, tool_input={"file_path": os.path.join(repo, "docs/guide.md")})
             self.assertIsNone(hooks._crew_limits("claude", other))
             os.environ["DEVKIT_SCOPE_OVERRIDE"] = "1"
@@ -468,9 +634,7 @@ class GuidedAndAutoTests(unittest.TestCase):
 
     def neo(self):
         pg.assign("parser", "Neo", now=self.m(0))
-        pg.note_agent_launch("claude", {"session_id": "s1", "tool_input": {"description": "Neo: parser"}})
-        pg.on_subagent("claude", {"session_id": "s1", "agent_id": "a1", "agent_type": "devkit:neo"}, True,
-                       now=self.m(1))
+        launch("a1", "devkit:neo", "Neo: parser", self.m(1))
 
     def test_guided_waits_for_the_developer_and_resumes(self):
         with TempState():
@@ -483,7 +647,7 @@ class GuidedAndAutoTests(unittest.TestCase):
             self.assertEqual(run["plan"][0]["state"], "blocked")
             self.assertEqual(run["agents"]["a1"]["waiting"], "D1")
             ctx = pg.on_tool_done("claude", {"session_id": "s1"})  # Morpheus is told to ask the developer
-            self.assertIn("D1 from Neo", ctx)
+            self.assertIn("D1 from Senior engineer (Neo)", ctx)
             self.assertIn("AskUserQuestion", ctx)
             with self.assertRaises(pg.StepError):  # no finishing with a decision open
                 pg.step("all done", kind="done", now=self.m(3))
@@ -505,15 +669,47 @@ class GuidedAndAutoTests(unittest.TestCase):
             self.assertEqual(pg.load_run("claude", "s1")["plan"][0]["state"], "running")  # Neo keeps working
             push = pg.crew_decision("Push the release branch?", recommend="yes", irreversible="push", now=self.m(3))
             self.assertEqual(push["state"], "pending")  # irreversible: the developer decides
-            pg.set_mode("auto", approve="push", now=self.m(4))
+            pg.set_mode("auto", approve="push fix/*", now=self.m(4))
             again = pg.crew_decision("Push the fix branch?", recommend="yes", irreversible="push", now=self.m(5))
-            self.assertEqual(again["state"], "decided")  # pre-approved
+            self.assertEqual(again["state"], "pending")  # a pre-approval without the developer's grant opens nothing
             over = pg.crew_decide("D1", "B: reject", now=self.m(6))  # the developer overrides an automatic choice
             self.assertEqual((over["answer"], over["overrides"]), ("B: reject", "A"))
             with self.assertRaises(pg.StepError):
                 pg.crew_decision("Pick one", options="A | B", recommend="C", now=self.m(7))
             with self.assertRaises(pg.StepError):
                 pg.set_mode("auto", approve="launch-missiles")
+
+
+class CrewMessageIdTests(unittest.TestCase):
+    def test_message_and_decision_ids_stay_unique_past_the_kept_200(self):
+        with TempState():
+            pg.start("Release", plan=["build"])
+            for i in range(205):
+                pg.crew_ask(f"note {i}", from_agent="a1")
+            last = pg.crew_ask("the last question", to="main", from_agent="a2")
+            msgs = pg.load_run("claude", "s1")["messages"]
+            self.assertEqual(len({m["id"] for m in msgs}), len(msgs))
+            self.assertEqual(last["id"], "M206")
+            reply = pg.crew_answer(last["id"], "yes")  # reaches the member who asked, and nobody else
+            run = pg.load_run("claude", "s1")
+            self.assertEqual([(m["id"], m["to"]) for m in run["messages"] if m.get("reply_to")], [(reply["id"], "a2")])
+            run["decisions"] = [{"id": f"D{i}", "state": "decided"} for i in range(1, 201)]
+            pg._save(run, touch_session=False)
+            self.assertEqual(pg.crew_decision("One more?", options="yes | no", recommend="yes")["id"], "D201")
+            self.assertEqual(pg.crew_decision("And another?", options="yes | no", recommend="yes")["id"], "D202")
+
+
+class CrewMessageAuditTests(unittest.TestCase):
+    def test_a_message_is_audited_by_its_kind_and_length_never_its_text(self):
+        from devkit import audit
+        with TempState():
+            pg.start("Release", plan=["build"])
+            q = pg.crew_ask("may I change lib/x.py? " + "x" * 480, from_agent="a1")
+            pg.crew_answer(q["id"], "yes, keep it small")
+            recs = audit.query(action="crew.message")
+            self.assertEqual([((r.get("ref") or {}).get("type"), (r.get("evidence") or {}).get("count")) for r in recs],
+                             [("message", 503), ("answer", 18)])
+            self.assertFalse([r for r in recs if "lib/x.py" in r["detail"] or "keep it small" in r["detail"]])
 
 
 class CrewSafetyTests(unittest.TestCase):
@@ -575,8 +771,7 @@ class CrewSafetyTests(unittest.TestCase):
         from devkit import hooks
         with TempState(), tempfile.TemporaryDirectory() as repo:
             pg.start("Review", plan=["review"], now=time.time())
-            pg.note_agent_launch("claude", {"session_id": "s1", "tool_input": {"description": "Seraph: review"}})
-            pg.on_subagent("claude", {"session_id": "s1", "agent_id": "r1", "agent_type": "seraph"}, True)
+            launch("r1", "seraph", "Seraph: review")
             edit = {"session_id": "s1", "agent_id": "r1", "tool_name": "apply_patch", "cwd": repo,
                     "tool_input": {"input": "*** Begin Patch\n*** Update File: src/a.py\n"}}
             self.assertIn("review-only", hooks._scope_violation("codex", dict(edit)) or
@@ -588,6 +783,324 @@ class CrewSafetyTests(unittest.TestCase):
                                      "scope": ["services/**"]})
         self.assertTrue(line.startswith("dev crew brief tank "))
         self.assertIn("'add \"export\" for $USER; rm -rf /'", line)
+
+
+class TranscriptCase(unittest.TestCase):
+    # a session whose own transcript (harness_transcript) the tests write: the developer's prompts and answers
+    def setUp(self):
+        self.state = TempState().__enter__()
+        self.addCleanup(self.state.__exit__, None, None, None)
+        root = Path(self.state.tmp.name)
+        self.transcript = root / ".claude" / "projects" / "-repo" / "s1.jsonl"  # the harness's own (B1)
+        self.transcript.parent.mkdir(parents=True)
+        self.transcript.write_text("")
+        p = mock.patch.object(core, "CLAUDE_HOME", root / ".claude")
+        p.start()
+        self.addCleanup(p.stop)
+        pg.start("Release", plan=["build", "ship"])
+
+    def write(self, rec):
+        with self.transcript.open("a") as fh:
+            fh.write(json.dumps(rec) + "\n")
+
+    def prompt(self, text, pid):
+        return pg.on_human_prompt("claude", {"session_id": "s1", "prompt": text, "prompt_id": pid,
+                                             "transcript_path": str(self.transcript)})
+
+    def grant(self, consume=True):
+        return pg.use_grant("claude", "s1", action="push", target="feat/x", repo="acme/api", consume=consume)
+
+    def answer(self, d, label, tid):
+        # the developer answers decision d with the question tool: its result in the transcript, then the hook
+        q = pg.ask_text(d)
+        result = {"questions": [{"question": q, "options": [{"label": o} for o in d["options"]]}],
+                  "answers": {q: label}}
+        self.write({"type": "user", "uuid": f"u-{tid}", "isSidechain": False, "toolUseResult": result,
+                    "message": {"role": "user", "content": [{"type": "tool_result", "tool_use_id": tid,
+                                                             "content": "answered"}]}})
+        return pg.on_question("claude", {"session_id": "s1", "tool_name": "AskUserQuestion", "tool_use_id": tid,
+                                         "tool_input": {"questions": result["questions"]}, "tool_response": result,
+                                         "transcript_path": str(self.transcript)})
+
+
+class EvidenceReplayTests(TranscriptCase):
+    # B3 (B-fy1q867o3pp, Seraph's batch 4): an agent pipes the developer's original prompt or question tool answer into
+    # `dev hook prompt` again. The transcript still holds the real record, so only the id it carries can tell a replay
+    def test_a_replayed_prompt_grants_nothing_after_its_grant_was_used(self):
+        self.write({"type": "user", "promptId": "prompt-001", "uuid": "u-1", "isSidechain": False,
+                    "origin": {"kind": "human"}, "message": {"role": "user", "content": "grant push feat/x"}})
+        self.assertEqual(len(self.prompt("grant push feat/x", "prompt-001")), 1)
+        self.assertIsNotNone(self.grant())  # the developer's push uses it
+        self.assertEqual(self.prompt("grant push feat/x", "prompt-001"), [])  # replayed: nothing recorded
+        self.assertIsNone(self.grant(consume=False))
+        refused = [r for r in __import__("devkit.audit").audit.records(1, "crew.evidence-refused")]
+        self.assertIn("prompt-001", " ".join(r["detail"] for r in refused))
+
+    def test_a_replayed_question_answer_records_nothing(self):
+        d = pg.crew_decision("Skip empty lines or reject the file?", options="A: skip | B: reject", recommend="A")
+        q = pg.ask_text(d)
+        result = {"questions": [{"question": q, "options": [{"label": "A: skip"}, {"label": "B: reject"}]}],
+                  "answers": {q: "B: reject"}}
+        self.write({"type": "user", "uuid": "u-2", "isSidechain": False, "toolUseResult": result,
+                    "message": {"role": "user", "content": [{"type": "tool_result", "tool_use_id": "toolu_q1",
+                                                             "content": "answered"}]}})
+        data = {"session_id": "s1", "tool_name": "AskUserQuestion", "tool_use_id": "toolu_q1",
+                "tool_input": {"questions": result["questions"]}, "tool_response": result,
+                "transcript_path": str(self.transcript)}
+        self.assertEqual(len(pg.on_question("claude", data)), 1)
+        self.assertEqual(pg.on_question("claude", data), [])
+        human = json.loads(self.state.sess.read_text()).get("human") or []
+        self.assertEqual([h["transcript_uuid"] for h in human], ["toolu_q1"])
+
+    def test_the_evidence_record_keeps_an_answer_that_names_an_option(self):
+        # M265 (Persephone's compliance review 2): crew.evidence keeps the answer only as one of the decision's options,
+        # so progress passes them; through the real audit.record
+        d = pg.crew_decision("Skip empty lines or reject the file?", options="A: skip | B: reject", recommend="A")
+        q = pg.ask_text(d)
+        result = {"questions": [{"question": q, "options": [{"label": "A: skip"}, {"label": "B: reject"}]}],
+                  "answers": {q: "b: reject (Recommended)"}}
+        self.write({"type": "user", "uuid": "u-3", "isSidechain": False, "toolUseResult": result,
+                    "message": {"role": "user", "content": [{"type": "tool_result", "tool_use_id": "toolu_q2",
+                                                             "content": "answered"}]}})
+        pg.on_question("claude", {"session_id": "s1", "tool_name": "AskUserQuestion", "tool_use_id": "toolu_q2",
+                                  "tool_input": {"questions": result["questions"]}, "tool_response": result,
+                                  "transcript_path": str(self.transcript)})
+        from devkit import audit
+        self.assertEqual([r["ref"]["answer"] for r in audit.records(1, "crew.evidence")], ["B: reject"])
+
+    def test_the_decision_records_keep_the_option_labels_and_an_answer_that_names_one(self):
+        # M327: crew.decision keeps the labels (ref.options) and crew.decided an answer that is one of them
+        from devkit import audit
+        pg.crew_decision("Skip empty lines or reject the file?", options="A: skip | B: reject", recommend="A")
+        pg.crew_decide("D1", "B: reject")
+        self.assertEqual([r["ref"].get("options") for r in audit.records(1, "crew.decision")], ["A: skip | B: reject"])
+        self.assertEqual([r["detail"] for r in audit.records(1, "crew.decided")], ["B: reject"])
+
+    def test_a_codex_entry_is_never_confirmed_by_the_hook_alone(self):
+        # The Keymaker: devkit reads no Codex transcript yet, so a Codex entry has nothing behind it but the hook event
+        self.assertFalse(pg.confirmed({"agent": "codex", "channel": "E2", "transcript_uuid": "p-1", "covers": "D1"}))
+
+
+class UnknownCommandGrantTests(TranscriptCase):
+    # M332 (The Keymaker's RT1/RT2): a command whose program is only known when it runs is the action class unknown
+    # (tier 2), its target cmd-<hash>; the developer opens that one command with "grant unknown cmd-<hash>"
+    def test_a_grant_of_an_unknown_command_opens_that_command_once(self):
+        self.write({"type": "user", "promptId": "prompt-020", "uuid": "u-20", "isSidechain": False,
+                    "origin": {"kind": "human"}, "message": {"role": "user", "content": "grant unknown cmd-1a2b3c4d5e"}})
+        self.prompt("grant unknown cmd-1a2b3c4d5e", "prompt-020")
+
+        def grant(target):
+            return pg.use_grant("claude", "s1", action="unknown", target=target, repo="acme/api")
+        self.assertIsNone(grant("cmd-ffffffffff"))
+        self.assertEqual((grant("cmd-1a2b3c4d5e") or {}).get("source"), "E2")
+        self.assertIsNone(grant("cmd-1a2b3c4d5e"))  # one use
+
+
+class StepGrantTests(TranscriptCase):
+    # M277 (Seraph's M243 follow-ups, The Keymaker): a step's --allow grant holds for what the developer's evidence
+    # covers, its target and its repository, through the real run and session state
+
+    def test_a_step_grant_opens_its_own_target_in_its_own_repository_only(self):
+        self.write({"type": "user", "promptId": "prompt-009", "uuid": "u-9", "isSidechain": False,
+                    "origin": {"kind": "human"}, "message": {"role": "user", "content": "grant push feat/parser"}})
+        self.prompt("grant push feat/parser", "prompt-009")
+        pg.assign("build", "Tank", allow="push")
+        launch("a_tank", "devkit:tank", "Tank: build")
+
+        def lane_push(target, repo="acme/api"):
+            return pg.use_grant("claude", "s1", action="push", target=target, repo=repo, lane="a_tank", consume=False)
+        self.assertEqual(lane_push("feat/parser")["source"], "step")
+        self.assertIsNone(lane_push("feat/other"))
+        self.assertIsNone(lane_push("main"))
+        self.assertIsNone(lane_push("feat/parser", repo="acme/web"))
+
+    def test_a_verified_decision_without_a_target_backs_no_step_grant(self):
+        d = pg.crew_decision("Push the parser branch?", options="yes | no", recommend="yes", irreversible="push")
+        self.answer(d, "yes", "toolu_q9")
+        self.assertTrue(pg.crew_decide(d["id"], "yes")["verified"])
+        pg.assign("build", "Tank", allow="push")
+        self.assertEqual(pg.load_run("claude", "s1")["plan"][0].get("allow"), [])
+
+
+class EstimateRoundingTests(unittest.TestCase):
+    # Trinity's 6c45efc and Link's 38a7c16: an estimate or a time left rounds like the dashboard's fmtAbout (to 5
+    # minutes, to the minute under 10), while measured time stays exact; the status block and dev progress print both
+    def test_the_status_block_rounds_estimates_and_keeps_measured_time_exact(self):
+        self.assertEqual(pg.fmt_range(27.4, 43), "~25m–45m")
+        with TempState():
+            t0 = time.time() - 60
+            pg.start("Work", plan=["api=12m", "docs=107m"], now=t0)
+            block = pg.render_update(pg.load_run("claude", "s1"), branch="b", now=t0 + 7 * 60)
+        self.assertIn("of ~2h00m", block)  # 119 minutes, estimated
+        self.assertIn("api · 7m of ~10m", block)  # 7 minutes measured, 12 estimated
+        self.assertIn("docs · ~1h45m", block)
+
+
+class ScopeWriteTests(unittest.TestCase):
+    # M292: Seraph (review-only) was flagged for docs/audit.md, which Neo, whose step scope holds it, changed during
+    # Seraph's shell call; a98d7f5 then dropped such a file, so a write the reviewer makes inside a working member's
+    # scope went unseen (the Code reviewer's batch 5). It is flagged "possible", naming whose scope holds it
+    def test_a_file_in_a_working_members_scope_is_flagged_possible_not_dropped(self):
+        with TempState():
+            pg.start("Work", plan=["audit docs", "review"])
+            pg.assign("audit docs", "Neo", scope="docs/audit.md", why="test")
+            pg.assign("review", "Seraph")
+            launch("a_neo", "devkit:neo", "Neo: audit docs")
+            launch("a_seraph", "devkit:seraph", "Seraph: review")
+            flagged = pg.scope_written("claude", "s1", "a_seraph", ["docs/audit.md"]) or {}
+            self.assertEqual((flagged.get("paths"), flagged.get("certainty")), (["docs/audit.md"], "possible"))
+            told = [m["text"] for m in pg.load_run("claude", "s1").get("messages") or [] if m.get("to") == "main"]
+            self.assertTrue(any("docs/audit.md is in the scope of" in t and "Neo" in t for t in told), told)
+
+
+LANE_REPORT = ("**[Firefly> DevKit · Security engineer (The Keymaker)]** acme/api · `main` · {task}\n"
+               "- **Done:** {task}\n- **Check:** {check}\n- **Next:** the tech lead")
+
+
+class LaneEndTests(unittest.TestCase):
+    # B-fy9639hfz5t, seen live by the developer: "isolated python spawns", assigned to The Keymaker while its lane for
+    # "red team fixes part 3" ran, was bound to that lane, and the lane's ✓ ending closed it done with none of its
+    # work. A step binds only to the launch whose description names it (or a new launch), and a lane's end closes
+    # only the steps its evidence is about; any other step it holds goes back to pending, the reason in its history
+    def setUp(self):
+        self.state = TempState().__enter__()
+        self.addCleanup(self.state.__exit__, None, None, None)
+        self.t0 = time.time() - 3600
+        pg.start("Release", plan=["red team fixes part 3", "isolated python spawns"], now=self.m(0))
+        pg.assign("red team fixes part 3", "The Keymaker", now=self.m(0), why="the live plan's assignment")
+        launch("a_rt3", "devkit:keymaker", "The Keymaker: red team fixes part 3", at=self.m(1))
+
+    def m(self, minutes):
+        return self.t0 + minutes * 60
+
+    def run_(self):
+        return pg.load_run("claude", "s1")
+
+    def plan(self):
+        return {s["name"]: s for s in self.run_()["plan"]}
+
+    def stop(self, aid, check, at):
+        pg.on_subagent("claude", {"session_id": "s1", "agent_id": aid, "agent_type": "devkit:keymaker",
+                                  "last_assistant_message": LANE_REPORT.format(task="red team fixes part 3",
+                                                                               check=check)}, False, now=at)
+        return self.plan()
+
+    def test_a_step_assigned_while_its_member_works_on_another_waits_for_its_own_launch(self):
+        pg.assign("isolated python spawns", "The Keymaker", now=self.m(5), why="the live plan's assignment")
+        s = self.plan()["isolated python spawns"]
+        self.assertEqual((s["owner"], s["state"]), ("main", "pending"))
+        told = [x["text"] for x in self.run_().get("messages") or [] if x.get("to") == "main"]
+        self.assertTrue(any("isolated python spawns" in t and "red team fixes part 3" in t for t in told), told)
+        plan = self.stop("a_rt3", "✓ 18 red team tests pass on both Pythons", at=self.m(30))
+        self.assertEqual(plan["red team fixes part 3"]["state"], "done")
+        self.assertEqual((plan["isolated python spawns"]["owner"], plan["isolated python spawns"]["state"]),
+                         ("main", "pending"))
+        launch("a_spawns", "devkit:keymaker", "The Keymaker: isolated python spawns", at=self.m(31))
+        self.assertEqual(self.plan()["isolated python spawns"]["owner"], "a_spawns")
+
+    def test_a_lanes_end_closes_only_the_steps_its_evidence_is_about(self):
+        # two steps join the working lane by delegation (its member is told); the lane's dev progress step --step
+        # names one, so its ✓ closes that one and its own step; the other goes back to pending, with the reason
+        from devkit import dispatch
+        named, other = "M379 guard text says the tech lead", "M381 dev backup is tier 1 for members"
+        for task in (named, other):
+            self.assertEqual(dispatch.delegate(task, to="The Keymaker", now=self.m(5))["lane"], "a_rt3")
+        pg.step("the guard says the tech lead", which=named, check="✓ 3 guard tests", from_agent="a_rt3",
+                now=self.m(20))
+        plan = self.stop("a_rt3", "✓ 18 red team tests pass", at=self.m(30))
+        self.assertEqual([plan[n]["state"] for n in ("red team fixes part 3", named, other)],
+                         ["done", "done", "pending"])
+        self.assertEqual(plan[other]["owner"], "main")
+        back = [h for h in self.run_()["history"] if h["step"] == other][-1]
+        self.assertEqual((back["from"], back["to"]), ("running", "pending"))
+        self.assertIn("names", back["why"])
+
+    def test_a_lane_step_that_names_no_step_of_the_plan_is_refused(self):
+        with self.assertRaises(pg.StepError) as e:
+            pg.step("finished", which="spawns everywhere else", check="✓ ok", from_agent="a_rt3")
+        self.assertIn("red team fixes part 3", str(e.exception))
+
+
+class BoundaryTests(unittest.TestCase):
+    # e6de8a9, L-fy1j7q5mw2i (Kid, M322, M349): what devkit writes while a test runs (runs, sessions, quota, call
+    # ledger, the team's crew policy, the continuity records and the prompt helper's cache) lands in the test's folder
+    def test_every_state_a_test_can_write_is_in_the_tests_folder(self):
+        from devkit import continuity, prompt
+        with TempState() as st:
+            root = Path(st.tmp.name)
+            outside = [str(p) for p in (pg.RUNS, pg.SESSIONS, pg.QUOTA, pg.CALLS, pg.TEAM_POLICY, continuity.CONT,
+                                        prompt.STATE) if not Path(p).is_relative_to(root)]
+            self.assertEqual(outside, [])
+
+    def test_the_boundary_alone_keeps_the_quota_and_the_crew_limit_in_the_tests_folder(self):
+        # test_continuity, test_plan_dag, test_state and test_raci use boundary() without TempState: with devkit's
+        # default max_parallel and the real quota they wrote the developer's crew limit, and the live hooks then
+        # audited a change back every few minutes (crew.limit 3 → 4)
+        with tempfile.TemporaryDirectory() as tmp:
+            patches = boundary(tmp)
+            for p in patches:
+                p.start()
+            try:
+                self.assertTrue(Path(pg.QUOTA).is_relative_to(tmp), pg.QUOTA)
+            finally:
+                for p in reversed(patches):
+                    p.stop()
+
+
+class ReconcileTranscriptTests(unittest.TestCase):
+    # Seraph (low, M305): the reconciler reads a lane's meta file next to the session's own transcript
+    # (harness_transcript), never next to a path the hook event names, so a forged event cannot end a member's lane
+    def test_the_reconciler_reads_meta_files_beside_the_sessions_own_transcript_only(self):
+        with TempState() as st, mock.patch.object(core, "CLAUDE_HOME", Path(st.tmp.name) / ".claude"):
+            root = Path(st.tmp.name)
+            own, forged = root / ".claude" / "projects" / "-repo" / "s1.jsonl", root / "forged" / "s1.jsonl"
+
+            def finished_meta(transcript):
+                meta = transcript.with_suffix("") / "subagents" / "agent-a_tank.meta.json"
+                meta.parent.mkdir(parents=True)
+                meta.write_text(json.dumps({"finished": True}))
+                os.utime(meta, (time.time() - 600, time.time() - 600))  # finished 10 minutes ago, no SubagentStop
+            for t in (own, forged):
+                t.parent.mkdir(parents=True, exist_ok=True)
+                t.write_text("")
+            pg.start("Work", plan=["api"])
+            pg.assign("api", "Tank")
+            launch("a_tank", "devkit:tank", "Tank: api")
+            finished_meta(forged)
+            pg.reconcile_hook("claude", {"session_id": "s1", "transcript_path": str(forged)})
+            self.assertEqual(pg.load_run("claude", "s1")["agents"]["a_tank"]["state"], "running")
+            finished_meta(own)
+            pg.reconcile_hook("claude", {"session_id": "s1", "transcript_path": str(forged)})
+            self.assertEqual(pg.load_run("claude", "s1")["agents"]["a_tank"]["state"], "unverified")
+
+
+class HookCallsTests(unittest.TestCase):
+    def test_the_hooks_call_only_devkit_functions_that_exist(self):
+        # Seraph M111 (4): the prompt hook called scope.resolve, lessons.note_correction and skillguard.on_prompt after
+        # they were removed; each call failed inside a try, so every prompt lost its turn class and skills silently
+        import ast
+        import importlib
+        from devkit import hooks
+        tree = ast.parse(Path(hooks.__file__).read_text())
+
+        def imports(body):  # `from . import x as y` written directly in this body (not in nested functions)
+            out, todo = {}, list(body)
+            while todo:
+                n = todo.pop()
+                if isinstance(n, ast.ImportFrom) and n.level == 1 and not n.module:
+                    out.update({a.asname or a.name: a.name for a in n.names})
+                elif not isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef, ast.Lambda)):
+                    todo += list(ast.iter_child_nodes(n))
+            return out
+        top, missing = imports(tree.body), set()
+        for fn in [n for n in ast.walk(tree) if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))]:
+            local = {n.id for n in ast.walk(fn) if isinstance(n, ast.Name) and isinstance(n.ctx, ast.Store)}
+            local |= {a.arg for a in fn.args.args + fn.args.kwonlyargs}
+            mods = {**{k: v for k, v in top.items() if k not in local}, **imports(fn.body)}
+            missing |= {f"{n.value.id}.{n.attr} (line {n.lineno})" for n in ast.walk(fn)
+                        if isinstance(n, ast.Attribute) and isinstance(n.value, ast.Name) and n.value.id in mods
+                        and not hasattr(importlib.import_module(f"devkit.{mods[n.value.id]}"), n.attr)}
+        self.assertEqual(sorted(missing), [])
 
 
 if __name__ == "__main__":

@@ -27,43 +27,25 @@ class SkillRuleTests(unittest.TestCase):
     def tearDown(self):
         sg.installed = self._installed
 
-    def test_ui_skills_need_design_intent_not_just_the_word_dashboard(self):
-        for text in ("podriamos abrir el dashboard y asi veo como avanzamos?", "open the dashboard",
-                     "y como ha quedado al final el dashboard!"):
-            self.assertNotIn("frontend-design", sg.on_prompt("claude", text, {}), text)
-        for text in ("Mejora el dashboard, es demasiado cargante", "redesign the settings page",
-                     "fix the css of the header"):
-            self.assertIn("frontend-design", sg.on_prompt("claude", text, {}), text)
-
-    def test_tests_and_pipelines_need_their_skills(self):
-        saved = sg.installed
-        sg.installed = lambda agent: {"testing", "cicd", "github-actions-hardening", "delivery"}
-        try:
-            self.assertIn("testing", sg.on_prompt("codex", "add unit tests for the parser", {}))
-            self.assertIn("cicd", sg.on_prompt("claude", "set up a GitLab CI pipeline", {}))
-        finally:
-            sg.installed = saved
-
-    def test_prompt_names_missing_skills(self):
-        text = sg.on_prompt("claude", "Redesign the dashboard UI and update the docs", {})
-        self.assertIn("frontend-design", text)
-        self.assertIn("docs", text)
-        self.assertEqual(sg.on_prompt("claude", "Redesign the dashboard UI",
-                                      {"skills_loaded": ["frontend-design", "impeccable"]}), "")
-        self.assertIn("impeccable", sg.on_prompt("claude", "Redesign the dashboard UI", {"skills_loaded": ["frontend-design"]}))
-        self.assertIn("impeccable", sg.on_prompt("codex", "mejora la interfaz", {}))
-        self.assertIn("frontend-design", sg.on_prompt("codex", "mejora la interfaz", {}))
-        self.assertIn("docs", sg.on_prompt("claude", "documenta el cambio", {}))
+    def test_each_kind_of_work_needs_its_skills(self):
+        need = {aid: {s for r in sg.rules_for_activity(aid) for s in sg.required(r, agent)}
+                for aid, agent in (("testing", "codex"), ("cicd", "claude"), ("ux", "claude"), ("docs", "claude"))}
+        self.assertIn("testing", need["testing"])
+        self.assertIn("cicd", need["cicd"])
+        self.assertLessEqual({"frontend-design", "impeccable"}, need["ux"])
+        self.assertIn("docs", need["docs"])
 
     def test_brief_gets_required_skills(self):
-        upd = sg.on_agent_brief("claude", {"prompt": "Rework the dashboard layout", "description": "ui"})
+        # the member's kind of work decides, not the words (no English UI word here)
+        upd = sg.on_agent_brief("claude", {"prompt": "Ajusta el encabezado", "description": "Trinity: encabezado"})
         self.assertIn("## devkit · required skills", upd["prompt"])
         self.assertIn("`frontend-design`", upd["prompt"])
         self.assertIsNone(sg.on_agent_brief("claude", upd))  # not appended twice
         named = sg.on_agent_brief("claude", {"prompt": "Use frontend-design and impeccable to rework the layout",
                                              "description": "Trinity: rework the layout"})
         self.assertNotIn("required skills", named["prompt"])  # the skills are named already
-        self.assertIn("**[Firefly> DevKit · Trinity]**", named["prompt"])  # every crew member reports the same way
+        # every crew member reports the same way, its role first
+        self.assertIn("**[Firefly> DevKit · Frontend engineer (Trinity)]**", named["prompt"])
         self.assertIsNone(sg.on_agent_brief("claude", {"prompt": "Use frontend-design and impeccable to rework the "
                                                                  "layout. End with **[Firefly> DevKit · Trinity]**"}))
         self.assertIsNone(sg.on_agent_brief("codex", {"prompt": "Rework the dashboard layout"}))

@@ -13,7 +13,8 @@ reference of every option is in [Commands › Git and GitHub](commands.md#git-an
 ```bash
 dev branch new feat/invoice-export --ticket PROJ-142    # from an up-to-date origin/main
 # … work in small, tested steps …
-dev commit -a -m "feat(invoice): add CSV export" --body "Finance copies invoices by hand every month."
+dev commit -a -m "feat(invoice): add CSV export" --why "Finance copies invoices by hand every month." \
+  --verified "python3 -m unittest tests.test_export (8 tests pass)"
 dev ci --run                                            # run what CI runs, here; record the evidence
 dev push                                                # one push, after the checks
 dev pr create --dry-run | sed '1,/^---$/d' > body.md   # the PR body, pre-filled from the template
@@ -53,8 +54,29 @@ that already exists here or on `origin`, is refused.
 proper name before its first push. It refuses to rename the default branch and permanent branches, and a branch that
 is already on `origin`, because the remote branch and its PR would stay behind.
 
-`dev branch ls` lists the local branches with their upstream (ahead ↑, behind ↓, or `gone`), how far each is from
-`origin/<default>`, its PR, its age, and the worktree that has it checked out.
+`dev branch ls` prints the branch map: one row per local branch with where it lives (local only, or local and
+`origin`), how far it is ahead (↑) and behind (↓) its upstream and the default branch, the commits that exist only on
+this Mac and the branch that carries them, its last backup, an embargo, its worktree, its pull request, and its
+linked task. Each row ends with whether its work is safe off this Mac, or why not:
+
+```text
+  fireflysoftwaresolutions/devkit · 4 branches · 1 not backed up ──────────────────────────────────
+  * release/26.11.3        local + origin  ↑19 ↓0 · 262 ahead of main · not backed up: the backup
+                                           policy of fireflysoftwaresolutions/devkit is ask, the
+                                           default for a public repository, and the developer has
+                                           not answered
+    feat/curl-install      local only      merged into release/26.11.3 · nothing to back up
+    main                   local + origin  ↑0 ↓0 · default branch · nothing to back up
+  Backup policy: the default: on for a private repository, ask for a public one (dev backup policy).
+  Backups wait for commits older than 30 min (backup.after_minutes).
+```
+
+`--offline` skips the fetch and the GitHub lookups, and `--json` gives the same rows to tools. `dev status` and the
+handoff note's generated block show the same rows, the dashboard shows them in each project's Branches tab, and the
+session-start context names the branches that exist only on this Mac and the embargoed ones.
+`dev backup` copies a branch that is not backed up to the remote when that push starts no CI run, and
+`dev branch embargo` keeps one off the remote (agents' pushes from another project's copy are held from 26.11.4); see
+[Delivery › Back up early, CI once](delivery.md#back-up-early-ci-once).
 
 `dev branch clean` lists the local branches that can go: merged into the default branch, whose PR was merged at the
 same commit, or gone upstream with every commit on the remote. It keeps the current branch, permanent branches,
@@ -65,6 +87,44 @@ until you add `--apply`.
 
 `dev commit -m "type(scope): summary"` commits the staged changes, every tracked change with `-a`, or only the paths
 you list. More `-m` options add paragraphs, and `--body` adds the reason.
+
+The message follows devkit's commit template, [`config/git/commit-template.txt`](../config/git/commit-template.txt):
+the header, then why, what changed, and how it was verified, then the trailers. `dev commit` writes it for you:
+
+```bash
+dev commit parser.py -m "fix(parser): keep quoted commas" \
+  --why "Rows with quoted commas were split in two." \
+  --body "The tokenizer reads a quoted field whole." \
+  --verified "python3 -m unittest tests.test_parser (12 tests pass)"
+```
+
+```text
+fix(parser): keep quoted commas
+
+Rows with quoted commas were split in two.
+
+The tokenizer reads a quoted field whole.
+
+Verified: python3 -m unittest tests.test_parser (12 tests pass)
+
+Refs: PROJ-142
+```
+
+| Option | Writes |
+| --- | --- |
+| `--why` | The first paragraph: why the change is needed |
+| `--body`, more `-m` | What changed; repeat `--body` for more paragraphs. Without `--why`, `--body` is the reason, as before |
+| `--verified` | The last paragraph, `Verified: …` (the label is added when you leave it out) |
+| `--refs` | The `Refs:` trailer: `#12`, `owner/repo#12`, a URL, or a ticket key such as `PROJ-142`. Repeat it for more |
+| `--breaking` | The `BREAKING CHANGE:` trailer: what breaks, and how to move to the new behavior |
+
+- **`Refs:` from your task.** Without `--refs`, `dev commit` fills `Refs:` with the ticket of the task you started on
+  this branch (`dev task start` links the branch to the task). A task's ticket is one of its links: `ticket:PROJ-142`,
+  `issue:#12`, or a URL. When the started tasks on the branch name different tickets, nothing is filled, and the output
+  names them so you can pick one with `--refs`. A message that already has a `Refs:` line keeps it.
+- **No devkit task ids.** A message that names a devkit task id (`T-…`, `F-…`, `B-…`, or `S-…`) is refused, whether
+  it is in the header, the body, or `--refs`. Task ids stay in the private handoff, whose session log already links
+  each commit to its task.
 
 | The header must | Refused example |
 | --- | --- |
@@ -83,6 +143,27 @@ you list. More `-m` options add paragraphs, and `--body` adds the reason.
 - **No secrets.** The guard's gitleaks scan runs on what the commit records.
 - **Amend with care.** `--amend` keeps the message unless you give `-m`. Amending a commit that is already pushed works,
   and the output tells you that the next push needs `dev push --force-with-lease`.
+
+### The template in your editor
+
+`git commit` without `-m` opens the template when it is the repository's `commit.template`. `dev setup` asks for it
+with your git hosts ("Open new commit messages with devkit's template?"), and the git step of `dev install`, which
+`dev setup` runs, applies the answer. The answer is kept:
+
+- **Yes:** it sets `commit.template` in each repository's own git config (never the global one), and in repositories
+  you clone later on the next install, without asking again.
+- **No:** nothing changes, and nobody asks again.
+- **Not answered yet:** `dev install` asks in a terminal. Without one (a scheduled job), nothing changes, and the step
+  says how to choose.
+
+`dev setup commit-template` asks again, even after a no, and `dev setup commit-template --remove` takes devkit's
+template out of every repository and records a no.
+
+A repository with a template of its own, in its config or your global config, keeps it. A repository where you removed
+devkit's (`git config --unset commit.template`) is never set again by `dev install`; only `dev setup commit-template`
+sets it again. The repositories point at a copy, `~/.local/state/devkit/git/commit-template.txt`, that each install
+refreshes. Because every line of the template is a comment, closing the editor without writing a message commits
+nothing.
 
 ### Work in progress instead of a stash
 
@@ -169,7 +250,13 @@ PR's address and `dev pr checks --watch`, or `dev pr create` when there is no PR
 
 ### Create
 
-`dev pr create` opens the PR of the pushed branch. HEAD must be what `origin` has, and it needs local CI evidence.
+`dev pr create` opens the PR of the pushed branch. HEAD must be what `origin` has, and a PR that is ready for review
+needs local CI evidence.
+
+A draft (`--draft`) opens without the evidence when no workflow runs on draft PRs, for example when the jobs have
+`if: github.event.pull_request.draft == false`, which `dev ci audit --fix` writes. Opening it costs no CI run, so
+`dev pr ready` asks for the evidence instead, before it starts the one run. Where a workflow runs on drafts, or devkit
+cannot tell, a draft needs the evidence too, and the refusal names the workflow.
 
 - **Title.** `--title`, or the first commit's header when it is a Conventional Commit, or one derived from the
   branch (`release/26.11.4` becomes `chore(release): 26.11.4`). It must be a Conventional Commit, because a squash
@@ -191,7 +278,7 @@ PR's address and `dev pr checks --watch`, or `dev pr create` when there is no PR
 dev pr create --dry-run          # title, template, evidence, which required sections are still empty, the body
 dev pr create --edit             # edit the pre-filled body in $EDITOR, then open the PR
 dev pr create --body-file body.md
-dev pr create --draft            # an early draft; empty sections are allowed
+dev pr create --draft            # an early draft; empty sections allowed, no evidence when drafts run no CI
 ```
 
 AI attribution is removed from the body. If the branch already has an open PR, its address is printed instead.
@@ -204,7 +291,7 @@ AI attribution is removed from the body. If the branch already has an open PR, i
 | `dev pr ls` | Your PRs and the ones waiting for your review. `--all` adds the others; `--all-projects` covers every project (from the registry cache) |
 | `dev pr checks [n] [--watch]` | Pass, fail, and pending counts; each failing job with the relevant lines of its log. `--watch` waits for the result and prints only that |
 | `dev pr diff [n]` | Files changed with +/−, largest first; `--patch` for the full diff, `--name-only` for the names |
-| `dev pr ready [n]` | Checks the title and the required sections, then marks a draft ready for review |
+| `dev pr ready [n]` | Checks the title, the required sections, and the local CI evidence for HEAD, then marks a draft ready for review (its one CI run) |
 | `dev pr comment [n] -m "…"` · `dev pr review [n] --approve \| --request-changes \| --comment` | Comment or review; `--request-changes` and `--comment` need a message. Attribution is removed |
 | `dev pr merge [n]` | Merges when the gate below allows it |
 
@@ -278,7 +365,7 @@ apply, then the command runs with your terminal attached.
 | `dev git push …` | The `dev push` rules for any refspec: no plain force push, nothing to the default branch, evidence for each pushed branch (`--ci-passed` accepted) |
 | `dev git commit …` | The commit-message and branch rules, then the guard's attribution and secret checks |
 | `dev git rebase -i`, `add -p`, and other interactive commands | Refused without a terminal |
-| `dev gh pr create …` | Evidence, a Conventional title, and the required sections unless `--draft` |
+| `dev gh pr create …` | Evidence (not for a draft where drafts run no CI), a Conventional title, and the required sections unless `--draft` |
 | `dev gh pr merge …` | `--admin` refused; the `dev pr merge` gate; a Conventional title for a squash |
 | `dev gh release create …` | A clean default branch and local CI evidence |
 | Anything else | The guard's rules |

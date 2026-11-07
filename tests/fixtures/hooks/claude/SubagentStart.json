@@ -1,0 +1,9 @@
+{
+ "agent_id": "a4e6fec8dd944e821",
+ "agent_type": "general-purpose",
+ "cwd": "/Users/dev/Development/.tmp/f0/repo",
+ "hook_event_name": "SubagentStart",
+ "prompt_id": "e2e95d7a-40e4-4785-8ebd-942160ad22f4",
+ "session_id": "043c3a29-420b-4c79-8e10-aef6ee7d46ac",
+ "transcript_path": "/Users/dev/.claude/projects/-Users-dev-Development--tmp-f0-repo/043c3a29-420b-4c79-8e10-aef6ee7d46ac.jsonl"
+}

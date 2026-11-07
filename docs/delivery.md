@@ -122,6 +122,67 @@ description](templates.md#pull-request-description): what and why, changes, how 
 risk and rollback, links. `dev pr create` fills the changes, the local CI result, and the links, and refuses a PR
 whose "What and why" or "How to verify" is still empty. The title is a Conventional Commit.
 
+### Back up early, CI once
+
+"Push once" protects CI time, not your work: a commit that exists only on this Mac is lost with the disk. Back up
+as you go whenever that costs no CI run, open the PR early as a draft, and mark it ready once:
+
+```bash
+dev backup               # the branch to origin, only when the push starts no CI run (fast-forward, scanned)
+dev pr create --draft    # visible early; a draft runs no job when ci.yml has the draft gate
+dev pr ready             # the one CI run: marking it ready starts it, with local CI evidence for HEAD
+```
+
+`dev backup` reads the CI configuration of the commit it would send and pushes only when it shows that the push
+starts no run: in this repository, `ci.yml` runs on pull requests and pushes to `main`, so a branch push is free.
+When the push would start CI, or devkit cannot tell, it does not push and says why and what to do
+(`dev backup --accept-ci`, or a `branches-ignore` entry). It never pushes the default branch, a long-lived branch
+(`main`, `master`, `develop`, `gh-pages`) or a branch a workflow deploys from, never forces, stops at a diverged
+remote branch with the commands to resolve it, and runs the secret scan on exactly the commits it sends: those the
+remote it pushes to does not have, even when another remote has them.
+`dev sync` does the same every hour and at the end of a session, for commits older than `backup.after_minutes`
+(30 by default; `backup.auto: false` turns it off). The branch map (`dev branch ls`, `dev status`, the handoff note)
+shows each branch's last backup, or why it is not backed up.
+
+Each project has a backup policy, kept in its handoff note so that every machine and the team follow it: `on`
+(`dev backup` and the hourly `dev sync` push its branches), `off` (never), or `ask`. Without a choice, a private
+repository is `on` and a public one is `ask` (so is one whose visibility devkit cannot read), because a backup of a
+public repository publishes the branch at once. With `ask`, the first `dev backup` you run in your terminal asks
+whether the project's branches may be backed up and records your answer as `on` or `off`; `dev sync` never asks and
+never pushes such a branch, and an agent's call is never asked. Choose it yourself with
+`dev backup policy on --why "open source: the code is public anyway"` (or `off`, or `ask`); `dev backup policy`
+shows it, and so do `dev status`, `dev branch ls`, the handoff note and the messages of `dev backup`.
+`dev backup --public` pushes once, whatever the policy. With `on`, embargoes still hold, and on a public repository a
+branch whose new commits read as a security fix or change a red-team test still waits for an embargo or
+`--public`. Setting the policy, `dev backup --public` and `dev branch embargo --lift` are your own decisions: type
+them in a terminal, or grant the main session once (`grant backup <project>`, `grant embargo <branch>`); crew
+members never run them.
+
+A branch that must stay off a public remote, such as an unreleased security fix, gets an embargo:
+`dev branch embargo fix/x --why "discloses an open hole" --until "the guard release"`. No backup pushes it, nor a
+branch that holds its commits (also after `fix/x` is merged into a release branch and deleted: the embargo keeps
+the branch's tips), until `dev branch embargo --lift fix/x`. When devkit cannot read the project's handoff note, it
+backs up nothing. On a public repository, devkit suggests an embargo when a branch's commits read as a security
+fix.
+
+An embargo holds agents' pushes too, from the embargoed project, its git folders and worktrees, temporary clones and
+unknown folders (a copy in another project's folder is held from 26.11.4). When an agent's `git push`, `dev push`, `dev pr create` or
+`gh pr create` would send an embargoed branch or the commits its embargo holds (under another name, from a branch
+made from it, by commit id, with `--all`), the guard refuses it unless you type `grant embargo <branch>`, which opens
+that one push. When devkit cannot read the handoff note, the guard refuses every agent push the same way. You can
+still push in a terminal. Crew members never push an embargoed branch.
+
+The embargo list and the backup policy in the handoff note change only through `dev branch embargo` (`--lift` to
+lift one) and `dev backup policy`. Agents may edit the note's other sections, but the guard refuses any change to those two keys and
+any shell write to the note (see [guard rules](guard.md#the-handoff-repository)). An embargo that disappears from
+the note without its lift record (`git.embargo` in the audit trail) keeps holding, in backups, the branch map and
+the guard, until `dev branch embargo --lift`.
+
+`dev ci init` writes the draft gate, and `dev ci audit --fix` adds it to an existing workflow:
+`types: [opened, synchronize, reopened, ready_for_review]` on `pull_request` and
+`if: github.event.pull_request.draft == false` on the jobs. With `delivery.draft_pr` on, `dev pr create` opens
+drafts by default (`--ready` for a PR that is ready now).
+
 ## 3. Branches or PRs that land together
 
 ```bash

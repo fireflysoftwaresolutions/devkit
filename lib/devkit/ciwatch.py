@@ -30,7 +30,7 @@ import subprocess
 import time
 from pathlib import Path
 
-from . import core
+from . import core, state
 from .core import STATE
 
 WATCH = STATE / "ci" / "watch"
@@ -180,6 +180,8 @@ def record(top: str, res: dict):
             json.dumps(res, indent=1, ensure_ascii=False))
     except OSError:
         pass
+    from . import prompt
+    prompt.safe_refresh(top, force=True)  # the prompt's checks follow the result at once (spec P-fxs316lh3nw R9)
     from . import audit
     detail = "; ".join(f"{d['run']} #{d['number']}: {d['class']}" for d in res["diagnoses"]) or res["state"]
     audit.record("ci.watch", f"{res.get('repo')}@{res.get('branch')}", detail, res["state"], sha=res.get("sha"))
@@ -226,12 +228,9 @@ def deliver(agent: str, sid: str, res: dict):
             os.environ["DEVKIT_SESSION"] = f"{agent}:{sid}"
             progress.crew_ask(text, to="main", from_agent="ci")
             return
-        f = progress.SESSIONS / f"{agent}-{sid}.json"
-        if f.exists():
-            s = core.read_json(f, {}) or {}
-            s.setdefault("ci_events", []).append({"ts": res["ts"], "text": text, "seen": False})
-            s["ci_events"] = s["ci_events"][-10:]
-            f.write_text(json.dumps(s))
+        ev = {"ts": res["ts"], "text": text, "seen": False}
+        state.update(progress.SESSIONS / f"{agent}-{sid}.json",  # the append on the fresh record
+                     lambda s: s.update(ci_events=((s.get("ci_events") or []) + [ev])[-10:]), create=False)
     except Exception:
         pass
 
@@ -241,13 +240,17 @@ def pending_events(agent: str, sid: str) -> str:
     try:
         from . import progress
         f = progress.SESSIONS / f"{agent}-{sid}.json"
-        s = core.read_json(f, {}) or {} if f.exists() else {}
-        new = [e for e in s.get("ci_events") or [] if not e.get("seen")]
-        if not new:
-            return ""
-        for e in new:
-            e["seen"] = True
-        f.write_text(json.dumps(s))
+        if not any(not e.get("seen") for e in (state.read(f) or {}).get("ci_events") or []):
+            return ""  # the usual case, without the lock
+        new = []
+
+        def take(s):
+            new.extend(e for e in s.get("ci_events") or [] if not e.get("seen"))
+            if not new:
+                return state.SKIP
+            for e in new:
+                e["seen"] = True
+        state.update(f, take, create=False)
         return "\n\n".join(e["text"] for e in new)
     except Exception:
         return ""
@@ -272,7 +275,7 @@ def start_background(top: str, session: str = "", branch: str = "", sha: str = "
         pass
     import sys
     log = open(STATE / "logs" / "ci-watch.log", "a") if (STATE / "logs").exists() else subprocess.DEVNULL
-    p = subprocess.Popen([sys.executable, str(core.DEVKIT_HOME / "bin" / "dev"), "ci", "watch", "--quiet",
+    p = subprocess.Popen([sys.executable, "-I", "-S", str(core.DEVKIT_HOME / "bin" / "dev"), "ci", "watch", "--quiet",
                           "--branch", branch, "--sha", sha] + (["--session", session] if session else []),
                          cwd=top, stdin=subprocess.DEVNULL, stdout=log, stderr=log, start_new_session=True,
                          close_fds=True)

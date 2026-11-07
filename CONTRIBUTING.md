@@ -20,10 +20,14 @@ installing it:
 ```bash
 git clone https://github.com/fireflysoftwaresolutions/devkit.git
 cd devkit
-python3 -m unittest discover -s tests
-/usr/bin/python3 -m unittest discover -s tests   # Python 3.9, the macOS system Python
+python3 -m unittest discover -s tests -t .
+/usr/bin/python3 -m unittest discover -s tests -t .   # Python 3.9, the macOS system Python
 bin/dev --help
 ```
+
+The `-t .` runs `tests/` as a package, so `tests/__init__.py` gives the whole run a temporary home and your own
+devkit state, configuration and handoff repository stay out of reach (`tests/_hermetic.py`). Without it, unittest
+skips `tests/__init__.py`, and `tests/test_hermetic.py` fails to say so.
 
 Installing devkit (`./install.sh`) changes your agents' global settings, hooks, and instructions under `~/.claude`
 and `~/.codex`. Do it only when you want devkit to manage your machine; see [Getting started](docs/getting-started.md).
@@ -49,7 +53,7 @@ Every check must pass before you open the pull request. CI runs the tests on Pyt
 
 | Check | Command |
 | --- | --- |
-| The tests, on both Pythons | `python3 -m unittest discover -s tests` and `/usr/bin/python3 -m unittest discover -s tests` |
+| The tests, on both Pythons | `python3 -m unittest discover -s tests -t .` and `/usr/bin/python3 -m unittest discover -s tests -t .` |
 | The code compiles | `python3 -m compileall -q lib bin` |
 | No test that cannot fail | `bin/dev test audit tests/` |
 | No unfinished work (stubs, placeholders, TODOs without a task) | `bin/dev stubs` |

@@ -1,0 +1,18 @@
+{
+ "agent_id": "aa4bf632657e825c3",
+ "agent_transcript_path": "/Users/dev/.claude/projects/-Users-dev-Development--tmp-f10-repo/8f6d96ec-ae34-4d6f-9063-b0e8e1b00a57/subagents/agent-aa4bf632657e825c3.jsonl",
+ "agent_type": "",
+ "background_tasks": [],
+ "cwd": "/Users/dev/Development/.tmp/f10/repo",
+ "effort": {
+  "level": "medium"
+ },
+ "hook_event_name": "SubagentStop",
+ "last_assistant_message": "<analysis>\nThe conversation is short. The user asked me to remember that their favorite fruit is mango and to reply OK. I wrote a user-type memory file, created the MEMORY.md index, and the remaining …",
+ "permission_mode": "default",
+ "prompt_id": "feba76c1-d5b1-4b3e-b430-0b328b2bd34b",
+ "session_crons": [],
+ "session_id": "8f6d96ec-ae34-4d6f-9063-b0e8e1b00a57",
+ "stop_hook_active": false,
+ "transcript_path": "/Users/dev/.claude/projects/-Users-dev-Development--tmp-f10-repo/8f6d96ec-ae34-4d6f-9063-b0e8e1b00a57.jsonl"
+}

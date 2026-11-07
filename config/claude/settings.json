@@ -5,10 +5,12 @@
   "skipDangerousModePermissionPrompt": true,
   "attribution": {
     "commit": "",
-    "pr": ""
+    "pr": "",
+    "sessionUrl": false
   },
   "cleanupPeriodDays": 14,
   "env": {
+    "BASH_DEFAULT_TIMEOUT_MS": "300000",
     "DOCKER_HOST": "unix://{{HOME}}/.colima/default/docker.sock",
     "TESTCONTAINERS_DOCKER_SOCKET_OVERRIDE": "/var/run/docker.sock",
     "NG_CLI_ANALYTICS": "false",
@@ -26,6 +28,7 @@
   "hooks": {
     "SessionStart": [
       {
+        "matcher": "startup|resume|clear|compact",
         "hooks": [
           {
             "type": "command",
@@ -37,7 +40,7 @@
     ],
     "PreToolUse": [
       {
-        "matcher": "Bash|Write|Edit|MultiEdit|NotebookEdit|Agent|Task",
+        "matcher": "Bash|Write|Edit|MultiEdit|NotebookEdit|Agent|Task|WebFetch|mcp__.*",
         "hooks": [
           {
             "type": "command",
@@ -71,7 +74,7 @@
     ],
     "ConfigChange": [
       {
-        "matcher": "user_settings",
+        "matcher": "user_settings|project_settings|local_settings",
         "hooks": [
           {
             "type": "command",
@@ -105,11 +108,23 @@
     ],
     "PostToolUse": [
       {
-        "matcher": "Bash|Agent|Task|Write|Edit|MultiEdit|WebFetch|WebSearch",
+        "matcher": "Bash|Agent|Task|Monitor|Write|Edit|MultiEdit|WebFetch|WebSearch|AskUserQuestion",
         "hooks": [
           {
             "type": "command",
             "command": "'{{DEVKIT}}/bin/dev' hook post-tool --agent claude",
+            "timeout": 10
+          }
+        ]
+      }
+    ],
+    "PostToolUseFailure": [
+      {
+        "matcher": "Agent|Task|Bash",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "'{{DEVKIT}}/bin/dev' hook post-tool-failure --agent claude",
             "timeout": 10
           }
         ]
@@ -133,6 +148,30 @@
             "type": "command",
             "command": "'{{DEVKIT}}/bin/dev' hook subagent-stop --agent claude",
             "timeout": 5
+          }
+        ]
+      }
+    ],
+    "PreCompact": [
+      {
+        "matcher": "manual|auto",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "'{{DEVKIT}}/bin/dev' hook pre-compact --agent claude",
+            "timeout": 15
+          }
+        ]
+      }
+    ],
+    "PostCompact": [
+      {
+        "matcher": "manual|auto",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "'{{DEVKIT}}/bin/dev' hook post-compact --agent claude",
+            "timeout": 10
           }
         ]
       }

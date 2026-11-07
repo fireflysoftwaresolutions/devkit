@@ -243,7 +243,10 @@ def _structure_reason(t, is_dir, temp):
     named = [(core.DEV, "the workspace root"), (core.HANDOFF, "the handoff repository"),
              (core.WT_ROOT, "the managed worktrees root"), (core.LOCAL, "the _local projects root"),
              (core.TMP_ROOT, "the devkit temp root"), (core.DEVKIT_HOME, "the devkit installation"),
-             (core.STATE, "devkit's state folder")]
+             (core.STATE, "devkit's state folder"),
+             # after `dev install` DEVKIT_HOME is the pinned copy when devkit runs from it: name the others apart
+             (core.source_home(), "the devkit checkout"), (core.runtime_home(), "the pinned devkit copy the hooks run"),
+             (core.pin_root(), "devkit's pinned releases")]
     for root, what in named:
         if t == core.real(root):
             return what, ASK

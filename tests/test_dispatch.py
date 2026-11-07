@@ -19,8 +19,12 @@ def m(minutes):
 
 
 def launch(aid, kind, label, at):
-    pg.note_agent_launch("claude", {"session_id": "s1", "tool_input": {"description": label, "subagent_type": kind}})
+    # Claude Code's sequence: the Agent call (PreToolUse), the agent's start, the call's result naming the agent
+    pg.note_agent_launch("claude", {"session_id": "s1", "tool_use_id": f"toolu_{aid}",
+                                    "tool_input": {"description": label, "subagent_type": kind}}, now=at)
     pg.on_subagent("claude", {"session_id": "s1", "agent_id": aid, "agent_type": kind}, True, now=at)
+    pg.launch_result("claude", {"session_id": "s1", "tool_use_id": f"toolu_{aid}", "tool_response": {"agentId": aid}},
+                     now=at)
 
 
 class RouteTests(unittest.TestCase):
@@ -58,7 +62,7 @@ class DelegationTests(unittest.TestCase):
             self.assertEqual((step["owner"], step["state"], step["requested_by"]), ("a2", "running", "a1"))
             self.assertIn("db/**", run["agents"]["a2"]["scope"])
             mail = pg.on_tool_done("claude", {"session_id": "s1", "agent_id": "a2"})
-            self.assertIn("Neo delegates", mail)
+            self.assertIn("Senior engineer (Neo) delegates", mail)
             self.assertIn("dev crew decline", mail)
 
     def test_delegate_to_an_idle_member_asks_morpheus_to_launch_it(self):
@@ -69,7 +73,7 @@ class DelegationTests(unittest.TestCase):
             self.assertEqual(r["member"]["id"], "seraph")
             self.assertIsNone(r["lane"])
             ctx = pg.on_tool_done("claude", {"session_id": "s1"})
-            self.assertIn("Neo delegates", ctx)
+            self.assertIn("Senior engineer (Neo) delegates", ctx)
             self.assertIn("ready to launch", ctx)
             self.assertIn("dev crew brief seraph", ctx)
             self.assertNotIn("ready to launch", pg.on_tool_done("claude", {"session_id": "s1"}) or "")  # told once

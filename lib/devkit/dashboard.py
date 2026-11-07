@@ -256,7 +256,10 @@ def project_health(p: dict, now: float = None) -> dict:
     if ns.get("due") and ns["due"] < time.strftime("%Y-%m-%d", time.localtime(now)) and ns.get("status") not in ("done", "archived"):
         risk.append(f"past its due date ({ns['due']})")
     level = "risk" if risk else "warn" if warn else "ok"
-    return {"level": level, "reasons": risk + warn}
+    # "ok" is a claim about the repository: without a checkout's git state or the PR list there is nothing to back it
+    known = bool(p.get("prs_known")) or (p.get("local", True) is not False and p.get("git", True) is not False
+                                         and bool(m.get("branch")))
+    return {"level": level, "reasons": risk + warn, "known": known}
 
 
 def _task_flag(scope: str) -> str:
@@ -760,7 +763,39 @@ def _timing(now: float) -> dict:
         return timing_summary([], now)
 
 
-def _runs(now: float) -> list:
+def run_seen(run: dict) -> int:
+    """The run's latest sign of life: a report by the run or by any of its lanes (updates of every kind, lane updates,
+    crew messages, step changes, decisions), a turn or a lane starting or ending, or a lane's last hook (`last_seen`,
+    contract C3). The lead's own last update alone misses a crew at work. 0 when there is none."""
+    ts = [run.get("started")]
+    for key in ("updates", "history", "messages", "decisions"):
+        ts += [x.get("ts") for x in run.get(key) or [] if isinstance(x, dict)]
+    ts += [x.get("decided") for x in run.get("decisions") or [] if isinstance(x, dict)]
+    for lane in (run.get("agents") or {}).values():
+        if isinstance(lane, dict):
+            ts += [lane.get("started"), lane.get("finished"), lane.get("last_seen")]
+            ts += [u.get("ts") for u in lane.get("updates") or [] if isinstance(u, dict)]
+    for iv in run.get("intervals") or []:
+        if isinstance(iv, (list, tuple)):
+            ts += list(iv[:2])
+    return int(max((t for t in ts if isinstance(t, (int, float)) and not isinstance(t, bool)), default=0))
+
+
+def plan_total(run: dict, now: float):
+    """Minutes the whole run takes by its plan as it stands: the active time so far plus the time left on the plan's
+    critical path, so "of about" and "left" always agree. None for a run without a plan (its estimate is its total)
+    and for a finished run (its active time is the total)."""
+    from . import progress
+    if not isinstance(run, dict) or run.get("state") == "done" or not run.get("plan"):
+        return None
+    try:
+        run = progress.normalize(run)
+        return round(progress.active_minutes(run, now=now) + progress.eta(run, now))
+    except (KeyError, TypeError, ValueError, ZeroDivisionError):
+        return None
+
+
+def _runs(now: float, host: str = "") -> list:
     """Agent runs with live progress on this machine (running, blocked, or finished in the last hour)."""
     try:
         from . import progress
@@ -775,8 +810,21 @@ def _runs(now: float) -> list:
             b = progress.brief(r)
         except (KeyError, TypeError, ValueError):
             continue
-        b.update({"agent": r.get("agent"), "session": r.get("session"), "project": r.get("project"),
-                  "estimate_cal": r.get("estimate_cal"), "finished": r.get("finished"),
+        lanes = r.get("agents") or {}
+        for s, raw in zip(b.get("plan") or [], r.get("plan") or []):
+            if isinstance(raw, dict):
+                lane = lanes.get(raw.get("owner")) or {}
+                s.update(label=raw.get("label") or "", persona=lane.get("persona") or "", after=raw.get("after") or [],
+                         scope=raw.get("scope") or lane.get("scope") or "", waiting=raw.get("waiting") or "",
+                         title=raw.get("title") or "")
+        b.update({"id": run_id(r), "agent": r.get("agent"), "session": r.get("session"), "project": r.get("project"),
+                  "mode": r.get("mode") or "", "host": host, "estimate_cal": r.get("estimate_cal"), "finished": r.get("finished"),
+                  "seen": run_seen(r), "total_min": plan_total(r, now),
+                  "decisions": [{k: d.get(k) for k in ("id", "ts", "question", "options", "recommend", "irreversible", "from_name")}
+                                for d in r.get("decisions") or [] if isinstance(d, dict) and d.get("state") == "pending"],
+                  "questions": [{k: m.get(k) for k in ("id", "ts", "from_name", "text")} for m in r.get("messages") or []
+                                if isinstance(m, dict) and m.get("to") == "main" and not m.get("answered")
+                                and not m.get("reply_to") and m.get("from") != "ci"][-20:],
                   "updates": [{k: u.get(k) for k in ("ts", "kind", "text", "next")} for u in (r.get("updates") or [])[-8:]]})
         out.append(b)
     return out[:20]
@@ -831,6 +879,334 @@ def _ops():
         return []
 
 
+# --------------------------------------------------------------------------- jobs, CI watches, details on demand
+
+# How much history each count can see: the page states these windows instead of implying more history than devkit keeps
+WINDOWS = {"commits_days": 30, "merged_days": 30, "canary_days": 7, "timing_days": 60, "runs_hours": 12,
+           "jobs_days": 30, "guard_events": 400}
+ITEM_ID_RE = re.compile(r"[A-Za-z][A-Za-z0-9_-]{0,79}")
+RUN_ID_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,159}")
+JOB_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9_-]{0,39}")
+CI_EXCERPT = 600          # characters of a failure's first error in the page data (the CI endpoint has it whole)
+CI_CAP = 100              # watched pipelines listed (newest first)
+
+
+def run_id(r: dict) -> str:
+    """A progress run's id: the name of its file, <agent>-<session>."""
+    return f"{r.get('agent')}-{r.get('session')}"
+
+
+def _windows(events: list, slog: list) -> dict:
+    return dict(WINDOWS, guard_since=events[0].get("ts", "") if events else "",
+                guard_capped=len(events) >= WINDOWS["guard_events"],
+                sessions_since=min((s["ts"] for s in slog if s.get("ts")), default=0))
+
+
+def _job_run(r):
+    return {k: r.get(k) for k in ("start", "end", "rc", "duration", "summary")} if r else None
+
+
+def jobs_summary(now: float = None) -> list:
+    """Scheduled jobs (`dev jobs`): schedule, the last run and the next, failures in the window. Cheap: the journal
+    only (launchd's view is in `jobs_detail`)."""
+    now = now or time.time()
+    try:
+        from . import jobs as jm
+        defs, runs = jm.jobs(), jm.journal(WINDOWS["jobs_days"])
+    except Exception:
+        return []
+    by = {}
+    for r in runs:
+        by.setdefault(r.get("job"), []).append(r)
+    out = []
+    for name, j in sorted(defs.items()):
+        rs = by.get(name) or []
+        last = rs[-1] if rs else None
+        enabled = bool(j.get("enabled", True))
+        if not enabled:
+            nxt = None
+        elif j.get("every"):  # from the last start, not from now: the value stays put between snapshots
+            nxt = round(last["start"] + int(j["every"]) * 60) if last and last.get("start") else None
+        else:
+            try:
+                nxt = jm.next_run(j, now)
+            except (ValueError, KeyError):
+                nxt = None
+        failed = [r for r in rs if r.get("rc") not in (0, None)]
+        state = ("off" if not enabled else "never" if not last else "skipped" if last.get("rc") is None
+                 else "ok" if last.get("rc") == 0 else "failed")
+        out.append({"name": name, "about": j.get("about") or "", "schedule": jm.schedule_text(j), "enabled": enabled,
+                    "notify": j.get("notify") or "", "timeout_min": j.get("timeout"), "next": round(nxt) if nxt else None,
+                    "installed": (jm.AGENTS_DIR / f"{jm.LABEL.format(name)}.plist").exists(),
+                    "last": _job_run(last), "state": state, "runs": len(rs), "failed": len(failed)})
+    return out
+
+
+def jobs_detail(name: str = None, now: float = None):
+    """All jobs with launchd's view (loaded or not), or one job with its runs in the window and the last 200 lines
+    of its log. None for a job that does not exist."""
+    from . import jobs as jm
+    summary = {j["name"]: j for j in jobs_summary(now)}
+    if name is not None and (not JOB_RE.fullmatch(name) or name not in summary):
+        return None
+    out = []
+    for n in ([name] if name is not None else list(summary)):
+        rec = dict(summary[n], loaded=jm.loaded(n))  # launchd's view: one launchctl call per job
+        if name is not None:
+            log = jm.LOGS / f"{n}.log"
+            rec.update(history=[_job_run(r) for r in jm.journal(WINDOWS["jobs_days"], n)][::-1],
+                       log=jm._last_lines(log, 200), log_path=core.tilde(log))
+        out.append(rec)
+    return out[0] if name is not None else {"jobs": out, "complete": True, "window_days": WINDOWS["jobs_days"]}
+
+
+def ci_watches(limit: int = CI_CAP, excerpt: int = CI_EXCERPT) -> dict:
+    """The pipelines devkit watched after a push (`dev ci watch`), newest first: run, state, first error, its class
+    and the one next action. `excerpt` characters of each first error (0: whole)."""
+    d = core.STATE / "ci" / "watch"
+
+    def mtime(p):
+        try:
+            return p.stat().st_mtime
+        except OSError:
+            return 0
+    files = sorted(d.glob("*.json"), key=mtime, reverse=True) if d.is_dir() else []
+    out = []
+    for f in files[:limit]:
+        rec = core.read_json(f, None)
+        if not isinstance(rec, dict):
+            continue
+        fails = [{"run": x.get("run"), "number": x.get("number"), "id": x.get("id"), "url": x.get("url"), "class": x.get("class") or "unknown",
+                  "action": x.get("action") or "", "jobs": x.get("failed_jobs") or [],
+                  "excerpt": (x.get("excerpt") or "")[:excerpt] if excerpt else x.get("excerpt") or ""}
+                 for x in rec.get("diagnoses") or [] if isinstance(x, dict)]
+        first = fails[0] if fails else {}
+        out.append({"repo": rec.get("repo"), "branch": rec.get("branch"), "sha": rec.get("sha"), "state": rec.get("state"),
+                    "ts": rec.get("ts"), "minutes": rec.get("minutes"), "provider": rec.get("provider"),
+                    "error": rec.get("error"), "runs": rec.get("runs") or [], "failures": fails,
+                    "class": first.get("class", ""), "action": first.get("action", ""),
+                    "first_error": first.get("excerpt", "")})
+    return {"watches": out, "complete": len(files) <= limit, "total": len(files), "watching": ci_watching(d)}
+
+
+def ci_watching(d: Path = None, now: float = None) -> list:
+    """Watchers still following a pipeline: a lock (<repo>-<branch>-<sha>.lock: "<pid> <since>") younger than 3 h
+    whose process is alive. The key is the repository folder and branch with unsafe characters replaced."""
+    d, now = d or core.STATE / "ci" / "watch", now or time.time()
+    out = []
+    for f in sorted(d.glob("*.lock")) if d.is_dir() else []:
+        try:
+            pid_s, since_s = (f.read_text().split() + ["0", "0"])[:2]
+            pid, since = int(pid_s), int(since_s)
+            if now - f.stat().st_mtime > 3 * 3600 or pid <= 1:
+                continue
+            os.kill(pid, 0)
+        except PermissionError:
+            pass  # alive, another user's process
+        except (OSError, ValueError):
+            continue
+        key, _, sha = f.stem.rpartition("-")
+        out.append({"key": key, "sha": sha, "pid": pid, "since": since})
+    return out
+
+
+def crew_roster() -> dict:
+    """devkit's crew (config/crew.json, with the team's changes): who they are, and the RACI by kind of work."""
+    try:
+        from . import crew, raci
+        roster = crew.load()
+        return {"members": [{k: m.get(k) for k in ("id", "name", "title", "tier", "tools", "summary", "main")}
+                            for m in crew.members(roster)],
+                "activities": [{k: a.get(k) for k in ("id", "name", "R", "A", "C", "I")} for a in raci.activities(roster)]}
+    except Exception:
+        return {"members": [], "activities": []}
+
+
+def _links(v) -> list:
+    if isinstance(v, str):
+        v = [x.strip() for x in v.strip("[]").split(",") if x.strip()]
+    return [{"kind": k if t else "link", "target": t or k, "text": x}
+            for x in v or [] for k, _, t in [str(x).partition(":")]]
+
+
+def item_detail(item_id: str, handoff: Path = None, reg: dict = None, now: float = None):
+    """A work item, whole: front matter, full body and changelog, links, lock, the plans and sessions that name it,
+    its branches, PRs and commits, and the progress run working on it. None when there is no such item."""
+    from . import work
+    if not item_id or not ITEM_ID_RE.fullmatch(item_id):
+        return None
+    now = now or time.time()
+    base = Path(handoff) if handoff else core.HANDOFF
+    root = base / "items"
+    f = next((p for p in sorted(root.rglob(f"{item_id}.md")) if p.is_file()), None) if root.is_dir() else None
+    if f is None:
+        return None
+    it = work.parse(f.read_text(errors="replace"))
+    m = it.get("meta") or {}
+    if (m.get("id") or f.stem) != item_id:
+        return None
+    scope, low = m.get("scope") or str(f.parent.relative_to(root)), item_id.lower()
+    holder = m.get("claimed_by") or ""
+    cm = re.search(r"\(([^:)]+)(?::([^)]+))?\)", holder)
+    agent, sess = (cm.group(1), cm.group(2) or "") if cm else ("", "")
+    plans = []
+    for p in sorted((base / "plans").rglob("*.md")) if (base / "plans").is_dir() else []:
+        try:
+            text = p.read_text(errors="replace")
+        except OSError:
+            continue
+        if item_id in text:
+            title = next((ln[2:].strip() for ln in text.splitlines() if ln.startswith("# ")), p.stem)
+            plans.append({"path": str(p.relative_to(base)), "title": title})
+    sessions = [s for s in read_session_log(base, months=12, limit=100_000) if item_id in s.get("text", "")]
+    reg = reg or {}
+    proj = next((p for p in reg.get("projects") or [] if isinstance(p, dict) and p.get("id") == scope), None) or {}
+    # the holder's session (devkit's session record) tells the branch and checkout the claim is worked on
+    held = {}
+    if agent and sess and RUN_ID_RE.fullmatch(f"{agent}-{sess}"):
+        sd = core.STATE / "sessions"
+        sf = next(iter(sorted(sd.glob(f"{agent}-{sess}*.json"))), None) if sd.is_dir() else None
+        held = (core.read_json(sf, {}) or {}) if sf else {}
+    checkouts = [(proj.get("main") or {}, proj.get("path"))] + [(w, w.get("path")) for w in proj.get("worktrees") or []]
+    branches, names = [], set()
+    for co, path in checkouts:
+        b = co.get("branch")
+        why = "the branch name has the id" if b and low in b.lower() else \
+            "the holder's session works on it" if b and b == held.get("branch") else ""
+        if why and b not in names:
+            names.add(b)
+            branches.append({"branch": b, "worktree": path, "match": why})
+    if held.get("branch") and held["branch"] not in names:
+        names.add(held["branch"])
+        branches.append({"branch": held["branch"], "worktree": held.get("top") or held.get("cwd") or "",
+                         "match": "the holder's session works on it"})
+
+    def pr_match(branch, title):
+        return ("the PR's branch is linked" if branch in names else
+                "the branch or title has the id" if low in f"{branch} {title}".lower() else "")
+    prs, seen = [], set()
+    for pr in proj.get("prs_open") or []:
+        why = pr_match(pr.get("branch"), pr.get("title"))
+        if why:
+            seen.add(pr.get("number"))
+            prs.append(dict(pr, state="OPEN", match=why))
+    for pr in pr_cache().get(scope) or []:
+        why = pr_match(pr.get("headRefName"), pr.get("title")) if isinstance(pr, dict) else ""
+        if why and pr.get("number") not in seen:
+            seen.add(pr.get("number"))
+            prs.append({"number": pr.get("number"), "title": pr.get("title"), "branch": pr.get("headRefName"),
+                        "state": pr.get("state"), "url": pr.get("url"), "updated": pr.get("updatedAt"), "match": why})
+    ci = [dict(w, match="a watched pipeline of a linked branch") for w in ci_watches()["watches"]
+          if w.get("branch") in names and (w.get("repo") or "").lower() in (scope.lower(), scope.split("/")[-1].lower())]
+    commits = []
+    if proj.get("path") and proj.get("local", True) is not False and proj.get("git", True) is not False:
+        out = core.gitout(proj["path"], "log", "--all", "-n", "100", "-i", "-F", f"--grep={item_id}",
+                          "--format=%H%x09%ct%x09%an%x09%s", timeout=5)
+        for ln in out.splitlines():
+            sha, ts, who, subject = (ln.split("\t", 3) + ["", "", ""])[:4]
+            commits.append({"sha": sha, "ts": int(ts) if ts.isdigit() else 0, "author": who, "subject": subject,
+                            "match": "the commit message has the id"})
+    from . import progress
+    runs = []
+    for rf in progress.RUNS.glob("*.json") if progress.RUNS.is_dir() else []:
+        r = core.read_json(rf, None)
+        if not isinstance(r, dict):
+            continue
+        why = ("the holder's session runs it" if agent and sess and r.get("agent") == agent
+               and str(r.get("session") or "").startswith(sess) else
+               "its goal or a step has the id" if item_id in (r.get("goal") or "") or any(
+                   item_id in (x.get("name") or "") for x in r.get("plan") or [] if isinstance(x, dict)) else "")
+        if why:
+            try:
+                runs.append(dict(progress.brief(r, now), id=run_id(r), agent=r.get("agent"), session=r.get("session"),
+                                 match=why))
+            except (KeyError, TypeError, ValueError):  # a malformed run must not hide the item
+                continue
+    runs.sort(key=lambda x: -(x.get("started") or 0))
+    expired = bool(holder) and work.parse_iso(m.get("lock_expires") or "") < now
+    return {"id": item_id, "title": m.get("title") or it.get("title") or item_id, "scope": scope,
+            "type": m.get("type") or "task", "status": m.get("status") or "todo", "meta": m,
+            "body": it.get("body") or "", "changelog": it.get("changelog") or [], "links": _links(m.get("links")),
+            "lock": {"holder": holder, "agent": agent, "session": sess, "expires": m.get("lock_expires") or "",
+                     "state": ("expired" if expired else "held") if holder else ""},
+            "plans": plans, "sessions": sessions[:200], "sessions_complete": len(sessions) <= 200,
+            "branches": branches, "prs": prs, "ci": ci, "commits": commits, "commits_complete": len(commits) < 100,
+            "run": runs[0] if runs else None, "runs": runs[:10], "path": str(f.relative_to(base))}
+
+
+def run_detail(rid: str, now: float = None):
+    """A progress run, whole: goal, mode, estimate, active time, ETA range, every step (state, owner, scope, dependencies,
+    estimate, actual, evidence, history), lanes, decisions and crew questions. None when there is no such run."""
+    from . import progress
+    if not rid or not RUN_ID_RE.fullmatch(rid) or ".." in rid:
+        return None
+    f = progress.RUNS / f"{rid}.json"
+    run = core.read_json(f, None) if f.is_file() else None
+    if not isinstance(run, dict) or not run.get("plan") and not run.get("goal"):
+        return None
+    now = now or time.time()
+    run = progress.normalize(run)
+    lanes, updates, hist = run.get("agents") or {}, run.get("updates") or [], run.get("history") or []
+
+    def safe(fn, default=None):
+        try:
+            return fn()
+        except (KeyError, TypeError, ValueError, ZeroDivisionError):
+            return default
+    steps = []
+    for s in run.get("plan") or []:
+        if not isinstance(s, dict):
+            continue
+        owner, name = s.get("owner") or "main", s.get("name") or ""
+        lane = lanes.get(owner) or {}
+        steps.append({"name": name, "title": s.get("title") or "", "state": s.get("state"), "owner": owner,
+                      "owner_label": "main" if owner == "main" else lane.get("persona") or lane.get("label") or "subagent",
+                      "label": s.get("label") or "", "desc": s.get("desc") or "", "scope": s.get("scope") or lane.get("scope"),
+                      "after": s.get("after") or [], "est": s.get("est"), "est_auto": bool(s.get("est_auto")),
+                      "min": safe(lambda: round(progress.step_minutes(run, s, now), 1), 0.0),
+                      "started": s.get("started"), "finished": s.get("finished"),
+                      "evidence": [{k: u.get(k) for k in ("ts", "kind", "text", "check", "next")} for u in updates
+                                   if u.get("step") == name and (u.get("check") or u.get("kind") in ("step", "done", "blocked"))],
+                      "history": [x for x in hist if x.get("step") == name]})
+    running = run.get("state") == "running"
+    lo, hi = safe(lambda: progress.eta_range(run, now), (None, None)) if running else (None, None)
+    return {"id": rid, "agent": run.get("agent"), "session": run.get("session"), "project": run.get("project"),
+            "goal": run.get("goal"), "mode": progress.mode_of(run), "state": run.get("state"),
+            "started": run.get("started"), "finished": run.get("finished"), "estimate": run.get("estimate"),
+            "estimate_cal": run.get("estimate_cal"),
+            "active_min": safe(lambda: round(progress.active_minutes(run, now=run.get("finished") or now), 1)),
+            "wall_min": safe(lambda: round(progress.wall_minutes(run, now), 1)),
+            "eta_min": safe(lambda: round(progress.eta(run, now))) if running else None, "eta_lo": lo, "eta_hi": hi,
+            "seen": run_seen(run), "total_min": plan_total(run, now),
+            "headline": safe(lambda: progress.headline(run, now), ""), "steps": steps,
+            "lanes": [{"id": k, "label": a.get("label") or "", "type": a.get("type") or "", "persona": a.get("persona") or "",
+                       "state": a.get("state"), "started": a.get("started"), "finished": a.get("finished"),
+                       "scope": a.get("scope"), "done": a.get("done") or 0,
+                       "min": safe(lambda: round(progress.active_minutes(run, a.get("started"), a.get("finished") or now, now, k), 1)),
+                       "updates": (a.get("updates") or [])[-20:]} for k, a in lanes.items() if isinstance(a, dict)],
+            "decisions": run.get("decisions") or [], "questions": run.get("messages") or [], "history": hist,
+            "updates": updates}
+
+
+def file_detail(rel: str, handoff: Path = None):
+    """One Markdown file of the handoff repository (the Explorer); None for anything else: a path that resolves outside
+    the repository (.., symlinks), inside .git, or not a Markdown file."""
+    if not rel or "\x00" in rel or rel.startswith("/"):
+        return None
+    base = Path(handoff or core.HANDOFF).resolve()
+    try:
+        p = (base / rel).resolve()
+    except (OSError, RuntimeError):
+        return None
+    if base not in p.parents or p.suffix != ".md" or ".git" in p.relative_to(base).parts or not p.is_file():
+        return None
+    try:
+        st, text = p.stat(), p.read_text(errors="replace")
+    except OSError:
+        return None
+    return {"path": str(p.relative_to(base)), "mtime": int(st.st_mtime), "size": st.st_size, "text": text}
+
+
 def _project(p: dict, now: float) -> dict:
     keep = ("id", "owner", "name", "path", "remote", "github", "default_branch", "canonical", "canonical_ok",
             "stack", "commands", "prs_open", "prs_known", "size_kb", "last_activity", "note", "note_summary",
@@ -846,7 +1222,62 @@ def _project(p: dict, now: float) -> dict:
     out["task_index"] = {t: i + 1 for i, t in enumerate(_open_tasks(ns))}
     if isinstance(out.get("status_line"), dict):
         out["status_line"] = dict(out["status_line"], parts=status_parts(out["status_line"].get("line")))
+    out["branches"] = branch_rows(p.get("branches"))
     return out
+
+
+# the branch map's fields the page shows (spec P-fy3bwa0pshk R8); branches.map makes the rows
+BRANCH_KEYS = ("name", "current", "default", "sha", "upstream", "upstream_gone", "ahead", "behind", "base_ahead", "base_behind",
+               "where", "last_commit", "unpushed", "oldest_unpushed", "merged_into", "last_backup", "embargo", "embargo_via",
+               "worktree", "worktree_missing", "session", "pr", "task", "backup", "backup_policy")
+
+
+def branch_rows(rows):
+    """The page's rows in the map's order: the current branch, work at risk, the newest; the default branch last. None
+    stays None: a registry without the map is unknown, which is not the same as a repository without branches."""
+    if rows is None:
+        return None
+    from . import branches
+    out = []
+    for r in branches.ordered(rows):
+        x = {k: r.get(k) for k in BRANCH_KEYS}
+        if x["worktree"]:
+            x["worktree"] = core.tilde(x["worktree"])
+        out.append(x)
+    return out
+
+
+def _git_error(text: str) -> str:
+    line = next((ln.strip() for ln in str(text or "").splitlines() if ln.strip()), "")
+    return _redact(line)[:300] or "git stopped without saying why"
+
+
+def branch_detail(pid: str, reg: dict, now: float = None):
+    """One project's branch map, read now (GET /api/v1/branches/{id}): {project, rows, counts, prs, mapped}, or
+    {project, error: {source, detail}} when git cannot read the repository; None for a project not cloned here.
+    prs says where the pull requests came from: ok (gh, or its recent cache), missing (gh is not installed; the last
+    cached list, if any), error (gh did not answer and nothing is cached), none (not a GitHub repository)."""
+    p = next((x for x in (reg or {}).get("projects") or [] if isinstance(x, dict) and x.get("id") == pid), None)
+    if not p or p.get("local") is False or not p.get("path"):
+        return None
+    from . import branches, registry
+    now = now or time.time()
+    path = p["path"]
+    rc, _, err = core.git(path, "for-each-ref", "--count=1", "--format=%(refname)", "refs/heads", timeout=15)
+    if rc != 0:
+        return {"project": pid, "error": {"source": "git", "detail": _git_error(err)}}
+    slug, prs, state = p.get("github"), [], "none"
+    if slug and not core.have("gh"):
+        prs, state = branches.cached_prs(slug) or [], "missing"
+    elif slug:
+        got = registry.prs(slug, max_age=900)
+        prs, state = (got, "ok") if got is not None else ([], "error")
+    seen = [c for c in [p.get("main")] + list(p.get("worktrees") or []) if isinstance(c, dict) and not c.get("missing")]
+    try:
+        rows = branches.map(path, prs=prs, offline=True, pid=pid, default=p.get("default_branch"), checkouts=seen, now=now)
+    except Exception as e:  # git read the branches but failed a later question: say what it said
+        return {"project": pid, "error": {"source": "git", "detail": _git_error(str(e))}}
+    return {"project": pid, "rows": branch_rows(rows), "counts": branches.counts(rows), "prs": state, "mapped": int(now)}
 
 
 def _initiative(i: dict, items: list = None) -> dict:
@@ -864,7 +1295,7 @@ def collect(reg: dict, handoff: Path = None, now: float = None) -> dict:
     handoff = Path(handoff) if handoff else core.HANDOFF
     files, meta = explorer_files(handoff)
     cache = pr_cache()
-    events = guard_events()
+    events = guard_events(WINDOWS["guard_events"])
     items = read_items(handoff, now)
     team = read_presence(handoff, reg, now=now)
     slog = read_session_log(handoff)
@@ -874,13 +1305,14 @@ def collect(reg: dict, handoff: Path = None, now: float = None) -> dict:
     acts = build_actions(reg, now, items, colls)
     for x in ppl:
         x["sessions"] = [_with_status(s) for s in x["sessions"]]
+    host = reg.get("host") or os.uname().nodename.split(".")[0]
     return {
         "v": 3,
         "version": core.VERSION,
         "copyright": core.COPYRIGHT,
         "generated": int(reg.get("generated") or now),
         "rendered": int(now),
-        "host": reg.get("host") or os.uname().nodename.split(".")[0],
+        "host": host,
         "me": reg.get("github_user") or "",
         "dev_root": core.tilde(reg.get("dev_root") or core.DEV),
         "handoff": core.tilde(handoff),
@@ -897,7 +1329,7 @@ def collect(reg: dict, handoff: Path = None, now: float = None) -> dict:
         "since": since_yesterday(reg, cache, now, items, slog, me),
         "who": me,
         "timing": _timing(now),
-        "runs": _runs(now),
+        "runs": _runs(now, host),
         "merged": merged_prs(cache, now - 30 * 86400)[:200],
         "sessions": [_with_status(s) for s in reg.get("sessions") or []],
         "providers": reg.get("providers") or {},
@@ -908,6 +1340,10 @@ def collect(reg: dict, handoff: Path = None, now: float = None) -> dict:
         "guard": events[-120:],
         "guard_rules": guard_rules(events),
         "drift": reg.get("drift"),
+        "jobs": jobs_summary(now),
+        "ci": ci_watches(),
+        "crew": crew_roster(),
+        "windows": _windows(events, slog),
         "files": files,
         "files_meta": meta,
     }
@@ -991,7 +1427,7 @@ kbd{display:inline-block;min-width:20px;padding:0 5px;border:1px solid var(--lin
 .meta{display:inline-flex;flex-wrap:wrap;align-items:center;gap:2px var(--s3);min-width:0}
 .meta>*{min-width:0}
 /* ---------- navbar: the official firefly | devkit lockup, text tabs, search */
-.nav{position:sticky;top:0;z-index:30;display:flex;align-items:center;gap:var(--s5);height:var(--nav-h);padding:0 max(var(--s5),calc((100% - var(--wide)) / 2 + var(--s5)));background:var(--page);border-bottom:1px solid var(--line-soft)}
+.nav{position:sticky;top:0;z-index:30;display:flex;align-items:center;gap:var(--s4);height:var(--nav-h);padding:0 max(var(--s5),calc((100% - var(--wide)) / 2 + var(--s5)));background:var(--page);border-bottom:1px solid var(--line-soft)}
 .lockup{display:flex;align-items:center;gap:var(--s3);text-decoration:none;flex:none;border-radius:var(--rs);padding:var(--s1) var(--s1) var(--s1) 0}
 .lockup .ff{height:22px;width:auto;flex:none}
 .lockup .ff-dark{display:var(--logo-dark)} .lockup .ff-light{display:var(--logo-light)}
@@ -999,16 +1435,35 @@ kbd{display:inline-block;min-width:20px;padding:0 5px;border:1px solid var(--lin
 .lockup .vr{width:1px;height:22px;background:var(--line);flex:none}
 .lockup .dk{display:flex;align-items:center;gap:6px;color:var(--strong);font-weight:600;font-size:var(--fs-3);letter-spacing:-.02em;line-height:1;transform:translateY(-1px)}
 .lockup .dk .spark{width:18px;height:18px;color:var(--accent);flex:none;transform:translateY(1px)}
-.tabs{display:flex;align-self:stretch;gap:var(--s4);overflow-x:auto;scrollbar-width:none;min-width:0}
-.tabs::-webkit-scrollbar{display:none}
-.tab{border:0;background:none;padding:0 2px;color:var(--text-2);font-size:var(--fs-2);cursor:pointer;white-space:nowrap;display:flex;align-items:center;gap:6px;box-shadow:inset 0 -2px 0 transparent}
-.tab:hover{color:var(--strong)}
-.tab[aria-selected="true"]{color:var(--strong);font-weight:600;box-shadow:inset 0 -2px 0 var(--strong)}
-.tab.sec{margin-left:var(--s2)}
-.tab .n{width:7px;height:7px;border-radius:50%;background:var(--bad);flex:none}
-.tab .n.warn{background:var(--warn)}
+/* the views: Priority+ (the tabs that fit, the rest in More); the row never scrolls */
+.views{display:flex;align-self:stretch;align-items:stretch;gap:var(--s4);flex:1 1 0;min-width:0}
+.tabs{display:flex;align-self:stretch;gap:var(--s3);overflow:hidden;min-width:0;flex:0 1 auto}
+.tab,.navmore>button{border:0;background:none;padding:0 2px;color:var(--text-2);font-size:var(--fs-2);cursor:pointer;white-space:nowrap;display:flex;align-items:center;gap:6px;box-shadow:inset 0 -2px 0 transparent;text-decoration:none}
+.tab:hover,.navmore>button:hover{color:var(--strong)}
+.tab[aria-current="page"],.navmore>button.cur{color:var(--strong);font-weight:600;box-shadow:inset 0 -2px 0 var(--strong)}
+.tab.sec{margin-left:var(--s3)}
+.tab .n,.navmore .n{width:7px;height:7px;border-radius:50%;background:var(--bad);flex:none}
+.tab .n.warn,.navmore .n.warn{background:var(--warn)}
+.navmore{position:relative;display:flex;align-items:stretch;flex:none}
+.navmore .menu{top:calc(100% + 2px);left:auto;right:0;min-width:240px}
+.navmore .menu a{display:flex;align-items:center;gap:var(--s2);padding:8px 10px;border-radius:var(--rs);text-decoration:none;color:var(--text);font-size:var(--fs-2)}
+.navmore .menu a:hover,.navmore .menu a:focus-visible{background:var(--hover)}
+.navmore .menu a[aria-current="page"]{color:var(--strong);font-weight:600}
+.navmore .menu .mck{width:16px;flex:none;display:inline-grid;place-items:center}
+.navmore .menu kbd{margin-left:auto}
+.navmore .menu hr{border:0;border-top:1px solid var(--line-soft);margin:4px 6px}
+@media (hover:none),(pointer:coarse){.navmore .menu kbd{display:none}}
+/* live state: an 8 px dot and one word; a popover on click; a banner under the nav when it matters */
+.livew{position:relative;display:flex;align-items:center;flex:none}
+.live{display:inline-flex;align-items:center;gap:6px;height:32px;padding:0 var(--s2);border:0;background:none;border-radius:var(--rs);cursor:pointer;font-size:var(--fs-1);color:var(--text-2);white-space:nowrap}
+.live:hover{background:var(--hover);color:var(--strong)}
+.live[data-state="init"]{visibility:hidden}
+.livepop{position:absolute;top:calc(100% + 6px);right:0;z-index:45;width:min(320px,calc(100vw - 32px));display:grid;gap:var(--s2);background:var(--raised);border:var(--elev-border);border-radius:var(--r);box-shadow:var(--shadow);padding:var(--s3) var(--s4);font-size:var(--fs-1);color:var(--text)}
+.livepop strong{font-size:var(--fs-2);color:var(--strong)} .livepop p{margin:0}
+.banner{width:100%;max-width:var(--wide);margin:0 auto;padding:var(--s4) var(--s5) 0}
+.banner .callout{margin:0}
 .spacer{flex:1}
-.search{position:relative;flex:0 1 240px;min-width:150px}
+.search{position:relative;flex:0 1 220px;min-width:150px}
 .search input{width:100%;height:34px;padding:0 34px 0 34px;border-radius:var(--rs);border:1px solid var(--line);background:transparent;outline:none;font-size:var(--fs-1)}
 .search input:focus{border-color:var(--focus)}
 .search .ico{position:absolute;left:10px;top:50%;transform:translateY(-50%);color:var(--text-2);pointer-events:none;display:flex}
@@ -1022,7 +1477,7 @@ kbd{display:inline-block;min-width:20px;padding:0 5px;border:1px solid var(--lin
 .btn.icon{width:32px;padding:0}
 .btn.ghost{border-color:transparent}
 .btn[aria-pressed="true"]{background:var(--wash)}
-.btn .lbl{overflow:hidden;text-overflow:ellipsis;min-width:0}
+.btn .lbl{overflow:hidden;text-overflow:ellipsis;min-width:0;font-variant-ligatures:none}
 .icopy{flex:none;width:28px;height:28px;border-radius:var(--rs);border:0;background:none;cursor:pointer;color:var(--text-2);display:inline-grid;place-items:center;padding:0}
 .icopy:hover{background:var(--hover);color:var(--strong)}
 .linkbtn{all:unset;cursor:pointer;color:var(--text-2);font-size:var(--fs-1);white-space:nowrap} .linkbtn:hover{color:var(--strong);text-decoration:underline}
@@ -1252,7 +1707,7 @@ table.pt .prs{flex-wrap:nowrap}
 .rsteps{list-style:none;margin:2px 0 0;padding:0;display:grid;gap:1px;font-size:var(--fs-1)}
 .rsteps li{display:grid;grid-template-columns:1.1em minmax(0,1fr) auto;gap:var(--s2);align-items:baseline;color:var(--text-2)}
 .rsteps .g{color:var(--text-2)} .rsteps li.running{color:var(--text)} .rsteps li.running .g{color:var(--mark-strong,var(--text))}
-.rsteps li.blocked,.rsteps li.blocked .g{color:var(--bad-text)} .rsteps .who{color:var(--text-2)} .rsteps .m{font-variant-numeric:tabular-nums}
+.rsteps li.blocked,.rsteps li.blocked .g{color:var(--bad-text)} .rsteps li.unverified,.rsteps li.unverified .g{color:var(--warn-text)} .rsteps .who{color:var(--text-2)} .rsteps .m{font-variant-numeric:tabular-nums}
 .lanes{display:flex;flex-wrap:wrap;gap:4px var(--s2);margin-top:2px;font-size:var(--fs-1);color:var(--text-2)}
 .lanes span{white-space:nowrap} .lanes .on{color:var(--text)} .lanes .lost{color:var(--warn-text)}
 .srows{display:grid;grid-template-columns:52px minmax(0,1fr);gap:2px var(--s3);margin:2px 0 0;font-size:var(--fs-1);line-height:1.45}
@@ -1431,7 +1886,7 @@ dialog.modal .md{padding:0}
 .md pre{background:var(--wash);padding:12px 14px;border-radius:var(--rs);overflow:auto}
 .md pre code{background:none;padding:0}
 .md blockquote{margin:.6em 0;padding:.1em 0 .1em 14px;border-left:1px solid var(--line);color:var(--text-2)}
-.md table{border-collapse:collapse;margin:.8em 0;font-size:var(--fs-1);display:block;overflow-x:auto}
+.md table{border-collapse:collapse;margin:.8em 0;font-size:var(--fs-1);display:block;overflow-x:auto;overflow-wrap:normal;max-width:100%}
 .md th,.md td{border-bottom:1px solid var(--line-soft);padding:6px 10px;text-align:left}
 .md th{font-weight:600;border-bottom-color:var(--line)}
 .md hr{border:0;border-top:1px solid var(--line-soft);margin:1.2em 0}
@@ -1477,7 +1932,9 @@ body{display:flex;flex-direction:column;min-height:100vh;min-height:100dvh}
 /* status and magnitude colors (dataviz: fixed status palette, one-hue ramp); fills only, text stays in text tokens */
 .k-ok{fill:var(--s-ok);background:var(--s-ok)} .k-warn{fill:var(--s-warn);background:var(--s-warn)} .k-risk{fill:var(--s-risk);background:var(--s-risk)}
 .k-done{fill:var(--s-done);background:var(--s-done)} .k-none{fill:var(--s-none);background:var(--s-none)} .k-mark{fill:var(--mark);background:var(--mark)}
-.dot.k-ok,.dot.k-warn,.dot.k-risk,.dot.k-done,.dot.k-none,.dot.k-mark{display:inline-block}
+.k-quiet{fill:var(--track);background:var(--track);box-shadow:inset 0 0 0 1px var(--axis)}
+.k-hol{fill:none;background:transparent;box-shadow:inset 0 0 0 1.5px var(--axis)}
+.dot.k-ok,.dot.k-warn,.dot.k-risk,.dot.k-done,.dot.k-none,.dot.k-mark,.dot.k-quiet,.dot.k-hol{display:inline-block}
 .stat{display:inline-flex;align-items:center;gap:6px;white-space:nowrap}
 /* stat tiles */
 .stile{display:grid;grid-template-columns:minmax(0,1fr);align-content:start;gap:var(--s2);padding:var(--s3) var(--s4) var(--s4);border-radius:12px;background:var(--card);text-decoration:none;color:inherit;min-width:0}
@@ -1570,11 +2027,13 @@ a.stile:hover{background:var(--card-hover)}
 .heat .h0,.heat-l .h0{fill:var(--h0);background:var(--h0)} .heat .h1,.heat-l .h1{fill:var(--h1);background:var(--h1)} .heat .h2,.heat-l .h2{fill:var(--h2);background:var(--h2)}
 .heat .h3,.heat-l .h3{fill:var(--h3);background:var(--h3)} .heat .h4,.heat-l .h4{fill:var(--h4);background:var(--h4)}
 .heat-l{display:flex;align-items:center;gap:4px;margin-top:var(--s2);font-size:var(--fs-1);color:var(--text-2)} .heat-l i{width:12px;height:12px;border-radius:3px}
-/* the quick-look modal */
-dialog.modal{width:min(760px,calc(100vw - 32px));max-height:calc(100dvh - 48px);padding:0;border:var(--elev-border);border-radius:16px;background:var(--raised);color:var(--text);box-shadow:var(--shadow);overflow:auto;overscroll-behavior:contain}
+/* the detail drawer: one native <dialog> on the right edge, full height; its body scrolls between a fixed header and footer */
+dialog.modal{position:fixed;inset:0 0 0 auto;margin:0;width:min(760px,calc(100vw - 48px));max-width:none;height:100vh;height:100dvh;max-height:none;padding:0;border:var(--elev-border);border-radius:16px 0 0 16px;background:var(--raised);color:var(--text);box-shadow:var(--shadow);overflow:hidden;flex-direction:column}
+dialog.modal[open]{display:flex}
 dialog.modal::backdrop{background:var(--overlay)}
 dialog.modal:focus{outline:none}
-.mh{position:sticky;top:0;z-index:3;display:flex;gap:var(--s3);align-items:flex-start;padding:var(--s5) var(--s5) var(--s4);background:var(--raised);border-bottom:1px solid var(--line-soft)}
+.mh{flex:none;z-index:3;display:flex;gap:var(--s3);align-items:flex-start;padding:var(--s5) var(--s5) var(--s4);background:var(--raised);border-bottom:1px solid var(--line-soft)}
+.mbody{flex:1 1 auto;overflow:auto;overscroll-behavior:contain;align-content:start}
 .mh-t{flex:1;min-width:0;display:grid;gap:var(--s1)}
 .mh h2{margin:0;font-size:var(--fs-4);font-weight:400;letter-spacing:-.025em;line-height:1.2;color:var(--strong);overflow-wrap:anywhere;text-wrap:balance}
 .mh .crumbs ol{margin:0}
@@ -1587,12 +2046,78 @@ dialog.modal:focus{outline:none}
 .lockline{display:flex;gap:var(--s3);align-items:flex-start;font-size:var(--fs-2)} .lockline .t2{font-size:var(--fs-1);margin-top:2px}
 .nextcmd{display:grid;gap:var(--s1);padding:var(--s3) var(--s4);border-radius:10px;background:var(--wash)} .nextcmd code{color:var(--text)}
 @media (prefers-reduced-motion:no-preference){dialog.modal[open]{animation:m-in .18s var(--ease)} dialog.modal[open]::backdrop{animation:b-in .18s linear}
-  @keyframes m-in{from{opacity:0;transform:translateY(8px)}} @keyframes b-in{from{opacity:0}}}
+  @keyframes m-in{from{opacity:0;transform:translateX(16px)}} @keyframes b-in{from{opacity:0}}
+  .flash{animation:flash 1.6s var(--ease) 1} @keyframes flash{from{box-shadow:inset 0 0 0 100vmax var(--hl)}to{box-shadow:inset 0 0 0 100vmax transparent}}}
 @media (prefers-reduced-motion:reduce){dialog.modal[open]{animation:b-in .12s linear} @keyframes b-in{from{opacity:0}}}
+/* drawer states: skeleton bars appear only when loading takes longer than 150 ms (no shimmer) */
+.skel{display:grid;gap:var(--s3);animation:skel-in 1ms 150ms both} @keyframes skel-in{from{visibility:hidden}to{visibility:visible}}
+.skel i{display:block;height:14px;border-radius:4px;background:var(--wash)} .skel i:nth-child(3n+1){width:62%} .skel i:nth-child(3n+2){width:88%} .skel i.blk{height:72px;width:100%}
+.mmeta{font-size:var(--fs-1);color:var(--text-2)}
+/* logs and excerpts from CI, jobs and agents: text only, monospace, scrolled inside the block */
+pre.log{margin:0;padding:var(--s3);border-radius:var(--rs);background:var(--wash);color:var(--text);font:400 var(--fs-1)/1.5 var(--mono);white-space:pre;overflow:auto;max-height:320px;tab-size:2;min-width:0}
+.logh{display:flex;align-items:baseline;gap:var(--s2);font-size:var(--fs-1);color:var(--text-2);min-width:0} .logh .rpath{margin-left:auto;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;min-width:0}
+/* Background work: run blocks, CI rows, the jobs table */
+.rgrid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:var(--s4);align-items:start}
+.rcard{display:grid;grid-template-columns:minmax(0,1fr);gap:6px;padding:var(--s4);border-radius:12px;background:var(--card);cursor:pointer;min-width:0;font-size:var(--fs-1)}
+.rcard:hover{background:var(--card-hover)}
+.rcard .rh{display:flex;align-items:baseline;gap:var(--s3);min-width:0}
+.rcard .rh a{font-size:var(--fs-2);font-weight:600;color:var(--strong);min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;flex:1 1 auto}
+.rcard .rst{flex:none;white-space:nowrap;color:var(--text)} .rcard.blocked .rst,.rcard.waiting .rst{color:var(--bad-text)} .rcard.lost .rst{color:var(--warn-text)} .rcard.done .rst{color:var(--good-text)}
+.rcard .rw{color:var(--text-2);min-width:0}
+.rcard.done .rbar i{background:var(--good)} .rcard.blocked .rbar i,.rcard.waiting .rbar i{background:var(--bad)} .rcard.lost .rbar i{background:var(--warn)}
+.rcard .rsteps{gap:2px} .rcard .warnline{padding:var(--s1) 0;border:0}
+.cirows{list-style:none;margin:0;padding:0}
+.cirow{display:grid;grid-template-columns:8px minmax(0,1fr) auto;gap:4px var(--s3);align-items:baseline;padding:var(--s3) var(--s2);border-bottom:1px solid var(--line-soft);font-size:var(--fs-1);min-width:0}
+.cirow:last-child{border-bottom:0} .cirow:hover{background:var(--hover)}
+.cirow .cx{grid-column:2/-1;display:grid;gap:var(--s2);min-width:0} .cirow .ct{color:var(--text);min-width:0} .cirow .ct strong{font-weight:600;color:var(--strong)}
+.cirow .cr{color:var(--text-2);white-space:nowrap;text-align:right}
+.cirow .ca{display:flex;flex-wrap:wrap;gap:var(--s2)}
+.foot2{margin:var(--s3) 0 0;font-size:var(--fs-1);color:var(--text-2)}
+table.jt td.c-job{max-width:340px} table.jt .jab{display:block;font-size:var(--fs-1);color:var(--text-2);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+/* the branch map: the backup state leads each row; the name is the row header; merged branches are quiet */
+table.bt td,table.bt th[scope="row"]{vertical-align:top;height:auto;padding-top:10px;padding-bottom:10px}
+table.bt th[scope="row"]{font-size:var(--fs-2);font-weight:400;color:var(--strong);white-space:normal;min-width:200px}
+table.bt .bn{font-size:var(--fs-1);overflow-wrap:anywhere;color:var(--strong)} table.bt th .tag{margin-left:6px;vertical-align:1px}
+table.bt .bsub{display:block;font-size:var(--fs-1);color:var(--text-2);line-height:1.4;margin-top:2px;overflow-wrap:anywhere}
+table.bt .bsub a{color:inherit} table.bt .bsub a:hover{color:var(--strong)}
+table.bt td.c-bk{min-width:210px;max-width:340px} table.bt td.c-ab{white-space:nowrap} table.bt td.c-wt{max-width:220px}
+table.bt td.c-wt .mono{font-size:var(--fs-1);overflow-wrap:anywhere}
+table.bt tr.quiet td,table.bt tr.quiet th,table.bt tr.quiet .bn{color:var(--text-2)}
+table.bt td.c-more{padding:var(--s3) var(--s2)}
+.brst{font-size:var(--fs-1);color:var(--text-2);white-space:nowrap}
+table.t .cl{display:none}
+.jstrip rect.k-mark{fill:var(--mark)} .jstrip rect.k-risk{fill:var(--s-risk)}
+/* the run drawer's steps and the connected task's connections */
+.steps{list-style:none;margin:0;padding:0}
+.steps>li{display:grid;grid-template-columns:24px 14px minmax(0,1fr) auto;gap:2px var(--s2);padding:var(--s2) 0;border-bottom:1px solid var(--line-soft);font-size:var(--fs-1);align-items:baseline;min-width:0}
+.steps>li:last-child{border-bottom:0}
+.steps .sn{color:var(--text-2);text-align:right;font-variant-numeric:tabular-nums} .steps .g{color:var(--text-2)}
+.steps .nm{color:var(--strong);font-weight:600;min-width:0;overflow-wrap:anywhere} .steps .ow{color:var(--text-2);font-weight:400}
+.steps .tm{color:var(--text-2);white-space:nowrap;text-align:right}
+.steps .sx{grid-column:3/-1;display:grid;grid-template-columns:72px minmax(0,1fr);gap:2px var(--s3);min-width:0}
+.steps .sx dt{color:var(--text-2)} .steps .sx dd{margin:0;min-width:0;overflow-wrap:anywhere;color:var(--text)}
+.steps .sx .wide{grid-column:1/-1}
+.steps li.running .g{color:var(--strong)} .steps li.blocked .g,.steps li.waiting .g{color:var(--bad-text)} .steps li.done .g{color:var(--good-text)}
+.steps li.unverified .g,.steps li.unverified .tm{color:var(--warn-text)} .steps .sc{font-family:var(--mono)}
+.conns{list-style:none;margin:0;padding:0}
+.conn{display:grid;grid-template-columns:16px 84px minmax(0,1fr);gap:2px var(--s3);padding:var(--s2) 0;border-bottom:1px solid var(--line-soft);font-size:var(--fs-1);align-items:baseline;min-width:0}
+.conn:last-child{border-bottom:0} .conn>.i{color:var(--text-2);align-self:center} .conn .k{color:var(--text-2)} .conn .v{min-width:0;overflow-wrap:anywhere} .conn .how,.conn .xs{grid-column:3;color:var(--text-2);min-width:0}
+.ans{display:grid;grid-template-columns:120px minmax(0,1fr);gap:var(--s3) var(--s4);margin:0;font-size:var(--fs-2)}
+.ans dt{color:var(--text-2);font-size:var(--fs-1);padding-top:2px} .ans dd{margin:0;display:grid;gap:var(--s1);min-width:0;overflow-wrap:anywhere}
+.ans .nextcmd{margin-top:var(--s1)}
+/* crew: who is working now, the roster, and who does what */
+table.crew{table-layout:fixed} table.crew th.c-mem{width:19%} table.crew th.c-sum{width:27%} table.crew th.c-does{width:16%} table.crew th.c-appr{width:18%} table.crew th.c-acc{width:10%} table.crew th.c-now{width:10%}
+table.crew td{vertical-align:top;height:auto;padding-top:var(--s3);padding-bottom:var(--s3)} table.crew th[scope="row"]{vertical-align:top;padding-top:var(--s3);white-space:normal} table.crew th[scope="row"]{font-size:var(--fs-2);font-weight:600;color:var(--strong);text-align:left}
+table.t th[scope="row"]{position:static;background:none;z-index:auto;border-bottom-color:var(--line-soft)}
+table.raci{table-layout:fixed} table.raci th[scope="row"]{font-weight:600;color:var(--strong);text-align:left;font-size:var(--fs-1)} table.raci td{font-size:var(--fs-1);vertical-align:top} table.raci th[scope="col"]{white-space:normal}
+table.raci td,table.raci th[scope="row"]{height:auto;padding-top:var(--s2);padding-bottom:var(--s2);vertical-align:top}
+.raci .me{color:var(--strong);font-weight:600}
+.wdot{display:inline-block;width:7px;height:7px;border-radius:50%;background:var(--good);margin-left:5px;vertical-align:1px}
+.rblk{display:none}
 /* the 12-column grid steps down: 6 columns, then one */
 @media (max-width:1180px){.sp-2,.sp-3{grid-column:span 6}.sp-4,.sp-5{grid-column:span 6}.sp-8,.full-md{grid-column:1/-1}}
 @media (max-width:768px){.g12>*{grid-column:1/-1}.g12>.stile{grid-column:span 6}.ctrs{grid-template-columns:repeat(2,minmax(0,1fr))}
-  .mfigs{grid-template-columns:minmax(0,1fr)} dialog.modal{width:calc(100vw - 16px);max-height:calc(100dvh - 16px);border-radius:14px}
+  .mfigs{grid-template-columns:minmax(0,1fr)} dialog.modal{width:100vw;border-radius:0;border:0}
   .mh{padding:var(--s4)}.mbody{padding:var(--s4)}.mf{padding:var(--s3) var(--s4)} .mh-row{gap:var(--s3)}
   .stile .s-v b,.ctr .s-v b{font-size:var(--fs-3)}}
 /* sticky table headers on wide screens (tables that fit), under the navbar and the page tabs */
@@ -1600,18 +2125,36 @@ dialog.modal:focus{outline:none}
   main .tw.st:not(.x) table.t th{top:var(--nav-h)} main .tabpanel .tw.st:not(.x) table.t th{top:calc(var(--nav-h) + var(--tabs-h))}}
 /* ---------- responsive */
 @media (max-width:1600px){table.pt:not(.it) .c-act{display:none}}
-@media (max-width:1180px){.nav{gap:var(--s4)}.tabs{gap:var(--s3)}.search{flex-basis:170px}#palbtn{display:none}
+@media (max-width:1180px){.nav{gap:var(--s4)}.views{gap:var(--s3)}.search{flex-basis:170px}#palbtn{display:none}.rgrid{grid-template-columns:minmax(0,1fr)}
   .board{grid-template-columns:repeat(2,minmax(0,1fr))}.c-size,.c-act{display:none}.c-who{display:none}
   .since{grid-template-columns:repeat(2,minmax(0,1fr))}.people{grid-template-columns:minmax(0,1fr)}}
 @media (max-width:1024px){.cols,.cols.even{grid-template-columns:minmax(0,1fr)}.search{flex-basis:150px}.c-last{display:none}
   .inir{grid-template-columns:minmax(0,1fr) minmax(120px,200px)}.inir .c3,.inir .c4{grid-column:1/-1}}
 @media (pointer:coarse){.icopy{width:40px;height:40px}.btn{height:40px}.btn.sm{height:36px}}
+@media (max-width:480px){.navmore .menu{left:var(--s4);min-width:0} .tabs,.views{gap:var(--s3)!important} .live .lgw{display:none}}
 @media (max-width:768px){
   :root{--nav-h:0px}
   .foot{width:calc(100% - 2 * var(--s4))}
   .nav{position:relative;flex-wrap:wrap;height:auto;padding:var(--s3) var(--s4);gap:var(--s3)}
   .lockup .ff{height:18px}.lockup .vr{height:18px}.lockup .dk{font-size:var(--fs-2)}
-  .tabs{order:3;width:100%;height:40px;gap:var(--s4)}.search{order:2;flex:1 1 100%}#palbtn{display:none}
+  .views{order:3;flex:1 1 100%;height:40px;gap:var(--s4)}.search{order:2;flex:1 1 100%}#palbtn{display:none}.livew{margin-left:auto}
+  .navmore{position:static}.navmore .menu{right:var(--s4)} .banner{padding:var(--s3) var(--s4) 0}
+  .head .sub{overflow-wrap:anywhere;min-width:0}
+  table.jt thead,table.crew thead{display:none}
+  table.bt thead{display:none} table.bt,table.bt tbody,table.bt tr,table.bt td,table.bt th[scope="row"]{display:block;width:100%;min-width:0;max-width:none}
+  table.bt tr{display:grid;grid-template-columns:minmax(0,1fr);gap:4px;padding:var(--s3) var(--s2);border-bottom:1px solid var(--line-soft)}
+  table.bt td,table.bt th[scope="row"],table.bt td:first-child{height:auto;border:0;padding:0;white-space:normal}
+  table.bt th[scope="row"]{order:-1} table.bt td.nil{display:none} table.bt td.c-ab .bsub{display:inline;margin:0 0 0 6px}
+  table.jt,table.jt tbody,table.jt tr,table.jt td,table.crew,table.crew tbody,table.crew tr,table.crew td,table.crew th{display:block;width:100%}
+  table.jt tr,table.crew tr{display:grid;grid-template-columns:minmax(0,1fr);gap:2px;padding:var(--s3) var(--s2);border-bottom:1px solid var(--line-soft)}
+  table.jt td,table.crew td,table.crew th,table.crew th:first-child,table.jt td:first-child,table.crew td:first-child{height:auto;border:0;padding:0;white-space:normal;max-width:none}
+  table.t .cl{display:inline;color:var(--text-2)}
+  table.raci{display:none} .rblk{display:block}
+  .conn{grid-template-columns:16px minmax(0,1fr)} .conn .k{grid-column:2} .conn .v,.conn .how,.conn .xs{grid-column:2}
+  .ans{grid-template-columns:minmax(0,1fr);gap:var(--s1)} .ans dd{margin-bottom:var(--s3)}
+  .steps>li{grid-template-columns:24px 14px minmax(0,1fr)} .steps .tm{grid-column:3;text-align:left} .steps .sx{grid-template-columns:minmax(0,1fr)}
+  .rcard .rh{flex-direction:column;align-items:flex-start;gap:2px} .rcard .rh a{white-space:normal;flex:none;max-width:100%}
+  .rcard .rsteps li{row-gap:0} .rcard .rsteps .ell{white-space:normal;overflow:visible} .rcard .rsteps .who{display:block} .rcard .rsteps .who .sep{display:none} .rcard .rsteps .m{text-align:right;max-width:9em}
   .filters{padding:var(--s3) var(--s4) 0;overflow-x:auto;flex-wrap:nowrap}
   main{padding:var(--s5) var(--s4) var(--s7)}
   .head{margin-bottom:var(--s5)}
@@ -1656,13 +2199,18 @@ JS = r"""
 "use strict";
 window.addEventListener("error", e => { const b = document.createElement("div"); b.className = "err"; b.id = "dk-error";
   b.textContent = "Dashboard error: " + (e.message || e.error); document.body.append(b); });
-const D = JSON.parse(document.getElementById("devkit-data").textContent);
-const VIEWS = [["overview", "Home", "o"], ["initiatives", "Initiatives", "i"], ["projects", "Projects", "p"], ["team", "Team", "m"], ["tasks", "Tasks", "t"], ["activity", "Activity", "a"], ["explorer", "Explorer", "e"], ["health", "Health", "h"]];
+window.addEventListener("unhandledrejection", e => { const b = document.createElement("div"); b.className = "err"; b.id = "dk-error";
+  b.textContent = "Dashboard error: " + (e.reason && e.reason.message || e.reason); document.body.append(b); });
+let D = JSON.parse(document.getElementById("devkit-data").textContent);   /* live mode swaps it for a newer snapshot */
+/* the views, by how often a day of work needs them, then the reference views (the first of those starts the second group) */
+const VIEWS = [["overview", "Home", "o"], ["tasks", "Tasks", "t"], ["background", "Background", "b"], ["team", "Team", "m"], ["projects", "Projects", "p"], ["initiatives", "Initiatives", "i"], ["activity", "Activity", "a"], ["explorer", "Explorer", "e"], ["health", "Health", "h"]];
+const REFVIEW = "activity";
 const ROUTES = VIEWS.map(v => v[0]).concat(["search", "actions"]);
 const DEFAULT = {view: "overview", id: "", tab: "", task: "", q: "", status: [], priority: [], owner: [], stack: [], tag: [], ci: [], health: [],
   live: false, prs: false, nc: false, loose: false, sort: "attention", group: "none", layout: "cards", dense: false, f: "", fq: "",
-  range: 7, types: [], tp: "", tmode: "board", who: "", tst: "", ist: "", psort: "priority", ilayout: "cards", mq: "", mg: "", src: "all", kind: "", modal: ""};
-const PAGEKEYS = {tab: "", task: "", modal: "", mq: "", mg: "", src: "all", tst: ""};
+  range: 7, types: [], tp: "", tmode: "board", who: "", tst: "", ist: "", psort: "priority", ilayout: "cards", mq: "", mg: "", src: "all", kind: "",
+  cq: "", rq: "", rm: "", rall: false, modal: ""};
+const PAGEKEYS = {tab: "", task: "", modal: "", mq: "", mg: "", src: "all", tst: "", cq: "", rq: "", rm: "", rall: false};
 const $ = (s, r = document) => r.querySelector(s);
 const $$ = (s, r = document) => Array.from(r.querySelectorAll(s));
 const SVGNS = "http://www.w3.org/2000/svg";
@@ -1689,6 +2237,8 @@ function append(el, kids) {
 }
 function sv(tag, attrs, ...kids) { const el = document.createElementNS(SVGNS, tag); for (const k in attrs || {}) if (attrs[k] != null) el.setAttribute(k, attrs[k]); return append(el, kids); }
 function safeUrl(u) { u = String(u || "").trim(); return /^(https?:|mailto:|#)/i.test(u) ? u : "#"; }
+// a URL from the data opens in a new tab only when safeUrl lets it through; anything else (javascript:, data:) opens nothing
+function openUrl(u) { const s = safeUrl(u); if (s !== "#") window.open(s, "_blank", "noopener"); }
 function clear(el) { while (el.firstChild) el.removeChild(el.firstChild); return el; }
 function debounce(fn, ms) { let t; return (...a) => { clearTimeout(t); t = setTimeout(() => fn(...a), ms); }; }
 function frag(...kids) { return append(document.createDocumentFragment(), kids); }
@@ -1715,7 +2265,12 @@ function kb(k) { if (k == null) return "—"; return k >= 1048576 ? (k / 1048576
 function plural(n, w, p) { return n + " " + (n === 1 ? w : (p || w + "s")); }
 function stripMarker(line) { return String(line || "").replace(/^[\W_]*(?:\[\s*firefly\s*>\s*devkit\s*\]|devkit(?=[\s·:—*`]))[\s·:—*`]*/i, "").replace(/(status:\s*)(?:\*\*|`)?(?:\[\s*firefly\s*>\s*devkit\s*\]|devkit\s*·)(?:\*\*|`)?\s*/gi, "$1"); }
 function iso(s) { const t = Date.parse(s || ""); return isNaN(t) ? 0 : t / 1000; }
+/* the window behind a count: the guard log keeps the last N decisions, the session log two months, commits 30 days */
+function guardWindow() { return (W.guard_capped ? ", the last " + W.guard_events : "") + (W.guard_since ? ", since " + shortDay(String(W.guard_since).slice(0, 10)) : ""); }
 function fmtMin(m) { m = Math.max(0, Math.round(m || 0)); return m >= 60 ? Math.floor(m / 60) + "h" + String(m % 60).padStart(2, "0") + "m" : m + "m"; }
+/* an estimate or a time left: to 5 minutes, under 10 minutes to the minute, so "about" claims no more precision than an
+   estimate has; measured time (active, wall, elapsed, over the estimate) keeps fmtMin */
+function fmtAbout(m) { const r = Math.max(0, Math.round(m || 0)); return fmtMin(r < 10 ? r : Math.round(m / 5) * 5); }
 
 /* ---------------------------------------------------------------- data model: work items, projects, initiatives, people */
 const OPEN = ["todo", "doing", "blocked"];
@@ -1726,7 +2281,7 @@ const PRIO = {high: ["", "High"], normal: ["", "Normal"], low: ["", "Low"]};
 const PRANK = {high: 0, normal: 1, low: 2}, HRANK = {risk: 0, warn: 1, ok: 2};
 const KIND = {"ci-failing": "CI", "changes-requested": "Review", "conflicts": "Conflicts", "review-waiting": "Review", "review-requested": "Review",
   "blocked": "Blocked", "blocked-task": "Blocked", "overdue": "Overdue", "idle-work": "Unsaved work", "reclaim": "Reclaim", "layout": "Layout", "stale-note": "Handoff",
-  "drift": "Config", "sign-in": "Sign in", "collision": "Collision", "expired-lock": "Lock"};
+  "drift": "Config", "sign-in": "Sign in", "collision": "Collision", "expired-lock": "Lock", "decision": "Decision", "ci-watch": "CI watch", "job-failed": "Job", "setup": "Setup"};
 const CHECKS = {passing: "CI passing", failing: "CI failing", pending: "CI running", none: "no CI", unknown: "CI unknown"};
 const ISTATUS = {todo: ["", "To do"], doing: ["", "Doing"], blocked: ["", "Blocked"], done: ["", "Done"], cancelled: ["", "Cancelled"]};
 const SDOT = {active: "d-ok", paused: "d-warn", blocked: "d-risk", done: "d-info", archived: "d-info", untracked: "d-info", unknown: "d-info"};
@@ -1738,10 +2293,8 @@ function isInit(scope) { return String(scope).startsWith("initiatives/"); }
 function flagOf(scope) { return isInit(scope) ? "-i " + scope.slice(12) : "-p " + scope; }
 function cnt(items) { const c = {open: 0, todo: 0, doing: 0, blocked: 0, done: 0, cancelled: 0, total: items.length}; for (const x of items) { if (x.open) c.open++; if (c[x.status] != null) c[x.status]++; } return c; }
 
-const ITEMS = (D.items || []).map(x => Object.assign({}, x, {holder: whoOf(x.claimed_by), agent: agentOf(x.claimed_by), open: OPEN.includes(x.status)}));
-const ITEMBY = new Map(ITEMS.map(x => [x.id, x]));
-const BYSCOPE = new Map();
-for (const x of ITEMS) { if (!BYSCOPE.has(x.scope)) BYSCOPE.set(x.scope, []); BYSCOPE.get(x.scope).push(x); }
+let ITEMS, ITEMBY, BYSCOPE, P, BYID, PEOPLE, BYWHO, ONPROJ, RUNS, INITS, BYINIT, MEMBEROF, FILES, FILEMAP, ACTIONS, W;
+let CREW, CREWBY, RACI, JOBS, CIW, RRUNS, CACHE = {};   /* CACHE: values computed once per snapshot (needs, contradictions) */
 /* scopes without work items still show their note checkboxes (legacy) as read-only items */
 function legacy(scope, t, tidx) {
   const out = []; let k = 0;
@@ -1753,46 +2306,8 @@ function legacy(scope, t, tidx) {
   }
   return out;
 }
-const P = (D.projects || []).map((p, i) => {
-  const ns = p.note_summary || null;
-  const t = (ns && ns.tasks) || {now: [], next: [], later: [], done_recent: [], open: 0, done: 0, overdue: []};
-  const id = p.id || p.name || "project-" + i;
-  const owner = id.includes("/") ? id.slice(0, id.lastIndexOf("/")) : "(local)";
-  const wts = p.worktrees || [], prsOpen = p.prs_open || [];
-  const live = (p.main && p.main.active ? 1 : 0) + wts.filter(w => w.active).length;
-  const o = Object.assign({}, p, {id, ns, t, owner, wts, live, status: ns ? (ns.status || "active") : "untracked", priority: (ns && ns.priority) || "normal", tags: (ns && ns.tags) || [],
-    stack: p.stack || [], prsOpen, prs: prsOpen.length, act: p.activity || {}, sessions: (ns && ns.sessions) || [], health: p.health || {level: "ok", reasons: []},
-    ci: Array.from(new Set(prsOpen.map(r => r.checks || "unknown"))), tidx: p.task_index || {}, local: p.local !== false, inits: p.initiatives || []});
-  o.items = BYSCOPE.get(id) || legacy(id, t, o.tidx);
-  o.cnt = cnt(o.items);
-  o.hay = [id, p.name, o.stack.join(" "), (p.main || {}).branch, o.tags.join(" "), ns && ns.purpose, ns && ns.state, o.items.filter(x => x.open).map(x => x.id + " " + x.title).join(" "),
-    p.status_line && p.status_line.line, prsOpen.map(r => "#" + r.number + " " + r.title).join(" ")].filter(Boolean).join(" \n ").toLowerCase();
-  return o;
-});
-const BYID = new Map(P.map(p => [p.id, p]));
-const PEOPLE = (D.people || []).map(x => Object.assign({}, x, {sessions: x.sessions || [], locks: x.locks || [], claimed: x.claimed || [], recent: x.recent || []}));
-if (!PEOPLE.length) { const live = (D.sessions || []).filter(s => s.active); if (live.length) PEOPLE.push({who: ME || D.host, user: ME.split("@")[0], host: D.host, updated: D.generated, sessions: live, locks: [], claimed: [], recent: []}); }
-const BYWHO = new Map(PEOPLE.map(x => [x.who, x]));
-const ONPROJ = new Map();
-for (const x of PEOPLE) for (const s of x.sessions) if (s.project) { if (!ONPROJ.has(s.project)) ONPROJ.set(s.project, []); ONPROJ.get(s.project).push(Object.assign({who: x.who, asOf: x.updated}, s)); }
-const RUNS = D.runs || [];
 function runOf(s) { return RUNS.find(r => r.session && r.session === s.session && r.agent === s.agent) || null; }
 function peopleOn(scopes, items) { const out = new Set(); for (const sc of scopes) for (const s of ONPROJ.get(sc) || []) out.add(s.who); for (const it of items) if (it.open && it.holder && it.lock !== "expired") out.add(it.holder); return Array.from(out); }
-for (const p of P) p.people = peopleOn([p.id], p.items);
-const INITS = (D.initiatives || []).map(x => {
-  const t = x.tasks || {};
-  const tk = {now: t.now || [], next: t.next || [], later: t.later || [], done_recent: t.done_recent || [], open: t.open || 0, done: t.done || 0, overdue: t.overdue || []};
-  const scope = "initiatives/" + x.id, linked = (x.linked_items || []).map(id => ITEMBY.get(id)).filter(Boolean);
-  const items = linked.length || BYSCOPE.has(scope) ? linked : legacy(scope, tk, x.task_index || {});
-  const projects = x.projects || [], members = x.members || [];
-  const last = Math.max(x.last_activity || 0, ...projects.map(id => (BYID.get(id) || {}).last_activity || 0));
-  return Object.assign({}, x, {t: tk, scope, scopeText: x.scope || "", items, cnt: cnt(items), members, projects, tidx: x.task_index || {}, status: x.status || "active", priority: x.priority || "normal",
-    title: x.title || x.id, tags: x.tags || [], sessions: x.sessions || [], last, people: peopleOn(projects.concat([scope]), items),
-    hay: [x.id, x.title, x.goal, x.scope, x.state, projects.join(" "), items.filter(i => i.open).map(i => i.id + " " + i.title).join(" "), (x.tags || []).join(" ")].filter(Boolean).join(" \n ").toLowerCase()});
-});
-const BYINIT = new Map(INITS.map(x => [x.id, x]));
-const MEMBEROF = new Map();
-for (const x of INITS) for (const id of x.projects) { if (!MEMBEROF.has(id)) MEMBEROF.set(id, []); MEMBEROF.get(id).push(x.id); }
 function allItems() { const out = ITEMS.slice(); for (const p of P) if (p.items.length && p.items[0].legacy) out.push(...p.items); for (const x of INITS) if (x.items.length && x.items[0].legacy) out.push(...x.items); return out; }
 function progOf(x) {
   const t = x.t || {}, done = t.done || 0, total = (t.open || 0) + done;
@@ -1813,9 +2328,282 @@ function progressBar(x, wide) {
 }
 function dueBadge(due, done) { if (!due) return null; const over = !done && due < lkey(new Date());
   return h("span", {class: "due" + (over ? " over" : ""), title: over ? "Past its due date (" + due + ")" : "Due " + due, text: over ? "overdue since " + shortDay(due) : "due " + shortDay(due)}); }
-const FILES = D.files || [];
-const FILEMAP = new Map(FILES.map(f => [f.path, f]));
-const ACTIONS = D.actions || [];
+/* everything derived from the data, in one place: live mode re-runs it when a newer snapshot arrives */
+function derive() {
+  W = D.windows || {};
+  ITEMS = (D.items || []).map(x => Object.assign({}, x, {holder: whoOf(x.claimed_by), agent: agentOf(x.claimed_by), open: OPEN.includes(x.status)}));
+  ITEMBY = new Map(ITEMS.map(x => [x.id, x]));
+  BYSCOPE = new Map();
+  for (const x of ITEMS) { if (!BYSCOPE.has(x.scope)) BYSCOPE.set(x.scope, []); BYSCOPE.get(x.scope).push(x); }
+  P = (D.projects || []).map((p, i) => {
+    const ns = p.note_summary || null;
+    const t = (ns && ns.tasks) || {now: [], next: [], later: [], done_recent: [], open: 0, done: 0, overdue: []};
+    const id = p.id || p.name || "project-" + i;
+    const owner = id.includes("/") ? id.slice(0, id.lastIndexOf("/")) : "(local)";
+    const wts = p.worktrees || [], prsOpen = p.prs_open || [];
+    const live = (p.main && p.main.active ? 1 : 0) + wts.filter(w => w.active).length;
+    const o = Object.assign({}, p, {id, ns, t, owner, wts, live, status: ns ? (ns.status || "active") : "untracked", priority: (ns && ns.priority) || "normal", tags: (ns && ns.tags) || [],
+      stack: p.stack || [], prsOpen, prs: prsOpen.length, act: p.activity || {}, sessions: (ns && ns.sessions) || [], health: p.health || {level: "ok", reasons: []},
+      ci: Array.from(new Set(prsOpen.map(r => r.checks || "unknown"))), tidx: p.task_index || {}, local: p.local !== false, inits: p.initiatives || []});
+    o.items = BYSCOPE.get(id) || legacy(id, t, o.tidx);
+    o.cnt = cnt(o.items);
+    o.hay = [id, p.name, o.stack.join(" "), (p.main || {}).branch, o.tags.join(" "), ns && ns.purpose, ns && ns.state, o.items.filter(x => x.open).map(x => x.id + " " + x.title).join(" "),
+      p.status_line && p.status_line.line, prsOpen.map(r => "#" + r.number + " " + r.title).join(" ")].filter(Boolean).join(" \n ").toLowerCase();
+    return o;
+  });
+  BYID = new Map(P.map(p => [p.id, p]));
+  PEOPLE = (D.people || []).map(x => Object.assign({}, x, {sessions: x.sessions || [], locks: x.locks || [], claimed: x.claimed || [], recent: x.recent || []}));
+  if (!PEOPLE.length) { const live = (D.sessions || []).filter(s => s.active); if (live.length) PEOPLE.push({who: ME || D.host, user: ME.split("@")[0], host: D.host, updated: D.generated, sessions: live, locks: [], claimed: [], recent: []}); }
+  BYWHO = new Map(PEOPLE.map(x => [x.who, x]));
+  ONPROJ = new Map();
+  for (const x of PEOPLE) for (const s of x.sessions) if (s.project) { if (!ONPROJ.has(s.project)) ONPROJ.set(s.project, []); ONPROJ.get(s.project).push(Object.assign({who: x.who, asOf: x.updated}, s)); }
+  RUNS = D.runs || [];
+  for (const p of P) p.people = peopleOn([p.id], p.items);
+  INITS = (D.initiatives || []).map(x => {
+    const t = x.tasks || {};
+    const tk = {now: t.now || [], next: t.next || [], later: t.later || [], done_recent: t.done_recent || [], open: t.open || 0, done: t.done || 0, overdue: t.overdue || []};
+    const scope = "initiatives/" + x.id, linked = (x.linked_items || []).map(id => ITEMBY.get(id)).filter(Boolean);
+    const items = linked.length || BYSCOPE.has(scope) ? linked : legacy(scope, tk, x.task_index || {});
+    const projects = x.projects || [], members = x.members || [];
+    const last = Math.max(x.last_activity || 0, ...projects.map(id => (BYID.get(id) || {}).last_activity || 0));
+    return Object.assign({}, x, {t: tk, scope, scopeText: x.scope || "", items, cnt: cnt(items), members, projects, tidx: x.task_index || {}, status: x.status || "active", priority: x.priority || "normal",
+      title: x.title || x.id, tags: x.tags || [], sessions: x.sessions || [], last, people: peopleOn(projects.concat([scope]), items),
+      hay: [x.id, x.title, x.goal, x.scope, x.state, projects.join(" "), items.filter(i => i.open).map(i => i.id + " " + i.title).join(" "), (x.tags || []).join(" ")].filter(Boolean).join(" \n ").toLowerCase()});
+  });
+  BYINIT = new Map(INITS.map(x => [x.id, x]));
+  MEMBEROF = new Map();
+  for (const x of INITS) for (const id of x.projects) { if (!MEMBEROF.has(id)) MEMBEROF.set(id, []); MEMBEROF.get(id).push(x.id); }
+  FILES = D.files || [];
+  FILEMAP = new Map(FILES.map(f => [f.path, f]));
+  ACTIONS = D.actions || [];
+  CREW = (D.crew || {}).members || [];
+  RACI = (D.crew || {}).activities || [];
+  CREWBY = new Map();
+  for (const m of CREW) for (const k of [m.id, m.name]) if (k) CREWBY.set(String(k).toLowerCase(), m);
+  JOBS = D.jobs || [];
+  CIW = Object.assign({watches: [], watching: [], complete: true, total: 0}, D.ci || {});
+  /* runs on other machines reach this Mac only as their presence summary */
+  const host = (ME.split("@")[1] || D.host || "").toLowerCase(), local = new Set(RUNS.map(r => r.agent + "~" + r.session));
+  RRUNS = [];
+  for (const x of PEOPLE) for (const s of x.sessions) if (s.progress && String(x.host || "").toLowerCase() !== host && !local.has(s.agent + "~" + s.session))
+    RRUNS.push(Object.assign({}, s.progress, {id: "remote~" + x.who + "~" + s.agent + "~" + s.session, remote: true, host: x.host, who: x.who, agent: s.agent, session: s.session, project: s.project, branch: s.branch, asOf: x.updated, decisions: [], questions: []}));
+  CACHE = {};
+}
+derive();
+/* ---------------------------------------------------------------- crew, runs, jobs and CI: one vocabulary (role first; a word next to every color) */
+const AGENTS = {claude: "Claude Code", codex: "Codex"};
+function agentName(id) { return AGENTS[String(id || "").toLowerCase()] || String(id || "agent"); }
+function mainMember() { return CREW.find(m => m.main) || {id: "morpheus", name: "Morpheus", title: "Tech lead", main: true}; }
+/* the roster member a persona, id, name or lane label ("Kid: curl installer") names; null when none matches */
+function member(x) {
+  const s = String(x || "").trim(); if (!s) return null;
+  if (s === "main") return mainMember();
+  const m = CREWBY.get(s.toLowerCase()); if (m) return m;
+  return s.includes(":") ? CREWBY.get(s.slice(0, s.indexOf(":")).trim().toLowerCase()) || null : null;
+}
+function roleName(m) { return m.title ? m.title + " (" + m.name + ")" : String(m.name || m.id); }
+/* role first: "Backend engineer (Tank)"; a lane with no member is "Subagent: <label>"; a label naming someone else, "<name> (not in the crew)" */
+function who(x, persona) {
+  const m = member(persona) || member(x); if (m) return roleName(m);
+  const s = String(x || "").trim();
+  if (!CREW.length) return s || String(persona || "") || "Subagent";   /* the roster could not be read: labels as they are */
+  if (persona && !member(persona)) return String(persona).trim() + " (not in the crew)";
+  if (!s) return "Subagent";
+  return s.includes(":") ? s.slice(0, s.indexOf(":")).trim() + " (not in the crew)" : "Subagent: " + s;
+}
+/* a step's owner: a lane (its persona or label), or the main session; a pending step of the main session may be assigned to a member */
+function stepWho(s) {
+  if (!s.owner || s.owner === "main") return s.label ? who(s.label) : roleName(mainMember());
+  return who(s.owner_label && s.owner_label !== "main" ? s.owner_label : s.owner, s.persona);
+}
+/* what a step does, for lists: its title, else its name without a leading code ("F4 caller identity" → "caller identity").
+   Codes such as F4, R2-3, LC-F6 or "F7 and F8" stay with the crew: the run drawer shows them dim */
+const STEPCODE = /^[A-Z][A-Z0-9-]*\d(?:\s*(?:,|\+|&|and)\s*[A-Z][A-Z0-9-]*\d)*[:.]?\s+(?=\S)/;
+function plainStep(name) { const s = String(name || "").trim(), m = STEPCODE.exec(s); return m ? s.slice(m[0].length) : s; }
+function stepTitle(s) { return String((s && s.title) || "").trim() || plainStep(s && s.name); }
+function stepCode(s) {
+  const n = String((s && s.name) || "").trim(); if (String((s && s.title) || "").trim()) return n === stepTitle(s) ? "" : n;
+  const p = plainStep(n); return p === n ? "" : n.slice(0, n.length - p.length).trim().replace(/[:.]$/, "");
+}
+function laneStep(label) { const l = String(label || ""); return l.includes(":") ? plainStep(l.slice(l.indexOf(":") + 1).trim()) : ""; }
+/* a step whose member stopped without evidence is unverified (contract C3): amber, the tech lead checks it, the developer is not asked */
+function stepWord(st) { return st === "unverified" ? ["!", roleName(mainMember()) + " checks it"] : STEPW[st] || STEPW.pending; }
+function when(ts) { return ts ? h("time", {datetime: new Date(ts * 1000).toISOString(), title: fmt(ts), text: rel(ts)}) : h("span", {text: "—"}); }
+function clock(ts) { if (!ts) return "—"; const d = new Date(ts * 1000), age = nowS() - ts; return (lkey(d) === lkey(new Date()) && age >= 0 ? "" : age > 6 * 86400 || age < -6 * 86400 ? shortDay(lkey(d)) + " " : d.toLocaleDateString(undefined, {weekday: "short"}) + " ") + tm(ts); }
+function jobDur(s) { return s == null ? "—" : s < 90 ? Math.max(0, Math.round(s)) + " s" : fmtMin(s / 60); }
+function sentence(s) { s = String(s || "").trim(); if (!s) return ""; s = s.charAt(0).toUpperCase() + s.slice(1); return /[.!?]$/.test(s) ? s : s + "."; }
+function repoName(r) { return String(r || "").split("/").pop(); }
+function provName(p) { return {github: "GitHub", gitlab: "GitLab", bitbucket: "Bitbucket", azure: "Azure"}[String(p || "").toLowerCase()] || "the provider"; }
+function taskIds(text) { return Array.from(new Set(String(text || "").match(/\b[A-Z]-[0-9a-z]{2,}\b/g) || [])).filter(id => ITEMBY.has(id)); }
+/* schedules as people say them; an interval's next run is an upper bound (launchd keeps its own clock) */
+const WEEKDAYS = {mon: "Mondays", tue: "Tuesdays", wed: "Wednesdays", thu: "Thursdays", fri: "Fridays", sat: "Saturdays", sun: "Sundays"};
+function schedText(s) {
+  s = String(s || "");
+  if (s === "manual") return "Only when run by hand";
+  const m = /^weekly,\s*([a-z,\s]+?)\s+(\d{1,2}:\d{2})$/i.exec(s); if (!m) return s;
+  const ds = m[1].split(/[,\s]+/).filter(Boolean).map(d => WEEKDAYS[d.toLowerCase().slice(0, 3)] || d);
+  return (ds.length > 1 ? ds.slice(0, -1).join(", ") + " and " + ds[ds.length - 1] : ds[0]) + " at " + m[2];
+}
+/* scheduled jobs: [color, word]; the order is the order of the table */
+const JOBST = {failed: ["risk", "Failed"], timeout: ["risk", "Timed out"], unscheduled: ["warn", "Not scheduled"], overdue: ["warn", "Overdue"],
+  skipped: ["warn", "Skipped"], ok: ["ok", "OK"], never: ["hol", "No runs yet"], off: ["hol", "Off"]};
+const JORDER = Object.keys(JOBST);
+let LOADED = null;   /* launchd's own view of each job (GET /api/v1/jobs, once per visit to Background work) */
+function jobOverdue(j, now) {
+  const last = j.last && j.last.start, s = String(j.schedule || "");
+  if (!last || !j.enabled) return false;
+  if (/^every/.test(s)) return !!j.next && now > j.next + (j.next - last) + 300;   /* two intervals without a start */
+  if (/^daily/.test(s)) return now - last > 26 * 3600;
+  if (/^weekly/.test(s)) return now - last > 8 * 86400;
+  return false;
+}
+function jobState(j, now) {
+  now = now || nowS();
+  if (!j.enabled || j.state === "off") return "off";
+  if (j.state === "failed") return j.last && j.last.rc === 124 ? "timeout" : "failed";
+  const loaded = j.loaded != null ? j.loaded : LOADED && LOADED[j.name] != null ? LOADED[j.name] : null;
+  if (!j.installed || loaded === false) return "unscheduled";
+  if (jobOverdue(j, now)) return "overdue";
+  if (j.state === "skipped") return "skipped";
+  return j.state === "never" ? "never" : "ok";
+}
+function jobWord(j, st) { st = st || jobState(j); return st === "failed" ? "Failed (exit " + (j.last && j.last.rc != null ? j.last.rc : "?") + ")" : JOBST[st][1]; }
+function stateDot(tone, label) { return h("span", {class: "dot k-" + tone, role: label ? "img" : null, "aria-label": label || null, "aria-hidden": label ? null : "true"}); }
+function stateWord(tone, word) { return h("span", {class: "stat"}, stateDot(tone), word); }
+/* CI watches: the latest result per branch in the window; failures first */
+const CIST = {failed: ["risk", "Failed"], watching: ["mark", "Watching"], timeout: ["warn", "Still running when the watch ended"], none: ["hol", "No CI run appeared"], passed: ["ok", "Passed"]};
+const CIORDER = Object.keys(CIST);
+const CICLASS = {test: "Test failure", lint: "Lint, format or types", build: "Build failure", dependencies: "Dependency resolution", pipeline: "Pipeline definition",
+  infrastructure: "Infrastructure (may be flaky)", unknown: "Not classified"};
+const CI_DAYS = 14;
+function ciState(w) { return CIST[w.state] && w.state !== "watching" ? w.state : "none"; }
+function ciKey(w) { return (w.repo || "") + "@" + (w.branch || ""); }
+function ciLatest() {
+  if (CACHE.ci) return CACHE.ci;
+  const seen = new Set(), out = [];
+  for (const w of CIW.watches || []) { const k = ciKey(w); if (!seen.has(k)) { seen.add(k); out.push(w); } }
+  return CACHE.ci = out;
+}
+function ciClass(w, f) { return CICLASS[(f && f.class) || w.class || "unknown"] || CICLASS.unknown; }
+/* a live watcher's key is the checkout folder and branch, with unsafe characters replaced: find the project it belongs to */
+function ckey(path, branch) { return ((String(path || "").split("/").filter(Boolean).pop() || "") + "-" + String(branch || "")).replace(/[^A-Za-z0-9._-]/g, "_"); }
+function watchWhere(wt) {
+  for (const p of P) for (const [path, br] of [[p.path, (p.main || {}).branch]].concat(p.wts.map(w => [w.path, w.branch])))
+    if (path && br && ckey(path, br) === wt.key) return {project: p, branch: br};
+  return null;
+}
+/* agent runs: waiting for you, blocked, stopped reporting, running, done */
+const RUNTONE = {waiting: "risk", blocked: "risk", lost: "warn", running: "mark", done: "ok"};
+function pending(r) { return (r.decisions || []).filter(d => !d.state || d.state === "pending"); }
+function runLive(r) { return PEOPLE.some(x => x.sessions.some(s => s.session === r.session && s.agent === r.agent)); }
+/* a run works while the run or any of its lanes reported in the last 30 minutes (`seen`: steps, notes, crew messages, lane
+   starts and stops), or while its session is live; the lead's own last update alone misses a crew at work */
+function runSeen(r) { return Math.max(r.updated || 0, r.seen || 0, r.started || 0); }
+function runQuiet(r) { return Math.max(0, (nowS() - runSeen(r)) / 60); }
+function runState(r) {
+  if (pending(r).length) return "waiting";
+  if (r.state === "blocked") return "blocked";
+  if (r.state === "done") return "done";
+  if (!r.remote && runQuiet(r) >= 30 && !runLive(r)) return "lost";
+  return "running";
+}
+function etaText(r) {
+  if (r.state !== "running") return "";
+  if (r.eta_lo != null && r.eta_hi != null) return fmtAbout(r.eta_lo) === fmtAbout(r.eta_hi) ? "about " + fmtAbout(r.eta_hi) + " left" : fmtAbout(r.eta_lo) + "–" + fmtAbout(r.eta_hi) + " left";
+  return r.eta_min != null ? "about " + fmtAbout(r.eta_min) + " left" : "";
+}
+function runStateText(r, st) {
+  st = st || runState(r);
+  if (st === "waiting") return "Blocked · waiting for you";
+  if (st === "blocked") return "Blocked";
+  if (st === "lost") return "Stopped reporting · last update " + rel(runSeen(r));
+  if (st === "done") return "Done · " + rel(r.finished || r.updated);
+  const e = etaText(r); return "Running" + (e ? " · " + e : "");
+}
+/* "of about": the plan's current total (active so far plus the time left), the number beside "left"; a run without a
+   plan, or a finished one, keeps its estimate */
+function runEst(r) { return r.total_min != null ? r.total_min : r.estimate_cal || r.estimate || 0; }
+function runFirstEst(r) { return r.estimate_cal || r.estimate || 0; }
+function runTime(r) {
+  const act = r.active_min || 0, wall = r.wall_min || 0, est = runEst(r);
+  const plan = r.plan || r.steps || [], done = plan.filter(s => s.state === "done" || s.state === "skipped").length;
+  return {steps: plan.length ? done + " of " + plan.length + " steps" : "No steps planned", act, wall, est, over: est && act > est && r.state === "running" ? act - est : 0,
+    text: fmtMin(act) + " active" + (wall - act >= 5 ? " (" + fmtMin(wall) + " wall)" : "") + (est ? " of about " + fmtAbout(est) : " · no estimate"), done, total: plan.length};
+}
+/* contradictions: shown where they occur, each with its fix (catalog C1 to C11) */
+function flagStr(f) { return f.parts.map(p => typeof p === "string" ? p : p.code).join(""); }
+function flagNodes(f) { return f.parts.map(p => typeof p === "string" ? p : h("code", {text: p.code})); }
+function runFlags(r, det) {
+  const out = [], plan = det ? det.steps || [] : r.plan || [], by = new Map(plan.map(s => [s.name, s]));
+  for (const s of plan) if (s.state === "running") for (const a of s.after || []) { const d = by.get(a);
+    if (d && d.state !== "done" && d.state !== "skipped") out.push({code: "C4", parts: ["“" + stepTitle(s) + "” is running before “" + stepTitle(d) + "” finished."], fix: "Check the plan's order with the run's owner."}); }
+  const lanes = det ? (det.lanes || []).filter(l => l.state === "running").map(l => [l.persona, l.label]) : (r.agents || []).filter(a => a.state === "running").map(a => ["", a.label]);
+  const groups = new Map();
+  for (const [persona, label] of lanes) { const m = member(persona) || member(label), l = String(label || ""), step = laneStep(l) || plainStep(l);
+    const k = (m ? m.id : persona || l) + "|" + step.toLowerCase(); groups.set(k, (groups.get(k) || []).concat([[m, step]])); }
+  for (const g of groups.values()) if (g.length > 1 && g[0][1]) out.push({code: "C5", parts: ["Two " + (g[0][0] ? roleName(g[0][0]) : "subagent") + " lanes run “" + g[0][1] + "”. One may be a stale launch."]});
+  if (runState(r) === "lost") out.push({code: "C6", parts: ["No update for " + Math.round(runQuiet(r)) + " min and its session is not live."], fix: "It may have ended without finishing; the step stays open until someone closes it."});
+  if (r.state === "done") { const open = plan.filter(s => s.state !== "done" && s.state !== "skipped");
+    if (open.length) out.push({code: "C7", parts: ["Finished with " + plural(open.length, "step") + " not done: " + open.map(stepTitle).join(", ") + "."]}); }
+  for (const id of taskIds(r.goal)) if (ITEMBY.get(id).status === "done") out.push({code: "C11", parts: ["The goal names " + id + ", which is done."]});
+  return out;
+}
+function doneWhen(body) {
+  const src = String(body || ""), m = /^#{1,6}\s*Done when\b.*$/im.exec(src); if (!m) return {total: 0, open: 0};
+  const rest = src.slice(m.index + m[0].length), end = rest.search(/^#{1,6}\s/m), sec = end < 0 ? rest : rest.slice(0, end);
+  return {total: (sec.match(/^\s*[-*+]\s+\[[ xX~]\]/gm) || []).length, open: (sec.match(/^\s*[-*+]\s+\[ \]/gm) || []).length};
+}
+function itemFlags(it, body) {
+  const out = [], f = "dev task " + flagOf(it.scope) + " ";
+  if (it.legacy) return out;
+  if (it.status === "done" && it.claimed_by) out.push({code: "C1", parts: ["Done, but still claimed by " + it.holder + "."], cmd: f + "release " + it.id + ' --why "done"'});
+  if (it.open && it.claimed_by && it.lock === "held") { const x = BYWHO.get(it.holder);
+    if (x && !x.sessions.length && x.updated && nowS() - x.updated > 7200) out.push({code: "C8", parts: ["Claimed by " + it.holder + ", who has had no live session for " + dur(nowS() - x.updated) + "."], cmd: f + "release " + it.id + ' --why "…"'}); }
+  if (it.status === "done") { const dw = doneWhen(body != null ? body : it.body); if (dw.open) out.push({code: "C10", parts: ["Marked done, but " + dw.open + " of " + dw.total + " “Done when” checks are not ticked."]}); }
+  if (it.status === "done") for (const r of RUNS) if (r.state !== "done" && taskIds(r.goal).includes(it.id)) out.push({code: "C11", parts: ["The goal of the run “" + r.goal + "” names " + it.id + ", which is done."]});
+  return out;
+}
+function projFlags(p) {
+  const out = [], sl = p.status_line, gb = (p.main || {}).branch;
+  if ((p.status === "done" || p.status === "archived") && p.cnt && p.cnt.open) out.push({code: "C2", parts: ["Marked done, with " + plural(p.cnt.open, "open task") + "."], fix: "Close or move the tasks, or reopen the project."});
+  if (sl && sl.branch && gb && sl.branch !== gb) out.push({code: "C3", parts: ["The latest status was saved on ", {code: sl.branch}, "; git is on ", {code: gb}, " now. It may be out of date."], fix: "Save a new status with dev handoff.", cmd: "dev handoff " + p.id});
+  return out;
+}
+function initFlags(x) { return (x.status === "done" || x.status === "archived") && x.cnt.open ? [{code: "C2", parts: ["Marked done, with " + plural(x.cnt.open, "open task") + "."], fix: "Close or move the tasks, or reopen the initiative."}] : []; }
+function allFlags() {
+  if (CACHE.flags) return CACHE.flags;
+  const out = [];
+  for (const p of P) for (const f of projFlags(p)) out.push(Object.assign({where: p.name || p.id, open: () => openModal("project", p.id)}, f));
+  for (const x of INITS) for (const f of initFlags(x)) out.push(Object.assign({where: x.title, open: () => openModal("initiative", x.id)}, f));
+  for (const it of ITEMS) for (const f of itemFlags(it)) out.push(Object.assign({where: it.id + " " + it.title, open: () => openTask(it.id)}, f));
+  for (const r of RUNS) for (const f of runFlags(r)) out.push(Object.assign({where: "Run “" + (r.goal || r.id) + "”", open: () => openModal("run", r.id)}, f));
+  return CACHE.flags = out;
+}
+function flagLine(f) { return h("div", {class: "warnline"}, stateDot("warn"), h("span", {style: "min-width:0"}, flagNodes(f), f.fix ? h("span", {class: "t2", text: " " + f.fix}) : null), f.cmd ? icopy(f.cmd, "Copy the fix") : null); }
+function flagCallout(f) { return callout("warn", flagStr(f), f.fix || null, f.cmd ? cmdBtn(f.cmd, false, "Copy the fix") : null); }
+/* everything that needs you, in one list (Home, the Needs you page, the tab dots): decisions and CI first, then the rest by severity */
+function needs() {
+  if (CACHE.needs) return CACHE.needs;
+  const lead = [], mid = [], now = nowS();
+  for (const r of RUNS) for (const d of pending(r)) lead.push({sev: "risk", kind: "decision", title: "Decision waiting: " + d.question, detail: who(d.from_name) + " in “" + (r.goal || "a run") + "”",
+    project: r.project, cmd: "", ts: d.ts || 0, modal: ["run", r.id], at: "waiting", go: "Open the run"});
+  lead.sort((a, b) => a.ts - b.ts);
+  for (const w of ciLatest()) if (w.state === "failed" && now - (w.ts || 0) < 86400) { const f = (w.failures || [])[0] || {};
+    lead.push({sev: "risk", kind: "ci-watch", title: "CI failed on " + w.branch + ": " + ciClass(w, f), detail: repoName(w.repo) + (w.sha ? " @ " + w.sha : ""), project: BYID.has(w.repo) ? w.repo : null, cmd: f.id ? "dev run view " + f.id + " --failed" : "dev ci status --watch", url: f.url || null, ts: w.ts || 0, modal: ["ci", ciKey(w)]}); }
+  for (const j of JOBS) { const st = jobState(j, now);
+    if (st === "failed" || st === "timeout") mid.push({sev: "warn", kind: "job-failed", title: st === "timeout" ? "Job " + j.name + " timed out" : "Job " + j.name + " failed (exit " + j.last.rc + ")", detail: (j.last && j.last.summary) || j.about || "", cmd: "dev jobs run " + j.name, ts: (j.last || {}).start || 0, modal: ["job", j.name]}); }
+  for (const s of D.issues || []) mid.push({sev: "warn", kind: "setup", title: s.text, detail: "Setup issue: " + s.kind, cmd: "dev doctor", ts: 0, view: "health"});
+  return CACHE.needs = lead.concat(ACTIONS.filter(a => a.sev === "risk"), mid, ACTIONS.filter(a => a.sev !== "risk"));
+}
+/* the Background tab's dot: red when something failed or waits for you, amber when a job is late or a run stopped reporting */
+function bgAttention() {
+  const now = nowS(), dec = RUNS.reduce((a, r) => a + pending(r).length, 0), ci = ciLatest().filter(w => w.state === "failed" && now - (w.ts || 0) < 86400).length;
+  const jf = JOBS.filter(j => ["failed", "timeout"].includes(jobState(j, now))).length;
+  if (dec || ci || jf) return ["risk", [dec ? plural(dec, "decision") + " waiting for you" : "", ci ? plural(ci, "CI failure") + " today" : "", jf ? plural(jf, "job") + " failed" : ""].filter(Boolean).join(", ")];
+  const late = JOBS.filter(j => ["overdue", "unscheduled"].includes(jobState(j, now))).length, lost = RUNS.filter(r => runState(r) === "lost").length;
+  if (late || lost) return ["warn", [late ? plural(late, "job") + " late or not scheduled" : "", lost ? plural(lost, "run") + " stopped reporting" : ""].filter(Boolean).join(", ")];
+  return null;
+}
 function initFor(path) { const m = /^initiatives\/([^/]+)\//.exec(path); return m ? BYINIT.get(m[1]) : null; }
 function projectFor(path) { let best = null; for (const p of P) if ((path === "projects/" + p.id + ".md" || path.startsWith("plans/" + p.id + "/")) && (!best || p.id.length > best.id.length)) best = p; return best; }
 
@@ -1980,7 +2768,10 @@ const ICON = {
   session: [["circle", {cx: 8, cy: 8, r: 5}], ["circle", {cx: 8, cy: 8, r: 1.5, fill: "currentColor"}]],
   merge: [["circle", {cx: 4.5, cy: 3.5, r: 1.5}], ["circle", {cx: 4.5, cy: 12.5, r: 1.5}], ["circle", {cx: 11.5, cy: 12.5, r: 1.5}], ["path", {d: "M4.5 5v6M4.5 6c0 3 7 2 7 5"}]],
   gear: [["circle", {cx: 8, cy: 8, r: 2}], ["path", {d: "M8 2v2M8 12v2M2 8h2M12 8h2M3.8 3.8l1.4 1.4M10.8 10.8l1.4 1.4M3.8 12.2l1.4-1.4M10.8 5.2l1.4-1.4"}]],
-  miss: [["circle", {cx: 8, cy: 8, r: 5}], ["path", {d: "M8 5.5v3M8 10.5v.1"}]]
+  miss: [["circle", {cx: 8, cy: 8, r: 5}], ["path", {d: "M8 5.5v3M8 10.5v.1"}]],
+  doc: [["path", {d: "M4.5 2.5h4.5l2.5 2.5v8.5h-7z"}], ["path", {d: "M9 2.5V5h2.5M6.5 8h3M6.5 10.5h3"}]],
+  book: [["path", {d: "M3 3.5c1.8-.6 3.5-.6 5 .5v9c-1.5-1.1-3.2-1.1-5-.5zM13 3.5c-1.8-.6-3.5-.6-5 .5v9c1.5-1.1 3.2-1.1 5-.5z"}]],
+  pulse: [["path", {d: "M2 8.5h2.5l1.5-4 2.5 7 1.5-3.5H14"}]]
 };
 function icon(name, label) {
   return sv("svg", {class: "i i-" + name, viewBox: "0 0 16 16", width: 16, height: 16, fill: "none", stroke: "currentColor", "stroke-width": 1.5, "stroke-linecap": "round", "stroke-linejoin": "round",
@@ -2002,24 +2793,34 @@ function cmdMenu(label, rows) {
    (role=img + aria-label) and every mark a tooltip with its exact value (data-tip: hover, and focus where the visual is focusable).
    Colors follow the dataviz rules: the fixed status palette (always with a label, legend or tooltip), neutral ink for progress,
    a one-hue warm-grey ramp for magnitude, text never in a data color. */
-const HS = {ok: "On track", warn: "At risk", risk: "Off track", done: "Done", none: "No data"};
-const HORDER = ["risk", "warn", "ok", "done", "none"];
+/* honest states: "On track" needs evidence (git state or the PR list) and activity in the last 14 days; no evidence is "No data" */
+const HS = {ok: "On track", warn: "At risk", risk: "Off track", quiet: "Quiet", done: "Done", none: "No data"};
+const HWHY = {quiet: "Quiet: no activity in 14 days", none: "No data: nothing to check it against"};
+const HORDER = ["risk", "warn", "ok", "quiet", "done", "none"];
+const QUIET_DAYS = 14;
 function hstate(p) {
   if (!p) return "none";
-  const st = p.status, lv = p.health ? p.health.level : "ok";
+  const st = p.status, lv = p.health ? p.health.level : "none";
   if (st === "done" || st === "archived") return "done";
   if (st === "blocked" || lv === "risk") return "risk";
   if (st === "paused" || lv === "warn") return "warn";
-  if (st === "untracked" || st === "unknown") return "none";
+  if (st === "untracked" || st === "unknown" || lv === "none") return "none";
+  if (p.health && p.health.known === false) return "none";   /* no git state and no PR list: nothing backs "on track" */
+  if (!p.last_activity || nowS() - p.last_activity > QUIET_DAYS * 86400) return "quiet";
   return "ok";
 }
 function memberState(m) { const p = BYID.get(m.id); return p ? hstate(p) : hstate({status: m.status || "unknown"}); }
-/* an initiative is off track when blocked or overdue, at risk when paused, due within a week or holding blocked tasks */
+/* an initiative is off track when blocked or overdue, at risk when paused, due within a week or holding blocked tasks; it follows its
+   members and tasks: nothing to judge is "No data", and no activity in 14 days is "Quiet" */
 function istate(x) {
   if (x.status === "done" || x.status === "archived") return "done";
   const today = lkey(new Date()), week = lkey(new Date(Date.now() + 7 * 864e5));
   if (x.status === "blocked" || (x.due && x.due < today)) return "risk";
   if (x.status === "paused" || (x.due && x.due <= week) || x.cnt.blocked) return "warn";
+  const ms = x.members.map(memberState), cut = nowS() - QUIET_DAYS * 86400;
+  if (!ms.length && !x.items.length) return "none";
+  const recent = (x.last || 0) > cut || x.items.some(i => iso(i.updated) > cut);
+  if (!recent && ms.every(s => s === "none" || s === "quiet" || s === "done")) return ms.length && ms.every(s => s === "none") ? "none" : "quiet";
   return "ok";
 }
 function tally(keys) { const c = {}; for (const k of keys) c[k] = (c[k] || 0) + 1; return c; }
@@ -2098,14 +2899,14 @@ function duePill(due, done, none) {
 function sessBar(s, who, i) {
   const p = s.progress || null, blocked = !!(p && p.state === "blocked"), pct = p ? (p.steps ? Math.min(100, 100 * (p.step || 0) / p.steps) : 0) : null;
   const what = (p && p.goal) || (s.status_parts && s.status_parts.task) || scopeName(s.project || "") || "Session";
-  const text = what + ", " + scopeName(s.project || "") + (s.branch ? " on " + s.branch : "") + ", " + (s.agent || "agent") + (p ? (blocked ? ": blocked" : p.steps ? ": " + (p.step || 0) + " of " + p.steps + " steps" + (p.eta_min != null ? ", about " + fmtMin(p.eta_min) + " left" : "") : "") : "");
+  const text = what + ", " + scopeName(s.project || "") + (s.branch ? " on " + s.branch : "") + ", " + (s.agent || "agent") + (p ? (blocked ? ": blocked" : p.steps ? ": " + (p.step || 0) + " of " + p.steps + " steps" + (p.eta_min != null ? ", about " + fmtAbout(p.eta_min) + " left" : "") : "") : "");
   return h("button", {class: "sbar" + (blocked ? " blocked" : ""), type: "button", "aria-label": text, "data-tip": text, onclick: e => { e.stopPropagation(); openModal("session", who + "~" + i); }},
     h("span", {class: "sb-l"}, h("span", {class: "ell", text: scopeName(s.project || "") || s.agent || "session"}), h("span", {class: "num t2", text: p ? (blocked ? "blocked" : p.steps ? (p.step || 0) + "/" + p.steps : "") : ""})),
     h("span", {class: "sb-b"}, pct != null ? h("i", {style: "width:" + pct.toFixed(0) + "%"}) : null));
 }
 /* a stat tile: label, value, one visual, its legend */
 function statTile(o) {
-  return h(o.href ? "a" : "div", {class: "stile" + (o.cls ? " " + o.cls : ""), href: o.href || null, "data-nav": o.href ? "" : null},
+  return h(o.href ? "a" : "div", {class: "stile" + (o.cls ? " " + o.cls : ""), href: o.href || null, "data-nav": o.href ? "" : null, onclick: o.onclick || null},
     h("span", {class: "s-l", text: o.label}), h("span", {class: "s-v"}, h("b", {class: "num", text: String(o.value)}), o.unit ? h("span", {class: "t2", text: o.unit}) : null),
     o.viz || null, o.legend || null);
 }
@@ -2244,7 +3045,7 @@ function itemRow(it, opts) {
   opts = opts || {};
   const first = taskCmds(it)[0];
   const sub = [opts.scope && it.scope !== opts.home ? scopeChip(it.scope) : null, it.due ? dueBadge(it.due, !it.open) : null, it.legacy && it.n ? h("span", {text: "#" + it.n + " in the note"}) : null].filter(Boolean);
-  return h("li", {class: "irow" + (it.open ? "" : " closed"), onclick: rowClick(() => openTask(it.id))},
+  return h("li", {class: "irow" + (it.open ? "" : " closed"), "data-key": "task~" + it.id, "data-sig": [it.status, it.bucket, it.claimed_by, it.lock].join("|"), "data-open": "task:" + it.id, onclick: rowClick(() => openTask(it.id))},
     istatusIcon(it.status),
     h("div", {class: "im"}, h("a", {class: "itl", href: taskHref(it.id), "data-nav": "", title: it.title, onclick: e => { e.preventDefault(); openTask(it.id); }, text: it.title}),
       sub.length ? h("div", {class: "imeta"}, sub) : null),
@@ -2296,32 +3097,32 @@ function counts(fn) { const m = new Map(); for (const p of P) for (const v of []
 function liveRun(s, asOf) {
   const p = s.progress || null, run = runOf(s), now = nowS();
   if (!p) return null;
-  const el = p.started ? (now - p.started) / 60 : 0, est = (run && run.estimate_cal) || p.estimate || 0;
+  const el = p.started ? (now - p.started) / 60 : 0, est = run ? runEst(run) : p.estimate || 0;
   const left = p.eta_min != null && p.state === "running" ? Math.max(0, p.eta_min - (now - (asOf || D.rendered || now)) / 60) : null;
   const pct = p.steps ? Math.min(100, 100 * (p.step || 0) / p.steps) : est ? Math.min(100, 100 * el / est) : null;
   const over = est && (p.active_min != null ? p.active_min : el) > est && p.state === "running";
-  const state = p.state === "blocked" ? "blocked" : p.state === "done" ? "done" : left != null ? "about " + fmtMin(left) + " left" : "running";
+  const state = p.state === "blocked" ? "blocked" : p.state === "done" ? "done" : left != null ? "about " + fmtAbout(left) + " left" : "running";
   const steps = p.steps ? (p.step || 0) + " of " + p.steps + " steps" : "step " + (p.step || 0);
   // active time (turns and subagents), with wall-clock time beside it only when they differ
   const act = p.active_min != null ? p.active_min : el, wall = p.wall_min != null ? p.wall_min : el;
-  const timeText = fmtMin(act) + " active" + (wall - act >= 5 ? " (" + fmtMin(wall) + " wall)" : "") + (est ? " of about " + fmtMin(est) : "");
+  const timeText = fmtMin(act) + " active" + (wall - act >= 5 ? " (" + fmtMin(wall) + " wall)" : "") + (est ? " of about " + fmtAbout(est) : "");
   const range = p.eta_lo != null && p.eta_hi != null && p.state === "running"
-    ? (fmtMin(p.eta_lo) === fmtMin(p.eta_hi) ? "about " + fmtMin(p.eta_hi) : fmtMin(p.eta_lo) + "–" + fmtMin(p.eta_hi)) + " left" : null;
+    ? (fmtAbout(p.eta_lo) === fmtAbout(p.eta_hi) ? "about " + fmtAbout(p.eta_hi) : fmtAbout(p.eta_lo) + "–" + fmtAbout(p.eta_hi)) + " left" : null;
   const state2 = p.state === "blocked" ? "blocked" : p.state === "done" ? "done" : range || state;
-  const plan = p.plan || [], glyph = {done: "✓", running: "▸", blocked: "■", skipped: "–", pending: "○"};
-  const shown = plan.filter(x => x.state === "running" || x.state === "blocked")
+  const plan = (run && run.plan) || p.plan || [], glyph = {done: "✓", running: "▸", blocked: "■", skipped: "–", pending: "○", unverified: "!"};
+  const shown = plan.filter(x => ["running", "blocked", "unverified"].includes(x.state))
     .concat(plan.filter(x => x.state === "pending").slice(0, 2));
   const doneN = plan.filter(x => x.state === "done" || x.state === "skipped").length;
   const stepList = shown.length ? h("ul", {class: "rsteps", "aria-label": "Plan steps"},
     shown.map(x => h("li", {class: x.state},
       h("span", {class: "g", "aria-hidden": "true", text: glyph[x.state] || "○"}),
-      h("span", {class: "ell", title: x.name}, x.name, x.owner && x.owner !== "main" ? h("span", {class: "who", text: " · " + x.owner}) : null),
-      h("span", {class: "m num", text: x.state === "running" ? fmtMin(x.min || 0) + " of ~" + fmtMin(x.est || 0) : "~" + fmtMin(x.est || 0)}))),
+      h("span", {class: "ell", title: stepTitle(x) + " · " + stepWho(x)}, stepTitle(x), x.owner && x.owner !== "main" ? h("span", {class: "who", text: " · " + stepWho(x)}) : null),
+      h("span", {class: "m num", text: x.state === "running" ? fmtMin(x.min || 0) + " of ~" + fmtAbout(x.est || 0) : x.state === "unverified" ? stepWord(x.state)[1] : "~" + fmtAbout(x.est || 0)}))),
     doneN ? h("li", {class: "more"}, h("span", {class: "g", text: "✓"}), h("span", {text: doneN + " done"}), h("span")) : null) : null;
   const lanes = (p.agents || []).length ? h("div", {class: "lanes", "aria-label": "Crew"},
-    p.agents.map(a => h("span", {class: a.state === "running" ? "on" : a.state === "lost" ? "lost" : "",
-      title: a.state === "lost" ? "stopped reporting" : a.state},
-      (a.state === "running" ? "▸ " : a.state === "lost" ? "! " : "✓ ") + a.label.split(":")[0] + " " + fmtMin(a.min || 0)))) : null;
+    p.agents.map(a => h("span", {class: a.state === "running" ? "on" : a.state === "lost" || a.state === "unverified" ? "lost" : "",
+      title: a.state === "lost" ? "stopped reporting" : a.state === "unverified" ? stepWord(a.state)[1] : a.state},
+      (a.state === "running" ? "▸ " : a.state === "lost" || a.state === "unverified" ? "! " : "✓ ") + who(a.label) + " " + fmtMin(a.min || 0)))) : null;
   return h("div", {class: "run " + (p.state || "running")},
     h("div", {class: "rh"}, h("strong", {class: "ell", title: p.goal || "", text: p.goal || "Agent run"}), h("span", {class: "rs num", text: state2})),
     pct != null ? h("div", {class: "rbar" + (over ? " over" : ""), role: "progressbar", "aria-valuenow": Math.round(pct), "aria-valuemin": 0, "aria-valuemax": 100, "aria-label": "Run progress: " + steps + ", " + state}, h("i", {style: "width:" + pct.toFixed(1) + "%"})) : null,
@@ -2363,13 +3164,68 @@ function sessionBlock(s, who, asOf, hideProject) {
     turn || s.subagents ? h("div", {class: "rmeta" + (slow ? " warn" : "")}, meta(turn ? "turn running for " + dur(turn) + (slow ? ", longer than 90% of turns here" : "") : null, s.subagents ? plural(s.subagents, "subagent") + " running" : null)) : null);
 }
 /* ---------------------------------------------------------------- navbar + filters */
+/* the views are navigation (links with aria-current), not tabs that control a panel. Priority+: every view renders in one row; after layout,
+   on resize and when fonts load, the views that do not fit move from the end into More, so the row never scrolls sideways */
+const NAV = {open: false};
+function navDots() {
+  const urgent = needs().filter(a => a.sev === "risk").length, colls = (D.collisions || []).length, bg = bgAttention();
+  return {overview: urgent ? ["risk", plural(urgent, "urgent item")] : null, background: bg, team: colls ? ["warn", plural(colls, "collision")] : null};
+}
+function curView() { return S.view === "actions" ? "overview" : S.view; }
+function viewHref(v) { return encode(Object.assign({}, S, PAGEKEYS, {view: v, id: "", task: "", modal: ""})); }
+function navDot(d) { return d ? h("span", {class: "n" + (d[0] === "warn" ? " warn" : ""), role: "img", title: d[1], "aria-label": d[1]}) : null; }
 function renderNav() {
-  const tabs = $("#tabs"); clear(tabs);
-  const urgent = ACTIONS.filter(a => a.sev === "risk").length, colls = (D.collisions || []).length;
-  for (const [v, label, key] of VIEWS) tabs.append(h("button", {class: "tab" + (v === "activity" ? " sec" : ""), role: "tab", "aria-selected": String(S.view === v || (v === "overview" && S.view === "actions")), type: "button", onclick: () => go(v), title: label + " (g " + key + ")"},
-    label, v === "overview" && urgent ? h("span", {class: "n", role: "img", title: plural(urgent, "urgent item"), "aria-label": plural(urgent, "urgent item")}) : null,
-    v === "team" && colls ? h("span", {class: "n warn", role: "img", title: plural(colls, "collision"), "aria-label": plural(colls, "collision")}) : null));
+  const tabs = $("#tabs"), dots = navDots(), cur = curView(); clear(tabs); clear($("#navmore"));
+  for (const [v, label, key] of VIEWS) tabs.append(h("a", {class: "tab" + (v === REFVIEW ? " sec" : ""), href: viewHref(v), "data-view": v, "aria-current": v === cur ? "page" : null, title: label + " (g " + key + ")",
+    onclick: e => { if (e.metaKey || e.ctrlKey || e.shiftKey || e.button) return; e.preventDefault(); closeMore(); go(v); }}, label, navDot(dots[v])));
+  fitNav();
   const q = $("#q"); if (document.activeElement !== q) q.value = S.q;
+}
+function fitNav() {
+  const tabs = $("#tabs"), wrap = $("#navmore"); if (!tabs || !wrap) return;
+  const focusView = document.activeElement && document.activeElement.closest && document.activeElement.closest("#navmore .menu") ? document.activeElement.getAttribute("data-view") : "";
+  const all = $$(".tab", tabs).concat($$(".menu a", wrap).map(a => a._tab).filter(Boolean));
+  for (const t of all) tabs.append(t);   /* back in the row, in order */
+  clear(wrap); wrap.hidden = true;
+  if (tabs.scrollWidth <= tabs.clientWidth + 1) { NAV.open = false; return; }
+  const dots = navDots(), cur = curView(), moved = [];
+  const btn = h("button", {type: "button", id: "morebtn", "aria-haspopup": "menu", "aria-expanded": "false", "aria-controls": "moremenu"});
+  const menu = h("div", {class: "menu", id: "moremenu", role: "menu", "aria-label": "More views", hidden: true});
+  wrap.append(btn, menu); wrap.hidden = false;
+  const label = () => { const c = moved.find(t => t.getAttribute("data-view") === cur), dot = moved.map(t => dots[t.getAttribute("data-view")]).filter(Boolean).sort((a, b) => (a[0] === "risk" ? 0 : 1) - (b[0] === "risk" ? 0 : 1))[0];
+    btn.className = c ? "cur" : ""; append(clear(btn), [c ? c.firstChild.textContent : "More", icon("chevron"), navDot(dot || null)]);
+    btn.setAttribute("aria-label", (c ? c.firstChild.textContent + ", current view. " : "") + "More views" + (dot ? ", " + dot[1] : "")); };
+  label();
+  const row = $$(".tab", tabs);
+  while (row.length > 1 && tabs.scrollWidth > tabs.clientWidth + 1) { const t = row.pop(); moved.unshift(t); t.remove(); label(); }
+  /* the moved views become menu items: name, attention dot, the shortcut on screens with a fine pointer; the current one is checked */
+  moved.forEach((t, i) => {
+    const v = t.getAttribute("data-view"), d = dots[v], spec = VIEWS.find(x => x[0] === v);
+    if (i && v === REFVIEW) menu.append(h("hr", {role: "separator"}));
+    const a = h("a", {role: "menuitem", href: t.getAttribute("href"), "data-view": v, tabindex: "-1", "aria-current": v === cur ? "page" : null,
+      onclick: e => { if (e.metaKey || e.ctrlKey || e.shiftKey) return; e.preventDefault(); closeMore(true); go(v); }},
+      h("span", {class: "mck", "aria-hidden": "true"}, v === cur ? icon("done") : null), spec[1], navDot(d), h("kbd", {"aria-hidden": "true", text: "g " + spec[2]}));
+    a._tab = t; menu.append(a);
+  });
+  btn.addEventListener("click", () => NAV.open ? closeMore(true) : openMore(0));
+  btn.addEventListener("keydown", e => { if (e.key === "ArrowDown") { e.preventDefault(); openMore(0); } else if (e.key === "ArrowUp") { e.preventDefault(); openMore(-1); } });
+  menu.addEventListener("keydown", e => {
+    const items = $$("a", menu), i = items.indexOf(document.activeElement);
+    if (e.key === "ArrowDown" || e.key === "ArrowUp") { e.preventDefault(); items[(i + (e.key === "ArrowDown" ? 1 : -1) + items.length) % items.length].focus(); }
+    else if (e.key === "Home" || e.key === "End") { e.preventDefault(); items[e.key === "Home" ? 0 : items.length - 1].focus(); }
+    else if (e.key === "Escape") { e.preventDefault(); e.stopPropagation(); closeMore(true); }
+    else if (e.key === "Tab") closeMore(false);
+  });
+  if (NAV.open) { menu.hidden = false; btn.setAttribute("aria-expanded", "true"); const f = focusView && $('a[data-view="' + focusView + '"]', menu); if (f) f.focus({preventScroll: true}); }
+}
+function openMore(at) {
+  const btn = $("#morebtn"), menu = $("#moremenu"); if (!btn) return;
+  NAV.open = true; menu.hidden = false; btn.setAttribute("aria-expanded", "true");
+  const items = $$("a", menu); if (items.length) items[at < 0 ? items.length - 1 : at].focus();
+}
+function closeMore(refocus) {
+  const btn = $("#morebtn"), menu = $("#moremenu"); NAV.open = false; if (!btn) return;
+  menu.hidden = true; btn.setAttribute("aria-expanded", "false"); if (refocus) btn.focus();
 }
 function renderFilters() {
   const bar = $("#filters"); clear(bar);
@@ -2387,6 +3243,8 @@ function renderFilters() {
 
 /* ---------------------------------------------------------------- Home: a compact summary of everything */
 function actionTarget(a) {
+  if (a.modal) return () => { if (a.at) OPENAT = a.at; openModal(a.modal[0], a.modal[1]); };
+  if (a.view) return () => go(a.view);
   const tid = (/\b([TFBS]-[0-9a-z]{6,})\b/.exec(a.cmd || "") || [])[1];
   if (tid && ITEMBY.has(tid)) return () => openTask(tid);
   if (a.project && (BYID.has(a.project) || MEMBEROF.has(a.project))) return () => openProject(a.project);
@@ -2396,6 +3254,8 @@ function actionTarget(a) {
   return null;
 }
 function actionHref(a) {
+  if (a.modal) return modalHref(a.modal[0], a.modal[1]);
+  if (a.view) return link({view: a.view});
   const tid = (/\b([TFBS]-[0-9a-z]{6,})\b/.exec(a.cmd || "") || [])[1];
   if (tid && ITEMBY.has(tid)) return taskHref(tid);
   if (a.project && (BYID.has(a.project) || MEMBEROF.has(a.project))) return link({view: "projects", id: a.project});
@@ -2408,10 +3268,11 @@ const SEVL = {risk: "Urgent", warn: "Needs a look", info: "For information"};
 const GROUP = {"ci-failing": n => n + " of your PRs are failing CI", "changes-requested": n => "Changes requested on " + n + " of your PRs", "conflicts": n => n + " of your PRs have merge conflicts",
   "review-waiting": n => n + " of your PRs are waiting for review", "review-requested": n => n + " PRs are waiting for your review", "blocked": n => n + " projects or initiatives are blocked",
   "blocked-task": n => n + " of your tasks are blocked", "overdue": n => n + " tasks or initiatives are overdue", "idle-work": n => n + " checkouts have unsaved work left idle",
-  "layout": n => n + " repositories are outside the workspace layout", "stale-note": n => n + " handoff notes are behind the code", "expired-lock": n => n + " expired locks are still held", "collision": n => n + " collisions"};
+  "layout": n => n + " repositories are outside the workspace layout", "stale-note": n => n + " handoff notes are behind the code", "expired-lock": n => n + " expired locks are still held", "collision": n => n + " collisions",
+  "decision": n => n + " decisions wait for you", "ci-watch": n => "CI failed on " + n + " branches", "job-failed": n => n + " scheduled jobs failed", "setup": n => n + " setup issues"};
 function actionWhere(a) {
   const p = a.project && BYID.get(a.project), n = (/#\d+/.exec(a.title || "") || [])[0], name = p ? p.name || p.id : a.project ? String(a.project).split("/").pop() : "";
-  return n && name ? n + " in " + name : name || a.title;
+  return n && name ? n + " in " + name : name || (a.modal ? a.detail : "") || a.title;
 }
 function actionGroups(list) {
   const out = [], by = new Map();
@@ -2425,8 +3286,9 @@ function actionRow(a, primary) {
     : href ? h("a", {class: "at", href, "data-nav": "", text: a.title}) : h("span", {class: "at", tabindex: "0", "data-nav": "", text: a.title});
   return h("li", {class: "act", onclick: rowClick(() => { if (go_) go_(); })},
     h("span", {class: "dot d-" + a.sev, role: "img", title: SEVL[a.sev], "aria-label": SEVL[a.sev]}),
-    h("div", {style: "min-width:0"}, title, h("div", {class: "ad"}, h("span", {text: KIND[a.kind] || a.kind}), p ? h("span", {class: "proj", text: p.name || p.id}) : null, a.detail ? h("span", {class: "ell"}, inline(a.detail)) : null)),
-    h("div", {class: "ar"}, primary ? cmdBtn(a.cmd, true, "Copy command") : icopy(a.cmd, "Copy command")));
+    h("div", {style: "min-width:0"}, title, h("div", {class: "ad"}, h("span", {text: KIND[a.kind] || a.kind}), p ? h("span", {class: "proj", text: p.name || p.id}) : null, a.detail ? h("span", {class: "ell"}, a.modal || a.view ? a.detail : inline(a.detail)) : null)),
+    h("div", {class: "ar"}, !a.cmd ? (href ? h("a", {class: "btn sm", href, onclick: e => { e.preventDefault(); e.stopPropagation(); if (go_) go_(); }}, a.go || "Open") : null)
+      : primary ? cmdBtn(a.cmd, true, "Copy command") : icopy(a.cmd, "Copy command")));
 }
 function groupRow(g, primary) {
   const a = g.items[0], n = g.items.length;
@@ -2436,28 +3298,28 @@ function groupRow(g, primary) {
   return h("li", {class: "act", onclick: rowClick(() => set({view: "actions", id: "", task: "", kind: label}, true))},
     h("span", {class: "dot d-" + a.sev, role: "img", title: SEVL[a.sev], "aria-label": SEVL[a.sev]}),
     h("div", {style: "min-width:0"}, h("a", {class: "at", href, "data-nav": "", text: (GROUP[a.kind] || (k => k + " " + label + " items"))(n)}), h("div", {class: "ad"}, h("span", {class: "ell", text: where}))),
-    h("div", {class: "ar"}, primary ? cmdBtn(a.cmd, true, "Copy command" + (num ? " for " + num : "")) : null));
+    h("div", {class: "ar"}, primary && a.cmd ? cmdBtn(a.cmd, true, "Copy command" + (num ? " for " + num : "")) : null));
 }
 /* Home: four figures, each with its context, linking to the filtered list */
 /* Home tiles: where things stand, each a number and one part-to-whole bar with its legend */
 function kpiStrip() {
-  const k = D.kpis || {}, sev = tally(ACTIONS.map(a => a.sev)), ic = tally(INITS.map(istate)), pc = tally(P.map(hstate));
+  const NE = needs(), sev = tally(NE.map(a => a.sev)), ic = tally(INITS.map(istate)), pc = tally(P.map(hstate)), tc = cnt(allItems());
   const sevParts = [["risk", sev.risk || 0, "Urgent"], ["warn", sev.warn || 0, "Needs a look"], ["done", sev.info || 0, "For information"]];
-  const taskParts = [["mark", k.doing || 0, "Doing"], ["risk", k.blocked || 0, "Blocked"], ["none", Math.max(0, (k.open || 0) - (k.doing || 0) - (k.blocked || 0)), "To do"]];
+  const taskParts = [["mark", tc.doing, "Doing"], ["risk", tc.blocked, "Blocked"], ["none", tc.todo, "To do"]];   /* the same count as Tasks (one helper, H7) */
   return [
-    statTile({label: "Needs you", value: ACTIONS.length, href: link({view: "actions"}), viz: segBar(sevParts, "What needs you"), legend: legend(sevParts), cls: "sp-3"}),
+    statTile({label: "Needs you", value: NE.length, href: link({view: "actions"}), viz: segBar(sevParts, "What needs you"), legend: legend(sevParts), cls: "sp-3"}),
     statTile({label: "Initiatives", value: INITS.length, href: link({view: "initiatives"}), viz: segBar(hparts(ic), "Initiatives"), legend: legend(hparts(ic)), cls: "sp-3"}),
     statTile({label: "Projects", value: P.length, href: link({view: "projects"}), viz: segBar(hparts(pc), "Projects"), legend: legend(hparts(pc)), cls: "sp-3"}),
-    statTile({label: "Open tasks", value: k.open || 0, href: link({view: "tasks"}), viz: segBar(taskParts, "Open tasks"), legend: legend(taskParts), cls: "sp-3"})];
+    statTile({label: "Open tasks", value: tc.open, href: link({view: "tasks"}), viz: segBar(taskParts, "Open tasks"), legend: legend(taskParts), cls: "sp-3"})];
 }
 function needsPanel() {
-  const groups = actionGroups(ACTIONS);
-  const row = g => { const a = g.items[0], n = g.items.length, one = n === 1, kind = one ? "action" : "actions", id = one ? actKey(a) : (KIND[a.kind] || a.kind);
+  const NE = needs(), groups = actionGroups(NE);
+  const row = g => { const a = g.items[0], n = g.items.length, one = n === 1, tgt = one && a.modal ? a.modal : [one ? "action" : "actions", one ? actKey(a) : (KIND[a.kind] || a.kind)], kind = tgt[0], id = tgt[1];
     return h("li", {class: "act", onclick: rowClick(() => openModal(kind, id))}, h("span", {class: "dot k-" + (a.sev === "risk" ? "risk" : a.sev === "warn" ? "warn" : "done"), role: "img", title: SEVL[a.sev], "aria-label": SEVL[a.sev]}),
       h("div", {style: "min-width:0"}, modalLink(kind, id, one ? a.title : (GROUP[a.kind] || (m => m + " " + id + " items"))(n), "at ell"), h("div", {class: "ad"}, h("span", {class: "ell", text: one ? actionWhere(a) : g.items.slice(0, 3).map(actionWhere).join(", ") + (n > 3 ? " and " + (n - 3) + " more" : "")}))),
       n > 1 ? h("span", {class: "cnt num", "aria-hidden": "true", text: String(n)}) : h("span")); };
-  return panel("Needs you", ACTIONS.length || null, ACTIONS.length ? h("a", {class: "more", href: link({view: "actions"}), text: "All " + ACTIONS.length}) : null,
-    ACTIONS.length ? h("ul", {class: "acts"}, groups.slice(0, 3).map(row)) : empty("All clear", "No failing CI, reviews, blocked work, collisions, overdue tasks or idle work."), {flush: !!ACTIONS.length, cls: "sp-4"});
+  return panel("Needs you", NE.length || null, NE.length ? h("a", {class: "more", href: link({view: "actions"}), text: "All " + NE.length}) : null,
+    NE.length ? h("ul", {class: "acts"}, groups.slice(0, 3).map(row)) : empty("All clear", "No decisions waiting, failing CI, reviews, blocked work, collisions, overdue tasks, failed jobs or idle work."), {flush: !!NE.length, cls: "sp-4"});
 }
 function collText(c, short) {
   if (c.kind === "expired-lock") { const it = ITEMBY.get(c.id); return (it ? "“" + it.title + "”" : c.id) + " is still claimed by " + whoOf(c.holder) + "; the lock expired " + rel(iso(c.until)); }
@@ -2494,7 +3356,7 @@ function initCard(x, compact) {
 function initiativesPanel() {
   const list = INITS.slice().sort((a, b) => HORDER.indexOf(istate(a)) - HORDER.indexOf(istate(b)) || PRANK[a.priority] - PRANK[b.priority] || String(a.due || "9").localeCompare(String(b.due || "9")));
   const mc = tally(INITS.flatMap(x => x.members.map(memberState)));
-  return panel("Initiatives", INITS.length || null, [legend(hparts(mc).filter(p => p[0] !== "none" || p[1])), h("a", {class: "more", href: link({view: "initiatives"}), text: "All initiatives"})],
+  return panel("Initiatives", INITS.length || null, [mc && Object.keys(mc).length ? h("span", {class: "t2", style: "font-size:var(--fs-1)", text: "Member projects:"}) : null, legend(hparts(mc)), h("a", {class: "more", href: link({view: "initiatives"}), text: "All initiatives"})],
     list.length ? h("div", {class: "icards home"}, list.slice(0, 6).map(x => initCard(x, true)))
       : empty("No initiatives yet", "Group related projects into a programme with a goal, milestone and due date: ", h("code", {text: 'dev initiative new <slug> --title "…" --projects owner/a,owner/b'})), {cls: "sp-12"});
 }
@@ -2511,18 +3373,18 @@ function sincePanel() {
       ctr("done", "Tasks done", (s.done || []).length, doneSeries(items, 14), "task")), {cls: "sp-4 full-md"});
 }
 function viewHome(main) {
-  const k = D.kpis || {}, n = ACTIONS.length, u = k.urgent || 0;
+  const NE = needs(), n = NE.length, u = NE.filter(a => a.sev === "risk").length;
   const title = u ? plural(u, "urgent item") + (u === 1 ? " needs you" : " need you") : n ? plural(n, "item") + (n === 1 ? " needs" : " need") + " a look" : "Nothing needs you";
   main.append(h("div", {class: "head"}, h("h1", {text: title}), h("span", {class: "sub", text: "Synced " + rel(D.generated) + " on " + D.host})));
   main.classList.add("view-home");
   main.append(h("div", {class: "g12 home"}, kpiStrip(), needsPanel(), teamNow(), sincePanel(), initiativesPanel()));
 }
 function viewActions(main) {
-  const kinds = new Map(); for (const a of ACTIONS) { const l = KIND[a.kind] || a.kind; kinds.set(l, (kinds.get(l) || 0) + 1); }
-  const list = ACTIONS.filter(a => !S.kind || (KIND[a.kind] || a.kind) === S.kind);
+  const NE = needs(), kinds = new Map(); for (const a of NE) { const l = KIND[a.kind] || a.kind; kinds.set(l, (kinds.get(l) || 0) + 1); }
+  const list = NE.filter(a => !S.kind || (KIND[a.kind] || a.kind) === S.kind);
   main.append(crumbs([["Home", link({view: "overview", kind: ""})], ["Needs you"]]));
-  main.append(h("div", {class: "head"}, h("h1", {text: "Everything that needs you"}), h("span", {class: "sub", text: plural(ACTIONS.length, "item") + ", most urgent first"})));
-  if (kinds.size > 1) main.append(h("div", {class: "toolbar"}, seg("Kind", "kind", [["", "All", ACTIONS.length]].concat(Array.from(kinds.entries()).map(([l, n]) => [l, l, n])))));
+  main.append(h("div", {class: "head"}, h("h1", {text: "Everything that needs you"}), h("span", {class: "sub", text: plural(NE.length, "item") + ", most urgent first"})));
+  if (kinds.size > 1) main.append(h("div", {class: "toolbar"}, seg("Kind", "kind", [["", "All", NE.length]].concat(Array.from(kinds.entries()).map(([l, n]) => [l, l, n])))));
   main.append(list.length ? h("ul", {class: "acts"}, list.map((a, i) => actionRow(a, i === 0))) : h("div", {class: "panel"}, empty("All clear")));
 }
 /* ---------------------------------------------------------------- Initiatives: list -> #/initiatives/<slug> */
@@ -2764,15 +3626,22 @@ function nowCell(p) {
   if (!d.length) return h("span", {class: "muted", text: p.cnt.open ? plural(p.cnt.open, "open task") : "—"});
   return h("div", {class: "slt"}, h("div", {class: "ell", title: d[0].title}, istatusIcon(d[0].status), " ", d[0].title), h("div", {class: "who"}, d[0].holder ? (isMe(d[0].holder) ? "you" : d[0].holder) : "unclaimed", d.length > 1 ? " · +" + (d.length - 1) + " more" : ""));
 }
+/* the project list's count of branches not backed up: a link to the map when there are some; unknown is "—", never 0 */
+function riskCell(p) {
+  if (!branchesKnown(p)) return h("span", {class: "muted", title: p.local ? "No branch map yet" : "Not cloned on this Mac", text: "—"});
+  const c = branchCounts(p.branches);
+  if (!c.risk) return h("span", {class: "num t2", title: plural(c.total, "branch", "branches") + ", none only on this Mac", text: "0"});
+  return h("a", {class: "stat num", href: link({view: "projects", id: p.id, tab: "branches"}), "data-nav": "", "aria-label": plural(c.risk, "branch", "branches") + " not backed up: open the branch map"}, stateDot("risk"), String(c.risk));
+}
 function projectTable(ps) {
   const th = (label, key, cls) => h("th", {scope: "col", class: cls || null, "aria-sort": S.sort === key ? "descending" : null}, key ? h("button", {type: "button", onclick: () => set({sort: key}, true), text: label + (S.sort === key ? " ↓" : "")}) : label);
   return h("div", {class: "tw st"}, h("table", {class: "t pt"},
-    h("thead", null, h("tr", null, th("", "attention", "c-health"), th("Project", "name"), th("Status", "priority", "c-st"), h("th", {class: "c-prog", text: "Progress"}), th("In progress", "tasks"), h("th", {text: "Latest agent status"}), h("th", {text: "PRs"}), h("th", {class: "c-act", text: "7 days"}), th("Last activity", "activity", "c-last"), h("th", {class: "c-who", text: "Who"}))),
+    h("thead", null, h("tr", null, th("", "attention", "c-health"), th("Project", "name"), th("Status", "priority", "c-st"), h("th", {class: "c-prog", text: "Progress"}), th("In progress", "tasks"), h("th", {text: "Latest agent status"}), h("th", {text: "PRs"}), h("th", {class: "c-bk", text: "Not backed up"}), h("th", {class: "c-act", text: "7 days"}), th("Last activity", "activity", "c-last"), h("th", {class: "c-who", text: "Who"}))),
     h("tbody", null, ps.map(p => h("tr", {onclick: rowClick(() => openModal("project", p.id))},
       h("td", {class: "c-health"}, healthDot(p)),
       h("td", {class: "c-name"}, h("span", {class: "pname"}, modalLink("project", p.id, p.name || p.id), ONPROJ.has(p.id) || p.live ? h("span", {class: "dot d-live", style: "margin-left:8px;vertical-align:1px", title: "Live session", "aria-label": "live session"}) : null, p.local ? null : h("span", {class: "tag", style: "margin-left:8px", title: "Handoff note only — clone with dev clone " + p.id, text: "not cloned"})), h("span", {class: "powner", text: p.owner + ((p.main || {}).branch ? " · " + p.main.branch : "")})),
       h("td", {class: "c-st"}, statusBadge(p.status), prioIcon(p.priority)),
-      h("td", {class: "c-prog"}, progressBar(p)), h("td", {class: "c-now"}, nowCell(p)), h("td", {class: "c-status"}, latest(p)), h("td", {class: "c-prs"}, prPills(p, 2)),
+      h("td", {class: "c-prog"}, progressBar(p)), h("td", {class: "c-now"}, nowCell(p)), h("td", {class: "c-status"}, latest(p)), h("td", {class: "c-prs"}, prPills(p, 2)), h("td", {class: "c-bk"}, riskCell(p)),
       h("td", {class: "c-act"}, h("div", {style: "display:flex;gap:8px;align-items:center"}, sparkline(p, 30, 64, 16), h("span", {class: "num t2", style: "font-size:var(--fs-1)", text: String(sum7(p))}))),
       h("td", {class: "c-last num t2", text: rel(p.last_activity)}), h("td", {class: "c-who"}, avatars(p.people, 3)))))));
 }
@@ -2780,8 +3649,8 @@ function projectTable(ps) {
 function projectCard(p) {
   const st = hstate(p);
   return h("article", {class: "ptile", onclick: rowClick(() => openModal("project", p.id))},
-    h("div", {class: "pt-h"}, h("span", {class: "dot k-" + st, role: "img", title: HS[st] + (p.health.reasons.length ? ": " + p.health.reasons.join(", ") : ""), "aria-label": HS[st]}),
-      h("div", {class: "pt-n"}, modalLink("project", p.id, p.name || p.id, "strong ell"), h("span", {class: "t2 ell", text: p.local ? p.owner : p.owner + ", not cloned"})), progRing(p, 36)),
+    h("div", {class: "pt-h"}, h("span", {class: "dot k-" + st, role: "img", title: (HWHY[st] || HS[st]) + (p.health.reasons.length ? ": " + p.health.reasons.join(", ") : ""), "aria-label": HS[st]}),
+      h("div", {class: "pt-n"}, modalLink("project", p.id, p.name || p.id, "strong ell"), h("span", {class: "t2 ell"}, p.local ? p.owner : p.owner + ", not cloned", branchesKnown(p) && branchCounts(p.branches).risk ? [" · ", stateDot("risk"), " " + branchCounts(p.branches).risk + " not backed up"] : null)), progRing(p, 36)),
     h("div", {class: "pt-f"}, ciStrip(p, 6), spark(commitSeries([p], 14), "Commits per day", "commit")));
 }
 function viewProjects(main) {
@@ -2802,7 +3671,7 @@ function viewProjects(main) {
     main.append(g ? panel(g, list.length, null, body, {cls: "mb", flush: true}) : body);
   }
 }
-const PTABS = [["overview", "Overview"], ["tasks", "Tasks"], ["prs", "Pull requests"], ["worktrees", "Worktrees"], ["plans", "Plans"], ["sessions", "Sessions"], ["note", "Handoff note"]];
+const PTABS = [["overview", "Overview"], ["tasks", "Tasks"], ["prs", "Pull requests"], ["branches", "Branches"], ["worktrees", "Worktrees"], ["plans", "Plans"], ["sessions", "Sessions"], ["note", "Handoff note"]];
 function viewUnknownProject(main) {
   const id = S.id, inits = INITS.filter(x => x.projects.includes(id));
   main.append(crumbs([["Projects", link({view: "projects", id: "", tab: ""})], [id]]));
@@ -2828,6 +3697,138 @@ function wtTable(p) {
       h("td", {text: w.missing ? "missing" : ((w.modified || 0) + (w.untracked || 0)) ? ((w.modified || 0) + (w.untracked || 0)) + " changed" : w.unpushed ? w.unpushed + " unpushed" : "clean"}),
       h("td", {text: w.active ? "live" : rel(w.last_activity)}), h("td", {class: "num", text: kb(w.size_kb)}), h("td", null, w.branch ? icopy("dev wt rm " + w.branch, "Remove") : null)))))));
 }
+/* ---------------------------------------------------------------- the branch map (spec P-fy3bwa0pshk R8): where each branch lives and whether its work
+   is safe off this Mac. The snapshot's rows show at once; on the Branches tab the live page also reads the map from git now (GET /api/v1/branches/{id}) */
+const BRISK = ["not_backed_up", "no_remote"];
+const BSTATE = {backed_up: ["ok", "Backed up"], on_remote: ["ok", "On the remote"], merged: ["done", "Merged"], waiting: ["hol", "Backup waits"],
+  embargoed: ["warn", "Embargoed"], not_backed_up: ["risk", "Not backed up"], no_remote: ["risk", "Not backed up"]};
+const BR = new Map();   /* project id -> what the live page read: {state: loading|ok|error|stopped|ended, data, problem, at, last} */
+const BR_AGE = 60000;   /* the Branches tab reads the map again when its last read is older than this */
+const MERGED_SHOWN = 3;
+function branchCounts(rows) {
+  if (!rows) return null;
+  const c = {total: rows.length, risk: 0, embargoed: 0, waiting: 0, merged: 0};
+  for (const r of rows) { const st = (r.backup || {}).state; if (BRISK.includes(st)) c.risk++; if (st === "waiting") c.waiting++; if (st === "merged") c.merged++; if (r.embargo) c.embargoed++; }
+  return c;
+}
+/* unknown is not 0: no map in the snapshot, or a map that came back empty for a checkout that is on a branch (git failed) */
+function branchesKnown(p) { return p.local && Array.isArray(p.branches) && !(p.branches.length === 0 && (p.main || {}).branch); }
+function embargoWho(s) { const m = member(s); return m ? roleName(m) : String(s || ""); }
+function branchLive(p) {
+  if (!LIVE.on || !p.local) return null;
+  const b = BR.get(p.id);
+  if (!b || (b.state !== "loading" && Date.now() - b.at > BR_AGE)) loadBranches(p.id);
+  return BR.get(p.id);
+}
+async function loadBranches(id) {
+  const prev = BR.get(id), last = prev ? (prev.state === "ok" ? prev : prev.last) : null;
+  BR.set(id, {state: "loading", at: Date.now(), last});
+  let next;
+  try {
+    const r = await fetch("/api/v1/branches/" + id.split("/").map(encodeURIComponent).join("/"), {cache: "no-store", credentials: "same-origin", headers: {Accept: "application/json"}});
+    if (r.status === 401) { setLive("ended"); next = {state: "ended"}; }
+    else if (!r.ok) { let pb = {}; try { pb = await r.json(); } catch (e) { pb = {}; } next = {state: "error", problem: pb, status: r.status}; }
+    else next = {state: "ok", data: await r.json()};
+  } catch (e) { next = {state: "stopped"}; }
+  next.at = Date.now(); if (next.state !== "ok") next.last = last;
+  BR.set(id, next);
+  if (next.state === "error") announce("git could not read the branches of " + repoName(id) + ".");
+  redrawBranches(id);
+}
+function retryBranches(id) { const b = BR.get(id); if (b && b.state !== "loading") { b.at = 0; } redrawBranches(id, true); }
+/* the panel is replaced in place; focus that was inside it stays inside it */
+function redrawBranches(id, refocus) {
+  const box = $("#branches"), p = BYID.get(id);
+  if (!box || !p || box.getAttribute("data-project") !== id) return;
+  const had = refocus || box.contains(document.activeElement), fresh = branchesPanel(p, true);
+  box.replaceWith(fresh); fitTables(fresh.parentNode || undefined);
+  if (had) { const t = $(".brretry", fresh) || $("h2", fresh); if (t) { if (!t.hasAttribute("tabindex") && t.tagName === "H2") t.setAttribute("tabindex", "-1"); t.focus({preventScroll: true}); } }
+}
+function aheadCell(r) {
+  if (r.upstream && !r.upstream_gone) return h("span", {class: "num", title: r.ahead + " ahead of " + r.upstream + ", " + r.behind + " behind", text: "↑" + r.ahead + " ↓" + r.behind});
+  if (r.unpushed && !r.merged_into) return h("span", {class: "num", title: plural(r.unpushed, "commit") + " on no remote", text: "↑" + r.unpushed});
+  return h("span", {class: "t2", title: "No upstream branch", text: "—"});
+}
+function baseText(r, p) {
+  if (r.merged_into || r.default) return r.default ? "default branch" : "";
+  const d = p.default_branch || "main";
+  if (r.base_ahead) return r.base_ahead + " ahead of " + d + (r.base_behind ? ", " + r.base_behind + " behind" : "");
+  return r.base_behind ? r.base_behind + " behind " + d : "";
+}
+function backupCell(r) {
+  const b = r.backup || {}, st = BSTATE[b.state] || ["none", "Not known"], emb = r.embargo, lines = [];
+  let word = st[1];
+  if (b.state === "backed_up") word = "Backed up " + rel(r.last_backup);
+  else if (b.state === "merged") word = "Merged into " + r.merged_into;
+  else if (b.state === "embargoed") lines.push(emb && emb.until ? "Until “" + emb.until + "”" : "Until it is lifted");
+  else if (b.reason) lines.push(sentence(b.reason + (b.state === "not_backed_up" && r.oldest_unpushed && /only on this Mac$/.test(b.reason) ? ", the oldest " + rel(r.oldest_unpushed) : "")));
+  if (emb && b.state !== "embargoed") lines.push("Embargoed" + (emb.until ? " until “" + emb.until + "”" : ""));
+  if (emb && (emb.why || emb.who)) lines.push((emb.who ? embargoWho(emb.who) + ": " : "") + (emb.why || "no reason given"));
+  if (r.embargo_via) lines.push("Held by the embargo on " + r.embargo_via);
+  return [stateWord(st[0], word), lines.map(t => h("span", {class: "bsub", text: t}))];
+}
+function prCell(pr, unknown) {
+  if (!pr) return unknown ? h("span", {class: "t2", title: "Pull requests unknown: gh did not answer", text: "not known"}) : null;
+  const open = pr.state === "open", word = open ? (pr.draft ? "draft" : "ready") : pr.state || "";
+  return [h("a", {href: safeUrl(pr.url), target: "_blank", rel: "noopener noreferrer", title: pr.title || null, text: "#" + pr.number}), " ", open ? h("span", {class: "tag", text: word}) : h("span", {class: "t2", text: word}),
+    open && pr.checks && pr.checks !== "unknown" ? h("span", {class: "bsub"}, h("span", {class: "badge"}, h("span", {class: "dot d-" + pr.checks, "aria-hidden": "true"}), "checks " + pr.checks)) : null];
+}
+function wtCell(r) {
+  if (r.worktree) return [h("span", {class: "mono", title: r.worktree, text: r.worktree.split("/").pop()}), r.worktree_missing ? h("span", {class: "bsub", text: "Missing on disk"}) : null,
+    r.session ? h("span", {class: "bsub"}, h("span", {class: "stat"}, h("span", {class: "dot d-live", "aria-hidden": "true"}), "live session")) : null];
+  return r.current ? h("span", {class: "t2", text: "main checkout"}) : null;
+}
+function branchRow(r, p, prsUnknown) {
+  const b = r.backup || {}, base = baseText(r, p), pr = prCell(r.pr, prsUnknown), wt = wtCell(r);
+  const cell = (cls, label, body) => h("td", {class: cls + (body == null ? " nil" : "")}, h("span", {class: "cl", text: label + " "}), body == null ? h("span", {class: "t2", text: "—"}) : body);
+  return h("tr", {class: b.state === "merged" ? "quiet" : null, "data-key": "branch~" + r.name, "data-sig": [b.state, r.ahead, r.behind, r.unpushed, r.last_backup, (r.pr || {}).number, (r.pr || {}).checks].join("|")},
+    h("td", {class: "c-bk"}, backupCell(r)),
+    h("th", {scope: "row"}, h("span", {class: "bn mono", title: r.sha ? r.name + " at " + r.sha : null, text: r.name}), r.current ? h("span", {class: "tag", text: "current"}) : null,
+      r.task ? h("span", {class: "bsub"}, h("a", {href: taskHref(r.task.id), "data-nav": "", onclick: e => { e.preventDefault(); openTask(r.task.id); }, text: r.task.id}), " ", r.task.title || "") : null),
+    cell("c-where", "Where", h("span", {text: r.where || "—"})),
+    h("td", {class: "c-ab"}, h("span", {class: "cl", text: "Ahead / behind "}), aheadCell(r), base ? h("span", {class: "bsub", text: base}) : null),
+    cell("c-pr", "Pull request", pr), cell("c-wt", "Worktree", wt));
+}
+function branchTable(rows, p, prsUnknown) {
+  const lead = rows.filter(r => (r.backup || {}).state !== "merged"), merged = rows.filter(r => (r.backup || {}).state === "merged");
+  const key = "br:" + p.id, all = !!SHOWN[key] || merged.length <= MERGED_SHOWN + 1, shown = lead.concat(all ? merged : merged.slice(0, MERGED_SHOWN));
+  return h("div", {class: "tw"}, h("table", {class: "t bt"}, h("thead", null, h("tr", null, ["Backup", "Branch", "Where", "Ahead / behind", "Pull request", "Worktree"].map(x => h("th", {scope: "col", text: x})))),
+    h("tbody", null, shown.map(r => branchRow(r, p, prsUnknown)),
+      all ? null : h("tr", null, h("td", {class: "c-more", colspan: "6"}, h("button", {class: "btn sm", type: "button", onclick: () => { SHOWN[key] = 1; redrawBranches(p.id, true); }}, "Show " + plural(merged.length - MERGED_SHOWN, "more merged branch", "more merged branches")))))));
+}
+/* live: whether to read the map now (the Branches tab); the overview's facts use the snapshot */
+function branchesPanel(p, live) {
+  const lv = live ? branchLive(p) : null, got = lv && (lv.state === "ok" ? lv : lv.last);
+  const fresh = got && got.data && (got.data.mapped || 0) >= (D.generated || 0) ? got.data : null;
+  const rows = fresh ? fresh.rows : p.branches, c = branchCounts(rows);
+  const prs = fresh ? fresh.prs : p.github && p.prs_known === false ? "error" : "ok", prsUnknown = prs === "error" || (prs === "missing" && !(rows || []).some(r => r.pr));
+  const when = fresh ? fresh.mapped : D.generated;
+  const status = !LIVE.on ? null : lv && lv.state === "loading" ? "Checking with git…" : "Checked " + rel(when);   /* a static copy: the navbar says when it was made */
+  const right = [c && c.risk ? h("span", {class: "badge"}, stateDot("risk"), c.risk + " not backed up") : null, c && c.embargoed ? h("span", {class: "badge"}, stateDot("warn"), c.embargoed + " embargoed") : null,
+    p.local && status ? h("span", {class: "brst", role: "status", text: status}) : null, p.local ? icopy("dev branch ls", "Copy the command that lists the branches") : null];
+  const body = [];
+  if (lv && lv.state === "error") { const pb = lv.problem || {};
+    body.push(callout("risk", pb.title || "Could not read the branches", [h("span", {text: pb.detail || "The server answered " + (lv.status || "with an error") + "."}), rows && rows.length ? " The rows below are from " + rel(when) + "." : ""],
+      h("button", {class: "btn brretry", type: "button", onclick: () => retryBranches(p.id)}, "Try again"))); }
+  else if (lv && lv.state === "stopped") body.push(h("div", {class: "notice", style: "margin:0 0 var(--s3)"}, "The dashboard server is not answering, so these rows are from " + rel(when) + ". Start it again with ", h("code", {text: "dev dashboard"}), "."));
+  if (!p.local) return panelFor(p, body.concat(empty("No branches on this Mac", "The project is not cloned here. Clone it to see where its branches live: ", h("code", {text: "dev clone " + p.id}))), c, right);
+  const noRemote = (rows || []).some(r => (r.backup || {}).state === "no_remote") || (rows && !rows.length && !p.remote);
+  if (noRemote) body.push(callout("warn", "No remote", "Every branch exists only on this Mac. devkit backs up branches to the remote, so nothing here can be backed up until the repository has one.", icopy("git remote add origin <url>", "Copy the command that adds a remote")));
+  if (rows && rows.length && prsUnknown) body.push(callout("info", "Pull requests not known", prs === "missing" ? "gh is not installed, so the rows cannot show their pull requests. Install it and sign in with gh auth login." : "gh did not answer, so the rows cannot show their pull requests. gh auth status shows why.", icopy(prs === "missing" ? "gh auth login" : "gh auth status", "Copy")));
+  if (rows == null) body.push(lv && lv.state === "loading" ? h("p", {class: "empty", role: "status", text: "Reading the branches with git…"})
+    : lv && lv.state === "error" ? null : empty("No branch map in this copy", "The snapshot was made before devkit mapped branches. Run ", h("code", {text: "dev sync"}), ", then open the dashboard again."));
+  else if (!rows.length) body.push(lv && lv.state === "error" ? null : (p.main || {}).branch ? empty("git listed no branches", "The checkout is on " + p.main.branch + ", but the map came back empty. ", h("code", {text: "dev branch ls"}), " in the repository shows what git says.")
+    : empty("No branches yet", "The repository has no commits. Its first commit makes the first branch."));
+  else body.push(branchTable(rows, p, prsUnknown), policyLine(rows[0].backup_policy));
+  return panelFor(p, body, c, right);
+}
+/* the project's backup policy (dev backup policy): every row carries the same record, none for the default */
+function policyLine(pol) {
+  const words = pol ? pol.policy + (pol.who ? ", set by " + embargoWho(pol.who) : "") + (pol.when ? " on " + String(pol.when).slice(0, 10) : "") + (pol.why ? ": " + pol.why : "")
+    : "the default, on for a private repository and ask for a public one";
+  return h("p", {class: "t2 brpol", style: "margin:var(--s2) 0 0", text: "Backup policy: " + words + "."});
+}
+function panelFor(p, body, c, right) { const el = panel("Branches", c ? c.total : null, right, body, {id: "branches", flush: false}); el.setAttribute("data-project", p.id); return el; }
 function repoKv(p) {
   const m = p.main || {};
   return h("dl", {class: "kv"},
@@ -2835,6 +3836,8 @@ function repoKv(p) {
     p.remote ? [h("dt", {text: "Remote"}), h("dd", null, p.github ? h("a", {href: "https://github.com/" + p.github, target: "_blank", rel: "noopener noreferrer", text: p.remote}) : p.remote)] : null,
     p.local ? [h("dt", {text: "Branch"}), h("dd", {text: (m.branch || "—") + (m.modified || m.untracked ? " · " + ((m.modified || 0) + (m.untracked || 0)) + " changed" : " · clean") + (m.ahead ? " · ↑" + m.ahead : "") + (m.behind ? " · ↓" + m.behind : "")})] : null,
     m.last_commit ? [h("dt", {text: "Last commit"}), h("dd", {text: rel(m.last_commit_ts) + " · " + m.last_commit})] : null,
+    branchesKnown(p) ? (c => [h("dt", {text: "Branches"}), h("dd", null, h("a", {href: link({tab: "branches"}), text: plural(c.total, "branch", "branches")}),
+      c.risk ? [", ", h("span", {class: "stat"}, stateDot("risk"), c.risk + " not backed up")] : c.total ? ", none only on this Mac" : null, c.embargoed ? ", " + c.embargoed + " embargoed" : null)])(branchCounts(p.branches)) : null,
     (p.commands || []).length ? [h("dt", {text: "Commands"}), h("dd", null, p.commands.map(c => h("code", {style: "margin-right:8px", text: c})))] : null,
     p.local && !p.canonical_ok && p.canonical ? [h("dt", {text: "Layout"}), h("dd", null, "Not at its canonical path — ", h("code", {text: "dev adopt " + p.path}))] : null,
     p.stack.length ? [h("dt", {text: "Stack"}), h("dd", null, p.stack.map(s => h("span", {class: "stk", text: s})))] : null,
@@ -2867,7 +3870,7 @@ function timeBody(t, showProject) {
     sub.n ? [h("h3", {class: "sub3", text: "Subagents, last 7 days"}), h("p", {class: "t2", style: "margin:0 0 6px;font-size:var(--fs-1)", text: plural(sub.n, "subagent") + ", median " + fmtMin(sub.median) + ", p90 " + fmtMin(sub.p90)}),
       slowTable((sub.top || []).slice(0, 4), showProject)] : null,
     (t.recent_runs || []).length ? [h("h3", {class: "sub3", text: "Recent runs: actual against estimate"}), h("ul", {class: "tl-rows"}, t.recent_runs.slice(0, 5).map(r => h("li", {class: "trow"},
-      h("span", {class: "tx ell", title: r.what, text: r.what || "run"}), h("span", {class: "num t2" + (r.estimate && r.secs / 60 > r.estimate * 1.5 ? " bad" : ""), text: fmtMin(r.secs / 60) + " of about " + fmtMin(r.estimate)}))))] : null];
+      h("span", {class: "tx ell", title: r.what, text: r.what || "run"}), h("span", {class: "num t2" + (r.estimate && r.secs / 60 > r.estimate * 1.5 ? " bad" : ""), text: fmtMin(r.secs / 60) + " of about " + fmtAbout(r.estimate)}))))] : null];
 }
 function viewProject(main) {
   const p = BYID.get(S.id);
@@ -2883,14 +3886,15 @@ function viewProject(main) {
           m.branch ? h("span", {class: "meta", title: "Current branch"}, icon("branch"), m.branch) : null, ns.due ? duePill(ns.due, p.status === "done") : null, lastSeen ? "active " + rel(lastSeen) : null, p.local ? null : "not cloned here")))),
       h("div", {class: "go"}, p.local ? cmdBtn("dev claude " + p.id, true, "Copy dev claude") : cmdBtn("dev clone " + p.id, true, "Copy dev clone"),
         cmdMenu("More commands", p.local ? [["Start Codex", "dev codex " + p.id], ["Go to the checkout", "dcd " + p.id], ["Write the handoff", "dev handoff " + p.id]] : [["Write the handoff", "dev handoff " + p.id]]))),
-    p.health.reasons.length ? h("ul", {class: "reasons"}, p.health.reasons.map(r => h("li", null, h("span", {class: "dot k-" + (p.health.level === "risk" ? "risk" : "warn"), "aria-hidden": "true"}), r))) : null));
+    p.health.reasons.length ? h("ul", {class: "reasons"}, p.health.reasons.map(r => h("li", null, h("span", {class: "dot k-" + (p.health.level === "risk" ? "risk" : "warn"), "aria-hidden": "true"}), r))) : null,
+    HWHY[st] ? h("p", {class: "t2", style: "margin:0;font-size:var(--fs-1)", text: HWHY[st] + "."}) : null, projFlags(p).map(flagLine)));
   const taskParts = [["mark", p.cnt.doing, "Doing"], ["risk", p.cnt.blocked, "Blocked"], ["none", p.cnt.todo, "To do"]];
   main.append(h("div", {class: "g12 tiles"},
     statTile({label: "Open tasks", value: p.cnt.open, href: link({tab: "tasks"}), viz: segBar(taskParts, "Open tasks"), legend: legend(taskParts), cls: "sp-3"}),
     statTile({label: "Open PRs", value: p.prs, href: link({tab: "prs"}), viz: ciStrip(p, 14), cls: "sp-3"}),
     statTile({label: "Commits, 14 days", value: commitSeries([p], 14).reduce((a, d) => a + d[1], 0), viz: spark(commitSeries([p], 14), "Commits per day", "commit", true), cls: "sp-3"}),
     statTile({label: "Live sessions", value: here.length, viz: here.length ? h("div", {class: "sbars"}, here.map(s => { const x = BYWHO.get(s.who), i = x ? x.sessions.indexOf(x.sessions.find(z => z.session === s.session && z.agent === s.agent)) : -1; return sessBar(s, s.who, Math.max(0, i)); })) : h("span", {class: "t2", text: "Nobody here now"}), cls: "sp-3"})));
-  main.append(pageTabs([["overview", "Overview"], ["tasks", "Tasks", p.cnt.open], ["prs", "Pull requests", p.prs], ["worktrees", "Worktrees", p.wts.length], ["plans", "Plans", plansL.length || (p.plans || []).length], ["sessions", "Sessions", sess.length], ["note", "Handoff note"]], tab));
+  main.append(pageTabs([["overview", "Overview"], ["tasks", "Tasks", p.cnt.open], ["prs", "Pull requests", p.prs], ["branches", "Branches", branchesKnown(p) ? p.branches.length : null], ["worktrees", "Worktrees", p.wts.length], ["plans", "Plans", plansL.length || (p.plans || []).length], ["sessions", "Sessions", sess.length], ["note", "Handoff note"]], tab));
   const tp = h("div", {class: "tabpanel", id: "tabpanel", role: "tabpanel", "aria-labelledby": "tab-" + tab}); main.append(tp);
   if (tab === "overview") {
     const doing = sortItems(p.items.filter(i => i.status === "doing" || i.status === "blocked")), next = sortItems(p.items.filter(i => i.status === "todo")).slice(0, 4);
@@ -2908,6 +3912,7 @@ function viewProject(main) {
         tt ? h("details", {class: "recent"}, h("summary", null, "How long work takes here"), timeBody(tt, false)) : null)));
   } else if (tab === "tasks") tp.append(itemsBlock(p.items, {scope: p.id}));
   else if (tab === "prs") tp.append(prTable(p));
+  else if (tab === "branches") tp.append(branchesPanel(p, true));
   else if (tab === "worktrees") tp.append(wtTable(p));
   else if (tab === "plans") tp.append(plansBlock(plansL, p.id, p.plans));
   else if (tab === "sessions") tp.append(sessionsBlock(sess, false));
@@ -2917,6 +3922,209 @@ function viewProject(main) {
     tp.append(panel("Handoff note", null, h("span", {style: "display:flex;gap:8px"}, f ? h("a", {class: "more", href: link({view: "explorer", f: p.note, id: "", tab: ""})}, "Open in Explorer") : null, icopy("dev handoff " + p.id, "Copy the handoff command")),
       f ? md(f.text) : p.ns ? [part("Purpose", ns.purpose), part("Current state", ns.state), part("Decisions and gotchas", ns.decisions), part("Links", ns.links)] : empty("No handoff note yet", h("code", {text: "dev sync"}), " creates it; agents fill it in with the devkit handoff skill.")));
   }
+}
+/* ---------------------------------------------------------------- Background work: is anything running, failing or waiting for me, and when will it
+   be done? Sections in a fixed order (live updates never move a section): what waits for you, runs, CI, scheduled jobs */
+function bgRuns() {
+  const rank = {waiting: 0, blocked: 1, lost: 2, running: 3, done: 4}, now = nowS();
+  return RUNS.concat(RRUNS).map(r => [runState(r), r]).filter(([st, r]) => st !== "done" || now - (r.finished || r.updated || now) < 3600)
+    .sort((a, b) => rank[a[0]] - rank[b[0]] || (b[1].started || 0) - (a[1].started || 0)).map(x => x[1]);
+}
+function sect(id, title, count, right, body) {
+  return h("section", {class: "panel mb", id, "aria-labelledby": id + "-h"},
+    h("div", {class: "ph"}, h("h2", {id: id + "-h", tabindex: "-1", text: title}), count != null ? h("span", {class: "count num", text: String(count)}) : null, right ? h("div", {class: "right"}, right) : null),
+    h("div", {class: "pb"}, body));
+}
+function toSection(id) { return e => { e.preventDefault(); const el = document.getElementById(id + "-h"); if (el) { el.scrollIntoView({block: "start"}); el.focus({preventScroll: true}); } }; }
+function runCard(r) {
+  const st = runState(r), t = runTime(r), plan = r.plan || [], pct = t.total ? 100 * t.done / t.total : t.est ? Math.min(100, 100 * t.act / t.est) : 0;
+  const pend = plan.filter(s => s.state === "pending"), shown = plan.filter(s => ["running", "blocked", "unverified"].includes(s.state)).concat(pend.slice(0, 2));
+  const nDone = plan.filter(s => s.state === "done").length, nSkip = plan.filter(s => s.state === "skipped").length, more = pend.length - Math.min(2, pend.length);
+  const by = new Map(plan.map(s => [s.name, s])), dec = pending(r)[0], qs = r.questions || [], qOld = qs.length ? Math.min(...qs.map(q => q.ts || nowS())) : 0;
+  const sess = sessOfRun(r), branch = (sess && sess.branch) || r.branch, eta = etaText(r);
+  const stepTxt = s => { const wait = (s.after || []).find(a => by.has(a) && !["done", "skipped"].includes(by.get(a).state));
+    return s.state === "running" ? fmtMin(s.min || 0) + " of ~" + fmtAbout(s.est || 0) : s.state === "blocked" ? (s.waiting ? "waiting for you" : "blocked") : s.state === "unverified" ? stepWord(s.state)[1]
+      : wait ? "waits for “" + stepTitle(by.get(wait)) + "”" : s.est ? "~" + fmtAbout(s.est) : ""; };
+  const blockedStep = plan.find(s => s.state === "blocked");
+  return h("article", {class: "rcard " + st, "data-key": "run~" + r.id, "data-sig": [st, t.done, r.step, r.updated].join("|"), "data-open": "run:" + r.id, onclick: rowClick(() => openModal("run", r.id))},
+    h("div", {class: "rh"}, modalLink("run", r.id, r.goal || "Agent run"), h("span", {class: "rst", text: runStateText(r, st)})),
+    h("div", {class: "rw ell"}, [r.project ? scopeName(r.project) : "", branch || "", agentName(r.agent), r.mode === "auto" ? "Auto" : "Guided", r.remote ? "on " + r.host : ""].filter(Boolean).join(" · ")),
+    h("div", {class: "rbar" + (t.over ? " over" : ""), role: "progressbar", "aria-valuenow": Math.round(pct), "aria-valuemin": 0, "aria-valuemax": 100, "aria-label": "Run progress",
+      "aria-valuetext": t.steps + (eta ? ", " + eta.replace("–", " to ").replace(/m\b/g, " minutes") : "")}, h("i", {style: "width:" + pct.toFixed(1) + "%"})),
+    h("div", {class: "rmeta num" + (t.over ? " warn" : "")}, meta(t.steps, t.text, t.over ? "over the estimate by " + fmtMin(t.over) : null)),
+    shown.length ? h("ol", {class: "rsteps", "aria-label": "Steps in progress and next"}, shown.map(s => { const g = stepWord(s.waiting ? "waiting" : s.state);
+      return h("li", {class: s.state}, h("span", {class: "g", "aria-hidden": "true", text: g[0]}), h("span", {class: "ell", title: stepTitle(s) + " · " + stepWho(s)}, h("span", {class: "sr", text: g[1] + ": "}), stepTitle(s), h("span", {class: "who"}, h("span", {class: "sep", text: " · "}), stepWho(s))),
+        h("span", {class: "m num", text: stepTxt(s)})); })) : null,
+    plan.length && (more || nDone || nSkip) ? h("div", {class: "rmeta", text: [more ? "○ " + more + " more to do" : "", nDone ? "✓ " + nDone + " done" : "", nSkip ? "– " + nSkip + " skipped" : ""].filter(Boolean).join(" · ")}) : null,
+    qs.length ? h("div", {class: "rmeta" + (nowS() - qOld > 900 ? " warn" : ""), text: plural(qs.length, "open question") + " to " + roleName(mainMember()) + ", oldest " + rel(qOld)}) : null,
+    st === "waiting" && dec ? h("div", {class: "rmeta bad", text: who(dec.from_name || "main") + " waits for your answer to " + dec.id + "."}) : null,
+    st === "blocked" && blockedStep ? h("div", {class: "rmeta bad", text: "“" + stepTitle(blockedStep) + "” is blocked" + (r.last ? ": " + r.last : "") + "."}) : null,
+    runFlags(r).filter(f => ["C4", "C5", "C6", "C7"].includes(f.code)).map(f => h("div", {class: "warnline"}, stateDot("warn"), h("span", {style: "min-width:0"}, flagNodes(f)))),
+    r.last || r.next ? h("dl", {class: "srows"}, r.last ? [h("dt", {text: "Latest"}), h("dd", {text: r.last})] : null, r.next ? [h("dt", {text: "Next"}), h("dd", {text: r.next})] : null) : null,
+    r.remote ? h("div", {class: "rmeta", text: "Last presence update " + rel(r.asOf)}) : null);
+}
+function ciRow(w) {
+  const st = ciState(w), key = ciKey(w), fails = w.failures || [], where = repoName(w.repo) + " · " + w.branch + (w.sha ? " @ " + w.sha : "");
+  const right = h("span", {class: "cr num", text: [w.ts ? rel(w.ts) : "", w.minutes != null ? (+w.minutes).toFixed(1) + "m" : ""].filter(Boolean).join(" · ")});
+  const base = {class: "cirow", "data-key": "ci~" + key, "data-sig": st + "|" + (w.ts || 0), "data-open": "ci:" + key, onclick: rowClick(() => openModal("ci", key))};
+  if (st !== "failed") return h("li", base, stateDot(CIST[st][0]), h("div", {class: "ct"}, h("strong", {text: CIST[st][1]}), " · ", modalLink("ci", key, where),
+      st === "timeout" && w.minutes != null ? " · after " + (+w.minutes).toFixed(1) + "m" : "", st === "none" ? " · within 5 minutes of the push" + (w.error ? ": " + w.error : "") : "",
+      st === "passed" && (w.runs || []).length ? " · " + w.runs.map(rn => (rn.name || "run") + " #" + (rn.number || "")).join(", ") : ""),
+    st === "timeout" ? icopy("dev ci status --watch", "Copy the watch command") : right);
+  const prov = provName(w.provider);
+  return h("li", base, stateDot("risk"), h("div", {class: "ct"}, h("strong", {text: "Failed"}), " · ", modalLink("ci", key, where)), right,
+    h("div", {class: "cx"}, fails.map((f, i) => { const jb = f.jobs || [], cut = String(f.excerpt || "").length >= 600;
+      return h("div", {style: "display:grid;gap:var(--s2);min-width:0"},
+        h("div", {text: (f.run || "run") + " #" + (f.number || "?") + " failed" + (jb[0] ? " in “" + (jb[0].name || "job") + "”" + (jb[0].step ? ", step “" + jb[0].step + "”" : "") : "") + " · " + ciClass(w, f) + (jb.length > 1 ? " · and " + plural(jb.length - 1, "more job") : "")}),
+        f.excerpt ? [h("div", {class: "logh", text: "From the CI log"}), untrusted(f.excerpt, "First error from the CI log of " + (f.run || "the run") + " #" + (f.number || ""), "cix~" + key + "~" + i),
+          cut ? h("button", {class: "linkbtn", type: "button", style: "justify-self:start", onclick: e => { e.stopPropagation(); openModal("ci", key); }}, "… the rest is in the detail") : null] : null,
+        f.action ? h("div", null, h("span", {class: "t2", text: "Next: "}), sentence(f.action)) : null,
+        h("div", {class: "ca"}, f.url ? h("a", {class: "btn sm", href: f.url, target: "_blank", rel: "noopener noreferrer", onclick: e => e.stopPropagation()}, "Open the log on " + prov) : null,
+          f.id ? cmdBtn("dev run view " + f.id + " --failed", false, "Copy dev run view " + f.id + " --failed") : null)); })));
+}
+function jobRow(j) {
+  const st = jobState(j), last = j.last, wnd = W.jobs_days || 30, every = /^every/.test(j.schedule || "");
+  return h("tr", {"data-key": "job~" + j.name, "data-sig": st + "|" + ((last || {}).start || 0), "data-open": "job:" + j.name, onclick: rowClick(() => openModal("job", j.name))},
+    h("td", {style: "white-space:nowrap"}, stateWord(JOBST[st][0], jobWord(j, st))),
+    h("td", {class: "c-job"}, modalLink("job", j.name, j.name, "pname"), h("span", {class: "jab", title: j.about || "", text: j.about || ""})),
+    h("td", null, h("span", {class: "cl", text: "Schedule "}), schedText(j.schedule)),
+    h("td", {class: "num"}, h("span", {class: "cl", text: "Last run "}), last ? clock(last.start) + " · " + (last.rc !== 0 && last.rc != null ? (last.rc === 124 ? "timed out" : "exit " + last.rc) : jobDur(last.duration)) : "No runs in " + wnd + " days"),
+    h("td", {class: "num", title: !j.enabled ? "Off: it does not run" : every ? "An upper bound: launchd keeps its own clock" : null}, h("span", {class: "cl", text: "Next run "}), !j.enabled || !j.next ? "—" : (every ? "by " : "") + clock(j.next)),
+    h("td", {class: "num" + (j.failed ? " bad" : "")}, h("span", {class: "cl", text: "Failures, " + wnd + " days "}), (j.failed || 0) + " of " + (j.runs || 0)));
+}
+let LOADED_AT = 0;
+function viewBackground(main) {
+  const now = nowS(), runs = bgRuns(), decs = [], wnd = W.jobs_days || 30;
+  for (const r of RUNS) for (const d of pending(r)) decs.push([d, r]);
+  decs.sort((a, b) => (a[0].ts || 0) - (b[0].ts || 0));
+  if (LIVE.on && now - LOADED_AT > 300) { LOADED_AT = now; liveGet("/api/v1/jobs").then(x => { LOADED = {}; for (const j of x.jobs || []) LOADED[j.name] = j.loaded; CACHE = {}; if (S.view === "background") { LIVE.quiet = true; try { render(); } finally { LIVE.quiet = false; } } }, () => {}); }
+  main.append(h("div", {class: "head"}, h("h1", {text: "Background work"}), h("span", {class: "sub", text: "Agent runs, CI watches and scheduled jobs on this Mac" + (LIVE.on ? "" : " · a static copy from " + fmt(D.generated))})));
+  const running = runs.filter(r => r.state === "running" && !pending(r).length).length, blocked = runs.filter(r => ["waiting", "blocked"].includes(runState(r))).length, fin = runs.filter(r => r.state === "done").length;
+  const latest = ciLatest().filter(w => now - (w.ts || 0) <= CI_DAYS * 86400), cf = latest.filter(w => w.state === "failed").length, cp = latest.filter(w => w.state === "passed").length;
+  const jworst = JOBS.map(j => [jobState(j, now), j]).sort((a, b) => JORDER.indexOf(a[0]) - JORDER.indexOf(b[0]))[0];
+  const oldest = decs.length ? decs[0][0].ts : 0, rp = [["mark", running, "Running"], ["risk", blocked, "Blocked"], ["ok", fin, "Finished in the last hour"]], cpParts = [["ok", cp, "Passed"], ["risk", cf, "Failed"], ["none", latest.length - cp - cf, "Other"]];
+  main.append(h("div", {class: "g12 tiles"},
+    statTile({label: "Waiting for you", value: decs.length, href: encode(S), onclick: toSection("waiting"), cls: "sp-3", viz: decs.length ? stateWord("risk", "Oldest waits " + rel(oldest).replace(/ ago$/, "")) : stateWord("ok", "Nothing waiting")}),
+    statTile({label: "Runs", value: running, href: encode(S), onclick: toSection("runs"), cls: "sp-3", viz: runs.length ? segBar(rp, "Runs") : h("span", {class: "t2", text: "No runs in the last hour"}),
+      legend: runs.length ? h("span", {class: "t2", style: "font-size:var(--fs-1)", text: [running + " running", blocked ? blocked + " blocked" : "", fin ? fin + " finished in the last hour" : ""].filter(Boolean).join(" · ")}) : null}),
+    statTile({label: "CI failures, " + CI_DAYS + " days", value: cf, href: encode(S), onclick: toSection("ci"), cls: "sp-3", viz: latest.length ? segBar(cpParts, "Latest CI results") : h("span", {class: "t2", text: "Nothing watched in " + CI_DAYS + " days"}),
+      legend: latest.length ? h("span", {class: "t2", style: "font-size:var(--fs-1)", text: cp + " passed · " + cf + " failed" + (latest.length - cp - cf ? " · " + (latest.length - cp - cf) + " other" : "")}) : null}),
+    statTile({label: "Scheduled jobs", value: JOBS.length, href: encode(S), onclick: toSection("jobs"), cls: "sp-3", viz: !JOBS.length ? h("span", {class: "t2", text: "No scheduled jobs"})
+      : ["failed", "timeout"].includes(jworst[0]) ? stateWord("risk", jworst[1].name + (jworst[0] === "timeout" ? " timed out on its last run" : " failed on its last run"))
+      : ["overdue", "unscheduled"].includes(jworst[0]) ? stateWord("warn", jworst[1].name + (jworst[0] === "overdue" ? " is overdue" : " is not scheduled"))
+      : stateWord("ok", "All " + JOBS.filter(j => j.enabled).length + " ran OK on their last run")})));
+  if (decs.length) main.append(sect("waiting", "Waiting for you", decs.length, null, h("ul", {class: "acts"}, decs.map(([d, r]) => h("li", {class: "act", "data-key": "dec~" + r.id + "~" + d.id, "data-open": "run:" + r.id, onclick: rowClick(() => openRunAt(r.id))},
+    stateDot("risk", "Waiting for you"), h("div", {style: "min-width:0"}, h("a", {class: "at", href: modalHref("run", r.id), "data-nav": "", onclick: e => { e.preventDefault(); openRunAt(r.id); }, text: d.question || d.id}),
+      h("div", {class: "ad", style: "display:block", text: who(d.from_name || "main") + " asks" + ((d.options || []).length ? " · Options: " + d.options.join(", ") : "") + (d.recommend ? " · Recommended: " + d.recommend : "")}),
+      d.irreversible ? h("div", {class: "ad", style: "display:block"}, h("span", {class: "tag", text: "Irreversible: " + d.irreversible})) : null,
+      h("div", {class: "ad", style: "display:block", text: "Run “" + (r.goal || r.id) + "” · " + (r.project ? scopeName(r.project) : "no project") + " · " + agentName(r.agent) + " · waiting " + rel(d.ts).replace(/ ago$/, "") + " · answer in that session; " + roleName(mainMember()) + " records it"})),
+    h("div", {class: "ar"}, h("a", {class: "btn sm", href: modalHref("run", r.id), onclick: e => { e.preventDefault(); e.stopPropagation(); openRunAt(r.id); }}, "Open the run")))))));
+  main.append(sect("runs", "Runs", runs.length ? running + " running" : null, RRUNS.length ? h("span", {class: "t2", style: "font-size:var(--fs-1)", text: "On this Mac, and other machines' last update"}) : null,
+    runs.length ? h("div", {class: "rgrid"}, runs.map(runCard)) : empty("No agent runs right now.", "Runs appear when an agent starts one with ", h("code", {text: "dev progress start"}), ". Finished runs stay here for an hour.")));
+  const old = ciLatest().filter(w => now - (w.ts || 0) > CI_DAYS * 86400), rank = w => CIORDER.indexOf(ciState(w));
+  const sorted = latest.slice().sort((a, b) => rank(a) - rank(b) || (b.ts || 0) - (a.ts || 0)), watching = CIW.watching || [];
+  const watchRow = wt => { const at = watchWhere(wt), where = at ? scopeName(at.project.id) + " · " + at.branch : wt.key;
+    return h("li", {class: "cirow", "data-key": "watch~" + wt.key + "~" + wt.sha}, h("span", {class: "dot k-mark", "aria-hidden": "true"}), h("div", {class: "ct"}, h("strong", {text: "Watching"}), " · " + where + (wt.sha ? " @ " + wt.sha : "")), h("span", {class: "cr num", text: "for " + rel(wt.since).replace(/ ago$/, "")})); };
+  const rows = sorted.filter(w => ciState(w) === "failed").map(ciRow).concat(watching.map(watchRow), sorted.filter(w => ciState(w) !== "failed").map(ciRow), SHOWN.ciold ? old.map(ciRow) : []);
+  main.append(sect("ci", "CI", latest.length || watching.length ? plural(new Set(latest.map(ciKey)).size + watching.length, "branch", "branches") : null, h("span", {class: "t2", style: "font-size:var(--fs-1)", text: "Latest result per branch, " + CI_DAYS + " days"}),
+    rows.length ? [h("ul", {class: "cirows"}, rows), old.length && !SHOWN.ciold ? h("button", {class: "btn sm", type: "button", onclick: () => { SHOWN.ciold = 1; render(); }}, "Show " + plural(old.length, "older result")) : null,
+      CIW.complete === false ? h("p", {class: "foot2", text: "Showing the newest " + (CIW.watches || []).length + " of " + CIW.total + " watched branches."}) : null]
+      : empty("Nothing watched in the last " + CI_DAYS + " days.", "devkit watches the pipeline after each push or pull request from this Mac and keeps the latest result per branch.")));
+  const jobs = JOBS.slice().sort((a, b) => JORDER.indexOf(jobState(a, now)) - JORDER.indexOf(jobState(b, now)) || a.name.localeCompare(b.name));
+  main.append(sect("jobs", "Scheduled jobs", JOBS.length || null, null, jobs.length ? [h("div", {class: "tw"}, h("table", {class: "t jt"},
+      h("thead", null, h("tr", null, ["State", "Job", "Schedule", "Last run", "Next run", "Failures, " + wnd + " days"].map(t => h("th", {scope: "col", text: t})))), h("tbody", null, jobs.map(jobRow)))),
+      h("p", {class: "foot2"}, "Jobs run through launchd even when the dashboard is closed. Change them with ", h("code", {text: "dev jobs"}), ".")]
+    : empty("No scheduled jobs.", "Install devkit's jobs with ", h("code", {text: "dev jobs install"}), ".")));
+}
+/* ---------------------------------------------------------------- the crew: who is working now, the roster, and who does what (the RACI) */
+function crewLanes(recent) {
+  const out = [];
+  for (const r of RUNS.concat(RRUNS)) {
+    const plan = r.plan || [], decs = pending(r);
+    for (const a of r.agents || []) {
+      const step = plan.find(s => s.owner === a.label && ["running", "blocked", "unverified"].includes(s.state)) || plan.find(s => s.owner === a.label);
+      const m = member(step && step.persona) || member(a.label), asks = m && decs.find(d => { const dm = member(d.from_name); return dm && dm.id === m.id; });
+      const st = a.state === "lost" ? "lost" : (step && step.waiting) || asks ? "waiting" : a.state === "unverified" || (step && step.state === "unverified") ? "unverified"
+        : a.state === "running" ? "running" : "done";
+      if (st === "done" && !recent) continue;
+      if (st === "done" && r.state !== "done" && !recent) continue;
+      out.push({m, label: a.label, run: r, step: step ? stepTitle(step) : laneStep(a.label), st, min: a.min || 0, dec: asks ? asks.id : "",
+        word: st === "waiting" ? "Waiting for you" + (asks ? " · " + asks.id : "") : st === "lost" ? "Stopped reporting" : st === "unverified" ? stepWord(st)[1] : st === "running" ? "Working" : "Done"});
+    }
+  }
+  const rank = {waiting: 0, unverified: 1, lost: 2, running: 3, done: 4};
+  return out.sort((a, b) => rank[a.st] - rank[b.st] || b.min - a.min);
+}
+function laneWho(l) { return l.m ? roleName(l.m) : who(l.label); }
+function workingNow() {
+  const lanes = crewLanes(false);
+  return panel("Working now", lanes.length, null, lanes.length ? h("ul", {class: "prows"}, lanes.map(l => {
+    const name = laneWho(l), text = name + ", " + l.word.toLowerCase() + (l.step ? " on " + l.step : "") + ", " + fmtMin(l.min).replace(/m$/, " minutes");
+    return h("li", {class: "prow", style: "grid-template-columns:16px minmax(0,1fr) auto", "data-key": "lane~" + l.run.id + "~" + l.label, "data-sig": l.st + "|" + (l.step || ""), "data-open": "run:" + l.run.id, onclick: rowClick(() => openModal("run", l.run.id))},
+      h("span", {class: "g " + (l.st === "waiting" ? "bad" : l.st === "lost" || l.st === "unverified" ? "warn-t" : ""), "aria-hidden": "true", text: (l.st === "unverified" ? stepWord(l.st) : STEPW[l.st] || STEPW.running)[0]}),
+      h("div", {class: "pm"}, h("div", {class: "pw"}, h("a", {class: "rl ell", href: modalHref("run", l.run.id), "data-nav": "", "aria-label": text, onclick: e => { e.preventDefault(); openModal("run", l.run.id); }, text: name})),
+        h("div", {class: "ps", text: [l.step, "“" + (l.run.goal || "") + "”", l.run.project ? scopeName(l.run.project) : "", l.run.remote ? "on " + l.run.host : ""].filter(Boolean).join(" · ")})),
+      h("span", {class: "t2 num" + (l.st === "waiting" ? " bad" : l.st === "lost" || l.st === "unverified" ? " warn-t" : ""), style: "font-size:var(--fs-1);white-space:nowrap", text: l.word + (l.st === "waiting" ? "" : " · " + fmtMin(l.min))}));
+  })) : empty("No crew member is working right now.", "Members work on the steps of a run; when one starts, it shows here."), {flush: !!lanes.length, cls: "mb"});
+}
+function memberNow(m, lanes) {
+  if (m.main) { const r = RUNS.find(x => x.state === "running"); return r ? "Leads " + (r.goal || "a run") : "—"; }
+  const l = lanes.find(z => z.m && z.m.id === m.id); return l ? (l.st === "waiting" ? "■ " : l.st === "lost" || l.st === "unverified" ? "! " : "● ") + (l.step || l.word) : "—";
+}
+function crewTab(box) {
+  if (!CREW.length) { box.append(h("div", {class: "panel"}, empty("The crew roster could not be read.", "Run ", h("code", {text: "dev crew"}), " to see what is wrong."))); return; }
+  box.append(workingNow());
+  const lanes = crewLanes(false), parts = m => ({R: RACI.filter(a => (a.R || []).includes(m.id)).map(a => a.name), A: RACI.filter(a => a.A === m.id).map(a => a.name)});
+  const input = h("input", {id: "cq", type: "search", class: "fin", placeholder: "Filter members…", value: S.cq, "aria-label": "Filter members", autocomplete: "off"});
+  const count = h("span", {class: "count t2", role: "status", "aria-live": "polite"}), body = h("div");
+  const hay = m => [m.title, m.name, m.id].concat(RACI.filter(a => (a.R || []).concat([a.A], a.C || [], a.I || []).includes(m.id)).map(a => a.name)).join(" ").toLowerCase();
+  function draw() {
+    const tk = tokens(input.value), shown = CREW.filter(m => tk.every(t => hay(m).includes(t)));
+    count.textContent = shown.length === CREW.length ? plural(CREW.length, "member") : plural(shown.length, "member") + " of " + CREW.length;
+    clear(body);
+    if (!shown.length) { body.append(empty("No member matches “" + input.value + "”.", h("button", {class: "btn sm", type: "button", onclick: () => { input.value = ""; S.cq = ""; history.replaceState(null, "", encode(S)); draw(); }}, "Clear the filter"))); return; }
+    body.append(h("div", {class: "tw"}, h("table", {class: "t crew"}, h("thead", null, h("tr", null, [["Member", "c-mem"], ["What they do", "c-sum"], ["Does", "c-does"], ["Approves", "c-appr"], ["Access", "c-acc"], ["Now", "c-now"]].map(([t, c]) => h("th", {scope: "col", class: c, text: t})))),
+      h("tbody", null, shown.map(m => { const pr = parts(m), now = memberNow(m, lanes);
+        return h("tr", {"data-key": "member~" + m.id, "data-sig": now, "data-open": "member:" + m.id, onclick: rowClick(() => openModal("member", m.id))},
+          h("th", {scope: "row"}, modalLink("member", m.id, roleName(m))), h("td", {class: "c-sum"}, h("div", {class: "clamp2 t2", title: m.summary || "", text: m.summary || "—"})),
+          h("td", null, h("span", {class: "cl", text: "Does: "}), pr.R.join(", ") || "—"), h("td", null, h("span", {class: "cl", text: "Approves: "}), pr.A.join(", ") || "—"),
+          h("td", {style: "white-space:nowrap"}, h("span", {class: "cl", text: "Access: "}), ACCESS[m.tools] || m.tools || "—"), h("td", null, h("span", {class: "cl", text: "Now: "}), now)); })))));
+  }
+  input.addEventListener("input", debounce(() => { S.cq = input.value; history.replaceState(null, "", encode(S)); store.set("devkit.state", S); draw(); }, 120));
+  draw();
+  box.append(panel("The crew", CREW.length, null, [h("div", {class: "toolbar"}, input, count), body]));
+}
+function raciTab(box) {
+  if (!CREW.length || !RACI.length) { box.append(h("div", {class: "panel"}, empty("The crew roster could not be read.", "Run ", h("code", {text: "dev crew"}), " to see what is wrong."))); return; }
+  const lanes = crewLanes(false), busy = new Set(lanes.filter(l => l.m && (l.st === "running" || l.st === "waiting")).map(l => l.m.id)), sel = CREW.find(m => m.id === S.rm) || null, only = !!sel && !S.rall;
+  const nameOf = id => { const m = CREW.find(z => z.id === id); return m ? roleName(m) : id; };
+  const names = ids => { ids = [].concat(ids || []).filter(Boolean); if (!ids.length) return h("span", {class: "t2", title: "Nobody", text: "—"});
+    return ids.map((id, i) => [i ? ", " : null, h("span", {class: sel && sel.id === id ? "me" : null, text: nameOf(id)}), busy.has(id) ? h("span", {class: "wdot", role: "img", "aria-label": "working now", title: "Working now"}) : null]); };
+  const input = h("input", {id: "rq", type: "search", class: "fin", placeholder: "Filter kinds of work…", value: S.rq, "aria-label": "Filter kinds of work", autocomplete: "off"});
+  const msel = h("select", {"aria-label": "Member"}); msel.append(h("option", {value: ""}, "Everyone"));
+  for (const m of CREW) msel.append(h("option", {value: m.id, selected: S.rm === m.id}, roleName(m)));
+  msel.addEventListener("change", () => set({rm: msel.value, rall: false}, true));
+  const onlyBox = sel ? h("label", {class: "toggle"}, (() => { const cb = h("input", {type: "checkbox", checked: only}); cb.addEventListener("change", () => set({rall: !cb.checked}, true)); return cb; })(), "Only their work") : null;
+  const count = h("span", {class: "count t2", role: "status", "aria-live": "polite"}), body = h("div");
+  const inRow = (a, id) => (a.R || []).includes(id) || a.A === id || (a.C || []).includes(id) || (a.I || []).includes(id);
+  const hay = a => [a.name].concat([].concat(a.R || [], [a.A], a.C || [], a.I || []).filter(Boolean).map(nameOf)).join(" ").toLowerCase();
+  function draw() {
+    const tk = tokens(input.value), rows = RACI.filter(a => tk.every(t => hay(a).includes(t)) && (!only || inRow(a, sel.id)));
+    count.textContent = plural(rows.length, "kind of work", "kinds of work"); clear(body);
+    if (!rows.length) { body.append(empty("No kind of work matches “" + input.value + "”.", h("button", {class: "btn sm", type: "button", onclick: () => { input.value = ""; S.rq = ""; history.replaceState(null, "", encode(S)); draw(); }}, "Clear the filter"))); return; }
+    const col = (t, l) => h("th", {scope: "col"}, t, h("span", {class: "t2", text: " (" + l + ")"}));
+    body.append(h("table", {class: "t raci"}, h("thead", null, h("tr", null, h("th", {scope: "col", style: "width:24%", text: "Kind of work"}), col("Does", "R"), col("Approves", "A"), col("Is consulted", "C"), col("Is informed", "I"))),
+      h("tbody", null, rows.map(a => h("tr", {"data-key": "raci~" + a.id}, h("th", {scope: "row", text: a.name}), h("td", null, names(a.R)), h("td", null, names(a.A)), h("td", null, names(a.C)), h("td", null, names(a.I)))))),
+      h("div", {class: "rblk"}, rows.map(a => h("div", {class: "pl"}, h("h3", {class: "strong", style: "margin:0;font-size:var(--fs-2)", text: a.name}),
+        h("dl", {class: "srows", style: "grid-template-columns:96px minmax(0,1fr)"}, h("dt", {text: "Does"}), h("dd", null, names(a.R)), h("dt", {text: "Approves"}), h("dd", null, names(a.A)),
+          h("dt", {text: "Is consulted"}), h("dd", null, names(a.C)), h("dt", {text: "Is informed"}), h("dd", null, names(a.I)))))));
+  }
+  input.addEventListener("input", debounce(() => { S.rq = input.value; history.replaceState(null, "", encode(S)); store.set("devkit.state", S); draw(); }, 120));
+  draw();
+  const sum = sel ? (() => { const n = k => RACI.filter(a => k === "A" ? a.A === sel.id : (a[k] || []).includes(sel.id)).length;
+    return h("p", {class: "lead", style: "margin:0 0 var(--s3)", text: roleName(sel) + " does " + plural(n("R"), "kind of work", "kinds of work") + ", approves " + n("A") + ", is consulted on " + n("C") + " and is informed about " + n("I") + "."}); })() : null;
+  box.append(panel("Who does what", plural(RACI.length, "kind of work", "kinds of work"), null, [h("div", {class: "toolbar"}, input, h("label", {class: "toggle", style: "padding:0"}, "Member", msel), onlyBox, count),
+    h("p", {class: "t2", style: "margin:0 0 var(--s3);font-size:var(--fs-1)", text: "Does: does the work. Approves: signs it off; one per kind of work. Is consulted: asked before decisions that affect them. Is informed: told when it is done."}), sum, body]));
 }
 /* ---------------------------------------------------------------- Team: one card per person (user@host) */
 function markerChip() { return h("span", {class: "mk", title: "The status-line marker every agent reply starts with"}, "[Firefly", h("span", {class: "chev", text: ">"}), " DevKit]"); }
@@ -2930,9 +4138,15 @@ function personCard(x) {
       claimed.length ? h("span", {class: "lockc" + (exp ? " exp" : ""), role: "img", "aria-label": plural(claimed.length, "claimed task") + (exp ? ", " + exp + " with an expired lock" : ""), "data-tip": plural(claimed.length, "claimed task") + (exp ? ", " + exp + " with an expired lock" : "")}, lockIcon(), h("b", {class: "num", text: String(claimed.length)})) : null),
     x.sessions.length ? h("div", {class: "sbars"}, x.sessions.map((s, i) => sessBar(s, x.who, i))) : null);
 }
-function viewTeam(main) {
+function viewTeam(main_) {
   const colls = D.collisions || [], live = PEOPLE.reduce((a, x) => a + x.sessions.length, 0), locks = ITEMS.filter(i => i.open && i.claimed_by).length;
-  main.append(h("div", {class: "head"}, h("h1", {text: "Team"}), h("span", {class: "sub", text: plural(PEOPLE.length, "person", "people") + ", " + plural(live, "live session") + ", " + plural(locks, "claimed task")})));
+  const tab = ["crew", "raci"].includes(S.tab) ? S.tab : "people", working = crewLanes(false).length;
+  main_.append(h("div", {class: "head"}, h("h1", {text: "Team"}), h("span", {class: "sub", text: plural(PEOPLE.length, "person", "people") + " · " + plural(working, "crew member") + " working now"})));
+  main_.append(pageTabs([["people", "People"], ["crew", "Crew", CREW.length], ["raci", "Who does what", RACI.length]], tab));
+  const main = h("div", {class: "tabpanel", id: "tabpanel", role: "tabpanel", "aria-labelledby": "tab-" + tab}); main_.append(main);
+  if (tab === "crew") { crewTab(main); return; }
+  if (tab === "raci") { raciTab(main); return; }
+  main.append(h("p", {class: "t2", style: "margin:0 0 var(--s4);font-size:var(--fs-1)", text: plural(live, "live session") + ", " + plural(locks, "claimed task")}));
   if (colls.length) main.append(panel("Collisions", colls.length, null, h("ul", {class: "acts"}, colls.map(c => {
     const cmd = c.kind === "expired-lock" ? "dev task " + flagOf(c.scope) + " release " + c.id + ' --why "lock expired"' : "dev team";
     const open = () => c.id ? openTask(c.id) : openProject(c.project);
@@ -2946,7 +4160,7 @@ function viewTeam(main) {
 /* ---------------------------------------------------------------- Tasks: every work item, across scopes */
 function taskCard(it) {
   const first = taskCmds(it)[0];
-  return h("div", {class: "tc", onclick: rowClick(() => openTask(it.id))},
+  return h("div", {class: "tc", "data-key": "task~" + it.id, "data-sig": [it.status, it.bucket, it.claimed_by, it.lock].join("|"), "data-open": "task:" + it.id, onclick: rowClick(() => openTask(it.id))},
     h("div", {class: "tx"}, istatusIcon(it.status), h("a", {class: "itl", href: taskHref(it.id), "data-nav": "", onclick: e => { e.preventDefault(); openTask(it.id); }, text: it.title})),
     first && it.open ? icopy(first[1], first[0]) : h("span"),
     h("div", {class: "meta"}, h("span", {class: "iid", text: it.legacy ? "note" : it.id}), scopeChip(it.scope), claimChip(it, true), it.due ? dueBadge(it.due, !it.open) : null, prioIcon(it.priority)));
@@ -2961,7 +4175,7 @@ function viewTasks(main) {
   for (const p of P.filter(p => p.items.length)) scopeSel.append(h("option", {value: p.id, selected: S.tp === p.id}, p.id));
   scopeSel.addEventListener("change", () => set({tp: scopeSel.value}, true));
   const whos = Array.from(new Set(all.filter(i => i.holder).map(i => i.holder))).sort();
-  const whoSel = h("select", {"aria-label": "Claimed by"}); whoSel.append(h("option", {value: ""}, "Anyone"), ME ? h("option", {value: "me", selected: S.who === "me"}, "Claimed by me") : null);
+  const whoSel = h("select", {"aria-label": "Claimed by"}); append(whoSel, [h("option", {value: ""}, "Anyone"), ME ? h("option", {value: "me", selected: S.who === "me"}, "Claimed by me") : null]);
   for (const w of whos) whoSel.append(h("option", {value: w, selected: S.who === w}, w));
   whoSel.addEventListener("change", () => set({who: whoSel.value}, true));
   main.append(h("div", {class: "head"}, h("h1", {text: "Tasks"}), h("span", {class: "sub", text: c.doing + " doing · " + c.blocked + " blocked · " + c.open + " open · work items with locks and history"})));
@@ -3053,8 +4267,8 @@ function viewActivity(main) {
   main.append(h("div", {class: "g12"},
     panel("Every day, 26 weeks", null, tbtn, [box, h("p", {class: "tnote", text: "Commits are kept for 30 days; sessions and finished tasks come from the handoff repository."})], {cls: "sp-8"}),
     h("div", {class: "sp-4 ctrs col1"},
-      statTile({label: "Commits, 26 weeks", value: hm.tot.c, viz: spark(commitSeries(ps, 14), "Commits per day", "commit", true), cls: "row"}),
-      statTile({label: "Sessions, 26 weeks", value: hm.tot.s, viz: spark(sessionSeries(null, 14), "Sessions per day", "session", true), cls: "row"}),
+      statTile({label: "Commits, " + (W.commits_days || 30) + " days", value: hm.tot.c, viz: spark(commitSeries(ps, 14), "Commits per day", "commit", true), cls: "row"}),
+      statTile({label: W.sessions_since ? "Sessions since " + shortDay(lkey(new Date(W.sessions_since * 1000))) : "Sessions", value: hm.tot.s, viz: spark(sessionSeries(null, 14), "Sessions per day", "session", true), cls: "row"}),
       statTile({label: "Tasks done, 26 weeks", value: hm.tot.t, viz: spark(doneSeries(ITEMS, 14), "Tasks done per day", "task", true), cls: "row"})),
     panel("Timeline", null, null, timeline(ps, n), {flush: true, cls: "sp-8"}),
     panel("Most active, last " + n + " days", rows.length, null, rows.length ? rankedBars(rows, v => String(v), id => openModal("project", id)) : empty("No commits in this range"), {cls: "sp-4"})));
@@ -3076,6 +4290,7 @@ function fileTree() {
 }
 function viewExplorer(main) {
   main.append(h("div", {class: "head"}, h("h1", {text: "Explorer"}), h("span", {class: "sub", text: "The handoff repository · " + D.handoff})));
+  if (!FILES.length && D.live && !D.files) { main.append(h("div", {class: "panel"}, empty("Loading the files…", "The live page loads the handoff repository's Markdown after the first screen."))); return; }
   if (!FILES.length) { main.append(h("div", {class: "panel"}, empty("The handoff repository has no Markdown files yet", "Run ", h("code", {text: "dev sync"}), " to generate the map and the notes."))); return; }
   const tree = fileTree();
   const pick = S.f && FILEMAP.has(S.f) ? FILEMAP.get(S.f) : (FILEMAP.get("PROJECTS.md") || FILES[0]);
@@ -3167,7 +4382,7 @@ function viewHealth(main, tiles) {
         h("td", {class: "t2", style: "white-space:nowrap", text: Object.entries(r.agents).map(([a, n]) => a + " " + n).join(" · ")}), h("td", {class: "num t2", style: "white-space:nowrap", text: r.last.slice(5)}),
         h("td", {class: "t2", style: "max-width:0;width:100%"}, h("div", {class: "ell", title: r.example}, r.example)))))))
     : empty("The guard has not blocked anything", "Blocked actions are grouped by rule here; a rule that keeps firing means an agent is fighting the workspace rules.");
-  main.append(h("div", {class: "cols", style: "margin-bottom:16px"}, panel("Guard decisions by rule", rules.reduce((a, r) => a + r.count, 0), null, guardBody, {flush: !!rules.length}), panel("Instruction canary · 7 days", null, markerChip(), canaryBody)));
+  main.append(h("div", {class: "cols", style: "margin-bottom:16px"}, panel("Guard decisions by rule" + guardWindow(), rules.reduce((a, r) => a + r.count, 0), null, guardBody, {flush: !!rules.length}), panel("Instruction canary · 7 days", null, markerChip(), canaryBody)));
   const drift = D.drift;
   const driftBody = drift == null ? h("p", {class: "t2", style: "font-size:var(--fs-1);margin:0"}, "No drift report in this registry. ", h("code", {text: "dev config diff"}), " compares the devkit configuration with Claude Code and Codex.")
     : !drift.length ? h("p", {class: "t2", style: "margin:0", text: "Claude Code and Codex match the devkit configuration."})
@@ -3195,10 +4410,17 @@ function viewHealthV3(main) {
   const can = Object.keys(sum).map(a => [a, sum[a][0], sum[a][1]]), ok = can.reduce((a, x) => a + x[1], 0), all = can.reduce((a, x) => a + x[2], 0);
   main.append(h("div", {class: "head"}, h("h1", {text: "Health"}), h("span", {class: "sub", text: "Agents, guard, configuration and disk"})));
   main.append(h("div", {class: "g12 tiles"}, prov("claude"), prov("codex"),
-    statTile({label: "Guard decisions", value: rules.reduce((a, r) => a + r.count, 0), viz: segBar(rules.slice(0, 4).map((r, i) => [i ? "none" : "mark", r.count, r.label]), "Guard decisions by rule"), cls: "sp-2"}),
-    statTile({label: "Status block, 7 days", value: all ? Math.round(100 * ok / all) + "%" : "—", viz: all ? segBar([["ok", ok, "Started with it"], ["risk", all - ok, "Missed"]], "Replies in 7 days") : h("span", {class: "t2", text: "No replies yet"}), legend: all ? legend([["ok", ok, "Started with it"], ["risk", all - ok, "Missed"]]) : null, cls: "sp-2"}),
-    statTile({label: "Configuration drift", value: drift == null ? "—" : drift.length, viz: h("span", {class: "stat t2"}, h("span", {class: "dot k-" + (drift && drift.length ? "warn" : "ok"), "aria-hidden": "true"}), drift == null ? "Not reported" : drift.length ? "Run dev config diff" : "Matches devkit"), cls: "sp-2"}),
+    statTile({label: "Guard decisions" + guardWindow(), value: rules.reduce((a, r) => a + r.count, 0), viz: segBar(rules.slice(0, 4).map((r, i) => [i ? "none" : "mark", r.count, r.label]), "Guard decisions by rule"), cls: "sp-2"}),
+    statTile({label: "Status block, 7 days", value: all ? Math.round(100 * ok / all) + "%" : "No data", cls: all ? "sp-2" : "sp-2 wordv", viz: all ? segBar([["ok", ok, "Started with it"], ["risk", all - ok, "Missed"]], "Replies in 7 days") : h("span", {class: "t2", text: "No replies yet"}), legend: all ? legend([["ok", ok, "Started with it"], ["risk", all - ok, "Missed"]]) : null}),
+    statTile({label: "Configuration drift", value: drift == null ? "Not reported" : drift.length, cls: drift == null ? "sp-2 wordv" : "sp-2", viz: h("span", {class: "stat t2"}, h("span", {class: "dot k-" + (drift && drift.length ? "warn" : "ok"), "aria-hidden": "true"}), drift == null ? "This registry has no drift report" : drift.length ? "Run dev config diff" : "Matches devkit")}),
     statTile({label: "Worktrees", value: wts.length, unit: disk ? kb(disk) + " on disk" : null, viz: h("span", {class: "stat t2"}, h("span", {class: "dot k-" + (recl ? "warn" : "ok"), "aria-hidden": "true"}), recl ? plural(recl, "finished worktree") + " to reclaim" : "Nothing to reclaim"), cls: "sp-2"})));
+  const issues = D.issues || [], flags = allFlags();
+  main.append(h("div", {class: "cols even mb"},
+    panel("Setup issues", issues.length || null, issues.length ? icopy("dev doctor", "Copy dev doctor") : null, issues.length ? h("ul", {class: "acts"}, issues.map(i => h("li", {class: "act", "data-key": "issue~" + i.kind + "~" + i.text},
+      stateDot("warn", "Needs a look"), h("div", {style: "min-width:0"}, h("div", {class: "strong", text: i.text}), h("div", {class: "ad", text: "Kind: " + i.kind})), h("span")))) : empty("No setup issues in the last sync."), {flush: !!issues.length}),
+    panel("Contradictions", flags.length || null, null, flags.length ? h("ul", {class: "acts"}, flags.map(f => h("li", {class: "act", onclick: rowClick(f.open)}, stateDot("warn", "Contradiction " + f.code),
+      h("div", {style: "min-width:0"}, h("a", {class: "at", href: "#", "data-nav": "", onclick: e => { e.preventDefault(); f.open(); }, text: f.where}), h("div", {class: "ad", style: "display:block"}, flagNodes(f), f.fix ? h("span", {class: "t2", text: " " + f.fix}) : null)),
+      f.cmd ? h("div", {class: "ar"}, icopy(f.cmd, "Copy the fix")) : h("span")))) : empty("No contradictions found.", "devkit compares task states, locks, plans and saved statuses on every update."), {flush: !!flags.length})));
   viewHealth(main, true);
   const tp = timePanel(D.timing, true, "How long things take");
   if (tp) main.append(h("div", {class: "mt"}, tp));
@@ -3238,7 +4460,7 @@ function viewSearch(main) {
   if (!shown.length) { main.append(h("div", {class: "panel"}, empty("Nothing found", "Try fewer words or clear filters. Search covers initiatives, projects, people, tasks, PRs, notes, plans, sessions and every Markdown file in the handoff repo."))); return; }
   const box = h("div", {class: "results panel"});
   for (const r of shown.slice(0, 300)) {
-    const run = () => r.url ? window.open(r.url, "_blank", "noopener") : r.tid ? openTask(r.tid) : r.file ? set({view: "explorer", id: "", f: r.file, fq: S.q}, true) : r.iid ? openInitiative(r.iid) : r.who ? go("team") : r.scope ? openScope(r.scope, "sessions") : openProject(r.pid);
+    const run = () => r.url ? openUrl(r.url) : r.tid ? openTask(r.tid) : r.file ? set({view: "explorer", id: "", f: r.file, fq: S.q}, true) : r.iid ? openInitiative(r.iid) : r.who ? go("team") : r.scope ? openScope(r.scope, "sessions") : openProject(r.pid);
     const el = h("button", {class: "res", type: "button", "data-nav": "", onclick: run},
       h("div", {class: "rt"}, h("span", {class: "tag", text: r.type}), h("span", {class: "ell"}, inline(r.title.slice(0, 200)))), h("div", {class: "rs"}, r.pid && r.type !== "project" && BYID.has(r.pid) ? (BYID.get(r.pid).name || r.pid) + " · " : "", snippet(r.text, S.q)));
     highlight(el, S.q); box.append(el);
@@ -3250,7 +4472,15 @@ function viewSearch(main) {
 let lastFocus = null;
 /* ---------------------------------------------------------------- quick-look modals: one native <dialog> (focus trap, Esc, focus returned to the
    trigger), a deep link per item (?modal=<kind>:<id>, and ?task=<id> for tasks), the next action as the one primary button */
+let OPENAT = "";   /* "waiting": open the run drawer at its Waiting for you section */
 function modalKey() { return S.task ? "task:" + S.task : S.modal || ""; }
+function stepRecord(dir) {
+  const k = modalKey(), kind = k.slice(0, k.indexOf(":")), keys = [];
+  for (const el of $$("[data-open]", $("#view"))) { const v = el.getAttribute("data-open"); if (v.startsWith(kind + ":") && !keys.includes(v)) keys.push(v); }
+  const nx = keys[keys.indexOf(k) + dir]; if (keys.indexOf(k) < 0 || !nx) return;
+  const j = nx.indexOf(":"); if (nx.startsWith("task:")) openTask(nx.slice(5)); else openModal(nx.slice(0, j), nx.slice(j + 1));
+}
+function openRunAt(id) { OPENAT = "waiting"; openModal("run", id); }
 function openModal(kind, id) { untip(); set({modal: kind + ":" + id, task: ""}, true); }
 function closeModal() { untip(); set({modal: "", task: ""}, true); }
 function layerHost() { const d = $("#modal"); return d && d.open ? d : document.body; }
@@ -3266,32 +4496,375 @@ function renderModal() {
   }
   if (!dlg.open) lastFocus = document.activeElement;
   const closeBtn = h("button", {class: "btn icon ghost", type: "button", onclick: closeModal, "aria-label": "Close (Esc)", title: "Close (Esc)"}, icon("close"));
-  clear(dlg).append(h("header", {class: "mh"}, h("div", {class: "mh-t"}, parts.head), closeBtn), h("div", {class: "mbody"}, parts.body), parts.foot ? h("footer", {class: "mf"}, parts.foot) : null);
-  if (!dlg.open) dlg.showModal();
-  closeBtn.focus({preventScroll: true});
+  const foot = (parts.foot || []).filter(Boolean);
+  append(clear(dlg), [h("header", {class: "mh"}, h("div", {class: "mh-t"}, parts.head), closeBtn), h("div", {class: "mbody", "aria-busy": parts.busy ? "true" : null}, parts.body), foot.length ? h("footer", {class: "mf"}, foot) : null]);
+  const opening = !dlg.open;
+  if (opening) dlg.showModal();
+  if (!LIVE.quiet) closeBtn.focus({preventScroll: true});   /* a live refresh keeps the reader's focus and place */
+  if (parts.after && (opening || !LIVE.quiet)) parts.after(dlg);
+  if (opening && kind === "run" && OPENAT === "waiting") { const w = $("#waiting-for-you", dlg); if (w) { w.scrollIntoView({block: "start"}); w.focus({preventScroll: true}); } }
+  OPENAT = "";
 }
 function mtitle(text) { return h("h2", {id: "modal-title", text}); }
+/* ---------------------------------------------------------------- details on demand: the live page fetches a drawer's record once and again when
+   its area changes; the static copy shows what the snapshot holds and says what is missing */
+const DET = new Map();
+const DETAIL_AREA = {task: "items", run: "runs", job: "jobs", ci: "ci"};
+const KINDWORD = {task: "Task", run: "Run", job: "Job", ci: "CI result", member: "Crew member"};
+const MISSING = {task: "It may have been deleted or moved to another project. The lists update on their own.",
+  run: "Runs live on the machine that ran them, and a finished run leaves this page after an hour.",
+  job: "There is no job with this name. dev jobs lists them.", ci: "A newer result for the same branch replaced it.", member: "The crew roster has no member with this id. dev crew lists them."};
+function detailPath(kind, id) { const e = encodeURIComponent(id); return {task: "/api/v1/items/" + e, run: "/api/v1/runs/" + e, job: "/api/v1/jobs/" + e, ci: "/api/v1/ci"}[kind]; }
+function detail(kind, id) {
+  if (!LIVE.on) return {state: "static"};
+  const k = kind + ":" + id; if (!DET.has(k)) loadDetail(kind, id); return DET.get(k);
+}
+async function loadDetail(kind, id, refresh) {
+  const k = kind + ":" + id, prev = DET.get(k); let next = null;
+  if (!prev) DET.set(k, {state: "loading"});
+  try {
+    const r = await fetch(detailPath(kind, id), {cache: "no-store", credentials: "same-origin", headers: {Accept: "application/json"}});
+    if (r.status === 401) { setLive("ended"); next = {state: "ended"}; }
+    else if (r.status === 404) next = {state: prev && prev.state === "ok" ? "removed" : "missing"};
+    else if (!r.ok) { let pb = {}; try { pb = await r.json(); } catch (e) { pb = {}; } next = {state: "error", problem: pb, status: r.status}; }
+    else {
+      let data = await r.json();
+      if (kind === "ci") data = (data.watches || []).find(w => ciKey(w) === id) || null;
+      next = !data ? {state: prev && prev.state === "ok" ? "removed" : "missing"}
+        : {state: "ok", data, updated: refresh && prev && prev.state === "ok" && JSON.stringify(prev.data) !== JSON.stringify(data) ? Date.now() : (prev && prev.updated) || 0};
+    }
+  } catch (e) { next = {state: "stopped"}; }
+  DET.set(k, next);
+  if (next.updated && (!prev || next.updated !== prev.updated)) announce(KINDWORD[kind] + " updated.");
+  if (modalKey() === k) rerenderModal();
+}
+function refreshDetail(changed) {
+  const k = modalKey(), i = k.indexOf(":"), kind = k.slice(0, i), all = changed.includes("*");
+  for (const key of Array.from(DET.keys())) { const kk = key.slice(0, key.indexOf(":")); if (key !== k && (all || changed.includes(DETAIL_AREA[kk]))) DET.delete(key); }
+  if (LIVE.on && DETAIL_AREA[kind] && $("#modal").open && (all || changed.includes(DETAIL_AREA[kind]))) loadDetail(kind, k.slice(i + 1), true);
+}
+function retryDetail() { DET.delete(modalKey()); rerenderModal(); }
+/* a re-render keeps the drawer's scroll, the scroll of its logs (or their bottom) and the focus inside it */
+function rerenderModal() {
+  const dlg = $("#modal"); if (!dlg.open) { renderModal(); return; }
+  const b = $(".mbody", dlg), y = b ? b.scrollTop : 0, had = dlg.contains(document.activeElement);
+  const logs = $$("pre.log[data-key]", dlg).map(p => [p.getAttribute("data-key"), p.scrollTop, p.scrollTop + p.clientHeight >= p.scrollHeight - 4]);
+  LIVE.quiet = true; try { renderModal(); } finally { LIVE.quiet = false; }
+  const nb = $(".mbody", dlg); if (nb) nb.scrollTop = y;
+  for (const [key, top, bottom] of logs) { const p = $$("pre.log[data-key]", dlg).find(x => x.getAttribute("data-key") === key); if (!p) continue;
+    if (bottom) p.scrollTop = p.scrollHeight; else { p.scrollTop = top; if (p.scrollHeight > p.clientHeight + top + 8) { const nl = p.nextElementSibling; if (nl && nl.classList.contains("newl")) nl.hidden = false; } } }
+  if (had && !dlg.contains(document.activeElement)) { const c = $(".mh .btn.icon", dlg); if (c) c.focus({preventScroll: true}); }
+}
+/* the drawer states every kind shares: not found, removed while open, server stopped, session ended, other errors */
+function drawerProblem(kind, id, det, crumbsList) {
+  const word = KINDWORD[kind] || "Record", close = h("button", {class: "btn", type: "button", onclick: closeModal}, "Close");
+  const again = h("button", {class: "btn", type: "button", onclick: retryDetail}, "Try again");
+  const head = t => [crumbsList ? crumbs(crumbsList) : null, mtitle(t)];
+  if (det.state === "missing" || det.state === "removed")
+    return {head: head(word + " " + id + " no longer exists"), body: [h("p", {class: "lead"}, det.state === "removed" ? "It was removed while you were looking at it. " : "", MISSING[kind] || "")], foot: [close]};
+  if (det.state === "stopped")
+    return {head: head("Could not load the details"), body: [h("p", {class: "lead"}, "The dashboard server is not answering. It stops by itself after 30 minutes without an open page. Start it again with ", h("code", {text: "dev dashboard"}), ".")], foot: [again, cmdBtn("dev dashboard", true, "Copy dev dashboard")]};
+  if (det.state === "ended")
+    return {head: head("This page is no longer signed in"), body: [h("p", {class: "lead"}, "The dashboard server restarted with a new key. Run ", h("code", {text: "dev dashboard"}), " to open a signed-in page.")], foot: [cmdBtn("dev dashboard", true, "Copy dev dashboard")]};
+  if (det.state === "error") { const pb = det.problem || {};
+    return {head: head("Could not load the details"), body: [h("p", {class: "lead", text: (pb.title || "Error " + (det.status || "")) + (pb.detail ? ": " + pb.detail : "")})], foot: [again]}; }
+  return null;
+}
+function skeleton() { return h("div", {class: "skel", role: "status"}, h("span", {class: "sr", text: "Loading details…"}), h("i"), h("i"), h("i", {class: "blk"}), h("i"), h("i"), h("i", {class: "blk"}), h("i"), h("i")); }
+function staticNote(what) {
+  return h("div", {class: "notice"}, "A static copy from " + fmt(D.generated) + ". " + (what ? "The whole " + what + " needs the live dashboard: run " : "Run "), h("code", {text: "dev dashboard"}), what ? "." : " for the live page.", " ", icopy("dev dashboard", "Copy"));
+}
+function updatedNote(det) { return det && det.updated ? "Updated " + (Date.now() - det.updated < 60000 ? "just now" : rel(det.updated / 1000)) : null; }
+function untrusted(text, label, key) { return h("pre", {class: "log", tabindex: "0", "aria-label": label, "data-key": key || null}, String(text == null ? "" : text)); }
+/* "› More" for long text: two or three lines, then all of it (textContent only) */
+function moreText(text, lines) {
+  const cls = lines === 2 ? "clamp2" : "clamp3", p = h("div", {class: cls, text: String(text || "")}), b = h("button", {class: "linkbtn", type: "button", "aria-expanded": "false"}, "› More");
+  b.addEventListener("click", e => { e.stopPropagation(); const on = b.getAttribute("aria-expanded") !== "true"; p.className = on ? "" : cls; b.setAttribute("aria-expanded", String(on)); b.textContent = on ? "› Less" : "› More"; });
+  return String(text || "").length > (lines === 2 ? 160 : 240) ? h("div", null, p, b) : p;
+}
+/* "Show all {n} …": the first `n`, then a button; the expansion survives live updates (SHOWN) */
+function showAll(key, list, n, rowFn, word) {
+  const all = !!SHOWN[key], shown = all ? list : list.slice(0, n);
+  return [shown.map(rowFn), list.length > n && !all ? h("li", {class: "showall"}, h("button", {class: "btn sm", type: "button", onclick: e => { e.stopPropagation(); SHOWN[key] = 1; rerenderModal(); }}, "Show all " + list.length + " " + word)) : null];
+}
+const STEPW = {running: ["▸", "Running"], pending: ["○", "To do"], blocked: ["■", "Blocked"], waiting: ["■", "Waiting for you"], done: ["✓", "Done"], skipped: ["–", "Skipped"], lost: ["!", "Stopped reporting"]};
+function stepTime(s) {
+  if (s.state === "running" || s.state === "done") return fmtMin(s.min || 0) + (s.est ? " of ~" + fmtAbout(s.est) : "");
+  return s.est ? "~" + fmtAbout(s.est) + (s.est_auto ? ", a default estimate" : "") : "";
+}
+function findRun(id) { return RUNS.find(x => x.id === id) || RRUNS.find(x => x.id === id) || null; }
+function sessOfRun(r) { for (const x of PEOPLE) for (const s of x.sessions) if (s.session === r.session && s.agent === r.agent) return s; return null; }
+/* ---------------------------------------------------------------- the run drawer: every step with its owner and evidence, the crew, what waits for you */
+function runModal(id) {
+  const r = findRun(id), remote = !!(r && r.remote);
+  const det = remote ? {state: "static"} : detail("run", id), cr = [["Background work", link({view: "background"})], ["Runs"]];
+  if (!r && det.state === "loading") return {head: [crumbs(cr), mtitle("Run")], body: [skeleton()], busy: true};
+  if (!r && det.state === "static") return drawerProblem("run", id, {state: "missing"}, cr);
+  const prob = drawerProblem("run", id, det, cr); if (prob) return prob;
+  const d = det.state === "ok" ? det.data : null, x = Object.assign({}, r || {}, d || {}), st = runState(x);
+  const steps = d ? d.steps || [] : (r.plan || []), lanes = d ? d.lanes || [] : (r.agents || []).map(a => ({label: a.label, state: a.state, min: a.min}));
+  const decs = d ? d.decisions || [] : r.decisions || [], open = decs.filter(z => !z.state || z.state === "pending"), sess = sessOfRun(x);
+  const tm_ = runTime(Object.assign({}, x, {plan: steps})), branch = (sess && sess.branch) || x.branch;
+  const head = [crumbs(cr), mtitle(x.goal || "Agent run"),
+    h("div", {class: "pline"}, meta(stateWord(RUNTONE[st], runStateText(x, st)), x.mode === "auto" ? "Auto" : "Guided", x.project ? scopeName(x.project) : null, branch ? h("span", {class: "meta"}, icon("branch"), branch) : null,
+      agentName(x.agent), remote ? "on " + x.host : null, updatedNote(det)))];
+  if (det.state === "loading") return {head, body: [skeleton()], busy: true};
+  const pct = tm_.total ? 100 * tm_.done / tm_.total : 0, cal = x.estimate_cal && x.estimate && x.estimate_cal !== x.estimate ? x.estimate_cal / x.estimate : 0;
+  const first = runFirstEst(x), planned = x.total_min != null && fmtAbout(first) !== fmtAbout(x.total_min);   /* "of about" is the plan's total, not the first estimate */
+  const figs = h("div", {class: "mfigs"},
+    h("div", null, h("span", {class: "s-l", text: "Progress"}), h("span", {class: "strong num", text: tm_.steps}),
+      h("div", {class: "rbar" + (tm_.over ? " over" : ""), role: "progressbar", "aria-valuenow": Math.round(pct), "aria-valuemin": 0, "aria-valuemax": 100, "aria-valuetext": tm_.steps}, h("i", {style: "width:" + pct.toFixed(1) + "%"}))),
+    h("div", null, h("span", {class: "s-l", text: "Time"}), h("span", {class: "num", text: tm_.text + (cal && !planned ? ": estimated " + fmtAbout(x.estimate) + ", ×" + cal.toFixed(1) + " from this project's runs" : "")}),
+      planned && first ? h("span", {class: "t2 num", text: "first estimate " + fmtAbout(first)}) : null,
+      tm_.over ? h("span", {class: "warn-t", text: "over the estimate by " + fmtMin(tm_.over)}) : null),
+    h("div", null, h("span", {class: "s-l", text: "Left"}), h("span", {class: "num", text: etaText(x).replace(/ left$/, "") || (x.state === "done" ? "Done" : "No estimate")}),
+      x.pace && Math.abs(x.pace - 1) >= 0.05 ? h("span", {class: "t2", text: "pace " + (+x.pace).toFixed(1) + "× the estimate"}) : null));
+  const stepLine = s => {
+    const dec = open.find(z => z.step === s.name), w = s.waiting || dec ? "waiting" : s.state, sw = stepWord(w), ev = (s.evidence || []).slice(-1)[0], code = stepCode(s);
+    const scope = [].concat(s.scope || []).filter(Boolean), files = scope.length === 1 ? String(scope[0]).split(/[\s,]+/).filter(Boolean) : scope;
+    const after = (s.after || []).map(a => { const o = steps.find(z => z.name === a); return o ? stepWord(o.state)[0] + " " + stepTitle(o) : "○ " + a; });
+    const hist = (s.evidence || []).map(e => ({ts: e.ts, text: [e.kind, e.text, e.check, e.next ? "next: " + e.next : ""].filter(Boolean).join(" · ")}))
+      .concat((s.history || []).map(e => ({ts: e.ts, text: (e.from || "") + " → " + (e.to || "") + " · " + who(e.by || "main") + (e.why ? " · " + e.why : "")}))).sort((a, b) => (b.ts || 0) - (a.ts || 0));
+    const rows = [s.desc ? h("dd", {class: "wide", text: s.desc}) : null,
+      ev ? [h("dt", {text: "Evidence"}), h("dd", {class: "ck " + ckClass(ev.check)}, moreText(ev.check || ev.text, 2))] : null,
+      files.length ? [h("dt", {text: "Files"}), h("dd", {title: files.join(", "), text: files.slice(0, 3).join(", ") + (files.length > 3 ? ", +" + (files.length - 3) + " more" : "")})] : null,
+      after.length ? [h("dt", {text: "Waits for"}), h("dd", {text: after.join(", ")})] : null,
+      s.state === "pending" && s.label && (!s.owner || s.owner === "main") ? h("dd", {class: "wide t2", text: "Assigned to " + who(s.label) + ", not started."}) : null,
+      dec ? h("dd", {class: "wide bad", text: "Waiting for your answer to " + dec.id + "."}) : null,
+      hist.length ? h("dd", {class: "wide"}, h("details", {class: "recent", "data-key": "ev~" + s.name}, h("summary", null, "Evidence and history (" + hist.length + ")"),
+        h("ul", {class: "rrows"}, hist.map(e => h("li", null, h("span", {class: "t2", text: fmt(e.ts) + " · "}), e.text))))) : null].filter(Boolean);
+    return h("li", {class: w}, h("span", {class: "sn", text: String(steps.indexOf(s) + 1)}), h("span", {class: "g", "aria-hidden": "true", text: sw[0]}),
+      h("span", {class: "nm"}, h("span", {class: "sr", text: sw[1] + ": "}), stepTitle(s), h("span", {class: "ow", text: " · " + stepWho(s)}),
+        code ? h("span", {class: "ow"}, " · ", h("span", {class: "sc", title: "The step's name in dev progress", text: code})) : null),
+      h("span", {class: "tm num", text: sw[1] + (stepTime(s) ? " · " + stepTime(s) : "")}), rows.length ? h("dl", {class: "sx"}, rows) : null);
+  };
+  const f = SHOWN.stepf || "all", nOpen = steps.filter(s => s.state !== "done" && s.state !== "skipped").length;
+  const shownSteps = steps.filter(s => f === "all" || (f === "open" ? s.state !== "done" && s.state !== "skipped" : s.state === "done" || s.state === "skipped"));
+  const segF = h("div", {class: "seg", role: "group", "aria-label": "Show steps"}, [["all", "All", steps.length], ["open", "Open", nOpen], ["done", "Done", steps.length - nOpen]].map(([v, l, n]) =>
+    h("button", {type: "button", "aria-pressed": String(f === v), onclick: () => { SHOWN.stepf = v; rerenderModal(); }}, l, h("span", {class: "sn num", text: String(n)}))));
+  const laneRow = l => {
+    const lst = ["running", "lost", "waiting", "unverified"].includes(l.state) ? l.state : "done", sw = lst === "running" ? ["▸", "Working"] : stepWord(lst);
+    const own = steps.filter(s => (l.id && s.owner === l.id) || (!l.id && s.owner === l.label)), ups = (l.updates || []).slice().reverse(), scope = [].concat(l.scope || []).filter(Boolean);
+    return h("li", {class: lst}, h("span", {class: "sn"}), h("span", {class: "g", "aria-hidden": "true", text: sw[0]}),
+      h("span", {class: "nm"}, h("span", {class: "sr", text: sw[1] + ": "}), who(l.label, l.persona), own.length ? h("span", {class: "ow", text: " · " + own.map(stepTitle).join(", ")}) : null),
+      h("span", {class: "tm num", text: sw[1] + " · " + fmtMin(l.min || 0) + (l.done ? " · " + l.done + " done" : "")}),
+      ups.length || scope.length ? h("dl", {class: "sx"}, scope.length ? [h("dt", {text: "Files"}), h("dd", {text: scope.join(", ")})] : null,
+        ups.length ? [h("dt", {text: "Latest"}), h("dd", null, ups[0].text || "", " ", h("span", {class: "t2", text: rel(ups[0].ts)}))] : null,
+        ups.length > 1 ? h("dd", {class: "wide"}, h("details", {class: "recent", "data-key": "up~" + (l.id || l.label)}, h("summary", null, "Updates (" + ups.length + ")"),
+          h("ul", {class: "rrows"}, ups.slice(1).map(u => h("li", null, h("span", {class: "t2", text: fmt(u.ts) + " · "}), u.text || ""))))) : null) : null);
+  };
+  const qs = d ? (d.questions || []).filter(m => m.from !== "ci") : (r.questions || []);
+  const laneName = idx => { if (idx === "main") return roleName(mainMember()); const l = lanes.find(z => z.id === idx); return l ? who(l.label, l.persona) : idx; };
+  const qOpen = q => !q.answered && !qs.some(z => z.reply_to === q.id);
+  const qRow = q => { const ans = qs.find(z => z.reply_to === q.id), to = q.to_name ? who(q.to_name) : laneName(q.to || "main");
+    return h("li", null, h("div", {class: "slw"}, meta(h("strong", {text: q.id}), who(q.from_name || q.from || "main") + " → " + to, rel(q.ts),
+      ans ? "Answered in " + ans.id : q.answered ? "Answered" : q.delivered === false ? "Not delivered yet: it reaches " + to + " with their next tool call" : "Open")), moreText(q.text, 3)); };
+  const decided = decs.filter(z => z.state === "decided").sort((a, b) => (b.decided || b.ts || 0) - (a.decided || a.ts || 0));
+  const ups = (d ? (d.updates || []).filter(u => u.kind !== "agent") : (r.updates || [])).slice().reverse(), hist = d ? (d.history || []).slice().reverse() : [];
+  const body = [figs, runFlags(x, d).map(flagCallout),
+    remote ? h("div", {class: "notice"}, "This run is on " + x.host + ". Its evidence, history and questions stay on that machine; open the dashboard there to see them. Last presence update " + rel(x.asOf) + ".") : null,
+    !remote && det.state === "static" ? staticNote("run: evidence, history and questions") : null,
+    open.length ? h("section", {class: "msec", id: "waiting-for-you", "aria-labelledby": "wfy-h", tabindex: "-1"}, h("div", {class: "msec-h"}, h("h3", {id: "wfy-h", text: "Waiting for you"}), h("span", {class: "count num", text: String(open.length)})),
+      h("ul", {class: "acts"}, open.map(z => h("li", {class: "act"}, stateDot("risk"), h("div", {style: "min-width:0"}, h("div", {class: "strong"}, z.id + "  ", z.question || ""),
+        h("div", {class: "ad", style: "display:block", text: (z.options || []).map(o => o + (o === z.recommend ? " (recommended)" : "")).join(" · ")}),
+        z.irreversible ? h("div", {class: "ad bad", style: "display:block", text: "Irreversible: " + z.irreversible + ". Auto mode never takes it without your approval."}) : null,
+        h("div", {class: "ad", style: "display:block", text: "Asked by " + who(z.from_name || "main") + " " + rel(z.ts) + "." + (z.step ? " It blocks “" + stepTitle(steps.find(q => q.name === z.step) || {name: z.step}) + "”." : "") + " Answer in the session; " + roleName(mainMember()) + " records it."})), h("span"))))) : null,
+    msec("Steps", steps.length ? h("ol", {class: "steps"}, shownSteps.map(stepLine)) : empty("No steps planned", "The run has a goal but no plan yet."), h("span", {style: "display:flex;gap:8px;align-items:center;margin-left:auto"}, h("span", {class: "count num", text: String(steps.length)}), steps.length ? segF : null)),
+    msec("Crew", lanes.length ? h("ol", {class: "steps"}, lanes.map(laneRow)) : empty("Only the main session worked on this run."), lanes.length ? h("span", {class: "count num", text: plural(lanes.length, "lane")}) : null),
+    d || qs.length ? msec("Questions between the crew", qs.length ? h("ul", {class: "rrows"}, qs.filter(qOpen).concat(qs.filter(q => !qOpen(q)).reverse()).map(qRow)) : empty("No questions between the crew."), qs.length ? h("span", {class: "count num", text: qs.length + " · " + qs.filter(qOpen).length + " open"}) : null) : null,
+    d ? msec("Decisions", decided.length ? h("ul", {class: "rrows"}, decided.map(z => h("li", null, h("div", {class: "strong", text: z.question || z.id}),
+      h("div", {class: "slw"}, meta("→ " + (z.answer || "—"), z.by === "auto" ? "automatically" : z.by === "main" ? "by " + roleName(mainMember()) : "by you", rel(z.decided || z.ts), z.by === "auto" ? h("span", {class: "tag", text: "Decided automatically: review it"}) : null)),
+      z.overrides ? h("div", {class: "t2", text: "You changed it: it was “" + z.overrides + "”."}) : null))) : empty("No decisions recorded.")) : null,
+    msec("Updates", ups.length ? h("ul", {class: "rrows"}, showAll("ups~" + id, ups, 20, u => h("li", null, h("div", {class: "slw"}, meta(u.kind || "update", rel(u.ts))), h("div", null, u.text || ""),
+      u.check ? h("div", {class: "ck " + ckClass(u.check), text: u.check}) : null, u.next ? h("div", {class: "t2", text: "Next: " + u.next}) : null), "updates")) : empty("No updates yet.")),
+    d ? msec("Run history", hist.length ? h("ul", {class: "rrows"}, showAll("hist~" + id, hist, 20, e => h("li", {text: fmt(e.ts) + " · " + (e.step || "") + " · " + (e.from || "") + " → " + (e.to || "") + " · " + who(e.by || "main") + (e.why ? " · " + e.why : "")}), "changes")) : empty("No step changes recorded yet.")) : null,
+    msec("Details", h("dl", {class: "kv"}, h("dt", {text: "Run id"}), h("dd", {class: "mono", text: x.id || id}), h("dt", {text: "Agent"}), h("dd", {text: agentName(x.agent)}),
+      x.session ? [h("dt", {text: "Session"}), h("dd", {class: "mono", text: x.session})] : null, x.project ? [h("dt", {text: "Project"}), h("dd", {text: x.project})] : null,
+      h("dt", {text: "Started"}), h("dd", {text: fmt(x.started)}), x.finished ? [h("dt", {text: "Finished"}), h("dd", {text: fmt(x.finished)})] : null,
+      h("dt", {text: "Estimate"}), h("dd", {text: x.estimate ? fmtMin(x.estimate) + (x.estimate_cal && x.estimate_cal !== x.estimate ? ", calibrated " + fmtMin(x.estimate_cal) : "") : "No estimate"}),
+      h("dt", {text: "Mode"}), h("dd", {text: x.mode === "auto" ? "Auto: the crew takes the recommended option and records it; irreversible actions still wait for you" : "Guided: decisions wait for you"})))];
+  return {head, body, foot: [x.project && (BYID.has(x.project) || MEMBEROF.has(x.project)) ? h("a", {class: "btn", href: link({view: "projects", id: x.project})}, "Open project") : null]};
+}
+/* ---------------------------------------------------------------- the job drawer: did it run, did it work, and if not, why */
+function jobModal(name) {
+  const j = JOBS.find(x => x.name === name), det = detail("job", name), cr = [["Background work", link({view: "background"})], ["Scheduled jobs"]];
+  if (!j && det.state !== "ok" && det.state !== "loading") return drawerProblem("job", name, det.state === "static" ? {state: "missing"} : det, cr);
+  const prob = drawerProblem("job", name, det, cr); if (prob) return prob;
+  const x = Object.assign({}, j || {}, det.state === "ok" ? det.data : {}), st = jobState(x), last = x.last || null, wnd = W.jobs_days || 30;
+  const head = [crumbs(cr), mtitle(name), x.about ? h("div", {class: "pline", text: x.about}) : null,
+    h("div", {class: "pline"}, meta(stateWord(JOBST[st][0], jobWord(x, st)), schedText(x.schedule), x.enabled ? "On" : "Off", updatedNote(det)))];
+  if (det.state === "loading") return {head, body: [skeleton()], busy: true};
+  const hist = det.state === "ok" ? x.history || [] : last ? [last] : [];
+  const resWord = r => r.rc === 0 ? "OK" : r.rc == null ? "Skipped" : r.rc === 124 ? "Timed out" : "Failed (exit " + r.rc + ")";
+  let strip = null;
+  if (hist.length) {
+    const rs = hist.slice(0, 40).reverse(), mx = Math.max(1, ...rs.map(r => r.duration || 0)), bw = 5, g = 2, H = 24, w = rs.length * (bw + g) - g;
+    const med = rs.map(r => r.duration || 0).sort((a, b) => a - b)[Math.floor(rs.length / 2)] || 0, nf = rs.filter(r => r.rc !== 0 && r.rc != null).length;
+    strip = sv("svg", {class: "spark jstrip", width: w, height: H, viewBox: "0 0 " + w + " " + H, role: "img", "aria-label": plural(rs.length, "run") + " in " + wnd + " days, " + nf + " failed, median " + jobDur(med)},
+      rs.map((r, i) => { const bh = Math.max(3, Math.round((r.duration || 0) / mx * H)); return sv("rect", {x: i * (bw + g), y: H - bh, width: bw, height: bh, rx: 1, class: r.rc !== 0 && r.rc != null ? "k-risk" : "k-mark", "data-tip": clock(r.start) + ": " + jobDur(r.duration) + ", " + resWord(r)}); }));
+  }
+  const log = det.state === "ok" ? x.log || [] : null;
+  const body = [st === "unscheduled" ? callout("warn", "Not scheduled", "launchd does not have this job, so it does not run. Install it with dev jobs install.", cmdBtn("dev jobs install")) : null,
+    st === "overdue" ? callout("warn", "Overdue", "It last ran " + rel(last.start) + " and runs " + schedText(x.schedule).replace(/^[A-Z]/, c => c.toLowerCase()) + ". The Mac may have been asleep, or launchd stopped it. dev jobs shows its state.", cmdBtn("dev jobs")) : null,
+    st === "off" ? callout("info", "This job is off", "Turn it on with dev jobs enable " + name + ".", cmdBtn("dev jobs enable " + name)) : null,
+    h("div", {class: "mfigs"},
+      h("div", null, h("span", {class: "s-l", text: "Last run"}), h("span", {class: "num", text: last ? clock(last.start) + " · " + jobDur(last.duration) : "No runs in " + wnd + " days"}), last ? h("span", {class: last.rc !== 0 && last.rc != null ? "bad" : "t2", text: resWord(last)}) : null),
+      h("div", null, h("span", {class: "s-l", text: "Next run"}), h("span", {class: "num", text: !x.enabled || !x.next ? "—" : (/^every/.test(x.schedule || "") ? "by " : "") + clock(x.next)})),
+      h("div", null, h("span", {class: "s-l", text: "Failures, " + wnd + " days"}), h("span", {class: "num" + (x.failed ? " bad" : ""), text: (x.failed || 0) + " of " + (x.runs || 0)}), strip)),
+    det.state === "static" ? staticNote("job: its runs and log") : null,
+    msec("Recent runs", hist.length ? h("div", {class: "tw"}, h("table", {class: "t"}, h("thead", null, h("tr", null, ["Start", "Duration", "Result", "Last line of output"].map(t => h("th", {scope: "col", text: t})))),
+      h("tbody", null, (SHOWN["jh~" + name] ? hist : hist.slice(0, 50)).map(r => h("tr", null, h("td", {class: "num", style: "white-space:nowrap", text: clock(r.start)}), h("td", {class: "num", text: jobDur(r.duration)}),
+        h("td", {class: r.rc !== 0 && r.rc != null ? "bad" : null, style: "white-space:nowrap", text: resWord(r)}), h("td", {class: "t2", style: "max-width:0;width:100%"}, h("div", {class: "ell", title: r.summary || "", text: r.summary || "—"}))))))) : empty("No runs in the last " + wnd + " days."),
+      hist.length ? h("span", {class: "count num", text: plural(x.runs || hist.length, "run") + " in the last " + wnd + " days"}) : null),
+    hist.length > 50 && !SHOWN["jh~" + name] ? h("button", {class: "btn sm", type: "button", onclick: () => { SHOWN["jh~" + name] = 1; rerenderModal(); }}, "Show all " + hist.length + " runs") : null,
+    log ? msec("Log, last 200 lines", log.length ? [h("div", {class: "logh"}, h("span", {class: "rpath", title: x.log_path || "", text: x.log_path || ""}), x.log_path ? icopy(x.log_path, "Copy the log path") : null),
+      untrusted(log.join("\n"), "The log of the job " + name, "log~" + name), h("button", {class: "btn sm newl", type: "button", hidden: true, onclick: e => { const p = e.currentTarget.previousElementSibling; p.scrollTop = p.scrollHeight; e.currentTarget.hidden = true; }}, "New lines below")]
+      : empty("The log is empty.", "It fills the first time the job runs.")) : null,
+    msec("Settings", h("dl", {class: "kv"}, h("dt", {text: "Schedule"}), h("dd", {text: schedText(x.schedule)}), h("dt", {text: "Timeout"}), h("dd", {text: x.timeout_min ? x.timeout_min + " min" : "—"}),
+      h("dt", {text: "Notify"}), h("dd", {text: x.notify === "always" ? "After every run" : x.notify === "failure" ? "When it fails" : x.notify || "—"}),
+      h("dt", {text: "Installed"}), h("dd", {text: x.installed ? "Yes" : "No: the launchd file is missing"}),
+      x.loaded != null ? [h("dt", {text: "Loaded in launchd"}), h("dd", {text: x.loaded ? "Yes" : "No"})] : null)),
+    msec("Commands", h("div", {class: "cmds"}, cmdRow("Run it now", "dev jobs run " + name), x.enabled ? cmdRow("Turn it off", "dev jobs disable " + name) : cmdRow("Turn it on", "dev jobs enable " + name), cmdRow("Show the journal", "dev jobs journal")))];
+  return {head, body, foot: [cmdBtn("dev jobs run " + name, true, "Copy dev jobs run " + name)], after: dlg => { const p = $("pre.log", dlg); if (p) p.scrollTop = p.scrollHeight; }};
+}
+/* ---------------------------------------------------------------- the CI drawer: why it failed, and what to do now */
+function ciModal(key) {
+  const w0 = ciLatest().find(w => ciKey(w) === key), det = detail("ci", key), cr = [["Background work", link({view: "background"})], ["CI"]];
+  if (!w0 && det.state !== "ok" && det.state !== "loading") return drawerProblem("ci", key, det.state === "static" ? {state: "missing"} : det, cr);
+  const prob = drawerProblem("ci", key, det, cr); if (prob) return prob;
+  const w = det.state === "ok" ? det.data : w0 || {repo: key.split("@")[0], branch: key.slice(key.indexOf("@") + 1)}, st = ciState(w), fails = w.failures || [], f0 = fails[0] || {}, prov = provName(w.provider);
+  const head = [crumbs(cr), mtitle(repoName(w.repo) + " · " + w.branch),
+    h("div", {class: "pline"}, meta(stateWord(CIST[st][0], CIST[st][1]), w.sha || null, prov === "the provider" ? null : prov, w.ts ? rel(w.ts) : null, w.minutes != null ? "watched " + (+w.minutes).toFixed(1) + "m" : null, updatedNote(det)))];
+  if (det.state === "loading") return {head, body: [skeleton()], busy: true};
+  const firstJob = ((f0.jobs || [])[0] || {}).name || "the failed job";
+  const body = [det.state === "static" ? staticNote("CI result: the whole first error") : null,
+    fails.map((fx, i) => h("section", {class: "msec", "aria-label": (fx.run || "run") + " #" + (fx.number || "")},
+      h("div", {class: "msec-h"}, h("h3", {text: (fx.run || "run") + " #" + (fx.number || "?") + " failed"}), h("span", {class: "count", text: ciClass(w, fx)})),
+      (fx.jobs || []).map(jb => h("div", {class: "trow"}, h("span", {class: "tx"}, h("span", {class: "t2", text: "Failed job "}), jb.name || "job", jb.step ? ", step “" + jb.step + "”" : ""), jb.url ? h("a", {class: "more", href: jb.url, target: "_blank", rel: "noopener noreferrer"}, "Open job") : null)),
+      fx.excerpt ? [h("div", {class: "logh", text: "From the CI log"}), untrusted(fx.excerpt, "First error from the CI log of " + (fx.run || "the run") + " #" + (fx.number || ""), "ci~" + i)] : h("p", {class: "t2", text: "No log was available. Open the run on " + prov + "."}),
+      fx.action ? h("div", {class: "trow"}, h("span", {class: "tx"}, h("span", {class: "t2", text: "Next  "}), sentence(fx.action))) : null)),
+    st === "passed" ? h("p", {class: "lead", text: "All runs passed."}) : null,
+    w.error ? callout("warn", "The watch could not finish: " + w.error, null) : null,
+    (w.runs || []).length ? msec("Runs", h("div", {class: "tw"}, h("table", {class: "t"}, h("thead", null, h("tr", null, ["Run", "Status", "Minutes", ""].map(t => h("th", {scope: "col", text: t})))),
+      h("tbody", null, w.runs.map(rn => h("tr", null, h("td", {text: (rn.name || "run") + " #" + (rn.number || "")}), h("td", {text: rn.status === "success" ? "Passed" : rn.status === "failure" ? "Failed" : rn.status || "—"}),
+        h("td", {class: "num", text: rn.elapsed != null ? (+rn.elapsed).toFixed(1) + "m" : "—"}), h("td", null, rn.url ? h("a", {class: "more", href: rn.url, target: "_blank", rel: "noopener noreferrer"}, "Open") : null))))))) : null,
+    msec("Commands", h("div", {class: "cmds"}, f0.id ? cmdRow("Read the failed log", "dev run view " + f0.id + " --failed") : null, cmdRow("Follow the pipeline", "dev ci status --watch"),
+      st === "failed" ? cmdRow("Hand it to " + who("link"), "dev crew brief link \"Fix the failed CI run: " + firstJob + ", " + ciClass(w, f0).toLowerCase() + "\"") : null))];
+  return {head, body, foot: [f0.url ? h("a", {class: "btn", href: f0.url, target: "_blank", rel: "noopener noreferrer"}, "Open the log on " + prov) : null, f0.id ? cmdBtn("dev run view " + f0.id + " --failed", true, "Copy dev run view " + f0.id + " --failed") : null]};
+}
+/* ---------------------------------------------------------------- a crew member: what they do, their part in each kind of work, their lanes */
+const ACCESS = {read: "Read only", review: "Reviews only", build: "Builds, no web", all: "Full"};
+const TIER = {strong: "Strongest model", standard: "Standard model", fast: "Fast model"};
+function memberModal(id) {
+  const m = CREW.find(x => x.id === id), cr = [["Team", link({view: "team", tab: "crew"})], ["Crew"]];
+  if (!m) return drawerProblem("member", id, {state: "missing"}, cr);
+  const part = k => RACI.filter(a => k === "A" ? a.A === m.id : (a[k] || []).includes(m.id)).map(a => a.name);
+  const lanes = crewLanes(true).filter(l => l.m && l.m.id === m.id);
+  const list = (title, xs) => [h("h3", {class: "sub3", text: title + " (" + xs.length + ")"}), xs.length ? h("ul", {class: "rrows"}, xs.map(x => h("li", {text: x}))) : h("p", {class: "t2", style: "margin:0;font-size:var(--fs-1)", text: "None"})];
+  return {head: [crumbs(cr), mtitle(roleName(m)), h("div", {class: "pline"}, meta(TIER[m.tier] || m.tier || null, ACCESS[m.tools] || m.tools || null, m.main ? "the main session" : null))],
+    body: [m.summary ? msec("What they do", h("p", {class: "lead", text: m.summary})) : null,
+      msec("Their part in each kind of work", h("div", {class: "cols even", style: "gap:var(--s5)"}, h("div", null, list("Does", part("R")), list("Approves", part("A"))), h("div", null, list("Is consulted on", part("C")), list("Is informed about", part("I"))))),
+      msec("Working now and in the last hour", lanes.length ? h("ul", {class: "lrows"}, lanes.map(l => h("li", {class: "lrow", onclick: rowClick(() => openModal("run", l.run.id))}, h("span", {class: "lk", "aria-hidden": "true", text: (STEPW[l.st] || STEPW.running)[0]}),
+        h("div", {class: "lm"}, modalLink("run", l.run.id, l.step || l.run.goal || "run", "lt"), h("div", {class: "ls", text: "“" + (l.run.goal || "") + "” · " + l.word + " · " + fmtMin(l.min || 0)}))))) : empty("Not working on a run now.", "Members work on the steps of a run; when one starts, it shows here."))],
+    foot: [h("a", {class: "btn", href: link({view: "team", tab: "raci", rm: m.id})}, "Open in Who does what")]};
+}
+/* ---------------------------------------------------------------- the connected task: who has it, what blocks it, what is next; what it is
+   connected to, each with how it was found (an inferred link is never stated as a fact); the whole body and history */
+function taskRuns(x, d) {
+  if (d) return (d.runs && d.runs.length ? d.runs : d.run ? [d.run] : []).map(r => Object.assign({}, findRun(r.id) || {}, r));
+  const m = /\(([^:)]+)(?::([^)]+))?\)/.exec(x.claimed_by || ""), agent = m ? m[1] : "", sess = m ? m[2] || "" : "";
+  return RUNS.map(r => { const why = agent && sess && r.agent === agent && String(r.session || "").startsWith(sess) ? "the holder's session runs it"
+      : String(r.goal || "").includes(x.id) || (r.plan || []).some(s => String(s.name || "").includes(x.id)) ? "its goal or a step has the id" : "";
+    return why ? Object.assign({}, r, {match: why}) : null; }).filter(Boolean).sort((a, b) => (b.started || 0) - (a.started || 0));
+}
+function connections(x, d) {
+  const out = [], low = x.id.toLowerCase(), p = BYID.get(x.scope), runs = taskRuns(x, d);
+  if (runs.length) { const r = runs[0], t = runTime(r);
+    out.push({kind: "run", k: "Run", icon: "doing", text: (r.goal || r.id) + " · " + t.steps + (etaText(r) ? " · " + etaText(r) : ""), how: r.match, open: findRun(r.id) || d ? ["run", r.id] : null,
+      xs: runs.length > 1 ? "and " + plural(runs.length - 1, "older run") : ""}); }
+  let branches = d ? d.branches || [] : [];
+  if (!d && p) { const names = new Set(), m = /\(([^:)]+)(?::([^)]+))?\)/.exec(x.claimed_by || ""), s = m ? (BYWHO.get(x.holder) || {sessions: []}).sessions.find(z => z.agent === m[1] && String(z.session || "").startsWith(m[2] || "\u0000")) : null;
+    for (const [b, wt] of [[(p.main || {}).branch, p.path]].concat(p.wts.map(w => [w.branch, w.path]))) if (b && !names.has(b) && (b.toLowerCase().includes(low) || (s && s.branch === b))) { names.add(b); branches.push({branch: b, worktree: wt, match: b.toLowerCase().includes(low) ? "the branch name has the id" : "the holder's session works on it"}); } }
+  for (const b of branches) out.push({kind: "branch", k: "Branch", icon: "branch", text: b.branch + " · " + (p && b.worktree === p.path ? "main checkout" : b.worktree ? String(b.worktree).split("/").slice(-2).join("/") : "a worktree"), how: b.match});
+  const bn = new Set(branches.map(b => b.branch));
+  const prs = d ? d.prs || [] : p ? p.prsOpen.map(r => Object.assign({}, r, {match: bn.has(r.branch) ? "the PR's branch is linked" : (String(r.branch) + " " + String(r.title)).toLowerCase().includes(low) ? "the branch or title has the id" : ""})).filter(r => r.match) : [];
+  for (const r of prs) out.push({kind: "pr", k: "Pull request", icon: "merge", text: "#" + r.number + " " + (r.title || "") + " · " + String(r.state || "open").toLowerCase() + (r.checks ? " · " + (CHECKS[r.checks] || r.checks) : ""), how: r.match, url: r.url});
+  const ci = d ? d.ci || [] : ciLatest().filter(w => bn.has(w.branch) && p && repoName(w.repo).toLowerCase() === repoName(p.github || p.id).toLowerCase()).map(w => Object.assign({}, w, {match: "a watched pipeline of a linked branch"}));
+  for (const w of ci) { const rn = (w.runs || [])[0] || {};
+    out.push({kind: "ci", k: "CI", icon: "pulse", text: (rn.name ? rn.name + " #" + rn.number + " " : "") + CIST[ciState(w)][1].toLowerCase() + (w.class && w.state === "failed" ? " · " + ciClass(w) : "") + (w.minutes != null ? " · " + (+w.minutes).toFixed(1) + "m" : "") + " · " + rel(w.ts), how: w.match, open: ["ci", ciKey(w)]}); }
+  if (d && (d.commits || []).length) out.push({kind: "commits", k: "Commits", icon: "session", text: d.commits.length + (d.commits_complete === false ? " (the newest 100)" : "") + " · newest: " + d.commits[0].subject, how: d.commits[0].match,
+    list: d.commits.map(c => String(c.sha || "").slice(0, 7) + " · " + c.author + " · " + rel(c.ts) + " · " + c.subject)});
+  const sess = d ? d.sessions || [] : (D.session_log || []).filter(s => String(s.text || "").includes(x.id));
+  if (sess.length) out.push({kind: "sessions", k: "Sessions", icon: "session", text: plural(sess.length, "session") + " name it" + (d && d.sessions_complete === false ? " (the newest 200)" : "") + " · latest " + rel(sess[0].ts) + (sess[0].who ? " by " + sess[0].who : ""), how: "these sessions name it",
+    list: sess.map(s => fmt(s.ts) + " · " + [s.who, s.agent, s.branch].filter(Boolean).join(" · ") + " · " + plain(stripMarker(s.text)))});
+  const plans = d ? d.plans || [] : FILES.filter(f => f.path.startsWith("plans/") && String(f.text || "").includes(x.id)).map(f => ({path: f.path, title: (/^# (.+)$/m.exec(f.text || "") || [])[1] || f.path}));
+  for (const pl of plans) out.push({kind: "plan", k: "Plan", icon: "doc", text: pl.title, how: "the plan names this task", href: FILEMAP.has(pl.path) || LIVE.on ? link({view: "explorer", f: pl.path, id: ""}) : null});
+  const links = d ? d.links || [] : (x.links || []).map(v => { const s = String(v), i = s.indexOf(":"); return {kind: i > 0 ? s.slice(0, i) : "link", target: i > 0 ? s.slice(i + 1) : s, text: s}; });
+  const lessons = links.filter(l => l.kind === "lesson" || /^L-/.test(l.target));
+  for (const l of lessons) out.push({kind: "lesson", k: "Lesson", icon: "book", text: l.target, how: "linked in the task"});
+  if (!lessons.length) for (const id of (String(x.title).match(/\bL-[0-9a-z]{4,}\b/g) || [])) out.push({kind: "lesson", k: "Lesson", icon: "book", text: id, how: "the title names it"});
+  for (const l of links.filter(l => !lessons.includes(l))) out.push({kind: "link", k: l.kind === "initiative" ? "Initiative" : "Link", icon: "doc", text: l.kind === "initiative" && BYINIT.has(l.target) ? BYINIT.get(l.target).title : l.text, how: "linked in the task",
+    open: l.kind === "initiative" && BYINIT.has(l.target) ? ["initiative", l.target] : null});
+  return out;
+}
+function connRow(c) {
+  const name = c.k + ": " + c.text, val = c.open ? modalLink(c.open[0], c.open[1], c.text) : c.url ? h("a", {href: c.url, target: "_blank", rel: "noopener noreferrer", text: c.text}) : c.href ? h("a", {href: c.href, text: c.text}) : h("span", {text: c.text});
+  if (val.tagName === "A") val.setAttribute("aria-label", name);
+  return h("li", {class: "conn"}, icon(c.icon), h("span", {class: "k", text: c.k}), h("span", {class: "v"}, val),
+    h("span", {class: "how", text: "Found: " + sentence(c.how)}), c.xs ? h("span", {class: "xs", text: c.xs}) : null,
+    c.list ? h("details", {class: "xs recent", "data-key": "conn~" + c.kind}, h("summary", null, "Show " + plural(c.list.length, c.kind === "commits" ? "commit" : "session")), h("ul", {class: "rrows"}, c.list.map(t => h("li", {text: t})))) : null);
+}
 function taskModal(id) {
-  const it = ITEMBY.get(id); if (!it) return null;
-  const ini = isInit(it.scope), cmds = taskCmds(it), exp = it.lock === "expired";
-  const scopeHref = ini ? link({view: "initiatives", id: it.scope.slice(12), tab: "tasks"}) : link({view: "projects", id: it.scope, tab: "tasks"});
-  const primary = it.open && !it.legacy && cmds.length ? cmds[0] : null, rest = primary ? cmds.slice(1) : cmds;
-  const lock = it.claimed_by ? h("div", {class: "lockline"}, lockRing(it.claimed_at, it.lock_expires, it.holder),
-      h("div", null, h("div", {class: exp ? "warn-t" : null, text: exp ? "Lock expired, still claimed by " + it.holder : "Claimed by " + (isMe(it.holder) ? "you (" + it.holder + ")" : it.holder)}),
-        h("div", {class: "t2", text: [it.agent ? "with " + it.agent : "", it.claimed_at ? "since " + fmt(iso(it.claimed_at)) : ""].filter(Boolean).join(", ") + (exp ? ". Anyone can release it." : ". Others cannot change it until the lock ends.")})))
-    : it.open ? h("div", {class: "lockline t2", text: it.legacy ? "A checkbox in the note: no lock yet; the next dev sync imports it." : "Unclaimed: start it to take the lock."}) : null;
-  return {head: [crumbs([[scopeName(it.scope), scopeHref], [it.legacy ? "Note task" : it.id]]), mtitle(it.title),
-      h("div", {class: "pline"}, meta(istatusBadge(it.status), (it.bucket || "next").replace(/^./, c => c.toUpperCase()), prioBadge(it.priority), typeTag(it.type), duePill(it.due, !it.open), !it.legacy ? "version " + it.version : null))],
-    body: [lock, primary ? h("div", {class: "nextcmd"}, h("span", {class: "label", text: "Next step: " + primary[0]}), cmdCode(primary[1])) : null,
-      it.body ? msec("Description", md(it.body)) : null,
-      rest.length ? msec(primary ? "Other commands" : "Commands", [h("div", {class: "cmds"}, rest.map(([label, c]) => cmdRow(label, c))), h("p", {class: "tnote"}, "Changes of scope need ", h("code", {text: '--why "…"'}), ": the reason is kept in the history.")]) : null,
-      !it.legacy ? msec("Details", h("dl", {class: "kv"}, h("dt", {text: "Id"}), h("dd", {class: "num", text: it.id}), h("dt", {text: ini ? "Initiative" : "Project"}), h("dd", null, scopeChip(it.scope)),
-        it.assignee ? [h("dt", {text: "Assignee"}), h("dd", {text: it.assignee})] : null,
-        h("dt", {text: "Created"}), h("dd", {text: [it.created ? fmt(iso(it.created)) : "", it.created_by ? "by " + it.created_by : ""].filter(Boolean).join(" ") || "—"}),
-        h("dt", {text: "Updated"}), h("dd", {text: [it.updated ? fmt(iso(it.updated)) + " (" + rel(iso(it.updated)) + ")" : "", it.updated_by ? "by " + it.updated_by : ""].filter(Boolean).join(" ") || "—"}),
-        it.path ? [h("dt", {text: "File"}), h("dd", null, h("code", {style: "word-break:break-all", text: it.path}), " ", icopy(D.handoff + "/" + it.path, "Copy path"))] : null)) : null,
-      !it.legacy && it.changelog.length ? msec("History", changelog(it.changelog), h("span", {class: "count num", text: String(it.changelog.length)})) : null],
-    foot: [h("a", {class: "btn", href: scopeHref}, ini ? "Open initiative" : "Open project"), primary ? cmdBtn(primary[1], true, primary[0]) : null]};
+  const it = ITEMBY.get(id), det = it && it.legacy ? {state: "static"} : detail("task", id);
+  if (!it && det.state !== "ok" && det.state !== "loading") return drawerProblem("task", id, det.state === "static" ? {state: "missing"} : det, null);
+  const d = det.state === "ok" ? det.data : null;
+  const x = Object.assign({id, title: id, scope: "", status: "todo", bucket: "next", priority: "normal", version: 1, changelog: [], links: [], body: "", claimed_by: "", holder: "", agent: "", open: true}, it || {});
+  if (d) { const m = d.meta || {}, lk = d.lock || {};
+    Object.assign(x, {title: d.title, scope: d.scope, status: d.status, type: d.type, body: d.body, changelog: d.changelog || [], path: d.path, open: OPEN.includes(d.status), claimed_by: lk.holder || "", holder: whoOf(lk.holder),
+      agent: lk.agent || "", lock: lk.state || "", lock_expires: lk.expires || "", bucket: m.bucket || x.bucket, priority: m.priority || x.priority, due: m.due || x.due || "", version: m.version || x.version,
+      created: m.created || x.created, created_by: m.created_by || x.created_by, updated: m.updated || x.updated, updated_by: m.updated_by || x.updated_by, claimed_at: m.claimed_at || x.claimed_at, assignee: m.assignee || x.assignee}); }
+  const ini = isInit(x.scope), scopeHref = ini ? link({view: "initiatives", id: x.scope.slice(12), tab: "tasks"}) : link({view: "projects", id: x.scope, tab: "tasks"});
+  const prob = drawerProblem("task", id, det, [[scopeName(x.scope), scopeHref], [id]]); if (prob) return prob;
+  const head = [crumbs([[scopeName(x.scope), scopeHref], [x.legacy ? "Note task" : x.id]]), mtitle(x.title),
+    h("div", {class: "pline"}, meta(istatusBadge(x.status), (x.bucket || "next").replace(/^./, c => c.toUpperCase()), typeTag(x.type), prioBadge(x.priority), duePill(x.due, !x.open), !x.legacy ? "version " + x.version : null, updatedNote(det)))];
+  if (det.state === "loading") return {head, body: [skeleton()], busy: true};
+  const cmds = taskCmds(x), primary = x.open && !x.legacy && cmds.length ? cmds[0] : null, conns = x.legacy ? [] : connections(x, d), runs = x.legacy ? [] : taskRuns(x, d);
+  const run = runs.find(r => r.state !== "done") || null, rstep = run ? (run.plan || run.steps || []).find(s => String(s.name || "").includes(x.id)) : null, exp = x.lock === "expired";
+  const whoHas = [];
+  if (x.status === "done" || x.status === "cancelled") whoHas.push((x.status === "done" ? "Done" : "Cancelled") + " by " + (x.updated_by || "someone") + " " + rel(iso(x.updated)) + ".");
+  else if (x.claimed_by && !exp) whoHas.push((isMe(x.holder) ? "You (" + x.holder + ")" : x.holder) + (x.agent ? " with " + agentName(x.agent) : "") + (x.claimed_at ? ", since " + clock(iso(x.claimed_at)) : "") + "." + (x.lock_expires ? " The lock ends in " + dur(iso(x.lock_expires) - nowS()) + "." : ""));
+  else if (x.claimed_by) whoHas.push("The lock expired " + rel(iso(x.lock_expires)) + "; " + x.holder + " still holds it. Anyone can release it.");
+  if (run) whoHas.push((rstep ? stepWho(rstep) : roleName(mainMember())) + " works on it in “" + (run.goal || run.id) + "”" + (rstep ? " (step “" + stepTitle(rstep) + "”)" : "") + ".");
+  if (!whoHas.length) whoHas.push(x.open ? (x.legacy ? "Nobody: a checkbox in the note has no lock. The next dev sync imports it." : "Nobody. Start it to take the lock.") : "Nobody.");
+  const blocks = [];
+  if (x.status === "blocked") { const e = (x.changelog || []).map(parseLog).find(z => /block/i.test(z.op) || /blocked/i.test(z.detail)); blocks.push("Blocked" + (e && e.why ? ": " + e.why.replace(/[.\s]+$/, "") : "") + "."); }
+  if (run) for (const z of pending(run)) blocks.push("Waiting for your answer to " + z.id + " in “" + (run.goal || run.id) + "”.");
+  for (const c of conns.filter(c => c.kind === "pr" && / CI failing/.test(c.text))) { const n = (/#(\d+)/.exec(c.text) || [])[1], w = ciLatest().find(z => z.state === "failed" && (d ? d.prs || [] : []).some(r => r.number == n && r.branch === z.branch));
+    blocks.push("Pull request #" + n + " is failing CI" + (w ? " (" + ciClass(w) + ")" : "") + "."); }
+  if (rstep) for (const a of rstep.after || []) { const o = (run.plan || run.steps || []).find(s => s.name === a); if (o && o.state !== "done" && o.state !== "skipped") blocks.push("It waits for step “" + stepTitle(o) + "”, which is " + (o.state === "unverified" ? "waiting for " + roleName(mainMember()) + " to check it" : stepWord(o.state)[1].toLowerCase()) + "."); }
+  if (!blocks.length) blocks.push("Nothing recorded.");
+  const nextStep = run ? (run.plan || run.steps || []).find(s => s.state === "running" || s.state === "pending") : null;
+  const nextText = run && run.next ? sentence(run.next) : nextStep ? "The run's next step: “" + nextStep.name + "”." : primary ? sentence(primary[0]) : x.open ? "Nothing planned." : "Nothing: it is " + (x.status === "done" ? "done." : x.status + ".");
+  const found = new Set(conns.map(c => c.kind)), missing = [["run", "a run"], ["branch", "a branch"], ["pr", "a pull request"], ["plan", "a plan"]].filter(([k]) => !found.has(k)).map(z => z[1]);
+  const notFound = missing.length ? "Not found: " + (missing.length > 1 ? missing.slice(0, -1).join(", ") + " or " + missing[missing.length - 1] : missing[0]) + "." : "";
+  const log = (x.changelog || []);
+  const body = [
+    h("dl", {class: "ans"}, h("dt", {text: "Who has it"}), h("dd", null, whoHas.map(t => h("span", {text: t}))),
+      h("dt", {text: "What blocks it"}), h("dd", {class: blocks[0] === "Nothing recorded." ? "t2" : null}, blocks.map(t => h("span", {text: t}))),
+      h("dt", {text: "What's next"}), h("dd", null, h("span", {text: nextText}), primary ? h("div", {class: "nextcmd"}, h("span", {class: "label", text: primary[0]}), h("div", {style: "display:flex;gap:8px;align-items:center;min-width:0"}, cmdCode(primary[1]), icopy(primary[1], "Copy " + primary[0].toLowerCase()))) : null)),
+    itemFlags(x, x.body).map(flagCallout),
+    det.state === "static" && !x.legacy ? h("div", {class: "notice"}, "A static copy from " + fmt(D.generated) + ": it shows the first 4,000 characters and the last 60 history entries. Run ", h("code", {text: "dev dashboard"}), " for the whole task.") : null,
+    x.legacy ? callout("info", "A checkbox in the handoff note", "It has no id, lock or history yet. The next dev sync imports it as a work item.") : msec("Connected to", conns.length ? [h("ul", {class: "conns"}, conns.map(connRow)), notFound ? h("p", {class: "tnote", text: notFound}) : null]
+      : h("p", {class: "t2", style: "margin:0;font-size:var(--fs-1)", text: "Nothing connected yet. A run, branch, pull request or plan shows up here once it names " + x.id + "."})),
+    msec("Description", x.body ? md(x.body) : h("p", {class: "t2", style: "margin:0;font-size:var(--fs-1)"}, "No description yet. It lives in ", h("code", {text: x.path || "the task file"}), ".")),
+    !x.legacy ? msec("History", log.length ? [changelog(SHOWN["hist~" + id] ? log : log.slice(0, 20)), log.length > 20 && !SHOWN["hist~" + id] ? h("button", {class: "btn sm", type: "button", onclick: () => { SHOWN["hist~" + id] = 1; rerenderModal(); }}, "Show all " + log.length + " entries") : null] : empty("No history yet."), h("span", {class: "count num", text: String(log.length)})) : null,
+    cmds.length > (primary ? 1 : 0) ? msec("Commands", [h("div", {class: "cmds"}, (primary ? cmds.slice(1) : cmds).map(([label, c]) => cmdRow(label, c))), h("p", {class: "tnote"}, "Changes of scope need ", h("code", {text: '--why "…"'}), ": the reason is kept in the history.")]) : null,
+    !x.legacy ? msec("Details", h("dl", {class: "kv"}, h("dt", {text: "Id"}), h("dd", {class: "num", text: x.id}), h("dt", {text: ini ? "Initiative" : "Project"}), h("dd", null, scopeChip(x.scope)),
+      x.assignee ? [h("dt", {text: "Assignee"}), h("dd", {text: x.assignee})] : null,
+      h("dt", {text: "Created"}), h("dd", {text: [x.created ? fmt(iso(x.created)) : "", x.created_by ? "by " + x.created_by : ""].filter(Boolean).join(" ") || "—"}),
+      h("dt", {text: "Updated"}), h("dd", {text: [x.updated ? fmt(iso(x.updated)) + " (" + rel(iso(x.updated)) + ")" : "", x.updated_by ? "by " + x.updated_by : ""].filter(Boolean).join(" ") || "—"}),
+      x.path ? [h("dt", {text: "File"}), h("dd", null, h("code", {style: "word-break:break-all", text: x.path}), " ", icopy(D.handoff + "/" + x.path, "Copy path"))] : null)) : null];
+  return {head, body, foot: [h("a", {class: "btn", href: scopeHref}, ini ? "Open initiative" : "Open project"), primary ? cmdBtn(primary[1], true, "Copy: " + primary[0]) : null]};
 }
 function initModal(slug) {
   const x = BYINIT.get(slug); if (!x) return null;
@@ -3311,6 +4884,7 @@ function projectModal(id) {
   return {head: [h("div", {class: "mh-row"}, progRing(p, 64, true), h("div", {class: "mh-tt"}, mtitle(p.name || p.id),
       h("div", {class: "pline"}, meta(h("span", {class: "stat"}, h("span", {class: "dot k-" + st, "aria-hidden": "true"}), HS[st]), p.owner, m.branch ? h("span", {class: "meta"}, icon("branch"), m.branch) : null, p.local ? null : "not cloned here"))))],
     body: [p.health.reasons.length ? h("ul", {class: "reasons"}, p.health.reasons.map(r => h("li", null, h("span", {class: "dot k-" + (p.health.level === "risk" ? "risk" : "warn"), "aria-hidden": "true"}), r))) : null,
+      HWHY[st] ? h("p", {class: "t2", style: "margin:0;font-size:var(--fs-1)", text: HWHY[st] + "."}) : null, projFlags(p).map(flagCallout),
       h("div", {class: "mfigs"},
         h("div", null, h("span", {class: "s-l", text: "Open PRs: " + p.prs}), ciStrip(p, 16)),
         h("div", null, h("span", {class: "s-l", text: "Commits, 14 days"}), spark(commitSeries([p], 14), "Commits per day", "commit", true)),
@@ -3339,19 +4913,20 @@ function sessionModal(key) {
 }
 function actKey(a) { let hh = 5381; const s = a.title + "|" + (a.project || "") + "|" + a.cmd; for (let i = 0; i < s.length; i++) hh = ((hh << 5) + hh + s.charCodeAt(i)) | 0; return a.kind + "~" + (hh >>> 0).toString(36); }
 function actionModal(key) {
-  const a = ACTIONS.find(x => actKey(x) === key); if (!a) return null;
+  const a = needs().find(x => actKey(x) === key); if (!a) return null;
   const p = a.project && BYID.get(a.project), href = actionHref(a);
   return {head: [mtitle(a.title), h("div", {class: "pline"}, meta(h("span", {class: "stat"}, h("span", {class: "dot k-" + (a.sev === "risk" ? "risk" : a.sev === "warn" ? "warn" : "done"), "aria-hidden": "true"}), SEVL[a.sev]), KIND[a.kind] || a.kind, p ? p.name || p.id : null))],
-    body: [a.detail ? h("p", {class: "lead"}, inline(a.detail)) : null, p && /ci-failing|conflicts|review/.test(a.kind) ? msec("Open PRs of " + (p.name || p.id), ciStrip(p, 20)) : null,
-      h("div", {class: "nextcmd"}, h("span", {class: "label", text: "The command that moves it forward"}), cmdCode(a.cmd))],
-    foot: [a.url ? h("a", {class: "btn", href: a.url, target: "_blank", rel: "noopener noreferrer"}, "Open on GitHub") : null, href ? h("a", {class: "btn", href}, p ? "Open " + (p.name || p.id) : "Open") : null, cmdBtn(a.cmd, true, "Copy command")]};
+    body: [a.detail ? h("p", {class: "lead"}, a.modal || a.view ? a.detail : inline(a.detail)) : null, p && /ci-failing|conflicts|review/.test(a.kind) ? msec("Open PRs of " + (p.name || p.id), ciStrip(p, 20)) : null,
+      a.cmd ? h("div", {class: "nextcmd"}, h("span", {class: "label", text: "The command that moves it forward"}), cmdCode(a.cmd)) : null],
+    foot: [a.url ? h("a", {class: "btn", href: a.url, target: "_blank", rel: "noopener noreferrer"}, "Open on " + (a.kind === "ci-watch" ? "the provider" : "GitHub")) : null, href ? h("a", {class: "btn" + (a.cmd ? "" : " primary"), href}, a.go || (p ? "Open " + (p.name || p.id) : "Open")) : null, a.cmd ? cmdBtn(a.cmd, true, "Copy command") : null]};
 }
 function actionsModal(label) {
-  const list = ACTIONS.filter(a => (KIND[a.kind] || a.kind) === label); if (!list.length) return null;
+  const list = needs().filter(a => (KIND[a.kind] || a.kind) === label); if (!list.length) return null;
   return {head: [mtitle((GROUP[list[0].kind] || (n => n + " " + label + " items"))(list.length)), h("div", {class: "pline", text: SEVL[list[0].sev]})],
-    body: [h("ul", {class: "acts"}, list.map(a => h("li", {class: "act", onclick: rowClick(() => openModal("action", actKey(a)))}, h("span", {class: "dot d-" + a.sev, "aria-hidden": "true"}),
-      h("div", {style: "min-width:0"}, modalLink("action", actKey(a), a.title, "at"), h("div", {class: "ad"}, h("span", {class: "ell", text: actionWhere(a) + (a.detail ? ": " + plain(a.detail) : "")}))), h("div", {class: "ar"}, icopy(a.cmd, "Copy command")))))],
-    foot: [h("a", {class: "btn", href: link({view: "actions", kind: label})}, "Open the full list"), cmdBtn(list[0].cmd, true, "Copy the first command")]};
+    body: [h("ul", {class: "acts"}, list.map(a => { const tgt = a.modal || ["action", actKey(a)];
+      return h("li", {class: "act", onclick: rowClick(() => openModal(tgt[0], tgt[1]))}, h("span", {class: "dot d-" + a.sev, "aria-hidden": "true"}),
+        h("div", {style: "min-width:0"}, modalLink(tgt[0], tgt[1], a.title, "at"), h("div", {class: "ad"}, h("span", {class: "ell", text: actionWhere(a) + (a.detail ? ": " + plain(a.detail) : "")}))), h("div", {class: "ar"}, a.cmd ? icopy(a.cmd, "Copy command") : null)); }))],
+    foot: [h("a", {class: "btn", href: link({view: "actions", kind: label})}, "Open the full list"), list[0].cmd ? cmdBtn(list[0].cmd, true, "Copy the first command") : null]};
 }
 function sinceModal(which) {
   const s = D.since || {}, T = {sessions: "Sessions since yesterday", commits: "Commits since yesterday", merged: "Merged PRs since yesterday", done: "Tasks completed since yesterday"};
@@ -3363,15 +4938,16 @@ function sinceModal(which) {
   return {head: [mtitle(T[which]), h("div", {class: "pline", text: "from " + fmtDay(s.from)})], body: [list], foot: [h("a", {class: "btn", href: link({view: "activity"})}, "Open Activity")]};
 }
 function modalLinkTask(id, text) { return h("a", {class: "rl", href: taskHref(id), onclick: e => { e.preventDefault(); openTask(id); }, text}); }
-const MODALS = {task: taskModal, initiative: initModal, project: projectModal, person: personModal, session: sessionModal, action: actionModal, actions: actionsModal, since: sinceModal};
+const MODALS = {task: taskModal, initiative: initModal, project: projectModal, person: personModal, session: sessionModal, action: actionModal, actions: actionsModal, since: sinceModal,
+  run: runModal, job: jobModal, ci: ciModal, member: memberModal};
 /* ---------------------------------------------------------------- command palette + sheet */
 function fuzzy(q, s) { const toks = String(q || "").toLowerCase().split(/\s+/).filter(Boolean); if (!toks.length) return 1; let total = 0; s = s.toLowerCase(); for (const t of toks) { const sc = fuzzy1(t, s); if (!sc) return 0; total += sc; } return total; }
 function fuzzy1(q, s) { const i = s.indexOf(q); if (i >= 0) return 100 - Math.min(i, 80) + (i === 0 ? 20 : 0); let qi = 0, score = 0, prev = -2; for (let j = 0; j < s.length && qi < q.length; j++) if (s[j] === q[qi]) { score += prev === j - 1 ? 3 : 1; prev = j; qi++; } return qi === q.length ? score : 0; }
 function paletteItems() {
   const items = [];
   for (const [v, label, key] of VIEWS) items.push({grp: "View", label: "Go to " + label, hint: "g " + key, run: () => go(v)});
-  items.push({grp: "View", label: "Everything that needs you", hint: ACTIONS.length + " items", run: () => go("actions")});
-  for (const a of ACTIONS) items.push({grp: "Action", label: "Copy: " + a.cmd, hint: a.title, run: () => copy(a.cmd)});
+  items.push({grp: "View", label: "Everything that needs you", hint: needs().length + " items", run: () => go("actions")});
+  for (const a of needs().filter(x => x.cmd)) items.push({grp: "Action", label: "Copy: " + a.cmd, hint: a.title, run: () => copy(a.cmd)});
   items.push({grp: "Setting", label: "Toggle theme (light/dark)", run: toggleTheme}, {grp: "Setting", label: "Theme: follow system", run: () => { try { localStorage.removeItem("devkit.theme"); } catch (e) {} delete document.documentElement.dataset.theme; }},
     {grp: "Setting", label: "Toggle dense mode", run: () => set({dense: !S.dense}, true)}, {grp: "Setting", label: "Clear search and filters", run: () => set(Object.assign({q: ""}, CLEAR), true)},
     {grp: "Help", label: "Keyboard shortcuts", hint: "?", run: openSheet}, {grp: "Help", label: "Print this view", run: () => window.print()});
@@ -3380,7 +4956,7 @@ function paletteItems() {
   for (const p of P) {
     items.push({grp: "Project", label: p.id, hint: p.health.level === "ok" ? p.status : p.health.reasons[0], run: () => openProject(p.id)});
     for (const c of p.local ? ["dcd ", "dev claude ", "dev codex ", "dev handoff "] : ["dev clone "]) items.push({grp: "Command", label: "Copy: " + c + p.id, run: () => copy(c + p.id)});
-    for (const r of p.prsOpen) items.push({grp: "PR", label: "#" + r.number + " " + (r.title || ""), hint: (CHECKS[r.checks] || "") + " · " + p.name, run: () => window.open(r.url, "_blank", "noopener")});
+    for (const r of p.prsOpen) items.push({grp: "PR", label: "#" + r.number + " " + (r.title || ""), hint: (CHECKS[r.checks] || "") + " · " + p.name, run: () => openUrl(r.url)});
   }
   for (const it of allItems().filter(i => i.open).slice(0, 1500)) items.push({grp: "Task", label: (it.legacy ? "" : it.id + " ") + it.title, hint: scopeName(it.scope) + (it.holder ? " · " + it.holder : ""), run: () => openTask(it.id)});
   for (const f of FILES) items.push({grp: "File", label: f.path, run: () => set({view: "explorer", id: "", f: f.path, fq: "", task: ""}, true)});
@@ -3409,10 +4985,10 @@ function openPalette() {
 }
 function closePalette() { const pal = $("#palette"); if (pal.hidden) return; pal.hidden = true; if (!S.task) { $("#scrim").classList.remove("on"); $("#scrim").hidden = true; } if (lastFocus && lastFocus.focus) lastFocus.focus(); }
 function openSheet() {
-  const sh = $("#sheet"); const rows = [["/", "Search everything"], ["⌘K · Ctrl K", "Command palette"], ["g o · i · p · m · t", "Home · Initiatives · Projects · Team · Tasks"], ["g a · e · h", "Activity · Explorer · Health"], ["u", "Up: from a page back to its list"],
-    ["← →", "Switch tabs (tab bar focused) · read the chart day by day"], ["j / k", "Next / previous item"], ["↵", "Open the focused item"], ["Esc", "Close the task drawer or palette, clear search"], ["?", "This sheet"]];
+  const sh = $("#sheet"); const rows = [["/", "Search everything"], ["⌘K · Ctrl K", "Command palette"], ["g o · t · b · m", "Home · Tasks · Background work · Team"], ["g c", "Team: the crew"], ["g p · i", "Projects · Initiatives"], ["g a · e · h", "Activity · Explorer · Health"], ["u", "Up: from a page back to its list"],
+    ["← →", "Switch tabs (tab bar focused) · read the chart day by day"], ["j / k", "Next / previous item"], ["↵", "Open the focused item"], ["[ · ]", "In a drawer: the previous or next record of its list"], ["Esc", "Close the drawer or palette, clear search"], ["?", "This sheet"]];
   clear(sh).append(h("h2", {text: "Keyboard shortcuts"}), h("dl", null, rows.map(([k, v]) => [h("dt", null, h("kbd", {text: k})), h("dd", {style: "margin:0", text: v})])),
-    h("p", {class: "t2", style: "margin:14px 0 0;font-size:var(--fs-1)", text: "The URL keeps the page, tab, task and filters — #/initiatives/<slug>, #/projects/<owner>/<repo>?tab=tasks&task=<id> — so you can bookmark or share any view. The page reloads itself every 2 minutes while visible."}),
+    h("p", {class: "t2", style: "margin:14px 0 0;font-size:var(--fs-1)", text: "The URL keeps the page, tab, task and filters — #/initiatives/<slug>, #/projects/<owner>/<repo>?tab=tasks&task=<id> — so you can bookmark or share any view. " + (LIVE.on ? "The live page updates in place as data changes." : "This static copy reloads itself every 2 minutes while visible.")}),
     h("div", {style: "text-align:right;margin-top:10px"}, h("button", {class: "btn", type: "button", onclick: closeSheet}, "Close")));
   sh.hidden = false; $("#scrim").hidden = false; $("#scrim").classList.add("on"); $("button", sh).focus();
 }
@@ -3445,7 +5021,9 @@ document.addEventListener("keydown", e => {
   if (typing || e.metaKey || e.ctrlKey || e.altKey) return;
   if (e.key === "/") { e.preventDefault(); $("#q").focus(); $("#q").select(); return; }
   if (e.key === "?") { e.preventDefault(); openSheet(); return; }
-  if (gAt && Date.now() - gAt < 1200) { gAt = 0; const v = VIEWS.find(x => x[2] === e.key.toLowerCase()); if (v) { e.preventDefault(); go(v[0]); } return; }
+  if (gAt && Date.now() - gAt < 1200) { gAt = 0; const k = e.key.toLowerCase(), v = VIEWS.find(x => x[2] === k);
+    if (k === "c") { e.preventDefault(); go("team", {tab: "crew"}); } else if (v) { e.preventDefault(); go(v[0]); } return; }
+  if ((e.key === "[" || e.key === "]") && $("#modal").open) { e.preventDefault(); stepRecord(e.key === "]" ? 1 : -1); return; }
   if (e.key === "g") { gAt = Date.now(); return; }
   if (e.key === "u" && !S.task && !S.modal) { if (S.id) { e.preventDefault(); go(S.view); } else if (S.view === "actions") go("overview"); return; }
   if (e.key === "j" || e.key === "k") {
@@ -3459,10 +5037,11 @@ document.addEventListener("keydown", e => {
 /* ---------------------------------------------------------------- render + boot */
 /* sticky headers need visible overflow; a table that does not fit its panel scrolls inside it instead */
 function fitTables(root) { for (const w of $$(".tw.st", root || document)) { w.classList.remove("x"); if (w.scrollWidth > w.clientWidth + 1) w.classList.add("x"); } }
-const VIEWFN = {overview: viewHome, actions: viewActions, initiatives: viewInitiatives, projects: viewProjects, team: viewTeam, tasks: viewTasks, activity: viewActivity, explorer: viewExplorer, health: viewHealthV3, search: viewSearch};
+const VIEWFN = {overview: viewHome, actions: viewActions, initiatives: viewInitiatives, projects: viewProjects, team: viewTeam, tasks: viewTasks, activity: viewActivity, explorer: viewExplorer, health: viewHealthV3, search: viewSearch, background: viewBackground};
 function pageTitle() {
   if (S.view === "initiatives" && S.id) return (BYINIT.get(S.id) || {}).title || S.id;
   if (S.view === "projects" && S.id) return (BYID.get(S.id) || {}).name || S.id;
+  if (S.view === "background") return "Background work";
   return (VIEWS.find(v => v[0] === S.view) || [0, S.view === "actions" ? "Needs you" : "Search"])[1];
 }
 function render() {
@@ -3477,11 +5056,165 @@ function render() {
   renderModal();
   if (fid) { const el = document.getElementById(fid); if (el && !$("#modal").open) el.focus({preventScroll: true}); }
   if (page !== lastView) { if (lastView) window.scrollTo(0, 0); lastView = page; document.title = pageTitle() + " · Firefly devkit"; }
-  const t = $("#ticker"); if (t) t.textContent = "Synced " + rel(D.generated);
+  liveTicker();
+}
+/* ---------------------------------------------------------------- live mode (the page served by `dev dashboard`): the event stream says a newer
+   snapshot exists and which areas changed; the page fetches only those, swaps the data, re-derives and re-renders in place, keeping the route,
+   filters, scroll position and the open dialog. While the reader types or has a menu open, the swap waits. The static export has none of this. */
+const LIVE = {on: !!D.live, state: D.live ? "init" : "static", pending: null, busy: false, again: null, quiet: false, retry: 0, at: 0, since: 0, dataAt: 0, failAt: 0, pop: false, newVersion: "", hiddenAt: 0};
+const LIVE_GAP = 2000;   /* at most one in-place re-render every 2 s, however often agents write */
+const PAGEVER = D.version || "";
+const LIVEWORD = {init: "Connecting…", connecting: "Connecting…", live: "Live", reconnecting: "Reconnecting…", offline: "Offline", ended: "Session ended"};
+const LIVETONE = {connecting: "none", live: "ok", reconnecting: "warn", offline: "risk", ended: "risk"};
+const LIVENAME = {init: "connecting", connecting: "connecting", live: "connected", reconnecting: "reconnecting", offline: "offline", ended: "session ended"};
+function liveTicker() {
+  const t = $("#ticker"); if (!t) return;
+  if (!LIVE.on) { t.textContent = "Synced " + rel(D.generated); return; }
+  t.textContent = "Data from " + new Date(LIVE.dataAt || (D.rendered || D.generated) * 1000).toLocaleTimeString(undefined, {hour: "2-digit", minute: "2-digit", second: "2-digit"});
+  t.setAttribute("data-live", LIVE.state);
+}
+function setLive(state) { if (LIVE.state === "ended" && state !== "ended") return; const was = LIVE.state; LIVE.state = state; if (was !== state) { liveIndicator(); renderBanner(); liveTicker(); fitNav(); } }
+/* the indicator: a button with a dot and one word; its popover says how current the data is */
+function liveIndicator() {
+  const b = $("#live"), pop = $("#livepop"); if (!b) return;
+  const st = LIVE.state, stat = st === "static";
+  b.setAttribute("data-state", st);
+  const gen = new Date(D.generated * 1000).toLocaleString(undefined, {month: "short", day: "numeric", hour: "2-digit", minute: "2-digit", hourCycle: "h23"});
+  b.setAttribute("aria-label", stat ? "A static copy, generated " + gen : "Live updates: " + LIVENAME[st]);
+  append(clear(b), [stat ? null : stateDot(LIVETONE[st] || "none"), stat ? [h("span", {class: "lgw", text: "Generated "}), gen] : LIVEWORD[st]]);
+  b.setAttribute("aria-expanded", String(LIVE.pop));
+  pop.hidden = !LIVE.pop;
+  if (!LIVE.pop) return;
+  const changed = LIVE.dataAt || (D.rendered || D.generated) * 1000;
+  append(clear(pop), stat ? [h("strong", {text: "A static copy"}), h("p", null, "It does not update. Run ", h("code", {text: "dev dashboard"}), " for the live page.")]
+    : [h("strong", {text: "Live updates"}),
+      h("p", {text: (st === "live" && LIVE.since ? "Connected for " + fmtMin((Date.now() - LIVE.since) / 60000) + ". " : st === "live" ? "Connected. " : LIVEWORD[st] + " ") +
+        "The data last changed at " + new Date(changed).toLocaleTimeString() + "."}),
+      h("p", {text: "Pull requests and checks are read again every minute; providers and configuration every 10 minutes."}),
+      h("p", {class: "t2", text: "Server " + location.host + " · devkit " + (D.version || "") + ". It stops after 30 minutes with no open page."})]);
+}
+function toggleLivePop(open) { LIVE.pop = open == null ? !LIVE.pop : open; liveIndicator(); }
+/* the banner under the nav: offline, session ended, a new devkit version; a polite status region, never an alert */
+function renderBanner() {
+  const b = $("#banner"); if (!b) return; clear(b);
+  const box = (tone, title, body, acts) => h("div", {class: "callout"}, stateDot(tone), h("div", {class: "cbody"}, h("strong", {text: title}), h("div", {text: body})), h("div", {class: "cact"}, acts));
+  const reload = primary => h("button", {class: "btn" + (primary ? " primary" : ""), type: "button", onclick: () => location.reload()}, "Reload");
+  let el = null;
+  if (LIVE.state === "ended") el = box("risk", "This page is no longer signed in.", "The dashboard server restarted with a new key. Run dev dashboard to open a signed-in page.", [cmdBtn("dev dashboard")]);
+  else if (LIVE.state === "offline") el = box("risk", "The dashboard server stopped.", "It stops by itself after 30 minutes with no open page. You are looking at data from " + new Date(LIVE.dataAt || (D.rendered || D.generated) * 1000).toLocaleTimeString(undefined, {hour: "2-digit", minute: "2-digit"}) + ".", [cmdBtn("dev dashboard"), reload(false)]);
+  else if (LIVE.newVersion && LIVE.newVersion !== PAGEVER) el = box("ok", "devkit was updated to " + LIVE.newVersion + ".", "Reload to get the new page. This page changes nothing, so reloading is safe.", [reload(true)]);
+  b.hidden = !el; if (el) b.append(el);
+}
+/* screen readers hear what matters, at most once every 10 s (batched): decisions, CI failures, failed jobs, finished or blocked runs, the stream */
+const SAY = {q: [], at: 0, t: 0};
+function announce(msg) {
+  if (msg) SAY.q.push(msg);
+  const wait = SAY.at + 10000 - Date.now(); clearTimeout(SAY.t);
+  if (wait > 0) { SAY.t = setTimeout(() => announce(""), wait); return; }
+  if (!SAY.q.length) return;
+  const el = $("#live-status"); if (el) el.textContent = SAY.q.splice(0).join(" ");
+  SAY.at = Date.now();
+}
+function newsOf(a, b) {
+  const out = [], dec = new Set(), runs = new Map((a.runs || []).map(r => [r.id, r])), ci = new Map(((a.ci || {}).watches || []).map(w => [ciKey(w) + w.sha + w.ts, w])), jobs = new Map((a.jobs || []).map(j => [j.name, j]));
+  for (const r of a.runs || []) for (const d of r.decisions || []) dec.add(r.id + "~" + d.id);
+  for (const r of b.runs || []) { for (const d of r.decisions || []) if (!dec.has(r.id + "~" + d.id)) out.push("Decision waiting: " + d.question + ", asked by " + who(d.from_name || "main") + ".");
+    const o = runs.get(r.id); if (o && o.state !== r.state && (r.state === "done" || r.state === "blocked")) out.push("Run " + (r.goal || r.id) + (r.state === "done" ? " finished." : " is blocked.")); }
+  for (const w of (b.ci || {}).watches || []) if (w.state === "failed" && !ci.has(ciKey(w) + w.sha + w.ts)) out.push("CI failed on " + w.branch + ": " + ciClass(w, (w.failures || [])[0]) + ".");
+  for (const j of b.jobs || []) { const o = jobs.get(j.name); if (j.state === "failed" && j.last && (!o || !o.last || o.last.start !== j.last.start)) out.push("Job " + j.name + " failed."); }
+  return out;
+}
+function userBusy() {
+  const a = document.activeElement, tag = (a && a.tagName) || "";
+  return !$("#palette").hidden || !!$(".facet[open],.cmenu[open]") || (/^(INPUT|SELECT|TEXTAREA)$/.test(tag) && a.id !== "q");
+}
+/* rows carry data-key (who they are) and data-sig (what they show): after a live update, rows whose signature changed flash once */
+function rowSigs() { const m = new Map(); for (const el of $$("[data-key][data-sig]", $("#view"))) m.set(el.getAttribute("data-key"), el.getAttribute("data-sig")); return m; }
+function applyLive() {
+  if (!LIVE.pending) return;
+  const wait = userBusy() ? 1000 : LIVE.at + LIVE_GAP - Date.now();
+  if (wait > 0) { clearTimeout(LIVE.retry); LIVE.retry = setTimeout(applyLive, wait); return; }
+  LIVE.at = Date.now(); LIVE.dataAt = Date.now();
+  const old = D, before = rowSigs(), act = document.activeElement, row = act && act.closest ? act.closest("[data-key]") : null;
+  const focusKey = row && $("#view").contains(row) ? row.getAttribute("data-key") : "", focusIdx = row ? $$("a,button,input,select,summary,[tabindex]", row).indexOf(act) : -1;
+  const opened = new Set($$("details[data-key]", $("#view")).filter(d => d.open).map(d => d.getAttribute("data-key")));
+  D = LIVE.pending; LIVE.pending = null; derive(); IDX = null;
+  if (D.version && D.version !== PAGEVER) LIVE.newVersion = D.version;
+  const dlg = $("#modal"), body = dlg && dlg.open ? $(".mbody", dlg) : null, y = window.scrollY, my = body ? body.scrollTop : 0;
+  LIVE.quiet = true;
+  try { render(); } finally { LIVE.quiet = false; }
+  for (const d of $$("details[data-key]", $("#view"))) if (opened.has(d.getAttribute("data-key"))) d.open = true;
+  window.scrollTo(0, y);
+  const nb = dlg && dlg.open ? $(".mbody", dlg) : null; if (nb) nb.scrollTop = my;
+  if (focusKey && !$("#modal").open) { const r = $$("[data-key]", $("#view")).find(el => el.getAttribute("data-key") === focusKey);
+    if (r) { const f = $$("a,button,input,select,summary,[tabindex]", r)[Math.max(0, focusIdx)] || r; if (f.focus) f.focus({preventScroll: true}); } }
+  const changed = []; for (const [k, sig] of rowSigs()) if (before.has(k) && before.get(k) !== sig) changed.push(k);
+  if (changed.length && changed.length <= 10) for (const el of $$("[data-key]", $("#view"))) if (changed.includes(el.getAttribute("data-key"))) { el.classList.remove("flash"); void el.offsetWidth; el.classList.add("flash"); }
+  for (const m of newsOf(old, D)) announce(m);
+  renderBanner(); liveTicker(); if (LIVE.pop) liveIndicator();
+}
+async function liveGet(path) {
+  const r = await fetch(path, {cache: "no-store", credentials: "same-origin", headers: {Accept: "application/json"}});
+  if (r.status === 401) { setLive("ended"); throw new Error("signed out"); }
+  if (!r.ok) throw new Error(path + " answered " + r.status);
+  return r.json();
+}
+async function liveUpdate(changed) {
+  if (LIVE.busy) { LIVE.again = (LIVE.again || []).concat(changed); return; }
+  LIVE.busy = true;
+  try {
+    const all = changed.includes("*"), areas = changed.filter(k => k !== "files" && k !== "*");
+    const next = Object.assign({}, LIVE.pending || D);
+    if (all || areas.length) Object.assign(next, await liveGet("/api/v1/dashboard?" + (all ? "omit=files" : "only=" + areas.map(encodeURIComponent).join(","))));
+    if (all || changed.includes("files")) { const f = await liveGet("/api/v1/files"); next.files = f.files || []; next.files_meta = f.meta || {}; }
+    LIVE.pending = next; applyLive(); refreshDetail(changed);
+  } catch (e) { /* the next event, or the reconnect, tries again */ }
+  finally { LIVE.busy = false; if (LIVE.again) { const a = LIVE.again; LIVE.again = null; liveUpdate(a); } }
+}
+/* the server answers /health while it runs: a failure after 30 s of reconnecting means it stopped; a 401 means it restarted with a new key */
+async function liveProbe() {
+  try { const hh = await liveGet("/api/v1/health"); if (hh && hh.version && hh.version !== PAGEVER) { LIVE.newVersion = hh.version; renderBanner(); } }
+  catch (e) { if (LIVE.state !== "ended" && LIVE.failAt && Date.now() - LIVE.failAt >= 30000) setLive("offline"); }
+}
+function liveStart() {
+  if (!LIVE.on || !window.EventSource) return;
+  let ver = D.snapshot || 0, es = null;
+  setTimeout(() => { if (LIVE.state === "init") setLive("connecting"); }, 500);
+  const stream = () => {
+    es = new EventSource("/api/v1/events?since=" + ver);
+    es.addEventListener("open", () => {
+      const back = LIVE.state === "reconnecting" || LIVE.state === "offline";
+      LIVE.failAt = 0; if (!LIVE.since || back) LIVE.since = Date.now();
+      setLive("live");
+      if (back) { announce("Live updates are back."); liveProbe(); }
+    });
+    es.addEventListener("error", () => {
+      if (LIVE.state === "ended") { es.close(); return; }
+      if (LIVE.state === "live") announce("Live updates lost. Retrying.");
+      if (!LIVE.failAt) LIVE.failAt = Date.now();
+      if (LIVE.state !== "offline") setLive("reconnecting");
+      if (es.readyState === 2) { es.close(); liveProbe(); setTimeout(() => { if (LIVE.state !== "ended") stream(); }, 3000); }   /* the browser gave up: try again */
+    });
+    es.addEventListener("snapshot", e => {
+      let m = null; try { m = JSON.parse(e.data); } catch (x) { return; }
+      setLive("live");
+      if (m && m.version > ver) { ver = m.version; liveUpdate(m.changed && m.changed.length ? m.changed : ["*"]); }
+    });
+  };
+  stream();
+  setInterval(() => { if ((LIVE.state === "reconnecting" || LIVE.state === "offline") && LIVE.failAt) liveProbe(); }, 5000);
+  document.addEventListener("visibilitychange", () => {
+    if (document.visibilityState === "hidden") { LIVE.hiddenAt = Date.now(); return; }
+    if (LIVE.hiddenAt && Date.now() - LIVE.hiddenAt > 60000 && LIVE.state === "live") liveUpdate(["*"]);
+    LIVE.hiddenAt = 0;
+  });
+  if (!D.files) liveUpdate(["files"]);   /* the first paint leaves the explorer's file contents out: they load now */
 }
 (function boot() {
   const nav = $("#nav");
-  nav.append(h("nav", {class: "tabs", id: "tabs", role: "tablist", "aria-label": "Views"}), h("span", {class: "spacer"}),
+  nav.append(h("nav", {class: "views", "aria-label": "Views"}, h("div", {class: "tabs", id: "tabs"}), h("div", {class: "navmore", id: "navmore", hidden: true})),
+    h("div", {class: "livew"}, h("button", {class: "live", id: "live", type: "button", "aria-controls": "livepop", "aria-expanded": "false", "data-state": LIVE.state, onclick: () => toggleLivePop()}),
+      h("div", {class: "livepop", id: "livepop", role: "region", "aria-label": "Live updates", hidden: true})),
     h("div", {class: "search", role: "search"}, h("span", {class: "ico", "aria-hidden": "true"}, icon("search")), h("input", {id: "q", type: "search", placeholder: "Search projects, tasks…", "aria-label": "Search everything", autocomplete: "off"}), h("kbd", {text: "/"})),
     h("button", {class: "btn ghost", id: "palbtn", type: "button", onclick: openPalette, "aria-label": "Command palette", title: "Command palette (⌘K)"}, h("kbd", {text: "⌘K"})),
     h("button", {class: "btn icon ghost", id: "theme", type: "button", onclick: toggleTheme, "aria-label": "Toggle theme", title: "Toggle theme"}, icon("theme")));
@@ -3493,8 +5226,12 @@ function render() {
     else set({q: v});
   }, 140));
   q.addEventListener("keydown", e => { if (e.key === "Enter") { const first = $("[data-nav]", $("#view")); if (first) first.focus(); } });
-  document.addEventListener("click", e => { $$(".facet[open],.cmenu[open]").forEach(d => { if (!d.contains(e.target)) d.open = false; }); }, true);
+  document.addEventListener("click", e => { $$(".facet[open],.cmenu[open]").forEach(d => { if (!d.contains(e.target)) d.open = false; });
+    if (NAV.open && !e.target.closest("#navmore")) closeMore(false);
+    if (LIVE.pop && !e.target.closest(".livew")) toggleLivePop(false); }, true);
+  $(".livew").addEventListener("keydown", e => { if (e.key === "Escape" && LIVE.pop) { e.preventDefault(); e.stopPropagation(); toggleLivePop(false); $("#live").focus(); } });
   window.addEventListener("resize", debounce(() => fitTables($("#view")), 150));
+  window.addEventListener("resize", debounce(fitNav, 100));
   document.addEventListener("toggle", e => { if (e.target && e.target.matches && e.target.matches("details")) fitTables(e.target); }, true);
   $("#scrim").addEventListener("click", () => { if (!$("#palette").hidden) closePalette(); else if (!$("#sheet").hidden) closeSheet(); });
   const dlg = $("#modal");
@@ -3503,9 +5240,10 @@ function render() {
   const st = decode(location.hash) || Object.assign({}, store.get("devkit.state", null) || {}, {modal: "", task: ""});
   if (st) S = Object.assign({}, DEFAULT, st, {view: ROUTES.includes(st.view) ? st.view : st.view === "portfolio" ? "initiatives" : "overview"});
   if (!location.hash || location.hash !== encode(S)) history.replaceState(null, "", encode(S));
-  render();
-  if (document.fonts && document.fonts.ready) document.fonts.ready.then(() => fitTables($("#view")));
+  liveIndicator(); renderBanner(); render();
+  if (document.fonts && document.fonts.ready) document.fonts.ready.then(() => { fitTables($("#view")); fitNav(); });
   try { const y = sessionStorage.getItem("devkit.scroll"); if (y) { window.scrollTo(0, +y); sessionStorage.removeItem("devkit.scroll"); } } catch (e) {}
+  if (LIVE.on) { liveStart(); return; }   /* live: the event stream replaces the timed reload */
   setInterval(() => { const t = $("#ticker"); if (t) t.textContent = "Synced " + rel(D.generated); }, 30000);
   setInterval(() => { if (document.visibilityState === "visible" && $("#palette").hidden && !S.task && !S.modal && !/^(INPUT|SELECT|TEXTAREA)$/.test((document.activeElement || {}).tagName || "")) {
     try { sessionStorage.setItem("devkit.scroll", String(window.scrollY)); } catch (e) {} location.reload(); } }, 120000);
@@ -3538,6 +5276,7 @@ __CSS__
 <header class="nav" id="nav" role="banner">
 <a class="lockup" href="#/overview" aria-label="Firefly devkit — home">__LOGO_DARK____LOGO_LIGHT__<span class="vr" aria-hidden="true"></span><span class="dk">__SPARK__<span>devkit</span></span></a>
 </header>
+<div class="banner" id="banner" role="status" hidden></div>
 <div class="filters" id="filters" role="region" aria-label="Filters"></div>
 <main id="view" tabindex="-1"></main>
 <footer class="foot">__SPARK__ <span>__COPYRIGHT__</span><span>devkit __VERSION__</span><span id="ticker"></span><span>Generated on __HOST__, __WHEN__</span><span>Press <kbd>?</kbd> for shortcuts</span></footer>
@@ -3547,6 +5286,7 @@ __CSS__
 <div class="sheet" id="sheet" role="dialog" aria-modal="true" aria-label="Keyboard shortcuts" hidden></div>
 <div class="tip" id="tip" role="tooltip" hidden></div>
 <div class="toast" id="toast" role="status" aria-live="polite"></div>
+<div class="sr" id="live-status" role="status" aria-live="polite"></div>
 <script id="devkit-data" type="application/json">__DATA__</script>
 <script>__JS__</script>
 </body>
@@ -3558,11 +5298,21 @@ def _esc(s) -> str:
     return str(s).replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;").replace('"', "&quot;")
 
 
-def render(reg: dict, handoff: Path = None, now: float = None) -> str:
-    """The complete, self-contained dashboard HTML for a registry."""
-    data = collect(reg, handoff=handoff, now=now)
+NONCE_RE = re.compile(r"[A-Za-z0-9_\-+/]{16,128}={0,2}")
+
+
+def page(data: dict, nonce: str = "") -> str:
+    """The dashboard HTML for already-collected data (`collect`). Without a nonce it is the self-contained static
+    export; with one (the live server), every inline <script> and <style> carries it, so the server's CSP can allow
+    exactly these and nothing else."""
+    if nonce and not NONCE_RE.fullmatch(nonce):
+        raise ValueError("a nonce is 16-128 base64 characters")
     when = time.strftime("%Y-%m-%d %H:%M", time.localtime(data["generated"]))
     page = HTML
+    if nonce:  # before any substitution: only the template's own tags, never text from the data
+        attr = f' nonce="{nonce}"'
+        page = (page.replace("<script>", f"<script{attr}>").replace("<style>", f"<style{attr}>")
+                .replace('<script id="devkit-data"', f'<script{attr} id="devkit-data"'))
     for key, val in (("__LIGHT__", LIGHT), ("__DARK__", DARK), ("__CSS__", CSS),
                      ("__LOGO_DARK__", _logo("firefly-logo-dark.svg", "ff-dark")),
                      ("__LOGO_LIGHT__", _logo("firefly-logo-light.svg", "ff-light")),
@@ -3571,6 +5321,11 @@ def render(reg: dict, handoff: Path = None, now: float = None) -> str:
         page = page.replace(key, val)
     # script and data last, so placeholders inside them are never substituted
     return page.replace("__JS__", JS.replace("</", "<\\/")).replace("__DATA__", safe_json(data))
+
+
+def render(reg: dict, handoff: Path = None, now: float = None) -> str:
+    """The complete, self-contained dashboard HTML for a registry (the static export)."""
+    return page(collect(reg, handoff=handoff, now=now))
 
 
 def write(reg: dict, handoff: Path = None) -> Path:

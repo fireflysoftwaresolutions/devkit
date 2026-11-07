@@ -56,7 +56,7 @@ class HandoffStalenessTests(unittest.TestCase):
         self.tmp.cleanup()
 
     def stale(self, now):
-        return hooks.handoff_staleness(str(self.repo), self.note, self.state, "ana@example.com", now)
+        return hooks.handoff_staleness(str(self.repo), self.note, self.state, "ana@example.com", now)[0]
 
     def test_commits_after_the_note_make_it_stale_until_the_note_changes(self):
         commit(self.repo, "feat: pdf export", T0 + 600)
@@ -84,14 +84,14 @@ class HandoffStalenessTests(unittest.TestCase):
         tasks_only = NOTE.replace("- `T-1` CSV export", "- `T-1` CSV export ✓")
         commit(handoff, "tasks: T-1 done", T0 + 500, files={"projects/acme/api.md": tasks_only})
         os.utime(note, (T0 + 900, T0 + 900))  # rewritten later by devkit, still no human change
-        stale = hooks.handoff_staleness(str(self.repo), note, self.state, "ana@example.com", T0 + 1000)
+        stale = hooks.handoff_staleness(str(self.repo), note, self.state, "ana@example.com", T0 + 1000)[0]
         self.assertEqual(len(stale), 1)  # the human sections last changed at T0, before the commit
 
     def test_no_commits_since_the_note_is_not_stale(self):
         commit(self.repo, "feat: old work", T0 - 600)
         self.assertEqual(self.stale(T0 + 100), [])
         self.assertEqual(hooks.handoff_staleness(str(self.repo), self.note.with_name("none.md"), self.state,
-                                                 "ana@example.com", T0), [])  # no note, nothing to check
+                                                 "ana@example.com", T0)[0], [])  # no note, nothing to check
 
 
 

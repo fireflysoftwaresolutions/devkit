@@ -1,15 +1,25 @@
 # Copyright (c) 2026 Firefly Software Solutions Inc.
 # SPDX-License-Identifier: Apache-2.0
 """`dev install` (idempotent configuration of git, Claude Code, Codex, skills, Docker, launchd)
-and `dev doctor` (verification)."""
+and `dev doctor` (verification).
+
+`dev install` first pins devkit (spec C10): a `git archive` of the checkout's HEAD, read-only, with a manifest of
+SHA-256 checksums, in ~/.local/share/devkit/releases/<version>-<sha>/. It pins only a release (a tag v<VERSION> that
+origin has on the same commit) or a commit whose local test gate passed (`dev ci --run`), unless the developer passes
+`--unverified --why`. It then runs the rest of the install from that copy, so the hooks, ~/.local/bin/dev, the status
+line, the scheduled jobs and the Desktop extension run it and never the checkout."""
 from __future__ import annotations
 
+import hashlib
+import io
 import json
 import os
+import shlex
 import sys
 import re
 import shutil
 import subprocess
+import tarfile
 import time
 from pathlib import Path
 
@@ -30,7 +40,9 @@ BLOCK_START, BLOCK_END = "# >>> devkit >>>", "# <<< devkit <<<"
 # --------------------------------------------------------------------------- helpers
 
 def render(text: str) -> str:
-    return (text.replace("{{DEVKIT}}", str(DEVKIT_HOME)).replace("{{HOME}}", str(HOME))
+    """Fill a config template. {{DEVKIT}} is the copy the hooks run (core.runtime_home: the pinned install), also when
+    this code runs from a checkout, so no setting written here ever points at the checkout once devkit is pinned."""
+    return (text.replace("{{DEVKIT}}", str(core.runtime_home())).replace("{{HOME}}", str(HOME))
             .replace("{{DEV}}", str(DEV)).replace("{{UID}}", str(os.getuid())))
 
 
@@ -128,6 +140,443 @@ def merge_hooks(current: dict, ours: dict) -> dict:
     return out
 
 
+# --------------------------------------------------------------------------- the pinned install (spec C10, K2)
+
+PIN_KEEP = 3                 # pinned copies kept; one still in use is never removed
+TESTED = ("run", "resumed")  # local CI evidence from a run of the suite; an attestation (--ci-passed) is not enough
+
+
+class PinError(Exception):
+    """`dev install` refused to pin or switch the copy: the message says why and what to do instead."""
+
+
+def _audit(action: str, target: str, detail: str, outcome: str = "ok", **extra):
+    from . import audit
+    audit.record(action, target, detail, outcome=outcome, **extra)
+
+
+def _sha256(path) -> str:
+    h = hashlib.sha256()
+    with open(path, "rb") as fh:
+        for chunk in iter(lambda: fh.read(1 << 16), b""):
+            h.update(chunk)
+    return h.hexdigest()
+
+
+def _files(root: Path) -> dict:
+    """{relative path: Path} of every file under `root`, the manifest itself excepted."""
+    out = {}
+    for d, _, names in os.walk(root):
+        for n in names:
+            p = Path(d) / n
+            rel = p.relative_to(root).as_posix()
+            if rel != core.PIN_MANIFEST:
+                out[rel] = p
+    return out
+
+
+def _read_only(root: Path):
+    """Files 0444 (0555 when git has them executable, as bin/dev must be for the hooks to run it), folders 0555."""
+    for d, _, names in os.walk(root, topdown=False):
+        for n in names:
+            p = os.path.join(d, n)
+            os.chmod(p, 0o555 if os.lstat(p).st_mode & 0o100 else 0o444)
+        os.chmod(d, 0o555)
+
+
+def _remove_tree(path: Path):
+    """Delete a pinned copy or a leftover of one: its folders are read-only, so they are made writable first."""
+    for d, _, _ in os.walk(path):
+        try:
+            os.chmod(d, 0o755)  # nosemgrep: python.lang.security.audit.insecure-file-permissions.insecure-file-permissions (adds only the owner's write to a 0555 folder, so rmtree can delete it)
+        except OSError:
+            pass
+    shutil.rmtree(path, ignore_errors=True)
+
+
+def _precompile(lib: Path):
+    """Compile the copy's modules now: its folders become read-only, so Python could never cache them and every hook
+    would compile devkit again. Hash-checked .pyc files never outlive their source. A module that does not compile
+    is refused: the hooks would fail open on it. The `python3` on PATH gets its own bytecode when it differs. Apple's
+    /usr/bin/python3 caches bytecode outside the tree (sys.pycache_prefix), so under it the modules are only checked."""
+    import py_compile
+    if not lib.is_dir():
+        return
+    bad = []
+    for f in sorted(lib.rglob("*.py")):
+        try:
+            if getattr(sys, "pycache_prefix", None):
+                compile(f.read_bytes(), str(f), "exec", dont_inherit=True)
+            else:
+                py_compile.compile(str(f), doraise=True, invalidation_mode=py_compile.PycInvalidationMode.CHECKED_HASH)
+        except (py_compile.PyCompileError, SyntaxError, ValueError):
+            bad.append(f.relative_to(lib.parent).as_posix())
+    if bad:
+        raise PinError(f"{', '.join(bad[:4])} does not compile, and the hooks would fail open on it. Fix it, commit, "
+                       f"then run `dev install` again.")
+    other = shutil.which("python3")
+    if other and not other.startswith("/usr/bin/") and core.real(other) != core.real(sys.executable):
+        sh([other, "-m", "compileall", "-q", "--invalidation-mode", "checked-hash", str(lib)], timeout=180)
+
+
+def _release(source: Path, commit: str, version: str):
+    """-> (tag, "") when HEAD is the release v<VERSION> and origin has that tag on the same commit, else (None, why).
+    A tag made only in this checkout (by anyone, an agent too) is not a release."""
+    tag = f"v{version}"
+    if tag not in core.gitout(source, "tag", "--points-at", commit).split():
+        return None, f"it is not the release {tag}"
+    rc, out, err = core.git(source, "ls-remote", "origin", f"refs/tags/{tag}", f"refs/tags/{tag}^{{}}", timeout=60)
+    if rc != 0:
+        return None, f"origin could not confirm the tag {tag} ({(err or out).strip()[:160] or f'exit {rc}'})"
+    refs = {parts[1]: parts[0] for parts in (ln.split() for ln in out.splitlines()) if len(parts) == 2}
+    remote = refs.get(f"refs/tags/{tag}^{{}}") or refs.get(f"refs/tags/{tag}")  # annotated tags: the peeled commit
+    if remote != commit:
+        return None, (f"origin has no tag {tag}" if not remote else
+                      f"origin's {tag} is {remote[:7]}, not {commit[:7]}, so the local tag is not the release")
+    return tag, ""
+
+
+def _tested(source: Path, commit: str):
+    """-> (evidence, "") when the local test gate (`dev ci --run`) passed for exactly this commit's tree, else
+    (None, why). The evidence is the record `dev push` checks."""
+    from . import gitx
+    c = gitx.ctx(source)
+    ev = gitx.evidence(c, commit) if c else None
+    if ev and ev.get("how") in TESTED:
+        return ev, ""
+    if ev:
+        return None, f"its local CI record is {gitx.describe_evidence(ev)}, a claim, not a run of the suite"
+    return None, "no `dev ci --run` passed for this tree"
+
+
+def _verify_source(source: Path, commit: str, version: str, unverified_why: str = None) -> dict:
+    """How this commit earned its pin -> {"how": release|tests|unverified, "detail"}. Raises PinError when it did not."""
+    from . import gitx
+    tag, not_release = _release(source, commit, version)
+    if tag:
+        return {"how": "release", "detail": f"release {tag}, the same commit on origin"}
+    ev, not_tested = _tested(source, commit)
+    if ev:
+        return {"how": "tests", "detail": f"tests passed for this tree ({gitx.describe_evidence(ev)})",
+                "evidence_ts": ev.get("ts")}
+    why = (unverified_why or "").strip()
+    if why:
+        return {"how": "unverified", "detail": f"unverified: {why}", "why": why}
+    raise PinError(f"{commit[:7]} is not verified: {not_release}, and {not_tested}. The hooks and the guard run only a "
+                   f"release or a commit whose tests passed here. Run `bin/dev ci --run` in {tilde(source)}, then "
+                   f"`dev install`; or move to the newest release with `dev update`; or install it anyway with "
+                   f"`dev install --unverified --why \"<reason>\"` (recorded in the audit).")
+
+
+def _info(man: dict, path: Path, verified=None, reused=False) -> dict:
+    return {"name": path.name, "version": man.get("version"), "commit": man.get("commit"), "path": str(path),
+            "source": man.get("source"), "verified": verified or man.get("verified"),
+            "files": len(man.get("files") or {}), "reused": reused}
+
+
+def _build(source: Path, commit: str, tree: str, version: str, name: str, verified: dict) -> Path:
+    """git archive `commit` into a new read-only copy with its manifest; replaces a copy of the same name."""
+    root = core.pin_root()
+    root.mkdir(parents=True, exist_ok=True)
+    tmp, old = root / f".{name}.tmp-{os.getpid()}", None
+    _remove_tree(tmp)
+    tmp.mkdir()
+    try:
+        p = subprocess.run(["git", "-C", str(source), "archive", "--format=tar", commit], capture_output=True,
+                           timeout=300, env=core.GIT_ENV)
+        if p.returncode != 0:
+            raise PinError(f"git archive {commit[:7]} failed: {p.stderr.decode('utf-8', 'replace').strip()[-200:]}")
+        with tarfile.open(fileobj=io.BytesIO(p.stdout)) as tf:
+            members = tf.getmembers()
+            bad = [m.name for m in members if not (m.isfile() or m.isdir()) or m.name.startswith("/")
+                   or ".." in Path(m.name).parts]
+            if bad:
+                raise PinError(f"{commit[:7]} has entries a pinned copy cannot hold (links, or paths outside the "
+                               f"tree): {', '.join(bad[:4])}")
+            tf.extractall(str(tmp), members=members, **({"filter": "data"} if hasattr(tarfile, "data_filter") else {}))
+        _precompile(tmp / "lib")
+        man = {"name": name, "version": version, "commit": commit, "tree": tree, "source": str(source),
+               "created": round(time.time(), 3), "verified": verified,
+               "files": {rel: _sha256(f) for rel, f in sorted(_files(tmp).items())}}
+        (tmp / core.PIN_MANIFEST).write_text(json.dumps(man, indent=1, sort_keys=True) + "\n")
+        _read_only(tmp)
+        dest = root / name
+        if dest.exists():
+            old = root / f".{name}.old-{os.getpid()}"
+            os.rename(dest, old)
+        os.rename(tmp, dest)
+    except BaseException:
+        _remove_tree(tmp)
+        raise
+    if old:
+        _remove_tree(old)
+    return dest
+
+
+def pin(source=None, unverified_why: str = None) -> dict:
+    """Pin the HEAD of the devkit checkout `source` (default: core.source_home()) -> what was pinned (name, version,
+    commit, path, source, verified, files). Refused (PinError) when tracked files have uncommitted changes, or when
+    HEAD is neither a release nor tested and no `unverified_why` is given. The copy is always built from git; when one
+    of that commit had changed since it was pinned, that is audited (outcome "tampered")."""
+    source = Path(source or core.source_home())
+    where = tilde(source)
+    top = core.gitout(source, "rev-parse", "--show-toplevel")
+    if not top:
+        raise PinError(f"{where} is not a git checkout of devkit, so there is nothing to pin. Run `dev install` in a "
+                       f"devkit checkout (install.sh clones one).")
+    source = Path(top)
+    rc, dirty, err = core.git(source, "status", "--porcelain", "--untracked-files=no")
+    if rc != 0:
+        raise PinError(f"git status failed in {where}: {err}")
+    if dirty:
+        names = [ln[3:] for ln in dirty.splitlines() if ln.strip()]
+        cur = core.install_record().get("name")
+        raise PinError(f"{where} has uncommitted changes to {len(names)} tracked file(s) "
+                       f"({', '.join(names[:4])}{' …' if len(names) > 4 else ''}), so its HEAD is not what is on "
+                       f"disk. Commit them (then `bin/dev ci --run`) or discard them, and run `dev install` again"
+                       + (f"; `dev install --version {cur}` re-applies the installed copy." if cur else "."))
+    commit = core.gitout(source, "rev-parse", "--verify", "-q", "HEAD^{commit}")
+    tree = core.gitout(source, "rev-parse", "--verify", "-q", "HEAD^{tree}")
+    if not commit:
+        raise PinError(f"{where} has no commit yet, so there is nothing to pin.")
+    version = core.gitout(source, "show", f"{commit}:VERSION").strip()
+    if not re.fullmatch(r"[0-9A-Za-z][0-9A-Za-z.+_-]{0,39}", version):
+        raise PinError(f"{where} has no usable VERSION file at {commit[:7]}.")
+    verified = _verify_source(source, commit, version, unverified_why)
+    name = f"{version}-{commit[:7]}"
+    dest = core.pin_root() / name
+    if dest.exists():  # rebuilt from git all the same: a manifest rewritten to match a change would look intact
+        problems = verify_pin(dest)
+        rec = core.install_record()
+        if rec.get("manifest_sha256") and core.real(rec.get("path") or "") == core.real(dest) \
+                and (dest / core.PIN_MANIFEST).is_file() and _sha256(dest / core.PIN_MANIFEST) != rec["manifest_sha256"]:
+            problems.insert(0, f"changed {core.PIN_MANIFEST}")
+        if problems:
+            _audit("install.pin", name, "the copy had changed since it was pinned, rebuilt from git: "
+                   + "; ".join(problems[:6]), outcome="tampered")
+    dest = _build(source, commit, tree, version, name, verified)
+    man = read_json(dest / core.PIN_MANIFEST, {}) or {}
+    _audit("install.pin", name, verified["detail"], outcome="unverified" if verified["how"] == "unverified" else "ok",
+           commit=commit, verified=verified["how"])
+    return dict(_info(man, dest, verified), source=str(source))
+
+
+def verify_pin(path) -> list:
+    """What differs between a pinned copy and its manifest, one short line each ("changed lib/devkit/guard.py",
+    "missing …", "added …", "writable …"); empty when the copy is intact."""
+    path = Path(path)
+    man = read_json(path / core.PIN_MANIFEST)
+    if not isinstance(man, dict) or not isinstance(man.get("files"), dict):
+        return [f"no readable manifest ({core.PIN_MANIFEST})"]
+    out, found = [], _files(path)
+    for rel, want in sorted(man["files"].items()):
+        f = found.get(rel)
+        if f is None:
+            out.append(f"missing {rel}")
+        elif f.is_symlink() or _sha256(f) != want:
+            out.append(f"changed {rel}")
+    out += [f"added {rel}" for rel in sorted(set(found) - set(man["files"]))]
+    for d, _, names in os.walk(path):
+        for n in [d] + [os.path.join(d, x) for x in names]:
+            if os.lstat(n).st_mode & 0o222:
+                out.append(f"writable {Path(n).relative_to(path).as_posix()}")
+    return out
+
+
+def pinned_copies() -> list:
+    """[(manifest, path)] of every pinned copy, newest first."""
+    root = core.pin_root()
+    out = []
+    for d in sorted(root.iterdir()) if root.is_dir() else []:
+        man = read_json(d / core.PIN_MANIFEST, {}) if d.is_dir() and not d.name.startswith(".") else None
+        if isinstance(man, dict) and man.get("commit"):
+            out.append((man, d))
+    return sorted(out, key=lambda x: -(x[0].get("created") or 0))
+
+
+def pins_in_use() -> set:
+    """Real paths of the pinned copies something still runs: the installed one, this process, ~/.local/bin/dev, and
+    any copy that Claude's settings, Claude's managed settings, Codex's hooks or a launchd job names."""
+    from . import policy
+    roots = {str(core.pin_root()), core.real(core.pin_root())}
+    used = set()
+
+    def add(p):
+        rp = core.real(p)
+        base = core.real(core.pin_root()) + os.sep
+        if rp.startswith(base):
+            used.add(base + rp[len(base):].split(os.sep)[0])
+    rec = core.install_record()
+    if rec.get("path"):
+        add(rec["path"])
+    add(DEVKIT_HOME)
+    link = core.HOME / ".local" / "bin" / "dev"
+    if os.path.lexists(link):
+        add(os.path.realpath(link))
+    texts = [CLAUDE_HOME / "settings.json", CODEX_HOME / "hooks.json", policy.MANAGED_FILE]
+    texts += sorted((core.HOME / "Library" / "LaunchAgents").glob("com.devkit*.plist"))
+    pat = re.compile("(" + "|".join(re.escape(r) for r in roots) + r")/([^/'\"\s<>]+)")
+    for f in texts:
+        try:
+            text = Path(f).read_text()
+        except (OSError, UnicodeDecodeError):
+            continue
+        for m in pat.finditer(text):
+            add(core.pin_root() / m.group(2))
+    return used
+
+
+def prune_pins(keep: int = PIN_KEEP) -> list:
+    """Remove the pinned copies beyond the newest `keep`, never one in use (pins_in_use), and the leftovers of an
+    install that stopped half-way. -> the names removed."""
+    used, removed = pins_in_use(), []
+    for i, (_, d) in enumerate(pinned_copies()):
+        if i >= keep and core.real(d) not in used:
+            _remove_tree(d)
+            removed.append(d.name)
+    root = core.pin_root()
+    for d in root.glob(".*") if root.is_dir() else []:
+        if d.is_dir() and time.time() - d.lstat().st_mtime > 3600:
+            _remove_tree(d)
+    if removed:
+        _audit("install.prune", ", ".join(removed), f"kept the newest {keep} pinned copies and those in use")
+    return removed
+
+
+def record_install(info: dict) -> dict:
+    """Write ~/.local/share/devkit/install.json: which pinned copy is installed, from which checkout, and the
+    checksum of its manifest (so a replaced manifest is noticed too)."""
+    path = Path(info["path"])
+    rec = {"name": info["name"], "version": info["version"], "commit": info["commit"], "path": str(path),
+           "source": str(info.get("source") or ""), "verified": info.get("verified"),
+           "manifest_sha256": _sha256(path / core.PIN_MANIFEST), "installed_at": round(time.time(), 3)}
+    f = core.install_record_file()
+    f.parent.mkdir(parents=True, exist_ok=True)
+    tmp = f.with_name(f.name + ".tmp")
+    tmp.write_text(json.dumps(rec, indent=1) + "\n")
+    os.replace(tmp, f)
+    return rec
+
+
+def select_pin(version: str) -> dict:
+    """The newest intact pinned copy named `version` or `version-<sha>` -> its info (`dev install --version`)."""
+    copies = pinned_copies()
+    hits = [(m, d) for m, d in copies if d.name == version or d.name.startswith(version + "-")]
+    if not hits:
+        raise PinError(f"no pinned copy of {version}; there are: {', '.join(d.name for _, d in copies) or 'none'}.")
+    man, d = hits[0]
+    problems = verify_pin(d)
+    if problems:
+        raise PinError(f"{d.name} differs from its manifest ({'; '.join(problems[:4])}), so it is not used. Pin it "
+                       f"again from git: check out {man.get('version')} in the checkout, then run `dev install`.")
+    return _info(man, d, reused=True)
+
+
+def _choose_copy(only=None, unverified_why=None, version=None, as_pinned=False) -> Path:
+    """Which pinned copy this install runs from -> its path. Full installs pin the checkout (or switch to --version)
+    and record it; `--only` re-applies steps from the installed copy. Raises PinError."""
+    step("Pinned copy of devkit (what the hooks and the guard run)")
+    if as_pinned:  # the second half of `dev install`, started by the first in the copy it pinned
+        problems = verify_pin(DEVKIT_HOME) if core.is_pinned(DEVKIT_HOME) else ["it is not a pinned copy"]
+        if problems:
+            raise PinError(f"{tilde(DEVKIT_HOME)} is not an intact pinned copy ({'; '.join(problems[:4])}). Run "
+                           f"`dev install` in the devkit checkout.")
+        rec = core.install_record()
+        if not rec.get("path") or core.real(rec["path"]) != core.real(DEVKIT_HOME):
+            if only:
+                raise PinError(f"{DEVKIT_HOME.name} is not the installed copy: `dev install --version "
+                               f"{DEVKIT_HOME.name}` switches to it.")
+            record_install(_info(read_json(DEVKIT_HOME / core.PIN_MANIFEST, {}) or {}, DEVKIT_HOME))
+        done(f"running from {tilde(DEVKIT_HOME)}")
+        return DEVKIT_HOME
+    if only:
+        if version or unverified_why:
+            raise PinError("--version and --unverified choose the copy every step runs, so they go without --only.")
+        cur = core.runtime_home()
+        if not core.is_pinned(cur):
+            raise PinError("devkit is not pinned yet: run `dev install` (every step) first; it pins the checkout.")
+        problems = verify_pin(cur)
+        if problems:
+            raise PinError(f"the installed copy {cur.name} differs from its manifest ({'; '.join(problems[:4])}). "
+                           f"Run `dev install` to rebuild it from git.")
+        done(f"{', '.join(sorted(only))} from the installed copy {cur.name}; `dev install` pins the checkout's HEAD")
+        return cur
+    info = select_pin(version) if version else pin(None, unverified_why)
+    rec = record_install(info)
+    v = info.get("verified") or {}
+    done(f"devkit {rec['version']} ({rec['commit'][:7]}) {'switched to' if info.get('reused') else 'pinned'} in "
+         f"{tilde(rec['path'])}: {info['files']} files, read-only, SHA-256 manifest · {v.get('detail', '')}")
+    if v.get("how") == "unverified":
+        note("installed without verification; recorded in the audit (`dev audit`)")
+    return Path(rec["path"])
+
+
+def _hook_copies() -> list:
+    """[(where, devkit copy it runs)] for each devkit command in Claude's settings (hooks, status line), Claude's
+    managed settings, Codex's hooks and ~/.local/bin/dev."""
+    from . import policy
+    out = []
+
+    def copy_of(command: str) -> Path:
+        try:
+            exe = shlex.split(command)[0]
+        except (ValueError, IndexError):
+            exe = (command.split() or [""])[0]
+        return Path(exe).parent.parent
+
+    def scan(label: str, data):
+        for event, groups in sorted(((data or {}).get("hooks") or {}).items()):
+            for g in groups or []:
+                for h in (g or {}).get("hooks") or []:
+                    if is_devkit_hook(h):
+                        out.append((f"{label} {event}", copy_of(h["command"])))
+    s = read_json(CLAUDE_HOME / "settings.json", {}) or {}
+    scan("Claude", s)
+    sl = str((s.get("statusLine") or {}).get("command") or "")
+    if "hook statusline" in sl:
+        out.append(("Claude status line", copy_of(sl)))
+    if policy.MANAGED_FILE.exists():
+        scan("Claude managed settings", read_json(policy.MANAGED_FILE, {}))
+    scan("Codex", read_json(CODEX_HOME / "hooks.json", {}))
+    link = core.HOME / ".local" / "bin" / "dev"
+    if os.path.lexists(link):
+        out.append(("~/.local/bin/dev", Path(os.path.realpath(link)).parent.parent))
+    return out
+
+
+def pin_checks() -> list:
+    """The doctor's checks of the pinned install -> [(name, ok, detail, fix)]."""
+    rec = core.install_record()
+    path = Path(rec["path"]) if rec.get("path") else None
+    if not path or not core.is_pinned(path):
+        return [("hooks run a pinned copy", False, "not pinned: the hooks run whatever the settings name" +
+                 (f" ({tilde(path)} is gone)" if path else ""), "dev install")]
+    man = read_json(path / core.PIN_MANIFEST, {}) or {}
+    copies = _hook_copies()
+    off = [(w, c) for w, c in copies if core.real(c) != core.real(path)]
+    src = rec.get("source") or ""
+    detail = (f"{len(copies)} commands run {tilde(path)}" if not off else "; ".join(
+        f"{w} runs {tilde(c)}" + (" (the checkout)" if src and core.real(c) == core.real(src) else "")
+        for w, c in off[:4]) + (f" (+{len(off) - 4} more)" if len(off) > 4 else ""))
+    out = [("hooks run the pinned copy", bool(copies) and not off, detail if copies else "no devkit hooks found",
+            "dev install --only cli,claude,codex")]
+    same = man.get("version") == rec.get("version") and man.get("commit") == rec.get("commit")
+    out.append(("pinned copy is the installed version", same,
+                f"devkit {rec.get('version')} ({(rec.get('commit') or '')[:7]}) · "
+                f"{(rec.get('verified') or {}).get('detail', 'verification unknown')}" if same else
+                f"install.json says {rec.get('version')} ({(rec.get('commit') or '')[:7]}), the copy holds "
+                f"{man.get('version')} ({(man.get('commit') or '')[:7]})", "dev install"))
+    problems = verify_pin(path)
+    if rec.get("manifest_sha256") and (path / core.PIN_MANIFEST).is_file() \
+            and _sha256(path / core.PIN_MANIFEST) != rec["manifest_sha256"]:
+        problems.insert(0, f"changed {core.PIN_MANIFEST}")
+    out.append(("pinned copy matches its manifest", not problems,
+                f"{len(man.get('files') or {})} files, each as pinned, read-only" if not problems else
+                f"changed after `dev install` pinned it ({len(problems)}): " + "; ".join(problems[:4]),
+                "dev install (rebuilds the copy from git)"))
+    return out
+
+
 # --------------------------------------------------------------------------- steps
 
 def ensure_config():
@@ -152,7 +601,8 @@ def install_cli():
     bindir = HOME / ".local" / "bin"
     bindir.mkdir(parents=True, exist_ok=True)
     link = bindir / "dev"
-    target = DEVKIT_HOME / "bin" / "dev"
+    home = core.runtime_home()  # the pinned copy: `dev` typed in a shell runs what the hooks run
+    target = home / "bin" / "dev"
     if link.is_symlink() or link.exists():
         if link.resolve() != target.resolve():
             backup(link) if not link.is_symlink() else None
@@ -160,7 +610,7 @@ def install_cli():
     if not link.exists():
         link.symlink_to(target)
     done(f"{tilde(link)} → {tilde(target)}")
-    block = f'{BLOCK_START}\n[ -f "{DEVKIT_HOME}/shell/devkit.zsh" ] && source "{DEVKIT_HOME}/shell/devkit.zsh"\n{BLOCK_END}\n'
+    block = f'{BLOCK_START}\n[ -f "{home}/shell/devkit.zsh" ] && source "{home}/shell/devkit.zsh"\n{BLOCK_END}\n'
     text = ZSHRC.read_text() if ZSHRC.exists() else ""
     if BLOCK_START in text:
         new = re.sub(re.escape(BLOCK_START) + r".*?" + re.escape(BLOCK_END) + r"\n?", block, text, flags=re.S)
@@ -172,9 +622,151 @@ def install_cli():
     done(f"{tilde(ZSHRC)} sources shell/devkit.zsh (dcd, dwt, completion, Docker env)")
 
 
-def setup_git(quiet=False):
+def setup_git(quiet=False, commit_template=None):
+    """`commit_template`: dev setup's answer ("yes" or "no"), passed by `dev install --commit-template`."""
     with quiet_mode(quiet):
         _setup_git()
+    if not quiet:  # a quiet run repairs drift: it never asks, so it never offers the template either
+        step("Commit template")
+        offer_commit_template(answer=commit_template)
+
+
+# --------------------------------------------------------------------------- the commit template (spec P-fy3bwa0pshk R9)
+# config/git/commit-template.txt is the message git opens for a commit written in an editor. `dev setup` asks whether
+# to use it, and the git step of `dev install` (which `dev setup` runs) applies the answer: commit.template in each
+# repository's own config. It asks once and keeps the answer. A repository with a template of its own (local or
+# global) keeps it, and one where the developer removed devkit's is never set again, except by
+# `dev setup commit-template`, which asks again (`--remove` takes devkit's out everywhere).
+
+COMMIT_TEMPLATE_QUESTION = "Open new commit messages with devkit's template (commit.template in each repository that has none)?"
+
+
+def commit_template_copy() -> Path:
+    """The file repositories point at: a copy in devkit's state, refreshed by each install. A pinned copy's path would
+    break git once that copy is pruned (git cannot commit with a template it cannot read)."""
+    return STATE / "git" / "commit-template.txt"
+
+
+def _commit_template_record() -> Path:
+    return STATE / "git" / "commit-template.json"  # {"answer": "yes" | "no", "when": iso, "set": [repository paths]}
+
+
+def commit_template_answer() -> str:
+    """"yes", "no", or "" before the developer answered."""
+    a = (read_json(_commit_template_record(), {}) or {}).get("answer", "")
+    return a if a in ("yes", "no") else ""
+
+
+def record_commit_template(answer: str, added=()) -> None:
+    """Keep the answer ("yes" or "no") and the repositories devkit set it in."""
+    if answer not in ("yes", "no"):
+        raise ValueError(f"the commit template answer is yes or no, not {answer!r}")
+    f = _commit_template_record()
+    rec = read_json(f, {}) or {}
+    when = rec.get("when") if rec.get("answer") == answer else time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+    f.parent.mkdir(parents=True, exist_ok=True)
+    f.write_text(json.dumps({"answer": answer, "when": when, "set": sorted(set(rec.get("set") or []) | set(map(str, added)))})
+                 + "\n")
+
+
+def _names(rs) -> str:
+    return ", ".join(Path(r).name for r in rs[:6]) + (f" (+{len(rs) - 6} more)" if len(rs) > 6 else "")
+
+
+def _commit_template_rows(repos, reset=False):
+    """-> (devkit's, their own, without one): every config scope counts, so a global template is theirs. Without
+    `reset`, a repository devkit set before and that has none now was cleaned by the developer: it is left out."""
+    from . import registry
+    copy, before = commit_template_copy(), set((read_json(_commit_template_record(), {}) or {}).get("set") or [])
+    ours, own, free = [], [], []
+    for r in (registry.discover()[0] if repos is None else repos):
+        r = str(r)
+        cur = core.gitout(r, "config", "--get", "commit.template")
+        if cur and core.real(os.path.expanduser(cur)) == core.real(copy):
+            ours.append(r)
+        elif cur:
+            own.append(r)
+        elif reset or r not in before:
+            free.append(r)
+    return ours, own, free
+
+
+def offer_commit_template(repos=None, ask=None, say=None, interactive=None, answer=None, reset=False) -> dict:
+    """Give devkit's commit template to the repositories (default: the workspace's main checkouts) that have none, as
+    the developer answered (`answer`, else the recorded one). Without an answer, `ask(question) -> text` asks when
+    `interactive` (default: a terminal, not quiet, not a scheduled job). `say(text)` reports (default: the install
+    step's lines). `reset`: also the repositories the developer took it out of. -> {"answer", "set", "devkit", "own"}."""
+    explain = say or print
+    report = (lambda kind, text: say(text)) if say else (lambda kind, text: (done if kind == "done" else note)(text))
+    if interactive is None:
+        interactive = sys.stdin.isatty() and not _QUIET[0] and not os.environ.get("DEVKIT_JOB")
+    copy, text = commit_template_copy(), (CONF / "git" / "commit-template.txt").read_text()
+    if not copy.exists() or copy.read_text() != text:
+        copy.parent.mkdir(parents=True, exist_ok=True)
+        copy.write_text(text)
+    recorded = commit_template_answer()
+    answer = answer or recorded
+    ours, own, free = _commit_template_rows(repos, reset)
+    res = {"answer": answer, "set": [], "devkit": ours, "own": own}
+    kept = f"; {len(own)} keep their own" if own else ""
+    if not answer and free:
+        if not interactive:
+            report("note", f"{len(free)} repositories have no commit template: run `dev setup commit-template` in a "
+                           "terminal (or `dev install --only git`) to choose whether they use devkit's")
+            return res
+        explain(f"\n  {ui.bold('Commit template')}\n  git can open each new commit message with devkit's template: "
+                "the header rule, then why, what\n  changed and how it was verified, then the Refs and BREAKING CHANGE "
+                f"trailers.\n  {len(free)} repositories have none: {_names(free)}.\n  devkit sets commit.template in "
+                "each one's own git config; repositories with a\n  template of their own keep it.")
+        answer = "yes" if (ask or input)("  Use it? [Y/n] ").strip().lower() in ("", "y", "yes") else "no"
+        res["answer"] = answer
+    if answer and answer != recorded:
+        record_commit_template(answer)
+    if answer == "no" or not free:
+        report("note" if answer == "no" else "done",
+               "devkit's commit template is off; turn it on: dev setup commit-template" if answer == "no" else
+               f"{len(ours)} repositories use devkit's commit template{kept}")
+        return res
+    for r in free:
+        rc, _, err = core.git(r, "config", "--local", "commit.template", str(copy))
+        if rc == 0:
+            res["set"].append(r)
+        else:
+            report("note", f"{Path(r).name}: git config commit.template failed: {err}")
+    record_commit_template("yes", res["set"])
+    report("done", f"commit.template set in {len(res['set'])} repositories: {_names(res['set'])} · "
+                   f"{len(ours) + len(res['set'])} use devkit's{kept} · take it out: dev setup commit-template --remove")
+    return res
+
+
+def setup_commit_template(assume_yes: bool = False, remove: bool = False, ask=None, say=print, repos=None) -> int:
+    """`dev setup commit-template`: ask again, even after a no, and on a yes set the template in every repository
+    without one, those the developer cleaned included. `remove` unsets devkit's everywhere and records a no. Consent is
+    the developer's: in an agent's call (anything but core.set_by_developer()), neither --yes nor a piped answer sets
+    anything. -> exit code."""
+    if remove:
+        ours, _, _ = _commit_template_rows(repos)
+        gone = [r for r in ours if core.git(r, "config", "--local", "--unset", "commit.template")[0] == 0]
+        record_commit_template("no")
+        say(f"  {ui.OK} devkit's commit template is off; taken out of {len(gone)} repositories"
+            + (f": {_names(gone)}" if gone else "") + ". Turn it on again: dev setup commit-template")
+        return 0
+    if not core.set_by_developer():
+        say(f"  {ui.WARN} dev setup commit-template sets commit.template in every repository without one, so it needs "
+            "your yes, typed in your own terminal: an agent's --yes or a piped answer is not consent. Nothing "
+            "changed; run it in a terminal: dev setup commit-template")
+        return 2
+    if not assume_yes:
+        _, _, free = _commit_template_rows(repos, reset=True)
+        say(f"\n  {ui.bold('Commit template')}\n  git can open each new commit message with devkit's template "
+            f"({tilde(CONF / 'git' / 'commit-template.txt')}).\n  {len(free)} repositories have none"
+            + (f": {_names(free)}" if free else "") + ". Repositories with a template of their own keep it.")
+        if (ask or input)("  Use it? [Y/n] ").strip().lower() not in ("", "y", "yes"):
+            record_commit_template("no")
+            say(f"  {ui.dim('Nothing changed. Turn it on later: dev setup commit-template')}")
+            return 0
+    res = offer_commit_template(repos, say=lambda t: say(f"  {ui.OK} {t}"), answer="yes", reset=True)
+    return 0 if res["answer"] == "yes" else 1
 
 
 def _setup_git():
@@ -193,11 +785,16 @@ def _setup_git():
     done(f"user.name / user.email = {name} <{email}>")
     rc, _, err = sh(["gh", "auth", "setup-git"], timeout=30)
     done("gh is git's credential helper for github.com") if rc == 0 else fail(f"gh auth setup-git: {err}")
-    inc = str(CONF / "git" / "gitconfig")
+    conf = core.runtime_home() / "config"  # the pinned copy's; each new pin replaces the path of the one before
+    inc = str(conf / "git" / "gitconfig")
     _, includes, _ = sh(["git", "config", "--global", "--get-all", "include.path"])
+    for old in includes.splitlines():
+        if old != inc and old.endswith("/config/git/gitconfig") and (
+                core.is_under(old, core.pin_root()) or core.real(old) == core.real(core.source_home() / "config" / "git" / "gitconfig")):
+            sh(["git", "config", "--global", "--fixed-value", "--unset-all", "include.path", old])
     if inc not in includes.splitlines():
         sh(["git", "config", "--global", "--add", "include.path", inc])
-    sh(["git", "config", "--global", "core.excludesFile", str(CONF / "git" / "ignore")])
+    sh(["git", "config", "--global", "core.excludesFile", str(conf / "git" / "ignore")])
     done("shared git defaults included; global ignore covers agent artefacts (.claude/worktrees, …)")
 
 
@@ -237,7 +834,7 @@ def setup_handoff():
             core.git(HANDOFF, "init", "-q", "-b", "main")
             for f in tpl.iterdir():
                 if not (HANDOFF / f.name).exists():
-                    shutil.copy2(f, HANDOFF / f.name)
+                    shutil.copyfile(f, HANDOFF / f.name)  # not copy2: the pinned copy's modes are read-only
             for d in ("projects", "log", "plans"):
                 (HANDOFF / d).mkdir(exist_ok=True)
                 (HANDOFF / d / ".gitkeep").touch()
@@ -257,7 +854,7 @@ def setup_handoff():
     else:
         for f in tpl.iterdir():
             if not (HANDOFF / f.name).exists():
-                shutil.copy2(f, HANDOFF / f.name)
+                shutil.copyfile(f, HANDOFF / f.name)
         remote = core.gitout(HANDOFF, "remote", "get-url", "origin")
         done(f"present · origin {remote or 'none'}")
     if (HANDOFF / ".git").exists():
@@ -269,7 +866,7 @@ def render_instructions() -> str:
     base = (DEVKIT_HOME / "agents" / "AGENTS.md").read_text()
     personal_f = CONFIG_FILE.parent / "AGENTS.personal.md"
     personal = personal_f.read_text() if personal_f.exists() else ""
-    header = (f"{GENERATED_MARK} {core.VERSION} from {tilde(DEVKIT_HOME)}/agents/AGENTS.md"
+    header = (f"{GENERATED_MARK} {core.VERSION} from {tilde(core.source_home())}/agents/AGENTS.md"
               f"{' + ' + tilde(personal_f) if personal else ''}; edit those and run `dev install` -->\n")
     return header + render(base) + ("\n\n## Personal additions\n\n" + personal if personal else "")
 
@@ -379,9 +976,17 @@ def app_checks(codex_plugins=None) -> list:
                                                                                           f"{st.get('version')})")
                 detail += "; turned off in Settings → Extensions" if st.get("enabled") is False else ", enabled"
                 lc = st.get("launcher") or {}
+                rt = core.runtime_home()
                 if lc and not lc.get("ok", True):
                     ok_, detail = False, detail + f"; launcher: {lc.get('reason')}"
+                elif lc.get("home") and core.is_pinned(rt) and core.real(lc["home"]) != core.real(rt):
+                    ok_, detail = False, detail + (f"; it runs {tilde(lc['home'])}, not the pinned copy: clear its "
+                                                   f"devkit folder setting in Settings → Extensions")
             res.append(("Claude Desktop", "devkit extension", ok_, detail, "dev install --only desktop"))
+            ok_b, detail_b = desktop.bypass_mode()
+            if ok_b is not None:
+                res.append(("Claude Desktop", "bypass mode in the Code tab", ok_b, detail_b,
+                            "" if ok_b else f"Claude Desktop → {desktop.BYPASS_SWITCH}"))
         except Exception:
             pass
     if CHATGPT_APP.exists() and CHATGPT_CODEX.exists():
@@ -398,14 +1003,20 @@ def app_checks(codex_plugins=None) -> list:
     return res
 
 
+def local_skills(home: Path) -> dict:
+    """devkit's own shared skills under <home>/agents/skills -> {name: directory}. The folder may be missing: git keeps
+    no empty folder, so a fresh clone or a release archive has none until a skill is added there."""
+    root = home / "agents" / "skills"
+    if not root.is_dir():
+        return {}
+    return {d.name: d for d in sorted(root.iterdir()) if (d / "SKILL.md").exists()}
+
+
 def _install_skills():
     step("Skills (shared by Claude Code and Codex)")
     manifest = load_conf("skills.json")
-    wanted = {}  # name -> directory to link
+    wanted = local_skills(DEVKIT_HOME)  # name -> directory to link
     only = {}  # name -> the agents that get it (default: both)
-    for d in sorted((DEVKIT_HOME / "agents" / "skills").iterdir()):
-        if (d / "SKILL.md").exists():
-            wanted[d.name] = d
     groups = set((core.CFG.get("skills") or {}).get("groups") or [])
     for src in manifest["sources"]:
         if src.get("group") and src["group"] not in groups and "all" not in groups:
@@ -464,6 +1075,7 @@ def write_claude_settings(include_hooks=True):
     frag = load_conf("claude/settings.json")
     plugins = load_conf("claude/plugins.json")
     new = core.deep_merge(cur, {k: v for k, v in frag.items() if k != "hooks"})
+    new.pop("includeCoAuthoredBy", None)  # deprecated since Claude Code 2.0.62; `attribution` replaces it
     new["hooks"] = merge_hooks(cur.get("hooks") or {}, frag.get("hooks") or {} if include_hooks else {})
     if not new["hooks"]:
         new.pop("hooks")
@@ -477,7 +1089,7 @@ def write_claude_settings(include_hooks=True):
     mine = "hook statusline" in str(sl.get("command") or "")
     if (core.CFG.get("claude") or {}).get("statusline", True) and (not sl or mine):
         # devkit's status line records Claude's usage windows (doctor, dashboard); a status line of yours is kept
-        new["statusLine"] = {"type": "command", "command": f"'{DEVKIT_HOME}/bin/dev' hook statusline --agent claude",
+        new["statusLine"] = {"type": "command", "command": f"'{core.runtime_home()}/bin/dev' hook statusline --agent claude",
                              "padding": 0}
     elif mine and not (core.CFG.get("claude") or {}).get("statusline", True):
         new.pop("statusLine", None)
@@ -573,14 +1185,72 @@ def write_codex_config(quiet=False):
                 rpc.write(edits)
                 done("config.toml: " + ", ".join(f"{k}={v}" for k, v in conf["settings"].items()))
                 done(f"trusted {len(projects)} project roots · MCP: {', '.join(plugins.get('mcp', {})) or 'none'}")
-                n = rpc.trust_hooks(core.HOME, hooks_f)
-                status = [h.get("trustStatus") for h in rpc.hooks(core.HOME) if str(h.get("sourcePath")) == str(hooks_f)]
-                if status and all(x == "trusted" for x in status):
-                    done(f"devkit hooks trusted ({len(status)}{', ' + str(n) + ' newly' if n else ''})")
+                n = rpc.trust_hooks(core.HOME, hooks_f, ours)
+                mine, foreign, ok = codex_hooks_state(rpc)
+                if ok:
+                    done(f"devkit hooks trusted ({len(mine)}{', ' + str(n) + ' newly' if n else ''})")
                 else:
-                    fail(f"hook trust status: {status} — open Codex and review them with /hooks")
+                    fail(f"hook trust status: {[h.get('trustStatus') for h in mine]} — open Codex and review them "
+                         "with /hooks")
+                pending = [h for h in foreign if h.get("trustStatus") != "trusted"]
+                if pending:
+                    note(f"not written by devkit, left untrusted: {'; '.join(map(hook_line, pending))} — review "
+                         "them in Codex with /hooks")
         except CodexError as e:
             fail(f"codex app-server: {e}")
+
+
+def codex_hooks_state(rpc):
+    """(devkit's hooks, the other hooks, whether every hook devkit writes is there and trusted) in ~/.codex/hooks.json,
+    as Codex lists them. A hook is devkit's only when it is declared exactly as config/codex/hooks.json renders it."""
+    from .codexrpc import declared_hooks, hook_id, split_hooks
+    ours = load_conf("codex/hooks.json")["hooks"]
+    mine, foreign = split_hooks(rpc.hooks(HOME), CODEX_HOME / "hooks.json", ours)
+    trusted = {hook_id(h) for h in mine if h.get("trustStatus") == "trusted"}
+    return mine, foreign, declared_hooks(ours) <= trusted
+
+
+def hook_line(h: dict) -> str:
+    """One Codex hook for a person: event, command, trust status and the file that declares it."""
+    return (f"{h.get('eventName')} `{h.get('command') or h.get('handlerType')}` "
+            f"({h.get('trustStatus')}, {tilde(h.get('sourcePath'))})")
+
+
+def codex_hook_checks(rpc) -> list:
+    """`dev doctor`'s rows for ~/.codex/hooks.json: devkit's own hooks are all there and trusted; and every hook devkit
+    did not write, with its source. devkit never trusts those (security review G3): the row fails while one waits for
+    the developer's review in Codex, and still lists the ones the developer trusted."""
+    mine, foreign, ok = codex_hooks_state(rpc)
+    pending = [h for h in foreign if h.get("trustStatus") != "trusted"]
+    return [("Codex", "devkit hooks trusted", ok,
+             ", ".join(f"{h.get('eventName')}:{h.get('trustStatus')}" for h in mine) or "none",
+             "dev install --only codex"),
+            ("Codex", "hooks devkit did not write", not pending, "; ".join(map(hook_line, foreign)) or "none",
+             "review them in Codex with /hooks: trust one only if you wrote it, or remove it from "
+             f"{tilde(CODEX_HOME / 'hooks.json')}; devkit never trusts them")]
+
+
+_GIT_ATTRIBUTION = re.compile(rb'"git_attribution"\s*:\s*(true|false)')
+
+
+def codex_git_attribution(sessions: Path = None, scan: int = 30):
+    """Whether Codex adds `Co-authored-by: Codex` to commits and a "Generated with Codex" line to PRs. It is an
+    account setting on OpenAI's side (no config.toml key turns it off); every session records it in its first
+    lines as `git_attribution`. The newest of the last `scan` sessions that records it, or None (unknown)."""
+    sessions = Path(sessions or CODEX_HOME / "sessions")
+    try:
+        files = sorted(sessions.glob("*/*/*/*.jsonl"), key=lambda p: p.stat().st_mtime, reverse=True)[:scan]
+    except OSError:
+        return None
+    for f in files:
+        try:
+            with open(f, "rb") as fh:  # the session's opening context (the flag sits about 150 KB in), not its turns
+                m = _GIT_ATTRIBUTION.search(fh.read(1 << 20))
+        except OSError:
+            continue
+        if m:
+            return m.group(1) == b"true"
+    return None
 
 
 def _toml_value(v) -> str:
@@ -668,8 +1338,10 @@ def build_codex_plugin() -> Path:
         _sh.rmtree(tmp)
     tmp.mkdir(parents=True)
     for name in (".codex-plugin", "assets", "skills"):
-        if (src / name).exists():
-            _sh.copytree(src / name, tmp / name)
+        if (src / name).exists():  # without the modes: the pinned copy is read-only, this build must stay writable
+            _sh.copytree(src / name, tmp / name, copy_function=_sh.copyfile)
+    for d, _, _ in os.walk(tmp):
+        os.chmod(d, 0o755)  # nosemgrep: python.lang.security.audit.insecure-file-permissions.insecure-file-permissions (mkdir's default, undoing the 0555 copytree copied; below the 0700 devkit root)
     for cmd in sorted((src / "commands").glob("*.md")):
         text = cmd.read_text()
         m = re.match(r"---\s*\n(.*?)\n---\s*\n(.*)$", text, re.S)
@@ -789,7 +1461,7 @@ def setup_docker():
     step("Docker on Colima")
     f = HOME / ".docker" / "config.json"
     cur = read_json(f, {}) or {}
-    dirs = list(dict.fromkeys((cur.get("cliPluginsExtraDirs") or []) + ["/opt/homebrew/lib/docker/cli-plugins"]))
+    dirs = list(dict.fromkeys((cur.get("cliPluginsExtraDirs") or []) + [f"{core.brew_prefix()}/lib/docker/cli-plugins"]))
     new = dict(cur, cliPluginsExtraDirs=dirs)
     if core.have("docker-credential-osxkeychain"):
         new.setdefault("credsStore", "osxkeychain")
@@ -835,7 +1507,7 @@ def _legacy_setup_launchd():
 <dict>
   <key>Label</key><string>{LAUNCHD_LABEL}</string>
   <key>ProgramArguments</key>
-  <array><string>/usr/bin/env</string><string>python3</string><string>{DEVKIT_HOME}/bin/dev</string><string>sync</string><string>--scheduled</string></array>
+  <array><string>/usr/bin/env</string><string>python3</string><string>-I</string><string>-S</string><string>{DEVKIT_HOME}/bin/dev</string><string>sync</string><string>--scheduled</string></array>
   <key>StartInterval</key><integer>{interval}</integer>
   <key>RunAtLoad</key><true/>
   <key>ProcessType</key><string>Background</string>
@@ -891,12 +1563,244 @@ def setup_desktop():
          + (f" (replaces {st.get('installed_version')})" if st.get("installed") else ""))
 
 
-def run_install(only=None):
-    print(ui.banner("install"))
-    steps = [("config", ensure_config), ("tools", setup_tools), ("cli", install_cli), ("git", setup_git), ("handoff", setup_handoff),
+# --------------------------------------------------------------------------- the prompt segment (spec P-fxs316lh3nw R9)
+# shell/devkit.zsh sets DEVKIT_PROMPT and DEVKIT_PROMPT_ASK inside devkit projects (lib/devkit/prompt.py has the
+# rule). `dev setup prompt` asks the developer, then shows them in the prompt they use: a marked block in Starship's
+# config (a backup first), or devkit's own zsh block in shell/devkit.zsh, turned on by the mode file, so ~/.zshrc is
+# never edited for it. oh-my-posh and Powerlevel10k get a snippet in docs/getting-started.md.
+
+PROMPT_START = "# >>> devkit prompt"
+PROMPT_END = "# <<< devkit prompt <<<"
+PROMPT_REFS = ("${env_var.DEVKIT_PROMPT}", "${env_var.DEVKIT_PROMPT_ASK}")
+PROMPT_DOCS = "docs/getting-started.md#the-prompt-helper"
+_FORMAT = re.compile(r'^format\s*=\s*("""(?:.|\n)*?"""|\'\'\'(?:.|\n)*?\'\'\'|"(?:[^"\\\n]|\\.)*"|\'[^\'\n]*\')',
+                     re.M)
+
+
+class PromptSetupError(ValueError):
+    """The Starship config cannot take devkit's block safely; the message says why and what to do."""
+
+
+def starship_toml() -> Path:
+    """The Starship config this shell reads: $STARSHIP_CONFIG, else ~/.config/starship.toml."""
+    return Path(os.environ.get("STARSHIP_CONFIG") or HOME / ".config" / "starship.toml")
+
+
+def prompt_kind(zshrc_text: str, env=None) -> str:
+    """Which prompt this Mac's zsh draws: starship, oh-my-posh, powerlevel10k, or zsh (none of them)."""
+    env = os.environ if env is None else env
+    t = zshrc_text or ""
+    if "starship init" in t or env.get("STARSHIP_SHELL"):
+        return "starship"
+    if "oh-my-posh init" in t or env.get("POSH_THEME"):
+        return "oh-my-posh"
+    if "powerlevel10k" in t or "p10k.zsh" in t or env.get("POWERLEVEL9K_MODE") is not None:
+        return "powerlevel10k"
+    return "zsh"
+
+
+def _top_level(text: str) -> str:
+    """The part of a TOML file before its first table header: where Starship's `format` lives. A line of the format
+    string such as `[](fg:#DA627D)\\` is not a header."""
+    m = re.search(r"^[ \t]*\[\[?[A-Za-z0-9_.\-\"' ]+\]\]?[ \t]*(?:#.*)?$", text, re.M)
+    return text[:m.start()] if m else text
+
+
+def _table_style(text: str, table: str) -> str:
+    m = re.search(rf"^\[{re.escape(table)}\]\s*$((?:\n(?!\[).*)*)", text, re.M)
+    s = re.search(r'^\s*style\s*=\s*["\']([^"\']*)["\']', m.group(1), re.M) if m else None
+    return s.group(1) if s else ""
+
+
+def _without_block(text: str) -> str:
+    return re.sub(r"\n?" + re.escape(PROMPT_START) + r"[^\n]*\n(?:.|\n)*?" + re.escape(PROMPT_END) + r"\n?", "", text)
+
+
+def _without_refs(text: str) -> str:
+    for ref in PROMPT_REFS:
+        text = re.sub(r"^[ \t]*" + re.escape(ref) + r"\\\n", "", text, flags=re.M)
+        text = text.replace(ref, "")
+    return text
+
+
+def _validate_toml(text: str, path: Path):
+    try:
+        import tomllib  # Python 3.11+; on older Pythons the text is checked by the rules above only
+    except ImportError:
+        return
+    try:
+        tomllib.loads(text)
+    except tomllib.TOMLDecodeError as e:
+        raise PromptSetupError(f"{tilde(path)} would not be valid TOML ({e}); nothing changed. Add the block by hand: "
+                               f"{PROMPT_DOCS}") from None
+
+
+def starship_with_prompt(text: str, path: Path = None, template: Path = None) -> str:
+    """Starship's config with devkit's marked block and the two references in `format`, after $git_status (or
+    $git_branch, or first), styled like the module it follows. Applying it twice gives the same text, and references
+    the developer moved elsewhere in `format` stay where they are."""
+    path = path or starship_toml()
+    tpl = (template or CONF / "starship.toml").read_text()
+    block = tpl[tpl.index(PROMPT_START):tpl.index(PROMPT_END) + len(PROMPT_END)] + "\n"
+    _validate_toml(text, path)
+    placed = _without_block(text)
+    keep = all(r in _top_level(placed) for r in PROMPT_REFS)
+    base = placed if keep else _without_refs(placed)
+    if re.search(r"^\s*\[env_var\.DEVKIT_PROMPT(_ASK)?\]", base, re.M):
+        raise PromptSetupError(f"{tilde(path)} already defines [env_var.DEVKIT_PROMPT] outside devkit's block; "
+                               "remove it, then run dev setup prompt again.")
+    top = _top_level(base)
+    fm = _FORMAT.search(top)
+    anchor = next((a for a in ("git_status", "git_branch") if fm and re.search(rf"\$\{{?{a}\b(?![\w.])", fm.group(1))),
+                  "")
+    bg = re.search(r"\bbg:(#[0-9A-Fa-f]{3,8}|\w+)", _table_style(base, anchor)) if anchor else None
+    style, ask = (f"bg:{bg.group(1)} fg:#10110F", "bg:#C0392B fg:#F3F1EB bold") if bg else \
+        ("bold fg:#FFB34A", "bold fg:#C0392B")
+    block = block.replace("{{STYLE}}", style).replace("{{ASK_STYLE}}", ask)
+    out = base
+    if fm and not keep:
+        s = fm.group(1)
+        q = s[:3] if s[:3] in ('"""', "'''") else s[0]
+        body = s[len(q):-len(q)]
+        refs = "".join(PROMPT_REFS)
+        tok = re.search(rf"\$\{{?{anchor}\}}?(?![\w.])", body) if anchor else None
+        if tok and len(q) == 3 and re.search(r"(?m)^[ \t]*" + re.escape(tok.group(0)) + r"\\\n", body):
+            line = re.search(r"(?m)^[ \t]*" + re.escape(tok.group(0)) + r"\\\n", body)
+            body = body[:line.end()] + "".join(f"{r}\\\n" for r in PROMPT_REFS) + body[line.end():]
+        elif tok:
+            body = body[:tok.end()] + refs + body[tok.end():]
+        elif len(q) == 3 and body.startswith("\n"):
+            body = "\n" + "".join(f"{r}\\\n" for r in PROMPT_REFS) + body[1:]
+        else:
+            body = refs + body
+        out = base[:fm.start(1)] + q + body + q + base[fm.end(1):]
+    out = (out if out.endswith("\n") else out + "\n") + "\n" + block if out else block
+    _validate_toml(out, path)
+    return out
+
+
+def starship_without_prompt(text: str) -> str:
+    """Starship's config without devkit's block and references: the text it had before."""
+    return _without_refs(_without_block(text))
+
+
+def _prompt_say(msg: str):
+    print(msg)
+
+
+def setup_prompt(assume_yes: bool = False, remove: bool = False, ask=None, zshrc: Path = None,
+                 starship: Path = None, env=None, say=_prompt_say) -> int:
+    """`dev setup prompt`: ask the developer, then show devkit's segment in the prompt they use. `remove` takes it out
+    again. Every file it rewrites is backed up first. Consent is the developer's: in an agent's call (anything but
+    core.set_by_developer()), neither --yes nor a piped answer adds anything. -> exit code."""
+    from . import prompt
+    zshrc = zshrc or ZSHRC
+    starship = starship or starship_toml()
+    kind = prompt_kind(zshrc.read_text() if zshrc.exists() else "", env)
+    if remove:
+        if starship.exists():
+            text = starship.read_text()
+            new = starship_without_prompt(text)
+            if new != text:
+                backup(starship)
+                starship.write_text(new)
+                say(f"  {ui.OK} Took devkit's block out of {tilde(starship)} (a copy is in {tilde(STATE / 'backups')}).")
+        prompt.set_mode("off")
+        say(f"  {ui.OK} The prompt helper is off. Open a new terminal tab to see it. Add it again: dev setup prompt")
+        return 0
+    if not core.set_by_developer():
+        say(f"  {ui.WARN} dev setup prompt changes your shell prompt, so it needs your yes, typed in your own terminal: "
+            "an agent's --yes or a piped answer is not consent. Nothing changed; run it in a terminal: dev setup "
+            "prompt")
+        return 2
+    where = {"starship": f"It adds a marked block to {tilde(starship)} and puts the helper after\n  your git branch. "
+                         "A copy of the file is saved first.",
+             "zsh": "It turns on devkit's own zsh block (shell/devkit.zsh, which your shell\n  already loads), so "
+                    f"{tilde(zshrc)} stays as it is.",
+             "oh-my-posh": "oh-my-posh draws your prompt: devkit sets the text, and you add two\n  segments to your "
+                           f"theme ({PROMPT_DOCS}).",
+             "powerlevel10k": "Powerlevel10k draws your prompt: devkit sets the text, and you add a\n  segment to "
+                              f"~/.p10k.zsh ({PROMPT_DOCS})."}[kind]
+    say(f"\n  {ui.bold('Prompt helper')}\n  devkit can show a small helper in your prompt inside devkit projects:\n"
+        f"    ✦ devkit · 6 working  ! 1 question for you\n  {where}")
+    if not assume_yes:
+        answer = (ask or input)("  Add it? [Y/n] ")
+        if (answer or "").strip().lower() not in ("", "y", "yes"):
+            prompt.set_mode("off")
+            say(f"  {ui.dim('Nothing changed. Add it later: dev setup prompt')}")
+            return 0
+    if kind == "starship":
+        text = starship.read_text() if starship.exists() else ""
+        try:
+            new = starship_with_prompt(text, starship)
+        except PromptSetupError as e:
+            say(f"  {ui.FAIL} {e}")
+            return 1
+        if new != text:
+            backup(starship)
+            starship.parent.mkdir(parents=True, exist_ok=True)
+            starship.write_text(new)
+    prompt.set_mode(kind)
+    prompt.safe_refresh()
+    say(f"  {ui.OK} Added. Open a new terminal tab to see it.\n    Take it out: dev setup prompt --remove")
+    return 0
+
+
+def install_prompt(starship: Path = None):
+    """`dev install`'s step: keep the segment as the developer chose; ask once when no answer is recorded yet. A
+    Starship block the developer took out by hand is not added back: only `dev setup prompt` asks for that."""
+    from . import prompt
+    step("Prompt helper")
+    m = prompt.mode()
+    if m == "starship":
+        path = starship or starship_toml()
+        text = path.read_text() if path.exists() else ""
+        if PROMPT_START not in text:
+            note(f"devkit's block is no longer in {tilde(path)}; add it again: dev setup prompt")
+            return
+        try:
+            new = starship_with_prompt(text, path)
+        except PromptSetupError as e:
+            note(str(e))
+            return
+        if new != text:
+            backup(path)
+            path.write_text(new)
+        done(f"devkit's block in {tilde(path)} is current")
+    elif m in ("zsh", "oh-my-posh", "powerlevel10k"):
+        prompt.safe_refresh()
+        done(f"on ({m}); take it out: dev setup prompt --remove")
+    elif m == "off":
+        done("off; add it: dev setup prompt")
+    elif sys.stdin.isatty() and not _QUIET[0]:
+        setup_prompt()
+    else:
+        note("not set up yet: dev setup prompt adds it to your prompt")
+
+
+def run_install(only=None, unverified_why=None, version=None, as_pinned=False, commit_template=None) -> int:
+    """`dev install`. From a checkout it pins the checkout (or switches to `version`), then starts itself again from
+    that pinned copy (`--as-pinned`), which runs the steps, so every path they write names the copy; `only` re-applies
+    some steps from the installed copy without pinning. -> exit code (1 when the copy was refused)."""
+    if not as_pinned:
+        print(ui.banner("install"))
+    try:
+        target = _choose_copy(only, unverified_why, version, as_pinned)
+    except PinError as e:
+        fail(str(e))
+        _audit("install.pin", tilde(core.source_home()), str(e), outcome="refused")
+        return 1
+    if core.real(target) != core.real(DEVKIT_HOME):
+        argv = [sys.executable, "-I", "-S", str(target / "bin" / "dev"), "install", "--as-pinned"]  # as its shebang
+        argv += ["--only", ",".join(sorted(only))] if only else []
+        argv += ["--commit-template", commit_template] if commit_template else []
+        sys.stdout.flush()
+        sys.stderr.flush()
+        os.execv(sys.executable, argv)
+    steps = [("config", ensure_config), ("tools", setup_tools), ("cli", install_cli), ("git", lambda: setup_git(commit_template=commit_template)), ("handoff", setup_handoff),
              ("instructions", write_agent_instructions), ("skills", install_skills), ("claude", setup_claude),
              ("codex", setup_codex), ("desktop", setup_desktop), ("docker", setup_docker), ("docs", setup_docs_tools),
-             ("launchd", setup_launchd)]
+             ("launchd", setup_launchd), ("prompt", install_prompt)]
     for name, fn in steps:
         if only and name not in only:
             continue
@@ -907,10 +1811,74 @@ def run_install(only=None):
             fn()
         except Exception as e:  # keep going; doctor reports what is left
             fail(f"{name}: {e}")
+    if not only:
+        step("Pinned copies")
+        removed = prune_pins()
+        done(f"{len(pinned_copies())} kept in {tilde(core.pin_root())} (the newest {PIN_KEEP} and any in use)"
+             + (f"; removed {', '.join(removed)}" if removed else "") + " · rollback: `dev install --version <v>`")
     print(f"\n{ui.ARROW} Run {ui.bold('dev doctor')} to verify, and open a new terminal (or `exec zsh`).")
+    return 0
 
 
 # --------------------------------------------------------------------------- doctor
+
+def crew_skill_checks(agents, roster=None, homes=None, groups=None) -> list:
+    """selfcheck D8 for `dev doctor`: per agent, the skills the crew names (the team's crew) that it has not
+    installed, with the lines that install them. -> [(group, name, ok, detail, fix)]. A skill of an opt-in group
+    (not one of devkit's default `skills.groups`) that the developer has not turned on only informs: the row passes
+    and says who names it and the line that turns the group on (Morpheus, M199); every other missing skill fails.
+    `homes`: {agent: (agent home, skills folder)}; `groups`: the groups turned on (default: the configuration)."""
+    from . import selfcheck
+    on = set((CFG.get("skills") or {}).get("groups") or [] if groups is None else groups)
+    defaults = set(core.DEFAULTS["skills"]["groups"])
+    rows = []
+    for agent in agents:
+        home, sdir = (homes or {}).get(agent, (None, None))
+        try:
+            named = selfcheck.crew_skills(selfcheck._roster(roster, team=True))
+            missing = selfcheck.d8_uninstalled_skills(agent, roster=roster, agent_home=home, skills_dir=sdir)
+        except Exception as e:  # a broken roster is the crew check's to report
+            rows.append(("Agents", f"crew skills ({agent})", False, f"crew: {e}", "dev crew sync"))
+            continue
+
+        def group(f):
+            return f.evidence.split("(group ", 1)[1].split(")")[0]
+
+        off = [f for f in missing if group(f) not in defaults | on | {"core", "unknown"}
+               and not group(f).startswith("plugin ")]
+        owed = [f for f in missing if f not in off]
+        parts = []
+        if owed:
+            parts.append(f"{len(owed)} of {len(named)} not installed: " + ", ".join(
+                f"{f.item.split(': ', 1)[1]} ({group(f)})" for f in owed[:5]) + (" …" if len(owed) > 5 else ""))
+        for f in off[:3]:
+            parts.append(f"info: {f.item.split(': ', 1)[1]} ({group(f)}, off) {f.evidence.split('; ', 1)[1]}; "
+                         f"to use it: {f.fix}")
+        rows.append(("Agents", f"crew skills ({agent})", not owed,
+                     " · ".join(parts) or f"all {len(named)} skills the crew names are installed",
+                     " · ".join(dict.fromkeys(f.fix for f in owed))))
+    return rows
+
+
+def crew_raci_checks(base=None, team=None) -> list:
+    """selfcheck D7 on the team's crew changes for `dev doctor`: the RACI errors they add to devkit's roster (the
+    approver also consulted or informed, a member in both, self-approval without a reason). -> [(group, name, ok,
+    detail, fix)]; `base` and `team` in place of the rosters (the tests)."""
+    from . import selfcheck
+    try:
+        found = selfcheck.d7_team_raci(base=base, team=team)
+    except Exception as e:  # a broken roster is the crew check's to report
+        return [("Agents", "crew RACI (team changes)", False, f"crew: {e}", "dev crew sync")]
+    detail = "no RACI errors" if not found else "; ".join(f.item.split(": ", 1)[1] for f in found[:4]) + \
+        (" …" if len(found) > 4 else "")
+    return [("Agents", "crew RACI (team changes)", not found, detail, " · ".join(f.fix for f in found[:2]))]
+
+
+def free_disk_check(free_gb: float) -> tuple:
+    """doctor's free-disk row: below 20 GB it names `dev free`, which shows what takes space and frees it by plan
+    item (spec P-fxs316lh3nw, decision (b): the name users see; `dev gc` stays for scripts)."""
+    return "Automation", "free disk", free_gb > 20, f"{free_gb:.0f} GB free", "dev free"
+
 
 def doctor() -> int:
     print(ui.banner("doctor"))
@@ -937,7 +1905,8 @@ def doctor() -> int:
     check("GitHub", "git uses gh credentials", "gh auth git-credential" in helper, helper.splitlines()[-1] if helper else "unset",
           "gh auth setup-git")
     exc = core.sh(["git", "config", "--global", "core.excludesFile"])[1]
-    check("GitHub", "global gitignore", exc == str(CONF / "git" / "ignore"), tilde(exc) if exc else "unset", "dev install --only git")
+    check("GitHub", "global gitignore", exc == str(core.runtime_home() / "config" / "git" / "ignore"),
+          tilde(exc) if exc else "unset", "dev install --only git")
 
     check("Workspace", "dev on PATH", shutil.which("dev") is not None, shutil.which("dev") or "missing", "dev install --only cli")
     check("Workspace", "shell integration", ZSHRC.exists() and BLOCK_START in ZSHRC.read_text(), tilde(ZSHRC), "dev install --only cli")
@@ -974,6 +1943,9 @@ def doctor() -> int:
               f"missing or out of date: {', '.join(stale[:5])}", "dev install --only codex")
     except Exception as e:
         check("Agents", "crew agents", False, f"crew: {e}", "dev crew sync")
+    for row in crew_skill_checks([a for a in ("claude", "codex") if CFG.get("agents", {}).get(a, True)]) + \
+            crew_raci_checks():
+        check(*row)
     managed = read_json(STATE / "skills-managed.json", []) or []
     if not isinstance(managed, dict):  # before 26.11.0: every skill went to both agents
         managed = {n: ["claude", "codex"] for n in managed}
@@ -983,11 +1955,15 @@ def doctor() -> int:
         check("Agents", f"skills in {tilde(home)}", bool(mine) and not broken, f"{len(mine) - len(broken)}/{len(mine)} linked"
               + (f"; missing {', '.join(broken[:3])}" if broken else ""), "dev install --only skills")
 
+    for name, ok, detail, fix in pin_checks():
+        check("Pinned install", name, ok, detail, fix)
+
     s = read_json(CLAUDE_HOME / "settings.json", {}) or {}
     check("Claude", "bypassPermissions default", (s.get("permissions") or {}).get("defaultMode") == "bypassPermissions",
           (s.get("permissions") or {}).get("defaultMode", "unset"), "dev install --only claude")
     att = s.get("attribution") or {}
-    check("Claude", "no attribution", att.get("commit") == "" and att.get("pr") == "", json.dumps(att), "dev install --only claude")
+    check("Claude", "no attribution", att.get("commit") == "" and att.get("pr") == "" and att.get("sessionUrl") is False,
+          json.dumps(att), "dev install --only claude")
     events = {e for e, gs in (s.get("hooks") or {}).items() for g in gs for h in g.get("hooks", []) if is_devkit_hook(h)}
     check("Claude", "devkit hooks", {"SessionStart", "SessionEnd", "PreToolUse", "Stop", "UserPromptSubmit",
                                      "PostToolUse"} <= events, ", ".join(sorted(events)),
@@ -1012,10 +1988,15 @@ def doctor() -> int:
                 bad = {k: cfg.get(k) for k, v in cw["settings"].items() if cfg.get(k) != v}
                 check("Codex", "approval/sandbox", not bad, ", ".join(f"{k}={cfg.get(k)}" for k in cw["settings"]),
                       "dev install --only codex")
-                hs = [h for h in rpc.hooks(HOME) if str(h.get("sourcePath")) == str(CODEX_HOME / "hooks.json")]
-                st = {h["eventName"]: h["trustStatus"] for h in hs}
-                check("Codex", "devkit hooks trusted", hs and all(v == "trusted" for v in st.values()),
-                      ", ".join(f"{k}:{v}" for k, v in st.items()) or "none", "dev install --only codex")
+                att_ = codex_git_attribution()
+                if att_ is not None:  # an account setting on OpenAI's side, recorded by every session
+                    check("Codex", "no attribution", att_ is False,
+                          "off for your account (the sessions record git_attribution: false)" if att_ is False else
+                          "on for your account: Codex adds Co-authored-by: Codex to commits and \"Generated with "
+                          "Codex\" to PRs (devkit's guard, dev commit and dev pr create still remove them)",
+                          "turn off commit attribution in your Codex account settings")
+                for row in codex_hook_checks(rpc):
+                    check(*row)
                 try:
                     avail = set(rpc.models())
                     profs = load_conf("codex/config.json").get("profiles") or {}
@@ -1070,6 +2051,9 @@ def doctor() -> int:
         check("Automation", f"job {jname}", okj, f"{_jobs.schedule_text(jj)} · last " +
               (core.ago(lr["start"]) + (" ok" if lr.get("rc") == 0 else f" exit {lr.get('rc')}") if lr else "never"),
               f"dev jobs show {jname}")
+    from . import audit
+    for row in audit.publish_checks():
+        check(*row)
     from . import canary
     sm = canary.summary(7)
     tot = sum(t for _, t in sm.values())
@@ -1110,7 +2094,7 @@ def doctor() -> int:
         by_agent[r.get("agent")] = by_agent.get(r.get("agent"), 0) + 1
     check("Agents", "sessions running with devkit (7d)", True,
           ", ".join(f"{k}: {v}" for k, v in sorted(by_agent.items()) if k) or "none yet", "")
-    check("Automation", "free disk", free_gb > 20, f"{free_gb:.0f} GB free", "dev gc --apply")
+    check(*free_disk_check(free_gb))
 
     group = None
     fails = 0

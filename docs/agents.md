@@ -51,6 +51,8 @@ devkit updates the tools without reinstalling the extension. The launcher looks 
 | `devkit_stubs` | A project's unfinished work, such as TODOs, placeholders, and stubs without a task (`dev stubs`) |
 | `devkit_lessons` · `devkit_delivery_policy` | Known pitfalls; the recorded delivery policy |
 | `devkit_crew` | The crew and, during a run, who works now, open messages, and decisions waiting for you |
+| `devkit_resume` | What devkit kept of a project's latest session (an open run or requests in the last 12 hours): the run, the crew working now, what waits, the last status block and git, read-only; your request text only when this app is that session's provider (see [Continuity](continuity.md#in-claude-desktop-chat-and-cowork)) |
+| `devkit_rules` | devkit's global rules for agents, as Claude Code and Codex get them, or one section by number or title (`dev agents rules`) |
 | `devkit_team` · `devkit_doctor` · `devkit_audit` · `devkit_jobs` | Who works on what; health; the audit trail; scheduled jobs |
 | `devkit_task_add` · `devkit_task_update` | Add a task; start, finish, block, unblock or release one (through `dev task`, so it is audited) |
 
@@ -81,18 +83,18 @@ Each starts with a header such as:
 | Section | What it tells the agents |
 | --- | --- |
 | Scope | The rules apply to development work only; a recipe or consulting work with the Firefly consulting kit gets a normal answer (see [Concepts › Development work only](concepts.md#development-work-only)) |
-| 0. Instruction canary and status block | Start the final message of every development turn, without exception and in any language, with the `[Firefly> DevKit]` status block (see [Concepts › The status block](concepts.md#the-status-block)) |
+| 0. Instruction canary and status block | Start the final message of every development turn, without exception and in any language, with the `[Firefly> DevKit]` status block (see [Concepts › The status block](concepts.md#the-status-block)), and name crew members as `<Role> (<Name>)` or by the role alone |
 | 1. Workspace | Where repositories, worktrees, the handoff repository, and scratch files live |
 | 2. Start of every task | Read the session context and the handoff note before anything else |
-| 3. How to work | Scale the process to the task, reproduce bugs first, verify in small steps, show evidence; write plainly in American English; keep the developer informed with `dev progress` and the `communicating` templates; learn from mistakes with lessons (see [Lessons](lessons.md)); spend tokens where they buy quality |
+| 3. How to work | Scale the process to the task, reproduce bugs first, verify in small steps, show evidence; write plainly in American English; keep the developer informed with `dev progress` and the `communicating` templates; learn from mistakes with lessons (see [Lessons](lessons.md)); spend tokens where they buy quality; lead the crew by its RACI, within its slots (see [The crew](crew.md)) |
 | 4. Files and disk | No stray files, backups, or reinstalls |
 | 5. Worktrees | Only when needed, through `dev wt new` |
-| 6. Git and GitHub | Branch names, Conventional Commits, CalVer, no AI attribution, no plain force pushes |
-| 7. Delivery | Know what CI runs, integrate and verify locally, push once, one CI run; every project has a recorded delivery policy (see [Delivery › The delivery policy](delivery.md#the-delivery-policy)) |
+| 6. Git and GitHub | Branch names, Conventional Commits in devkit's commit template, CalVer, no AI attribution, no plain force pushes |
+| 7. Delivery | Know what CI runs, integrate and verify locally, back up early without a CI run, open a draft PR early and mark it ready once, push once, one CI run; every project has a recorded delivery policy (see [Delivery › The delivery policy](delivery.md#the-delivery-policy)) |
 | 8. Backend methodology | Contracts first, isolated domain logic, migrations, real-dependency tests, resilience, security, operability |
 | 9. Skills and tools | Which skill for which job; required skills are enforced (see [Skills and plugins › Required skills](skills-and-plugins.md#required-skills)) |
 | 10. Stack conventions | Java, Python, PHP, TypeScript, Angular, React, and containers |
-| 11. Projects, initiatives, tasks, and handoff | The hierarchy, one project per session, the team protocol (claim, reasons, plan revisions) and the handoff duty |
+| 11. Projects, initiatives, tasks, and handoff | The hierarchy, one project per session, the team protocol (claim, reasons, plan revisions), the handoff duty, and what to do after a compaction (see [Continuity](continuity.md)) |
 | 12. The devkit guard | Follow what a denial says; never work around it |
 
 A repository's own AGENTS.md or CLAUDE.md adds to them; an explicit request from the developer wins over both.
@@ -107,13 +109,15 @@ A repository's own AGENTS.md or CLAUDE.md adds to them; an explicit request from
 | --- | --- | --- |
 | `permissions.defaultMode` | `bypassPermissions` (or your `claude.default_mode`) | No permission prompts; the guard and deny rules still apply |
 | `skipDangerousModePermissionPrompt` | `true` (bypass mode only) | Skips the one-time confirmation of bypass mode |
-| `attribution.commit` · `attribution.pr` | `""` | No Co-Authored-By trailer, no "Generated with Claude Code" line |
+| `attribution.commit` · `attribution.pr` · `attribution.sessionUrl` | `""` · `""` · `false` | No Co-Authored-By trailer, no "Generated with Claude Code" line, and no `Claude-Session` trailer in cloud and Remote Control sessions. devkit also removes the deprecated `includeCoAuthoredBy` |
 | `cleanupPeriodDays` | `14` | Claude Code deletes transcripts and other session data older than 14 days |
-| `env` | see below | Environment for every session |
+| `env` | see below | Environment for every session, including `BASH_DEFAULT_TIMEOUT_MS=300000`: a foreground command gets 5 minutes instead of 2, so a test suite or a build is not cut off (longer jobs run in the background) |
 | `hooks` | see [Hooks](#hooks) | devkit's hook handlers (any other handlers are kept) |
 | `enabledPlugins` | the plugins in `config/claude/plugins.json` set to `true` | Plugins enabled everywhere |
 | `fastModePerSessionOptIn` | `true` | Fast mode is chosen per session (see [Models and tokens](models-and-tokens.md#claude-code-fast-mode)) |
 | `statusLine` | `dev hook statusline --agent claude`, only when you have no status line of your own | Shows `project · branch · model · ctx 42% · 5h 12% · 7d 36%` and records Claude's usage windows |
+
+**Bypass mode in Claude Desktop.** The Code tab reads the same `~/.claude/settings.json`, but Claude Desktop also keeps its own switch per account: **Settings → Code → Allow bypass permissions mode**. Turning it on is your consent in the app, so devkit never writes it; `dev doctor` reads it and says whether bypass mode is allowed, off, or not offered for your account (its plan or its organization's policy).
 
 **Claude's quota.** Claude Code reports the plan's 5-hour and 7-day usage windows only to the status line, so
 devkit's status line saves them in `~/.local/state/devkit/quota/claude.json` each time it refreshes (about 80 ms,
@@ -155,6 +159,7 @@ devkit does not edit `config.toml` as text. It starts `codex app-server` and wri
 | --- | --- | --- |
 | `approval_policy` | `never` (or your `codex.approval_policy`) | No approval prompts, the equivalent of Claude's bypass mode |
 | `sandbox_mode` | `danger-full-access` (or your `codex.sandbox_mode`) | No sandbox; the guard is the safety net |
+| `analytics.enabled` | `false` | Stops OpenAI's usage analytics, like the other telemetry opt-outs devkit sets |
 | `projects."<path>".trust_level` | `trusted` | For the dev root and every repository under it (and new ones from `dev clone`, `dev new`, `dev adopt`) |
 | `shell_environment_policy.set` | Docker, Testcontainers, and telemetry variables | Environment for commands Codex runs |
 | `agents.max_concurrent_threads_per_session` | `4` | At most four subagent threads per session |
@@ -163,13 +168,15 @@ devkit does not edit `config.toml` as text. It starts `codex app-server` and wri
 | `mcp_servers` | from `config/codex/plugins.json` | context7, Chrome DevTools, Angular CLI |
 | `hooks.state."<key>".trusted_hash` | the hashes Codex reports | Trust for devkit's hooks |
 
+**Attribution in Codex.** Codex can add `Co-authored-by: Codex` to commits and "Generated with Codex" to pull requests, in the terminal and in the ChatGPT app. No `config.toml` key turns it off: it is an account setting on OpenAI's side, which every session records as `git_attribution`. `dev doctor` reads it from your newest session and fails when it is on. Either way, the guard refuses attribution in commits that agents run, and `dev commit` and `dev pr create` remove the lines.
+
 devkit also writes files that it owns:
 
 | File | Content |
 | --- | --- |
 | `~/.codex/hooks.json` | devkit's hook handlers, merged with any others |
 | `~/.codex/fast.config.toml`, `deep.config.toml`, `review.config.toml` | The profiles for `codex --profile <name>` (see [Models and tokens](models-and-tokens.md#codex-profiles)) |
-| `~/.codex/agents/<id>.toml` | The crew's roles, one per member plus the `scout` alias of Sparks (see [The crew's agents and Codex roles](#the-crews-agents-and-codex-roles)) |
+| `~/.codex/agents/<id>.toml` | The crew's roles, one per member plus `scout`, the alias of the Lookup scout (Sparks) (see [The crew's agents and Codex roles](#the-crews-agents-and-codex-roles)) |
 
 ### Hook trust
 
@@ -190,17 +197,17 @@ and the rest).
 
 ## The crew's agents and Codex roles
 
-One roster, `config/crew.json`, defines the crew's 25 members and Morpheus for both agents (see
+One roster, `config/crew.json`, defines the crew's 25 members and the tech lead (Morpheus) for both agents (see
 [The crew](crew.md)):
 
 | Agent | What devkit installs | Launched with |
 | --- | --- | --- |
-| Claude Code (terminal and Desktop's Code tab) | `plugin/agents/<id>.md` in the devkit plugin, generated by `dev crew sync`, plus `scout.md` as an alias of Sparks | The Agent tool, `subagent_type: devkit:<id>` |
+| Claude Code (terminal and Desktop's Code tab) | `plugin/agents/<id>.md` in the devkit plugin, generated by `dev crew sync`, plus `scout.md`, the alias of the Lookup scout (Sparks) | The Agent tool, `subagent_type: devkit:<id>` |
 | Codex (CLI and the ChatGPT app) | `~/.codex/agents/<id>.toml`, written by `dev install --only codex`, plus `scout.toml` | `spawn_agent` with the agent type `<id>` |
 
 Each generated file carries the member's identity, role, skills, tools, and the report format, and its model and
-effort follow the member's tier. Morpheus is the main session's role, so he has no file. Codex roles of read-only
-members get the read-only sandbox; review members keep a shell for tests and scans, and the guard refuses their edits.
+effort follow the member's tier. The tech lead (Morpheus) is the main session's role, so he has no file. Codex roles
+of read-only members get the read-only sandbox; review members keep a shell for tests and scans, and the guard refuses their edits.
 Roles devkit wrote earlier and no longer has are removed on the next install. `dev doctor` checks that every crew role
 is installed, and `dev crew sync --check` reports Claude agents that are out of date.
 
@@ -223,20 +230,36 @@ works from the Desktop and ChatGPT apps, whose PATH is minimal.
 
 | Event | Claude Code | Codex | What it does |
 | --- | --- | --- | --- |
-| SessionStart | every source, 30 s | `startup\|resume\|clear\|compact`, 30 s | Records the session's starting commit and branch, refreshes the project's generated blocks, exports `DEVKIT_SESSION` (Claude), restores managed settings in the background, clones `node_modules` into a fresh worktree, queues a sync that pulls the claims of other machines, and prints the workspace context |
-| UserPromptSubmit | 10 s | 10 s | Starts the turn clock; adds real progress records and the branch's CI/CD pipelines when you ask for status; names the skills the request needs; reminds the agent of the status block in a session that already missed it once, naming the failure mode (nothing comes before the block); queues a correction from you (a prompt that starts with `no,` or `you forgot`) as a lesson signal; registers a session that missed SessionStart and injects its context. Background notifications (subagent results, system notices) are not treated as your request |
-| PreToolUse | `Bash\|Write\|Edit\|MultiEdit\|NotebookEdit\|Agent\|Task`, 15 s | `^(Bash\|apply_patch\|spawn_agent)$`, 15 s | The [guard](guard.md): allow silently, or `deny` (both) or `ask` (Claude) with the reason, which is written to the audit trail; refuses a commit that would take untracked unfinished work, and enforces the crew's limits and file scopes. Starts the call's timer. On a subagent launch (Agent, Task, `spawn_agent`) records its description for its lane; on Claude's Agent and Task tools, appends the required skills and the report format to the brief. Inside a subagent (the input carries `agent_id`), routes a single `dev progress` or `dev crew` command to that subagent's lane |
-| PostToolUse | `Bash\|Agent\|Task\|Write\|Edit\|MultiEdit\|WebFetch\|WebSearch`, 10 s | `^(Bash\|apply_patch)$`, 10 s | Records slow calls; delivers crew messages to their recipient (the main session, or the subagent that made the call); tells the main session about decisions waiting for you and members ready to launch; reminds the main session to update you after a long silence; after a `git commit`, `push`, `merge`, `tag`, `rebase`, `cherry-pick`, or `revert`, or a `gh pr create`, `gh pr merge`, or `gh release create`, queues a sync of the handoff repository (see [Teams and machines › Near-real-time sync](teams.md#near-real-time-sync)) |
-| SubagentStart · SubagentStop | 5 s | 5 s | Opens and closes the subagent's progress lane (its persona, its step, its active time); at SubagentStop, checks that the report starts with the member's own status block (`**[Firefly> DevKit · Neo]**`) and sends it back once without it, then closes its step |
-| Stop | 10 s | 10 s | On development turns only ([Concepts › Development work only](concepts.md#development-work-only)): checks, scores, and stores the status block; asks the agent to continue when the block is missing or not first (it says which, quoting the reply's first line), the turn left unfinished work without a task (`dev stubs`), new tests cannot fail (`dev test audit`), a plan changed without `dev plan revise`, matching files changed without their required skills, or your commits are newer than the handoff note's last real update (its human sections; task and session lines do not count), checked after every turn with new commits and from the repository the session is in now; once per session after a fix or revert commit, asks whether it deserves a lesson; counts the lessons the reply names as applied; writes a missed block to the audit trail; records the turn; and, at most every 2 minutes, starts a background sync that writes the session line, renews locks, and publishes presence |
-| SessionEnd | 10 s | 3 s | A background sync that writes the session's final line and closes the session record |
-| ConfigChange | `user_settings`, 15 s | — | Refuses changes to devkit-managed keys in `~/.claude/settings.json`, restores them, and writes the refusal to the audit trail |
+| SessionStart | `startup\|resume\|clear\|compact`, 30 s | `startup\|resume\|clear\|compact`, 30 s | Records the session's starting commit and branch, refreshes the project's generated blocks, exports `DEVKIT_SESSION` (Claude), restores managed settings in the background, clones `node_modules` into a fresh worktree, queues a sync that pulls the claims of other machines, and prints the workspace context. In a project, the context carries the catalog of the ids the agent declares (kinds of work, skills, and lesson anchors), cut at whole lines to 7,000 characters and placed before the handoff note, the part a cut may lose. After a compaction or a resume, the continuity brief comes first: the run and its current step, the crew working now (not to relaunch), the decisions and messages waiting, your latest requests verbatim, the last status block and git, at most 4 KB. After `/clear`, a notice of the previous session's open run and `dev session carry` |
+| UserPromptSubmit | 10 s | 10 s | Starts the turn clock; adds real progress records and the branch's CI/CD pipelines when you ask for status; adds the tech lead's route for the request, a guess from its words (English only; `crew.route_hint` turns it off); reminds the agent of the status block in a session that already missed it once, naming the failure mode (nothing comes before the block); registers a session that missed SessionStart and injects its context, catalog included. Records a line you type on its own, outside code blocks and quotes, as your evidence for one decision or one action: `approve D<n>[: <option>]` or `grant <action> <target>` (see [The crew › Decisions](crew.md)). It does not read your prompt for corrections or for skills. Background notifications (subagent results, system notices) and relayed comments are not treated as your request. Keeps your prompt, redacted and cut to 1,000 characters, as pending in the session's continuity checkpoint until Stop classes the turn, and gives the main session, once and first, what waits for it: the brief of a compaction only the transcript showed, or "Not in the summary" |
+| PreToolUse | `Bash\|Write\|Edit\|MultiEdit\|NotebookEdit\|Agent\|Task`, 15 s | `^(Bash\|apply_patch\|spawn_agent)$`, 15 s | The [guard](guard.md): allow silently, or `deny` (both) or `ask` (Claude) with the reason, which is written to the audit trail; refuses a commit that would take untracked unfinished work, and enforces the crew's limits, file scopes, and scratch folders. Starts the call's timer, and records each shell call with the agent that made it (the call ledger that tells devkit [who is calling](crew.md#who-is-calling)). On a subagent launch (Agent, Task, `spawn_agent`) records its description for its lane; on Claude's Agent and Task tools, appends the required skills, the known pitfalls, and the report format to the brief. Inside a subagent (the input carries `agent_id`), routes a single `dev progress` or `dev crew` command to that subagent's lane. Names the open [lessons](lessons.md) anchored on the command the call runs or the file it writes, each at most once an hour per agent, and every refusal names the lessons of the call it refuses. Refuses a shell call that runs one of devkit's hooks by hand, since a hook event typed through a shell could forge your prompt or answer. A subagent's shell command that devkit cannot check against its lane (reading the lane or judging the command fails) is refused rather than run unchecked |
+| PostToolUse | `Bash\|Agent\|Task\|Monitor\|Write\|Edit\|MultiEdit\|WebFetch\|WebSearch\|AskUserQuestion`, 10 s | `^(Bash\|apply_patch)$`, 10 s | Closes the shell call in the call ledger. Records your answer to a decision that the question tool asked as `D<n> · <question>` as your evidence for it. Names the open lessons whose error signature the call's output shows, each at most once an hour per agent. Right after a call that usually ends the turn (a subagent launch, a monitor, a background command, or `dev progress done`, `dev handoff --log`, `dev sync`, `dev task done`, a push, a PR, or a release), shows the main session the status block its final message opens with, with the project and branch filled in, at most once per 2 minutes in a turn; records slow calls; delivers crew messages to their recipient (the main session, or the subagent that made the call); tells the main session about decisions waiting for you and members ready to launch; reminds the main session to update you after a long silence; after a `git commit`, `push`, `merge`, `tag`, `rebase`, `cherry-pick`, or `revert`, or a `gh pr create`, `gh pr merge`, or `gh release create`, queues a sync of the handoff repository (see [Teams and machines › Near-real-time sync](teams.md#near-real-time-sync)). Gives the main session, once and first, the brief of a compaction only the transcript showed or "Not in the summary"; gives a member, after its own compaction, a reminder of its role, step, scope, procedure, and report format |
+| PostToolUseFailure | `Agent\|Task\|Bash`, 10 s | — | A subagent launch that failed (an unknown agent type, an interrupt) started no agent, so its launch record goes at once: it never labels another agent or holds a crew slot. A failed or interrupted shell call leaves the call ledger. Names the open lessons whose error signature the failure shows |
+| SubagentStart · SubagentStop | 5 s | 5 s | Opens and closes the subagent's progress lane (its persona, its step, its active time); a lane binds to exactly one launch. At SubagentStop, for a member someone launched, sends it back once for each of these, in order: a report that does not start with its own status block (`**[Firefly> DevKit · Neo]**`); no `dev progress step` in its lane; and the [crew gates](crew.md#every-report-is-checked) (proofs, skills, unfinished work, tests that cannot fail, lessons). Then it closes the lane and its step, and reads the member's transcript once more for a compaction no hook saw. The compaction summarizer's stop is skipped: it owes no report and binds nothing |
+| Stop | 10 s | 10 s | On development turns only ([Concepts › Development work only](concepts.md#development-work-only)): checks, scores, and stores the status block; asks the agent to continue when the block is missing or not first (it says which, quoting the reply's first line), the turn left unfinished work without a task (`dev stubs`), new tests cannot fail (`dev test audit`), a plan changed without `dev plan revise`, matching files changed without their required skills, or your commits are newer than the handoff note's last real update (its human sections; task and session lines do not count), checked after every turn with new commits and from the repository the session is in now; once per session after a fix or revert commit, asks whether it deserves a lesson; counts the lessons the reply names as applied; writes a missed block to the audit trail; records the turn; and, at most every 2 minutes, starts a background sync that writes the session line, renews locks, and publishes presence. When the turn ends (it is not sent back), refreshes the continuity checkpoint and keeps the turn's requests only when the turn was development work; when the classifier fails, they go |
+| SessionEnd | 10 s | 3 s | A background sync that writes the session's final line and closes the session record. After `/clear`, links the next session in the folder to this one for 10 minutes, and this session's kept requests go |
+| PreCompact | `manual\|auto`, 15 s | 15 s | Writes the session's continuity checkpoint (the run, the crew working now, the decisions and messages waiting, your last 5 requests, git) and records the compaction. In Claude Code's main session, adds devkit's instructions to the summarizer's: what to keep, by id, and your open requests word for word. Never blocks a compaction |
+| PostCompact | `manual\|auto`, 10 s | 10 s | Closes the compaction's record. In Claude Code's main session, compares the summary with devkit's record and keeps the items it left out ("Not in the summary": running members, requests, decisions, messages, the current step) for the next hook; the summary itself is never stored or injected. Prints nothing |
+| ConfigChange | `user_settings\|project_settings\|local_settings`, 15 s | — | Refuses changes to devkit-managed keys in `~/.claude/settings.json`, restores them, and writes the refusal to the audit trail. In every settings file it also refuses and removes a `DEVKIT_*` variable in the `env` block |
 | InstructionsLoaded | 10 s | — | Records which instruction files the session loaded, to explain canary misses |
 
 The Stop hook never loops: it asks for one more pass at most once per turn for the status block and for changed
 plans, once per session for each missing skill, once per turn for the handoff note, and once per session for a
-lesson. With `canary.enforce`, `handoff.enforce` or
-`skills.enforce` set to `false`, the matching request is not made.
+lesson. SubagentStop sends a member back at most once for each of its checks. With `canary.enforce`,
+`handoff.enforce`, `skills.enforce` or `crew.gates.enforce` set to `false`, the matching request is not made; the
+crew gates still record what they find in the audit trail (`crew.gate`).
+
+devkit's own headless model calls (background AI, marked `DEVKIT_HEADLESS=1`) get no hook work: nothing is recorded,
+recalled, or injected for them. The guard still judges their tools.
+
+Once `dev setup prompt` turned the prompt helper on, the hooks keep its cache current for the session's folder.
+PostToolUse refreshes it at most every 5 seconds; UserPromptSubmit, Stop, SubagentStart, and SubagentStop refresh it
+at once, so an answered decision or a member that starts or finishes shows in your next prompt. A refresh reads a few
+files and runs no git, network call, or other program.
+
+Claude Code registers 13 events and Codex 10, because Codex has no PostToolUseFailure, ConfigChange, or
+InstructionsLoaded event. The consistency checks compare this table with `config/claude/settings.json` and `config/codex/hooks.json`
+(see [Developing devkit › Consistency checks](development.md#consistency-checks)).
 
 ### The session context
 
@@ -268,8 +291,19 @@ devkit has to be active in every Claude and Codex session to work. These safegua
 | `dev doctor` | Reports project settings under `~/Development` that switch devkit off, whether each agent's plugin copy is current, the sessions that ran with devkit in the last 7 days, every hook, and the desktop apps, whose bundled agents (Claude Code in Claude Desktop, Codex in the ChatGPT app) must use the same configuration and plugins, with the sessions recorded from each |
 | Results per surface | Every session and status-block result records where it ran (terminal, Claude Desktop, the ChatGPT app, an IDE), so a surface that drops the instructions shows up in `dev doctor` |
 
-**Fail-open.** Every handler catches all errors, logs them and exits with `0` without output, so a devkit bug never
-blocks or breaks a session. Background work is detached, so hooks return in milliseconds.
+**Fail-open, except where failing open would let an action through.** Every handler catches its errors, logs them,
+and exits with `0` without output, so a devkit bug does not block or break a session; the guard records each such
+failure as `guard.failopen` in the audit trail. Some checks fail closed instead:
+
+- **The irreversible-action gate.** When the gate itself fails while it enforces, a command that names an
+  irreversible action is refused, and so is an MCP call; the developer-only actions (an embargo lift, a public
+  backup, a backup policy) are refused without a grant in every setting.
+- **The lane check.** A crew member's shell command that devkit cannot check against its lane is refused instead of
+  run unchecked.
+- **Commands the guard cannot read safely,** such as a heredoc that macOS's bash ends earlier than zsh, count as more
+  than the one command they look like.
+
+Background work is detached, so hooks return in milliseconds.
 
 **Logs.** `~/.local/state/devkit/logs/hooks.log` (errors, every guard decision, skill reminders),
 `~/.local/state/devkit/logs/sync.log` (background syncs), `~/.local/state/devkit/logs/config.log` (restored and

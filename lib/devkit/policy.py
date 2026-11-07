@@ -167,7 +167,7 @@ def diff_git():
     email = u.get("email") or f"{u['id']}+{u['login']}@users.noreply.github.com"
     out = []
     for key, want in (("user.name", name), ("user.email", email),
-                      ("core.excludesFile", str(core.DEVKIT_HOME / "config" / "git" / "ignore"))):
+                      ("core.excludesFile", str(core.runtime_home() / "config" / "git" / "ignore"))):
         cur = core.sh(["git", "config", "--global", key])[1]
         if cur != want:
             out.append(Drift("git", key, cur or MISSING, want))

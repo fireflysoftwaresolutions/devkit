@@ -429,6 +429,21 @@ class CanaryTests(unittest.TestCase):
         self.assertEqual(canary.format_issues(block), [])
         self.assertIn("Check    ", ui.status_block(line, color=False))
         self.assertIn("\033[48;2;255;179;74m", ui.status_block(line, color=True))
+        # the Crew and You bullets get their own rows, one member per line, and long values wrap under their column
+        crewed = canary.status_text(block.replace(
+            "- **Next:**", "- **Crew:** Backend engineer (Tank) ▸ F2 · Technical writer (Ghost) ▸ tutorials\n"
+                           "- **You:** approve the push of the release branch.\n- **Next:**"))
+        out = ui.status_block(crewed, color=False, cols=60)
+        rows = out.splitlines()
+        self.assertEqual(rows[1].split(), ["Done", "added", "the", "CSV", "export", "endpoint."])  # crew not in Done
+        crew_at = next(i for i, r in enumerate(rows) if r.strip().startswith("Crew"))
+        self.assertIn("Backend engineer (Tank) ▸ F2", rows[crew_at])
+        self.assertEqual(rows[crew_at + 1].strip(), "Technical writer (Ghost) ▸ tutorials")
+        self.assertIn("You       approve the push of the release branch.", out)
+        long = canary.status_text(block.replace("added the CSV export endpoint.", "added " + "the CSV export " * 8))
+        wrapped = ui.status_block(long, color=False, cols=60).splitlines()
+        self.assertTrue(all(len(r) <= 60 for r in wrapped))
+        self.assertTrue(wrapped[2].startswith(" " * 14))  # the continuation lines up under the value column
         # older one-line forms are still understood, but scored as not following the format
         old = "`[Firefly> DevKit]` `api ⎇ main` `T-fwk7a2xyz1` ❯ fixed ❯ ✓ tests ❯ next → push"
         self.assertTrue(canary.has_marker(old))

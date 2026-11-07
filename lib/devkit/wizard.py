@@ -32,16 +32,32 @@ from .core import CONFIG_FILE, DEVKIT_HOME, STATE
 STACKS = {"java": "Java / Spring (JDK, Maven, Gradle, jdtls)", "python": "Python (uv, pyright)",
           "php": "PHP (php, Composer, intelephense)", "node": "Node / TypeScript / Angular / React (pnpm, tsc, ng)"}
 BASE_GROUPS = ("core", "docker", "agents", "docs", "security")
+# A first run on a Mac with no repositories preselects these, and the wizard always asks (the developer's choice,
+# 2026-11-06): a light, fast first install; Java and PHP are one answer away.
+FIRST_STACKS = ("python", "node")
 CLAUDE_MODES = {"bypassPermissions": "no prompts; the devkit guard protects the workspace (recommended)",
                 "acceptEdits": "edits without prompts, commands ask", "default": "ask before every tool"}
 CODEX_MODES = {"full": ("never", "danger-full-access", "no prompts, full access; the devkit guard protects (recommended)"),
                "workspace": ("on-request", "workspace-write", "sandboxed to the project; asks when it needs more")}
 CLAUDE_INSTALLER = "curl -fsSL https://claude.ai/install.sh | bash"  # Claude Code's official native installer
-GH_LOGIN = ["gh", "auth", "login", "-h", "github.com", "-s", "repo,read:org,workflow,gist"]
+# HTTPS with the browser: no questions about protocols or tokens, and git signs in through gh.
+GH_LOGIN = ["gh", "auth", "login", "-h", "github.com", "-p", "https", "-w", "-s", "repo,read:org,workflow,gist"]
 
 
 class Answers(dict):
     pass
+
+
+def _commit_template_default() -> bool:
+    """The commit template question's default: the recorded answer, yes before the first one (spec P-fy3bwa0pshk R9)."""
+    from . import setup as setup_mod
+    return setup_mod.commit_template_answer() != "no"
+
+
+def _template_args(a) -> list:
+    """The commit template answer for `dev install`, whose git step applies and records it: the wizard writes no
+    devkit state itself."""
+    return ["--commit-template", "yes" if a.get("commit_template", True) else "no"]
 
 
 def _hw():
@@ -131,8 +147,57 @@ def run(assume_yes=False, skip_packages=False) -> int:
 
 # --------------------------------------------------------------------------- shared by both front ends
 
+def _setup_cfg(saved) -> dict:
+    """devkit's defaults with the saved config on top: what the wizard reads, never the running config."""
+    return core.deep_merge(core.DEFAULTS, saved or {})
+
+
+def offered_groups(clouds, saved) -> list:
+    """The optional skill groups (`skills.optional`) the wizard offers for these tools: ["iac"] for terraform."""
+    return core.offered_skill_groups(clouds, _setup_cfg(saved))
+
+
+def saved_group_answers(saved) -> dict:
+    """{group: on} for each optional group the saved setup was offered (its tools were picked and skills.groups was
+    saved): a rerun keeps a decline. Groups never offered have no answer, and their offer starts at yes."""
+    groups = ((saved or {}).get("skills") or {}).get("groups")
+    if groups is None:
+        return {}
+    return {g: g in groups for g in offered_groups((saved or {}).get("clouds") or [], saved)}
+
+
+def accepted_groups(a, saved) -> list:
+    """The optional groups offered for the answers' tools that the developer accepted (yes unless answered no)."""
+    return [g for g in offered_groups(a["clouds"], saved) if (a.get("skill_groups") or {}).get(g, True)]
+
+
+def skill_question(group: str, clouds, saved) -> str:
+    """The offer's question, naming the tools and the group's skills from config/skills.json."""
+    when = ((_setup_cfg(saved).get("skills") or {}).get("optional") or {}).get(group) or []
+    try:
+        sources = json.loads((DEVKIT_HOME / "config" / "skills.json").read_text()).get("sources") or []
+    except (OSError, ValueError):
+        sources = []
+    names = [n for s in sources if isinstance(s, dict) and s.get("group") == group for n in s.get("skills") or {}]
+    tools = ", ".join(_label(k) for k in clouds if k in when) or group
+    return f"Add the agent skills for {tools}" + (f" ({', '.join(names)})" if names else "") + "?"
+
+
+def _skill_groups(saved, a):
+    """skills.groups to save: the saved (else devkit's default) groups, each optional group offered for the tools
+    picked set as answered; None when none was offered, so the default groups stay unpinned."""
+    offered = offered_groups(a["clouds"], saved)
+    if not offered:
+        return None
+    groups = list((_setup_cfg(saved).get("skills") or {}).get("groups") or [])
+    on = set(accepted_groups(a, saved))
+    return [g for g in groups if g not in offered or g in on] + [g for g in offered if g in on and g not in groups]
+
+
 def build_config(saved, a, login) -> dict:
-    """The config to save: the saved one with the answers applied (the keys `dev setup` has always written)."""
+    """The config to save: the saved one with the answers applied (the keys `dev setup` has always written, and
+    skills.groups when an optional skill group was offered)."""
+    groups = _skill_groups(saved, a)
     return core.deep_merge(saved or {}, {
         "dev_root": a["root"], "github_user": login, "handoff_repo": a["handoff"],
         "agents": {"claude": a["use_claude"], "codex": a["use_codex"]},
@@ -142,21 +207,41 @@ def build_config(saved, a, login) -> dict:
         "stacks": a["stacks"], "lock": a["lock"], "hosts": a["hosts"], "clouds": a["clouds"],
         "docker": {"cpu": a["cpu"], "memory": a["mem"], "disk": a["disk"], "autostart": a["autostart"]},
         "gc": {"auto": a["gc_auto"]}, "sync": {"interval_minutes": a["interval"]},
+        "ai": {"enabled": bool(a.get("ai")), "asked": True},
+        **({"skills": {"groups": groups}} if groups is not None else {}),
     })
 
 
-def plan_rows(a, skip_packages) -> list:
+AI_QUESTION = ("Let background jobs ask a small model (Claude Haiku or Codex's gpt-6-luna, at most 20 calls a day), "
+               "for example to merge duplicate lessons written in different languages?")
+AI_HELP = ("Off by default. Without it, devkit compares where lessons apply (files, commands, kinds of work, errors) "
+           "instead. Change it later with ai.enabled in devkit's config.")
+
+
+def ask_ai(p, saved) -> bool:
+    """Background AI is opt-in, and the wizard asks about it once: a saved answer is kept, not asked again."""
+    prev = (saved or {}).get("ai") or {}
+    if prev.get("asked"):
+        return bool(prev.get("enabled"))
+    return p.yesno(AI_QUESTION, False)
+
+
+def plan_rows(a, skip_packages, saved=None) -> list:
     """The plan as the line prompts print it."""
     cm = a["codex_mode"]
+    skills = accepted_groups(a, saved)
     return [("config", str(core.tilde(CONFIG_FILE))), ("root", a["root"]),
             ("handoff", f"{a['handoff']} → {a['root']}/.handoff"),
             ("Claude Code", f"{a['claude_mode']}" if a["use_claude"] else "skip"),
             ("Codex", f"{cm} ({CODEX_MODES[cm][0]} / {CODEX_MODES[cm][1]})" if a["use_codex"] else "skip"),
-            ("stacks", ", ".join(a["stacks"])), ("git hosts", ", ".join(a["hosts"])),
-            ("clouds", ", ".join(a["clouds"]) or "none"),
+            ("stacks", ", ".join(a["stacks"])),
+            ("git hosts", ", ".join(a["hosts"]) + f" · commit template {'on' if a.get('commit_template', True) else 'off'}"),
+            ("clouds", (", ".join(a["clouds"]) or "none") + (f" · agent skills: {', '.join(skills)}" if skills
+                                                             else "")),
             ("packages", "skip" if skip_packages else "Homebrew + npm for the stacks, hosts and clouds"),
             ("Docker VM", f"{a['cpu']} CPU · {a['mem']} GB · {a['disk']} GB" + (" · at login" if a["autostart"] else "")),
-            ("automation", f"sync every {a['interval']} min · safe cleanup {'on' if a['gc_auto'] else 'report only'}"),
+            ("automation", f"sync every {a['interval']} min · safe cleanup {'on' if a['gc_auto'] else 'report only'}"
+                           f" · background AI {'on' if a.get('ai') else 'off'}"),
             ("lock", "managed settings (sudo)" if a["lock"] else "off (drift is still blocked and repaired)")]
 
 
@@ -169,6 +254,9 @@ def _run_lines(assume_yes=False, skip_packages=False) -> int:
           f"[brackets]; nothing changes until you confirm.")
     d = detect()
     p = Prompter(assume_yes)
+    if p.yes and not assume_yes:
+        print(f"  {ui.WARN} No terminal to answer from, so every question takes its default (as with --yes). "
+              f"To choose, run {ui.bold('dev setup')} in a terminal.")
     cfg = core.deep_merge(core.DEFAULTS, d["config"] or {})
 
     p.section("This machine")
@@ -183,7 +271,8 @@ def _run_lines(assume_yes=False, skip_packages=False) -> int:
         print(f"     {('Claude Code' if k == 'claude' else 'Codex'):<12} {state}"
               + (f" · {x.get('version')}" if x.get("version") else "") + (f" · plan {x.get('plan')}" if x.get("plan") else ""))
     if not d["gh"].get("login"):
-        print(f"\n  {ui.FAIL} Sign in to GitHub first: gh auth login -s repo,read:org,workflow,gist")
+        print(f"\n  {ui.FAIL} devkit needs your GitHub account, and you are not signed in. Run "
+              f"{' '.join(GH_LOGIN)}, then dev setup again.")
         return 2
 
     a = Answers()
@@ -203,7 +292,9 @@ def _run_lines(assume_yes=False, skip_packages=False) -> int:
         a["codex_mode"] = p.choose("Codex autonomy", {k: v[2] for k, v in CODEX_MODES.items()}, a["codex_mode"])
 
     p.section("Stacks (toolchains, language servers, skills)")
-    a["stacks"] = p.multi("Stacks you develop in (comma-separated numbers)", STACKS, cfg.get("stacks") or list(STACKS))
+    found = [k for k in STACKS if ((d.get("stacks_found") or {}).get("counts") or {}).get(k)]
+    a["stacks"] = p.multi("Stacks you develop in (comma-separated numbers)", STACKS,
+                          (d["config"] or {}).get("stacks") or found or list(FIRST_STACKS))
 
     from . import toolchain
     seen = toolchain.detect()
@@ -214,10 +305,15 @@ def _run_lines(assume_yes=False, skip_packages=False) -> int:
                     {k: v[0] for k, v in toolchain.HOSTS.items()},
                     list(dict.fromkeys((cfg.get("hosts") or []) + seen["hosts"])) or ["github"])
     a["hosts"] = list(dict.fromkeys(["github"] + hosts))
+    from . import setup as setup_mod
+    a["commit_template"] = p.yesno(setup_mod.COMMIT_TEMPLATE_QUESTION, setup_mod.commit_template_answer() != "no")
     p.section("Cloud and infrastructure (CLIs and sign-in checks)")
     a["clouds"] = p.multi("Clouds and infrastructure tools you use (numbers, or empty for none)",
                           {k: v[0] for k, v in toolchain.CLOUDS.items()},
                           list(dict.fromkeys((cfg.get("clouds") or []) + seen["clouds"])))
+    a["skill_groups"] = saved_group_answers(d["config"])
+    for g in offered_groups(a["clouds"], d["config"]):  # optional skill groups, for the tools just picked
+        a["skill_groups"][g] = p.yesno(skill_question(g, a["clouds"], d["config"]), a["skill_groups"].get(g, True))
 
     p.section("Docker on Colima")
     dk = cfg["docker"]
@@ -229,6 +325,7 @@ def _run_lines(assume_yes=False, skip_packages=False) -> int:
     p.section("Automation")
     a["gc_auto"] = p.yesno("Reclaim disk automatically (merged worktrees, idle build output, stale temp)?", cfg["gc"]["auto"])
     a["interval"] = int(p.ask("Background sync interval (minutes)", str(cfg["sync"]["interval_minutes"])))
+    a["ai"] = ask_ai(p, d["config"] or {})
     a["lock"] = False
     if a["use_claude"]:
         a["lock"] = p.yesno("Lock Claude Code settings with a managed-settings file (needs your admin password)?",
@@ -237,7 +334,7 @@ def _run_lines(assume_yes=False, skip_packages=False) -> int:
     new = build_config(d["config"], a, login)
 
     p.section("Plan")
-    for k, v in plan_rows(a, skip_packages):
+    for k, v in plan_rows(a, skip_packages, d["config"]):
         print(f"     {ui.dim(k.ljust(12))} {v}")
     if d["config"] and d["config"] != new:
         changed = sorted(k for k in set(new) | set(d["config"]) if new.get(k) != d["config"].get(k))
@@ -253,13 +350,12 @@ def _run_lines(assume_yes=False, skip_packages=False) -> int:
         rc = install_packages(a["stacks"], a["use_claude"], extra=toolchain.groups({"hosts": a["hosts"], "clouds": a["clouds"]}))
         if rc != 0:
             print(f"  {ui.WARN} some packages failed; continuing with the configuration")
-    py = sys.executable
-    subprocess.call([py, str(DEVKIT_HOME / "bin" / "dev"), "install"])
+    subprocess.call(_dev("install", *_template_args(a)))
     _post_install(p, a["use_claude"], a["use_codex"])
     if a["lock"]:
-        subprocess.call([py, str(DEVKIT_HOME / "bin" / "dev"), "config", "lock"])
+        subprocess.call(_dev("config", "lock"))
     print(f"\n  {ui.ARROW} Verifying …")
-    rc = subprocess.call([py, str(DEVKIT_HOME / "bin" / "dev"), "doctor"])
+    rc = subprocess.call(_dev("doctor"))
     print(f"\n  {ui.bold('Next:')} open a new terminal (or `exec zsh`), then `dev` — and in any project, start "
           f"Claude Code or Codex as usual. `dev agents test` runs a live check of both agents.\n")
     return rc
@@ -277,7 +373,7 @@ def _post_install(p, use_claude, use_codex):
             subprocess.call(["codex", "login"])
     if core.have("colima") and core.sh(["colima", "status"], timeout=20)[0] != 0:
         if p.yesno("Start Docker (Colima VM) now?", not p.yes):
-            subprocess.call([sys.executable, str(DEVKIT_HOME / "bin" / "dev"), "docker", "up"])
+            subprocess.call(_dev("docker", "up"))
 
 
 # --------------------------------------------------------------------------- packages
@@ -488,7 +584,7 @@ def tui_defaults(d, detected=True) -> Answers:
     if "stacks" in saved or not detected:
         stacks = list(cfg.get("stacks") or [])
     else:
-        stacks = [k for k in STACKS if found.get(k)] or list(STACKS)
+        stacks = [k for k in STACKS if found.get(k)] or list(FIRST_STACKS)
     agents, dk = cfg.get("agents") or {}, cfg["docker"]
     claude_mode = (cfg.get("claude") or {}).get("default_mode", "bypassPermissions")
     codex_mode = (cfg.get("codex") or {}).get("mode", "full")
@@ -505,7 +601,9 @@ def tui_defaults(d, detected=True) -> Answers:
         mem=min(int(dk.get("memory") or max(4, min(16, ram // 5))), ram),
         disk=int(dk.get("disk") or 80), autostart=bool(dk.get("autostart")),
         gc_auto=bool(cfg["gc"].get("auto", True)), interval=int(cfg["sync"].get("interval_minutes") or 60),
-        lock=bool(cfg.get("lock")) and bool(agents.get("claude", True)))
+        lock=bool(cfg.get("lock")) and bool(agents.get("claude", True)),
+        ai=bool((cfg.get("ai") or {}).get("enabled", False)), skill_groups=saved_group_answers(saved),
+        commit_template=_commit_template_default())
 
 
 # --------------------------------------------------------------------------- interactive wizard: words
@@ -644,7 +742,7 @@ def _brewfile(lines):
 
 
 def _dev(*args) -> list:
-    return [sys.executable, str(DEVKIT_HOME / "bin" / "dev"), *args]
+    return [sys.executable, "-I", "-S", str(DEVKIT_HOME / "bin" / "dev"), *args]  # as its shebang
 
 
 def _child_env() -> dict:
@@ -674,8 +772,8 @@ class _Wizard:
             self.term.write(f"\n  Nothing changed. Run {tui.bold('dev setup')} again when you are ready.\n\n")
             return 1
         if outcome == "no-github":
-            self.term.write(f"\n  {tui.bad('✗')} Sign in to GitHub first: {tui.bold(' '.join(GH_LOGIN[:3]))} "
-                            f"-s repo,read:org,workflow,gist\n\n")
+            self.term.write(f"\n  {tui.bad('✗')} devkit needs your GitHub account, and you are not signed in. Run "
+                            f"{tui.bold(' '.join(GH_LOGIN))}, then {tui.bold('dev setup')} again.\n\n")
             return 2
         return self.apply()
 
@@ -696,6 +794,10 @@ class _Wizard:
         mode = "recommended"
         while True:
             mode = self.screen.ask(self.welcome_prompt(mode), self.welcome)
+            if mode == "recommended" and self.first_stacks():
+                if self.section([k for k, _ in SECTIONS].index("stacks")) is tui.BACK:
+                    continue  # Esc on the stacks question: back to the welcome screen
+                break
             if mode == "recommended" or self.walk() is not tui.BACK:
                 break
         while True:
@@ -705,6 +807,11 @@ class _Wizard:
             k = self.screen.ask(self.section_prompt(), lambda: self.frame(STEPS, "Review"))
             if k is not tui.BACK:
                 self.section(k)
+
+    def first_stacks(self) -> bool:
+        """A first run with no repositories to learn from: the recommended setup still asks for the toolchains."""
+        return not (self.d.get("config") or {}).get("stacks") and \
+            not ((self.d.get("stacks_found") or {}).get("counts") or {})
 
     def _survey(self):
         self.d = survey()
@@ -782,6 +889,10 @@ class _Wizard:
         lines = self.banner() + [""]
         lines.append(f"  {tui.bold(ui.greeting(name))} " + ("Let's set up devkit on this Mac." if first else
                                                              "devkit is already set up here."))
+        if first:
+            lines += ["  devkit sets up Claude Code and Codex with shared rules and a safety guard,",
+                      "  and keeps your project notes, tasks, and plans in a private GitHub",
+                      "  repository: your handoff repository."]
         lines.append("  " + tui.dim("Nothing changes until you apply the plan at the end." if first else
                                     "Your saved choices are the starting point; nothing changes until you apply."))
         lines += ["", "  " + tui.bold("On this Mac")]
@@ -856,14 +967,29 @@ class _Wizard:
                 a["hosts"], help="devkit installs each host's CLI, checks the sign-in and shows its pipelines in "
                                  "dev ci status."),
                 store=lambda v: a.update(hosts=list(dict.fromkeys(["github"] + v))),
-                show=lambda: ", ".join(_label(k) for k in a["hosts"]))]
+                show=lambda: ", ".join(_label(k) for k in a["hosts"])),
+                _Q("commit_template", "Commit template", lambda: tui.Confirm(
+                    "Open new commit messages with devkit's template?", a["commit_template"],
+                    help="Sets commit.template in each repository that has none, in its own git config: the header "
+                         "rule, then why, what changed and how it was verified, then the Refs and BREAKING CHANGE "
+                         "trailers. Repositories with a template of their own keep it."),
+                   show=yes_no("commit_template"))]
         if key == "clouds":
             from . import toolchain
+            saved = d.get("config")
+            optional = list((_setup_cfg(saved).get("skills") or {}).get("optional") or {})
             return [_Q("clouds", "Clouds", lambda: tui.MultiSelect(
                 "Clouds and infrastructure tools",
                 [self._tool_option(k, self._cloud_help(k)) for k in toolchain.CLOUDS], a["clouds"],
                 help="devkit installs each CLI and checks the sign-in. Leave them all unselected if you use none."),
-                show=lambda: ", ".join(_label(k) for k in a["clouds"]) or "none")]
+                show=lambda: ", ".join(_label(k) for k in a["clouds"]) or "none")] + [
+                _Q("skill_groups", f"Agent skills · {g}", lambda g=g: tui.Confirm(
+                    skill_question(g, a["clouds"], saved), a["skill_groups"].get(g, True),
+                    help=f"The {g} group of config/skills.json, for the tools you picked; devkit installs it for "
+                         "Claude Code and Codex. Change it later with skills.groups in devkit's config."),
+                   store=lambda v, g=g: a["skill_groups"].update({g: bool(v)}),
+                   show=lambda g=g: "yes" if a["skill_groups"].get(g, True) else "no",
+                   when=lambda g=g: g in offered_groups(a["clouds"], saved)) for g in optional]
         if key == "docker":
             cpus, ram = d["cpus"], d["ram"]
             return [
@@ -895,6 +1021,8 @@ class _Wizard:
                     help="How often devkit refreshes the project map and pull requests and pushes the handoff "
                          "repository."), store=lambda v: a.update(interval=int(v)),
                    show=lambda: f"every {a['interval']} min"),
+                _Q("ai", "Background AI", lambda: tui.Confirm(AI_QUESTION, a["ai"], help=AI_HELP),
+                   show=yes_no("ai"), when=lambda: not ((d.get("config") or {}).get("ai") or {}).get("asked")),
                 _Q("lock", "Lock Claude Code settings", lambda: tui.Confirm(
                     "Lock Claude Code settings?", a["lock"],
                     help="Writes a managed-settings file that other tools cannot change; needs your admin password. "
@@ -967,17 +1095,21 @@ class _Wizard:
 
     # ---------------------------------------------------------------- review
     def review_rows(self, a) -> list:
+        skills = accepted_groups(a, self.d.get("config"))
         agents = [f"Claude Code ({CLAUDE_UI[a['claude_mode']][0].lower()})"] if a["use_claude"] else []
         agents += [f"Codex ({CODEX_UI[a['codex_mode']][0].lower()})"] if a["use_codex"] else []
         return [
             ("Workspace", f"{a['root']} · handoff {a['handoff']}"),
             ("Agents", ", ".join(agents) or "none"),
             ("Stacks", ", ".join(_label(k) for k in a["stacks"]) or "none"),
-            ("Git hosts and CI/CD", ", ".join(_label(k) for k in a["hosts"])),
-            ("Clouds", ", ".join(_label(k) for k in a["clouds"]) or "none"),
+            ("Git hosts and CI/CD", ", ".join(_label(k) for k in a["hosts"])
+             + f" · commit template {'on' if a['commit_template'] else 'off'}"),
+            ("Clouds", (", ".join(_label(k) for k in a["clouds"]) or "none")
+             + (f" · agent skills: {', '.join(skills)}" if skills else "")),
             ("Docker", f"{a['cpu']} CPUs · {a['mem']} GB memory · {a['disk']} GB disk"
                        + (" · starts at login" if a["autostart"] else "")),
             ("Automation", f"sync every {a['interval']} min · disk cleanup {'on' if a['gc_auto'] else 'report only'}"
+                           f" · background AI {'on' if a.get('ai') else 'off'}"
                            + (f" · settings lock {'on' if a['lock'] else 'off'}" if a["use_claude"] else "")),
         ]
 
@@ -1175,7 +1307,7 @@ class _Wizard:
                 fails.append(s[2:])
             elif s.startswith("! "):
                 notes.append(s[2:])
-        rc = _exec(_dev("install"), line, log, env=_child_env())
+        rc = _exec(_dev("install", *_template_args(self.a)), line, log, env=_child_env())
         if fails or rc not in (0, None):
             cl.finish(i, "fail", f"{len(fails) or 1} problem{'s' if len(fails) > 1 else ''} in {len(parts)} parts",
                       [tui.bad("✗ ") + f for f in fails[:6]] + ([] if fails else self._tail(tail))

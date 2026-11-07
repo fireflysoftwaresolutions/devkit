@@ -30,6 +30,17 @@ lib/devkit/
   security.py           dev sec scan and the pre-commit secret check
   ci.py                 GitHub Actions workflow reader for dev ci
   cistatus.py           dev ci status: CI/CD runs on GitHub, GitLab, Bitbucket, and Azure, with an ETA
+  ciwatch.py            dev ci watch: follow a run to its end and say why it failed and what to do
+  pipelines.py          dev ci audit and dev ci init on the four CI/CD hosts
+  crew.py               dev crew: the roster from config/crew.json, briefs, the session graph, team changes
+  raci.py               the crew's RACI: who does, approves, is consulted on, and is informed about each kind of work
+  dispatch.py           routing work to a crew member, delegation between members, dispatch of ready work
+  gates.py              what a crew member owes before it stops (SubagentStop)
+  selfcheck.py          the consistency checks: the parts of devkit that describe each other, compared
+  state.py              serialized, atomic writes of the session and run records
+  scope.py              whether a turn is development work
+  stubs.py              dev stubs: unfinished work in delivered code
+  testx.py · testaudit.py   dev test: failed first, then the blast radius, dev test prove; dev test audit
   delivery.py           dev delivery: detect, recommend, and record a delivery policy; the tag check
   fs.py                 dev files, find, grep, diff, rm, mv, and cp: token-light and recoverable
   gitx.py               dev branch, commit, rebase, push, pr, run, release, issue, git, gh; local CI evidence
@@ -42,13 +53,16 @@ lib/devkit/
   docs.py               dev docs check
   diagram.py            dev diagram: layout, routing, rendering and validation
   dashboard.py          the HTML command center
+  dashserver.py         the dashboard as a local, live, read-only server
+  desktop.py · mcp.py   the Claude Desktop extension and the MCP server (dev mcp) it runs
   providers.py          Claude Code and Codex status, quota and self-tests
-  setup.py              dev install and dev doctor
+  setup.py              dev install (the pinned copy, then the steps) and dev doctor
   wizard.py             dev setup
   toolchain.py          git hosts and clouds: their CLIs, sign-in checks and Homebrew groups
   codexrpc.py           JSON-RPC client for codex app-server
 agents/AGENTS.md        global instructions rendered for Claude Code and Codex
-plugin/                 the devkit plugin: skills, slash commands, the scout agent, icon
+plugin/                 the devkit plugin: skills, slash commands, the crew's agents (generated), icon
+desktop/                the Claude Desktop extension: manifest and launcher
 config/                 Claude Code, Codex, git, docs, skill and skill-rule configuration applied by dev install
 templates/              plan, task, pull request and handoff templates
 shell/                  zsh integration and completion
@@ -78,8 +92,8 @@ install.sh · Brewfile   bootstrap and toolchain
 
 ```bash
 cd ~/Development/fireflysoftwaresolutions/devkit
-python3 -m unittest discover -s tests -v
-/usr/bin/python3 -m unittest discover -s tests -v     # Python 3.9 compatibility
+python3 -m unittest discover -s tests -t . -v
+/usr/bin/python3 -m unittest discover -s tests -t . -v     # Python 3.9 compatibility
 python3 -m py_compile lib/devkit/*.py && /usr/bin/python3 -m py_compile lib/devkit/*.py
 ```
 
@@ -91,11 +105,64 @@ hosts and clouds, the diagram engine and the docs diagrams (stale renders and th
 decisions and escaping. Tests that need state use a
 temporary state folder. GitHub CI runs the same suite on Python 3.9 and 3.13; run it locally first.
 
+### Consistency checks
+
+Parts of devkit describe each other: the crew's rules and the functions that enforce them, the parser and
+[Commands](commands.md), the registered hooks and [Agents › Hooks](agents.md#hooks), the configuration the code reads
+and [Configuration](configuration.md), and the roster and its RACI. `lib/devkit/selfcheck.py` compares them, from
+file reads and imports only, in about a second:
+
+| Check | Fails when |
+| --- | --- |
+| D1 | An enforced rule of `dev crew rules` names a function that does not import, or that no test names |
+| D2 | A planned rule names no open work item or plan step (this Mac's state) |
+| D3 | A public function of the crew's modules has no caller outside its own definition and the tests |
+| D4 | A command or option is missing from [Commands](commands.md) or a top-level command from the `using-devkit` skill's table, or a `dev …` command in the instructions, skills, docs, or roster does not parse |
+| D5 | The registered hook events differ from the hooks table or the counts on [Surfaces](surfaces.md) |
+| D6 | A configuration key the code reads is missing from [Configuration](configuration.md) |
+| D7 | A kind of work breaks RACI hygiene: its approver also consulted or informed, a member both consulted and informed, an approver of its own work without a recorded reason, a knowledge doc that does not exist, or no knowledge skill |
+| D8 | A skill the crew names is not installed for its agent (this Mac's state) |
+| D9 | A procedure phase's proof, or a command its gate names, is not in the phase's `devkit` list |
+| D10 | A kind of work has no file anchor and does not say why, or an open lesson has no anchors (this Mac's state) |
+| D11 | A row of the guardrail table in [The crew](crew.md#guardrails) cites no rule id, or states a planned rule as fact |
+| D12 | `tests/__init__.py` does not activate `tests/_hermetic.py` (the run's temporary home), or a documented `unittest discover -s tests` lacks `-t .`, which unittest needs to import `tests/__init__.py` |
+
+`tests/test_consistency.py` runs the checks that read only the repository, and tests the others on small fixtures.
+Drift that exists today is listed in its `KNOWN` allowlist, each item with its review finding, owner, and the task
+or plan step that removes it. A new finding fails the test, and so does a listed one that is gone: when you fix one,
+take it out of `KNOWN` in the same commit.
+
+```bash
+python3 -m unittest tests.test_consistency
+python3 -I -c "import sys; sys.path.insert(0,'lib'); from devkit import selfcheck; [print(f) for f in selfcheck.run()]"
+```
+
+The second command lists every finding today, including the checks of this Mac's state. Each finding names its
+evidence and the fix.
+
+## Trying a change in your own sessions
+
+Your sessions' hooks and the guard run the [pinned copy](getting-started.md#the-pinned-copy) in
+`~/.local/share/devkit/releases/`, and so does `dev` in your shell. An edit in the checkout changes nothing for them
+until you pin it, so a half-written `guard.py` never switches off the guard of your running sessions. Run the
+checkout's own code with `bin/dev` from the checkout.
+
+To use a change in your sessions:
+
+1. Commit it on your branch.
+2. Run `bin/dev ci --run` in the checkout. It runs what CI runs and records the evidence for that commit's tree.
+3. Run `bin/dev install` yourself, in a terminal (the guard refuses it from an agent). It pins the tested commit and
+   re-applies the configuration from the new copy.
+4. Start new agent sessions; running sessions keep the copy they started with until they restart.
+
+`dev install --version <previous version>` switches back. `dev install --unverified --why "<reason>"` pins an untested
+commit when you must, and records the reason in the audit trail.
+
 ## Adding a command
 
 1. Write `cmd_<name>(a)` in `lib/devkit/cli.py`; return an exit code.
 2. Register it in `build_parser()` with its options.
-3. Add it to `COMMANDS` (grouped help) and to `shell/completions/_dev`.
+3. Add it to `COMMANDS` (grouped help) and to `shell/completions/_dev` (its subcommands and flags too).
 4. Document it in [Commands](commands.md) and, when agents use it, in the `using-devkit` or `workspace` skill.
 
 ## Adding a guard rule
@@ -113,15 +180,17 @@ devkit follows its own delivery method: integrate locally, run the full suite, p
    (`dev calver --next`) and add a `CHANGELOG.md` entry.
 2. Run the tests on both Pythons (see [Running the tests](#running-the-tests)), `dev docs check` and
    `dev diagram check docs/diagrams`.
-3. Run `dev install` on your machine, then `dev doctor` and `dev agents test`; every check must pass.
-4. Run what CI runs (`dev ci --run`), then push the release branch once (`dev push`), open one PR
-   (`dev pr create`), and watch its CI (`dev pr checks --watch`).
+3. Commit, then run what CI runs (`bin/dev ci --run`). It records the evidence that `dev install` and `dev push`
+   check. In your terminal, run `bin/dev install`, which pins this tested commit for your hooks, then `dev doctor`
+   and `dev agents test`; every check must pass.
+4. Push the release branch once (`dev push`), open one PR (`dev pr create`), and watch its CI
+   (`dev pr checks --watch`).
 5. Merge with `dev pr merge`, wait for the CI run on `main` (`dev ci status --watch`), and publish with
    `dev release`. It tags `vYY.MM.PATCH` on `main` and creates the GitHub release with the CHANGELOG section as its
    notes. The guard refuses a raw `gh pr merge` or `gh release create`.
 6. Verify what was published: download the source archive into an empty folder
    (`gh release download vYY.MM.PATCH --archive tar.gz -D <folder>`), compare it with the tag, and run its tests.
-7. Developers update with `dev update`.
+7. Developers update with `dev update`, which checks out the new release and pins it.
 
 ## Conventions
 

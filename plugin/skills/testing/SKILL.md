@@ -45,7 +45,17 @@ dev test prove                    # each new or changed test must FAIL with your
 ```
 
 The Stop hook runs the audit on the test files a turn changed and sends the turn back when a test cannot fail. Fix the
-test or delete it; never weaken the detector's finding by adding a meaningless assertion.
+test or delete it; never weaken the detector's finding by adding a meaningless assertion. A crew member's changed
+tests get the same audit when it stops (the crew gates).
+
+Two known gaps of `dev test prove`, until they are fixed:
+
+- **Python `unittest` tests with a docstring are left out** of its count, without a warning: `unittest -v` prints the
+  docstring on a second line, where prove does not look for the result. Put a comment on the line before the test
+  instead of a docstring, and check that `dev test prove --json` lists as many tests as you added.
+- **It runs the tests in a plain copy of the repository, without `.git`.** A test that clones its own repository or
+  runs git on the repository root fails there. Build test repositories from files: copy what the test needs into a
+  temporary folder, `git init`, and commit.
 
 ## 3. TDD done right
 

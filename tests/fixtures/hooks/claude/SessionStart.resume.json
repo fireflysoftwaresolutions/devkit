@@ -1,0 +1,11 @@
+{
+ "context_tokens": 57932,
+ "cwd": "/Users/dev/Development/.tmp/f0/repo",
+ "estimated_cache_write_usd": 0.0116,
+ "hook_event_name": "SessionStart",
+ "prompt_cache_likely_expired": false,
+ "seconds_since_last_response": 188,
+ "session_id": "043c3a29-420b-4c79-8e10-aef6ee7d46ac",
+ "source": "resume",
+ "transcript_path": "/Users/dev/.claude/projects/-Users-dev-Development--tmp-f0-repo/043c3a29-420b-4c79-8e10-aef6ee7d46ac.jsonl"
+}

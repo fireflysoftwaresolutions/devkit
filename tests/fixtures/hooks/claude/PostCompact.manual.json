@@ -1,0 +1,9 @@
+{
+ "compact_summary": "<analysis>\nThe conversation is short. The user asked me to remember that their favorite fruit is mango and to reply OK. I wrote a user-type memory file, created the MEMORY.md index, and the remaining …",
+ "cwd": "/Users/dev/Development/.tmp/f10/repo",
+ "hook_event_name": "PostCompact",
+ "prompt_id": "feba76c1-d5b1-4b3e-b430-0b328b2bd34b",
+ "session_id": "8f6d96ec-ae34-4d6f-9063-b0e8e1b00a57",
+ "transcript_path": "/Users/dev/.claude/projects/-Users-dev-Development--tmp-f10-repo/8f6d96ec-ae34-4d6f-9063-b0e8e1b00a57.jsonl",
+ "trigger": "manual"
+}

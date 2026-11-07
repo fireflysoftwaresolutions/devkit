@@ -310,7 +310,7 @@ Every generated pipeline:
 
 When the project has a delivery policy, its test gate is what the test job runs: on devkit, whose gate is
 `python3 -m compileall -q lib bin` and `unittest` on two Pythons, the job runs `python -m compileall -q lib bin` and
-`python -m unittest discover -s tests` once, on the Python the setup step installs. The result audits clean by
+`python -m unittest discover -s tests -t .` once, on the Python the setup step installs. The result audits clean by
 construction, and the dry run ends like this:
 
 ```text

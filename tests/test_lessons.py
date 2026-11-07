@@ -4,6 +4,7 @@
 import sys
 import tempfile
 import unittest
+from unittest import mock
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "lib"))
@@ -12,6 +13,61 @@ from devkit import core, guard, lessons, work  # noqa: E402
 
 A = {"user": "ana", "host": "mbp1", "agent": "claude", "session": "s1"}
 IDENT = ["-c", "user.email=t@example.com", "-c", "user.name=t"]
+
+
+class CrewPitfallTests(unittest.TestCase):
+    """Crew members get the known pitfalls for their task (they get no session start), and learn with devkit."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        root = Path(self.tmp.name)
+        self.saved = (lessons.LESSONS, work.HANDOFF, lessons.USAGE_LOCAL)
+        lessons.LESSONS, work.HANDOFF, lessons.USAGE_LOCAL = root / "lessons", root, root / "usage.json"
+        self.regex = lessons.add("acme/api", "A regex rewrite broke the parser", cause="sed -i on nested code",
+                                 prevention="exact-string edits that must match once", a=A,
+                                 activities=["feature"], files=["src/parser/**"], commands=["sed -i"])
+        self.push = lessons.add("acme/api", "A third push in an hour was refused", severity="high",
+                                cause="speculative CI fixes", prevention="reproduce locally, push once", a=A)
+        self.other = lessons.add("global", "The status block came after text", cause="a note before the block",
+                                 prevention="write the block first", a=A)
+
+    def tearDown(self):
+        lessons.LESSONS, work.HANDOFF, lessons.USAGE_LOCAL = self.saved
+        self.tmp.cleanup()
+
+    def test_a_step_gets_the_lessons_of_its_kind_of_work_and_files_and_its_projects_high_ones(self):
+        picked = [x["meta"]["id"] for x in lessons.for_task("acme/api", activity="feature",
+                                                             files=["src/parser/lexer.py"])]
+        self.assertEqual(picked[0], self.regex["meta"]["id"])  # its kind of work and files
+        self.assertIn(self.push["meta"]["id"], picked)  # the project's high-severity lesson, always
+        self.assertNotIn(self.other["meta"]["id"], picked)  # a global lesson with no anchor in common
+        lessons.prevent(lessons.find(self.regex["meta"]["id"]), by="test", ref="tests/test_parser.py",
+                        why="a lint now refuses sed -i", a=A)
+        self.assertNotIn(self.regex["meta"]["id"],
+                         [x["meta"]["id"] for x in lessons.for_task("acme/api", activity="feature")])
+
+    def test_a_claude_launch_brief_gets_the_pitfalls_and_how_to_record_a_new_one(self):
+        from devkit import skillguard
+        out = skillguard.on_agent_brief("claude", {"description": "Neo: arreglo del parser",
+                                                   "prompt": "Arregla el parser tras la reescritura."}, "acme/api")
+        self.assertIn("## devkit · known pitfalls", out["prompt"])
+        self.assertIn(self.regex["meta"]["id"], out["prompt"])  # Neo does feature work: its lessons, any language
+        self.assertIn("dev lesson recur", out["prompt"])
+
+    def test_a_launch_gets_the_skills_of_its_kind_of_work(self):
+        from devkit import skillguard
+        with mock.patch.object(skillguard, "installed", lambda agent: {"testing", "test-driven-development",
+                                                                       "property-based-testing"}):
+            out = skillguard.on_agent_brief("claude", {"description": "Mouse: tests",
+                                                       "prompt": "Los tests fallan a veces; arréglalo."})
+        self.assertIn("- `testing`", out["prompt"])
+        self.assertIn("what devkit knows about test strategy", out["prompt"])
+
+    def test_every_member_with_a_shell_is_told_to_record_lessons(self):
+        from devkit import crew
+        r = crew.load(team=False)
+        self.assertIn("dev lesson add", crew.body(crew.member("tank", r), r))
+        self.assertIn("so the tech lead records it as a lesson", crew.body(crew.member("sparks", r), r))  # no shell
 
 
 class LessonTests(unittest.TestCase):

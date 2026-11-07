@@ -1,14 +1,16 @@
 # Disk and cleanup
 
 Agents fill disks with worktrees, duplicated dependencies, build output, and temp files. devkit reclaims that space
-with `dev gc`, applied automatically every hour for the safe cases, and never deletes work that is not already safe
-on a remote.
+with an unattended cleanup that the nightly `gc` job applies for the safe cases, and never deletes work that is not
+already safe on a remote. To see what fills your disk and free it yourself, item by item, use `dev du` and
+`dev free` (see [Disk use](disk.md)).
 
-## `dev gc`
+## The unattended cleanup
+
+`dev gc` without `--apply` is `dev free` under its old name. With `--apply`, it runs the cleanup below:
 
 ```bash
-dev gc            # dry run: what is reclaimable and why (PR states refreshed from GitHub)
-dev gc -v         # also list what is kept, and why
+dev gc -v         # dry run: what the cleanup would reclaim, what it keeps, and why (PR states from GitHub)
 dev gc --apply    # reclaim it (asks for confirmation in a terminal; -y to skip)
 ```
 
@@ -55,37 +57,32 @@ work in progress.
 ## Automatic cleanup
 
 The scheduled `gc` job runs `dev gc --apply --yes --auto-only` every night at 04:00: it applies the actions of the
-`dev gc` plan that are safe without a person. Set `"gc": {"auto": false}` in `~/.config/devkit/config.json` (the
+cleanup that are safe without a person. Set `"gc": {"auto": false}` in `~/.config/devkit/config.json` (the
 wizard's "report only") to keep the job off, or move it with `dev jobs set gc --at 02:00`. `dev jobs show gc` lists
 its recent runs, and every action is in the audit trail (see [Scheduled jobs and the audit trail](jobs-and-audit.md)).
 
 The `sleep` job (03:30) trims devkit's own records as well: old timing records, finished runs, session records,
 caches, the hooks log, and old `dev rm` manifest entries (see [Lessons › Sleep](lessons.md#sleep)).
 
-## `dev du`
+## What fills the disk
 
-```bash
-dev du             # cached sizes (refreshed hourly)
-dev du --refresh   # recompute now
-```
-
-Main checkout and worktree sizes per project, Claude Code transcripts and temp, the Codex home, devkit temp, npm and
-Homebrew caches, the Colima VM disk, and `docker system df`.
+`dev du` explains what takes space on this Mac and why, and ends with a plan to free it; `dev free <n>` deletes an
+item of that plan after asking. Both are described in [Disk use](disk.md).
 
 ## What the agents keep themselves
 
 | Data | Retention |
 | --- | --- |
 | Claude Code transcripts, file history, plans, tool results | Deleted after `cleanupPeriodDays` = 14 (set by devkit; Claude Code's default is 30) |
-| Claude Code worktrees | Clean, unnamed session worktrees are removed by Claude Code at exit; the rest by `dev gc` |
+| Claude Code worktrees | Clean, unnamed session worktrees are removed by Claude Code at exit; the merged ones by the cleanup or `dev free` |
 | Codex app worktrees | Managed by the app: it keeps the 15 most recent (Settings → Worktrees), never deletes pinned or running chats; devkit never removes them |
 | Codex sessions | No automatic retention; use `codex archive` / `codex delete` |
 
 ## Deleting by hand
 
 `dev rm` moves what you delete to the macOS Trash instead of unlinking it, so it can be restored with `dev rm --undo`
-(see [Commands › Files](commands.md#files)). The space comes back only when the Trash is emptied; `dev gc` never
-empties it. Gitignored build output deleted with `dev rm -r` needs no flag.
+(see [Commands › Files](commands.md#files)). The space comes back only when the Trash is emptied; neither the cleanup
+nor `dev free` empties it. Gitignored build output deleted with `dev rm -r` needs no flag.
 
 ## Saving disk up front
 

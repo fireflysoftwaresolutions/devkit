@@ -1,0 +1,31 @@
+{
+ "cwd": "/Users/dev/Development/.tmp/f0/repo",
+ "duration_ms": 2,
+ "effort": {
+  "level": "medium"
+ },
+ "hook_event_name": "PostToolUse",
+ "permission_mode": "bypassPermissions",
+ "prompt_id": "e2e95d7a-40e4-4785-8ebd-942160ad22f4",
+ "session_id": "043c3a29-420b-4c79-8e10-aef6ee7d46ac",
+ "tool_input": {
+  "description": "F0 bg probe",
+  "prompt": "Run this one Bash command exactly: python3 -c 'import time; time.sleep(40)' && date +%s > bg-done.txt  Then reply with: bg done.\n\n## devkit · your report\nStart your final report with your status block…",
+  "run_in_background": true,
+  "subagent_type": "general-purpose"
+ },
+ "tool_name": "Agent",
+ "tool_response": {
+  "agentId": "a4e6fec8dd944e821",
+  "canContinueAgent": true,
+  "canReadOutputFile": true,
+  "description": "F0 bg probe",
+  "isAsync": true,
+  "outputFile": "/tmp/claude-dev/-Users-dev-Development--tmp-f0-repo/043c3a29-420b-4c79-8e10-aef6ee7d46ac/tasks/a4e6fec8dd944e821.output",
+  "prompt": "Run this one Bash command exactly: python3 -c 'import time; time.sleep(40)' && date +%s > bg-done.txt  Then reply with: bg done.\n\n## devkit · your report\nStart your final report with your status block…",
+  "resolvedModel": "claude-haiku-5-5",
+  "status": "async_launched"
+ },
+ "tool_use_id": "toolu_01Cpn9wzAgYnjNpkWP4DMESh",
+ "transcript_path": "/Users/dev/.claude/projects/-Users-dev-Development--tmp-f0-repo/043c3a29-420b-4c79-8e10-aef6ee7d46ac.jsonl"
+}

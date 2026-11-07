@@ -11,7 +11,10 @@ import fcntl
 import json
 import os
 import re
+import stat
 import subprocess
+import sys
+import tempfile
 import time
 from pathlib import Path
 
@@ -23,11 +26,20 @@ VERSION = (DEVKIT_HOME / "VERSION").read_text().strip() if (DEVKIT_HOME / "VERSI
 # Tools are looked up on a predictable PATH even when a hook runs from an app
 # (Claude Desktop, Codex app, launchd) whose PATH is minimal.
 _EXTRA_PATH = ["/opt/homebrew/bin", "/opt/homebrew/sbin", "/usr/local/bin", str(HOME / ".local" / "bin")]
+
+
+def brew_prefix() -> str:
+    """Homebrew's prefix: /opt/homebrew on Apple Silicon, /usr/local on Intel Macs (HOMEBREW_PREFIX wins)."""
+    env = os.environ.get("HOMEBREW_PREFIX")
+    if env and Path(env, "bin", "brew").exists():
+        return env
+    for p in ("/opt/homebrew", "/usr/local"):
+        if Path(p, "bin", "brew").exists():
+            return p
+    return "/opt/homebrew"
 os.environ["PATH"] = ":".join(dict.fromkeys(_EXTRA_PATH + os.environ.get("PATH", "").split(":")))
 
 # --------------------------------------------------------------------------- config
-
-CONFIG_FILE = Path(os.environ.get("DEVKIT_CONFIG", str(HOME / ".config" / "devkit" / "config.json")))
 
 DEFAULTS = {
     "dev_root": "~/Development",
@@ -49,18 +61,287 @@ DEFAULTS = {
     "claude": {"default_mode": "bypassPermissions"},
     "codex": {"mode": "full", "approval_policy": "never", "sandbox_mode": "danger-full-access"},
     "stacks": ["java", "python", "php", "node"],
-    "skills": {"groups": ["security-deep", "postgres", "observability"], "enforce": True, "rules": []},
+    # skills.groups: the optional skill groups of config/skills.json this Mac installs. skills.optional: groups never
+    # installed by default, which the setup wizard offers when the developer picks one of these tools.
+    "skills": {"groups": ["security-deep", "postgres", "observability"], "optional": {"iac": ["terraform"]},
+               "enforce": True, "rules": []},
     "language": "en-US",
     "hosts": ["github"],
     "clouds": [],
     "packages": {"auto": True},
     "ui": {"powerline": False},
-    "progress": {"nudge_minutes": 8, "notify": True, "notify_after_minutes": 10, "slow_tool_seconds": 20},
+    # progress: updates, timing, and the crew's slots (spec P-fxtwig4hqvx). quota_steps scales max_parallel by the
+    # plan's usage (5-hour and weekly windows), and from quota_percent one member works at a time; slot_weights is
+    # what one launch costs by kind; reserve keeps slots for the developer's own request (docs/configuration.md).
+    "progress": {"nudge_minutes": 8, "notify": True, "notify_after_minutes": 10, "slow_tool_seconds": 20,
+                 "max_parallel": 4, "max_depth": 2, "quota_percent": 90,
+                 "quota_steps": {"50": 1.0, "70": 0.75, "85": 0.5},
+                 "slot_weights": {"builder": 1.0, "review": 0.5, "read": 0.5, "scout": 0.0},
+                 "reserve": 1, "stale_agent_hours": 6, "stale_agent_minutes": 90},
     "work": {"lock_hours": 8},
     "lock": False,
     "handoff": {"enforce": True},
     "canary": {"enforce": True},
+    "dashboard": {"idle_minutes": 30},  # the live dashboard server stops after this long with no page open
+    # the audit trail (docs/audit.md). The team policy (<handoff>/policy/audit.json) sets a floor: a machine may
+    # record more and keep longer, never less. Only the developer changes these, in a terminal (spec C11).
+    # Retention (compliance review): the team copy is read more widely, so it keeps no longer than this machine by
+    # default; floor_months is never under AUDIT_FLOOR_MIN. Pruning the handoff copy leaves the months in git history.
+    "audit": {
+        "publish": True,            # the daily job copies this machine's records to the handoff repository
+        "level": "changes",         # security | changes | all (all: also read-only commands)
+        "retention": {"local_months": 13, "team_months": 13, "floor_months": 3},
+        "hold": False,              # a legal hold: nothing is pruned, here or in the handoff copy
+        "forward": "",              # "" | a file (JSONL lines) | "syslog" | "syslog://host:port" (CEF lines)
+        "redact": {"extra": []},    # more regular expressions for the redactor
+    },
 }
+
+AUDIT_LEVELS = ("security", "changes", "all")  # from the fewest records to the most
+# the least floor_months may be: 3 months covers the time it takes to notice an incident and investigate it. Less
+# data comes from audit.level security, not from a shorter floor (compliance review, GDPR art. 5(1)(e) and 32)
+AUDIT_FLOOR_MIN = 3
+
+
+def _months_ok(v) -> bool:
+    return isinstance(v, int) and not isinstance(v, bool) and 1 <= v <= 1200
+
+
+def _floor_ok(v) -> bool:
+    return _months_ok(v) and v >= AUDIT_FLOOR_MIN
+
+
+def _patterns_ok(v) -> bool:
+    return isinstance(v, list) and all(isinstance(p, str) and p for p in v)
+
+
+def _bad_patterns(v: list) -> list:
+    bad = []
+    for p in v:
+        try:
+            re.compile(p)
+        except re.error as e:
+            bad.append(f"{p!r} ({e})")
+    return bad
+
+
+def _forward_ok(v) -> bool:
+    if not isinstance(v, str):
+        return False
+    if v in ("", "syslog"):
+        return True
+    if v.startswith("syslog://"):
+        return bool(re.fullmatch(r"syslog://[A-Za-z0-9.-]+:\d{1,5}", v))
+    return v.startswith(("/", "~"))
+
+
+# the audit section's keys -> (the check, what the value must be)
+AUDIT_RULES = {
+    ("publish",): (lambda v: isinstance(v, bool), "true or false"),
+    ("level",): (lambda v: v in AUDIT_LEVELS, "security, changes or all"),
+    ("hold",): (lambda v: isinstance(v, bool), "true or false"),
+    ("forward",): (_forward_ok, '"" (off), an absolute file path, "syslog" or "syslog://host:port"'),
+    ("retention", "local_months"): (_months_ok, "a whole number of months from 1 to 1200"),
+    ("retention", "team_months"): (_months_ok, "a whole number of months from 1 to 1200"),
+    ("retention", "floor_months"): (_floor_ok, f"a whole number of months from {AUDIT_FLOOR_MIN} to 1200 "
+                                               f"({AUDIT_FLOOR_MIN} is the hard minimum)"),
+    ("redact", "extra"): (_patterns_ok, "a list of regular expressions"),
+}
+
+
+def audit_config(raw, fill: bool = True):
+    """An audit section checked against AUDIT_RULES -> (values, errors). `fill`: every key, a default where the
+    value is missing or wrong; else only the keys `raw` sets with a valid value (a team policy's floor)."""
+    values = json.loads(json.dumps(DEFAULTS["audit"])) if fill else {}
+    errors = []
+    if raw is None:
+        return values, errors
+    if not isinstance(raw, dict):
+        return values, ["audit must be an object"]
+    groups = {path[0] for path in AUDIT_RULES if len(path) == 2}
+    for key, val in raw.items():
+        if key in groups:
+            if not isinstance(val, dict):
+                errors.append(f"audit.{key} must be an object")
+                continue
+            items = [((key, k), v) for k, v in val.items()]
+        else:
+            items = [((key,), val)]
+        for path, v in items:
+            name = "audit." + ".".join(path)
+            rule = AUDIT_RULES.get(path)
+            if not rule:
+                errors.append(f"unknown key {name}")
+                continue
+            if not rule[0](v):
+                errors.append(f"{name} must be {rule[1]} (got {json.dumps(v, ensure_ascii=False)[:40]})")
+                continue
+            if path == ("redact", "extra") and _bad_patterns(v):  # the valid patterns still apply
+                errors += [f"{name}: {b} is not a regular expression" for b in _bad_patterns(v)]
+                v = [p for p in v if not _bad_patterns([p])]
+            if len(path) == 2:
+                values.setdefault(path[0], {})[path[1]] = v
+            else:
+                values[path[0]] = v
+    return values, errors
+
+
+def _number_in(lo, hi, whole=False):
+    def ok(v):
+        if isinstance(v, bool) or not isinstance(v, int if whole else (int, float)):
+            return False
+        return lo <= v <= hi
+    return ok
+
+
+def _steps_ok(v) -> bool:
+    """quota_steps: {"<usage percent>": <share of max_parallel, 0 to 1>}, such as {"70": 0.75}."""
+    if not isinstance(v, dict):
+        return False
+    for k, f in v.items():
+        try:
+            pct = float(k)
+        except (TypeError, ValueError):
+            return False
+        if not 0 <= pct <= 100 or not _number_in(0, 1)(f):
+            return False
+    return True
+
+
+SLOT_KINDS = ("builder", "review", "read", "scout")
+
+
+def _weights_ok(v) -> bool:
+    return isinstance(v, dict) and all(k in SLOT_KINDS and _number_in(0, 1)(w) for k, w in v.items())
+
+
+# the progress section's keys -> (the check, what the value must be)
+PROGRESS_RULES = {
+    "nudge_minutes": (_number_in(1, 240), "a number of minutes from 1 to 240"),
+    "notify": (lambda v: isinstance(v, bool), "true or false"),
+    "notify_after_minutes": (_number_in(0, 1440), "a number of minutes from 0 to 1440"),
+    "slow_tool_seconds": (_number_in(1, 3600), "a number of seconds from 1 to 3600"),
+    "max_parallel": (_number_in(1, 10, whole=True), "a whole number from 1 to 10"),
+    "max_depth": (_number_in(1, 5, whole=True), "a whole number from 1 to 5"),
+    "quota_percent": (_number_in(1, 100), "a usage share in percent from 1 to 100"),
+    "quota_steps": (_steps_ok, 'an object of usage percent to the share of max_parallel from 0 to 1, such as '
+                               '{"70": 0.75}'),
+    "slot_weights": (_weights_ok, "an object of builder, review, read or scout to a cost from 0 to 1"),
+    "reserve": (_number_in(0, 9, whole=True), "a whole number of slots from 0 to 9"),
+    "stale_agent_hours": (_number_in(1, 168), "a number of hours from 1 to 168"),
+    "stale_agent_minutes": (_number_in(5, 1440), "a number of minutes from 5 to 1440"),
+}
+
+
+def progress_config(raw):
+    """A progress section checked against PROGRESS_RULES -> (values, errors): every key, with its default where the
+    value is missing or wrong. quota_steps and slot_weights add to their defaults, key by key."""
+    values = json.loads(json.dumps(DEFAULTS["progress"]))
+    if raw is None:
+        return values, []
+    if not isinstance(raw, dict):
+        return values, ["progress must be an object"]
+    errors = []
+    for key, v in raw.items():
+        rule = PROGRESS_RULES.get(key)
+        if not rule:
+            errors.append(f"unknown key progress.{key}")
+        elif not rule[0](v):
+            errors.append(f"progress.{key} must be {rule[1]} (got {json.dumps(v, ensure_ascii=False)[:40]})")
+        elif isinstance(values.get(key), dict):
+            values[key] = {**values[key], **v}
+        else:
+            values[key] = v
+    return values, errors
+
+
+def config_errors(cfg: dict) -> list:
+    """What is wrong in the checked sections of a devkit configuration (audit, progress). -> [message]"""
+    cfg = cfg or {}
+    out = audit_config(cfg.get("audit"))[1] if "audit" in cfg else []
+    return out + (progress_config(cfg.get("progress"))[1] if "progress" in cfg else [])
+
+
+class ConfigError(ValueError):
+    """Why `dev config set` changed nothing, and what to do instead."""
+
+
+def _parse_value(text: str):
+    """A value as the developer types it: JSON when it parses (6, true, {"70": 0.5}), else the text itself."""
+    try:
+        return json.loads(text)
+    except (TypeError, ValueError):
+        return text
+
+
+def config_set(key: str, value: str, path=None, developer=None) -> tuple:
+    """`dev config set <key> <value>`: one key of devkit's configuration file, validated, written atomically and
+    audited -> (old value, new value). Only the developer sets it, in a terminal (set_by_developer, spec C11, K1):
+    an agent's command, a hook and a job are refused, whatever the key. The old value comes from that file and
+    devkit's defaults, never from the effective configuration."""
+    path = Path(path or CONFIG_FILE)
+    try:
+        who = set_by_developer() if developer is None else bool(developer)
+    except Exception:
+        who = False  # a check that cannot decide refuses (fail closed)
+    if not who:
+        _config_audit(key, "", "refused", why="not the developer's terminal")
+        raise ConfigError("dev config set changes devkit's configuration, which only the developer does, in a "
+                          "terminal (spec C11, K1). Ask them, with the key, the value and why.")
+    parts = [p for p in str(key or "").split(".") if p]
+    if not parts or parts[0] not in DEFAULTS or len(parts) > 2 or (len(parts) == 2 and
+                                                                     not isinstance(DEFAULTS[parts[0]], dict)):
+        raise ConfigError(f"unknown key {key!r}: dev config show lists the keys, docs/configuration.md explains them")
+    new = _parse_value(value)
+    section, name = parts[0], parts[1] if len(parts) == 2 else None
+    if name is not None and name not in DEFAULTS[section] and section in ("progress", "audit"):
+        raise ConfigError(f"unknown key {key}: docs/configuration.md lists the {section} keys")
+    try:
+        doc = json.loads(path.read_text()) if path.exists() else {}
+    except (OSError, ValueError) as e:
+        raise ConfigError(f"{tilde(path)} is not valid JSON ({e}): fix it with dev config edit first") from None
+    if not isinstance(doc, dict):
+        raise ConfigError(f"{tilde(path)} must hold a JSON object: fix it with dev config edit first")
+    own = doc.get(section) if isinstance(doc.get(section), dict) else {}
+    if name is None:
+        old = doc.get(section, DEFAULTS[section])
+        trial = dict(doc, **{section: new})
+    else:
+        old = own.get(name, DEFAULTS[section].get(name))
+        trial = dict(doc, **{section: dict(own, **{name: new})})
+    try:
+        problems = [e for e in config_errors({section: trial[section]} if section in ("audit", "progress") else {})
+                    if key in e or "must be an object" in e]
+    except Exception as e:  # a value the checks cannot judge is refused (fail closed)
+        problems = [f"{key}: the value could not be checked ({type(e).__name__})"]
+    default = DEFAULTS[section].get(name) if name is not None else DEFAULTS[section]
+    if not problems and section not in ("audit", "progress") and default is not None and \
+            type(new) is not type(default) and not (isinstance(default, float) and isinstance(new, int)):
+        problems = [f"{key} must be {type(default).__name__} like its default ({json.dumps(default)})"]
+    if problems:
+        raise ConfigError("; ".join(problems))
+    path = Path(os.path.realpath(path))  # a linked file (dotfiles) stays linked: the write goes to its target
+    path.parent.mkdir(parents=True, exist_ok=True)
+    mode = stat.S_IMODE(path.stat().st_mode) if path.exists() else 0o600
+    fd, tmp = tempfile.mkstemp(prefix=f".{path.name}.", suffix=".tmp", dir=str(path.parent))
+    try:
+        with os.fdopen(fd, "w") as fh:
+            fh.write(json.dumps(trial, indent=2, ensure_ascii=False) + "\n")
+        os.chmod(tmp, mode)  # the file keeps its own permissions
+        os.replace(tmp, path)
+    except OSError as e:
+        Path(tmp).unlink(missing_ok=True)
+        raise ConfigError(f"could not write {tilde(path)}: {e}") from None
+    _config_audit(key, f"{json.dumps(old, ensure_ascii=False)} → {json.dumps(new, ensure_ascii=False)}", "ok")
+    return old, new
+
+
+def _config_audit(key: str, detail: str, outcome: str, **extra):
+    try:
+        from . import audit
+        audit.record("dev.config.set", str(key)[:120], detail[:300], outcome, **extra)
+    except Exception:
+        pass
 
 
 def deep_merge(base: dict, extra: dict) -> dict:
@@ -73,6 +354,14 @@ def deep_merge(base: dict, extra: dict) -> dict:
     return out
 
 
+def offered_skill_groups(tools, cfg=None) -> list:
+    """The optional skill groups (`skills.optional`) the setup wizard offers for the cloud and infrastructure tools
+    the developer picked (toolchain.CLOUDS keys): ["iac"] for terraform. Offered, never installed by default."""
+    picked = set(tools or [])
+    optional = ((cfg if cfg is not None else CFG).get("skills") or {}).get("optional") or {}
+    return [g for g, when in optional.items() if picked & set(when or [])]
+
+
 def load_config() -> dict:
     cfg = json.loads(json.dumps(DEFAULTS))
     if CONFIG_FILE.exists():
@@ -80,8 +369,12 @@ def load_config() -> dict:
             cfg = deep_merge(cfg, json.loads(CONFIG_FILE.read_text()))
         except (OSError, ValueError):
             pass
-    if os.environ.get("DEV_ROOT"):
-        cfg["dev_root"] = os.environ["DEV_ROOT"]
+    root = os.environ.get("DEV_ROOT")
+    if root and expand(root) != expand(cfg["dev_root"]):
+        if set_by_developer():
+            cfg["dev_root"] = root
+        else:  # the handoff (policies, plans, tasks) lives below it, so it is configuration like DEVKIT_CONFIG
+            _refuse_env("DEV_ROOT", root, f"the dev_root of {CONFIG_FILE}")
     return cfg
 
 
@@ -89,6 +382,93 @@ def expand(p) -> Path:
     return Path(os.path.expanduser(os.path.expandvars(str(p))))
 
 
+# ---- who set DEVKIT_CONFIG or DEV_ROOT (spec C11, K1)
+#
+# An agent's command can set them, and so can a nested session it starts; devkit would then read a configuration, a
+# handoff and approvals nobody gave. devkit takes a DEVKIT_CONFIG outside ~/.config/devkit/config.json, or a DEV_ROOT
+# other than the configured dev_root, only from the developer: a process in a terminal (it has a controlling
+# terminal), with no agent among its parent processes and no agent's marker in its environment. The agents' shell
+# commands and devkit's hooks have no controlling terminal and run below the agent, so theirs never count; devkit
+# then reads the standard file, says so on stderr and drops the variable for the processes it starts. The guard
+# refuses the same assignments in an agent's command text; this check covers what the text does not show.
+
+AGENT_MARKERS = ("CLAUDECODE", "CLAUDE_CODE_ENTRYPOINT", "CLAUDE_PID", "CODEX_SANDBOX", "CODEX_THREAD_ID",
+                 "DEVKIT_SESSION", "DEVKIT_AGENT", "DEVKIT_FROM_AGENT")
+_LOOKUP = object()
+
+
+def is_agent_process(args: str) -> bool:
+    """True when a command line is an agent: Claude Code, Codex, or their desktop apps (by the executable's name)."""
+    words = (args or "").split()
+    if not words:
+        return False
+    exe = os.path.basename(words[0]).casefold()
+    if exe in ("claude", "codex") or "/claude/versions/" in words[0]:
+        return True
+    return exe.startswith("node") and any("claude-code" in w or "@openai/codex" in w for w in words[1:3])
+
+
+def _ancestry():
+    """Command lines of this process's parents, nearest first, up to launchd; None when `ps` gives no answer."""
+    try:
+        out = subprocess.run(["ps", "-axo", "pid=,ppid=,args="], capture_output=True, text=True, timeout=10).stdout
+    except (OSError, subprocess.SubprocessError):
+        return None
+    procs = {}
+    for ln in out.splitlines():
+        parts = ln.split(None, 2)
+        if len(parts) >= 2 and parts[0].isdigit() and parts[1].isdigit():
+            procs[int(parts[0])] = (int(parts[1]), parts[2] if len(parts) > 2 else "")
+    if not procs:
+        return None
+    chain, pid = [], os.getppid()
+    while pid > 1 and pid in procs and len(chain) < 64:
+        pid, args = procs[pid]
+        chain.append(args)
+    return chain
+
+
+def _has_terminal() -> bool:
+    try:
+        os.close(os.open("/dev/tty", os.O_RDONLY))
+        return True
+    except OSError:
+        return False
+
+
+def set_by_developer(environ=None, ancestry=_LOOKUP, terminal=None) -> bool:
+    """True when this process runs in the developer's terminal: no agent marker in its environment, no agent among
+    its parents (ancestry: their command lines; None when unknown), and a controlling terminal."""
+    env = os.environ if environ is None else environ
+    if any(env.get(k) for k in AGENT_MARKERS):
+        return False
+    chain = _ancestry() if ancestry is _LOOKUP else ancestry
+    if chain is None or any(is_agent_process(a) for a in chain):
+        return False
+    return _has_terminal() if terminal is None else bool(terminal)
+
+
+def _refuse_env(name: str, value: str, instead: str):
+    print(f"devkit: ignoring {name}={value}: devkit takes it only from the developer, in a terminal, not from an "
+          f"agent's command or hook (spec C11). Using {instead}.", file=sys.stderr)
+    os.environ.pop(name, None)
+
+
+def config_file(environ=None, home=None) -> Path:
+    """The configuration file devkit reads: DEVKIT_CONFIG when it names the standard place or the developer set it
+    in a terminal (set_by_developer), else ~/.config/devkit/config.json."""
+    env = os.environ if environ is None else environ
+    std = Path(home or HOME) / ".config" / "devkit" / "config.json"
+    val = env.get("DEVKIT_CONFIG")
+    if not val or os.path.realpath(expand(val)).casefold() == os.path.realpath(std).casefold():
+        return std
+    if set_by_developer(env):
+        return expand(val)
+    _refuse_env("DEVKIT_CONFIG", val, str(std))
+    return std
+
+
+CONFIG_FILE = config_file()
 CFG = load_config()
 DEV = expand(CFG["dev_root"])
 HANDOFF = expand(CFG["handoff_dir"]) if CFG.get("handoff_dir") else DEV / ".handoff"
@@ -102,6 +482,29 @@ RESERVED_TOP = {HANDOFF.name, ".worktrees", ".tmp", "_local"}
 CLAUDE_HOME = HOME / ".claude"
 CODEX_HOME = expand(os.environ.get("CODEX_HOME", str(HOME / ".codex")))
 AGENTS_HOME = HOME / ".agents"
+
+
+def devkit_roots(home=None) -> list:
+    """devkit's state, configuration and install folders: ~/.local/state/devkit, ~/.config/devkit and
+    ~/.local/share/devkit. What lies below them decides what the guard and the gates allow (spec C11)."""
+    h = Path(home) if home else HOME
+    return [h / ".local" / "state" / "devkit", h / ".config" / "devkit", h / ".local" / "share" / "devkit"]
+
+
+def ensure_roots(home=None):
+    """Create devkit's three roots, readable and writable by the developer's account only (0700): a root's mode
+    protects every file below it from the Mac's other accounts. devkit calls it whenever it starts, `dev install`
+    included. Never raises: a root it cannot create or change keeps what it has."""
+    for root in devkit_roots(home):
+        try:
+            root.mkdir(parents=True, exist_ok=True)
+            if stat.S_IMODE(root.stat().st_mode) != 0o700:
+                os.chmod(root, 0o700)  # nosemgrep: python.lang.security.audit.insecure-file-permissions.insecure-file-permissions (0700 is owner-only: this tightens the root)
+        except OSError:
+            pass
+
+
+ensure_roots()
 
 # --------------------------------------------------------------------------- shell
 
@@ -380,3 +783,79 @@ def write_if_changed(path: Path, text: str) -> bool:
     tmp.write_text(text)
     os.replace(tmp, path)
     return True
+
+
+# --------------------------------------------------------------------------- the pinned install (spec C10)
+#
+# `dev install` copies one commit of the devkit checkout, read-only and with a manifest of checksums, to
+# ~/.local/share/devkit/releases/<version>-<sha>/ and records it in ~/.local/share/devkit/install.json. The agents'
+# hooks, the status line, ~/.local/bin/dev and the scheduled jobs run that copy, so an edit in the checkout reaches
+# them only through the next `dev install`. `bin/dev` run from the checkout still runs the checkout.
+# The paths are functions of HOME so that tests can move HOME.
+
+PIN_MANIFEST = ".devkit-manifest.json"
+
+
+def share_dir() -> Path:
+    return HOME / ".local" / "share" / "devkit"
+
+
+def pin_root() -> Path:
+    return share_dir() / "releases"
+
+
+def install_record_file() -> Path:
+    return share_dir() / "install.json"
+
+
+def dev_link() -> Path:
+    """The `dev` a shell finds: the link that `dev install` points at the pinned copy's bin/dev."""
+    return HOME / ".local" / "bin" / "dev"
+
+
+def dev_commands() -> list:
+    """Every place a shell can find `dev`: the link and `dev` in each other folder on PATH (real folder paths), except
+    folders in the workspace or a temp folder, where a repository's own bin/dev is code under review."""
+    out, seen = [], set()
+    for d in [str(dev_link().parent)] + os.environ.get("PATH", "").split(os.pathsep):
+        if not d or not os.path.isabs(d):
+            continue
+        rd = real(d)
+        if rd in seen or is_under(rd, DEV) or is_temp(rd):
+            continue
+        seen.add(rd)
+        out.append(Path(rd) / "dev")
+    return out
+
+
+def install_record() -> dict:
+    """What `dev install` installed last: version, commit, path of the pinned copy, source checkout ({} if none)."""
+    rec = read_json(install_record_file(), {})
+    return rec if isinstance(rec, dict) else {}
+
+
+def is_pinned(path=None) -> bool:
+    """True when `path` (default: the code that runs now) is a pinned copy: a folder of pin_root() with a manifest."""
+    p = Path(path or DEVKIT_HOME)
+    return p.resolve().parent == pin_root().resolve() and (p / PIN_MANIFEST).is_file()
+
+
+def runtime_home() -> Path:
+    """The devkit copy that hooks, the installed `dev`, the status line and the jobs run: this copy when it is pinned,
+    else the pinned copy that `dev install` recorded. Settings written from a checkout point there too, never at the
+    checkout. Before the first pinned install, the copy that runs now."""
+    if is_pinned(DEVKIT_HOME):
+        return DEVKIT_HOME
+    path = install_record().get("path")
+    return Path(path) if path and is_pinned(path) else DEVKIT_HOME
+
+
+def source_home() -> Path:
+    """The devkit checkout that `dev install` pins and `dev update` updates: this copy when it is a checkout; for a
+    pinned copy, the checkout it was made from."""
+    if not is_pinned(DEVKIT_HOME):
+        return DEVKIT_HOME
+    rec = install_record()
+    src = rec.get("source") if rec.get("path") and real(rec["path"]) == real(DEVKIT_HOME) else None
+    src = src or (read_json(DEVKIT_HOME / PIN_MANIFEST, {}) or {}).get("source")
+    return Path(src) if src else DEVKIT_HOME

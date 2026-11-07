@@ -1,0 +1,23 @@
+
+# Header, on the first line: type(scope): summary
+#   Imperative mood, at most 72 characters, no period at the end.
+#   Types: feat fix refactor perf docs test build ci chore deps style revert
+#   A breaking change adds ! after the type or scope: feat(api)!: drop v1 tokens
+#
+# Body, after a blank line, one paragraph each:
+#   1. Why: the problem or need, and who it affects.
+#   2. What changed: the behavior and the parts it touches.
+#   3. Verified: the command you ran and its result, for example
+#      Verified: python3 -m unittest tests.test_parser (12 tests pass)
+#
+# Trailers, last, after a blank line, one per line:
+#   Refs: #142 (an issue number, a URL, or a ticket key the repository knows)
+#   BREAKING CHANGE: what breaks, and how to move to the new behavior
+#
+# Never a devkit task id (T-, F-, B- or S- ids): they stay in the private
+# handoff, whose session log already links each commit to its task.
+# Never a line that credits an AI tool.
+#
+# Lines that start with # are removed. dev commit -m "<header>" --why "..."
+# --verified "..." writes this message for you, and fills Refs from the
+# ticket of the task you started on this branch.

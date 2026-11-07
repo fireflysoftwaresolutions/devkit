@@ -2,11 +2,12 @@
 # zsh completion for devkit's `dev` command.
 
 _dev() {
-  local -a cmds projects
+  local -a cmds projects sub
   cmds=(
-    'ls:List projects'
+    'ls:The projects on this Mac'
     'go:Print a project path'
     'status:Project status'
+    'alias:Short project names shared by the team'
     'clone:Clone into ~/Development/<owner>/<repo>'
     'new:Start a new project'
     'adopt:Move a repo into the canonical layout'
@@ -14,28 +15,60 @@ _dev() {
     'claude:Start Claude Code in a project'
     'codex:Start Codex in a project'
     'handoff:Show or edit a handoff note'
-    'wt:Manage worktrees'
-    'ci:Show what CI runs, to run it locally'
-    'diagram:Branded SVG diagrams'
-    'docs:Check documentation'
+    'dashboard:Open the live dashboard'
+    'overview:Portfolio digest'
+    'standup:Recent work'
     'initiative:Cross-project initiatives'
     'task:Project or initiative tasks'
     'note:Project metadata'
-    'overview:Portfolio digest'
-    'standup:Recent work'
-    'agents:Claude Code and Codex status and self-tests'
-    'sec:Security scan'
-    'setup:Setup wizard'
-    'config:Agent settings policy'
+    'plan:Versioned plans and specs'
+    'team:Who is working on what'
+    'progress:Live progress of agent work'
+    'crew:The crew of specialist agents'
+    'time:How long things take'
+    'report:Status report'
+    'lesson:Lessons learned'
+    'jobs:Scheduled jobs'
+    'audit:The audit trail'
+    'sleep:Consolidate and forget lessons and old records'
+    'delivery:Delivery policy'
+    'files:Compact tree'
+    'find:Find files'
+    'grep:Search code'
+    'diff:Token-light git diff'
+    'rm:Move to the Trash, with undo'
+    'mv:Move safely'
+    'cp:Copy safely'
+    'stubs:Unfinished work'
+    'wt:Manage worktrees'
+    'branch:Branches from an up-to-date main'
+    'commit:Conventional Commit'
+    'rebase:Rebase on main'
+    'push:Push with local CI evidence'
+    'pr:Pull requests'
+    'run:CI runs'
+    'release:Tag and publish by the policy'
+    'issue:Issues'
+    'ci:What CI runs, CI status, audit and init'
+    'test:Failed tests first, then the blast radius'
     'calver:CalVer version'
-    'dashboard:Open the dashboard'
+    'sec:Security scan'
+    'docs:Check documentation'
+    'diagram:Branded SVG diagrams'
     'canary:Instruction-compliance report'
     'sync:Refresh map and notes, push handoff repo'
     'gc:Reclaim disk safely'
     'du:Disk usage report'
+    'setup:Setup wizard'
+    'prompt:What devkit'"'"'s prompt helper shows here'
     'doctor:Verify the setup'
-    'install:Apply the devkit configuration'
-    'update:Update devkit'
+    'agents:Claude Code and Codex status, self-tests and rules'
+    'config:Agent settings policy'
+    'guard:Simulate a guard decision'
+    'plugin:Validate the devkit plugin'
+    'desktop:Claude Desktop extension'
+    'install:Pin devkit and apply its configuration'
+    'update:Update devkit to the newest release'
     'docker:Docker on Colima'
     'version:Show version'
     'help:Show help'
@@ -44,21 +77,123 @@ _dev() {
     _describe 'command' cmds
     return
   fi
-  projects=(${(f)"$(dev __complete projects 2>/dev/null)"})
   case "${words[2]}" in
-    go|status|open|handoff|claude|codex|ci)
+    go|status|open|handoff|claude|codex|ci|clone)
+      projects=(${(f)"$(dev __complete aliases 2>/dev/null)"})
       _describe 'project' projects ;;
+    alias)
+      if (( CURRENT == 3 )); then
+        sub=('rm:Remove an alias'); _describe 'alias command' sub
+      else
+        projects=(${(f)"$(dev __complete aliases 2>/dev/null)"}); _describe 'project' projects
+        _arguments '--move[take the alias from the project that has it]'
+      fi ;;
+    ls)
+      _arguments '--all[also the portfolio projects not on this Mac]' '--offline[cached data only]' '--json[the rows as JSON]' ;;
     wt)
       if (( CURRENT == 3 )); then
-        local -a sub; sub=('new:Create a managed worktree' 'ls:List worktrees' 'rm:Remove a worktree safely')
+        sub=('new:Create a managed worktree' 'ls:List worktrees' 'rm:Remove a worktree safely')
         _describe 'worktree command' sub
       elif [[ "${words[3]}" == rm ]]; then
         local -a br; br=(${(f)"$(dev __complete branches 2>/dev/null)"}); _describe 'branch' br
+      elif [[ "${words[CURRENT-1]}" == --repo ]]; then
+        projects=(${(f)"$(dev __complete aliases 2>/dev/null)"}); _describe 'project' projects
       fi ;;
+    config)
+      if (( CURRENT == 3 )); then
+        sub=('repair:Put devkit'"'"'s settings back' 'show:The effective configuration' 'edit:Edit your devkit config'
+             'validate:Check your devkit config' 'set:Set one key (the developer only)'
+             'lock:Lock the settings (asks for your password)' 'unlock:Remove the lock'
+             'status:The lock and recent events')
+        _describe 'config command' sub
+      fi
+      _arguments '--check[one line and exit 1 when a setting differs]' ;;
+    task)
+      if (( CURRENT == 3 )); then
+        sub=('add:Create a work item' 'start:Claim and start' 'claim:Claim and start' 'release:Give the lock back'
+             'done:Mark done' 'reopen:Back to todo after done or cancel' 'block:Mark blocked' 'unblock:Back to work'
+             'cancel:Cancel' 'move:Move between Now, Next and Later' 'edit:Change title, description, priority or due date'
+             'delegate:Assign to a teammate' 'link:Count toward an initiative' 'show:Fields, description and history'
+             'history:The changelog' 'ls:Open items')
+        _describe 'task verb' sub
+      else
+        _arguments '*--why[the reason, recorded in the changelog]:reason:' '*-p[project]:project:' '*-i[initiative]:initiative:'
+      fi ;;
+    progress)
+      if (( CURRENT == 3 )); then
+        sub=('start:Start a run' 'step:Close a finished step' 'note:Update while a step runs' 'add:Add a step'
+             'assign:Hand a step to a crew member' 'begin:Start a step in parallel' 'reopen:Undo a wrong close'
+             'skip:Skip a step on purpose' 'block:The run is blocked' 'done:The run is finished'
+             'history:Every step change' 'time:How long things take')
+        _describe 'progress command' sub
+      else
+        case "${words[3]}" in
+          assign) _arguments '--to[the crew member]:member:' '--scope[the files it owns]:globs:' '--why[assign a member the RACI does not make Responsible]:reason:' ;;
+          done) _arguments '--next[what comes next]:next:' '--check[the evidence]:evidence:' '--step[which step]:step:' '--force[skip the safety checks]' '--why[end without an Accountable approval]:reason:' ;;
+          step) _arguments '--next[what comes next]:next:' '--check[the evidence]:evidence:' '--step[which step]:step:' '--force[skip the safety checks]' '--no-check[nothing to verify]' '--approves[the finished steps this Check approves]:steps:' ;;
+          block) _arguments '--next[what comes next]:next:' '--check[the evidence]:evidence:' '--step[which step]:step:' '--force[skip the safety checks]' ;;
+          start) _arguments '--plan[steps with estimates]:plan:' '--estimate[total estimate]:estimate:' '--steps[number of steps]:steps:' '--mode[who takes decisions]:mode:(guided auto)' ;;
+          reopen|skip|add) _arguments '--why[the reason]:reason:' ;;
+        esac
+      fi ;;
+    crew)
+      if (( CURRENT == 3 )); then
+        sub=('graph:The live session as one graph' 'raci:Who does, approves, is consulted and informed'
+             'rules:Every crew rule and its check' 'show:One member' 'brief:A ready brief for a member'
+             'route:Who should do a task' 'delegate:A step for another member' 'decline:Hand a step back'
+             'next:Who to launch now' 'ask:A question or a decision' 'answer:Answer a message' 'inbox:Messages for you'
+             'mode:Guided or auto' 'decide:Record the developer'"'"'s answer' 'decisions:This run'"'"'s decisions'
+             'set:Change a member for the whole team' 'history:The team'"'"'s changes to the crew'
+             'sync:Regenerate the Claude agents')
+        _describe 'crew command' sub
+      else
+        case "${words[3]}" in
+          graph) _arguments '--latest[the newest running run on this Mac]' '(--json)--mermaid[a Mermaid flowchart]' '(--mermaid)--json[nodes and edges]' ;;
+          raci) _arguments '--set[change a row: "R=… A=… C=… I=…"]:assignments:' '--why[the reason]:reason:' '--markdown[the matrix as a Markdown table]' ;;
+          set)
+            if (( CURRENT == 5 )); then
+              sub=(name title role summary personality goal returns use_when not_for skills procedure devkit done_when keywords tools tier)
+              _describe 'field' sub
+            else
+              _arguments '--why[the reason, kept in the crew history]:reason:'
+            fi ;;
+          mode) (( CURRENT == 4 )) && { sub=(guided auto); _describe 'mode' sub; } ;;
+          sync) _arguments '--check[report differences only]' ;;
+        esac
+      fi ;;
+    agents)
+      if (( CURRENT == 3 )); then
+        sub=('status:Installed, signed in, plan, quota' 'test:A live self-test' 'rules:devkit'"'"'s global rules for agents')
+        _describe 'agents command' sub
+      elif [[ "${words[3]}" == rules ]]; then
+        _arguments '--section[one section, by number or title words]:section:'
+      elif (( CURRENT == 4 )); then
+        sub=(claude codex all); _describe 'agent' sub
+      fi ;;
+    dashboard)
+      _arguments '--no-open[print the one-time link]' '--status[is a server running?]' '--stop[stop the server]' \
+        '--export[write a static copy to a file]:file:_files' '--path[write the static copy and print its path]' ;;
+    desktop)
+      (( CURRENT == 3 )) && { sub=('pack:Build the extension bundle' 'status:What Claude Desktop has installed'); _describe 'desktop command' sub; } ;;
     docker)
       local -a act; act=(up down status prune autostart-on autostart-off); _describe 'action' act ;;
     install)
-      _arguments '--only[steps]:steps:(config cli git handoff instructions skills claude codex docker launchd)' ;;
+      _arguments \
+        '(--version --unverified --why)--only[re-apply steps from the installed copy]:steps:_values -s , step config tools cli git handoff instructions skills claude codex desktop docker docs launchd' \
+        '(--only --unverified --why)--version[switch to a pinned copy kept from an earlier install]:version:_files -W $HOME/.local/share/devkit/releases -/' \
+        '(--only --version)--unverified[pin a commit that is neither a release nor tested]' \
+        '(--only --version)--why[the reason for --unverified]:reason:' ;;
+    setup)
+      if (( CURRENT == 3 )); then
+        sub=('prompt:Only the prompt helper'); _describe 'setup command' sub
+      fi
+      if [[ "${words[3]}" == prompt ]]; then
+        _arguments '--remove[take the prompt helper out again]' '(-y --yes)'{-y,--yes}'[accept every default]'
+      else
+        _arguments '(-y --yes)'{-y,--yes}'[accept every default]' '--skip-packages[do not install Homebrew or npm packages]'
+      fi ;;
+    prompt)
+      (( CURRENT == 3 )) && { sub=('refresh:Write it for this Mac'); _describe 'prompt command' sub; } ;;
     gc)
       _arguments '--apply[reclaim]' '-y[no prompt]' '-v[list kept items]' ;;
     adopt)

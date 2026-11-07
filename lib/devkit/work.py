@@ -241,9 +241,13 @@ def request_sync(reason: str = "", delay: int = 15):
         out = open(log, "a")
     except OSError:
         out = subprocess.DEVNULL
-    subprocess.Popen([sys.executable, str(core.DEVKIT_HOME / "bin" / "dev"), "sync", "--quiet", "--offline", "--delay",
-                      str(delay)], stdin=subprocess.DEVNULL, stdout=out, stderr=out, start_new_session=True,
-                     close_fds=True)
+    try:
+        subprocess.Popen([sys.executable, "-I", "-S", str(core.DEVKIT_HOME / "bin" / "dev"), "sync", "--quiet",
+                          "--offline", "--delay", str(delay)], stdin=subprocess.DEVNULL, stdout=out, stderr=out,
+                         start_new_session=True, close_fds=True)  # isolated, as its shebang runs it
+    finally:
+        if out is not subprocess.DEVNULL:
+            out.close()  # the child holds its own copy of the log
     return True
 
 
@@ -332,8 +336,10 @@ def update(it: dict, op: str, why: str = "", a=None, **changes) -> dict:
     return it
 
 
-def claim(it: dict, a=None, hours: float = None, why: str = "") -> dict:
-    """Take the lock (pull first, push immediately so other machines see it)."""
+def claim(it: dict, a=None, hours: float = None, why: str = "", branch: str = "") -> dict:
+    """Take the lock (pull first, push immediately so other machines see it). `branch`: the branch the work happens
+    on, kept as `branch:<name>` in the item's links (the private handoff), so task ids never go into branch names
+    and the branch map still finds the task (spec P-fy3bwa0pshk R7)."""
     a = a or actor()
     hours = hours or float(core.CFG.get("work", {}).get("lock_hours", 8))
     pull()
@@ -348,7 +354,10 @@ def claim(it: dict, a=None, hours: float = None, why: str = "") -> dict:
     if m.get("status") == "todo":
         m["status"], m["bucket"] = "doing", "now"
     m["assignee"] = m.get("assignee") or a["user"]
-    _touch(it, a, "claim", why, f"lock until {m['lock_expires']}")
+    links = [x for x in (m.get("links") or []) if x]
+    if branch and f"branch:{branch}" not in links:
+        m["links"] = links + [f"branch:{branch}"]
+    _touch(it, a, "claim", why, f"lock until {m['lock_expires']}" + (f", on {branch}" if branch else ""))
     it["path"].write_text(render(it))
     ok = _commit([it["path"]], f"{m['id']}: claim by {actor_str(a)}", wait=True)
     if not ok:
@@ -358,6 +367,16 @@ def claim(it: dict, a=None, hours: float = None, why: str = "") -> dict:
         if h2 and h2 != m["claimed_by"]:
             raise ValueError(f"{m['id']} was claimed by {h2} on another machine first")
     return it
+
+
+def reopen(it: dict, why: str, a=None) -> dict:
+    """A finished or cancelled item goes back to work (todo), with its reason in the changelog and the commit."""
+    if not (why or "").strip():
+        raise ValueError("reopening a finished item needs its reason: --why \"…\"")
+    status = (it.get("meta") or {}).get("status")
+    if status not in ("done", "cancelled"):
+        raise ValueError(f"{it['meta'].get('id')} is {status}, not finished: there is nothing to reopen")
+    return update(it, "reopen", why=why, a=a, status="todo")
 
 
 def release(it: dict, a=None, why: str = "", status: str = None) -> dict:
