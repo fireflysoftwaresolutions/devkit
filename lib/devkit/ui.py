@@ -56,7 +56,9 @@ TRAIL = "·   ˚  ✦   ⋆  ·  ✧"
 _PAL24 = {"a": (140, 140, 165), "w": (185, 228, 255), "e": (255, 255, 255), "b": (96, 96, 124),
           "g": (205, 255, 70), "s": (255, 214, 90),
           # Firefly brand: amber is the light (the spark), paper and charcoal the ink, stone the quiet text
-          "amber": (255, 179, 74), "paper": (243, 241, 235), "charcoal": (16, 17, 15), "stone": (191, 184, 171)}
+          "amber": (255, 179, 74), "paper": (243, 241, 235), "charcoal": (16, 17, 15), "stone": (191, 184, 171),
+          # the spark when the theme is unknown: 5.0:1 on white, 4.2:1 on black (the setup wizard's amber on light)
+          "amber_deep": (163, 95, 0)}
 _PAL256 = {"a": 245, "w": 153, "e": 231, "b": 240, "g": 154, "s": 221}
 # firefly lime -> cyan -> violet
 _STOPS = [(190, 255, 60), (0, 214, 255), (170, 90, 255)]
@@ -113,13 +115,19 @@ def logo_inline() -> str:
 ART_DIR = Path(__file__).resolve().parent / "art"
 
 
-def terminal_theme() -> str:
-    """dark | light — DEVKIT_THEME wins; else COLORFGBG ("fg;bg", bg 7/15 = light); default dark."""
+def known_theme() -> str:
+    """dark | light when the terminal says so, "" when it does not: DEVKIT_THEME wins; else COLORFGBG ("fg;bg", a
+    color number; bg 7/15 = light). macOS Terminal, Ghostty and others set neither."""
     t = os.environ.get("DEVKIT_THEME", "").lower()
     if t in ("dark", "light"):
         return t
     bg = os.environ.get("COLORFGBG", "").split(";")[-1]
-    return "light" if bg in ("7", "15") else "dark"
+    return ("light" if bg in ("7", "15") else "dark") if bg.isdigit() else ""
+
+
+def terminal_theme() -> str:
+    """dark | light — known_theme(), default dark."""
+    return known_theme() or "dark"
 
 
 # The devkit wordmark in half blocks, drawn by hand on the Manrope letterforms; ✦ (amber) is the dot of the i.
@@ -133,10 +141,13 @@ WORDMARK = [
 
 
 def wordmark() -> list:
-    """The wordmark rows, inked for the terminal's theme (paper on dark, charcoal on light)."""
-    dark = terminal_theme() == "dark"
+    """The wordmark rows, inked for the terminal's theme (paper on dark, charcoal on light). When the theme is unknown,
+    the terminal's own text color, which reads on its background whatever it is, and the deep amber spark."""
+    theme = known_theme()
+    if TRUECOLOR and not theme:
+        return [r.replace("✦", _fg(_PAL24["amber_deep"], "✦", True)) for r in WORDMARK]
     if TRUECOLOR:
-        ink = _PAL24["paper"] if dark else _PAL24["charcoal"]
+        ink = _PAL24["paper"] if theme == "dark" else _PAL24["charcoal"]
         return [_fg(ink, r.replace("✦", "\x00"), False).replace("\x00", _fg(_PAL24["amber"], "✦", True) +
                                                                        f"\x1b[38;2;{ink[0]};{ink[1]};{ink[2]}m")
                 for r in WORDMARK]
@@ -152,7 +163,7 @@ def banner(context: str = "", framed: bool = True) -> str:
     if width() < len(WORDMARK[0]) + 6:
         return f"\n  {logo_inline()}  {dim(meta)}\n"
     out = [""] + ["  " + r for r in wordmark()] + [""]
-    out.append("  " + (_fg(_PAL24["stone"], TAGLINE, False) if TRUECOLOR else TAGLINE))
+    out.append("  " + (_fg(_PAL24["stone"], TAGLINE, False) if TRUECOLOR and known_theme() else TAGLINE))
     out.append("  " + dim(f"{meta}  ·  {COPYRIGHT}"))
     return "\n".join(out) + "\n"
 
