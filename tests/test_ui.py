@@ -108,6 +108,14 @@ class BannerThemeTests(unittest.TestCase):
                             self.assertGreaterEqual(round(contrast(ink, bg), 2), floor, f"{run.strip()!r} {ink} on {bg}")
                     self.assertTrue([ink for ink, run in runs if "✦" in run and ink], "the spark keeps a color")
 
+    def test_a_dark_theme_without_truecolor_keeps_its_cyan_logo_and_yellow_spark(self):
+        # The light and unknown fixes above leave a dark 256-color terminal as it was: the one-line logo bold cyan, the
+        # wordmark's spark the terminal's yellow.
+        with mock.patch.object(ui, "COLOR", True):
+            logo, spark = ui.bold(ui.cyan("✦ devkit")), ui.yellow("✦")
+        self.assertIn(logo, self.banner(40, truecolor=False, COLORFGBG="15;0"))
+        self.assertIn(spark, self.banner(100, truecolor=False, COLORFGBG="15;0"))
+
 
 if __name__ == "__main__":
     unittest.main()
