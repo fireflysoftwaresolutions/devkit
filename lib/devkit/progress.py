@@ -1290,7 +1290,8 @@ def _take_messages(agent, sid, me: str, mark=True) -> list:
 IRREVERSIBLE = ("push", "pr", "merge", "release", "deploy", "delete-data", "migrate-production", "spend", "publish",
                 "external-message", "push-destructive", "pr-write", "api-write")
 TIER1 = ("push", "pr")  # a member's step grant covers these only (spec C6)
-NEVER_PREAPPROVED = ("publish", "deploy")
+NEVER_PREAPPROVED = ("publish", "deploy", "unknown", "developer-only", "backup",
+                     "embargo")  # the developer grants each one; checked again when a pre-approval is used
 PREAPPROVAL_HOURS = 8
 PREAPPROVAL_USES = {"merge": 1, "release": 1}  # every other action: 10
 
@@ -1613,7 +1614,8 @@ HUMAN_IDS_KEEP = 2000  # ids of the prompts and answers evidence came from, kept
 QUESTION_TOOLS = ("AskUserQuestion",)  # Codex's request_user_input joins when its payload is known (spec F0, S3)
 GRANT_CLASSES = ("push", "pr", "push-destructive", "pr-write", "merge", "release", "publish", "deploy", "api-write",
                  "external-message", "delete-data", "migrate-production", "spend",
-                 "unknown")  # C6's classes, IRREVERSIBLE, and a command known only when it runs (cmd-<hash>, RT1/RT2)
+                 "unknown",  # C6's classes, IRREVERSIBLE, and a command known only when it runs (cmd-<hash>, RT1/RT2)
+                 "developer-only", "backup", "embargo")  # B2: the developer's own decisions (guard.DEVELOPER_GRANTS)
 HEADLESS_SURFACES = ("SDK", "claude -p", "codex exec")  # nobody at the keyboard: DEVKIT_PREAPPROVE only
 TRANSCRIPT_DAYS = 30  # Claude Code's default cleanupPeriodDays: older evidence may have lost its transcript
 _APPROVE_LINE = re.compile(r"(?i)^approve\s+(D\d+)\s*(?::\s*(\S.*?))?\s*$")

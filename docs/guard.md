@@ -285,6 +285,35 @@ The grant opens that one command text, once, in the repository of the session yo
 minutes. `unknown` is never
 pre-approved with `dev crew mode auto --approve`.
 
+### The developer's own decisions
+
+Lifting an embargo and publishing a branch make its commits public, and the backup policy decides whether devkit
+publishes a project's branches at all. These commands are the action `developer-only`, tier 2:
+
+| Command | Grant line that opens it once |
+| --- | --- |
+| `dev branch embargo --lift <branch>` | `grant embargo <branch>` |
+| `dev backup --public` | `grant backup <project>` |
+| `dev backup policy on\|off\|ask` | `grant backup <project>` |
+
+A crew member never runs them. In the main session they are refused without a grant in every setting of
+`safeguards.irreversible_main`, the first week's audit included: that week measures the gate's guesses, and these are
+exact commands. A command that names one of them and that the guard cannot parse or check is refused too. Everything
+else keeps the audit week.
+
+Type the grant line on its own in your prompt, for example:
+
+```text
+grant embargo fix/token-leak
+grant backup acme/api
+```
+
+A grant opens one of these commands, for that branch or project only, in the repository of the session you typed it
+in, and expires after 30 minutes. `grant backup <project>` opens one public backup or one policy change, not both.
+`grant developer-only <target>` with the target the refusal names (`embargo/<branch>`, `backup-public/<project>`,
+`backup-policy/<project>`) works too. None of them is ever pre-approved with `dev crew mode auto --approve`. A dry run,
+the help, `dev branch embargo` (the list), and `dev backup policy` (the read) need no grant.
+
 ### Unfinished work in a commit
 
 | Command | Decision |

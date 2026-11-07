@@ -10,14 +10,17 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import time
 import unittest
 from pathlib import Path
 from unittest import mock
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "lib"))
+sys.path.insert(0, str(ROOT / "tests"))
 
 from devkit import audit, core, guard  # noqa: E402
+import test_progress as tp  # noqa: E402  the real session and transcript (TranscriptCase)
 
 
 def _git(repo, *args):
@@ -520,8 +523,9 @@ class RedTeam2(unittest.TestCase):
                 with self.subTest(cmd=cmd):
                     self.assertEqual(self.targets(cmd), [("developer-only", "backup-public/acme/widget"),
                                                          ("push", "feat/a")])
-            self.assertIn("`grant developer-only embargo/feat/x`", self.main("dev branch embargo --lift feat/x"))
-            self.assertNotIn("grant developer-only", self.main("dev branch embargo --lift"))  # `?`: no grant covers it
+            self.assertIn("`grant embargo feat/x`", self.main("dev branch embargo --lift feat/x"))
+            self.assertIn("`grant backup acme/widget`", self.main("dev backup policy off"))
+            self.assertNotIn("grant embargo", self.main("dev branch embargo --lift"))  # `?`: no grant covers it
             for cmd in ("dev branch embargo", "dev backup policy", "dev backup --public --dry-run",
                         "dev branch embargo --lift -h"):  # the list, the policy read, a dry run, the help
                 with self.subTest(cmd=cmd):
@@ -536,6 +540,109 @@ class RedTeam2(unittest.TestCase):
                                                              agent="claude", session="s1", grant=grant))
                 self.assertIsNotNone(guard.irreversible_verdict("dev branch embargo --lift feat/y", self.repo,
                                                                 agent="claude", session="s1", grant=grant))
+
+
+class DeveloperOnlyGrants(tp.TranscriptCase):
+    # B2 follow-up (the tech lead's decisions): the developer opens one developer-only action with a line that reads
+    # naturally, `grant embargo <branch>` or `grant backup <project>` (and `grant developer-only <target>` still works),
+    # through the real prompt hook, transcript and grant store: single use, 30 minutes, bound to its target and
+    # repository. Without one these exact commands are refused in every setting of safeguards.irreversible_main, the
+    # audit week included; everything else keeps the audit week.
+    def setUp(self):
+        super().setUp()
+        root = Path(self.state.tmp.name)
+        self.repo = make_repo(root)
+        for p in (mock.patch.object(guard, "current_project", return_value="acme/api"),
+                  mock.patch.object(audit, "policy_file", lambda: root / "no-policy.json"),
+                  mock.patch.object(core, "STATE", root / "state")):  # a fresh gate start: the audit week
+            p.start()
+            self.addCleanup(p.stop)
+        self.typed = 0
+
+    def type_line(self, text):
+        # the developer types the line: their own prompt in the session's transcript, then the prompt hook
+        self.typed += 1
+        pid = f"prompt-b2-{self.typed}"
+        self.write({"type": "user", "promptId": pid, "uuid": f"u-b2-{self.typed}", "isSidechain": False,
+                    "origin": {"kind": "human"}, "message": {"role": "user", "content": text}})
+        return self.prompt(text, pid)
+
+    def main(self, cmd, setting="enforce", now=None):
+        with settings(main=setting):
+            v = guard.irreversible_verdict(cmd, self.repo, agent="claude", session="s1", now=now)
+        return v[1] if v else None
+
+    def test_grant_embargo_opens_one_lift_of_that_branch(self):
+        self.type_line("grant embargo feat/x")
+        self.assertIn("grant embargo feat/y", self.main("dev branch embargo --lift feat/y") or "")  # its branch only
+        self.assertIsNone(self.main("dev branch embargo --lift feat/x"))
+        self.assertIn("grant embargo feat/x", self.main("dev branch embargo --lift feat/x") or "")  # once
+
+    def test_grant_backup_opens_one_public_backup_or_one_policy_change_of_that_project(self):
+        self.type_line("grant backup acme/api")
+        self.assertIn("grant backup acme/other", self.main("dev backup policy on -p acme/other") or "")
+        self.assertIsNone(self.main("dev backup --public feat/a"))
+        self.assertIn("grant backup acme/api", self.main("dev backup policy off") or "")  # its one use is gone
+        self.type_line("grant backup acme/api")
+        self.assertIsNone(self.main("dev backup policy off"))
+
+    def test_a_grant_expires_after_thirty_minutes(self):
+        self.type_line("grant embargo feat/x")
+        later = time.time() + tp.pg.GRANT_TTL + 60
+        self.assertIsNotNone(self.main("dev branch embargo --lift feat/x", now=later))
+        self.assertIsNone(self.main("dev branch embargo --lift feat/x"))
+
+    def test_grant_developer_only_with_the_gates_target_still_works(self):
+        self.type_line("grant developer-only embargo/feat/x")
+        self.assertIsNone(self.main("dev branch embargo --lift feat/x"))
+        self.assertIsNotNone(self.main("dev branch embargo --lift feat/x"))
+
+    def test_developer_only_actions_are_refused_in_every_setting_the_audit_week_included(self):
+        for setting in (None, "audit", "enforce", "bogus"):  # None: the first week on this Mac, which audits
+            with self.subTest(setting=setting):
+                self.assertIn("grant embargo feat/x", self.main("dev branch embargo --lift feat/x", setting) or "")
+                self.assertIn("grant backup acme/api", self.main("dev backup --public feat/a", setting) or "")
+                self.assertIsNotNone(self.main("dev backup policy ask", setting))
+        self.assertEqual(guard.irreversible_setting("main"), "audit")  # the week really is on
+        for setting in (None, "audit"):  # everything else keeps the audit week
+            with self.subTest(setting=setting):
+                self.assertIsNone(self.main("dev release --version 26.11.5", setting))
+                self.assertIsNone(self.main("dev backup feat/a", setting))
+        self.type_line("grant embargo feat/x")
+        self.assertIsNone(self.main("dev branch embargo --lift feat/x", "audit"))  # the grant opens it in audit too
+        rec = [r for r in self.gate_records() if (r.get("ref") or {}).get("irreversible") == "developer-only"]
+        self.assertEqual([(r["ref"]["result"], r["ref"]["setting"]) for r in rec[:1]], [("deny", "enforce")])
+
+    def test_unparsed_or_failing_checks_of_developer_only_commands_deny_in_audit(self):
+        self.assertIsNotNone(self.main("dev branch embargo --lift feat/x 'unclosed", "audit"))
+        self.assertIsNone(self.main("ls 'unclosed", "audit"))
+        with mock.patch.object(tp.pg, "use_grant", side_effect=RuntimeError("state busy")):
+            self.assertIsNotNone(self.main("dev backup --public feat/a", "audit"))
+            self.assertIsNone(self.main("dev release --version 26.11.5", "audit"))  # audit fails open (P4)
+
+    def test_crew_members_never_run_them_whatever_the_setting_or_grant(self):
+        self.type_line("grant embargo feat/x")
+        for setting in ("audit", "enforce"):
+            with self.subTest(setting=setting), settings(member=setting):
+                v = guard.crew_shell_verdict("dev branch embargo --lift feat/x", self.repo, None, "redteamprobe",
+                                             level="all", lane="a1", session="s1")
+                self.assertIn("Crew members never run", (v or ("", ""))[1])
+
+    def test_a_pre_approval_planted_in_the_run_opens_nothing(self):
+        run = tp.pg.load_run("claude", "s1")
+        run["mode"] = "auto"
+        run["project"] = "acme/api"
+        run["preapprovals"] = [{"id": f"P{i}", "action": act, "target": t, "repo": "acme/api", "uses_left": 5,
+                                "expires": time.time() + 3600, "evidence": {"channel": "E2"}, "ts": time.time()}
+                               for i, (act, t) in enumerate((("developer-only", "embargo/feat/x"),
+                                                             ("embargo", "feat/x")))]
+        tp.pg._save(run)
+        self.assertIn("grant embargo feat/x", self.main("dev branch embargo --lift feat/x") or "")
+
+    def gate_records(self):
+        files = sorted((Path(self.state.tmp.name) / "audit").glob("*.jsonl"))
+        return [r for f in files for r in map(json.loads, f.read_text().splitlines())
+                if r["action"] == "guard.irreversible"]
 
 
 if __name__ == "__main__":

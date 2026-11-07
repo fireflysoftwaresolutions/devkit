@@ -3894,6 +3894,12 @@ TIERS = {"push": 1, "pr": 1, "push-destructive": 2, "pr-write": 2, "merge": 2, "
 # a deploy may reach production, an unknown program may be anything, and a developer-only decision (B2: lifting an
 # embargo, publishing a branch that looks like a security fix, the backup policy) is theirs: they grant each one
 NEVER_PREAPPROVED = frozenset({"publish", "deploy", "unknown", "developer-only"})
+# The grant lines that read naturally for a developer-only target (B2): `grant embargo <branch>` opens one embargo
+# lift of that branch, `grant backup <project>` one public backup or one policy change of that project. `grant
+# developer-only <target>` names the gate's own target and opens it too. Exact targets only, never a pattern.
+DEVELOPER_GRANTS = {"embargo/": "embargo", "backup-public/": "backup", "backup-policy/": "backup"}
+# a developer-only command in text the guard cannot parse or check: denied in every setting, as the action is
+_DEV_ONLY_TEXT = re.compile(r"\bdev\b[\s\S]*\b(?:embargo|backup)\b")
 AUDIT_WEEK_S = 7 * 86400
 GATE_START = "irreversible-gate.json"  # in STATE: when the gate first ran on this Mac (the main session's audit week)
 _WHAT = {"push": "pushes {t}", "pr": "opens a PR from {t}", "push-destructive": "rewrites or deletes {t} on the remote",
@@ -5064,6 +5070,39 @@ def _grant_lookup(agent, session, lane, now):
     return look
 
 
+def developer_grant(target) -> tuple:
+    """The natural grant line's (class, target) for a developer-only target (`embargo/feat/x` -> ("embargo",
+    "feat/x")), or ("", "") when it has none."""
+    t = str(target or "")
+    for prefix, cls in DEVELOPER_GRANTS.items():
+        if t.startswith(prefix) and len(t) > len(prefix):
+            return cls, t[len(prefix):]
+    return "", ""
+
+
+def _grant_keys(a) -> list:
+    """The (class, target) pairs whose grant opens action `a`: its own, and for a developer-only action first the
+    natural one (B2)."""
+    keys = [(a["action"], a["target"])]
+    cls, t = developer_grant(a["target"]) if a["action"] == "developer-only" else ("", "")
+    return [(cls, t)] + keys if cls else keys
+
+
+def _look(look, a, consume):
+    for action, target in _grant_keys(a):
+        g = look(action, target, a["repo"], consume)
+        if g:
+            return g
+    return None
+
+
+def _setting_for(a, setting) -> str:
+    """The setting that applies to action `a`: a developer-only action is refused without a grant in every setting,
+    the audit week included (the week measures the gate's guesses, and these are exact commands); every other action
+    follows safeguards.irreversible_<who>."""
+    return "enforce" if a["action"] == "developer-only" else setting
+
+
 def _what(a) -> str:
     return _WHAT[a["action"]].format(t=a["target"])
 
@@ -5092,8 +5131,9 @@ def _main_reason(a) -> str:
                 f"program builds), so the guard can classify it. If it must run as it is, ask the developer first; "
                 f"they approve this exact command by typing this line on its own: `grant unknown {a['target']}`.")
     if a["action"] == "developer-only":  # B2
-        how = "" if _UNKNOWABLE.search(a["target"]) else \
-            f", or grant the main session this one by typing this line on its own: `grant developer-only {a['target']}`"
+        cls, t = developer_grant(a["target"])
+        how = "" if _UNKNOWABLE.search(a["target"]) or not cls else \
+            f", or grant the main session this one, once, by typing this line on its own: `grant {cls} {t}`"
         return ("`dev branch embargo --lift`, `dev backup --public` and `dev backup policy on|off|ask` are the "
                 "developer's own decisions: lifting an embargo or publishing a branch makes its commits public, and "
                 "the backup policy decides whether devkit publishes a project's branches at all. The developer types "
@@ -5148,20 +5188,21 @@ def _main_gate(acts, agent, session, grant, now):
     if not tier2:
         return None
     try:
-        found = [(a, None if _UNKNOWABLE.search(a["target"]) else look(a["action"], a["target"], a["repo"], False))
-                 for a in tier2]
-        missing = next((a for a, g in found if not g), None)
-        if missing and setting == "enforce":
-            _gate_record(missing, "deny", "main", setting, session=session)
+        found = [(a, None if _UNKNOWABLE.search(a["target"]) else _look(look, a, False)) for a in tier2]
+        missing = next((a for a, g in found if not g and _setting_for(a, setting) == "enforce"), None)
+        if missing:
+            _gate_record(missing, "deny", "main", "enforce", session=session)
             return deny(_main_reason(missing))
         for a, g in found:
-            used = look(a["action"], a["target"], a["repo"], True) if g else None
-            if g and not used and setting == "enforce":  # used up between the check and its use
-                _gate_record(a, "deny", "main", setting, session=session)
+            s = _setting_for(a, setting)
+            used = _look(look, a, True) if g else None
+            if g and not used and s == "enforce":  # used up between the check and its use
+                _gate_record(a, "deny", "main", s, session=session)
                 return deny(_main_reason(a))
-            _gate_record(a, "granted" if used else "audit", "main", setting, session=session, g=used)
-    except Exception as e:  # a tier-2 action is already named: enforce denies it
-        return _gate_failed("irreversible", e, setting, session)
+            _gate_record(a, "granted" if used else "audit", "main", s, session=session, g=used)
+    except Exception as e:  # a tier-2 action is already named: enforce denies it, and a developer-only one always
+        strict = any(_setting_for(a, setting) == "enforce" for a in tier2)
+        return _gate_failed("irreversible", e, "enforce" if strict else setting, session)
     return None
 
 
@@ -5174,14 +5215,18 @@ def irreversible_verdict(cmd: str, cwd, *, agent: str = "claude", session: str =
     try:
         acts = irreversible_actions(cmd, cwd or os.getcwd())
         if acts is None:
-            if not _IRREV_TEXT.search(_unescape(cmd or "")):
+            text = _unescape(cmd or "")
+            dev_only = bool(_DEV_ONLY_TEXT.search(text))
+            if not dev_only and not _IRREV_TEXT.search(text):
                 return None
-            setting = irreversible_setting("main", now)
+            setting = "enforce" if dev_only else irreversible_setting("main", now)
             a = {"action": "unparsed", "tier": 2, "target": "?", "repo": _repo_of(cwd), "words": str(cmd)[:200]}
             _gate_record(a, "deny" if setting == "enforce" else "audit", "main", setting, session=session)
             return deny(UNPARSED_REASON) if setting == "enforce" else None
         return _main_gate(acts, agent, session, grant, now) if acts else None
     except Exception as e:
+        if _DEV_ONLY_TEXT.search(_unescape(cmd or "")):  # it may name a developer-only action: denied in every setting
+            return _gate_failed("irreversible", e, "enforce", session, None)
         return _gate_failed("irreversible", e, _safe_setting(now), session, cmd or "")
 
 
@@ -5225,10 +5270,13 @@ def _member_gate(cmd, cwd, member, lane, agent, session, grant, now) -> str | No
     try:
         acts = irreversible_actions(cmd, cwd)
         if acts is None:
-            return UNPARSED_REASON if _IRREV_TEXT.search(_unescape(cmd)) and setting == "enforce" else None
+            text = _unescape(cmd)
+            return UNPARSED_REASON if _DEV_ONLY_TEXT.search(text) or (
+                _IRREV_TEXT.search(text) and setting == "enforce") else None
         for a in (a for a in acts if a["tier"] == 2):
-            _gate_record(a, "deny" if setting == "enforce" else "audit", who, setting, lane, session)
-            if setting == "enforce":
+            s = _setting_for(a, setting)
+            _gate_record(a, "deny" if s == "enforce" else "audit", who, s, lane, session)
+            if s == "enforce":
                 return (f"Crew members never run `{a['words']}`: it {_what(a)}, which cannot be undone (spec C6, tier "
                         f"2), granted or not. Put the exact command and why it is needed under \"Needs from "
                         f"the tech lead\" in your report.")
