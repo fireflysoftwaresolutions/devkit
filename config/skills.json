@@ -1,14 +1,14 @@
 {
-  "_comment": "Third-party skills fetched at install time from upstream at a pinned commit, then linked into ~/.claude/skills and ~/.agents/skills (Codex). Sources without `group` are always installed; a `group` source is installed when the group is listed in devkit config `skills.groups` (default: security-deep, postgres, observability). Bump a ref with `dev install --only skills` after review. Rationale per skill: docs/skills-and-plugins.md.",
+  "_comment": "Third-party skills fetched at install time from upstream at a pinned commit, then linked into ~/.claude/skills and ~/.agents/skills (Codex). Sources without `group` are always installed; a `group` source is installed when the group is listed in devkit config `skills.groups` (default: security-deep, postgres, observability). Bump a ref with `dev install --only skills` after review. `why` says why each source is here (`dev ext ls -v`); more in docs/skills-and-plugins.md.",
   "sources": [
     {
       "repo": "anthropics/claude-plugins-official",
       "ref": "cb421c81df4274fd28fd1ead817bc6ffea723fed",
       "license": "Apache-2.0",
+      "why": "Claude gets frontend-design from its plugin; Codex gets the same skill here",
       "agents": [
         "codex"
       ],
-      "_why": "Claude gets frontend-design from its plugin; Codex gets the same skill here",
       "skills": {
         "frontend-design": "plugins/frontend-design/skills/frontend-design"
       }
@@ -17,10 +17,10 @@
       "repo": "pbakaus/impeccable",
       "ref": "414603bf14c7a344edb466bb1f85690c77ce8b7d",
       "license": "Apache-2.0",
+      "why": "Codex gets impeccable from its plugin; Claude gets the same skill (tag skill-v4.8.0) here",
       "agents": [
         "claude"
       ],
-      "_why": "Codex gets impeccable from its plugin; Claude gets the same skill (tag skill-v4.8.0) here",
       "skills": {
         "impeccable": ".claude/skills/impeccable"
       }
@@ -29,6 +29,7 @@
       "repo": "mattpocock/skills",
       "ref": "4ae2317ddb22b046e26455e4f9c9b3aaaf62212d",
       "license": "MIT",
+      "why": "Design vocabulary: alignment interviews, domain models, deep modules, architecture reviews",
       "skills": {
         "grill-with-docs": "skills/engineering/grill-with-docs",
         "domain-modeling": "skills/engineering/domain-modeling",
@@ -40,6 +41,7 @@
       "repo": "anthropics/knowledge-work-plugins",
       "ref": "d900840716eb262e1feb17c6f4406c9ce0e06bcf",
       "license": "Apache-2.0",
+      "why": "Architecture decisions, system design reviews and incident response",
       "skills": {
         "architecture": "engineering/skills/architecture",
         "system-design": "engineering/skills/system-design",
@@ -50,6 +52,7 @@
       "repo": "likec4/likec4",
       "ref": "3cce820fadd11839d6bd745cf611722085558065",
       "license": "MIT",
+      "why": "C4 architecture diagrams as code",
       "skills": {
         "likec4-dsl": "skills/likec4-dsl"
       }
@@ -58,6 +61,7 @@
       "repo": "vercel-labs/agent-skills",
       "ref": "1a2c79d4e6c4a2283dc2c614b6538cbe1ed5ca62",
       "license": "MIT (SKILL.md frontmatter)",
+      "why": "React and Next.js performance and composition patterns",
       "skills": {
         "react-best-practices": "skills/react-best-practices",
         "composition-patterns": "skills/composition-patterns"
@@ -67,6 +71,7 @@
       "repo": "angular/skills",
       "ref": "aa7775d9679246b690045c0a2bf4fca0b35e4939",
       "license": "MIT (SKILL.md frontmatter, Google LLC)",
+      "why": "Angular code, architecture and new applications, from the Angular team",
       "skills": {
         "angular-developer": "angular-developer",
         "angular-new-app": "angular-new-app"
@@ -76,6 +81,7 @@
       "repo": "github/awesome-copilot",
       "ref": "3f6e39551b5782bbc6ba683074bb29f92ef982ab",
       "license": "MIT",
+      "why": "Spring Boot, JUnit, documentation, workflow hardening, Dependabot and threat models",
       "skills": {
         "java-springboot": "skills/java-springboot",
         "spring-boot-testing": "skills/spring-boot-testing",
@@ -92,6 +98,7 @@
       "repo": "anthropics/skills",
       "ref": "ca45fc496a3436251f191354091d557da31c15b5",
       "license": "per anthropics/skills (Anthropic)",
+      "why": "A structured workflow for specs, proposals and decision documents",
       "skills": {
         "doc-coauthoring": "skills/doc-coauthoring"
       }
@@ -100,6 +107,7 @@
       "repo": "trailofbits/skills",
       "ref": "470419e16f97e112d01fc32f4898aea1755015d9",
       "license": "CC-BY-SA-4.0 (attribution in NOTICE)",
+      "why": "Semgrep scans, false-positive checks, variant analysis and property-based tests",
       "skills": {
         "semgrep": "plugins/static-analysis/skills/semgrep",
         "fp-check": "plugins/fp-check/skills/fp-check",
@@ -111,6 +119,7 @@
       "repo": "dash0hq/agent-skills",
       "ref": "120c2a9f0bfd143ee9ccd911b95626ece33c37fe",
       "license": "Apache-2.0",
+      "why": "OpenTelemetry instrumentation and semantic conventions",
       "skills": {
         "otel-instrumentation": "skills/otel-instrumentation",
         "otel-semantic-conventions": "skills/otel-semantic-conventions"
@@ -120,6 +129,7 @@
       "repo": "trailofbits/skills",
       "ref": "470419e16f97e112d01fc32f4898aea1755015d9",
       "license": "CC-BY-SA-4.0 (attribution in NOTICE)",
+      "why": "Deeper security reviews: workflow auditing, supply chain, SARIF, sharp edges",
       "group": "security-deep",
       "skills": {
         "agentic-actions-auditor": "plugins/agentic-actions-auditor/skills/agentic-actions-auditor",
@@ -132,6 +142,7 @@
       "repo": "trailofbits/skills",
       "ref": "470419e16f97e112d01fc32f4898aea1755015d9",
       "license": "CC-BY-SA-4.0 (attribution in NOTICE); CodeQL needs GitHub Code Security for private code",
+      "why": "CodeQL queries and scans",
       "group": "codeql",
       "skills": {
         "codeql": "plugins/static-analysis/skills/codeql"
@@ -141,6 +152,7 @@
       "repo": "supabase/agent-skills",
       "ref": "c9be0e931b7930f7d02126d04774d904c381e7d7",
       "license": "MIT",
+      "why": "Postgres schema, migrations, queries and RLS",
       "group": "postgres",
       "skills": {
         "supabase-postgres-best-practices": "skills/supabase-postgres-best-practices"
@@ -150,6 +162,7 @@
       "repo": "dash0hq/agent-skills",
       "ref": "120c2a9f0bfd143ee9ccd911b95626ece33c37fe",
       "license": "Apache-2.0",
+      "why": "The OpenTelemetry Collector",
       "group": "observability",
       "skills": {
         "otel-collector": "skills/otel-collector"
@@ -159,6 +172,7 @@
       "repo": "hashicorp/agent-skills",
       "ref": "5e30fa5c867ba6777c37e4206babfd08049c396f",
       "license": "MPL-2.0",
+      "why": "Terraform style and tests",
       "group": "iac",
       "skills": {
         "terraform-style-guide": "plugins/terraform/skills/terraform-style-guide",
@@ -169,6 +183,7 @@
       "repo": "grafana/skills",
       "ref": "8fb72a527961f05e708f53d2a0500709e12d7970",
       "license": "Apache-2.0",
+      "why": "k6 load tests",
       "group": "load-testing",
       "skills": {
         "k6": "skills/grafana-k6/k6"
@@ -178,6 +193,7 @@
       "repo": "pactflow/pactflow-agent-skills",
       "ref": "1e980c8051a2b961b05ebd2951cf729b1b4a16b3",
       "license": "MIT",
+      "why": "Consumer-driven contract tests with Pact",
       "group": "contract-testing",
       "skills": {
         "pactflow": "plugins/swagger-contract-testing/skills/pactflow"
@@ -187,6 +203,7 @@
       "repo": "getsentry/skills",
       "ref": "e94f22214528d69899d09c627b3315ddc3544816",
       "license": "Apache-2.0",
+      "why": "Review third-party skills before installing them",
       "group": "skill-review",
       "skills": {
         "skill-scanner": "skills/skill-scanner"

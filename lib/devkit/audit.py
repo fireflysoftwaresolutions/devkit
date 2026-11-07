@@ -167,8 +167,13 @@ MESSAGE_ACTIONS = {"crew.message"}
 # the developer's evidence for a decision or a grant (compliance review 2, section 3): its detail is the line they
 # typed or the question tool's question and label, so only its length is recorded (a hash of a short option is
 # guessable: The Keymaker, M287); `answer` stays only when it is one of the decision's options. `covers`, the
-# channel, the transcript uuid (which verify checks) and the chain say the rest
+# channel, the transcript uuid (which verify checks) and the chain say the rest. A question tool answer also keeps
+# how the click became an option (evidence.match: exact, letter, words or free), whether the question was devkit's
+# own (evidence.asked: exact or reworded), and the clicked label when the call offered it (ref.label, the tech
+# lead's text like the options, redacted and cut to LABEL_CUT): never the developer's own text, never the question
+# (the Security engineer's question audit decision, 26.11.4)
 EVIDENCE_ACTIONS = {"crew.evidence"}
+LABEL_CUT = 120
 # the decision records, by the same rule (M285): crew.decision keeps the decision id, who asked, the option labels
 # (ref.options, redacted as usual) and the question's length; crew.decided keeps the answer, and the answer it
 # overrides, only when it names one of those options. Both keep the labels, so a record read again checks its
@@ -227,11 +232,17 @@ def _option(answer, options) -> str:
     return f"[free text: {len(s)} characters]"
 
 
+def evidence_label(label, rx=None) -> str:
+    """An offered label as crew.evidence keeps it: redacted, home folders as ~, at most LABEL_CUT characters."""
+    rx = _extra_rules(settings()["redact"]["extra"]) if rx is None else rx
+    return _clean(" ".join(str(label).split()), rx)[:LABEL_CUT]
+
+
 def _labels(options, rx) -> str:
-    """A decision's option labels as its records keep them: redacted as usual, joined by " | ", at most 300
+    """A decision's option labels as its records keep them: redacted as usual, joined by " | ", at most VALUE_CUT
     characters. Its answers are checked against the same text split again, when written and when read."""
     opts = options.split("|") if isinstance(options, str) else options if isinstance(options, (list, tuple)) else []
-    return _clean(" | ".join(t for t in (str(o).strip() for o in opts) if t), rx)[:300]
+    return _clean(" | ".join(t for t in (str(o).strip() for o in opts) if t), rx)[:VALUE_CUT]
 
 
 def _decided(rec: dict) -> dict:
@@ -367,6 +378,10 @@ ACTIONS = {
     "handoff": ("data", "info"),
     "job": ("job", "info"), "jobs": ("config", "notice"), "ci.watch": ("job", "info"), "ops": ("job", "info"),
     "state": ("lifecycle", "warning"), "install": ("lifecycle", "notice"),
+    # dev ext: a change to the plugins, skills and MCP servers that run (supply chain), and drift found
+    "ext": ("security", "notice"), "ext.drift": ("security", "warning"),
+    # an extension recorded or a change accepted (F1-R4: shown until the developer acknowledges it), the acknowledgement
+    "ext.accept": ("security", "warning"), "ext.ack": ("security", "notice"),
     "caller": ("security", "warning"), "caller.unverified": ("security", "notice"),
     "calls": ("lifecycle", "notice"), "progress": ("decision", "notice"), "session": ("lifecycle", "info"),
     "run": ("lifecycle", "notice"),  # a run orphaned by its ended session, or taken back by its resumed one
@@ -384,6 +399,7 @@ EXTRAS = {
     "exit": "evidence.exit", "duration": "evidence.duration", "cwd": "evidence.cwd", "tool": "evidence.tool",
     "rule": "evidence.rule", "rules": "evidence.rule", "count": "evidence.count", "file": "evidence.file",
     "channel": "evidence.channel", "transcript_uuid": "evidence.transcript_uuid", "verified": "evidence.check",
+    "match": "evidence.match", "asked": "evidence.asked", "label": "ref.label", "labels": "ref.labels",
     "flag": "evidence.flag", "paths": "evidence.file", "certainty": "evidence.check",
     "id": "ref.id", "by": "ref.by", "was": "ref.was", "type": "ref.type", "result": "ref.result",
     "answer": "ref.answer", "asked_by": "ref.asked_by", "irreversible": "ref.irreversible", "mode": "ref.mode",
@@ -394,6 +410,7 @@ EXTRAS = {
     # the decision's options, read by build to keep an answer that names one; crew.decision and crew.decided keep
     # them as ref.options, crew.evidence never stores them
     "options": "",
+    "layer": "ref.layer",  # dev ext: the layer a change or drift is in (team, user, project, retired)
 }
 RAISE = {"tampered": "critical"}  # a caller's outcome word that makes the record more severe
 EVIDENCE_KEYS = {p.split(".", 1)[1] for p in EXTRAS.values() if p.startswith("evidence.")}
@@ -407,6 +424,9 @@ SCHEMA = {
     "evidence": (dict, False), "ref": (dict, False), "prev": (str, True), "hash": (str, True),
 }
 _CUT = {"target": 300, "detail": 600, "why": 300, "run": 80}
+# characters a record keeps of each ref and evidence value: a decision's options and labels too, so a value this long
+# may have been cut, and progress refuses a decision whose labels would not fit (the Code reviewer's finding 2)
+VALUE_CUT = 300
 _B32 = "0123456789ABCDEFGHJKMNPQRSTVWXYZ"  # Crockford's base 32: ids sort by time
 
 
@@ -485,7 +505,7 @@ def _value(v, extra):
         v = ", ".join(str(x) for x in v)
     if isinstance(v, bool) or v is None or isinstance(v, (int, float)):
         return v
-    return _clean(str(v), extra)[:300]
+    return _clean(str(v), extra)[:VALUE_CUT]
 
 
 def _place(rec: dict, key: str, v, extra) -> None:
@@ -604,6 +624,8 @@ def build(action: str, target="", detail="", outcome="ok", extra: dict = None, c
     options = extra.pop("options", None)
     if str(action) in EVIDENCE_ACTIONS and extra.get("answer") not in (None, ""):
         extra["answer"] = _option(extra["answer"], options)
+    if str(action) in EVIDENCE_ACTIONS and extra.get("label") not in (None, ""):
+        extra["label"] = evidence_label(extra["label"], rx)
     out, code, raw = outcome_of(outcome)
     cat, sev = kind(action)
     rec = {"v": V, "id": new_id(ts), "ts": ts, "time": iso(ts), "actor": actor(), "action": str(action)[:80],
@@ -655,7 +677,12 @@ def kept(rec: dict, level: str) -> bool:
 
 # --------------------------------------------------------------------------- writing and the chain (R2)
 
-CHECKS: list = []  # more checks for verify: fn(record, path, line) -> problem text or None (spec C5 adds one)
+CHECKS: list = []  # more checks for verify: fn(record, path, line) -> problem text, a Note or None (spec C5 adds one)
+
+
+class Note(str):
+    """What a check says about a record that is no problem: it could not check the record, for example. verify
+    reports it, and the chain still holds."""
 
 
 def canonical(rec: dict) -> bytes:
@@ -828,7 +855,7 @@ def _forward(rec: dict, cfg: dict):
 # dev commands that only read; everything else is audited (and these too at audit.level all)
 READ_ONLY = {"help", "ls", "go", "status", "open", "overview", "standup", "dashboard", "team", "report", "time",
              "files", "find", "grep", "diff", "canary", "du", "doctor", "version", "agents", "calver", "audit",
-             "__complete", "hook", "guard", "plugin", "docs", "diagram", "stubs", "mcp",
+             "__complete", "completion", "hook", "guard", "plugin", "docs", "diagram", "stubs", "mcp",
              "test"}  # dev test run|plan|prove|audit: runs and reads tests (prove in a temp copy), changes nothing
 READ_SUB = {("task", "ls"), ("task", "show"), ("task", "history"), ("task", None), ("plan", "ls"), ("plan", None),
             ("lesson", "ls"), ("lesson", "show"), ("lesson", "scan"), ("lesson", "review"), ("lesson", None),
@@ -901,7 +928,7 @@ def _reclean(r: dict, rx) -> dict:
             out[k] = _clean(r[k], rx)[:_CUT.get(k)]
     for group in ("evidence", "ref", "crew"):
         if isinstance(r.get(group), dict):
-            out[group] = {k: _clean(v, rx)[:300] if isinstance(v, str) else v for k, v in r[group].items()}
+            out[group] = {k: _clean(v, rx)[:VALUE_CUT] if isinstance(v, str) else v for k, v in r[group].items()}
     if action in EVIDENCE_ACTIONS and not _UNLINE.fullmatch(str(r.get("detail") or "")) and \
             (out.get("ref") or {}).get("answer"):
         out["ref"] = {**out["ref"], "answer": _option(out["ref"]["answer"], None)}  # never checked against options
@@ -1077,9 +1104,10 @@ def _load_checks():
 
 
 def verify_file(path: Path) -> dict:
-    """The chain of one month file: its first broken link, and what the CHECKS find in the intact records."""
+    """The chain of one month file: its first broken link, and what the CHECKS find in the intact records: their
+    problems (`checks`) and their notes (`notes`, no problem)."""
     _load_checks()
-    res = {"path": str(path), "records": 0, "v1": 0, "first": None, "checks": []}
+    res = {"path": str(path), "records": 0, "v1": 0, "first": None, "checks": [], "notes": []}
     try:
         data = Path(path).read_bytes()
     except OSError as e:
@@ -1109,7 +1137,9 @@ def verify_file(path: Path) -> dict:
                         problem = chk(r, path, n)
                     except Exception as e:
                         problem = f"the check failed: {e}"
-                    if problem:
+                    if isinstance(problem, Note):
+                        res["notes"].append({**where, "kind": "note", "note": str(problem)})
+                    elif problem:
                         res["checks"].append({**where, "kind": "check", "problem": str(problem)})
                 last, tail = r["hash"], b""
             continue
@@ -1130,8 +1160,9 @@ def _diverges(local: bytes, published: bytes):
 
 def verify(team: bool = True) -> dict:
     """Check every local month file's chain and, with `team`, the handoff copies and that each local file extends its
-    published copy (the anchor). -> {ok, first, files, records, unpublished}; `unpublished`: v2 records chained but
-    not yet in the published copy, so not yet anchored."""
+    published copy (the anchor). -> {ok, first, files, records, unpublished, problems, notes}; `unpublished`: v2
+    records chained but not yet in the published copy, so not yet anchored; `notes`: what the checks say that is no
+    problem."""
     out = {"ok": True, "first": None, "files": [], "records": 0, "unpublished": 0 if team else None}
     local = sorted(AUDIT.glob("*.jsonl")) if AUDIT.exists() else []
     files = local + ([f for f in sorted((core.HANDOFF / "audit").rglob("*.jsonl"))]
@@ -1160,6 +1191,7 @@ def verify(team: bool = True) -> dict:
                 out["unpublished"] += sum(1 for ln in data[len(p):].splitlines() if _v2(ln))
     out["first"] = problems[0] if problems else None
     out["problems"] = problems
+    out["notes"] = [n for f in out["files"] for n in f.get("notes") or []]
     out["ok"] = not problems
     return out
 
@@ -1591,6 +1623,8 @@ def _cmd_verify(a, ui) -> int:
               + f": {p['problem']}")
         if len(res["problems"]) > 1:
             print(ui.dim(f"  and {len(res['problems']) - 1} more problem(s) in other files or checks"))
+    for n in res["notes"]:
+        print(f"  {ui.WARN} {core.tilde(n['path'])} line {n['line']}: {n['note']}")
     record("audit.verify", f"{len(res['files'])} file(s)", "the chain holds" if res["ok"] else
            f"{res['first']['kind']} at {core.tilde(res['first']['path'])}:{res['first']['line']}",
            "ok" if res["ok"] else "failed", count=res["records"],

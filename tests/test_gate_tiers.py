@@ -454,7 +454,8 @@ class MemberTests(GateCase):
 
     def test_a_member_command_the_guard_cannot_parse_that_names_an_action_is_denied(self):
         self.assertIsNotNone(self.member("gh pr merge 12 'unclosed"))
-        self.assertIsNone(self.member("ls 'unclosed"))
+        # D10 (round ten): any line the tokenizer cannot read is refused now, an action named or not
+        self.assertIn("cannot read this command", self.member("ls 'unclosed") or "")
 
     def test_a_member_reads_and_builds_as_before(self):
         for cmd in ("git status", "gh pr view 12", "pytest -q", "git commit -m 'gh pr merge 12'", "git push -n"):

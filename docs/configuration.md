@@ -85,13 +85,43 @@ matching files must also contain; with `content_files`, files of those globs mat
 }
 ```
 
+### Extensions
+
+| Key | Default | Meaning |
+| --- | --- | --- |
+| `ext.add` | `[]` | Your own plugins, skills, and MCP servers, on top of devkit's |
+| `ext.remove` | `[]` | Ids of devkit's extensions you do not want installed |
+| `ext.disable` | `[]` | Ids to keep installed but off |
+| `ext.enable` | `[]` | Ids devkit ships off that you turn on |
+
+Change them with `dev ext add|remove|enable|disable` (see
+[Commands › dev ext add](commands.md#dev-ext-add--remove--enable--disable)), which checks each entry and applies it,
+rather than by hand; `dev ext ls` shows the result with its layer. Ids are
+those `dev ext ls --json` prints. devkit itself and its security plugins (`security-guidance`, `claude-security`,
+`codex-security`) stay on whatever the overlay says. `dev install`, `dev config repair`, and the managed-settings
+lock use the same effective set, so they never undo your choice.
+
+```json
+{
+  "ext": {
+    "add": [
+      { "kind": "mcp", "name": "postgres", "agents": ["codex"], "command": "npx", "args": ["-y", "pg-mcp@2.1.0"],
+        "license": "MIT", "why": "Postgres tools" },
+      { "kind": "skill", "name": "k6", "repo": "grafana/skills", "ref": "<40-char sha>", "path": "skills/k6",
+        "license": "Apache-2.0", "why": "load tests" }
+    ],
+    "disable": ["plugin:claude:commit-commands@claude-plugins-official"]
+  }
+}
+```
+
 ### Work, progress, and display
 
 | Key | Default | Meaning |
 | --- | --- | --- |
 | `work.lock_hours` | `8` | How long a claimed task stays locked without renewal (see [Teams and machines](teams.md#locks-across-machines)) |
 | `progress.nudge_minutes` | `8` | Minutes without an update to the developer before the hooks remind the agent |
-| `progress.notify` | `true` | Desktop notifications when a run blocks or finishes, and when a long turn ends |
+| `progress.notify` | `true` | Desktop notifications when a run blocks or finishes, and when a long turn ends. Security notices, such as an extension accepted, show even when it is `false` |
 | `progress.notify_after_minutes` | `10` | A turn at least this long sends a notification when it ends |
 | `progress.slow_tool_seconds` | `20` | Tool calls at least this slow are recorded for `dev time` |
 | `progress.max_parallel` | `4` | The crew's slots: how many crew members may work at once (1 to 10), counting the helpers they launch; the guard refuses a launch that does not fit ([The crew](crew.md#guardrails)). The team's `policy/progress.json` in the handoff repository may set a lower ceiling, such as `{"max_parallel": 3}` |
@@ -261,7 +291,7 @@ Never edit the generated files directly; the next install overwrites them, and `
 | `GITLAB_TOKEN` | `dev ci status` for GitLab when `glab` is not installed (`GITLAB_PRIVATE_TOKEN` works too) |
 | `BITBUCKET_TOKEN`, or `BITBUCKET_USERNAME` and `BITBUCKET_APP_PASSWORD` | `dev ci status` for Bitbucket Pipelines, and the Bitbucket sign-in check of `dev doctor` |
 | `AZURE_DEVOPS_EXT_PAT` | `dev ci status` for Azure Pipelines and the `az devops` CLI (`AZURE_DEVOPS_PAT` works too for `dev ci status`) |
-| `DEVKIT_NO_NOTIFY=1` | No desktop notifications from that process |
+| `DEVKIT_NO_NOTIFY=1` | No progress notifications from that process; security notices, such as an extension accepted, still show |
 | `DEVKIT_THEME=dark\|light` | The wordmark's ink: paper on dark, charcoal on light (otherwise taken from `COLORFGBG`, default dark) |
 | `DEVKIT_ALLOW_STUBS=1` | One commit may take unfinished work the developer accepted |
 | `DEVKIT_SCOPE_OVERRIDE=1` | In the agent's environment: the main session may edit files a working crew member owns (emergencies) |
@@ -286,9 +316,10 @@ install](guard.md#devkits-own-state-configuration-and-install)).
 The shell integration and the agents' environments also set `DOCKER_HOST`, `TESTCONTAINERS_DOCKER_SOCKET_OVERRIDE`,
 `NG_CLI_ANALYTICS=false`, `NEXT_TELEMETRY_DISABLED=1`, and `SUPERPOWERS_DISABLE_TELEMETRY=1`. Claude Code's
 environment also turns off the telemetry and version checks of the security scanners (`TRIVY_DISABLE_TELEMETRY`,
-`TRIVY_SKIP_VERSION_CHECK`, `SEMGREP_SEND_METRICS=off`, `SYFT_CHECK_FOR_APP_UPDATE`, `GRYPE_CHECK_FOR_APP_UPDATE`) and
+`TRIVY_SKIP_VERSION_CHECK`, `SEMGREP_SEND_METRICS=off`, `SYFT_CHECK_FOR_APP_UPDATE`, `GRYPE_CHECK_FOR_APP_UPDATE`),
 the review prompts of the security plugins (`ENABLE_STOP_REVIEW=0`, `ENABLE_COMMIT_REVIEW=0`,
-`CLAUDE_SECURITY_SCAN_TIP=off`).
+`CLAUDE_SECURITY_SCAN_TIP=off`), and impeccable's update check and telemetry (`IMPECCABLE_NO_UPDATE_CHECK=1`,
+`IMPECCABLE_NO_TELEMETRY=1`).
 
 ## What everyone gets: the devkit repository
 

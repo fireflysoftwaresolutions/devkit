@@ -20,6 +20,8 @@ as devkit grows (D1-D11 of the crew gap review 2).
   D11 every row of the guardrail table in docs/crew.md cites a matrix id (`E-…`), and never a `planned` row as fact
   D12 the test suite is hermetic: tests/__init__.py activates tests/_hermetic.py, and every documented command that
       discovers tests/ runs it as a package (`-t .`), the only way unittest imports tests/__init__.py
+  D13 the shell completion checked in (shell/completions/_dev and dev.bash) is what the parser generates now, and
+      every completion rule (lib/devkit/completion.py RULES) names an argument the parser has
 
 Each check returns findings: (check, item, evidence, fix). `item` is stable across runs (no line numbers), so a known
 finding can be listed by it. The checks read files and import devkit's modules only: no network and no subprocess.
@@ -851,11 +853,19 @@ def d12_hermetic_tests(home=None) -> list:
     return out
 
 
+def d13_completion(home=None, parser=None) -> list:
+    """D13: the shell completion checked in (shell/completions/_dev and dev.bash) is what dev's parser generates now,
+    and every completion rule still names an argument of the parser."""
+    from . import completion
+    root = completion.tree(parser or _parser())
+    return [Finding("D13", item, evidence, fix) for item, evidence, fix in completion.drift(_home(home), root)]
+
+
 # --------------------------------------------------------------------------- all of them
 
 REPO_CHECKS = (("D1", d1_enforced_rows), ("D3", d3_unwired), ("D4", d4_commands), ("D5", d5_hook_events),
                ("D6", d6_config_keys), ("D7", d7_raci_hygiene), ("D9", d9_phase_proofs), ("D10", d10_file_anchors),
-               ("D11", d11_guardrails), ("D12", d12_hermetic_tests))
+               ("D11", d11_guardrails), ("D12", d12_hermetic_tests), ("D13", d13_completion))
 MACHINE_CHECKS = (("D2", d2_planned_rows), ("D7", d7_team_raci),
                   ("D8", lambda: d8_uninstalled_skills("claude") + d8_uninstalled_skills("codex")),
                   ("D10", d10_lesson_anchors))

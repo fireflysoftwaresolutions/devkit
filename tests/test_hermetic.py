@@ -151,6 +151,32 @@ class RefusedAccess(unittest.TestCase):
         self.assertEqual(0, subprocess.run(["/usr/bin/true", os.path.join(own, "x"), self.real["state"] + "-other"],
                                            cwd=own).returncode)
 
+    # a security notice ignores DEVKIT_NO_NOTIFY, so the run itself refuses osascript: a test never shows the
+    # developer a desktop notification, by any spelling of the program or way of starting it. The script only
+    # returns a word, so a run without the refusal shows nothing either
+    def test_a_desktop_notification_is_refused(self):
+        script = ["-e", "on run argv", "-e", "return item 1 of argv", "-e", "end run", "--", "x"]
+        line = "cd . && osascript -e 'return 1' >/dev/null"
+        starts = {
+            "absolute": lambda: subprocess.run(["/usr/bin/osascript", *script], capture_output=True),
+            "bare": lambda: subprocess.run(["osascript", *script], capture_output=True),
+            "shell=True": lambda: subprocess.run(line, shell=True, capture_output=True),
+            "sh -c": lambda: subprocess.run(["/bin/sh", "-c", line], capture_output=True),
+            "executable= with another argv[0]": lambda: subprocess.run(["note", *script], capture_output=True,
+                                                                       executable="/usr/bin/osascript"),
+            "posix_spawn with another argv[0]": lambda: os.waitpid(
+                os.posix_spawn("/usr/bin/osascript", ["note", *script], dict(os.environ)), 0),
+            "os.system": lambda: os.system(line),
+            "env": lambda: subprocess.run(["/usr/bin/env", "X=1", "osascript", *script], capture_output=True),
+        }
+        for name, start in starts.items():
+            with self.subTest(name):
+                self.assert_refused(start, "osascript")
+        # another program still starts, and a shell line that only names osascript as a word runs
+        self.assertEqual(0, subprocess.run(["/usr/bin/true"]).returncode)
+        self.assertEqual(0, subprocess.run("echo osascript >/dev/null", shell=True).returncode)
+        self.assertEqual(0, os.system("grep -c osascript /dev/null >/dev/null; true"))
+
     def real_tmp(self):
         d = tempfile.mkdtemp()
         self.addCleanup(shutil.rmtree, d, True)

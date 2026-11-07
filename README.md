@@ -121,7 +121,7 @@ dev doctor                   verify the whole setup                   dev agents
 
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="docs/images/dashboard/home-1440-dark.webp">
-  <img src="docs/images/dashboard/home-1440-light.webp" alt="The devkit dashboard's Home view: the title says 5 urgent items need you; four stat tiles with a segmented bar each (what needs you, initiatives, projects, and open tasks by state); the Needs you list with a decision waiting, a failed CI run, and a PR failing CI; Team now with a progress bar per running session; four Since yesterday counters with sparklines; and three initiative cards, each with a progress ring and its due date." width="100%">
+  <img src="docs/images/dashboard/home-1440-light.webp" alt="The devkit dashboard's Now view: the headline says 2 things need you, because a run is paused until you answer the decision D1 and CI failed on a branch. On the left, the Needs you queue: the decision with an amber bar, its options and the words to type, the failed CI run with the command to copy, a pull request with changes requested, and one Housekeeping row. On the right, two running runs, each with a landing strip of its steps and when it lands. Below, a line about a branch that is only on this Mac, and what finished since yesterday." width="100%">
 </picture>
 
 All commands are in [docs/commands.md](docs/commands.md).

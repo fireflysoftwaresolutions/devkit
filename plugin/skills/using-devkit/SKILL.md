@@ -60,7 +60,7 @@ diagram files without them.
 | CI/CD pipelines | `dev ci audit [--fix]`, `dev ci init`, `dev ci status` | `cicd`, `github-actions-hardening`, `devsecops` |
 | Architecture and design | `dev initiative` for cross-project work | `architecture`, `system-design`, `domain-modeling`, `codebase-design`, `likec4-dsl`, `diagrams` |
 | Backend | — | `backend`, `java-springboot`, `spring-boot-testing`, `java-junit` |
-| Frontend | Chrome DevTools MCP, `playwright-cli` | `angular-developer`, `react-best-practices`, `composition-patterns`, `frontend-design` / `impeccable` |
+| Frontend | Chrome DevTools MCP, `playwright-cli`, `dev impeccable <verb>` (impeccable's engine: `context` once at the start, `detect`, …; never its launcher by path) | `angular-developer`, `react-best-practices`, `composition-patterns`, `frontend-design` / `impeccable` |
 | Security | `dev sec scan` | `devsecops`, `/security-review` |
 | Branch, commit, PR | `dev branch new`, `dev branch ls` (where each branch lives, backed up or not), `dev commit --why "…" --verified "…"` (the commit template), `dev rebase`, `dev push`, `dev backup` (a copy on the remote when it starts no CI run; `dev backup policy` shows the project's policy, `dev branch embargo` keeps a branch off), `dev pr create [--draft]\|ready\|checks --watch\|merge`, `dev run view --failed`, `dev issue`; `dev git` and `dev gh` for anything else | `delivery`, `communicating` (commit and PR templates) |
 | Ship | `dev ci --run`, `dev ci status`, `dev calver`, `dev delivery`, `dev release`, `/devkit:ship` | `delivery`, `release-policy` |
@@ -77,9 +77,10 @@ diagram files without them.
 | Where things stand | `dev status`, `dev overview`, `dev standup`, `dev dashboard` (for the developer), `dev prompt` (the prompt helper; `dev setup prompt` adds it), `/devkit:status` | — |
 | Something is off | `dev doctor`, `dev canary` (status block results and the turns the Stop hook sent back), `dev agents` (both agents' versions, sign-in, quota), `dev config diff`, `dev guard check "<cmd>"`, `dev plugin validate` | — |
 | Background jobs and history | `dev jobs` (ls, run, set, logs), `dev audit`, `dev sync` (the handoff repository) | — |
+| Third-party plugins, skills, and MCP servers: what is installed, what pins it, why it is there, what is outdated | `dev ext ls [--agent claude\|codex] [-v] [--json]`, `dev ext outdated [<name>]`, `dev ext update <name> --why "…"` (a team pin, on a branch; `--apply` is the developer's), `dev ext add\|remove --team` (devkit's defaults, on a branch); `dev ext add\|remove\|enable\|disable` and `dev ext ack` (confirms the acceptances listed at the session start) are the developer's | `devsecops` |
 | Files, safely | `dev files`, `dev find`, `dev grep`, `dev diff`, `dev rm` (to the Trash, `--undo`), `dev mv`, `dev cp` | — |
 | Disk and Docker | `dev du` (what fills the disk, why, and the plan), `dev free <n>` (frees a plan item; `dev gc` is its old name), `dev docker up\|status\|trim` | `workspace` |
-| Install, update, or roll back devkit, and change its settings (the developer, in a terminal: the guard refuses them to agents) | `dev setup`, `dev setup prompt`, `dev setup commit-template`, `dev install [--only <steps>]`, `dev install --version <previous>` (rollback), `dev update`, `dev config set <key> <value>`, `dev version` | — |
+| Install, update, or roll back devkit, and change its settings (the developer, in a terminal: the guard refuses them to agents) | `dev setup`, `dev setup prompt`, `dev setup commit-template`, `dev setup shell` (the zsh helpers), `dev completion zsh\|bash` (Tab completion, generated from the parser), `dev install [--only <steps>]`, `dev install --version <previous>` (rollback), `dev update` (`dev update --check` only tells, and agents may run it), `dev config set <key> <value>`, `dev version` | — |
 | Claude Desktop chat and Cowork | `dev desktop status\|pack`; the extension runs `dev mcp` | — |
 
 ## Projects and initiatives

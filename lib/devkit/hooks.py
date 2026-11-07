@@ -288,6 +288,24 @@ def session_start(agent: str):
         pass
     text = "\n\n".join(x for x in (_continuity("on_session_start", agent, data),
                                    _with_catalog(context_for(cwd, agent), agent)) if x)
+    shown = []  # the notices the developer must see too, not only the agent (Claude: a system message)
+    try:  # devkit notices from files only, no network (spec P-fym583l7sg1)
+        from . import ext, updatecheck
+        notices = ((lambda: updatecheck.session_line(installed=updatecheck.installed_version()), False),  # daily
+                   (lambda: ext.session_line(cwd), False),  # extensions changed outside devkit, each audited once
+                   (lambda: ext.accepted_line(), True),  # extensions accepted since the developer's last ack
+                   (lambda: ext.last_ack_line(), True))  # that last ack, once, with its terminal
+    except Exception:
+        notices = ()
+        _log(f"session-start notices {agent}: {traceback.format_exc()[-300:]}")
+    for notice, to_developer in notices:
+        try:
+            line = notice()
+            text += f"\n\n{line}" if line else ""
+            if line and to_developer:
+                shown.append(line)
+        except Exception:
+            _log(f"session-start notice {agent}: {traceback.format_exc()[-300:]}")
     if os.environ.get("DEVKIT_GUARD", "").lower() == "off":  # spec F8, rule 5: never silent
         text = ("devkit · the guard is off in this session (DEVKIT_GUARD=off): it judges no tool call, so the "
                 "workspace rules, the crew's limits and the irreversible-action gate do not hold. That is recorded "
@@ -295,6 +313,9 @@ def session_start(agent: str):
                 + text)
     if agent == "codex":
         print(json.dumps({"hookSpecificOutput": {"hookEventName": "SessionStart", "additionalContext": text}}))
+    elif shown:  # Claude Code shows a system message to the developer, as the canary does at the Stop hook
+        print(json.dumps({"systemMessage": "\n\n".join(shown),
+                          "hookSpecificOutput": {"hookEventName": "SessionStart", "additionalContext": text}}))
     else:
         print(text)
 

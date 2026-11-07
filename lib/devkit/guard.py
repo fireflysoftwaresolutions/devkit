@@ -147,15 +147,25 @@ def record_bypasses(cmd, session: str = "", lane: str = "", mode: str = "") -> i
 UNKNOWN = Path("/__devkit_unknown__")
 
 
+_NUL = chr(0)
+
+
+def _c_path(p) -> str:
+    """A path as the system reads it, a C string: up to its first NUL. os.path raises on a NUL, and a guard that
+    raises lets the call through."""
+    return str(p).split(_NUL, 1)[0]
+
+
 def resolve(path, cwd) -> Path:
-    """Absolute real path, or UNKNOWN when it depends on shell state the hook cannot see ($VAR, $(…), `…`)."""
-    p = os.path.expanduser(os.path.expandvars(str(path)))
+    """Absolute real path, or UNKNOWN when it depends on shell state the hook cannot see ($VAR, $(…), `…`). A NUL ends
+    the path (_c_path), and the folder's."""
+    p = os.path.expanduser(os.path.expandvars(_c_path(path)))
     if "$" in p or "`" in p:
         return UNKNOWN
     if not os.path.isabs(p):
         if cwd is None or str(cwd) == str(UNKNOWN):
             return UNKNOWN
-        p = os.path.join(cwd, p)
+        p = os.path.join(_c_path(cwd), p)
     return Path(real(p))
 
 
@@ -278,22 +288,26 @@ def check_write_path(path, cwd, agent):
 
 # --------------------------------------------------------------------------- bash parsing
 
-def _newlines_to_semicolons(cmd: str) -> str:
-    out, q = [], None
-    i = 0
-    while i < len(cmd):
+def _newlines_to_semicolons(cmd: str, op: str = ";") -> str:
+    """`cmd` with each newline outside quotes made a `;` (`op` for tmux_list_refusal). A backslash outside single
+    quotes escapes the next character, as the tokenizer (shlex, posix) reads it, so `echo \\'` opens no quote that
+    would hide the next line. `#` is an ordinary character (round ten): the words after one are read as more
+    commands, which can only add a refusal, and a quote in a comment makes a line the guard cannot read
+    (UNREADABLE_REASON). A backslash-newline is read as given here; check_bash reads it as bash does too."""
+    out, q, i, n = [], None, 0, len(cmd)
+    while i < n:
         ch = cmd[i]
+        if ch == "\\" and q != "'" and i + 1 < n and cmd[i + 1] != "\n":
+            out.append(cmd[i:i + 2])
+            i += 2
+            continue
         if q:
-            if ch == "\\" and q == '"' and i + 1 < len(cmd):
-                out.append(cmd[i:i + 2])
-                i += 2
-                continue
             if ch == q:
                 q = None
         elif ch in ("'", '"'):
             q = ch
         elif ch == "\n":
-            ch = ";"
+            ch = op
         out.append(ch)
         i += 1
     return "".join(out)
@@ -376,12 +390,13 @@ def strip_heredocs(cmd: str) -> str:
     return _split_heredocs(cmd)[0]
 
 
-def split_commands(cmd: str, ops: bool = False):
+def split_commands(cmd: str, ops: bool = False, newline: str = ";"):
     """-> list of (argv, redirect_targets). None when the command cannot be tokenised. With `ops`, each entry is
-    (argv, redirect_targets, the operator after the segment ('|', '&&', ';', … or ''), its here-strings (<<< …))."""
-    cmd = strip_heredocs(cmd)
+    (argv, redirect_targets, the operator after the segment ('|', '&&', ';', … or ''), its here-strings (<<< …)).
+    `newline`: the operator a newline outside quotes becomes (`&` for tmux_list_refusal only)."""
     try:
-        lex = shlex.shlex(_newlines_to_semicolons(cmd), posix=True, punctuation_chars=";&|()<>")
+        lex = shlex.shlex(_newlines_to_semicolons(strip_heredocs(cmd), newline), posix=True,
+                          punctuation_chars=";&|()<>")
         lex.whitespace_split = True
         lex.commenters = ""
         tokens = list(lex)
@@ -956,10 +971,49 @@ def _pipe_gate_open(cmd) -> str:
     return "hatch" if "DEVKIT_PIPE_OK" in names else ""
 
 
+# a line with a word that starts with `#` and a backslash-newline at its end: bash ends the comment at the newline
+_COMMENT_CONTINUES = re.compile(r"(?m)^([^\n]*(?<![^ \t\n;&|()])#[^\n]*)\\\n")
+
+
+def _continued_readings(cmd: str) -> list:
+    """The other readings of a command with a backslash-newline (round eleven, the tech lead's decision on the code
+    reviewer's round ten finding 3): every pair removed, as bash joins the words (`dev \\` and `install` on the next
+    line), and the backslash of a line with a `#` word dropped with its newline kept, as bash ends a comment at its
+    newline (`ls # x \\` and `dev install`). check_bash checks each one as well as the command as given, so a reading
+    can only add a refusal; no grammar is read. [] for a command without a backslash-newline."""
+    if "\\\n" not in cmd:
+        return []
+    joined = cmd.replace("\\\n", "")
+    comments = _COMMENT_CONTINUES.sub(lambda m: m.group(1) + "\n", cmd).replace("\\\n", "")
+    return list(dict.fromkeys(r for r in (joined, comments) if r != cmd))
+
+
 def check_bash(cmd: str, cwd: str, agent: str):
+    """The guard's verdict on a shell command, or None. A command with a backslash-newline is checked again in each
+    of its other readings (_continued_readings): the first refusal stands, and the escape hatches each reading used
+    are recorded. An ask (a write outside ~/Development) stands only when no reading refuses: approving the write
+    must not also run what another reading refuses."""
+    v = _check_bash_reading(cmd, cwd, agent)
+    if v and v[0] == "deny":
+        return v
+    first = v
+    hatches = list(_BYPASSES)
+    for alt in _continued_readings(cmd or ""):
+        w = _check_bash_reading(alt, cwd, agent)
+        if w and w[0] == "deny":
+            return w
+        first = first or w
+        hatches += [b for b in _BYPASSES if b not in hatches]
+    _BYPASSES[:] = hatches
+    return first
+
+
+def _check_bash_reading(cmd: str, cwd: str, agent: str):
     _BYPASSES.clear()
     if not cmd or not cmd.strip():
         return None
+    if _NUL in cmd:
+        return deny(NUL_REASON)
     v = protected_bash(cmd, cwd or os.getcwd()) or evidence_forgery(cmd, cwd or os.getcwd())
     if v:
         return v
@@ -970,9 +1024,62 @@ def check_bash(cmd: str, cwd: str, agent: str):
         if how == "hatch":
             _hatch({"DEVKIT_PIPE_OK"}, "DEVKIT_PIPE_OK", "pipe-gate", PIPE_REASON)
     segs = split_commands(cmd)
-    if segs is None:
-        return _attribution(cmd) if re.search(r"\b(git|gh)\b", cmd) else None
-    ecwd = cwd or os.getcwd()
+    if segs is None:  # D10: protected_bash's walker refuses it first; this keeps check_bash closed on its own
+        return deny(UNREADABLE_REASON)
+    return _check_segments(cmd, segs, cwd or os.getcwd(), agent)
+
+
+# N2: what a segment runs one level down, which the rules on destructive commands read as they read the top level: a
+# shell's -c line, eval's words, and the command find -exec and xargs run (so `find … -exec sh -c '<line>'` is read
+# too). Their own rules judge a command that takes the file names they substitute ({}), as rm, cp or mkdir do.
+_PATH_TAKERS = frozenset({"rm", "unlink", "mkdir", "touch", "cp", "mv", "rsync", "ditto"})
+
+
+def _shell_line(args):
+    """The -c line of a shell's arguments, or None (a script file or its input is not a line given here)."""
+    k = 0
+    while k < len(args):
+        a = args[k]
+        if a == "--" or not a.startswith(("-", "+")):
+            return None
+        if a.startswith("-") and not a.startswith("--") and "c" in a[1:]:
+            return _with_positionals(args[k + 1], args[k + 2:]) if k + 1 < len(args) else None
+        k += 2 if a in ("-o", "+o", "-O", "+O", "--rcfile", "--init-file") else 1
+    return None
+
+
+def _nested_lines(argv) -> list:
+    run = _unwrap(argv)
+    if not run:
+        return []
+    if run != list(argv):  # a runner (uv run, npx, npm exec, timeout, a wrapper): its command is read as a line (F3)
+        return [shlex.join(run)]
+    argv = run
+    name, args = os.path.basename(argv[0]), argv[1:]
+    if name in _SHELLS:
+        line = _shell_line(args)
+        return [line] if line else []
+    if name == "eval":
+        return [" ".join(args)] if args else []
+    inners = []
+    if name == "xargs":
+        i, takes = 0, {"-I", "-n", "-P", "-L", "-d", "-E", "-s", "-a", "-J", "-R", "-S"}
+        while i < len(args) and args[i].startswith("-"):
+            i += 2 if args[i] in takes else 1
+        inners.append(args[i:])
+    elif name == "find":
+        for k, a in enumerate(args):
+            if a in ("-exec", "-execdir", "-ok", "-okdir"):
+                sub = args[k + 1:]
+                inners.append(sub[:next((j for j, x in enumerate(sub) if x in (";", "+")), len(sub))])
+    runs = [_unwrap(x) for x in inners]
+    return [shlex.join(x) for x in runs if x and os.path.basename(x[0]) not in _PATH_TAKERS]
+
+
+def _check_segments(cmd: str, segs, ecwd: str, agent: str, depth: int = 0, outer_envs=frozenset()):
+    """The rules on destructive commands for each segment of `cmd`, then for the lines it runs one level down
+    (_nested_lines, to depth 4). `outer_envs`: the variables set for the shell that runs this line, which its
+    commands inherit (an escape hatch on `sh -c` reaches the line)."""
     raw_segments = re.split(r"&&|\|\||;|\n|\|", cmd)
     pending_adds = []
     for idx, (argv0, redirs) in enumerate(segs):
@@ -982,7 +1089,7 @@ def check_bash(cmd: str, cwd: str, agent: str):
         argv = _strip_prefix(argv0)
         while argv and argv[0] in _RESERVED:  # `if …; then rm -rf ~; fi` runs rm
             argv = _strip_prefix(argv[1:])
-        envs = frozenset(a.split("=", 1)[0] for a in argv0[:len(argv0) - len(argv)] if "=" in a)
+        envs = frozenset(a.split("=", 1)[0] for a in argv0[:len(argv0) - len(argv)] if "=" in a) | outer_envs
         for r in redirs:
             v = check_write_path(r, ecwd, agent)
             if v:
@@ -998,6 +1105,13 @@ def check_bash(cmd: str, cwd: str, agent: str):
         if name == "pushd" and len(argv) > 1:
             ecwd = str(resolve(argv[1], ecwd))
             continue
+        dev = _dev_args(argv)
+        if dev and dev[:1] == ["impeccable"]:  # the engine writes where --target and --file point, from its folder
+            here = _prefix_chdir(argv0[:len(argv0) - len(_strip_prefix(argv0))], ecwd)
+            for t in impeccable_paths(impeccable_engine_words(dev[1:]), writes=True):
+                v = check_write_path(t, here, agent)
+                if v:
+                    return v
         res = None
         if name == "git":
             res = check_git(argv, ecwd, seg_text + " " + (raw_segments[idx] if idx < len(raw_segments) else ""), envs,
@@ -1078,6 +1192,11 @@ def check_bash(cmd: str, cwd: str, agent: str):
                     res = deny(f"Do not create backup copies ({dest.name}); git already keeps history.")
         if res:
             return res
+        for line in (_nested_lines(argv) if depth < 4 else []):
+            inner = split_commands(line)
+            res = _check_segments(line, inner, ecwd, agent, depth + 1, envs) if inner else None
+            if res:
+                return res
     return None
 
 
@@ -1694,13 +1813,13 @@ def protected_patch(patch: str, cwd):
 
 def _lexical(path, cwd) -> Path:
     """Like resolve(), but the last component is not followed: the path of a link itself, not of what it points at."""
-    p = os.path.expanduser(os.path.expandvars(str(path)))
+    p = os.path.expanduser(os.path.expandvars(_c_path(path)))
     if "$" in p or "`" in p:
         return UNKNOWN
     if not os.path.isabs(p):
         if cwd is None or str(cwd) == str(UNKNOWN):
             return UNKNOWN
-        p = os.path.join(cwd, p)
+        p = os.path.join(_c_path(cwd), p)
     head, tail = os.path.split(os.path.normpath(p))
     return Path(os.path.join(real(head), tail)) if tail and tail not in (".", "..") else Path(real(p))
 
@@ -1815,6 +1934,219 @@ INSTALL_REASON = ("`dev install` and `dev update` change what every hook, the gu
                   f"installed now. {_TAIL}")
 
 
+TERMINAL_REASON = ("Opening a Terminal or iTerm window, or a .command or .tool file (which macOS runs in one), starts "
+                   "a shell the guard cannot read, with no agent marker, re-parented to launchd and with a terminal: "
+                   "to devkit it looks like the developer's terminal, where `dev install` and `dev ext ack` are "
+                   "theirs (F1-R4, spec C10, K1). Run the command itself through the Bash tool, where the guard reads "
+                   "it, or ask the developer to run it in their terminal. Opening files, folders and URLs in other "
+                   f"apps stays open. {_TAIL}")
+_TERMINAL_APPS = re.compile(r"(?:^|/)(?:terminal|iterm2?|iterm 2|warp|ghostty|alacritty|kitty|wezterm|hyper)"
+                            r"(?:\.app)?/?$|^com\.(?:apple\.terminal|googlecode\.iterm2|mitchellh\.ghostty)$|"
+                            r"^dev\.warp\.", re.I)
+_OPEN_VALUES = frozenset({"-a", "-b", "--env", "--stdin", "--stdout", "--stderr", "-u", "--url", "-s", "--arch"})
+TERMINAL_TYPING_REASON = (
+    "Agents cannot type into a terminal session; the developer can. What runs in a screen or tmux session looks like "
+    "the developer's own terminal to devkit (F1-R4, spec C10, K1), and the guard does not read what is typed there, "
+    "so it refuses screen's -X and -Q (stuff and every other command sent to a session), tmux's send-keys, "
+    "send-prefix, paste-buffer, set-buffer, load-buffer, pipe-pane and command-prompt, the tmux commands and options "
+    "that carry a command (run-shell, if-shell, set-hook, source-file, bind-key, a hook, default-command, "
+    "default-shell, a #() format), what can build a #() from pieces (set-option or setw with -a or -F, a format with "
+    "the E or T modifier such as #{E:@x}), a tmux command list (`\\;`, `';'`: run one tmux command per call, joined "
+    "with &&), a configuration file (screen -c, tmux -f), a screen or tmux word the shell or a runner fills in (a $ "
+    "or a backtick in any tmux word, except in the shell command that new, split-window and the like start), and a "
+    "tmux command it does not know. Run the command through the Bash tool, where the guard "
+    "reads it, or start it in a session of its own: `screen -dm <command>`, `tmux new -d '<command>'`. "
+    f"{_TAIL}")
+UNREADABLE_REASON = (
+    "The guard cannot read this command: it holds a quote that is never closed (an apostrophe in a comment counts, as "
+    "in `# don't`, and so does `\\'` inside `$'…'`), so the guard cannot tell which commands run, and bash may still "
+    "run the lines before it. Close the quote, or remove the comment or the apostrophe; a heredoc body is not read, "
+    "so text with apostrophes can go in one (`cat <<'EOF' > file`). The same holds for a line the command hands to a "
+    "shell (`sh -c`, `eval`, a heredoc a shell reads), and for a command line in a program's code (`os.system`, "
+    f"`execSync`) that names dev, claude, codex, tmux, screen, osascript or open. {_TAIL}")
+NUL_REASON = ("This command holds a NUL character, which shells read in different ways (bash ends the line there, "
+              "zsh keeps it in the word), so the guard cannot tell what runs. Write the command without it; to "
+              f"produce a NUL byte, use `printf '\\0'`. {_TAIL}")
+PATH_NUL_REASON = ("This path holds a NUL character. The system reads a path up to its first NUL, so the file written "
+                   "would not be the one named, and the guard's rules cannot read the path. Write the path without it.")
+
+
+def terminal_open_refusal(argv) -> bool:
+    """F1-R4 part 2: `open -a Terminal|iTerm …`, `open -b <a terminal's bundle id>`, and `open` of a .command or
+    .tool file (Terminal runs it) start a shell the guard cannot read, which passes set_by_developer()."""
+    if not argv or os.path.basename(str(argv[0])) != "open":
+        return False
+    args, i = [str(a) for a in argv[1:]], 0
+    while i < len(args):
+        a = args[i]
+        if a in ("-a", "-b") or (a.startswith("-") and not a.startswith("--") and a[-1:] in ("a", "b") and len(a) > 2):
+            if i + 1 < len(args) and _TERMINAL_APPS.search(args[i + 1].strip().rstrip("/")):
+                return True
+            i += 2
+            continue
+        if a == "--args":  # the words after it go to the app, not to open
+            return False
+        if a in ("-u", "--url") or a.startswith("--url="):  # a file:// URL to a .command file opens it in Terminal
+            url = a.split("=", 1)[1] if "=" in a else (args[i + 1] if i + 1 < len(args) else "")
+            if url.casefold().rstrip("/").endswith((".command", ".tool")):
+                return True
+        if a in _OPEN_VALUES:
+            i += 2
+            continue
+        if not a.startswith("-") and a.casefold().rstrip("/").endswith((".command", ".tool")):
+            return True
+        i += 1
+    return False
+
+
+EXT_REASON = ("This command changes the plugins, skills or MCP servers that run in every session on this Mac: "
+              "`dev ext add|remove|enable|disable`, `dev ext update --apply`, or a `claude plugin|mcp` or `codex "
+              "plugin|mcp` verb that adds, removes, switches or updates one (spec P-fym583l7sg1, K1), or `dev ext "
+              "ack`, which confirms that the extensions accepted since the last session were the developer's. Only "
+              "the developer does that, in a terminal, with `dev ext`, which audits it and records it in the lock. Ask "
+              "them, with the command and why. Agents may run `dev ext ls`, `dev ext outdated`, `dev ext update "
+              "<name> --to <ref> --why \"…\"` (a team pin, on a branch of the devkit checkout) and the vendor CLIs' "
+              f"read-only verbs (`list`, `get`, `details`). {_TAIL}")
+
+
+def _ext_refusal(args) -> bool:
+    """What changes the extensions that run on this Mac, or acknowledges what was accepted, is the developer's: an
+    allowlist that fails closed (L-fyrlq1cola2): `dev ext ls|outdated`, a team edit (`add|remove --team`, no
+    `--project`) and `update` without `--apply` stay open; `ack`, `enable`, `disable` and any other verb are refused. The parser takes no abbreviated options, so the exact words are enough; `--team` counts only before
+    the `--` that ends the options (after it, it is the entry's name: L1)."""
+    if args[:1] != ["ext"]:
+        return False
+    sub, words = (args[1:2] or [""])[0], args[2:]  # an MCP server's own command line is one quoted word
+    if sub in ("", "-h", "--help", "ls", "outdated"):
+        return False
+    if sub == "update":
+        return "--apply" in words
+    if sub in ("add", "remove"):
+        return "--team" not in _dev_opts(words) or "--project" in words
+    return True  # enable, disable, ack (F1-R4: the developer's acknowledgement) and any verb a later devkit adds
+
+
+# H1 and its re-reviews (the Security engineer): the agents' own CLIs change the same plugins, marketplaces and MCP
+# servers `dev ext` does, outside its audit trail and lock. Two rounds of a verb block list over a loose parse each
+# lost to a new spelling (an option's value read as the group, `--`, help where a parser takes it as a value), so the
+# rule is an allowlist that fails closed (round three): a claude or codex call whose words include a group word
+# anywhere is the developer's, unless its whole argv is one of these exact read-only forms. NAME is one argument that
+# is no option; `claude plugins` is `claude plugin`. A group alone prints its help.
+_VENDOR_WORDS = frozenset({"plugin", "plugins", "mcp", "marketplace"})
+_NAME = "<name>"
+_VENDOR_READ = {
+    "claude": frozenset({("plugin",), ("plugin", "list"), ("plugin", "details", _NAME), ("plugin", "validate", _NAME),
+                         ("plugin", "marketplace", "list"), ("mcp",), ("mcp", "list"), ("mcp", "get", _NAME)}),
+    "codex": frozenset({("plugin",), ("plugin", "list"), ("plugin", "marketplace", "list"), ("mcp",), ("mcp", "list"),
+                        ("mcp", "get", _NAME)}),
+}
+_VENDOR_FLAGS = frozenset({"-h", "--help", "--json"})  # none takes a value, so the words around them are plain
+
+
+def _vendor_word(word: str) -> bool:
+    """A group word: the word itself, in any case, or an option's value written `--option=<word>`."""
+    w = str(word).casefold()
+    return w in _VENDOR_WORDS or (w.startswith("-") and w.partition("=")[2] in _VENDOR_WORDS)
+
+
+_SHELL_GLOB = frozenset("{*?[")
+_XARGS_VALUES = frozenset({"-I", "-n", "-P", "-L", "-d", "-E", "-s", "-a", "-J", "-R", "-S"})
+
+
+def _shell_made(word) -> bool:
+    """F2 (re-review four): a word the shell may turn into other words before claude or codex reads it: one that holds
+    `$` or a backtick (a variable, "$@", a substitution, ANSI-C quoting `$'…'`), or one without whitespace that holds
+    `{`, `*`, `?` or `[` (brace expansion, a glob). The guard reads words with their quotes removed, so a quoted `*`
+    counts too; a word with whitespace was quoted, and in quotes the shell expands only `$` and backticks."""
+    w = str(word)
+    return "$" in w or "`" in w or (not any(c.isspace() for c in w) and bool(_SHELL_GLOB & set(w)))
+
+
+def _xargs_command(args) -> list:
+    """The command xargs runs, as its arguments give it (before the words it adds from its input)."""
+    i = 0
+    while i < len(args) and args[i].startswith("-"):
+        i += 2 if args[i] in _XARGS_VALUES else 1
+    return list(args[i:])
+
+
+def _vendor_read_only(cli: str, args) -> bool:
+    """The whole argv after the program is one of _VENDOR_READ's forms, with no option but -h, --help and --json."""
+    if not {a for a in args if a.startswith("-")} <= _VENDOR_FLAGS:
+        return False
+    words = [a for a in args if not a.startswith("-")]
+    if cli == "claude" and words[:1] == ["plugins"]:
+        words[0] = "plugin"
+    return any(len(form) == len(words) and all(f in (w, _NAME) for f, w in zip(form, words))
+               for form in _VENDOR_READ[cli])
+
+
+def vendor_ext_refusal(argv, cwd=None, names=(), more=False) -> bool:
+    """True when a claude or codex call may add, remove, switch or update a plugin, a marketplace or an MCP server:
+    its words include a group word (_vendor_word) and its argv is not an exact read-only form. The program is read as
+    the shell finds it (agent_cli: a path from the folder the command runs in, a link on the PATH, the npm package a
+    runner starts); one the shell picks at run time (a variable, or a bare name with PATH set by the command or the
+    shell before it, `names`) may be claude, so a group word with it is refused as well (N3). With claude or codex, a
+    word the shell expands (_shell_made) may be a group word, and xargs adds words the guard cannot see (`more`), so
+    such a call is no read-only form either (F2 of re-review four)."""
+    if not argv:
+        return False
+    prog, args = str(argv[0]), [str(a) for a in argv[1:]]
+    if os.path.basename(prog) == "xargs":
+        inner = _unwrap(_xargs_command(args))
+        return bool(inner) and vendor_ext_refusal(inner, cwd, names, more=True)
+    named = any(_vendor_word(a) for a in args)
+    if not (named or more or any(_shell_made(a) for a in args)):
+        return False
+    cli = agent_cli(prog, cwd, search=True)
+    if not cli:
+        cli, args = _agent_script(argv, cwd) or ("", args)
+    if not cli:
+        if not named:
+            return False
+        if "$" in prog or "`" in prog or ("PATH" in set(names) and "/" not in prog):
+            return True
+        if "/" not in prog or prog.startswith("@"):  # a bare name the PATH finds, or a scoped npm package
+            return False
+        path = os.path.expanduser(prog)
+        if not os.path.isabs(path):
+            path = os.path.join(str(cwd), path) if cwd and str(cwd) != str(UNKNOWN) else ""
+        return not (path and os.path.exists(path))  # a copy or a link the command has yet to make
+    return more or any(_shell_made(a) for a in args) or not _vendor_read_only(cli, args)
+
+
+_JS_RUNTIMES = frozenset({"node", "nodejs", "bun", "deno"})
+_AGENT_SCRIPTS = (("/@anthropic-ai/claude-code/", "claude"), ("/@openai/codex/", "codex"))
+
+
+def _agent_script(argv, cwd):
+    """(cli, its arguments) when a JS runtime runs Claude Code's or Codex's own script from their npm package
+    (`node …/@openai/codex/bin/codex.js mcp add …`), else None."""
+    if os.path.basename(str(argv[0])) not in _JS_RUNTIMES:
+        return None
+    rest = [str(a) for a in argv[1:]]
+    for k, a in enumerate(rest):
+        if a.startswith("-"):
+            continue
+        path = os.path.expanduser(a)
+        if not os.path.isabs(path) and cwd and str(cwd) != str(UNKNOWN):
+            path = os.path.join(str(cwd), path)
+        real = os.path.realpath(_c_path(path)) if os.path.isabs(path) else ""
+        cli = next((c for pkg, c in _AGENT_SCRIPTS if pkg in real), "")
+        if cli:
+            return cli, rest[k + 1:]
+    return None
+
+
+_UPDATE_CHECK = frozenset({"--check", "--quiet", "--record"})
+
+
+def _update_check(args) -> bool:
+    """`dev update --check [--quiet] [--record]`: read-only (it fetches tags, never moves the checkout or the pinned
+    copy), so agents may run it. Exact words only: an abbreviation or any other word is the update itself."""
+    return args[:1] == ["update"] and "--check" in args[1:] and set(args[1:]) <= _UPDATE_CHECK
+
+
 LOCK_REASON = ("`dev config {sub}` adds or removes the managed-settings drop-in that keeps user and project settings "
                "from turning off devkit's hooks (`sudo`, outside the agent's reach for a reason). It is a safeguards "
                "change, which only the developer makes, in a terminal (RT5, spec C11). Ask them to run it, and say "
@@ -1837,12 +2169,32 @@ GUARDLESS_REASON = ("This starts a nested {cli} session with {what}, so its tool
 _AGENT_PACKAGES = {"claude-code": "claude", "codex": "codex"}  # npm packages whose binary is claude or codex (RT8)
 
 
-def agent_cli(word) -> str:
-    """'claude' or 'codex' when a command word runs one of them: the binary, or the npm package a runner such as
-    npx, bunx, pnpm dlx or yarn dlx starts (`@anthropic-ai/claude-code@latest`, `claude-code`, `@openai/codex`), and
-    '' otherwise (RT8)."""
-    name = os.path.basename(str(word or ""))
-    if name in _AGENT_CLIS:
+def _agent_binary(path: str) -> str:
+    """'claude' or 'codex' when a path names one of their binaries: a file named so, or a file in Claude Code's
+    versions folder (`~/.local/bin/claude` links to `~/.local/share/claude/versions/<version>`; F1)."""
+    p = Path(path)
+    if p.name in _AGENT_CLIS:
+        return p.name
+    return "claude" if (p.parent.name, p.parent.parent.name) == ("versions", "claude") and p.name else ""
+
+
+def agent_cli(word, cwd=None, search=False) -> str:
+    """'claude' or 'codex' when a command word runs one of them: the binary, by its name, by Claude Code's versions
+    folder, or by a path that resolves to either (a link, `..`; a relative one from `cwd`, the folder the command runs
+    in: N3); with `search`, a bare name the PATH resolves to either (a link named otherwise); or the npm package a
+    runner such as npx, bunx, pnpm dlx or yarn dlx starts (`@anthropic-ai/claude-code@latest`, `claude-code`,
+    `@openai/codex`); '' otherwise (RT8)."""
+    text = str(word or "")
+    name = _agent_binary(text)
+    if not name and "/" in text:
+        path = os.path.expanduser(os.path.expandvars(text))
+        if not os.path.isabs(path) and cwd and str(cwd) != str(UNKNOWN):
+            path = os.path.join(str(cwd), path)
+        name = _agent_binary(os.path.realpath(_c_path(path))) if os.path.isabs(path) and "$" not in path else ""
+    elif not name and search and text and not set(text) & set("$`"):
+        found = shutil.which(text)
+        name = _agent_binary(os.path.realpath(found)) if found else ""
+    if name:
         return name
     pkg = str(word or "")
     if pkg.startswith("@"):  # @scope/name@version
@@ -1853,9 +2205,10 @@ def agent_cli(word) -> str:
     return _AGENT_PACKAGES.get(pkg.casefold(), "")
 
 
-def guardless_session(name, argv, names=()) -> str | None:
-    """Why a nested claude or codex call would run without devkit's hooks or sandbox, or None (RT6)."""
-    name = agent_cli(argv[0]) if argv else ""
+def guardless_session(name, argv, names=(), cwd=None) -> str | None:
+    """Why a nested claude or codex call would run without devkit's hooks or sandbox, or None (RT6). A relative path
+    to the binary is read from `cwd`, the folder the command runs in (N3)."""
+    name = agent_cli(argv[0], cwd) if argv else ""
     if not name:
         return None
     home = sorted(set(names) & _AGENT_HOME_ENV)
@@ -2004,6 +2357,7 @@ class _Shell:
         self.bodies = heredoc_bodies(cmd)
         self.unresolved = []
         self.exported = set(exported)
+        self.typed = True  # the command holds this text (D10 refuses it unread); False for a file read from disk
 
     def target(self, t, cwd, verb="write", holds=False, track=True):
         lp = _lexical(t, cwd)
@@ -2045,7 +2399,11 @@ class _Shell:
             if self.note_mentions and re.search(r">|\b(tee|cp|mv|rm|ln|sed|perl|python|ruby|node|dd|git)\b", self.cmd):
                 return deny("This command names a project's handoff note or the team's records, may write files, "
                             "and the guard cannot parse it to see where (B2a). Split it into simple commands.")
-            return None
+            # D10 (round ten): a line the command holds and the tokenizer cannot read is refused, here and in the shell
+            # lines it runs; a script file or a sourced file is read as before (not refused for its comments)
+            return deny(UNREADABLE_REASON) if self.typed else None
+        if tmux_list_refusal(self.cmd):
+            return deny(TERMINAL_TYPING_REASON)
         cwd = self.cwd
         for argv0, redirs in segs:
             argv0, clobber, k = list(argv0), [], 0
@@ -2091,10 +2449,11 @@ class _Shell:
         inner.note_mentions = inner.note_mentions or self.note_mentions
         return inner
 
-    def nested(self, text, cwd, same_shell=False, names=()):
+    def nested(self, text, cwd, same_shell=False, names=(), typed=True):
         if not text or self.depth >= 4:
             return None
         inner = self.child(text, cwd, names)
+        inner.typed = typed
         v = inner.run()
         self.unresolved += inner.unresolved
         if same_shell:  # source and eval run in this shell: what they export stays set
@@ -2106,8 +2465,8 @@ class _Shell:
         python -m devkit…), a program that imports devkit, or an agent session (its hooks run devkit)."""
         if _dev_args(argv) is not None:
             return "a devkit command"
-        if agent_cli(argv[0]):
-            return f"a nested {agent_cli(argv[0])} session, whose hooks run devkit"
+        if agent_cli(argv[0], cwd):
+            return f"a nested {agent_cli(argv[0], cwd)} session, whose hooks run devkit"
         if _INTERP.match(name) and len(argv) > 1:
             if argv[1] == "-m" and len(argv) > 2 and argv[2].split(".")[0] == "devkit":
                 return "a devkit command"
@@ -2145,9 +2504,15 @@ class _Shell:
         v = self.forged_env(name, argv, cwd, names)
         if v:
             return v
-        why = guardless_session(name, argv, set(names) | self.exported)
+        why = guardless_session(name, argv, set(names) | self.exported, cwd)
         if why:
             return deny(why)
+        if vendor_ext_refusal(argv, cwd, set(names) | self.exported):
+            return deny(EXT_REASON)
+        if terminal_open_refusal(argv):
+            return deny(TERMINAL_REASON)
+        if terminal_typing_refusal(argv):
+            return deny(TERMINAL_TYPING_REASON)
         if _INTERP.match(name) and _dev_args(argv) is None:
             why = code_session_refusal(argv, cwd, self.bodies)
             if why:
@@ -2162,13 +2527,13 @@ class _Shell:
         if installer and _devkit_installer(resolve(installer, cwd)):
             return deny(INSTALL_REASON)
         if name in _SHELLS:
-            for text in _shell_inputs(args, cwd, self.bodies):
-                v = self.nested(text, cwd, names=names)
+            for text, typed in _shell_sources(args, cwd, self.bodies):
+                v = self.nested(text, cwd, names=names, typed=typed)
                 if v:
                     return v
             return None
         if name in ("source", ".") and args:
-            return self.nested(_read_small(resolve(args[0], cwd)), cwd, same_shell=True)
+            return self.nested(_read_small(resolve(args[0], cwd)), cwd, same_shell=True, typed=False)
         if name == "eval":
             return self.nested(" ".join(args), cwd, same_shell=True)
         if name == "xargs":
@@ -2222,12 +2587,17 @@ class _Shell:
     def dev(self, args, cwd, names=()):
         helps = _dev_skips(args[1:], "-h", "--help")
         words = _dev_words(args)
-        if args[:1] in (["install"], ["update"]) and not helps:
+        if args[:1] in (["install"], ["update"]) and not helps and not _update_check(args):
             return deny(INSTALL_REASON)
+        if _ext_refusal(args) and not helps:
+            return deny(EXT_REASON)
         if args[:1] in (["claude"], ["codex"]):  # dev claude|codex execs the agent with the words after the query
-            why = guardless_session(args[0], [args[0], *[a for a in args[1:] if a != "--"]], names)
+            inner = [args[0], *[a for a in args[1:] if a != "--"]]
+            why = guardless_session(args[0], inner, names)
             if why:
                 return deny(why)
+            if vendor_ext_refusal(inner, cwd, names):
+                return deny(EXT_REASON)
         if words[:2] == ["config", "set"]:
             keys = [k for a in args[2:] for k in {a.casefold(), a.casefold().split("=", 1)[-1]}]
             if any(k.startswith("safeguards") for k in keys):
@@ -2240,6 +2610,15 @@ class _Shell:
             return deny(LOCK_REASON.format(sub=words[1]))
         if args[:1] == ["hook"] and not helps:
             return deny(HOOK_REASON)
+        if args[:1] == ["impeccable"]:  # its words reach the engine: agents run only the allowlist's forms
+            words = impeccable_engine_words(args[1:])
+            refusal = impeccable_refusal(words)
+            if refusal:
+                return deny(refusal)
+            # it writes where --target and --file point, from the folder the shell is in: judged as any write
+            v = self.targets(impeccable_paths(words, writes=True), cwd, track=False)
+            if v:
+                return v
         if args[:1] in (["rm"], ["mv"], ["cp"]):
             return self.segment(args[0], args, [], cwd)
         if args[:1] and (args[0] in _DEV_READ or args[0] in _DEV_TEXT):
@@ -2290,9 +2669,14 @@ class _Shell:
         i, takes = 0, {"-I", "-n", "-P", "-L", "-d", "-E", "-s", "-a", "-J", "-R", "-S"}
         while i < len(args) and args[i].startswith("-"):
             i += 2 if args[i] in takes else 1
+        if terminal_typing_refusal(_unwrap(args[i:], more=True), more=True):  # the words it adds may type
+            return deny(TERMINAL_TYPING_REASON)
         names, inner = _env_split(args[i:])
         if not inner:
             return None
+        why = _xargs_dev_refusal(inner)
+        if why:
+            return deny(why)
         name = os.path.basename(inner[0])
         if name not in _READERS:  # it adds paths read from its input, which the guard cannot see
             self.unresolved.append(f"xargs {name}")
@@ -2317,15 +2701,12 @@ class _Shell:
                 inner = args[k + 1:]
                 inner = inner[:next((j for j, x in enumerate(inner) if x in (";", "+")), len(inner))]
                 inames, inner = _env_split(inner)
-                iname = os.path.basename(inner[0]) if inner else ""
-                v = self.forged_env(iname, inner, cwd, inames) if inner else None
-                if v:
-                    return v
-                why = guardless_session(iname, inner, inames) if inner else None
-                if why:
-                    return deny(why)
-                idev = _dev_args(inner) if inner else None
-                v = self.dev(idev, cwd) if idev is not None else None
+                if not inner:
+                    continue
+                iname = os.path.basename(inner[0])
+                # N2: find runs its command as the shell runs a segment, so every rule of a segment applies to it, and
+                # a shell it starts (`-exec sh -c '<line>'`) has its line read again, as `sh -c` has
+                v = self.segment(iname, inner, [], cwd, inames)
                 if v:
                     return v
                 inplace = iname in ("sed", "yq") and any(x.startswith("-i") or x.startswith("--in") for x in inner)
@@ -2387,9 +2768,16 @@ class _Shell:
                     f"open it without 'w' or 'a' and print it. {_TAIL}")
 
 
-def _unwrap(argv):
+_FIND_RUNS = frozenset({"-exec", "-execdir", "-ok", "-okdir"})  # find's primaries that run a command
+
+
+def _unwrap(argv, more: bool = False, stop=()):
     """The command a segment really runs: without env/sudo/nohup prefixes, shell keywords (`then`, `do`, `{`, `!`),
-    `timeout N`, `uv run`, `npx`."""
+    `timeout N`, `uv run`, the package runners (npx, npm exec|x, bun x, yarn exec, `pnpm|yarn <claude|codex>`: F3 of
+    re-review four) and the wrappers. A screen or tmux call that terminal_typing_refusal refuses is returned as it is,
+    for the walker to refuse; `more`: a runner (xargs) adds words after these; `stop`: launchers (screen, tmux)
+    returned as they are. A segment that starts with a find primary or operator (`-exec`, `-name`, `,`) is the rest of
+    a find expression the tokenizer split at `\\;`, `\\(` or `\\)`, and is read as find's (round ten)."""
     while True:
         argv = _strip_prefix(argv)
         if not argv:
@@ -2402,17 +2790,23 @@ def _unwrap(argv):
             while rest and rest[0].startswith("-"):
                 rest = rest[1:]
             argv = rest[1:]
-        elif (n in ("uv", "poetry", "pipenv", "pdm", "hatch", "rye") and argv[1:2] == ["run"]) or \
-                (n == "pnpm" and argv[1:2] in (["exec"], ["dlx"])) or (n == "yarn" and argv[1:2] == ["dlx"]):
-            argv = argv[2:]
-            while argv and argv[0].startswith("-"):
-                argv = argv[1:]
-        elif n in ("npx", "bunx", "uvx", "pnpx"):
-            argv = argv[1:]
-            while argv and argv[0].startswith("-"):
-                argv = argv[1:]
+        elif n in _PACKAGE_MANAGERS and _pm_runs(n, (pm := _pm_verb(argv[1:]))[0]):
+            argv = _runner_command(pm[1], calls=n == "npm")
+        elif n in ("npx", "pnpx", "bunx", "uvx"):
+            argv = _runner_command(argv[1:], calls=n == "npx")
+        elif n in ("pnpm", "yarn") and agent_cli((_runner_command(argv[1:]) or [""])[0]):
+            argv = _runner_command(argv[1:])  # `pnpm claude …` runs the package's bin, or the PATH's
         elif n in _WRAPPERS:
             argv = _wrapped(n, argv[1:])
+        elif n in ("screen", "tmux") and n in stop:
+            return argv
+        elif n in ("screen", "tmux"):
+            refused, run = (_screen_parse if n == "screen" else _tmux_parse)([str(a) for a in argv[1:]], more)
+            if refused:  # it types into a session: the call itself is what the walker refuses
+                return argv
+            argv = run
+        elif n == "expect":
+            argv = _expect_command(argv[1:])
         elif n == "yarn" and argv[1:3] == ["workspaces", "foreach"]:  # runs `yarn <command>` in each workspace
             rest, i = argv[3:], 0
             while i < len(rest) and rest[i].startswith("-"):
@@ -2420,8 +2814,58 @@ def _unwrap(argv):
             return [argv[0], *rest[i:]]
         elif n == "yarn" and argv[1:2] == ["workspace"] and len(argv) > 2:  # `yarn workspace <name> <command>`
             return [argv[0], *argv[3:]]
+        elif (n == "," or (n.startswith("-") and len(n) > 1)) and any(a in _FIND_RUNS for a in argv):
+            return ["find", *argv]
         else:
             return argv
+
+
+# options of the package runners that take a value (`npx -p <pkg>`, `npm exec --package <pkg>`, pnpm's `--filter`,
+# uv's `--with <pkg>`), so the word after one is no command; a runner's `-c '<line>'` (npx, npm exec) hands the line to
+# a shell. The package managers' own options before their verb (`npm --prefix . exec`, `uv --directory . run`) are read
+# with the same list (F3-R4).
+_RUNNER_VALUES = frozenset({"-p", "--package", "-w", "--workspace", "--prefix", "--registry", "--cache", "--userconfig",
+                            "--loglevel", "--script-shell", "--filter", "-F", "-C", "--dir", "--cwd",
+                            "--with", "--python", "--directory", "--project", "--env-file", "--group", "--extra",
+                            "--index", "--with-requirements", "--with-editable", "--from", "--default-index",
+                            "--index-url", "--extra-index-url", "--find-links", "-f", "--cache-dir", "--config-file",
+                            "--package", "-P", "--only-group", "--no-group", "--python-preference", "--color"})
+_PACKAGE_MANAGERS = frozenset({"npm", "pnpm", "yarn", "bun", "uv", "poetry", "pipenv", "pdm", "hatch", "rye"})
+
+
+def _pm_verb(args) -> tuple:
+    """A package manager's verb and the words after it, past its own options and their values (_RUNNER_VALUES):
+    `npm --silent exec -- x` -> ("exec", ["--", "x"])."""
+    i = 0
+    while i < len(args) and args[i].startswith("-") and args[i] != "--":
+        i += 2 if args[i] in _RUNNER_VALUES else 1
+    return (args[i] if i < len(args) else ""), list(args[i + 1:])
+
+
+def _pm_runs(n: str, verb: str) -> bool:
+    """True when this package manager's verb runs the command after it (npm exec|x, pnpm exec|dlx, yarn exec|dlx,
+    bun x, uv|poetry|pipenv|pdm|hatch|rye run)."""
+    return verb in {"npm": ("exec", "x"), "pnpm": ("exec", "dlx"), "yarn": ("exec", "dlx"), "bun": ("x",)}.get(
+        n, ("run",))
+
+
+def _runner_command(args, calls=False) -> list:
+    """The command a package runner runs, from its arguments: the first word that is no option (or the words after
+    `--`), past the values of _RUNNER_VALUES; with `calls`, a `-c|--call '<line>'` comes back as `sh -c <line>`.
+    [] when it names none."""
+    i = 0
+    while i < len(args):
+        a = args[i]
+        if a == "--":
+            return list(args[i + 1:])
+        if calls and (a in ("-c", "--call") or a.startswith("--call=")):
+            line = a.split("=", 1)[1] if "=" in a else (args[i + 1] if i + 1 < len(args) else "")
+            return ["sh", "-c", line] if line else []
+        if a.startswith("-"):
+            i += 2 if a in _RUNNER_VALUES else 1
+            continue
+        return list(args[i:])
+    return []
 
 
 # programs that run the command they are given (Seraph, M243): `script -q /dev/null cmd`, `watch -n 600 cmd`, GNU
@@ -2466,6 +2910,286 @@ def _wrapped(n, args):
     return rest
 
 
+# F1-R4 part 2: screen, tmux and expect start a command in a terminal of their own, which is re-parented to launchd
+# and has a pty, so it passes set_by_developer(); the guard reads the command each one starts, as a shell line where
+# the tool hands it to one. Round nine (the tech lead's decision, lesson L-fyrlq1cola2): what screen and tmux would
+# type into a session is not read but refused, by an allowlist that fails closed (terminal_typing_refusal). Screen
+# expands $VAR, ${VAR} and $:cap: in each -X word and `stuff -k` types a terminal key, so no reading of it held.
+_SCREEN_FLAGS = frozenset("46aAdDfiLlmnOqrRUvx")  # screen's options without a value (-dm, -fn, -ln, -U, …)
+_SCREEN_VALUES = frozenset("ehpsStT")  # with one: the rest of the word, or the next word
+_SCREEN_SESSION = frozenset("dDrRx")  # last in its word, the next word may name a session (-r x, -x x, -d x)
+
+
+def _screen_parse(args, more: bool = False) -> tuple:
+    """-> (refused, command): whether a screen call may send a command to a session or holds what the guard does not
+    read, and the command it starts ([] for none). Its options are read as screen reads them: letters in one word,
+    a value as the rest of the word or the next word, and an optional session name after -d, -D, -r, -R, -x, -ls,
+    -list and -wipe. Refused: -X and -Q (they send a screen command: stuff, exec, …), -c (a configuration file), a
+    letter or long option screen does not have, a word the shell or a runner fills in (it may be -X), a session name
+    followed by more words (the command may start at either), and with `more` (xargs adds words) a call whose
+    command the words it adds could still change."""
+    i, n = 0, len(args)
+    while i < n:
+        a = args[i]
+        if _shell_made(a):
+            return True, []
+        if a == "--":
+            i += 1
+            break
+        if not a.startswith("-") or a == "-":
+            break
+        i += 1
+        if a == "-Logfile":
+            i += 1
+            continue
+        if a.startswith("--"):
+            if a in ("--help", "--version"):
+                continue
+            return True, []
+        session = a in ("-ls", "-list", "-wipe")
+        for k, c in enumerate(a[1:] if not session else "", 1):
+            if c in _SCREEN_VALUES:
+                if k == len(a) - 1:
+                    if i < n and _shell_made(args[i]):
+                        return True, []
+                    i += 1
+                break
+            if c not in _SCREEN_FLAGS:
+                return True, []
+            session = c in _SCREEN_SESSION and k == len(a) - 1
+        if session and i < n and not args[i].startswith("-"):
+            if _shell_made(args[i]) or i + 1 < n:
+                return True, []
+            i += 1
+    command = list(args[i:])
+    if command and _shell_made(command[0]):
+        return True, []
+    return (more and not command), command
+
+
+_TMUX_COMMANDS = {  # every tmux command (3.5) -> its alias; tmux also takes a unique prefix of the name
+    "attach-session": "attach", "bind-key": "bind", "break-pane": "breakp", "capture-pane": "capturep",
+    "choose-buffer": "", "choose-client": "", "choose-tree": "", "clear-history": "clearhist",
+    "clear-prompt-history": "clearphist", "clock-mode": "", "command-prompt": "", "confirm-before": "confirm",
+    "copy-mode": "", "customize-mode": "", "delete-buffer": "deleteb", "detach-client": "detach",
+    "display-menu": "menu", "display-message": "display", "display-panes": "displayp", "display-popup": "popup",
+    "find-window": "findw", "has-session": "has", "if-shell": "if", "join-pane": "joinp", "kill-pane": "killp",
+    "kill-server": "", "kill-session": "", "kill-window": "killw", "last-pane": "lastp", "last-window": "last",
+    "link-window": "linkw", "list-buffers": "lsb", "list-clients": "lsc", "list-commands": "lscm",
+    "list-keys": "lsk", "list-panes": "lsp", "list-sessions": "ls", "list-windows": "lsw", "load-buffer": "loadb",
+    "lock-client": "lockc", "lock-server": "lock", "lock-session": "locks", "move-pane": "movep",
+    "move-window": "movew", "new-session": "new", "new-window": "neww", "next-layout": "nextl",
+    "next-window": "next", "paste-buffer": "pasteb", "pipe-pane": "pipep", "previous-layout": "prevl",
+    "previous-window": "prev", "refresh-client": "refresh", "rename-session": "rename", "rename-window": "renamew",
+    "resize-pane": "resizep", "resize-window": "resizew", "respawn-pane": "respawnp", "respawn-window": "respawnw",
+    "rotate-window": "rotatew", "run-shell": "run", "save-buffer": "saveb", "select-layout": "selectl",
+    "select-pane": "selectp", "select-window": "selectw", "send-keys": "send", "send-prefix": "",
+    "server-access": "", "set-buffer": "setb", "set-environment": "setenv", "set-hook": "", "set-option": "set",
+    "set-window-option": "setw", "show-buffer": "showb", "show-environment": "showenv", "show-hooks": "",
+    "show-messages": "showmsgs", "show-options": "show", "show-prompt-history": "showphist",
+    "show-window-options": "showw", "source-file": "source", "split-window": "splitw", "start-server": "start",
+    "suspend-client": "suspendc", "swap-pane": "swapp", "swap-window": "swapw", "switch-client": "switchc",
+    "unbind-key": "unbind", "unlink-window": "unlinkw", "wait-for": "wait",
+}
+_TMUX_ALIASES = {**{a: c for c, a in _TMUX_COMMANDS.items() if a}, "split-pane": "split-window",
+                 "splitp": "split-window", "server-info": "show-messages", "info": "show-messages",
+                 "choose-window": "choose-tree", "choose-session": "choose-tree"}  # and tmux's default command-alias
+_TMUX_TYPES = frozenset({"send-keys", "send-prefix", "paste-buffer", "set-buffer", "load-buffer", "pipe-pane",
+                         "command-prompt"})
+_TMUX_CARRIES = {  # a command that runs the command (or the file of commands) it carries -> its options that take a
+    # value, and how many words it takes before that command
+    "run-shell": ("cdt", 0), "if-shell": ("t", 0), "source-file": ("t", 0), "set-hook": ("t", 1),
+    "bind-key": ("NT", 1), "confirm-before": ("cpt", 0), "display-menu": ("bcCHsStTxy", 0),
+    "display-panes": ("dt", 0), "choose-tree": ("FfKOt", 0), "choose-buffer": ("FfKOt", 0),
+    "choose-client": ("FfKOt", 0),
+}
+_TMUX_STARTS = {  # a command that starts a shell command (read as one) -> its options that take a value
+    "new-session": "ceFfnstxy", "new-window": "ceFnt", "split-window": "ceFlpt", "respawn-pane": "cet",
+    "respawn-window": "cet", "display-popup": "bcdehsStTwxy",
+}
+_TMUX_SETS = frozenset({"set-option", "set-window-option"})
+# the options whose value is a command tmux runs (a hook is one too), matched as tmux matches a name: by a prefix
+_TMUX_RUN_OPTIONS = ("default-command", "default-shell", "command-alias", "copy-command", "editor", "lock-command",
+                     "after-", "alert-activity", "alert-bell", "alert-silence", "client-active", "client-attached",
+                     "client-detached", "client-focus-in", "client-focus-out", "client-resized",
+                     "client-session-changed", "client-light-theme", "client-dark-theme", "command-error",
+                     "pane-died", "pane-exited", "pane-focus-in", "pane-focus-out", "pane-mode-changed",
+                     "pane-set-clipboard", "pane-title-changed", "session-closed", "session-created",
+                     "session-renamed", "session-window-changed", "window-layout-changed", "window-linked",
+                     "window-pane-changed", "window-renamed", "window-resized", "window-unlinked")
+_TMUX_FORMAT = re.compile(r"#\{[^{}]*\}")  # a format, whose braces and ? the shell leaves alone in a quoted word
+_RUNNER_FILLS = re.compile(r"(?<!#)\{\d*(?:\.|//?|/\.|#|%)?\}")  # {} and parallel's {.} {/} {#} {%} {1} …
+# a format with the E or T modifier, also in a `;` list of modifiers (#{E:…}, #{T;=10:…}, #{p10;E:…}): tmux expands the
+# value again, so a value built from pieces (an option set to `#`, then `(cmd)`) becomes a #() that runs (round ten)
+_TMUX_REEXPANDS = re.compile(r"#\{[^}]*?(?<=[{;])[ET][;:]")
+
+
+def _tmux_name(word):
+    """The tmux command `word` names, as tmux finds it: an alias, the full name, or a unique prefix of one; None for a
+    word that names no command or more than one."""
+    if word in _TMUX_ALIASES:
+        return _TMUX_ALIASES[word]
+    if word in _TMUX_COMMANDS:
+        return word
+    hits = [c for c in _TMUX_COMMANDS if word and c.startswith(word)]
+    return hits[0] if len(hits) == 1 else None
+
+
+def _tmux_unread(word, line: bool = False) -> bool:
+    """A tmux word the guard cannot read: `#(…)` (a format that runs a shell command), a format that expands a value
+    again (the E or T modifier, _TMUX_REEXPANDS), `$` or a backtick anywhere (round eleven: the shell can build a
+    `#(` from them, as `"$X(cmd)"` with X='#' does), or, in a word without whitespace (it may be unquoted), a glob, a
+    brace expansion or a runner's {}: the shell or the runner may make it a `;` and a command. `line`: a word of the
+    shell command a command starts (_TMUX_STARTS), which the guard reads as `sh -c`, so there `$` and a backtick count
+    only in a word without whitespace (`tmux new -d 'echo $HOME'` stays open). A format's own braces and ? are left
+    alone."""
+    w = str(word)
+    if "#(" in w or _TMUX_REEXPANDS.search(w) or (not line and ("$" in w or "`" in w)):
+        return True
+    if any(c.isspace() for c in w):
+        return False
+    while _TMUX_FORMAT.search(w):
+        w = _TMUX_FORMAT.sub("", w)
+    return "$" in w or "`" in w or bool(set(w) & set("*?[")) or bool(_RUNNER_FILLS.search(w)) or \
+        bool(re.search(r"\{[^{}]*(?:,|\.\.)[^{}]*\}", w))
+
+
+def _tmux_args(words, values) -> tuple:
+    """-> (the option letters, the words after the options) of one tmux command, read as tmux reads them: letters in
+    one word, a value as the rest of the word or the next word, options until `--` or the first other word."""
+    letters, k = set(), 0
+    while k < len(words) and words[k].startswith("-") and len(words[k]) > 1:
+        w = words[k]
+        k += 1
+        if w == "--":
+            break
+        for j, c in enumerate(w[1:], 1):
+            letters.add(c)
+            if c in values:
+                k += 0 if j < len(w) - 1 else 1
+                break
+    return letters, list(words[k:])
+
+
+def _tmux_one(cmd) -> tuple:
+    """-> (refused, line) for one tmux command: refused when it types into a pane, carries a command, sets an option
+    whose value is one or appends to or expands formats into a value (-a, -F), is a command the guard does not know,
+    or holds a word it cannot read; the shell line of a command it starts (new-session, new-window, split-window,
+    respawn-*, display-popup), else None."""
+    if not cmd:
+        return False, None
+    name = _tmux_name(cmd[0])
+    line = _tmux_args(cmd[1:], _TMUX_STARTS[name])[1] if name in _TMUX_STARTS else []
+    if name is None or name in _TMUX_TYPES or any(_tmux_unread(w) for w in cmd[:len(cmd) - len(line)]) or \
+            any(_tmux_unread(w, line=True) for w in line):
+        return True, None
+    if name in _TMUX_CARRIES:
+        values, names = _TMUX_CARRIES[name]
+        letters, pos = _tmux_args(cmd[1:], values)
+        return len(pos) > names or (name == "set-hook" and "R" in letters), None
+    if name in _TMUX_SETS:
+        letters, pos = _tmux_args(cmd[1:], "t")
+        if letters & {"a", "F"}:  # a value built from pieces (`#`, then `(cmd)`) can be a #() no word shows (round ten)
+            return True, None
+        option = (pos or [""])[0].split("[", 1)[0]
+        return bool(option) and any(o.startswith(option) or option.startswith(o) for o in _TMUX_RUN_OPTIONS), None
+    if name in _TMUX_STARTS:
+        pos = _tmux_args(cmd[1:], _TMUX_STARTS[name])[1]
+        return False, " ".join(pos) or None
+    return False, None
+
+
+def _tmux_parse(args, more: bool = False) -> tuple:
+    """-> (refused, command): whether a tmux call types into a pane or runs what the guard does not read
+    (_tmux_one; a `;` list, from a word that is or ends in `;`; a configuration file, -f; with `more`, the words xargs
+    adds, which may start a command after a `;`), and what it starts, as `sh -c <line>`: the shell command of a
+    command that starts one, or the line of `tmux -c <line>`. [] when it starts none (`tmux ls`, `tmux attach`).
+    Agents have no need for tmux command lists, so a list is refused, not read (round ten; tmux_list_refusal for the
+    list the tokenizer splits at `\\;`)."""
+    i, n = 0, len(args)
+    while i < n and args[i].startswith("-") and args[i] != "-":
+        a = args[i]
+        i += 1
+        if a == "--":
+            break
+        if _tmux_unread(a):
+            return True, []
+        for k, c in enumerate(a[1:], 1):
+            if c in "cfLST":
+                value = a[k + 1:]
+                if not value:
+                    value, i = (args[i] if i < n else ""), i + 1
+                if c == "f" or _tmux_unread(value):
+                    return True, []
+                if c == "c":  # tmux -c runs the line in a shell, as a login shell does, and no tmux command
+                    return False, ["sh", "-c", value]
+                break
+            if c not in "2CDdlNquUvV":
+                return True, []
+    if more:
+        return True, []
+    words = args[i:]
+    if any(w.endswith(";") for w in words):  # tmux ends a command at a word that ends in `;` (`x;`, `'sh;'`, `"\\;"`)
+        return True, []
+    refused, line = _tmux_one(words)
+    return refused, ([] if refused or not line else ["sh", "-c", line])
+
+
+def tmux_list_refusal(text) -> bool:
+    """A tmux `;` list the tokenizer split (round ten): tmux's `\\;`, `';'` or `";"` ends a segment, as an operator
+    does, so a segment right after a tmux call across `;` that starts with a word tmux reads as one of its commands
+    (a name, an alias or a unique prefix) or a word the shell fills in is the list's next command. tmux never sees a
+    newline, so here a newline is read as `&`, no list: `tmux new -d` with `set -e` on the next line stays open
+    (round eleven). A text the tokenizer cannot read is no list here; its callers refuse it (D10)."""
+    segs = split_commands(text, ops=True, newline="&") or []
+    for k in range(1, len(segs)):
+        first = str(segs[k][0][0]) if segs[k][0] else ""
+        if segs[k - 1][2].startswith(";") and first and _tmux_call(segs[k - 1][0]) and (  # `;`, `';;'`
+                _tmux_name(first) is not None or _shell_made(first) or _tmux_unread(first)):
+            return True
+    return False
+
+
+def _tmux_call(argv) -> bool:
+    """The segment runs tmux, after its prefixes and wrappers (`sudo`, `env`, `timeout 5`)."""
+    run = _unwrap(argv, stop=("tmux",))
+    return bool(run) and os.path.basename(str(run[0])) == "tmux"
+
+
+def terminal_typing_refusal(argv, more: bool = False) -> bool:
+    """True when a screen or tmux call would type into a terminal session or run what the guard does not read
+    (_screen_parse, _tmux_parse): agents cannot type into a terminal session; the developer can. `more`: a runner
+    (xargs) adds words the guard does not see after these."""
+    if not argv:
+        return False
+    name, args = os.path.basename(str(argv[0])), [str(a) for a in argv[1:]]
+    if name == "screen":
+        return _screen_parse(args, more)[0]
+    if name == "tmux":
+        return _tmux_parse(args, more)[0]
+    return False
+
+
+_EXPECT_RUN = re.compile(r"(?:^|[;\n\[{]|\bthen\b)\s*(?:spawn|exec|system)\s+([^;\n\]}]*)")
+_EXPECT_SPAWN_OPTS = frozenset({"-noecho", "-console", "-nottycopy", "-nottyinit", "-pty", "-ignore", "-open",
+                                "-leaveopen"})
+
+
+def _expect_command(args) -> list:
+    """What `expect -c '<script>'` runs, as `sh -c <lines>`: each `spawn`, `exec` and `system` command of the script
+    (Tcl words read as shell words, past spawn's own options). [] when it runs none the guard can see."""
+    scripts = [args[k + 1] for k, a in enumerate(args[:-1]) if a == "-c"]
+    lines = []
+    for script in scripts:
+        for m in _EXPECT_RUN.finditer(script):
+            words = m.group(1).replace("{", " ").replace("}", " ").split()
+            while words and words[0] in _EXPECT_SPAWN_OPTS:
+                words = words[2:] if words[0] in ("-ignore", "-open", "-leaveopen") else words[1:]
+            if words:
+                lines.append(" ".join(words))
+    return ["sh", "-c", "; ".join(lines)] if lines else []
+
+
 _PY_FLAGS = frozenset("uIBEsSOqbdvxRP")  # python's own flags without a value; -W and -X take one
 
 
@@ -2489,6 +3213,19 @@ def _dev_args(argv):
             return _dev_command(argv[i + 1:])
         if argv[i:i + 2] in (["-m", "devkit"], ["-m", "devkit.cli"]):
             return _dev_command(argv[i + 2:])
+    return None
+
+
+def _xargs_dev_refusal(inner) -> str | None:
+    """F1-R4 part 2: xargs adds the words it reads from its input, so `xargs dev` (or `xargs dev ext`) may run
+    `dev install` or `dev ext ack`; like `xargs claude`, a dev call whose command comes from the input is refused."""
+    dargs = _dev_args(list(inner))
+    if dargs is None:
+        return None
+    if not dargs:
+        return INSTALL_REASON
+    if dargs == ["ext"]:
+        return EXT_REASON
     return None
 
 
@@ -2561,26 +3298,53 @@ def _dev_words(args) -> list:
     return _positionals(args, _DEV_VALUES)
 
 
+_POSITIONAL = re.compile(r'"\$[@*]"|\$[@*]|\$\{(\d+)\}|\$(\d)')
+
+
+def _with_positionals(line: str, words) -> str:
+    """A shell's -c line with the words after it in place of $0, $1…, ${1} and "$@" or $* (the words after $0),
+    quoted as the shell passes them, so the guard reads what runs (`sh -c 'claude "$@"' _ plugin install x`)."""
+    if not words:
+        return line
+
+    def sub(m):
+        n = m.group(1) or m.group(2)
+        if n is None:
+            return " ".join(shlex.quote(w) for w in words[1:])
+        return shlex.quote(words[int(n)]) if int(n) < len(words) else ""
+    return _POSITIONAL.sub(sub, line)
+
+
 def _shell_inputs(args, cwd, bodies) -> list:
-    """The scripts a shell runs: its -c string, a script file, or its input (the command's heredocs)."""
-    i = 0
+    """The scripts a shell runs: its -c string, a script file, or its input (the command's heredocs). With -s it reads
+    its input even when words follow, and they are its $1, $2 … (`bash -s plugin install x <<< 'claude "$@"'`)."""
+    return [text for text, _ in _shell_sources(args, cwd, bodies)]
+
+
+def _shell_sources(args, cwd, bodies) -> list:
+    """_shell_inputs as (text, typed): typed when the command holds the text (a -c line, a heredoc), False for a
+    script file read from disk."""
+    i, stdin = 0, False
     while i < len(args):
         a = args[i]
         if a == "--":
             i += 1
             break
         if a.startswith("-") and not a.startswith("--") and "c" in a[1:]:
-            return [args[i + 1]] if i + 1 < len(args) else []
+            return [(_with_positionals(args[i + 1], args[i + 2:]), True)] if i + 1 < len(args) else []
         if a in ("-o", "+o", "-O", "+O", "--rcfile", "--init-file"):
             i += 2
             continue
         if a.startswith(("-", "+")):
+            stdin = stdin or (a.startswith("-") and not a.startswith("--") and "s" in a[1:])
             i += 1
             continue
         break
+    if stdin:
+        return [(_with_positionals(b, ["sh", *args[i:]]), True) for b in bodies]
     if i < len(args):
-        return [_read_small(resolve(args[i], cwd))]
-    return list(bodies)
+        return [(_read_small(resolve(args[i], cwd)), False)]
+    return [(b, True) for b in bodies]
 
 
 def _program(argv, cwd, bodies):
@@ -2994,8 +3758,10 @@ _DEV_IN_CODE = re.compile(r"(?<![\w.-])dev[\s'\",\[\]]{1,6}(progress|crew)\b(?:[
 _SPAWNS = re.compile(
     r"\bsubprocess\b|\bos\.(?:system|popen|exec\w*|spawn\w*|posix_spawn\w*)\b|\bpty\.spawn\b|\bchild_process\b|"
     r"\b(?:execSync|spawnSync|execFile\w*|spawn|exec|system|popen|proc_open|shell_exec|passthru)\s*\(|"
-    r"\bIO\.popen\b|\bOpen3\b|\bProcess\.(?:spawn|exec)\b|\bdo shell script\b|\bDeno\.(?:run|Command)\b|"
-    r"\bBun\.(?:spawn|\$)")
+    r"\bIO\.popen\b|\bOpen3\b|\bProcess\.(?:spawn|exec)\b|\bDeno\.(?:run|Command)\b|\bBun\.(?:spawn|\$)|"
+    # AppleScript: do shell script runs a line; Terminal's do script, iTerm's write text and keystroke type one into
+    # a terminal (F1-R4 part 2)
+    r"\bdo (?:shell )?script\b|\bwrite text\b|\bkeystroke\b")
 _SPAWNS_QUOTED = re.compile(r"`[^`]*`|\bqx\b|%x[\[{(]")  # backticks run a command in perl, ruby and php only
 LANE_REASON = ("Run `dev progress …` and `dev crew …` as a command of its own (no `&&`, `;`, pipes, `$(…)`, `bash -c`, "
                "`env` or `timeout` around it), so devkit can route it to your lane; anywhere else it would act as "
@@ -3124,11 +3890,13 @@ def _expansions(cmd: str) -> list:
     return out
 
 
-def shell_calls(cmd: str, cwd, depth: int = 0):
+def shell_calls(cmd: str, cwd, depth: int = 0, where: bool = False):
     """Every program a shell command runs, as (argv, code): each segment's command words without prefixes or
     keywords, the commands of nested shells and of the substitutions the shell expands, and for an interpreter the
     program it runs (inline, its input, or a script outside the workspace; None for a repository's own script).
-    Text the command only carries is not a call. None when the command cannot be parsed."""
+    Text the command only carries is not a call. None when the command cannot be parsed. With `where`, each call is
+    (argv, code, the folder it runs in): after the `cd` and `pushd` before it and its prefix's `env -C` or `sudo -D`,
+    UNKNOWN when only the run knows it (a variable, `find -execdir`)."""
     if depth > 4:
         return []
     segs = split_commands(cmd)
@@ -3142,23 +3910,28 @@ def shell_calls(cmd: str, cwd, depth: int = 0):
         if os.path.basename(argv[0]) in ("cd", "pushd"):
             cwd = str(core.HOME) if len(argv) == 1 else cwd if argv[1] == "-" else str(resolve(argv[1], cwd))
             continue
-        more = _program_calls(argv, cwd, bodies, depth)
+        here = _prefix_chdir(argv0[:len(argv0) - len(_strip_prefix(argv0))], cwd) if where else cwd
+        more = _program_calls(argv, here, bodies, depth, where)
         if more is None:
             return None
         out += more
     for text in _expansions(cmd):
-        more = shell_calls(text, cwd, depth + 1)
+        more = shell_calls(text, cwd, depth + 1, where)
         if more is None:
             return None
         out += more
     return out
 
 
-def _program_calls(argv, cwd, bodies, depth):
+def _program_calls(argv, cwd, bodies, depth, where=False):
     name, args = os.path.basename(argv[0]), argv[1:]
+
+    def call(a, code, at=cwd):
+        return (a, code, at) if where else (a, code)
+
     if _INTERP.match(name) and _dev_args(argv) is None:
-        return [(argv, None if _repo_script(argv, cwd) else _program(argv, cwd, bodies)[0])]
-    out, texts, inners = [(argv, None)], [], []
+        return [call(argv, None if _repo_script(argv, cwd) else _program(argv, cwd, bodies)[0])]
+    out, texts, inners = [call(argv, None)], [], []
     if name in _SHELLS:
         texts = _shell_inputs(args, cwd, bodies)
     elif name in ("source", ".") and args:
@@ -3169,20 +3942,21 @@ def _program_calls(argv, cwd, bodies, depth):
         i, takes = 0, {"-I", "-n", "-P", "-L", "-d", "-E", "-s", "-a", "-J", "-R", "-S"}
         while i < len(args) and args[i].startswith("-"):
             i += 2 if args[i] in takes else 1
-        inners = [_unwrap(args[i:])]
+        inners = [(_unwrap(args[i:]), cwd)]
     elif name == "find":
         for k, a in enumerate(args):
             if a in ("-exec", "-execdir", "-ok", "-okdir"):
                 sub = args[k + 1:]
-                inners.append(_unwrap(sub[:next((j for j, x in enumerate(sub) if x in (";", "+")), len(sub))]))
+                at = str(UNKNOWN) if where and a in ("-execdir", "-okdir") else cwd  # each found file's folder
+                inners.append((_unwrap(sub[:next((j for j, x in enumerate(sub) if x in (";", "+")), len(sub))]), at))
     for text in texts:
-        more = shell_calls(text, cwd, depth + 1) if text else []
+        more = shell_calls(text, cwd, depth + 1, where) if text else []
         if more is None:
             return None
         out += more
-    for inner in inners:
+    for inner, at in inners:
         if inner:
-            out += _program_calls(inner, cwd, bodies, depth + 1) or []
+            out += _program_calls(inner, at, bodies, depth + 1, where) or []
     return out
 
 
@@ -3404,7 +4178,8 @@ _RO_GH_READ = frozenset({"view", "list", "diff", "checks", "status"})
 _RO_DEV = {"status": None, "grep": None, "find": None, "files": None, "diff": None, "stubs": None, "help": None,
            "version": None, "sec": ("scan",), "test": ("", "run", "plan", "audit", "prove"), "plan": ("show",),
            "lesson": ("add", "recur"), "task": ("", "ls", "list", "show"), "ci": ("", "status", "ls", "list"),
-           "delivery": ("", "show"), "audit": ("", "verify", "show", "stats", "config")}
+           "delivery": ("", "show"), "audit": ("", "verify", "show", "stats", "config"), "completion": None,
+           "__complete": None}
 _SED_ADDR = r"(?:\d+|\$|/(?:[^/\\\n]|\\.)*/I?)"
 _SED_PRINT = re.compile(rf"^(?:{_SED_ADDR}(?:\s*,\s*{_SED_ADDR})?)?\s*(?:p|q\d*)$")
 
@@ -3589,6 +4364,8 @@ def _ro_dev(args) -> str | None:
         return None
     pos = _dev_words(args)  # options take values (--action guard, --search add): the subcommand is the next word
     sub = pos[0] if pos else ""
+    if sub == "impeccable":  # its words go to the engine as they are: the read verbs' own rules decide
+        return _ro_impeccable(args[args.index(sub) + 1:])
     if sub in _RO_DEV and (_RO_DEV[sub] is None or (pos[1] if len(pos) > 1 else "") in _RO_DEV[sub]):
         if sub == "ci" and _dev_sets(args, "--run", "--resume"):
             return "`dev ci --run` runs the pipeline's build and package steps"
@@ -3596,6 +4373,426 @@ def _ro_dev(args) -> str | None:
             return "`dev audit --publish` commits the audit trail to the handoff repository, and `-o` writes a file"
         return None
     return f"`dev {' '.join(pos[:2]) or '…'}` changes devkit's records or the repository"
+
+
+# --------------------------------------------------------------------------- dev impeccable (spec F7, C6)
+#
+# Crew members run impeccable's engine with `dev impeccable <verb>` (impeccable.py), which takes the engine from
+# devkit's own skills folder and checks its digest against the install record before every run, without a shell. The
+# skill's launcher typed by its path is judged like any other script: the shell can reach another file than the one the
+# guard reads by the same words (a link, `..` after `cd`, a quoted `~`, a glob, a folder moved earlier in the same
+# command; the Code reviewer's reviews of 11fd55e, 452dd51 and 1e606b7), and its `exec "$bin"` names its program at
+# run time, so the gate refuses it to crew lanes.
+#
+# Agents get an allowlist of verbs, not a block list (the tech lead's decision on the Code reviewer's review of
+# e498c41..7a1f31b: the engine has verbs its help does not show, such as hook-admin, hook-before-edit, build-phase and
+# capture-server, and an update can add more). The 0.1.18 engine's help shows detect, ignores, help, install, link,
+# update, check and telemetry (and the legacy `skills` namespace); the skill also runs context, doctor, live and the
+# helpers its reference files name.
+# - Every lane and the main session: `context` with only --target (loads PRODUCT.md, DESIGN.md and the surface
+#   brief), `detect` on local paths (scans HTML and CSS), `doctor` with only --json and --target (reports drift; --fix
+#   moves hook entries), and the helper forms that write nothing: `surface-brief read`, `critique-storage slug` and
+#   `trend`.
+# - Write lanes and the main session, also: `detect` on URLs on this Mac, `live` (starts the live server and injects
+#   its script into the page), `generate`, `document`, `extract` and `init` with no other words, the design commands
+#   that write project files (0.1.18 runs them in the agent's chat, not as engine verbs: init "not a CLI command", the
+#   others "Unknown command"), and the skill's helpers in the forms of IMPECCABLE_FORMS.
+# - Where the engine writes: it runs in the shell's folder and counts --target and --file from there, so a `cd` first
+#   moves them. The guard judges those values (impeccable_paths) as writes from the folder the shell is in after `cd`,
+#   `pushd` or `env -C`, as it judges any other write: the main session through check_write_path and the protected
+#   paths, a crew lane outside the workspace, in the handoff repository or outside its step's scope
+#   (_impeccable_lane_write). `dev impeccable` checks the real folder and paths again when it runs
+#   (impeccable.outside_project): the tech lead's decision on the Code reviewer's review of d9186f1 and b97db94, where
+#   `cd ~/.claude && dev impeccable live --target settings.json` passed both.
+# - Everything else is the developer's, in a terminal: the verbs that write the agents' settings, hooks or skill
+#   folders (hooks, install, link, update, pin, unpin, doctor --fix), the other hidden helpers (hook, hook-admin,
+#   hook-before-edit, capture-server, live-inject, …), ignore and ignores, telemetry, check, help, no verb, the
+#   helpers' other sub-verbs and flags, and the allowlist's words spelled any other way (another case, after `skills`
+#   or a second `--`): it fails closed.
+#
+# The helpers (the tech lead's decision on the helper verbs: an exact verb only when it reads or writes inside the
+# project or talks to the live server `live` started). Each was run from the verified 0.1.18 engine (SHA-256
+# 543ee2f7…a8e1, the skill's engine-checksums.txt) in a scratch project with a scratch HOME, under sandbox-exec with
+# the network closed but for loopback and a logging proxy in HTTPS_PROXY, next to its help and the skill's reference
+# files (live.md, new-work.md, polish.md, region-map.md, critique.md):
+# - live-poll, live-accept, live-status, live-resume, live-complete, live-wrap, live-insert and live-server talk to the
+#   live server, which listens on 127.0.0.1 only, and write .impeccable/live and the page they wrap. `--file` and
+#   live's `--target` pick where they write, so they take a path in the project: `live --target
+#   ../other-app/index.html` injected its script into that file, and `live-wrap --file ../x.html` wrapped an element
+#   there. `live-complete --force` completes a session whose source still has live-mode leftovers, past its gate.
+# - surface-brief and critique-storage write .impeccable/surfaces and .impeccable/critique; a URL target is only a
+#   key, never fetched. `read`, `slug` and `trend` wrote nothing; `latest` closes the snapshot it reads once the
+#   target file changed, so it is a write lane's. `write` and `latest` fingerprint a local target file, so agents
+#   give every target as a path in the project (the tech lead's decision on the free words that name a file), and a
+#   URL or `route:` key is the developer's.
+# - comp-spec writes .impeccable/build; `--out`, `--out-dir` and `--spec` write where they point, outside the project
+#   too, and the skill never passes them.
+# - build-phase writes .impeccable/build and checks a gate at each step. `advance --force` passes a phase over its
+#   failed check, `start --comp` records any image as the approved comp and marks the comps phase skipped, and
+#   `start --reset` throws the open gates away; the skill's `start --direction` (with --decision-comp) keeps the comps
+#   gate open.
+# - concept-seed GETs https://impeccable.style/api/roll and writes ~/.impeccable/seed-salt; generate-image sends its
+#   prompt and images to the OpenAI API with the developer's key: the developer's.
+# `detect` loads a URL in Chrome, so agents give it local paths and URLs on localhost or 127.0.0.1 only (the tech
+# lead's decision): in 0.1.18 a word without a scheme is a path to it, and --cdp takes a port or such a URL.
+# Read-only lanes run the read verbs with their reading flags, on local path shapes only: no value or path may name a
+# URL or anything that could pass for a host.
+
+# verb -> (flags that take a value: the kind of value, flags alone, whether local paths may follow)
+IMPECCABLE_READS = {
+    "context": ({"--target": "path"}, frozenset(), False),
+    "detect": ({"--scope": "names"}, frozenset({"--json", "--quiet", "--list-rules", "--no-config", "--no-advisory",
+                                                "--no-inline-ignores", "--no-design-system", "--help"}), True),
+    "doctor": ({"--target": "path"}, frozenset({"--json", "--help"}), False),
+}
+IMPECCABLE_WRITES = ("live", "generate", "document", "extract", "init")
+# the helper forms that write nothing, which read-only lanes run too: verb -> its sub-verbs
+IMPECCABLE_READ_HELPERS = {"surface-brief": ("read",), "critique-storage": ("slug", "trend")}
+# What agents may give the verbs whose words are checked in write lanes and the main session, from the 0.1.18 engine's
+# help and the skill's reference files: verb -> {sub-verb ('' for none; more than one word is matched whole) ->
+# (flags that take a value: its kind, flags alone, (fewest, most or None for any, kind) other words[, flags it
+# needs])}. The other words' kind is one for all, or a list with one per place (the last one for every later word).
+# Kinds: "word" any word that does not start with -; "name" letters, digits, `.`, `_` and `-`, never `.` or `..`
+# alone (the engine may name a file after it); "path" a path in the project, for every word that names a file of the
+# project, one the engine writes, reads or names its own files after (impeccable_paths: `dev impeccable` checks each
+# through its links); "url" a local path or a URL on this Mac;
+# "port" a port number; "cdp" a DevTools port or a URL on this Mac; or a tuple of the only words it takes. A path, url,
+# port or cdp value never has a character the shell expands (_EXPANDS).
+_W = "word"
+_PICK = {"--id": "name", "--count": _W, "--element-id": _W, "--classes": _W, "--tag": _W, "--query": _W, "--text": _W,
+         "--page-url": _W, "--file": "path"}
+_NONE = (0, 0, _W)
+IMPECCABLE_FORMS = {
+    "context": {"": ({"--target": "path"}, frozenset(), _NONE)},
+    # the design commands run in the agent's chat in 0.1.18 (init "not a CLI command", the others "Unknown command"),
+    # so an engine that adds them gets no words from an agent
+    **{verb: {"": ({}, frozenset(), _NONE)} for verb in ("generate", "document", "extract", "init")},
+    "live": {"": ({"--target": "path"}, frozenset({"--help"}), _NONE)},
+    "detect": {"": ({"--scope": _W, "--viewport": _W, "--cdp": "cdp", "--target": _W},
+                    frozenset({"--json", "--quiet", "--github", "--list-rules", "--no-config", "--no-inline-ignores",
+                               "--no-design-system", "--no-advisory", "--no-consent-hiding", "--no-overlay-hiding",
+                               "--help"}), (0, None, "url"))},
+    "live-poll": {"": ({"--reply": _W, "--file": "path", "--data": _W, "--timeout": _W, "--types": _W,
+                        "--ack-timeout": _W}, frozenset({"--stream", "--then-poll", "--help"}), (0, 2, _W))},
+    "live-accept": {"": ({"--id": "name", "--variant": _W, "--page-url": _W},
+                         frozenset({"--discard", "--bake", "--no-bake", "--help"}), _NONE)},
+    "live-status": {"": ({}, frozenset(), _NONE)},
+    "live-resume": {"": ({"--id": "name"}, frozenset(), _NONE)},
+    "live-complete": {"": ({"--id": "name", "--error": _W}, frozenset({"--discarded", "--help"}), _NONE)},
+    "live-wrap": {"": (_PICK, frozenset({"--help"}), _NONE)},
+    "live-insert": {"": ({**_PICK, "--position": ("before", "after")}, frozenset({"--help"}), _NONE)},
+    "live-server": {"": ({"--port": "port"}, frozenset({"--background", "--help"}), _NONE),
+                    "stop": ({}, frozenset({"--keep-inject"}), _NONE)},
+    # A target of surface-brief and critique-storage, related targets included, is a file of the project (or a slug)
+    # that the engine fingerprints or names its own files in .impeccable after, so it is a path in the project: a URL
+    # or a `route:` key is the developer's (the tech lead's decision). The body file is read only, and the skill
+    # writes it to a temp file (critique.md), so it stays a word, as does trend's count.
+    # read <target> | write <primary target> <body file> [related targets…]
+    "surface-brief": {"read": ({}, frozenset(), (1, 1, "path")),
+                      "write": ({}, frozenset(), (2, None, ["path", _W, "path"]))},
+    # slug|latest <target> | trend <target> [count] | write <target> <body file> | close <target> <snapshot file that
+    # latest returned, whose front matter close rewrites>
+    "critique-storage": {"slug": ({}, frozenset(), (1, 1, "path")),
+                         "latest": ({}, frozenset({"--json"}), (1, 1, "path")),
+                         "trend": ({}, frozenset(), (1, 2, ["path", _W])),
+                         "write": ({}, frozenset(), (2, 2, ["path", _W])),
+                         "close": ({}, frozenset(), (2, 2, "path"))},
+    # --comp the approved comp image (in .impeccable/mocks) and --regions the regions file the skill writes in the
+    # project; --crop and --plate-prompt a region's id
+    "comp-spec": {"": ({"--comp": "path", "--regions": "path", "--crop": "name", "--scale": _W, "--plate-prompt": _W,
+                        "--background": ("transparent", "opaque", "auto")},
+                       frozenset({"--grid", "--inspect-map", "--json", "--auto", "--print", "--schema", "--help"}),
+                       _NONE)},
+    # start: --direction a seed reference or `none`, --decision-comp the chosen card's comp (in
+    # .impeccable/mocks/decision), --artifact the entry file whose SHA-256 the gates record; record hero: --build the
+    # capture it scores
+    "build-phase": {"start": ({"--direction": _W, "--decision-comp": "path", "--breakpoint": _W, "--artifact": "path",
+                               "--session-id": "name"}, frozenset(), _NONE, ("--direction",)),
+                    "advance": ({}, frozenset(), _NONE), "scaffold": ({}, frozenset(), _NONE),
+                    "record hero": ({"--build": "path"}, frozenset(), _NONE),
+                    "finish": ({"--disposition": ("ship", "fix", "rebuild", "recapture")}, frozenset(), _NONE)},
+}
+IMPECCABLE_AGENTS = frozenset(IMPECCABLE_READS) | frozenset(IMPECCABLE_WRITES) | frozenset(IMPECCABLE_FORMS)
+# why a verb or a flag is the developer's, named in the refusal
+_IMPECCABLE_VERB_WHY = {
+    "concept-seed": "it GETs https://impeccable.style/api/roll and writes ~/.impeccable/seed-salt, outside the project",
+    "generate-image": "it sends its prompt and images to the OpenAI API with the developer's key, which leaves this "
+                      "Mac and costs money",
+}
+_GATE = "skips a gate of the skill"
+_OUT = "writes where its path points, outside the project too"
+_IMPECCABLE_FLAG_WHY = {
+    ("build-phase", "--force"): f"`--force` {_GATE}: it advances the build over a phase whose check failed",
+    ("build-phase", "--reason"): f"`--reason` goes with `--force`, which {_GATE}",
+    ("build-phase", "--comp"): f"`--comp` {_GATE}: it records any image as the approved comp and marks the comps phase "
+                               f"skipped",
+    ("build-phase", "--reset"): f"`--reset` {_GATE}: it throws away the build's open gates",
+    ("live-complete", "--force"): f"`--force` {_GATE}: it completes a session whose source still has live-mode "
+                                  f"leftovers",
+    ("comp-spec", "--out"): f"`--out` {_OUT}", ("comp-spec", "--out-dir"): f"`--out-dir` {_OUT}",
+    ("comp-spec", "--spec"): f"`--spec` {_OUT}",
+}
+# a path a read-only lane may give the engine: one that starts ./, ../, / (never //) or ~/, `.` or `..`, or one whose
+# first part has only ASCII letters, digits, _ and - and is not a host on its own (localhost, or a number such as
+# 2130706433 or 0x7f000001); never with a colon (a scheme, a port, an IPv6 address)
+_LOCAL_PATH = re.compile(r"(?:\.\.?/|/(?!/)|~/|\.\.?\Z"
+                         r"|(?!(?:localhost|[0-9]+|0x[0-9a-f]+)(?:/|\Z))[A-Za-z0-9_-]+(?:/|\Z))", re.I)
+_NAMES = re.compile(r"[a-z]+(?:,[a-z]+)*\Z")  # --scope: the detector's design domains, comma-separated
+# a URL on this Mac: http, https, ws or wss (any case) to localhost or 127.0.0.1 as typed (lowercase, no user, no
+# other spelling of the address), an optional port, then nothing or a path, query or fragment without spaces or `\`
+_HERE_URL = re.compile(r"(?i:https?|wss?)://(?:localhost|127\.0\.0\.1)(?::[0-9]{1,5})?(?:[/?#][^\s\\]*)?\Z")
+# what the shell expands in a word it reads unquoted: a variable or a substitution, braces and globs. The guard reads
+# the typed words and `dev impeccable` the expanded ones, so a path, URL or port with one of them is refused by both:
+# the two then judge the same value (the Code reviewer's finding on b97db94: `live --target $HOME/x` passed the guard)
+_EXPANDS = re.compile(r"[$`{*?\[]")
+_IMPECCABLE_NAME = re.compile(r"[A-Za-z0-9._-]+\Z")  # not _NAME: the vendor CLI allowlist's name slot has that name
+IMPECCABLE_REASON = ("`dev impeccable {verb}` is the developer's{why}. Agents run `dev impeccable` only with the forms "
+                     "on its allowlist, spelled exactly: in every lane `context`, `detect` on local paths, `doctor` "
+                     "(with `--json` or `--target`, never `--fix`), `surface-brief read`, and `critique-storage slug` "
+                     "and `trend`; in write lanes and the main session also `detect` on URLs on localhost or "
+                     "127.0.0.1, `live`, `generate`, `document`, `extract`, `init`, the live helpers (`live-poll`, "
+                     "`live-accept`, `live-status`, `live-resume`, `live-wrap`, `live-insert`, `live-server`, and "
+                     "`live-complete` without `--force`), `surface-brief write`, `critique-storage latest`, `write`, "
+                     "and `close`, `comp-spec` without `--out`, `--out-dir`, or `--spec`, and `build-phase start "
+                     "--direction`, `advance` without `--force`, `record hero`, `scaffold`, and `finish`, where "
+                     "`--target`, `--file`, `--artifact`, `--build`, `--decision-comp`, `--comp`, `--regions`, and "
+                     "the targets and snapshot file of `surface-brief` and `critique-storage` name a path in the "
+                     "project (not a URL or a route), from a folder in it, and no path, URL or port has a character "
+                     "the shell expands. The developer runs everything else, in a terminal: some "
+                     "verbs write the agents' settings, hooks or skill folders (`hooks`, `install`, `link`, `update`, "
+                     "`pin`, `unpin`, `doctor --fix`), which change what runs in every later session on this Mac; "
+                     "some reach the internet or cost money (`concept-seed`, `generate-image`); some skip the skill's "
+                     "own gates; and an engine update can add more. Ask them, with the command and why. " + _TAIL)
+
+
+def impeccable_engine_words(args) -> list:
+    """The words `dev impeccable` passes to the engine, from the words after `impeccable` as typed: dev's parser drops
+    one first `--` (Python 3.9 and 3.15 alike), and passes every later word as it is."""
+    words = [str(w) for w in args]
+    return words[1:] if words[:1] == ["--"] else words
+
+
+def _doctor_extra(rest) -> str:
+    """The first word after `doctor` an agent may not give it, or '': only --json, --help and --target <path> (a value
+    that starts with `-` could be a flag to the engine). --fix in any case or spelling counts first."""
+    if any(w.casefold().startswith("--fix") for w in rest):
+        return "--fix"
+    i = 0
+    while i < len(rest):
+        w = rest[i]
+        if w in ("--json", "--help") or (w.startswith("--target=") and not w[9:].startswith("-")):
+            i += 1
+        elif w == "--target" and i + 1 < len(rest) and not rest[i + 1].startswith("-"):
+            i += 2
+        else:
+            return w
+    return ""
+
+
+def _project_path(value) -> bool:
+    """True for a path inside the folder the engine runs in, by its words: not empty, no first -, / or ~, no colon or
+    control character, and no `..` part."""
+    return bool(value) and value[0] not in "-/~" and ":" not in value and value.isprintable() and \
+        ".." not in re.split(r"[/\\]", value)
+
+
+def _impeccable_value(kind, shown, value) -> str:
+    """Why `value` (typed as `shown`) does not fit `kind` (IMPECCABLE_FORMS), or ''."""
+    if isinstance(kind, tuple):
+        return "" if value in kind else f"`{shown}` takes only {', '.join(kind)}"
+    if kind in ("path", "url", "port", "cdp") and _EXPANDS.search(value):
+        return (f"`{shown}` has a character the shell expands ($, a backtick, {{, *, ? or [), so the engine could get "
+                f"another value than the one the guard reads: write the value out in full")
+    if kind == "path":
+        return "" if _project_path(value) else (f"`{shown}` names a path outside the project: give one inside it, "
+                                                f"with no first /, ~ or -, no `..` part and no colon")
+    if kind == "name":
+        return "" if _IMPECCABLE_NAME.match(value) and value not in (".", "..") and not value.startswith("-") else \
+            (f"`{shown}` is not a name: give letters, digits, `.`, `_` and `-` only, not `.` or `..` alone and no "
+             f"first -, since the engine may name a file after it")
+    if kind == "port":
+        return "" if re.fullmatch(r"[0-9]{1,5}", value) else \
+            f"`{shown}` is not a port number: give its digits only, since the live server listens on 127.0.0.1"
+    if kind == "cdp":
+        return "" if re.fullmatch(r"[0-9]{1,5}", value) or _HERE_URL.match(value) else \
+            (f"`{shown}` is not a port or a URL on localhost or 127.0.0.1, and a DevTools address anywhere else "
+             f"leaves this Mac")
+    if kind == "url" and (value.startswith("//") or (":" in value and not _HERE_URL.match(value))):
+        return (f"`{shown}` is not a local path or a URL on localhost or 127.0.0.1: detect loads a URL in Chrome, "
+                f"and one anywhere else leaves this Mac")
+    return f"`{shown}` gives a value that starts with -, which the engine could read as a flag" \
+        if value.startswith("-") else ""
+
+
+def _impeccable_form(verb, forms, rest, found=None) -> tuple:
+    """('', '') when `rest`, the words after `verb`, fit one of its `forms` (IMPECCABLE_FORMS), else (the call to name
+    in the refusal, why it is the developer's or ''): the first word that fits no form names it. Each value that fits
+    goes into the list `found`, when given, as (its flag, or '' for a word after the sub-verb; its kind; the value)."""
+    found = [] if found is None else found
+    for key in sorted(forms, key=lambda k: -len(k.split())):
+        sub = key.split()
+        if rest[:len(sub)] == sub:
+            break
+    else:
+        return " ".join([verb, *rest[:1]])[:80], ""
+    takes, alone, (fewest, most, kinds), *needs = forms[key]
+    call, rest = " ".join([verb, *sub]), rest[len(sub):]
+    count = i = 0
+    given = set()
+    while i < len(rest):
+        a = rest[i]
+        flag, eq, value = a.partition("=")
+        if a.startswith("-") and flag in takes:
+            if not eq and i + 1 == len(rest):
+                return f"{call} {a}"[:80], f"`{a}` needs a value"
+            value = value if eq else rest[i + 1]
+            shown = a if eq else f"{a} {value}"
+            i += 1 if eq else 2
+            why = _impeccable_value(takes[flag], shown, value)
+            if why:
+                return f"{call} {shown}"[:80], why
+            found.append((flag, takes[flag], value))
+            given.add(flag)
+        elif a in alone:
+            i += 1
+        elif a.startswith("-") or (most is not None and count == most):
+            return f"{call} {a}"[:80], _IMPECCABLE_FLAG_WHY.get((verb, flag), "")
+        else:
+            kind = kinds[min(count, len(kinds) - 1)] if isinstance(kinds, list) else kinds
+            why = _impeccable_value(kind, a, a)
+            if why:
+                return f"{call} {a}"[:80], why
+            found.append(("", kind, a))
+            count, i = count + 1, i + 1
+    if count < fewest:
+        return call[:80], f"it takes {fewest} or more words after `{call}`"
+    missing = next((f for f in (needs[0] if needs else ()) if f not in given), "")
+    return (call[:80], f"it needs `{missing}`") if missing else ("", "")
+
+
+def impeccable_developer_call(words) -> tuple:
+    """('', '') when an agent may run the engine with `words`, the words it gets (impeccable_engine_words); else (the
+    call to name in the refusal, why it is the developer's or ''). The first word is the verb and must be on the
+    allowlist as it is spelled there (IMPECCABLE_AGENTS); doctor takes only --json, --help and --target, and the verbs
+    of IMPECCABLE_FORMS only their forms. Anything else is the developer's (fails closed); the name reads through `--`
+    and the legacy `skills` namespace, however often, to the verb the engine would run."""
+    words = [str(w) for w in words]
+    verb = words[0] if words else ""
+    if verb in IMPECCABLE_FORMS:
+        return _impeccable_form(verb, IMPECCABLE_FORMS[verb], words[1:])
+    if verb in IMPECCABLE_AGENTS:
+        extra = _doctor_extra(words[1:]) if verb == "doctor" else ""
+        return (f"doctor {extra}", "") if extra else ("", "")
+    k = 0
+    while k < len(words) and (words[k] == "--" or words[k].casefold() == "skills"):
+        k += 1
+    return " ".join(words[:k + 1])[:80] or "(no verb)", _IMPECCABLE_VERB_WHY.get(words[k] if k < len(words) else "", "")
+
+
+def impeccable_refusal(words) -> str:
+    """The refusal of `dev impeccable` with `words`, the words the engine gets, to anyone but the developer, or ''
+    when an agent may run it (impeccable_developer_call)."""
+    name, why = impeccable_developer_call(words)
+    return IMPECCABLE_REASON.format(verb=name, why=f": {why}" if why else "") if name else ""
+
+
+def impeccable_paths(words, writes=False) -> list:
+    """The values of the path kind in `words`, the words the engine gets, which it counts from the folder it runs in:
+    for a verb of IMPECCABLE_FORMS, those of the form the words fit (up to the first word that fits none, which the
+    refusal names), such as --target, --file, --artifact and the helpers' targets; for another verb, such as doctor,
+    each --target and --file (`--flag value` or `--flag=value`). `dev impeccable` checks them all through their links
+    (impeccable.outside_project). `writes` keeps the ones the guard judges as writes: live's --target and the live
+    helpers' --file, the page and the source the engine writes. The others are files it reads, keys it names its own
+    files in .impeccable after, and the snapshot in .impeccable/critique that `critique-storage close` marks closed;
+    `context` and `doctor` only read. detect's --target names a page by part of its URL or title, not a path."""
+    words = [str(w) for w in words]
+    verb = words[0] if words else ""
+    if verb in IMPECCABLE_FORMS:
+        found = []
+        _impeccable_form(verb, IMPECCABLE_FORMS[verb], words[1:], found)
+        return [v for flag, kind, v in found if kind == "path" and
+                (not writes or (flag in ("--target", "--file") and verb not in IMPECCABLE_READS))]
+    if writes and verb in IMPECCABLE_READS:
+        return []
+    out, i = [], 1
+    while i < len(words):
+        flag, eq, value = words[i].partition("=")
+        if flag in ("--target", "--file") and (eq or i + 1 < len(words)):
+            out.append(value if eq else words[i + 1])
+            i += 0 if eq else 1
+        i += 1
+    return out
+
+
+def _impeccable_lane_write(words, cwd, scope, base) -> str:
+    """Why a crew lane may not run the engine with `words` in the folder `cwd` (where the shell is when it runs dev):
+    a path it writes (impeccable_paths) is not known before the shell runs, lies outside the workspace or in the
+    handoff repository, or outside the step's `scope` (counted from `base`, as scope_holds counts); '' otherwise."""
+    layers = _layers(scope)
+    verb = words[0] if words else ""
+    for value in impeccable_paths(words, writes=True):
+        p = resolve(value, cwd)
+        does = f"`dev impeccable {verb}` writes where `{value}` points"
+        if p == UNKNOWN:
+            return (f"{does}, counted from a folder the guard cannot know before the shell runs (a `cd` to a "
+                    f"variable or a substitution). Run it from the project's folder, with its path written out.")
+        if not is_under(p, DEV) or real(p) == real(DEV) or is_under(p, core.HANDOFF):
+            return (f"{does}: {tilde(p)}, outside the workspace ({tilde(DEV)}) or in the handoff repository. The "
+                    f"engine counts it from the folder the shell is in after `cd`, `pushd` or `env -C`; run it from "
+                    f"the project's folder, with a path inside the project.")
+        if layers and not all(scope_holds(str(p), cwd, layer, base=base) for layer in layers):
+            where = "; ".join(", ".join(layer) for layer in layers)
+            return (f"{does}: {tilde(p)}, outside your step's scope ({where}). Give a path inside it, or ask the tech "
+                    f"lead to widen it (`dev crew ask \"…\"`).")
+    return ""
+
+
+def _ro_impeccable(args) -> str | None:
+    """Why a read-only lane may not run `dev impeccable` with `args`, the words after it as typed, or None. dev drops
+    a first `--` and passes the rest to the engine as they are, so a later `--` is a word the engine reads, never a
+    reading flag."""
+    args = impeccable_engine_words(args)
+    refusal = impeccable_refusal(args)
+    if refusal:
+        return refusal
+    verb, rest = args[0], args[1:]
+    if rest[:1] and rest[0] in IMPECCABLE_READ_HELPERS.get(verb, ()):
+        return None  # its form was checked above: no flags, only its targets
+    if verb not in IMPECCABLE_READS:
+        call = " ".join([verb, *rest[:1]]) if verb in IMPECCABLE_READ_HELPERS else verb
+        return (f"`dev impeccable {call}` writes files or starts a session, so a write lane runs it; a read-only lane "
+                f"runs {', '.join(IMPECCABLE_READS)} (doctor without --fix), surface-brief read, and critique-storage "
+                f"slug and trend")
+    takes, alone, paths = IMPECCABLE_READS[verb]
+    i = 0
+    while i < len(rest):
+        a = rest[i]
+        flag, eq, value = a.partition("=")
+        if flag in takes:
+            kind = takes[flag]
+            value = value if eq else (rest[i + 1] if i + 1 < len(rest) else "")
+            shown = a if eq else f"{a} {value}"
+            i += 1 if eq else 2
+        else:
+            i += 1
+            if a in alone:
+                continue
+            if a.startswith("-") or not paths:
+                return (f"`dev impeccable {verb} {a}` is not one of its reading flags or a local path, so a write lane "
+                        f"runs it")
+            kind, value, shown = "path", a, a
+        if kind == "names":
+            if not _NAMES.match(value):
+                return (f"`dev impeccable {verb} {shown}` gives {flag} something other than its design domains "
+                        f"(letters and commas, such as type,layout), not a local path, so a write lane runs it")
+        elif ":" in value or not _LOCAL_PATH.match(value):
+            plain = value and ":" not in value and not value.startswith(("/", "~")) and not value[0].isspace()
+            local = f"; a local file with this name is `./{value}`" if plain else ""
+            return (f"`dev impeccable {verb} {shown}` is not a local path shape: it could name a URL or a host (a "
+                    f"scheme, a port, a domain, an address, a user@host, a query), which the engine fetches, so a "
+                    f"write lane runs it. A read-only lane gives a path that starts ./, ../, / or ~/, or whose first "
+                    f"part has only letters, digits, _ and - and is not localhost or a number{local}")
+    return None
 
 
 def _own_scratch_script(argv, cwd, member) -> bool:
@@ -3802,7 +4999,8 @@ def crew_shell_verdict(cmd: str, cwd, scope=None, member=None, level=None, base=
         _record("guard", "crew-readonly", f"the roster cannot be read ({type(e).__name__}: {e}), so the lane works "
                 f"at review or stricter"[:300], "recorded", rule="crew-readonly")
         level = _strictest(level, "review")
-    calls = shell_calls(cmd, cwd)
+    placed = shell_calls(cmd, cwd, where=True)
+    calls = None if placed is None else [(argv, code) for argv, code, _ in placed]
     if calls is None:  # the shell would read it another way than the tokenizer: judge the words, refuse a lane name
         if _LANE_TEXT.search(cmd):
             return deny(LANE_REASON)
@@ -3814,7 +5012,15 @@ def crew_shell_verdict(cmd: str, cwd, scope=None, member=None, level=None, base=
     # the routed call, and the `cat` of a quoted heredoc message it carries (runs_one_command's data form)
     one_routed = routed and lanes == [1] and [k for k, _ in _dev_calls(*calls[0])] == ["lane"] and \
         all(argv == ["cat"] for argv, code in calls[1:])
-    for argv, code in calls:
+    for argv, code, at in placed:
+        dev = _dev_args(argv) if code is None else None
+        imp = impeccable_refusal(impeccable_engine_words(dev[1:])) if dev and dev[:1] == ["impeccable"] else ""
+        if imp:  # off the allowlist: the developer's, in every lane
+            return deny(imp)
+        if dev and dev[:1] == ["impeccable"]:  # where it writes, from the folder it runs in: the workspace, the scope
+            why = _impeccable_lane_write(impeccable_engine_words(dev[1:]), at, scope, base)
+            if why:
+                return deny(why)
         for kind, args in _dev_calls(argv, code):
             if kind == "lane" and not one_routed:
                 return deny(LANE_REASON)
@@ -5123,23 +6329,74 @@ def _code_texts(code, name="") -> list:
 _CALL_LIST = re.compile(r"((?:'[^'\n]*'|\"[^\"\n]*\")\s*,\s*[\[(]\s*(?:(?:'[^'\n]*'|\"[^\"\n]*\")\s*,?\s*)+)[\])]")
 
 
+_CODE_SCREEN_SENDS = re.compile(r"-[A-Za-z0-9]*[XQ][A-Za-z0-9]*")
+
+
+def _code_types(code, name="") -> bool:
+    """True when a program that can start a process names screen or tmux and, among its other string literals, a
+    word that types into a session: screen's -X or -Q, a tmux command that types or carries a command (by its name or
+    alias), or a `#(` format or one that expands a value again (#{E:…}, #{T:…}). Such a program may build its words at
+    run time (`['screen', '-S', s, opt, …]`), which
+    the guard does not read as one call, so the words decide (fails closed)."""
+    if not code or not _code_spawns(code, name):
+        return False
+    words = {next((g for g in m.groups() if g is not None), "").strip() for m in _STR_LIT.finditer(code)}
+    progs = {os.path.basename(w) for w in words}
+    if "screen" in progs and any(_CODE_SCREEN_SENDS.fullmatch(w) for w in words):
+        return True
+    carries = _TMUX_TYPES | set(_TMUX_CARRIES)
+    return "tmux" in progs and any("#(" in w or _TMUX_REEXPANDS.search(w) or (_TMUX_ALIASES.get(w) or w) in carries
+                                   for w in words)
+
+
+# the commands the rules on a program's code judge, as whole words: a string literal the tokenizer cannot read that
+# names one is refused (UNREADABLE_REASON), since the guard cannot tell what the program hands to a shell (round eleven)
+_CODE_ACTS_ON = re.compile(r"\b(?:dev|devkit|claude|codex|tmux|screen|osascript|open)\b")  # devkit: python3 -m devkit
+
+
 def code_session_refusal(argv, cwd, bodies, depth: int = 0) -> str | None:
-    """Why an interpreter's program starts a nested agent session without devkit's hooks or sandbox, or runs `dev
-    hook`, in a command line it hands to a process (subprocess, os.system, os.exec*, child_process, …), or None:
-    the refusals the shell form gets, for the same commands named in code (RT12). A repository's own script is its
-    code, as for the other checks."""
+    """Why an interpreter's program starts a nested agent session without devkit's hooks or sandbox, changes the
+    extensions (EXT_REASON), runs `dev install|update` (INSTALL_REASON) or runs `dev hook`, in a command line it
+    hands to a process (subprocess, os.system, os.exec*, child_process, AppleScript's do shell script, …), or None:
+    the refusals the shell form gets, for the same commands named in code (RT12). A command line the tokenizer cannot
+    read that names one of the commands these rules judge is refused as unreadable (_CODE_ACTS_ON, round eleven). A
+    repository's own script is its code, as for the other checks."""
     if depth > 3 or _repo_script(argv, cwd):
         return None
     name = os.path.basename(argv[0])
     code = _program(argv, cwd, bodies)[0]
     homes = set(_AGENT_HOME_ENV) & set(re.findall(r"\b[A-Z_]+\b", code or ""))
+    if _code_types(code, name):
+        return TERMINAL_TYPING_REASON
     for text in _code_texts(code, name):
-        calls = shell_calls(text, cwd, depth + 1) or []
+        if tmux_list_refusal(text):  # a tmux `;` list in a command line the program hands to a shell (round ten)
+            return TERMINAL_TYPING_REASON
+        calls = shell_calls(text, cwd, depth + 1)
+        if calls is None:  # D10 in a program's code (round eleven): a line the tokenizer cannot read, such as
+            if _CODE_ACTS_ON.search(text):  # os.system("dev install # don't"), is refused when it names a command
+                return UNREADABLE_REASON  # these rules judge; any other literal (print("don't")) stays data
+            continue
         for inner, icode in calls:
             why = guardless_session(os.path.basename(inner[0]), inner, homes)
             if why:
                 return why
             dargs = _dev_args(inner)
+            helps = dargs is not None and _dev_skips(dargs[1:], "-h", "--help")
+            if vendor_ext_refusal(inner, cwd) or (dargs is not None and _ext_refusal(dargs) and not helps):
+                return EXT_REASON
+            if terminal_open_refusal(inner):
+                return TERMINAL_REASON
+            if terminal_typing_refusal(inner):
+                return TERMINAL_TYPING_REASON
+            if os.path.basename(inner[0]) == "xargs":
+                if terminal_typing_refusal(_unwrap(_xargs_command(inner[1:]), more=True), more=True):
+                    return TERMINAL_TYPING_REASON
+                why = _xargs_dev_refusal(_unwrap(_xargs_command(inner[1:])))
+                if why:
+                    return why
+            if dargs is not None and dargs[:1] in (["install"], ["update"]) and not helps and \
+                    not _update_check(dargs):  # F1 (re-review four): as the shell form is (_Shell.dev)
+                return INSTALL_REASON
             if dargs is not None and dargs[:1] == ["hook"] and not _dev_skips(dargs[1:], "-h", "--help"):
                 return HOOK_REASON
             if icode is not None and _INTERP.match(os.path.basename(inner[0])):
@@ -5880,9 +7137,21 @@ def member_write_exempt(path, cwd, scope=None, member=None, base=None) -> bool:
     return bool(layers) and all(scope_holds(ap, cwd, layer, base=base) for layer in layers)
 
 
+def _named_paths(tool, tool_input) -> list:
+    """The paths a tool call names: a file tool's file_path and notebook_path, and an MCP tool's path keys."""
+    if not isinstance(tool_input, dict):
+        return []
+    paths = [tool_input.get(k) for k in ("file_path", "notebook_path")]
+    if str(tool).startswith("mcp__"):
+        paths += _mcp_out_paths(tool_input)
+    return [p for p in paths if isinstance(p, str)]
+
+
 def check(tool: str, tool_input: dict, cwd: str, agent: str):
     tool_input = tool_input or {}
     _BYPASSES.clear()
+    if any(_NUL in p for p in _named_paths(tool, tool_input)):  # as check_bash refuses one in a command: a rule after
+        return deny(PATH_NUL_REASON)  # the guard (the crew's scopes) would raise on it and fail open
     if tool == "WebFetch":
         return webfetch_verdict(tool_input)
     if str(tool).startswith("mcp__"):  # by name (spec F8); C6 judges sending and publishing (F5)

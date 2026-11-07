@@ -37,6 +37,7 @@ lib/devkit/
   dispatch.py           routing work to a crew member, delegation between members, dispatch of ready work
   gates.py              what a crew member owes before it stops (SubagentStop)
   selfcheck.py          the consistency checks: the parts of devkit that describe each other, compared
+  completion.py         dev completion: zsh and bash completion generated from the parser, and its live values
   state.py              serialized, atomic writes of the session and run records
   scope.py              whether a turn is development work
   stubs.py              dev stubs: unfinished work in delivered code
@@ -53,6 +54,7 @@ lib/devkit/
   docs.py               dev docs check
   diagram.py            dev diagram: layout, routing, rendering and validation
   dashboard.py          the HTML command center
+  web/                  the dashboard page: brand themes, styles, markup, script, and one file per rebuilt section
   dashserver.py         the dashboard as a local, live, read-only server
   desktop.py · mcp.py   the Claude Desktop extension and the MCP server (dev mcp) it runs
   providers.py          Claude Code and Codex status, quota and self-tests
@@ -126,6 +128,7 @@ file reads and imports only, in about a second:
 | D10 | A kind of work has no file anchor and does not say why, or an open lesson has no anchors (this Mac's state) |
 | D11 | A row of the guardrail table in [The crew](crew.md#guardrails) cites no rule id, or states a planned rule as fact |
 | D12 | `tests/__init__.py` does not activate `tests/_hermetic.py` (the run's temporary home), or a documented `unittest discover -s tests` lacks `-t .`, which unittest needs to import `tests/__init__.py` |
+| D13 | `shell/completions/_dev` or `dev.bash` differs from what the parser generates (`bin/dev completion zsh\|bash`), or a completion rule in `lib/devkit/completion.py` names an argument the parser no longer has |
 
 `tests/test_consistency.py` runs the checks that read only the repository, and tests the others on small fixtures.
 Drift that exists today is listed in its `KNOWN` allowlist, each item with its review finding, owner, and the task
@@ -162,7 +165,10 @@ commit when you must, and records the reason in the audit trail.
 
 1. Write `cmd_<name>(a)` in `lib/devkit/cli.py`; return an exit code.
 2. Register it in `build_parser()` with its options.
-3. Add it to `COMMANDS` (grouped help) and to `shell/completions/_dev` (its subcommands and flags too).
+3. Add it to `COMMANDS` (grouped help), then regenerate the shell completion from the parser:
+   `bin/dev completion zsh > shell/completions/_dev` and `bin/dev completion bash > shell/completions/dev.bash`. When
+   an argument takes something devkit knows (a project, a task, a branch), add a rule to `RULES` in
+   `lib/devkit/completion.py`. CI fails while the checked-in scripts differ from the parser (D13).
 4. Document it in [Commands](commands.md) and, when agents use it, in the `using-devkit` or `workspace` skill.
 
 ## Adding a guard rule

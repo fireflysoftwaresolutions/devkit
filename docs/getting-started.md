@@ -244,6 +244,7 @@ with `dev install --only <step>`, which re-applies it from the copy that is inst
 | `docs` | Checks markdownlint, lychee, and Vale, and syncs the Google and write-good Vale styles |
 | `launchd` | Loads devkit's seven scheduled jobs, `com.devkit.job.<name>`: sync (hourly by default), sleep, gc, repair, audit, doctor and lessons ([jobs and audit](jobs-and-audit.md)) |
 | `prompt` | Keeps the [prompt helper](#the-prompt-helper) as you chose it: refreshes devkit's Starship block, or asks once when you have not answered yet (`dev setup prompt`) |
+| `shell` | Keeps the [zsh helpers](#tab-completion-and-the-zsh-helpers) as you chose them, or asks once when you have not answered yet (`dev setup shell`) |
 
 Details are in [Agents](agents.md) and [Configuration](configuration.md).
 
@@ -369,6 +370,56 @@ digits from it become numbers. Measured on an Apple Silicon Mac
 with 40 projects of 3 checkouts each: 0.13 ms per prompt, and 1.7 ms for a prompt right after devkit rewrote the
 cache. The budget is 5 ms, and a test holds it. `DEVKIT_PROMPT` and `DEVKIT_PROMPT_ASK` hold plain text, because Starship
 and `oh-my-posh` escape a `%` for zsh themselves; the preceding snippets escape it for zsh and Powerlevel10k.
+
+## Tab completion and the zsh helpers
+
+**Tab completion** works as soon as your shell sources `shell/devkit.zsh` (the `cli` step does that). Press
+<kbd>Tab</kbd> after `dev` and zsh offers every command with a one-line description; after a command, its
+subcommands, options and choices; and where an argument names something devkit knows, the live values:
+
+```text
+$ dev task done <Tab>
+T-fy3k2m9q1ab  -- now · Fix the login timeout
+T-fy3k2pa7c2d  -- next (blocked) · Ship the beta
+$ dev progress step --step <Tab>
+design  -- step 1 · done
+api     -- step 2 · running · Backend engineer (Tank)
+$ dcd devkit <Tab>
+feat/zsh-completions  -- ~/Development/.worktrees/fireflysoftwaresolutions/devkit/feat-zsh-completions
+```
+
+The completion is generated from `dev`'s own commands, so it never falls behind them. Projects, worktrees, work items,
+plan steps, crew members, plans, and branches come from devkit's records; the full list is in
+[Commands › `dev completion`](commands.md#dev-completion-zsh--bash). A second <kbd>Tab</kbd> within 10 seconds costs
+under a millisecond. A <kbd>Tab</kbd> waits at most 0.1 seconds for new values when it has older ones to show, and
+0.5 seconds for the first values of a kind in a new shell; macOS's bash 3.2 counts only whole seconds, so it waits up
+to 1 second. When devkit is slower than that, you get the last values, and the new ones on the next <kbd>Tab</kbd>.
+
+In bash, add this line to `~/.bashrc`:
+
+```bash
+eval "$(dev completion bash)"
+```
+
+**`dcd` and `dwt`** move you around: `dcd widget` goes to a project by its alias, id, or part of its name, and
+`dcd widget login` to its worktree for `feat/login`; `dwt feat/login` creates or reuses a managed worktree and goes
+there.
+
+**The zsh helpers** add fzf pickers, and change how your shell behaves, so they are off until you say yes. Run
+`dev setup shell` in your own terminal (`dev install` also asks once): run by an agent, it changes nothing and exits
+with code 2. Then, with fzf installed:
+
+| Keys or command | What it does |
+| --- | --- |
+| <kbd>Ctrl</kbd>+<kbd>X</kbd> <kbd>i</kbd> | Insert a work item's id, picked from the project you are in |
+| <kbd>Ctrl</kbd>+<kbd>X</kbd> <kbd>p</kbd> | Insert a project's alias |
+| <kbd>Ctrl</kbd>+<kbd>X</kbd> <kbd>b</kbd> | Insert a branch of the repository you are in |
+| `dpick task` (or `project`, `branch`, `worktree`, `step`, `plan`, `member`) | Print one, picked with fzf: `git switch "$(dpick branch)"` |
+| `dcd` with no project | Pick a project or worktree on this Mac and go there |
+
+zsh's own completion system already uses <kbd>Ctrl</kbd>+<kbd>X</kbd> <kbd>t</kbd>, so the work item picker is on
+<kbd>i</kbd>. A key you bound yourself keeps your binding. `dev setup shell --remove` turns the helpers off again;
+completion, `dcd`, and `dwt` stay.
 
 ## Onboarding another developer
 

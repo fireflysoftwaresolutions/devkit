@@ -1,0 +1,40 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="generator" content="devkit __VERSION__">
+<title>Firefly devkit · command centre</title>
+<link rel="icon" href="__FAVICON__">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Manrope:wght@300..800&display=swap">
+<script>(function(){try{var t=JSON.parse(localStorage.getItem("devkit.theme"));if(t==="light"||t==="dark")document.documentElement.dataset.theme=t;}catch(e){}})();</script>
+<style>
+:root{__LIGHT__}
+@media (prefers-color-scheme: dark){:root:where(:not([data-theme="light"])){__DARK__}}
+:root[data-theme="dark"]{__DARK__}
+:root[data-theme="light"]{__LIGHT__}
+__CSS__
+</style>
+</head>
+<body>
+<a class="skip" href="#view">Skip to content</a>
+<header class="nav" id="nav" role="banner">
+<a class="lockup" href="#/now" aria-label="Firefly devkit — Now">__LOGO_DARK____LOGO_LIGHT__<span class="vr" aria-hidden="true"></span><span class="dk">__SPARK__<span>devkit</span></span></a>
+</header>
+<div class="banner" id="banner" role="status" hidden></div>
+<div class="filters" id="filters" role="region" aria-label="Filters"></div>
+<main id="view" tabindex="-1"></main>
+<footer class="foot">__SPARK__ <span>__COPYRIGHT__</span><span>devkit __VERSION__</span><span id="ticker"></span><span>Generated on __HOST__, __WHEN__</span><span>Press <kbd>?</kbd> for shortcuts</span></footer>
+<div class="scrim" id="scrim" hidden></div>
+<dialog class="modal" id="modal" aria-labelledby="modal-title" aria-modal="true"></dialog>
+<div class="palette" id="palette" role="dialog" aria-modal="true" aria-label="Command palette" hidden></div>
+<div class="sheet" id="sheet" role="dialog" aria-modal="true" aria-label="Keyboard shortcuts" hidden></div>
+<div class="tip" id="tip" role="tooltip" hidden></div>
+<div class="toast" id="toast" role="status" aria-live="polite"></div>
+<div class="sr" id="live-status" role="status" aria-live="polite"></div>
+<script id="devkit-data" type="application/json">__DATA__</script>
+<script>__JS__</script>
+</body>
+</html>

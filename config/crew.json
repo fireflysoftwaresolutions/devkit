@@ -819,9 +819,10 @@
       "procedure": [
         {
           "phase": "Design in hand",
-          "do": "Start from the design of the UX designer (Sati) with every state and its copy; ask for one when it is missing.",
+          "do": "Start from the design of the UX designer (Sati) with every state and its copy; ask for one when it is missing. Load `frontend-design` and `impeccable`, then run impeccable's setup once, from the project's root: `dev impeccable context`. Run the other impeccable commands the skill names the same way, `dev impeccable <verb>`, never by the launcher's path, which the guard refuses. You may run `context`, `detect`, `doctor`, `live`, and the `live-…`, `surface-brief`, `critique-storage`, `comp-spec`, and `build-phase` helpers as the skill uses them, with paths inside the project. The developer runs every other verb, `concept-seed` and `generate-image` included. Follow what it prints, but write PRODUCT.md or DESIGN.md only when the developer asks.",
           "skills": [
-            "frontend-design"
+            "frontend-design",
+            "impeccable"
           ],
           "devkit": [
             "dev crew ask"
@@ -1207,9 +1208,10 @@
       "procedure": [
         {
           "phase": "Design in hand",
-          "do": "Start from the design of the UX designer (Sati) and the platform's guidelines.",
+          "do": "Start from the design of the UX designer (Sati) and the platform's guidelines. Load `frontend-design` and `impeccable`, then run impeccable's setup once, from the project's root: `dev impeccable context`. Run the other impeccable commands the skill names the same way, `dev impeccable <verb>`, never by the launcher's path, which the guard refuses. You may run `context`, `detect`, `doctor`, `live`, and the `live-…`, `surface-brief`, `critique-storage`, `comp-spec`, and `build-phase` helpers as the skill uses them, with paths inside the project. The developer runs every other verb, `concept-seed` and `generate-image` included. Follow what it prints, but write PRODUCT.md or DESIGN.md only when the developer asks.",
           "skills": [
-            "frontend-design"
+            "frontend-design",
+            "impeccable"
           ],
           "devkit": [
             "dev crew ask"
@@ -1572,9 +1574,10 @@
       "procedure": [
         {
           "phase": "Task and content",
-          "do": "Start from the user's task and the real content, not from components.",
+          "do": "Start from the user's task and the real content, not from components. Load `frontend-design` and `impeccable`, then run impeccable's setup once, from the project's root: `dev impeccable context`. Run the other impeccable commands the skill names the same way, `dev impeccable <verb>`, never by the launcher's path, which the guard refuses. You may run `context`, `detect`, `doctor`, `live`, and the `live-…`, `surface-brief`, `critique-storage`, `comp-spec`, and `build-phase` helpers as the skill uses them, with paths inside the project. The developer runs every other verb, `concept-seed` and `generate-image` included. Follow what it prints, but write PRODUCT.md or DESIGN.md only when the developer asks.",
           "skills": [
-            "frontend-design"
+            "frontend-design",
+            "impeccable"
           ],
           "gate": "the user's task is written for each screen"
         },
@@ -4220,6 +4223,7 @@
       "knowledge": {
         "skills": [
           "frontend-design",
+          "impeccable",
           "testing"
         ],
         "docs": [

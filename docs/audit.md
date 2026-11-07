@@ -72,9 +72,22 @@ devkit keeps these out of every record it writes:
   transcript. Of the line itself (`approve D<n>: …`, or the question and answer from the question tool) it keeps only
   the length: a hash of a short answer could be guessed, and `dev audit verify` finds the developer's message by its
   id. It keeps the answer only when that answer is one of the decision's options; free text becomes
-  `[free text: N characters]`.
+  `[free text: N characters]`. An answer from the question tool also keeps three fields, which show how a click
+  became an option and still show it when the transcript is gone after 30 days:
+  - `match` (in `evidence`): `exact` (devkit's own label, word for word), `letter` (an offered label that names an
+    option by its letter, such as `A: Skip them`), `words` (one that names it by its words), or `free` (text you
+    typed yourself). For an irreversible decision it is always `exact`.
+  - `asked` (in `evidence`): `exact` when the question was devkit's own, `reworded` when the tech lead reworded it.
+  - `label` (in `ref`): the label you clicked, only when the dialog offered it. Labels are the tech lead's text, like
+    the options `crew.decision` keeps, and are redacted, home-cleaned, and cut to 120 characters. Text you typed
+    yourself (**Other**) is never kept: it stays a length.
+
+  The question itself is kept as a length only, with no hash: devkit's own words plus a short context are easy to
+  guess, so a hash in an export would confirm a guess.
 - **Decision questions.** A member's question for the developer (`crew.decision`) keeps the decision id, the member
-  who asked, the option labels (redacted as usual), and the length of the question, which often quotes the developer.
+  who asked, the option labels (redacted as usual), the labels the dialog offers for them (`labels`, the
+  recommended one marked and the option that performs an irreversible action with what it runs), the session, and
+  the length of the question, which often quotes the developer.
 - **Free-text answers.** The developer's answer (`crew.decided`, and the `dev crew decide` command that records it)
   keeps the decision id, who answered, and the answer only when it names one of the decision's options, by its
   label or its letter; any other answer becomes `[free text: N characters]`.
@@ -169,8 +182,8 @@ dev audit show 01M6SFPEZ2
 | `target` · `detail` | yes | What the action was about and how, redacted. At most 300 and 600 characters |
 | `outcome` | yes | `ok`, `blocked`, `failed`, or `recorded` |
 | `why` | for an override | The reason given with `--why`, redacted. At most 300 characters |
-| `evidence` | when there is some | `command`, `commit`, `check`, `exit`, `duration`, `cwd`, `tool`, `rule`, `count`, `file`, `flag` (an escape hatch's name), `channel`, and `transcript_uuid` |
-| `ref` | when there is some | Links to other records and decisions: `id`, `by`, `was`, `type`, `result`, `answer`, `asked_by`, `irreversible`, `mode`, `overrides`, `routed`, and `session`; for the irreversible-action gate, `tier` (1 or 2), `setting` (`audit` or `enforce`), `grant` (the grant's id), `source` (`E1`, `E2`, `step`, or `preapproval`), and `repo` (the `owner/repo` acted on) |
+| `evidence` | when there is some | `command`, `commit`, `check`, `exit`, `duration`, `cwd`, `tool`, `rule`, `count`, `file`, `flag` (an escape hatch's name), `channel`, `transcript_uuid`, and, for a question tool answer, `match` and `asked` |
+| `ref` | when there is some | Links to other records and decisions: `id`, `by`, `was`, `type`, `result`, `answer`, `label`, `labels`, `asked_by`, `irreversible`, `mode`, `overrides`, `routed`, and `session`; for the irreversible-action gate, `tier` (1 or 2), `setting` (`audit` or `enforce`), `grant` (the grant's id), `source` (`E1`, `E2`, `step`, or `preapproval`), and `repo` (the `owner/repo` acted on) |
 | `prev` · `hash` | yes | The hash chain, see [Verify the chain](#verify-the-chain) |
 
 A stored record has no other fields: devkit drops whatever a caller passes outside this list. A record read back
@@ -237,9 +250,15 @@ problem it prints the file, the line, and the record's id, and exits `1`:
 | Problem | Meaning |
 | --- | --- |
 | does not match its hash | The record was changed after it was written |
+| no message of the developer backs it | A `crew.evidence` record points to no prompt or question tool answer of the developer in the session's transcript |
+| the transcript shows another answer, match, label, or asked | `dev audit verify` reran the matcher on the question and label in the transcript, against the decision as the session's run holds it, else as its `crew.decision` record keeps it (`options`, `labels`), and the evidence record says otherwise. `asked` is checked while the run still holds the question |
 | does not link to the one before it | A record was removed, inserted, or changed before this one |
 | differs from the published copy | Records were changed or removed after they were published |
 | unreadable | The month file could not be read |
+
+Some checks cannot run on every record. When a `crew.decision` record kept its options or labels only up to the
+300-character limit, verify cannot rebuild that decision: it prints a note marked `!` and still exits `0`, because a
+check it cannot run is no evidence of a change.
 
 Records written since the last publish are counted as _not yet published, so not yet anchored_. Every run is itself
 recorded as `audit.verify`, with `critical` severity when it fails. The daily job never publishes a local file over a

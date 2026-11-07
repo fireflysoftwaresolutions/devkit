@@ -1462,9 +1462,12 @@ def _ask_decision(a, me) -> int:
     if a.to:
         ui.err("a decision goes to the developer through the tech lead: drop --to")
         return 2
-    d = progress.crew_decision(" ".join(a.text), options=a.options or "", recommend=a.recommend or "",
-                               irreversible=a.irreversible or "", from_agent=me, target=a.target or "",
-                               approves=getattr(a, "approves", "") or "", performs=getattr(a, "performs", "") or "")
+    opts, rec = progress.decision_shape(" ".join(a.text), a.options or "", a.recommend or "", a.irreversible or "",
+                                        a.target or "", getattr(a, "approves", "") or "",
+                                        performs=getattr(a, "performs", "") or "")
+    d = progress.crew_decision(" ".join(a.text), options=opts, recommend=rec, irreversible=a.irreversible or "",
+                               from_agent=me, target=a.target or "", approves=getattr(a, "approves", "") or "",
+                               performs=getattr(a, "performs", "") or "")
     if d["state"] == "decided":
         print(f"{ui.OK} auto mode: go ahead with {_option(d, d['answer'])} ({d['id']}, recorded; the developer can "
               "revisit it with dev crew decisions)")
@@ -1480,7 +1483,7 @@ def _ask_decision(a, me) -> int:
               f"(Check: – waiting for {d['id']}; Needs from the tech lead: {d['id']}). The tech lead resumes you "
               "with the answer")
     else:
-        print("ask the developer now (AskUserQuestion / request_user_input) with the decision template, then: "
+        print("ask the developer now in one question call (dev crew decisions --ask prints it), then: "
               f"dev crew decide {d['id']} \"<answer>\"")
     return 0
 
@@ -1507,34 +1510,58 @@ def _decide(a, me) -> int:
     return 0
 
 
-def _ask(run, did) -> int:
-    """The decision as the developer must be asked it: only an answer to this question is their evidence (E1)."""
+def _ask(run, ids, as_json=False) -> int:
+    """The decisions as question tool calls the tech lead can send as they are or reword (spec C5: the developer's
+    answer to a question that names D<n> up front, with an option's letter, is their evidence E1)."""
     from . import progress
-    d = progress._decision(run, did)
-    if not d:
-        ui.err(f"no decision {did} in this session's run: dev crew decisions")
+    try:
+        p = progress.ask_calls(run, ids)
+    except progress.StepError as e:
+        ui.err(str(e))
         return 2
-    print("Ask the developer with the question tool (AskUserQuestion), exactly:")
-    print(f"  question: {progress.ask_text(d)}")
-    if d.get("options"):
-        print(f"  options: {' | '.join(d['options'])}")
-        print(ui.dim("  use these labels as they are; \"(Recommended)\" may follow the one you recommend"))
-    print(f"Or they type a line of its own in their prompt: approve {d['id']}" + (": <option>" if d.get("options")
-                                                                                 else ""))
-    if d.get("irreversible"):
-        perf = progress.performing_option(d)
-        print(ui.dim(f"  it leads to an irreversible action ({d['irreversible']}): only one of the options, or the "
-                     "approve line, counts; a free-text answer does not. "
-                     + (f"Only “{perf}” opens it" if perf else "No option opens it" if d.get("options")
-                        else "Only approve or yes opens it")))
+    if as_json:
+        print(json.dumps(p, ensure_ascii=False, indent=1))
+        return 0
+    asked = [q["header"] for c in p["calls"] for q in c["questions"]]
+    if not asked and not p["typed"]:
+        print("  no decisions wait for the developer")
+        return 0
+    n = len(p["calls"])
+    if n:
+        print(f"Ask the developer in {'one question call' if n == 1 else f'{n} question calls, one after the other'}"
+              " (AskUserQuestion, at most 4 questions each, an irreversible decision alone in its call). Reword a "
+              "reversible question as you like and add context; keep “D<n> ·” up front (or the header D<n>) and "
+              "each option's letter.")
+    for i, c in enumerate(p["calls"], 1):
+        if n > 1:
+            print(f"Call {i} of {n}:")
+        for q in c["questions"]:
+            print(f"  {q['question']}")
+            print(f"    header {q['header']} · " + " | ".join(o["label"] for o in q["options"]))
+    decs = [progress._decision(run, x) for x in asked + p["typed"]]
+    print("Or the developer types a line of its own: " + "; ".join(
+        f"approve {d['id']}" + (": <option>" if d.get("options") else "") for d in decs))
+    for d in decs:
+        if d.get("irreversible"):
+            perf = progress.performing_option(d)
+            print(ui.dim(f"  {d['id']} leads to an irreversible {d['irreversible']}: send devkit's exact call, "
+                         "word for word: one question, its own header, labels only (no description, no preview); "
+                         "a reworded question or label, another question in the call, or the developer's own text "
+                         "counts for nothing. "
+                         + (f"Only “{perf}” opens it" if perf else "No option opens it" if d.get("options")
+                            else "Only approve or yes opens it")))
+    print(ui.dim("  the tool input as JSON: dev crew decisions --ask --json"))
     return 0
 
 
 def _decisions(a) -> int:
     from . import progress
     run = live_run()
-    if getattr(a, "ask", None):
-        return _ask(run, a.ask)
+    if getattr(a, "ask", None) is not None:
+        return _ask(run, a.ask, getattr(a, "ask_json", False))
+    if getattr(a, "ask_json", False):
+        ui.err("--json goes with --ask: dev crew decisions --ask --json")
+        return 2
     decs = [d for d in (run or {}).get("decisions") or [] if not a.pending or d.get("state") == "pending"]
     if not decs:
         print("  no pending decisions" if a.pending else "  no decisions in this session's run")
@@ -2021,8 +2048,9 @@ def register(add):
     x.add_argument("--decision", action="store_true",
                    help="a decision point: in auto mode the recommendation is taken and recorded; otherwise it waits "
                         "for the developer")
-    x.add_argument("--options", help="the options, separated by |: \"A: rewrite the parser | B: patch it\"")
-    x.add_argument("--recommend", help="the option you recommend, e.g. A")
+    x.add_argument("--options", help="2 to 4 options, each with its letter, separated by |: \"A: rewrite the parser "
+                                     "| B: patch it\" (an irreversible approval without them is A: yes | B: no)")
+    x.add_argument("--recommend", help="the letter of the option you recommend, e.g. A (the developer sees it first)")
     x.add_argument("--irreversible", help="the irreversible action it leads to: " + ", ".join(_irreversible()))
     x.add_argument("--target", help="what that action acts on (a branch, a tag, a PR number): the developer's "
                                     "answer opens that action on that target once")
@@ -2045,8 +2073,10 @@ def register(add):
     x.add_argument("text", nargs="+", help="the answer")
     x = sp.add_parser("decisions", help="this run's decisions; automatic ones are marked for review")
     x.add_argument("--pending", action="store_true", help="only those waiting for the developer")
-    x.add_argument("--ask", metavar="ID", help="the exact question and options to ask the developer with the "
-                                               "question tool for this decision (their evidence, spec C5)")
+    x.add_argument("--ask", nargs="*", metavar="ID", help="the question tool calls that ask the developer these "
+                   "decisions, every pending one without IDs: at most 4 per call, the recommended option first; reword "
+                   "freely, keeping “D<n> ·” up front and the option letters (their evidence, spec C5)")
+    x.add_argument("--json", dest="ask_json", action="store_true", help="with --ask: the tool input as JSON")
     x = sp.add_parser("route", help="who should do a task, ranked with the reasons; --plan: a member for each open step")
     x.add_argument("task", nargs="*", help="the task, in a sentence")
     x.add_argument("--files", help="the files it touches, comma-separated (they weigh in the ranking)")

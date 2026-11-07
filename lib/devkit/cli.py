@@ -21,7 +21,7 @@ COPYRIGHT = core.COPYRIGHT
 COMMANDS = [
     ("Projects", [
         ("ls [--all]", "The projects on this Mac: branch, your changes, checks, worktrees, activity"),
-        ("go <name>", "Print a project's path (shell: `dcd <name>` jumps there)"),
+        ("go <name> [branch]", "Print a project's path, or its worktree's (shell: `dcd <name>` jumps there)"),
         ("status [name]", "What needs you, checks, the crew and the last update of a project"),
         ("alias [<alias> [project]|rm]", "Short project names shared by the team; dev status, go, open, wt take them"),
         ("clone <owner/repo|url>", "Clone by host/owner/repo (GitHub, GitLab, Bitbucket, any git URL)"),
@@ -55,6 +55,7 @@ COMMANDS = [
     ("Agents", [
         ("claude [query] [-w branch]", "Start Claude Code in a project (optionally in its own worktree)"),
         ("codex [query] [-w branch]", "Start Codex in a project (optionally in its own worktree)"),
+        ("impeccable <verb> [args…]", "Run the impeccable design engine devkit installed (its digest checked, no shell)"),
         ("handoff [query] [--edit|--log …]", "Show, edit or append to the project's handoff note"),
     ]),
     ("Worktrees", [
@@ -92,11 +93,15 @@ COMMANDS = [
     ]),
     ("Environment", [
         ("setup [--yes]", "The installation and configuration wizard (first install, or to change choices)"),
+        ("setup shell", "The zsh helpers: fzf pickers for tasks, projects and branches, and their keys"),
+        ("completion zsh|bash", "Tab completion for dev, generated from its own commands and options"),
         ("doctor", "Verify the whole setup (git, gh, Claude, Codex, skills, Docker, automation)"),
         ("agents [test [claude|codex]]", "Claude Code and Codex: installed, signed in, plan, quota; live self-tests"),
         ("config [--check]|repair|lock|…", "The agent settings devkit manages: what differs, why, the fix"),
         ("guard check <cmd>|--write p", "Simulate what the guard decides for a command or a file write"),
         ("plugin validate", "Validate the devkit plugin with Claude Code's validator and Codex's parser"),
+        ("ext ls|outdated|update|add|remove|enable|disable|ack",
+         "Third-party plugins, skills and MCP servers: pins, updates, drift, your own set"),
         ("desktop pack|status", "Claude Desktop extension: build the .mcpb bundle, check what is installed"),
         ("install [--only step]", "Pin the checkout read-only for the hooks, then apply the configuration"),
         ("update", "Move devkit to the newest release (or pull its branch), pin it and re-apply it"),
@@ -894,7 +899,9 @@ def cmd_status(a):
         print("\n".join(render_home(v)))
         return 0
     v = status_view(reg, p, w)
-    _prompt_refresh(reg, (w or {}).get("path") or p.get("path") if a.query else os.getcwd())
+    where = ((w or {}).get("path") or p.get("path")) if a.query else os.getcwd()
+    v["needs_you"] += devkit_needs(where)  # the plugins of the project asked about, not of the folder it runs in
+    _prompt_refresh(reg, where)
     v["show_all"] = bool(getattr(a, "all", False))
     if getattr(a, "json", False):
         print(json.dumps(v, indent=2, ensure_ascii=False, default=str))
@@ -902,6 +909,22 @@ def cmd_status(a):
     print("\n".join(render_status(v)))
     print()
     return 0
+
+
+def devkit_needs(cwd: str = None) -> list:
+    """`dev status` "Needs you": devkit's own notices, from recorded state only (no network): a newer release, and
+    extensions changed outside devkit."""
+    out = []
+    try:
+        from . import ext, updatecheck
+        line = updatecheck.status_line(installed=updatecheck.installed_version())
+        if line:
+            out.append({"kind": "devkit", "text": line, "command": "dev update --check"})
+        out += ext.status_needs(cwd)
+    except Exception as e:  # a notice never breaks dev status
+        out.append({"kind": "devkit", "text": f"devkit's notices could not be read ({type(e).__name__})",
+                    "command": ""})
+    return out
 
 
 def cmd_branch(a):
@@ -915,7 +938,21 @@ def cmd_branch(a):
 
 def cmd_go(a):
     p = _resolve(_reg(prs=False), a.query, note=True, here=True)
-    print(p["path"])
+    if not getattr(a, "branch", None):
+        print(p["path"])
+        return 0
+    from . import completion
+    trees = completion.worktrees_of(p["path"])
+    want = a.branch.strip().lower()
+    hits = [t for t in trees if t[0].lower() == want] or [t for t in trees if want in t[0].lower()]
+    if len(hits) != 1:
+        alias = registry.alias_map(_reg(prs=False)["projects"]).get(p["id"], p["id"])
+        ui.err(f"{len(hits) or 'no'} worktrees of {alias} match “{a.branch}”"
+               + (": pick one" if hits else ("; its worktrees:" if trees else "; it has none (dev wt new <branch>)")))
+        for b, where in hits or trees:
+            print(f"    {ui.bold(b)}  {ui.dim(where)}", file=sys.stderr)
+        return 2
+    print(os.path.expanduser(hits[0][1]))
     return 0
 
 
@@ -1476,6 +1513,12 @@ def update_checkout(home: Path):
 
 
 def cmd_update(a):
+    if getattr(a, "check", False):  # read-only: agents may run it (guard)
+        from . import updatecheck
+        return updatecheck.cmd_check(a)
+    if getattr(a, "quiet", False) or getattr(a, "record", False):
+        ui.err("--quiet and --record go with --check")
+        return 2
     home = core.source_home()  # the checkout; `dev` itself may run from the pinned copy, which git never changes
     print(f"{ui.ARROW} updating {tilde(home)}")
     rc, message, install = update_checkout(home)
@@ -3023,6 +3066,9 @@ def cmd_setup(a):
     if getattr(a, "what", None) == "commit-template":
         from . import setup as setup_mod
         return setup_mod.setup_commit_template(assume_yes=a.yes, remove=a.remove)
+    if getattr(a, "what", None) == "shell":
+        from . import setup as setup_mod
+        return setup_mod.setup_shell(assume_yes=a.yes, remove=a.remove)
     from . import wizard
     return wizard.run(assume_yes=a.yes, skip_packages=a.skip_packages)
 
@@ -3067,20 +3113,23 @@ def cmd_mcp(a):
 
 
 def cmd_complete(a):
-    if a.kind == "projects":
-        reg = core.read_json(core.HANDOFF / "registry.json", {}) or {}
-        print("\n".join(p["id"] for p in reg.get("projects", [])))
-    elif a.kind == "aliases":  # alias:project, for zsh's _describe; the projects on this Mac first
-        ps = (core.read_json(core.HANDOFF / "registry.json", {}) or {}).get("projects", [])
-        amap = registry.alias_map(ps)
-        here, away = registry.split_local(ps)
-        print("\n".join(f"{amap.get(p['id'], p['id']).replace(':', '_')}:{p['id']}" for p in here + away))
-    elif a.kind == "branches":
-        reg = core.read_json(core.HANDOFF / "registry.json", {}) or {}
-        print("\n".join(sorted({w.get("branch") for p in reg.get("projects", []) for w in p.get("worktrees", [])
-                                if w.get("branch")})))
-    elif a.kind == "commands":
-        print("\n".join(c.split()[0] for _, cmds in COMMANDS for c, _ in cmds))
+    """`dev __complete <kind>`: the live values shell completion offers, as value:description lines. bin/dev answers
+    the kinds of completion.KINDS before it builds this parser; this is the same answer for callers of main()."""
+    from . import completion
+    if a.kind == "commands":
+        print("\n".join(sorted({c.split()[0] for _, cmds in COMMANDS for c, _ in cmds})))
+        return 0
+    if completion.OLD_KINDS.get(a.kind, a.kind) not in completion.KINDS:
+        ui.err(f"unknown kind “{a.kind}”: one of {', '.join(completion.KINDS)}, commands")
+        return 2
+    rows = completion.values(a.kind, getattr(a, "project", None), getattr(a, "initiative", None), getattr(a, "arg", ""))
+    sys.stdout.write(completion.render(rows, tab=getattr(a, "tab", False)))
+    return 0
+
+
+def cmd_completion(a):
+    from . import completion
+    sys.stdout.write(completion.SCRIPTS[a.shell][1]())
     return 0
 
 
@@ -3111,7 +3160,9 @@ def build_parser():
     p.add_argument("--names", action="store_true", help="print project ids only")
     p.add_argument("--all", action="store_true", help="also the portfolio projects that are not on this Mac")
     p.add_argument("--json", action="store_true", help="the rows as JSON (for tools)")
-    add("go", cmd_go, "Print a project's path").add_argument("query", help="an id, an alias or part of a name")
+    p = add("go", cmd_go, "Print a project's path, or the path of one of its worktrees")
+    p.add_argument("query", help="an id, an alias or part of a name")
+    p.add_argument("branch", nargs="?", help="a managed worktree's branch (or part of it): print that worktree's path")
     p = add("alias", cmd_alias, "Short names for projects, shared by the team: dev alias <alias> [project], "
                                 "dev alias rm <alias>, dev alias (list)")
     p.add_argument("alias", nargs="?", help="the alias to set, or rm")
@@ -3481,10 +3532,15 @@ def build_parser():
     desktop.register(add)
     from . import crew
     crew.register(add)
+    from . import ext
+    ext.register(add)
+    from . import impeccable
+    impeccable.register(add)
     add("doctor", cmd_doctor, "Verify the setup")
     p = add("install", cmd_install, "Pin devkit for the hooks, then apply the configuration")
     p.add_argument("--only", help="comma list: config,tools,cli,git,handoff,instructions,skills,claude,codex,desktop,"
-                                  "docker,docs,launchd; re-applies them from the installed copy without pinning")
+                                  "docker,docs,launchd,prompt,shell; re-applies them from the installed copy without "
+                                  "pinning")
     p.add_argument("--version", help="switch to a pinned copy kept from an earlier install (rollback), e.g. 26.11.2")
     p.add_argument("--unverified", action="store_true",
                    help="pin HEAD although it is neither a release nor tested (`dev ci --run`); needs --why")
@@ -3509,22 +3565,30 @@ def build_parser():
     p.add_argument("rest", nargs=argparse.REMAINDER, help="render <spec|dir> [--out DIR] [--png] · check <spec|svg|dir> · new <kind> <name>")
     p = add("setup", cmd_setup, "Installation and configuration wizard; dev setup prompt adds the prompt helper, "
                                 "dev setup commit-template the commit template")
-    p.add_argument("what", nargs="?", choices=["prompt", "commit-template"],
-                   help="prompt: only the prompt helper; commit-template: only the commit template (commit.template)")
-    p.add_argument("--remove", action="store_true", help="with prompt or commit-template: take it out again")
+    p.add_argument("what", nargs="?", choices=["prompt", "commit-template", "shell"],
+                   help="prompt: only the prompt helper; commit-template: only the commit template (commit.template); "
+                        "shell: only the zsh helpers (fzf pickers and their keys)")
+    p.add_argument("--remove", action="store_true", help="with prompt, commit-template or shell: take it out again")
     p.add_argument("-y", "--yes", action="store_true", help="accept every default (non-interactive)")
     p.add_argument("--skip-packages", action="store_true", help="do not install Homebrew/npm packages")
     add("prompt", cmd_prompt, "What devkit's prompt helper shows here; refresh writes it for this Mac").add_argument(
         "action", nargs="?", choices=["refresh"])
-    add("update", cmd_update, "Update devkit: the newest release, or a pull of its branch")
+    p = add("update", cmd_update, "Update devkit: the newest release, or a pull of its branch; --check only tells")
+    p.add_argument("--check", action="store_true", help="read-only: the newest release, what changes in it, and "
+                                                         "whether the checkout and the pinned copy are behind")
+    p.add_argument("--quiet", action="store_true", help="with --check: print nothing (the daily job)")
+    p.add_argument("--record", action="store_true", help="with --check: record the result for the session start "
+                                                          "and dev status")
     add("docker", cmd_docker, "Docker on Colima").add_argument(
         "action", choices=["up", "down", "status", "trim", "prune", "autostart-on", "autostart-off"])
     add("version", cmd_version, "Show version")
+    p = add("completion", cmd_completion, "Tab completion for dev, generated from its own parser: zsh or bash")
+    p.add_argument("shell", choices=["zsh", "bash"], help="the shell to print the completion script for")
     p = add("hook", cmd_hook, argparse.SUPPRESS)
     p.add_argument("event")
     p.add_argument("--agent", default="claude", choices=["claude", "codex"])
-    p = add("__complete", cmd_complete, argparse.SUPPRESS)
-    p.add_argument("kind")
+    from . import completion
+    completion.add_complete_arguments(add("__complete", cmd_complete, argparse.SUPPRESS))
     return ap
 
 

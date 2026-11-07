@@ -2,10 +2,11 @@
 
 `dev dashboard` opens devkit's command center: a local, read-only app on your Mac that updates by itself while it is
 open. It is visual first: a number or a shape stands in for a sentence, and the detail opens in a drawer on the right.
-**Home** answers "is anything wrong, and where do things stand?" in one screen. **Tasks** holds the work items,
-**Background** the agent runs, CI results, and scheduled jobs, and **Team** the people and the crew. From any of them
-you open an item in a drawer, or drill into an **initiative** or a **project** page and down to a single **task**.
-Every item comes with the one command that moves it forward.
+It opens on **Now**, which answers "does anything need you, and when does the running work land?" in one screen.
+**Tasks** holds the work items, **Background** the agent runs, CI results, and scheduled jobs, and **Team** the people
+and the crew. From any of them you open an item in a drawer, or drill into an **initiative** or a **project** page and
+down to a single **task**. Every item says how to move it forward: a command to copy, or the words to type in the
+agent's session.
 
 ## Open it
 
@@ -37,18 +38,20 @@ The server's log is `~/.local/state/devkit/logs/dashboard.log`.
 
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="images/dashboard/home-1440-dark.webp">
-  <img src="images/dashboard/home-1440-light.webp" alt="The dashboard's Home view: the title says 5 urgent items need you; four stat tiles with a segmented bar each (what needs you by urgency, initiatives on track, projects by off track, at risk, on track, and quiet, open tasks by doing, blocked, and to do); the Needs you list with a decision waiting, a failed CI run, and a PR failing CI; Team now with a progress bar per running session; four Since yesterday counters with sparklines; and three initiative cards, each with a progress ring, its member projects as colored squares, and its due date." width="100%">
+  <img src="images/dashboard/home-1440-light.webp" alt="The dashboard's Now view: the headline says 2 things need you, and the line under it says Invoice export is paused until you answer D1 and CI failed on feat/rules-engine. On the left, the Needs you queue: the decision D1, Include cancelled invoices in the export?, with an amber bar, who asks, the two options with the recommended one, the words to type, and Open the run; a failed CI run with its first error and the command to copy; a pull request with changes requested; and one Housekeeping row. On the right, two runs: Invoice export with its landing strip, paused on you and landing 25 to 60 minutes after you answer D1, and Rules engine migration on another Mac, landing 15:55 to 16:10. Below, a line says one branch is only on this Mac, and the Since yesterday line lists 4 tasks done, 2 PRs merged, and 1 run finished." width="100%">
 </picture>
 
 ## Views
 
 The views are in the order you need them during a day of work, then the reference views. When the window is too
-narrow for all of them, the last ones move into a **More** menu, so the navigation never scrolls sideways. A red or
-amber dot on a view says it holds something that needs you.
+narrow for all of them, the last ones move into a **More** menu, so the navigation never scrolls sideways. A dot after
+a view's name says it holds something for you: amber on **Now** when something waits for your answer, red when
+something is broken, and a hollow diamond when something needs a look. Its tooltip says what, for example _Now, 2
+items need you_.
 
 | View | Keys | The job it does |
 | --- | --- | --- |
-| **Home** | `g o` | _Is anything wrong, and where do things stand?_ The title answers it, for example _5 urgent items need you_ or _Nothing needs you_. **Four stat tiles** follow, each a number and one segmented bar with its legend: what needs you (urgent, needs a look, for information), initiatives and projects (on track, at risk, off track, quiet, no data, done), and open tasks (doing, blocked, to do). Each tile links to its list. **Needs you** shows the top three groups, starting with decisions that wait for you and CI that failed in the last 24 hours. **Team now** shows each person with a thin progress bar per running session, and crew members by role. **Since yesterday** is four counters (sessions, commits, merged PRs, tasks done), each with its 14-day sparkline. Below, one card per **initiative**: a progress ring, a waffle of its member projects (one square each, colored by state), a due-date pill, and the people on it. At 1440 × 900 the whole summary fits without scrolling |
+| **Now** | `g n` · `g o` | _Does anything need you, and when does the running work land?_ One sentence answers it. Below it are the **Needs you** queue in the server's order, the live runs with their landing times, and two closing lines: the branches that exist only on this Mac, and what finished since yesterday (see [Now](#now)). **All N** lists every row (`#/now?all=1`) |
 | **Tasks** | `g t` | Every work item across projects and initiatives, as a board (Now · Next · Later · Closed) or grouped by scope. Filter by status, scope, and who claimed it (anyone, or only you). Every card shows who holds the lock and opens the task's drawer |
 | **Background** | `g b` | _Is anything running, failing, or waiting for you, and when is it done?_ Agent runs, CI results, and scheduled jobs on this Mac (see [Background work](#background-work)) |
 | **Team** | `g m` | _Who is doing what right now?_ The tabs **People**, **Crew** (`g c`), and **Who does what** (see [Team and the crew](#team-and-the-crew)) |
@@ -57,6 +60,60 @@ amber dot on a view says it holds something that needs you.
 | **Activity** | `g a` | A calendar heatmap of the last 26 weeks (one square per day, darker for more commits, sessions, and finished tasks; the day's numbers on hover, and a **Table** view), three counters with 14-day sparklines, the timeline (live sessions, session logs, completed and blocked tasks, merged PRs, operations, canary misses over 7 or 30 days), and the most active projects. Commits are kept for 30 days |
 | **Explorer** | `g e` | The handoff repository as a tree, with a safe Markdown viewer and find-in-file (`↵` / `⇧↵` step through matches). Up to 2 MB is embedded, newest first |
 | **Health** | `g h` | Status tiles come first, for Claude Code and Codex (signed in, quota used), guard decisions, the share of replies that started with the status block, configuration drift, and worktrees with disk use. Then the details: the **Setup issues** from the last sync, **Contradictions** (see [Honest states](#honest-states)), providers, guard decisions grouped by rule, the instruction canary per agent, drift, every worktree, disk usage per project, and **Time** (see [Live runs and time](#live-runs-and-time)) |
+
+## Now
+
+_Does anything need you, and when does the running work land?_ Now answers in one look and lets you act in one click.
+The server ranks, words, and times everything on it (`lib/devkit/dashnow.py`); the page only draws it, in the order it
+receives, and never sorts it again. From top to bottom:
+
+| Part | What it shows |
+| --- | --- |
+| **The answer** | One sentence, with one line under it that names the cause, and today's date and time on the right (table below) |
+| **Needs you** | Up to five rows in the server's order, then **All N** for the rest. A row that waits for your answer has an amber bar and glyph; a broken one has a red ✗. Each row shows its age, its details, the command to copy when there is one, and one link (**Open the run**, **Open the log**, **Open the job**, **Open the pull request**, or **Branches**). Housekeeping is one quiet row with its count. [The action list](#the-action-list) says what enters and in what order |
+| **Running** | One block per run that is running, blocked, waiting for you, or stopped reporting, at most four, then _N more runs_ (Background work). Each block shows the goal and project; the branch, mode, and agent; the landing strip; how far it is (_3 of 6 steps · paused on you 9 min_, or _2 of 4 steps · 48 min of about 1 h 30_); and the landing line. A run on this Mac opens its drawer. A run on another Mac says where it runs and when it last reported (_on studio · last update 2 min ago_). Runs that finished in the last hour take one line each (_Docs refresh · finished 14:20 in 35 min_). Under the runs, the people on other machines and their projects (_bob@studio works on lending-rules_) |
+| **Safety** | One line: the branches that exist only on this Mac, with the age of the oldest commit and a **Branches** link, or _Every branch is on the remote._ |
+| **Since yesterday** | Tasks done, PRs merged, and runs finished, each a link, or _nothing finished_. It is open on the day's first visit and before noon; at other times it folds into a disclosure |
+
+The first rule that matches writes the answer:
+
+| When | Headline | The line under it |
+| --- | --- | --- |
+| A decision or a grant waits for you | _2 things need you_, or _1 decision waits for you_ (or _1 grant waits for you_) when it is the only item | The first two rows, a clause each, such as _Invoice export is paused until you answer D1. CI failed on feat/rules-engine._ |
+| CI failed, a scheduled job failed, or a run is blocked or stopped reporting | _CI failed on feat/rules-engine_, _The doctor job failed_, or _Invoice export stopped reporting_ | The first error, or the reason |
+| Nothing else but a branch kept on this Mac for more than 4 hours, or an agent that is not signed in | _Nothing urgent. 2 things to look at._ | The first item |
+| Nothing needs you, and runs are going | _Nothing needs you_ | _2 runs are going. The first lands about 15:40._ |
+| Nothing needs you, and nothing runs | _Nothing needs you_ | _Nothing is running. Next in lending-core: Document the export endpoint._ The two columns become one **Next up** block (see [Honest states](#honest-states)) |
+| No projects yet | _Welcome to devkit_ | _Nothing is tracked yet. Clone a project with `dev clone <owner/repo>`, or start one with `dev new <name>`._ |
+
+The headline counts only the first three orders of [the action list](#the-action-list): your pull requests, blocked
+or overdue work, and housekeeping show in the queue but never make the headline.
+
+### The landing strip
+
+Each run has a landing strip: its plan's steps in order, at most eight (the rest show as _+N done_), on one line from
+the run's start. Each step is a glyph: `✓` done, `▶` running, `■` waiting for your answer (amber), `✗` blocked, `◇`
+ended without evidence, and `○` to do. A dotted run-out leads to the landing bracket, which holds a clock range
+(_15:55–16:10_) or, while the run waits for your answer, the time it needs after it (_+25–60 min_); the run-out is
+amber then. The line under the strip says when the run lands:
+
+| The run | Landing line |
+| --- | --- |
+| Running, with estimates | _Lands 15:55–16:10_, or _Lands about 15:40_ when both ends round to the same time |
+| Waiting for your answer | _Lands 25–60 min after you answer D1_. The time it waits for you does not count |
+| Over 1.5 times its estimate | _Lands 16:20–16:45, later than planned (estimate 2 h, now about 3 h)._ |
+| Blocked on a problem | _Blocked:_ and the reason, then _No landing time until it moves._ |
+| Stopped reporting: no sign of life for 30 minutes | _No update for 18 min. The landing time is unknown._ |
+| No estimate | _48 min so far. No estimate, so no landing time._ |
+
+The range is the one `dev progress` computes (`progress.eta_range`), rounded to 5 minutes, with one rule added: a step
+paused on your decision counts as running, so the time it waits for you adds nothing. A run's landing is reused for up
+to 60 seconds while its steps and its last update stay the same. A run on another Mac gets its landing from that
+Mac's last presence update.
+
+On a phone the queue comes before the runs:
+
+<img src="images/dashboard/home-390-dark.webp" alt="The Now view on a 390-pixel-wide phone screen in the dark theme: the headline 2 things need you; the Needs you queue with the decision D1 and its amber bar, the failed CI run, the pull request with changes requested, and the Housekeeping row; then the two runs with their landing strips; then the line about the branch only on this Mac and the Since yesterday line." width="320">
 
 ## Background work
 
@@ -217,14 +274,14 @@ link opens it again; a link inside a drawer to another record replaces its conte
 | Kind | Opens from | Shows |
 | --- | --- | --- |
 | `task` (`?task=<id>`) | Every task row and card | The connected task (below) |
-| `run:<id>` | Background work, Team now, session bars | The whole run (see [Background work](#background-work)) |
+| `run:<id>` | A run on Now, Background work, session bars | The whole run (see [Background work](#background-work)) |
 | `ci:<repo>@<branch>` | Background work's CI section | The failed jobs, the whole first error, and the next action |
 | `job:<name>` | Background work's jobs table | The job's schedule, recent runs, and log |
 | `member:<id>` | The Crew tab | A crew member: role, what they do, the kinds of work they do and approve, and what they work on now |
 | `initiative:<slug>` · `project:<owner/repo>` | Cards, tiles, and rows | The visuals and key facts; **Open full page** |
 | `person:<user@host>` · `session:<user@host>~<n>` | Team | Sessions, claimed tasks with lock countdown rings; a session's goal and progress |
-| `action:<key>` · `actions:<kind>` | Needs you | The problem, where it is, and the command |
-| `since:<sessions\|commits\|merged\|done>` | Since yesterday counters | The full list |
+| `action:<key>` · `actions:<kind>` | Links from earlier versions, and the items of an `actions` drawer | The problem, where it is, and the command |
+| `since:<sessions\|commits\|merged\|done>` | Now's Since yesterday line (tasks done, PRs merged) | The full list |
 
 **The connected task** first answers three questions, **Who has it** (who holds the lock, with which agent, since
 when, and the run that works on it), **What blocks it**, and **What's next**, with the command to copy. Then **Connected to**
@@ -244,8 +301,9 @@ a drawer shows what the copy holds and says what needs the live dashboard.
 
 ## Live runs and time
 
-Agents report progress on long runs (`dev progress start|step|block|done`). Summary views draw each running session
-as a thin bar (steps done of the total; red when blocked). The run's drawer and the project page show:
+Agents report progress on long runs (`dev progress start|step|block|done`). Now draws each run as a landing strip
+with its landing time (see [The landing strip](#the-landing-strip)); Team and the project pages draw each running
+session as a thin bar (steps done of the total; red when blocked). The run's drawer and the project page show:
 
 - the run's goal, a thin progress bar, steps done of the total, elapsed time against the plan's current total (the
   time so far plus the time left, so the two agree; a run without a plan uses its estimate, the calibrated one when
@@ -308,16 +366,44 @@ Every number and label on the page can be trusted at a glance.
   done with open tasks, a saved status from another branch, a step running before the step it waits for, two lanes of
   one member on one step, a run that stopped reporting, a run done with steps left, a claim held without a live
   session, and a task done with unticked **Done when** boxes. Health lists them all.
+- **Now says what it knows, and how old it is.** Each of its areas (the queue, the runs, safety, and since
+  yesterday) is built on its own, so one that fails never hides the others.
+
+| State | What Now shows |
+| --- | --- |
+| Loading | The shapes of the sentence, three rows, and two runs, at their real height, with no spinner. Screen readers hear _Loading what needs you._ |
+| Nothing waits for you, runs are going | _Nothing waits for you._ where the queue would be; the runs as usual |
+| Nothing needs you, nothing runs | The two columns become one **Next up** block: the top Now task of up to three projects, the most recently active first, each with `dev task -p <project> start <id>` to copy |
+| A new install, with no projects | _Welcome to devkit_ and **Get started**: an agent signed in, your first project, and the first sync, each marked done or to do, with its command when one helps |
+| An area failed | That area says so in its place, with a red ✗ and the reason, such as _Runs could not be read_; the other areas still show |
+| A source is degraded | The queue quotes the error and says which results it shows, ending with _Shown: the results from 14:52._ |
+| An area is stale | A tag after its title, such as _◇ as of 14:52 · 23 min old_, when a source behind it is older than twice its refresh: 2 minutes for the registry, 30 minutes for pull requests |
+| The static copy | The line under the sentence ends with _a copy from 15:03; it does not update._ |
+| Many rows or runs | Five rows, then **All N**; four runs, then _N more runs_ |
 
 ## The action list
 
-It is ordered by what blocks you most. Home shows the top three groups (items of the same kind are one row) and
-opens each in a drawer, where the command is the amber button. **Needs you** (`#/actions`) lists them all. It has
-a filter per kind and a copy icon per item.
+Now's **Needs you** queue holds everything that waits for you, ranked once by the server: what blocks you most comes
+first, and within one order, the row that holds up the most crew members, then the oldest. Items of one kind in one
+place are one row. Now shows the first five; **All N** (`#/now?all=1`) lists every row in the same order.
+
+| Order | What enters | The row | To act |
+| --- | --- | --- | --- |
+| 1 | A decision waits for you · an irreversible action waits for your grant | `D1 · <question>`, who asks (role first), what it pauses and how many crew members wait, the options with the recommended one, and the words to type, such as `approve D1` or `approve D1: B` · _Merge PR 142 waits for your grant_, tagged _Irreversible_, with `grant merge 142` | **Open the run** at the decision, then type the words in the agent's session. Nothing on the page copies them: your consent is typed, never pasted |
+| 2 | A run is blocked, or stopped reporting (no sign of life for 30 minutes) · CI failed on a branch in the last 24 hours | The reason, or who sent no update since when · the job, the step, and the first error | **Open the run** · `cd -- <project path> && dev run view <id> --failed` and **Open the log** |
+| 3 | A scheduled job failed · a branch has been only on this Mac for more than 4 hours · an agent is not signed in | The first error line · why it is not backed up · what to run | `dev jobs show <name>` · `cd -- <checkout> && dev backup -- <branch>` and **Branches** · `claude` or `codex login` |
+| 4 | Your pull requests: failing CI, changes requested, merge conflicts, waiting for review; a review requested of you · a blocked project, initiative, or task; overdue work | The pull request or the item, with its branch and project | The command for its kind (below) |
+| 5 | Housekeeping: finished worktrees, expired locks, two sessions on one branch, idle work, notes behind the code, configuration drift, repositories outside the layout | One row, such as _Housekeeping 4 · 2 finished worktrees, 1 expired lock, 1 note behind the code_ | Opens the housekeeping list (`#/now?all=1&kind=housekeeping`) |
+
+A pull request that fails CI on a branch that already has a CI row is listed once. A branch only on this Mac for less
+than 4 hours shows only in the safety line under the runs.
+
+Each kind of item has its command. The housekeeping list, the full list of one kind (`#/now?all=1&kind=CI`, which is
+where links to `#/actions?kind=…` go), and the command palette list the items one by one, each with a copy icon.
 
 | Order | Item | Command |
 | --- | --- | --- |
-| 0 | A decision waits for you (urgent) · CI failed on a branch in the last 24 hours (urgent) · a scheduled job failed on its last run · a setup issue from the last sync | Open the run and answer in its session · `dev run view <id> --failed` · `dev jobs show <name>` · `dev doctor` |
+| 0 | A decision waits for you · CI failed on a branch in the last 24 hours · a scheduled job failed on its last run · a setup issue from the last sync | Open the run and type your answer in its session · `dev run view <id> --failed` · `dev jobs show <name>` · `dev doctor` |
 | 1 | One of **your** PRs is failing CI | `gh pr checks <n> -R <owner/repo> --watch` |
 | 2 | Changes requested on your PR | `gh pr view <n> -R <repo> --comments` |
 | 3 | Your PR has merge conflicts | `cd <its worktree> && git fetch origin && git rebase origin/<default>` (or `dcd … && gh pr checkout …`) |
@@ -364,7 +450,8 @@ a filter per kind and a copy icon per item.
 | --- | --- |
 | `/` | Search |
 | `⌘K` · `Ctrl K` | Command palette |
-| `g` then `o` `t` `b` `m` | Home · Tasks · Background work · Team |
+| `g` then `n` or `o` | Now |
+| `g` then `t` `b` `m` | Tasks · Background work · Team |
 | `g` then `c` | Team: the Crew tab |
 | `g` then `p` `i` | Projects · Initiatives |
 | `g` then `a` `e` `h` | Activity · Explorer · Health |
@@ -379,12 +466,14 @@ a filter per kind and a copy icon per item.
 
 Every page, tab, open drawer, and filter lives in the URL, so any view can be bookmarked, shared with someone who has
 the same handoff repo, or reached with the back button. The format is `#/<view>[/<id>][?<key>=<value>&…]`, with
-defaults omitted. Ids keep their slashes and dots (`#/projects/gitlab.com/firefly/platform/api`). Links from earlier
-versions (`#/portfolio`, `?p=<project>`, `?i=<initiative>`) still resolve.
+defaults omitted. Ids keep their slashes and dots (`#/projects/gitlab.com/firefly/platform/api`). An empty or unknown
+view opens Now. Links from earlier versions still resolve: `#/overview` opens Now, `#/actions` opens Now's full list
+(`#/now?all=1`), and `#/portfolio`, `?p=<project>`, and `?i=<initiative>` open their pages.
 
 | Key | Values | Example |
 | --- | --- | --- |
-| view (path) | `overview` `tasks` `background` `team` `projects` `initiatives` `activity` `explorer` `health` `search` `actions` | `#/background` |
+| view (path) | `now` `tasks` `background` `team` `projects` `initiatives` `activity` `explorer` `health` `search` | `#/background` |
+| `all` | `1` opens the full **Needs you** list of Now, every row in the server's order | `#/now?all=1` |
 | id (path) | an initiative slug · a project id | `#/initiatives/lending` · `#/projects/acme/api` |
 | `tab` | initiative: `projects` `tasks` `plans` `sessions` `docs` · project: `tasks` `prs` `worktrees` `plans` `sessions` `note` · team: `crew` `raci` | `#/projects/acme/api?tab=prs` |
 | `task` | a task id: opens the task's drawer | `#/projects/acme/api?tab=tasks&task=T-fwk6cesh07u` |
@@ -398,7 +487,7 @@ versions (`#/portfolio`, `?p=<project>`, `?i=<initiative>`) still resolve.
 | `sort` `group` `layout` `dense` | Projects: `attention` `activity` `priority` `tasks` `name` `size` · `none` `initiative` `owner` `status` `priority` · `cards` (tiles, the default) `table` · `1` | `#/projects?layout=table` |
 | `ist` `psort` `ilayout` | Initiatives: status · `priority` `due` `progress` `activity` · `cards` (the default) `table` | `#/initiatives?ilayout=table` |
 | `tp` `who` `tmode` | Tasks: scope · claimed by (`me` or `user@host`) · `board` `list` | `#/tasks?who=me&tst=doing` |
-| `kind` | Needs-you kind filter | `#/actions?kind=CI` |
+| `kind` | With `all`: `housekeeping`, or a kind of [the action list](#the-action-list) (`CI`, `Review`, `Conflicts`, …) | `#/now?all=1&kind=housekeeping` |
 | `f` · `fq` | Explorer file · find-in-file text | `#/explorer?f=initiatives/lending/README.md` |
 | `range` | `7` or `30` (Activity) | `#/activity?range=30` |
 | `types` | search result types | `#/search?q=api&types=initiative,task` |
@@ -412,13 +501,21 @@ versions (`#/portfolio`, `?p=<project>`, `?i=<initiative>`) still resolve.
 | Refresh | the live page updates in place; a static copy reloads every 2 minutes while visible (not while a drawer is open), keeping its view, filters, and scroll position |
 | Data | The registry (projects, git state, worktrees, PRs, initiatives, live sessions with progress, providers, drift). From the handoff repo: **work items** (`items/<scope>/<id>.md`, with lock and changelog), **presence** (`presence/<user>@<host>.json`), **session logs** (`sessions/<scope>/<YYYY-MM>.md`), **versioned plans** (`plans/<scope>/*.md`), notes, and initiative READMEs. Also the PR cache, the instruction canary, guard decisions, the operations log, **timing records**, and **active runs** |
 
-The decisions are computed in Python (`lib/devkit/dashboard.py`) and unit-tested (`tests/test_dashboard.py`):
+The decisions are computed in Python and unit-tested:
 
-- action priority and commands, project health, _since yesterday_, guard rule grouping, task numbering;
-- lock state, collisions, people, initiative-linked items and KPIs;
-- session-log and status-line parsing, plan status, timing summaries, and credential masking.
+- in `lib/devkit/dashboard.py` (`tests/test_dashboard.py`): action priority and commands, project health, _since
+  yesterday_, guard rule grouping, task numbering; lock state, collisions, people, initiative-linked items and KPIs;
+  session-log and status-line parsing, plan status, timing summaries, and credential masking;
+- in `lib/devkit/dashnow.py` (`tests/test_dashnow.py`): the five areas of Now, which the snapshot carries as `attention`
+  (the ranked queue and its sentence), `runs` (where each run waits and when it lands), `safety`, `since`, and
+  `as_of` (when each slow source was last read). Every copied command quotes the values it names, so a branch name
+  pastes as one word.
 
-The page only renders them.
+The page only renders them; `tests/test_dashboard_now.py` checks that Now draws them as given, in headless Chromium.
+Its code lives in `lib/devkit/web/`: `page.html`, the two themes (`theme-light.css`, `theme-dark.css`), `base.css`,
+`app.js`, and `boot.js`, with one script and one style sheet per redesigned section in `web/sections/` (`now.js`,
+`now.css`). `dashboard.py` joins them into one inline script and one inline style sheet, so the live page and the
+static copy stay one self-contained file.
 
 ## Design
 
@@ -427,18 +524,25 @@ a number or a shape stands in for a sentence, text is a label, and the explanati
 
 - **Identity.** The official Firefly logo (the paper version on dark, the charcoal one on light) next to the devkit
   spark; charcoal and paper surfaces; Manrope.
-- **Amber**, the firefly's light, appears once per screen at most: on the button for the most important next action.
-  Progress rings, bars and sparklines are neutral (ink on light, stone on dark; today in the darker step).
-- **Data colors.** Status uses one fixed palette in both themes: green `#0ca30c` on track, yellow `#fab219` at risk,
-  red `#d03b3b` off track, grey for done. The set was checked with a colorblind-safety validator (adjacent pairs pass
-  for the common color-vision deficiencies) and always comes with a legend, a label or a tooltip, never color alone.
-  The heatmap uses one warm-grey ramp, light to dark. Text is never in a data color.
+- **Tokens, in two layers.** `lib/devkit/web/theme-light.css` and `theme-dark.css` hold Firefly's primitives
+  (`--ff-*`), then the semantic tokens the components read (`--surface-*`, `--ink*`, `--you*`, `--alert*`, `--ok`,
+  `--focus`, the fonts). Only these two files hold raw colors and font names, so a different brand changes them and
+  no component.
+- **Color is spent on exceptions.** Amber, the firefly's light, means your move and nothing else: a Now row that waits
+  for your answer (its bar and glyph), the step and run-out of a run that waits for you, the dot on **Now**, and the
+  primary button. Red means broken: failed CI, a failed job, a blocked run, off track. Green is a passing check or on
+  track (`#2f7d3f` on light, `#6fbf7f` on dark), and done is grey. Everything healthy is ink. At risk is a hollow
+  diamond in ink with its word, never a color alone. Text selection, search highlights, and the row flash are stone.
+  Progress rings, bars, and sparklines are neutral (ink on light, stone on dark; today in the darker step), and the
+  heatmap uses one warm-grey ramp, light to dark. Every state comes with a legend, a label, or a tooltip, and a test
+  checks the contrast of 38 text and glyph pairs in both themes.
 - **Visuals.** Inline SVG only, no chart library: progress rings with the number inside, thin segmented bars with a
   legend, member-project waffles, 14-day sparklines, CI strips, a calendar heatmap, lock countdown rings, and due-date
   pills. Every visual has an accessible name and a tooltip with the exact value on hover, and on focus where it can be
   focused; tables carry the same numbers.
-- **Type.** Four sizes (13, 15, 18, and 28 px) and two weights (400 and 600), sentence case everywhere. Monospace is
-  only for commands and paths.
+- **Type.** The views use four sizes (13, 15, 18, and 28 px). Now has its own scale: 32 px for the sentence, 20 px
+  for section titles, 16 px for the line under the sentence, 14 px for rows, and 12 px for small labels. Two weights
+  (400 and 600), sentence case everywhere. Monospace is only for commands and paths.
 - **Components.** One set used everywhere: stat tiles, cards and tiles on a soft surface (never nested), sections (a
   heading, a count, one quiet link), rows divided by hairlines whose title is a real link, quiet tables, avatars with
   live dots, session bars, underlined tabs, breadcrumbs, quiet buttons, copy icons, command menus, and one drawer.
@@ -446,13 +550,11 @@ a number or a shape stands in for a sentence, text is a label, and the explanati
   say what to do next, and instant rendering with no skeletons.
 - **Layout.** A full-height page: the header, a main area that grows, and the footer at the bottom of the window on
   short pages (after the content on long ones). A 12-column grid up to 1600 px puts panels side by side, and one
-  spacing scale (4, 8, 12, 16, 24, 32, 48, 64 px). Home fits a 1440 × 900 screen without scrolling. Responsive at
+  spacing scale (4, 8, 12, 16, 24, 32, 48, 64 px). Now fits a 1440 × 900 screen without scrolling. Responsive at
   1440, 1280, 1100, 768, and 390 px with no horizontal page scroll; copy icons on rows appear on hover and focus, and
   always on phones and tablets. Keyboard-first with visible focus rings; with reduced motion the drawer fades without
   moving; prints cleanly. The theme toggle (the half-filled circle, or the palette) is remembered, and _Theme: follow
   system_ resets it.
-
-<img src="images/dashboard/home-390-dark.webp" alt="The Home view on a 390-pixel-wide phone screen in the dark theme: the stat tiles sit two by two, then Needs you, Team now with session bars, the Since yesterday counters, and the initiative cards." width="320">
 
 ## Privacy and security
 

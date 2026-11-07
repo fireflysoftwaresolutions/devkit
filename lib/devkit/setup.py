@@ -30,6 +30,9 @@ from .core import (AGENTS_HOME, CFG, CLAUDE_HOME, CODEX_HOME, CONFIG_FILE, DEV, 
 CONF = DEVKIT_HOME / "config"
 SKILLS_SHARE = HOME / ".local" / "share" / "devkit" / "skills"
 SKILLS_SRC = HOME / ".local" / "share" / "devkit" / "skills-src"
+ENGINES_SHARE = HOME / ".local" / "share" / "devkit" / "engines"  # verified skill engines, kept across reinstalls
+ENGINES_FILE = "skill-engines.json"  # in STATE: the engines the skills step installed (the guard trusts them by it)
+ENGINE_MAX_BYTES = 256 << 20  # a download larger than this is refused
 LAUNCHD_LABEL = "com.devkit.sync"
 LAUNCHD_PLIST = HOME / "Library" / "LaunchAgents" / f"{LAUNCHD_LABEL}.plist"
 ZSHRC = HOME / ".zshrc"
@@ -1003,6 +1006,241 @@ def app_checks(codex_plugins=None) -> list:
     return res
 
 
+# --------------------------------------------------------------------------- the impeccable engine
+#
+# The impeccable skill's launcher (scripts/impeccable) runs the platform binary that sits beside it, else downloads
+# one at its first run, inside an agent session. The skills step fetches it here instead: the asset for this platform
+# from the upstream release of the engine version the pinned skill names (scripts/VERSION), checked against the
+# engine-checksums.txt of that same pinned commit (never against anything published beside the binary), and placed as
+# scripts/bin/<os>-<arch>/impeccable, the sibling the launcher runs without a check. A verified copy stays in
+# ENGINES_SHARE, since every install copies the skill afresh. STATE/ENGINES_FILE records what was installed:
+# `dev impeccable` (impeccable.py) checks the engine against that record before every run, and both live where agents
+# may not write.
+
+def engines_record() -> Path:
+    """The record of the engines the skills step installed: STATE/ENGINES_FILE."""
+    return STATE / ENGINES_FILE
+
+
+def engine_platform() -> str:
+    """The launcher's name for this platform, `<os>-<arch>` from uname (darwin-arm64, linux-x64); '' for another."""
+    u = os.uname()
+    osn = {"Darwin": "darwin", "Linux": "linux"}.get(u.sysname, "")
+    arch = {"arm64": "arm64", "aarch64": "arm64", "x86_64": "x64", "amd64": "x64"}.get(u.machine.lower(), "")
+    return f"{osn}-{arch}" if osn and arch else ""
+
+
+def _engine_pin(skill_dir: Path, plat: str) -> tuple:
+    """(version, asset, digest): the engine version the skill names, this platform's asset, and the SHA-256 its
+    engine-checksums.txt records for them ('' when it records none)."""
+    scripts = Path(skill_dir) / "scripts"
+    try:
+        version = (scripts / "VERSION").read_text().strip()
+    except OSError:
+        version = ""
+    asset = f"impeccable-{plat or 'unknown'}"
+    try:
+        lines = (scripts / "engine-checksums.txt").read_text().splitlines()
+    except OSError:
+        lines = []
+    for line in lines:
+        f = line.split()
+        if len(f) >= 3 and version and f[0] == version and f[1] == asset and re.fullmatch(r"[0-9a-f]{64}", f[2]):
+            return version, asset, f[2]
+    return version, asset, ""
+
+
+def _download_engine(url: str, dest) -> None:
+    """Fetch `url` into `dest` with curl (as the launcher does): HTTPS only, redirects included, at most
+    ENGINE_MAX_BYTES. Raises OSError when it fails."""
+    if not core.have("curl"):
+        raise OSError("curl is not installed")
+    rc, _, err = sh(["curl", "-fsSL", "--proto", "=https", "--proto-redir", "=https", "--retry", "2",
+                     "--max-filesize", str(ENGINE_MAX_BYTES), "-o", str(dest), url], timeout=300)
+    if rc != 0:
+        raise OSError(((err or "").strip().splitlines() or [f"curl exit {rc}"])[-1][:200])
+
+
+def _engine_record(update: dict | None = None, drop: str = "") -> dict:
+    """The engines the skills step installed (STATE/ENGINES_FILE), after setting `update` or dropping `drop`."""
+    f = engines_record()
+    rec = read_json(f, {}) or {}
+    if not isinstance(rec, dict):
+        rec = {}
+    if update is None and not (drop and drop in rec):
+        return rec
+    rec.pop(drop, None)
+    rec.update(update or {})
+    f.parent.mkdir(parents=True, exist_ok=True)
+    tmp = f.with_name(f".{f.name}.{os.getpid()}")
+    tmp.write_text(json.dumps(rec, indent=1, sort_keys=True) + "\n")
+    os.replace(tmp, f)
+    return rec
+
+
+def install_impeccable_engine(skill_dir, repo: str) -> dict:
+    """Put the impeccable engine for this platform beside the skill's launcher (see the section comment) ->
+    {"outcome": "installed" | "present" | "failed", "detail": …}. A verified copy in place or kept is reused without a
+    download. A digest mismatch, a failed download or a file error (a folder it cannot write, a folder where the
+    engine goes) leaves nothing executable, is audited and reported, and never raises: the rest of the install goes
+    on, and the launcher falls back to its own first-run download."""
+    skill_dir = Path(skill_dir)
+    plat = engine_platform()
+    version, asset, digest = _engine_pin(skill_dir, plat)
+    target = skill_dir / "scripts" / "bin" / plat / "impeccable"
+    url = f"https://github.com/{repo}/releases/download/engine-v{version}/{asset}"
+    kept = ENGINES_SHARE / "impeccable" / version / asset
+    tmp = kept.with_name(f".{asset}.part.{os.getpid()}")
+
+    def failed(why: str, outcome: str = "failed") -> dict:
+        for p in (tmp, target):
+            try:
+                if p.is_file() or p.is_symlink():
+                    p.unlink()
+            except OSError as e:
+                why += f" ({tilde(p)} could not be removed: {e.strerror or e})"
+        try:
+            _engine_record(drop="impeccable")
+        except OSError as e:  # the guard still checks the engine's digest, so a stale record trusts no other file
+            why += f" ({tilde(STATE / ENGINES_FILE)} could not be updated: {e.strerror or e})"
+        _audit("install.engine", "impeccable", why, outcome=outcome, check=f"sha256 {digest or 'none pinned'}")
+        detail = f"{why}; the launcher would download it at its first run. Retry with `dev install --only skills`"
+        fail(f"impeccable engine: {detail}")
+        return {"outcome": "failed", "detail": detail}
+
+    if not (plat and version and digest):
+        return failed(f"no digest for {asset} (engine {version or '?'}) in the pinned engine-checksums.txt, so nothing "
+                      f"was downloaded")
+    outcome = "present"
+    try:
+        if target.is_symlink() or (target.exists() and _sha256(target) != digest):
+            target.unlink()  # never leave an engine the pinned digest does not name
+        if not target.exists():
+            if kept.is_file() and _sha256(kept) != digest:
+                kept.unlink()
+            if not kept.is_file():
+                outcome = "installed"
+                kept.parent.mkdir(parents=True, exist_ok=True)
+                try:
+                    _download_engine(url, tmp)
+                except OSError as e:
+                    return failed(f"the download of {url} failed: {e}")
+                got = _sha256(tmp) if tmp.is_file() else ""
+                if got != digest:
+                    return failed(f"the download of {url} does not match the pinned digest (SHA-256 "
+                                  f"{got[:12] or 'none'}…, engine-checksums.txt says {digest[:12]}…), so nothing was "
+                                  f"installed", "refused")
+                os.chmod(tmp, 0o755)  # nosemgrep: python.lang.security.audit.insecure-file-permissions.insecure-file-permissions (an executable the owner runs, as the launcher expects)
+                os.replace(tmp, kept)
+            target.parent.mkdir(parents=True, exist_ok=True)
+            part = target.with_name(f".impeccable.{os.getpid()}")
+            try:
+                os.link(kept, part)  # the same file: no second copy of the engine on disk
+            except OSError:
+                shutil.copyfile(kept, part)
+            os.chmod(part, 0o755)  # nosemgrep: python.lang.security.audit.insecure-file-permissions.insecure-file-permissions (an executable the owner runs, as the launcher expects)
+            os.replace(part, target)
+            if _sha256(target) != digest:
+                return failed(f"{tilde(target)} does not match the pinned digest after it was placed")
+        for old in (ENGINES_SHARE / "impeccable").iterdir() if (ENGINES_SHARE / "impeccable").is_dir() else []:
+            if old.name != version:
+                shutil.rmtree(old, ignore_errors=True)
+        st = os.stat(target)
+        launcher = skill_dir / "scripts" / "impeccable"
+        _engine_record({"impeccable": {
+            "version": version, "platform": plat, "asset": asset, "sha256": digest, "url": url,
+            "engine": str(target), "stat": [st.st_dev, st.st_ino, st.st_size, st.st_mtime_ns, st.st_ctime_ns],
+            "launcher": str(launcher.resolve()), "launcher_sha256": _sha256(launcher) if launcher.is_file() else "",
+            "installed_at": round(time.time(), 3)}})
+    except OSError as e:
+        where = f": {tilde(e.filename)}" if getattr(e, "filename", None) else ""
+        return failed(f"{e.strerror or e}{where}, so the engine was not placed; fix that path's owner or permissions, "
+                      f"or move away what is in the way")
+    detail = (f"engine {version} for {plat}, SHA-256 {digest[:12]}… matches the pinned engine-checksums.txt" +
+              (f" (from {url})" if outcome == "installed" else " (the verified copy, no download)"))
+    if outcome == "installed":
+        _audit("install.engine", "impeccable", detail, check=f"sha256 {digest}", file=str(target))
+    done(f"impeccable {detail}")
+    return {"outcome": outcome, "detail": detail}
+
+
+def impeccable_checks() -> list:
+    """`dev doctor` rows for impeccable on Claude: the skill linked, and its engine beside the launcher with the
+    SHA-256 the pinned engine-checksums.txt names."""
+    fix = "dev install --only skills"
+    link, skill_dir = CLAUDE_HOME / "skills" / "impeccable", SKILLS_SHARE / "impeccable"
+    linked = (link / "SKILL.md").is_file()
+    rows = [("Agents", "impeccable skill (Claude)", linked,
+             f"{tilde(link)} → {tilde(link.resolve())}" if linked else f"not linked in {tilde(link.parent)}", fix)]
+    plat = engine_platform()
+    version, asset, digest = _engine_pin(skill_dir, plat)
+    target = skill_dir / "scripts" / "bin" / plat / "impeccable"
+    if not (skill_dir / "SKILL.md").is_file():
+        ok, detail = False, f"the skill is not installed in {tilde(SKILLS_SHARE)}"
+    elif not digest:
+        ok, detail = False, f"the pinned engine-checksums.txt has no digest for {asset} (engine {version or '?'})"
+    elif not target.is_file():
+        ok, detail = False, f"engine {version} for {plat} not installed: the launcher would download it at its first run"
+    else:
+        got = _sha256(target)
+        ok = got == digest
+        detail = (f"{version} for {plat}, SHA-256 {digest[:12]}… matches engine-checksums.txt" if ok else
+                  f"{tilde(target)} does not match engine-checksums.txt (SHA-256 {got[:12]}…, pinned {digest[:12]}…)")
+    rows.append(("Agents", "impeccable engine", ok, detail, fix))
+    return rows
+
+
+def claude_plugin_check(listed: str) -> tuple:
+    """The `dev doctor` row for Claude Code's plugins: each plugin of the effective set (the team's, then the dev ext
+    overlay) enabled in `claude plugin list`."""
+    from . import ext
+    want = ext.effective_plugin_ids("claude")
+    blocks = {b.split("\n")[0].strip().strip("❯ ").strip(): b for b in re.split(r"\n\s*(?=❯ )", listed or "")}
+    bad = [p for p in want if p not in blocks or "enabled" not in blocks[p] or "disabled" in blocks[p]]
+    return ("Claude", "plugins", not bad, f"{len(want) - len(bad)}/{len(want)} enabled"
+            + (f"; missing: {', '.join(bad)}" if bad else ""), "dev install --only claude")
+
+
+def claude_mcp_check(mcp_out: str) -> tuple:
+    """The `dev doctor` row for Claude Code's MCP servers: each server of the effective set in `claude mcp list`."""
+    from . import ext
+    want = ext.effective_mcp("claude")
+    miss = [n for n in want if not re.search(rf"^{re.escape(n)}:", mcp_out or "", re.M)]
+    return ("Claude", "MCP servers", not miss, ", ".join(want) + (f"; missing {miss}" if miss else ""),
+            "dev install --only claude")
+
+
+def codex_plugin_check(listed: str) -> tuple:
+    """The `dev doctor` row for Codex's plugins: each plugin of the effective set enabled in `codex plugin list`."""
+    from . import ext
+    want = ext.effective_plugin_ids("codex")
+    lines = (listed or "").splitlines()
+    bad = [p for p in want if not any(ln.startswith(p + " ") and "installed, enabled" in ln for ln in lines)]
+    return ("Codex", "plugins", not bad, f"{len(want) - len(bad)}/{len(want)} enabled"
+            + (f"; missing: {', '.join(bad)}" if bad else ""), "dev install --only codex")
+
+
+def codex_mcp_check(configured: set) -> tuple:
+    """The `dev doctor` row for Codex's MCP servers: each server of the effective set in Codex's configuration."""
+    from . import ext
+    want = set(ext.effective_mcp("codex"))
+    return ("Codex", "MCP servers", want <= configured, ", ".join(sorted(want & configured)) +
+            (f"; missing {sorted(want - configured)}" if want - configured else ""), "dev install --only codex")
+
+
+def impeccable_codex_check(listed: str) -> tuple:
+    """The `dev doctor` row for impeccable on Codex, which gets it from its plugin: enabled in `codex plugin list`,
+    when the effective set (the team's, then the dev ext overlay) has it."""
+    from . import ext
+    plugin = next((p for p in ext.effective_plugin_ids("codex") if p.split("@")[0] == "impeccable"), None)
+    if plugin is None:
+        return ("Codex", "impeccable plugin", True, "not in your set: removed or disabled with dev ext",
+                "dev ext ls impeccable")
+    ok = any(ln.startswith(plugin + " ") and "installed, enabled" in ln for ln in (listed or "").splitlines())
+    return ("Codex", "impeccable plugin", ok, f"{plugin} enabled" if ok else f"{plugin} not enabled in `codex plugin "
+            f"list`", "dev install --only codex")
+
+
 def local_skills(home: Path) -> dict:
     """devkit's own shared skills under <home>/agents/skills -> {name: directory}. The folder may be missing: git keeps
     no empty folder, so a fresh clone or a release archive has none until a skill is added there."""
@@ -1014,7 +1252,8 @@ def local_skills(home: Path) -> dict:
 
 def _install_skills():
     step("Skills (shared by Claude Code and Codex)")
-    manifest = load_conf("skills.json")
+    from . import ext
+    manifest = {"sources": ext.effective_skill_sources()}  # skills.json, then the dev ext overlay
     wanted = local_skills(DEVKIT_HOME)  # name -> directory to link
     only = {}  # name -> the agents that get it (default: both)
     groups = set((core.CFG.get("skills") or {}).get("groups") or [])
@@ -1032,10 +1271,22 @@ def _install_skills():
                 fail(f"{name}: SKILL.md missing in {src['repo']}@{src['ref'][:12]}/{rel}")
                 continue
             out = SKILLS_SHARE / name
+            try:  # the folder is deleted next: it must sit right inside the shared skills folder, links and `..`
+                inside = out.resolve().parent == SKILLS_SHARE.resolve()  # resolved (`..` is devkit's install)
+            except (OSError, ValueError, RuntimeError):  # a NUL in the name, a link loop (RuntimeError on 3.9)
+                inside = False
+            # and one folder name, never a path: `x/../kept-skill` resolves inside too, to another skill's folder
+            inside = inside and name not in (".", "..") and Path(name).name == name
+            if not inside:
+                fail(f"{name!r} from {src['repo']}: not a folder name inside {tilde(SKILLS_SHARE)}, so it is skipped "
+                     f"and nothing is deleted; rename the skill in skills.json, on a branch of the devkit checkout")
+                continue
             if out.exists():
                 shutil.rmtree(out)
             shutil.copytree(s, out, symlinks=True)
             (out / ".devkit-source").write_text(f"{src['repo']}@{src['ref']} {rel} license={src.get('license')}\n")
+            if name == "impeccable":  # its launcher would download the engine at its first run, inside a session
+                install_impeccable_engine(out, src["repo"])
             wanted[name] = out
             if src.get("agents"):  # e.g. a Claude plugin's skill given to Codex only, so Claude has no duplicate
                 only[name] = set(src["agents"])
@@ -1080,10 +1331,14 @@ def write_claude_settings(include_hooks=True):
     if not new["hooks"]:
         new.pop("hooks")
     ep = dict(new.get("enabledPlugins") or {})
-    for p in plugins["plugins"]:
+    from . import ext
+    on, off = ext.effective_claude_plugins(ext.team(), ext.user_layer())  # team default, then the dev ext overlay
+    for p in on:
         ep[p] = True
-    for p in plugins.get("disabled", []):
+    for p in off:
         ep[p] = False
+    for p in ext.retired_plugin_keys("claude"):  # retired from the team default (dev ext): its key goes too
+        ep.pop(p, None)
     new["enabledPlugins"] = ep
     sl = cur.get("statusLine") or {}
     mine = "hook statusline" in str(sl.get("command") or "")
@@ -1108,6 +1363,8 @@ def setup_claude():
     locked = policy.lock_status() != "off"
     write_claude_settings(include_hooks=not locked)
     plugins = load_conf("claude/plugins.json")
+    from . import ext  # what to install: the team default, then the dev ext overlay (spec P-fym583l7sg1 R8)
+    plugins.update(plugins=ext.effective_plugin_ids("claude"), mcp=ext.effective_mcp("claude"))
     frag = load_conf("claude/settings.json")
     done(f"settings.json: {frag['permissions']['defaultMode']} by default, no attribution, hooks: "
          + ", ".join(sorted((frag.get('hooks') or {}).keys())))
@@ -1143,6 +1400,7 @@ def setup_claude():
         else:
             done("devkit plugin reinstalled from this checkout (skills, commands, agents)")
     done(f"{len(plugins['plugins'])} plugins installed and enabled")
+    _extensions("claude")
     for name, spec in plugins.get("mcp", {}).items():
         rc, _, _ = sh(["claude", "mcp", "get", name], timeout=30)
         if rc == 0:
@@ -1161,6 +1419,8 @@ def write_codex_config(quiet=False):
     with quiet_mode(quiet):
         conf = load_conf("codex/config.json")
         plugins = load_conf("codex/plugins.json")
+        from . import ext
+        plugins["mcp"] = ext.effective_mcp("codex")  # the team's, then the dev ext overlay
         hooks_f = CODEX_HOME / "hooks.json"
         cur = (read_json(hooks_f, {}) or {}).get("hooks", {})
         ours = load_conf("codex/hooks.json")["hooks"]
@@ -1402,6 +1662,8 @@ def setup_codex():
     write_codex_profiles(load_conf("codex/config.json"))
     write_codex_agents(load_conf("codex/config.json"))
     plugins = load_conf("codex/plugins.json")
+    from . import ext
+    plugins["plugins"] = ext.effective_plugin_ids("codex")  # the team's, then the dev ext overlay
     codex_root = build_codex_plugin()
     if "firefly-devkit" in plugins.get("marketplaces", {}):
         plugins["marketplaces"]["firefly-devkit"] = str(codex_root)
@@ -1433,6 +1695,46 @@ def setup_codex():
             n = len(list((DEVKIT_HOME / "plugin" / "commands").glob("*.md")))
             done(f"devkit plugin reinstalled from this checkout (skills, and {n} commands as skills)")
     done(f"{len(plugins['plugins'])} plugins installed and enabled")
+    _extensions("codex")
+
+
+def _extensions(agent: str):
+    """Uninstall the agent's extensions retired from devkit's defaults (`retired` in its plugins.json), each audited
+    as ext.retire (a user overlay that adds one back keeps it), then record what its vendor marketplace plugins are
+    now (~/.local/state/devkit/ext-lock.json), so a later change outside devkit shows as drift (dev ext). Accepting a
+    change made outside devkit, and vouching for what ships with the app the first time, is the developer's, in a
+    terminal (core.set_by_developer, F1 of re-review four): from anyone else's run both stay as drift. A process an
+    agent starts in screen, tmux or a Terminal window passes that check, so ext.record_lock audits each acceptance and
+    lists it until the developer runs `dev ext ack` (F1-R4 part 1)."""
+    from . import ext
+    try:
+        for ok, msg in ext.retire(agent, lambda argv, timeout=300: sh(argv, timeout=timeout)):
+            done(msg) if ok else fail(msg)
+        try:
+            developer = core.set_by_developer()
+        except Exception:
+            developer = False  # a check that cannot decide vouches for nothing (fail closed)
+        changes, new = ext.lock_changes(agent), ext.new_app_lines(agent)  # L3, F2: name them before the record
+        if developer:
+            for line in changes:
+                note(f"accepting a change made outside devkit: {line}")
+            for line in new:
+                note(f"recording what ships with the {agent} app for the first time: {line}")
+            if changes or new:  # F1-R4 part 1: a terminal an agent opens can look like the developer's
+                note("each is audited (ext.accept) and listed at the next session start and in dev status until "
+                     "you run dev ext ack")
+        else:
+            for line in changes:
+                note(f"not accepted, a change made outside devkit: {line}")
+            for line in new:
+                note(f"not recorded, seen with the {agent} app for the first time: {line}")
+            if changes or new:
+                note("these stay as drift until the developer runs dev install in a terminal")
+        n = ext.record_lock(agent, accept=developer)
+        if n:
+            done(f"{n} vendor plugin version(s) recorded: a change outside devkit now shows as drift (dev ext ls)")
+    except ext.ExtError as e:
+        fail(f"extensions: {e}")
 
 
 def setup_tools():
@@ -1778,6 +2080,58 @@ def install_prompt(starship: Path = None):
         note("not set up yet: dev setup prompt adds it to your prompt")
 
 
+# --------------------------------------------------------------------------- the zsh helpers
+# shell/devkit.zsh always loads Tab completion, `dcd` and `dwt`. The helpers that change how the shell behaves (fzf
+# pickers on Ctrl-X i, p and b, `dpick`, and `dcd` without a project picking one) stay off until the developer says
+# yes here; the answer is a file shell/devkit.zsh reads (completion.helpers_file), so ~/.zshrc is never edited for it.
+
+def setup_shell(assume_yes: bool = False, remove: bool = False, ask=None, say=_prompt_say) -> int:
+    """`dev setup shell`: ask the developer, then turn the zsh helpers on. `remove` turns them off. Consent is the
+    developer's: in an agent's call (anything but core.set_by_developer()), neither --yes nor a piped answer turns
+    anything on. -> exit code."""
+    from . import completion
+    if remove:
+        completion.set_helpers_mode("off")
+        say(f"  {ui.OK} The zsh helpers are off. Open a new terminal tab for it to take effect. Turn them on again: "
+            "dev setup shell")
+        return 0
+    if not core.set_by_developer():
+        say(f"  {ui.WARN} dev setup shell changes your shell's keys, so it needs your yes, typed in your own terminal: "
+            "an agent's --yes or a piped answer is not consent. Nothing changed; run it in a terminal: dev setup shell")
+        return 2
+    fzf = "fzf is installed" if shutil.which("fzf") else "fzf is not installed yet (brew install fzf); until then " \
+                                                          "the keys stay free"
+    say(f"\n  {ui.bold('zsh helpers')}\n  devkit can add fzf pickers to your shell ({fzf}):\n"
+        "    Ctrl-X i  a work item    Ctrl-X p  a project      Ctrl-X b  a branch\n"
+        "    dcd       with no project, pick a project or worktree to go to\n"
+        "    dpick     print a picked task, project, branch or worktree\n"
+        "  Keys you already bound keep your binding. Tab completion, dcd <alias> and dwt work either way.")
+    if not assume_yes:
+        answer = (ask or input)("  Turn them on? [Y/n] ")
+        if (answer or "").strip().lower() not in ("", "y", "yes"):
+            completion.set_helpers_mode("off")
+            say(f"  {ui.dim('Nothing changed. Turn them on later: dev setup shell')}")
+            return 0
+    completion.set_helpers_mode("on")
+    say(f"  {ui.OK} On. Open a new terminal tab to use them.\n    Turn them off: dev setup shell --remove")
+    return 0
+
+
+def install_shell():
+    """`dev install`'s step: keep the developer's answer; ask once, in their terminal, when there is none yet."""
+    from . import completion
+    step("zsh helpers")
+    m = completion.helpers_mode()
+    if m == "on":
+        done("on (fzf pickers on Ctrl-X i, p and b); turn them off: dev setup shell --remove")
+    elif m == "off":
+        done("off; turn them on: dev setup shell")
+    elif sys.stdin.isatty() and not _QUIET[0] and not os.environ.get("DEVKIT_JOB"):
+        setup_shell()
+    else:
+        note("not set up yet: dev setup shell turns on the fzf pickers")
+
+
 def run_install(only=None, unverified_why=None, version=None, as_pinned=False, commit_template=None) -> int:
     """`dev install`. From a checkout it pins the checkout (or switches to `version`), then starts itself again from
     that pinned copy (`--as-pinned`), which runs the steps, so every path they write names the copy; `only` re-applies
@@ -1800,7 +2154,7 @@ def run_install(only=None, unverified_why=None, version=None, as_pinned=False, c
     steps = [("config", ensure_config), ("tools", setup_tools), ("cli", install_cli), ("git", lambda: setup_git(commit_template=commit_template)), ("handoff", setup_handoff),
              ("instructions", write_agent_instructions), ("skills", install_skills), ("claude", setup_claude),
              ("codex", setup_codex), ("desktop", setup_desktop), ("docker", setup_docker), ("docs", setup_docs_tools),
-             ("launchd", setup_launchd), ("prompt", install_prompt)]
+             ("launchd", setup_launchd), ("prompt", install_prompt), ("shell", install_shell)]
     for name, fn in steps:
         if only and name not in only:
             continue
@@ -1954,6 +2308,9 @@ def doctor() -> int:
         broken = [n for n in mine if not (home / n / "SKILL.md").exists()]
         check("Agents", f"skills in {tilde(home)}", bool(mine) and not broken, f"{len(mine) - len(broken)}/{len(mine)} linked"
               + (f"; missing {', '.join(broken[:3])}" if broken else ""), "dev install --only skills")
+    if CFG.get("agents", {}).get("claude", True):
+        for row in impeccable_checks():
+            check(*row)
 
     for name, ok, detail, fix in pin_checks():
         check("Pinned install", name, ok, detail, fix)
@@ -1968,16 +2325,10 @@ def doctor() -> int:
     check("Claude", "devkit hooks", {"SessionStart", "SessionEnd", "PreToolUse", "Stop", "UserPromptSubmit",
                                      "PostToolUse"} <= events, ", ".join(sorted(events)),
           "dev install --only claude")
-    want = load_conf("claude/plugins.json")
     _, listed, _ = sh(["claude", "plugin", "list"], timeout=60) if core.have("claude") else (1, "", "")
-    blocks = {b.split("\n")[0].strip("❯ ").strip(): b for b in re.split(r"\n\s*(?=❯ )", listed)}
-    bad = [p for p in want["plugins"] if p not in blocks or "enabled" not in blocks[p] or "disabled" in blocks[p]]
-    check("Claude", "plugins", not bad, f"{len(want['plugins']) - len(bad)}/{len(want['plugins'])} enabled"
-          + (f"; missing: {', '.join(bad)}" if bad else ""), "dev install --only claude")
+    check(*claude_plugin_check(listed))
     _, mcp_out, _ = sh(["claude", "mcp", "list"], timeout=90) if core.have("claude") else (1, "", "")
-    miss = [n for n in want.get("mcp", {}) if not re.search(rf"^{re.escape(n)}:", mcp_out, re.M)]
-    check("Claude", "MCP servers", not miss, ", ".join(want.get("mcp", {})) + (f"; missing {miss}" if miss else ""),
-          "dev install --only claude")
+    check(*claude_mcp_check(mcp_out))
 
     if core.have("codex"):
         from .codexrpc import CodexError, CodexRPC
@@ -2006,18 +2357,14 @@ def doctor() -> int:
                           "set codex.profiles in ~/.config/devkit/config.json to models from `codex debug models`")
                 except Exception:
                     pass
-                mcps = set((cfg.get("mcp_servers") or {}).keys())
-                wantm = set(load_conf("codex/plugins.json").get("mcp", {}))
-                check("Codex", "MCP servers", wantm <= mcps, ", ".join(sorted(wantm & mcps)) +
-                      (f"; missing {sorted(wantm - mcps)}" if wantm - mcps else ""), "dev install --only codex")
+                check(*codex_mcp_check(set((cfg.get("mcp_servers") or {}).keys())))
         except CodexError as e:
             check("Codex", "app-server", False, str(e), "codex doctor")
         _, listed, _ = sh(["codex", "plugin", "list"], timeout=120)
-        wantp = load_conf("codex/plugins.json")["plugins"]
-        bad = [p for p in wantp if not any(ln.startswith(p + " ") and "installed, enabled" in ln for ln in listed.splitlines())]
-        check("Codex", "plugins", not bad, f"{len(wantp) - len(bad)}/{len(wantp)} enabled" +
-              (f"; missing: {', '.join(bad)}" if bad else ""), "dev install --only codex")
-        for group, name, ok, detail, fix in app_checks(wantp):
+        check(*codex_plugin_check(listed))
+        check(*impeccable_codex_check(listed))
+        from . import ext
+        for group, name, ok, detail, fix in app_checks(ext.effective_plugin_ids("codex")):
             check(group, name, ok, detail, fix)
 
     from . import providers
@@ -2034,6 +2381,9 @@ def doctor() -> int:
             check("Agents", f"{p['name']} quota", bool(q.get("available")),
                   f"{q.get('used_percent')}% used · resets {core.fmt_ts(q.get('resets_at'))}",
                   "wait for the reset or add credits")
+    from . import ext
+    for row in ext.doctor_checks():  # third-party extensions: required ones on, the lock, pins, retired, project
+        check(*row)
     from .cli import plugin_checks
     for name, ok, detail in plugin_checks():
         check("Plugin", name, ok, detail if isinstance(detail, str) else " ".join(detail), "dev plugin validate")
