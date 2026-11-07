@@ -51,6 +51,9 @@ TICKET_SECONDS = 60
 HEARTBEAT_SECONDS = 15
 HISTORY = 128               # versions whose changed areas are remembered for a page that reconnects
 CACHE_KEYS = 64
+BRANCH_SECONDS = 5.0        # a project's branch map (git, PRs) is read at most this often; between, the same answer
+BRANCH_READS = 2            # at most this many maps are read at once: one more is a 429 with Retry-After
+BRANCH_WAIT_SECONDS = 30    # a request for a map that is being read waits this long for that read
 GZIP_MIN = 1400
 VOLATILE = {"rendered", "generated"}   # change on every build: not a reason to tell the pages
 AREA_RE = re.compile(r"[a-z_]{1,40}")
@@ -275,6 +278,41 @@ class App:
         self.cookie = f"devkit_dashboard_{port}"   # cookies ignore the port: one name per server
         self.tickets, self.clients, self.last = {}, 0, clock()
         self.lock = threading.Lock()
+        self.branch_maps, self.branch_reading = {}, {}   # pid -> (time, answer) · pid -> Event while git reads it
+
+    def branch_map(self, pid: str, read):
+        """The branch map of `pid` under the server's limit (the page's own throttle is not one) -> (answer, 0), or
+        (None, seconds to wait) when BRANCH_READS maps are being read already. A map is read at most once per
+        BRANCH_SECONDS; a request that comes while it is read waits for that read instead of starting another."""
+        while True:
+            with self.lock:
+                hit = self.branch_maps.get(pid)
+                if hit and self.clock() - hit[0] < BRANCH_SECONDS:
+                    return hit[1], 0
+                busy = self.branch_reading.get(pid)
+                if busy is None:
+                    if len(self.branch_reading) >= BRANCH_READS:
+                        return None, 1
+                    self.branch_reading[pid] = threading.Event()
+                    break
+            if not busy.wait(BRANCH_WAIT_SECONDS):
+                return None, 1
+            with self.lock:  # the read it waited for: its answer, whatever the clock says now
+                hit = self.branch_maps.get(pid)
+                if hit:
+                    return hit[1], 0
+        answer, ok = None, False
+        try:
+            answer, ok = read(), True
+        finally:
+            with self.lock:
+                done = self.branch_reading.pop(pid)
+                if ok:
+                    self.branch_maps[pid] = (self.clock(), answer)
+                    for k in sorted(self.branch_maps, key=lambda k: self.branch_maps[k][0])[:-CACHE_KEYS]:
+                        del self.branch_maps[k]
+            done.set()
+        return answer, 0
 
     def touch(self):
         self.last = self.clock()
@@ -460,7 +498,11 @@ def make_handler(app: App):
                 return self._json(200, d) if d else self._problem(404, "Not found", "No progress run with this id.")
             if sub.startswith("/branches/"):  # one project's branch map, read now (spec P-fy3bwa0pshk R8)
                 pid = sub[len("/branches/"):]
-                d = dashboard.branch_detail(pid, snap.reg) if PROJECT_RE.fullmatch(pid) and ".." not in pid else None
+                d, wait = app.branch_map(pid, lambda: dashboard.branch_detail(pid, snap.reg)) if \
+                    PROJECT_RE.fullmatch(pid) and ".." not in pid else (None, 0)
+                if wait:
+                    return self._problem(429, "Too many branch reads", f"The dashboard reads at most {BRANCH_READS} "
+                                         f"branch maps at once. Try again in {wait} s.", {"Retry-After": str(wait)})
                 if d is None:
                     return self._problem(404, "Not found", "No project with this id is cloned on this Mac.")
                 if d.get("error"):

@@ -268,6 +268,45 @@ class ServerTests(unittest.TestCase):
             self.assertEqual((status, json.loads(body)["status"]), (404, 404), path)
 
 
+    def test_branch_maps_are_limited_on_the_server_for_every_client(self):
+        # The page throttles its own clicks; the server limits any client: a project's map is read at most once per
+        # BRANCH_SECONDS (the others get the same answer, a request that arrives while it is read waits for it), and
+        # at most BRANCH_READS maps are read at once: one more is a 429 problem with Retry-After, and runs no git.
+        from devkit import dashboard
+        reads, gate = [], threading.Event()
+
+        def detail(pid, reg):
+            reads.append(pid)
+            if pid != "acme/widget":
+                gate.wait(5)
+            return {"project": pid, "rows": [], "counts": {}, "prs": "none", "mapped": 0}
+        with mock.patch.object(dashboard, "branch_detail", side_effect=detail):
+            for _ in range(4):
+                status, _, body = self.srv.request("/api/v1/branches/acme/widget")
+                self.assertEqual((status, json.loads(body)["project"]), (200, "acme/widget"))
+            self.assertEqual(reads, ["acme/widget"])
+            self.srv.clock.t += dashserver.BRANCH_SECONDS + 1
+            self.assertEqual(self.srv.request("/api/v1/branches/acme/widget")[0], 200)
+            self.assertEqual(reads, ["acme/widget"] * 2)
+            slow = [f"acme/s{k}" for k in range(dashserver.BRANCH_READS)] + ["acme/s0"]
+            got = {}
+            threads = [threading.Thread(target=lambda k, p: got.__setitem__(k, self.srv.request("/api/v1/branches/" + p)),
+                                        args=(k, p)) for k, p in enumerate(slow)]
+            for t in threads:
+                t.start()
+            until(lambda: len(reads) == 2 + dashserver.BRANCH_READS)
+            status, headers, body = self.srv.request("/api/v1/branches/acme/c")
+            pb = json.loads(body)
+            self.assertEqual((status, headers["content-type"], pb["status"]), (429, "application/problem+json", 429))
+            self.assertTrue(headers["retry-after"].isdigit())
+            gate.set()
+            for t in threads:
+                t.join(5)
+            self.assertEqual(sorted(r[0] for r in got.values()), [200] * len(slow))
+            self.assertNotIn("acme/c", reads)
+            self.assertEqual(reads.count("acme/s0"), 1)  # the second request for acme/s0 waited for the first read
+
+
 class GzipTests(unittest.TestCase):
     def test_large_answers_are_compressed_for_a_client_that_accepts_it(self):
         state = TempState()
