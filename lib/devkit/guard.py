@@ -615,9 +615,32 @@ _GIT_CONFIG_READS = {"--get", "--get-all", "--get-regexp", "--get-urlmatch", "--
                      "--show-origin", "--show-scope", "--name-only"}
 
 
+# git config keys whose value is a command line, or a file git runs or reads more configuration from, under later git
+# calls the guard reads as benign (RT9): the editor, fsmonitor (under `git status`), the ssh command (under `git
+# fetch`), the hooks folder, and include files that can set any of them again
+_EXEC_CONFIG_KEY = re.compile(r"^(?:core\.(?:editor|fsmonitor|sshcommand|hookspath)|sequence\.editor|include\.path|"
+                              r"includeif\..+)$", re.I)
+EXEC_CONFIG_REASON = ("This writes `{key}` into git's configuration. Its value is a command line, or a file git runs "
+                      "or reads more configuration from, under later git calls in every session (`git status`, `git "
+                      "fetch`, `git commit`), so it would run whatever it names where the guard only sees an "
+                      "ordinary git call (RT9). Agents may not set it; ask the developer, and say what and why.")
+
+
+def git_config_refusal(argv) -> str | None:
+    """Why a git call writes a pager or another command-running key into git's configuration (RT3, RT9), or None."""
+    _, sub, args = _git_split(argv)
+    key = pager_config_write(args) if sub == "config" else None
+    if not key:
+        return None
+    if _EXEC_CONFIG_KEY.match(key):
+        return EXEC_CONFIG_REASON.format(key=key)
+    return PAGER_CONFIG_REASON.format(key=key, where="git's configuration", tool="git")
+
+
 def pager_config_write(args) -> str | None:
-    """The pager key a `git config` call (its arguments after `config`) sets, or None: core.pager, pager.<command>,
-    or a key the guard cannot read (`git config $K …`), in any scope or file (RT3)."""
+    """The pager or command-running key a `git config` call (its arguments after `config`) sets, or None: core.pager,
+    pager.<command>, the _EXEC_CONFIG_KEY keys, or a key the guard cannot read (`git config $K …`), in any scope or
+    file (RT3, RT9)."""
     if args[:1] and args[0] in ("get", "list", "unset", "remove-section", "rename-section", "edit"):
         return None
     if args[:1] == ["set"]:
@@ -627,7 +650,7 @@ def pager_config_write(args) -> str | None:
     pos = _positionals(args, _GIT_CONFIG_VALUES)
     if len(pos) < 2:
         return None
-    return pos[0] if _PAGER_KEY.match(pos[0]) or _dynamic_name(pos[0]) else None
+    return pos[0] if _PAGER_KEY.match(pos[0]) or _EXEC_CONFIG_KEY.match(pos[0]) or _dynamic_name(pos[0]) else None
 
 
 def gh_pager_config_write(args) -> str | None:
@@ -638,10 +661,9 @@ def gh_pager_config_write(args) -> str | None:
 
 def check_git(argv, cwd, full_segment, envs=frozenset(), pending=None):
     cdir, sub, args = _git_split(argv)
-    if sub == "config":
-        key = pager_config_write(args)
-        if key:
-            return deny(PAGER_CONFIG_REASON.format(key=key, where="git's configuration", tool="git"))
+    why = git_config_refusal(argv)
+    if why:
+        return deny(why)
     gcwd = str(resolve(cdir, cwd)) if cdir else cwd
     if gcwd == str(UNKNOWN):
         gcwd = None
@@ -1770,6 +1792,8 @@ class _Shell:
             why = code_session_refusal(argv, cwd, self.bodies)
             if why:
                 return deny(why)
+        if name == "git" and (why := git_config_refusal(argv)):  # for crew members too (RT9)
+            return deny(why)
         dev = _dev_args(argv)
         if dev is not None:
             return self.dev(dev, cwd)

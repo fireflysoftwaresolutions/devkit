@@ -163,6 +163,25 @@ class RedTeam2(unittest.TestCase):
                 self.assertIsNone(self.check(cmd))
                 self.assertIsNone(self.member(cmd))
 
+    # ---- RT9
+    def test_rt9_command_executing_git_config_keys_are_refused(self):
+        # besides the pager, git config keys whose value is a command line (or a file git runs or reads more config
+        # from) run under later git calls the guard reads as benign
+        self.assertIsNotNone(self.check("git config core.pager 'gh pr merge 12'"))  # baseline: pager is refused
+        for cmd in ("git config core.fsmonitor 'gh pr merge 12'", "git config core.sshCommand 'gh pr merge 12'",
+                    "git config core.editor 'gh pr merge 12'", "git config core.hooksPath /tmp/h",
+                    "git config include.path /tmp/evil", "git config --global includeIf.gitdir:~/.path /tmp/evil",
+                    "git config set sequence.editor x", "git -C . config --local Core.FSMonitor x",
+                    "git config core.pager 'gh pr merge 12'"):
+            with self.subTest(cmd=cmd):
+                self.assertIsNotNone(self.check(cmd))
+                self.assertIsNotNone(self.member(cmd))
+        for cmd in ("git config user.name t", "git config --get core.editor", "git config core.autocrlf false",
+                    "git config --unset core.hooksPath"):
+            with self.subTest(cmd=cmd):
+                self.assertIsNone(self.check(cmd))
+                self.assertIsNone(self.member(cmd))
+
 
 if __name__ == "__main__":
     unittest.main()
