@@ -6,6 +6,7 @@
 # except whether the caller is the developer's terminal.
 # Tests carry comments, not docstrings (`dev test prove` leaves out tests with one).
 # Run: python3 -m unittest tests.test_cli_wiring
+import argparse
 import contextlib
 import io
 import json
@@ -93,6 +94,27 @@ class StepApprovesTests(HookCase):
         self.assertEqual(rc, 2, out)
         self.assertIn("verify", out)
         self.assertEqual(pg.load_run("claude", "s1").get("approvals") or [], [])
+
+
+def _parsers(p, path=()):
+    for act in p._actions:
+        for name, sub in (getattr(act, "choices", None) or {}).items() if act.nargs == argparse.PARSER else ():
+            yield from _parsers(sub, (*path, name))
+    yield path, p
+
+
+class ParserReadsFlagsAsTheGuardDoesTests(unittest.TestCase):
+    # B1: argparse took a unique prefix of a flag (`dev sync --sched`), and `dev -h <command>` ran the command
+
+    def test_no_dev_parser_takes_an_abbreviated_flag(self):
+        on = [" ".join(path) or "dev" for path, p in _parsers(cli.build_parser()) if p.allow_abbrev]
+        self.assertEqual(on, [])
+        for argv in (["sync", "--sched"], ["backup", "--al"], ["push", "--force-w"]):
+            with self.subTest(argv=argv), contextlib.redirect_stderr(io.StringIO()), \
+                    self.assertRaises(SystemExit) as e:
+                cli.build_parser().parse_args(argv)
+            self.assertEqual(e.exception.code, 2)
+        self.assertTrue(cli.build_parser().parse_args(["sync", "--scheduled"]).scheduled)  # the full flag works
 
 
 if __name__ == "__main__":

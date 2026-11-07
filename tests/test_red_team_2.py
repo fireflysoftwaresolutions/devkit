@@ -418,6 +418,28 @@ class RedTeam2(unittest.TestCase):
                 mock.patch.object(pipelines, "push_starts_ci", side_effect=RuntimeError("broken")):
             self.assertIn("push #3", (self.budget(3)[2] or ("", ""))[1])
 
+    # ---- B1 (security review of the pipeline): dev's parser read a unique prefix of a flag as the flag, a word
+    # after `--` as an argument, and ran the command after a leading `--` or `-h`, while the guard compared flags as
+    # exact strings anywhere in the command. The guard now reads a dev command's words the way the parser does; a
+    # prefix of a flag that adds an action still counts as the flag, for a dev whose parser takes abbreviations (an
+    # older checkout's bin/dev).
+    def test_b1_a_prefix_of_a_flag_that_pushes_is_the_flag(self):
+        self.assertEqual(self.acts("dev sync --scheduled"), ["push"])  # baseline: the full flag is caught
+        for cmd in ("dev sync --sched", "dev sync --fin", "bin/dev sync --sch --quiet", "dev sync --scheduled --off"):
+            with self.subTest(cmd=cmd):  # a prefix of the flag that skips the push (--offline) skips nothing
+                self.assertEqual(self.acts(cmd), ["push"])
+                self.assert_tier_1(cmd)
+        self.assertEqual(self.targets("dev backup --al"), [("push", "all-branches")])
+        self.assertEqual(self.targets("dev push --force-w"), [("push-destructive", "feat/x")])
+        self.assertEqual(self.acts("dev backup --dry-run --al"), [])  # the exact flag that skips the push still does
+
+    def test_b1_a_flag_after_double_dash_is_an_argument(self):
+        self.assertEqual(self.acts("dev backup --dry-run feat/x"), [])  # baseline: a dry run pushes nothing
+        for cmd in ("dev backup feat/x -- --dry-run", "dev backup feat/x -- --help", "dev backup feat/x -- -h"):
+            with self.subTest(cmd=cmd):  # the parser takes the word after -- as a branch and pushes feat/x
+                self.assertIn(("push", "feat/x"), self.targets(cmd))
+                self.assert_tier_1(cmd)
+
 
 if __name__ == "__main__":
     unittest.main()

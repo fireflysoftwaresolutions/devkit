@@ -3085,8 +3085,17 @@ def cmd_complete(a):
 
 # --------------------------------------------------------------------------- parser
 
+class Parser(argparse.ArgumentParser):
+    """dev's parser: no abbreviated flags. argparse reads a unique prefix as the flag (`dev sync --sched` ran a
+    scheduled sync) while the guard matches the flag itself (B1). Subparsers are built with the parent's class, so
+    every `dev` command and subcommand gets it."""
+
+    def __init__(self, *args, allow_abbrev=False, **kwargs):
+        super().__init__(*args, allow_abbrev=allow_abbrev, **kwargs)
+
+
 def build_parser():
-    ap = argparse.ArgumentParser(prog="dev", add_help=False)
+    ap = Parser(prog="dev", add_help=False)
     ap.add_argument("-h", "--help", action="store_true")
     sp = ap.add_subparsers(dest="cmd")
 

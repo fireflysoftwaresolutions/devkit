@@ -2156,6 +2156,48 @@ def _dev_args(argv):
     return None
 
 
+# How the guard reads a dev command's flags: the way dev's parser does (B1). argparse ends the options at `--` (a
+# later word is an argument: `dev backup x -- --dry-run` pushes x), keeps the last of a repeated option, and takes a
+# short option's value attached (`-px`). dev's parsers take no abbreviations; an older checkout's bin/dev does, so a
+# prefix of a flag that adds an action counts as the flag, while only the exact flag skips one.
+def _dev_opts(args) -> list:
+    """The words dev's parser reads as options: those before the `--` that ends them."""
+    return args[:args.index("--")] if "--" in args else list(args)
+
+
+def _dev_skips(args, *flags) -> bool:
+    """True when dev's parser reads one of `flags`, each of which skips an action (--dry-run, --help, --offline): the
+    exact flag before `--`. A prefix skips nothing, and after `--` the word is an argument."""
+    return any(a in flags for a in _dev_opts(args))
+
+
+def _dev_sets(args, *flags) -> str:
+    """The first of `flags` a dev call sets, each of which adds an action or a refusal: the flag, `--flag=value`, a
+    prefix of a long flag (`--sched`), or a short flag in a cluster before a value (`-xo`, `-o/tmp/x`). Counted after
+    `--` too, so a spelling the guard does not expect fails closed."""
+    for a in args:
+        if a.startswith("--"):
+            w = a.split("=", 1)[0]
+            hit = next((f for f in flags if f.startswith("--") and len(w) > 2 and f.startswith(w)), "")
+        elif a[:1] == "-" and len(a) > 1:
+            hit = ""
+            for c in a[1:]:
+                hit = next((f for f in flags if f == "-" + c), "")
+                if hit or "-" + c in _DEV_VALUES:
+                    break
+        else:
+            continue
+        if hit:
+            return hit
+    return ""
+
+
+def _dev_words(args) -> list:
+    """The words dev's parser reads as arguments (command, subcommand, branches, PR numbers): an option's value is
+    not one, and after `--` every word is one."""
+    return _positionals(args, _DEV_VALUES)
+
+
 def _shell_inputs(args, cwd, bodies) -> list:
     """The scripts a shell runs: its -c string, a script file, or its input (the command's heredocs)."""
     i = 0
@@ -4245,29 +4287,32 @@ def _job_actions(name, cwd, depth) -> list:
 
 def _dev_actions(dargs, cwd, depth=0) -> list:
     """What a `dev` command (its arguments after `dev`) does: [(action, target[, repo])]."""
-    pos = _positionals(dargs, _DEV_VALUES)
-    if not pos or "--help" in dargs or "-h" in dargs:
+    pos = _dev_words(dargs)
+    if not pos:
         return []
     cmd, sub = pos[0], pos[1] if len(pos) > 1 else ""
     if cmd in ("git", "gh"):
         rest = dargs[dargs.index(cmd) + 1:]
         rest = rest[1:] if rest[:1] == ["--"] else rest
+        if _dev_skips(rest, "-h", "--help"):
+            return []
         if cmd == "gh":
             return _gh_actions(rest, cwd)
         cdir, gsub, gargs = _git_split(["git", *rest])
         return _push_actions(gargs, str(resolve(cdir, cwd)) if cdir else cwd) if gsub == "push" else []
-    if "--dry-run" in dargs:
+    if _dev_skips(dargs, "-h", "--help", "--dry-run"):
         return []
     if cmd == "backup":  # pushes branches whose commits exist only here (spec P-fy3bwa0pshk R5): tier 1, per branch
-        targets = list(pos[1:]) + (["all-branches"] if "--all" in dargs else [])
+        targets = list(pos[1:]) + (["all-branches"] if _dev_sets(dargs, "--all") else [])
         return [("push", t) for t in targets or [_branch(cwd)]]
-    if cmd == "sync" and {"--scheduled", "--finish"} & set(dargs) and not {"--offline", "--no-push"} & set(dargs):
+    if cmd == "sync" and _dev_sets(dargs, "--scheduled", "--finish") and \
+            not _dev_skips(dargs, "--offline", "--no-push"):
         return [("push", "the branches of every project")]  # these runs back up branches (cmd_sync): no grant names it
     if cmd == "jobs" and sub in ("run", "exec"):  # a job runs a dev command (the scheduled sync, a custom job)
         return _job_actions(pos[2] if len(pos) > 2 else "", cwd, depth)
     if cmd == "push":
         cur = _branch(cwd)
-        lease = "--force-with-lease" in dargs or _protected_branch(cur, _default_branch(cwd))
+        lease = bool(_dev_sets(dargs, "--force-with-lease")) or _protected_branch(cur, _default_branch(cwd))
         return [("push-destructive" if lease else "push", cur)]
     if cmd == "pr":
         sel = _pr_sel(pos[2]) if len(pos) > 2 else ""
@@ -4616,10 +4661,10 @@ def _produced(argv, cwd) -> str:
 
 def _segment_actions(argv, cwd, bodies, depth) -> list:
     name = os.path.basename(argv[0])
-    if "--help" in argv[1:]:
+    dev = _dev_args(argv)
+    if dev is None and "--help" in argv[1:]:  # a dev call's help is read the way its parser reads it (_dev_actions)
         return []
     found, more = [], []
-    dev = _dev_args(argv)
     if dev is not None:
         found = _dev_actions(dev, cwd)
     elif name == "git":
