@@ -1515,6 +1515,9 @@ def guardless_session(name, argv, names=()) -> str | None:
             key = spec.partition("=")[0].strip().strip("'\"")
             if not key or _CODEX_KEY.search(key):
                 return GUARDLESS_REASON.format(cli=name, what=f"`{flag} {spec}`".replace("  ", " "))
+        if flag == "--profile" or (flag.startswith("-p") and not flag.startswith("--")):
+            # a profile in config.toml carries the same sandbox, approval and hook settings -c does (RT14)
+            return GUARDLESS_REASON.format(cli=name, what=f"`{flag}`, a profile that may set its sandbox and hooks")
         if flag in ("-s", "--sandbox") and nxt == "danger-full-access":
             return GUARDLESS_REASON.format(cli=name, what=f"`{flag} danger-full-access`")
         if flag == "--disable":

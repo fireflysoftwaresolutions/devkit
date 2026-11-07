@@ -109,6 +109,19 @@ class RedTeam2(unittest.TestCase):
         self.assertEqual(guard.agent_cli("/usr/local/bin/codex"), "codex")
         self.assertEqual(guard.agent_cli("@evil/claude-code"), "")
 
+    # ---- RT14
+    def test_rt14_codex_profile_can_disable_the_sandbox_and_hooks(self):
+        # a profile in config.toml carries the sandbox_mode, approval_policy and hooks that -c is refused for
+        self.assertIsNotNone(self.check("codex -c sandbox_mode=danger-full-access exec hi"))  # baseline
+        for cmd in ("codex -p evil exec hi", "codex --profile evil exec hi", "codex --profile=evil exec hi",
+                    "codex exec -p evil hi"):
+            with self.subTest(cmd=cmd):
+                self.assertIsNotNone(self.check(cmd))
+                self.assertIsNotNone(self.member(cmd))
+        for cmd in ("codex exec hi", "claude -p hi"):  # claude's -p is --print, not a profile
+            with self.subTest(cmd=cmd):
+                self.assertIsNone(self.check(cmd))
+
 
 if __name__ == "__main__":
     unittest.main()
