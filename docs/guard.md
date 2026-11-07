@@ -307,8 +307,13 @@ the developer's decision too. These commands are the action `developer-only`, ti
 | `dev branch embargo --lift <branch>` | `grant embargo <branch>` |
 | `git push`, `dev push`, `dev pr create` or `gh pr create` that sends an embargoed branch, or commits its embargo holds (under another name, a commit id, a branch made from it, a tag, `--all`) | `grant embargo <branch>` |
 | `git push`, `dev push`, `dev pr create` or `gh pr create` of any branch while devkit cannot read the project's handoff note | `grant embargo <branch>` |
+| `git push`, `dev push`, `dev pr create` or `gh pr create` from a folder known only when it runs (`cd "$X"`, `git -C "$(…)"`, `GIT_DIR=$G`, anything after `source` or `.`) or from a folder that is no project (a temporary clone, a folder that does not exist yet), while any project on this Mac has an embargo or devkit cannot read an embargo list | none: the target is `?`; the agent writes out the path of the project's checkout instead |
 | `dev backup --public` | `grant backup <project>` |
 | `dev backup policy on\|off\|ask` | `grant backup <project>` |
+
+A push from inside a repository's git folder (`<repo>/.git`, `<repo>/.git/worktrees/<name>`), or one that
+`env -C <dir>` or `sudo -D <dir>` runs in another folder, is judged as the project of that folder, so
+`grant embargo <branch>` in that project opens it. The handoff repository's own pushes are never held.
 
 The developer can still push an embargoed branch in a terminal. `dev backup` and `dev sync` hold embargoes
 themselves, so they need no grant for it. A crew member never runs them. In the main session they are refused without a grant in every setting of
