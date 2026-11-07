@@ -350,13 +350,12 @@ def _run_lines(assume_yes=False, skip_packages=False) -> int:
         rc = install_packages(a["stacks"], a["use_claude"], extra=toolchain.groups({"hosts": a["hosts"], "clouds": a["clouds"]}))
         if rc != 0:
             print(f"  {ui.WARN} some packages failed; continuing with the configuration")
-    py = sys.executable
-    subprocess.call([py, str(DEVKIT_HOME / "bin" / "dev"), "install", *_template_args(a)])
+    subprocess.call(_dev("install", *_template_args(a)))
     _post_install(p, a["use_claude"], a["use_codex"])
     if a["lock"]:
-        subprocess.call([py, str(DEVKIT_HOME / "bin" / "dev"), "config", "lock"])
+        subprocess.call(_dev("config", "lock"))
     print(f"\n  {ui.ARROW} Verifying …")
-    rc = subprocess.call([py, str(DEVKIT_HOME / "bin" / "dev"), "doctor"])
+    rc = subprocess.call(_dev("doctor"))
     print(f"\n  {ui.bold('Next:')} open a new terminal (or `exec zsh`), then `dev` — and in any project, start "
           f"Claude Code or Codex as usual. `dev agents test` runs a live check of both agents.\n")
     return rc
@@ -374,7 +373,7 @@ def _post_install(p, use_claude, use_codex):
             subprocess.call(["codex", "login"])
     if core.have("colima") and core.sh(["colima", "status"], timeout=20)[0] != 0:
         if p.yesno("Start Docker (Colima VM) now?", not p.yes):
-            subprocess.call([sys.executable, str(DEVKIT_HOME / "bin" / "dev"), "docker", "up"])
+            subprocess.call(_dev("docker", "up"))
 
 
 # --------------------------------------------------------------------------- packages
@@ -743,7 +742,7 @@ def _brewfile(lines):
 
 
 def _dev(*args) -> list:
-    return [sys.executable, str(DEVKIT_HOME / "bin" / "dev"), *args]
+    return [sys.executable, "-I", "-S", str(DEVKIT_HOME / "bin" / "dev"), *args]  # as its shebang
 
 
 def _child_env() -> dict:

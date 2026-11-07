@@ -1460,7 +1460,7 @@ def _legacy_setup_launchd():
 <dict>
   <key>Label</key><string>{LAUNCHD_LABEL}</string>
   <key>ProgramArguments</key>
-  <array><string>/usr/bin/env</string><string>python3</string><string>{DEVKIT_HOME}/bin/dev</string><string>sync</string><string>--scheduled</string></array>
+  <array><string>/usr/bin/env</string><string>python3</string><string>-I</string><string>-S</string><string>{DEVKIT_HOME}/bin/dev</string><string>sync</string><string>--scheduled</string></array>
   <key>StartInterval</key><integer>{interval}</integer>
   <key>RunAtLoad</key><true/>
   <key>ProcessType</key><string>Background</string>
@@ -1738,7 +1738,7 @@ def run_install(only=None, unverified_why=None, version=None, as_pinned=False, c
         _audit("install.pin", tilde(core.source_home()), str(e), outcome="refused")
         return 1
     if core.real(target) != core.real(DEVKIT_HOME):
-        argv = [sys.executable, str(target / "bin" / "dev"), "install", "--as-pinned"]
+        argv = [sys.executable, "-I", "-S", str(target / "bin" / "dev"), "install", "--as-pinned"]  # as its shebang
         argv += ["--only", ",".join(sorted(only))] if only else []
         argv += ["--commit-template", commit_template] if commit_template else []
         sys.stdout.flush()

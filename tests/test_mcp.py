@@ -346,7 +346,7 @@ class ManifestTests(unittest.TestCase):
         self.assertEqual((m["manifest_version"], m["name"], m["display_name"]), ("0.4", "devkit", "devkit"))
         self.assertEqual(m["server"]["type"], "python")
         self.assertEqual(m["server"]["entry_point"], "server/launcher.py")
-        self.assertEqual(m["server"]["mcp_config"]["args"], ["${__dirname}/server/launcher.py"])
+        self.assertEqual(m["server"]["mcp_config"]["args"], ["-I", "-S", "${__dirname}/server/launcher.py"])
         self.assertEqual(m["server"]["mcp_config"]["env"]["DEVKIT_HOME"], "${user_config.devkit_home}")
         self.assertEqual(m["user_config"]["devkit_home"]["type"], "directory")
         self.assertFalse(m["user_config"]["devkit_home"]["required"])

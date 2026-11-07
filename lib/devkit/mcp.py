@@ -464,7 +464,9 @@ def run_dev(argv: list, timeout: float = DEFAULT_TIMEOUT, call: Call = None, pro
     call = call or Call()
     with tempfile.TemporaryFile() as out, tempfile.TemporaryFile() as err:
         try:
-            call.proc = subprocess.Popen([sys.executable, str(DEV_BIN)] + [str(x) for x in argv], cwd=cwd or _cwd(),
+            # -I -S as bin/dev's shebang; -I ignores PYTHONIOENCODING, so -X utf8 keeps the output UTF-8
+            call.proc = subprocess.Popen([sys.executable, "-I", "-S", "-X", "utf8", str(DEV_BIN)] + [str(x) for x in argv],
+                                         cwd=cwd or _cwd(),
                                          stdin=subprocess.DEVNULL, stdout=out, stderr=err, env=env,
                                          start_new_session=True)
         except OSError as e:

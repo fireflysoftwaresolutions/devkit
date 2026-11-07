@@ -275,7 +275,7 @@ def start_background(top: str, session: str = "", branch: str = "", sha: str = "
         pass
     import sys
     log = open(STATE / "logs" / "ci-watch.log", "a") if (STATE / "logs").exists() else subprocess.DEVNULL
-    p = subprocess.Popen([sys.executable, str(core.DEVKIT_HOME / "bin" / "dev"), "ci", "watch", "--quiet",
+    p = subprocess.Popen([sys.executable, "-I", "-S", str(core.DEVKIT_HOME / "bin" / "dev"), "ci", "watch", "--quiet",
                           "--branch", branch, "--sha", sha] + (["--session", session] if session else []),
                          cwd=top, stdin=subprocess.DEVNULL, stdout=log, stderr=log, start_new_session=True,
                          close_fds=True)

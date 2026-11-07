@@ -30,6 +30,13 @@ def plain(s) -> str:
     return tui.strip(s)
 
 
+def dev_args(argv) -> list:
+    """The arguments of a `dev` call after its bin/dev path, whatever the interpreter flags before it."""
+    argv = [str(a) for a in argv]
+    i = next((n for n, a in enumerate(argv) if a.endswith("/bin/dev")), None)
+    return argv[i + 1:] if i is not None else []
+
+
 class FakeTerm(tui.Terminal):
     """A terminal that reads scripted bytes and writes to a string (no termios, no TTY)."""
 
@@ -418,8 +425,8 @@ class LineModeTests(unittest.TestCase):
         self.assertEqual(rc, 0)
         self.assertEqual(cfg, SNAPSHOT_FIRST)
         self.assertEqual(list(cfg), list(SNAPSHOT_FIRST))  # same key order in the file
-        self.assertEqual([c[2] for c in calls], ["install", "doctor"])
-        self.assertEqual(calls[0][3:], ["--commit-template", "yes"])  # the default, applied by `dev install`
+        self.assertEqual([dev_args(c)[0] for c in calls], ["install", "doctor"])
+        self.assertEqual(dev_args(calls[0])[1:], ["--commit-template", "yes"])  # the default, applied by `dev install`
 
     def test_yes_on_a_configured_mac_keeps_the_saved_values(self):
         rc, cfg, _, _ = line_mode(saved=SAVED)
@@ -433,7 +440,7 @@ class LineModeTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as state:
             rc, cfg, out, calls = line_mode(yes=False, typed=typed, state=Path(state))
             self.assertEqual(list(Path(state).iterdir()), [])  # the wizard itself writes no devkit state
-        self.assertEqual(calls[0][2:], ["install", "--commit-template", "no"])  # `dev install` applies the answer
+        self.assertEqual(dev_args(calls[0]), ["install", "--commit-template", "no"])  # `dev install` applies the answer
         self.assertEqual(rc, 0)
         self.assertEqual(cfg["dev_root"], "~/Code")
         self.assertEqual(cfg["agents"], {"claude": False, "codex": True})
@@ -516,7 +523,7 @@ class InteractiveTests(unittest.TestCase):
                 rc = wizard._Wizard(term, skip_packages=skip).run()
             cfg = json.loads(cfgf.read_text()) if cfgf.exists() else None
             # the commit template answer goes to `dev install`, which applies it; the wizard writes no state for it
-            install = next((r for r in ran if r[2:3] == ["install"]), [])
+            install = next((r for r in ran if dev_args(r)[:1] == ["install"]), [])
             self.template_answer = install[install.index("--commit-template") + 1] \
                 if "--commit-template" in install else None
             self.assertFalse((state / "git").exists())
@@ -528,7 +535,7 @@ class InteractiveTests(unittest.TestCase):
         self.assertEqual(cfg["stacks"], ["java", "node"])  # from the repositories, not every stack
         self.assertEqual(cfg["hosts"], ["github", "gitlab"])
         self.assertEqual(cfg["docker"]["cpu"], 6)
-        self.assertEqual([r[2] for r in ran], ["install", "doctor"])
+        self.assertEqual([dev_args(r)[0] for r in ran], ["install", "doctor"])
         self.assertEqual(self.template_answer, "yes")  # the recommended setup uses the commit template
         self.assertIn("devkit is ready.", text)
         self.assertRegex(text, r"Good (morning|afternoon|evening), Ada\.")
@@ -884,9 +891,9 @@ class PseudoTerminalTests(unittest.TestCase):
             "stacks": ["java", "python", "php", "node"], "lock": False, "hosts": ["github"], "clouds": [],
             "docker": {"cpu": 4, "memory": 6, "disk": 80, "autostart": True}, "gc": {"auto": False},
             "sync": {"interval_minutes": 30}, "ai": {"enabled": False, "asked": True}})
-        ran = [c["argv"][0] if c["argv"][0] in ("brew", "npm") else c["argv"][2] for c in t.calls()]
+        ran = [c["argv"][0] if c["argv"][0] in ("brew", "npm") else dev_args(c["argv"])[0] for c in t.calls()]
         self.assertEqual(ran, ["brew", "npm", "install", "doctor"])
-        self.assertIn(["install", "--commit-template", "yes"], [c["argv"][2:] for c in t.calls()])
+        self.assertIn(["install", "--commit-template", "yes"], [dev_args(c["argv"]) for c in t.calls()])
         log = self.home / ".local" / "state" / "devkit" / "logs" / "setup.log"
         self.assertEqual(log.stat().st_mode & 0o777, 0o600)
         raw = t.out.decode("utf-8", "replace")

@@ -23,6 +23,8 @@
     "mcp_config": {
       "command": "python3",
       "args": [
+        "-I",
+        "-S",
         "${__dirname}/server/launcher.py"
       ],
       "env": {

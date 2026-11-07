@@ -202,7 +202,7 @@ def status(base: Path = None) -> dict:
            "bundle": str(bundles[-1]) if bundles else None, "launcher": None}
     launcher = base / "Claude Extensions" / (ext_id or EXT_ID) / "server" / "launcher.py"
     if ext_id and launcher.exists():
-        rc, text, _ = core.sh([sys.executable, str(launcher), "--check"], timeout=15, input="",
+        rc, text, _ = core.sh([sys.executable, "-I", "-S", str(launcher), "--check"], timeout=15, input="",
                               env=dict(os.environ, DEVKIT_HOME=home_setting))
         try:
             out["launcher"] = json.loads(text)

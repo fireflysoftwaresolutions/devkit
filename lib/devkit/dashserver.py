@@ -736,21 +736,28 @@ def stop(wait: float = 5.0) -> bool:
     return stopped
 
 
+# The server's process: isolated as bin/dev's shebang (-I -S: no PYTHONPATH, current folder, site-packages or .pth
+# file can put code into it), so it finds devkit from the lib folder it is given, never from the environment. Its
+# command line keeps `devkit.dashserver serve --fd N` (SERVE_MARKS: _is_ours stops only such a process).
+_SERVE_CODE = ("import sys; sys.path.insert(0, sys.argv[1]); from devkit import dashserver; "
+               "sys.exit(dashserver.serve_fd(int(sys.argv[-1])))")
+
+
 def start() -> dict:
     """Start a server in the background on a fresh 127.0.0.1 port; its state (pid, port, token, version)."""
     state_file().parent.mkdir(parents=True, exist_ok=True, mode=0o700)
     log_file().parent.mkdir(parents=True, exist_ok=True)
     lib = str(Path(__file__).resolve().parents[1])
     token = secrets.token_urlsafe(32)
-    env = dict(os.environ, DEVKIT_DASHBOARD_TOKEN=token,  # never in argv, where `ps` shows it
-               PYTHONPATH=os.pathsep.join(x for x in (lib, os.environ.get("PYTHONPATH", "")) if x))
+    env = dict(os.environ, DEVKIT_DASHBOARD_TOKEN=token)  # never in argv, where `ps` shows it
     sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     try:
         sock.bind(("127.0.0.1", 0))
         sock.listen(64)  # requests wait in the backlog until the server accepts them: no start-up race
         port = sock.getsockname()[1]
         with open(log_file(), "a") as log:
-            proc = subprocess.Popen([sys.executable, "-m", "devkit.dashserver", "serve", "--fd", str(sock.fileno())],
+            proc = subprocess.Popen([sys.executable, "-I", "-S", "-c", _SERVE_CODE, lib, "devkit.dashserver", "serve",
+                                     "--fd", str(sock.fileno())],
                                     pass_fds=(sock.fileno(),), env=env, cwd=str(state_file().parent),
                                     stdin=subprocess.DEVNULL, stdout=log, stderr=log, start_new_session=True)
         _CHILDREN[proc.pid] = proc

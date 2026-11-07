@@ -266,11 +266,12 @@ class HookTests(Sandbox):
             with self.assertRaises(Execd):
                 setup.run_install()
             pin = core.install_record()["path"]
-            self.assertEqual(execv.call_args[0][1][1:], [f"{pin}/bin/dev", "install", "--as-pinned"])
+            self.assertEqual(execv.call_args[0][1][1:], ["-I", "-S", f"{pin}/bin/dev", "install", "--as-pinned"])
             commit(self.src, "26.11.4")  # untested: `--only` re-applies from the installed copy and pins nothing
             with self.assertRaises(Execd):
                 setup.run_install(only={"claude"})
-            self.assertEqual(execv.call_args[0][1][1:], [f"{pin}/bin/dev", "install", "--as-pinned", "--only", "claude"])
+            self.assertEqual(execv.call_args[0][1][1:],
+                             ["-I", "-S", f"{pin}/bin/dev", "install", "--as-pinned", "--only", "claude"])
             self.assertEqual(core.install_record()["path"], pin)
             (self.src / "README.md").write_text("changed\n")  # a dirty checkout: refused, nothing runs
             execv.reset_mock()
