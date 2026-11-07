@@ -123,13 +123,19 @@ SHA_RE = re.compile(r"[0-9a-f]{40}")
 TIPS_KEPT = 20  # the newest tips of an embargoed branch the note keeps
 
 
+def note_text(text: str) -> str:
+    """A note's text as devkit reads it: no byte-order mark, LF line endings. An editor that saves a BOM or CRLF must
+    never turn the embargo list or the backup policy into "none" (B2a; the guard reads notes the same way)."""
+    return str(text or "").lstrip("﻿").replace("\r\n", "\n").replace("\r", "\n")
+
+
 def _note_meta(pid: str):
     """The metadata of the project's handoff note -> (meta, "") or (None, why devkit cannot read it). No note in a
     handoff repository that is there reads as no metadata; a missing repository, a file that cannot be read, a block
     that never ends or an embargo list that does not parse is unreadable (B2: never "no embargo")."""
     f = core.note_path(pid)
     try:
-        text = f.read_text()
+        text = note_text(f.read_text())
     except FileNotFoundError:
         if not Path(core.HANDOFF).is_dir():
             return None, f"the handoff repository {core.tilde(core.HANDOFF)} is not on this Mac"
@@ -809,7 +815,7 @@ def _edit_records(pid: str, key: str, edit) -> None:
     the new records (an empty list drops the key)."""
     f = core.note_path(pid)
     with core.Lock("notes", wait=30):
-        text = f.read_text() if f.exists() else notes.new_note(pid)
+        text = note_text(f.read_text()) if f.exists() else notes.new_note(pid)
         meta, body = notes.split_frontmatter(text)
         found = meta.get(key)
         recs = edit([r for r in found if isinstance(r, dict)] if isinstance(found, list) else [])
@@ -862,7 +868,7 @@ POLICIES = ("on", "off", "ask")
 def backup_policy(pid: str):
     """The project's recorded choice {policy, why, who, when}, or None: the default by visibility applies."""
     try:
-        text = core.note_path(pid).read_text()
+        text = note_text(core.note_path(pid).read_text())
     except OSError:
         return None
     meta, _ = notes.split_frontmatter(text)

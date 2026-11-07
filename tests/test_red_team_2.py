@@ -838,6 +838,24 @@ class EmbargoedBranchesStayOffTheRemote(EmbargoCase):
         self.assertIsNone(self.main("git push origin feat/x 'unclosed", setting="audit"))
 
 
+class NotesInAnotherEncoding(EmbargoCase):
+    # The code reviewer's follow-up to B2a: a note saved with a byte-order mark (or CRLF line endings) read as "no
+    # embargo" and "no backup policy", so its branches were backed up and the guard saw no key to keep. devkit and the
+    # guard now read it as the same note.
+    def test_b2a_a_note_with_a_bom_or_crlf_keeps_its_embargo_and_backup_policy(self):
+        from devkit import branches
+        for text in ("﻿" + NOTE, NOTE.replace("\n", "\r\n"), "﻿" + NOTE.replace("\n", "\r\n")):
+            with self.subTest(text=repr(text[:6])):
+                self.note.write_bytes(text.encode())
+                held, why = branches.read_embargoes(self.PID)
+                self.assertEqual((sorted(held or {}), why), (["fix/hole"], ""))
+                self.assertEqual((branches.backup_policy(self.PID) or {}).get("policy"), "off")
+                self.assertIsNotNone(self.check("Edit", {"file_path": str(self.note), "old_string": "branch: fix/hole",
+                                                         "new_string": "branch: fix/other"}))
+                self.assertIsNone(self.check("Edit", {"file_path": str(self.note), "old_string": "Old text.",
+                                                      "new_string": "New text."}))
+
+
 @unittest.skipUnless(tb.HAS_GITLEAKS, "the backup's secret scan needs gitleaks")
 class TheBackupRemembersItsEmbargoes(tb.BackupCase):
     # B2a: an embargo that left the note without `dev branch embargo --lift` (a hand edit, a bad merge, a checkout of

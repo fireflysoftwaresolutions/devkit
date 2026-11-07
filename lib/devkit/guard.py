@@ -1421,9 +1421,10 @@ def note_file(p) -> bool:
 
 def note_keys(text) -> tuple:
     """The two keys of a note's metadata as devkit reads them (a block that never ends reads as none), and their
-    lines as written, so a second copy of a key that the parser would drop still counts as writing it."""
-    from . import notes
-    text = text or ""
+    lines as written, so a second copy of a key that the parser would drop still counts as writing it. Read as devkit
+    reads a note: without a byte-order mark, with LF line endings."""
+    from . import branches, notes
+    text = branches.note_text(text)
     meta, _ = notes.split_frontmatter(text)
     end = text.find("\n---\n", 4) if text.startswith("---\n") else -1
     raw, cur = [], None
