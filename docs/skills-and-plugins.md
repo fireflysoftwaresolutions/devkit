@@ -383,7 +383,7 @@ command sets, a copy the command makes) counts as one of them. With `claude` or 
 The guard reads the command `screen`, `tmux`, and `expect -c` start, and refuses opening a Terminal or iTerm window
 or a `.command` file, whose text it cannot follow. Agents cannot type into a `screen` or `tmux` session at all; you
 can: the guard refuses `screen -X` and `-Q`, tmux's `send-keys`, `paste-buffer`, and the other commands that type
-into a pane or carry a command, in every form it reads
+into a pane or carry a command, a tmux command list, and what can build a `#(…)` format from pieces
 ([the guard's rules](guard.md#devkits-own-state-configuration-and-install) list them). It cannot see everything: a
 program name built at run time (`$(printf claude)`, an alias), a script piped into a shell, a command a git alias or
 `at` starts later, and options that load a plugin for one session only (`claude --mcp-config`, `--plugin-dir`) get
