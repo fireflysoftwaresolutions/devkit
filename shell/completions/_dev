@@ -39,9 +39,10 @@ _dev_live() {
 }
 
 # _dev_values KIND [ARG]: $reply = the lines of `dev __complete KIND [ARG]`, as value:description, for the project or
-# initiative the command line names (-p, -i). They are kept in this shell for $_dev_ttl seconds (10). A Tab waits at
-# most $_dev_wait seconds (0.1) for the command; past it, it offers the last values it had, and the command finishes in
-# the background for a later Tab.
+# initiative the command line names (-p, -i). They are kept in this shell for $_dev_ttl seconds (10). A Tab that has
+# older values to offer waits at most $_dev_wait seconds (0.1) for the command, and the first of its kind in this shell
+# $_dev_first_wait (0.5); past it, it offers what it has, and the command finishes in the background for a later Tab.
+# A fetch whose file is still missing after $_dev_stale seconds (30) died: the next Tab drops it and starts another.
 _dev_values() {
   emulate -L zsh
   setopt extended_glob
@@ -50,7 +51,7 @@ _dev_values() {
   local kind=$1 arg=${2:#-} key f out dir=${XDG_CACHE_HOME:-$HOME/.cache}/devkit/complete
   local -a cmd line old
   local -i i fd ok=0
-  local -F now=$EPOCHREALTIME ttl=${_dev_ttl:-10} wait=${_dev_wait:-0.1}
+  local -F now=$EPOCHREALTIME ttl=${_dev_ttl:-10} wait=${_dev_wait:-0.1} stale=${_dev_stale:-30}
   reply=()
   cmd=(dev __complete $kind)
   line=("${(@Q)_dev_words}")
@@ -71,6 +72,11 @@ _dev_values() {
     return 0
   fi
   f=$_dev_pending[$key]
+  if [[ -n $f && ! -e $f ]] && (( now - ${_dev_pending_at[$key]:-0} >= stale )); then
+    zf_rm -f -- $f.part
+    unset "_dev_pending[$key]" "_dev_pending_at[$key]"
+    f=
+  fi
   if [[ -z $f ]]; then
     if [[ ! -d $dir ]]; then
       zf_mkdir -p -m 700 -- $dir 2>/dev/null || return 1
@@ -80,16 +86,20 @@ _dev_values() {
       old=($dir/*(N.mh+24))
       (( $#old )) && zf_rm -f -- $old
     fi
+    (( ${+_dev_cache[$key]} )) || wait=${_dev_first_wait:-0.5}
     f=$dir/$$.$(( ++_dev_seq ))
     exec {fd}< <(command "${cmd[@]}" >|$f.part 2>/dev/null; zf_mv -f -- $f.part $f 2>/dev/null; print)
     read -t $wait -u $fd out && ok=1
     exec {fd}<&-
-    (( ok )) || _dev_pending[$key]=$f
+    if (( ! ok )); then
+      _dev_pending[$key]=$f
+      _dev_pending_at[$key]=$now
+    fi
   fi
   if [[ -e $f ]]; then
     out=$(<$f)
     zf_rm -f -- $f
-    unset "_dev_pending[$key]"
+    unset "_dev_pending[$key]" "_dev_pending_at[$key]"
     _dev_cache[$key]=$out
     _dev_cache_at[$key]=$now
   fi
@@ -105,7 +115,7 @@ _dev_exec() {
   _normal
 }
 
-typeset -gA _dev_cache _dev_cache_at _dev_pending
+typeset -gA _dev_cache _dev_cache_at _dev_pending _dev_pending_at
 typeset -gi _dev_seq _dev_swept
 typeset -gA _dev_label=(projects 'project' initiatives 'initiative' tasks 'task' steps 'plan step' crew 'crew member' activities 'kind of work' plans 'plan' branches 'branch' worktrees 'worktree' versions 'pinned copy' places 'place')
 typeset -ga _dev_here=(tasks steps plans branches worktrees)

@@ -5,11 +5,12 @@
 # CI fails while this file differs from the parser (selfcheck D13).
 
 # _dev_values KIND [ARG]: _dev_reply = the values of `dev __complete KIND [ARG]` (descriptions dropped) for the project
-# or initiative the line names (-p, -i), kept for $_dev_ttl seconds (10). A Tab waits at most $_dev_wait seconds (0.1;
-# whole seconds before bash 4) for the command; past it, the last values are offered and the command finishes in the
-# background for a later Tab.
+# or initiative the line names (-p, -i), kept for $_dev_ttl seconds (10). A Tab that has older values to offer waits at
+# most $_dev_wait seconds (0.1) for the command, and the first of its kind in this shell $_dev_first_wait (0.5); bash
+# 3.2 waits whole seconds, so 1 s. Past it, the last values are offered and the command finishes in the background for
+# a later Tab. A fetch whose file is still missing after $_dev_stale seconds (30) died: the next Tab starts another.
 _dev_values() {
-  local kind=$1 arg=$2 key var at= f= line w ok= wait=${_dev_wait:-0.1} i
+  local kind=$1 arg=$2 key var at= f= since= line w ok= wait=${_dev_wait:-0.1} i
   local dir=${XDG_CACHE_HOME:-$HOME/.cache}/devkit/complete
   local -a cmd vals
   _dev_reply=()
@@ -28,15 +29,26 @@ _dev_values() {
   [[ -n $arg && $arg != - ]] && cmd+=("$arg")
   key="${cmd[*]:2}"
   case " $_dev_here " in *" $kind "*) key="$key @$PWD" ;; esac
-  var=_dev_c_${key//[^a-zA-Z0-9]/_}
-  eval "at=\${${var}_at:-}; f=\${${var}_pending:-}"
+  # The letters are spelled out: under a UTF-8 locale, bash 3.2's [a-zA-Z] also matches letters such as ñ, which no
+  # variable name may hold, so a folder named diseño would break every Tab (and eval would run a word of its path).
+  var=_dev_c_${key//[^abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789]/_}
+  eval "at=\${${var}_at:-}; f=\${${var}_pending:-}; since=\${${var}_since:-0}"
   if [[ -n $at ]] && (( SECONDS - at < ${_dev_ttl:-10} )); then
     eval "_dev_reply=(\"\${${var}[@]}\")"
     return 0
   fi
+  if [[ -n $f && ! -e $f ]] && (( SECONDS - since >= ${_dev_stale:-30} )); then
+    rm -f "$f.part"
+    f=
+  fi
   if [[ -z $f ]]; then
     [[ -d $dir ]] || mkdir -p -m 700 "$dir" 2>/dev/null || return 1
+    if [[ -z $_dev_swept ]]; then
+      _dev_swept=1
+      find "$dir" -maxdepth 1 -type f -mmin +1440 -delete 2>/dev/null
+    fi
     f=$dir/$$.$RANDOM$RANDOM
+    [[ -n $at ]] || wait=${_dev_first_wait:-0.5}
     if (( BASH_VERSINFO[0] < 4 )); then
       wait=${wait%%.*}
       (( ${wait:-0} < 1 )) && wait=1
@@ -44,7 +56,7 @@ _dev_values() {
     exec 9< <("${cmd[@]}" >"$f.part" 2>/dev/null; mv -f "$f.part" "$f" 2>/dev/null; echo)
     IFS= read -r -t "$wait" -u 9 line && ok=1
     exec 9<&-
-    [[ -n $ok ]] || eval "${var}_pending=\$f"
+    [[ -n $ok ]] || eval "${var}_pending=\$f; ${var}_since=\$SECONDS"
   fi
   if [[ -e $f ]]; then
     vals=()
@@ -60,25 +72,50 @@ _dev_values() {
   return 0
 }
 
+# No word below is split by an unquoted expansion, which would also expand it as a file pattern: `*f` (any number of
+# files) would match main.tf. Specs are split by pattern matching, compgen's output one line at a time, and no shell
+# option changes, so a Ctrl-C during a Tab leaves the shell as it was.
+
+# _dev_add ARGS…: add the words `compgen ARGS…` prints to COMPREPLY, one per line, as they are.
+_dev_add() {
+  local x
+  while IFS= read -r x; do
+    COMPREPLY+=("$x")
+  done < <(compgen "$@")
+}
+
+# _dev_files -f|-d: add the files (-f) or folders (-d) that start with the word being typed to COMPREPLY, each escaped
+# as the shell reads it back: x\[1\].txt, not a pattern that names x1.txt when the line runs.
+_dev_files() {
+  local x q
+  while IFS= read -r x; do
+    printf -v q '%q' "$x"
+    COMPREPLY+=("$q")
+  done < <(compgen "$1" -- "$_dev_cur")
+}
+
 # _dev_complete_with TOKEN: COMPREPLY = what TOKEN (from _dev_spec) offers for the word being typed: c:<words>
 # (choices), m:<words> (a comma list), f (files), d (folders), l:<kinds>:<arg>:<words>:<f|d> (live values), n.
+# compgen splits a word list on IFS: the default, set as a local so a value the user gave IFS cannot change the split.
 _dev_complete_with() {
-  local t=$1 cur=$_dev_cur kinds arg words files k v q w pre IFS=$' \t\n'
+  local t=$1 cur=$_dev_cur kinds arg words files k v q w pre IFS=$' \t\n'  # nosemgrep: bash.lang.security.ifs-tampering.ifs-tampering (local)
   case $t in
     c:*) w=${t#c:}
-         COMPREPLY=($(compgen -W "${w//,/ }" -- "$cur")) ;;
+         _dev_add -W "${w//,/ }" -- "$cur" ;;
     m:*) w=${t#m:}
          pre=
          [[ $cur == *,* ]] && pre=${cur%,*},
-         COMPREPLY=($(compgen -P "$pre" -W "${w//,/ }" -- "${cur##*,}")) ;;
-    f) COMPREPLY=($(compgen -f -- "$cur")) ;;
-    d) COMPREPLY=($(compgen -d -- "$cur")) ;;
+         _dev_add -P "$pre" -W "${w//,/ }" -- "${cur##*,}" ;;
+    f|d) _dev_files "-$t" ;;
     l:*) IFS=: read -r _ kinds arg words files <<< "$t"
-         IFS=$' \t\n'
+         IFS=$' \t\n'  # nosemgrep: bash.lang.security.ifs-tampering.ifs-tampering (the local, back to the default)
          [[ $arg == @* ]] && arg=${_dev_args[${arg#@} - 1]:--}
-         COMPREPLY=($(compgen -W "${words//,/ }" -- "$cur"))
-         for k in ${kinds//,/ }; do
-           [[ $k == - ]] && continue
+         _dev_add -W "${words//,/ }" -- "$cur"
+         kinds=$kinds,
+         while [[ -n $kinds ]]; do
+           k=${kinds%%,*}
+           kinds=${kinds#*,}
+           [[ -z $k || $k == - ]] && continue
            _dev_values "$k" "$arg"
            for v in "${_dev_reply[@]}"; do
              [[ $v == "$cur"* ]] || continue
@@ -86,15 +123,16 @@ _dev_complete_with() {
              COMPREPLY+=("$q")
            done
          done
-         [[ $files == f ]] && COMPREPLY+=($(compgen -f -- "$cur"))
-         [[ $files == d ]] && COMPREPLY+=($(compgen -d -- "$cur")) ;;
+         [[ $files == [fd] ]] && _dev_files "-$files" ;;
   esac
   return 0
 }
 
+# _dev: the completion function bash calls on Tab. It splits the specs on the default IFS, set as a local so a value
+# the user gave IFS cannot change the split.
 _dev() {
-  local c o v p path= w i n=0 want= tok t _dev_cur=${COMP_WORDS[COMP_CWORD]} IFS=$' \t\n'
-  local -a ps _dev_args
+  local c o v p path= w i n=0 want= tok t rest _dev_cur=${COMP_WORDS[COMP_CWORD]} IFS=$' \t\n'  # nosemgrep: bash.lang.security.ifs-tampering.ifs-tampering (local)
+  local -a _dev_args
   COMPREPLY=()
   _dev_spec ""
   for (( i = 1; i < COMP_CWORD; i++ )); do
@@ -106,7 +144,7 @@ _dev() {
     fi
     case $w in
       -*=*) continue ;;
-      -*) for t in $v; do [[ ${t%%=*} == "$w" ]] && want=1; done
+      -*) [[ " $v " == *" $w="* ]] && want=1
           continue ;;
     esac
     if (( n == 0 )) && [[ -n $c && " $c " == *" $w "* ]]; then
@@ -121,22 +159,28 @@ _dev() {
     w=${COMP_WORDS[COMP_CWORD-1]}
     [[ $w == = ]] && w=${COMP_WORDS[COMP_CWORD-2]}
     tok=
-    for t in $v; do [[ ${t%%=*} == "$w" ]] && tok=${t#*=}; done
+    if [[ " $v " == *" $w="* ]]; then
+      tok=" $v "
+      tok=${tok#*" $w="}
+      tok=${tok%% *}
+    fi
     _dev_complete_with "${tok:-n}"
     return 0
   fi
   if [[ $_dev_cur == -* ]]; then
-    COMPREPLY=($(compgen -W "$o" -- "$_dev_cur"))
+    _dev_add -W "$o" -- "$_dev_cur"
     return 0
   fi
   if [[ -n $c ]]; then
-    COMPREPLY=($(compgen -W "$c" -- "$_dev_cur"))
+    _dev_add -W "$c" -- "$_dev_cur"
     return 0
   fi
-  ps=($p)
   tok=
-  for (( i = 0; i < ${#ps[@]}; i++ )); do
-    t=${ps[i]}
+  rest="$p "
+  i=0
+  while [[ $rest == *" "* ]]; do
+    t=${rest%% *}
+    rest=${rest#* }
     if [[ $t == \** ]]; then
       tok=${t#\*}
       break
@@ -145,6 +189,7 @@ _dev() {
       tok=$t
       break
     fi
+    i=$((i + 1))
   done
   _dev_complete_with "${tok:-n}"
   return 0

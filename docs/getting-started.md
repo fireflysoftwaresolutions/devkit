@@ -391,8 +391,9 @@ feat/zsh-completions  -- ~/Development/.worktrees/fireflysoftwaresolutions/devki
 The completion is generated from `dev`'s own commands, so it never falls behind them. Projects, worktrees, work items,
 plan steps, crew members, plans, and branches come from devkit's records; the full list is in
 [Commands › `dev completion`](commands.md#dev-completion-zsh--bash). A second <kbd>Tab</kbd> within 10 seconds costs
-under a millisecond, and a <kbd>Tab</kbd> never waits more than 0.1 seconds: when devkit is slower than that, you get
-the last values, and the new ones on the next <kbd>Tab</kbd>.
+under a millisecond. A <kbd>Tab</kbd> waits at most 0.1 seconds for new values when it has older ones to show, and
+0.5 seconds for the first values of a kind in a new shell; macOS's bash 3.2 counts only whole seconds, so it waits up
+to 1 second. When devkit is slower than that, you get the last values, and the new ones on the next <kbd>Tab</kbd>.
 
 In bash, add this line to `~/.bashrc`:
 

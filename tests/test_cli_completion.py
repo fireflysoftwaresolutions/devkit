@@ -26,10 +26,12 @@ from unittest import mock
 REPO = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO / "lib"))
 
-from devkit import cli, completion, core, setup  # noqa: E402
+from devkit import cli, completion, core, guard, setup  # noqa: E402
 
 ZSH = shutil.which("zsh")
 BASH = shutil.which("bash")
+BASH_MAJOR = int(re.search(r"version (\d+)", subprocess.run([BASH, "--version"], capture_output=True, text=True)
+                           .stdout).group(1)) if BASH else 0
 ANSI = re.compile(r"\x1b\[[0-9;?]*[A-Za-z]|\x1b[()][A-Za-z0-9]|\x1b[=>]|\r")
 
 ITEM = """---
@@ -52,7 +54,7 @@ PS1='%% ' RPS1=
 unsetopt AUTO_LIST AUTO_MENU MENU_COMPLETE BEEP
 autoload -Uz compinit && compinit -u -D
 source {devkit_zsh}
-_dev_wait=10
+_dev_wait=10 _dev_first_wait=10
 compadd() {{
   if [[ ${{@[1,(i)(-|--)]}} == *-(O|A|D)\ * ]]; then
     builtin compadd "$@"
@@ -97,6 +99,13 @@ zpty -d dk
 def git(cwd, *args):
     subprocess.run(["git", "-C", str(cwd), "-c", "user.name=t", "-c", "user.email=t@example.com", *args],
                    check=True, capture_output=True)
+
+
+def fake_dev(folder: Path, body: str) -> str:
+    # a `dev` in `folder` that runs the sh lines `body`; -> a PATH that finds it first
+    (folder / "dev").write_text("#!/bin/sh\n" + body)
+    (folder / "dev").chmod(0o755)
+    return f"{folder}:/usr/bin:/bin"
 
 
 class Fixture:
@@ -277,7 +286,7 @@ class ZshDeadline(unittest.TestCase):
             (d / "dev").chmod(0o755)
             script = (f"source {REPO / 'shell' / 'completions' / '_dev'}\n"
                       "zmodload zsh/datetime zsh/zselect\n"
-                      "_dev_words=(dev task done '') _dev_wait=0.1\n"
+                      "_dev_words=(dev task done '') _dev_wait=0.1 _dev_first_wait=0.1\n"
                       "float t0=$EPOCHREALTIME\n"
                       "_dev_values tasks\n"
                       'print -r -- "first ${#reply} $(( EPOCHREALTIME - t0 ))"\n'
@@ -300,6 +309,60 @@ class ZshDeadline(unittest.TestCase):
             self.assertEqual(lines["third"], "T-1:now · one")
             self.assertEqual(lines["runs"].strip(), "1", "a cached value ran the command again")
 
+    # A fetch that dies before it renames its file (Ctrl-C, a crash) must not block the values for the rest of the
+    # shell's life: a Tab inside the stale window (_dev_stale, 30 s) starts nothing new, a Tab past it drops the dead
+    # fetch, deletes its leftover .part file and fetches again.
+    def test_a_fetch_that_died_is_started_again_past_the_stale_window(self):
+        with tempfile.TemporaryDirectory() as d:
+            d = Path(d).resolve()
+            die, count = d / "die", d / "count"
+            path = fake_dev(d, f'echo run >> "{count}"\n'
+                               f'if [ -e "{die}" ]; then rm -f "{die}"; kill -9 $PPID; exit 1; fi\n'
+                               "printf 'T-1:now · one\\n'\n")
+            die.write_text("")
+            script = (f"source {REPO / 'shell' / 'completions' / '_dev'}\n"
+                      "_dev_words=(dev task done '') _dev_wait=5 _dev_first_wait=5\n"
+                      "_dev_values tasks\n"
+                      f'print -r -- "first ${{#reply}} $(wc -l < {count})"\n'
+                      "_dev_values tasks\n"
+                      f'print -r -- "again ${{#reply}} $(wc -l < {count})"\n'
+                      "_dev_stale=0\n"
+                      "_dev_values tasks\n"
+                      f'print -r -- "later ${{(j:,:)reply}} $(wc -l < {count})"\n')
+            r = subprocess.run([ZSH, "-f", "-c", script], capture_output=True, text=True, timeout=60,
+                               env={"HOME": str(d), "PATH": path})
+            self.assertEqual(r.returncode, 0, r.stderr)
+            got = [" ".join(ln.split()) for ln in r.stdout.splitlines()]
+            self.assertEqual(got, ["first 0 1", "again 0 1", "later T-1:now · one 2"])
+            self.assertEqual(list((d / ".cache" / "devkit" / "complete").glob("*.part")), [])
+
+    # The first Tab of a kind in a new shell has nothing to fall back on, so it waits _dev_first_wait (0.5 s): a dev
+    # slower than _dev_wait (0.1 s; /usr/bin/python3 takes about 110 ms) still fills it. A later Tab, which has the
+    # older values to offer, waits only _dev_wait.
+    def test_the_first_tab_waits_longer_than_a_refresh(self):
+        with tempfile.TemporaryDirectory() as d:
+            d = Path(d).resolve()
+            path = fake_dev(d, "sleep 0.5\nprintf 'T-1:now · one\\n'\n")
+            script = (f"source {REPO / 'shell' / 'completions' / '_dev'}\n"
+                      "zmodload zsh/datetime zsh/zselect\n"
+                      "_dev_words=(dev task done '') _dev_wait=0.05 _dev_first_wait=5\n"
+                      "_dev_values tasks\n"
+                      'print -r -- "first ${(j:,:)reply}"\n'
+                      "_dev_ttl=0\n"
+                      "float t0=$EPOCHREALTIME\n"
+                      "_dev_values tasks\n"
+                      'print -r -- "refresh ${(j:,:)reply}"\n'
+                      'print -r -- "waited $(( EPOCHREALTIME - t0 ))"\n'
+                      "local f=${_dev_pending[(R)*]}\n"  # let the background fetch end before the folder goes
+                      "repeat 1000; do [[ -z $f || -e $f ]] && break; zselect -t 1; done\n")
+            r = subprocess.run([ZSH, "-f", "-c", script], capture_output=True, text=True, timeout=60,
+                               env={"HOME": str(d), "PATH": path})
+            self.assertEqual(r.returncode, 0, r.stderr)
+            lines = dict(ln.split(" ", 1) for ln in r.stdout.splitlines() if " " in ln)
+            self.assertEqual(lines.get("first"), "T-1:now · one", "the first Tab did not wait for its values")
+            self.assertEqual(lines.get("refresh"), "T-1:now · one")
+            self.assertLess(float(lines["waited"]), 0.4, "a Tab with older values waited for the slow command")
+
 
 @unittest.skipUnless(ZSH, "zsh is not installed")
 class ZshTabCost(unittest.TestCase):
@@ -311,7 +374,7 @@ class ZshTabCost(unittest.TestCase):
         fx = Fixture()
         self.addCleanup(fx.tmp.cleanup)
         script = (f"source {REPO / 'shell' / 'completions' / '_dev'}\nzmodload zsh/datetime\n"
-                  "_dev_words=(dev task done '') _dev_wait=10\n"
+                  "_dev_words=(dev task done '') _dev_wait=10 _dev_first_wait=10\n"
                   "float t0=$EPOCHREALTIME\n_dev_values tasks\nfloat first=$(( (EPOCHREALTIME - t0) * 1000 ))\n"
                   "t0=$EPOCHREALTIME\nrepeat 300; do _dev_values tasks; done\n"
                   "float cached=$(( (EPOCHREALTIME - t0) * 1000 / 300 ))\n"
@@ -337,7 +400,7 @@ class BashCompletion(unittest.TestCase):
     def complete(self, *words):
         # COMPREPLY for `dev <words…>` with the cursor on the last word, as bash fills COMP_WORDS on Tab
         quoted = " ".join("'" + w.replace("'", "'\\''") + "'" for w in ("dev", *words))
-        script = (f"source {REPO / 'shell' / 'completions' / 'dev.bash'}\n_dev_wait=10\n"
+        script = (f"source {REPO / 'shell' / 'completions' / 'dev.bash'}\n_dev_wait=10 _dev_first_wait=10\n"
                   f"COMP_WORDS=({quoted}); COMP_CWORD={len(words)}; _dev; printf '%s\\n' \"${{COMPREPLY[@]}}\"\n")
         r = subprocess.run([BASH, "--norc", "--noprofile", "-c", script], capture_output=True, text=True,
                            timeout=60, env=self.fx.env(), cwd=str(self.fx.widget))
@@ -355,6 +418,117 @@ class BashCompletion(unittest.TestCase):
         self.assertEqual(self.complete("go", "widget", ""), {"feat/login"})
         self.assertEqual(self.complete("go", "gadget", ""), set())
         self.assertIn("api\\ contract", self.complete("progress", "step", "--step", ""))
+
+
+@unittest.skipUnless(BASH, "bash is not installed")
+class BashValues(unittest.TestCase):
+    # The bash side of the live values, with a `dev` of the test's own in a home of its own.
+    def setUp(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        self.d = Path(tmp.name).resolve()
+        self.count = self.d / "count"
+
+    def bash(self, body, cwd=None, **env):
+        # run `body` after sourcing dev.bash, with the cursor on `dev task done <here>`
+        script = (f"source {REPO / 'shell' / 'completions' / 'dev.bash'}\n"
+                  "COMP_WORDS=(dev task done ''); COMP_CWORD=3\n" + body)
+        return subprocess.run([BASH, "--norc", "--noprofile", "-c", script], capture_output=True, text=True,
+                              timeout=60, cwd=str(cwd or self.d),
+                              env={"HOME": str(self.d), "PATH": self.path, "LANG": "en_US.UTF-8", **env})
+
+    def runs(self) -> int:
+        return len(self.count.read_text().splitlines()) if self.count.exists() else 0
+
+    # In a folder whose name has a letter outside ASCII (diseño), bash 3.2 under a UTF-8 locale counts ñ as a letter of
+    # [a-zA-Z], so the cache variable got a name bash refuses: every Tab said "bad substitution", offered nothing, and
+    # eval ran a word built from the path. The Tab offers the values, the next takes them from the cache.
+    def test_a_folder_with_a_non_ascii_name(self):
+        self.path = fake_dev(self.d, f'echo run >> "{self.count}"\nprintf \'T-1:now · one\\n\'\n')
+        here = self.d / "diseño"
+        here.mkdir()
+        r = self.bash("_dev_wait=10 _dev_first_wait=10\n"
+                      '_dev; echo "first=${COMPREPLY[*]}"\n_dev; echo "second=${COMPREPLY[*]}"\n',
+                      cwd=here, LC_ALL="en_US.UTF-8")
+        self.assertEqual((r.stdout.splitlines(), r.stderr), (["first=T-1", "second=T-1"], ""))
+        self.assertEqual(self.runs(), 1, "the second Tab ran dev again instead of using the cache")
+
+    # As in zsh: a fetch that died before renaming its file is started again past the stale window, not before, and
+    # its leftover .part file is deleted.
+    def test_a_fetch_that_died_is_started_again_past_the_stale_window(self):
+        die = self.d / "die"
+        self.path = fake_dev(self.d, f'echo run >> "{self.count}"\n'
+                                     f'if [ -e "{die}" ]; then rm -f "{die}"; kill -9 $PPID; exit 1; fi\n'
+                                     "printf 'T-1:now · one\\n'\n")
+        die.write_text("")
+        r = self.bash(f"_dev_wait=5 _dev_first_wait=5\n"
+                      f"_dev_values tasks ''; n=$(wc -l < {self.count}); echo \"first ${{#_dev_reply[@]}} $((n))\"\n"
+                      f"_dev_values tasks ''; n=$(wc -l < {self.count}); echo \"again ${{#_dev_reply[@]}} $((n))\"\n"
+                      "_dev_stale=0\n"
+                      f"_dev_values tasks ''; n=$(wc -l < {self.count}); echo \"later ${{_dev_reply[*]}} $((n))\"\n")
+        self.assertEqual((r.stdout.splitlines(), r.stderr), (["first 0 1", "again 0 1", "later T-1 2"], ""))
+        self.assertEqual(list((self.d / ".cache" / "devkit" / "complete").glob("*.part")), [])
+
+    # Words split from a spec or from compgen are not file patterns: `*f` (any number of files) stays a token instead
+    # of matching main.tf, and a file named x[1].txt is offered as itself, escaped as the live values are, so the line
+    # names that file when it runs, not the x1.txt its pattern matches.
+    def test_tokens_and_file_names_are_not_globbed(self):
+        self.path = fake_dev(self.d, "exit 0\n")
+        here = self.d / "globs"
+        here.mkdir()
+        for name in ("main.tf", "notes.txt", "x[1].txt", "x1.txt"):
+            (here / name).write_text("")
+        r = self.bash("COMP_WORDS=(dev rm n); COMP_CWORD=2; _dev; echo \"n=${COMPREPLY[*]}\"\n"
+                      "COMP_WORDS=(dev rm x); COMP_CWORD=2; _dev; printf 'x=%s\\n' \"${COMPREPLY[@]}\"\n", cwd=here)
+        self.assertEqual(r.stderr, "")
+        out = r.stdout.splitlines()
+        self.assertEqual(out[0], "n=notes.txt")
+        self.assertEqual(sorted(out[1:]), ["x=x1.txt", "x=x\\[1\\].txt"])
+
+    # A Tab with nothing cached waits at most _dev_first_wait (0.5 s), rounded up to whole seconds before bash 4:
+    # 1 s on macOS's bash 3.2. The command finishes in the background, a later Tab takes its values, and the next one
+    # within _dev_ttl runs nothing.
+    def test_a_slow_command_holds_the_tab_at_most_the_first_wait(self):
+        gate = self.d / "gate"
+        os.mkfifo(gate)
+        self.path = fake_dev(self.d, f'echo run >> "{self.count}"\ncat "{gate}" >/dev/null\n'
+                                     "printf 'T-1:now · one\\n'\n")
+        script = (f"source {REPO / 'shell' / 'completions' / 'dev.bash'}\nCOMP_WORDS=(dev task done ''); COMP_CWORD=3\n"
+                  "_dev_values tasks ''; echo \"first ${#_dev_reply[@]}\"\nread -r _\n"
+                  "_dev_values tasks ''; echo \"second ${_dev_reply[*]}\"\n"
+                  "_dev_values tasks ''; echo \"third ${_dev_reply[*]}\"\n")
+        p = subprocess.Popen([BASH, "--norc", "--noprofile", "-c", script], stdin=subprocess.PIPE,
+                             stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, cwd=str(self.d),
+                             env={"HOME": str(self.d), "PATH": self.path})
+        self.addCleanup(p.kill)
+        t0 = time.monotonic()
+        first = p.stdout.readline().strip()
+        waited = time.monotonic() - t0
+        with open(gate, "w") as g:  # the slow command goes on
+            g.write("go\n")
+        cache = self.d / ".cache" / "devkit" / "complete"
+        until = time.monotonic() + 30
+        while time.monotonic() < until and not [f for f in cache.iterdir() if not f.name.endswith(".part")]:
+            time.sleep(0.01)
+        out, err = p.communicate("go\n", timeout=60)
+        self.assertEqual(first, "first 0", err)
+        self.assertLess(waited, 1.5 if BASH_MAJOR < 4 else 1.0, "the Tab waited past its deadline")
+        self.assertEqual(out.splitlines(), ["second T-1", "third T-1"], err)
+        self.assertEqual(self.runs(), 1, "a cached value ran the command again")
+
+    # Like zsh, bash deletes the value files it left over a day ago, once per shell, and keeps the fresh ones.
+    def test_value_files_older_than_a_day_are_deleted(self):
+        self.path = fake_dev(self.d, "printf 'T-1:now · one\\n'\n")
+        cache = self.d / "cache" / "devkit" / "complete"
+        cache.mkdir(parents=True)
+        old, fresh = cache / "1.old", cache / "2.fresh"
+        old.write_text("x")
+        fresh.write_text("y")
+        two_days_ago = time.time() - 2 * 86400
+        os.utime(old, (two_days_ago, two_days_ago))
+        r = self.bash("_dev_wait=5 _dev_first_wait=5\n_dev_values tasks ''\n", XDG_CACHE_HOME=str(self.d / "cache"))
+        self.assertEqual(r.stderr, "")
+        self.assertEqual(sorted(f.name for f in cache.iterdir()), ["2.fresh"])
 
 
 class LiveValues(unittest.TestCase):
@@ -377,6 +551,23 @@ class LiveValues(unittest.TestCase):
         r = self.fx.dev("__complete", "nonsense")
         self.assertEqual(r.returncode, 2)
         self.assertIn("unknown kind", r.stderr)
+
+    # The steps still to do come first, so a long run's done steps do not bury them; each keeps its number in the plan.
+    def test_open_steps_come_before_done_ones(self):
+        lines = self.fx.dev("__complete", "steps").stdout.splitlines()
+        self.assertEqual(lines, ["api contract:step 2 · running · Backend engineer (Tank)", "design:step 1 · done"])
+
+    # Text from git or the registry is drawn on the terminal in a listing: its control characters (an escape that sets
+    # the window title or colors the screen, C1 ones included) are dropped, and its words kept.
+    def test_values_carry_no_control_characters(self):
+        git(self.fx.widget, "checkout", "-q", "-b", "esc/branch")
+        self.addCleanup(git, self.fx.widget, "branch", "-q", "-D", "esc/branch")
+        git(self.fx.widget, "commit", "-q", "--allow-empty", "-m",
+            "evil \x1b]0;TITLE\x07 \x1b[41mRED\x1b[0m \u009b31m subject")
+        git(self.fx.widget, "checkout", "-q", "main")
+        line = next(ln for ln in self.fx.dev("__complete", "branches").stdout.splitlines() if ln.startswith("esc/"))
+        self.assertIsNone(re.search(r"[\x00-\x1f\x7f-\x9f]", line), repr(line))
+        self.assertTrue(line.endswith(" subject"), repr(line))
 
     # dev go <project> <branch>: the worktree's path, by its branch or a unique part of it; no match lists them.
     def test_dev_go_to_a_worktree(self):
@@ -417,6 +608,15 @@ class Generated(unittest.TestCase):
         self.assertEqual(completion.short("project (default: the one you are in)"),
                          "project (default: the one you are in)")
         self.assertEqual(completion.short("word " * 30, width=20), "word word word word…")
+
+
+class ReadOnlyLanes(unittest.TestCase):
+    # A read-only crew lane may print the completion scripts and list live values: both only read devkit's records.
+    def test_completion_and_its_live_values_are_reads(self):
+        for cmd in ("dev completion zsh", "dev completion bash", "dev __complete tasks",
+                    "dev __complete worktrees widget"):
+            self.assertIsNone(guard.readonly_refusal(cmd, str(REPO)), cmd)
+        self.assertIsNotNone(guard.readonly_refusal("dev task add x", str(REPO)))
 
 
 class ShellHelpersConsent(unittest.TestCase):

@@ -18,8 +18,9 @@ Not released yet: the date is set when the release is tagged.
   differ from the parser.
 - **Live values with descriptions:** project aliases, a project's worktrees, the work items of the project you are in,
   the plan steps of its live run, crew members by id with their role, kinds of work, plans, branches, initiatives, and
-  pinned copies, wherever an argument takes one. A Tab waits at most 0.1 s for them and a second Tab within 10 s
-  costs under a millisecond.
+  pinned copies, wherever an argument takes one. A Tab waits at most 0.1 s for them when it has older values to show
+  and 0.5 s for the first of a kind in a new shell (1 s in macOS's bash 3.2, which waits in whole seconds), and a
+  second Tab within 10 s costs under a millisecond.
 - **`dcd <project> <branch>` and `dev go <project> <branch>`** go to a project's worktree; `dcd` and `dwt` complete
   like `dev go` and `dev wt new`.
 - **zsh helpers, with your yes (`dev setup shell`):** fzf pickers on <kbd>Ctrl</kbd>+<kbd>X</kbd> <kbd>i</kbd> (a work

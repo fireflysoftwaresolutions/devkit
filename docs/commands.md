@@ -1410,10 +1410,19 @@ Where an argument takes something devkit knows, completion offers the live value
 | Branches of the repository you are in | `--base`, `--branch`, `--since`, `dev branch embargo`, `dev backup` |
 | Initiatives, pinned devkit copies | `-i`/`--initiative`, `dev task link --to`; `dev install --version` |
 
-The values come from `dev __complete <kind>`, which answers without building the full parser (about 60 ms). The shell
-keeps them for 10 seconds (`_dev_ttl`), so a second Tab costs under a millisecond, and a Tab waits at most 0.1 seconds
-for the command (`_dev_wait`): past that, it offers the last values it had, and picks up the new ones on a later Tab
-once the command has finished in the background.
+The values come from `dev __complete <kind>`, which answers without building the full parser: about 35 ms with
+Homebrew's Python and about 100 ms with macOS's own `/usr/bin/python3`. The shell keeps them for 10 seconds
+(`_dev_ttl`), so a second Tab costs under a millisecond. How long a Tab waits for the command:
+
+| Tab | zsh and bash 4 or later | bash 3.2 (macOS) |
+| --- | --- | --- |
+| The first of its kind in this shell, with nothing to offer yet (`_dev_first_wait`) | 0.5 seconds | 1 second |
+| A later one, with older values to offer (`_dev_wait`) | 0.1 seconds | 1 second |
+
+bash 3.2 waits only in whole seconds. Past the wait, the Tab offers the values it has, and a later Tab picks up the new
+ones once the command has finished in the background. A command still unfinished after 30 seconds (`_dev_stale`)
+counts as dead, and the next Tab runs it again. The values wait in `~/.cache/devkit/complete`; each shell deletes the
+files there that are older than a day.
 
 Once `dev setup prompt` turned it on, it also draws the [prompt helper](getting-started.md#the-prompt-helper): before
 each prompt, `_devkit_prompt` sets `DEVKIT_PROMPT` and `DEVKIT_PROMPT_ASK` inside devkit projects and unsets them
