@@ -1315,7 +1315,7 @@ plugin that a repository's `.claude/settings.json` enables outside the catalog. 
 
 ### `dev ext outdated [<name>] [--agent claude|codex] [--json]`
 
-Shows, for each extension, what upstream has now against its pin, with the compare or release link. It uses your own
+For each extension, shows what upstream has now against its pin, and the compare or release link. It uses your own
 `gh` sign-in and `npm`, with a 15-second limit per call, and reads the Claude marketplace copy that
 `claude plugin marketplace update` keeps. Agents may run it.
 
@@ -1349,6 +1349,37 @@ dev ext update chrome-devtools --to 1.13.2 --why "the network panel fix"
 newest upstream is used. `--apply` updates a vendor marketplace plugin on this Mac instead (`claude plugin update`, or
 `codex plugin add`), after the same review, and records the new version as accepted, so it no longer shows as drift.
 Only you run `--apply`, in a terminal.
+
+### `dev ext add | remove | enable | disable`
+
+`dev ext <verb> … --why "…" [--team | --project]` changes your own set of extensions on top of devkit's, then
+applies that one entry on this Mac. Your choices live
+in `ext` in `~/.config/devkit/config.json` (see [Configuration › Extensions](configuration.md#extensions)), so
+`dev install` and `dev config repair` keep them. Each change needs `--why` and is audited as `ext.add`, `ext.remove`,
+`ext.enable`, or `ext.disable`. Only you run these, in a terminal; devkit's own security plugins and devkit itself
+cannot be removed or turned off.
+
+```bash
+dev ext disable commit-commands --why "I commit with dev commit"
+dev ext add mcp postgres --agent codex --license MIT --why "Postgres tools" --command "npx -y pg-mcp@2.1.0"
+dev ext add mcp docs --license MIT --why "our docs" --url https://docs.example.com/mcp
+dev ext add skill k6 --repo grafana/skills --ref <40-char sha> --path skills/k6 --license Apache-2.0 --why "load tests"
+dev ext add plugin figma@claude-plugins-official --agent claude --license MIT --why "design handoff"
+dev ext disable superpowers --agent claude --project --why "not in this repository"
+```
+
+| Option | Effect |
+| --- | --- |
+| `--team` | With `add` or `remove`: changes devkit's defaults in the checkout instead (a branch only, like `dev ext update`); `remove --team` retires the entry, so `dev install` uninstalls it on every Mac. Agents may run it; the change goes through a PR |
+| `--project` | With `enable` or `disable`: a Claude Code plugin from devkit's catalog, in this project's `.claude/settings.json` (`claude plugin enable\|disable -s project`) |
+| `--command "…"` | An MCP server's command line, quoted, with an exact version: `pkg@1.2.3` (npm) or `pkg==1.2.3` (PyPI) |
+| `--url` | A remote MCP server: `https` only |
+
+The same rules apply to your entries as to devkit's: a skill needs a full 40-character commit SHA, an MCP server an
+exact version or an `https` URL, and every entry a license and a reason. An MCP server, in either agent, and a Codex
+plugin have no on and off switch, so `disable` removes them and `enable` adds them back; a skill is linked or
+unlinked by the skills step. When the managed-settings lock is on
+(`dev config lock`), it keeps devkit's plugin set: run `dev config lock` again after a Claude plugin change.
 
 ### `dev install [--only STEPS | --version VERSION | --unverified --why "…"]`
 

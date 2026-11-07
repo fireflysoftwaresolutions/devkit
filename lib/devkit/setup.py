@@ -1005,7 +1005,8 @@ def app_checks(codex_plugins=None) -> list:
 
 def _install_skills():
     step("Skills (shared by Claude Code and Codex)")
-    manifest = load_conf("skills.json")
+    from . import ext
+    manifest = {"sources": ext.effective_skill_sources()}  # skills.json, then the dev ext overlay
     wanted = {}  # name -> directory to link
     only = {}  # name -> the agents that get it (default: both)
     for d in sorted((DEVKIT_HOME / "agents" / "skills").iterdir()):
@@ -1074,11 +1075,12 @@ def write_claude_settings(include_hooks=True):
     if not new["hooks"]:
         new.pop("hooks")
     ep = dict(new.get("enabledPlugins") or {})
-    for p in plugins["plugins"]:
-        ep[p] = True
-    for p in plugins.get("disabled", []):
-        ep[p] = False
     from . import ext
+    on, off = ext.effective_claude_plugins(ext.team(), ext.user_layer())  # team default, then the dev ext overlay
+    for p in on:
+        ep[p] = True
+    for p in off:
+        ep[p] = False
     for p in ext.retired_plugin_keys("claude"):  # retired from the team default (dev ext): its key goes too
         ep.pop(p, None)
     new["enabledPlugins"] = ep
@@ -1105,6 +1107,8 @@ def setup_claude():
     locked = policy.lock_status() != "off"
     write_claude_settings(include_hooks=not locked)
     plugins = load_conf("claude/plugins.json")
+    from . import ext  # what to install: the team default, then the dev ext overlay (spec P-fym583l7sg1 R8)
+    plugins.update(plugins=ext.effective_plugin_ids("claude"), mcp=ext.effective_mcp("claude"))
     frag = load_conf("claude/settings.json")
     done(f"settings.json: {frag['permissions']['defaultMode']} by default, no attribution, hooks: "
          + ", ".join(sorted((frag.get('hooks') or {}).keys())))
@@ -1159,6 +1163,8 @@ def write_codex_config(quiet=False):
     with quiet_mode(quiet):
         conf = load_conf("codex/config.json")
         plugins = load_conf("codex/plugins.json")
+        from . import ext
+        plugins["mcp"] = ext.effective_mcp("codex")  # the team's, then the dev ext overlay
         hooks_f = CODEX_HOME / "hooks.json"
         cur = (read_json(hooks_f, {}) or {}).get("hooks", {})
         ours = load_conf("codex/hooks.json")["hooks"]
@@ -1400,6 +1406,8 @@ def setup_codex():
     write_codex_profiles(load_conf("codex/config.json"))
     write_codex_agents(load_conf("codex/config.json"))
     plugins = load_conf("codex/plugins.json")
+    from . import ext
+    plugins["plugins"] = ext.effective_plugin_ids("codex")  # the team's, then the dev ext overlay
     codex_root = build_codex_plugin()
     if "firefly-devkit" in plugins.get("marketplaces", {}):
         plugins["marketplaces"]["firefly-devkit"] = str(codex_root)

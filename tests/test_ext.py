@@ -731,6 +731,238 @@ class GuardTests(unittest.TestCase):
                 self.assertIn("terminal", why)
 
 
+class OverlayValidationTests(unittest.TestCase):
+    """The developer's own entries obey the same supply-chain rules as the team's (spec threats: user overlay)."""
+
+    def refused(self, item) -> str:
+        with self.assertRaises(ext.ExtError) as cm:
+            ext.catalog(fixture_team(), {"add": [item]}, set())
+        return str(cm.exception)
+
+    def test_a_skill_needs_a_full_commit_sha(self):
+        why = self.refused({"kind": "skill", "name": "x", "repo": "o/r", "ref": "414603b", "path": "s/x",
+                            "license": "MIT", "why": "w"})
+        self.assertIn("ext.add skill x", why)
+        self.assertIn("40-character", why)
+
+    def test_an_mcp_server_needs_an_exact_version_or_https(self):
+        self.assertIn("exact version", self.refused({"kind": "mcp", "name": "m", "command": "npx",
+                                                     "args": ["-y", "some-mcp"], "license": "MIT", "why": "w"}))
+        self.assertIn("https", self.refused({"kind": "mcp", "name": "m", "url": "http://mcp.example.com/mcp",
+                                             "license": "MIT", "why": "w"}))
+
+    def test_every_entry_needs_a_license(self):
+        self.assertIn("needs a license", self.refused({"kind": "plugin", "agent": "claude", "id": "p@m",
+                                                       "why": "w"}))
+
+
+class PrecedenceTests(unittest.TestCase):
+    def test_user_remove_and_disable_change_team_entries_but_not_required_ones(self):
+        user = {"remove": ["mcp:claude:chrome-devtools", "plugin:claude:devkit@firefly-devkit"],
+                "disable": ["plugin:claude:superpowers@claude-plugins-official",
+                            "plugin:claude:security-guidance@claude-plugins-official"]}
+        cat = by_id(ext.catalog(fixture_team(), user, set()))
+        self.assertNotIn("mcp:claude:chrome-devtools", cat)
+        self.assertIn("plugin:claude:devkit@firefly-devkit", cat)  # required: stays
+        self.assertFalse(cat["plugin:claude:superpowers@claude-plugins-official"].enabled)
+        self.assertTrue(cat["plugin:claude:security-guidance@claude-plugins-official"].enabled)  # required: stays on
+
+    def test_user_enable_turns_on_a_plugin_the_team_ships_off(self):
+        cat = by_id(ext.catalog(fixture_team(), {"enable": ["plugin:claude:php-lsp@claude-plugins-official"]},
+                                set()))
+        self.assertTrue(cat["plugin:claude:php-lsp@claude-plugins-official"].enabled)
+
+    def test_the_effective_claude_plugins_follow_the_overlay(self):
+        on, off = ext.effective_claude_plugins(fixture_team(), {"disable": [
+            "plugin:claude:superpowers@claude-plugins-official"]})
+        self.assertIn("superpowers@claude-plugins-official", off)
+        self.assertNotIn("superpowers@claude-plugins-official", on)
+        self.assertIn("devkit@firefly-devkit", on)
+
+    def test_the_overlay_change_keeps_enable_and_disable_apart(self):
+        u = ext.overlay_change({}, "disable", ["a"])
+        u = ext.overlay_change(u, "enable", ["a"])
+        self.assertEqual((u["enable"], u["disable"]), (["a"], []))
+        item = {"kind": "mcp", "name": "m", "url": "https://m.example.com", "license": "MIT", "why": "w"}
+        u = ext.overlay_change(ext.overlay_change(u, "add", ["mcp:claude:m"], item), "remove", ["mcp:claude:m"])
+        self.assertEqual((u["add"], u["remove"]), ([], ["mcp:claude:m"]))
+
+
+class EffectiveSetTests(unittest.TestCase):
+    """Setup, repair and the managed lock use the effective set, so they never undo an overlay choice (spec R8)."""
+
+    def overlay(self, ext_cfg):
+        return mock.patch.dict(core.CFG, {"ext": ext_cfg})
+
+    def test_repair_keeps_a_plugin_the_overlay_disabled(self):
+        from devkit import policy
+        with self.overlay({"disable": ["plugin:claude:commit-commands@claude-plugins-official"]}):
+            flat, _ = policy.claude_desired()
+            payload = policy.managed_payload()
+            f = core.CLAUDE_HOME / "settings.json"
+            f.parent.mkdir(parents=True, exist_ok=True)
+            f.write_text("{}")
+            setup.write_claude_settings()
+            ep = json.loads(f.read_text())["enabledPlugins"]
+        key = "commit-commands@claude-plugins-official"
+        self.assertIs(flat[("enabledPlugins", key)], False)
+        self.assertIs(payload["enabledPlugins"][key], False)
+        self.assertIs(ep[key], False)
+
+    def test_an_overlay_cannot_switch_off_a_required_plugin(self):
+        from devkit import policy
+        with self.overlay({"disable": ["plugin:claude:security-guidance@claude-plugins-official"]}):
+            flat, _ = policy.claude_desired()
+        self.assertIs(flat[("enabledPlugins", "security-guidance@claude-plugins-official")], True)
+
+    def test_codex_and_claude_mcp_servers_follow_the_overlay(self):
+        from devkit import policy
+        add = {"kind": "mcp", "name": "docs", "url": "https://docs.example.com/mcp", "license": "MIT", "why": "w",
+               "agents": ["codex"]}
+        with self.overlay({"add": [add], "remove": ["mcp:codex:angular-cli", "mcp:claude:angular-cli"]}):
+            desired = policy.codex_desired()
+            claude_mcp = ext.effective_mcp("claude")
+            codex_mcp = ext.effective_mcp("codex")
+        self.assertIn(("mcp_servers", "docs"), desired)
+        self.assertNotIn(("mcp_servers", "angular-cli"), desired)
+        self.assertEqual(codex_mcp["docs"], {"url": "https://docs.example.com/mcp"})
+        self.assertNotIn("angular-cli", claude_mcp)
+        self.assertIn("chrome-devtools", claude_mcp)
+
+    def test_the_skills_step_gets_overlay_skills_and_drops_removed_ones(self):
+        add = {"kind": "skill", "name": "k6", "repo": "grafana/skills", "ref": SHA_C, "path": "skills/k6",
+               "license": "Apache-2.0", "why": "load tests", "agents": ["claude"]}
+        with self.overlay({"add": [add], "disable": ["skill:codex:codebase-design"]}):
+            sources = ext.effective_skill_sources()
+        mine = [s for s in sources if "k6" in s["skills"] and s["ref"] == SHA_C]  # the team has a k6 too
+        self.assertEqual([(s["repo"], s["ref"], s["agents"]) for s in mine], [("grafana/skills", SHA_C, ["claude"])])
+        cd = [s for s in sources if "codebase-design" in s["skills"]]
+        self.assertEqual([s.get("agents") for s in cd], [["claude"]])
+        self.assertTrue(any("grill-with-docs" in s["skills"] and not s.get("agents") for s in sources))
+
+
+class ChangeCommandTests(unittest.TestCase):
+    """`dev ext add|remove|enable|disable`: the developer's overlay, written through devkit's configuration and
+    applied to that one entry."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.cfg = Path(self.tmp.name) / "config.json"
+        self.cfg.write_text(json.dumps({"dev_root": str(core.DEV)}))
+        self.run = FakeRun()
+
+    def dev(self, *args, developer=True):
+        out = io.StringIO()
+        with mock.patch.object(core, "CONFIG_FILE", self.cfg), \
+                mock.patch.object(core, "set_by_developer", return_value=developer), \
+                mock.patch.object(ext, "runner", return_value=self.run), \
+                mock.patch.object(ext, "install_skills", lambda: None), \
+                mock.patch.dict(core.CFG, {"ext": json.loads(self.cfg.read_text()).get("ext") or {}}), \
+                contextlib.redirect_stdout(out), contextlib.redirect_stderr(out):
+            rc = cli.main(["ext", *args])
+        return rc, plain(out.getvalue())
+
+    def overlay(self) -> dict:
+        return json.loads(self.cfg.read_text()).get("ext") or {}
+
+    def test_disable_writes_the_overlay_runs_the_agent_command_and_audits(self):
+        rc, out = self.dev("disable", "commit-commands", "--why", "I commit with dev commit")
+        self.assertEqual(rc, 0, out)
+        self.assertEqual(self.overlay()["disable"], ["plugin:claude:commit-commands@claude-plugins-official"])
+        self.assertEqual(self.run.calls, [["claude", "plugin", "disable", "commit-commands@claude-plugins-official",
+                                           "-s", "user"]])
+        rec = audit.records(days=1, action="ext.disable")[-1]
+        self.assertEqual((rec["target"], rec.get("why")), ("plugin:claude:commit-commands@claude-plugins-official",
+                                                           "I commit with dev commit"))
+
+    def test_a_required_extension_cannot_be_disabled_or_removed(self):
+        for verb in ("disable", "remove"):
+            with self.subTest(verb=verb):
+                rc, out = self.dev(verb, "security-guidance", "--why", "x")
+                self.assertEqual(rc, 2)
+                self.assertIn("required", out)
+        self.assertEqual((self.overlay(), self.run.calls), ({}, []))
+
+    def test_add_mcp_takes_its_command_line_and_checks_its_pin(self):
+        rc, out = self.dev("add", "mcp", "pg", "--agent", "codex", "--license", "MIT", "--why", "Postgres tools",
+                           "--command", "npx -y pg-mcp@2.1.0")
+        self.assertEqual(rc, 0, out)
+        (item,) = self.overlay()["add"]
+        self.assertEqual((item["command"], item["args"], item["agents"]), ("npx", ["-y", "pg-mcp@2.1.0"], ["codex"]))
+        self.assertEqual(self.run.calls, [["codex", "mcp", "add", "pg", "--", "npx", "-y", "pg-mcp@2.1.0"]])
+        rc, out = self.dev("add", "mcp", "loose", "--license", "MIT", "--why", "w", "--command", "npx -y loose-mcp")
+        self.assertEqual(rc, 2)
+        self.assertIn("exact version", out)
+
+    def test_an_agent_is_refused_by_devkit_itself_too(self):
+        rc, out = self.dev("disable", "commit-commands", "--why", "x", developer=False)
+        self.assertEqual(rc, 1)
+        self.assertIn("terminal", out)
+        self.assertEqual((self.overlay(), self.run.calls), ({}, []))
+
+    def test_project_disable_writes_the_projects_claude_settings_through_claude(self):
+        rc, out = self.dev("disable", "superpowers", "--agent", "claude", "--project", "--why", "not here")
+        self.assertEqual(rc, 0, out)
+        self.assertEqual(self.run.calls, [["claude", "plugin", "disable", "superpowers@claude-plugins-official",
+                                           "-s", "project"]])
+        self.assertEqual(self.overlay(), {})
+
+
+class TeamChangeTests(unittest.TestCase):
+    """`dev ext add|remove --team`: a repository edit in the devkit checkout, on a branch (agents may run it)."""
+
+    def setUp(self):
+        UpdateCommandTests.setUp(self)
+        subprocess.run(["git", "switch", "-q", "-c", "chore/ext-team"], cwd=self.home, check=True,
+                       capture_output=True, env=self.env)
+
+    def dev(self, *args):
+        out = io.StringIO()
+        with mock.patch.object(core, "source_home", return_value=self.home), \
+                contextlib.redirect_stdout(out), contextlib.redirect_stderr(out):
+            rc = cli.main(["ext", *args])
+        return rc, plain(out.getvalue())
+
+    def test_add_team_mcp_writes_the_server_and_its_meta(self):
+        rc, out = self.dev("add", "mcp", "pg", "--team", "--agent", "claude", "--license", "MIT", "--why",
+                           "Postgres tools", "--command", "npx -y pg-mcp@2.1.0")
+        self.assertEqual(rc, 0, out)
+        conf = json.loads((self.home / "config" / "claude" / "plugins.json").read_text())
+        self.assertEqual(conf["mcp"]["pg"], {"command": "npx", "args": ["-y", "pg-mcp@2.1.0"]})
+        self.assertEqual(conf["meta"]["mcp:pg"], {"why": "Postgres tools", "license": "MIT"})
+        self.assertIn("mcp:claude:pg", {e.id for e in ext.catalog(ext.team_at(self.home), {}, {"all"})})
+
+    def test_remove_team_plugin_retires_it(self):
+        rc, out = self.dev("remove", "commit-commands", "--team", "--why", "dev commit covers it")
+        self.assertEqual(rc, 0, out)
+        conf = json.loads((self.home / "config" / "claude" / "plugins.json").read_text())
+        self.assertNotIn("commit-commands@claude-plugins-official", conf["plugins"])
+        self.assertIn("commit-commands@claude-plugins-official", conf["retired"])
+        self.assertNotIn("commit-commands@claude-plugins-official", conf["meta"])
+
+
+class OverlayGuardTests(unittest.TestCase):
+    verdict = GuardTests.verdict
+
+    def test_changing_what_runs_on_this_mac_is_the_developers(self):
+        for cmd in ("dev ext add mcp pg --license MIT --why w --command 'npx -y pg-mcp@2.1.0'",
+                    "dev ext remove commit-commands --why x", "dev ext disable superpowers --why x",
+                    "dev ext enable php-lsp --why x", "dev ext disable superpowers --project --why x",
+                    "dev ext add mcp pg --team --project --license MIT --why w --command 'npx -y pg@2.1.0'",
+                    "dev ext add mcp pg --license MIT --why w --command 'npx -y x@1.0.0 --team'"):
+            with self.subTest(cmd=cmd):
+                v, why = self.verdict(cmd)
+                self.assertEqual(v, "deny")
+                self.assertIn("terminal", why)
+
+    def test_a_team_edit_in_the_checkout_is_open_to_agents(self):
+        for cmd in ("dev ext add mcp pg --team --license MIT --why w --command 'npx -y pg-mcp@2.1.0'",
+                    "dev ext remove commit-commands --team --why x", "dev ext add --help"):
+            with self.subTest(cmd=cmd):
+                self.assertEqual(self.verdict(cmd)[0], "allow")
+
+
 class LsCommandTests(unittest.TestCase):
     def ls(self, *args) -> str:
         out = io.StringIO()

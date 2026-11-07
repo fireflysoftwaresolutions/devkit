@@ -85,6 +85,36 @@ matching files must also contain; with `content_files`, files of those globs mat
 }
 ```
 
+### Extensions
+
+| Key | Default | Meaning |
+| --- | --- | --- |
+| `ext.add` | `[]` | Your own plugins, skills, and MCP servers, on top of devkit's |
+| `ext.remove` | `[]` | Ids of devkit's extensions you do not want installed |
+| `ext.disable` | `[]` | Ids to keep installed but off |
+| `ext.enable` | `[]` | Ids devkit ships off that you turn on |
+
+Change them with `dev ext add|remove|enable|disable` (see
+[Commands › dev ext add](commands.md#dev-ext-add--remove--enable--disable)), which checks each entry and applies it,
+rather than by hand; `dev ext ls` shows the result with its layer. Ids are
+those `dev ext ls --json` prints. devkit itself and its security plugins (`security-guidance`, `claude-security`,
+`codex-security`) stay on whatever the overlay says. `dev install`, `dev config repair`, and the managed-settings
+lock use the same effective set, so they never undo your choice.
+
+```json
+{
+  "ext": {
+    "add": [
+      { "kind": "mcp", "name": "postgres", "agents": ["codex"], "command": "npx", "args": ["-y", "pg-mcp@2.1.0"],
+        "license": "MIT", "why": "Postgres tools" },
+      { "kind": "skill", "name": "k6", "repo": "grafana/skills", "ref": "<40-char sha>", "path": "skills/k6",
+        "license": "Apache-2.0", "why": "load tests" }
+    ],
+    "disable": ["plugin:claude:commit-commands@claude-plugins-official"]
+  }
+}
+```
+
 ### Work, progress, and display
 
 | Key | Default | Meaning |

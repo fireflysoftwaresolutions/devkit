@@ -1781,9 +1781,17 @@ EXT_REASON = ("This `dev ext` command changes the plugins, skills or MCP servers
 
 
 def _ext_refusal(args) -> bool:
-    """`dev ext update … --apply` updates a vendor plugin on this Mac: the developer's. The parser takes no
-    abbreviated options, so the exact word is enough."""
-    return args[:1] == ["ext"] and args[1:2] == ["update"] and "--apply" in args[2:]
+    """What changes the extensions that run on this Mac is the developer's: `dev ext update … --apply`, and
+    `dev ext add|remove|enable|disable` unless it is a team edit (`add|remove --team`, no `--project`) in the devkit
+    checkout. The parser takes no abbreviated options, so the exact words are enough."""
+    if args[:1] != ["ext"]:
+        return False
+    sub, words = (args[1:2] or [""])[0], args[2:]  # an MCP server's own command line is one quoted word
+    if sub == "update":
+        return "--apply" in words
+    if sub in ("add", "remove"):
+        return "--team" not in words or "--project" in words
+    return sub in ("enable", "disable")
 
 
 _UPDATE_CHECK = frozenset({"--check", "--quiet", "--record"})

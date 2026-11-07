@@ -17,6 +17,12 @@ All notable changes to devkit. Versions follow CalVer `YY.MM.PATCH` (PATCH resta
   pin in the devkit checkout, on a branch only, after printing the compare link, the commits, the files changed, and
   any license change. `update --apply` updates a vendor marketplace plugin on this Mac and accepts it; only you run
   it, in a terminal.
+- **Your own extensions: `dev ext add`, `remove`, `enable`, and `disable`.** Add a plugin, a skill pinned by commit,
+  or an MCP server pinned by exact version or `https` URL, or turn one of devkit's off, with `--why`. Your choices
+  live in `ext` in your devkit configuration, and `dev install`, `dev config repair`, and the managed-settings lock
+  keep them, so a plugin you turned off is no longer turned back on within six hours. `--project` turns a Claude Code
+  plugin on or off for one repository; `--team` changes devkit's defaults in the checkout, on a branch. devkit itself
+  and its security plugins cannot be removed or turned off. Only you run these, in a terminal.
 - **`dev update --check` tells you whether a newer devkit release is out**, and what changes in it: the installed and
   newest releases, the CHANGELOG headings in between, and whether the checkout and the pinned copy are behind. It is
   read-only, so agents may run it. A daily `update-check` job records the answer at 09:15; the first session of the

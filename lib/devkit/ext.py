@@ -21,6 +21,7 @@ from __future__ import annotations
 import json
 import os
 import re
+import shlex
 import time
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
@@ -571,8 +572,7 @@ def report_drift(rows: list, audit=None, seen: Path = None) -> list:
     except state.StateBusy:
         return []
     for r, d in new:
-        audit("ext.drift", r["id"], f"{d['kind']}: {d['detail']}", "drift", layer=r.get("layer"),
-              **({"from": d["from"], "to": d["to"]} if d.get("from") else {}))
+        audit("ext.drift", r["id"], f"{d['kind']}: {d['detail']}", "drift", layer=r.get("layer"))
     return new
 
 
@@ -1065,6 +1065,338 @@ def _apply_update(a) -> int:
     return rc
 
 
+
+# --------------------------------------------------------------------------- the developer's own settings (step 5)
+
+def effective_claude_plugins(t: dict, user: dict = None) -> tuple:
+    """(enabled, disabled) `name@marketplace` keys for Claude Code after the team and user layers (spec R8): what
+    `enabledPlugins`, `dev config repair` and the managed lock write. An invalid overlay falls back to the team's."""
+    try:
+        cat = catalog(t, user, None)
+    except ExtError:
+        cat = catalog(t, {}, None)
+    plugins = [e for e in cat if e.kind == "plugin" and e.agent == "claude"]
+    return ({e.spec["id"] for e in plugins if e.enabled}, {e.spec["id"] for e in plugins if not e.enabled})
+
+
+def effective(agent: str, kind: str, t: dict = None, user: dict = None, groups=None) -> list:
+    """This agent's enabled entries of one kind after layering: what `dev install` installs."""
+    t = team() if t is None else t
+    try:
+        cat = catalog(t, user_layer() if user is None else user, skill_groups() if groups is None else groups)
+    except ExtError:
+        cat = catalog(t, {}, skill_groups() if groups is None else groups)
+    return [e for e in cat if e.agent == agent and e.kind == kind and e.enabled]
+
+
+def overlay_skill_sources(user: dict = None) -> list:
+    """The overlay's skills as config/skills.json sources, for the skills step."""
+    out = []
+    for item in (user_layer() if user is None else user)["add"]:
+        if isinstance(item, dict) and item.get("kind") == "skill":
+            _user_items(item)  # validates
+            out.append({"repo": item["repo"], "ref": item["ref"], "license": item["license"], "why": item["why"],
+                        "agents": list(item.get("agents") or AGENTS), "skills": {item["name"]: item["path"]}})
+    return out
+
+
+def entry_argv(verb: str, e: Ext) -> list:
+    """The one command that applies `verb` (add, remove, enable, disable) to `e` on this machine, or [] when the
+    skills step does it."""
+    pid = e.spec.get("id")
+    if e.kind == "plugin" and e.agent == "claude":
+        return {"add": ["claude", "plugin", "install", pid, "-s", "user", "-y"],
+                "enable": ["claude", "plugin", "enable", pid, "-s", "user"],
+                "disable": ["claude", "plugin", "disable", pid, "-s", "user"],
+                "remove": ["claude", "plugin", "uninstall", pid, "-s", "user"]}[verb]
+    if e.kind == "plugin":  # Codex has no plugin switch: off means removed
+        return ["codex", "plugin", "add", pid] if verb in ("add", "enable") else ["codex", "plugin", "remove", pid]
+    if e.kind == "mcp":
+        if verb in ("remove", "disable"):
+            return ["claude", "mcp", "remove", "-s", "user", e.name] if e.agent == "claude" else \
+                ["codex", "mcp", "remove", e.name]
+        s = e.spec
+        if e.agent == "claude":
+            return ["claude", "mcp", "add", "-s", "user", "--transport", "http", e.name, s["url"]] if s.get("url") \
+                else ["claude", "mcp", "add", "-s", "user", e.name, "--", s["command"], *s.get("args", [])]
+        return ["codex", "mcp", "add", e.name, "--url", s["url"]] if s.get("url") else \
+            ["codex", "mcp", "add", e.name, "--", s["command"], *s.get("args", [])]
+    return []
+
+
+def overlay_change(user: dict, verb: str, ids: list, item: dict = None) -> dict:
+    """The overlay after one change: `add` an item, or `remove|enable|disable` catalog ids. Never mutates `user`."""
+    u = {k: list(user.get(k) or []) for k in ("add", "remove", "disable", "enable")}
+    if verb == "add":
+        key = _item_key(item)
+        u["add"] = [x for x in u["add"] if _item_key(x) != key] + [item]
+        u["remove"] = [x for x in u["remove"] if x not in ids]
+    elif verb == "remove":
+        mine = [x for x in u["add"] if set(_item_ids(x)) & set(ids)]
+        u["add"] = [x for x in u["add"] if x not in mine]
+        u["remove"] = sorted(set(u["remove"]) | set(ids))
+    elif verb in ("enable", "disable"):
+        other = "disable" if verb == "enable" else "enable"
+        u[other] = [x for x in u[other] if x not in ids]
+        u[verb] = sorted(set(u[verb]) | set(ids))
+    return u
+
+
+def _item_key(item) -> tuple:
+    return (item.get("kind"), item.get("agent"), item.get("id") or item.get("name"))
+
+
+def _item_ids(item) -> list:
+    try:
+        return [e.id for e in _user_items(item)]
+    except ExtError:
+        return []
+
+
+def effective_mcp(agent: str, t: dict = None, user: dict = None) -> dict:
+    """{name: spec} of this agent's enabled MCP servers after layering: what setup adds and repair expects."""
+    return {e.name: dict(e.spec) for e in effective(agent, "mcp", t, user, {"all"})}
+
+
+def effective_plugin_ids(agent: str, t: dict = None, user: dict = None) -> list:
+    return [e.spec["id"] for e in effective(agent, "plugin", t, user, {"all"})]
+
+
+def effective_skill_sources(t: dict = None, user: dict = None) -> list:
+    """config/skills.json sources after layering (groups are left to the skills step): team sources without the
+    skills the overlay removed or disabled, split by agent where only one agent keeps a skill, plus the overlay's."""
+    t = team() if t is None else t
+    user = user_layer() if user is None else user
+    try:
+        cat = catalog(t, user, None)
+    except ExtError:
+        cat, user = catalog(t, {}, None), {}
+    on = {e.id for e in cat if e.kind == "skill" and e.enabled}
+    out = []
+    for src in (t.get("skills") or {}).get("sources") or []:
+        base = {k: v for k, v in src.items() if k not in ("skills", "agents")}
+        whole, split = {}, []
+        for name, rel in (src.get("skills") or {}).items():
+            agents = [a for a in (src.get("agents") or AGENTS) if f"skill:{a}:{name}" in on]
+            if not agents:
+                continue
+            if sorted(agents) == sorted(src.get("agents") or AGENTS):
+                whole[name] = rel
+            else:
+                split.append({**base, "agents": agents, "skills": {name: rel}})
+        if whole:
+            out.append({**base, **({"agents": src["agents"]} if src.get("agents") else {}), "skills": whole})
+        out += split
+    for s in overlay_skill_sources(user):
+        name = next(iter(s["skills"]))
+        agents = [a for a in s["agents"] if f"skill:{a}:{name}" in on]
+        if agents:
+            out.append({**s, "agents": agents})
+    return out
+
+
+def install_skills():
+    """The skills step (fetch at the pinned commit, link into both agents), for an overlay skill change."""
+    from . import setup
+    setup.install_skills(quiet=True)
+
+
+def _item_from_args(a) -> dict:
+    item = {"kind": a.kind, "license": a.license or "", "why": a.why or ""}
+    if a.kind == "plugin":
+        item.update(id=a.name, agent=a.agent or "")
+    elif a.kind == "mcp":
+        cmd = shlex.split(a.command or "")
+        item["name"] = a.name
+        if a.url:
+            item["url"] = a.url
+        elif cmd:
+            item.update(command=cmd[0], args=cmd[1:])
+        item["agents"] = [a.agent] if a.agent else list(AGENTS)
+    else:
+        item.update(name=a.name, repo=a.repo or "", ref=a.ref or "", path=a.path or "",
+                    agents=[a.agent] if a.agent else list(AGENTS))
+    return item
+
+
+def cmd_change(a) -> int:
+    """`dev ext add|remove|enable|disable`: the developer's overlay (or --team: the repo config; --project: the
+    project's Claude settings), then that one entry applied on this Mac."""
+    from . import audit, ui
+    verb = a.ext_cmd
+    if not (a.why or "").strip():
+        ui.err(f'dev ext {verb} needs --why "<reason>": it goes in the audit trail')
+        return 2
+    if getattr(a, "team", False):
+        return _team_change(a)
+    if getattr(a, "project", False):
+        return _project_change(a)
+    t, user = team(), user_layer()
+    try:
+        if verb == "add":
+            item = _item_from_args(a)
+            ids = [e.id for e in _user_items(item)]
+            new = overlay_change(user, "add", ids, item)
+        else:
+            hits = select(catalog(t, user, None), a.name, a.agent)
+            req = [e.id for e in hits if e.required]
+            if verb in ("remove", "disable") and req:
+                ui.err(f"{', '.join(req)} is required (devkit itself or a security plugin): it cannot be "
+                       f"{'removed' if verb == 'remove' else 'disabled'}")
+                return 2
+            ids = [e.id for e in hits]
+            new = overlay_change(user, verb, ids)
+        after = {e.id: e for e in catalog(t, new, None)}
+    except ExtError as e:
+        ui.err(str(e))
+        return 2
+    try:
+        core.config_set("ext", json.dumps(new))
+    except core.ConfigError as e:
+        ui.err(str(e))
+        return 1
+    targets = [after[i] for i in ids if i in after] if verb != "remove" else hits
+    say = lambda *x, **k: audit.record(*x, why=a.why.strip(), layer="user", **k)  # noqa: E731
+    acts = [(verb, e.id, entry_argv(verb, e)) for e in targets if entry_argv(verb, e)]
+    rc = 0
+    for ok, msg in apply(acts, runner(), audit=say):
+        print(msg) if ok else ui.err(msg)
+        rc = rc if ok else 1
+    skills = [e for e in targets if e.kind == "skill"]
+    for e in skills:
+        say(f"ext.{verb}", e.id, "the skills step links or unlinks it", "ok")
+    if skills:
+        install_skills()
+        print(f"skills relinked: {', '.join(sorted({e.name for e in skills}))}")
+    print(f"recorded in your overlay (ext.{verb} in ~/.config/devkit/config.json): dev install and dev config "
+          f"repair keep it")
+    from . import policy
+    if any(e.kind == "plugin" and e.agent == "claude" for e in targets) and policy.lock_status() != "off":
+        print("the managed-settings lock forces devkit's plugin set: run dev config lock again to include this")
+    return rc
+
+
+def _project_change(a) -> int:
+    from . import audit, ui
+    if a.ext_cmd not in ("enable", "disable"):
+        ui.err("--project changes only enable and disable, for Claude Code plugins in devkit's catalog")
+        return 2
+    try:
+        hits = [e for e in select(catalog(team(), user_layer(), None), a.name, "claude", kinds=("plugin",))]
+    except ExtError as e:
+        ui.err(f"{e} (--project takes only Claude Code plugins in devkit's catalog)")
+        return 2
+    if a.ext_cmd == "disable" and any(e.required for e in hits):
+        ui.err(f"{hits[0].id} is required: it cannot be disabled in a project")
+        return 2
+    acts = [(a.ext_cmd, e.id, ["claude", "plugin", a.ext_cmd, e.spec["id"], "-s", "project"]) for e in hits]
+    rc = 0
+    for ok, msg in apply(acts, runner(), audit=lambda *x, **k: audit.record(*x, why=a.why.strip(), layer="project",
+                                                                             **k)):
+        print(msg + " (this project's .claude/settings.json)") if ok else ui.err(msg)
+        rc = rc if ok else 1
+    return rc
+
+
+def _team_change(a) -> int:
+    """--team: add or remove an entry in the devkit checkout's team configuration, on a branch."""
+    from . import audit, ui
+    if a.ext_cmd not in ("add", "remove"):
+        ui.err("--team takes add and remove; to ship a plugin off by default, edit `disabled` in the agent's "
+               "plugins.json on a branch")
+        return 2
+    home = core.source_home()
+    refusal = checkout_refusal(home)
+    if refusal:
+        ui.err(refusal)
+        return 1
+    try:
+        if a.ext_cmd == "add":
+            item = _item_from_args(a)
+            entries = _user_items(item)
+            changed = _team_add(home, item, entries)
+        else:
+            hits = [e for e in select(catalog(team_at(home), {}, {"all"}), a.name, a.agent) if e.layer == "team"]
+            if any(e.required for e in hits):
+                ui.err(f"{hits[0].id} is required: it cannot be removed from devkit's defaults")
+                return 2
+            changed = _team_remove(home, hits)
+        catalog(team_at(home), {}, {"all"})  # the result must still be a valid catalog
+    except ExtError as e:
+        ui.err(str(e))
+        return 2
+    for f, eid in changed:
+        audit.record(f"ext.{a.ext_cmd}", eid, f"team default, {f}", "ok", why=a.why.strip(), layer="team")
+        print(f"{'added to' if a.ext_cmd == 'add' else 'removed from'} {f}: {eid}")
+    print("next: commit it (dev commit --why …) and open a PR; the Security engineer reviews it; dev install then "
+          + ("installs it" if a.ext_cmd == "add" else "uninstalls it on every Mac (retired)"))
+    return 0
+
+
+def _rw(home: Path, rel: str):
+    f = home / "config" / rel
+    return f, json.loads(f.read_text())
+
+
+def _save(f: Path, doc: dict):
+    f.write_text(json.dumps(doc, indent=2, ensure_ascii=False) + "\n")
+
+
+def _team_add(home: Path, item: dict, entries: list) -> list:
+    meta = {"why": item["why"], "license": item["license"]}
+    out = []
+    if item["kind"] == "skill":
+        f, doc = _rw(home, "skills.json")
+        src = {"repo": item["repo"], "ref": item["ref"], "license": item["license"], "why": item["why"],
+               "skills": {item["name"]: item["path"]}}
+        if sorted(item.get("agents") or AGENTS) != sorted(AGENTS):
+            src["agents"] = list(item["agents"])
+        doc["sources"].append(src)
+        _save(f, doc)
+        return [(str(f.relative_to(home)), e.id) for e in entries]
+    for e in entries:
+        f, doc = _rw(home, f"{e.agent}/plugins.json")
+        if e.kind == "plugin":
+            if e.spec["id"] not in doc.setdefault("plugins", []):
+                doc["plugins"].append(e.spec["id"])
+            doc.setdefault("meta", {})[e.spec["id"]] = meta
+            doc["retired"] = [r for r in doc.get("retired") or [] if r != e.spec["id"]]
+        else:
+            doc.setdefault("mcp", {})[e.name] = dict(e.spec)
+            doc.setdefault("meta", {})[f"mcp:{e.name}"] = meta
+            doc["retired"] = [r for r in doc.get("retired") or [] if r != f"mcp:{e.name}"]
+        if not doc["retired"]:
+            doc.pop("retired")
+        _save(f, doc)
+        out.append((str(f.relative_to(home)), e.id))
+    return out
+
+
+def _team_remove(home: Path, hits: list) -> list:
+    out = []
+    for e in hits:
+        if e.kind == "skill":
+            f, doc = _rw(home, "skills.json")
+            for src in doc["sources"]:
+                if src.get("repo") == e.source and src.get("ref") == e.pin and e.name in src.get("skills", {}):
+                    src["skills"].pop(e.name)
+            doc["sources"] = [s for s in doc["sources"] if s.get("skills")]
+        else:
+            f, doc = _rw(home, f"{e.agent}/plugins.json")
+            key = e.spec["id"] if e.kind == "plugin" else f"mcp:{e.name}"
+            if e.kind == "plugin":
+                for lst in ("plugins", "disabled"):
+                    doc[lst] = [p for p in doc.get(lst) or [] if p != key]
+            else:
+                (doc.get("mcp") or {}).pop(e.name, None)
+            (doc.get("meta") or {}).pop(key, None)
+            doc["retired"] = sorted(set(doc.get("retired") or []) | {key})
+        _save(f, doc)
+        if (str(f.relative_to(home)), e.id) not in out:
+            out.append((str(f.relative_to(home)), e.id))
+    return out
+
+
 # --------------------------------------------------------------------------- dev ext
 
 def _columns(rows: list, cols: list) -> list:
@@ -1111,7 +1443,8 @@ def cmd_ls(a) -> int:
 
 
 def cmd_ext(a) -> int:
-    return {"ls": cmd_ls, "outdated": cmd_outdated, "update": cmd_update}[a.ext_cmd](a)
+    return {"ls": cmd_ls, "outdated": cmd_outdated, "update": cmd_update, "add": cmd_change, "remove": cmd_change,
+            "enable": cmd_change, "disable": cmd_change}[a.ext_cmd](a)
 
 
 def register(add):
@@ -1140,3 +1473,28 @@ def register(add):
     q.add_argument("--agent", choices=AGENTS)
     q.add_argument("--apply", action="store_true", help="update a vendor marketplace plugin on this Mac and accept "
                                                         "it (the developer, in a terminal)")
+    q = sp.add_parser("add", allow_abbrev=False,
+                      help="add your own plugin, skill or MCP server (your overlay; --team: devkit's defaults)")
+    q.add_argument("kind", choices=KINDS)
+    q.add_argument("name", help="a skill or MCP server name, or a plugin id name@marketplace")
+    q.add_argument("--agent", choices=AGENTS, help="only this agent (a plugin needs it; default: both)")
+    q.add_argument("--repo", help="skill: owner/repo on GitHub")
+    q.add_argument("--ref", help="skill: the full 40-character commit SHA")
+    q.add_argument("--path", help="skill: its folder in the repository")
+    q.add_argument("--url", help="MCP server: an https URL (remote server)")
+    q.add_argument("--license", help="its license, such as MIT (required)")
+    q.add_argument("--why", help="why you add it (required, audited)")
+    q.add_argument("--team", action="store_true", help="add it to devkit's defaults in the checkout, on a branch")
+    q.add_argument("--command", help='MCP server: the command line, quoted, with an exact version, such as '
+                                     '"npx -y pkg@1.2.3" or "uvx pkg==1.2.3"')
+    for verb, text in (("remove", "remove an extension (your overlay; --team: retire it from devkit's defaults)"),
+                       ("enable", "turn an extension on (your overlay; --project: this project's Claude settings)"),
+                       ("disable", "turn an extension off (your overlay; --project: this project's Claude settings)")):
+        q = sp.add_parser(verb, allow_abbrev=False, help=text)
+        q.add_argument("name", help="a name or a full id (dev ext ls)")
+        q.add_argument("--agent", choices=AGENTS)
+        q.add_argument("--why", help="the reason (required, audited)")
+        if verb == "remove":
+            q.add_argument("--team", action="store_true", help="retire it from devkit's defaults in the checkout")
+        else:
+            q.add_argument("--project", action="store_true", help="Claude Code plugins: this project only")

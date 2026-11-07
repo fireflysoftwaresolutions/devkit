@@ -69,12 +69,23 @@ def claude_desired():
     frag = load_conf("claude/settings.json")
     plugins = load_conf("claude/plugins.json")
     flat = {path: v for path, v in _flatten({k: v for k, v in frag.items() if k != "hooks"})}
-    for p in plugins["plugins"]:
+    on, off = _effective_plugins(plugins)
+    for p in on:
         flat[("enabledPlugins", p)] = True
-    for p in plugins.get("disabled", []):
+    for p in off:
         flat[("enabledPlugins", p)] = False
     hooks = {event: [h["command"] for g in groups for h in g["hooks"]] for event, groups in frag["hooks"].items()}
     return flat, hooks
+
+
+def _effective_plugins(plugins: dict) -> tuple:
+    """(enabled, disabled) Claude plugin keys after devkit's team default and the developer's `ext` overlay (spec
+    P-fym583l7sg1 R8): repair and the lock never undo a plugin the developer turned off with `dev ext disable`."""
+    from . import ext
+    t = ext.team()
+    t["claude"] = plugins
+    on, off = ext.effective_claude_plugins(t, ext.user_layer())
+    return sorted(on), sorted(off)
 
 
 def codex_desired():
@@ -84,7 +95,10 @@ def codex_desired():
     flat = {(k,): v for k, v in conf["settings"].items()}
     for path, v in _flatten(conf.get("upsert", {})):
         flat[path] = v
-    for name in plugins.get("mcp", {}):
+    from . import ext
+    t = ext.team()
+    t["codex"] = plugins
+    for name in ext.effective_mcp("codex", t):  # the team's and the overlay's (spec P-fym583l7sg1 R8)
         flat[("mcp_servers", name)] = "present"
     flat[("projects", str(core.DEV), "trust_level")] = "trusted"
     return flat
@@ -248,7 +262,8 @@ def managed_payload() -> dict:
     plugins = load_conf("claude/plugins.json")
     # fastModePerSessionOptIn stays a user setting: once managed, Claude Code refuses `/fast on` outside a terminal.
     payload = {k: v for k, v in frag.items() if k not in ("fastModePerSessionOptIn",)}
-    payload["enabledPlugins"] = {p: True for p in plugins["plugins"]}
+    on, off = _effective_plugins(plugins)
+    payload["enabledPlugins"] = {**{p: True for p in on}, **{p: False for p in off}}
     payload["_devkit"] = {"version": core.VERSION, "source": str(core.DEVKIT_HOME),
                           "note": "Managed by devkit. Change devkit's configuration, then `dev config lock` again."}
     return payload
