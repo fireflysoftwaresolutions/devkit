@@ -3222,13 +3222,18 @@ def _publish():
         pass
 
 
-def notify(title: str, text: str):
-    """macOS notification (proactive updates for the developer). Never fails."""
-    if not cfg().get("notify") or os.environ.get("DEVKIT_NO_NOTIFY"):
+def notify(title: str, text: str, security: bool = False):
+    """A macOS desktop notification for the developer. Never fails. DEVKIT_NO_NOTIFY and `progress.notify: false`
+    turn progress notices off; a security notice (`security=True`, such as an extension accepted) ignores both,
+    because an agent can set either. The text and title reach osascript as arguments, never inside the script, so
+    they need no escaping (AppleScript rejects the \\uXXXX escapes json.dumps writes) and cannot run as script; the
+    absolute path keeps an `osascript` planted earlier on PATH from running."""
+    if not security and (not cfg().get("notify") or os.environ.get("DEVKIT_NO_NOTIFY")):
         return
     try:
-        core.sh(["osascript", "-e", f"display notification {json.dumps(text[:180])} with title "
-                 f"{json.dumps('devkit · ' + title[:60])}"], timeout=5)
+        core.sh(["/usr/bin/osascript", "-e", "on run argv",
+                 "-e", "display notification (item 1 of argv) with title (item 2 of argv)", "-e", "end run",
+                 "--", text[:180], "devkit · " + title[:60]], timeout=5)
     except Exception:
         pass
 

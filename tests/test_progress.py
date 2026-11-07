@@ -88,6 +88,25 @@ def launch(aid, kind, label, at=None, sid="s1"):
                      now=at)
 
 
+class DesktopNotificationTests(unittest.TestCase):
+    def test_a_progress_notification_sends_its_text_and_title_to_osascript_as_arguments(self):
+        # B2-R6: json.dumps wrote the title's middle dot as a JSON escape, which AppleScript rejects (-2741), so every
+        # progress notification failed silently. As arguments the text needs no escaping and cannot run as script
+        calls = []
+
+        def sh(args, **kw):
+            calls.append([str(a) for a in args])
+            return 0, "", ""
+        text = 'Export → 3 steps " & (system info) & "'
+        with mock.patch.dict(core.CFG, {"progress": {}}), mock.patch.dict(os.environ, {}), \
+                mock.patch.object(core, "sh", sh):
+            os.environ.pop("DEVKIT_NO_NOTIFY", None)
+            pg.notify("run finished · acme/api", text)
+        self.assertEqual(calls, [["/usr/bin/osascript", "-e", "on run argv",
+                                  "-e", "display notification (item 1 of argv) with title (item 2 of argv)",
+                                  "-e", "end run", "--", text, "devkit · run finished · acme/api"]])
+
+
 class ProgressTests(unittest.TestCase):
     def test_minutes(self):
         self.assertEqual(pg.parse_minutes("45m"), 45)
