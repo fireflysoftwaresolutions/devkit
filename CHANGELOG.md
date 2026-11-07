@@ -16,6 +16,13 @@ All notable changes to devkit. Versions follow CalVer `YY.MM.PATCH` (PATCH resta
   26.11.5 now say they are planned. The Next.js MCP server is added with `dev ext add`, because agents cannot run
   `claude mcp add`. [The crew](docs/crew.md#rooms-planned-for-26116) describes rooms, planned for 26.11.6 and not
   available yet. Disk use is in the index, and `skills.optional` is in Configuration.
+- **The installer says Apple silicon, and stops early on an Intel Mac without Homebrew.** Homebrew's own installer
+  stops on Intel Macs since September 2026 (Homebrew/install PR #1140), and its `.pkg` is for Apple silicon only. A
+  fresh Intel Mac failed at the installer's Homebrew step with Homebrew's message, and the advice to run the
+  installer again, which failed the same way. Now the first step stops before it downloads or changes anything, and
+  says that a new install needs Apple silicon and why. An Intel Mac that already has Homebrew (on its `PATH` or in
+  `/usr/local`) still installs, with one warning line. The installer's first line and `--help`, the README, and
+  [Getting started](docs/getting-started.md#requirements) say Apple silicon.
 
 ## [26.11.4] - 2026-11-07
 

@@ -45,7 +45,8 @@ Docker and the background automation, and keeps them that way.
 
 ## Install
 
-devkit is for macOS only (Apple Silicon and Intel). In Terminal, run:
+devkit is for Macs with Apple silicon: it installs its tools with Homebrew, and Homebrew no longer installs on Intel
+Macs. An Intel Mac that already has Homebrew can still run it. In Terminal, run:
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/fireflysoftwaresolutions/devkit/main/install.sh | bash

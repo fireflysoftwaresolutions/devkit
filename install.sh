@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
-# devkit installer. devkit is for macOS (Apple Silicon and Intel).
+# devkit installer. devkit is for Macs with Apple silicon: Homebrew, which it needs, no longer installs on Intel
+# Macs. An Intel Mac that already has Homebrew can still run it.
 # Copyright (c) 2026 Firefly Software Solutions Inc.
 # SPDX-License-Identifier: Apache-2.0
 #
@@ -17,10 +18,12 @@
 
 usage() {
   cat <<EOF
-devkit installer. devkit is for macOS (Apple Silicon and Intel).
+devkit installer. devkit is for Macs with Apple silicon.
 
 It makes sure Homebrew, git, Python, and the GitHub CLI are present, gets devkit (the newest
 release), signs you in to GitHub, and starts the setup wizard. Safe to run again.
+
+An Intel Mac can run it only if it already has Homebrew: Homebrew no longer installs on Intel.
 
 Usage:
   curl -fsSL $INSTALL_URL | bash
@@ -115,19 +118,32 @@ describe() {
 
 check_mac() {
   step "This Mac" "devkit runs on macOS; this checks the system before anything changes."
-  local os arch ver
+  local os machine arch ver
   os="$(uname -s)"
   if [ "$os" != Darwin ]; then
-    fail "This computer runs $os. devkit is for macOS only (Apple Silicon and Intel); nothing was changed."
+    fail "This computer runs $os. devkit is for Macs with Apple silicon; nothing was changed."
     exit 1
   fi
-  arch="$(uname -m)"
-  case "$arch" in arm64) arch="Apple Silicon" ;; x86_64) arch="Intel" ;; esac
+  machine="$(uname -m)"
+  # Homebrew's own installer stops on Intel Macs (Homebrew/install PR #1140): only a Homebrew already there can serve.
+  if [ "$machine" != arm64 ] && ! command -v brew >/dev/null 2>&1 && [ ! -x /usr/local/bin/brew ]; then
+    fail "devkit needs a Mac with Apple silicon for a new install, because Homebrew no longer installs on Intel Macs." \
+      "Nothing was changed."
+    printf '    This Mac reports an Intel processor (%s) and has no Homebrew.\n' "$machine" >&2
+    printf '    An Intel Mac that already has Homebrew can still run this installer.\n' >&2
+    printf '    On a Mac with Apple silicon, a terminal under Rosetta reports Intel too: open a native one.\n' >&2
+    exit 1
+  fi
+  case "$machine" in arm64) arch="Apple silicon" ;; x86_64) arch="Intel" ;; *) arch="$machine" ;; esac
   ver="$(sw_vers -productVersion 2>/dev/null || true)"
   ok "macOS${ver:+ $ver} on $arch"
+  if [ "$machine" != arm64 ]; then
+    note "Homebrew no longer supports Intel Macs: devkit uses the Homebrew you have, but some tools may build slowly" \
+      "from source."
+  fi
 }
 
-# Homebrew lives in /opt/homebrew on Apple Silicon and in /usr/local on Intel.
+# Homebrew lives in /opt/homebrew on Apple silicon and in /usr/local on Intel.
 find_brew() {
   local b
   if command -v brew >/dev/null 2>&1; then command -v brew; return 0; fi
@@ -361,7 +377,7 @@ main() {
     esac
   done
   colors
-  printf '%sdevkit installer%s · devkit is for macOS (Apple Silicon and Intel)\n' "$C_B" "$C_OFF"
+  printf '%sdevkit installer%s · devkit is for Macs with Apple silicon\n' "$C_B" "$C_OFF"
 
   # From a clone (./install.sh): set up that checkout. Through a pipe, or as a file on its own: get devkit first.
   src="${BASH_SOURCE[0]:-}"

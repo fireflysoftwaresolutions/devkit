@@ -27,7 +27,7 @@ GIT_ENV = dict(os.environ, GIT_CONFIG_GLOBAL=os.devnull, GIT_CONFIG_NOSYSTEM="1"
 STUBS = {
     "uname": """#!/bin/sh
 echo "uname $*" >> "$STUB_LOG"
-case "$1" in -m) echo arm64 ;; *) echo "${STUB_OS:-Darwin}" ;; esac
+case "$1" in -m) echo "${STUB_ARCH:-arm64}" ;; *) echo "${STUB_OS:-Darwin}" ;; esac
 """,
     "sw_vers": """#!/bin/sh
 echo 26.1
@@ -171,7 +171,9 @@ class BootstrapTests(unittest.TestCase):
         (setup,) = self.m.setups()
         self.assertEqual((setup["home"], setup["version"], setup["python"]),
                          (str(self.m.devkit.resolve()), "26.11.10", "homebrew"))
-        self.assertIn("devkit is for macOS (Apple Silicon and Intel)", out.splitlines()[0])
+        self.assertIn("devkit is for Macs with Apple silicon", out.splitlines()[0])
+        self.assertIn("macOS 26.1 on Apple silicon", out)
+        self.assertNotIn("Intel", out)  # on Apple silicon, no Intel warning and no Intel claim
         self.assertIn("devkit 26.11.10 (v26.11.10) in ~/Development/fireflysoftwaresolutions/devkit", out)
         self.assertIn("Claude Code with devkit's shared rules", out)  # what you have now: the agents you chose
         for first in ("Open a new Terminal window", "dev doctor", "dev dashboard", "then claude (or codex)"):
@@ -215,7 +217,7 @@ class BootstrapTests(unittest.TestCase):
     def test_outside_macos_it_stops_before_changing_anything(self):
         rc, out = self.m.pipe(STUB_OS="Linux")
         self.assertEqual(rc, 1)
-        self.assertIn("This computer runs Linux. devkit is for macOS only (Apple Silicon and Intel)", out)
+        self.assertIn("This computer runs Linux. devkit is for Macs with Apple silicon; nothing was changed.", out)
         self.assertEqual([c for c in self.m.calls() if not c.startswith("uname")], [])
         self.assertFalse(self.m.devkit.exists())
 
@@ -223,7 +225,8 @@ class BootstrapTests(unittest.TestCase):
         rc, out = self.m.pipe("--help")
         self.assertEqual(rc, 0)
         for word in ("--yes", "--skip-packages", "--no-setup", "DEVKIT_HOME", "DEVKIT_REPO", "DEVKIT_REF",
-                     "| bash -s -- [options]", "devkit is for macOS (Apple Silicon and Intel)"):
+                     "| bash -s -- [options]", "devkit is for Macs with Apple silicon.",
+                     "An Intel Mac can run it only if it already has Homebrew"):
             self.assertIn(word, out)
         self.assertEqual(self.m.calls(), [])
 
@@ -234,6 +237,55 @@ class BootstrapTests(unittest.TestCase):
         self.assertEqual(self.m.release(where), "v26.11.9")
         self.assertFalse(self.m.devkit.exists())
         self.assertEqual(self.m.setups(), [])  # --no-setup
+
+
+# A curl that records each download (Homebrew's installer is the only one) and fails it.
+CURL = """#!/bin/sh
+echo "curl $*" >> "$STUB_LOG"
+exit 22
+"""
+
+
+class IntelMacTests(unittest.TestCase):
+    """Homebrew's own installer stops on Intel Macs (Homebrew/install PR #1140, merged 2026-09-11) and its .pkg is
+    Apple silicon only: a new install needs Apple silicon, and an Intel Mac that already has Homebrew still runs."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.m = Machine(Path(self.tmp.name))
+        self.m.signed_in.touch()
+        (self.m.stubs / "curl").write_text(CURL)
+        (self.m.stubs / "curl").chmod(0o755)
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    # brew is neither on PATH nor in /usr/local: the installer says why in its own words and touches nothing
+    @unittest.skipIf(os.path.exists("/usr/local/bin/brew"), "this machine has Homebrew in /usr/local")
+    def test_an_intel_mac_without_homebrew_stops_before_changing_anything(self):
+        (self.m.stubs / "brew").unlink()
+        rc, out = self.m.pipe(STUB_ARCH="x86_64")
+        self.assertEqual(rc, 1, out)
+        self.assertIn("devkit needs a Mac with Apple silicon for a new install, because Homebrew no longer installs "
+                      "on Intel Macs. Nothing was changed.", out)
+        self.assertIn("An Intel Mac that already has Homebrew can still run this installer.", out)
+        self.assertNotIn("run the installer again", out)  # a retry would fail the same way
+        self.assertEqual([c for c in self.m.calls() if not c.startswith("uname")], [])  # no curl, brew or gh
+        self.assertFalse(self.m.devkit.exists())
+        self.assertFalse((self.m.home / ".zprofile").exists())
+        self.assertEqual(self.m.setups(), [])
+
+    # brew is on PATH: the install goes on, with one warning line
+    def test_an_intel_mac_with_homebrew_continues_with_one_warning(self):
+        rc, out = self.m.pipe(STUB_ARCH="x86_64")
+        self.assertEqual(rc, 0, out)
+        self.assertIn("macOS 26.1 on Intel", out)
+        warnings = [ln for ln in out.splitlines() if ln.lstrip().startswith("!") and "Intel" in ln]
+        self.assertEqual(len(warnings), 1, out)
+        self.assertIn("Homebrew no longer supports Intel Macs", warnings[0])
+        self.assertEqual(self.m.release(), "v26.11.10")
+        self.assertEqual(len(self.m.setups()), 1)
+        self.assertNotIn("curl", "\n".join(self.m.calls()))
 
 
 class ExistingCheckoutTests(unittest.TestCase):

@@ -6,8 +6,13 @@ share a handoff repository, and lists every file devkit touches. When devkit is 
 
 ## Requirements
 
-- A Mac with Apple Silicon or Intel. devkit does not run on Linux or Windows. The installer installs Homebrew if it is
-  missing.
+- A Mac with Apple silicon (M1 or later). To check, open **About This Mac**, which shows a chip named Apple M…, or
+  run `uname -m`, which prints `arm64`. devkit installs its tools with Homebrew, and Homebrew's installer no longer
+  runs on Intel Macs, so a new install needs Apple silicon. The installer installs Homebrew if it is missing. devkit
+  does not run on Linux or Windows.
+- An Intel Mac that already has Homebrew can still run devkit. Homebrew no longer supports Intel, so some tools may
+  build slowly from source, and Homebrew plans to stop running on Intel in or after September 2027 (see Homebrew's
+  [support tiers](https://docs.brew.sh/Support-Tiers)).
 - A GitHub account. devkit's repository, `fireflysoftwaresolutions/devkit`, is public; your handoff repository stays
   private.
 - A Claude account for Claude Code, a ChatGPT account for Codex, or both.
@@ -24,8 +29,9 @@ command and a few presses of Return. Have your Mac's login password and your Git
    curl -fsSL https://raw.githubusercontent.com/fireflysoftwaresolutions/devkit/main/install.sh | bash
    ```
 
-   The first line says `devkit installer · devkit is for macOS (Apple Silicon and Intel)`. Each step after it starts
-   with `✦` and its name, then one sentence that says what the step does and why.
+   The first line says `devkit installer · devkit is for Macs with Apple silicon`. Each step after it starts
+   with `✦` and its name, then one sentence that says what the step does and why. On an Intel Mac without Homebrew,
+   the first step stops and says why; nothing is changed.
 3. **Homebrew**, only if your Mac does not have it yet. Homebrew is the standard installer for developer tools on a
    Mac, and devkit uses it for everything else. It asks for your Mac password: type it and press Return. Nothing
    appears while you type; that is normal. Then press Return to continue. This step takes the longest of all,
@@ -88,8 +94,10 @@ dev doctor
 The installer prints each step with one sentence on what it does and why, and ends with a summary: where devkit is,
 its version, what you have now, and what to do first. It is safe to run again. In order, it:
 
-1. Checks that the computer is a Mac, and stops on any other system before it changes anything.
-2. Finds Homebrew in `/opt/homebrew` (Apple Silicon) or `/usr/local` (Intel), or installs it with Homebrew's official
+1. Checks that the computer is a Mac, and stops on any other system before it changes anything. On an Intel Mac, it
+   goes on only when Homebrew is already there (on your `PATH` or in `/usr/local`), with one warning line; otherwise
+   it stops, says that a new install needs Apple silicon, and changes nothing.
+2. Finds Homebrew in `/opt/homebrew` (Apple silicon) or `/usr/local` (Intel), or installs it with Homebrew's official
    installer, which asks for your password. When Homebrew was not on your `PATH`, it adds Homebrew's `shellenv` line to
    `~/.zprofile`, as Homebrew's installer asks you to do, so new terminals find `brew` and what it installs.
 3. Installs git, Python, and the GitHub CLI with Homebrew when they are missing.
@@ -366,7 +374,7 @@ or a member that finished shows in your next prompt; `dev status`, `dev alias`, 
 `dev ci watch` refresh it too. A refresh from a hook reads a few files and runs no git, network call, or other
 program. A zsh function reads the cache with builtins only, never Python, git, or another program, and only when the
 cache is a regular file of yours, not a link, in a folder of yours, and neither is writable by anyone else; only
-digits from it become numbers. Measured on an Apple Silicon Mac
+digits from it become numbers. Measured on an Apple silicon Mac
 with 40 projects of 3 checkouts each: 0.13 ms per prompt, and 1.7 ms for a prompt right after devkit rewrote the
 cache. The budget is 5 ms, and a test holds it. `DEVKIT_PROMPT` and `DEVKIT_PROMPT_ASK` hold plain text, because Starship
 and `oh-my-posh` escape a `%` for zsh themselves; the preceding snippets escape it for zsh and Powerlevel10k.
@@ -502,7 +510,7 @@ each).
 | `~/.agents/skills/<name>` | Symlinks (Codex's user skill folder) | Delete the symlinks |
 | `~/Development/fireflysoftwaresolutions/devkit` | The devkit checkout (installer; `DEVKIT_HOME` chooses another folder) | Delete the folder |
 | Homebrew, git, Python, and the GitHub CLI | Installed by the installer when they are missing | `brew uninstall git python gh`; Homebrew's own uninstall script |
-| `~/.zprofile` | One line, `eval "$(/opt/homebrew/bin/brew shellenv)"`, added by the installer only when Homebrew was not on your `PATH` (Apple Silicon) | Delete the line |
+| `~/.zprofile` | One line, `eval "$(/opt/homebrew/bin/brew shellenv)"`, added by the installer only when Homebrew was not on your `PATH` (Apple silicon) | Delete the line |
 | `~/.local/bin/dev` | Symlink to `bin/dev` in the pinned copy | Delete it |
 | `~/.zshrc` | The block between `# >>> devkit >>>` and `# <<< devkit <<<` | Delete the block |
 | `~/.config/starship.toml` | Only after you agree in `dev setup prompt`: the block between `# >>> devkit prompt` and `# <<< devkit prompt <<<`, and its two references in `format` | `dev setup prompt --remove` |
