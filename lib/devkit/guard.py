@@ -998,6 +998,13 @@ def check_bash(cmd: str, cwd: str, agent: str):
         if name == "pushd" and len(argv) > 1:
             ecwd = str(resolve(argv[1], ecwd))
             continue
+        dev = _dev_args(argv)
+        if dev and dev[:1] == ["impeccable"]:  # the engine writes where --target and --file point, from its folder
+            here = _prefix_chdir(argv0[:len(argv0) - len(_strip_prefix(argv0))], ecwd)
+            for t in impeccable_paths(impeccable_engine_words(dev[1:]), writes=True):
+                v = check_write_path(t, here, agent)
+                if v:
+                    return v
         res = None
         if name == "git":
             res = check_git(argv, ecwd, seg_text + " " + (raw_segments[idx] if idx < len(raw_segments) else ""), envs,
@@ -2241,9 +2248,14 @@ class _Shell:
         if args[:1] == ["hook"] and not helps:
             return deny(HOOK_REASON)
         if args[:1] == ["impeccable"]:  # its words reach the engine: agents run only the allowlist's forms
-            refusal = impeccable_refusal(impeccable_engine_words(args[1:]))
+            words = impeccable_engine_words(args[1:])
+            refusal = impeccable_refusal(words)
             if refusal:
                 return deny(refusal)
+            # it writes where --target and --file point, from the folder the shell is in: judged as any write
+            v = self.targets(impeccable_paths(words, writes=True), cwd, track=False)
+            if v:
+                return v
         if args[:1] in (["rm"], ["mv"], ["cp"]):
             return self.segment(args[0], args, [], cwd)
         if args[:1] and (args[0] in _DEV_READ or args[0] in _DEV_TEXT):
@@ -3128,11 +3140,13 @@ def _expansions(cmd: str) -> list:
     return out
 
 
-def shell_calls(cmd: str, cwd, depth: int = 0):
+def shell_calls(cmd: str, cwd, depth: int = 0, where: bool = False):
     """Every program a shell command runs, as (argv, code): each segment's command words without prefixes or
     keywords, the commands of nested shells and of the substitutions the shell expands, and for an interpreter the
     program it runs (inline, its input, or a script outside the workspace; None for a repository's own script).
-    Text the command only carries is not a call. None when the command cannot be parsed."""
+    Text the command only carries is not a call. None when the command cannot be parsed. With `where`, each call is
+    (argv, code, the folder it runs in): after the `cd` and `pushd` before it and its prefix's `env -C` or `sudo -D`,
+    UNKNOWN when only the run knows it (a variable, `find -execdir`)."""
     if depth > 4:
         return []
     segs = split_commands(cmd)
@@ -3146,23 +3160,28 @@ def shell_calls(cmd: str, cwd, depth: int = 0):
         if os.path.basename(argv[0]) in ("cd", "pushd"):
             cwd = str(core.HOME) if len(argv) == 1 else cwd if argv[1] == "-" else str(resolve(argv[1], cwd))
             continue
-        more = _program_calls(argv, cwd, bodies, depth)
+        here = _prefix_chdir(argv0[:len(argv0) - len(_strip_prefix(argv0))], cwd) if where else cwd
+        more = _program_calls(argv, here, bodies, depth, where)
         if more is None:
             return None
         out += more
     for text in _expansions(cmd):
-        more = shell_calls(text, cwd, depth + 1)
+        more = shell_calls(text, cwd, depth + 1, where)
         if more is None:
             return None
         out += more
     return out
 
 
-def _program_calls(argv, cwd, bodies, depth):
+def _program_calls(argv, cwd, bodies, depth, where=False):
     name, args = os.path.basename(argv[0]), argv[1:]
+
+    def call(a, code, at=cwd):
+        return (a, code, at) if where else (a, code)
+
     if _INTERP.match(name) and _dev_args(argv) is None:
-        return [(argv, None if _repo_script(argv, cwd) else _program(argv, cwd, bodies)[0])]
-    out, texts, inners = [(argv, None)], [], []
+        return [call(argv, None if _repo_script(argv, cwd) else _program(argv, cwd, bodies)[0])]
+    out, texts, inners = [call(argv, None)], [], []
     if name in _SHELLS:
         texts = _shell_inputs(args, cwd, bodies)
     elif name in ("source", ".") and args:
@@ -3173,20 +3192,21 @@ def _program_calls(argv, cwd, bodies, depth):
         i, takes = 0, {"-I", "-n", "-P", "-L", "-d", "-E", "-s", "-a", "-J", "-R", "-S"}
         while i < len(args) and args[i].startswith("-"):
             i += 2 if args[i] in takes else 1
-        inners = [_unwrap(args[i:])]
+        inners = [(_unwrap(args[i:]), cwd)]
     elif name == "find":
         for k, a in enumerate(args):
             if a in ("-exec", "-execdir", "-ok", "-okdir"):
                 sub = args[k + 1:]
-                inners.append(_unwrap(sub[:next((j for j, x in enumerate(sub) if x in (";", "+")), len(sub))]))
+                at = str(UNKNOWN) if where and a in ("-execdir", "-okdir") else cwd  # each found file's folder
+                inners.append((_unwrap(sub[:next((j for j, x in enumerate(sub) if x in (";", "+")), len(sub))]), at))
     for text in texts:
-        more = shell_calls(text, cwd, depth + 1) if text else []
+        more = shell_calls(text, cwd, depth + 1, where) if text else []
         if more is None:
             return None
         out += more
-    for inner in inners:
+    for inner, at in inners:
         if inner:
-            out += _program_calls(inner, cwd, bodies, depth + 1) or []
+            out += _program_calls(inner, at, bodies, depth + 1, where) or []
     return out
 
 
@@ -3619,13 +3639,21 @@ def _ro_dev(args) -> str | None:
 # capture-server, and an update can add more). The 0.1.18 engine's help shows detect, ignores, help, install, link,
 # update, check and telemetry (and the legacy `skills` namespace); the skill also runs context, doctor, live and the
 # helpers its reference files name.
-# - Every lane and the main session: `context` (loads PRODUCT.md, DESIGN.md and the surface brief), `detect` (scans
-#   HTML and CSS), `doctor` with only --json and --target (reports drift; --fix moves hook entries), and the helper
-#   forms that write nothing: `surface-brief read`, `critique-storage slug` and `trend`.
-# - Write lanes and the main session, also: `live` (starts the live server and injects its script into the page),
-#   `generate`, `document`, `extract` and `init`, the design commands that write project files (0.1.18 runs them in
-#   the agent's chat, not as engine verbs: init "not a CLI command", the others "Unknown command"), and the skill's
-#   helpers in the forms of IMPECCABLE_FORMS.
+# - Every lane and the main session: `context` with only --target (loads PRODUCT.md, DESIGN.md and the surface
+#   brief), `detect` on local paths (scans HTML and CSS), `doctor` with only --json and --target (reports drift; --fix
+#   moves hook entries), and the helper forms that write nothing: `surface-brief read`, `critique-storage slug` and
+#   `trend`.
+# - Write lanes and the main session, also: `detect` on URLs on this Mac, `live` (starts the live server and injects
+#   its script into the page), `generate`, `document`, `extract` and `init` with no other words, the design commands
+#   that write project files (0.1.18 runs them in the agent's chat, not as engine verbs: init "not a CLI command", the
+#   others "Unknown command"), and the skill's helpers in the forms of IMPECCABLE_FORMS.
+# - Where the engine writes: it runs in the shell's folder and counts --target and --file from there, so a `cd` first
+#   moves them. The guard judges those values (impeccable_paths) as writes from the folder the shell is in after `cd`,
+#   `pushd` or `env -C`, as it judges any other write: the main session through check_write_path and the protected
+#   paths, a crew lane outside the workspace, in the handoff repository or outside its step's scope
+#   (_impeccable_lane_write). `dev impeccable` checks the real folder and paths again when it runs
+#   (impeccable.outside_project): the tech lead's decision on the Code reviewer's review of d9186f1 and b97db94, where
+#   `cd ~/.claude && dev impeccable live --target settings.json` passed both.
 # - Everything else is the developer's, in a terminal: the verbs that write the agents' settings, hooks or skill
 #   folders (hooks, install, link, update, pin, unpin, doctor --fix), the other hidden helpers (hook, hook-admin,
 #   hook-before-edit, capture-server, live-inject, …), ignore and ignores, telemetry, check, help, no verb, the
@@ -3670,40 +3698,49 @@ IMPECCABLE_WRITES = ("live", "generate", "document", "extract", "init")
 IMPECCABLE_READ_HELPERS = {"surface-brief": ("read",), "critique-storage": ("slug", "trend")}
 # What agents may give the verbs whose words are checked in write lanes and the main session, from the 0.1.18 engine's
 # help and the skill's reference files: verb -> {sub-verb ('' for none; more than one word is matched whole) ->
-# (flags that take a value: its kind, flags alone, (fewest, most or None for any, kind) other words)}. Kinds: "word"
-# any word that does not start with -, "path" a path in the project, "url" a local path or a URL on this Mac, "port" a
-# DevTools port or a URL on this Mac, or a tuple of the only words it takes.
+# (flags that take a value: its kind, flags alone, (fewest, most or None for any, kind) other words[, flags it
+# needs])}. The other words' kind is one for all, or a list with one per place (the last one for every later word).
+# Kinds: "word" any word that does not start with -; "name" letters, digits, `.`, `_` and `-`, never `.` or `..`
+# alone (the engine may name a file after it); "path" a path in the project; "url" a local path or a URL on this Mac;
+# "port" a port number; "cdp" a DevTools port or a URL on this Mac; or a tuple of the only words it takes. A path, url,
+# port or cdp value never has a character the shell expands (_EXPANDS).
 _W = "word"
-_PICK = {"--id": _W, "--count": _W, "--element-id": _W, "--classes": _W, "--tag": _W, "--query": _W, "--text": _W,
+_PICK = {"--id": "name", "--count": _W, "--element-id": _W, "--classes": _W, "--tag": _W, "--query": _W, "--text": _W,
          "--page-url": _W, "--file": "path"}
 _NONE = (0, 0, _W)
 IMPECCABLE_FORMS = {
+    "context": {"": ({"--target": "path"}, frozenset(), _NONE)},
+    # the design commands run in the agent's chat in 0.1.18 (init "not a CLI command", the others "Unknown command"),
+    # so an engine that adds them gets no words from an agent
+    **{verb: {"": ({}, frozenset(), _NONE)} for verb in ("generate", "document", "extract", "init")},
     "live": {"": ({"--target": "path"}, frozenset({"--help"}), _NONE)},
-    "detect": {"": ({"--scope": _W, "--viewport": _W, "--cdp": "port", "--target": _W},
+    "detect": {"": ({"--scope": _W, "--viewport": _W, "--cdp": "cdp", "--target": _W},
                     frozenset({"--json", "--quiet", "--github", "--list-rules", "--no-config", "--no-inline-ignores",
                                "--no-design-system", "--no-advisory", "--no-consent-hiding", "--no-overlay-hiding",
                                "--help"}), (0, None, "url"))},
     "live-poll": {"": ({"--reply": _W, "--file": "path", "--data": _W, "--timeout": _W, "--types": _W,
                         "--ack-timeout": _W}, frozenset({"--stream", "--then-poll", "--help"}), (0, 2, _W))},
-    "live-accept": {"": ({"--id": _W, "--variant": _W, "--page-url": _W},
+    "live-accept": {"": ({"--id": "name", "--variant": _W, "--page-url": _W},
                          frozenset({"--discard", "--bake", "--no-bake", "--help"}), _NONE)},
     "live-status": {"": ({}, frozenset(), _NONE)},
-    "live-resume": {"": ({"--id": _W}, frozenset(), _NONE)},
-    "live-complete": {"": ({"--id": _W, "--error": _W}, frozenset({"--discarded", "--help"}), _NONE)},
+    "live-resume": {"": ({"--id": "name"}, frozenset(), _NONE)},
+    "live-complete": {"": ({"--id": "name", "--error": _W}, frozenset({"--discarded", "--help"}), _NONE)},
     "live-wrap": {"": (_PICK, frozenset({"--help"}), _NONE)},
     "live-insert": {"": ({**_PICK, "--position": ("before", "after")}, frozenset({"--help"}), _NONE)},
-    "live-server": {"": ({"--port": _W}, frozenset({"--background", "--help"}), _NONE),
+    "live-server": {"": ({"--port": "port"}, frozenset({"--background", "--help"}), _NONE),
                     "stop": ({}, frozenset({"--keep-inject"}), _NONE)},
-    "surface-brief": {"read": ({}, frozenset(), (1, 1, _W)), "write": ({}, frozenset(), (2, None, _W))},
+    # write <primary target> <body file> [related targets…]: the engine may build the brief's file from the target
+    "surface-brief": {"read": ({}, frozenset(), (1, 1, _W)), "write": ({}, frozenset(), (2, None, ["path", _W]))},
+    # close <target> <snapshot file that latest returned>
     "critique-storage": {"slug": ({}, frozenset(), (1, 1, _W)), "latest": ({}, frozenset({"--json"}), (1, 1, _W)),
                          "trend": ({}, frozenset(), (1, 2, _W)), "write": ({}, frozenset(), (2, 2, _W)),
-                         "close": ({}, frozenset(), (2, 2, _W))},
-    "comp-spec": {"": ({"--comp": _W, "--regions": _W, "--crop": _W, "--scale": _W, "--plate-prompt": _W,
+                         "close": ({}, frozenset(), (2, 2, [_W, "path"]))},
+    "comp-spec": {"": ({"--comp": _W, "--regions": _W, "--crop": "name", "--scale": _W, "--plate-prompt": _W,
                         "--background": ("transparent", "opaque", "auto")},
                        frozenset({"--grid", "--inspect-map", "--json", "--auto", "--print", "--schema", "--help"}),
                        _NONE)},
     "build-phase": {"start": ({"--direction": _W, "--decision-comp": _W, "--breakpoint": _W, "--artifact": _W,
-                               "--session-id": _W}, frozenset(), _NONE),
+                               "--session-id": "name"}, frozenset(), _NONE, ("--direction",)),
                     "advance": ({}, frozenset(), _NONE), "scaffold": ({}, frozenset(), _NONE),
                     "record hero": ({"--build": _W}, frozenset(), _NONE),
                     "finish": ({"--disposition": ("ship", "fix", "rebuild", "recapture")}, frozenset(), _NONE)},
@@ -3737,16 +3774,22 @@ _NAMES = re.compile(r"[a-z]+(?:,[a-z]+)*\Z")  # --scope: the detector's design d
 # a URL on this Mac: http, https, ws or wss (any case) to localhost or 127.0.0.1 as typed (lowercase, no user, no
 # other spelling of the address), an optional port, then nothing or a path, query or fragment without spaces or `\`
 _HERE_URL = re.compile(r"(?i:https?|wss?)://(?:localhost|127\.0\.0\.1)(?::[0-9]{1,5})?(?:[/?#][^\s\\]*)?\Z")
+# what the shell expands in a word it reads unquoted: a variable or a substitution, braces and globs. The guard reads
+# the typed words and `dev impeccable` the expanded ones, so a path, URL or port with one of them is refused by both:
+# the two then judge the same value (the Code reviewer's finding on b97db94: `live --target $HOME/x` passed the guard)
+_EXPANDS = re.compile(r"[$`{*?\[]")
+_NAME = re.compile(r"[A-Za-z0-9._-]+\Z")
 IMPECCABLE_REASON = ("`dev impeccable {verb}` is the developer's{why}. Agents run `dev impeccable` only with the forms "
-                     "on its allowlist, spelled exactly: in every lane `context`, `detect` (local paths, and URLs on "
-                     "localhost or 127.0.0.1), `doctor` (with `--json` or `--target`, never `--fix`), `surface-brief "
-                     "read`, and `critique-storage slug` and `trend`; in write lanes and the main session also `live`, "
-                     "`generate`, `document`, `extract`, `init`, the live helpers (`live-poll`, `live-accept`, "
-                     "`live-status`, `live-resume`, `live-wrap`, `live-insert`, `live-server`, and `live-complete` "
-                     "without `--force`), `surface-brief write`, `critique-storage latest`, `write`, and `close`, "
-                     "`comp-spec` without `--out`, `--out-dir`, or `--spec`, and `build-phase start --direction`, "
-                     "`advance` without `--force`, `record hero`, `scaffold`, and `finish`, where `--target` and "
-                     "`--file` name a path in the project. The developer runs everything else, in a terminal: some "
+                     "on its allowlist, spelled exactly: in every lane `context`, `detect` on local paths, `doctor` "
+                     "(with `--json` or `--target`, never `--fix`), `surface-brief read`, and `critique-storage slug` "
+                     "and `trend`; in write lanes and the main session also `detect` on URLs on localhost or "
+                     "127.0.0.1, `live`, `generate`, `document`, `extract`, `init`, the live helpers (`live-poll`, "
+                     "`live-accept`, `live-status`, `live-resume`, `live-wrap`, `live-insert`, `live-server`, and "
+                     "`live-complete` without `--force`), `surface-brief write`, `critique-storage latest`, `write`, "
+                     "and `close`, `comp-spec` without `--out`, `--out-dir`, or `--spec`, and `build-phase start "
+                     "--direction`, `advance` without `--force`, `record hero`, `scaffold`, and `finish`, where "
+                     "`--target` and `--file` name a path in the project, from a folder in it, and no path, URL or port "
+                     "has a character the shell expands. The developer runs everything else, in a terminal: some "
                      "verbs write the agents' settings, hooks or skill folders (`hooks`, `install`, `link`, `update`, "
                      "`pin`, `unpin`, `doctor --fix`), which change what runs in every later session on this Mac; "
                      "some reach the internet or cost money (`concept-seed`, `generate-image`); some skip the skill's "
@@ -3788,10 +3831,20 @@ def _impeccable_value(kind, shown, value) -> str:
     """Why `value` (typed as `shown`) does not fit `kind` (IMPECCABLE_FORMS), or ''."""
     if isinstance(kind, tuple):
         return "" if value in kind else f"`{shown}` takes only {', '.join(kind)}"
+    if kind in ("path", "url", "port", "cdp") and _EXPANDS.search(value):
+        return (f"`{shown}` has a character the shell expands ($, a backtick, {{, *, ? or [), so the engine could get "
+                f"another value than the one the guard reads: write the value out in full")
     if kind == "path":
         return "" if _project_path(value) else (f"`{shown}` names a path outside the project: give one inside it, "
                                                 f"with no first /, ~ or -, no `..` part and no colon")
+    if kind == "name":
+        return "" if _NAME.match(value) and value not in (".", "..") and not value.startswith("-") else \
+            (f"`{shown}` is not a name: give letters, digits, `.`, `_` and `-` only, not `.` or `..` alone and no "
+             f"first -, since the engine may name a file after it")
     if kind == "port":
+        return "" if re.fullmatch(r"[0-9]{1,5}", value) else \
+            f"`{shown}` is not a port number: give its digits only, since the live server listens on 127.0.0.1"
+    if kind == "cdp":
         return "" if re.fullmatch(r"[0-9]{1,5}", value) or _HERE_URL.match(value) else \
             (f"`{shown}` is not a port or a URL on localhost or 127.0.0.1, and a DevTools address anywhere else "
              f"leaves this Mac")
@@ -3811,9 +3864,10 @@ def _impeccable_form(verb, forms, rest) -> tuple:
             break
     else:
         return " ".join([verb, *rest[:1]])[:80], ""
-    takes, alone, (fewest, most, kind) = forms[key]
+    takes, alone, (fewest, most, kinds), *needs = forms[key]
     call, rest = " ".join([verb, *sub]), rest[len(sub):]
     count = i = 0
+    given = set()
     while i < len(rest):
         a = rest[i]
         flag, eq, value = a.partition("=")
@@ -3826,16 +3880,21 @@ def _impeccable_form(verb, forms, rest) -> tuple:
             why = _impeccable_value(takes[flag], shown, value)
             if why:
                 return f"{call} {shown}"[:80], why
+            given.add(flag)
         elif a in alone:
             i += 1
         elif a.startswith("-") or (most is not None and count == most):
             return f"{call} {a}"[:80], _IMPECCABLE_FLAG_WHY.get((verb, flag), "")
         else:
+            kind = kinds[min(count, len(kinds) - 1)] if isinstance(kinds, list) else kinds
             why = _impeccable_value(kind, a, a)
             if why:
                 return f"{call} {a}"[:80], why
             count, i = count + 1, i + 1
-    return (call[:80], f"it takes {fewest} or more words after `{call}`") if count < fewest else ("", "")
+    if count < fewest:
+        return call[:80], f"it takes {fewest} or more words after `{call}`"
+    missing = next((f for f in (needs[0] if needs else ()) if f not in given), "")
+    return (call[:80], f"it needs `{missing}`") if missing else ("", "")
 
 
 def impeccable_developer_call(words) -> tuple:
@@ -3862,6 +3921,47 @@ def impeccable_refusal(words) -> str:
     when an agent may run it (impeccable_developer_call)."""
     name, why = impeccable_developer_call(words)
     return IMPECCABLE_REASON.format(verb=name, why=f": {why}" if why else "") if name else ""
+
+
+def impeccable_paths(words, writes=False) -> list:
+    """The values of --target and --file (`--flag value` or `--flag=value`) in `words`, the words the engine gets:
+    paths it counts from the folder it runs in. `live` and the live helpers write there; `context` and `doctor` read
+    there, and `writes` leaves them out. detect's --target names a page by part of its URL or title, not a path."""
+    words = [str(w) for w in words]
+    verb = words[0] if words else ""
+    if verb == "detect" or (writes and verb in IMPECCABLE_READS):
+        return []
+    out, i = [], 1
+    while i < len(words):
+        flag, eq, value = words[i].partition("=")
+        if flag in ("--target", "--file") and (eq or i + 1 < len(words)):
+            out.append(value if eq else words[i + 1])
+            i += 0 if eq else 1
+        i += 1
+    return out
+
+
+def _impeccable_lane_write(words, cwd, scope, base) -> str:
+    """Why a crew lane may not run the engine with `words` in the folder `cwd` (where the shell is when it runs dev):
+    a path it writes (impeccable_paths) is not known before the shell runs, lies outside the workspace or in the
+    handoff repository, or outside the step's `scope` (counted from `base`, as scope_holds counts); '' otherwise."""
+    layers = _layers(scope)
+    verb = words[0] if words else ""
+    for value in impeccable_paths(words, writes=True):
+        p = resolve(value, cwd)
+        does = f"`dev impeccable {verb}` writes where `{value}` points"
+        if p == UNKNOWN:
+            return (f"{does}, counted from a folder the guard cannot know before the shell runs (a `cd` to a "
+                    f"variable or a substitution). Run it from the project's folder, with its path written out.")
+        if not is_under(p, DEV) or real(p) == real(DEV) or is_under(p, core.HANDOFF):
+            return (f"{does}: {tilde(p)}, outside the workspace ({tilde(DEV)}) or in the handoff repository. The "
+                    f"engine counts it from the folder the shell is in after `cd`, `pushd` or `env -C`; run it from "
+                    f"the project's folder, with a path inside the project.")
+        if layers and not all(scope_holds(str(p), cwd, layer, base=base) for layer in layers):
+            where = "; ".join(", ".join(layer) for layer in layers)
+            return (f"{does}: {tilde(p)}, outside your step's scope ({where}). Give a path inside it, or ask the tech "
+                    f"lead to widen it (`dev crew ask \"…\"`).")
+    return ""
 
 
 def _ro_impeccable(args) -> str | None:
@@ -4116,7 +4216,8 @@ def crew_shell_verdict(cmd: str, cwd, scope=None, member=None, level=None, base=
         _record("guard", "crew-readonly", f"the roster cannot be read ({type(e).__name__}: {e}), so the lane works "
                 f"at review or stricter"[:300], "recorded", rule="crew-readonly")
         level = _strictest(level, "review")
-    calls = shell_calls(cmd, cwd)
+    placed = shell_calls(cmd, cwd, where=True)
+    calls = None if placed is None else [(argv, code) for argv, code, _ in placed]
     if calls is None:  # the shell would read it another way than the tokenizer: judge the words, refuse a lane name
         if _LANE_TEXT.search(cmd):
             return deny(LANE_REASON)
@@ -4128,11 +4229,15 @@ def crew_shell_verdict(cmd: str, cwd, scope=None, member=None, level=None, base=
     # the routed call, and the `cat` of a quoted heredoc message it carries (runs_one_command's data form)
     one_routed = routed and lanes == [1] and [k for k, _ in _dev_calls(*calls[0])] == ["lane"] and \
         all(argv == ["cat"] for argv, code in calls[1:])
-    for argv, code in calls:
+    for argv, code, at in placed:
         dev = _dev_args(argv) if code is None else None
         imp = impeccable_refusal(impeccable_engine_words(dev[1:])) if dev and dev[:1] == ["impeccable"] else ""
         if imp:  # off the allowlist: the developer's, in every lane
             return deny(imp)
+        if dev and dev[:1] == ["impeccable"]:  # where it writes, from the folder it runs in: the workspace, the scope
+            why = _impeccable_lane_write(impeccable_engine_words(dev[1:]), at, scope, base)
+            if why:
+                return deny(why)
         for kind, args in _dev_calls(argv, code):
             if kind == "lane" and not one_routed:
                 return deny(LANE_REASON)

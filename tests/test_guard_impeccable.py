@@ -35,6 +35,10 @@ sys.path.insert(0, str(ROOT / "lib"))
 from devkit import core, guard, setup  # noqa: E402
 
 CWD = str(ROOT)
+# a project checkout in the run's workspace, where agents run `dev impeccable` (the engine writes where --target and
+# --file point, from the folder it runs in, so the guard judges those paths as writes)
+OWNER = core.DEV / "acme-impeccable"
+PROJECT = str(OWNER / "web")
 ENGINE = b"\xcf\xfa\xed\xfe made-up engine for the guard tests\n"
 # the launcher's forms that made the gate refuse it: a probe of a program passed as $1, and exec of a built path
 LAUNCHER = ("#!/bin/sh\nset -eu\n"
@@ -65,7 +69,7 @@ HELPERS = ("live-poll", "live-poll --timeout=600000", "live-poll --reply e1 done
            "--file src/index.html", "live-insert --id e2 --count 3 --position after --element-id hero --tag h1",
            "live-server", "live-server --background", "live-server stop", "live-server stop --keep-inject",
            "surface-brief read src/index.html", "surface-brief write src/index.html /tmp/brief.md",
-           "surface-brief write https://example.com/pricing brief.md src/a.html",
+           "surface-brief write src/pricing.html brief.md src/a.html",
            "critique-storage slug src/index.html", "critique-storage latest src/index.html --json",
            "critique-storage trend src/index.html 5", "critique-storage write src/index.html /tmp/body.md",
            "critique-storage close src/index.html 2026-11-07T11-13-00Z__src-index-html.md",
@@ -98,9 +102,14 @@ READER = "seraph"  # a review lane: the read-only allowlist applies
 WRITER = "sati"  # a build lane: the gate applies, the allowlist does not
 
 
-def lane(cmd, member):
-    v = guard.crew_shell_verdict(cmd, CWD, None, member)
+def lane(cmd, member, cwd=PROJECT, scope=None):
+    v = guard.crew_shell_verdict(cmd, cwd, scope, member, base=PROJECT if scope else None)
     return v[1] if v else None
+
+
+def main(cmd, cwd=PROJECT):
+    # the main session's verdict on a shell command: None, or (decision, why)
+    return guard.check("Bash", {"command": cmd}, cwd, "claude")
 
 
 class LauncherCase(unittest.TestCase):
@@ -112,6 +121,7 @@ class LauncherCase(unittest.TestCase):
         self.link = core.HOME / ".claude" / "skills" / "impeccable"
         self.addCleanup(self.cleanup)
         self.cleanup()
+        Path(PROJECT, "src").mkdir(parents=True)
         scripts = self.skill / "scripts"
         scripts.mkdir(parents=True)
         (self.skill / "SKILL.md").write_text("---\nname: impeccable\n---\n")
@@ -132,7 +142,7 @@ class LauncherCase(unittest.TestCase):
     def cleanup(self):
         if self.link.is_symlink():
             self.link.unlink()
-        for d in (self.skill, setup.ENGINES_SHARE / "impeccable"):
+        for d in (self.skill, setup.ENGINES_SHARE / "impeccable", OWNER):
             shutil.rmtree(d, ignore_errors=True)
         (core.STATE / setup.ENGINES_FILE).unlink(missing_ok=True)
 
@@ -199,20 +209,23 @@ class ReadOnlyLaneTests(LauncherCase):
 
     def test_a_read_only_lane_refuses_flags_that_write_or_reach_out(self):
         for args in ("detect --github src", "detect --json http://localhost:5173/",
-                     "detect --cdp 9222 --json", "detect --json src --viewport 390x844", "context --out notes.md",
-                     "context src/app.tsx", "context -- --out notes.md", "context --target localhost:3000",
-                     "context --target=//example.com/app", "doctor --target example.com"):
+                     "detect --cdp 9222 --json", "detect --json src --viewport 390x844", "doctor --target example.com"):
             with self.subTest(args=args):
                 v = lane(f"dev impeccable {args}", READER) or ""
                 self.assertIn(WRITE_LANE, v)
                 self.assertNotIn(DEVELOPERS, v)
+        # context takes only --target, a path in the project, in every lane: any other word is the developer's
+        for args in ("context --out notes.md", "context src/app.tsx", "context -- --out notes.md",
+                     "context --target localhost:3000", "context --target=//example.com/app"):
+            with self.subTest(args=args):
+                self.assertIn(DEVELOPERS, lane(f"dev impeccable {args}", READER) or "")
 
     def test_a_read_only_lane_lets_detect_scan_local_paths_but_not_a_host(self):
         # `detect` scans a URL when it gets one, so a read-only lane gives it only a path shape: one that starts ./,
         # ../, / or ~/ (or is . or ..), or whose first part has only letters, digits, _ and - and is not a host on its
         # own. A domain (with a final dot too), an address in any notation, a user@host, a query or a fragment, a
         # leading space and a bare file name are refused; a host and port, a URL or another word with a colon that is
-        # not a URL on this Mac is the developer's in every lane.
+        # not a URL on this Mac, and a word the shell expands (a glob such as `?`), is the developer's in every lane.
         for args in ("detect --json src", "detect ./index.html", "detect src/index.html", "detect ~/site/a.html",
                      "detect ../site/a.html", "detect /tmp/site/a.html", "detect .", "detect --scope type,layout src",
                      "context --target src/app.tsx", "doctor --target src"):
@@ -220,13 +233,13 @@ class ReadOnlyLaneTests(LauncherCase):
                 self.assertIsNone(lane(f"dev impeccable {args}", READER))
         for args in ("detect example.com", "detect example.com/pricing", "detect 192.168.1.20", "detect localhost",
                      "detect index.html", "detect localhost.", "detect example.com.", "detect user@example.com",
-                     "detect 'example.com?x'", "detect ' example.com'", "detect 2130706433", "detect 0x7f000001",
+                     "detect ' example.com'", "detect 2130706433", "detect 0x7f000001",
                      "detect LOCALHOST/app", "detect src#top", "detect '~user/x'", "detect ''",
                      "context --target example.com.", "doctor --target 2130706433", "detect http://localhost:5173/"):
             with self.subTest(args=args):
                 self.assertIn("local path", lane(f"dev impeccable {args}", READER) or "")
         for args in ("detect localhost:3000", "detect --json 127.0.0.1:8080/pricing", "detect //example.com",
-                     "detect [::1]:5173", "detect --json https://example.com"):
+                     "detect [::1]:5173", "detect --json https://example.com", "detect 'example.com?x'"):
             with self.subTest(args=args):
                 self.assertIn(DEVELOPERS, lane(f"dev impeccable {args}", READER) or "")
 
@@ -271,11 +284,11 @@ class DeveloperOnlyTests(LauncherCase):
     # as `dev ext add` is: refused to the main session's agent and to both lane kinds, nested forms included. Agents
     # get an allowlist, not a block list: a hidden verb or one a newer engine adds is the developer's too.
     def test_the_main_session_leaves_impeccables_harness_verbs_to_the_developer(self):
-        self.assertIsNone(guard.check("Bash", {"command": "dev impeccable doctor --json"}, CWD, "claude"))
+        self.assertIsNone(main("dev impeccable doctor --json"))
         for args in HARNESS:
             for cmd in (f"dev impeccable {args}", f"bash -c 'dev impeccable {args}'"):
                 with self.subTest(cmd=cmd):
-                    v = guard.check("Bash", {"command": cmd}, CWD, "claude")
+                    v = main(cmd)
                     self.assertIn(DEVELOPERS, v[1] if v else "")
 
     def test_a_read_only_lane_leaves_impeccables_harness_verbs_to_the_developer(self):
@@ -293,10 +306,10 @@ class DeveloperOnlyTests(LauncherCase):
     def test_the_main_session_runs_only_impeccables_allowlisted_verbs(self):
         for args in AGENT_VERBS + HELPERS:
             with self.subTest(allowed=args):
-                self.assertIsNone(guard.check("Bash", {"command": f"dev impeccable {args}"}, CWD, "claude"))
+                self.assertIsNone(main(f"dev impeccable {args}"))
         for args in DEVELOPER_ONLY:
             with self.subTest(refused=args):
-                v = guard.check("Bash", {"command": f"dev impeccable {args}".strip()}, CWD, "claude")
+                v = main(f"dev impeccable {args}".strip())
                 self.assertIn(DEVELOPERS, v[1] if v else "")
 
     def test_a_write_lane_runs_only_impeccables_allowlisted_verbs(self):
@@ -320,8 +333,7 @@ class DeveloperOnlyTests(LauncherCase):
     def refused_everywhere(self, args, why):
         # the refusal of `dev impeccable <args>` in the main session and in both lane kinds names the developer and
         # gives `why`
-        for where, v in (("main", (guard.check("Bash", {"command": f"dev impeccable {args}"}, CWD, "claude")
-                                   or (None, ""))[1]),
+        for where, v in (("main", (main(f"dev impeccable {args}") or (None, ""))[1]),
                          ("write lane", lane(f"dev impeccable {args}", WRITER) or ""),
                          ("read-only lane", lane(f"dev impeccable {args}", READER) or "")):
             with self.subTest(args=args, where=where):
@@ -359,12 +371,12 @@ class DeveloperOnlyTests(LauncherCase):
     def test_agents_detect_urls_only_on_this_mac(self):
         # detect loads a URL in Chrome, so a URL off this Mac reaches the network: agents give it local paths, URLs
         # on localhost or 127.0.0.1, and --cdp a port or such a URL
-        for args in ("detect http://localhost:5173/", "detect --json https://127.0.0.1:8443/a?b=1#c",
+        for args in ("detect http://localhost:5173/", "detect --json https://127.0.0.1:8443/a#c",
                      "detect HTTP://localhost/app", "detect --cdp 9222", "detect --cdp ws://127.0.0.1:9222/devtools/x",
                      "detect --cdp=http://localhost:9222", "detect index.html"):
             with self.subTest(allowed=args):
                 self.assertIsNone(lane(f"dev impeccable {args}", WRITER))
-                self.assertIsNone(guard.check("Bash", {"command": f"dev impeccable {args}"}, CWD, "claude"))
+                self.assertIsNone(main(f"dev impeccable {args}"))
         for args in ("detect https://example.com", "detect --json http://localhost.evil.com/",
                      "detect http://localhost@evil.com/", "detect http://localhost:80@evil.com/",
                      "detect 'http://127.0.0.1\\@evil.com'", "detect http://10.0.0.2:3000/",
@@ -377,6 +389,136 @@ class DeveloperOnlyTests(LauncherCase):
         # OpenAI API with the developer's key
         self.refused_everywhere("concept-seed --scope direction --mode operate", "impeccable.style")
         self.refused_everywhere("generate-image --ref a.png --prompt-file p.txt --out b.png", "OpenAI")
+
+    def test_the_design_commands_take_no_words_and_context_only_a_project_path(self):
+        # generate, document, extract and init run in the agent's chat in 0.1.18, so they take no words; context takes
+        # only --target, a path in the project (the tech lead's decision on the Code reviewer's review of b97db94: any
+        # word reached the engine)
+        for args in ("generate", "document", "extract", "init", "context", "context --target src/app.tsx"):
+            with self.subTest(allowed=args):
+                self.assertIsNone(lane(f"dev impeccable {args}", WRITER))
+                self.assertIsNone(main(f"dev impeccable {args}"))
+        for args in ("generate --anything https://x", "init --force /etc", "document --out /tmp/x", "extract src",
+                     "context src/app.tsx", "context --out notes.md", "context --target src --json"):
+            self.refused_everywhere(args, "")
+        for args in ("context --target /etc", "context --target ../x", "context --target=~/x"):
+            self.refused_everywhere(args, "outside the project")
+
+    def test_ids_and_crops_are_names_and_brief_and_snapshot_files_are_project_paths(self):
+        # the engine may build a file path from --id, --session-id and --crop, from the file name `critique-storage
+        # close` gets, and from the target `surface-brief write` gets: a name takes letters, digits, `.`, `_` and `-`
+        # (never `.` or `..` alone), and the two files are paths in the project
+        for args in ("build-phase start --direction k1 --session-id s-1.2_a", "live-complete --id e1",
+                     "live-resume --id e1", "comp-spec --crop hero.1",
+                     "critique-storage close src/x.html 2026-11-07T11-13-00Z__src-x-html.md",
+                     "surface-brief write src/x.html /tmp/brief.md src/y.html"):
+            with self.subTest(allowed=args):
+                self.assertIsNone(lane(f"dev impeccable {args}", WRITER))
+                self.assertIsNone(main(f"dev impeccable {args}"))
+        for args in ("build-phase start --direction k1 --session-id ../../../tmp/x", "live-complete --id ../../x",
+                     "live-resume --id /tmp/x", "live-accept --id .. --discard", "live-wrap --id . --count 3 --tag h1",
+                     "comp-spec --crop ../../x --comp c.png", "comp-spec --crop=a/b", "live-complete --id 'e 1'"):
+            self.refused_everywhere(args, "not a name")
+        for args in ("critique-storage close src/x ../../../../tmp/x.md", "critique-storage close src/x /tmp/x.md",
+                     "surface-brief write ../../../x /tmp/b.md", "surface-brief write /etc/x b.md",
+                     "surface-brief write https://example.com/pricing brief.md"):
+            self.refused_everywhere(args, "outside the project")
+
+    def test_values_the_shell_expands_are_the_developers(self):
+        # the guard reads the words before the shell expands them and `dev impeccable` checks them after, so a path, a
+        # URL or a port with $, `, {, *, ? or [ could reach the engine as another value than the one the guard read
+        for args in ("live --target $HOME/x", "live --target \"$(echo /etc)\"", "live --target `pwd`/x",
+                     "live --target src/*", "live --target {/etc/x,src}", "live --target 'src/[ab].html'",
+                     "live-wrap --id e1 --count 3 --tag h1 --file 'src/?.html'", "detect $U",
+                     "detect 'http://localhost:5173/?a=1'", "detect --cdp '9222*'", "live-server --port $P",
+                     "critique-storage close src/x.html '*.md'", "surface-brief write '$HOME/x' b.md"):
+            self.refused_everywhere(args, "the shell expands")
+        for cmd in ("X=/etc; dev impeccable live --target $X", "U=https://example.com/x; dev impeccable detect $U"):
+            with self.subTest(cmd=cmd):
+                self.assertIn(DEVELOPERS, lane(cmd, WRITER) or "")
+                self.assertIn(DEVELOPERS, (main(cmd) or (None, ""))[1])
+
+    def test_the_refusal_gives_read_only_lanes_detect_on_local_paths_only(self):
+        # a read-only lane gives detect local path shapes only (no URL, not even on this Mac), as the code does
+        reason = guard.impeccable_refusal(["hooks", "on"])
+        every, writes = reason.split("in write lanes and the main session also", 1)
+        self.assertNotIn("localhost", every)
+        self.assertIn("localhost", writes)
+
+    def test_build_phase_start_needs_a_direction(self):
+        # the skill starts a build with --direction (and --decision-comp), which keeps the comps gate open
+        for args in ("build-phase start --direction none", "build-phase start --artifact src/x.html --direction=k1"):
+            with self.subTest(allowed=args):
+                self.assertIsNone(lane(f"dev impeccable {args}", WRITER))
+        for args in ("build-phase start", "build-phase start --artifact src/index.html",
+                     "build-phase start --decision-comp a.png --artifact src/x.html"):
+            self.refused_everywhere(args, "needs `--direction`")
+
+    def test_the_live_servers_port_is_digits_only(self):
+        # the live server listens on 127.0.0.1; a host in --port could move it
+        for args in ("live-server --port 8400", "live-server --port=8400 --background"):
+            with self.subTest(allowed=args):
+                self.assertIsNone(lane(f"dev impeccable {args}", WRITER))
+        for args in ("live-server --port 0.0.0.0:80", "live-server --port=localhost", "live-server --port 80x",
+                     "live-server --port http://localhost:8400"):
+            self.refused_everywhere(args, "port number")
+
+
+class EngineFolderTests(LauncherCase):
+    # The engine writes where --target and --file point, counted from the folder it runs in, so the guard judges those
+    # values as writes from the folder the shell is in after `cd`, `pushd` or `env -C`, as it judges any other write
+    # (the Code reviewer's finding on d9186f1 and b97db94: `cd ~/.claude && dev impeccable live --target
+    # settings.json` passed in the main session and in a write lane, and the same write by `echo >>` did not). A
+    # write lane refuses them outside the workspace, in the handoff repository and outside its step's scope; the main
+    # session asks first, as for any write outside the workspace. `dev impeccable` checks the folder again when it runs.
+    def outside(self):
+        # folders outside the workspace, computed from the run's home: the home, an agent's settings, the handoff
+        # repository and a folder that is neither temporary nor an agent's
+        return [str(core.HOME), str(core.HOME / ".claude"), str(core.HANDOFF), str(core.HOME / "Library")]
+
+    def forms(self, folder):
+        # the engine's write flags behind each way the shell changes folder before it runs dev
+        return (f"cd {folder} && dev impeccable live --target .zshrc",
+                f"cd {folder}; dev impeccable live-wrap --id e1 --count 3 --tag h1 --file settings.json",
+                f"(cd {folder} && dev impeccable live --target index.html)",
+                f"env -C {folder} dev impeccable live --target=index.html",
+                f"pushd {folder} && dev impeccable live-insert --id e1 --count 1 --position after --tag p --file x.html",
+                f"bash -c 'cd {folder} && dev impeccable live-poll --reply e1 done --file index.html'")
+
+    def test_a_write_lane_refuses_engine_paths_outside_the_workspace(self):
+        for folder in self.outside():
+            for cmd in self.forms(folder):
+                with self.subTest(cmd=cmd):
+                    self.assertIn("outside the workspace", lane(cmd, WRITER) or "")
+        for cmd in (f"cd {PROJECT}/src && dev impeccable live --target index.html",
+                    f"env -C {PROJECT} dev impeccable live-wrap --id e1 --count 3 --tag h1 --file src/x.html"):
+            with self.subTest(allowed=cmd):
+                self.assertIsNone(lane(cmd, WRITER, cwd=str(core.HOME)))
+
+    def test_the_main_session_asks_before_engine_paths_outside_the_workspace(self):
+        lib = core.HOME / "Library"
+        for cmd in (f"cd {lib} && dev impeccable live --target index.html",
+                    f"cd {lib}; dev impeccable live-wrap --id e1 --count 3 --tag h1 --file x/y.html",
+                    f"cd {core.HOME} && dev impeccable live-poll --reply e1 done --file index.html",
+                    f"pushd {lib} && dev impeccable live --target=index.html",
+                    f"env -C {lib} dev impeccable live --target index.html"):
+            with self.subTest(cmd=cmd):
+                v = main(cmd)
+                self.assertEqual(v and v[0], "ask")
+                self.assertIn("Writes outside", v[1])
+        self.assertIsNone(main(f"cd {PROJECT}/src && dev impeccable live --target index.html", cwd=str(lib)))
+
+    def test_a_write_lane_keeps_engine_paths_to_its_steps_scope(self):
+        scope = ["src/**"]
+        for cmd in ("dev impeccable live --target src/index.html",
+                    "cd src && dev impeccable live-wrap --id e1 --count 3 --tag h1 --file x.html"):
+            with self.subTest(allowed=cmd):
+                self.assertIsNone(lane(cmd, WRITER, scope=scope))
+        for cmd in ("dev impeccable live --target README.md", "dev impeccable live --target=docs/x.html",
+                    "dev impeccable live-wrap --id e1 --count 3 --tag h1 --file docs/x.html",
+                    "cd docs && dev impeccable live --target index.html"):
+            with self.subTest(refused=cmd):
+                self.assertIn("scope", lane(cmd, WRITER, scope=scope) or "")
 
 
 if __name__ == "__main__":

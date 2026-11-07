@@ -91,16 +91,22 @@ Not released yet: the date is set when the release is tagged.
   runs a program named only at run time, and refuses it in every crew lane. It still does: the shell can reach another
   file than the one the guard reads by the same typed path (a symbolic link, `..` after `cd`, a quoted `~`, a glob, or
   a folder moved earlier in the same command), so no typed launcher path is trusted. Crew lanes run
-  `dev impeccable <verb>` instead, from an allowlist: every lane runs `context`, `detect`, and `doctor` without
-  `--fix`, and write lanes and the main session also run `live`, `generate`, `document`, `extract`, and `init`.
-  Agents also run the skill's helpers in the forms it uses that stay inside the project or talk to the live server on
-  `127.0.0.1` (the `live-…` helpers, `surface-brief`, `critique-storage`, `comp-spec`, and `build-phase`; read-only
-  lanes only `surface-brief read` and `critique-storage slug` and `trend`), with `--target` and `--file` inside the
-  project and `detect` URLs only on `localhost` or `127.0.0.1`. Read-only lanes keep to the reading flags and give
-  `detect` only local path shapes (no URL, host, domain, address, `user@`, query, or fragment). Every other verb,
-  including `concept-seed`, `generate-image`, the forms that skip the skill's gates, the engine's hidden ones, and any
-  a newer engine adds, is the developer's: the guard refuses it to every agent, the main session's included, and
-  `dev impeccable` runs it only in your terminal.
+  `dev impeccable <verb>` instead, from an allowlist: every lane runs `context` (with `--target` only), `detect`, and
+  `doctor` without `--fix`, and write lanes and the main session also run `live`, and `generate`, `document`,
+  `extract`, and `init` with no other words. Agents also run the skill's helpers in the forms it uses that stay inside
+  the project or talk to the live server on `127.0.0.1` (the `live-…` helpers, `surface-brief`, `critique-storage`,
+  `comp-spec`, and `build-phase start --direction`; read-only lanes only `surface-brief read` and
+  `critique-storage slug` and `trend`), with `--target` and `--file` inside the project, a name as an ID, a port
+  number as the live server's port, and `detect` URLs only on `localhost` or `127.0.0.1`. No path, URL, or port may
+  hold a character the shell expands (`$`, a backtick, `{`, `*`, `?`, or `[`). Read-only lanes keep to the reading
+  flags and give `detect` only local path shapes (no URL, host, domain, address, `user@`, query, or fragment). The
+  guard follows `cd`, `pushd`, and `env -C` and judges `--target` and `--file` as writes: a write lane may not point
+  them outside the workspace or its step's scope, and the main session asks first, as for any write outside the
+  workspace. `dev impeccable` checks again when it runs: an agent's call runs only from a git checkout below
+  `~/Development` (not the handoff repository), with each `--target` and `--file`, through its symbolic links, inside
+  that checkout. Every other verb, including `concept-seed`, `generate-image`, the forms that skip the skill's gates,
+  the engine's hidden ones, and any a newer engine adds, is the developer's: the guard refuses it to every agent, the
+  main session's included, and `dev impeccable` runs it only in your terminal.
 
 ## [26.11.3] - 2026-11-06
 

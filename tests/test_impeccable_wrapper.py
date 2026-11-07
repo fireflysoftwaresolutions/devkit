@@ -62,7 +62,14 @@ DEVELOPER_ONLY = (["hook-admin"], ["hook"], ["hook-before-edit"], ["capture-serv
                   ["generate-image", "--prompt-file", "p.txt"], ["build-phase", "advance", "--force", "--reason", "x"],
                   ["build-phase", "start", "--comp", "comp.png"], ["live-complete", "--id", "e1", "--force"],
                   ["live", "--target", "../app"], ["live-wrap", "--id", "e1", "--file", "../x.html"],
-                  ["comp-spec", "--crop", "art", "--out", "../x.png"], ["detect", "https://example.com"])
+                  ["comp-spec", "--crop", "art", "--out", "../x.png"], ["detect", "https://example.com"],
+                  # the Code reviewer's run-gate words on b97db94: the design commands take no words, context only
+                  # --target in the project, build-phase start needs --direction, the live server's port is digits,
+                  # the close file is a project path, and a value with a glob character is the developer's
+                  ["generate", "--anything", "https://x"], ["init", "--force", "/etc"], ["context", "--target", "/etc"],
+                  ["document", "--out", "/tmp/x"], ["build-phase", "start"], ["live-server", "--port", "0.0.0.0"],
+                  ["critique-storage", "close", "a", "../../b"], ["live", "--target", "src/*"],
+                  ["live-complete", "--id", "../../x"])
 
 
 class WrapperCase(unittest.TestCase):
@@ -85,11 +92,18 @@ class WrapperCase(unittest.TestCase):
             res = setup.install_impeccable_engine(self.skill, "pbakaus/impeccable")
         self.assertEqual(res["outcome"], "installed")
         self.engine = scripts / "bin" / self.plat / "impeccable"
-        self.project = Path(tempfile.mkdtemp(dir=core.HOME))  # the caller's folder
+        owner = core.DEV / "acme-impeccable"
+        owner.mkdir(parents=True, exist_ok=True)
+        self.project = Path(tempfile.mkdtemp(dir=owner))  # the caller's folder: a project checkout in the workspace
+        self.git_init(self.project)
         self.box = Path(tempfile.mkdtemp(dir=core.HOME))  # where the engine writes down what it got
-        for d in (self.project, self.box):
+        for d in (owner, self.box):
             self.addCleanup(shutil.rmtree, d, True)
         self.out = self.box / "engine.json"
+
+    @staticmethod
+    def git_init(folder):
+        subprocess.run(["git", "init", "-q", str(folder)], check=True, capture_output=True, timeout=30)
 
     def cleanup(self):
         for d in (self.skill, setup.ENGINES_SHARE / "impeccable"):
@@ -105,14 +119,27 @@ class WrapperCase(unittest.TestCase):
         got = json.loads(self.out.read_text()) if self.out.exists() else None
         return p.returncode, p.stderr, got
 
+    def run_as(self, args, developer, cwd=None):
+        # impeccable.run with the words the engine would get, in or outside the developer's terminal, in the project
+        # or in `cwd` -> (exit code, stderr, the engine's argv or None)
+        if self.out.exists():
+            self.out.unlink()
+        with mock.patch.object(core, "set_by_developer", lambda *a, **k: developer), \
+                mock.patch.dict(os.environ, {"FAKE_ENGINE_OUT": str(self.out)}), \
+                contextlib.redirect_stderr(io.StringIO()) as err:
+            rc = impeccable.run(args, cwd=str(cwd or self.project))
+        got = json.loads(self.out.read_text()) if self.out.exists() else {}
+        return rc, err.getvalue(), got.get("argv")
+
 
 class RunTests(WrapperCase):
     def test_each_word_reaches_the_engine_as_one_argument_without_a_shell(self):
-        target = "src/$(touch pwned); touch owned `touch ticked` & echo *"
-        rc, err, got = self.dev("context", "--target", target, "--", "--json")
+        # a reply's words take any text, so an agent's call carries this one too
+        reason = "src/$(touch pwned); touch owned `touch ticked` & echo *"
+        rc, err, got = self.dev("live-poll", "--reply", "e1", "error", reason)
         self.assertEqual(rc, 0, err)
-        self.assertEqual(got["argv"], ["context", "--target", target, "--", "--json"])
-        self.assertEqual(sorted(os.listdir(self.project)), [])  # no shell ran the substitutions
+        self.assertEqual(got["argv"], ["live-poll", "--reply", "e1", "error", reason])
+        self.assertEqual(sorted(os.listdir(self.project)), [".git"])  # no shell ran the substitutions
 
     def test_the_engine_runs_in_the_callers_folder(self):
         rc, err, got = self.dev("context")
@@ -187,18 +214,6 @@ class DeveloperOnlyTests(WrapperCase):
     # runs them only in the developer's terminal (core.set_by_developer): an agent's call (here, one with Claude
     # Code's marker) runs nothing, and the developer's runs the engine. Agents get an allowlist, so any other verb,
     # hidden or added by a newer engine, is the developer's too.
-    def run_as(self, args, developer):
-        # impeccable.run with the words the engine would get, in or outside the developer's terminal ->
-        # (exit code, stderr, the engine's argv or None)
-        if self.out.exists():
-            self.out.unlink()
-        with mock.patch.object(core, "set_by_developer", lambda *a, **k: developer), \
-                mock.patch.dict(os.environ, {"FAKE_ENGINE_OUT": str(self.out)}), \
-                contextlib.redirect_stderr(io.StringIO()) as err:
-            rc = impeccable.run(args, cwd=str(self.project))
-        got = json.loads(self.out.read_text()) if self.out.exists() else {}
-        return rc, err.getvalue(), got.get("argv")
-
     def test_an_agent_runs_only_the_allowlisted_verbs(self):
         for args in AGENT_VERBS:
             with self.subTest(allowed=args):
@@ -230,6 +245,63 @@ class DeveloperOnlyTests(WrapperCase):
             rc = impeccable.run(["hooks", "on"], cwd=str(self.project))
         got = json.loads(self.out.read_text()) if self.out.exists() else {}
         self.assertEqual((rc, got.get("argv")), (0, ["hooks", "on"]), err.getvalue())
+
+
+class ProjectBoundaryTests(WrapperCase):
+    # The engine writes in the folder it runs in and where --target and --file point, so an agent's call runs only in
+    # a project checkout of the workspace (its git top folder below ~/Development, the handoff repository excepted),
+    # and each --target and --file, resolved from that folder through its links, stays inside that checkout (the
+    # tech lead's decision on the Code reviewer's finding: `cd ~/.claude && dev impeccable live --target
+    # settings.json` passed). This is the check that sees the folder and the words as the engine gets them; the guard
+    # checks the typed command before it.
+    def handoff(self):
+        # the run's handoff repository as a git checkout, for this test only
+        h = core.HANDOFF
+        made = not h.exists()
+        if not (h / ".git").exists():
+            h.mkdir(parents=True, exist_ok=True)
+            self.git_init(h)
+            self.addCleanup(shutil.rmtree, h if made else h / ".git", True)
+        return h
+
+    def test_an_agent_runs_the_engine_only_in_a_project_checkout(self):
+        plain = core.DEV / "acme-impeccable" / "not-a-checkout"
+        plain.mkdir()
+        claude = core.HOME / ".claude"
+        claude.mkdir(exist_ok=True)
+        for here in (claude, core.HOME, plain, self.handoff(), self.box):
+            for args in (["live"], ["context"], ["live", "--target", "index.html"]):
+                with self.subTest(here=str(here), args=args):
+                    rc, err, argv = self.run_as(args, developer=False, cwd=here)
+                    self.assertEqual((rc, argv), (1, None), err)
+                    self.assertIn("not in a project checkout", err)
+        sub = self.project / "src"
+        sub.mkdir()
+        rc, err, argv = self.run_as(["live", "--target", "index.html"], developer=False, cwd=sub)
+        self.assertEqual((rc, argv), (0, ["live", "--target", "index.html"]), err)
+        rc, err, argv = self.run_as(["live", "--target", "settings.json"], developer=True, cwd=claude)
+        self.assertEqual((rc, argv), (0, ["live", "--target", "settings.json"]), err)
+
+    def test_an_agents_engine_paths_stay_in_the_checkout_through_links(self):
+        outside = Path(tempfile.mkdtemp(dir=core.HOME))
+        self.addCleanup(shutil.rmtree, outside, True)
+        (self.project / "src").mkdir()
+        (self.project / "src" / "out").symlink_to(outside)
+        (self.project / "page.html").symlink_to(core.HOME / ".zshrc")
+        for args in (["live", "--target", "src/out/index.html"], ["live", "--target=src/out"],
+                     ["live", "--target", "page.html"], ["context", "--target", "src/out"],
+                     ["live-wrap", "--id", "e1", "--count", "3", "--tag", "h1", "--file", "src/out/x.html"],
+                     ["live-poll", "--reply", "e1", "done", "--file=src/out/x.html"]):
+            with self.subTest(args=args):
+                rc, err, argv = self.run_as(args, developer=False)
+                self.assertEqual((rc, argv), (1, None), err)
+                self.assertIn("outside the project checkout", err)
+        for args in (["live", "--target", "src/index.html"], ["live-wrap", "--id", "e1", "--count", "3", "--tag",
+                                                               "h1", "--file", "src/x.html"]):
+            with self.subTest(allowed=args):
+                self.assertEqual(self.run_as(args, developer=False)[::2], (0, args))
+        rc, err, argv = self.run_as(["live", "--target", "src/out/index.html"], developer=True)
+        self.assertEqual((rc, argv), (0, ["live", "--target", "src/out/index.html"]), err)
 
 
 if __name__ == "__main__":

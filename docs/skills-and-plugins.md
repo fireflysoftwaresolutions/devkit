@@ -205,7 +205,7 @@ no telemetry.
 2. Before every run, it checks that `~/.local/state/devkit/skill-engines.json` names that file, that the file's
    SHA-256 matches the one recorded there, and that the file did not change between the check and the start.
 3. It runs the engine in your current folder, with each word after `dev impeccable` as one argument, as typed: no
-   shell reads them. The engine gets `IMPECCABLE_SKILL_DIR` (the skill folder) and `IMPECCABLE_SELF`
+   shell reads them. For an agent, that folder must be in a project checkout of the workspace (below). The engine gets `IMPECCABLE_SKILL_DIR` (the skill folder) and `IMPECCABLE_SELF`
    (`dev impeccable`, the name it prints in the commands it suggests), as the launcher sets them, plus
    `IMPECCABLE_NO_UPDATE_CHECK=1` and `IMPECCABLE_NO_TELEMETRY=1`. Every other `IMPECCABLE_*` variable is dropped:
    `IMPECCABLE_BIN` would pick another engine, and the others move its downloads, caches, and plugins.
@@ -224,26 +224,38 @@ settings or hooks is the developer's.
 
 | Verb | Read-only lanes | Write lanes and the main session | What it does |
 | --- | --- | --- | --- |
-| `context` | yes, with `--target` | yes | Loads PRODUCT.md, DESIGN.md, and the surface brief, and prints what to follow |
+| `context` | yes, with `--target` | yes, with `--target` only | Loads PRODUCT.md, DESIGN.md, and the surface brief, and prints what to follow |
 | `detect` | yes, on local paths (below) | yes, on local paths and URLs on `localhost` or `127.0.0.1` | Scans HTML and CSS for design anti-patterns; it loads a URL in Chrome |
 | `doctor` | yes, with `--json` or `--target` | yes, with `--json` or `--target` | Reports drift between the project's impeccable files and the engine; never `--fix`, which moves hook entries |
 | `live` | no | yes, with `--target` inside the project | Starts the live server on `127.0.0.1` and adds its script to the page |
-| `live-poll`, `live-accept`, `live-status`, `live-resume`, `live-wrap`, `live-insert`, `live-server` | no | yes, with `--file` inside the project | Talk to the live server and write `.impeccable/live` and the page they wrap |
+| `live-poll`, `live-accept`, `live-status`, `live-resume`, `live-wrap`, `live-insert`, `live-server` | no | yes, with `--file` inside the project, a name as `--id`, and a port number as `live-server --port` | Talk to the live server and write `.impeccable/live` and the page they wrap |
 | `live-complete` | no | yes, never `--force` | Records the end of a live session; `--force` skips its check for live-mode leftovers in the source |
-| `surface-brief` | `read` | `read`, `write` | Reads or writes the surface brief in `.impeccable/surfaces` |
-| `critique-storage` | `slug`, `trend` | `slug`, `latest`, `trend`, `write`, `close` | Keeps critique snapshots in `.impeccable/critique`; `latest` closes a snapshot whose file changed |
-| `comp-spec` | no | yes, never `--out`, `--out-dir`, or `--spec` | Measures a comp image into `.impeccable/build`; those three flags write where they point |
-| `build-phase` | no | `start --direction`, `advance`, `record hero`, `scaffold`, `finish` | Runs the gates of a comp-led build in `.impeccable/build`; never `advance --force`, `start --comp`, or `start --reset`, which skip a gate |
-| `generate`, `document`, `extract`, `init` | no | yes | The design commands that write project files. Engine 0.1.18 runs them in the agent's chat, not as engine verbs, so `dev impeccable` reaches them only if a newer engine adds them |
+| `surface-brief` | `read` | `read`, `write` with its target inside the project | Reads or writes the surface brief in `.impeccable/surfaces` |
+| `critique-storage` | `slug`, `trend` | `slug`, `latest`, `trend`, `write`, `close` with its snapshot file inside the project | Keeps critique snapshots in `.impeccable/critique`; `latest` closes a snapshot whose file changed |
+| `comp-spec` | no | yes, with a name as `--crop`, never `--out`, `--out-dir`, or `--spec` | Measures a comp image into `.impeccable/build`; those three flags write where they point |
+| `build-phase` | no | `start` with `--direction` (required) and a name as `--session-id`, `advance`, `record hero`, `scaffold`, `finish` | Runs the gates of a comp-led build in `.impeccable/build`; never `advance --force`, `start --comp`, or `start --reset`, which skip a gate |
+| `generate`, `document`, `extract`, `init` | no | yes, with no other words | The design commands that write project files. Engine 0.1.18 runs them in the agent's chat, not as engine verbs, so `dev impeccable` reaches them only if a newer engine adds them |
 
 - **Each verb counts only as listed:** the first word, spelled as in the table. A verb after `skills` (the engine's
   legacy namespace) or after a second `--`, or in another case, such as `Context`, is not on the list. A helper takes
   only the sub-verbs and flags the skill uses, so `surface-brief path`, `build-phase status`, or
   `live-server --host` is not on it either.
-- **Paths where the engine writes stay in the project.** `--target` and `--file` take a path with no first `/`, `~`,
-  or `-`, no `..` part, and no colon: in a scratch run, `live --target ../other-app/index.html` injected the live
+- **Paths where the engine writes stay in the project.** `--target` and `--file`, the target of
+  `surface-brief write`, and the snapshot file of `critique-storage close` take a path with no first `/`, `~`, or
+  `-`, no `..` part, and no colon: in a scratch run, `live --target ../other-app/index.html` injected the live
   script into that file, and `live-wrap --file ../outside.html` wrapped an element there. Files the engine only
-  reads, such as a comp image or the body of a brief, may be anywhere.
+  reads, such as a comp image or the body of a brief, may be anywhere. `--id`, `--session-id`, and `--crop` take a
+  name (letters, digits, `.`, `_`, and `-`, never `.` or `..` alone), since the engine may name a file after it.
+- **The engine runs in a project checkout.** It counts `--target` and `--file` from the folder it runs in, so a
+  `cd` first could move them anywhere. The guard follows `cd`, `pushd`, and `env -C` and judges both values as
+  writes: a write lane may not point them outside the workspace, into the handoff repository, or outside its
+  step's scope, and the main session asks you first, as for any write outside the workspace. When it runs,
+  `dev impeccable` checks again what the guard can only read as typed: for an agent, the real path of the current
+  folder must be in a git checkout below `~/Development` (not the handoff repository), and each `--target` and
+  `--file`, resolved through its symbolic links, must stay in that checkout.
+- **No value the shell expands.** A path, URL, or port with `$`, a backtick, `{`, `*`, `?`, or `[` is yours: the
+  guard reads the words before the shell expands them, so the engine could get another value. Write the value
+  out in full. This also leaves a `detect` URL with a query (`?`) to you.
 - **Every other verb is the developer's,** in a terminal: `hooks`, `install`, `link`, `update`, `pin`, `unpin`, and
   `doctor --fix` write the agents' settings, hooks, or skill folders, which change what runs in every later session.
   `concept-seed` calls `https://impeccable.style/api/roll` and writes `~/.impeccable/seed-salt`, and
