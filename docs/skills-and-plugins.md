@@ -260,7 +260,9 @@ The guard refuses the same changes from an agent, through `dev ext` or through t
 `claude plugin install|uninstall|enable|disable|update|prune`, `claude plugin marketplace add|remove|update`,
 `claude mcp add|add-json|add-from-claude-desktop|remove|reset-project-choices`, `codex plugin add|remove`,
 `codex plugin marketplace add|upgrade|remove`, and `codex mcp add|remove`. Read-only verbs (`list`, `get`, `details`,
-`validate`) and `--help` stay open, and a verb the guard does not know is refused. devkit itself also refuses
+`validate`) and `--help` stay open, and a verb the guard does not know is refused. For `claude`, a verb after `--`
+still counts (`claude -- plugin install x` installs), and `--help` after `--` is an argument, not help. devkit
+itself also refuses
 `dev ext update --apply` and `dev ext enable|disable --project` outside your terminal.
 
 Whatever changes outside devkit anyway shows as drift: at the session start, in `dev status`, `dev doctor`, and
@@ -275,8 +277,19 @@ Whatever changes outside devkit anyway shows as drift: at the session start, in 
 | `not-in-catalog` | A plugin, MCP server, or skill folder is installed outside devkit's catalog, or a project enables a plugin devkit does not manage | `dev ext add` it, or remove it |
 | `retired` | An entry devkit dropped is still installed | `dev install` removes it |
 
-What ships with the Codex app itself (the `openai-bundled` and `openai-primary-runtime` plugins, and MCP servers it
-runs from its own app bundle) is listed with the layer `agent` and is never drift.
+What ships with the Codex app itself is listed with the layer `agent`, without drift, only when the app vouches for
+it, because agents can write Codex's plugin cache and `config.toml`:
+
+- **An `openai-bundled` plugin** counts when the app bundle holds it
+  (`ChatGPT.app/Contents/Resources/plugins/openai-bundled/plugins/<name>`).
+- **An MCP server** counts when its command, with links and `..` resolved, is a file in the app bundle's
+  `Contents/Resources`, is no interpreter, agent, or package runner (`node`, `python`, `sh`, `codex`, `npx`, …),
+  and its environment loads no other code. Claude Code's MCP servers never count.
+- **An `openai-primary-runtime` plugin** is downloaded by the app, so nothing on disk vouches for it: it counts
+  once `dev install` has recorded it, and `dev install` names what it records for the first time.
+
+`dev install` records all of them in the lock: a plugin's version and file digest, an MCP server's whole table.
+A change after that shows as `changed`; anything else is `not-in-catalog`.
 
 The pins have rules of their own:
 

@@ -37,12 +37,15 @@ All notable changes to devkit. Versions follow CalVer `YY.MM.PATCH` (PATCH resta
   reported the same way.
 - **Agents cannot change your extensions through the vendor CLIs either.** The guard refuses the `claude plugin`,
   `claude plugin marketplace`, `claude mcp`, `codex plugin`, `codex plugin marketplace`, and `codex mcp` verbs that
-  add, remove, switch, or update a plugin, marketplace, or MCP server, in any shell form; `list`, `get`, `details`,
-  and `--help` stay open. `dev ext update --apply` and `dev ext enable|disable --project` also check that you run
+  add, remove, switch, or update a plugin, marketplace, or MCP server, in any shell form, `find -exec` and Claude
+  Code's versioned binary included; for `claude`, a verb after `--` counts too, because Claude Code still runs it.
+  `list`, `get`, `details`, and `--help` stay open; `--help` after `--`, or taken as an option's value, is not help. `dev ext update --apply` and `dev ext enable|disable --project` also check that you run
   them in a terminal, and `--team` after a `--` no longer passes the guard as a team edit.
 - **Drift covers what devkit does not manage.** A plugin, MCP server, or skill folder installed outside the catalog,
-  for Claude Code and Codex, is reported as `not-in-catalog`; what ships with the Codex app is listed but is not
-  drift. A required plugin that is not installed, or that a project turns off in `.claude/settings.json` or
+  for Claude Code and Codex, is reported as `not-in-catalog`. What ships with the Codex app is listed without drift
+  only when the app vouches for it (a bundled plugin the app bundle holds, an MCP server that runs from the bundle
+  and is no interpreter) or `dev install` recorded it (the runtime plugins), and a later change shows as `changed`;
+  a plugin folder named like the app's marketplace or a command path that only starts with the app proves nothing. A required plugin that is not installed, or that a project turns off in `.claude/settings.json` or
   `.claude/settings.local.json`, is reported as `required-off` with the file, and `dev doctor` points to
   `dev config lock`. The lock now keeps a digest of each vendor plugin's files, so a rewritten version or commit
   number no longer hides changed files, and a devkit skill whose folder is not devkit's copy shows as `changed`.
