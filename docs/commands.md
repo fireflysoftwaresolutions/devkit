@@ -325,7 +325,7 @@ Live progress of long agent work, with active time, a critical-path ETA and a pl
 | `dev progress reopen <step> --why "…"` · `dev progress skip <step> --why "…"` | Undoes a wrong close, or skips a step on purpose |
 | `dev progress block "<why>" [--next "<what is needed>"]` | The run is blocked; prints the update and sends a desktop notification |
 | `dev progress done "<outcome>" [--why "…"]` | The run is finished; refused while steps are pending, decisions wait, or an Accountable member has not approved the work they own. `--why` ends it without that approval and records the reason. Records the active time against the estimate and sends a desktop notification |
-| `dev progress history` | Every step change: when, from → to, by whom (Morpheus, a crew member, devkit), why |
+| `dev progress history` | Every step change: when, from → to, by whom (the tech lead (Morpheus), a crew member, devkit), why |
 | `dev progress` | Every run of the last 12 hours on this Mac, and the runs of other machines from their presence |
 | `dev progress time [--days N] [-p PROJECT]` | Same as `dev time` |
 
@@ -333,8 +333,8 @@ Estimates accept `45m`, `1h30m`, `2h`, or a number of minutes. Inside a subagent
 `add` write to that subagent's own lane (the hooks pass its id), never to the main plan; `assign`, `begin`, `reopen`,
 `skip`, `done`, and `start --replace` change the main plan and are refused there. Run them as a command of their
 own: inside `&&`, a pipe, `$(…)`, or a redirect, the guard refuses them. devkit records every shell call with the
-agent that made it, and a command is Morpheus's only when such a call holds it as typed. Morpheus types these
-commands himself too: through a script or another shell, they are refused (see [The crew › Who is
+agent that made it, and a command is the tech lead's (Morpheus's) only when such a call holds it as typed. The tech lead types these
+commands too: through a script or another shell, they are refused (see [The crew › Who is
 calling](crew.md#who-is-calling)).
 
 ### `dev time [--days N] [-p PROJECT]`
@@ -367,7 +367,7 @@ devkit's specialist agents. See [The crew](crew.md).
 | Command | Effect |
 | --- | --- |
 | `dev crew [--json] [--latest]` | The roster, and in a session with a run: who is working now, the steps assigned to each member, open messages and decisions, and the mode. `--latest` reads the most recent running run on this Mac instead of this session's; `--json` prints the roster and the live state |
-| `dev crew graph [--latest] [--mermaid \| --json]` | The live session as one graph, with Morpheus, the run's steps with their state, owner, kind of work, and the steps each waits for; the crew lanes and nested subagents under their steps; the work items the run tracks; decisions waiting for the developer; approvals owed; and open messages. `--latest` draws the most recent running run on this Mac; `--mermaid` prints a Mermaid flowchart that renders on GitHub; `--json` prints the nodes and edges |
+| `dev crew graph [--latest] [--mermaid \| --json]` | The live session as one graph, with the tech lead (Morpheus), the run's steps with their state, owner, kind of work, and the steps each waits for; the crew lanes and nested subagents under their steps; the work items the run tracks; decisions waiting for the developer; approvals owed; and open messages. `--latest` draws the most recent running run on this Mac; `--mermaid` prints a Mermaid flowchart that renders on GitHub; `--json` prints the nodes and edges |
 | `dev crew raci [<work> \| <member> \| "<task>"] [--markdown]` | Who does (R), approves (A), is consulted on (C), and is informed about (I) each kind of work, as one table. With a kind of work, its row; with a member, what they do, approve, and are consulted or informed on; with a task, the kind of work it reads as, and its row. `--markdown` prints the whole matrix as a Markdown table |
 | `dev crew raci <work> --set "R=tank A=seraph C=… I=…" --why "…"` | Changes one row of the RACI for the whole team, recorded in the handoff repository with who and why |
 | `dev crew rules` | Every crew rule, the devkit check that enforces it, and its state (enforced, planned, or guidance). Exits with `1` when a rule's check is missing |
@@ -376,13 +376,13 @@ devkit's specialist agents. See [The crew](crew.md).
 | `dev crew show <name>` | One member: role, personality, when to use it, skills, tools, model tier, keywords |
 | `dev crew brief <name> "<task>" [--scope "<globs>"] [--step <step>] [--activity ID]` | A ready brief for the Agent tool or `spawn_agent`, the exact launch line for Claude Code and Codex, and the `dev progress assign` command that links the lane. `--activity` declares the task's kind of work, which picks the brief's skills, knowledge, and known pitfalls in any language; without it, the member's Responsible kind of work decides |
 | `dev crew route "<task>" [--files a,b]` · `dev crew route --plan [--apply]` | The best members for a task, with scores and reasons; or a member for every unowned plan step |
-| `dev crew delegate "<task>" [--to <name>\|auto] [--scope …] [--after <step>] [--estimate 30m] [--files a,b]` | A step for another member, with who asked; joins a working member's lane, or waits for Morpheus to launch it |
-| `dev crew decline "<step>" --why "…"` | Hands a delegated step back to Morpheus |
+| `dev crew delegate "<task>" [--to <name>\|auto] [--scope …] [--after <step>] [--estimate 30m] [--files a,b]` | A step for another member, with who asked; joins a working member's lane, or waits for the tech lead (Morpheus) to launch it |
+| `dev crew decline "<step>" --why "…"` | Hands a delegated step back to the tech lead (Morpheus) |
 | `dev crew next` | Ready to launch (with the commands), queued until a slot frees, waiting and why, and who is busy |
-| `dev crew next --first <step> --why "…"` | Morpheus launches that step ahead of the order; the reason is recorded and audited. Both options are required |
+| `dev crew next --first <step> --why "…"` | The tech lead (Morpheus) launches that step ahead of the order; the reason is recorded and audited. Both options are required |
 | `dev crew ask "<text>" [--to <name>]` · `dev crew answer <id> "<text>"` · `dev crew inbox` | Messages between members; delivered with the recipient's next action |
 | `dev crew ask --decision "<question>" [--options "A \| B"] [--recommend A] [--irreversible push] [--target v26.11.4] [--approves "api, screens"]` | A decision point: decided at once in auto mode, waits for the developer in guided mode or for irreversible actions. `--target` is what the irreversible action acts on; the developer's answer opens that action on that target once. `--approves` names the finished steps the developer's answer approves, checked against the plan |
-| `dev crew mode [guided\|auto] [--approve "push feat/*, release v26.11.4"]` · `dev crew decide <id> "<answer>"` · `dev crew decisions [--pending] [--ask <id>]` | The mode (`--approve` names each action with its target; publish and deploy never), the developer's answers (recorded by Morpheus only), and every decision with who took it. `--ask <id>` prints the exact question and options to ask with the question tool; only an answer to it, or a typed `approve <id>[: <option>]`, makes the decision the developer's |
+| `dev crew mode [guided\|auto] [--approve "push feat/*, release v26.11.4"]` · `dev crew decide <id> "<answer>"` · `dev crew decisions [--pending] [--ask <id>]` | The mode (`--approve` names each action with its target; publish and deploy never), the developer's answers (recorded by the tech lead (Morpheus) only), and every decision with who took it. `--ask <id>` prints the exact question and options to ask with the question tool; only an answer to it, or a typed `approve <id>[: <option>]`, makes the decision the developer's |
 | `dev crew sync [--check]` | Regenerates the Claude Code agents from `config/crew.json` |
 
 ## Lessons

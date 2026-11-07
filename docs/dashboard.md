@@ -101,8 +101,9 @@ Each step shows its state with a glyph and a word:
 
 A step is **unverified** when its member stopped without a Check ✓ in its report and without a
 `dev progress step --check` of its own, or when a review or read-only member's shell call wrote files. It shows in
-amber on the run card, in the run's drawer, and under **Working now** on the Crew tab. Morpheus settles it: he closes
-it with evidence, or reopens it with `dev progress reopen <step> --why "…"`. It never appears under **Needs you**,
+amber on the run card, in the run's drawer, and under **Working now** on the Crew tab. A review step's ✓ closes the
+unverified work it approves; otherwise the tech lead (Morpheus) settles it: closes it with evidence, or reopens it
+with `dev progress reopen <step> --why "…"`. It never appears under **Needs you**,
 because nothing waits for you.
 
 On a phone the figures sit two by two and the runs stack:
@@ -233,7 +234,7 @@ when, and why), the other `dev task` commands, and the details follow.
 
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="images/dashboard/drawer-1440-dark.webp">
-  <img src="images/dashboard/drawer-1440-light.webp" alt="A task's drawer over a project page: the task Export invoices as CSV, doing, in Now; who has it (you, with Claude Code, and the Tech lead Morpheus working on it in a run), what blocks it (your answer to D1), what's next with the dev task done command to copy; the run, branch, pull request, CI result, and plan it is connected to, each with how it was found; the description, the Done when checklist, the history, and an amber Copy: Mark done button in the footer." width="100%">
+  <img src="images/dashboard/drawer-1440-light.webp" alt="A task's drawer over a project page: the task Export invoices as CSV, doing, in Now; who has it (you, with Claude Code, and the tech lead (Morpheus) working on it in a run), what blocks it (your answer to D1), what's next with the dev task done command to copy; the run, branch, pull request, CI result, and plan it is connected to, each with how it was found; the description, the Done when checklist, the history, and an amber Copy: Mark done button in the footer." width="100%">
 </picture>
 
 A drawer says what state its data is in. It reads _Loading_ while the details arrive, _no longer exists_ when the record is

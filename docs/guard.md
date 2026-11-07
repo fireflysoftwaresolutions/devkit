@@ -371,7 +371,11 @@ DEVKIT_LOCAL_CI_PASSED=1.
 
 - A command the tokenizer cannot parse (for example unbalanced quotes) is allowed; only the attribution check runs on
   its raw text.
-- Any exception in the guard is logged to `~/.local/state/devkit/logs/hooks.log` and the call is allowed.
+- Most exceptions in the guard are logged to `~/.local/state/devkit/logs/hooks.log` and the call is allowed. These
+  checks fail closed instead, because letting the call through would defeat them: a crew member's shell command that
+  the lane check cannot read or judge; an irreversible action, in enforce, when the gate itself fails and the text
+  looks irreversible; the MCP gate; and the developer-only actions (lifting an embargo, `dev backup --public`,
+  `dev backup policy`).
 - Every deny and ask is logged there too, and written to the audit trail (`dev audit --action guard`), so you can
   review what was blocked.
 

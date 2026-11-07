@@ -1,51 +1,51 @@
-<svg xmlns="http://www.w3.org/2000/svg" width="1096" height="824" viewBox="0 0 1096 824" role="img" aria-labelledby="dk-title dk-desc">
-<title id="dk-title">How Morpheus leads the crew</title>
-<desc id="dk-desc">The developer gives Morpheus, the main session, a goal. Morpheus plans the steps with their dependencies and briefs crew members, each in its own lane with its own files, up to the slot limit (four by default). Members send questions and decisions back to Morpheus, who asks the developer the decisions that are theirs. At SubagentStop, devkit checks each report before it reaches Morpheus: the member's status block, its recorded step, and the crew gates. After the push, CI watch follows the run and sends a failure's diagnosis to Morpheus, who hands the fix to Link.</desc>
-<rect width="1096" height="824" fill="#F3F1EB"/>
+<svg xmlns="http://www.w3.org/2000/svg" width="1232" height="824" viewBox="0 0 1232 824" role="img" aria-labelledby="dk-title dk-desc">
+<title id="dk-title">How the tech lead (Morpheus) leads the crew</title>
+<desc id="dk-desc">The developer gives the tech lead (Morpheus), the main session, a goal. The tech lead plans the steps with their dependencies and briefs crew members, each in its own lane with its own files, up to the slot limit (four by default, lower when usage is high). Members send questions and decisions back to the tech lead, who asks the developer the decisions that are theirs. At SubagentStop, devkit checks each report before it reaches the tech lead: the member's status block, its recorded step, and the crew gates. After the push, CI watch follows the run and sends a failure's diagnosis to the tech lead, who hands the fix to the Release engineer (Link).</desc>
+<rect width="1232" height="824" fill="#F3F1EB"/>
 <g font-family="Manrope, 'Manrope Variable', system-ui, -apple-system, 'Segoe UI', Arial, sans-serif">
 <circle cx="68" cy="74" r="4" fill="#FFB34A"/>
-<text x="80" y="78.5" font-size="12" font-weight="600" fill="#62645B" letter-spacing="0.48">HOW MORPHEUS LEADS THE CREW</text>
-<g transform="translate(209.4,100.0)">
-<rect x="-32.0" y="320.0" width="848.0" height="160.0" rx="12" fill="#EAE7DF" stroke="#D8D4CA" stroke-width="1"/>
-<text x="-16.0" y="344.0" font-size="12" font-weight="600" fill="#62645B" text-anchor="start" letter-spacing="0.48">LANES · OWN TIME AND FILES · SLOT LIMIT</text>
-<path d="M368.0,99.5 L368.0,152.5" fill="none" stroke="#62645B" stroke-width="1.5" stroke-linejoin="round" stroke-linecap="round"/><polygon points="368.0,160.0 364.0,152.0 372.0,152.0" fill="#62645B"/><polygon points="368.0,92.0 372.0,100.0 364.0,100.0" fill="#62645B"/>
-<rect x="313.1" y="114.0" width="109.8" height="24.0" rx="11.0" fill="#F3F1EB"/>
-<text x="368.0" y="130.0" font-size="13" font-weight="400" fill="#62645B" text-anchor="middle">goal · decisions</text>
-<path d="M368.0,247.5 L368.0,312.5" fill="none" stroke="#62645B" stroke-width="1.5" stroke-linejoin="round" stroke-linecap="round"/><polygon points="368.0,320.0 364.0,312.0 372.0,312.0" fill="#62645B"/><polygon points="368.0,240.0 372.0,248.0 364.0,248.0" fill="#62645B"/>
-<rect x="312.0" y="268.0" width="112.1" height="24.0" rx="11.0" fill="#F3F1EB"/>
-<text x="368.0" y="284.0" font-size="13" font-weight="400" fill="#62645B" text-anchor="middle">brief · questions</text>
-<path d="M368.0,480.0 L368.0,568.5" fill="none" stroke="#62645B" stroke-width="1.5" stroke-linejoin="round" stroke-linecap="round"/><polygon points="368.0,576.0 364.0,568.0 372.0,568.0" fill="#62645B"/>
-<rect x="342.2" y="516.0" width="51.6" height="24.0" rx="11.0" fill="#F3F1EB"/>
-<text x="368.0" y="532.0" font-size="13" font-weight="400" fill="#62645B" text-anchor="middle">report</text>
-<path d="M268.0,616.0 L-80.4,616.0 Q-92.4,616.0 -92.4,604.0 L-92.4,212.0 Q-92.4,200.0 -80.4,200.0 L260.5,200.0" fill="none" stroke="#62645B" stroke-width="1.5" stroke-linejoin="round" stroke-dasharray="6 5" stroke-linecap="butt"/><polygon points="268.0,200.0 260.0,204.0 260.0,196.0" fill="#62645B"/>
-<rect x="-145.4" y="396.0" width="105.9" height="24.0" rx="11.0" fill="#F3F1EB"/>
-<text x="-92.4" y="412.0" font-size="13" font-weight="400" fill="#62645B" text-anchor="middle">checked report</text>
-<path d="M468.0,200.0 L588.5,200.0" fill="none" stroke="#62645B" stroke-width="1.5" stroke-linejoin="round" stroke-linecap="round"/><polygon points="596.0,200.0 588.0,204.0 588.0,196.0" fill="#62645B"/>
-<rect x="492.6" y="188.0" width="78.7" height="24.0" rx="11.0" fill="#F3F1EB"/>
-<text x="532.0" y="204.0" font-size="13" font-weight="400" fill="#62645B" text-anchor="middle">push once</text>
-<path d="M696.0,240.0 L696.0,360.5" fill="none" stroke="#62645B" stroke-width="1.5" stroke-linejoin="round" stroke-dasharray="6 5" stroke-linecap="butt"/><polygon points="696.0,368.0 692.0,360.0 700.0,360.0" fill="#62645B"/>
-<rect x="624.9" y="292.0" width="142.3" height="24.0" rx="11.0" fill="#F3F1EB"/>
-<text x="696.0" y="308.0" font-size="13" font-weight="400" fill="#62645B" text-anchor="middle">failure, via Morpheus</text>
-<circle cx="368.0" cy="16.0" r="9" fill="#FFFFFF" stroke="#62645B" stroke-width="1.5"/><path d="M351.0,44.0 Q351.0,28.0 368.0,28.0 Q385.0,28.0 385.0,44.0 Z" fill="#FFFFFF" stroke="#62645B" stroke-width="1.5"/>
-<text x="368.0" y="70.0" font-size="16" font-weight="600" fill="#272820" text-anchor="middle">Developer</text>
-<rect x="268.0" y="160.0" width="200.0" height="80.0" rx="6.0" fill="#FFB34A" stroke="#F0A33C" stroke-width="2"/>
-<text x="368.0" y="194.0" font-size="16" font-weight="600" fill="#272820" text-anchor="middle">Morpheus</text>
-<text x="368.0" y="216.0" font-size="13" font-weight="400" fill="#272820" text-anchor="middle">plan with dependencies</text>
-<rect x="596.0" y="160.0" width="200.0" height="80.0" rx="6.0" fill="#DBDBCF" stroke="#7A8460" stroke-width="1.5"/>
-<text x="696.0" y="194.0" font-size="16" font-weight="600" fill="#272820" text-anchor="middle">CI watch</text>
-<text x="696.0" y="216.0" font-size="13" font-weight="400" fill="#4A5040" text-anchor="middle">first error · class · action</text>
-<rect x="-4.0" y="368.0" width="200.0" height="80.0" rx="6.0" fill="#FFFFFF" stroke="#BFB8AB" stroke-width="1.5"/>
-<text x="96.0" y="402.0" font-size="16" font-weight="600" fill="#272820" text-anchor="middle">Tank</text>
-<text x="96.0" y="424.0" font-size="13" font-weight="400" fill="#62645B" text-anchor="middle">services/**</text>
-<rect x="268.0" y="368.0" width="200.0" height="80.0" rx="6.0" fill="#FFFFFF" stroke="#BFB8AB" stroke-width="1.5"/>
-<text x="368.0" y="402.0" font-size="16" font-weight="600" fill="#272820" text-anchor="middle">Trinity</text>
-<text x="368.0" y="424.0" font-size="13" font-weight="400" fill="#62645B" text-anchor="middle">web/**</text>
-<rect x="596.0" y="368.0" width="200.0" height="80.0" rx="6.0" fill="#FFFFFF" stroke="#BFB8AB" stroke-width="1.5"/>
-<text x="696.0" y="402.0" font-size="16" font-weight="600" fill="#272820" text-anchor="middle">Link</text>
-<text x="696.0" y="424.0" font-size="13" font-weight="400" fill="#62645B" text-anchor="middle">.github/workflows/**</text>
-<rect x="268.0" y="576.0" width="200.0" height="80.0" rx="6.0" fill="#DBDBCF" stroke="#7A8460" stroke-width="1.5"/>
-<text x="368.0" y="610.0" font-size="16" font-weight="600" fill="#272820" text-anchor="middle">Crew checks</text>
-<text x="368.0" y="632.0" font-size="13" font-weight="400" fill="#4A5040" text-anchor="middle">status block · step · gates</text>
+<text x="80" y="78.5" font-size="12" font-weight="600" fill="#62645B" letter-spacing="0.48">HOW THE TECH LEAD (MORPHEUS) LEADS THE CREW</text>
+<g transform="translate(176.0,100.0)">
+<rect x="-24.0" y="320.0" width="1016.0" height="160.0" rx="12" fill="#EAE7DF" stroke="#D8D4CA" stroke-width="1"/>
+<text x="-8.0" y="344.0" font-size="12" font-weight="600" fill="#62645B" text-anchor="start" letter-spacing="0.48">LANES · OWN TIME AND FILES · SLOT LIMIT</text>
+<path d="M448.0,99.5 L448.0,152.5" fill="none" stroke="#62645B" stroke-width="1.5" stroke-linejoin="round" stroke-linecap="round"/><polygon points="448.0,160.0 444.0,152.0 452.0,152.0" fill="#62645B"/><polygon points="448.0,92.0 452.0,100.0 444.0,100.0" fill="#62645B"/>
+<rect x="393.1" y="114.0" width="109.8" height="24.0" rx="11.0" fill="#F3F1EB"/>
+<text x="448.0" y="130.0" font-size="13" font-weight="400" fill="#62645B" text-anchor="middle">goal · decisions</text>
+<path d="M448.0,247.5 L448.0,312.5" fill="none" stroke="#62645B" stroke-width="1.5" stroke-linejoin="round" stroke-linecap="round"/><polygon points="448.0,320.0 444.0,312.0 452.0,312.0" fill="#62645B"/><polygon points="448.0,240.0 452.0,248.0 444.0,248.0" fill="#62645B"/>
+<rect x="392.0" y="268.0" width="112.1" height="24.0" rx="11.0" fill="#F3F1EB"/>
+<text x="448.0" y="284.0" font-size="13" font-weight="400" fill="#62645B" text-anchor="middle">brief · questions</text>
+<path d="M448.0,480.0 L448.0,568.5" fill="none" stroke="#62645B" stroke-width="1.5" stroke-linejoin="round" stroke-linecap="round"/><polygon points="448.0,576.0 444.0,568.0 452.0,568.0" fill="#62645B"/>
+<rect x="422.2" y="516.0" width="51.6" height="24.0" rx="11.0" fill="#F3F1EB"/>
+<text x="448.0" y="532.0" font-size="13" font-weight="400" fill="#62645B" text-anchor="middle">report</text>
+<path d="M320.0,616.0 L-100.0,616.0 Q-112.0,616.0 -112.0,604.0 L-112.0,212.0 Q-112.0,200.0 -100.0,200.0 L312.5,200.0" fill="none" stroke="#62645B" stroke-width="1.5" stroke-linejoin="round" stroke-dasharray="6 5" stroke-linecap="butt"/><polygon points="320.0,200.0 312.0,204.0 312.0,196.0" fill="#62645B"/>
+<rect x="51.0" y="604.0" width="105.9" height="24.0" rx="11.0" fill="#F3F1EB"/>
+<text x="104.0" y="620.0" font-size="13" font-weight="400" fill="#62645B" text-anchor="middle">checked report</text>
+<path d="M576.0,200.0 L704.5,200.0" fill="none" stroke="#62645B" stroke-width="1.5" stroke-linejoin="round" stroke-linecap="round"/><polygon points="712.0,200.0 704.0,204.0 704.0,196.0" fill="#62645B"/>
+<rect x="604.6" y="188.0" width="78.7" height="24.0" rx="11.0" fill="#F3F1EB"/>
+<text x="644.0" y="204.0" font-size="13" font-weight="400" fill="#62645B" text-anchor="middle">push once</text>
+<path d="M840.0,240.0 L840.0,360.5" fill="none" stroke="#62645B" stroke-width="1.5" stroke-linejoin="round" stroke-dasharray="6 5" stroke-linecap="butt"/><polygon points="840.0,368.0 836.0,360.0 844.0,360.0" fill="#62645B"/>
+<rect x="768.9" y="292.0" width="142.3" height="24.0" rx="11.0" fill="#F3F1EB"/>
+<text x="840.0" y="308.0" font-size="13" font-weight="400" fill="#62645B" text-anchor="middle">failure, via Morpheus</text>
+<circle cx="448.0" cy="16.0" r="9" fill="#FFFFFF" stroke="#62645B" stroke-width="1.5"/><path d="M431.0,44.0 Q431.0,28.0 448.0,28.0 Q465.0,28.0 465.0,44.0 Z" fill="#FFFFFF" stroke="#62645B" stroke-width="1.5"/>
+<text x="448.0" y="70.0" font-size="16" font-weight="600" fill="#272820" text-anchor="middle">Developer</text>
+<rect x="320.0" y="160.0" width="256.0" height="80.0" rx="6.0" fill="#FFB34A" stroke="#F0A33C" stroke-width="2"/>
+<text x="448.0" y="194.0" font-size="16" font-weight="600" fill="#272820" text-anchor="middle">Tech lead (Morpheus)</text>
+<text x="448.0" y="216.0" font-size="13" font-weight="400" fill="#272820" text-anchor="middle">plan with dependencies</text>
+<rect x="712.0" y="160.0" width="256.0" height="80.0" rx="6.0" fill="#DBDBCF" stroke="#7A8460" stroke-width="1.5"/>
+<text x="840.0" y="194.0" font-size="16" font-weight="600" fill="#272820" text-anchor="middle">CI watch</text>
+<text x="840.0" y="216.0" font-size="13" font-weight="400" fill="#4A5040" text-anchor="middle">first error · class · action</text>
+<rect x="0.0" y="368.0" width="256.0" height="80.0" rx="6.0" fill="#FFFFFF" stroke="#BFB8AB" stroke-width="1.5"/>
+<text x="128.0" y="402.0" font-size="16" font-weight="600" fill="#272820" text-anchor="middle">Backend engineer (Tank)</text>
+<text x="128.0" y="424.0" font-size="13" font-weight="400" fill="#62645B" text-anchor="middle">services/**</text>
+<rect x="320.0" y="368.0" width="256.0" height="80.0" rx="6.0" fill="#FFFFFF" stroke="#BFB8AB" stroke-width="1.5"/>
+<text x="448.0" y="402.0" font-size="16" font-weight="600" fill="#272820" text-anchor="middle">Frontend engineer (Trinity)</text>
+<text x="448.0" y="424.0" font-size="13" font-weight="400" fill="#62645B" text-anchor="middle">web/**</text>
+<rect x="712.0" y="368.0" width="256.0" height="80.0" rx="6.0" fill="#FFFFFF" stroke="#BFB8AB" stroke-width="1.5"/>
+<text x="840.0" y="402.0" font-size="16" font-weight="600" fill="#272820" text-anchor="middle">Release engineer (Link)</text>
+<text x="840.0" y="424.0" font-size="13" font-weight="400" fill="#62645B" text-anchor="middle">.github/workflows/**</text>
+<rect x="320.0" y="576.0" width="256.0" height="80.0" rx="6.0" fill="#DBDBCF" stroke="#7A8460" stroke-width="1.5"/>
+<text x="448.0" y="610.0" font-size="16" font-weight="600" fill="#272820" text-anchor="middle">Crew checks</text>
+<text x="448.0" y="632.0" font-size="13" font-weight="400" fill="#4A5040" text-anchor="middle">status block · step · gates</text>
 </g>
 </g>
 </svg>
