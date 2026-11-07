@@ -505,7 +505,7 @@ def _handoff_state(agent: str, data: dict, sess: dict, now=None):
 def _handoff_nudge(agent: str, data: dict, sess: dict, now=None):
     """End of a development turn: the commits made since the handoff note last really changed send the turn back
     only when it matters (R3): handoff.block_after_commits of them (5), the oldest older than
-    handoff.block_after_minutes (60), or a milestone since the note changed (the end of the run, a work item closed, a
+    handoff.block_after_minutes (60), or a milestone after one of them (the end of the run, a work item closed, a
     push, a PR, a release). Below that, the reminder before the end said it (turn_checklist). Never for a member, and
     the Stop hook skips it while members work. The check re-arms after each update of the note."""
     if data.get("stop_hook_active"):
@@ -517,13 +517,17 @@ def _handoff_nudge(agent: str, data: dict, sess: dict, now=None):
     pid, stale, changed = st
     commits, minutes = _handoff_limits()
     oldest = min(ts for _, ts in stale)
-    milestone = next((w for ts, w in reversed(sess.get("milestones") or []) if ts > changed), None)
+    # a milestone makes the note due for the commits made before it (so it also came after the note changed); one
+    # that came before every unrecorded commit found the note current
+    mts, milestone = next(((ts, w) for ts, w in reversed(sess.get("milestones") or []) if ts >= oldest), (0, None))
     if len(stale) >= commits:
         why = ""
     elif now - oldest >= minutes * 60:
         why = f" The oldest is {int((now - oldest) // 60)} minutes old."
     elif milestone:
-        why = f" They come before a milestone: after `{milestone}` the note is due."
+        before = sum(1 for _, ts in stale if ts <= mts)
+        who = "They come" if before == len(stale) else f"{before} of them come{'s' if before == 1 else ''}"
+        why = f" {who} before a milestone: after `{milestone}` the note is due."
     else:
         return None
     from . import work

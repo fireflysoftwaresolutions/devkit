@@ -143,6 +143,18 @@ class HandoffGateTests(TurnCase):
         self.sess["milestones"].append([int(self.now) - 30, "dev progress done"])
         self.assertIn("after `dev progress done`", self.nudge())
 
+    def test_r3_a_milestone_counts_only_for_the_commits_made_before_it(self):
+        # the push came after the note and before every unrecorded commit: the note was current at the push, so the
+        # commit made since is reminded, not sent back as if it came before the push
+        self.commits(1)
+        self.sess["milestones"] = [[int(self.now) - 600, "dev push"]]
+        self.assertIsNone(self.nudge())
+        # two commits before a later push and one after it: the message counts the ones the push came after
+        self.sess["milestones"].append([int(self.now) - 60, "dev push"])
+        commit(self.repo, "feat: late part", int(self.now) - 30, email=EMAIL)
+        self.assertIn("devkit: 2 commit(s) in acme/api are newer than its handoff note. 1 of them comes before a "
+                      "milestone: after `dev push` the note is due.", self.nudge())
+
     def test_r3_a_member_never_gets_the_handoff_gate(self):
         self.commits(5)
         self.assertIsNone(self.nudge(agent_id="a-tank"))
