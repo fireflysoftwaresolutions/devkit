@@ -2876,6 +2876,24 @@ class _Shell:
                 bad = _forged(_code_env_sets(code, name))
                 if bad:
                     return deny(forged_env_reason(bad, f"the devkit command this {name} program runs"))
+            return self.program_lines(name, code, cwd)
+        return None
+
+    def program_lines(self, name, code, cwd):
+        """The command lines an interpreter's program may hand to a shell or a process (_code_texts: os.system,
+        subprocess with a string or shell=True, child_process.exec, Ruby's system and backticks, Perl's system, …),
+        judged by the rules of a typed line, with the variables the program sets in its environment as exported:
+        `os.system('HOME=/x dev status')` is refused as `HOME=/x dev status` is. A Python program that starts
+        processes only with argument lists (_py_argv_only) hands no string to a shell, so only its lists count there:
+        a string it holds is at most one argument word. A string the tokenizer cannot read is left to
+        code_session_refusal, which refuses one that names a command it judges."""
+        if not code:
+            return None
+        env = _code_env_sets(code, name)
+        for text in _code_texts(code, name, lists_only=_py_argv_only(code, name)):
+            v = self.nested(text, cwd, names=env, typed=False)
+            if v:
+                return v
         return None
 
     def segment(self, name, argv, assigns, cwd, names=()):
@@ -4958,7 +4976,9 @@ class _ScratchShell(_Shell):
         self.member = member
 
     def child(self, text, cwd, names=()):
-        return _ScratchShell(text, cwd, self.member, self.depth + 1)
+        inner = _ScratchShell(text, cwd, self.member, self.depth + 1)
+        inner.exported = self.exported | set(names)  # what the parent or the program exports reaches the nested line
+        return inner
 
     def target(self, t, cwd, verb="write", holds=False, track=True):
         p = resolve(t, cwd)
@@ -7426,12 +7446,13 @@ def _opaque_actions(name, argv, cwd) -> list:
     return out
 
 
-def _code_texts(code, name="") -> list:
+def _code_texts(code, name="", lists_only=False) -> list:
     """The command lines an interpreter's program may hand to a shell or a process: its string literals and its lists
-    of string literals, when the program can start a process at all (or call a function it names at run time)."""
+    of string literals, when the program can start a process at all (or call a function it names at run time).
+    `lists_only`: only the lists, each written as the command line it runs."""
     if not _code_spawns(code, name):
         return []
-    texts = [next((g for g in m.groups() if g is not None), "") for m in _STR_LIT.finditer(code)]
+    texts = [] if lists_only else [next((g for g in m.groups() if g is not None), "") for m in _STR_LIT.finditer(code)]
     for m in [*_LIST_LIT.finditer(code), *_BARE_LIST.finditer(code), *_CALL_LIST.finditer(code)]:
         items = re.findall(r"'([^'\n]*)'|\"([^\"\n]*)\"", m.group(1))
         texts.append(" ".join(shlex.quote(a or b) for a, b in items))

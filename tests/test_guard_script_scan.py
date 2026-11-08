@@ -79,6 +79,37 @@ class ProgramScan(unittest.TestCase):
             with self.subTest(body=body):
                 self.assertIn("sets", self.main(self.script("env.py", body)) or "")
 
+    def test_a_shell_line_a_program_runs_is_judged_as_the_typed_line(self):
+        # `HOME=/tmp/x dev status` typed is refused; handed to a shell by a program it was allowed. Each twin runs the
+        # same way without the forged variable and stays allowed.
+        forged = (
+            "python3 -c \"import subprocess; subprocess.run('HOME=/tmp/x dev status', shell=True)\"",
+            "python3 -c \"import os; os.system('HOME=/tmp/x dev status')\"",
+            "python3 -c \"import os; os.popen('HOME=/tmp/x dev status').read()\"",
+            "python3 -c \"import os; os.system('export HOME=/tmp/x; dev status')\"",
+            "python3 -c \"import os; os.environ['HOME'] = '/tmp/x'; os.system('cd /tmp && dev status')\"",
+            "node -e \"require('child_process').execSync('HOME=/tmp/x dev status')\"",
+            "node -e \"require('child_process').exec('DEV_ROOT=/tmp/x dev status')\"",
+            "ruby -e 'system(\"HOME=/tmp/x dev status\")'",
+            "ruby -e '" + TICK + "HOME=/tmp/x dev status" + TICK + "'",
+            "perl -e 'system(\"HOME=/tmp/x dev status\")'")
+        for cmd in forged:
+            with self.subTest(cmd=cmd):
+                self.assertIn("sets", self.main(cmd) or "")
+                self.assertIn("sets", self.member(cmd) or "")
+            twin = cmd.replace("HOME=/tmp/x ", "").replace("DEV_ROOT=/tmp/x ", "").replace(
+                "export HOME=/tmp/x; ", "").replace("os.environ['HOME'] = '/tmp/x'; ", "")
+            with self.subTest(twin=twin):
+                self.assertIsNone(self.main(twin))
+                self.assertIsNone(self.member(twin))
+        # a program that starts processes only with argument lists hands no string to a shell: the line it holds is
+        # data (a probe's table of commands), while the same words as its argument list run and are refused
+        data = 'import subprocess\nCASES = ["HOME=/tmp/x dev status"]\nsubprocess.run(["git", "status"])\n'
+        self.assertIsNone(self.main(self.script("probe.py", data)))
+        self.assertIsNone(self.member(self.script("probe.py", data)))
+        listed = 'import subprocess\nsubprocess.run(["env", "HOME=/tmp/x", "dev", "status"])\n'
+        self.assertIn("sets", self.main(self.script("run.py", listed)) or "")
+
 
 if __name__ == "__main__":
     unittest.main()

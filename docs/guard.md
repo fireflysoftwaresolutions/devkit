@@ -420,6 +420,12 @@ A Python variable named `HOME`, `DEV_ROOT`, or `DEVKIT_*` (`HOME = Path.home()`)
 does not count as setting devkit's environment. `os.environ["HOME"] = …`, `putenv`, an `env={"HOME": …}` dictionary,
 and `dict(os.environ, HOME=…)` still do.
 
+A command line a program hands to a shell or a process (`subprocess.run('…', shell=True)`, `os.system`, `os.popen`,
+Node's `child_process.exec` and `execSync`, Ruby's `system` and backticks, Perl's `system`) is judged by the rules of
+the same line typed in the shell, with the variables the program sets in its own environment counted as set:
+`os.system('HOME=/tmp/x dev status')` is refused as `HOME=/tmp/x dev status` is, and so is `os.environ["HOME"] = …`
+followed by `os.system('cd /tmp && dev status')`.
+
 A pager is a command too: `git -c core.pager=…`, `-c pager.<command>=…`, `GIT_PAGER`, and `PAGER` for git, and
 `GH_PAGER` and `PAGER` for gh, are classified as the command they name, and so are `core.editor`,
 `sequence.editor`, `core.fsmonitor`, and `core.sshCommand` set with `-c` or a `GIT_CONFIG_KEY_<n>` pair on the
