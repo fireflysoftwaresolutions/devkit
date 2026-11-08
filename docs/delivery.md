@@ -214,13 +214,17 @@ release branch name when the project uses CalVer.
 
 After every push, PR, merge or release, devkit follows the run in the background (`dev ci watch`) and tells the
 session how it ended at the session's next hook. A hook runs only when the session does something, so that watch
-wakes no idle agent. **An agent that waits on the run arms a watch that wakes it, in the same turn, and names its
-task id in its reply.** In Claude Code it runs `dev ci watch --wait` as a Monitor or a background command; in Codex,
-which has no background wake-up, it runs it in the foreground with a timeout. A watch that ends before its run (exit
-3) is re-armed with the command `dev ci watches` prints. The Stop hook sends back a turn that sent work to origin and
-left its unfinished run with nothing that wakes the agent.
+wakes no idle agent. **An agent that waits on the run arms a wait that wakes it, in the same turn, and names its
+task id in its reply.** CI is one source of the one wait for every devkit event, `dev watch --wait`: the background
+watch's result reaches the agent through it, together with its crew's questions and decisions (see
+[Progress and communication › Waiting and waking](progress-and-communication.md#waiting-and-waking)). To follow one
+run job by job, the agent arms `dev ci watch --wait` instead: in Claude Code as a Monitor or a background command; in
+Codex, which has no background wake-up, in the foreground with a timeout. A wait that ends before its run (exit 3) is
+armed again with the command `dev watches` or `dev ci watches` prints. The Stop hook sends back a turn that sent work
+to origin and left its unfinished run with nothing that wakes the agent.
 
 ```bash
+dev watch --wait                      # every devkit event, the CI result included (Claude Code: in the background)
 dev ci watch --wait --pr <n>          # a PR's head, or its merge commit once merged
 dev ci watch --wait --tag v26.11.4    # a release tag
 dev ci watches                        # live watches, and expired ones with the command to re-arm each

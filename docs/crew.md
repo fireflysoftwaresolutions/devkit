@@ -116,7 +116,10 @@ short version:
    `dev crew owner` reads it), decisions waiting for the developer, approvals owed, and open messages. Outside a
    project, or with `--global`, it draws every live session on this Mac. Answer
    questions as they come (`dev crew answer M2 "…"`), and keep the developer informed with `dev progress step`, whose
-   update shows every lane.
+   update shows every lane. Before ending a turn while members work, arm `dev watch --wait`: it wakes the idle tech
+   lead for their questions, decisions for the developer, steps that become ready, members that stop or are lost,
+   and CI results (see
+   [Progress and communication › Waiting and waking](progress-and-communication.md#waiting-and-waking)).
 
 5. **Check and integrate** each member's work, then run the full suite once (`dev ci --run`).
 
@@ -227,7 +230,10 @@ The crew shares a number of slots, and a launch that does not fit is refused wit
   Lookup scout (Sparks) nothing (`progress.slot_weights`). Members' helpers count, and so does a member that works
   again after its lane ended: over the limit, it reads only until a slot frees.
 - **The reserve.** `progress.reserve` (1) keeps a slot for what you ask while the crew works: plan steps queued in an
-  earlier turn do not take it, and a launch for your request in the current turn does (`crew.reserve`).
+  earlier turn do not take it, and a launch for your request in the current turn does (`crew.reserve`). A message
+  you type while the tech lead works counts as your latest request too. Claude Code runs no prompt hook for it, so
+  devkit reads it from the transcript at the next tool call. It moves the request clock only, never counts as an
+  approval or a grant.
 - **The order.** `dev crew next` lists the ready steps in the order to launch them: the longest critical path first,
   then your latest request, then the oldest. It records that order, and a launch out of it needs
   `dev crew next --first "<step>" --why "…"`.
@@ -311,7 +317,14 @@ dev crew ask "Should the export include voided invoices?"           # to the tec
 dev crew ask --to Seraph "Please look at the rounding in total()"   # to another member
 dev crew answer M3 "No: only issued and paid ones"
 dev crew inbox
+dev watch --wait --for me --timeout 9                               # a member blocked on the answer, in the foreground
 ```
+
+A member keeps working on what does not need the answer. When it is blocked, it waits for the answer with
+`dev watch --wait --for me --timeout 9`, in the foreground and as a command of its own, so the wait takes its own
+messages and never the tech lead's; with no answer, it ends with the question under "Needs from the tech lead." The
+tech lead's idle session wakes for the question through its own `dev watch --wait` (see
+[Progress and communication › Waiting and waking](progress-and-communication.md#waiting-and-waking)).
 
 A message reaches its recipient with the recipient's next action (the PostToolUse hook adds it to the context), or
 with the main session's next prompt. A message to a member who has not started yet, or whose lane ended or went
@@ -331,6 +344,12 @@ Each message has a kind, and only a question waits:
 
 `dev status` and the dashboard list the questions to the tech lead that nobody answered, each with its
 `dev crew answer` command; a notice or an answer is never listed as open.
+
+On Claude Code, a `SendMessage` from the tech lead to the member who asked answers that member's open questions to
+the tech lead: devkit marks each answered via SendMessage, keeps the text as the answer, and records
+`crew.message-answered`. Codex's `send_input` does not, so answer there with `dev crew answer` before you resume the
+member. A question whose member ended and holds no running or blocked step is **moot**: nobody waits for it, it is
+never listed as open and wakes nobody, and `dev watch` shows it as moot with the reason.
 
 Message ids are numbered per run, so two runs of one project can both hold an `M3`. Where a run's message or
 decision is shown to anyone but that run's own session and members, its id carries the run's session: `M3@9448c4d0`,
@@ -612,6 +631,8 @@ dashboard and the handoff read, and devkit's audit trail (`dev audit`), publishe
 | `crew.decision`, `crew.decided`, `crew.mode` | a decision point, its answer (and by whom), a change of mode |
 | `crew.withdrawn`, `crew.decision-closed` | the tech lead withdrew a decision, or its run ended or was replaced, each with the reason |
 | `crew.message-closed` | a question that still waited for an answer closed because its run ended or was replaced, with the reason (never its text) |
+| `crew.message-answered`, `crew.message-moot` | a question answered via SendMessage (with the channel), or one nobody waits on any more because its member ended and holds no open step (with the reason) |
+| `watch.wake` | a `dev watch --wait` woke its agent: the kinds of events, how many, and the time from the oldest event to the wake |
 | `scope.write` | a file a read-only member's shell call changed, counted for whoever's own edit call touched it during that call, otherwise flagged for the read-only member |
 | `crew.delegate`, `crew.decline` | work handed to another member, or handed back |
 | `raci.override` | a step assigned to a member the RACI does not make Responsible, with the reason |

@@ -85,7 +85,7 @@ nothing falls between them.
 | Review and PR | `/code-review`, `dev pr create` with the PR template | `communicating` | [Git and GitHub › Pull requests](git-and-github.md#pull-requests) |
 | Integrate | one `release/<version>` or `integration/<topic>` branch, `dev push` | `delivery` | [Delivery](delivery.md) |
 | Release | `dev pr merge`, `dev release`, `dev delivery` | `release-policy` | [Git and GitHub › Releases](git-and-github.md#releases) |
-| CI status | `dev ci watch`, `dev ci watch --wait`, `dev ci status --watch`, `dev ci audit` | `cicd`, `communicating` | [CI/CD pipelines](ci-cd.md) |
+| CI status | `dev ci watch`, `dev ci watch --wait`, `dev watch --wait`, `dev ci status --watch`, `dev ci audit` | `cicd`, `wait-and-wake`, `communicating` | [CI/CD pipelines](ci-cd.md) |
 | Deploy | a tag and its pipeline (GitOps) | `delivery` | [Delivery](delivery.md) |
 | Handoff | `dev handoff --log`, `dev lesson add` | `handoff`, `learning-loop` | [Concepts › Handoff notes](#handoff-notes), [Lessons](lessons.md) |
 
