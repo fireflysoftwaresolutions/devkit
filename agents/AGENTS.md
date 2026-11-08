@@ -392,7 +392,8 @@ Follow the devkit `backend` skill for the detailed checklists. Always:
   instructions → `docs`, pushes → `delivery`, releases → `release-policy`, and so on. devkit names the skills for the
   files you change; load them before you start. Briefs for Claude subagents get them appended. A turn that changed
   matching files or ran matching commands (`git push`, `dev release`, `dev lesson add`, `pytest`…) without loading
-  them is sent back once to load them and review the work. Put the skills in every brief you write.
+  them is sent back once to load them and review the work. Put the skills in every brief you write, and never call
+  one the crew gates check optional (`dev crew brief` lists those first).
 - **Working efficiently and communicating:** `working-efficiently` (models, effort, subagents, tokens),
   `communicating` (updates, decisions, PRs, handovers, formats), `using-devkit` (which `dev` command for which job),
   `work-state` (keeping items, runs, lanes, decisions, CI watches and branches true; `/devkit:reconcile` checks them

@@ -98,6 +98,7 @@ match, such as the `postgres` rule. A file on disk outside every repository is s
 | When | Hook | Claude Code | Codex |
 | --- | --- | --- | --- |
 | A session starts | SessionStart | The context carries the catalog: the skills of each kind of work, for the agent to pick | The same |
+| A crew member is briefed | `dev crew brief` | The brief lists first the skills the crew gates check before the member stops (each procedure phase's, and those the files of its scope require), then the other skills of its role or kind of work; it never calls a gated skill optional | The same |
 | A subagent starts | PreToolUse | On the Agent and Task tools, a "devkit · required skills" section is appended to the subagent's brief, with the skills of its declared kind of work (else its member's Responsible one) and of the files it owns | Not enforced: a hook cannot rewrite a `spawn_agent` call, so a member gets its skills only from the brief `dev crew brief` writes |
 | A crew member stops | SubagentStop | The crew gates send the member back once if it did not load the skills of its procedure or of the files it changed | The same, judged against the skills installed for Codex |
 | The agent finishes a turn | Stop | If the turn changed matching files or ran matching commands without loading a required skill, it goes back once per skill per session to load the skill and review the work; the request names the reason and the files or commands | The same |
