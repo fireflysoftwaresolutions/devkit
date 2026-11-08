@@ -193,6 +193,34 @@ class RefusedAccess(unittest.TestCase):
         self.assertEqual(0, subprocess.run("echo osascript >/dev/null", shell=True).returncode)
         self.assertEqual(0, os.system("grep -c osascript /dev/null >/dev/null; true"))
 
+    # from a working folder inside a real root (a run started in the handoff repository), shutil.rmtree of a
+    # temporary folder works: its walk opens and removes names relative to the folder it holds open (dir_fd), not
+    # to the working folder. A name relative to the working folder is still refused there
+    def test_a_cleanup_by_folder_descriptor_is_judged_by_that_folder_not_the_working_folder(self):
+        fake = os.path.realpath(self.real_tmp())
+        saved = {k: _hermetic.state()[k] for k in ("real", "prefixes", "named", "homes")}
+        _hermetic._record_real(fake, saved["homes"])
+        self.addCleanup(_hermetic.state().update, saved)
+        inside = os.path.join(fake, ".local", "state", "devkit", "logs")
+        _hermetic.state()["allow"] += 1
+        try:
+            os.makedirs(inside)
+        finally:
+            _hermetic.state()["allow"] -= 1
+        here = os.getcwd()
+        self.addCleanup(os.chdir, here)
+        os.chdir(inside)
+        tree = os.path.join(self.real_tmp(), "t")
+        os.makedirs(os.path.join(tree, "a", "logs"))
+        Path(tree, "a", "logs", "f.json").write_text("{}")
+        shutil.rmtree(tree)
+        self.assertFalse(os.path.exists(tree))
+        fd = os.open(self.real_tmp(), os.O_RDONLY)
+        self.addCleanup(os.close, fd)
+        os.mkdir("d", dir_fd=fd)
+        os.rmdir("d", dir_fd=fd)
+        self.assert_refused(lambda: open(self.probe, "w"), os.path.join(inside, self.probe))
+
     def real_tmp(self):
         d = tempfile.mkdtemp()
         self.addCleanup(shutil.rmtree, d, True)

@@ -40,6 +40,7 @@ state through devkit's hooks while the suite runs (`report()`):
 from __future__ import annotations
 
 import atexit
+import fcntl
 import fnmatch
 import json
 import os
@@ -230,6 +231,49 @@ _LOCATIONS = ("DEVKIT_CONFIG", "DEV_ROOT", "XDG_CONFIG_HOME", "XDG_STATE_HOME", 
               "CLAUDE_CONFIG_DIR", "CLAUDE_ENV_FILE")
 
 
+# Where an event that takes a folder descriptor carries it: path argument -> dir_fd argument (CPython's os module;
+# a negative value is the working folder). A relative name with one is relative to that folder, not the working one.
+_DIR_FD = {"os.remove": {0: 1}, "os.rmdir": {0: 1}, "os.mkdir": {0: 2}, "os.chmod": {0: 2}, "os.chown": {0: 3},
+           "os.utime": {0: 3}, "os.rename": {0: 2, 1: 3}, "os.symlink": {1: 2}, "os.link": {0: 2, 1: 3}}
+
+
+def _fd_folder(fd):
+    """The folder an open descriptor names, or None when the system cannot tell."""
+    try:
+        if hasattr(fcntl, "F_GETPATH"):  # macOS
+            return os.fsdecode(fcntl.fcntl(fd, fcntl.F_GETPATH, bytes(1024)).split(b"\0", 1)[0]) or None
+        return os.readlink(f"/proc/self/fd/{fd}")
+    except (OSError, ValueError):
+        return None
+
+
+def _at(p, dir_fd):
+    """`p` as an absolute path, relative to the folder `dir_fd` names when it is one; None when that is unknown."""
+    if not isinstance(dir_fd, int) or dir_fd < 0 or isinstance(p, int) or p is None:
+        return _path(p)
+    try:
+        p = os.fsdecode(os.fspath(p))
+    except TypeError:
+        return None
+    if os.path.isabs(p):
+        return os.path.normpath(p)
+    folder = _fd_folder(dir_fd)
+    return os.path.normpath(os.path.join(folder, p)) if folder else None
+
+
+def _in_fd_walk() -> bool:
+    """Whether the caller is shutil.rmtree's walk by folder descriptors: its relative names are below the folder the
+    shutil.rmtree event named, which the hook judged already, and the open event does not carry the descriptor."""
+    f = sys._getframe(2)
+    for _ in range(4):
+        if f is None:
+            return False
+        if f.f_code.co_name.startswith("_rmtree_safe_fd") and f.f_globals.get("__name__") == "shutil":
+            return True
+        f = f.f_back
+    return False
+
+
 def _path(p):
     if isinstance(p, int) or p is None:
         return None
@@ -326,7 +370,8 @@ def _hook(event, args):
         # a security notice ignores DEVKIT_NO_NOTIFY (devkit's acceptance notice), so the run refuses the program
         _refuse("process", "osascript", "a test never shows the developer a desktop notification")
     if event == "open":
-        p = _protected(_path(args[0]))
+        rel = isinstance(args[0], (str, bytes, os.PathLike)) and not os.path.isabs(os.fsdecode(os.fspath(args[0])))
+        p = "" if rel and _in_fd_walk() else _protected(_path(args[0]))
         if p:
             mode, flags = args[1], args[2] if len(args) > 2 else 0
             write = any(c in mode for c in "wax+") if isinstance(mode, str) else bool((flags or 0) & _WRITE_FLAGS)
@@ -345,11 +390,13 @@ def _hook(event, args):
     for kind, table in (("write", _WRITE_EVENTS), ("read", _READ_EVENTS)):
         idx = table.get(event)
         if idx:
+            fds = _DIR_FD.get(event, {})
             for i in idx:
                 if i < len(args):
-                    p = _protected(_path(args[i]))
+                    at = _at(args[i], args[fds[i]] if i in fds and fds[i] < len(args) else None)
+                    p = _protected(at)
                     if p:
-                        _refuse(kind, _path(args[i]), f"{event}, real {p} root")
+                        _refuse(kind, at, f"{event}, real {p} root")
             return
 
 
