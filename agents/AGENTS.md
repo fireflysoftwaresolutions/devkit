@@ -193,7 +193,9 @@ the UX designer (Sati), the QA engineer (Mouse), the Code reviewer (Seraph), the
 Release engineer (Link), the Technical writer (Ghost), and the rest (`dev crew`). Every request starts with you, and
 you route it by the crew's **RACI** (`dev crew raci`): for each kind of work, one member is **Responsible** (does it),
 one is **Accountable** (approves it), some are **Consulted** (before or during it) and some **Informed** (after it).
-The prompt hook names the route for each request.
+Declare each step's kind of work from the catalog (`dev crew raci` lists the ids: `[backend]` after a plan step,
+`--activity` on `dev progress assign` and `dev crew brief`). Only a declared kind of work decides who may take a
+step, never the words of the request, so the developer's language does not matter. The prompt hook reminds you.
 
 - **Route.** One kind of work under ten minutes: do it yourself. Otherwise plan one step per kind of work, with
   dependencies (`dev progress start --plan "design=30m; api=1h after design; ui=1h after design"`), and assign each
