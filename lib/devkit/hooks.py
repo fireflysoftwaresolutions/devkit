@@ -2338,7 +2338,35 @@ def subagent_start(agent: str):
     from . import progress
     data = _stdin_json()
     progress.on_subagent(agent, data, True)
+    _make_scratch_folder(agent, data)
     _prompt_refresh(data, force=True)  # a lane opened: the prompt's crew count follows
+
+
+def _claude_tmp() -> Path:
+    """Where Claude Code keeps its per-session folders, scratchpads among them."""
+    return Path("/tmp") / f"claude-{os.getuid()}"
+
+
+def _make_scratch_folder(agent: str, data: dict):
+    """Creates a crew member's own folder in the session scratchpad, scratchpad/<member id>/, when its lane opens: the
+    brief names it and the guard lets the member write only there, but a read-only member may not create a folder.
+    Only when Claude Code made the session's scratchpad (<tmp>/claude-<uid>/<project key>/<session id>/scratchpad),
+    and only for a crew member: a helper that names no member gets nothing."""
+    try:
+        sid, aid = str(data.get("session_id") or ""), str(data.get("agent_id") or "")
+        transcript = str(data.get("transcript_path") or "")
+        if agent != "claude" or not (sid and aid and transcript):
+            return
+        pad = _claude_tmp() / Path(transcript).parent.name / sid / "scratchpad"
+        if not pad.is_dir():
+            return
+        from . import progress
+        run = progress.load_run(agent, sid) or {}
+        member = _member_folder(run, aid)
+        if member and member != aid and re.fullmatch(r"[a-z0-9][a-z0-9-]*", member):
+            (pad / member).mkdir(exist_ok=True)
+    except Exception:
+        _log(f"scratch folder {agent}: {traceback.format_exc()[-300:]}")
 
 
 def _launch_meta(data: dict) -> dict:
