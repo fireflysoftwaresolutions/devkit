@@ -155,7 +155,9 @@ shows it, and so do `dev status`, `dev branch ls`, the handoff note and the mess
 records the repository's visibility when it was set. An `on` set while the repository was private, or before devkit
 recorded the visibility, no longer holds once the repository is public or its visibility cannot be read: devkit
 treats it as `ask` and backs up nothing until you answer again in a terminal, because a backup would now publish the
-branch.
+branch. A policy set while devkit could not read the visibility records `unknown`: an `on` decided then holds while
+devkit still cannot read it, and waits for you again once the repository reads as public. The skipped backup says
+which visibility the policy was decided for.
 `dev backup --public` pushes once, whatever the policy. With `on`, embargoes still hold, and on a public repository a
 branch whose new commits read as a security fix or change a red-team test still waits for an embargo or
 `--public`. Setting the policy, `dev backup --public` and `dev branch embargo --lift` are your own decisions: type

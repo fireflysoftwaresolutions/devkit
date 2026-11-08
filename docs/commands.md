@@ -368,7 +368,7 @@ repository](initiatives.md#adopt-an-existing-handoff-repository).
 
 devkit's specialist agents. See [The crew](crew.md).
 
-### `dev crew [graph | raci | rules | show | brief | route | delegate | decline | next | ask | answer | inbox | mode | decide | decisions | set | history | sync]`
+### `dev crew [graph | raci | rules | show | brief | route | delegate | decline | next | owner | ask | answer | inbox | mode | decide | decisions | set | history | sync]`
 
 | Command | Effect |
 | --- | --- |
@@ -387,6 +387,7 @@ devkit's specialist agents. See [The crew](crew.md).
 | `dev crew withdraw <id> --why "…"` | Closes a pending decision that no longer applies (tech lead only): frees the step blocked on it, tells the asking member, and records why. It is never the developer's answer and never allows an irreversible action |
 | `dev crew next` | Ready to launch (with the commands), queued until a slot frees, waiting and why, and who is busy |
 | `dev crew next --first <step> --why "…"` | The tech lead (Morpheus) launches that step ahead of the order; the reason is recorded and audited. Both options are required |
+| `dev crew owner <path>… [--json]` | Who holds each file before you edit or assign it: the crew member, their run and session, their step, their lane state (working; stale when its session's process is gone or it has been silent for `progress.stale_agent_minutes`; ended when devkit or Claude Code saw it end) and last activity, and what to do (wait, `dev crew ask --to <id> "…"`, or nothing when the holder ended or is stale). It decides exactly as the edit check does. Exits with `1` while a working member holds a path, `0` when every path is free. Reads only |
 | `dev crew ask "<text>" [--to <name>]` · `dev crew answer <id> "<text>"` · `dev crew inbox` | Messages between members; delivered with the recipient's next action |
 | `dev crew ask --decision "<question>" --options "A: <choice> \| B: <choice>" --recommend A [--irreversible push] [--target v26.11.4] [--performs A] [--approves "api, screens"]` | A decision point: a question under 300 characters, 2 to 4 options each with its letter, and the recommended one (refused otherwise, with the corrected command; an irreversible action without options is asked as `A: yes \| B: no`). Decided at once in auto mode, waits for the developer in guided mode or for irreversible actions. `--target` is what the irreversible action acts on, and the question names it as a word of its own; the developer's answer opens that action on that target once, and only when it chooses the option that performs it: `--performs`, else the one option that reads yes or approve, else the recommended one ([The crew › Guided or automatic](crew.md#guided-or-automatic)). `--approves` names the finished steps the developer's answer approves, checked against the plan |
 | `dev crew mode [guided\|auto] [--approve "push feat/*, release v26.11.4"]` · `dev crew decide <id> "<answer>"` · `dev crew decisions [--pending] [--ask [<id>…] [--json]]` | The mode (`--approve` names each action with its target; publish and deploy never), the developer's answers (recorded by the tech lead (Morpheus) only), and every decision with who took it. `--ask` prints the pending decisions (or the ones named) as question tool calls, at most 4 per call and an irreversible one alone in its call, the recommended option first, `--json` for the tool's input; the tech lead may reword a reversible one. Only an answer to a question with `D<n> ·` up front (or the header `D<n>`) that picks one of its options by letter or words, or a typed `approve <id>[: <option>]`, makes the decision the developer's. An irreversible one counts only in devkit's exact call: one question, its own header (`D<n>` or empty), labels only (no description, preview, or other field), its question and labels word for word (the performing option's label says what it runs, `A: yes (release v26.11.4)`) |
@@ -520,7 +521,8 @@ go to stderr.
 ### `dev wt ls [--all]`
 
 The worktrees of the current project (or of every project with `--all`): branch, PR, state, location (`canonical`,
-`claude`, `codex`, `temp`, `stray`, `missing`), live session or idle time, size, and path.
+`claude`, `codex`, `temp`, `stray`, `missing`), live session or idle time, size, and path. A branch that the merge
+test of `dev branch prune` finds merged, also by squash or cherry-pick, has no unpushed count.
 
 ### `dev wt rm <branch | path>`
 
@@ -594,7 +596,7 @@ Tokens are read from the environment and never printed. A host that cannot be re
 `dev status` shows the latest run of the branch, and when you ask an agent for status, the prompt hook adds the
 branch's pipelines to its context.
 
-### `dev ci watch [-p PROJECT] [--branch B] [--sha S] [--tag T] [--pr N] [--wait] [--timeout 90] [--json] [--quiet]`
+### `dev ci watch [-p PROJECT] [--branch B] [--sha S] [--timeout 90] [--json] [--quiet] [--wait [--pr N | --tag T]]`
 
 Follows the CI/CD runs of a branch for one commit (default: the current branch at HEAD) until they finish, on GitHub
 Actions, GitLab CI, Bitbucket Pipelines, or Azure Pipelines. A failure comes with the failed jobs and steps, the first
@@ -604,9 +606,10 @@ Azure give the job, step and link), its class (`test`, `lint`, `build`, `depende
 has secrets redacted. Exit codes: 0 passed, 1 failed (cancelled and timed out count as failed), 3 still running at the
 timeout, 4 none (no run appeared within five minutes, or the runs were only skipped, neutral, or stale).
 
-With `--wait`, it is the watch an agent waits on, and its output wakes the agent. It follows one target: `--pr N`
-(the PR's head, or its merge commit once merged), `--tag T`, `--sha S` (on `--branch B`), or `--branch B` as origin
-has it; by default, what the session last sent to origin. It prints one line per finished job, then one line that
+With `--wait`, it is the watch an agent waits on, and its output wakes the agent. It follows one target, the first
+it is given of: `--pr N` (the PR's head, or its merge commit once merged), `--tag T`, `--sha S` (on `--branch B`), or
+`--branch B` as origin has it; by default, what the session last sent to origin. `--pr` and `--tag` work only with
+`--wait`. It prints one line per finished job, then one line that
 starts with `CI <word> ·` (passed, failed, cancelled, timed out, skipped, none, or still running with the command to
 re-arm it). It retries host errors and ends by itself at `--timeout`. Exit codes: 0 passed, 1 failed, 2 nothing to
 watch, 3 the watch ended first (re-arm it), 4 none. Claude Code runs it with the Monitor tool (`--timeout 28`,
@@ -760,8 +763,8 @@ of `dev release` need GitHub (or a host listed in `gitx.github_hosts`).
 | `dev branch new <type>/<topic> [--ticket KEY] [--base REF]` | Fetches, then creates the branch from `origin/<default>` (or `--base`) and switches to it; uncommitted changes come along. The name is normalized: `feat/Invoice Export --ticket PROJ-142` → `feat/PROJ-142-invoice-export` |
 | `dev branch rename <type>/<topic> [--ticket KEY]` | Renames the current branch before its first push (or names a detached HEAD); refuses permanent branches and branches already on `origin` |
 | `dev branch ls [--offline] [--json]` | The branch map: every local branch, where it lives (local only, or local and its remote), ahead and behind its upstream and `origin/<default>`, the branch that has its commits (`merged into …`), its last backup or why it is not backed up, its embargo, worktree, PR (draft or ready, checks) and linked task. `--offline` uses the cached PR list; `--json` prints the rows (below) |
-| `dev branch clean [--apply] [--offline] [--json]` | The local branches that are merged, whose PR was merged, or that are gone upstream with every commit on the remote; deleted only with `--apply` |
-| `dev branch prune [--apply] [--remote \| --local] [--offline] [--json]` | Every local and remote branch with its state: merged and how (its tip is in `origin/<default>`, its PR from this repository was merged, or every commit has an equivalent there), an open PR, not merged (commits ahead, age of the last commit), or protected. Fetches `origin` first and changes nothing else. `--apply` deletes the merged ones: the remote branch (with a lease on the listed commit), the local branch, and its worktree when that is clean. It never deletes the default or a permanent branch, the current branch, a branch with an open PR, an embargoed branch, a worktree with uncommitted changes, a lock, or a live session, a branch created in the last 24 hours with no commit of its own, or a branch with commits the default branch lacks. Each deletion is audited as `branch.pruned` with how it was merged. `--remote` or `--local` limits it to one side; `--offline` skips the fetch and GitHub and keeps remote branches. Exits with `1` when a deletion failed. See [Git and GitHub › Close merged branches](git-and-github.md#close-merged-branches) |
+| `dev branch clean [--apply] [--offline] [--json]` | The local branches that the merge test of `dev branch prune` finds merged (so also by squash or cherry-pick), or that are gone upstream with every commit on the remote; deleted only with `--apply` |
+| `dev branch prune [--apply] [--remote \| --local] [--offline] [--json]` | Every local and remote branch with its state: merged and how (its tip is in `origin/<default>`, its PR from this repository was merged, or every commit has an equivalent there), an open PR, not merged (commits ahead, age of the last commit), or protected. Fetches `origin` first and changes nothing else. `--apply` deletes the merged ones: the remote branch (with a lease on the listed commit), the local branch, and its worktree when that is clean. It never deletes the default or a permanent branch, the current branch or the main checkout's, a branch with an open PR, a remote branch whose open PRs it cannot read (GitHub unreachable, or another host), an embargoed branch, a worktree that has uncommitted changes, is locked, belongs to the Codex app, or has a live session, a branch created in the last 24 hours with no commit of its own, or a branch with commits the default branch lacks. Each deletion is audited as `branch.pruned` with how it was merged. `--remote` or `--local` limits it to one side; `--offline` skips the fetch and GitHub and keeps remote branches. `--apply` without `--local` or `--offline` deletes on `origin`, an irreversible action: a crew member never runs it, and the main session runs it under the [irreversible-action gate](guard.md#git). Exits with `1` when a deletion failed. See [Git and GitHub › Close merged branches](git-and-github.md#close-merged-branches) |
 | `dev branch embargo <branch> --why "…" [--until "<step or date>"]` | Keeps the branch off the remote (see [Guard rules › The developer's own decisions](guard.md#the-developers-own-decisions) for what an agent's push is held from until 26.11.4): `dev backup` and `dev sync` never push it, nor a branch that holds any of its commits. Stored in the `embargo:` list of the handoff note's metadata (with who and when), so every machine sees it; audited as `git.embargo`. The record also keeps the branch's tips (`commits:`, updated by every backup run), so the embargo holds its commits after the branch is merged into another and deleted. Every branch view shows it. Without a branch, lists the embargoes (`--json` too) |
 | `dev branch embargo --lift <branch>` | Ends the embargo; the next backup may push the branch and the branches that carry its commits. The developer's own decision: devkit refuses it from a crew member's lane, and the guard asks the main session for the developer's grant (`grant embargo <branch>`) |
 
@@ -1162,7 +1165,7 @@ release, and handoff change (see [Teams and machines › Near-real-time sync](te
 | Option | Effect |
 | --- | --- |
 | `--offline` | No network; cached PR data of any age |
-| `--scheduled` | Background mode (the `sync` job): pull first, release expired locks, refresh PR states and sizes, rotate logs. When the `gc` or `sleep` job is not installed, it also applies the safe cleanup (with `gc.auto` on) or runs `dev sleep` once a day |
+| `--scheduled` | Background mode (the `sync` job): pull first, release expired locks, refresh PR states and sizes, rotate logs. When the `gc` or `sleep` job is not installed, it also applies the safe cleanup (with `gc.auto` on) or runs `dev sleep` once a day. With `--offline` or `--no-push`, that cleanup keeps every branch on `origin`. A crew member never runs it, in any form: the [irreversible-action gate](guard.md#git) counts it as a deletion on `origin` |
 | `--no-push` | Commit but do not push |
 | `--quiet` | No output |
 
@@ -1193,7 +1196,8 @@ files, commits that are not pushed, a program working in the folder), then repor
 why and what to do. A number always means the item you saw: if a newer measurement changed the plan, `dev free`
 prints the new plan and deletes nothing. It removes worktrees and copies with `git worktree remove`, deletes only
 folders git ignores, runs the tool's own command for a cache or Docker images (and says which), and never prunes
-Docker volumes. Every deletion is in the audit trail.
+Docker volumes. Every deletion is in the audit trail. A worktree whose branch the merge test of `dev branch prune`
+finds merged, also by squash or cherry-pick, counts as merged, not as unpushed.
 
 | Option | Effect |
 | --- | --- |
@@ -1507,14 +1511,15 @@ checkout's commit in `~/.local/share/devkit/releases/<version>-<commit>/` and ru
 hooks, the guard, the status line, `~/.local/bin/dev`, the scheduled jobs, and the Claude Desktop extension run it,
 never the checkout. It pins only a release (a `vYY.MM.PATCH` tag that GitHub has on the same commit) or a commit whose
 `bin/dev ci --run` passed on this Mac, and refuses tracked files with uncommitted changes and code that does not
-compile. It keeps the newest three copies and any copy in use. Run it yourself, in a terminal: the guard refuses
+compile. It keeps the newest three copies and any copy in use, and retires the others: their `bin/dev` runs the
+installed release, so a session that started before the install runs it too. Run it yourself, in a terminal: the guard refuses
 `dev install`, `dev update`, and `install.sh` from an agent. See
 [Getting started › The pinned copy](getting-started.md#the-pinned-copy).
 
 | Option | Effect |
 | --- | --- |
 | `--only STEPS` | Re-applies only these steps from the installed copy, without pinning. `STEPS` is a comma-separated list of `config,tools,cli,git,handoff,instructions,skills,claude,codex,desktop,docker,docs,launchd,prompt,shell` |
-| `--version VERSION` | Switches to a copy pinned by an earlier install, for a rollback: `26.11.2`, or `26.11.2-<commit>`. It checks the copy against its checksums first |
+| `--version VERSION` | Switches to a copy pinned by an earlier install, for a rollback: `26.11.2`, or `26.11.2-<commit>`. It checks the copy against its checksums first, and gives a copy that a newer install retired its own `bin/dev` back |
 | `--unverified --why "…"` | Pins the checkout's commit although it is neither a release nor tested; the reason is recorded in the audit trail |
 | `--commit-template yes\|no` | The answer `dev setup` gives for the [commit template](git-and-github.md#the-template-in-your-editor): the git step records it, and `yes` sets `commit.template` in each repository that has none |
 | `--yes`, `-y` | Goes on without asking when Claude Code or Codex sessions that use devkit are still running. Without it, `dev install` lists those sessions first and asks once in a terminal; each must be restarted to load the new hooks, because a running session keeps the hooks of the release it started with |

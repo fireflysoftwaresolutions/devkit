@@ -52,6 +52,7 @@ it takes a lock: your name and an expiry time, pushed to the handoff repository 
 | `dev pr merge` | Marks the open items linked to the merged branch done, with the pull request and the merge commit in their changelog |
 | `dev release` | Refuses to tag while items linked to branches merged since the previous tag are open, unless you give `--why` |
 | `dev task reconcile --apply` | Sends doing items without a lock back to todo, and marks open items of merged branches done, in one commit |
+| `dev task move`, `block`, `cancel`, `unblock` | `move`, `block`, and `cancel` apply to open items only: a done or cancelled item keeps the state it was closed in, and the refusal names `dev task reopen <id> --why "<what is left>"`. `unblock` applies only to a blocked item |
 
 Renewal follows the branch because the branch is where the work happens. When every live session renewed every lock
 its machine held, a lock on work nobody touched stayed for days, and its item stayed doing. Now a lock lives only as
@@ -113,6 +114,14 @@ A member can also stop without a report:
   the same way.
 - **Silence.** A lane that stops reporting for too long, or whose session ended, is `lost`, and its steps go back to
   pending. A lost lane that reports again runs again.
+
+A member that works again after its lane ended takes a crew slot like a launch. While no slot is free, it may read
+but not write, and the tech lead is told once; it takes its slot at its first tool call after one frees. When a
+step and its files go to another lane, a lane that kept those files may read but not write until the tech lead
+assigns it a step.
+
+When Claude Code gives the main conversation a new session id after a compaction, the session's open run moves to
+the new id with its working lanes, and the run's history and the audit trail (`session.adopt`) record the move.
 
 Your answer to a decision never brings back a lane that ended. The step the decision blocked goes back to pending
 instead, and the tech lead launches the member again with your answer.
@@ -212,16 +221,23 @@ tells you once to restart the session, and starts the pinned release for its bac
 watch, and the repair). devkit trusts `install.json` only when the copy it names is a pinned copy whose manifest and
 checksums match, so an edited record cannot make an older copy look current.
 
+Copies from 26.11.5 and earlier have no such check, so `dev install` and `dev config repair` retire every other
+pinned copy: its `bin/dev` becomes a link to the installed release's, and a session that started before the install
+runs the installed release from its next hook. `dev install --version <version>` gives a retired copy its own
+`bin/dev` back, for a rollback. The guard refuses an agent's command that runs devkit from another release folder.
+
 Before they change anything, `dev install` and `dev update` list the Claude Code and Codex sessions that use devkit
 and still run, and ask once in a terminal. Press Return to go on, or type `n` to stop with nothing changed. `--yes`
 goes on without asking.
 
-**Where you see it.** The one-time notice in the older session, the list that `dev install` prints, and `dev doctor`,
-which names a file that an older devkit wrote. `dev audit --action config.repair-skipped` lists what older sessions
-left alone.
+**Where you see it.** The one-time notice in the older session, the list that `dev install` prints, and `dev doctor`:
+its `agents run the pinned release` row names a hook, the status line, or an instructions file that an older copy
+wrote, with that copy, and its `older copies retired` row names a copy that still runs its own code.
+`dev audit --action config.repair-skipped` lists what older sessions left alone, and
+`dev audit --action install.retire` the copies retired.
 
-**Repair.** Restart each session the list names. When `dev doctor` reports a file that an older devkit wrote, run
-the command it prints, such as `dev install --only instructions`.
+**Repair.** Restart each session the list names. When `dev doctor` reports what an older copy wrote, or a copy not
+retired, run the command it prints, such as `dev config repair` or `dev install --only instructions`.
 
 ## Branches after a merge
 
@@ -233,12 +249,16 @@ closes or keeps a branch, and each says which way the test held:
 - every commit it adds has an equivalent in the default branch, because it was cherry-picked or a release branch
   carried it.
 
-`dev branch prune` lists the merged branches on this Mac and on `origin`, each with the way the test held, and
-`dev branch prune --apply` deletes the ones nothing protects: the remote branch, the local one, and its worktree when
-the worktree is clean. `--local` and `--remote` limit it to one side. The nightly `gc` job,
-`dev pr merge`, and `dev release` prune the branches they merge or find merged. `dev doctor` reports whether GitHub
-deletes a pull request's branch when it merges (the repository's `delete_branch_on_merge` setting), and
-`dev delivery apply` sets it. [Git and GitHub](git-and-github.md) has the commands and their options.
+`dev branch prune` lists every branch on this Mac and on `origin` with its state, each merged one with the way the
+test held, and `dev branch prune --apply` deletes the merged ones nothing protects: the remote branch, the local one,
+and its worktree when the worktree is clean. `--local` and `--remote` limit it to one side. Deleting on `origin` is
+an irreversible action: a crew member never runs it, and the main session runs it under the
+[irreversible-action gate](guard.md#git). `dev pr merge` and `dev release` delete the branches they merge, and the
+nightly `gc` job deletes merged branches as [Disk and cleanup](disk-and-cleanup.md#merged-branches) describes.
+`dev free`, the unpushed count of `dev wt ls`, and `dev branch clean` use the same test, so a branch merged by
+squash or cherry-pick reads as merged. `dev doctor` reports whether GitHub deletes a pull request's branch when it
+merges (the repository's `delete_branch_on_merge` setting), and `dev delivery apply` sets it.
+[Git and GitHub](git-and-github.md) has the commands and their options.
 
 See also [Teams and machines](teams.md), [The crew](crew.md),
 [Progress and communication](progress-and-communication.md), [CI/CD pipelines](ci-cd.md), and

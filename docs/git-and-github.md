@@ -78,11 +78,11 @@ session-start context names the branches that exist only on this Mac and the emb
 `dev branch embargo` keeps one off the remote (agents' pushes from another project's copy are held from 26.11.4); see
 [Delivery › Back up early, CI once](delivery.md#back-up-early-ci-once).
 
-`dev branch clean` lists the local branches that can go: merged into the default branch, whose PR was merged at the
-same commit, or gone upstream with every commit on the remote. It keeps the current branch, permanent branches,
-branches checked out in a worktree, and branches with commits that exist only here, and says why. Nothing is deleted
-until you add `--apply`. `dev branch prune` (below) also covers remote branches, worktrees, and branches merged by
-content.
+`dev branch clean` lists the local branches that can go: merged by the merge test of `dev branch prune` (below), so
+also by squash or cherry-pick, or gone upstream with every commit on the remote. It keeps the current branch,
+permanent branches, branches checked out in a worktree, and branches with commits that exist only here and are not
+merged, and says why. Nothing is deleted until you add `--apply`. `dev branch prune` also covers remote branches and
+worktrees.
 
 ### Close merged branches
 
@@ -125,15 +125,24 @@ the fetch and GitHub and leaves remote branches alone, and `--json` prints the r
 - a branch with a commit the default branch does not have by content.
 
 Each deletion is audited as `branch.pruned`, with how the branch was merged and its last commit
-(`dev audit --action branch.pruned`). The same merge test closes branches at four other moments:
+(`dev audit --action branch.pruned`). Deleting on `origin` is an irreversible action: a crew member never runs
+`dev branch prune --apply` without `--local` or `--offline`, and the main session runs it under the
+[irreversible-action gate](guard.md#git). The listing, `--local`, and `--offline` need no grant.
+
+The same merge test closes branches at four other moments:
 
 - `dev pr merge` deletes the remote branch, then the local branch and its clean worktree.
-- `dev release` deletes the branches the release merged (merged into it, and not into the previous tag), remote and
-  local, and prints them. Branches merged before stay for the nightly job.
+- `dev release`, once the release is out (not a `--draft`), deletes the branches the release merged (merged into it,
+  and not into the previous tag), remote and local, and prints them. Branches merged before stay for the nightly
+  job.
 - The nightly `gc` job deletes a merged local branch that has not moved for `gc.grace_hours` (24), with its idle
   worktree. It deletes a merged remote branch only when its pull request merged or devkit pushed it as a backup
   (`dev backup`, `dev sync`); anyone else's merged branch waits for `dev branch prune --apply`.
 - The hourly backup no longer pushes a branch merged by content back to `origin`: the branch map counts it as merged.
+
+`dev wt rm`, `dev free`, the unpushed count of `dev wt ls`, and `dev branch clean` use the same test, so a branch
+merged by squash or cherry-pick reads as merged, not as unpushed.
+[Disk and cleanup › Merged branches](disk-and-cleanup.md#merged-branches) has what the nightly job deletes and keeps.
 
 On GitHub, turn on the repository setting that deletes a pull request's branch when it merges:
 `dev delivery apply --why "…"` sets `delete_branch_on_merge` and records it in the delivery policy, and `dev doctor`
@@ -370,8 +379,8 @@ allowed method, otherwise your default. A squash commit gets the PR title and th
 Afterward devkit deletes the remote branch (unless `--keep-branch`). When the merge test finds the branch merged, it
 also removes the branch's worktree if that is clean and idle, or switches this checkout to the default branch and
 fast-forwards it, and deletes the local branch; uncommitted changes or a commit the PR did not carry keep it, and the
-output says why. See [Close merged branches](#close-merged-branches). `--dry-run` shows the method and the squash
-message.
+output says why. Run inside the branch's own worktree, it leaves that worktree and names `dev wt rm <branch>`.
+See [Close merged branches](#close-merged-branches). `--dry-run` shows the method and the squash message.
 
 ## CI runs
 

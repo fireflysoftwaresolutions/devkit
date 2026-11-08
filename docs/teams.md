@@ -130,6 +130,10 @@ then swaps it in, so a reader never sees half a file.
 
 Claiming a blocked item keeps it blocked; run `dev task unblock <n>` when the blocker is gone.
 
+A closed item keeps the state it was closed in. `dev task move`, `block`, and `cancel` refuse a done or cancelled
+item and name `dev task reopen <n> --why "<what is left>"`, and `dev task unblock` refuses any item that is not
+blocked.
+
 ### Locks across machines
 
 <picture>

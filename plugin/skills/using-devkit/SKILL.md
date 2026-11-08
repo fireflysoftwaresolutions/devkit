@@ -30,8 +30,11 @@ this skill is the how.
   verifying it, `dev task release <n>` if you stop without finishing, `dev task add "…" --later` for follow-ups you
   discover. Nothing stays doing without a lock: `dev pr merge` closes the merged branch's items, and
   `dev task reconcile` lists what drifted (`work-state` skill).
-  Changes of scope need a reason: `dev task edit|move|cancel|block|reopen <n> --why "…"`. Initiative-level work uses
-  `-i`.
+  Changes of scope need a reason: `dev task edit|move|cancel|block|reopen <n> --why "…"`. A closed item keeps the
+  state it was closed in: `move`, `block`, and `cancel` need an open item, `unblock` a blocked one, and a done item
+  with work left comes back with `dev task reopen <n> --why "<what is left>"`. Initiative-level work uses `-i`.
+- Before you edit files outside your own lane, or assign a scope, run `dev crew owner <paths>`: it names the member
+  whose step holds them. A member whose lane ended or went stale holds no files.
 - Plans and specs go to `~/Development/.handoff/plans/<project id>/` (`dev plan new "…"`; Superpowers writes there
   too). After you change one, `dev plan revise <file> --why "…"`—the Stop hook insists. An approved plan whose text
   changed goes back to draft until it is approved again (`dev plan approve`).
@@ -71,14 +74,14 @@ diagram files without them.
 | Backend | — | `backend`, `java-springboot`, `spring-boot-testing`, `java-junit` |
 | Frontend | Chrome DevTools MCP, `playwright-cli`, `dev impeccable <verb>` (impeccable's engine: `context` once at the start, `detect`, …; never its launcher by path) | `angular-developer`, `react-best-practices`, `composition-patterns`, `frontend-design` / `impeccable` |
 | Security | `dev sec scan` | `devsecops`, `/security-review` |
-| Branch, commit, PR | `dev branch new`, `dev branch ls` (where each branch lives, backed up or not), `dev commit --why "…" --verified "…"` (the commit template), `dev rebase`, `dev push`, `dev backup` (a copy on the remote when it starts no CI run; `dev backup policy` shows the project's policy, `dev branch embargo` keeps a branch off), `dev pr create [--draft]\|ready\|checks --watch\|merge` (merge closes the branch's items and deletes the branch), `dev branch prune [--apply]` (merged branches here and on origin, with their worktrees), `dev run view --failed`, `dev issue`; `dev git` and `dev gh` for anything else | `delivery`, `communicating` (commit and PR templates) |
+| Branch, commit, PR | `dev branch new`, `dev branch ls` (where each branch lives, backed up or not), `dev commit --why "…" --verified "…"` (the commit template), `dev rebase`, `dev push`, `dev backup` (a copy on the remote when it starts no CI run; `dev backup policy` shows the project's policy, `dev branch embargo` keeps a branch off), `dev pr create [--draft]\|ready\|checks --watch\|merge` (merge closes the branch's items and deletes the branch), `dev branch prune [--apply]` (merged branches here and on origin, by ancestry, PR, or content, with their worktrees; `--apply` deletes on origin, an irreversible action a crew member never runs), `dev run view --failed`, `dev issue`; `dev git` and `dev gh` for anything else | `delivery`, `communicating` (commit and PR templates) |
 | Ship | `dev ci --run`, `dev ci status`, `dev calver`, `dev delivery`, `dev release`, `/devkit:ship` | `delivery`, `release-policy` |
 | Document | `dev docs check`, `dev diagram render` | `docs`, `documentation-writer`, `doc-coauthoring`, `diagrams` |
 | Hand off | `dev handoff`, `dev note set status=… priority=…`, `dev task`, `/devkit:handoff`; `dev handoff-import` adopts an older handoff repository; `dev session brief` (what a session kept through compaction or `/clear`), `dev session carry` (the run into this session after `/clear`) | `handoff` |
 | Coordinate with others | `dev team`, `dev task start\|release`, `dev task reopen <n> --why "…"`, `dev task show <n>` (history) | — |
 | Keep work state true | `dev task reconcile [--apply]` (doing items without a lock, open items of merged branches, duplicates), the work state row of `dev doctor`, `dev ci watches`, `dev branch prune [--apply]`, `/devkit:reconcile` (all of them, fixes after the developer agrees) | `work-state` |
 | Choose model, effort, subagents | `sparks` agent (alias `scout`) for lookups; `codex --profile fast\|deep\|review` | `working-efficiently` |
-| Lead the crew | `dev crew` (roster), `dev crew raci [<id>]`, `dev progress assign <step> --to <member> --activity <id>`, `dev crew brief <member> "…" --activity <id>`, `dev crew graph` (the session as one graph), `dev crew next` (the slots and the order to launch in), `dev progress step --approves "<steps>"`, `dev progress confirm <step> --why "…"` (a step's work still holds after a reopen), `dev crew withdraw <id> --why "…"` (a decision that no longer applies), `dev crew rules` (every rule and its check) | `crew`, `work-state` |
+| Lead the crew | `dev crew` (roster), `dev crew raci [<id>]`, `dev crew owner <paths>` (who holds those files, before you edit outside your lane or assign a scope), `dev progress assign <step> --to <member> --activity <id>`, `dev crew brief <member> "…" --activity <id>`, `dev crew graph` (the session as one graph), `dev crew next` (the slots and the order to launch in), `dev progress step --approves "<steps>"`, `dev progress confirm <step> --why "…"` (a step's work still holds after a reopen), `dev crew withdraw <id> --why "…"` (a decision that no longer applies), `dev crew rules` (every rule and its check) | `crew`, `work-state` |
 | Learn from mistakes | `dev lesson add\|anchor\|recur\|prevent`, `dev lesson --search "…"`, `dev lesson scan\|review`; `dev sleep` consolidates them nightly | `learning-loop` |
 | Keep the developer informed | `dev progress start\|step\|note\|block\|done`, `dev time` | `communicating` |
 | Plans and specs | `dev plan new "…" --kind plan\|spec\|spike\|bugfix\|adr`, `dev plan revise --why`, `approve`, `ls` | Superpowers writing-plans, `communicating` (formats) |
@@ -89,7 +92,7 @@ diagram files without them.
 | Background jobs and history | `dev jobs` (ls, run, set, logs), `dev audit`, `dev sync` (the handoff repository) | — |
 | Third-party plugins, skills, and MCP servers: what is installed, what pins it, why it is there, what is outdated | `dev ext ls [--agent claude\|codex] [-v] [--json]`, `dev ext outdated [<name>]`, `dev ext update <name> --why "…"` (a team pin, on a branch; `--apply` is the developer's), `dev ext add\|remove --team` (devkit's defaults, on a branch); `dev ext add\|remove\|enable\|disable` and `dev ext ack` (confirms the acceptances listed at the session start) are the developer's | `devsecops` |
 | Files, safely | `dev files`, `dev find`, `dev grep`, `dev diff`, `dev rm` (to the Trash, `--undo`), `dev mv`, `dev cp` | — |
-| Disk and Docker | `dev du` (what fills the disk, why, and the plan), `dev free <n>` (frees a plan item; `dev gc` is its old name), `dev docker up\|status\|trim` | `workspace` |
+| Disk and Docker | `dev du` (what fills the disk, why, and the plan), `dev free <n>` (frees a plan item, with the merge test of `dev branch prune`; `dev gc` is its old name), `dev docker up\|status\|trim` | `workspace` |
 | Install, update, or roll back devkit, and change its settings (the developer, in a terminal: the guard refuses them to agents) | `dev setup`, `dev setup prompt`, `dev setup commit-template`, `dev setup shell` (the zsh helpers), `dev completion zsh\|bash` (Tab completion, generated from the parser), `dev install [--only <steps>]`, `dev install --version <previous>` (rollback), `dev update` (`dev update --check` only tells, and agents may run it; both list the running sessions that use devkit, which the developer restarts after), `dev config set <key> <value>`, `dev version` | — |
 | Claude Desktop chat and Cowork | `dev desktop status\|pack`; the extension runs `dev mcp` | — |
 

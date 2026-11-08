@@ -36,8 +36,10 @@ dev pr ready             # once, when the local suite is green: starts the one C
   remote lacks for secrets. `--accept-ci` pushes anyway and counts against the push budget. `dev sync` backs up every
   hour and at the end of a session, for commits older than `backup.after_minutes` (30).
 - **The backup policy** is per project: `dev backup policy on|off|ask`. A private repository is on by default and a
-  public one ask, because a backup there publishes the branch. Changing it is the developer's own decision: it needs
-  their typed `grant backup <project>`, and so does `dev backup --public`.
+  public one ask, because a backup there publishes the branch. An `on` keeps the visibility it was decided for: when
+  the repository no longer reads as private and the visibility differs (or none was recorded), backups wait for the
+  developer again. Changing it is the developer's own decision: it needs their typed `grant backup <project>`, and
+  so does `dev backup --public`.
 - **Embargo** a branch that must not leave this Mac, such as an unshipped security fix:
   `dev branch embargo <branch> --why "…"`. Its commits stay held after a merge into another branch, and an unreadable
   handoff note stops every backup. Lifting it needs the developer's `grant embargo <branch>`.
@@ -123,17 +125,25 @@ signal to stop and reproduce locally.
 
 1. From the verified, green integration branch: merge with the repository's strategy (squash vs merge commit):
    `dev pr merge`. It marks the merged branch's open items done (the PR and the merge commit in their changelog) and
-   deletes the branch on origin and here, naming a worktree that still holds it (`dev wt rm <branch>`). Arm a watch
-   on the merge commit (`dev ci watch --wait --pr <n>`).
+   deletes the branch on origin and here, with its clean worktree; run inside that worktree, it names
+   `dev wt rm <branch>` instead. Arm a watch on the merge commit (`dev ci watch --wait --pr <n>`).
 2. Reconcile: `dev task reconcile`, then `--apply`, or reopen an item with what is left. `dev release` refuses while
    items of branches merged since the previous tag are open; `--why "…"` overrides it on the record, only for an
    item that truly stays open.
 3. Version: the project's own scheme, otherwise CalVer `YY.MM.PATCH` (`dev calver` prints the next one). Tag
    `vYY.MM.PATCH` (`git tag -s` if the project signs tags), push the tag, create the GitHub release with notes from the
-   CHANGELOG: `dev release` does all three (the guard refuses a raw `gh release create`), and prunes the branches it
-   finds merged. Arm a watch on the tag (`dev ci watch --wait --tag v<version>`).
+   CHANGELOG: `dev release` does all three (the guard refuses a raw `gh release create`), and once the release is out
+   (not a `--draft`) deletes the branches it merged. Arm a watch on the tag (`dev ci watch --wait --tag v<version>`).
 4. Verify the published artefact: download/install it from the release and smoke-test it.
 5. Update the handoff note: version, what shipped, follow-ups. `dev branch prune` shows no merged branch left.
+
+**Merged branches go.** One merge test decides: the branch's tip is in `origin/<default>`, its PR from this repository
+merged (merge, squash, or rebase), or every commit has an equivalent there (cherry-picked, or carried by a release
+branch). `dev pr merge`, `dev release`, the nightly `gc`, `dev wt rm`, `dev free`, `dev wt ls`, and
+`dev branch clean` all use it, so a squash- or cherry-pick-merged branch reads as merged, not unpushed.
+`dev branch prune` lists the rest; `--apply` deletes on origin, an irreversible action that a crew member never runs
+and the main session runs under the gate (`--local` stays on this Mac). On GitHub, `dev delivery apply` sets
+`delete_branch_on_merge` and `dev doctor` reports it. A `dev sync --offline` or `--no-push` deletes nothing on origin.
 
 ## 6. GitOps rules
 

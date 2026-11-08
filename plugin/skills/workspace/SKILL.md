@@ -37,11 +37,15 @@ dev wt rm feat/short-topic           # refuses if there are uncommitted or unpus
 listed in `.worktreeinclude` (for example `.env`). Python: run `uv sync` in the new worktree.
 
 A worktree lives as long as its branch. Once the branch is merged (by ancestry, by a merged PR, or by content), it
-goes: `dev pr merge` deletes the branch and names a worktree that still holds it, and the nightly `gc` job removes
-merged worktrees that are clean. `dev branch prune` lists every merged branch here and on origin with what keeps the
-others, and `--apply` deletes them with their clean worktrees; the current branch, a branch with an open PR, an
-embargoed branch, and a worktree with uncommitted changes or a live session are kept. Remove the worktree of an
-abandoned branch with `dev wt rm <branch>`.
+goes: `dev pr merge` deletes the branch with its clean worktree, `dev release` deletes the branches a release merged,
+and the nightly `gc` job removes an idle, clean, merged worktree with its branch, a merged local branch that has not
+moved for 24 hours, and a merged remote branch whose PR merged or that devkit backed up. `dev branch prune` lists
+every branch here and on origin with its state, and `--apply` deletes the merged ones with their clean worktrees; the
+current branch, a branch with an open PR, an embargoed branch, and a worktree with uncommitted changes or a live
+session are kept. Deleting on origin is irreversible: a crew member never runs `dev branch prune --apply` without
+`--local`, nor `dev sync --scheduled`. `dev free`, `dev wt ls`, and `dev branch clean` use the same merge test, so a
+squash- or cherry-pick-merged branch counts as merged, not unpushed, and a `dev sync --offline` or `--no-push`
+deletes nothing on origin. Remove the worktree of an abandoned branch with `dev wt rm <branch>`.
 
 ## Disk
 

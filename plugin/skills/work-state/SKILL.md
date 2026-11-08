@@ -30,6 +30,10 @@ item to the work branch you are on; `dev branch new` and `dev wt new` link the o
 lock renews only while one of your live sessions is on that branch. Work elsewhere and the lock runs out: the item goes
 back to todo, and someone else may take it.
 
+**A closed item keeps the state it was closed in.** `dev task move`, `block`, and `cancel` need an open item (todo,
+doing, or blocked) and refuse a done or cancelled one; `dev task unblock` takes only a blocked one. A done item with
+work left comes back with `dev task reopen <n> --why "<what is left>"`, then moves like any open item.
+
 **A decision is open only while someone waits for it.** It is moot when the member that asked has ended and no step
 is blocked on it: it needs no answer, never goes in the status block's **You** line, and does not stop
 `dev progress done`. Ending or replacing the run closes every decision still pending in it, with the reason.
@@ -42,8 +46,8 @@ while none is free it may read but not write.
 
 | Who | Commands |
 | --- | --- |
-| The tech lead | `dev progress done\|confirm\|reopen\|skip` and `dev crew decide\|withdraw`, typed in the main session: run through a script or `bash -c`, they are refused (Codex runs them and records them as unverified). The repairs: `dev task reconcile --apply`, `dev branch prune --apply` |
-| A crew member | `dev progress step\|note` and `dev crew ask\|answer`, in its own lane; it asks the tech lead for a repair |
+| The tech lead | `dev progress done\|confirm\|reopen\|skip` and `dev crew decide\|withdraw`, typed in the main session: run through a script or `bash -c`, they are refused (Codex runs them and records them as unverified). The repairs: `dev task reconcile --apply`, `dev branch prune --apply` (under the irreversible-action gate when it deletes on origin) |
+| A crew member | `dev progress step\|note` and `dev crew ask\|answer`, in its own lane; it asks the tech lead for a repair. It never runs `dev branch prune --apply` (unless `--local` or `--offline`) or `dev sync --scheduled`: the guard counts both as deletions on origin |
 | The developer | answers to decisions; `dev install`, `dev update`, and the restart of their sessions; the yes before `dev branch prune --apply` deletes branches on origin |
 
 ## Before you end a turn
@@ -62,7 +66,7 @@ while none is free it may read but not write.
 ## After a merge
 
 - `dev pr merge` marks the open items of the merged branch done, with the PR and the merge commit in their changelog,
-  and deletes the merged branch (`--keep-branch` keeps it). Arm a watch on the merge commit:
+  and deletes the merged branch with its clean worktree (`--keep-branch` keeps it). Arm a watch on the merge commit:
   `dev ci watch --wait --pr <n>`.
 - Merged somewhere else (GitHub's web page, another Mac)? Run `dev task reconcile` and `dev branch prune`, and apply
   what they report.
@@ -74,7 +78,8 @@ while none is free it may read but not write.
    are done, with the merge commit as evidence.
 2. `dev release` refuses while such an item is open. When one truly has work left (reopened with what is left),
    `--why "…"` releases anyway and records the reason in the audit and the output; never use it to skip the check.
-3. `dev branch prune`: no merged branch or worktree left behind. `dev release` prunes the branches it finds merged.
+3. `dev branch prune`: no merged branch or worktree left behind. Once the release is out (not a `--draft`),
+   `dev release` deletes the branches it merged.
 4. After the tag, arm a watch on it: `dev ci watch --wait --tag v<version>`.
 
 ## Read the checks
@@ -118,5 +123,6 @@ while none is free it may read but not write.
 - **Starting an item on `main`, then working on another branch.** The lock never renews there and runs out after 8
   hours. Start it on its branch, or create the branch with `dev branch new`.
 - **Leaving merged branches behind.** They hide which work is still open; prune them.
+- **Moving or cancelling a done item.** It is refused: reopen it with what is left, then change it.
 - **Running devkit from an old release folder.** Use `dev` on the PATH; an older copy writes no managed config and
   only tells you to restart.

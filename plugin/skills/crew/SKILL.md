@@ -112,6 +112,10 @@ dev crew graph                       # the session as one graph: steps, lanes, d
   member that needs more asks you. Write scopes repository-relative (`lib/**`): they match in every checkout of the
   repository. `assign` and `dev crew delegate --scope` rewrite an absolute or `~` path inside one checkout to that
   form and tell you, and refuse one that spans checkouts or names a worktree that is not there (deleted included).
+- **Check who holds the files first.** Before you assign a scope, or edit files outside your own lane, run
+  `dev crew owner <paths>`: it names the member whose step holds each path. A member whose lane ended or went stale
+  holds no files. When a step and its files go to another lane, a lane that kept those files may read but not write
+  until you assign it a step, so two lanes never write the same files.
 - Work you discover goes into the plan when it **starts** (`dev progress add`, then `dev progress begin`), so its
   time is its own; close a step only with its evidence and only the step it is about.
 - `dev crew brief` prints the brief and the exact spawn line. Launch every parallel member **in one message**. Then
@@ -149,6 +153,8 @@ files.
   as yours only when you type them: run through a script or `bash -c`, they are refused. A member runs its lane
   commands on their own (not inside `&&`, a pipe, or `$(…)`; a message from a quoted heredoc is fine); read-only crew
   commands run anywhere: `dev crew graph`, `show`, `rules`, `history`, `next`, and `dev crew raci` without `--set`.
+  After a compaction, Claude Code gives your conversation a new session id; devkit moves your open run and its
+  working lanes to it (`session.adopt`), so your plan commands keep working.
 - **Helpers:** a member may launch a helper for a narrow lookup or a slice of its own files. The helper gets the
   member's tools and files, takes a slot, and no launch goes deeper than `progress.max_depth` (2). A member that needs
   another specialist asks you.

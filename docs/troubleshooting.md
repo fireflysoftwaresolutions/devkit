@@ -141,6 +141,20 @@ the older session leaves the agents' settings and hooks, `CLAUDE.md`, `AGENTS.md
 new release wrote them, and records each skipped change as `config.repair-skipped`. Restart the session. A `dev`
 command run from an older copy says the same and names the installed `dev` to run instead.
 
+Copies from 26.11.5 and earlier have no such check, so `dev install` retires them: it turns the `bin/dev` of every
+other pinned copy into a link to the installed release's `bin/dev`, and keeps the copy's own `bin/dev` beside it
+(`bin/.dev.retired`). A session that started before the install then runs the installed release from its next hook,
+and its repair writes nothing older back. `dev config repair` retires a copy that an install missed. Each
+retirement is in the audit trail (`dev audit --action install.retire`). The guard refuses an agent's command that
+runs devkit from another release folder.
+
+`dev doctor` shows two rows for this in its Pinned install group:
+
+| Check that fails | Cause | Fix |
+| --- | --- | --- |
+| `agents run the pinned release` | A hook, the status line, `~/.claude/CLAUDE.md`, or `~/.codex/AGENTS.md` belongs to an older copy, which the row names with its version | `dev config repair`, then restart the sessions that started before `dev install` |
+| `older copies retired` | Another pinned copy's `bin/dev` still runs its own code, so a session that started before the install can write its hooks and instructions back | `dev config repair`: the installed release retires it |
+
 When `dev doctor` reports `out of date: an older devkit wrote it` for `~/.claude/CLAUDE.md` or `~/.codex/AGENTS.md`,
 the file holds the rules of an older release, for example one that a session on 26.11.5 or earlier rewrote after the
 update. Run the command it prints, `dev install --only instructions`.
@@ -154,8 +168,10 @@ ls ~/.local/share/devkit/releases     # the copies kept: <version>-<commit>
 dev install --version 26.11.2         # or the full name, 26.11.2-<commit>
 ```
 
-It checks the copy against its checksums before it uses it. The checkout stays where it is; `dev update` later moves
-it to the newest release again.
+It checks the copy against its checksums before it uses it. A copy that a newer install retired gets its own
+`bin/dev` back first, and only when that file matches the copy's manifest. The checkout stays where it is;
+`dev update` later moves it to the newest release again. Run these commands in your terminal: the guard refuses `dev install` and any command that names the releases
+folder to an agent.
 
 ## Sessions and agents
 

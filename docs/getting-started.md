@@ -277,9 +277,12 @@ session at once. That is why `dev install` first makes a **pinned copy**: a read
   tested. The reason goes to the audit trail (`dev audit`).
 - **Checked.** `dev doctor` fails when a file in the copy changed after it was pinned, or when a hook runs something
   other than the pinned copy, and names the fix. `dev install` rebuilds a changed copy from git.
+- **Older copies retired.** A session keeps the hooks it started with, so after an install it still runs an older
+  copy. `dev install` retires the other copies: their `bin/dev` runs the installed release, so such a session runs it
+  from its next hook. The guard refuses an agent's command that runs devkit from another release folder.
 - **Rollback.** devkit keeps the newest three copies, and any copy still in use. To go back to an earlier one, run
   `dev install --version 26.11.2` (the version, or `<version>-<commit>`); it checks the copy against its checksums
-  first.
+  first and gives a retired copy its own `bin/dev` back.
 
 ### First run of each agent
 

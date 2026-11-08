@@ -49,10 +49,12 @@ dev delivery apply -i <initiative> --set release_train="bom → parent → servi
 Every change bumps the policy's version and records who changed it, when and why. `--tasks` opens a work item for
 each gap, such as no CI, no test gate, no changelog, or no release workflow.
 
-Branch cleanup is part of the policy: a merged branch is deleted. `dev pr merge` and `dev release` prune the
-branches they merge or find merged, `dev branch prune` lists the rest (`--apply` deletes them with their clean
-worktrees), and GitHub's `delete_branch_on_merge` deletes a PR's branch when GitHub merges it. `dev doctor` reports
-that setting, and `dev delivery apply` turns it on.
+Branch cleanup is part of the policy: a merged branch is deleted. `dev pr merge` deletes the branch it merges with
+its clean worktree, `dev release` deletes the branches a release merged once it is out, the nightly `gc` closes
+merged branches, `dev branch prune` lists the rest (`--apply` deletes them with their clean worktrees; on origin
+that is an irreversible action), and GitHub's `delete_branch_on_merge` deletes a PR's branch when GitHub merges it.
+The policy field `delete_branch_on_merge` is on unless set to `false`: `dev delivery apply` sets it on GitHub (a
+repository administrator's right) and names the setting on other hosts, and `dev doctor` reports where it is off.
 
 ## 4. Release by the policy (delivery skill, global rules §7)
 

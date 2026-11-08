@@ -194,7 +194,12 @@ that launch alone, so two members launched together never swap lanes:
   on that lane's own evidence.
 - **A launch that failed** (an unknown agent type, an interrupt) starts no agent, so its record goes at once: it
   never labels another agent or holds a slot.
-- **A resumed agent** keeps its own lane and takes nothing else.
+- **A resumed agent** keeps its own lane and takes nothing else. It takes a crew slot like a launch: while none is
+  free, it may read but not write, and the tech lead is told once (`crew.queued`); it takes its slot at its first
+  tool call after one frees.
+- **A lane whose files went to another lane.** When a step and its scope go to another lane, a lane that holds no
+  open step and kept an overlapping scope may read but not write until the tech lead assigns it a step
+  (`crew.scope-handed`), so two lanes never write the same files.
 - **A launch whose record was lost** gets a restricted lane: read-only, no step, no scope, no slot, recorded as
   `crew.unbound`, until the tech lead assigns it a step.
 - **A stopped or silent member.** TaskStop fires no SubagentStop, so the PostToolUse hook ends the lane of an agent
@@ -215,7 +220,8 @@ The crew shares a number of slots, and a launch that does not fit is refused wit
   and the weekly windows both count and the lower limit wins, and from `progress.quota_percent` (90 %) one member
   works at a time until the window resets.
 - **The cost of a launch.** A builder costs one slot, a review-only or read-only member half a slot, and the
-  Lookup scout (Sparks) nothing (`progress.slot_weights`). Resumed agents and members' helpers count.
+  Lookup scout (Sparks) nothing (`progress.slot_weights`). Members' helpers count, and so does a member that works
+  again after its lane ended: over the limit, it reads only until a slot frees.
 - **The reserve.** `progress.reserve` (1) keeps a slot for what you ask while the crew works: plan steps queued in an
   earlier turn do not take it, and a launch for your request in the current turn does (`crew.reserve`).
 - **The order.** `dev crew next` lists the ready steps in the order to launch them: the longest critical path first,
@@ -246,7 +252,14 @@ scope.
 agent that made it, from the hook's own input (the call ledger, in devkit's state, closed when the call ends). A `dev`
 command then looks for the open calls that hold its own arguments: it acts as the tech lead only when every such call
 is the main session's, and as a member when any is a member's. No environment variable, parent process, or recent
-activity can make a caller the tech lead. These commands need the tech lead:
+activity can make a caller the tech lead.
+
+Claude Code gives a running conversation a new session id after a compaction. Every hook registration records the
+agent's process, so the new id takes that process over from the older record, and the older session's open run
+moves to the new id with its working lanes (`session.adopt`). A `dev` command picks, among its process's sessions,
+the one whose call ledger holds its open call. When none does, it takes the one session of the same repository from
+the last 12 hours that holds the call and that no live process holds: the conversation before its new id
+registered. These commands need the tech lead:
 
 - `dev progress start` and `start --replace` in the main session, and `assign`, `begin`, `reopen`, `skip`, `confirm`,
   and `done`;
@@ -352,8 +365,10 @@ main session launched: a member's own helpers, and agents with no launch record,
 When the member stops for good, its step ends on evidence: done with a Check ✓ in its report or its own
 `dev progress step --check`, otherwise unverified, for the tech lead to close with evidence or reopen. A review-only or
 read-only member whose shell call wrote files ends unverified too. A file that changed during that call inside a
-working member's scope counts as that member's write (`scope.write` in the audit trail), so only the files outside
-every working scope count against the read-only member. Keeping the step open while gate findings remain is planned.
+working member's scope counts as that member's write only while that member, or a helper of it, has a call open;
+otherwise it is the read-only member's own write, since a read-only member can write through a script in its
+scratch folder. Either way the working member's step keeps the file, and the review that follows that step lists it
+(`scope.write` in the audit trail). Keeping the step open while gate findings remain is planned.
 
 **Review steps start on unverified work.** A step whose dependencies ended unverified waits, except a review step
 (its kind of work is review, or its member works review-only): it starts, and its Check ✓ ends done the steps it
@@ -528,6 +543,7 @@ Each guardrail cites the rule of `dev crew rules` that enforces it. A rule marke
 | Separate files for parallel members | `assign` refuses a scope that overlaps a working member's scope (`E-separate-files`) |
 | A member stays in its scope | the guard refuses its edits outside the files it was assigned (`E-scope`); a review-only or read-only member's shell runs only the read-only allowlist and its writes are detected, while a builder's shell is not checked against its scope (`E-shell-scope`) |
 | The main session respects a member's files | the guard refuses the main session's edits inside a working member's scope; `DEVKIT_SCOPE_OVERRIDE=1` for an emergency (`E-main-scope`) |
+| An ended or stale member | holds no file in any session's run; `dev crew owner <path>` says who holds a file, exactly as the edit check does (`E-owner`) |
 | Read-only members never edit | the Code reviewer, the Red team tester, the Performance analyst, the Compliance reviewer, the Business analyst, the Product owner, and the Lookup scout (Sparks) have no edit tools, and their helpers have none either (`E-read-only`) |
 | Helpers stay inside their member's limits | a helper gets its member's tools and files, takes a slot, and no launch goes deeper than `progress.max_depth` (`E-nested`) |
 | Work goes to its Responsible member | `assign` refuses another member unless `--why` is recorded, judged on the declared kind of work, the member's role, or the files (`E-responsible`, `E-any-language`); words never refuse a step (`E-words-never-refuse`) |
@@ -553,10 +569,12 @@ dashboard and the handoff read, and devkit's audit trail (`dev audit`), publishe
 | `crew.stop-deferred` | a member's stop met a busy hook and is applied at the next one |
 | `crew.bind`, `crew.resume`, `crew.launch-failed`, `crew.unbound` | a lane binds to its launch, a member resumes, a launch fails, or a lane runs restricted because its launch record was lost |
 | `crew.limit`, `crew.reserve` | the effective slot limit changes, or a launch takes the slot kept for your request |
+| `crew.queued`, `crew.scope-handed` | a resumed member waits for a slot, or a lane loses its scope to the lane that took its files |
+| `session.adopt` | a session's open run moves to the new id Claude Code gave the conversation |
 | `crew.message` | a question or answer between members |
 | `crew.decision`, `crew.decided`, `crew.mode` | a decision point, its answer (and by whom), a change of mode |
 | `crew.withdrawn`, `crew.decision-closed` | the tech lead withdrew a decision, or its run ended or was replaced, each with the reason |
-| `scope.write` | a file a read-only member's shell call changed, counted for the working member whose scope holds it, or flagged for the read-only member |
+| `scope.write` | a file a read-only member's shell call changed, counted for the working member whose scope holds it while that member has a call open, otherwise flagged for the read-only member |
 | `crew.delegate`, `crew.decline` | work handed to another member, or handed back |
 | `raci.override` | a step assigned to a member the RACI does not make Responsible, with the reason |
 | `caller.refused`, `caller.unverified` | a tech lead's command refused because it did not come from the main session, or allowed on Codex without verification |

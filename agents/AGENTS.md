@@ -199,6 +199,8 @@ The prompt hook names the route for each request.
   recorded. Launch one step per member with `dev crew brief --step`, whose launch description names it: a step binds
   only to the launch that names it. devkit creates the member's `scratchpad/<member id>/` at launch, the only place
   it may write scratch files.
+- **Owners.** Before you edit files outside your own lane or assign a scope, run `dev crew owner <paths>`: it names
+  the member whose step holds them. A member whose lane ended or went stale holds no files.
 - **Parallel or not.** Run members in parallel only for independent steps with fixed contracts and separate files;
   otherwise in sequence. They share the crew's slots (`progress.max_parallel`, four by default), which shrink as the
   account's 5-hour and weekly usage grows and keep one for the developer's own request; `dev crew next` shows the
@@ -254,7 +256,9 @@ rely on.
   repository. Use `dev wt new <type>/<topic>` (or your harness's own worktree feature)—never raw
   `git worktree add`; the devkit guard blocks unmanaged paths.
 - One worktree per task, named after the branch. A merged branch goes with its worktree: `dev branch prune --apply`
-  deletes what `dev pr merge` and the nightly `gc` leave. Remove an abandoned task's worktree with `dev wt rm <branch>`.
+  deletes what `dev pr merge` and the nightly `gc` leave. Deleting on origin is irreversible: crew members run it
+  only with `--local`, and never run `dev sync --scheduled`. Remove an abandoned task's worktree with
+  `dev wt rm <branch>`.
 - Never edit another worktree's files from your session, and never use bare `git stash` / `git stash pop` (the stash
   is shared by all worktrees); use a WIP commit instead.
 
@@ -471,4 +475,5 @@ around it with other commands; if the user really wants the blocked action, tell
 
 devkit runs a pinned release. A session on an older copy writes no managed config (settings, hooks, these
 instructions) and only says to restart: tell the developer. `dev install` and `dev update` list the sessions still
-running; each needs a restart after an update. Use `dev` on the PATH; never run devkit from an old release folder.
+running; each needs a restart after an update. Use `dev` on the PATH; never run devkit from an old release folder
+(the guard refuses it).

@@ -16,6 +16,10 @@ explains what moves each record and how to repair one that drifted.
 
 ### Added
 
+- **`dev crew owner <path>…` says who holds a file before you edit it.** For each path it names the crew member,
+  their run, session, and step, their lane's state (working, stale, or ended), their last activity, and what to do.
+  It decides exactly as the edit check does, and exits with `1` while a working member holds a path. See
+  [The crew](docs/crew.md).
 - **`dev task reconcile` finds stale work items.** It lists the project's doing items without a lock, its open items
   whose branch is already merged into the default branch on `origin`, and items that share a title, and changes
   nothing. `--apply` sends the first back to todo and closes the second with the merge commit as evidence, in one
@@ -32,11 +36,13 @@ explains what moves each record and how to repair one that drifted.
   passed, failed, nothing to watch, ended first, or none. `dev ci watches` lists the live watches and the ones that
   stopped before their runs ended, each with the command to arm it again. See
   [CI/CD pipelines › Wait on a run](docs/ci-cd.md#wait-on-a-run-a-watch-that-wakes-the-agent).
-- **`dev branch prune` removes merged branches.** It lists the local and remote branches that one merge test finds
-  merged (by ancestry, a merged pull request, or equivalent content), each with the way the test held, and `--apply`
-  deletes the ones nothing protects, with their clean worktrees. The nightly `gc` job,
-  `dev pr merge`, and `dev release` prune too; `dev doctor` reports whether GitHub deletes a pull request's branch when
-  it merges, and `dev delivery apply` turns that setting on. See [Git and GitHub](docs/git-and-github.md).
+- **`dev branch prune` closes merged branches.** It lists every local and remote branch with its state: merged and
+  how (its tip is in `origin/<default>`, its pull request from this repository merged, or every commit has an
+  equivalent there), an open pull request, not merged, or protected. `--apply` deletes the merged ones nothing
+  protects, with their clean worktrees; `--remote` or `--local` limits it to one side, `--offline` leaves `origin`
+  alone, and `--json` prints the rows. The same merge test drives `dev gc`, `dev wt rm`, `dev pr merge`,
+  `dev release`, and the branch map. See
+  [Git and GitHub › Close merged branches](docs/git-and-github.md#close-merged-branches).
 - **`dev doctor` checks the work state, and the dashboard's Health view shows it.** The `work state` check lists doing
   items without a lock, open items of merged branches, duplicate titles, runs with no step change for
   `work.lock_hours`, and runs begun before the latest release tag, each with its fix, and changes nothing. See
@@ -55,6 +61,22 @@ explains what moves each record and how to repair one that drifted.
   commit. `dev branch new` and `dev wt new` link the one item you hold that has no branch.
 - **`dev pr merge` closes the work items of the branch it merges.** Each open item linked to the merged branch becomes
   done, with the pull request and the merge commit in its changelog; `--auto` closes nothing until GitHub merges.
+- **`dev pr merge` and `dev release` delete the branches they merge.** When the merge test finds the branch merged,
+  `dev pr merge` removes its clean worktree with the local branch, or switches the main checkout to the updated
+  default branch and deletes it; uncommitted changes keep it, and the output says why. Inside the branch's own
+  worktree it names `dev wt rm` instead. Once a release is out (not a `--draft`), `dev release` deletes the branches
+  it merged, on `origin` and on this Mac, and names the merged ones it kept; branches merged before the previous tag
+  stay for `dev gc` and `dev branch prune`.
+- **The nightly `gc` job closes merged branches.** An idle, clean worktree whose branch is merged goes with its
+  branch; a merged local branch goes once it has not moved for `gc.grace_hours` (24); a merged remote branch goes
+  only when its pull request merged or devkit pushed it as a backup. Anyone else's merged remote branch is listed as
+  kept, with `dev branch prune --apply` to delete it. See
+  [Disk and cleanup › Merged branches](docs/disk-and-cleanup.md#merged-branches).
+- **`dev delivery apply` makes the host delete a merged pull request's branch.** The delivery policy has a new field,
+  `delete_branch_on_merge`, on unless you set it to `false`. On GitHub, `dev delivery apply` sets the repository's
+  setting, which needs an administrator, and records `true` only when GitHub took it; on GitLab, Bitbucket, and
+  Azure DevOps it names the setting to change there. `dev doctor` lists each GitHub project you administer where it
+  is off.
 - **`dev release` refuses while items of merged branches are open.** It and `--dry-run` list the open items linked to
   the branches merged since the previous tag; `--why "<reason>"` releases anyway and records the reason in the output
   and the audit trail.
@@ -82,6 +104,11 @@ explains what moves each record and how to repair one that drifted.
 
 ### Fixed
 
+- **A crew member that ended no longer holds its files.** After a compaction gave the conversation a new session id,
+  a member's stop closed nothing in the run that listed it, so the edit check refused its files for hours. Now the
+  stop closes the lane in every run that lists it, and a stale lane (its session's process gone, or silent for
+  `progress.stale_agent_minutes`) holds nothing. `dev session carry` closes such lanes with the reason instead of
+  refusing, and `dev status` marks stale members.
 - **A stopped rebase no longer stops every handoff sync without a word.** devkit ends it before reads, pulls, commits,
   `dev sync`, and `dev install`, records it as `handoff.rebase-aborted`, and shows the problem under Needs attention
   until a push succeeds. Changes to one item from two machines are settled field by field. See
@@ -108,8 +135,30 @@ explains what moves each record and how to repair one that drifted.
 - **`dev progress start --replace` no longer drops a run's pending decisions without a trace.** They close with the
   reason.
 - **A step that goes back to pending is announced again, and a run blocked on a step runs again once the step moves.**
-- **A file that a read-only member's shell call changed inside a working member's scope counts as that member's
-  write**, so the read-only member's step is no longer marked unverified for it.
+- **A read-only member's write is credited to the right lane.** A file that a review or read-only member's shell
+  call changed inside a working member's scope counts as that member's write only while that member has a call open;
+  otherwise it is the read-only member's own write, and its step ends unverified. The review that follows the working
+  member's step lists those files. When a step and its files go to another lane, a lane that kept those files may
+  read but not write until the tech lead assigns it a step.
+- **A resumed crew member takes a slot.** A member that worked again after it stopped took no crew slot, so the crew
+  could run over its limit. Now it takes a slot like a launch; while none is free, it may read but not write, the
+  tech lead is told once, and it takes its slot at its first tool call after one frees.
+- **A session whose id changes keeps its run.** Claude Code gives a running conversation a new session id after a
+  compaction, and the session lost its lanes, so the tech lead's own commands were refused as caller unknown. Every
+  hook registration now records the agent's process, the new id takes that process over from the older record, and
+  the older session's open run moves to the new id with its working lanes (`session.adopt` in the audit trail). A
+  `dev` command finds its session by the open call that typed it.
+- **A closed work item stays closed until you reopen it.** `dev task unblock` on a done item set it back to todo or
+  doing, and `move`, `block`, and `cancel` changed done and cancelled items too. Now `move`, `block`, and `cancel`
+  apply to open items only (todo, doing, blocked) and name `dev task reopen <id> --why "<what is left>"`, and
+  `unblock` applies only to a blocked item.
+- **A branch merged by content is no longer pushed back to `origin`.** The branch map, `dev gc`, and `dev wt rm`
+  knew only ancestry, so a cherry-picked branch, or one a release branch carried, read as unpushed, and the hourly
+  backup pushed it back after its remote branch was deleted. They use the merge test now, and so do `dev free`, the
+  unpushed count of `dev wt ls`, and `dev branch clean`, so a branch merged by squash or cherry-pick reads as merged.
+- **`dev sync --offline` and `--no-push` delete nothing on `origin`.** When the `gc` job is not installed, the hourly
+  sync applies the cleanup itself, and the cleanup deletes merged branches on `origin`. An offline or no-push run now
+  keeps every remote branch and says so.
 - **Crew members have their scratch folder.** Briefs never named it, so members wrote at the scratchpad's top level
   and were refused, and read-only members could not create theirs. Briefs now name `scratchpad/<member id>/`, and
   devkit creates it when the member's lane opens.
@@ -124,14 +173,34 @@ explains what moves each record and how to repair one that drifted.
 - **An older devkit no longer overwrites a newer install.** Sessions still on 26.11.4 rewrote the hooks, `CLAUDE.md`,
   `AGENTS.md`, and the global git config right after `dev install` pinned 26.11.5. A copy older than the pinned
   release now changes no devkit-managed setting, records `config.repair-skipped`, and tells you once to restart, and
-  background commands run the pinned release. See
+  background commands run the pinned release. Copies from 26.11.5 and earlier have no such check, so `dev install`
+  retires the other pinned copies: their `bin/dev` runs the installed release, and a session that started before the
+  install runs it from its next hook. `dev install --version <version>` gives a retired copy its own code back, for
+  a rollback. `dev doctor` names a hook, the status line, or instructions that an older copy wrote back, with that
+  copy, and any copy that still runs its own code. See
   [Troubleshooting](docs/troubleshooting.md#a-session-says-it-runs-an-older-devkit).
 
 ### Security
 
 - **A backup policy keeps the visibility it was decided for.** A policy set to `on` while a repository was private
-  kept publishing its branches after the repository became public. Such a policy now counts as `ask` until you
-  answer again in a terminal. See [Delivery](docs/delivery.md#back-up-early-ci-once).
+  kept publishing its branches after the repository became public, and an `on` recorded without a visibility kept
+  publishing while `gh` failed or the Mac was offline. Now a policy decided while devkit cannot read the visibility
+  records it as `unknown`, and an `on` decided for another visibility, or with none recorded, counts as `ask` until
+  you answer again in a terminal, unless the repository reads as private. The skip reason names the visibility it
+  was decided for. See [Delivery](docs/delivery.md#back-up-early-ci-once).
+- **A forged merge commit can no longer close others' work items.** devkit counted every merge commit whose message
+  named a branch, also one inside a merged branch, where any author writes the message. Now only first-parent merges
+  count, on GitHub only with their merged pull request from the repository itself and its `mergedAt`, and a merge
+  dated more than ten minutes ahead counts for nothing.
+- **The guard refuses running devkit from another release folder.** An older pinned copy may lack newer safeguards,
+  and its repair writes its hooks, guard, and instructions back for every session. An agent's shell command that
+  names a copy in `~/.local/share/devkit/releases` other than the pinned release, or the folder itself, is refused;
+  run `dev` from the PATH. See [Guard rules](docs/guard.md#devkits-own-state-configuration-and-install).
+- **Deleting branches on `origin` is an irreversible action.** `dev branch prune --apply` without `--local` or
+  `--offline`, `dev gc --apply`, and `dev sync --scheduled` in every form, whose cleanup can delete merged branches on
+  `origin`, are tier 2 of the irreversible-action gate, like `git push --delete`: a crew member never runs them, and
+  the main session runs them under `safeguards.irreversible_main` with a grant for the exact target (`origin:merged-branches`
+  or `origin:merged-branches-of-every-project`); a branch glob grant never covers them. See [Guard rules › Git](docs/guard.md#git).
 - **devkit trusts its install record only when it holds up.** `install.json` counts only when it names a pinned copy
   whose manifest and checksums match, so an edited record cannot make an older copy, with older guard rules, look
   current.
