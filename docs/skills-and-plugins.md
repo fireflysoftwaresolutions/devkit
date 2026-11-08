@@ -76,6 +76,7 @@ one step: only Claude Code's subagent briefs get the required skills added by a 
 | `postgres` | `supabase-postgres-best-practices` | the same | SQL files and migration folders in a repository whose project files name Postgres; `psql`, `pg_dump`, `pg_restore` |
 | `workflows` | `cicd`, `github-actions-hardening`, `delivery` | the same | GitHub, GitLab, Bitbucket and Azure pipeline files; `gh workflow`; `cicd` work |
 | `security` | `devsecops` | `devsecops` | Dockerfiles, security folders, Terraform; `dev sec scan`; `security`, `sso`, `redteam`, and `dependencies` work |
+| `terraform` | `terraform-style-guide` | the same | `*.tf` and `*.tfvars` files, only when the `iac` skill group is installed |
 | `docs` | `docs` | `docs` | `README.md`, Markdown in `docs/`, MDX, `CHANGELOG.md`, `CONTRIBUTING.md`, skills (`plugin/skills/**`, any `SKILL.md`), agent files, slash commands, and `agents/AGENTS.md`; `dev docs check`; `docs` work |
 | `diagrams` | `diagrams` | `diagrams` | Diagram specs, SVG, C4, and Mermaid files; `dev diagram`; `architecture` work |
 | `delivery` | `delivery` | `delivery` | `git push`, `dev push`, `dev pr`, `gh pr create`; `release` work |
@@ -91,7 +92,9 @@ files a turn changed (`files`); a regular expression on the content of changed f
 HTML counts as UI and a test that holds HTML does not); the command words an agent runs (`commands`, read without
 their quoted text and heredocs, with `bin/dev` counted as `dev`); and the kinds of work a step or brief declares
 (`activities`, ids from `dev crew raci`). A `project` condition limits a rule to repositories whose project files
-match, such as the `postgres` rule. A file on disk outside every repository is scratch work and matches no rule.
+match, such as the `postgres` rule, and a `group` condition applies a rule only when its optional skill group is in
+`skills.groups`, such as the `terraform` rule. A file on disk outside every repository is scratch work and matches no
+rule.
 
 ### Where devkit enforces them
 
@@ -581,7 +584,9 @@ it on every Mac.
    `dev ext update <name> --why "…"` on a branch of the devkit checkout: it prints the compare link, the commits, and
    the files changed before it changes only that pin.
 
-3. If a kind of work should require it, add or change a rule in `config/skill-rules.json`.
+3. If a kind of work should require it, add or change a rule in `config/skill-rules.json`. A skill that sets
+   `disable-model-invocation` goes in its source's `user_only` list instead: the developer runs it as a slash
+   command, and no crew procedure or rule may ask a model to load it.
 4. Run `dev install --only skills`, then `dev doctor`.
 5. Record the change in `CHANGELOG.md` and in `NOTICE`.
 

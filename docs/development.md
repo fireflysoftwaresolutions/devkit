@@ -129,6 +129,7 @@ file reads and imports only, in about a second:
 | D11 | A row of the guardrail table in [The crew](crew.md#guardrails) cites no rule id, or states a planned rule as fact |
 | D12 | `tests/__init__.py` does not activate `tests/_hermetic.py` (the run's temporary home), or a documented `unittest discover -s tests` lacks `-t .`, which unittest needs to import `tests/__init__.py` |
 | D13 | `shell/completions/_dev` or `dev.bash` differs from what the parser generates (`bin/dev completion zsh\|bash`), or a completion rule in `lib/devkit/completion.py` names an argument the parser no longer has |
+| D14 | A skill that the crew, a skill rule, the `using-devkit` table, or section 9 of `agents/AGENTS.md` names comes from no source devkit installs, or the crew, a rule, or the table asks a model to load a skill only the developer can run (`user_only` in `config/skills.json`) |
 
 `tests/test_consistency.py` runs the checks that read only the repository, and tests the others on small fixtures.
 Drift that exists today is listed in its `KNOWN` allowlist, each item with its review finding, owner, and the task
@@ -205,8 +206,8 @@ feature changes what agents should do, change them in the same branch, or agents
    ```
 
    The consistency test fails when a `dev …` command in the instructions, skills, docs, or roster does not parse,
-   when a top-level command is missing from the `using-devkit` table, and on the other drift in
-   [Consistency checks](#consistency-checks).
+   when a top-level command is missing from the `using-devkit` table, when a skill you name comes from no source
+   devkit installs or only the developer can run it, and on the other drift in [Consistency checks](#consistency-checks).
 4. Try the change in your own sessions (see [Trying a change in your own sessions](#trying-a-change-in-your-own-sessions)):
    your agents read the pinned copy, and `agents/AGENTS.md` reaches `~/.claude/CLAUDE.md` and `~/.codex/AGENTS.md`
    only through `bin/dev install`.
