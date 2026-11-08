@@ -305,10 +305,10 @@ To move to a newer impeccable, change its `ref` in `config/skills.json` after re
 
 | Skill | Source · license | Use |
 | --- | --- | --- |
-| `grill-with-docs` | mattpocock/skills · MIT | Interview the developer to align before work starts |
+| `grill-with-docs` | mattpocock/skills · MIT | Interview the developer to align before work starts. Your own slash command, `/grill-with-docs`: a model cannot load it |
 | `domain-modeling` | mattpocock/skills · MIT | Glossary and domain model, ADRs |
 | `codebase-design` | mattpocock/skills · MIT | Deep-module design |
-| `improve-codebase-architecture` | mattpocock/skills · MIT | Architecture review and refactoring direction |
+| `improve-codebase-architecture` | mattpocock/skills · MIT | Architecture review and refactoring direction. Your own slash command, `/improve-codebase-architecture`: a model cannot load it |
 | `architecture` | anthropics/knowledge-work-plugins · Apache-2.0 | Architecture decisions and trade-offs |
 | `system-design` | anthropics/knowledge-work-plugins · Apache-2.0 | System design reviews |
 | `incident-response` | anthropics/knowledge-work-plugins · Apache-2.0 | Triage, communication, and blameless postmortems |

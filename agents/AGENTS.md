@@ -390,9 +390,11 @@ Follow the devkit `backend` skill for the detailed checklists. Always:
   all and applies the fixes the developer agrees to).
 - **Code intelligence:** use the LSP tools (TypeScript, Python, Java, PHP) to find definitions, references, and type
   errors rather than grepping when they are available.
-- **Design and architecture:** `grill-with-docs`, `domain-modeling`, `codebase-design`,
-  `improve-codebase-architecture`, `architecture`, `system-design`, `likec4-dsl` (C4 diagrams). ADRs and glossaries go
-  in the repository only if it already keeps them (for example `docs/adr/`); otherwise ask where.
+- **Design and architecture:** `domain-modeling`, `codebase-design`, `architecture`, `system-design`, `likec4-dsl`
+  (C4 diagrams). `grill-with-docs` and `improve-codebase-architecture` are the developer's own slash commands
+  (`/grill-with-docs`, `/improve-codebase-architecture`): a model cannot load them, so suggest them and never put
+  them in a brief. ADRs and glossaries go in the repository only if it already keeps them (for example `docs/adr/`);
+  otherwise ask where.
 - **Frontend:** `frontend-design` and `impeccable` for UI quality; `angular-developer`,
   `react-best-practices`, `composition-patterns`; Chrome DevTools MCP and `playwright-cli` to verify in a real
   browser. Do not create PRODUCT.md / DESIGN.md unless the user asks.
