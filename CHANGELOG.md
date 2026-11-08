@@ -81,7 +81,8 @@ explains what moves each record and how to repair one that drifted.
   the branches merged since the previous tag; `--why "<reason>"` releases anyway and records the reason in the output
   and the audit trail.
 - **Only what is open needs you.** A decision belongs to its run: ending or replacing the run closes its pending
-  decisions, with the reason. A decision whose asking member ended and that no step waits on is moot: it shows on a
+  decisions, with the reason. A decision whose asking member ended (its lane done, stopped, lost, or closed unverified)
+  and that no step waits on is moot: it shows on a
   quiet line under its run, never under Needs you, and no longer stops `dev progress done`. `dev status`, the
   dashboard, and the continuity brief list only open decisions and unanswered questions.
 - **Crew messages have a kind.** A question waits until someone answers it. A notice and an answer close once
@@ -109,6 +110,15 @@ explains what moves each record and how to repair one that drifted.
   stop closes the lane in every run that lists it, and a stale lane (its session's process gone, or silent for
   `progress.stale_agent_minutes`) holds nothing. `dev session carry` closes such lanes with the reason instead of
   refusing, and `dev status` marks stale members.
+- **An ended or stale crew member no longer shows as working.** `dev progress`, the status block's Crew line, the
+  crew's slots, `dev crew next`, the continuity brief, and the dashboard counted every lane its run still listed as
+  running, so a run whose members had all ended still showed 6 agents working. They now decide as `dev crew owner` does:
+  only members that still work count and hold a slot, a stale one is marked stale (Stopped reporting on the
+  dashboard), and one that ended is left out; the brief after a compaction names it on an "Ended since" line. The
+  scheduled sweep reads Claude Code's records beside every session transcript devkit knows, so it closes such
+  lanes, with the reason in the run's history.
+- **The dashboard no longer warns about commits merged by content.** A project's health, its actions, and the
+  worktrees to reclaim count only commits with no equivalent on `origin`'s default branch.
 - **A stopped rebase no longer stops every handoff sync without a word.** devkit ends it before reads, pulls, commits,
   `dev sync`, and `dev install`, records it as `handoff.rebase-aborted`, and shows the problem under Needs attention
   until a push succeeds. Changes to one item from two machines are settled field by field. See

@@ -178,7 +178,8 @@ On a phone the figures sit two by two and the runs stack:
   opens their drawer (sessions, claimed tasks with a countdown ring per lock, recent sessions); a session bar opens
   that session. **Collisions**, such as two sessions on the same branch, are listed first, each with its command.
 - **Crew** (`#/team?tab=crew`, `g c`) starts with **Working now**, the crew members on a run, with their step, run,
-  and state (working, waiting for you, done). **The crew** lists every member role first, for example
+  and state (working, waiting for you, done). A member that ended is not listed, and one that went stale shows as
+  Stopped reporting, as `dev status` marks it. **The crew** lists every member role first, for example
   `Frontend engineer (Trinity)`: what they do, the kinds of work they do and approve, their access, and what they work
   on now. A member opens their drawer. See [The crew](crew.md).
 - **Who does what** (`#/team?tab=raci`) is the crew's RACI, one row per kind of work with who does it, who approves it,
