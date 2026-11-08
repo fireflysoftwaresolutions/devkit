@@ -369,6 +369,17 @@ class StaleLockTests(unittest.TestCase):
             left = work.parse_iso(work.load(it["path"])["meta"]["lock_expires"]) - time.time()
             self.assertGreater(left, 7.9 * 3600)
 
+    def test_a_closed_items_lock_does_not_renew_while_a_live_session_is_on_its_branch(self):
+        # an item closed with its lock still set (an older devkit, or two Macs' changes merged): staying on its
+        # branch must not keep a finished item locked
+        for status in ("done", "cancelled"):
+            with self.subTest(status), TempHandoff():
+                it = self.claimed(hours=1)
+                work.update(work.load(it["path"]), "edit", why="closed with its lock", a=A, status=status)
+                before = work.load(it["path"])["meta"]["lock_expires"]
+                self.assertEqual(work.renew_locks(A, hours=8, sessions=[self.LIVE]), 0)
+                self.assertEqual(work.load(it["path"])["meta"]["lock_expires"], before)
+
     def test_a_lock_runs_out_when_no_live_session_is_on_its_branch(self):
         cases = {"no session": ("feat/export", []),
                  "a session on another branch": ("feat/export", [dict(self.LIVE, branch="feat/other")]),

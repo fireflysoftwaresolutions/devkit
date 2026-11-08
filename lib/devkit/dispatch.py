@@ -184,8 +184,10 @@ def delegate(task: str, to: str = "auto", files=None, scope: str = "", after: st
         run["steps"] = len(run["plan"])
         by = progress._name_of(run, from_agent or "main")
         _log_change(run, s, None, "pending", from_agent or "main", f"delegated by {by} to {m['name']}", now)
-        lane_id = next((k for k, v in (run.get("agents") or {}).items() if v.get("state") == "running"
-                        and progress._label_matches(m["name"], v)), None)
+        # only a lane whose member still works takes it (progress.working_agents): one that ended or went stale
+        # would hold a step nobody starts, so the step waits for a new launch, with Morpheus
+        lane_id = next((k for k, v in progress.working_agents(run, now)
+                        if progress._label_matches(m["name"], v)), None)
         if lane_id and lane_id != from_agent and not progress.deps_open(run, s):  # a step that waits does not start
             s.update(owner=lane_id, state="running", started=now, joined=lane_id)  # its launch does not name it
             if s.get("scope"):

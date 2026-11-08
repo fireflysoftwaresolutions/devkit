@@ -423,11 +423,12 @@ def reconcile(run: dict, facts: dict, now: float, lim: dict | None = None) -> li
     `ended_how` (what saw the end, when it was not the meta file beside the session's own transcript), `last_seen`
     (its last hook), `transcript_mtime` and `active` (its last activity anywhere); the session's `ended` and `alive`;
     the session's `launches`.
-    Rules: a working lane whose meta finished `finish_grace` ago with no SubagentStop is unverified, its steps too,
-    and frees its slot; one whose transcript ends with its interruption stopped (stop_moves); one silent past
-    `stale_minutes`, or whose session ended while its meta does not say it runs, is lost, and its steps wait for an
-    owner; a lost lane seen again works again and takes back the steps it lost; the run of an ended session is
-    orphaned; a launch pending past `launch_ttl` fails."""
+    Rules: a working lane whose meta finished `finish_grace` ago with no SubagentStop is unverified, its steps too
+    (a step that started after that finish, which nobody worked on, waits for a new launch instead), and frees its
+    slot; one whose transcript ends with its interruption stopped (stop_moves); one silent past `stale_minutes`, or
+    whose session ended while its meta does not say it runs, is lost, and its steps wait for an owner; a lost lane
+    seen again works again and takes back the steps it lost; the run of an ended session is orphaned; a launch
+    pending past `launch_ttl` fails."""
     lim = {**LIMITS, **(lim or {})}
     facts = facts or {}
     fl, sess = facts.get("lanes") or {}, facts.get("session") or {}
@@ -447,7 +448,10 @@ def reconcile(run: dict, facts: dict, now: float, lim: dict | None = None) -> li
                 how = f" ({f['ended_how']})" if f.get("ended_how") else ""
                 why = f"finished at {_iso(mf)} with no SubagentStop{how}: no report, so no evidence"
                 moves.append(_lane_move(aid, st, "unverified", why, at=mf))
-                moves += [_step_move(s, "unverified", aid, why) for s in mine]
+                late = f"it started after its member finished at {_iso(mf)}: nobody worked on it, so it waits for a " \
+                       f"new launch"  # delegated or assigned into a lane whose member had already ended
+                moves += [_step_move(s, "pending", "main", late) if (s.get("started") or 0) > mf
+                          else _step_move(s, "unverified", aid, why) for s in mine]
             elif f.get("stopped_at") is not None:
                 how = f.get("ended_how") or "its transcript ends with its interruption"
                 moves += stop_moves(run, aid, f"interrupted at {_iso(f['stopped_at'])} ({how}), before its report",

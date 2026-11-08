@@ -874,9 +874,10 @@ def _live_branches(sessions) -> set:
 
 
 def renew_locks(a=None, hours: float = None, sessions=None) -> int:
-    """Extend the locks this actor holds on items linked to a branch (`branch:<name>`, set by `claim`) that one of the
-    live sessions on this machine is on now. `sessions`: `registry.live_sessions()` (read when None). Any other lock
-    is left to run out after `work.lock_hours`, and `expire_locks` then sends its item back to todo."""
+    """Extend the locks this actor holds on open items (OPEN) linked to a branch (`branch:<name>`, set by `claim`)
+    that one of the live sessions on this machine is on now; a done or cancelled item's lock is never renewed.
+    `sessions`: `registry.live_sessions()` (read when None). Any other lock is left to run out after
+    `work.lock_hours`, and `expire_locks` then sends its item back to todo."""
     a = a or actor()
     hours = hours or float(core.CFG.get("work", {}).get("lock_hours", 8))
     if sessions is None:
@@ -886,6 +887,8 @@ def renew_locks(a=None, hours: float = None, sessions=None) -> int:
     me = f"{a['user']}@{a['host']}"
     changed, skipped = [], []
     for it in all_items():
+        if (it["meta"].get("status") or "todo") not in OPEN:  # a done or cancelled item needs no lock kept alive
+            continue
         holder, expired = lock_holder(it)
         working = any((it["scope"], ln[len("branch:"):]) in live for ln in _links(it) if ln.startswith("branch:"))
         if holder and holder.startswith(me) and not expired and working:

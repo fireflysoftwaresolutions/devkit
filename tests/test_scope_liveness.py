@@ -23,7 +23,7 @@ from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "lib"))
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from devkit import approvals, cli, continuity, core, crew, guard, hooks, progress as pg, work  # noqa: E402
+from devkit import approvals, cli, continuity, core, crew, dispatch, guard, hooks, progress as pg, work  # noqa: E402
 from test_progress import TempState, launch  # noqa: E402
 
 TEAMLESS = crew.load
@@ -255,6 +255,43 @@ class CarryTests(OwnerCase):
         self.assertEqual(pg.load_run("claude", "s2")["agents"]["a_kid"]["state"], "running")
 
 
+class EndedMemberTakesNoStepTests(OwnerCase):
+    # this session's run still lists the Backend engineer (Tank) as running, but Claude Code recorded him finished
+    # beside this session's transcript ten minutes ago, after his last activity: `dev crew owner` and the Crew line
+    # show him ended, so no new step goes to his lane and the files he held are free (Code reviewer, second pass)
+    def ended_tank(self, plan, label, assign=None):
+        pg.start("Export", plan=plan, now=self.now - 3600)
+        if assign:
+            pg.assign(assign, "Tank", scope="lib/api/**", now=self.now - 3600)
+        launch("a_tank", "devkit:tank", label, self.now - 3600)
+        self.claude_meta("s1", "a_tank", finished=True, at=self.now - 10 * MIN, log_at=self.now - 11 * MIN)
+        run = pg.load_run("claude", "s1")
+        self.assertEqual(run["agents"]["a_tank"]["state"], "running")
+        self.assertEqual(pg.lane_states(run, self.now)["a_tank"]["state"], "ended")
+
+    def test_a_step_delegated_to_an_ended_member_waits_for_a_new_launch(self):
+        self.ended_tank(["api"], "Tank: api", assign="api")
+        r = dispatch.delegate("add a nullable column for the export date", to="Tank", now=self.now)
+        self.assertIsNone(r["lane"])
+        run = pg.load_run("claude", "s1")
+        step = run["plan"][-1]
+        self.assertEqual((step["owner"], step["state"]), ("main", "pending"))
+        self.assertIn(step["name"], [s["name"] for s in dispatch._sorted(run, self.now)[0]])  # dev crew next has it
+
+    def test_a_step_assigned_to_an_ended_member_waits_for_a_new_launch(self):
+        # his launch names the step and his lane holds no other one, so only his end keeps the step from his lane
+        self.ended_tank(["export endpoint"], "Tank: export endpoint")
+        pg.assign("export endpoint", "Tank", now=self.now)
+        step = pg.load_run("claude", "s1")["plan"][0]
+        self.assertEqual((step["owner"], step["state"]), ("main", "pending"))
+
+    def test_a_scope_only_an_ended_member_held_is_free_to_assign(self):
+        self.ended_tank(["api", "parser"], "Tank: api", assign="api")
+        pg.assign("parser", "Neo", scope="lib/api/**", now=self.now)
+        self.assertEqual(pg.load_run("claude", "s1")["plan"][1]["scope"], ["lib/api/**"])
+        self.assertEqual(self.owner("lib/api/routes.py")[0], 0)  # as dev crew owner says
+
+
 class SweepTests(OwnerCase):
     def test_the_sweep_closes_a_lane_claude_code_recorded_finished_beside_the_conversations_newer_transcript(self):
         # tonight's old run: the sweep read Claude Code's records only beside its own session's transcript, where the
@@ -307,8 +344,9 @@ class ProgressViewTests(WhoStillWorksCase):
     def test_the_crew_line_marks_stale_and_ended_members(self):
         line = pg.crew_summary(self.fixture(), now=self.now)
         parts = line.split(" · ")
+        # the Keymaker's stop never reached the run, so no report did either: ended, not done
         self.assertEqual(parts[:3], ["DevEx engineer (Kid) ▸ branches", "Technical writer (Ghost) ✗ docs (stale)",
-                                     "Security engineer (The Keymaker) ✓ guard (ended)"])
+                                     "Security engineer (The Keymaker) ⚠ guard (ended, no report)"])
         self.assertRegex(parts[3], r"^1 of \d+ slots in use")
 
     def test_a_lane_with_no_recorded_activity_in_a_run_with_no_start_still_works(self):

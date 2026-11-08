@@ -1112,8 +1112,9 @@ def assign(which, label: str, cwd: str | None = None, now: float | None = None, 
            from_agent: str | None = None, why: str = "", activity: str = "", allow: str = "") -> dict:
     """Hand a plan step to a subagent: the next subagent launched with this description owns it, or a working lane
     of that member whose launch names the step and that holds no other step (_launch_takes; never a lane busy with
-    another step, B-fy9639hfz5t), and its time is that subagent's time. `scope`: the files it owns (comma-separated
-    globs); the guard keeps that subagent's edits inside them. The crew's RACI must make the member Responsible for
+    another step, B-fy9639hfz5t, nor one whose member ended or went stale, working_agents), and its time is that
+    subagent's time. `scope`: the files it owns (comma-separated globs); the guard keeps that subagent's edits inside
+    them, and only a working member's scope can refuse it. The crew's RACI must make the member Responsible for
     the step's kind of work; `why` overrides it, recorded. `activity`: the step's kind of work, an id from dev crew
     raci, which then decides whatever language the step is written in. `allow`: the tier-1 actions (push, pr) the
     member may take in this step, each only with the developer's evidence for it (their grant, or a verified
@@ -1152,9 +1153,10 @@ def assign(which, label: str, cwd: str | None = None, now: float | None = None, 
             _audit("crew.allow", s["name"], f"{label} may {', '.join(s['allow']) or 'take no irreversible action'}"
                    + (f"; no grant of the developer for {', '.join(missing)}" if missing else ""),
                    project=run.get("project") or "")
+        live = working_agents(run, now)  # a member that ended or went stale takes no step and holds no files
         if globs:
-            for k, lane in (run.get("agents") or {}).items():
-                if lane.get("state") == "running" and not _label_matches(label, lane):
+            for _, lane in live:
+                if not _label_matches(label, lane):
                     clash = [g for g in globs for h in lane.get("scope") or [] if _globs_overlap(g, h)]
                     if clash:
                         from . import crew
@@ -1163,8 +1165,7 @@ def assign(which, label: str, cwd: str | None = None, now: float | None = None, 
                                         f"({', '.join(lane.get('scope'))}). Give each member different files, or "
                                         f"wait until they finish.")
             s["scope"] = globs
-        working = [k for k, v in (run.get("agents") or {}).items()
-                   if v.get("state") == "running" and _label_matches(label, v)]
+        working = [k for k, v in live if _label_matches(label, v)]
         lane_id = None if deps_open(run, s) else next((k for k in working if s.get("owner") == k
                                                        or _launch_takes(run, k, s)), None)
         if working and not lane_id and not deps_open(run, s) and s.get("state") not in DONE:
@@ -4046,9 +4047,9 @@ def crew_summary(run: dict, limit: int = 4, now: float | None = None) -> str:
         live = (states.get(aid) or {}).get("state", "working")
         if lane.get("state") == "running" and live == "stale":  # a member that went quiet works no longer
             mark, what = "✗", f"{what} (stale)"
-        elif lane.get("state") == "running" and live == "ended":
+        elif lane.get("state") == "running" and live == "ended":  # its stop never reached the run, nor its report
             stopped = "interruption" in states[aid]["why"]
-            mark, what = ("✗", f"{what} (stopped)") if stopped else ("✓", f"{what} (ended)")
+            mark, what = ("✗", f"{what} (stopped)") if stopped else ("⚠", f"{what} (ended, no report)")
         works = lane.get("state") == "running" and live == "working"
         lanes.append((not works, f"{crew.who(m)} {mark} {what}".strip()))
     if not lanes:
