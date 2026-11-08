@@ -1,9 +1,9 @@
 # Copyright (c) 2026 Firefly Software Solutions Inc.
 # SPDX-License-Identifier: Apache-2.0
 # Read-only crew lanes (review, read) run the diagnostics, substitutions, sed and awk forms that only read, mkdir in
-# their own scratch folder, a shell variable of their own, and `dev guard check` and `dev lesson show`. Lessons
-# L-fzhjqanjs7z, L-fzmuou5jou0, L-fyzx9w2cwqi, L-fyz5atkx52n and the read-only part of L-fy15osnf0z3: the commands are
-# the ones they recorded as refused. Each allowed form has a twin that writes or runs code and stays refused.
+# their own scratch folder, a shell variable of their own, and `dev guard check` and `dev lesson show`. The commands
+# are ones review members were refused for in recorded sessions. Each allowed form has a twin that writes or runs code
+# and stays refused.
 # Run: python3 -m unittest tests.test_guard_readonly_lanes -v
 import sys
 import tempfile
@@ -109,7 +109,7 @@ class ReadOnlyLanes(unittest.TestCase):
 
     def test_devkits_reads_run(self):
         self.assert_runs('dev guard check "rm -rf ~"', "bin/dev guard check --agent codex git push",
-                         "dev lesson show L-fy15osnf0z3", "dev lesson", "dev lesson ls")
+                         "dev lesson show L-abc123", "dev lesson", "dev lesson ls")
         self.assert_refused("dev lesson prevent L-x --by guard --ref t --why w", "dev lesson retire L-x",
                             "dev plan revise x.md --why y")
 

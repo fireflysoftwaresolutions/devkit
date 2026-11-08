@@ -7860,7 +7860,8 @@ def _var_program(word, text) -> str:
 
 
 # A variable the command itself sets from a literal names a program or a path the guard can read before the shell
-# runs (B-fyouzwjdxv6, B-fyxlzwa4phq): `py=python3; $py -m unittest …`, `for P in python3 /usr/bin/python3; do $P -m
+# runs, so crew members can loop over interpreters and name a path once: `py=python3; $py -m unittest …`, `for P in
+# python3 /usr/bin/python3; do $P -m
 # unittest …; done`, `S=/tmp/x; mkdir -p $S`. literal_variants writes the command once for each value the variable
 # can hold where it is used, and the guard judges every variant: one refusal refuses the command. A variable is
 # resolved only when every use of it is: after a plain assignment of a literal word that always runs before it (at
@@ -8083,7 +8084,7 @@ def _text_actions(text, cwd, depth=0, from_code=False, expand=True):
     shell expands. Quoted text a command only carries is one word here, so it is never read as a command. None when
     a level cannot be parsed. `from_code`: the text is a string literal of an interpreter's program, where `${…}`,
     `{…}`, `[…]` and `*` are the language's own (a template, an f-string, a list), so they never make a program the
-    shell names at run time; the shells and substitutions it runs are judged as usual (M394). `expand` False: the
+    shell names at run time; the shells and substitutions it runs are judged as usual. `expand` False: the
     text is a string of a program that never hands one to a shell (_py_argv_only), so the substitutions in it are
     text; a shell it names with its own command line (`bash -c …`) is still read in full."""
     if not text or not str(text).strip():

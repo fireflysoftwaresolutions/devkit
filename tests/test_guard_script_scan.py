@@ -2,9 +2,8 @@
 # SPDX-License-Identifier: Apache-2.0
 # The guard reads an interpreter's program before it runs (guard._code_texts, _code_env_sets). A Python program that
 # starts processes only with argument lists has no string a shell reads, so a Markdown code span or a regex with
-# backticks in it is text; and a Python variable named HOME sets no environment. Lessons L-fy4000hoz14 and
-# L-fzkgksoe9jy. Each allowed program has a twin that hands the same string to a shell, or really sets HOME for a
-# devkit command, and stays refused.
+# backticks in it is text; and a Python variable named HOME sets no environment. Each allowed program has a twin that
+# hands the same string to a shell, or really sets HOME for a devkit command, and stays refused.
 # Run: python3 -m unittest tests.test_guard_script_scan -v
 import sys
 import tempfile

@@ -1375,7 +1375,7 @@ def _route_subagent_progress(data: dict, agent: str = "claude"):
     `dev crew ask|answer|inbox|decide|decisions|mode|delegate|decline|route` call of its shell command gets
     DEVKIT_FROM_AGENT, so it updates that subagent's lane (its messages, decisions and delegations come from it, and
     `decide` refuses it) and never advances the main plan (guard.lane_route). A single call is the whole command (a
-    quoted heredoc message is data, K8). A compound command (`cd <worktree> && dev progress step "…" | tail -3`) is
+    quoted heredoc message is data). A compound command (`cd <worktree> && dev progress step "…" | tail -3`) is
     routed only when the lane verdict allows everything else it runs: the rewrite approves nothing but the lane
     calls."""
     aid = data.get("agent_id")

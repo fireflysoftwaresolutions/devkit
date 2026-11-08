@@ -3,7 +3,7 @@
 # A variable the command itself sets from a literal (`py=python3; $py …`, `for P in python3 /usr/bin/python3; do $P
 # …; done`) names a program or a path the guard reads before the shell runs (guard.literal_variants): the command is
 # judged once per value, in the main session, a write lane and a read-only lane. A value from outside the command
-# stays unknown. Lessons L-fyv09h5aa9v, L-fzeuo6cwlr3, L-fzanumrssgl; B-fyouzwjdxv6, B-fyxlzwa4phq.
+# stays unknown.
 # Run: python3 -m unittest tests.test_guard_variables -v
 import sys
 import tempfile
@@ -111,7 +111,7 @@ class LiteralVariables(unittest.TestCase):
         self.assertEqual(guard.check("Bash", {"command": f"F={state}; echo hi > $F"}, CWD, "claude")[0], "deny")
 
     def test_a_script_run_through_a_literal_variable_is_read_like_the_script_written_out(self):
-        # B-fyouzwjdxv6: python3 $S/x.py went uninspected while python3 /path/x.py was read
+        # python3 $S/x.py used to go uninspected while python3 /path/x.py was read
         with tempfile.TemporaryDirectory() as d:
             script = Path(d) / "x.py"
             state = core.HOME / ".local" / "state" / "devkit" / "runs" / "probe.json"

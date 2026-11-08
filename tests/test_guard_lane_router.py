@@ -2,8 +2,8 @@
 # SPDX-License-Identifier: Apache-2.0
 # The lane router (guard.lane_route, hooks._route_subagent_progress) for a crew member's compound command: a lane call
 # after `cd` and reads, or with a read-only filter piped after it, reaches the member's lane; message text in its
-# quoted arguments is data. Lessons L-fy15osnf0z3, L-fxvgeoz2elt, L-fy183z8ikp5 (its routing part), B-fzfdim2dwfn.
-# The commands are the ones the lessons recorded as refused. Every allowed form has a twin that stays refused.
+# quoted arguments is data. The commands are ones crew members were refused for in recorded sessions. Every allowed
+# form has a twin that stays refused.
 # Run: python3 -m unittest tests.test_guard_lane_router -v
 import random
 import shlex
@@ -33,7 +33,7 @@ RECORDED = (
     ('dev progress note "sig rehearsal" --next "full suite" 2>&1 | tail -12', f'{HEAD}dev progress note'),
     ('git status --short && bin/dev crew inbox', f'git status --short && {HEAD}bin/dev crew inbox'),
     ('bin/dev crew inbox; git log --oneline -5', f'{HEAD}bin/dev crew inbox; git log'),
-    ('bin/dev stubs 2>&1 | tail -3; bin/dev progress step "F3 nested agents" --check "26e257d"',
+    ('bin/dev stubs 2>&1 | tail -3; bin/dev progress step "nested agents" --check "26e257d"',
      f'bin/dev stubs 2>&1 | tail -3; {HEAD}bin/dev progress step'),
     ('bin/dev progress 2>&1 | grep -n "review batch 5" | head', f'{HEAD}bin/dev progress 2>&1 | grep'),
     ('cd ~/Development/.worktrees/acme/devkit/fix-x && dev progress note "red: 12 new tests fail" --next "fix"',
