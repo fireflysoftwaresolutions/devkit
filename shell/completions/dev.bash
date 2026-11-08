@@ -324,12 +324,13 @@ _dev_spec() {
     'free') o='-h --help --safe -y --yes' p='*n' ;;
     'gc') o='-h --help --safe -y --yes --apply --auto-only -v --verbose' p='*n' ;;
     'canary') o='-h --help --days --limit' v='--days=n --limit=n' ;;
-    'ci') o='-h --help -p --project --sha --timeout --quiet --commands --runs --status --branch --all-branches --watch --limit --all-jobs --json --run --mark-passed --note --evidence --dry-run --keep-going --step-timeout --resume --provider --fix --strict --stack --force' v='-p=l:projects:-:: --project=l:projects:-:: --sha=n --timeout=n --branch=l:branches:-:: --limit=n --note=n --step-timeout=n --provider=c:github,gitlab,bitbucket,azure --stack=c:auto,python,node,java-maven,java-gradle,go,php,docker' p='l:projects:-:status,audit,init,watch:' ;;
-    'branch') c='new rename ls clean embargo' o='-h --help' ;;
+    'ci') o='-h --help -p --project --sha --wait --tag --pr --timeout --quiet --commands --runs --status --branch --all-branches --watch --limit --all-jobs --json --run --mark-passed --note --evidence --dry-run --keep-going --step-timeout --resume --provider --fix --strict --stack --force' v='-p=l:projects:-:: --project=l:projects:-:: --sha=n --tag=n --pr=n --timeout=n --branch=l:branches:-:: --limit=n --note=n --step-timeout=n --provider=c:github,gitlab,bitbucket,azure --stack=c:auto,python,node,java-maven,java-gradle,go,php,docker' p='l:projects:-:status,audit,init,watch,watches:' ;;
+    'branch') c='new rename ls clean prune embargo' o='-h --help' ;;
     'branch new') o='-h --help --ticket --base' v='--ticket=n --base=l:branches:-::' p='n' ;;
     'branch rename') o='-h --help --ticket' v='--ticket=n' p='n' ;;
     'branch ls') o='-h --help --offline --json' ;;
     'branch clean') o='-h --help --offline --json --apply' ;;
+    'branch prune') o='-h --help --apply --remote --local --offline --json' ;;
     'branch embargo') o='-h --help --why --until --lift --json' v='--why=n --until=n' p='l:branches:-::' ;;
     'commit') o='-h --help -m --message --why --body --verified --refs --breaking -a --all --amend --wip --unwip' v='-m=n --message=n --why=n --body=n --verified=n --refs=n --breaking=n' p='*f' ;;
     'rebase') o='-h --help --base --continue --abort --skip' v='--base=l:branches:-::' ;;

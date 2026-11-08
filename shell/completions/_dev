@@ -1596,6 +1596,9 @@ _dev__ci() {
     '(- *)'{-h,--help}'[show this help message and exit]' \
     '(--project -p)'{-p+,--project=}'[the project (id or a unique part of its name) for status, audit, init…]:project: _dev_live projects -' \
     '--sha=[watch: the commit whose runs to follow]:sha: ' \
+    '--wait[watch: for an agent that waits on the run]' \
+    '--tag=[watch --wait]:tag: ' \
+    '--pr=[watch --wait]:pr: ' \
     '--timeout=[watch: minutes before giving up]:timeout: ' \
     '--quiet[watch: no progress lines, only the result]' \
     '--commands[print only the run commands]' \
@@ -1620,7 +1623,7 @@ _dev__ci() {
     '--strict[audit: exit 1 on medium findings too]' \
     '--stack=[init: the stack]:stack:(auto python node java-maven java-gradle go php docker)' \
     '--force[init: overwrite an existing pipeline file]' \
-    '::project: _dev_live projects - status audit init watch'
+    '::project: _dev_live projects - status audit init watch watches'
 }
 
 _dev__branch() {
@@ -1638,6 +1641,7 @@ _dev__branch() {
         'rename:rename the current branch'
         'ls:local branches'
         'clean:delete local branches that are merged or gone upstream'
+        'prune:every local and remote branch with its state'
         'embargo:keep a branch off the remote'
       )
       _describe -t commands 'dev branch command' cmds && ret=0 ;;
@@ -1648,6 +1652,7 @@ _dev__branch() {
         (rename) _dev__branch__rename && ret=0 ;;
         (ls) _dev__branch__ls && ret=0 ;;
         (clean) _dev__branch__clean && ret=0 ;;
+        (prune) _dev__branch__prune && ret=0 ;;
         (embargo) _dev__branch__embargo && ret=0 ;;
       esac ;;
   esac
@@ -1682,6 +1687,16 @@ _dev__branch__clean() {
     '--offline[no fetch and no GitHub lookups]' \
     '--json[json]' \
     '--apply[delete them]'
+}
+
+_dev__branch__prune() {
+  _arguments -s -S : \
+    '(- *)'{-h,--help}'[show this help message and exit]' \
+    '--apply[delete the merged branches nothing protects]' \
+    '(--local --remote)--remote[only the branches on origin]' \
+    '(--local --remote)--local[only the branches on this Mac]' \
+    '--offline[no fetch and no GitHub lookups]' \
+    '--json[json]'
 }
 
 _dev__branch__embargo() {

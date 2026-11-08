@@ -539,7 +539,7 @@ def _prs(c, limit=100):
     if c.provider != "github":
         return None
     data, _ = gh_json(["pr", "list", "-R", c.slug, "--state", "all", "--limit", str(limit), "--json",
-                       "number,state,headRefName,headRefOid,updatedAt,title,url"], c)
+                       "number,state,headRefName,headRefOid,updatedAt,title,url,isCrossRepository,mergeCommit"], c)
     return data if isinstance(data, list) else None
 
 
@@ -2353,7 +2353,7 @@ def _pr_merge(c, a) -> int:
     tail = [f"merged #{n} ({method}) into {p.get('baseRefName')}"]
     if not a.keep_branch:
         tail.append("remote branch deleted")
-        tail.append(_after_merge(c, p.get("headRefName")))
+        tail.append(_after_merge(c, p.get("headRefName"), p))
     ok(" · ".join(x for x in tail if x))
     _refresh_prs(c)
     _close_merged_items(c, p.get("headRefName"), n)
@@ -2399,42 +2399,74 @@ def merged_branch(subject: str):
     return (m.group(1) or m.group(2), None) if m else (None, None)
 
 
+FUTURE_SLACK = 600  # a commit dated more than ten minutes past this Mac's clock: its date is its author's word only
+
+
 def merged_branches(top, rev: str) -> dict:
-    """branch -> {"sha", "pr", "at"} for the merge commits of `rev` (a range such as `v26.11.5..HEAD`, or a ref),
-    the newest merge of each branch; `at`: its commit time, in seconds since the epoch."""
+    """branch -> {"sha", "pr", "at"} for the merge commits made on `rev`'s own line (a range such as
+    `v26.11.5..HEAD`, or a ref), the newest merge of each branch; `at`: its commit time, in seconds since the epoch.
+    Only first-parent merges count: a merge inside a merged branch names whatever that branch's author wrote. A merge
+    dated in the future is left out, so its date cannot outrun the link of a later item to the same branch name."""
     out = {}
-    for ln in core.gitout(top, "log", "--merges", "--format=%H%x09%ct%x09%s", rev).splitlines():
+    limit = time.time() + FUTURE_SLACK
+    for ln in core.gitout(top, "log", "--merges", "--first-parent", "--format=%H%x09%ct%x09%s", rev,
+                          timeout=60).splitlines():
         sha, _, rest = ln.partition("\t")
         at, _, subject = rest.partition("\t")
         branch, pr = merged_branch(subject)
-        if branch and branch not in out:
-            out[branch] = {"sha": sha, "pr": pr, "at": int(at or 0)}
+        at = int(at) if at.isdigit() else 0
+        if branch and branch not in out and at <= limit:
+            out[branch] = {"sha": sha, "pr": pr, "at": at}
     return out
 
 
-def merged_without_merge_commit(top, ref: str, branches, since: str = None) -> dict:
-    """Which of `branches` reached `ref` without a merge commit that names them: a squash or rebase merge (a merged
-    PR of the branch whose commit is in `ref`) or a fast-forward (the branch's tip is in `ref`). `since`: a tag; a
-    merge already in it does not count. branch -> {"sha", "pr", "at"}, `at` being when it was merged (the PR) or
-    committed (the tip), which `work.linked_open` compares with each item's link to the branch."""
+def github_merged_prs(c):
+    """The merged pull requests of the repository on GitHub that came from the repository itself (a fork's branch can
+    carry any name), newest 200: [{number, headRefName, headRefOid, mergeCommit, mergedAt, baseRefName}]. None off
+    GitHub; [] when GitHub cannot be read, so nothing counts as merged there without its pull request."""
+    if c is None or c.provider != "github":
+        return None
+    prs, _ = gh_json(["pr", "list", "-R", c.slug, "--state", "merged", "--limit", "200", "--json",
+                      "number,mergedAt,mergeCommit,headRefName,headRefOid,isCrossRepository,baseRefName"], c)
+    return [p for p in prs if isinstance(p, dict) and p.get("isCrossRepository") is False and
+            (p.get("mergeCommit") or {}).get("oid")] if isinstance(prs, list) else []
+
+
+def _with_pr(merged: dict, prs: list) -> dict:
+    """On GitHub a merge commit counts only with the merged pull request that made it: the same merge commit and
+    branch, from the repository itself; `at` becomes the PR's mergedAt, which GitHub sets, not the commit date."""
+    from . import work
+    by_sha = {(p.get("mergeCommit") or {}).get("oid"): p for p in prs}
+    out = {}
+    for b, m in merged.items():
+        p = by_sha.get(m["sha"])
+        if p and p.get("headRefName") == b:
+            out[b] = {"sha": m["sha"], "pr": p.get("number"), "at": work.parse_iso(p.get("mergedAt") or "")}
+    return out
+
+
+def merged_without_merge_commit(top, ref: str, branches, since: str = None, prs=None) -> dict:
+    """Which of `branches` reached `ref` without a merge commit that names them. On GitHub (`prs`: its merged pull
+    requests, `github_merged_prs`) only by a merged PR of the branch whose merge commit is in `ref`: a squash or rebase
+    merge. Elsewhere (`prs` None) also by a fast-forward: the branch's tip is in `ref` and not dated in the future.
+    `since`: a tag; a merge already in it does not count. branch -> {"sha", "pr", "at"}, `at` being when it was merged
+    (the PR) or committed (the tip), which `work.linked_open` compares with each item's link to the branch."""
     from . import work
     branches, out = list(branches or ()), {}
     by_head = {}
-    c = ctx(top) if branches else None
-    if c is not None and c.provider == "github":  # one call for every branch: the recent merged PRs
-        prs, _ = gh_json(["pr", "list", "-R", c.slug, "--state", "merged", "--limit", "200", "--json",
-                          "number,mergedAt,mergeCommit,headRefName"], c)
-        for p in prs if isinstance(prs, list) else []:
-            sha = (p.get("mergeCommit") or {}).get("oid") or ""
-            if sha and p.get("headRefName") in branches:
-                by_head.setdefault(p["headRefName"], []).append((sha, p.get("number"),
-                                                                 work.parse_iso(p.get("mergedAt") or "")))
+    for p in prs or []:
+        sha = (p.get("mergeCommit") or {}).get("oid") or ""
+        if sha and p.get("headRefName") in branches:
+            by_head.setdefault(p["headRefName"], []).append((sha, p.get("number"),
+                                                             work.parse_iso(p.get("mergedAt") or "")))
+    limit = time.time() + FUTURE_SLACK
     for b in branches:
         found = sorted(by_head.get(b, []), key=lambda x: -x[2])  # the newest merge of the name first
-        for name in (f"refs/heads/{b}", f"refs/remotes/origin/{b}"):
+        for name in (f"refs/heads/{b}", f"refs/remotes/origin/{b}") if prs is None else ():
             tip = _ref_sha(top, name)
-            if tip:
-                found.append((tip, None, int(core.gitout(top, "log", "-1", "--format=%ct", tip) or 0)))
+            at = int(core.gitout(top, "log", "-1", "--format=%ct", tip) or 0) if tip else 0
+            if tip and at <= limit:
+                found.append((tip, None, at))
         for sha, pr, at in found:
             if _is_ancestor(top, sha, ref) and not (since and _is_ancestor(top, sha, since)):
                 out[b] = {"sha": sha, "pr": pr, "at": at}
@@ -2442,29 +2474,60 @@ def merged_without_merge_commit(top, ref: str, branches, since: str = None) -> d
     return out
 
 
+def merges_into(top, ref: str, branches=(), since: str = None, c=None) -> dict:
+    """The branches merged into `ref` (since the tag `since`): its first-parent merge commits, checked against their
+    pull requests on GitHub, and `branches` merged without a merge commit. branch -> {"sha", "pr", "at"}."""
+    c = c or ctx(top)
+    prs = github_merged_prs(c)
+    merged = merged_branches(top, f"{since}..{ref}" if since else ref)
+    if prs is not None:
+        merged = _with_pr(merged, prs)
+    merged.update(merged_without_merge_commit(top, ref, [b for b in branches or () if b not in merged], since, prs))
+    return merged
+
+
 def merged_into_default(top, default: str, branches=()) -> dict:
     """The branches merged into the default branch as origin has it (the local branch when there is no origin):
     a merge that only exists on this Mac has not shipped. `branches`: those to look for also among merges without a
     merge commit (`merged_without_merge_commit`). branch -> {"sha", "pr", "at"}."""
     ref = f"origin/{default}" if _ref_sha(top, f"refs/remotes/origin/{default}") else default
-    merged = merged_branches(top, ref)
-    merged.update(merged_without_merge_commit(top, ref, [b for b in branches if b not in merged]))
-    return merged
+    return merges_into(top, ref, branches)
 
 
 def _merge_ref(m: dict) -> str:
     return f"PR #{m['pr']}" if m.get("pr") else m["sha"][:7]
 
 
-def _after_merge(c, head: str) -> str:
-    """Local clean-up after a merge: leave the merged branch, update the default branch, delete the local branch."""
+def _merged_pr(c, p: dict):
+    """The pull request just merged, as the merge test reads it ([{number, state, headRefName, headRefOid,
+    isCrossRepository, mergeCommit}]), from GitHub after the merge; None when GitHub cannot say."""
+    if not p or not p.get("number") or c.provider != "github":
+        return None
+    pm, _ = gh_json(["pr", "view", str(p["number"]), "-R", c.slug, "--json",
+                     "number,headRefName,headRefOid,isCrossRepository,mergeCommit"], c)
+    return [dict(pm, state="MERGED")] if isinstance(pm, dict) else None
+
+
+def _after_merge(c, head: str, p: dict = None) -> str:
+    """Local clean-up after a merge, when the merge test finds the branch merged (it says how): the branch's clean
+    worktree goes with the local branch (gc.remove_worktree checks it again), or this checkout leaves the branch for
+    an updated default branch and deletes it. A branch with work the default branch lacks stays, with the reason."""
     _fetch(c)
     if not head or not _ref_sha(c.top, f"refs/heads/{head}"):
         return ""
+    from . import branches
+    base = _base_ref(c)
+    prs = _merged_pr(c, p)
+    m = branches.merge_test(c.top, head, base, prs=prs)
+    if not m["merged"]:
+        return f"local branch kept: {branches.merge_words(m, base)} (dev branch prune lists it)"
     wts = _worktree_branches(c.top)
     here = core.real(c.top)
     if head in wts and core.real(wts[head]) != here:
-        return f"worktree {core.tilde(wts[head])} still has it (dev wt rm {head})"
+        if core.real(wts[head]) == core.real(c.main):
+            return f"the main checkout has {head}: switch it to {c.default}, then dev branch prune --apply"
+        from . import gc
+        return gc.remove_worktree(c.main, wts[head], head, merged={"base": base, "sha": m["sha"], "prs": prs})[1]
     if c.branch == head:
         if core.real(c.top) != core.real(c.main):
             return f"this worktree's branch is merged: dev wt rm {head} when you are done here"
@@ -2477,7 +2540,8 @@ def _after_merge(c, head: str) -> str:
             return "local branch kept"
         core.git(c.top, "merge", "--ff-only", "-q", f"origin/{c.default}")
     core.git(c.top, "branch", "-D", head)
-    return f"local branch deleted · {c.default} @ {core.gitout(c.top, 'rev-parse', '--short', c.default)}"
+    return (f"local branch deleted ({branches.merge_words(m, base)}) · {c.default} @ "
+            f"{core.gitout(c.top, 'rev-parse', '--short', c.default)}")
 
 
 def _pr_ready(c, a) -> int:
@@ -2866,6 +2930,8 @@ def cmd_release(a) -> int:
         ok(f"dry run: release {tag} ({scheme}) · local CI: {describe_evidence(ev)} · remote CI: {remote_ci}")
         for s in steps:
             print(f"  → {s}")
+        for line in released_branches(c, current, apply=False):
+            print(line)
         if notes:
             print(ui.dim("  notes: " + notes.splitlines()[0][:100]))
         return 0
@@ -2886,6 +2952,8 @@ def cmd_release(a) -> int:
         ok(f"tagged and pushed {tag} · release pages for {c.host} are not supported yet")
         if override:
             ok(override)
+        for line in released_branches(c, current, apply=True):
+            print(line)
         return 0
     args = ["release", "create", tag, "-R", c.slug, "--verify-tag", "--title", tag]
     args += ["--notes", notes] if notes else ["--generate-notes"]
@@ -2902,19 +2970,45 @@ def cmd_release(a) -> int:
        f"install and smoke-test it")
     if override:
         ok(override)
+    if a.draft:
+        info("the branches this release merged stay until it is published: dev branch prune --apply then")
+    else:
+        for line in released_branches(c, current, apply=True):
+            print(line)
     return 0
+
+
+def released_branches(c, since, apply: bool) -> list:
+    """The branches a release merged: merged into it by the merge test (dev branch prune's) and not into the previous
+    release `since`. With `apply`, deleted (the remote branch, the local one and its clean worktree, audited as
+    branch.pruned); either way -> the lines to print. Branches merged before stay for dev gc and dev branch prune."""
+    from . import branches
+    try:
+        plan = branches.prune_plan(c.top, offline=not c.has_origin)
+    except Exception as e:  # the release is out; the branches wait for dev branch prune
+        return [f"  {ui.WARN} merged branches not deleted ({e}): dev branch prune --apply"]
+
+    def shipped_now(r) -> bool:
+        ref = f"refs/heads/{r['name']}" if r["where"] == "local" else f"refs/remotes/origin/{r['name']}"
+        return not since or not branches.merge_test(c.top, r["name"], since, ref=ref, prs=plan.get("prs"))["merged"]
+
+    kept = [f"  {ui.dim('kept ' + r['where'] + ' ' + r['name'] + ': ' + r['why'])}" for r in plan["branches"]
+            if r["state"] == "merged" and r["action"] == "keep" and shipped_now(r)]
+    if not apply:
+        return [f"  → delete {r['where']} {r['name']} ({r['why']})" for r in plan["branches"]
+                if r["action"] == "delete" and shipped_now(r)] + kept
+    return [branches._prune_line(r, True) for r in branches.prune(plan, only=shipped_now)] + kept
 
 
 def release_open_items(c, since) -> list:
     """The open work items linked to the branches merged since the tag `since` (every merge of HEAD without one):
-    [(item, branch, {"sha", "pr", "at"})]. The merges are the merge commits of `since..HEAD`, and the squash, rebase
-    and fast-forward merges of the linked branches (`merged_without_merge_commit`)."""
+    [(item, branch, {"sha", "pr", "at"})]. The merges are `merges_into`'s: the first-parent merge commits of
+    `since..HEAD` (on GitHub only with their merged pull request), and the squash, rebase and (off GitHub) fast-forward
+    merges of the linked branches."""
     if not c.pid:
         return []
     from . import work
-    merged = merged_branches(c.top, f"{since}..HEAD" if since else "HEAD")
-    linked = [b for b in work.linked_branches(c.pid) if b not in merged]
-    merged.update(merged_without_merge_commit(c.top, "HEAD", linked, since))
+    merged = merges_into(c.top, "HEAD", work.linked_branches(c.pid), since, c)
     if not merged:
         return []
     return [(it, b, merged[b]) for it, b in work.linked_open(c.pid, merged)]
@@ -3203,6 +3297,7 @@ def cmd_gh(a) -> int:
 COMMAND_NAMES = ("branch", "commit", "rebase", "push", "pr", "run", "release", "issue", "git", "gh")
 HELP = ("Git and GitHub", [
     ("branch new|rename|ls|clean", "Branches from an up-to-date origin/<default>, named by the standard"),
+    ("branch prune [--apply]", "Every branch with its state; --apply deletes the merged ones, remote and local"),
     ("branch embargo <branch> --why …", "Keep a branch off the remote; dev backup and dev sync never push it"),
     ("commit -m \"type(scope): …\"", "Conventional Commit (-a, paths, --amend); --wip/--unwip instead of a stash"),
     ("rebase [--continue|--abort]", "Fetch and rebase on origin/<default>, with a conflict report"),
@@ -3221,8 +3316,9 @@ def _lang_arg(p):
 
 def register(add):
     """Add the git/GitHub commands. `add(name, fn, help)` returns an argparse subparser; handlers return exit codes."""
-    p = add("branch", cmd_branch, "Branches: new (from an up-to-date origin/<default>) · rename · ls · clean · embargo")
-    sp = p.add_subparsers(dest="branch_cmd", metavar="new|rename|ls|clean|embargo")
+    p = add("branch", cmd_branch, "Branches: new (from an up-to-date origin/<default>) · rename · ls · clean · prune · "
+                                  "embargo")
+    sp = p.add_subparsers(dest="branch_cmd", metavar="new|rename|ls|clean|prune|embargo")
     sp.required = True
     q = sp.add_parser("new", help="create <type>/<topic> from an up-to-date origin/<default> and switch to it")
     q.add_argument("name", help="<type>/<topic>, e.g. feat/invoice-export")
@@ -3238,6 +3334,15 @@ def register(add):
         q.add_argument("--json", action="store_true")
         if name == "clean":
             q.add_argument("--apply", action="store_true", help="delete them")
+    q = sp.add_parser("prune", help="every local and remote branch with its state (merged and how, open PR, not "
+                                    "merged, protected); --apply deletes the merged ones and their clean worktrees")
+    q.add_argument("--apply", action="store_true", help="delete the merged branches nothing protects (the remote "
+                                                         "branch, the local one and its clean worktree)")
+    side = q.add_mutually_exclusive_group()
+    side.add_argument("--remote", action="store_true", help="only the branches on origin")
+    side.add_argument("--local", action="store_true", help="only the branches on this Mac (and their worktrees)")
+    q.add_argument("--offline", action="store_true", help="no fetch and no GitHub lookups; remote branches stay")
+    q.add_argument("--json", action="store_true")
     q = sp.add_parser("embargo", help="keep a branch off the remote: a backup never pushes it (no branch: the list)")
     q.add_argument("branch", nargs="?", help="the branch (default with --lift: none; without a branch: list them)")
     q.add_argument("--why", help="why it stays off the remote (required to set one)")

@@ -4,6 +4,7 @@
 # `dev doctor`'s crew checks (lib/devkit/setup.py): each skill the crew names but this Mac has not installed for an
 # agent (selfcheck D8) shows as a failed check with the line that fixes it. The tests use a small roster and agent
 # folders of their own, never the developer's. Run: python3 -m unittest tests.test_doctor
+import json
 import os
 import subprocess
 import sys
@@ -263,6 +264,37 @@ class WorkStateTests(unittest.TestCase):
         self.assertEqual((ws["checked"], ws["count"]), (1, 4))
         self.assertEqual(again["projects"], ws["projects"])
         self.assertEqual(len(calls), 1)
+
+
+class BranchCleanupCheckTests(unittest.TestCase):
+    # dev doctor reads GitHub's delete_branch_on_merge for every GitHub project on this Mac in one GraphQL call: each
+    # one with it off that the developer administers fails with the command that turns it on; one they do not
+    # administer is only named (they cannot change it). gh is replaced.
+    PROJECTS = [("acme/api", "acme/api"), ("acme/web", "acme/web"), ("other/lib", "other/lib")]
+
+    def checks(self, data):
+        calls = []
+
+        def gh(args):
+            calls.append(list(args))
+            return 0, json.dumps({"data": data}), ""
+        return setup.branch_cleanup_checks(self.PROJECTS, gh=gh), calls
+
+    def test_a_project_with_it_off_fails_with_the_command_that_turns_it_on(self):
+        rows, calls = self.checks({"r0": {"deleteBranchOnMerge": False, "viewerPermission": "ADMIN"},
+                                   "r1": {"deleteBranchOnMerge": True, "viewerPermission": "ADMIN"},
+                                   "r2": {"deleteBranchOnMerge": True, "viewerPermission": "WRITE"}})
+        failing = [(name, fix) for _, name, ok, _, fix in rows if not ok]
+        self.assertEqual(failing, [("delete merged branches · acme/api",
+                                    'dev delivery apply -p acme/api --why "delete the branch of each merged PR"')])
+        self.assertEqual(len(calls), 1)
+
+    def test_a_project_you_do_not_administer_is_named_without_failing(self):
+        rows, _ = self.checks({"r0": {"deleteBranchOnMerge": True, "viewerPermission": "ADMIN"},
+                               "r1": {"deleteBranchOnMerge": True, "viewerPermission": "MAINTAIN"},
+                               "r2": {"deleteBranchOnMerge": False, "viewerPermission": "WRITE"}})
+        self.assertEqual([ok for _, _, ok, _, _ in rows], [True])
+        self.assertIn("off in other/lib, which you do not administer", rows[0][3])
 
 
 if __name__ == "__main__":

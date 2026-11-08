@@ -935,5 +935,315 @@ class TaskBranchTests(BackupCase):
         self.assertEqual(rows["feat/report"]["task"]["id"], it["meta"]["id"])
 
 
+# --------------------------------------------------------------------------- closing merged branches
+# One merge test for every branch: merged into the default branch as an ancestor, by its merged pull request (any
+# method), or by content (every commit has an equivalent there, git cherry all "-"). `dev branch prune` lists every
+# local and remote branch with its state and, with --apply, deletes the merged ones that nothing protects.
+
+
+class MergeCase(Sandbox):
+    def feature(self, name, *msgs, base="main", push=False, age=2 * HOUR):
+        then = dict(core.GIT_ENV, GIT_COMMITTER_DATE=f"@{int(self.now - age)} +0000")  # the reflog keeps this time
+        git(self.repo, "switch", "-q", "-c", name, base, env=then)
+        tips = [self.commit(m, age=age) for m in msgs]
+        if push:
+            git(self.repo, "push", "-q", "-u", "origin", name)
+        git(self.repo, "switch", "-q", "main")
+        return tips
+
+    def land(self, *picks):
+        # commits reach origin/main the way a release branch carries them: cherry-picked, so the shas differ
+        git(self.repo, "switch", "-q", "main")
+        for sha in picks:
+            git(self.repo, "cherry-pick", "--allow-empty", sha)
+        git(self.repo, "push", "-q", "origin", "main")
+
+    def squash(self, branch):
+        git(self.repo, "switch", "-q", "main")
+        git(self.repo, "merge", "-q", "--squash", branch)
+        git(self.repo, "commit", "-q", "-m", f"feat: land {branch} (#7)")
+        git(self.repo, "push", "-q", "origin", "main")
+
+    def check(self, name, prs=None, ref=None):
+        return branches.merge_test(self.repo, name, "origin/main", ref=ref, prs=prs)
+
+
+class MergeTestTests(MergeCase):
+    def test_a_branch_whose_tip_is_in_the_default_branch_is_merged_as_an_ancestor(self):
+        self.feature("feat/ff", "feat: add the fast-forward thing")
+        git(self.repo, "merge", "-q", "--ff-only", "feat/ff")
+        git(self.repo, "push", "-q", "origin", "main")
+        m = self.check("feat/ff")
+        self.assertEqual((m["merged"], m["how"]), (True, "ancestor"))
+        self.assertIn("in origin/main", branches.merge_words(m, "origin/main"))
+
+    def test_a_branch_whose_commits_were_cherry_picked_is_merged_by_content(self):
+        tips = self.feature("fix/picked", "fix: keep the first thing", "fix: keep the second thing")
+        self.land(*tips)
+        m = self.check("fix/picked")
+        self.assertEqual((m["merged"], m["how"], m["ahead"]), (True, "content", 2))
+        self.assertIn("2 commits have an equivalent in origin/main", branches.merge_words(m, "origin/main"))
+
+    def pr(self, branch, head, merge=None, cross=False, n=7):
+        return {"number": n, "state": "MERGED", "headRefName": branch, "headRefOid": head,
+                "mergeCommit": {"oid": merge or git(self.repo, "rev-parse", "origin/main")}, "isCrossRepository": cross}
+
+    def test_a_squash_merged_branch_is_merged_by_its_pull_request(self):
+        tips = self.feature("feat/squashed", "feat: add part one", "feat: add part two")
+        self.squash("feat/squashed")
+        self.assertEqual(self.check("feat/squashed")["merged"], False)  # git cherry cannot see a squash
+        m = self.check("feat/squashed", prs=[self.pr("feat/squashed", tips[-1])])
+        self.assertEqual((m["merged"], m["how"], m["pr"]), (True, "pr", 7))
+        self.assertEqual(branches.merge_words(m, "origin/main"), "merged: PR #7 was merged")
+
+    def test_a_commit_after_the_merged_pull_request_keeps_the_branch_unmerged(self):
+        tips = self.feature("feat/later", "feat: add part one")
+        self.squash("feat/later")
+        git(self.repo, "switch", "-q", "feat/later")
+        self.commit("feat: add the part nobody merged")
+        git(self.repo, "switch", "-q", "main")
+        m = self.check("feat/later", prs=[self.pr("feat/later", tips[-1])])
+        self.assertEqual((m["merged"], m["how"], m["ahead"]), (False, None, 2))
+
+    def test_a_pull_request_from_another_repository_does_not_count(self):
+        # a fork's PR may carry the name and head of someone else's branch
+        tips = self.feature("fix/victim", "fix: work of the victim", "fix: more work of the victim")
+        self.squash("fix/victim")
+        m = self.check("fix/victim", prs=[self.pr("fix/victim", tips[-1], cross=True)])
+        self.assertEqual((m["merged"], m["how"]), (False, None))
+
+    def test_a_pull_request_merged_into_another_branch_does_not_count(self):
+        tips = self.feature("feat/stacked", "feat: add part one", "feat: add part two")
+        git(self.repo, "switch", "-q", "-c", "feat/base", "main")
+        git(self.repo, "merge", "-q", "--squash", "feat/stacked")
+        git(self.repo, "commit", "-q", "-m", "feat: land feat/stacked on feat/base (#7)")
+        into_base = git(self.repo, "rev-parse", "HEAD")
+        git(self.repo, "switch", "-q", "main")
+        m = self.check("feat/stacked", prs=[self.pr("feat/stacked", tips[-1], merge=into_base)])
+        self.assertEqual((m["merged"], m["how"]), (False, None))
+
+    def test_one_commit_without_an_equivalent_keeps_the_branch_unmerged(self):
+        tips = self.feature("fix/half", "fix: keep the landed thing", "fix: keep the stranded thing")
+        self.land(tips[0])
+        m = self.check("fix/half")
+        self.assertEqual((m["merged"], m["how"], m["missing"]), (False, None, 1))
+        self.assertIn("1 of 2 commits not in origin/main", branches.merge_words(m, "origin/main"))
+
+    def test_the_branch_map_counts_a_branch_merged_by_content_as_merged_so_no_backup_pushes_it_again(self):
+        # the hourly backup pushed cherry-picked branches back to origin after the tech lead deleted them
+        self.land(*self.feature("fix/picked", "fix: keep the picked thing", "fix: keep the other thing"))
+        row = self.rows()["fix/picked"]
+        self.assertEqual((row["merged_into"], row["backup"]["state"]), ("main", "merged"))
+        self.assertIn("by content", row["backup"]["reason"])
+
+    def test_a_remote_branch_is_tested_by_its_remote_ref(self):
+        tips = self.feature("fix/remote", "fix: keep the remote thing", push=True)
+        git(self.repo, "branch", "-q", "-D", "fix/remote")
+        self.land(*tips)
+        m = self.check("fix/remote", ref="refs/remotes/origin/fix/remote")
+        self.assertEqual((m["merged"], m["how"]), (True, "content"))
+
+
+class PruneCase(MergeCase):
+    # gh answers `pr list` with self.prs; the handoff repository is there (no embargo); no process works anywhere
+    def setUp(self):
+        super().setUp()
+        self.prs = []
+        self.saved_gh = gitx.GH
+        gitx.GH = self.gh
+        Path(core.HANDOFF).mkdir(parents=True, exist_ok=True)
+        for patch in (mock.patch.dict(os.environ, {"DEVKIT_NO_AUTOSYNC": "1"}),
+                      mock.patch.object(core, "active_cwds", return_value=[])):
+            patch.start()
+            self.addCleanup(patch.stop)
+
+    def tearDown(self):
+        gitx.GH = self.saved_gh
+        super().tearDown()
+
+    def gh(self, args, cwd=None, timeout=60):
+        if list(args[:2]) == ["pr", "list"]:
+            return 0, json.dumps(self.prs), ""
+        return 1, "", "no canned answer for gh " + " ".join(args)
+
+    def dev(self, *argv):
+        os.chdir(self.repo)
+        a = cli.build_parser().parse_args(list(argv))
+        out, err = io.StringIO(), io.StringIO()
+        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+            rc = a.fn(a)
+        return rc, " ".join((out.getvalue() + err.getvalue()).split())
+
+    def local(self, name):
+        rc, out, _ = core.sh(["git", "-C", str(self.repo), "rev-parse", "--verify", "-q", f"refs/heads/{name}"])
+        return out if rc == 0 else ""
+
+    def on_origin(self, name):
+        rc, out, _ = core.sh(["git", "-C", str(self.origin), "rev-parse", "--verify", "-q", f"refs/heads/{name}"])
+        return out if rc == 0 else ""
+
+    def worktree(self, branch):
+        path = self.root / ("wt-" + branch.replace("/", "-"))
+        git(self.repo, "worktree", "add", "-q", str(path), branch)
+        return path
+
+    def records(self, action):
+        out = []
+        for f in sorted(Path(audit.AUDIT).glob("*.jsonl")):
+            out += [r for r in map(json.loads, f.read_text().splitlines()) if r.get("action") == action]
+        return out
+
+    def scene(self):
+        # feat/ff: fast-forwarded into main, also on origin. fix/picked: cherry-picked into main, only here, in a clean
+        # worktree. feat/open: on origin with open PR #9. feat/wip: one commit main lacks. develop: a permanent
+        # branch at main. feat/here: the branch checked out, at main.
+        self.feature("feat/ff", "feat: add the fast-forward thing", push=True)
+        git(self.repo, "merge", "-q", "--ff-only", "feat/ff")
+        git(self.repo, "push", "-q", "origin", "main")
+        self.land(*self.feature("fix/picked", "fix: keep the picked thing"))
+        self.wt = self.worktree("fix/picked")
+        open_tip = self.feature("feat/open", "feat: add the open thing", push=True)[-1]
+        self.prs = [{"number": 9, "state": "OPEN", "headRefName": "feat/open", "headRefOid": open_tip,
+                     "updatedAt": "2026-11-07T10:00:00Z"}]
+        self.feature("feat/wip", "feat: add the unfinished thing")
+        git(self.repo, "branch", "develop", "main")
+        git(self.repo, "switch", "-q", "-c", "feat/here", "main")
+
+
+class PruneTests(PruneCase):
+    def test_without_apply_it_lists_every_branch_with_its_state_and_changes_nothing(self):
+        self.scene()
+        before = git(self.repo, "for-each-ref", "--format=%(refname) %(objectname)")
+        origin_before = git(self.origin, "for-each-ref", "--format=%(refname) %(objectname)")
+        rc, out = self.dev("branch", "prune")
+        self.assertEqual(rc, 0, out)
+        for needle in ("local feat/ff merged: its tip is in origin/main",
+                       "remote feat/ff merged: its tip is in origin/main",
+                       "local fix/picked merged by content: 1 commit has an equivalent in origin/main",
+                       "remote feat/open open PR #9",
+                       "local feat/wip not merged: 1 commit not in origin/main",
+                       "local develop protected: a permanent branch",
+                       "local feat/here protected: the current branch",
+                       "local main protected: the default branch",
+                       "dry run"):
+            self.assertIn(needle, out)
+        self.assertEqual(git(self.repo, "for-each-ref", "--format=%(refname) %(objectname)"), before)
+        self.assertEqual(git(self.origin, "for-each-ref", "--format=%(refname) %(objectname)"), origin_before)
+        self.assertTrue(self.wt.is_dir())
+
+    def test_apply_deletes_the_merged_local_and_remote_branches_and_the_clean_worktree(self):
+        self.scene()
+        rc, out = self.dev("branch", "prune", "--apply")
+        self.assertEqual(rc, 0, out)
+        self.assertEqual((self.local("feat/ff"), self.on_origin("feat/ff")), ("", ""))
+        self.assertEqual(self.local("fix/picked"), "")
+        self.assertFalse(self.wt.exists())
+        for kept in ("feat/open", "feat/wip", "develop", "feat/here", "main"):
+            self.assertTrue(self.local(kept), kept)
+        self.assertTrue(self.on_origin("feat/open"))
+        self.assertIn("deleted local fix/picked and its worktree", out)
+
+    def test_each_deletion_is_audited_with_how_the_branch_was_merged(self):
+        self.scene()
+        self.dev("branch", "prune", "--apply")
+        got = sorted((r["target"], r["detail"]) for r in self.records("branch.pruned"))
+        self.assertEqual([t for t, _ in got], ["feat/ff", "feat/ff", "fix/picked"])
+        details = " | ".join(d for _, d in got)
+        self.assertIn("remote branch deleted, merged: its tip is in origin/main", details)
+        self.assertIn("local branch deleted, merged: its tip is in origin/main", details)
+        self.assertIn("local branch and its worktree deleted, merged by content", details)
+        self.assertEqual({r["project"] for r in self.records("branch.pruned")}, {PID})
+
+    def test_json_lists_the_state_and_how_of_each_branch(self):
+        self.scene()
+        rc, out = self.dev("branch", "prune", "--json")
+        rows = {(r["where"], r["name"]): r for r in json.loads(out)["branches"]}
+        self.assertEqual({k: (rows[k]["state"], rows[k]["how"], rows[k]["action"]) for k in (
+            ("local", "fix/picked"), ("remote", "feat/open"), ("local", "feat/wip"), ("local", "develop"))},
+            {("local", "fix/picked"): ("merged", "content", "delete"), ("remote", "feat/open"): ("open_pr", None, "keep"),
+             ("local", "feat/wip"): ("not_merged", None, "keep"), ("local", "develop"): ("protected", "ancestor", "keep")})
+        self.assertEqual(rows[("local", "feat/wip")]["ahead"], 1)
+
+    def test_remote_only_leaves_the_local_branches(self):
+        self.scene()
+        rc, out = self.dev("branch", "prune", "--remote", "--apply")
+        self.assertEqual(rc, 0, out)
+        self.assertEqual(self.on_origin("feat/ff"), "")
+        self.assertTrue(self.local("feat/ff"))
+        self.assertTrue(self.local("fix/picked"))
+
+    def test_local_only_leaves_the_remote_branches(self):
+        self.scene()
+        rc, out = self.dev("branch", "prune", "--local", "--apply")
+        self.assertEqual(rc, 0, out)
+        self.assertTrue(self.on_origin("feat/ff"))
+        self.assertEqual(self.local("feat/ff"), "")
+
+    def test_a_merged_branch_whose_worktree_has_uncommitted_changes_is_kept(self):
+        self.land(*self.feature("fix/picked", "fix: keep the picked thing"))
+        wt = self.worktree("fix/picked")
+        (wt / "draft.txt").write_text("not committed\n")
+        rc, out = self.dev("branch", "prune", "--apply")
+        self.assertTrue(self.local("fix/picked"))
+        self.assertTrue((wt / "draft.txt").exists())
+        self.assertIn("local fix/picked kept: its worktree has uncommitted changes", out)
+
+    def test_a_merged_branch_with_a_live_session_in_its_worktree_is_kept(self):
+        self.land(*self.feature("fix/picked", "fix: keep the picked thing"))
+        wt = self.worktree("fix/picked")
+        sessions = Path(registry.STATE) / "sessions"
+        sessions.mkdir(parents=True, exist_ok=True)
+        (sessions / "s1.json").write_text(json.dumps({"agent": "claude", "session": "s1", "top": str(wt),
+                                                      "pid": os.getpid(), "started": int(self.now)}))
+        rc, out = self.dev("branch", "prune", "--apply")
+        self.assertTrue(self.local("fix/picked"))
+        self.assertTrue(wt.is_dir())
+        self.assertIn("local fix/picked kept: a live session works in its worktree", out)
+
+    def test_an_embargoed_merged_branch_is_kept(self):
+        self.write_note(EMBARGO_NOTE)
+        self.land(*self.feature("release/x", "feat: add the embargoed thing"))
+        rc, out = self.dev("branch", "prune", "--apply")
+        self.assertTrue(self.local("release/x"))
+        self.assertIn("local release/x protected: embargoed", out)
+
+    def test_a_merged_branch_with_an_open_pull_request_is_kept(self):
+        tip = self.feature("feat/reopened", "feat: add the reopened thing", push=True)[-1]
+        git(self.repo, "merge", "-q", "--ff-only", "feat/reopened")
+        git(self.repo, "push", "-q", "origin", "main")
+        self.prs = [{"number": 11, "state": "OPEN", "headRefName": "feat/reopened", "headRefOid": tip}]
+        self.dev("branch", "prune", "--apply")
+        self.assertTrue(self.local("feat/reopened"))
+        self.assertTrue(self.on_origin("feat/reopened"))
+
+    def test_a_remote_branch_that_moved_after_the_listing_is_kept(self):
+        self.feature("feat/ff", "feat: add the fast-forward thing", push=True)
+        git(self.repo, "merge", "-q", "--ff-only", "feat/ff")
+        git(self.repo, "push", "-q", "origin", "main")
+        os.chdir(self.repo)
+        plan = branches.prune_plan(self.repo, where=("remote",))
+        other = self.root / "other"
+        git(self.root, "clone", "-q", str(self.origin), str(other))
+        git(other, "switch", "-q", "feat/ff")
+        self.commit("feat: add what a teammate pushed meanwhile", repo=other)
+        git(other, "push", "-q", "origin", "feat/ff")
+        moved = git(other, "rev-parse", "HEAD")
+        results = branches.prune(plan)
+        self.assertEqual(self.on_origin("feat/ff"), moved)
+        self.assertEqual([r["result"] for r in results if r["name"] == "feat/ff"], ["failed"])
+
+    def test_a_new_branch_without_commits_of_its_own_is_kept(self):
+        git(self.repo, "branch", "feat/started", "main")
+        rc, out = self.dev("branch", "prune", "--apply")
+        self.assertTrue(self.local("feat/started"))
+        self.assertIn("local feat/started kept: created", out)
+        self.assertIn("no commits yet", out)
+
+    def test_branch_prune_without_apply_is_not_audited_and_with_apply_it_is(self):
+        self.assertFalse(audit._changes(["branch", "prune"]))
+        self.assertFalse(audit._changes(["branch", "prune", "--json"]))
+        self.assertTrue(audit._changes(["branch", "prune", "--apply"]))
+
+
 if __name__ == "__main__":
     unittest.main()

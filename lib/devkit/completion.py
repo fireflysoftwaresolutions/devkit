@@ -62,7 +62,7 @@ RULES = (
     (("sec",), "query", "projects"),
     (("du",), "query", "projects"),
     (("clone",), "repo", "projects:ids"),
-    (("ci",), "query", "words:status,audit,init,watch+projects"),
+    (("ci",), "query", "words:status,audit,init,watch,watches+projects"),
     (("alias",), "alias", "words:rm"),
     (("audit",), "--project", "projects:ids"),
     (("session",), "--project", "projects:ids"),

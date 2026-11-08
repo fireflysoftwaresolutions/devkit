@@ -402,6 +402,10 @@ class ReleaseOpenItemsTests(unittest.TestCase):
         git(w.repo, "merge", "-q", "--no-ff", "feat/invoice", "-m", "Merge pull request #7 from acme/feat/invoice")
         git(w.repo, "push", "-q", "origin", "main")
         merge = git(w.repo, "rev-parse", "HEAD")
+        merged_pr = {"number": 7, "state": "MERGED", "headRefName": "feat/invoice", "mergeCommit": {"oid": merge},
+                     "mergedAt": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()), "isCrossRepository": False,
+                     "baseRefName": "main"}
+        w.gh.on(["pr", "list"], [merged_pr], when=lambda args: "merged" in args)
         rc, _, err = dev("ci", "--mark-passed")
         self.assertEqual(rc, 0, err)
 

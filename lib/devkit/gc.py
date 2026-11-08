@@ -74,6 +74,47 @@ def _newest_mtime(path: str, limit=2000) -> float:
     return newest
 
 
+def _branch_plan(p: dict):
+    """`dev branch prune`'s plan for the project's main checkout on this Mac (the same merge test), or None when it
+    cannot be made (no checkout here, not a repository, git or GitHub failing)."""
+    if not p.get("path") or not os.path.isdir(p["path"]):
+        return None
+    from . import branches
+    try:
+        return branches.prune_plan(p["path"])
+    except Exception:  # one broken repository must not stop the cleanup of the others
+        return None
+
+
+def _moved_at(top: str, name: str) -> int:
+    """When the local branch last moved: its newest reflog entry, else its last commit. Seconds since the epoch."""
+    import re
+    stamps = [int(x) for x in re.findall(r"@\{(\d+)\}", gitout(top, "reflog", "show", "--date=unix", "--format=%gd",
+                                                             f"refs/heads/{name}", "--", timeout=30))]
+    return max(stamps) if stamps else int(gitout(top, "log", "-1", "--format=%ct", f"refs/heads/{name}") or 0)
+
+
+def _branch_actions(p: dict, bp: dict, grace: float, now: float, actions: list, notes: list) -> None:
+    """The merged branches the nightly job deletes: a local branch without a worktree that has not moved for the grace
+    period (the worktree loop takes those with one), and a remote branch whose pull request merged or that devkit itself
+    pushed as a backup (dev backup, dev sync); anyone else's merged remote branch waits for dev branch prune --apply."""
+    for r in bp["branches"]:
+        if r["action"] != "delete" or (r["where"] == "local" and r["worktree"]):
+            continue
+        label = f"{p['id']} · {'origin/' if r['where'] == 'remote' else ''}{r['name']}"
+        if r["where"] == "remote" and not (r["pr_merged"] or r["backup"]):
+            notes.append(f"keep   {label} — {r['why']}, but devkit did not push it and no pull request of it merged: "
+                         f"dev branch prune --apply deletes it")
+            continue
+        moved = _moved_at(bp["top"], r["name"]) if r["where"] == "local" else 0
+        if r["where"] == "local" and now - moved < grace:
+            notes.append(f"keep   {label} — {r['why']}, but it moved {core.ago(moved)}")
+            continue
+        actions.append({"kind": "prune-branch", "project": p["id"], "main": p["path"], "where": r["where"],
+                        "branch": r["name"], "path": label.split(" · ", 1)[1], "reason": r["why"], "kb": 0,
+                        "auto": True, "plan": bp, "row": r})
+
+
 def plan(reg: dict, with_sizes=True) -> dict:
     g = CFG["gc"]
     grace, idle_art, temp_age = g["grace_hours"] * 3600, g["idle_artefact_days"] * 86400, g["temp_days"] * 86400
@@ -81,6 +122,8 @@ def plan(reg: dict, with_sizes=True) -> dict:
     actions, notes = [], []
     active_slugs = {core.claude_slug(c) for c in core.active_cwds()}
     for p in reg["projects"]:
+        bp = _branch_plan(p)
+        rows = {(r["where"], r["name"]): r for r in (bp or {}).get("branches") or []}
         for w in p["worktrees"]:
             br = w.get("branch") or "detached"
             if w.get("missing"):
@@ -98,12 +141,21 @@ def plan(reg: dict, with_sizes=True) -> dict:
             if w.get("modified") or w.get("untracked"):
                 notes.append(f"keep   {label} — uncommitted work ({registry._state(w)})")
                 continue
-            if w.get("unpushed"):
+            row = rows.get(("local", br))
+            merged = row if row and row["state"] == "merged" and core.real(row["worktree"] or "") == core.real(
+                w["path"]) else None  # the merge test of dev branch prune: ancestor, its pull request, or content
+            if w.get("unpushed") and not merged:
                 notes.append(f"keep   {label} — {w['unpushed']} commit(s) not on any remote")
                 continue
             pr = w.get("pr")
             removable = w.get("location") != "codex"
-            if removable and pr and pr["state"] in ("MERGED", "CLOSED") and idle > grace:
+            if merged and removable and idle > grace:
+                actions.append({"kind": "remove-worktree", "project": p["id"], "main": p["path"], "path": w["path"],
+                                "branch": br, "github": p.get("github"), "pr": None,
+                                "merged": {"base": bp["base"], "sha": merged["sha"], "prs": bp.get("prs")},
+                                "reason": f"{merged['merge']}, idle {core.ago(now - idle)}",
+                                "kb": w.get("size_kb") or 0, "auto": True})
+            elif removable and pr and pr["state"] in ("MERGED", "CLOSED") and idle > grace:
                 actions.append({"kind": "remove-worktree", "project": p["id"], "main": p["path"], "path": w["path"],
                                 "branch": br, "github": p.get("github"), "pr": pr,
                                 "reason": f"PR #{pr['number']} {pr['state'].lower()}, idle {core.ago(now - idle)}",
@@ -124,6 +176,8 @@ def plan(reg: dict, with_sizes=True) -> dict:
             else:
                 why = f"PR #{pr['number']} {pr['state'].lower()}" if pr else "work in progress"
                 notes.append(f"keep   {label} — {why}, idle {core.ago(now - idle).replace(' ago', '')}")
+        if bp:
+            _branch_actions(p, bp, grace, now, actions, notes)
     for root, e in _temp_entries():
         try:
             if e.name in active_slugs or any(e.name.startswith(s) for s in active_slugs):
@@ -139,8 +193,20 @@ def plan(reg: dict, with_sizes=True) -> dict:
             "reclaimable_kb": sum(a.get("kb") or 0 for a in actions)}
 
 
-def _still_safe(path: str):
-    """Re-verify a linked worktree right before deleting anything in it. -> (ok, reason)."""
+def _merged_now(path: str, branch: str, merged: dict):
+    """The merge test again, right before deleting: the worktree's HEAD is still the commit the caller tested and is
+    still merged into merged["base"] -> the test's result, or None."""
+    from . import branches
+    if not merged or not branch or gitout(path, "rev-parse", "HEAD") != merged.get("sha"):
+        return None
+    m = branches.merge_test(path, branch, merged["base"], ref="HEAD", prs=merged.get("prs"))
+    return m if m["merged"] else None
+
+
+def _still_safe(path: str, branch: str = None, merged: dict = None):
+    """Re-verify a linked worktree right before deleting anything in it. `merged`: {base, sha, prs} when the caller
+    found its branch merged (branches.merge_test): commits on no remote may go if they are merged into base. -> (ok,
+    reason)."""
     core._CWDS = None  # refresh process list
     if is_active(path):
         return False, "a process is now working in it"
@@ -149,16 +215,21 @@ def _still_safe(path: str):
         return False, "git status failed"
     if out.strip():
         return False, "it has uncommitted or untracked changes"
-    if int(gitout(path, "rev-list", "--count", "HEAD", "--not", "--remotes") or 0):
-        return False, "it has commits that are on no remote"
+    if int(gitout(path, "rev-list", "--count", "HEAD", "--not", "--remotes") or 0) and \
+            not _merged_now(path, branch, merged):
+        return False, "it has commits that are on no remote" + (
+            f" and not merged into {merged['base']}" if merged else "")
     return True, ""
 
 
-def remove_worktree(main: str, path: str, branch: str = None, github: str = None, require_pr=None, log=True):
-    """Safe removal used by `dev wt rm` and gc. -> (ok, message)."""
-    ok, why = _still_safe(path)
+def remove_worktree(main: str, path: str, branch: str = None, github: str = None, require_pr=None, log=True,
+                    merged: dict = None):
+    """Safe removal used by `dev wt rm`, gc, `dev branch prune` and `dev pr merge`. `merged`: {base, sha, prs} when the
+    caller's merge test found the branch merged; it is tested again here. -> (ok, message)."""
+    ok, why = _still_safe(path, branch, merged)
     if not ok:
         return False, f"kept {tilde(path)}: {why}"
+    landed = _merged_now(path, branch, merged) if merged else None
     if require_pr is not None and github and branch:
         fresh = registry.pr_fresh(github, branch)
         if fresh == "unknown" or not fresh or fresh.get("state") not in ("MERGED", "CLOSED"):
@@ -172,6 +243,10 @@ def remove_worktree(main: str, path: str, branch: str = None, github: str = None
         if int(gitout(main, "rev-list", "--count", branch, "--not", "--remotes") or 1) == 0:
             git(main, "branch", "-D", branch)
             msg += "; local branch deleted (still on the remote)"
+        elif landed and gitout(main, "rev-parse", "--verify", "-q", f"refs/heads/{branch}") == merged.get("sha"):
+            from . import branches
+            git(main, "branch", "-D", branch)
+            msg += f"; local branch deleted ({branches.merge_words(landed, merged['base'])})"
     tmp = Path(real(os.environ.get("CLAUDE_CODE_TMPDIR", "/tmp"))) / f"claude-{os.getuid()}" / core.claude_slug(path)
     if tmp.exists():
         shutil.rmtree(tmp, ignore_errors=True)
@@ -189,7 +264,15 @@ def apply(pl: dict, only_auto=True) -> list:
         k = a["kind"]
         if k == "remove-worktree":
             ok, msg = remove_worktree(a["main"], a["path"], a.get("branch"), a.get("github"),
-                                      require_pr=a.get("pr"))
+                                      require_pr=a.get("pr"), merged=a.get("merged"))
+        elif k == "prune-branch":
+            from . import branches
+            done = branches.prune(a["plan"], only=lambda x, row=a["row"]: x is row)
+            r = done[0] if done else dict(a["row"], result="failed", error="not deleted")
+            ok = r.get("result") == "deleted"
+            msg = (f"deleted {a['where']} branch {a['path']} ({a['reason']})" if ok else
+                   f"kept {a['where']} branch {a['path']}: {r.get('error') or 'not deleted'}")
+            _log("gc · " + msg)
         elif k == "prune-artefacts":
             ok, why = _still_safe(a["path"])
             if not ok:

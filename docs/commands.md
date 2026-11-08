@@ -524,9 +524,10 @@ The worktrees of the current project (or of every project with `--all`): branch,
 
 ### `dev wt rm <branch | path>`
 
-Removes a worktree only when it has no uncommitted, untracked, or unpushed work and no process uses it. The local
-branch is deleted when all its commits are on a remote. A registered worktree whose folder is gone is pruned. Exits
-with `1` when removal was refused.
+Removes a worktree only when it has no uncommitted, untracked, or unpushed work and no process uses it. Commits on no
+remote do not stop it when the branch is merged into `origin/<default>`, as an ancestor or by content (the merge test
+of `dev branch prune`). The local branch is deleted when all its commits are on a remote or it is merged, and the
+output says how. A registered worktree whose folder is gone is pruned. Exits with `1` when removal was refused.
 
 ## Delivery
 
@@ -593,21 +594,38 @@ Tokens are read from the environment and never printed. A host that cannot be re
 `dev status` shows the latest run of the branch, and when you ask an agent for status, the prompt hook adds the
 branch's pipelines to its context.
 
-### `dev ci watch [-p PROJECT] [--branch B] [--sha S] [--timeout 90] [--json] [--quiet]`
+### `dev ci watch [-p PROJECT] [--branch B] [--sha S] [--tag T] [--pr N] [--wait] [--timeout 90] [--json] [--quiet]`
 
 Follows the CI/CD runs of a branch for one commit (default: the current branch at HEAD) until they finish, on GitHub
 Actions, GitLab CI, Bitbucket Pipelines, or Azure Pipelines. A failure comes with the failed jobs and steps, the first
 error of the failed log (GitHub through `gh run view --log-failed`, GitLab through `glab ci trace`; Bitbucket and
 Azure give the job, step and link), its class (`test`, `lint`, `build`, `dependencies`, `pipeline`,
-`infrastructure`, `unknown`) and the one next action. The log excerpt is marked as untrusted output and has secrets
-redacted. Exit codes: 0 passed, 1 failed, 3 still running at the timeout, 4 no run appeared within five minutes.
+`infrastructure`, `cancelled`, `unknown`) and the one next action. The log excerpt is marked as untrusted output and
+has secrets redacted. Exit codes: 0 passed, 1 failed (cancelled and timed out count as failed), 3 still running at the
+timeout, 4 none (no run appeared within five minutes, or the runs were only skipped, neutral, or stale).
+
+With `--wait`, it is the watch an agent waits on, and its output wakes the agent. It follows one target: `--pr N`
+(the PR's head, or its merge commit once merged), `--tag T`, `--sha S` (on `--branch B`), or `--branch B` as origin
+has it; by default, what the session last sent to origin. It prints one line per finished job, then one line that
+starts with `CI <word> ·` (passed, failed, cancelled, timed out, skipped, none, or still running with the command to
+re-arm it). It retries host errors and ends by itself at `--timeout`. Exit codes: 0 passed, 1 failed, 2 nothing to
+watch, 3 the watch ended first (re-arm it), 4 none. Claude Code runs it with the Monitor tool (`--timeout 28`,
+`timeout_ms` 1800000, re-armed on expiry) or as a background command; Codex runs it in the foreground with a timeout.
 
 devkit starts it in the background after every `git push`, `dev push`, `gh pr create`, `dev pr create`,
-`gh pr merge`, `dev pr merge`, and `dev release` that a main session runs (one watcher per repository, branch, and
-commit), and the result reaches that session with its next action: a crew message to the main agent when it has a
-progress run, otherwise a note on its next tool call or prompt. Each result is in `~/.local/state/devkit/ci/watch/`,
-the audit trail (`ci.watch`), and a desktop notification. `DEVKIT_NO_CI_WATCH=1` turns the automatic start off. See
-[CI/CD pipelines › Watch every run](ci-cd.md#watch-every-run).
+`gh pr ready`, `dev pr ready`, `gh pr merge`, `dev pr merge`, and `dev release` that a main session runs (one watcher
+per repository, branch, and commit), and the result reaches that session with its next action at its next hook: a
+crew message to the main agent when it has a progress run, otherwise a note on its next tool call or prompt. That
+wakes no idle session, so an agent that waits on the run arms `--wait`; the Stop hook sends back a turn that sent work
+to origin and leaves its unfinished run with nothing that wakes the agent. Each result is in
+`~/.local/state/devkit/ci/watch/`, the audit trail (`ci.watch`), and a desktop notification. `DEVKIT_NO_CI_WATCH=1`
+turns the automatic start off. See [CI/CD pipelines › Watch every run](ci-cd.md#watch-every-run).
+
+### `dev ci watches [--json]`
+
+Lists the live watches, and those that stopped before their runs ended with the command to re-arm each: devkit's
+background watches and the agents' `dev ci watch --wait`, with the repository, target, start, last event, expiry,
+agent, and session. See [CI/CD pipelines › List the watches](ci-cd.md#list-the-watches).
 
 ### `dev ci audit [--fix] [--strict] [--provider HOST] [--json] [-p PROJECT]`
 
@@ -676,7 +694,13 @@ one, or else the recommendation) in the handoff repository with the changes from
 | `--tasks` | Open a work item for every gap (high gaps go to Now, with high priority) |
 
 The fields are `versioning`, `tag_format`, `version_source`, `release_flow`, `changelog`, `test_gate`, `ci`,
-`branch_model`, `publish`, `deploy`, `kind`, `release_train`, and `bump`.
+`branch_model`, `publish`, `deploy`, `kind`, `release_train`, `delete_branch_on_merge`, and `bump`.
+
+In a project, `dev delivery apply` also makes the host delete a pull request's branch when it merges, as
+`delete_branch_on_merge` says (on unless you `--set delete_branch_on_merge=false`): on GitHub it sets the repository's
+setting (`gh api`, which needs a repository administrator) and records `true` only when GitHub took it; otherwise it prints why and
+records nothing. On GitLab, Bitbucket, and Azure DevOps it names the setting to change there. `dev doctor` lists each
+GitHub project you administer where the setting is off.
 
 ```bash
 dev delivery apply --why "first release policy: service, CalVer, Maven verify gate" --tasks
@@ -729,7 +753,7 @@ command prints one line or a short table, and a refusal exits with `2` with the 
 [Git and GitHub](git-and-github.md). `dev pr`, `dev run view`, `dev run rerun`, `dev issue`, and the release page
 of `dev release` need GitHub (or a host listed in `gitx.github_hosts`).
 
-### `dev branch new | rename | ls | clean | embargo`
+### `dev branch new | rename | ls | clean | prune | embargo`
 
 | Command | Effect |
 | --- | --- |
@@ -737,6 +761,7 @@ of `dev release` need GitHub (or a host listed in `gitx.github_hosts`).
 | `dev branch rename <type>/<topic> [--ticket KEY]` | Renames the current branch before its first push (or names a detached HEAD); refuses permanent branches and branches already on `origin` |
 | `dev branch ls [--offline] [--json]` | The branch map: every local branch, where it lives (local only, or local and its remote), ahead and behind its upstream and `origin/<default>`, the branch that has its commits (`merged into …`), its last backup or why it is not backed up, its embargo, worktree, PR (draft or ready, checks) and linked task. `--offline` uses the cached PR list; `--json` prints the rows (below) |
 | `dev branch clean [--apply] [--offline] [--json]` | The local branches that are merged, whose PR was merged, or that are gone upstream with every commit on the remote; deleted only with `--apply` |
+| `dev branch prune [--apply] [--remote \| --local] [--offline] [--json]` | Every local and remote branch with its state: merged and how (its tip is in `origin/<default>`, its PR from this repository was merged, or every commit has an equivalent there), an open PR, not merged (commits ahead, age of the last commit), or protected. Fetches `origin` first and changes nothing else. `--apply` deletes the merged ones: the remote branch (with a lease on the listed commit), the local branch, and its worktree when that is clean. It never deletes the default or a permanent branch, the current branch, a branch with an open PR, an embargoed branch, a worktree with uncommitted changes, a lock, or a live session, a branch created in the last 24 hours with no commit of its own, or a branch with commits the default branch lacks. Each deletion is audited as `branch.pruned` with how it was merged. `--remote` or `--local` limits it to one side; `--offline` skips the fetch and GitHub and keeps remote branches. Exits with `1` when a deletion failed. See [Git and GitHub › Close merged branches](git-and-github.md#close-merged-branches) |
 | `dev branch embargo <branch> --why "…" [--until "<step or date>"]` | Keeps the branch off the remote (see [Guard rules › The developer's own decisions](guard.md#the-developers-own-decisions) for what an agent's push is held from until 26.11.4): `dev backup` and `dev sync` never push it, nor a branch that holds any of its commits. Stored in the `embargo:` list of the handoff note's metadata (with who and when), so every machine sees it; audited as `git.embargo`. The record also keeps the branch's tips (`commits:`, updated by every backup run), so the embargo holds its commits after the branch is merged into another and deleted. Every branch view shows it. Without a branch, lists the embargoes (`--json` too) |
 | `dev branch embargo --lift <branch>` | Ends the embargo; the next backup may push the branch and the branches that carry its commits. The developer's own decision: devkit refuses it from a crew member's lane, and the guard asks the main session for the developer's grant (`grant embargo <branch>`) |
 
@@ -873,7 +898,7 @@ a fresh fetch, that `origin` has nothing you lack, no WIP or fixup commits, a fi
 | `dev pr view [n] [--body] [--json]` | One-line state: branches, checks, review, conflicts, size, author, age, address |
 | `dev pr ls [--all] [--all-projects [--offline]] [--json]` | Your open PRs and those waiting for your review; `--all` adds the others; `--all-projects` covers every project |
 | `dev pr checks [n] [--watch [--fail-fast] [--interval S] [--timeout MIN]] [--lines N] [--json]` | Pass, fail, and pending counts; each failing job with its trimmed log (25 lines). Exits with `0` (passed), `1` (failed), or `8` (pending). When every check was skipped (a draft's run skips the jobs with the draft gate), it reports no checks yet and exits with `8`, never passed. `--watch` waits and prints only the result; it also waits up to two minutes for the real run after `dev pr ready` |
-| `dev pr merge [n] [--squash \| --merge \| --rebase] [--auto] [--keep-branch] [--dry-run]` | Merges when the checks passed and the reviews allow it, with the repository's method (checks that were all skipped have not passed: it waits for the real run); a squash commit gets the PR title and its "What and why"; then deletes the branch and updates the default branch locally, and marks the open work items linked to the merged branch as done (`merged in PR #<n> (<short sha>)` in their changelog; the output names them). `--auto` lets GitHub merge when the checks pass and closes no item |
+| `dev pr merge [n] [--squash \| --merge \| --rebase] [--auto] [--keep-branch] [--dry-run]` | Merges when the checks passed and the reviews allow it, with the repository's method (checks that were all skipped have not passed: it waits for the real run); a squash commit gets the PR title and its "What and why"; then deletes the remote branch and, when the merge test finds it merged, the local branch with its clean worktree (or switches to the default branch and updates it), and marks the open work items linked to the merged branch as done (`merged in PR #<n> (<short sha>)` in their changelog; the output names them). `--auto` lets GitHub merge when the checks pass and closes no item |
 | `dev pr ready [n] [--ci-passed] [--lang L]` | Marks a draft ready after checking its title and required sections. Marking ready starts the one CI run, so for the current branch it also needs the PR's head to be your HEAD and local CI evidence for it (`--ci-passed` attests it) |
 | `dev pr comment [n] -m "…" \| --body-file F` | Comments on a PR |
 | `dev pr review [n] --approve \| --request-changes \| --comment [-m "…"]` | Reviews a PR; `--request-changes` and `--comment` need a message |
@@ -895,11 +920,16 @@ CI on GitHub not failing or running, and notes from the CHANGELOG section. It cr
 pushes it, and creates the GitHub release. A project that releases with release-please or semantic-release is
 refused. See [Git and GitHub › Releases](git-and-github.md#releases).
 
-It and `--dry-run` also list the open work items linked to the branches merged since the previous tag (by a merge
-commit of `<previous tag>..HEAD`, a squash or rebase merge of the branch's PR, or a fast-forward) and refuse while any
-is open. Close the shipped ones (`dev task done`, or
+It and `--dry-run` also list the open work items linked to the branches merged since the previous tag and refuse
+while any is open. A branch counts when a first-parent merge commit of `<previous tag>..HEAD` names it, or a squash or
+rebase merge of its PR, or (off GitHub) a fast-forward. On GitHub a merge commit counts only with the merged PR from
+the repository that made it, and its time is the PR's `mergedAt`; a merge dated in the future counts for nothing. Close the shipped ones (`dev task done`, or
 `dev task reconcile --apply`), or release anyway with `--why "<reason>"`, which the output and the audit
 (`dev.release.open-items`) record. See [Teams and machines › Shipped and stale items](teams.md#shipped-and-stale-items).
+
+Once the release is published (not a `--draft`), it deletes the branches the release merged (merged into it by the
+merge test of `dev branch prune`, and not into the previous tag), remote and local with their clean worktrees, prints
+each with how it was merged, and names the merged ones it kept and why. `--dry-run` lists them.
 
 ### `dev issue ls | view | create`
 
@@ -1177,6 +1207,11 @@ The same as `dev free`, under its old name, for scripts. `--apply` runs the unat
 fresh PR states, asks for confirmation in a terminal (skip it with `-y`), and then syncs. `-v` also lists what that
 cleanup keeps and why. `--auto-only` applies only the actions that are safe without a person, which is what the
 nightly `gc` job runs. The rules are in [Disk and cleanup](disk-and-cleanup.md).
+
+That cleanup also closes merged branches with the merge test of `dev branch prune`: an idle, clean worktree whose
+branch is merged (also by content) goes with its branch; a merged local branch that has not moved for
+`gc.grace_hours` goes; and a merged remote branch goes only when its pull request merged or devkit pushed it as a
+backup. Anyone else's merged remote branch is listed as kept: `dev branch prune --apply` deletes it.
 
 ### `dev jobs [ls | show | run | logs | journal | set | enable | disable | install]`
 

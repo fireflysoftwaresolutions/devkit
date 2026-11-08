@@ -960,9 +960,9 @@ def devkit_needs(cwd: str = None) -> list:
 
 def cmd_branch(a):
     """`dev branch ls` is the branch map (branches.py, spec P-fy3bwa0pshk R7); new, rename and clean stay in gitx."""
-    if getattr(a, "branch_cmd", None) in ("ls", "embargo"):
+    if getattr(a, "branch_cmd", None) in ("ls", "embargo", "prune"):
         from . import branches as branchmap
-        return branchmap.cmd_ls(a) if a.branch_cmd == "ls" else branchmap.cmd_embargo(a)
+        return {"ls": branchmap.cmd_ls, "embargo": branchmap.cmd_embargo, "prune": branchmap.cmd_prune}[a.branch_cmd](a)
     from . import gitx
     return gitx.cmd_branch(a)
 
@@ -1227,6 +1227,19 @@ def wt_new(p, branch, base=None, quiet=False, deps=True):
     return str(path)
 
 
+def _wt_merged(p: dict, branch: str):
+    """{base, sha, prs} when the worktree's branch is merged into origin/<default> as an ancestor or by content (the
+    merge test of dev branch prune, without GitHub), so `dev wt rm` may remove it with commits on no remote."""
+    if not branch:
+        return None
+    from . import branches
+    default = p.get("default_branch") or "main"
+    base = f"origin/{default}" if core.git(p["path"], "rev-parse", "--verify", "-q",
+                                           f"refs/remotes/origin/{default}")[0] == 0 else default
+    m = branches.merge_test(p["path"], branch, base)
+    return {"base": base, "sha": m["sha"], "prs": None} if m["merged"] else None
+
+
 def cmd_wt(a):
     reg = _reg(prs=a.wt_cmd == "ls")
     if a.wt_cmd == "new":
@@ -1271,7 +1284,8 @@ def cmd_wt(a):
                         core.git(p["path"], "worktree", "prune")
                         print(f"{ui.OK} pruned missing worktree {tilde(w['path'])}")
                         return 0
-                    ok, msg = gc.remove_worktree(p["path"], w["path"], w.get("branch"), p.get("github"))
+                    ok, msg = gc.remove_worktree(p["path"], w["path"], w.get("branch"), p.get("github"),
+                                                 merged=_wt_merged(p, w.get("branch")))
                     print(f"{ui.OK if ok else ui.FAIL} {msg}")
                     return 0 if ok else 1
         ui.err(f"no worktree matches “{target}” — `dev wt ls --all`")
@@ -1427,7 +1441,8 @@ def _gc_unattended(a):
         print(ui.section(f"Reclaimable: {human_kb(pl['reclaimable_kb'])}"))
         for x in pl["actions"]:
             label = {"remove-worktree": "remove worktree", "prune-artefacts": "prune build output",
-                     "purge-temp": "purge temp", "prune-meta": "prune metadata"}[x["kind"]]
+                     "purge-temp": "purge temp", "prune-meta": "prune metadata",
+                     "prune-branch": f"delete {x.get('where', '')} branch"}[x["kind"]]
             print(f"  {ui.ARROW} {label:<19} {tilde(x['path'])}  {ui.dim(x['reason'] + ' · ' + human_kb(x.get('kb')))}")
     else:
         print(f"  {ui.OK} nothing to reclaim")
@@ -1657,11 +1672,17 @@ def cmd_ci_status(a, top):
 
 def cmd_ci(a):
     from . import ci
+    if a.query == "watches":  # the live watches, and the expired ones with the command to re-arm each
+        from . import ciwatch
+        return ciwatch.cmd_watches(a)
     top = core.gitout(os.getcwd(), "rev-parse", "--show-toplevel")
-    if a.query and a.query not in ("status", "audit", "init", "watch"):
+    if a.query and a.query not in ("status", "audit", "init", "watch", "watches"):
         top = _resolve(_reg(prs=False), a.query)["path"]
     if getattr(a, "project", None):
         top = _resolve(_reg(prs=False), a.project)["path"]
+    if a.query == "watch" and getattr(a, "wait", False):  # an agent waits on one run: its output wakes the agent
+        from . import ciwatch
+        return ciwatch.cmd_wait(a, top)
     if not top:
         ui.err("not inside a repository")
         return 2
@@ -2262,6 +2283,14 @@ def cmd_delivery(a):
             except ValueError as e:
                 ui.err(str(e))
                 return 2
+        if not (a.why or "").strip():
+            ui.err("recording a delivery policy needs the reason: --why \"…\"")
+            return 2
+        if repo:  # the host deletes a merged pull request's branch, as the policy says (on unless set to false)
+            want = base.get("delete_branch_on_merge") is not False
+            got, line = delivery.branch_cleanup(repo, want)
+            print(f"{ui.OK if got is not None else ui.WARN} {line}")
+            base["delete_branch_on_merge"] = got
         try:
             rec = delivery.record(scope, base, a.why or "")
         except ValueError as e:
@@ -3620,12 +3649,20 @@ def build_parser():
     p.add_argument("--days", type=int, default=7)
     p.add_argument("--limit", type=int, default=20)
     p = add("ci", cmd_ci, "What CI runs (to run it locally first), `dev ci status`: live runs on any host, "
-                          "`dev ci watch`: follow a run to the end and diagnose a failure, `dev ci audit`: diagnose "
-                          "pipelines, `dev ci init`: set one up")
-    p.add_argument("query", nargs="?", help="a project, or `status`, `audit`, `init` or `watch`")
+                          "`dev ci watch`: follow a run to the end and diagnose a failure (`--wait`: for an agent "
+                          "that waits on it), `dev ci watches`: the live and expired watches, `dev ci audit`: "
+                          "diagnose pipelines, `dev ci init`: set one up")
+    p.add_argument("query", nargs="?", help="a project, or `status`, `audit`, `init`, `watch` or `watches`")
     p.add_argument("-p", "--project", help="the project (id or a unique part of its name) for status, audit, init "
                                            "and watch")
-    p.add_argument("--sha", help="watch: the commit whose runs to follow (default: HEAD)")
+    p.add_argument("--sha", help="watch: the commit whose runs to follow (default: HEAD; with --wait, what this "
+                                 "session last sent to origin)")
+    p.add_argument("--wait", action="store_true",
+                   help="watch: for an agent that waits on the run: one line per finished job, then one line with "
+                        "the conclusion; exit 0 passed, 1 failed, 3 the watch ended first (re-arm it), 4 none. Run it "
+                        "as a Claude Code Monitor or background command, or in the foreground on Codex")
+    p.add_argument("--tag", help="watch --wait: the runs of this tag")
+    p.add_argument("--pr", help="watch --wait: the runs of this PR's head, or of its merge commit once merged")
     p.add_argument("--timeout", type=float, default=90, help="watch: minutes before giving up (default 90)")
     p.add_argument("--session", help=argparse.SUPPRESS)
     p.add_argument("--quiet", action="store_true", help="watch: no progress lines, only the result")

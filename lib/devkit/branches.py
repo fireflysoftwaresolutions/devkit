@@ -17,6 +17,8 @@ A row (`dev branch ls --json` prints the list; `registry.json` keeps it as `proj
     where                                                   "local + origin" | "local only"
     last_commit, unpushed, oldest_unpushed                  unix times; unpushed: commits on no remote ref
     merged_into                                             a branch that has every commit of this one, or null
+    merged_how                                              ancestor, or content (git cherry: every commit has an
+                                                            equivalent in the default branch), or null
     last_backup                                             unix time of the newest git.backup record, or null
     embargo                                                 {why, until, who, when} or null
     embargo_via                                             the embargoed branch that carries its commits, or null
@@ -412,6 +414,47 @@ def _counts(walked, names):
     return {n: (count[k], oldest[k]) for k, n in enumerate(names)}
 
 
+CONTENT_DAYS = 7  # how far before a branch's oldest own commit the default branch is searched for its equivalents
+
+
+def _content_merged(top, base_ref: str, off_base, names, cands) -> list:
+    """The branches of `cands` whose every own commit (off `base_ref`, merges left out, as git cherry does) has an
+    equivalent in `base_ref`: the same patch id among its commits since CONTENT_DAYS before the oldest of them. Two git
+    calls for the whole repository, where git cherry takes one per branch (the session start has 30 s)."""
+    if off_base is None:
+        return []
+    want = {n: 1 << k for k, n in enumerate(names) if n in cands}
+    mask = 0
+    for b in want.values():
+        mask |= b
+    own = {sha: bits for sha, (_, bits) in off_base.items() if bits & mask}
+    stamps = [ts for sha, (ts, _) in off_base.items() if sha in own and ts]
+    if not own or not stamps:
+        return []
+    since = min(stamps) - CONTENT_DAYS * 86400
+    rc, patches, _ = core.sh(["git", "-C", str(top), "log", "-p", "--no-merges", "--format=commit %H",
+                              f"--since={since}", base_ref, "--stdin"], input="".join(f"{s}\n" for s in own),
+                             timeout=120)
+    if rc != 0:
+        return []
+    listed = {ln[7:47] for ln in patches.splitlines() if ln.startswith("commit ") and len(ln) >= 47}
+    rc, ids, _ = core.sh(["git", "-C", str(top), "patch-id", "--stable"], input=patches + "\n", timeout=120)
+    if rc != 0:
+        return []
+    pid_of = {}
+    for ln in ids.splitlines():
+        parts = ln.split()
+        if len(parts) == 2:
+            pid_of[parts[1]] = parts[0]
+    landed = {p for sha, p in pid_of.items() if sha not in own}
+    out = []
+    for name, bit in want.items():
+        mine = [sha for sha, bits in own.items() if bits & bit and sha in listed]  # its non-merge commits
+        if mine and all(pid_of.get(sha) in landed for sha in mine):
+            out.append(name)
+    return out
+
+
 def _carrier_order(r: dict, head: str):
     # among branches at the same commit, the one that carries the backup: the default branch, then one with an
     # upstream, then the one checked out, then by name
@@ -507,7 +550,7 @@ def map(repo, prs=None, offline=False, now=None, pid=None, default=None, current
             "session": bool(c.get("active")),
             "pr": None, "task": None, "backup": None})
     by_name = {r["name"]: r for r in rows}
-    off_base = _walk(top, names, tips, [base_ref]) if base_ref else None  # who carries which commit, in one walk
+    off_base = _walk(top, names, tips, [base_ref], with_ts=True) if base_ref else None  # who carries which commit
     for r in rows:  # merged into: the default branch when the base has every commit, else the closest container
         if r["default"]:
             continue
@@ -529,6 +572,13 @@ def map(repo, prs=None, offline=False, now=None, pid=None, default=None, current
                 strict.sort(key=lambda x: (int(core.gitout(top, "rev-list", "--count", f"{sha}..refs/heads/{x}") or 0),
                                            x != default, x))
             r["merged_into"] = strict[0]
+    for r in rows:
+        r["merged_how"] = "ancestor" if r["merged_into"] else None
+    # merged by content (the merge test): cherry-picked or carried by a release branch. Without this the hourly backup
+    # pushed such a branch back to origin after its remote branch had been deleted.
+    cands = [r["name"] for r in rows if not r["default"] and not r["merged_into"] and r["unpushed"]]
+    for name in _content_merged(top, base_ref, off_base, names, cands) if base_ref and cands else ():
+        by_name[name]["merged_into"], by_name[name]["merged_how"] = default, "content"
     done = backups(pid)
     held_full = read_embargoes(pid)[0] or {}
     held = {b: {k: e[k] for k in notes.EMBARGO_FIELDS} for b, e in held_full.items()}
@@ -559,6 +609,8 @@ def _backup_state(r: dict, has_remotes: bool, after: int, now: float, skipped) -
     n = r["unpushed"]
     if has_remotes and n == 0:
         return {"state": "backed_up", "reason": ""} if r["last_backup"] else {"state": "on_remote", "reason": ""}
+    if r["merged_into"] and r.get("merged_how") == "content":
+        return {"state": "merged", "reason": f"its commits have an equivalent in {r['merged_into']} (merged by content)"}
     if r["merged_into"]:
         return {"state": "merged", "reason": f"its commits are in {r['merged_into']}"}
     if not has_remotes:
@@ -1011,3 +1063,309 @@ def _share(branch: str, what: str = "embargo") -> None:
         work.request_sync(f"{what} {branch}")
     except Exception:
         pass
+
+
+# --------------------------------------------------------------------------- the merge test
+# One test decides whether a branch is merged, for `dev branch prune`, `dev branch clean`, the nightly gc, the worktree
+# cleanup, `dev pr merge` and `dev release`, and every one of them says which way it holds.
+
+HOWS = ("ancestor", "pr", "content")
+
+
+def _sha(top, ref) -> str:
+    return core.gitout(top, "rev-parse", "--verify", "-q", f"{ref}^{{commit}}") if ref else ""
+
+
+def _ancestor(top, a, b) -> bool:
+    return core.git(top, "merge-base", "--is-ancestor", a, b, timeout=60)[0] == 0
+
+
+def merge_test(top, name: str, base: str, ref: str = None, prs=None) -> dict:
+    """Is the branch `name` (its `ref`, refs/heads/<name> unless given) merged into `base` (origin/<default>)?
+
+      ancestor  its tip is in `base`: a merge commit or a fast-forward;
+      pr        a merged pull request of the branch (any method: merge, squash or rebase) had its tip, or a later
+                commit, as its head, so nothing was added after the merge; it came from the repository itself (a
+                fork's branch can carry any name and head) and its merge commit is in `base` (not merged elsewhere);
+      content   every commit `base` lacks has an equivalent there (`git cherry`: all "-"): cherry-picked, or carried by
+                a release branch that merged; merge commits are left out, as git cherry leaves them out.
+
+    prs: the repository's pull requests ({number, state, headRefName, headRefOid, isCrossRepository, mergeCommit});
+    none skips the pull-request test.
+    -> {merged, how (one of HOWS or None), pr, sha, ahead (commits `base` lacks), missing (of them, those without an
+    equivalent; None when git cherry could not tell)}."""
+    sha = _sha(top, ref or f"refs/heads/{name}")
+    out = {"merged": False, "how": None, "pr": None, "sha": sha, "ahead": 0, "missing": None}
+    if not sha or not _sha(top, base):
+        return out
+    if _ancestor(top, sha, base):
+        return dict(out, merged=True, how="ancestor", missing=0)
+    n = core.gitout(top, "rev-list", "--count", f"{base}..{sha}", timeout=60)
+    out["ahead"] = int(n) if n.isdigit() else 0
+    for p in prs or []:
+        head = str(p.get("headRefOid") or "")
+        landed = str((p.get("mergeCommit") or {}).get("oid") or "")
+        if p.get("headRefName") != name or str(p.get("state") or "").upper() != "MERGED" or not head or \
+                p.get("isCrossRepository") is not False or not landed or not _sha(top, landed) or \
+                not _ancestor(top, landed, base):
+            continue
+        if head == sha or (_sha(top, head) and _ancestor(top, sha, head)):
+            return dict(out, merged=True, how="pr", pr=p.get("number"), missing=0)
+    rc, cherry, _ = core.git(top, "cherry", base, sha, timeout=120)
+    if rc != 0:
+        return out
+    marks = [ln[:1] for ln in cherry.splitlines() if ln[:1] in ("+", "-")]
+    out["missing"] = marks.count("+")
+    if marks and not out["missing"]:
+        return dict(out, merged=True, how="content")
+    return out
+
+
+def _commits(n: int) -> str:
+    return f"{n} commit{'' if n == 1 else 's'}"
+
+
+def merge_words(m: dict, base: str) -> str:
+    """The merge test's answer in words, for every output that closes or keeps a branch."""
+    if not m.get("sha"):
+        return "the branch does not exist"
+    if m.get("how") == "ancestor":
+        return f"merged: its tip is in {base}"
+    if m.get("how") == "pr":
+        return f"merged: PR #{m.get('pr')} was merged"
+    if m.get("how") == "content":
+        n = m.get("ahead") or 0
+        return f"merged by content: {_commits(n)} {'has' if n == 1 else 'have'} an equivalent in {base}"
+    ahead, missing = m.get("ahead") or 0, m.get("missing")
+    if missing is None or missing == ahead:
+        return f"not merged: {_commits(ahead)} not in {base}"
+    return f"not merged: {missing} of {_commits(ahead)} not in {base}"
+
+
+# --------------------------------------------------------------------------- dev branch prune
+# Every local and remote branch with its state; with --apply the merged ones go: the remote branch, the local branch
+# and its worktree when that is clean. What nothing may delete: the default branch and the permanent ones, the
+# current branch, a branch with an open pull request, an embargoed branch, a worktree with uncommitted changes, a
+# lock or a live session, and a branch with commits the default branch does not have by content.
+
+PRUNE_STATES = ("merged", "open_pr", "not_merged", "protected")
+FRESH_HOURS = 24  # a branch that never had a commit of its own is kept this long after it was created
+
+
+def _live_tops() -> set:
+    """The real paths where a devkit session is live now, from its session records (registry._session_live)."""
+    from . import registry
+    out = set()
+    d = Path(registry.STATE) / "sessions"
+    for f in d.glob("*.json") if d.is_dir() else ():
+        s = core.read_json(f, {}) or {}
+        top = s.get("top") or ""
+        if isinstance(s, dict) and top and registry._session_live(s, top):
+            out.add(core.real(top))
+    return out
+
+
+def _created_only(top, name: str, now: float):
+    """When the branch `name` was created, if that is all its reflog holds and it was less than FRESH_HOURS ago (it
+    never had a commit of its own yet); else None."""
+    lines = core.gitout(top, "reflog", "show", "--date=unix", "--format=%gd%x09%gs", f"refs/heads/{name}", "--",
+                        timeout=30).splitlines()
+    if len(lines) != 1:
+        return None
+    when, _, what = lines[0].partition("\t")  # feat/x@{1794119002}: when the entry was written, not the commit's date
+    found = re.search(r"@\{(\d+)\}$", when)
+    ts = int(found.group(1)) if found else 0
+    return ts if what.startswith("branch: Created from") and now - ts < FRESH_HOURS * 3600 else None
+
+
+def _worktree_hold(top, w: dict, live: set):
+    """Why a merged branch's worktree must stay, or None when it can go."""
+    from . import registry
+    path = w["path"]
+    if not os.path.isdir(path):
+        return None
+    if w.get("locked"):
+        return "its worktree is locked"
+    if registry.classify_location(Path(path), Path(top)) == "codex":
+        return "the Codex app manages its worktree"
+    if core.gitout(path, "status", "--porcelain", timeout=60):
+        return "its worktree has uncommitted changes"
+    if core.real(path) in live or core.is_active(path):
+        return "a live session works in its worktree"
+    return None
+
+
+def prune_plan(top, prs=None, offline=False, where=("local", "remote"), now=None) -> dict:
+    """What `dev branch prune` would do in the repository at `top`: {project, base, default, applied, branches: rows}.
+    A row: name, where (local|remote), sha, state (PRUNE_STATES), how (merge_test), pr, ahead, missing, last_commit,
+    merge (the merge test in words), worktree, action (delete|keep), why, backup (devkit pushed it: a git.backup record),
+    pr_merged (a merged pull request of the branch exists). Fetches origin first unless `offline`; changes nothing."""
+    from . import gitx, registry
+    now = now or time.time()
+    c = gitx.ctx(top)
+    if c is None:
+        raise ValueError("not inside a git repository")
+    if not offline and c.has_origin:
+        gitx._fetch(c)
+    base = gitx._base_ref(c)
+    github = c.provider == "github"
+    if prs is None and github:
+        prs = cached_prs(c.slug) if offline else gitx._prs(c, limit=200)
+    held, unreadable = read_embargoes(c.pid)
+    done = backups(c.pid)
+    trees = registry.list_worktrees(Path(c.main))
+    in_main = (trees[:1] or [{}])[0].get("branch")
+    wts = {w["branch"]: w for w in trees[1:] if w.get("branch")}
+    live = _live_tops()
+    fmt = "%(refname)%00%(objectname)%00%(committerdate:unix)"
+    refs = []
+    if "local" in where:
+        refs += [("local", ln) for ln in core.gitout(c.top, "for-each-ref", "--format=" + fmt, "refs/heads").splitlines()]
+    if "remote" in where and c.has_origin:
+        refs += [("remote", ln) for ln in core.gitout(c.top, "for-each-ref", "--format=" + fmt,
+                                                      "refs/remotes/origin").splitlines()]
+    rows = []
+    for kind, ln in refs:
+        ref, sha, ts = (ln.split("\x00") + ["", ""])[:3]
+        name = ref[len("refs/heads/"):] if kind == "local" else ref[len("refs/remotes/origin/"):]
+        if not name or name == "HEAD":
+            continue
+        m = merge_test(c.top, name, base, ref=ref, prs=prs)
+        mine = [p for p in prs or [] if p.get("headRefName") == name]
+        open_pr = next((p for p in mine if str(p.get("state") or "").upper() == "OPEN"), None)
+        w = wts.get(name) if kind == "local" else None
+        r = {"name": name, "where": kind, "sha": sha, "state": "", "how": m["how"], "pr": m["pr"], "ahead": m["ahead"],
+             "missing": m["missing"], "last_commit": int(ts) if ts.isdigit() else 0, "merge": merge_words(m, base),
+             "worktree": w["path"] if w else None, "action": "keep", "why": "",
+             "backup": bool((done.get(name) or {}).get("backup")),
+             "pr_merged": any(str(p.get("state") or "").upper() == "MERGED" for p in mine)}
+        protect = ("the default branch" if name == c.default else
+                   "a permanent branch" if name in _permanent() else
+                   "the current branch" if name == c.branch else
+                   "checked out in the main checkout" if kind == "local" and name == in_main else
+                   "embargoed" if name in (held or {}) else None)
+        if protect:
+            r.update(state="protected", why=f"protected: {protect}")
+        elif open_pr:
+            r.update(state="open_pr", why=f"open PR #{open_pr.get('number')}")
+        elif not m["merged"]:
+            r.update(state="not_merged", why=r["merge"] + f", last commit {core.ago(r['last_commit'])}")
+        else:
+            r["state"] = "merged"
+            hold = None
+            if held is None:
+                hold = f"the embargo list cannot be read ({unreadable})"
+            elif kind == "remote" and offline:
+                hold = "offline: remote branches are left as they are"
+            elif kind == "remote" and not github:
+                hold = f"the merge requests on {c.host or 'this remote'} are not read here: an open one would lose its branch"
+            elif kind == "remote" and prs is None:
+                hold = "GitHub could not be read: an open pull request would lose its branch"
+            elif w:
+                hold = _worktree_hold(c.main, w, live)
+            if not hold and kind == "local" and m["how"] == "ancestor":
+                created = _created_only(c.top, name, now)
+                if created:
+                    hold = f"created {core.ago(created)}, no commits yet"
+            if hold:
+                r["why"] = f"kept: {hold} ({r['merge']})"
+            else:
+                r.update(action="delete", why=r["merge"])
+        rows.append(r)
+    order = {"delete": 0, "keep": 1}
+    rows.sort(key=lambda r: (order[r["action"]], PRUNE_STATES.index(r["state"]), r["name"], r["where"]))
+    return {"project": c.pid, "top": c.top, "main": c.main, "base": base, "default": c.default, "applied": False,
+            "prs": prs, "branches": rows}
+
+
+def _permanent() -> set:
+    from . import guard
+    return set(guard.PERMANENT_BRANCHES)
+
+
+def _record(plan: dict, r: dict, what: str, outcome: str = "ok", error: str = "") -> None:
+    from . import audit
+    audit.record("branch.pruned", r["name"], f"{what}, {r['merge']}" + (f": {error}" if error else ""), outcome,
+                 project=plan["project"], branch=r["name"], commit=r["sha"])
+
+
+def prune(plan: dict, only=None) -> list:
+    """Delete the rows of `plan` whose action is delete (and `only(row)` holds): each remote branch with a lease on
+    the commit the plan saw (a branch someone pushed to since stays), then each local branch with its worktree
+    (gc.remove_worktree, which checks again that it is clean and idle). Each deletion is audited (branch.pruned).
+    -> the rows acted on, each with result (deleted|failed) and error."""
+    from . import gc
+    top = plan["top"]
+    todo = [r for r in plan["branches"] if r["action"] == "delete" and (only is None or only(r))]
+    for r in sorted(todo, key=lambda r: r["where"] != "remote"):
+        name = r["name"]
+        if r["where"] == "remote":
+            rc, _, err = core.git(top, "push", "--quiet", f"--force-with-lease=refs/heads/{name}:{r['sha']}", "origin",
+                                  "--delete", name, timeout=120)
+            what = "remote branch deleted"
+        else:
+            what, rc, err = "local branch deleted", 0, ""
+            if r["worktree"] and os.path.isdir(r["worktree"]):
+                ok, msg = gc.remove_worktree(plan["main"], r["worktree"], name, log=False,
+                                             merged={"base": plan["base"], "sha": r["sha"], "prs": plan.get("prs")})
+                rc, err, what = (0, "", "local branch and its worktree deleted") if ok else (1, msg, what)
+            elif r["worktree"]:
+                core.git(plan["main"], "worktree", "prune", timeout=60)
+            tip = _sha(top, f"refs/heads/{name}")
+            if rc == 0 and tip and tip != r["sha"]:
+                rc, err = 1, f"it moved to {tip[:7]} since the listing"
+            elif rc == 0 and tip:
+                rc, _, err = core.git(top, "branch", "-D", name, timeout=60)
+        last = (err or "").strip().splitlines()[-1:] or ["failed"]
+        r["result"], r["error"] = ("deleted", "") if rc == 0 else ("failed", last[0][:200])
+        _record(plan, r, what if rc == 0 else what.replace("deleted", "not deleted"), "ok" if rc == 0 else "failed",
+                r["error"])
+        r["did"] = what
+    plan["applied"] = True
+    return todo
+
+
+def _prune_line(r: dict, applied: bool) -> str:
+    where = f"{r['where']:<6} {r['name']}"
+    if applied and r.get("result") == "deleted":
+        tree = f" and its worktree {core.tilde(r['worktree'])}" if r.get("did", "").startswith("local branch and") else ""
+        return f"  {ui.OK} deleted {r['where']} {r['name']}{tree} ({r['why']})"
+    if applied and r.get("result") == "failed":
+        return f"  {ui.FAIL} not deleted {r['where']} {r['name']}: {r.get('error') or 'failed'} ({r['why']})"
+    verb = "delete" if r["action"] == "delete" else "keep"
+    return f"  {verb:<6} {where}  {ui.dim(r['why']) if r['action'] == 'keep' else r['why']}"
+
+
+def cmd_prune(a) -> int:
+    """`dev branch prune [--apply] [--remote|--local] [--offline] [--json]`."""
+    top = core.gitout(os.getcwd(), "rev-parse", "--show-toplevel")
+    if not top:
+        print(f"{ui.WARN} not inside a git repository", file=sys.stderr)
+        return 2
+    where = ("remote",) if a.remote else ("local",) if a.local else ("local", "remote")
+    plan = prune_plan(top, offline=bool(a.offline), where=where)
+    acted = prune(plan) if a.apply else []
+    if a.json:
+        out = {k: plan[k] for k in ("project", "base", "default", "applied")}
+        out["branches"] = plan["branches"]
+        print(json.dumps(out, indent=2, ensure_ascii=False))
+        return 1 if any(r.get("result") == "failed" for r in acted) else 0
+    rows = plan["branches"]
+    n_local, n_remote = (sum(1 for r in rows if r["where"] == w) for w in ("local", "remote"))
+    print(f"{plan['project']} · against {plan['base']} · {n_local} local and {n_remote} remote branch"
+          f"{'es' if n_remote != 1 else ''}")
+    for r in rows:
+        print(_prune_line(r, bool(a.apply)))
+    drop = [r for r in rows if r["action"] == "delete"]
+    trees = sum(1 for r in drop if r["worktree"])
+    if not drop:
+        print(f"{ui.OK} nothing to delete: no merged branch is free to go")
+        return 0
+    if not a.apply:
+        print(f"{ui.INFO} dry run: nothing deleted · dev branch prune --apply deletes {len(drop)} branch"
+              f"{'es' if len(drop) != 1 else ''}" + (f" and {trees} worktree{'s' if trees != 1 else ''}" if trees else ""))
+        return 0
+    failed = [r for r in acted if r.get("result") == "failed"]
+    print(f"{ui.OK if not failed else ui.WARN} deleted {len(acted) - len(failed)} of {len(acted)} merged branch"
+          f"{'es' if len(acted) != 1 else ''}" + (f"; {len(failed)} failed (see above)" if failed else ""))
+    return 1 if failed else 0

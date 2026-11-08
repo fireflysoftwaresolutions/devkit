@@ -2296,6 +2296,57 @@ def tools_check(stacks, have=None) -> tuple:
     return "Toolchain", "required tools", not missing, detail, install_commands(tools[t] for t in missing)
 
 
+def branch_cleanup_checks(projects, gh=None) -> list:
+    """GitHub's delete_branch_on_merge for the GitHub projects on this Mac ([(project id, "owner/repo")]), read in one
+    GraphQL call. -> doctor rows: a failing one per project with it off that you administer, with the command that
+    turns it on (`dev delivery apply`), then one passing row for the rest (one you do not administer is named: only
+    its admins can change it)."""
+    projects = [(pid, slug) for pid, slug in projects if re.fullmatch(r"[\w.-]+/[\w.-]+", slug or "")]
+    if not projects:
+        return []
+    gh = gh or (lambda args: sh(["gh", *args], timeout=30))
+    query = "query { " + " ".join(
+        f'r{i}: repository(owner: "{slug.split("/")[0]}", name: "{slug.split("/")[1]}") '
+        f"{{ deleteBranchOnMerge viewerPermission }}" for i, (_, slug) in enumerate(projects)) + " }"
+    rc, out, err = gh(["api", "graphql", "-f", f"query={query}"])
+    try:
+        data = (json.loads(out or "{}") or {}).get("data") or {}
+    except (ValueError, AttributeError):
+        data = {}
+    if not data:
+        why = (err or "").strip().splitlines()[:1] or ["no answer"]
+        return [("GitHub", "delete merged branches", True, f"not checked: GitHub could not be read ({why[0][:120]})",
+                 "")]
+    rows, on, others, unread = [], 0, [], []
+    for i, (pid, slug) in enumerate(projects):
+        r = data.get(f"r{i}")
+        if not isinstance(r, dict):
+            unread.append(slug)
+        elif r.get("deleteBranchOnMerge"):
+            on += 1
+        elif r.get("viewerPermission") == "ADMIN":
+            rows.append(("GitHub", f"delete merged branches · {pid}", False,
+                         f"off in {slug}: the branch of each merged PR stays on GitHub",
+                         f'dev delivery apply -p {pid} --why "delete the branch of each merged PR"'))
+        else:
+            others.append(slug)
+    detail = f"on in {on} of {len(projects)} GitHub projects" + (
+        f"; off in {', '.join(others)}, which you do not administer" if others else "") + (
+        f"; not read: {', '.join(unread)}" if unread else "")
+    return rows + [("GitHub", "delete merged branches", True, detail, "")]
+
+
+def _github_projects(mains) -> list:
+    """[(project id, "owner/repo")] of the checkouts on github.com."""
+    out = []
+    for m in mains:
+        remote = core.gitout(m, "config", "--get", "remote.origin.url")
+        parsed = core.parse_remote(remote) if remote else None
+        if parsed and parsed[0] == "github.com" and parsed[1]:
+            out.append((core.project_identity(m, remote)[0], f"{parsed[1]}/{parsed[2]}"))
+    return out
+
+
 def doctor() -> int:
     print(ui.banner("doctor"))
     results = []
@@ -2305,6 +2356,7 @@ def doctor() -> int:
 
     check(*tools_check(CFG.get("stacks") or []))
     rc, out, err = sh(["gh", "auth", "status"], timeout=20)
+    gh_ok = rc == 0
     check("GitHub", "gh authenticated", rc == 0, (out + err).split("\n")[1].strip() if rc == 0 else err[:120],
           "gh auth login -s repo,read:org,workflow,gist")
     u = core.gh_user()
@@ -2336,6 +2388,9 @@ def doctor() -> int:
     check("Workspace", "canonical layout", not layout, f"{len(mains)} repos; " +
           (f"{len(layout)} not at their canonical path: {', '.join(tilde(m) for m in layout)}" if layout else "all in place"),
           "dev adopt <path> (when no sessions are open in it)")
+    if gh_ok:  # merged pull requests' branches must not pile up on GitHub
+        for row in branch_cleanup_checks(_github_projects(mains)):
+            check(*row)
     from . import selfcheck
     for row in selfcheck.work_state_checks():  # the project you are in: stale work items and runs, each with its fix
         check(*row)
