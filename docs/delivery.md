@@ -108,7 +108,7 @@ the pipeline itself, see [CI/CD pipelines](ci-cd.md).
 ```bash
 dev branch new feat/x                   # from an up-to-date origin/main
 # … small steps, targeted tests while iterating …
-dev commit -a -m "feat(scope): summary" --body "why"
+dev commit -a -m "feat(scope): summary" --why "the problem and who it affects" --verified "the command and its result"
 dev ci --run            # the full local equivalent of CI: lint, types, unit, integration (Testcontainers), build
 dev sec scan            # secrets, dependencies, code patterns, IaC, workflows
 dev push                # one push, only with local CI evidence for exactly these files
