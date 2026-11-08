@@ -311,8 +311,10 @@ dev crew inbox
 
 A message reaches its recipient with the recipient's next action (the PostToolUse hook adds it to the context), or
 with the main session's next prompt. A message to a member who has not started yet, or whose lane ended or went
-stale, waits for their next launch; devkit tells the sender when the member ended or went stale. A message to the
-tech lead by role, such as `--to "Tech lead"` or `--to Morpheus`, reaches the main session.
+stale, waits for their next launch; devkit tells the sender when the member ended or went stale. An answer
+(`dev crew answer`) or a decision's result goes to the lane that asked while its member works; once that lane ended
+or went stale, it goes to the member's working lane or waits for their next launch, like any other message. A message
+to the tech lead by role, such as `--to "Tech lead"` or `--to Morpheus`, reaches the main session.
 
 Each message has a kind, and only a question waits:
 

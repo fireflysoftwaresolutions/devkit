@@ -356,6 +356,62 @@ class MessageToAMemberWhoEndedTests(EndedTankCase):
         self.assertNotIn("waits for their next launch", self.lead_mail())
 
 
+class ReplyToAMemberWhoEndedTests(EndedTankCase):
+    # an answer (dev crew answer) and a decision's result (dev crew decide) went to the lane that asked, by its id,
+    # even after that lane ended: the member's next launch never read them, and nobody was told (Code reviewer, final
+    # pass). They follow the rule of any message now: the lane that asked while its member works, else the member's
+    # working lane or next launch, and the sender is told
+    def test_an_answer_for_a_member_who_ended_reaches_their_next_launch_and_the_answerer_is_told(self):
+        self.ended_tank(["api"], "Tank: api", assign="api")
+        q = pg.crew_ask("Which date format does the export use?", from_agent="a_tank", now=self.now - 15 * MIN)
+        a = pg.crew_answer(q["id"], "ISO 8601, in UTC", now=self.now)
+        told = self.lead_mail()
+        self.assertIn("Backend engineer (Tank) ended: Claude Code recorded it finished", told)
+        self.assertIn(f"{a['id']} waits for their next launch: launch them again", told)
+        stored = next(m for m in pg.load_run("claude", "s1")["messages"] if m["id"] == a["id"])
+        self.assertEqual(stored["reply_to"], q["id"])  # still the answer to his question
+        launch("a_tank2", "devkit:tank", "Tank: export date", self.now + 60)
+        self.assertIn("ISO 8601, in UTC", self.mail_of("a_tank2"))
+
+    def test_a_decision_result_for_a_member_whose_lane_was_lost_reaches_their_next_launch(self):
+        # his lane went quiet while his step waited on D1: the answer sends the step back for a new launch, and that
+        # launch reads the answer
+        pg.start("Export", plan=["api"], now=self.now - MIN, mode="guided")
+        pg.assign("api", "Tank", scope="lib/api/**", now=self.now - MIN)
+        launch("a_tank", "devkit:tank", "Tank: api", self.now - MIN)
+        pg.crew_decision("Skip empty lines or reject the file?", options="A: skip | B: reject", recommend="A",
+                         from_agent="a_tank", now=self.now)
+        self.assertEqual(pg.load_run("claude", "s1")["plan"][0]["state"], "blocked")
+        later = self.now + (pg.cfg()["stale_agent_hours"] + 1) * 3600
+        run = pg.load_run("claude", "s1")
+        self.assertTrue(pg.expire_stale(run, now=later))
+        pg._save(run, touch_session=False)
+        pg.crew_decide("D1", "B: reject", now=later)
+        self.assertEqual(pg.load_run("claude", "s1")["plan"][0]["state"], "pending")
+        told = self.lead_mail()
+        self.assertIn("Backend engineer (Tank) ended: its lane is lost", told)
+        self.assertIn("waits for their next launch: launch them again (dev crew brief tank", told)
+        launch("a_tank2", "devkit:tank", "Tank: api", later + MIN)
+        self.assertIn("Decision D1 — Skip empty lines or reject the file? → B: reject", self.mail_of("a_tank2"))
+
+    def test_an_answer_and_a_decision_result_for_a_member_who_works_go_to_the_lane_that_asked(self):
+        # two working lanes of the Backend engineer (Tank): the replies go to the older one, which asked, and not by
+        # his name to his newest lane
+        pg.start("Export", plan=["api", "csv"], now=self.now - 20 * MIN, mode="guided")
+        launch("a_old", "devkit:tank", "Tank: api", self.now - 20 * MIN)
+        launch("a_new", "devkit:tank", "Tank: csv", self.now - 10 * MIN)
+        q = pg.crew_ask("Which date format does the export use?", from_agent="a_old", now=self.now - 5 * MIN)
+        pg.crew_decision("Skip empty lines or reject the file?", options="A: skip | B: reject", recommend="A",
+                         from_agent="a_old", now=self.now - 5 * MIN)
+        pg.crew_answer(q["id"], "ISO 8601, in UTC", now=self.now)
+        pg.crew_decide("D1", "B: reject", now=self.now)
+        mail = self.mail_of("a_old")
+        self.assertIn("ISO 8601, in UTC", mail)
+        self.assertIn("Decision D1 — Skip empty lines or reject the file? → B: reject", mail)
+        self.assertEqual(self.mail_of("a_new"), "")
+        self.assertNotIn("waits for their next launch", self.lead_mail())
+
+
 class StepOfAMemberWhoEndedTests(EndedTankCase):
     # a step whose owner ended or went stale closes with the tech lead's evidence, like one of his own, and the run's
     # history says its owner had ended (a step whose owner still works is still refused: test_progress,

@@ -1699,6 +1699,18 @@ def _waits_notice(run, m: dict, frm: str, now: float | None = None) -> str:
             f"{again}, or ask someone else (dev crew ask --to <member> \"…\").")
 
 
+def _reply_to(run, aid: str, now: float | None = None) -> str:
+    """Where a reply to lane `aid` goes (the answer to its question, the result of its decision): that lane while its
+    member works, as `dev crew owner` reads it (lane_gone over lane_states of the caller's own run; a lane the run
+    does not know counts as working); else the member's name, which crew_ask addresses (_addr) to their working lane
+    or to their next launch, telling the sender (_waits_notice). A lane with no name to address keeps its id."""
+    lane = (run.get("agents") or {}).get(aid)
+    if not isinstance(lane, dict) or not (lane.get("persona") or lane.get("label")):
+        return aid
+    states = lane_states(run, now, own=True) if lane.get("state") == "running" else {}
+    return _lane_name(lane) if lane_gone(aid, lane, states) else aid
+
+
 def _name_of(run, addr: str) -> str:
     if addr == "main":
         return "Morpheus"
@@ -1782,13 +1794,15 @@ def crew_answer(msg_id: str, text: str, from_agent: str | None = None, cwd: str 
             raise ValueError(f"no message {msg_id}")
         q["answered"] = True
         _save(run, touch_session=False)
-    a = crew_ask(text, to=q["from"] if q["from"] != "main" else "main", from_agent=from_agent, cwd=cwd, now=now,
-                 kind="answer")
+    to = _reply_to(run, q["from"], now)  # the asking lane while its member works, else the member by name
+    a = crew_ask(text, to=to, from_agent=from_agent, cwd=cwd, now=now, kind="answer")
     with _tx(agent, sid):
         run = normalize(load_run(agent, sid) or {})
         for m in run.get("messages") or []:
             if m["id"] == a["id"]:
-                m["reply_to"], m["to"], m["to_name"] = q["id"], q["from"], q["from_name"]
+                m["reply_to"] = q["id"]
+                if to == q["from"]:  # by the lane's id, even one the run no longer knows (_addr would read a name)
+                    m["to"], m["to_name"] = q["from"], q["from_name"]
         _save(run, touch_session=False)
     return a
 
@@ -2171,9 +2185,10 @@ def crew_decision(question: str, options=None, recommend: str = "", irreversible
 
 def crew_decide(decision_id: str, answer: str, cwd: str | None = None, now: float | None = None) -> dict:
     """Record the developer's answer (Morpheus runs it after asking): the waiting member's step runs again, and a
-    message with the answer waits for that member (delivered when Morpheus resumes it). Who decided is computed,
-    never typed (spec C5): the developer, verified, when an unused piece of their evidence (E1, E2) given after the
-    decision was shown covers it; otherwise Morpheus, unverified, and an irreversible decision stays pending."""
+    message with the answer waits for that member (delivered when Morpheus resumes it, or to their next launch when
+    their lane ended: _reply_to). Who decided is computed, never typed (spec C5): the developer, verified, when an
+    unused piece of their evidence (E1, E2) given after the decision was shown covers it; otherwise Morpheus,
+    unverified, and an irreversible decision stays pending."""
     now = now or time.time()
     _main_only(None, "records the developer's answers", cwd)
     agent, sid = current_session(cwd)
@@ -2220,9 +2235,9 @@ def crew_decide(decision_id: str, answer: str, cwd: str | None = None, now: floa
            overrides=d.get("overrides") or "", verified=d["verified"], channel=(ev or {}).get("channel") or "",
            transcript_uuid=(ev or {}).get("transcript_uuid") or "", session=f"{agent}:{sid}",
            options=d.get("options") or [])
-    if d["from"] != "main":
-        crew_ask(f"Decision {d['id']} — {d['question'][:120]} → {d['answer']}", to=d["from"], cwd=cwd, now=now,
-                 kind="notice")
+    if d["from"] != "main":  # the asking lane while its member works, else the member's working lane or next launch
+        crew_ask(f"Decision {d['id']} — {d['question'][:120]} → {d['answer']}", to=_reply_to(run, d["from"], now),
+                 cwd=cwd, now=now, kind="notice")
     return d
 
 
