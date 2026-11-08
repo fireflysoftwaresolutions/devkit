@@ -368,6 +368,7 @@ attribution, with the other sources.
 | --- | --- | --- |
 | Superpowers specs and plans go to `~/Development/.handoff/plans/<id>/` and are not committed | global instructions | Superpowers otherwise writes and commits `docs/superpowers/…` in the repository |
 | Superpowers asks before creating a worktree, and uses `dev wt new` | global instructions | Its worktree step otherwise runs after every design approval |
+| Where a Superpowers skill and devkit differ, devkit wins: test scale and selection, finishing a branch (`dev push`, `dev pr create`, `dev pr ready`, `dev pr merge`, `dev wt rm`), the plans folder, and worktrees | global instructions | Superpowers' TDD asks for a test first on every change, and its branch-finishing step merges locally with `git merge`, pushes with a raw `git push`, and removes worktrees with `git worktree remove`, outside devkit's PR flow and its one CI run |
 | `SUPERPOWERS_DISABLE_TELEMETRY=1` | agent environments, shell | Turns off its version ping |
 | `ENABLE_STOP_REVIEW=0`, `ENABLE_COMMIT_REVIEW=0` | Claude `env` | security-guidance would otherwise run an Opus review after every turn and an agent review on every commit |
 | `CLAUDE_SECURITY_SCAN_TIP=off` | Claude `env` | No scan tip in every session; run Claude Security when you want it |

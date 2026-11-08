@@ -67,7 +67,7 @@ diagram files without them.
 | --- | --- | --- |
 | Find, clone, start a project | `dev ls` (this Mac; `--all` adds the portfolio), `dev go`, `dev alias` (short names the team shares), `dev clone`, `dev new`, `dev adopt` (move a repository into the layout, with the developer), `dev open`; `dev claude` and `dev codex` start an agent in it | `workspace` |
 | Parallel work | `dev wt new <type>/<topic>` | `workspace` |
-| Plan, build, debug | `dev task`, plans folder | Superpowers (brainstorming, writing-plans, TDD, systematic-debugging) |
+| Plan, build, debug | `dev task`, plans folder | Superpowers (brainstorming, writing-plans, TDD, systematic-debugging); where one differs from devkit, devkit wins (global instructions, section 9) |
 | Test | `dev test` (failed first, then the blast radius), `dev test plan`, `dev test audit`, `dev test prove`; `dev stubs` for unfinished work | `testing`, Superpowers TDD |
 | CI/CD pipelines | `dev ci audit [--fix]`, `dev ci init`, `dev ci status`, `dev ci watch --wait` (the wait that wakes you: a Monitor or background command in Claude Code, the foreground in Codex), `dev ci watches` | `cicd`, `github-actions-hardening`, `devsecops` |
 | Architecture and design | `dev initiative` for cross-project work | `architecture`, `system-design`, `domain-modeling`, `codebase-design`, `likec4-dsl`, `diagrams` |

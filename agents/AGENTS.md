@@ -371,7 +371,11 @@ Follow the devkit `backend` skill for the detailed checklists. Always:
 - **Superpowers** (brainstorming, writing-plans, executing-plans, TDD, systematic-debugging,
   verification-before-completion): use them for non-trivial work. Save specs and plans to
   `{{DEV}}/.handoff/plans/<owner>/<repo>/`, not `docs/superpowers/` in the repository, and do not commit them
-  unless the user asks. Its worktree step follows section 5: ask before creating one.
+  unless the user asks. Its worktree step follows section 5: ask before creating one. **Where a Superpowers skill
+  and devkit differ, devkit wins:** how much to test and which tests to run follow section 3 and the `testing`
+  skill; finishing a branch follows sections 6 and 7 (`dev push`, `dev pr create`, `dev pr ready`, `dev pr merge`,
+  `dev wt rm`), never a local merge into the default branch, a raw `git push` or `git worktree remove`; plans go to
+  the handoff plans folder; worktrees follow section 5.
 - **Library and framework docs:** prefer the vendor's version-matched source (Angular CLI MCP, the project's
   installed `node_modules/<pkg>` docs, framework MCPs), then web search. Check the version in the lockfile before
   using an API.
