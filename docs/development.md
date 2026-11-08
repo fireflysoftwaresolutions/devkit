@@ -129,7 +129,7 @@ file reads and imports only, in about a second:
 | D11 | A row of the guardrail table in [The crew](crew.md#guardrails) cites no rule id, or states a planned rule as fact |
 | D12 | `tests/__init__.py` does not activate `tests/_hermetic.py` (the run's temporary home), or a documented `unittest discover -s tests` lacks `-t .`, which unittest needs to import `tests/__init__.py` |
 | D13 | `shell/completions/_dev` or `dev.bash` differs from what the parser generates (`bin/dev completion zsh\|bash`), or a completion rule in `lib/devkit/completion.py` names an argument the parser no longer has |
-| D14 | A skill that the crew, a skill rule, the `using-devkit` table, or section 9 of `agents/AGENTS.md` names comes from no source devkit installs, or the crew, a rule, or the table asks a model to load a skill only the developer can run (`user_only` in `config/skills.json`) |
+| D14 | A skill that the crew, a skill rule, the `using-devkit` table, or section 9 of `agents/AGENTS.md` names comes from no source devkit installs; the crew, a rule, or the table asks a model to load a skill only the developer can run (`user_only` in `config/skills.json`) or one a devkit skill replaces (`superseded`); or the rules table in [Skills and plugins](skills-and-plugins.md#the-rules) differs from `config/skill-rules.json` |
 
 `tests/test_consistency.py` runs the checks that read only the repository, and tests the others on small fixtures.
 Drift that exists today is listed in its `KNOWN` allowlist, each item with its review finding, owner, and the task

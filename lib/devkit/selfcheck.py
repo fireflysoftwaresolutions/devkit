@@ -24,7 +24,8 @@ as devkit grows (D1-D11 of the crew gap review 2).
       every completion rule (lib/devkit/completion.py RULES) names an argument the parser has
   D14 every skill devkit names (the crew, the skill rules, the using-devkit table, AGENTS.md section 9) comes from
       a source devkit installs, and none that the crew, a rule or the table asks a model to load is one only the
-      developer can run (`disable-model-invocation`)
+      developer can run (`disable-model-invocation`) or one devkit's own skill supersedes; the rules table of
+      docs/skills-and-plugins.md shows each skill rule with the skills it requires
 
 Each check returns findings: (check, item, evidence, fix). `item` is stable across runs (no line numbers), so a known
 finding can be listed by it. The checks read files and import devkit's modules only: no network and no subprocess.
@@ -839,6 +840,31 @@ def d14_skill_names(home=None, roster=None) -> list:
     return out
 
 
+def d14_rules_table(home=None) -> list:
+    """D14, the docs: the rules table of docs/skills-and-plugins.md against config/skill-rules.json. A rule without a
+    row, a row whose Claude Code or Codex skills differ from the rule's, or a row for a rule the config lacks."""
+    home = _home(home)
+    shown = {}
+    for row in _table(_read(home / "docs" / "skills-and-plugins.md"), "### The rules"):
+        ids = re.findall(r"`([^`]+)`", row[0]) if row else []
+        if ids and len(row) >= 3:
+            claude = re.findall(r"`([^`]+)`", row[1])
+            shown[ids[0]] = (claude, claude if row[2].strip().lower() == "the same" else re.findall(r"`([^`]+)`", row[2]))
+    out, fix = [], "make the row of docs/skills-and-plugins.md › The rules match config/skill-rules.json"
+    rules = (core.read_json(home / "config" / "skill-rules.json", {}) or {}).get("rules") or []
+    for r in rules:
+        want = tuple(list((r.get("skills") or {}).get(a) or []) for a in ("claude", "codex"))
+        if r.get("id") not in shown:
+            out.append(Finding("D14", f"rules table: {r.get('id')}", "the rule has no row in the rules table", fix))
+        elif shown[r["id"]] != want:
+            out.append(Finding("D14", f"rules table: {r['id']}", f"the row shows {shown[r['id']]}, the rule requires "
+                               f"{want} (Claude Code, Codex)", fix))
+    for rid in sorted(set(shown) - {r.get("id") for r in rules}):
+        out.append(Finding("D14", f"rules table: {rid}", "the row names a rule config/skill-rules.json does not have",
+                           fix))
+    return out
+
+
 def d9_phase_proofs(roster=None) -> list:
     """D9: a procedure phase whose proof is not in its own `devkit` list, or whose gate names a `dev …` command (in
     backticks) that is not in that list."""
@@ -1202,7 +1228,7 @@ def old_copy_checks(claude_home=None, codex_home=None, managed=None) -> list:
 REPO_CHECKS = (("D1", d1_enforced_rows), ("D3", d3_unwired), ("D4", d4_commands), ("D5", d5_hook_events),
                ("D6", d6_config_keys), ("D7", d7_raci_hygiene), ("D9", d9_phase_proofs), ("D10", d10_file_anchors),
                ("D11", d11_guardrails), ("D12", d12_hermetic_tests), ("D13", d13_completion),
-               ("D14", d14_skill_names))
+               ("D14", d14_skill_names), ("D14", d14_rules_table))
 MACHINE_CHECKS = (("D2", d2_planned_rows), ("D7", d7_team_raci),
                   ("D8", lambda: d8_uninstalled_skills("claude") + d8_uninstalled_skills("codex")),
                   ("D10", d10_lesson_anchors))
