@@ -2120,7 +2120,9 @@ def crew_notices(sess: dict) -> str:
 
 
 def _background_told(agent: str, data: dict) -> str:
-    """crew_notices for a hook that has not read the session record (UserPromptSubmit)."""
+    """crew_notices for the main session, taken under the session record's lock (as ciwatch.pending_events takes CI
+    results): what it tells leaves the record in the same write, and a busy record tells nothing now and all of it
+    at the next hook. A copy read earlier and patched later told a notice again whenever the patch was dropped."""
     if data.get("agent_id"):
         return ""
     try:
@@ -2129,11 +2131,17 @@ def _background_told(agent: str, data: dict) -> str:
             return ""
         sess = state.read(sf) or {}
         if not (sess.get("crew_background") or sess.get("crew_finished")):
-            return ""
-        before = copy.deepcopy(sess)
-        text = crew_notices(sess)
-        _patch_quietly(sf, before, sess)
-        return text
+            return ""  # the usual case, without the lock
+        told = []
+
+        def take(s):
+            if not (s.get("crew_background") or s.get("crew_finished")):
+                return state.SKIP
+            told[:] = [crew_notices(s)]
+        state.update(sf, take, create=False)
+        return told[0] if told else ""
+    except state.StateBusy:
+        return ""  # audited by state; the notice stays for the next hook
     except Exception:
         _log(f"background notice {agent}: {traceback.format_exc()[-300:]}")
         return ""
@@ -2176,10 +2184,13 @@ def post_tool(agent: str):
             work.request_sync("delivery: " + DELIVERY.search(words).group(0))
         if data.get("tool_name") in SHELL_TOOLS and CI_TRIGGER.search(words) and not data.get("agent_id"):
             from . import ciwatch  # a push or PR starts CI: watch it, and tell this session how it ended
-            cwd = data.get("cwd") or os.getcwd()
-            top = core.gitout(cwd, "rev-parse", "--show-toplevel")
-            if top and not core.is_temp(top):
-                ciwatch.start_background(top, session=f"{agent}:{data.get('session_id') or ''}")
+            # what the command sent to the remote, in the repository it names: a pushed branch or tag, a merge
+            # commit on the base branch, a release tag. A local branch or an unpushed commit starts no pipeline
+            raw = (data.get("tool_input") or {}).get("command") or ""  # a list stays a list: its shell's script
+            for top, ref, sha in ciwatch.targets(raw, data.get("cwd") or os.getcwd()):
+                if not core.is_temp(top):
+                    ciwatch.start_background(top, session=f"{agent}:{data.get('session_id') or ''}", branch=ref,
+                                             sha=sha)
     except Exception:
         pass
     closing = background = ""
@@ -2189,11 +2200,11 @@ def post_tool(agent: str):
             sess = state.read(sf) or {}
             before = copy.deepcopy(sess)
             closing = closing_reminder(data, sess, time.time(), agent=agent)
-            background = "" if data.get("agent_id") else crew_notices(sess)
             if note_milestone(data, sess, time.time()) or sess != before:  # only what changed, on the fresh record:
                 _patch_quietly(sf, before, sess)  # a background launch's SubagentStart claims its entry meanwhile
     except Exception:
         _log(f"post-tool closing {agent}: {traceback.format_exc()[-300:]}")
+    background = _background_told(agent, data)  # under the lock: told once, nothing while the record is busy
     _context_out("PostToolUse", "\n\n".join(x for x in (carried, answered, background, _output_pitfalls(agent, data),
                                                         _bulk_rewrite_note(data), closing,
                                                         progress.on_tool_done(agent, data)) if x))

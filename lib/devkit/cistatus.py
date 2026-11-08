@@ -117,7 +117,8 @@ def github_run(r: dict, now: float) -> dict:
     fin = _ts(r.get("updatedAt")) if status not in RUNNING else 0
     return {"provider": "GitHub Actions", "id": str(r.get("databaseId")), "name": r.get("workflowName") or r.get("name"),
             "number": r.get("number"), "title": r.get("displayTitle"), "branch": r.get("headBranch"),
-            "sha": (r.get("headSha") or "")[:7], "event": r.get("event"), "status": status, "started": st,
+            "sha": (r.get("headSha") or "")[:7], "event": r.get("event"), "status": status,
+            "conclusion": r.get("conclusion") or "", "started": st,
             "finished": fin, "elapsed": (fin or now) - st if st else 0, "eta": None, "url": r.get("url"),
             "workflow_id": r.get("workflowDatabaseId"), "jobs": []}
 
