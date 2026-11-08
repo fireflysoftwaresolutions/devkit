@@ -1075,8 +1075,35 @@ def work_state(scope: str, top, *, runs=None, now=None, lock_hours=None, merged=
     return {"project": scope, "rows": rows, "count": count}
 
 
+HANDOFF_SKILL = Path("plugin") / "skills" / "handoff" / "SKILL.md"
+HANDOFF_MAX_LINES = 150  # when the handoff skill states no size
+
+
+def handoff_max_lines(home=None) -> int:
+    """The size the handoff skill sets for a project's note ("Keep the whole note under ~150 lines")."""
+    m = re.search(r"under ~?(\d+) lines", _read(_home(home) / HANDOFF_SKILL))
+    return int(m.group(1)) if m else HANDOFF_MAX_LINES
+
+
+def handoff_size_rows(scope: str) -> list:
+    """`dev doctor`'s warning when the project's handoff note is longer than the handoff skill allows; [] when it is
+    within it or there is no note."""
+    note = core.note_path(scope)
+    try:
+        n = len(note.read_text(encoding="utf-8", errors="ignore").splitlines())
+    except OSError:
+        return []
+    limit = handoff_max_lines()
+    if n <= limit:
+        return []
+    return [("Workspace", "handoff note", False, f"{scope}: {core.tilde(note)} has {n} lines, over the ~{limit} the "
+             "handoff skill sets", "rewrite Current state as it stands and move history and long material into "
+             "plans/ (the handoff skill, /devkit:handoff)")]
+
+
 def work_state_checks(top=None, scope=None, *, runs=None, now=None) -> list:
-    """`dev doctor`'s "work state" row for the project you are in, [] outside one: (group, name, ok, detail, fix)."""
+    """`dev doctor`'s "work state" row for the project you are in, [] outside one: (group, name, ok, detail, fix);
+    and a "handoff note" warning when the project's note is longer than the handoff skill allows."""
     top = top or core.gitout(os.getcwd(), "rev-parse", "--show-toplevel")
     if not top or core.real(top) == core.real(core.HANDOFF):
         return []
@@ -1084,15 +1111,16 @@ def work_state_checks(top=None, scope=None, *, runs=None, now=None) -> list:
         from . import registry
         main = registry.main_of(Path(top)) or Path(top)
         scope = core.project_identity(main, core.gitout(str(main), "config", "--get", "remote.origin.url"))[0]
+    size = handoff_size_rows(scope)
     try:
         r = work_state(scope, top, runs=runs, now=now)
     except (OSError, ValueError, KeyError) as e:  # an item or run file it cannot read: say so, never stop the doctor
         return [("Workspace", "work state", False, f"{scope}: the work state could not be read ({e})",
-                 f"dev task -p {scope} reconcile")]
+                 f"dev task -p {scope} reconcile")] + size
     if not r["rows"]:
-        return [("Workspace", "work state", True, f"{scope}: no stale work items or runs", "")]
+        return [("Workspace", "work state", True, f"{scope}: no stale work items or runs", "")] + size
     return [("Workspace", "work state", False, f"{scope}: " + "; ".join(x["text"] for x in r["rows"]),
-             " · ".join(dict.fromkeys(x["fix"] for x in r["rows"] if x["fix"])))]
+             " · ".join(dict.fromkeys(x["fix"] for x in r["rows"] if x["fix"])))] + size
 
 
 # --------------------------------------------------------------------------- devkit copies older than the pin
