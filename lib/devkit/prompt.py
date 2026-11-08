@@ -142,15 +142,25 @@ def checks_for(remote: str, branch: str) -> str:
     """The branch's latest checks from what devkit already knows (never the network): the end of a run `dev ci
     watch` followed, or the runs `dev status` and `dev ci status` read last, whichever is newer. -> passed, failed,
     running, or "" (no run yet, or not known)."""
+    return checks_detail(remote, branch).get("state", "")
+
+
+def checks_detail(remote: str, branch: str) -> dict:
+    """checks_for with the details the session-start welcome shows: {"state": passed, failed or running, "ts": when
+    devkit recorded it (the newer record wins), "at": when the run ended (when it started, while it runs), "failed":
+    the first failed job's name or ""}; {} when no run is known or the newest record's state is not one of those."""
     from . import cistatus, ciwatch
     prov = cistatus.provider_for(remote or "")
     if not prov or not branch:
-        return ""
+        return {}
     kind, _host, path = prov
-    best, best_ts = "", 0.0
+    best = {"state": "", "ts": 0.0}
     rec = core.read_json(ciwatch.WATCH / f"{ciwatch._key(path, branch)}.json", None)
     if isinstance(rec, dict) and rec.get("branch") == branch and _WATCH_STATE.get(rec.get("state")):
-        best, best_ts = _WATCH_STATE[rec["state"]], float(rec.get("ts") or 0)
+        ts = float(rec.get("ts") or 0)
+        failed = next((j.get("name") for d in rec.get("diagnoses") or [] if isinstance(d, dict)
+                       for j in d.get("failed_jobs") or [] if isinstance(j, dict) and j.get("name")), "")
+        best = {"state": _WATCH_STATE[rec["state"]], "ts": ts, "at": ts, "failed": failed}
     prefix = f"runs-{kind}-{path}-{branch}-".replace("/", "__").replace(":", "_")
     tail = re.compile(r"\d+-[01]\.json")
     try:
@@ -169,9 +179,11 @@ def checks_for(remote: str, branch: str) -> str:
         except OSError:
             continue
         st = _RUN_STATE.get(r.get("status"), "")
-        if ts > best_ts:
-            best, best_ts = st, ts
-    return best
+        if ts > best["ts"]:
+            failed = next((j.get("name") for j in r.get("jobs") or [] if isinstance(j, dict)
+                           and j.get("status") == "failed" and j.get("name")), "")
+            best = {"state": st, "ts": ts, "at": float(r.get("finished") or r.get("started") or ts), "failed": failed}
+    return best if best["state"] else {}
 
 
 # --------------------------------------------------------------------------- refresh: what hooks and commands call
