@@ -23,13 +23,16 @@ Python 3.9 compatible, stdlib only.
 from __future__ import annotations
 
 import argparse
+import contextlib
 import glob as _glob
 import json
 import os
 import re
 import shlex
+import shutil
 import subprocess
 import sys
+import tempfile
 import time
 from pathlib import Path
 from types import SimpleNamespace
@@ -778,6 +781,105 @@ def _commit_refs(c, a, text: str):
     return [], None, ""
 
 
+# Crew members who work in one checkout share one git index (lesson L-g1ha6djvhfp). In a crew lane `dev commit` commits
+# from a temporary index that holds HEAD plus the lane's own staged entries, so the shared index keeps every other
+# staged entry exactly as it was, for its owner. The main session, a developer's shell and `dev commit <paths>` commit
+# as before.
+
+
+def _commit_lane(c):
+    """The crew lane that runs this `dev commit` -> (lane id, scope layers, the folder its globs count from), or None
+    in the main session and a developer's shell. The lane is DEVKIT_FROM_AGENT when the hooks set it, else the member
+    the call ledger names (progress._as_lane); its scope is the one the guard checks its edits against: its own globs
+    and those of the open steps it owns, inside its parents' (progress.lane_scope), counted from guard.scope_base."""
+    from . import progress
+    aid = progress._as_lane(os.environ.get("DEVKIT_FROM_AGENT") or None, c.top)
+    if not aid:
+        return None
+    agent, sid = progress.current_session(c.top)
+    run, lane = progress.lane_of(agent, sid, aid)
+    layers = progress.lane_scope(run, aid) if lane else []
+    return aid, layers, guard.scope_base((run or {}).get("project"), c.top)
+
+
+def _own(path: str, top, layers, base) -> bool:
+    """Is a repository-relative path inside every layer of the lane's scope? Without a scope, nothing is."""
+    return bool(layers) and all(guard.scope_holds(path, top, layer, base=base) for layer in layers)
+
+
+def _git_z(top, *args, env=None, input=None):
+    """A git call that reads or writes NUL-separated paths, kept byte for byte (surrogate escapes) -> (rc, out, err)."""
+    try:
+        p = subprocess.run(["git", "-C", str(top), *args], capture_output=True, encoding="utf-8",
+                           errors="surrogateescape", env=env or core.GIT_ENV, input=input, timeout=120)
+    except (OSError, subprocess.TimeoutExpired) as e:
+        return 127, "", str(e)
+    return p.returncode, p.stdout, p.stderr.strip()
+
+
+def _zsplit(out: str) -> list:
+    return [x for x in (out or "").split("\0") if x]
+
+
+def _few(paths, n: int = 6) -> str:
+    return ", ".join(paths[:n]) + (f" and {len(paths) - n} more" if len(paths) > n else "")
+
+
+def _lane_index(top, head: str, paths):
+    """A temporary index of HEAD plus the shared index's entries for `paths`: their staged content, and their removal
+    when the shared index no longer has them. A commit from it carries those paths and nothing else; the shared index
+    is only read. -> (folder to delete, index file, error)."""
+    folder = tempfile.mkdtemp(prefix="devkit-index-")
+    index = os.path.join(folder, "index")
+    env = dict(core.GIT_ENV, GIT_INDEX_FILE=index)
+    rc, out, err = _git_z(top, "read-tree", head or "--empty", env=env)
+    if rc == 0:
+        rc, out, err = _git_z(top, "ls-files", "-s", "-z")
+    if rc == 0:
+        entries = {}
+        for rec in _zsplit(out):  # "mode blob stage\tpath", one per stage of a path
+            entries.setdefault(rec.split("\t", 1)[-1], []).append(rec)
+        lines = []
+        for p in paths:
+            if head:
+                lines.append(f"0 {'0' * len(head)}\t{p}")  # mode 0 drops HEAD's entry, before the staged ones
+            lines.extend(entries.get(p, []))
+        rc, out, err = _git_z(top, "update-index", "-z", "--index-info", env=env,
+                              input="".join(x + "\0" for x in lines))
+    if rc != 0:
+        shutil.rmtree(folder, ignore_errors=True)
+        return None, None, err or out
+    return folder, index, ""
+
+
+@contextlib.contextmanager
+def _index_file(index):
+    """While it runs, core's git calls use `index` as the index, so the guard's staged-secret scan and the commit see
+    the lane's index and not the shared one. Without an index nothing changes."""
+    old = core.GIT_ENV.get("GIT_INDEX_FILE")
+    if index:
+        core.GIT_ENV["GIT_INDEX_FILE"] = index
+    try:
+        yield
+    finally:
+        if index and old is None:
+            core.GIT_ENV.pop("GIT_INDEX_FILE", None)
+        elif index:
+            core.GIT_ENV["GIT_INDEX_FILE"] = old
+
+
+def _lane_refusal(layers, left) -> int:
+    """No staged file of the lane's own: what stays staged, and why."""
+    if not layers:
+        return refuse(f"your crew lane has no file scope, so devkit cannot tell which of the {len(left)} staged "
+                      f"file(s) are yours; they stay staged: {_few(left)}",
+                      'name your files: dev commit -m "type(scope): summary" <paths>')
+    where = "; ".join(", ".join(layer) for layer in layers)
+    return refuse(f"none of the {len(left)} staged file(s) is in your step's scope ({where}); they stay staged for "
+                  f"their owner: {_few(left)}",
+                  'stage and commit your files in one step: dev commit -m "type(scope): summary" <paths>')
+
+
 def cmd_commit(a) -> int:
     c = ctx()
     if c is None:
@@ -813,8 +915,15 @@ def cmd_commit(a) -> int:
         ids = list(dict.fromkeys(_WORK_ID.findall(message)))
         if ids:
             return _task_id_refusal(ids)
+    lane = None if a.paths else _commit_lane(c)
     if a.paths:
         rc, _, err = core.git(c.top, "add", "--", *a.paths)
+        if rc != 0:
+            return fail("git add failed", err)
+    elif a.all and lane:  # only the lane's tracked changes: the others' work stays unstaged
+        mine = [p for p in _zsplit(_git_z(c.top, "diff", "--name-only", "--no-renames", "-z")[1])
+                if _own(p, c.top, lane[1], lane[2])]
+        rc, _, err = core.git(c.top, "--literal-pathspecs", "add", "-u", "--", *mine) if mine else (0, "", "")
         if rc != 0:
             return fail("git add failed", err)
     elif a.all:
@@ -823,14 +932,38 @@ def cmd_commit(a) -> int:
     if not staged and not a.amend:
         return fail("nothing staged to commit",
                     "stage files, list them (dev commit -m … <paths>), or use -a for every tracked change")
-    v = _guard_commit(c, message)
-    if v:
-        return refuse(v[1])
-    args = ["commit", "-q"] + (["--amend"] if a.amend else []) + (["-m", message] if message else ["--no-edit"])
-    if a.paths:
-        args += ["--", *a.paths]
-    pushed_before = a.amend and bool(core.gitout(c.top, "branch", "-r", "--contains", "HEAD"))
-    rc, out, err = core.git(c.top, *args, timeout=900)
+    folder = index = None
+    head, left = "", []
+    if lane:
+        rc, out, err = _git_z(c.top, "diff", "--cached", "--name-only", "--no-renames", "-z")
+        if rc != 0:
+            return fail("git diff failed", err or out)
+        names = _zsplit(out)
+        own = [p for p in names if _own(p, c.top, lane[1], lane[2])]
+        mine = set(own)
+        left = [p for p in names if p not in mine]
+        if not own and not a.amend:
+            return _lane_refusal(lane[1], left)
+        head = core.gitout(c.top, "rev-parse", "-q", "--verify", "HEAD")
+        folder, index, err = _lane_index(c.top, head, own)
+        if not folder:
+            return fail("could not prepare the lane's own index", err)
+    try:
+        with _index_file(index):
+            v = _guard_commit(c, message)
+            if v:
+                return refuse(v[1])
+            args = ["commit", "-q"] + (["--amend"] if a.amend else []) + (["-m", message] if message else ["--no-edit"])
+            if a.paths:
+                args += ["--", *a.paths]
+            if lane and core.gitout(c.top, "rev-parse", "-q", "--verify", "HEAD") != head:
+                return fail("another commit landed while this one was prepared; nothing was committed and the staged "
+                            "files are as they were", "run the same dev commit again")
+            pushed_before = a.amend and bool(core.gitout(c.top, "branch", "-r", "--contains", "HEAD"))
+            rc, out, err = core.git(c.top, *args, timeout=900)
+    finally:
+        if folder:
+            shutil.rmtree(folder, ignore_errors=True)
     if rc != 0:
         return fail("git commit failed", err or out)
     sha = core.gitout(c.top, "rev-parse", "--short", "HEAD")
@@ -840,6 +973,8 @@ def cmd_commit(a) -> int:
     extra = [f"{files} file(s) +{ins} −{dels}", c.branch + (f" ↑{ahead}" if ahead else "")]
     if said:
         extra.append(said)
+    if left:
+        extra.append(f"left {len(left)} staged file(s) outside your scope for their owner: {_few(left)}")
     if removed:
         extra.append(f"removed {removed} AI-attribution line(s)")
     if pushed_before:
@@ -3352,7 +3487,8 @@ def register(add):
     q.add_argument("--lift", action="store_true", help="end the embargo of the branch")
     q.add_argument("--json", action="store_true")
 
-    p = add("commit", cmd_commit, "Conventional Commit of the staged changes, -a (tracked) or the given paths")
+    p = add("commit", cmd_commit, "Conventional Commit of the staged changes, -a (tracked) or the given paths; in a "
+                                  "crew lane, only the staged files inside its scope (the others stay staged)")
     p.add_argument("-m", "--message", action="append", help="header `type(scope): summary`; more -m add paragraphs")
     p.add_argument("--why", help="first paragraph of the body: why the change is needed (the commit template)")
     p.add_argument("--body", action="append", help="a body paragraph (repeat for more): what changed (after --why), "
@@ -3361,7 +3497,8 @@ def register(add):
     p.add_argument("--refs", action="append", help="trailer `Refs:`, an issue (#12), a URL or a ticket key (repeat for "
                                                    "more); default: the ticket of the task started on this branch")
     p.add_argument("--breaking", help="trailer `BREAKING CHANGE:`: what breaks and how to move to the new behavior")
-    p.add_argument("-a", "--all", action="store_true", help="stage every tracked change first")
+    p.add_argument("-a", "--all", action="store_true", help="stage every tracked change first (in a crew lane, those "
+                                                            "inside its scope)")
     p.add_argument("--amend", action="store_true", help="amend HEAD (keeps its message without -m)")
     p.add_argument("--wip", action="store_true", help="save everything as a WIP commit (instead of git stash)")
     p.add_argument("--unwip", action="store_true", help="undo the WIP commit at HEAD, keeping its changes")
