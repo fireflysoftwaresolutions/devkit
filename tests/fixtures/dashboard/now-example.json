@@ -14,7 +14,7 @@
   "headline": {
    "count": 2,
    "kind": "needs_you",
-   "line": "Invoice export is paused until you answer D1. CI failed on feat/rules-engine.",
+   "line": "Invoice export is paused until you answer D1@7f3a. CI failed on feat/rules-engine.",
    "text": "2 things need you"
   },
   "items": [
@@ -24,7 +24,7 @@
      "lanes": 2,
      "run": "Invoice export"
     },
-    "clause": "Invoice export is paused until you answer D1.",
+    "clause": "Invoice export is paused until you answer D1@7f3a.",
     "copy": null,
     "count": 1,
     "id": "decision:claude-7f3a:D1",
@@ -54,7 +54,7 @@
     "rank": 1,
     "run_id": "claude-7f3a",
     "since": 1793977560,
-    "title": "D1 · Include cancelled invoices in the export?",
+    "title": "D1@7f3a · Include cancelled invoices in the export?",
     "tone": "you",
     "type_to_answer": [
      "approve D1",
@@ -168,7 +168,7 @@
    "decisions": [
     {
      "from_name": "Tank",
-     "id": "D1",
+     "id": "D1@7f3a",
      "irreversible": "",
      "options": [
       "A: Leave them out",
@@ -190,7 +190,7 @@
      "low": 1500
     },
     "state": "after_answer",
-    "text": "Lands 25–60 min after you answer D1"
+    "text": "Lands 25–60 min after you answer D1@7f3a"
    },
    "eta_hi": 70.0,
    "eta_lo": 34.0,
@@ -206,7 +206,7 @@
    "moot": [
     {
      "asker": "Technical writer (Ghost)",
-     "id": "D2",
+     "id": "D2@7f3a",
      "question": "List the CSV columns in the release notes?",
      "since": 1793975700,
      "text": "Moot: Technical writer (Ghost) ended, and no step waits on D2."
@@ -318,7 +318,7 @@
    ],
    "waiting_on": {
     "kind": "decision",
-    "ref": "D1",
+    "ref": "D1@7f3a",
     "since": 1793977560
    },
    "wall_min": 75.0,

@@ -120,8 +120,8 @@ class QueueTests(unittest.TestCase):
     def test_decision_row_names_the_asker_options_and_words_to_type_and_has_no_copy(self):
         self.assertEqual(row(fx.document("example"), "decision:claude-7f3a:D1"), {
             "id": "decision:claude-7f3a:D1", "rank": 1, "kind": "decision", "tone": "you", "count": 1,
-            "title": "D1 · Include cancelled invoices in the export?",
-            "clause": "Invoice export is paused until you answer D1.",
+            "title": "D1@7f3a · Include cancelled invoices in the export?",
+            "clause": "Invoice export is paused until you answer D1@7f3a.",
             "lines": ["Backend engineer (Tank) asks · pauses Invoice export, 2 crew members wait"], "since": at(15, 6),
             "project": "acme/lending-core", "run_id": "claude-7f3a", "asker": "Backend engineer (Tank)",
             "blocks": {"run": "Invoice export", "lanes": 2}, "irreversible": None,
@@ -249,7 +249,7 @@ class ResolvedTests(unittest.TestCase):
         self.assertFalse([i for i in ids(doc) if i.startswith("decision:")])
         mine = next(r for r in doc["runs"] if r["id"] == "claude-7f3a")
         self.assertEqual((mine["waiting_on"], mine["decisions"]), (None, []))
-        self.assertEqual(mine["moot"], [{"id": "D1", "question": "Include cancelled invoices in the export?",
+        self.assertEqual(mine["moot"], [{"id": "D1@7f3a", "question": "Include cancelled invoices in the export?",
                                          "asker": "Backend engineer (Tank)", "since": at(15, 6),
                                          "text": "Moot: Backend engineer (Tank) ended, and no step waits on D1."}])
 
@@ -264,7 +264,7 @@ class ResolvedTests(unittest.TestCase):
              "from_name": "Neo", "to_name": "Morpheus", "kind": "question", "answered": True}]
         doc = areas(with_runs(fx.welcome(), run))
         mine = next(r for r in doc["runs"] if r["id"] == "claude-9c1d")
-        self.assertEqual([q["id"] for q in mine["questions"]], ["M2"])
+        self.assertEqual([q["id"] for q in mine["questions"]], ["M2@9c1d"])  # the page names each question's run
 
 
 class HeadlineTests(unittest.TestCase):
@@ -274,19 +274,19 @@ class HeadlineTests(unittest.TestCase):
     def test_needs_you_counts_ranks_1_to_4_and_names_the_next_clause(self):
         self.assertEqual(fx.document("example")["attention"]["headline"],
                          {"kind": "needs_you", "count": 2, "text": "2 things need you",
-                          "line": "Invoice export is paused until you answer D1. CI failed on feat/rules-engine."})
+                          "line": "Invoice export is paused until you answer D1@7f3a. CI failed on feat/rules-engine."})
 
     def test_a_lone_decision_says_so(self):
         kw = fx.example()
         kw["ci"] = {"watches": [], "complete": True, "total": 0, "watching": []}
         self.assertEqual(self.headline(kw), {"kind": "needs_you", "count": 1, "text": "1 decision waits for you",
-                                             "line": "Invoice export is paused until you answer D1."})
+                                             "line": "Invoice export is paused until you answer D1@7f3a."})
 
     def test_a_lone_grant_says_grant(self):
         d = fx.decision("D1", "Merge PR 142 now?", ["yes", "no"], "yes", at(15, 2), irreversible="merge", target="142")
         self.assertEqual(self.headline(with_runs(fx.welcome(), statement_run(decisions=[d]))),
                          {"kind": "needs_you", "count": 1, "text": "1 grant waits for you",
-                          "line": "Statement import is paused until you answer D1."})
+                          "line": "Statement import is paused until you answer D1@9c1d."})
 
     def test_urgent_ci_failure_names_the_branch_and_the_first_error(self):
         kw = fx.example()
@@ -355,7 +355,7 @@ class LandingTests(unittest.TestCase):
         # 10 of the blocked step's 30 minutes are done: 20 + 15 + 5 = 40 minutes left, x0.68 and x1.4, to 5 min
         self.assertEqual(dashnow.landing(fx.invoice_run(), NOW),
                          {"state": "after_answer", "basis": "critical_path", "remaining_s": {"low": 1500, "high": 3600},
-                          "lands_at": None, "over_estimate": None, "text": "Lands 25–60 min after you answer D1"})
+                          "lands_at": None, "over_estimate": None, "text": "Lands 25–60 min after you answer D1@7f3a"})
 
     def test_half_an_hour_of_waiting_leaves_the_range_unchanged(self):
         self.assertEqual(dashnow.landing(fx.invoice_run(), NOW + 1800)["remaining_s"], {"low": 1500, "high": 3600})

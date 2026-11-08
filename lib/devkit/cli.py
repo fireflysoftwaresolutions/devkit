@@ -705,21 +705,35 @@ def _asker(name, roster):
         (m or {}).get("name") or name or "Morpheus")
 
 
-def _message_need(msg: dict, roster) -> dict:
-    """A crew question to the tech lead that nobody answered yet (progress.waiting_messages)."""
+def _session_of(ref: str) -> str:
+    """'the session' for a bare id, 'session 9448c4d0' for a qualified one (progress.shown_id)."""
+    from . import progress as pg
+    prefix = pg.split_id(ref)[1]
+    return f"session {prefix}" if prefix else "the session"
+
+
+def _message_need(msg: dict, roster, ref: str = "") -> dict:
+    """A crew question to the tech lead that nobody answered yet (progress.waiting_messages); `ref`: its id as shown
+    to the caller (progress.shown_id), which `dev crew answer` takes."""
     _, who = _asker(msg.get("from_name"), roster)
-    return {"kind": "message", "id": msg.get("id"), "text": f"{who} asks: {(msg.get('text') or '').rstrip()} Answer it "
-                                                            "in the chat with the session, or:",
-            "command": f"dev crew answer {msg.get('id')} \"…\"", "ts": msg.get("ts")}
+    ref = ref or msg.get("id")
+    return {"kind": "message", "id": ref, "text": f"{who} asks: {(msg.get('text') or '').rstrip()} Answer it in the "
+                                                  f"chat with {_session_of(ref)}, or:",
+            "command": f"dev crew answer {ref} \"…\"", "ts": msg.get("ts")}
 
 
-def _decision_need(d: dict, roster) -> dict:
+def _decision_need(d: dict, roster, ref: str = "") -> dict:
+    """A decision that needs the developer; `ref`: its id as shown to the caller (progress.shown_id). Its answer is
+    typed in the chat of the session that owns it, whose evidence reads the bare `approve D<n>` line."""
     m, who = _asker(d.get("from_name"), roster)
     q = (d.get("question") or "").rstrip()
     rec = f" {m['name'] if m else who} recommends {d['recommend']}." if d.get("recommend") else ""
     answer = f"approve {d['id']}" + (f": {d['recommend']}" if d.get("recommend") else "")
-    return {"kind": "decision", "id": d.get("id"), "text": f"{who} asks: {q}{rec} Answer in the chat with the "
-                                                           "session:", "command": answer, "ts": d.get("ts")}
+    ref = ref or d.get("id")
+    where = "Answer in the chat with the session:" if ref == d.get("id") else \
+        f"Answer {ref} in the chat with {_session_of(ref)}:"
+    return {"kind": "decision", "id": ref, "text": f"{who} asks: {q}{rec} {where}", "command": answer,
+            "ts": d.get("ts")}
 
 
 def _issue_needs(reg: dict, p: dict) -> list:
@@ -733,9 +747,11 @@ def _issue_needs(reg: dict, p: dict) -> list:
     return out
 
 
-def status_view(reg: dict, p: dict, w: dict = None, runs=None, ci=None, roster=None, now=None) -> dict:
+def status_view(reg: dict, p: dict, w: dict = None, runs=None, ci=None, roster=None, now=None, caller=None) -> dict:
     """Everything `dev status` shows for one project, in Sati's order: what needs you, what happens now (checks, the
-    crew, the plan), the last update, then the details. `--json` prints this."""
+    crew, the plan), the last update, then the details. `--json` prints this. `caller`: the (agent, session id) that
+    runs it, whose own run's messages and decisions keep their bare ids; every other run's carry their session
+    (progress.shown_id)."""
     from . import canary, crew as crew_mod, progress as pg
     now = now or time.time()
     roster = roster or crew_mod.load()
@@ -747,8 +763,10 @@ def status_view(reg: dict, p: dict, w: dict = None, runs=None, ci=None, roster=N
     runs = pg.active_runs() if runs is None else runs
     mine = [r for r in runs if r.get("project") == p["id"]]
     # what needs you is what is open now; the saved block's You line is history once the developer acted on it
-    needs = [_decision_need(d, roster) for r in mine for d in pg.pending_decisions(r)]
-    needs += [_message_need(m, roster) for r in mine for m in pg.waiting_messages(r)]
+    needs = [_decision_need(d, roster, pg.shown_id(r, d.get("id"), caller)) for r in mine
+             for d in pg.pending_decisions(r)]
+    needs += [_message_need(m, roster, pg.shown_id(r, m.get("id"), caller)) for r in mine
+              for m in pg.waiting_messages(r)]
     sl = p.get("status_line") or registry.status_line(p["id"]) or {}
     parsed = canary.parse_line(sl.get("line") or "") if sl.get("line") else {}
     if local and not p.get("canonical_ok", True):
@@ -872,8 +890,9 @@ def render_status(v: dict, cols: int = None) -> list:
     return out
 
 
-def home_view(reg: dict, runs=None, name: str = None, roster=None, offline: bool = True) -> dict:
-    """`dev status` outside a project: what needs you across this Mac's projects, then the projects."""
+def home_view(reg: dict, runs=None, name: str = None, roster=None, offline: bool = True, caller=None) -> dict:
+    """`dev status` outside a project: what needs you across this Mac's projects, then the projects. `caller`: as
+    status_view takes it."""
     from . import crew as crew_mod, progress as pg
     roster = roster or crew_mod.load()
     runs = pg.active_runs() if runs is None else runs
@@ -885,7 +904,7 @@ def home_view(reg: dict, runs=None, name: str = None, roster=None, offline: bool
         for r in runs:
             if r.get("project") == p["id"]:
                 for d in pg.pending_decisions(r):
-                    n = _decision_need(d, roster)
+                    n = _decision_need(d, roster, pg.shown_id(r, d.get("id"), caller))
                     n.update(text=f"{alias}: {n['text'][:1].lower()}{n['text'][1:]}", command=f"dev status {alias}")
                     needs.append(n)
         if not p.get("canonical_ok", True):
@@ -929,15 +948,16 @@ def cmd_status(a):
         p, w = _resolve(reg, a.query), None
     else:
         p, w = registry.project_for_cwd(reg, os.getcwd())
+    caller = _status_caller()
     if not p:
-        v = home_view(reg, offline=False)
+        v = home_view(reg, offline=False, caller=caller)
         _prompt_refresh(reg)
         if getattr(a, "json", False):
             print(json.dumps(v, indent=2, ensure_ascii=False, default=str))
             return 0
         print("\n".join(render_home(v)))
         return 0
-    v = status_view(reg, p, w)
+    v = status_view(reg, p, w, caller=caller)
     where = ((w or {}).get("path") or p.get("path")) if a.query else os.getcwd()
     v["needs_you"] += devkit_needs(where)  # the plugins of the project asked about, not of the folder it runs in
     _prompt_refresh(reg, where)
@@ -948,6 +968,16 @@ def cmd_status(a):
     print("\n".join(render_status(v)))
     print()
     return 0
+
+
+def _status_caller():
+    """The (agent, session id) `dev status` runs in, as `dev crew answer` resolves it, so an id shown bare answers
+    the same run; None when it cannot be told (then every run's ids carry their session)."""
+    from . import progress as pg
+    try:
+        return pg.current_session()
+    except Exception:
+        return None
 
 
 def devkit_needs(cwd: str = None) -> list:

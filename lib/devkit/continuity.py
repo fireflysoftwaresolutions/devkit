@@ -871,14 +871,17 @@ def _header(rec: dict, reason: str, agent: str, sid: str) -> str:
     return f"devkit · this conversation was compacted{d}. devkit's record wins over the summary:"
 
 
-def brief(agent: str, sid: str, reason: str = "manual", chat: bool = False, now=None, provider=None) -> str:
+def brief(agent: str, sid: str, reason: str = "manual", chat: bool = False, now=None, provider=None,
+          caller=None) -> str:
     """The continuity brief, at most 4 KB: header, latest requests (newest first, verbatim), run, crew working now,
     waiting, last status block, git and the rule. The run, lanes, decisions, messages and git come from the live
     records; the checkpoint gives the prompts and the status and stands in for a live record it cannot read.
     Request, decision and message text is shown only to the session's own provider (`_shows`; `provider` None: the
     session itself), a pending request only to the session itself, and a request older than 7 days to nobody;
-    another reader gets the count and times, ids and senders. `chat` cuts each request to 200 characters. "" when
-    there is nothing to carry over."""
+    another reader gets the count and times, ids and senders. `chat` cuts each request to 200 characters. `caller`:
+    the (agent, session id) that reads it (None: the session itself); a reader other than the session sees each
+    decision and message id with the session it belongs to (progress.shown_id). "" when there is nothing to carry
+    over."""
     now = now or time.time()
     rec = read(agent, sid) or {}
     cp = rec.get("checkpoint") or {}
@@ -912,6 +915,9 @@ def brief(agent: str, sid: str, reason: str = "manual", chat: bool = False, now=
         lanes = [dict(x, minutes=int(max(0, now - (x.get("started") or now)) / 60)) for x in cp.get("lanes") or []]
         ended = []
         decs, msgs = cp.get("decisions") or [], cp.get("messages") or []
+    me, reader = {"agent": agent, "session": sid}, caller or (agent, sid)
+    decs = [dict(d, id=progress.shown_id(me, d.get("id"), reader)) for d in decs]
+    msgs = [dict(m, id=progress.shown_id(me, m.get("id"), reader)) for m in msgs]
     git = _git(sess.get("top") or rec.get("cwd") or "", sess)
     if not git.get("branch") and cp.get("git"):
         git = cp["git"]
@@ -1682,6 +1688,7 @@ def _session_command(a) -> int:
     progress._main_only(None, {"brief": "reads a session's continuity brief", "carry": "moves a run between sessions",
                                "forget": "deletes continuity records"}[act], cwd)
     if act == "brief":
+        me = progress.resolve_session(cwd)  # the reader: another session's ids carry their session
         if a.latest:
             hit = latest(cwd=cwd, project=a.project)
             if not hit:
@@ -1691,11 +1698,11 @@ def _session_command(a) -> int:
         elif a.session and ":" in a.session:
             agent, sid = a.session.split(":", 1)
         else:
-            agent, sid, how = progress.resolve_session(cwd)
+            agent, sid, how = me
             if how == "shell":
                 raise ValueError("no agent session here: give --session <agent>:<session id> or --latest")
-        print(brief(agent, sid, reason="manual", chat=a.for_chat, provider=_reader(a.provider, a.for_chat, cwd))
-              or "devkit: nothing to carry over for that session")
+        print(brief(agent, sid, reason="manual", chat=a.for_chat, provider=_reader(a.provider, a.for_chat, cwd),
+                    caller=me[:2]) or "devkit: nothing to carry over for that session")
         return 0
     if act == "carry":
         agent, to_sid, how = progress.resolve_session(cwd)

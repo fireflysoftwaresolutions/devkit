@@ -972,14 +972,19 @@ def start(goal: str, steps: int = 0, estimate: str = "", cwd: str | None = None,
                 raise StepError(f"a run is live in this session: “{live['goal']}” ({done_} of "
                                 f"{len(live.get('plan') or [])} steps). Add to it (dev progress add), end it (dev "
                                 f"progress done), or replace it: dev progress start … --replace --why \"<reason>\"")
-            # its pending decisions belong to it: closed, and kept with the reason in the run that replaces it
+            # its pending decisions and waiting questions belong to it: closed, and kept with the reason in the run
+            # that replaces it
             closed = _close_decisions(live, f"run replaced: {why.strip()[:240]}", now, history_run=run)
+            closed_msgs = _close_messages(live, f"run replaced: {why.strip()[:240]}", now)
             run["replaced"] = {"goal": live["goal"], "started": live.get("started"), "ts": round(now),
                                "why": why.strip()[:300]}
             if closed:
                 run["replaced"]["decisions"] = closed
+            if closed_msgs:
+                run["replaced"]["messages"] = closed_msgs
             _audit("progress.replace", live["goal"][:120], why.strip()[:300], project=run.get("project") or "")
             _audit_closed(run, closed)
+            _audit_closed_messages(run, closed_msgs)
         _save(run)
     _publish()
     return run
@@ -1699,15 +1704,16 @@ def _waits_notice(run, m: dict, frm: str, now: float | None = None) -> str:
             f"{again}, or ask someone else (dev crew ask --to <member> \"…\").")
 
 
-def _reply_to(run, aid: str, now: float | None = None) -> str:
+def _reply_to(run, aid: str, now: float | None = None, own: bool = True) -> str:
     """Where a reply to lane `aid` goes (the answer to its question, the result of its decision): that lane while its
-    member works, as `dev crew owner` reads it (lane_gone over lane_states of the caller's own run; a lane the run
-    does not know counts as working); else the member's name, which crew_ask addresses (_addr) to their working lane
-    or to their next launch, telling the sender (_waits_notice). A lane with no name to address keeps its id."""
+    member works, as `dev crew owner` reads it (lane_gone over lane_states of `run`, the caller's own unless `own` is
+    False; a lane the run does not know counts as working); else the member's name, which crew_ask addresses (_addr)
+    to their working lane or to their next launch, telling the sender (_waits_notice). A lane with no name to address
+    keeps its id."""
     lane = (run.get("agents") or {}).get(aid)
     if not isinstance(lane, dict) or not (lane.get("persona") or lane.get("label")):
         return aid
-    states = lane_states(run, now, own=True) if lane.get("state") == "running" else {}
+    states = lane_states(run, now, own=own) if lane.get("state") == "running" else {}
     return _lane_name(lane) if lane_gone(aid, lane, states) else aid
 
 
@@ -1731,12 +1737,16 @@ def crew_ask(text: str, to: str | None = None, from_agent: str | None = None, cw
     now = now or time.time()
     from_agent = _as_lane(from_agent, cwd)
     agent, sid = current_session(cwd)
+    return _ask_into(agent, sid, text, to, from_agent or "main", now, kind)
+
+
+def _ask_into(agent: str, sid: str, text: str, to, frm: str, now: float, kind: str = "message") -> dict:
+    """crew_ask into the run of session `agent`:`sid`, from `frm` (a lane of that run, or "main")."""
     with _tx(agent, sid):
         run = load_run(agent, sid)
         if not run:
             raise ValueError("no progress run in this session: the tech lead starts one with dev progress start")
         run = normalize(run)
-        frm = from_agent or "main"
         m = _post(run, frm, _addr(run, to or "", now), text, now, kind=kind if kind in ("notice", "answer") else "")
         told = _waits_notice(run, m, frm, now) if m["to"].startswith("name:") and frm not in NOTICE_SENDERS else ""
         if told:  # never silently: the sender learns with its next tool call that nobody reads it now
@@ -1776,28 +1786,182 @@ def _asks(m: dict) -> bool:
     return not (m.get("from") in NOTICE_SENDERS or m.get("from_name") == "devkit" or m.get("reply_to"))
 
 
-def waiting_messages(run, to: str = "main") -> list:
-    """The messages to `to` (the tech lead by default) that ask a question nobody has answered yet: delivered or
-    not, they wait. A notice (CI watch, a step or launch notice, a decision's result) never waits."""
+def _open_questions(run) -> list:
+    """The messages of `run` that ask a question nobody has answered, and that did not close with their run."""
     msgs = [m for m in (run or {}).get("messages") or [] if isinstance(m, dict)]
     replied = {m.get("reply_to") for m in msgs if m.get("reply_to")}
-    return [m for m in msgs if m.get("to") == to and _asks(m) and not m.get("answered") and m.get("id") not in replied]
+    return [m for m in msgs if _asks(m) and not m.get("answered") and not m.get("closed") and m.get("id") not in replied]
+
+
+def waiting_messages(run, to: str = "main") -> list:
+    """The messages to `to` (the tech lead by default) that ask a question nobody has answered yet: delivered or
+    not, they wait. A notice (CI watch, a step or launch notice, a decision's result) never waits, nor does any
+    question of a run that is done: its questions closed with it (_close_messages), runs saved before that included."""
+    if (run or {}).get("state") == "done":
+        return []
+    return [m for m in _open_questions(run) if m.get("to") == to]
+
+
+def _close_messages(run, reason: str, now: float) -> list:
+    """A run ends or is replaced: each question in it that still waits for an answer, to the tech lead or to a
+    member, closes with the reason, and takes no answer any more. -> copies of the closed messages, for the audit
+    after the save."""
+    closed = []
+    for m in _open_questions(run):
+        m.update(closed=round(now), reason=reason[:300])
+        closed.append(dict(m))
+    return closed
+
+
+def _audit_closed_messages(run, closed: list):
+    for m in closed:  # never the text: crew messages quote the developer's requests
+        _audit("crew.message-closed", m["id"], m.get("reason") or "", "closed", project=(run or {}).get("project") or "",
+               why=m.get("reason") or "")
+
+
+# --------------------------------------------------------------------------- ids across runs
+# Message and decision ids (M3, D2) are numbered per run, so two runs of one project both hold an M3. Where a run's
+# message or decision is shown to anyone but that run's own session and members, it carries the run's session:
+# M3@9448c4d0 (shown_id), which dev crew answer resolves in that run (run_of_prefix).
+
+SESSION_PREFIX = 8  # characters of a session id a qualified id names at least
+_QUALIFIED = re.compile(r"^([A-Za-z]\d+)@([0-9A-Za-z][0-9A-Za-z._-]*)$")
+
+
+def _run_sessions() -> list:
+    """(agent, session id) of every run file on this Mac (<agent>-<session id>.json)."""
+    out = []
+    for f in RUNS.glob("*.json") if RUNS.exists() else []:
+        agent, _, sid = f.stem.partition("-")
+        if agent and sid:
+            out.append((agent, sid))
+    return out
+
+
+_PREFIXES: dict = {}  # (runs folder, its mtime, session id) -> prefix: a page lists many ids of one run
+
+
+def session_prefix(sid: str) -> str:
+    """The shortest prefix of session id `sid`, 8 characters at least (the whole id when shorter), that no other run
+    of this Mac shares: what a qualified id names its run by."""
+    sid = str(sid or "")
+    try:  # the folder's mtime changes when a run file is added or removed, the only change a prefix depends on
+        key = (str(RUNS), RUNS.stat().st_mtime_ns, sid)
+    except OSError:
+        key = None
+    if key in _PREFIXES:
+        return _PREFIXES[key]
+    others = {s.lower() for _, s in _run_sessions() if s != sid}
+    n = min(SESSION_PREFIX, len(sid))
+    while n < len(sid) and any(o.startswith(sid[:n].lower()) for o in others):
+        n += 1
+    if key:
+        if len(_PREFIXES) > 512:
+            _PREFIXES.clear()
+        _PREFIXES[key] = sid[:n]
+    return sid[:n]
+
+
+def shown_id(run, item_id: str, caller=None) -> str:
+    """A message or decision id of `run` as shown to `caller`, the (agent, session id) that reads it: bare in the
+    caller's own run, whose main session and members answer by it; qualified with the run's session everywhere else
+    (M3@9448c4d0), the dashboard and a terminal with no session included (`caller` None). A run that names no
+    session keeps the bare id."""
+    sid = (run or {}).get("session")
+    if not item_id or not sid:
+        return item_id
+    if caller and tuple(caller[:2]) == (run.get("agent") or "claude", sid):
+        return item_id
+    return f"{item_id}@{session_prefix(sid)}"
+
+
+def split_id(ref) -> tuple:
+    """'M3@9448c4d0' -> ('M3', '9448c4d0'); 'M3' -> ('M3', '')."""
+    ref = str(ref or "").strip()
+    mt = _QUALIFIED.match(ref)
+    return (mt.group(1), mt.group(2)) if mt else (ref, "")
+
+
+def run_of_prefix(prefix: str) -> tuple:
+    """The (agent, session id) of the one run on this Mac whose session id starts with `prefix`. Raises ValueError
+    for a prefix shorter than 8 characters (unless it is a whole session id), one no run has, and one that more than
+    one run shares."""
+    p = str(prefix or "").lower()
+    hits = [(a, s) for a, s in _run_sessions() if s.lower().startswith(p)]
+    exact = [(a, s) for a, s in hits if s.lower() == p]
+    if len(exact) == 1:
+        return exact[0]
+    if len(p) < SESSION_PREFIX:
+        raise ValueError(f"@{prefix} is too short: name the run by at least {SESSION_PREFIX} characters of its "
+                         f"session id, as dev status prints it")
+    if not hits:
+        raise ValueError(f"no run of a session {prefix}… on this Mac: dev status lists the questions that wait")
+    if len(hits) > 1:
+        raise ValueError(f"@{prefix} names {len(hits)} runs ({', '.join(f'{a}:{s[:12]}' for a, s in hits)}): give "
+                         f"more characters of the session id")
+    return hits[0]
+
+
+def _waiting_elsewhere(msg_id: str, own: tuple, cwd: str | None = None) -> list:
+    """The qualified ids of the questions to the tech lead with id `msg_id` that wait in this Mac's other active runs
+    of the caller's project (of every project when it is unknown). Read before any lock: _project runs git."""
+    mine = load_run(*own) or {}
+    project = mine.get("project") or (core.read_json(session_path(*own), {}) or {}).get("project") or _project(cwd)
+    out = []
+    for r in active_runs():
+        if (r.get("agent") or "claude", r.get("session")) == own or (project and r.get("project") != project):
+            continue
+        if any(str(m.get("id") or "").lower() == msg_id.lower() for m in waiting_messages(r)):
+            out.append(shown_id(r, msg_id, own))
+    return out
+
+
+def _closed_why(run, m: dict) -> str:
+    """Why a question takes no answer any more ('' while it may): it closed with its run, or its run is done."""
+    if m.get("closed"):
+        return m.get("reason") or "its run ended"
+    return "its run ended" if (run or {}).get("state") == "done" and _asks(m) else ""
 
 
 def crew_answer(msg_id: str, text: str, from_agent: str | None = None, cwd: str | None = None, now: float | None = None) -> dict:
+    """Answer crew message `msg_id` (`dev crew answer`): mark it answered and post the answer, in the run that holds
+    it, to the lane that asked while its member works (_reply_to of that run). A qualified id (M3@9448c4d0) names
+    that run by its session; a bare one is the caller's own run's. The tech lead's or the developer's bare id whose
+    message in the caller's run is missing, or is no question waiting for an answer, while another active run of the
+    project holds one that waits by that id, is refused with the qualified ids to use: it never answers a message
+    other than the one shown. A crew member answers the messages of its own run only."""
     from_agent = _as_lane(from_agent, cwd)
     agent, sid = current_session(cwd)
-    with _tx(agent, sid):
-        run = normalize(load_run(agent, sid) or {})
-        q = next((m for m in run.get("messages") or [] if m["id"].lower() == str(msg_id).lower()), None)
+    own = (agent, sid)
+    bare, prefix = split_id(msg_id)
+    elsewhere = []
+    if prefix:
+        target = run_of_prefix(prefix)
+        if target != own and from_agent:
+            raise ValueError(f"{msg_id} is a message of another session's run: a crew member answers the messages of "
+                             f"its own run only. Ask the tech lead: dev crew ask \"…\"")
+    else:  # a member's bare id is its own run's: its inbox shows only those
+        target, elsewhere = own, ([] if from_agent else _waiting_elsewhere(bare, own, cwd))
+    with _tx(*target):
+        run = normalize(load_run(*target) or {})
+        q = next((m for m in run.get("messages") or [] if str(m.get("id") or "").lower() == bare.lower()), None)
+        if elsewhere and (not q or q not in waiting_messages(run, q.get("to") or "main")):
+            what = f"{bare} in this session's run is no question waiting for an answer" if q else \
+                f"this session's run has no message {bare}"
+            raise ValueError(f"{what}, and another run waits on its own {bare}. Answer the one dev status lists by its "
+                             "qualified id: " + " · ".join(f'dev crew answer {x} "…"' for x in elsewhere))
         if not q:
             raise ValueError(f"no message {msg_id}")
+        if _closed_why(run, q):
+            raise ValueError(f"{msg_id} was closed ({_closed_why(run, q)}): it takes no answer. Ask again with dev "
+                             f"crew ask if it still matters")
         q["answered"] = True
         _save(run, touch_session=False)
-    to = _reply_to(run, q["from"], now)  # the asking lane while its member works, else the member by name
-    a = crew_ask(text, to=to, from_agent=from_agent, cwd=cwd, now=now, kind="answer")
-    with _tx(agent, sid):
-        run = normalize(load_run(agent, sid) or {})
+    # the asking lane while its member works, else the member by name; another session's run is not the caller's own
+    to = _reply_to(run, q["from"], now, own=target == own)
+    a = _ask_into(target[0], target[1], text, to, from_agent or "main", now or time.time(), kind="answer")
+    with _tx(*target):
+        run = normalize(load_run(*target) or {})
         for m in run.get("messages") or []:
             if m["id"] == a["id"]:
                 m["reply_to"] = q["id"]
@@ -2192,6 +2356,7 @@ def crew_decide(decision_id: str, answer: str, cwd: str | None = None, now: floa
     now = now or time.time()
     _main_only(None, "records the developer's answers", cwd)
     agent, sid = current_session(cwd)
+    decision_id = _own_decision_id(decision_id, agent, sid, "answered")
     answer = answer.strip()[:800]
 
     def find(run):
@@ -2239,6 +2404,25 @@ def crew_decide(decision_id: str, answer: str, cwd: str | None = None, now: floa
         crew_ask(f"Decision {d['id']} — {d['question'][:120]} → {d['answer']}", to=_reply_to(run, d["from"], now),
                  cwd=cwd, now=now, kind="notice")
     return d
+
+
+def _own_decision_id(decision_id: str, agent: str, sid: str, verb: str) -> str:
+    """The bare id of a decision of the caller's own run (agent, sid): a qualified id (D2@9448c4d0) of that session
+    loses its session; one of another session's run is refused, since a decision is `verb` (answered, withdrawn) in
+    the session that owns it, where the developer's evidence lives (its transcript)."""
+    bare, prefix = split_id(decision_id)
+    if not prefix:
+        return bare
+    try:
+        target = run_of_prefix(prefix)
+    except ValueError as e:
+        raise StepError(str(e))
+    if target != (agent, sid):
+        raise StepError(f"{decision_id} is a decision of another session's run ({target[0]}:{target[1][:12]}): it is "
+                        f"{verb} in the session that owns it, where the developer's evidence lives (its transcript). "
+                        f"There the developer types approve {bare}, and its tech lead runs dev crew decide {bare} "
+                        f"\"…\" or dev crew withdraw {bare} --why \"…\"")
+    return bare
 
 
 def _release(run, d: dict, why: str, now: float) -> list:
@@ -2299,6 +2483,7 @@ def crew_withdraw(decision_id: str, why: str, from_agent: str | None = None, cwd
     if not why:
         raise StepError("say why: dev crew withdraw <id> --why \"…\" (it goes into the run's history and the audit)")
     agent, sid = current_session(cwd)
+    decision_id = _own_decision_id(decision_id, agent, sid, "withdrawn")
     with _tx(agent, sid):
         run = normalize(load_run(agent, sid) or {})
         d = _decision(run, decision_id)
@@ -3983,9 +4168,10 @@ def step(text: str, nxt: str = "", cwd: str | None = None, kind: str = "step", c
     finished steps the Check approves or sends back (approvals.record). kind "done" ends the run, refused while a
     crew member still works on a step (_refuse_members_working), while an approval is owed or a step is flagged
     recheck once the plan is closed, unless `why` (approvals.end_check), or while a decision still needs the
-    developer, unless `force`; the decisions still pending (moot ones too) close with the run."""
+    developer, unless `force`; the decisions still pending (moot ones too) and the questions still waiting for an
+    answer close with the run."""
     now = now or time.time()
-    closed = []
+    closed, closed_msgs = [], []
     agent, sid = current_session(cwd)
     from_agent = _as_lane(from_agent, cwd)
     if kind == "done" and not from_agent:
@@ -4100,6 +4286,7 @@ def step(text: str, nxt: str = "", cwd: str | None = None, kind: str = "step", c
                                 f"{gone[s['name']]}; closed with the run's end: {text}" if s["name"] in gone else text,
                                 now)
             closed = _close_decisions(run, "run ended", now)
+            closed_msgs = _close_messages(run, "run ended", now)
             run.update(state="done", finished=now)
             _close(run, "turn", None, now)
             record("run", agent, sid, run.get("goal", ""), active_minutes(run, now=now) * 60, run.get("project", ""),
@@ -4112,6 +4299,7 @@ def step(text: str, nxt: str = "", cwd: str | None = None, kind: str = "step", c
         run["updates"] = run["updates"][-40:]
         _save(run)
     _audit_closed(run, closed)
+    _audit_closed_messages(run, closed_msgs)
     _publish()
     if kind in ("blocked", "done"):
         notify(f"{run.get('project') or 'devkit'} · {kind}", text)

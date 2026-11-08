@@ -166,7 +166,9 @@ files.
   default, or `--to Seraph`; `--to "Tech lead"` and `--to Morpheus` reach the main session). The message reaches the
   recipient with its next action. Answer with `dev crew answer M1 "Yes, skip them"`. Answer quickly: a member waiting
   on you blocks a lane. Only a question waits: a notice (a CI result, a step or launch notice, a decision's result)
-  and an answer close once delivered, and `dev status` lists only the questions nobody answered.
+  and an answer close once delivered, and `dev status` lists only the questions nobody answered. Another session's
+  run shows its ids with its session (`M1@9448c4d0`): answer by that qualified id, never the bare one, and record a
+  decision only in the session that owns it.
 - **Decisions that are the developer's** (scope, behavior, cost, risk): you ask the developer with the decision
   template (`communicating` skill). Members never ask the developer directly.
 - **Updates to the developer** are yours: `dev progress step` prints the status block with every lane under it.

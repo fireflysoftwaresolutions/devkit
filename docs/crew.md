@@ -328,6 +328,24 @@ Each message has a kind, and only a question waits:
 `dev status` and the dashboard list the questions to the tech lead that nobody answered, each with its
 `dev crew answer` command; a notice or an answer is never listed as open.
 
+Message ids are numbered per run, so two runs of one project can both hold an `M3`. Where a run's message or
+decision is shown to anyone but that run's own session and members, its id carries the run's session: `M3@9448c4d0`,
+with at least 8 characters of the session id. `dev status` in your session shows your run's ids bare and every other
+run's qualified; the dashboard, which belongs to no session, qualifies them all, and so does a continuity brief read
+from another session.
+
+```bash
+dev crew answer M3@9448c4d0 "Yes, ship it"   # answers M3 of that run; the answer reaches the member who asked there
+dev crew answer M3 "Yes, ship it"            # M3 of your own session's run
+```
+
+A bare id never answers another message than the one shown: when your run has no `M3`, or its `M3` waits for no
+answer, while another run's `M3` waits, `dev crew answer M3` is refused and prints the qualified ids to use. A crew
+member answers the messages of its own run only. When a run ends (`dev progress done`) or is replaced
+(`dev progress start --replace`), its questions that still wait close with the reason (`crew.message-closed`): they
+leave **Needs you**, the dashboard, and the continuity brief, and take no answer. To recover a closed question that
+still matters, ask it again with `dev crew ask`.
+
 ### Every report is checked
 
 Every member ends its report with its own status block:
@@ -466,6 +484,9 @@ A decision belongs to its run, and only an open one needs you:
   never your answer, so it opens no irreversible action.
 - **Closed with its run.** When the run ends (`dev progress done`) or is replaced (`dev progress start --replace`),
   each decision still pending in it, moot ones included, closes with the reason (`crew.decision-closed`).
+- **Answered in its own session.** A decision of another session's run shows as `D3@9448c4d0`. Answer it in that
+  session's chat (`approve D3: <option>`), where devkit reads your evidence; its tech lead records it there.
+  `dev crew decide` and `dev crew withdraw` refuse another session's qualified id, and take your own run's.
 
 [Work states › Decisions](work-states.md#decisions) draws the whole lifecycle.
 
@@ -580,6 +601,7 @@ dashboard and the handoff read, and devkit's audit trail (`dev audit`), publishe
 | `crew.message` | a question or answer between members |
 | `crew.decision`, `crew.decided`, `crew.mode` | a decision point, its answer (and by whom), a change of mode |
 | `crew.withdrawn`, `crew.decision-closed` | the tech lead withdrew a decision, or its run ended or was replaced, each with the reason |
+| `crew.message-closed` | a question that still waited for an answer closed because its run ended or was replaced, with the reason (never its text) |
 | `scope.write` | a file a read-only member's shell call changed, counted for the working member whose scope holds it while that member has a call open, otherwise flagged for the read-only member |
 | `crew.delegate`, `crew.decline` | work handed to another member, or handed back |
 | `raci.override` | a step assigned to a member the RACI does not make Responsible, with the reason |

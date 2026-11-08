@@ -1300,6 +1300,140 @@ class CrewMessageIdTests(unittest.TestCase):
             self.assertEqual(pg.crew_decision("And another?", options="yes | no", recommend="yes")["id"], "D202")
 
 
+RUN_A = "5e1f0a2b-7c3d-4e5f-8a9b-0c1d2e3f4a5b"  # made-up session ids: never a real session of this Mac
+RUN_B = "c0ffee00-1234-4abc-8def-001122334455"
+NO_RUN = "d00d0000-0000-4000-8000-000000000000"  # a session of the same project with no run
+
+
+class CrossRunIdTests(unittest.TestCase):
+    # Message and decision ids are numbered per run, so two runs of one project both hold an M1. dev status listed
+    # another run's M11 and `dev crew answer M11` answered the caller's own M11 instead, leaving the listed one open.
+    # Here run A's Code reviewer asks M1, still waiting; run B's Release engineer asked an M1 its tech lead answered.
+    T0 = 1_800_000_000.0
+
+    def m(self, minutes):
+        return self.T0 + minutes * 60
+
+    def setUp(self):
+        self.state = TempState().__enter__()
+        self.addCleanup(self.state.__exit__, None, None, None)
+        for sid in (RUN_A, RUN_B, NO_RUN):
+            (pg.SESSIONS / f"claude-{sid}.json").write_text(json.dumps(
+                {"agent": "claude", "session": sid, "started": self.T0, "project": "acme/api"}))
+        with self.in_(RUN_A):
+            pg.start("Parser", plan=["parser", "review"], now=self.m(0))
+            launch("a1", "devkit:seraph", "Seraph: review", self.m(1), sid=RUN_A)
+            pg.crew_ask("Ship the parser with the old error format?", from_agent="a1", now=self.m(2))
+        with self.in_(RUN_B):
+            pg.start("Release", plan=["build"], now=self.m(0))
+            launch("b1", "devkit:link", "Link: build", self.m(1), sid=RUN_B)
+            q = pg.crew_ask("may I push the release branch?", from_agent="b1", now=self.m(2))
+            pg.crew_answer(q["id"], "yes", now=self.m(3))
+
+    def in_(self, sid):
+        return mock.patch.dict(os.environ, {"DEVKIT_SESSION": f"claude:{sid}"})
+
+    def run_of(self, sid):
+        return pg.load_run("claude", sid)
+
+    def waiting(self, sid):
+        return [m["id"] for m in pg.waiting_messages(self.run_of(sid))]
+
+    def test_a_bare_id_never_answers_the_callers_settled_message_while_another_run_waits_on_it(self):
+        before = self.run_of(RUN_B)["messages"]
+        with self.in_(RUN_B), self.assertRaises(ValueError) as e:
+            pg.crew_answer("M1", "yes, ship it", now=self.m(4))
+        self.assertIn('dev crew answer M1@5e1f0a2b "…"', str(e.exception))
+        self.assertEqual(self.run_of(RUN_B)["messages"], before)
+        self.assertEqual(self.waiting(RUN_A), ["M1"])
+
+    def test_a_qualified_id_answers_that_runs_message_and_the_answer_reaches_its_member(self):
+        before = self.run_of(RUN_B)["messages"]
+        with self.in_(RUN_B):
+            a = pg.crew_answer("M1@5e1f0a2b", "yes, keep the old format", now=self.m(4))
+        answers = [(m["id"], m["to"], m.get("reply_to"), m["text"]) for m in self.run_of(RUN_A)["messages"]
+                   if m.get("kind") == "answer"]
+        self.assertEqual(answers, [(a["id"], "a1", "M1", "yes, keep the old format")])
+        self.assertEqual(self.waiting(RUN_A), [])
+        self.assertEqual(self.run_of(RUN_B)["messages"], before)
+        self.assertIn("yes, keep the old format", pg.on_tool_done("claude", {"session_id": RUN_A, "agent_id": "a1"}))
+
+    def test_a_bare_id_the_callers_run_lacks_is_refused_with_the_qualified_ids_that_wait(self):
+        pg.start("Docs", plan=["docs"], now=self.m(0))  # TempState's session s1: its Technical writer waits on M1
+        pg.crew_ask("which guide gets the new page?", from_agent="c1", now=self.m(2))
+        with self.in_(NO_RUN), self.assertRaises(ValueError) as e:
+            pg.crew_answer("M1", "the configuration guide", now=self.m(4))
+        self.assertIn("M1@5e1f0a2b", str(e.exception))
+        self.assertIn("M1@s1", str(e.exception))
+        self.assertNotIn("M1@c0ffee00", str(e.exception))  # run B's M1 waits no more
+        self.assertEqual((self.waiting(RUN_A), self.waiting("s1")), (["M1"], ["M1"]))
+
+    def test_a_run_that_ends_closes_its_waiting_questions(self):
+        from devkit import audit
+        with self.in_(RUN_A):
+            pg.step("stopped early", kind="done", force=True, now=self.m(5))
+        run = self.run_of(RUN_A)
+        self.assertEqual(pg.waiting_messages(run), [])
+        self.assertEqual([(m["id"], m.get("closed"), m.get("reason")) for m in run["messages"]],
+                         [("M1", round(self.m(5)), "run ended")])
+        self.assertEqual([r["target"] for r in audit.query(action="crew.message-closed")], ["M1"])
+
+    def test_a_closed_question_takes_no_answer(self):
+        with self.in_(RUN_A):
+            pg.step("stopped early", kind="done", force=True, now=self.m(5))
+        with self.in_(RUN_B), self.assertRaises(ValueError) as e:
+            pg.crew_answer("M1@5e1f0a2b", "yes", now=self.m(6))
+        self.assertIn("M1@5e1f0a2b was closed (run ended)", str(e.exception))
+        self.assertEqual([m["id"] for m in self.run_of(RUN_A)["messages"]], ["M1"])
+
+    def test_dev_status_qualifies_another_runs_questions_and_drops_a_finished_runs(self):
+        from devkit import cli, crew, registry
+        with self.in_(RUN_B):
+            pg.crew_ask("may I tag v1.2.0?", from_agent="b1", now=self.m(4))  # run B's own M3, waiting
+        p = {"id": "acme/api", "owner": "acme", "name": "api", "path": None, "local": False, "main": {},
+             "worktrees": [], "canonical_ok": True, "prs_open": [], "status_line": {"line": ""}}
+        reg = {"projects": [p], "issues": [], "sessions": []}
+
+        def answers(runs):
+            with mock.patch.object(registry, "alias_map", lambda projects: {}):
+                v = cli.status_view(reg, p, None, runs=runs, ci={"runs": []}, roster=crew.load(team=False),
+                                    now=self.m(5), caller=("claude", RUN_B))
+            return sorted(n["command"] for n in v["needs_you"] if n["kind"] == "message")
+        self.assertEqual(answers([self.run_of(RUN_A), self.run_of(RUN_B)]),
+                         ['dev crew answer M1@5e1f0a2b "…"', 'dev crew answer M3 "…"'])
+        ended = dict(self.run_of(RUN_A), state="done", finished=self.m(5))  # saved before runs closed their questions
+        self.assertEqual(answers([ended, self.run_of(RUN_B)]), ['dev crew answer M3 "…"'])
+
+    def test_the_dashboard_lists_each_runs_questions_by_their_qualified_id(self):
+        from devkit import dashboard, dashnow
+        runs = dashboard._runs(self.m(5), raw=[self.run_of(RUN_A)])
+        self.assertEqual([q["id"] for q in runs[0]["questions"]], ["M1@5e1f0a2b"])
+        self.assertEqual([q["id"] for q in dashnow._questions(self.run_of(RUN_A))], ["M1@5e1f0a2b"])
+
+    def test_a_brief_read_from_another_session_qualifies_the_ids_and_its_own_session_keeps_them_bare(self):
+        self.assertIn("Crew messages waiting: M1@5e1f0a2b from",
+                      continuity.brief("claude", RUN_A, caller=("claude", RUN_B), now=self.m(5)))
+        self.assertIn("Crew messages waiting: M1 from", continuity.brief("claude", RUN_A, now=self.m(5)))
+
+    def test_decide_refuses_another_sessions_qualified_id(self):
+        with self.in_(RUN_A):
+            pg.crew_decision("Keep the old error format?", options="A: keep | B: drop", recommend="A",
+                             from_agent="a1", now=self.m(3))
+        with self.in_(RUN_B):
+            pg.crew_decision("Tag on Friday?", options="A: yes | B: no", recommend="A", now=self.m(3))
+            with self.assertRaises(pg.StepError) as e:
+                pg.crew_decide("D1@5e1f0a2b", "A: keep", now=self.m(4))
+        self.assertIn("answered in the session that owns it", str(e.exception))
+        self.assertEqual([d["state"] for d in self.run_of(RUN_A)["decisions"] + self.run_of(RUN_B)["decisions"]],
+                         ["pending", "pending"])
+
+    def test_decide_takes_the_callers_own_qualified_id(self):
+        with self.in_(RUN_B):
+            pg.crew_decision("Tag on Friday?", options="A: yes | B: no", recommend="A", now=self.m(3))
+            d = pg.crew_decide("D1@c0ffee00", "B: no", now=self.m(4))
+        self.assertEqual((d["id"], d["state"], d["answer"]), ("D1", "decided", "B: no"))
+
+
 class CrewMessageAuditTests(unittest.TestCase):
     def test_a_message_is_audited_by_its_kind_and_length_never_its_text(self):
         from devkit import audit

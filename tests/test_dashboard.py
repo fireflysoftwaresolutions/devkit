@@ -989,13 +989,13 @@ class DetailTests(unittest.TestCase):
         self.assertEqual(ui["evidence"], [])                                          # a note is not evidence
         self.assertEqual([x["to"] for x in api["history"]], ["done"])
         self.assertEqual((d["lanes"][0]["persona"], d["mode"]), ("Tank", "auto"))
-        self.assertEqual((d["decisions"][0]["id"], d["questions"][0]["text"]), ("D1", "may I touch cli.py?"))
+        self.assertEqual((d["decisions"][0]["id"], d["questions"][0]["text"]), ("D1@s1", "may I touch cli.py?"))
         self.assertIsNotNone(d["eta_lo"])
         for bad in ("claude-nope", "../runs/claude-s1", "..", ""):
             self.assertIsNone(dashboard.run_detail(bad), bad)
         runs = dashboard._runs(now, "testmac")
         self.assertEqual((runs[0]["id"], runs[0]["host"], runs[0]["mode"]), ("claude-s1", "testmac", "auto"))
-        self.assertEqual(([q["id"] for q in runs[0]["questions"]], [x["id"] for x in runs[0]["decisions"]]), (["M1"], ["D1"]))
+        self.assertEqual(([q["id"] for q in runs[0]["questions"]], [x["id"] for x in runs[0]["decisions"]]), (["M1@s1"], ["D1@s1"]))  # ids name their run
         self.assertEqual(runs[0]["plan"][1]["after"], ["api"])
 
     def settled_run(self, now):
@@ -1023,17 +1023,17 @@ class DetailTests(unittest.TestCase):
         now = time.time()
         self.settled_run(now)
         r = dashboard._runs(now, "testmac")[0]
-        self.assertEqual([d["id"] for d in r["decisions"]], ["D2"])                    # D1 is moot, D3 decided
-        self.assertEqual([m["id"] for m in r["questions"]], ["M2"])                    # a notice, an answer and a reply never wait
+        self.assertEqual([d["id"] for d in r["decisions"]], ["D2@s3"])                 # D1 is moot, D3 decided
+        self.assertEqual([m["id"] for m in r["questions"]], ["M2@s3"])                 # a notice, an answer and a reply never wait
 
     # the whole run keeps every decision and message, each with the state the page shows: moot, and waiting or not
     def test_the_whole_run_marks_moot_decisions_and_the_questions_that_wait(self):
         now = time.time()
         self.settled_run(now)
         d = dashboard.run_detail("claude-s3", now=now)
-        self.assertEqual([(x["id"], x["state"]) for x in d["decisions"]], [("D1", "moot"), ("D2", "pending"), ("D3", "decided")])
+        self.assertEqual([(x["id"], x["state"]) for x in d["decisions"]], [("D1@s3", "moot"), ("D2@s3", "pending"), ("D3@s3", "decided")])
         self.assertEqual(d["decisions"][0]["moot"], "Moot: Backend engineer (Tank) ended, and no step waits on D1.")
-        self.assertEqual([m["id"] for m in d["questions"] if m["waiting"]], ["M2"])
+        self.assertEqual([m["id"] for m in d["questions"] if m["waiting"]], ["M2@s3"])
         self.assertEqual(len(d["questions"]), 5)
 
     def crew_run(self, now):
