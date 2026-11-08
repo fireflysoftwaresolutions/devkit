@@ -5,6 +5,13 @@
 
 # devkit
 
+[![Latest release](https://img.shields.io/github/v/release/fireflysoftwaresolutions/devkit?sort=date&label=release)](https://github.com/fireflysoftwaresolutions/devkit/releases/latest)
+[![CI](https://github.com/fireflysoftwaresolutions/devkit/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/fireflysoftwaresolutions/devkit/actions/workflows/ci.yml)
+[![License: Apache 2.0](https://img.shields.io/badge/license-Apache%202.0-blue)](LICENSE)
+![Python 3.9 or later](https://img.shields.io/badge/python-3.9%2B-3776AB)
+![macOS on Apple silicon](https://img.shields.io/badge/macOS-Apple%20silicon-555555)
+![For Claude Code and Codex](https://img.shields.io/badge/agents-Claude%20Code%20%C2%B7%20Codex-555555)
+
 devkit is how Firefly Software developers work with Claude Code and Codex. Every repository is in a predictable
 place. Every project has a living handoff note and a task board that a team, its Macs, and its agents share safely.
 Every agent session starts from the current state, keeps you informed while it works, and ends by recording what
@@ -30,6 +37,7 @@ Docker and the background automation, and keeps them that way.
 | Each session rediscovers the project | The session starts with the project's handoff note, tasks, locks, git state, commands, and the last status |
 | Two people (or two agents) pick up the same task | `dev task start` locks it on every machine at once; every change records who, when, and why |
 | "How is it going?" | Agents report progress with an ETA computed from their real pace, and you get a notification when they finish or get stuck |
+| A crew question or a CI result waits until you type something | One wait, `dev watch --wait`, wakes an idle session for each crew question, decision, ready step, and CI result; a turn that would leave nothing to wake it is sent back |
 | Worktrees and `repo-pr12` copies pile up; disks fill | One managed worktree location, a guard that blocks stray ones, and safe automatic cleanup once work is merged |
 | Push → CI → fix → push → CI … | `dev ci --run` runs what CI runs, here; `dev push` pushes once, only with that evidence; `dev ci status` follows the one CI run with an ETA on GitHub, GitLab, Bitbucket, or Azure |
 | PRs with empty descriptions, merges past red checks | `dev pr create` fills the PR template and refuses an empty "What and why"; `dev pr merge` waits for green checks and reviews; `dev release` tags and publishes by the policy |
@@ -102,6 +110,8 @@ dev plan new "Refund events" --kind spec                              a versione
 dev initiative show payments one initiative across its projects       dev task -i payments
 dev team                     who is working on what, on every machine
 dev progress                 live runs with ETA                       dev time   where the time goes
+dev crew graph               the run, its crew lanes, decisions, and messages   dev crew next   who to launch next
+dev watch --wait             wake on the next crew question, decision, or CI result   dev watches   every wait
 dev report --days 7          a status report for the team, in Markdown
 dev claude api -w feat/x     Claude Code in a managed worktree        dev codex api   Codex in the project
 dev branch new feat/invoice-export                                    a branch from an up-to-date main
@@ -110,6 +120,7 @@ dev ci --run                 run what CI runs, here, and record it    dev push  
 dev pr create                the PR, from the template                dev pr checks --watch   wait for CI
 dev pr merge                 when checks and reviews allow it         dev release   tag and publish by the policy
 dev ci status --watch        the branch's pipelines: jobs, current step, ETA (GitHub, GitLab, Bitbucket, Azure)
+dev ci watch --wait --pr 12  wake when that PR's CI ends              dev backup   this branch, when no CI starts
 dev lesson add "…" --cause "…" --prevent "…"                          a lesson every later session recalls
 dev jobs                     the scheduled jobs and their last runs   dev audit --team   what devkit did, everywhere
 dev delivery                 the project's release policy and gaps     dev delivery apply --why "…"   record it
@@ -150,14 +161,14 @@ stage's guide is in [Concepts › From plan to operate](docs/concepts.md#from-pl
 | Initiatives | Cross-project goals with workstreams, cross-project tasks, honest progress, and adoption of older handoff repositories | [Initiatives](docs/initiatives.md) |
 | Progress and communication | `dev progress` with active time, per-step estimates and dependencies, a critical-path ETA range, a plan that changes only with evidence, reminders, notifications, one wait that wakes an idle agent for every devkit event (`dev watch --wait`), a short welcome when a session starts, `dev time`, message templates, `dev report` | [Progress and communication](docs/progress-and-communication.md) |
 | The crew | 25 specialist agents, named by role, and the tech lead (Morpheus), the main session that leads them, for Claude Code and Codex from one roster: slots that follow your usage, lanes with their own time, file scopes the guard enforces, messages, routing and delegation, guided or automatic decisions, and a status block every member must end with | [The crew](docs/crew.md) |
-| Status block | Every reply starts with a `[Firefly> DevKit]` block (done, check, progress, next) that devkit checks, scores, and shows everywhere | [Concepts](docs/concepts.md#the-status-block) |
+| Status block | Every reply starts with a `[Firefly> DevKit]` block (done, check, progress, next) that devkit checks, scores, and shows everywhere; while a run is active it always says which step of how many is running | [Concepts](docs/concepts.md#the-status-block) |
 | Dashboard | A live, local, read-only command center that opens on Now (does anything need you, and when does the running work land?), then tasks, background work, team and crew, projects, initiatives, activity, explorer, and health | [Dashboard](docs/dashboard.md) |
 | Claude Desktop and ChatGPT | The same setup in Claude Desktop's Code tab and the ChatGPT app's Codex; a devkit extension with 20 tools for Desktop chat and Cowork | [Agents](docs/agents.md#claude-desktop-and-the-chatgpt-app) |
 | Delivery | `dev ci`, local integration, one push and one CI run, CalVer, a push budget, and no blind re-runs | [Delivery](docs/delivery.md) |
 | Git and GitHub | `dev branch`, `commit`, `rebase`, `push`, `pr`, `run`, `release`, and `issue`: local CI evidence before every push, the PR template filled and checked, gated merges, releases by the policy, WIP commits instead of a shared stash | [Git and GitHub](docs/git-and-github.md) |
 | Delivery policy | `dev delivery` detects how a project versions, tests, and releases, recommends a policy, and records it; sessions see it and the guard enforces its tags | [Delivery › The delivery policy](docs/delivery.md#the-delivery-policy) |
 | CI/CD status | `dev ci status [--watch]` for GitHub Actions, GitLab CI, Bitbucket Pipelines, and Azure Pipelines: jobs, current step, elapsed time, and an ETA | [Commands › dev ci status](docs/commands.md#dev-ci-status---watch---branch-name----all-branches---all-jobs---limit-n---json) |
-| CI/CD pipelines | `dev ci audit` finds what makes a pipeline slow, unreliable, or unsafe on all four hosts, and `--fix` applies the safe GitHub fixes; `dev ci init` writes a pinned pipeline with security scans and signed releases; `dev ci watch` follows every run after a push, reports each result once, and hands a failure, diagnosed, to the Release engineer (Link); `dev ci watch --wait` wakes an agent that waits on a run | [CI/CD pipelines](docs/ci-cd.md) |
+| CI/CD pipelines | `dev ci audit` finds what makes a pipeline slow, unreliable, or unsafe on all four hosts, and `--fix` applies the safe GitHub fixes; `dev ci init` writes a pinned pipeline with security scans and signed releases; `dev ci watch` follows every run after a push, reports each result once, and hands a failure, diagnosed, to the Release engineer (Link); `dev ci watch --wait` wakes an agent that waits on one run, and the session's one `dev watch --wait` covers every run devkit follows | [CI/CD pipelines](docs/ci-cd.md) |
 | Testing | `dev test` runs the last failures first, then only what your changes can break; `dev test audit` finds tests that cannot fail, and `dev test prove` checks that new tests fail without the change; `dev ci --run --resume` repeats only what a fix affects | [Testing](docs/testing.md) |
 | Unfinished work | `dev stubs` finds TODOs, placeholders, and stubs without a task; the end of a turn and every commit refuse them | [Commands › Quality](docs/commands.md#quality) |
 | Files | `dev files`, `find`, `grep`, and `diff` with compact, capped output; `dev rm`, `mv`, and `cp` with the Trash, undo, and refusals instead of lost work | [Commands › Files](docs/commands.md#files) |
@@ -183,18 +194,23 @@ devkit is also a plugin for **Claude Code** and **Codex**, installed automatical
 - **Context in, record out.** Each session receives the project's handoff note, tasks, locks, initiatives, branch,
   PRs, commands, the last status, and the known pitfalls; its commits, status, and session line are recorded and the
   handoff repository is pushed within seconds.
+- **A welcome.** Each session opens with `dev status` in at most five lines: whether anything needs you, what is
+  running, what is next, and where you are. It shows in Claude Code and Codex, in the terminal and in the desktop
+  apps.
 - **Kept informed.** Agents post a plan with an estimate, progress updates with an ETA, and a final report; the hooks
   answer "how is it going?" from real records and remind a quiet agent to update you.
+- **Nothing waits unseen.** An idle session's `dev watch --wait` wakes it for each crew question, answer, decision,
+  ready step, and CI result, and a crew member waits for its own answer with `dev watch --wait --for me`.
 - **A crew.** 25 specialist agents (the Senior engineer, the Frontend and Backend engineers, the Software
   architect, the Code reviewer, the Release engineer, and the rest) that the main session leads as the tech lead
   (Morpheus), in parallel lanes with their own files and time.
 - **Slash commands:** `/devkit:status` · `/devkit:overview` · `/devkit:task` · `/devkit:handoff` · `/devkit:standup` ·
   `/devkit:progress` · `/devkit:crew-status` · `/devkit:test` · `/devkit:stubs` · `/devkit:ship` · `/devkit:ci` ·
-  `/devkit:dashboard` · `/devkit:doctor` (skills of the same name in Codex).
-- **Skills:** `using-devkit`, `handoff`, `communicating`, `working-efficiently`, `crew`, `workspace`, `delivery`,
-  `release-policy`, `testing`, `cicd`, `learning-loop`, `backend`, `devsecops`, `docs`, and `diagrams`, plus a curated,
-  pinned set for architecture, Angular, React, Spring, testing, security, and observability. Required skills are
-  enforced for each kind of work.
+  `/devkit:dashboard` · `/devkit:doctor` · `/devkit:reconcile` (skills of the same name in Codex).
+- **Skills:** `using-devkit`, `handoff`, `communicating`, `working-efficiently`, `crew`, `wait-and-wake`, `work-state`,
+  `workspace`, `delivery`, `release-policy`, `testing`, `cicd`, `learning-loop`, `backend`, `devsecops`, `docs`, and
+  `diagrams`, plus a curated, pinned set for architecture, Angular, React, Spring, testing, security, and
+  observability. Required skills are enforced for each kind of work.
 - **Rules:** one set of global instructions for both agents: the status block on every turn, method, plain American
   English, progress and time, learning from mistakes, token use, files and disk, worktrees, branches, commits, delivery, backend practice, required
   skills, the team protocol, and handoff.

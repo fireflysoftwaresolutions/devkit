@@ -92,6 +92,10 @@ managed setting a running session does not reload. `dev update` lists the sessio
 - **The global instructions** keep plan labels ("Phase 1," a finding number) out of code, docs, commits, and PRs, put
   the design-first loop for UI work in, say that devkit wins where a Superpowers skill differs, and say that the tech
   lead's own procedure is guidance while devkit checks what it produces.
+- **The README shows where devkit stands and what 26.11.7 adds,** updated on `main` after the tag: badges for the
+  latest release, CI, the license, Python, the platform, and the agents; the one wait (`dev watch --wait`,
+  `dev watches`), `dev crew graph`, `dev ci watch --wait --pr`, the session-start welcome, the Progress line, the
+  `wait-and-wake` and `work-state` skills, and `/devkit:reconcile`.
 
 ### Fixed
 
