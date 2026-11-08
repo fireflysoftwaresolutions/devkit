@@ -178,6 +178,39 @@ commit when you must, and records the reason in the audit trail.
 2. Add allow **and** deny cases to `tests/test_devkit.py` (false positives cost as much as misses).
 3. Document it in [Guard rules](guard.md) and, if it reflects a working rule, in `agents/AGENTS.md`.
 
+## Change a devkit skill, agent, command, or AGENTS.md
+
+The skills, the crew's agents, the slash commands, and `agents/AGENTS.md` tell every agent how to use devkit. When a
+feature changes what agents should do, change them in the same branch, or agents keep doing the old thing.
+
+1. Load the `docs` skill. These files are documentation, written to the same standard, and devkit requires the
+   skill for them: skills (`plugin/skills/**`, any `SKILL.md`), agent files, slash commands, and `agents/AGENTS.md`.
+2. Change every place that teaches the behavior:
+
+   | When the feature changes | Change |
+   | --- | --- |
+   | A working rule every session follows | `agents/AGENTS.md`, keeping its sections and their numbers, and its row in [Agents › Global instructions](agents.md#global-instructions) |
+   | How a job is done | The skill in `plugin/skills/<name>/SKILL.md` that teaches the job (the `using-devkit` table names it), and the guide in `docs/` |
+   | A `dev` command | [Commands](commands.md), the `using-devkit` table for a top-level command, and every skill or doc that shows its old form |
+   | A crew member, procedure, or kind of work | `config/crew.json`, then `bin/dev crew sync`, which writes `plugin/agents/*.md` (`dev install` writes the Codex roles from the same roster); never edit a generated agent file. Then [The crew](crew.md) |
+   | Which skills a kind of work or a file requires | `config/skill-rules.json` and the rules table in [Skills and plugins › Required skills](skills-and-plugins.md#required-skills) |
+   | A slash command | `plugin/commands/<name>.md` with a `description`, under a name no skill uses (Codex gets each command as a skill of the same name), and the slash command list in [Skills and plugins](skills-and-plugins.md) |
+
+3. Run the checks:
+
+   ```bash
+   bin/dev crew sync --check                                     # the agent files match config/crew.json
+   python3 -m unittest tests.test_consistency tests.test_codex_plugin
+   dev docs check
+   ```
+
+   The consistency test fails when a `dev …` command in the instructions, skills, docs, or roster does not parse,
+   when a top-level command is missing from the `using-devkit` table, and on the other drift in
+   [Consistency checks](#consistency-checks).
+4. Try the change in your own sessions (see [Trying a change in your own sessions](#trying-a-change-in-your-own-sessions)):
+   your agents read the pinned copy, and `agents/AGENTS.md` reaches `~/.claude/CLAUDE.md` and `~/.codex/AGENTS.md`
+   only through `bin/dev install`.
+
 ## Release process
 
 devkit follows its own delivery method: integrate locally, run the full suite, push once.
