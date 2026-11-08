@@ -330,8 +330,25 @@ def _tx(agent: str, sid: str):
     return state.hold(run_path(agent, sid))
 
 
+def _settle(run: dict):
+    """What every save keeps true, whichever path changed the run (a command, a hook, the reconciler): a
+    ready-to-launch notice belongs to a pending step, so a step that leaves pending is announced again once it is
+    ready again; and a run blocked on a step (`blocked_on`) stays blocked only while that step is."""
+    for s in run.get("plan") or []:
+        if isinstance(s, dict) and s.get("ready_told") and s.get("state") != "pending":
+            s.pop("ready_told", None)
+    if run.get("state") != "blocked":
+        run.pop("blocked_on", None)
+    elif run.get("blocked_on"):
+        s = _by_name(run.get("plan") or []).get(run["blocked_on"])
+        if not s or s.get("state") != "blocked":
+            run["state"] = "running"
+            run.pop("blocked_on", None)
+
+
 def _save(run: dict, touch_session: bool = True):
-    """Write the run atomically through state. The caller loaded it inside the same _tx."""
+    """Write the run atomically through state, settled first (_settle). The caller loaded it inside the same _tx."""
+    _settle(run)
     p = run_path(run["agent"], run["session"])
     with state.hold(p):
         state.replace(p, run, indent=1)
@@ -878,9 +895,14 @@ def start(goal: str, steps: int = 0, estimate: str = "", cwd: str | None = None,
                 raise StepError(f"a run is live in this session: “{live['goal']}” ({done_} of "
                                 f"{len(live.get('plan') or [])} steps). Add to it (dev progress add), end it (dev "
                                 f"progress done), or replace it: dev progress start … --replace --why \"<reason>\"")
+            # its pending decisions belong to it: closed, and kept with the reason in the run that replaces it
+            closed = _close_decisions(live, f"run replaced: {why.strip()[:240]}", now, history_run=run)
             run["replaced"] = {"goal": live["goal"], "started": live.get("started"), "ts": round(now),
                                "why": why.strip()[:300]}
+            if closed:
+                run["replaced"]["decisions"] = closed
             _audit("progress.replace", live["goal"][:120], why.strip()[:300], project=run.get("project") or "")
+            _audit_closed(run, closed)
         _save(run)
     _publish()
     return run
@@ -1243,10 +1265,15 @@ def lane_of(agent: str, sid: str, agent_id: str):
     return run, (run.get("agents") or {}).get(agent_id)
 
 
+_TECH_LEAD = re.compile(r"(?:the\s+)?(?:main|lead|morpheus|tech[\s-]?lead)(?:\s*\((?:morpheus|(?:the\s+)?tech[\s-]?lead)"
+                        r"\))?", re.IGNORECASE)
+
+
 def _addr(run, ref: str):
-    """'Morpheus'/'lead'/'main'/'' -> 'main'; a crew name or label -> that lane's id (or the name, for later)."""
-    r = (ref or "").strip()
-    if not r or r.lower() in ("main", "lead", "morpheus", "tech lead"):
+    """'Morpheus', 'the tech lead', 'Tech lead (Morpheus)', 'lead', 'main', '' -> 'main'; a crew name or label -> that
+    lane's id (or the name, for later)."""
+    r = " ".join((ref or "").split())
+    if not r or _TECH_LEAD.fullmatch(r):
         return "main"
     agents = run.get("agents") or {}
     if r in agents:
@@ -1272,8 +1299,9 @@ def _name_of(run, addr: str) -> str:
 def crew_ask(text: str, to: str | None = None, from_agent: str | None = None, cwd: str | None = None, now: float | None = None,
              kind: str = "message") -> dict:
     """A question or request between crew members (default: to Morpheus, the main session). It reaches the recipient
-    with its next tool call (PostToolUse) or prompt. The audit trail keeps its kind and length, never its text (crew
-    messages quote the developer's requests)."""
+    with its next tool call (PostToolUse) or prompt. `kind`: "message" (a question, or a notice when CI watch or devkit
+    sends it), "notice" (it tells, and waits for no answer) or "answer". The audit trail keeps its kind and length,
+    never its text (crew messages quote the developer's requests)."""
     now = now or time.time()
     from_agent = _as_lane(from_agent, cwd)
     agent, sid = current_session(cwd)
@@ -1282,7 +1310,8 @@ def crew_ask(text: str, to: str | None = None, from_agent: str | None = None, cw
         if not run:
             raise ValueError("no progress run in this session: the tech lead starts one with dev progress start")
         run = normalize(run)
-        m = _post(run, from_agent or "main", _addr(run, to or ""), text, now)
+        m = _post(run, from_agent or "main", _addr(run, to or ""), text, now,
+                  kind=kind if kind in ("notice", "answer") else "")
         _save(run, touch_session=False)
     _audit("crew.message", f"{m['from_name']} → {m['to_name']}", "", project=run.get("project") or "", id=m["id"],
            type=kind, count=len(m["text"]))
@@ -1295,15 +1324,35 @@ def _next_id(items: list, prefix: str) -> str:
     return f"{prefix}{max(nums, default=0) + 1}"
 
 
-def _post(run, frm: str, to: str, text: str, now: float, from_name: str = "") -> dict:
-    """Add a message to the run (the caller saves it). -> the message."""
+NOTICE_SENDERS = ("ci", "devkit")  # CI watch and devkit itself tell; they never ask
+
+
+def _post(run, frm: str, to: str, text: str, now: float, from_name: str = "", kind: str = "") -> dict:
+    """Add a message to the run (the caller saves it). `kind`: question, notice or answer; without it, a notice from
+    CI watch or devkit, else a question. -> the message."""
     msgs = run.setdefault("messages", [])
     m = {"id": _next_id(msgs, "M"), "ts": round(now), "from": frm, "to": to, "text": text.strip()[:1500],
-         "delivered": False}
+         "delivered": False, "kind": kind or ("notice" if frm in NOTICE_SENDERS else "question")}
     m["from_name"], m["to_name"] = from_name or _name_of(run, frm), _name_of(run, to)
     msgs.append(m)
     run["messages"] = msgs[-200:]
     return m
+
+
+def _asks(m: dict) -> bool:
+    """Does the message ask something? A message written before messages had a kind asks unless CI watch or devkit
+    sent it or it answers another."""
+    if m.get("kind"):
+        return m["kind"] == "question"
+    return not (m.get("from") in NOTICE_SENDERS or m.get("from_name") == "devkit" or m.get("reply_to"))
+
+
+def waiting_messages(run, to: str = "main") -> list:
+    """The messages to `to` (the tech lead by default) that ask a question nobody has answered yet: delivered or
+    not, they wait. A notice (CI watch, a step or launch notice, a decision's result) never waits."""
+    msgs = [m for m in (run or {}).get("messages") or [] if isinstance(m, dict)]
+    replied = {m.get("reply_to") for m in msgs if m.get("reply_to")}
+    return [m for m in msgs if m.get("to") == to and _asks(m) and not m.get("answered") and m.get("id") not in replied]
 
 
 def crew_answer(msg_id: str, text: str, from_agent: str | None = None, cwd: str | None = None, now: float | None = None) -> dict:
@@ -1601,6 +1650,8 @@ def ask_calls(run: dict, ids=None) -> dict:
                 raise StepError(f"no decision {i} in this session's run: dev crew decisions")
             if d.get("state") == "decided" and d.get("verified"):
                 raise StepError(f"{d['id']} was already decided by the developer: “{d.get('answer')}”")
+            if _not_open(d):
+                raise StepError(_not_open(d))
             picked += [d] if d not in picked else []
         picked.sort(key=lambda x: int(x["id"][1:]))
     else:
@@ -1716,6 +1767,8 @@ def crew_decide(decision_id: str, answer: str, cwd: str | None = None, now: floa
         d = _decision(run, decision_id)
         if not d:
             raise StepError(f"no decision {decision_id}")
+        if _not_open(d):
+            raise StepError(_not_open(d))
         if d["state"] == "decided" and d.get("by") != "auto" and d.get("verified") is not False:
             raise StepError(f"{d['id']} was already decided by {d['by']}: “{d['answer']}”")
         return d
@@ -1760,7 +1813,51 @@ def crew_decide(decision_id: str, answer: str, cwd: str | None = None, now: floa
            transcript_uuid=(ev or {}).get("transcript_uuid") or "", session=f"{agent}:{sid}",
            options=d.get("options") or [])
     if d["from"] != "main":
-        crew_ask(f"Decision {d['id']} — {d['question'][:120]} → {d['answer']}", to=d["from"], cwd=cwd, now=now)
+        crew_ask(f"Decision {d['id']} — {d['question'][:120]} → {d['answer']}", to=d["from"], cwd=cwd, now=now,
+                 kind="notice")
+    return d
+
+
+def crew_withdraw(decision_id: str, why: str, from_agent: str | None = None, cwd: str | None = None,
+                  now: float | None = None) -> dict:
+    """The tech lead withdraws a pending decision (`dev crew withdraw <id> --why`): state withdrawn, with the reason
+    in the run's history and the audit trail. A step blocked on it runs again, and the asking lane, when it still
+    runs, is told to go on without an answer. Never the developer's answer: no evidence, no `chosen`, so it opens no
+    irreversible action (approves_action and use_grant read decided ones only), and it takes no answer later."""
+    _main_only(from_agent, "withdraws decisions", cwd)
+    now = now or time.time()
+    why = " ".join(str(why or "").split())
+    if not why:
+        raise StepError("say why: dev crew withdraw <id> --why \"…\" (it goes into the run's history and the audit)")
+    agent, sid = current_session(cwd)
+    with _tx(agent, sid):
+        run = normalize(load_run(agent, sid) or {})
+        d = _decision(run, decision_id)
+        if not d:
+            raise StepError(f"no decision {decision_id} in this session's run: dev crew decisions")
+        if d.get("state") != "pending":
+            raise StepError(_not_open(d) or f"{d['id']} is already decided ({d.get('answer')}): only a pending "
+                                            f"decision is withdrawn")
+        d.update(state="withdrawn", withdrawn=round(now), why=why[:300])
+        _decision_history(run, d, "withdrawn", why, now)
+        for s in run.get("plan") or []:
+            if s.get("waiting") == d["id"]:
+                s.pop("waiting", None)
+                if s.get("state") == "blocked":
+                    _log_change(run, s, "blocked", "running", "main", f"{d['id']} withdrawn: {why[:80]}", now)
+                    s["state"] = "running"
+        lane = (run.get("agents") or {}).get(d.get("from") or "main")
+        for ln in (run.get("agents") or {}).values():
+            if ln.get("waiting") == d["id"]:
+                ln.pop("waiting", None)
+                ln.pop("state_before_wait", None)  # an ended lane stays ended
+        tell = d.get("from") not in (None, "", "main") and isinstance(lane, dict) and lane.get("state") == "running"
+        _save(run, touch_session=False)
+    _audit("crew.withdrawn", d["id"], why[:300], "withdrawn", project=run.get("project") or "", by="morpheus",
+           why=why[:300], was="pending", session=f"{agent}:{sid}")
+    if tell:
+        crew_ask(f"Decision {d['id']} was withdrawn by the tech lead: {why}. Go on without it; it is not the "
+                 f"developer's answer.", to=d["from"], cwd=cwd, now=now, kind="notice")
     return d
 
 
@@ -1778,8 +1875,86 @@ def _how_to_ask(d: dict) -> str:
             f"as you like, keeping “{d['id']} ·” up front and the option letters), or {typed}")
 
 
+ENDED_LANE = ("done", "stopped", "lost")  # a lost lane that is seen again runs again, and its decisions with it
+
+
+def _awaiting(run) -> list:
+    """Every decision in state pending, moot ones included: the developer's evidence is matched against these, so an
+    answer to a moot decision still counts and their latest word on it still voids an earlier yes."""
+    return [d for d in (run or {}).get("decisions") or [] if isinstance(d, dict) and d.get("state") == "pending"]
+
+
+def is_moot(run, d: dict) -> bool:
+    """A pending decision nobody waits for: the crew lane that asked it has ended (done, stopped or lost) and no
+    open step is blocked on it. The tech lead's own decisions, and those of a lane the run does not know, never are."""
+    if not isinstance(d, dict) or d.get("state") != "pending":
+        return False
+    lane = ((run or {}).get("agents") or {}).get(d.get("from") or "main")
+    if d.get("from") in (None, "", "main") or not isinstance(lane, dict) or lane.get("state") not in ENDED_LANE:
+        return False
+    return not any(isinstance(s, dict) and s.get("waiting") == d.get("id") and s.get("state") == "blocked"
+                   for s in (run or {}).get("plan") or [])
+
+
 def pending_decisions(run) -> list:
-    return [d for d in (run or {}).get("decisions") or [] if d.get("state") == "pending"]
+    """The decisions that need the developer: pending and not moot. Closed, withdrawn and decided ones never do."""
+    return [d for d in _awaiting(run) if not is_moot(run, d)]
+
+
+def moot_decisions(run) -> list:
+    return [d for d in _awaiting(run) if is_moot(run, d)]
+
+
+def decision_state(run, d: dict) -> str:
+    """A decision's state as shown: "moot" for a pending one nobody waits for, else its recorded state."""
+    return "moot" if is_moot(run, d) else str(d.get("state") or "")
+
+
+def _moot_reason(run, d: dict) -> str:
+    from . import crew
+    return f"{crew.who(d.get('from_name') or _name_of(run, d.get('from') or 'main'))} ended, and no step waits on " \
+           f"{d.get('id')}"
+
+
+def moot_text(run, d: dict) -> str:
+    """Why a moot decision needs nobody, in one line: "Moot: Backend engineer (Tank) ended, and no step waits on
+    D1."."""
+    return f"Moot: {_moot_reason(run, d)}."
+
+
+def _decision_history(run, d: dict, to: str, why: str, now: float, was: str = "pending"):
+    run.setdefault("history", []).append({"ts": round(now), "step": f"(decision {d['id']})", "from": was, "to": to,
+                                          "by": "main", "why": (why or "")[:300]})
+    run["history"] = run["history"][-200:]
+
+
+def _close_decisions(run, reason: str, now: float, history_run=None) -> list:
+    """A run ends or is replaced: each of its pending decisions (moot ones too) becomes state closed with the
+    reason, and a line in the history of `history_run` (the run itself, or the run that replaces it). -> copies of
+    the closed decisions, for the audit after the save."""
+    closed = []
+    for d in _awaiting(run):
+        d.update(state="closed", closed=round(now), reason=reason[:300])
+        _decision_history(history_run if history_run is not None else run, d, "closed", reason, now)
+        closed.append(dict(d))
+    return closed
+
+
+def _audit_closed(run, closed: list):
+    for d in closed:
+        _audit("crew.decision-closed", d["id"], d.get("reason") or "", "closed", project=(run or {}).get("project") or "",
+               why=d.get("reason") or "", was="pending")
+
+
+def _not_open(d: dict) -> str:
+    """Why a closed or withdrawn decision takes no answer and no question any more; '' for any other."""
+    if d.get("state") == "withdrawn":
+        return f"{d['id']} was withdrawn by the tech lead ({d.get('why') or 'no reason'}): it takes no answer. Ask a " \
+               f"new decision if it matters again"
+    if d.get("state") == "closed":
+        return f"{d['id']} was closed ({d.get('reason') or 'its run ended'}): it takes no answer. Ask a new decision " \
+               f"if it matters again"
+    return ""
 
 
 def _ci(agent, sid) -> str:
@@ -2404,7 +2579,7 @@ def on_question(agent: str, data: dict, now: float | None = None) -> list:
     qs = [q for q in call or [] if isinstance(q, dict)]
     resp = data.get("tool_response") if isinstance(data.get("tool_response"), dict) else {}
     answers = resp.get("answers") if isinstance(resp.get("answers"), dict) else {}
-    pending = {d["id"] for d in pending_decisions(run)}
+    pending = {d["id"] for d in _awaiting(run)}
     ids = [asked_decision(q) for q in qs]
     shown, new, refused, voided = set(), [], {}, set()
     for q, did in ([] if member else zip(qs, ids)):
@@ -2435,7 +2610,7 @@ def on_question(agent: str, data: dict, now: float | None = None) -> list:
                           question=qt[:800], label=label[:300], session=sid))
     taken = {e["covers"] for e in new if not e.get("void")}
     notes = resp.get("annotations") if isinstance(resp.get("annotations"), dict) else {}
-    for d in pending_decisions(run):  # P16, P17: the developer's latest word on it too, fail closed
+    for d in _awaiting(run):  # P16, P17: the developer's latest word on it too, fail closed
         if not d.get("irreversible") or d["id"] in voided | taken or \
                 not any(_speaks_of(d, q, answers, notes) for q in qs):
             continue
@@ -2474,7 +2649,7 @@ def on_final_message(agent: str, sid: str, text: str, now: float | None = None):
         return
     ids = {f"D{n}" for n in _DECISION_REF.findall(str(text or ""))}
     run = load_run(agent, sid)
-    named = sorted((d["id"] for d in pending_decisions(run) if d["id"] in ids), key=lambda x: int(x[1:]))
+    named = sorted((d["id"] for d in _awaiting(run) if d["id"] in ids), key=lambda x: int(x[1:]))
     if named:
         _mark_shown(agent, sid, set(named), now)
     elif not ((state.read(f) or {}).get("last_shown") or {}).get("ids"):
@@ -3262,8 +3437,10 @@ def step(text: str, nxt: str = "", cwd: str | None = None, kind: str = "step", c
          approves: str = "") -> dict:
     """Record a step of the run: Morpheus's closes a plan step, a member's goes to its lane; `approves` names the
     finished steps the Check approves or sends back (approvals.record). kind "done" ends the run, refused while an
-    approval is owed or a step is flagged recheck, unless `why` (approvals.end_check)."""
+    approval is owed or a step is flagged recheck, unless `why` (approvals.end_check), or while a decision still
+    needs the developer, unless `force`; the decisions still pending (moot ones too) close with the run."""
     now = now or time.time()
+    closed = []
     agent, sid = current_session(cwd)
     from_agent = _as_lane(from_agent, cwd)
     if kind == "done" and not from_agent:
@@ -3337,6 +3514,7 @@ def step(text: str, nxt: str = "", cwd: str | None = None, kind: str = "step", c
             if cur:
                 _log_change(run, cur, cur.get("state"), "blocked", "main", text, now)
                 cur["state"] = "blocked"
+                run["blocked_on"] = cur["name"]  # the run runs again once this step moves (_settle)
         elif kind == "done":
             waiting = pending_decisions(run)
             if waiting and not force:
@@ -3361,6 +3539,7 @@ def step(text: str, nxt: str = "", cwd: str | None = None, kind: str = "step", c
                     else:
                         s["state"] = "skipped"
                     _log_change(run, s, old_state, s["state"], "main", text, now)
+            closed = _close_decisions(run, "run ended", now)
             run.update(state="done", finished=now)
             _close(run, "turn", None, now)
             record("run", agent, sid, run.get("goal", ""), active_minutes(run, now=now) * 60, run.get("project", ""),
@@ -3372,6 +3551,7 @@ def step(text: str, nxt: str = "", cwd: str | None = None, kind: str = "step", c
                                "step": target["name"] if target else ""})
         run["updates"] = run["updates"][-40:]
         _save(run)
+    _audit_closed(run, closed)
     _publish()
     if kind in ("blocked", "done"):
         notify(f"{run.get('project') or 'devkit'} · {kind}", text)
@@ -3450,6 +3630,10 @@ def render_update(run: dict, branch: str | None = None, now: float | None = None
     if grants:  # what the developer granted, echoed in the status until it is used or expires (spec C5)
         lines += ["", "Granted: " + "; ".join(f"{e['covers']} by your prompt at {_when(e['ts'])}, until "
                                               f"{_when(e['expires'])}" for e in grants)]
+    moot = moot_decisions(run)
+    if moot:  # asked by a lane that ended, and no step waits on them: not the developer's, on a line of their own
+        lines += [""] + [f"Moot: {d['id']} · “{(d.get('question') or '')[:70]}”: {_moot_reason(run, d)}. It closes "
+                         f"with the run, or: dev crew withdraw {d['id']} --why \"…\"" for d in moot]
     if plan:
         lines.append("")
         for i, s in enumerate(plan, 1):
@@ -4509,13 +4693,13 @@ def _on_subagent(agent: str, data: dict, started: bool, now: float | None = None
 
 
 def scope_written(agent: str, sid: str, aid: str, paths: list, now: float | None = None) -> dict | None:
-    """A review or read-only lane's shell call wrote these files (spec F7, write detection): the lane keeps them in
-    `scope_writes`, so its report is unverified and its step cannot end done on its word; Morpheus gets a crew
-    message; and the audit trail a scope.write record. "possible" when the file may be another lane's: it is in the
-    scope of a lane that works now (M292; the message names that lane, and the file is never left out, since the
-    review lane may have written it itself: the Code reviewer's batch 5 on a98d7f5), or another lane that may write
-    works in the run at the time (a file outside every scope may be its); else "certain". -> the lane's
-    scope_writes, or None without a lane."""
+    """A review or read-only lane's shell call wrote these files (write detection). A file in the scope of
+    another lane that works now is that lane's write: the audit trail records it as that lane's (scope.write,
+    outcome attributed), and the read-only lane is neither flagged nor reported for it. Each other file the lane
+    keeps in `scope_writes`, so its report is unverified and its step cannot end done on its word; Morpheus gets a
+    crew notice naming those files; and the audit trail a scope.write record, "possible" when another lane that may
+    write works in the run at the time (a file outside every scope may be its), else "certain". -> the lane's
+    scope_writes, or None without a lane or when it has none."""
     now = now or time.time()
     paths = sorted({str(p) for p in paths or [] if p})
     if not paths:
@@ -4528,31 +4712,38 @@ def scope_written(agent: str, sid: str, aid: str, paths: list, now: float | None
         chain = set(lane_chain(run, aid))
         running = [k for k, v in run["agents"].items() if k not in chain and v.get("state") == "running"]
         layers = {k: lane_scope(run, k) for k in running}
-        held = {p: [k for k in running if layers[k] and in_scope(p, layers[k])] for p in paths}
-        holders = [k for k in running if any(k in ks for ks in held.values())]
-        others = [k for k in running if lane_tools(run, k) in ("build", "all")]
-        certainty = "possible" if others or all(held.values()) else "certain"
-        level = lane_tools(run, aid)
-        had = lane.get("scope_writes") or {}
-        lane["scope_writes"] = {"ts": round(now), "paths": sorted(set(had.get("paths") or []) | set(paths))[:20],
-                                "certainty": "certain" if "certain" in (had.get("certainty"), certainty) else
-                                certainty}
+        owned, loose = {}, []
+        for p in paths:
+            holder = next((k for k in running if layers[k] and in_scope(p, layers[k])), None)
+            if holder:
+                owned.setdefault(holder, []).append(p)
+            else:
+                loose.append(p)
         who = lane.get("persona") or lane.get("label") or aid
-        shown = ", ".join(paths[:5]) + (f" and {len(paths) - 5} more" if len(paths) > 5 else "")
-        inside = [p for p in paths if held[p]]
-        bits = [f"{', '.join(inside[:3])} {'is' if len(inside) == 1 else 'are'} in the scope of "
-                f"{', '.join(_name_of(run, k) for k in holders[:3])}, who works now"] if inside else []
-        rest = [k for k in others if k not in holders]
-        bits += [f"{', '.join(_name_of(run, k) for k in rest[:3])} works too"] if rest else []
-        maybe = f" (possibly another member's: {'; '.join(bits)})" if bits else ""
-        _post(run, aid, "main", f"devkit: {who} works {'review-only' if level == 'review' else 'read-only'}, and "
-              f"its shell call wrote {shown}{maybe}. Its report counts as unverified: check the change (git diff), "
-              f"keep or revert it, then close its step with evidence.", now, from_name="devkit")
-        _save(run)
-        writes = dict(lane["scope_writes"])
-    _audit("scope.write", who, f"{certainty}: {', '.join(paths[:20])}"[:600], "detected", lane=aid[:16],
-           paths=paths[:20], certainty=certainty, count=len(paths), project=run.get("project") or "",
-           **({"severity": "warning"} if certainty == "certain" else {}))
+        others = [k for k in running if lane_tools(run, k) in ("build", "all")]
+        certainty = "possible" if others else "certain"
+        if loose:
+            level = lane_tools(run, aid)
+            had = lane.get("scope_writes") or {}
+            lane["scope_writes"] = {"ts": round(now), "paths": sorted(set(had.get("paths") or []) | set(loose))[:20],
+                                    "certainty": "certain" if "certain" in (had.get("certainty"), certainty) else
+                                    certainty}
+            shown = ", ".join(loose[:5]) + (f" and {len(loose) - 5} more" if len(loose) > 5 else "")
+            maybe = (f" (possibly another member's: {', '.join(_name_of(run, k) for k in others[:3])} works too)"
+                     if others else "")
+            _post(run, aid, "main", f"devkit: {who} works {'review-only' if level == 'review' else 'read-only'}, and "
+                  f"its shell call wrote {shown}{maybe}. Its report counts as unverified: check the change (git diff), "
+                  f"keep or revert it, then close its step with evidence.", now, from_name="devkit", kind="notice")
+            _save(run)
+        writes = dict(lane.get("scope_writes") or {}) or None
+    for k, mine in owned.items():
+        _audit("scope.write", _name_of(run, k), f"attributed: {', '.join(mine[:20])}"[:600], "attributed",
+               lane=k[:16], paths=mine[:20], count=len(mine), project=run.get("project") or "",
+               why=f"changed during {who}'s shell call, inside the scope of {_name_of(run, k)}, who works now")
+    if loose:
+        _audit("scope.write", who, f"{certainty}: {', '.join(loose[:20])}"[:600], "detected", lane=aid[:16],
+               paths=loose[:20], certainty=certainty, count=len(loose), project=run.get("project") or "",
+               **({"severity": "warning"} if certainty == "certain" else {}))
     return writes
 
 

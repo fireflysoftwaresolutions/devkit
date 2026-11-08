@@ -198,10 +198,11 @@ def delegate(task: str, to: str = "auto", files=None, scope: str = "", after: st
     if lane_id and s.get("owner") == lane_id:
         progress.crew_ask(text + f". It is in your lane now: record it with dev progress step \"…\" --step \"{name}\" "
                           f"--check \"…\", or your report's ✓ does not close it; if you cannot take it: dev crew "
-                          f"decline \"{name}\" --why \"…\"", to=lane_id, from_agent=from_agent, cwd=cwd, now=now)
+                          f"decline \"{name}\" --why \"…\"", to=lane_id, from_agent=from_agent, cwd=cwd, now=now,
+                          kind="notice")
     elif from_agent:
         progress.crew_ask(text + f". Launch {crew.who(m)} when it is ready: dev crew next", to="main",
-                          from_agent=from_agent, cwd=cwd, now=now)
+                          from_agent=from_agent, cwd=cwd, now=now, kind="notice")
     return {"step": s, "member": m, "routed": routed, "lane": lane_id if s.get("owner") == lane_id else None}
 
 
@@ -226,7 +227,7 @@ def decline(which: str, why: str, from_agent: str | None = None, cwd: str | None
         progress._save(run, touch_session=False)
     from . import crew
     progress.crew_ask(f"{crew.who(who)} declined “{s['name']}”: {why}. Route it again: dev crew route \"{s['name']}\"",
-                      to="main", from_agent=from_agent, cwd=cwd, now=now)
+                      to="main", from_agent=from_agent, cwd=cwd, now=now, kind="notice")
     return s
 
 

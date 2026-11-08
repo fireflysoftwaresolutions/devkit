@@ -217,8 +217,22 @@ LANDING = LandingMemo()
 
 
 def _pending(run: dict) -> list:
-    decs = [d for d in run.get("decisions") or [] if isinstance(d, dict) and d.get("state") == "pending"]
-    return sorted(decs, key=lambda d: (d.get("ts") or 0, str(d.get("id"))))
+    """The decisions that need the developer (progress.pending_decisions): pending and not moot, oldest first."""
+    return sorted(progress.pending_decisions(run), key=lambda d: (d.get("ts") or 0, str(d.get("id"))))
+
+
+def _moot(run: dict, roster) -> list:
+    """A run's moot decisions (asked by a lane that ended, and no step waits on them), each with its own line: shown
+    on the run, never in the queue."""
+    return [{"id": _line(d.get("id"), 20), "question": _line(d.get("question"), TITLE),
+             "asker": _who(d.get("from_name") or d.get("from"), roster), "since": _int(d.get("ts")),
+             "text": _line(progress.moot_text(run, d))}
+            for d in sorted(progress.moot_decisions(run), key=lambda d: (d.get("ts") or 0, str(d.get("id"))))]
+
+
+def _questions(run: dict) -> list:
+    """The crew's questions to the tech lead that wait for an answer (progress.waiting_messages); notices never."""
+    return [{k: m.get(k) for k in ("id", "ts", "from_name", "text")} for m in progress.waiting_messages(run)][-20:]
 
 
 def _steps(run: dict) -> list:
@@ -359,7 +373,7 @@ def _remote_brief(b: dict, now: float) -> dict:
                    for s in (b.get("plan") if isinstance(b.get("plan"), list) else [])[:200] if isinstance(s, dict)]
     out["agents"] = [{"label": _line(a.get("label"), 120), "state": _line(a.get("state"), 20), "min": _num(a.get("min"))}
                      for a in (b.get("agents") if isinstance(b.get("agents"), list) else [])[:50] if isinstance(a, dict)]
-    out.update(decisions=[], questions=[], updates=[])
+    out.update(decisions=[], questions=[], updates=[], moot=[])
     return out
 
 
@@ -431,7 +445,7 @@ def _run_order(r: dict):
     return (group, -(r.get("started") or 0))
 
 
-def _runs(raw_runs, briefs, now, host, team, memo) -> list:
+def _runs(raw_runs, briefs, now, host, team, memo, roster=None) -> list:
     by_id = {dashboard.run_id(r): r for r in raw_runs or [] if isinstance(r, dict)}
     out = []
     for b in (briefs or [])[:RUNS_CAP]:
@@ -440,7 +454,10 @@ def _runs(raw_runs, briefs, now, host, team, memo) -> list:
             continue
         wo = waiting_on(raw, now)
         eta = memo.get(b["id"], landing_key(raw, wo), lambda raw=raw: landing(raw, now))
-        out.append(dict(b, machine=None, who=None, branch=None, waiting_on=wo, eta=eta))
+        decisions = [{k: d.get(k) for k in ("id", "ts", "question", "options", "recommend", "irreversible",
+                                             "from_name")} for d in _pending(raw)]
+        out.append(dict(b, machine=None, who=None, branch=None, waiting_on=wo, eta=eta, decisions=decisions,
+                        questions=_questions(raw), moot=_moot(raw, roster)))
     out += _remote_runs(team, host, now)
     return sorted(out, key=_run_order)
 
@@ -627,14 +644,21 @@ def _run_items(raw_runs, now, roster) -> list:
     return out
 
 
+CI_SETTLED = ("passed", "failed")  # a watch that timed out or found no run says nothing about the failure before it
+
+
 def _ci_items(reg, ci, now) -> list:
+    """A row per repository and branch whose newest settled watch failed in the last day: a later green run on the
+    same branch and repository clears the failure."""
     watches = ci.get("watches") if isinstance(ci, dict) else ci
     out, seen = [], set()
     for w in sorted([w for w in watches or [] if isinstance(w, dict)], key=lambda w: -(w.get("ts") or 0)):
         repo, branch, ts = str(w.get("repo") or ""), str(w.get("branch") or ""), w.get("ts") or 0
-        if w.get("state") != "failed" or now - ts > CI_WINDOW_S or (repo, branch) in seen:
+        if w.get("state") not in CI_SETTLED or (repo, branch) in seen:
             continue
-        seen.add((repo, branch))
+        seen.add((repo, branch))  # the newest settled result of the branch decides
+        if w.get("state") != "failed" or now - ts > CI_WINDOW_S:
+            continue
         p = _project_of(reg, repo)
         f = next((x for x in w.get("failures") or [] if isinstance(x, dict)), {})
         job = next((j for j in f.get("jobs") or [] if isinstance(j, dict)), {})
@@ -884,7 +908,7 @@ def areas(reg, raw_runs, briefs, actions, ci, jobs, items, since, team, now, hos
     dashboard.jobs_summary; `items`: dashboard.read_items; `since`: dashboard.since_yesterday; `team`: presence
     (dashboard.read_presence); `roster`: crew.load(), for names as `<Role> (<Name>)`; `prs_at`: the PR cache's last
     read."""
-    runs = _guarded("runs", lambda: _runs(raw_runs, briefs, now, host, team, memo))
+    runs = _guarded("runs", lambda: _runs(raw_runs, briefs, now, host, team, memo, roster))
     return {"attention": _guarded("attention", lambda: _attention(reg, raw_runs, actions, ci, jobs, items, runs, now,
                                                                   roster)),
             "runs": runs,

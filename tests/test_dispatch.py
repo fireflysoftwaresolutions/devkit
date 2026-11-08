@@ -100,6 +100,27 @@ class DelegationTests(unittest.TestCase):
             self.assertIn("dev crew brief seraph", ctx)
             self.assertNotIn("ready to launch", pg.on_tool_done("claude", {"session_id": "s1"}) or "")  # told once
 
+    def test_a_step_back_to_pending_is_announced_ready_to_launch_again(self):
+        with TempState():
+            pg.start("Feature", plan=["schema=30m"], now=m(0))
+            pg.assign("schema", "Dozer", now=m(0))
+            self.assertIn("schema", dispatch.ready_context("claude", "s1"))
+            pg.begin("schema", now=m(1))
+            pg.step("schema migrated", which="schema", check="✓ migration runs", now=m(20))
+            pg.reopen("schema", "the column type is wrong", now=m(21))  # back to pending, still the Dozer's
+            self.assertIn("schema", dispatch.ready_context("claude", "s1"))
+
+    def test_delegate_and_decline_notices_never_wait_for_the_tech_leads_answer(self):
+        with TempState():
+            pg.start("Feature", plan=["parser=30m"], now=m(0))
+            launch("a1", "devkit:neo", "Neo: parser", m(1))
+            launch("a2", "devkit:dozer", "Dozer: schema", m(1))
+            dispatch.delegate("review the parser before merge", to="auto", from_agent="a1", now=m(2))
+            step = dispatch.delegate("add the export column", to="Dozer", now=m(2))["step"]["name"]
+            dispatch.decline(step, "it needs a data migration plan first", from_agent="a2", now=m(3))
+            pg.on_tool_done("claude", {"session_id": "s1"})  # both delivered to the tech lead
+            self.assertEqual(pg.waiting_messages(pg.load_run("claude", "s1")), [])
+
     def test_dependencies_and_capacity_decide_what_is_ready(self):
         with TempState():
             pg.start("Feature", plan=["design=30m", "api=1h after design", "ui=1h after design"], now=m(0))

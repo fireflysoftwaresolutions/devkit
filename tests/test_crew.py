@@ -593,6 +593,56 @@ class CrewSessionTests(unittest.TestCase):
             self.assertIn("B: patch it (was A)", listed)
             self.assertIn("morpheus · unverified", listed)
 
+    def test_withdraw_closes_a_decision_for_the_tech_lead_only(self):
+        with TempState():
+            pg.start("Parser", plan=["parse"])
+            run_cli("crew", "ask", "--decision", "Rewrite or patch the parser?", "--options",
+                    "A: rewrite it | B: patch it", "--recommend", "A")
+            rc, _, err = run_cli("crew", "withdraw", "D1", "--why", "not mine to drop", from_agent="a1")
+            self.assertEqual(rc, 2)
+            self.assertIn("only the tech lead", err)
+            rc, out, _ = run_cli("crew", "withdraw", "D1", "--why", "the parser stays as it is")
+            self.assertEqual(rc, 0)
+            self.assertIn("D1 withdrawn: the parser stays as it is", out)
+            self.assertIn("no pending decisions", run_cli("crew", "decisions", "--pending")[1])
+
+    def test_a_delivered_notice_is_no_open_message(self):
+        with TempState():
+            pg.start("Parser", plan=["parse"])
+            pg.crew_ask("CI passed on feat/parser", to="main", from_agent="ci")
+            run_cli("crew", "inbox")  # delivered to the tech lead
+            self.assertEqual(crew.open_messages(pg.load_run("claude", "s1")), [])
+
+    def test_decisions_marks_a_moot_decision_and_pending_leaves_it_out(self):
+        with TempState() as t:
+            pg.start("Parser", plan=["parse"])
+            t.launch()
+            run_cli("crew", "ask", "--decision", "Skip empty lines?", "--options", "A: skip | B: reject",
+                    "--recommend", "A", from_agent="a1")
+            pg.on_subagent("claude", {"session_id": "s1", "agent_id": "a1", "agent_type": "devkit:neo",
+                                      "last_assistant_message": "stopped"}, False)  # the asking lane ends
+            self.assertIn("no pending decisions", run_cli("crew", "decisions", "--pending")[1])
+            self.assertIn("moot", run_cli("crew", "decisions")[1])
+
+    def test_dev_status_lists_only_the_decisions_that_still_need_the_developer(self):
+        from devkit import registry
+        now = time.time()
+        run = {"v": 2, "project": "acme/api", "goal": "Release", "state": "running", "started": now - 3600,
+               "updates": [], "intervals": [], "messages": [], "steps": 1, "step": 0,
+               "plan": [{"name": "api", "state": "pending", "owner": "main", "est": 10}],
+               "agents": {"lane1": {"label": "Tank: api", "persona": "Tank", "state": "done", "started": now - 1800,
+                                    "finished": now - 600, "updates": []}},
+               "decisions": [{"id": "D1", "ts": now - 900, "state": "pending", "from": "lane1", "from_name": "Tank",
+                              "question": "Keep the old endpoint?", "options": [], "recommend": ""},
+                             {"id": "D2", "ts": now - 300, "state": "pending", "from": "main",
+                              "from_name": "Morpheus", "question": "Ship on Friday?", "options": [], "recommend": ""}]}
+        p = {"id": "acme/api", "owner": "acme", "name": "api", "path": None, "local": False, "main": {},
+             "worktrees": [], "canonical_ok": True, "prs_open": [], "status_line": {"line": ""}}
+        with mock.patch.object(registry, "alias_map", lambda projects: {}):
+            v = cli.status_view({"projects": [p], "issues": [], "sessions": []}, p, None, runs=[run],
+                                ci={"runs": []}, roster=crew.load(team=False), now=now)
+        self.assertEqual([n["id"] for n in v["needs_you"] if n["kind"] == "decision"], ["D2"])
+
     def test_a_decision_names_the_steps_the_developers_answer_approves(self):
         # M280 (F6, D4): dev crew ask --decision --approves "<steps>" keeps them on the decision, checked against the plan
         with TempState():

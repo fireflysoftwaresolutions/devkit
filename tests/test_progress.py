@@ -1101,6 +1101,160 @@ class GuidedAndAutoTests(unittest.TestCase):
                 pg.set_mode("auto", approve="launch-missiles")
 
 
+NEO_REPORT = ("**[Firefly> DevKit · Senior engineer (Neo)]** acme/api · `main` · parser\n"
+              "- **Done:** parser\n- **Check:** {check}\n- **Next:** the tech lead")
+
+
+class OpenDecisionTests(unittest.TestCase):
+    # Nothing shows as needing the developer once it is answered, withdrawn, closed with its run, or moot: its asking
+    # lane ended and it blocks no open step. The Senior engineer's lane asks D1 and its step waits on it
+    T0 = 1_800_000_000.0
+
+    def m(self, minutes):
+        return self.T0 + minutes * 60
+
+    def setUp(self):
+        self.state = TempState().__enter__()
+        self.addCleanup(self.state.__exit__, None, None, None)
+        pg.start("Feature", plan=["parser", "docs"], now=self.m(0), mode="guided")
+        pg.assign("parser", "Neo", now=self.m(0))
+        launch("a1", "devkit:neo", "Neo: parser", self.m(1))
+        pg.crew_decision("Skip empty lines or reject the file?", options="A: skip | B: reject", recommend="A",
+                         from_agent="a1", now=self.m(2))
+
+    def run_(self):
+        return pg.load_run("claude", "s1")
+
+    def end_lane(self, at, check="✓ 12 parser tests pass"):
+        # the member stops (SubagentStop) with its report: its lane ends, and its step leaves the blocked state
+        pg.on_subagent("claude", {"session_id": "s1", "agent_id": "a1", "agent_type": "devkit:neo",
+                                  "last_assistant_message": NEO_REPORT.format(check=check)}, False, now=at)
+
+    def test_a_decision_whose_asking_lane_ended_and_blocks_no_step_is_moot(self):
+        self.end_lane(self.m(5))
+        run = self.run_()
+        self.assertEqual(pg.pending_decisions(run), [])
+        self.assertEqual([d["id"] for d in pg.moot_decisions(run)], ["D1"])
+
+    def test_a_decision_that_still_blocks_a_step_needs_the_developer_after_its_lane_went_quiet(self):
+        run = self.run_()
+        self.assertTrue(pg.expire_stale(run, now=self.m(24 * 60)))  # the lane is lost; its step stays blocked on D1
+        pg._save(run, touch_session=False)
+        run = self.run_()
+        self.assertEqual(([d["id"] for d in pg.pending_decisions(run)], pg.moot_decisions(run)), (["D1"], []))
+
+    def test_a_moot_decision_does_not_stop_the_run_from_ending(self):
+        self.end_lane(self.m(5))
+        pg.reopen("docs", "not in this run", skip=True, now=self.m(6))
+        run = pg.step("feature finished", kind="done", why="the review is out of this test", now=self.m(7))
+        self.assertEqual(run["state"], "done")
+
+    def test_the_end_of_the_run_closes_its_pending_decisions_with_the_reason(self):
+        from devkit import audit
+        pg.crew_decision("Ship on Friday?", options="A: yes | B: no", recommend="A", now=self.m(3))  # D2: the lead's
+        pg.step("stopped early", kind="done", force=True, now=self.m(6))
+        run = self.run_()
+        by_id = {d["id"]: d for d in run["decisions"]}
+        self.assertEqual([by_id[i]["state"] for i in ("D1", "D2")], ["closed", "closed"])
+        self.assertIn("run ended", by_id["D2"]["reason"])
+        self.assertEqual([(h["from"], h["to"]) for h in run["history"] if h["step"] == "(decision D2)"],
+                         [("pending", "closed")])
+        self.assertEqual(sorted(r["target"] for r in audit.query(action="crew.decision-closed")), ["D1", "D2"])
+
+    def test_replacing_the_run_closes_its_pending_decisions_and_keeps_them_in_the_new_run(self):
+        from devkit import audit
+        pg.start("Feature, smaller", plan=["parser"], now=self.m(10), replace=True, why="the plan changed")
+        run = self.run_()
+        self.assertEqual(run["decisions"], [])
+        kept = run["replaced"]["decisions"]
+        self.assertEqual([(d["id"], d["state"], d["question"]) for d in kept],
+                         [("D1", "closed", "Skip empty lines or reject the file?")])
+        self.assertIn("run replaced: the plan changed", kept[0]["reason"])
+        self.assertEqual([(h["from"], h["to"]) for h in run["history"] if h["step"] == "(decision D1)"],
+                         [("pending", "closed")])
+        self.assertEqual([r["target"] for r in audit.query(action="crew.decision-closed")], ["D1"])
+
+    def test_withdrawing_a_decision_lets_the_asking_lane_work_again_and_tells_it(self):
+        from devkit import audit
+        d = pg.crew_withdraw("D1", "the parser keeps both behaviors", now=self.m(4))
+        run = self.run_()
+        self.assertEqual((d["state"], d["why"]), ("withdrawn", "the parser keeps both behaviors"))
+        self.assertEqual((run["plan"][0]["state"], run["agents"]["a1"].get("waiting")), ("running", None))
+        self.assertEqual([h["to"] for h in run["history"] if h["step"] == "(decision D1)"], ["withdrawn"])
+        self.assertEqual([r["target"] for r in audit.query(action="crew.withdrawn")], ["D1"])
+        mail = pg.on_tool_done("claude", {"session_id": "s1", "agent_id": "a1"})
+        self.assertIn("D1 was withdrawn by the tech lead: the parser keeps both behaviors", mail)
+
+    def test_a_withdrawn_decision_is_never_the_developers_answer(self):
+        pg.crew_decision("Push feat/parser?", irreversible="push", target="feat/parser", now=self.m(3))  # D2
+        pg.crew_withdraw("D2", "the push waits for the release branch", now=self.m(4))
+        self.assertFalse(pg.approves_action(pg._decision(self.run_(), "D2")))
+        with self.assertRaises(pg.StepError) as e:
+            pg.crew_decide("D2", "A: yes", now=self.m(5))
+        self.assertIn("withdrawn", str(e.exception))
+
+    def test_only_the_tech_lead_withdraws_a_decision_and_says_why(self):
+        with self.assertRaises(pg.StepError):
+            pg.crew_withdraw("D1", "  ", now=self.m(4))
+        with self.assertRaises(pg.StepError):
+            pg.crew_withdraw("D1", "not mine to drop", from_agent="a1", now=self.m(4))
+        self.assertEqual(pg._decision(self.run_(), "D1")["state"], "pending")
+
+    def test_the_status_block_asks_the_developer_only_for_open_decisions(self):
+        pg.crew_decision("Ship on Friday?", options="A: yes | B: no", recommend="A", now=self.m(3))  # D2: open
+        self.end_lane(self.m(5))  # D1 is moot
+        text = pg.render_update(self.run_(), branch="feat/x", now=self.m(6))
+        you = [ln for ln in text.splitlines() if ln.startswith("- **You:**")]
+        self.assertEqual(you, ["- **You:** decide “Ship on Friday?”"])
+        self.assertIn("Moot: D1", text)
+
+    def test_the_hooks_never_remind_the_tech_lead_of_a_moot_decision(self):
+        self.end_lane(self.m(5))
+        self.assertEqual(pg.decisions_context("claude", "s1"), "")
+        self.assertEqual(pg.waiting_context("claude", "s1", None, self.m(6)), "")
+
+
+class BlockedRunTests(unittest.TestCase):
+    def test_reopening_the_blocked_step_lets_the_run_run_again(self):
+        with TempState():
+            pg.start("Release", plan=["build", "ship"], now=time.time())
+            self.assertEqual(pg.step("the build server is down", kind="blocked")["state"], "blocked")
+            self.assertEqual(pg.reopen("build", "the build server is back")["state"], "running")
+
+    def test_a_run_blocked_on_a_step_runs_again_once_that_step_moves_and_not_on_a_note(self):
+        with TempState():
+            pg.start("Release", plan=["build", "ship"], now=time.time())
+            pg.step("the build server is down", kind="blocked")
+            self.assertEqual(pg.note("still waiting for the build server")["state"], "blocked")
+            self.assertEqual(pg.begin("build")["state"], "running")
+
+
+class CrewMessageWaitingTests(unittest.TestCase):
+    # a crew message to the tech lead is delivered once; it waits only while it asks a question nobody has answered
+    def test_a_notice_to_the_tech_lead_never_waits_for_an_answer(self):
+        with TempState():
+            pg.start("Release", plan=["build"])
+            pg.crew_ask("CI passed on feat/x", to="main", from_agent="ci")
+            self.assertIn("CI passed on feat/x", pg.messages_context("claude", "s1", "main"))
+            self.assertEqual(pg.waiting_messages(pg.load_run("claude", "s1")), [])
+
+    def test_a_question_to_the_tech_lead_waits_until_it_is_answered(self):
+        with TempState():
+            pg.start("Release", plan=["build"])
+            q = pg.crew_ask("may I change lib/x.py?", from_agent="a1")
+            pg.messages_context("claude", "s1", "main")  # delivered
+            self.assertEqual([m["id"] for m in pg.waiting_messages(pg.load_run("claude", "s1"))], [q["id"]])
+            pg.crew_answer(q["id"], "yes")
+            self.assertEqual(pg.waiting_messages(pg.load_run("claude", "s1")), [])
+
+    def test_a_question_to_the_tech_lead_by_role_reaches_the_main_session_once(self):
+        with TempState():
+            pg.start("Release", plan=["build"])
+            pg.crew_ask("may I change lib/x.py?", to="the tech lead", from_agent="a1")
+            self.assertIn("may I change lib/x.py?", pg.messages_context("claude", "s1", "main"))
+            self.assertEqual(pg.messages_context("claude", "s1", "main"), "")
+
+
 class CrewMessageIdTests(unittest.TestCase):
     def test_message_and_decision_ids_stay_unique_past_the_kept_200(self):
         with TempState():
@@ -1359,20 +1513,35 @@ class EstimateRoundingTests(unittest.TestCase):
 
 
 class ScopeWriteTests(unittest.TestCase):
-    # M292: Seraph (review-only) was flagged for docs/audit.md, which Neo, whose step scope holds it, changed during
-    # Seraph's shell call; a98d7f5 then dropped such a file, so a write the reviewer makes inside a working member's
-    # scope went unseen (the Code reviewer's batch 5). It is flagged "possible", naming whose scope holds it
-    def test_a_file_in_a_working_members_scope_is_flagged_possible_not_dropped(self):
-        with TempState():
-            pg.start("Work", plan=["audit docs", "review"])
-            pg.assign("audit docs", "Neo", scope="docs/audit.md", why="test")
-            pg.assign("review", "Seraph")
-            launch("a_neo", "devkit:neo", "Neo: audit docs")
-            launch("a_seraph", "devkit:seraph", "Seraph: review")
-            flagged = pg.scope_written("claude", "s1", "a_seraph", ["docs/audit.md"]) or {}
-            self.assertEqual((flagged.get("paths"), flagged.get("certainty")), (["docs/audit.md"], "possible"))
-            told = [m["text"] for m in pg.load_run("claude", "s1").get("messages") or [] if m.get("to") == "main"]
-            self.assertTrue(any("docs/audit.md is in the scope of" in t and "Neo" in t for t in told), told)
+    # The Code reviewer works read-only while the Senior engineer, whose step scope holds docs/audit.md, writes it:
+    # a file that changed during the reviewer's shell call inside a working member's scope is that member's write
+    def setUp(self):
+        self.state = TempState().__enter__()
+        self.addCleanup(self.state.__exit__, None, None, None)
+        pg.start("Work", plan=["audit docs", "review"])
+        pg.assign("audit docs", "Neo", scope="docs/audit.md", why="test")
+        pg.assign("review", "Seraph")
+        launch("a_neo", "devkit:neo", "Neo: audit docs")
+        launch("a_seraph", "devkit:seraph", "Seraph: review")
+
+    def told(self):
+        return [m["text"] for m in pg.load_run("claude", "s1").get("messages") or [] if m.get("to") == "main"
+                and "shell call wrote" in m["text"]]
+
+    def test_a_file_in_a_working_members_scope_is_recorded_as_that_members_write(self):
+        from devkit import audit
+        pg.scope_written("claude", "s1", "a_seraph", ["docs/audit.md"])
+        self.assertNotIn("scope_writes", pg.load_run("claude", "s1")["agents"]["a_seraph"])
+        self.assertEqual(self.told(), [])
+        recs = audit.query(action="scope.write")
+        self.assertEqual([(r["target"], r["detail"]) for r in recs], [("Neo", "attributed: docs/audit.md")])
+
+    def test_only_the_files_outside_every_working_scope_flag_the_read_only_lane(self):
+        flagged = pg.scope_written("claude", "s1", "a_seraph", ["docs/audit.md", "lib/x.py"]) or {}
+        self.assertEqual(flagged.get("paths"), ["lib/x.py"])
+        (text,) = self.told()
+        self.assertIn("wrote lib/x.py", text)
+        self.assertNotIn("docs/audit.md", text)
 
 
 LANE_REPORT = ("**[Firefly> DevKit · Security engineer (The Keymaker)]** acme/api · `main` · {task}\n"

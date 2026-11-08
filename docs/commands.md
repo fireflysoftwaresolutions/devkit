@@ -382,6 +382,7 @@ devkit's specialist agents. See [The crew](crew.md).
 | `dev crew route "<task>" [--files a,b]` · `dev crew route --plan [--apply]` | The best members for a task, with scores and reasons; or a member for every unowned plan step |
 | `dev crew delegate "<task>" [--to <name>\|auto] [--scope …] [--after <step>] [--estimate 30m] [--files a,b]` | A step for another member, with who asked; joins a working member's lane, or waits for the tech lead (Morpheus) to launch it |
 | `dev crew decline "<step>" --why "…"` | Hands a delegated step back to the tech lead (Morpheus) |
+| `dev crew withdraw <id> --why "…"` | Closes a pending decision that no longer applies (tech lead only): frees the step blocked on it, tells the asking member, and records why. It is never the developer's answer and never allows an irreversible action |
 | `dev crew next` | Ready to launch (with the commands), queued until a slot frees, waiting and why, and who is busy |
 | `dev crew next --first <step> --why "…"` | The tech lead (Morpheus) launches that step ahead of the order; the reason is recorded and audited. Both options are required |
 | `dev crew ask "<text>" [--to <name>]` · `dev crew answer <id> "<text>"` · `dev crew inbox` | Messages between members; delivered with the recipient's next action |

@@ -230,6 +230,43 @@ class QueueTests(unittest.TestCase):
         self.assertEqual(doc["attention"]["headline"]["text"], "210 things need you")
 
 
+class ResolvedTests(unittest.TestCase):
+    # a row leaves the queue once the event that resolves it is recorded
+    def test_a_later_green_run_on_the_same_branch_and_repo_clears_its_ci_failure(self):
+        kw = fx.example()
+        failed = next(w for w in kw["ci"]["watches"] if w["branch"] == "feat/rules-engine")
+        kw["ci"]["watches"].insert(0, dict(failed, state="passed", ts=at(15, 10), failures=[]))
+        self.assertNotIn("ci_failed:acme/lending-rules:feat/rules-engine", ids(areas(kw)))
+
+    def test_a_decision_whose_asking_lane_ended_leaves_the_queue_and_shows_as_moot_on_its_run(self):
+        # the Backend engineer's lane ended, and its step went back to the tech lead: nothing waits on D1 now
+        run = fx.invoice_run()
+        run["agents"]["a-tank"].update(state="done", finished=at(15, 10))
+        run["plan"][3].update(state="pending", owner="main")
+        kw = fx._inputs(fx.registry_example(), [run, fx.docs_run()], fx.items_example(), fx.ci_example(),
+                        fx.jobs_example(), [], fx.pr_cache())
+        doc = areas(kw)
+        self.assertFalse([i for i in ids(doc) if i.startswith("decision:")])
+        mine = next(r for r in doc["runs"] if r["id"] == "claude-7f3a")
+        self.assertEqual((mine["waiting_on"], mine["decisions"]), (None, []))
+        self.assertEqual(mine["moot"], [{"id": "D1", "question": "Include cancelled invoices in the export?",
+                                         "asker": "Backend engineer (Tank)", "since": at(15, 6),
+                                         "text": "Moot: Backend engineer (Tank) ended, and no step waits on D1."}])
+
+    def test_a_runs_questions_are_the_questions_still_waiting_for_an_answer(self):
+        run = statement_run()
+        run["messages"] = [
+            {"id": "M1", "ts": at(15, 0), "from": "devkit", "to": "main", "text": "Neo started", "delivered": True,
+             "from_name": "devkit", "to_name": "Morpheus", "kind": "notice"},
+            {"id": "M2", "ts": at(15, 1), "from": "a1", "to": "main", "text": "May I touch the schema?",
+             "delivered": True, "from_name": "Neo", "to_name": "Morpheus", "kind": "question"},
+            {"id": "M3", "ts": at(15, 2), "from": "a1", "to": "main", "text": "Split the file?", "delivered": True,
+             "from_name": "Neo", "to_name": "Morpheus", "kind": "question", "answered": True}]
+        doc = areas(with_runs(fx.welcome(), run))
+        mine = next(r for r in doc["runs"] if r["id"] == "claude-9c1d")
+        self.assertEqual([q["id"] for q in mine["questions"]], ["M2"])
+
+
 class HeadlineTests(unittest.TestCase):
     def headline(self, kw):
         return areas(kw)["attention"]["headline"]

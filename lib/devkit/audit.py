@@ -303,6 +303,7 @@ COMMAND_ARGS = {
     "crew": "", "crew answer": "id:select text:text+", "crew ask": "text:text+",
     "crew brief": "name:name task:text+", "crew decide": "id:select text:text+", "crew decisions": "",
     "crew decline": "step:select+", "crew delegate": "task:text+", "crew graph": "", "crew history": "",
+    "crew withdraw": "id:select",
     "crew inbox": "", "crew mode": "mode:name?", "crew next": "", "crew raci": "work:roster?",
     "crew route": "task:text*", "crew rules": "", "crew set": "name:name field:name value:text+",
     "crew show": "name:name+", "crew sync": "",

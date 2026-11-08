@@ -198,6 +198,7 @@
    "last": "D1 asked: cancelled invoices",
    "machine": null,
    "mode": "guided",
+   "moot": [],
    "next": "",
    "pace": 1.0,
    "plan": [
@@ -354,6 +355,7 @@
    "last": "migration done",
    "machine": "studio",
    "mode": null,
+   "moot": [],
    "next": "rate tables",
    "pace": 1.0,
    "plan": [

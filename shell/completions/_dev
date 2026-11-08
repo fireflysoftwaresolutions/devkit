@@ -2104,6 +2104,7 @@ _dev__crew() {
         'inbox:messages for you not delivered yet'
         'mode:guided (the developer decides) or auto'
         'decide:record the developer'\''s answer to a decision'
+        'withdraw:close a pending decision that no longer matters, with the reason'
         'decisions:this run'\''s decisions'
         'route:who should do a task, ranked with the reasons'
         'delegate:add a step for another crew member'
@@ -2127,6 +2128,7 @@ _dev__crew() {
         (inbox) _dev__crew__inbox && ret=0 ;;
         (mode) _dev__crew__mode && ret=0 ;;
         (decide) _dev__crew__decide && ret=0 ;;
+        (withdraw) _dev__crew__withdraw && ret=0 ;;
         (decisions) _dev__crew__decisions && ret=0 ;;
         (route) _dev__crew__route && ret=0 ;;
         (delegate) _dev__crew__delegate && ret=0 ;;
@@ -2233,6 +2235,13 @@ _dev__crew__decide() {
     '(- *)'{-h,--help}'[show this help message and exit]' \
     ':id: ' \
     '*:text: '
+}
+
+_dev__crew__withdraw() {
+  _arguments -s -S : \
+    '(- *)'{-h,--help}'[show this help message and exit]' \
+    '--why=[why it no longer matters]:why: ' \
+    ':id: '
 }
 
 _dev__crew__decisions() {

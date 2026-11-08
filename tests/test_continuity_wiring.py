@@ -166,7 +166,10 @@ class PromptRefreshTests(HookCase):
         p.start()
         self.addCleanup(p.stop)
         prompt.set_mode("zsh")  # the developer turned the helper on (dev setup prompt); off, the hooks write nothing
-        self.make_run(lanes=())
+        run = self.make_run(lanes=())
+        # no lane works, so D1 is the tech lead's own: it waits for the developer (a lane's that ended would be moot)
+        run["decisions"][0].update({"from": "main", "from_name": "Morpheus"})
+        state.replace(pg.run_path("claude", SID), run)
 
     def asks(self) -> str:
         return prompt.show(str(self.cwd), cols=200)[1]
