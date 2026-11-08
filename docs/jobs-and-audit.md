@@ -133,6 +133,7 @@ full record, its categories and levels, the hash chain, and the exports are in [
 | `canary.miss` | A final message lacks the status block |
 | `crew.<event>` | A crew member's lane starts, binds, ends, or is lost; a crew gate sends a member back (`crew.gate`); a crew message is sent (its id, sender, recipient, and length, never its text); a decision is asked or made |
 | `handoff.<folder>` | devkit commits to the handoff repository: `handoff.items`, `handoff.plans`, `handoff.lessons`, `handoff.policies`, and so on |
+| `handoff.record-skipped` | A lock job left an item it can't rewrite without dropping lines: the target is the file, the detail is `<id>: <op>`, the outcome is `blocked` |
 | `handoff.push` | The handoff repository is pushed, or the push fails |
 | `ops` | Cleanups, worktree removals, adoptions, and sleep summaries |
 | `job.<name>` · `jobs.set` · `jobs.install` | A job runs, a schedule changes, the jobs are installed |

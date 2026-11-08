@@ -555,8 +555,9 @@ def release(it: dict, a=None, why: str = "", status: str = None) -> dict:
 def _report_skipped(job: str, op: str, skipped: list) -> None:
     """A lock job leaves an item it cannot rewrite (RecordLossError) as it is. Say so where someone will see it: a
     warning on stderr, which is the sync's log when the job runs in the background, and an audit record kept at every
-    audit level (`dev audit --action handoff.record-skipped`): the file, and `<item id>: <op>` (the audit keeps no
-    text of the item)."""
+    audit level (`dev audit --action handoff.record-skipped`): the file, and `<item id>: <op>`. Neither quotes the
+    item: the background sync keeps its last log line as the job's audit detail, so the warning names the file and
+    the number of lines, and `dev task show` shows them."""
     if not skipped:
         return
     from . import audit, ui
@@ -566,8 +567,8 @@ def _report_skipped(job: str, op: str, skipped: list) -> None:
         except ValueError:
             target = str(err.path)
         ui.warn(f"{job}: left {core.tilde(err.path)} as it is: it would drop {len(err.lost)} line(s) that the job does "
-                f"not change, first “{err.lost[0][:100]}”. See “devkit refused to write a task or plan file” in "
-                f"docs/troubleshooting.md.")
+                f"not change; `dev task show {err.path.stem}` shows the item. See “devkit refused to write a task or "
+                f"plan file” in docs/troubleshooting.md.")
         audit.record("handoff.record-skipped", target, f"{err.path.stem}: {op}", outcome="blocked")
 
 

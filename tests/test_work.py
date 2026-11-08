@@ -262,7 +262,11 @@ class LockJobReportTests(unittest.TestCase):
                     self.assertEqual(it["path"].read_text(), before)
                     self.assertIn(f"{job}: left ", err.getvalue())
                     self.assertIn(it["path"].name, err.getvalue())
-                    self.assertIn("“Keep this line.”", err.getvalue())
+                    self.assertIn("1 line(s)", err.getvalue())
+                    # the background sync keeps its last log line as the job's audit detail, so the warning names the
+                    # file and the count, never the item's text
+                    self.assertNotIn("Keep this line", err.getvalue())
+                    self.assertNotIn("Context.", err.getvalue())
                     recs = [r for r in audit.query(days=1, action="handoff.record-skipped")
                             if r["target"] == f"items/acme/api/{it['path'].name}"]
                     self.assertEqual([(r["outcome"], r["detail"]) for r in recs],
