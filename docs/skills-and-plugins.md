@@ -40,6 +40,7 @@ agent's copy when it differs from the checkout.
 | `cicd` | Fast, reliable, DevSecOps pipelines on GitHub Actions, GitLab, Bitbucket and Azure: `dev ci audit` and `dev ci init` (see [CI/CD pipelines](ci-cd.md)) |
 | `crew` | Leading devkit's crew: who to send, parallel or in sequence, briefs, lanes, scopes, messages, delegation, guided or automatic decisions (see [The crew](crew.md)) |
 | `work-state` | Keeping devkit's records of work in flight true: what each state of an item, run, step, lane, decision, CI watch, and branch means, what to do before ending a turn, after a merge, and before a release, and how to repair drift (see [Work states](work-states.md)) |
+| `wait-and-wake` | Waiting without polling: when to arm `dev watch --wait`, the one wait for every devkit event, and how each agent arms it (the Claude Code main session in the background, a crew member or Codex in the foreground), the exit codes, re-arming, and `dev watches` (see [Progress and communication › Waiting and waking](progress-and-communication.md#waiting-and-waking)) |
 
 Slash commands: `/devkit:status`, `/devkit:overview`, `/devkit:task`, `/devkit:handoff`, `/devkit:standup`,
 `/devkit:ship`, `/devkit:ci`, `/devkit:dashboard`, `/devkit:doctor`, `/devkit:progress`, `/devkit:crew-status`,
