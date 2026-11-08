@@ -868,6 +868,27 @@ def _index_file(index):
             core.GIT_ENV["GIT_INDEX_FILE"] = old
 
 
+def _sync_shared_index(top, before: str, left) -> str:
+    """After a lane's commit, the shared index takes the commit's version of every path the commit changed, except the
+    paths another lane keeps staged there. A pre-commit hook that fixed and re-staged a file changed only the lane's
+    own index: without this the shared index would still hold the old version, a staged revert of the hook's fix that
+    the next commit would carry. -> "" or the error."""
+    if before:
+        rc, out, err = _git_z(top, "diff-tree", "-r", "--name-only", "--no-renames", "-z", before, "HEAD")
+    else:
+        rc, out, err = _git_z(top, "diff-tree", "-r", "--root", "--no-commit-id", "--name-only", "--no-renames", "-z",
+                              "HEAD")
+    if rc != 0:
+        return err or out
+    keep = set(left)
+    paths = [p for p in _zsplit(out) if p not in keep]
+    if not paths:
+        return ""
+    rc, out, err = _git_z(top, "--literal-pathspecs", "reset", "-q", "HEAD", "--pathspec-from-file=-",
+                          "--pathspec-file-nul", input="".join(p + "\0" for p in paths))
+    return "" if rc == 0 else (err or out or "git reset failed")
+
+
 def _lane_refusal(layers, left) -> int:
     """No staged file of the lane's own: what stays staged, and why."""
     if not layers:
@@ -966,6 +987,7 @@ def cmd_commit(a) -> int:
             shutil.rmtree(folder, ignore_errors=True)
     if rc != 0:
         return fail("git commit failed", err or out)
+    synced = _sync_shared_index(c.top, head, left) if lane else ""
     sha = core.gitout(c.top, "rev-parse", "--short", "HEAD")
     subject = core.gitout(c.top, "log", "-1", "--format=%s")
     files, ins, dels = _shortstat(c.top)
@@ -977,6 +999,9 @@ def cmd_commit(a) -> int:
         extra.append(f"left {len(left)} staged file(s) outside your scope for their owner: {_few(left)}")
     if removed:
         extra.append(f"removed {removed} AI-attribution line(s)")
+    if synced:
+        extra.append(f"the shared index still holds the old version of what you committed ({synced}): run "
+                     "git reset -q -- <your committed paths>")
     if pushed_before:
         extra.append("amended a pushed commit: the next push needs dev push --force-with-lease")
     ok(f"{sha} {subject} · " + " · ".join(extra))

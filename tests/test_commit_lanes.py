@@ -161,6 +161,19 @@ class LaneCommitTests(Lanes):
         self.assertIn("plugin/commands/ship.md", out)
         self.assertIn("plugin/commands/new.md", out)
 
+    def test_a_hook_that_restages_a_lane_file_leaves_no_staged_revert_in_the_shared_index(self):
+        hook = self.repo / ".git" / "hooks" / "pre-commit"
+        hook.write_text("#!/bin/sh\nprintf 'RULES = 9\\n' > lib/guard.py\ngit add lib/guard.py\n")
+        hook.chmod(0o755)
+        theirs = self.ghost_stages()
+        self.write("lib/guard.py", "RULES = 2\n")
+        git(self.repo, "add", "lib/guard.py")
+        rc, out, err = self.dev(KEY, "commit", "-m", "fix(guard): read the rules once")
+        self.assertEqual(rc, 0, err)
+        self.assertEqual(git(self.repo, "show", "HEAD:lib/guard.py"), "RULES = 9")  # the hook's fix was committed
+        self.assertEqual(sorted(self.staged()), ["plugin/commands/new.md", "plugin/commands/ship.md"])
+        self.assertEqual(self.entries("plugin/commands/ship.md", "plugin/commands/new.md"), theirs)
+
     def test_a_lane_with_nothing_of_its_own_staged_is_refused_and_nothing_moves(self):
         theirs = self.ghost_stages()
         head = git(self.repo, "rev-parse", "HEAD")
