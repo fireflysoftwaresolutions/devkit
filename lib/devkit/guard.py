@@ -1161,6 +1161,43 @@ def _pipe_gate_open(cmd) -> str:
     return "hatch" if "DEVKIT_PIPE_OK" in names else ""
 
 
+# The variables that tell a program an agent runs it (core.AGENT_MARKERS): a project's own tools read them to act
+# differently for agents, so an agent must not hide them.
+IDENTITY_REASON = ("This command hides from what it runs that an agent runs it: it unsets or blanks {name} (`unset`, "
+                   "`env -u`, `env -i`, or an empty assignment before the command), which tells a project's own tools "
+                   "that an agent is at work. Run the command with the environment it has; if a tool misbehaves under "
+                   "an agent, tell the developer.")
+
+
+def identity_hiding(argv0) -> str | None:
+    """IDENTITY_REASON for a segment (its words, prefixes included) that unsets or blanks an agent identity variable
+    (core.AGENT_MARKERS): `unset NAME`, `env -u NAME …`, `env -i …`, an empty `NAME=` before a command, alone or
+    after export."""
+    names = set(core.AGENT_MARKERS)
+    words = [str(w) for w in argv0]
+    for k, w in enumerate(words):
+        m = re.fullmatch(r"([A-Za-z_][A-Za-z0-9_]*)=", w)
+        if m and m.group(1) in names:
+            return IDENTITY_REASON.format(name=_code(m.group(1)))
+        base = os.path.basename(w)
+        if base == "unset" and (k == 0 or words[k - 1] in ("builtin", "command")) and "-f" not in words[k + 1:]:
+            hit = next((a for a in words[k + 1:] if a in names), None)
+            if hit:
+                return IDENTITY_REASON.format(name=_code(hit))
+        if base == "env":
+            j = k + 1
+            while j < len(words) and (words[j].startswith("-") or _ASSIGN.match(words[j])):
+                a = words[j]
+                if a in ("-", "--ignore-environment") or re.fullmatch(r"-[A-Za-z]*i[A-Za-z]*", a):
+                    return IDENTITY_REASON.format(name="every variable")
+                val = words[j + 1] if a in ("-u", "--unset") and j + 1 < len(words) else \
+                    a.split("=", 1)[1] if a.startswith("--unset=") else a[2:] if re.fullmatch(r"-u\w+", a) else ""
+                if val in names:
+                    return IDENTITY_REASON.format(name=_code(val))
+                j += 2 if a in ("-u", "--unset", "-C", "--chdir", "-S", "--split-string", "-P") else 1
+    return None
+
+
 # a line with a word that starts with `#` and a backslash-newline at its end: bash ends the comment at the newline
 _COMMENT_CONTINUES = re.compile(r"(?m)^([^\n]*(?<![^ \t\n;&|()])#[^\n]*)\\\n")
 
@@ -1353,6 +1390,9 @@ def _check_segments(cmd: str, segs, ecwd: str, agent: str, depth: int = 0, outer
         if _env_runs_string(argv0):
             return deny("`env -S` (--split-string) runs a command line from a string, which the guard cannot check. "
                         "Type the command itself.")
+        why = identity_hiding(argv0)
+        if why:
+            return deny(why)
         argv = _strip_prefix(argv0)
         while argv and argv[0] in _RESERVED:  # `if …; then rm -rf ~; fi` runs rm
             argv = _strip_prefix(argv[1:])
